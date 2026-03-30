@@ -7,6 +7,7 @@
 
 import type { Command } from 'commander';
 
+import { execSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -55,6 +56,63 @@ function saveProviders(data: ProvidersFile): void {
     writeFileSync(PROVIDERS_PATH, JSON.stringify(data, null, 4) + '\n', { mode: 0o600 });
 }
 
+const OPENCODE_AUTH_PATH = join(homedir(), '.local', 'share', 'opencode', 'auth.json');
+
+function loginOpenCodeZen(opts: { model?: string; default?: boolean }): void {
+    // 1. Check if opencode is installed
+    try {
+        execSync('which opencode', { stdio: 'pipe' });
+    } catch {
+        console.log('OpenCode not found. Installing...');
+        try {
+            execSync('brew install opencode', { stdio: 'inherit', timeout: 120_000 });
+        } catch {
+            console.error('Failed to install OpenCode.');
+            console.error('Install manually: curl -fsSL https://opencode.ai/install | bash');
+            process.exit(1);
+        }
+    }
+
+    // 2. Run opencode providers login (interactive — needs TTY for browser OAuth)
+    console.log('Launching OpenCode Zen authentication...');
+    console.log('This will open a browser for sign-in.\n');
+
+    const result = spawnSync('opencode', ['providers', 'login', '-p', 'opencode'], {
+        stdio: 'inherit',
+    });
+
+    if (result.status !== 0) {
+        console.error('\nOpenCode auth failed or was cancelled.');
+        console.error('Try running directly: opencode providers login -p opencode');
+        process.exit(1);
+    }
+
+    // 3. Verify auth succeeded by checking opencode's auth file
+    if (existsSync(OPENCODE_AUTH_PATH)) {
+        console.log('\nOpenCode Zen: authenticated');
+    } else {
+        console.log('\nOpenCode auth file not found. Check: opencode providers list');
+    }
+
+    // 4. Store in smooth providers
+    const data = loadProviders();
+    data.providers['opencode-zen'] = {
+        name: 'OpenCode Zen',
+        apiKey: 'opencode-managed', // Auth is managed by opencode, not an API key
+        model: opts.model ?? 'opencode/zen',
+        enabled: true,
+    };
+
+    if (opts.default || !data.default) data.default = 'opencode-zen';
+    saveProviders(data);
+
+    console.log(`  Model: ${opts.model ?? 'opencode/zen'}`);
+    if (data.default === 'opencode-zen') console.log('  (default provider)');
+    console.log('');
+    console.log('Auth is shared between the leader and all Smooth Operators.');
+    console.log('OpenCode manages credentials at: ~/.local/share/opencode/auth.json');
+}
+
 export function registerAuthCommand(program: Command) {
     const auth = program.command('auth').description('Provider authentication (shared by leader + Smooth Operators)');
 
@@ -75,6 +133,13 @@ export function registerAuthCommand(program: Command) {
                 process.exit(1);
             }
 
+            // OpenCode Zen: delegate to opencode's own auth flow
+            if (providerId === 'opencode-zen') {
+                loginOpenCodeZen(opts);
+                return;
+            }
+
+            // All other providers: API key flow
             let apiKey = opts.apiKey;
             if (!apiKey && known.envVar) {
                 apiKey = process.env[known.envVar];
