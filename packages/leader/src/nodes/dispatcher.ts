@@ -1,28 +1,25 @@
-/** Dispatcher node — assigns beads to Smooth Operators (workers) */
+/** Dispatcher node — assigns beads to Smooth Operators via sandbox manager */
 
 import { randomUUID } from 'node:crypto';
 
 import type { OrchestratorStateType } from '../graph/state.js';
 import { updateBead } from '../beads/client.js';
 import { sendMessage } from '../beads/messaging.js';
-
-/** Maximum concurrent Smooth Operators */
-const MAX_OPERATORS = 3;
+import { hasCapacity } from '../sandbox/manager.js';
+import { requestOperator } from '../sandbox/pool.js';
 
 export async function dispatcherNode(state: OrchestratorStateType): Promise<Partial<OrchestratorStateType>> {
     const { readyBeads, activeWorkers } = state;
 
-    const currentOperatorCount = Object.keys(activeWorkers).length;
-    const slotsAvailable = MAX_OPERATORS - currentOperatorCount;
-
-    if (slotsAvailable <= 0 || readyBeads.length === 0) {
+    if (!hasCapacity() || readyBeads.length === 0) {
         return { phase: 'monitoring' };
     }
 
     const newAssignments = { ...activeWorkers };
-    const toDispatch = readyBeads.slice(0, slotsAvailable);
 
-    for (const beadId of toDispatch) {
+    for (const beadId of readyBeads) {
+        if (!hasCapacity()) break;
+
         const operatorId = `operator-${randomUUID().slice(0, 8)}`;
 
         // Update bead status and label with operator assignment
@@ -35,11 +32,22 @@ export async function dispatcherNode(state: OrchestratorStateType): Promise<Part
         // Send assignment message
         await sendMessage(beadId, 'leader→worker', `Assigned to Smooth Operator ${operatorId}. Begin assessment.`, 'leader');
 
-        newAssignments[beadId] = operatorId;
+        // Spawn Smooth Operator container via sandbox manager
+        const operator = await requestOperator({
+            beadId,
+            operatorId,
+            workspacePath: '/workspace', // Determined by workflow context
+            permissions: ['beads:read', 'beads:write', 'beads:message', 'fs:read', 'fs:write', 'exec:test'],
+            phase: 'assess',
+        });
 
-        // TODO: Actually spawn Docker container with OpenCode
-        // This will be implemented in Phase 2 (sandbox manager)
-        console.log(`[dispatcher] Assigned bead ${beadId} to Smooth Operator ${operatorId}`);
+        if (operator) {
+            newAssignments[beadId] = operatorId;
+            console.log(`[dispatcher] Spawned Smooth Operator ${operatorId} (container ${operator.containerId}) for bead ${beadId}`);
+        } else {
+            console.log(`[dispatcher] Queued Smooth Operator ${operatorId} for bead ${beadId} (at capacity)`);
+            newAssignments[beadId] = operatorId;
+        }
     }
 
     return {
