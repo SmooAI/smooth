@@ -2,6 +2,7 @@ import { Box, Text, useInput } from 'ink';
 import React, { useCallback, useEffect, useState } from 'react';
 
 import type { LeaderClient } from '../../client/leader-client.js';
+import { MarkdownRenderer } from '../markdown/index.js';
 
 interface ChatMessage {
     role: 'user' | 'assistant' | 'tool' | 'reasoning';
@@ -251,7 +252,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
         case 'user':
             return (
                 <Box paddingLeft={2}>
-                    <Text color="green" bold>
+                    <Text color="#f49f0a" bold>
                         You:{' '}
                     </Text>
                     <Text>{message.content}</Text>
@@ -259,11 +260,13 @@ function MessageBubble({ message }: { message: ChatMessage }) {
             );
         case 'assistant':
             return (
-                <Box paddingLeft={2}>
-                    <Text color="cyan" bold>
-                        Smooth:{' '}
+                <Box flexDirection="column" paddingLeft={2}>
+                    <Text color="#00a6a6" bold>
+                        Smooth:
                     </Text>
-                    <Text>{message.content}</Text>
+                    <Box paddingLeft={2}>
+                        <MarkdownRenderer content={message.content} />
+                    </Box>
                 </Box>
             );
         case 'tool':
