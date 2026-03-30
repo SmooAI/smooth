@@ -18,10 +18,6 @@
         "changeset": "changeset",
         "db:generate": "pnpm --filter @smooth/db generate",
         "db:migrate": "pnpm --filter @smooth/db migrate",
-        "postgres:up": "docker compose -f docker/docker-compose.yml up -d postgres",
-        "postgres:down": "docker compose -f docker/docker-compose.yml down",
-        "postgres:logs": "docker compose -f docker/docker-compose.yml logs -f postgres",
-        "postgres:ps": "docker compose -f docker/docker-compose.yml ps",
         "leader:dev": "pnpm --filter @smooth/leader dev"
     },
     "devDependencies": {
@@ -31,5 +27,11 @@
         "syncpack": "^13.0.0",
         "turbo": "^2.5.0",
         "typescript": "^5.8.3"
+    },
+    "pnpm": {
+        "onlyBuiltDependencies": [
+            "better-sqlite3",
+            "esbuild"
+        ]
     }
 }

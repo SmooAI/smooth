@@ -4,15 +4,25 @@ import { execSync } from 'node:child_process';
 export function registerDownCommand(program: Command) {
     program
         .command('down')
-        .description('Stop Smooth platform (preserves data volumes)')
-        .action(() => {
+        .description('Stop Smooth platform')
+        .option('--msb', 'Also stop Microsandbox server')
+        .action((opts) => {
             console.log('Stopping Smooth...');
 
-            // Stop PostgreSQL (NEVER pass -v — that destroys the data volume)
-            console.log('Stopping PostgreSQL...');
-            execSync('docker compose -f docker/docker-compose.yml down', { stdio: 'inherit' });
+            // Leader is a foreground process — user stops it with Ctrl+C
+            console.log('  Leader: stop with Ctrl+C in the terminal running it');
 
-            console.log('Smooth stopped. Data volumes preserved.');
-            console.log('Leader process (if running) should be stopped separately (Ctrl+C).');
+            // Optionally stop Microsandbox server
+            if (opts.msb) {
+                try {
+                    execSync('msb server stop', { stdio: 'pipe' });
+                    console.log('  Microsandbox server: stopped');
+                } catch {
+                    console.log('  Microsandbox server: already stopped');
+                }
+            }
+
+            console.log('');
+            console.log('Database preserved at ~/.smooth/smooth.db');
         });
 }

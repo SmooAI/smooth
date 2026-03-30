@@ -4,7 +4,7 @@ import { betterAuth } from 'better-auth';
 import { db } from '@smooth/db/client';
 
 export const auth = betterAuth({
-    database: drizzleAdapter(db, { provider: 'pg' }),
+    database: drizzleAdapter(db, { provider: 'sqlite' }),
     emailAndPassword: {
         enabled: true,
     },

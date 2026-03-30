@@ -11,7 +11,7 @@ export interface Project {
 
 export interface SystemHealth {
     leader: { status: 'healthy' | 'degraded' | 'down'; uptime: number };
-    postgres: { status: 'healthy' | 'degraded' | 'down'; connectionCount: number };
+    database: { status: 'healthy' | 'degraded' | 'down'; path: string };
     sandbox: { status: 'healthy' | 'degraded' | 'down'; backend: string; activeSandboxes: number; maxConcurrency: number };
     tailscale: { status: 'connected' | 'disconnected'; hostname?: string };
     beads: { status: 'healthy' | 'degraded' | 'down'; openIssues: number };

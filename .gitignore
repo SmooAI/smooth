@@ -34,8 +34,10 @@ test-results/
 playwright-report/
 coverage/
 
-# Docker
-docker/postgres/backups/
+# Database
+*.db
+*.db-wal
+*.db-shm
 
 # Beads (data is gitignored, config is not)
 .beads/dolt/

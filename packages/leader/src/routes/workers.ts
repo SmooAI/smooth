@@ -1,7 +1,6 @@
 import { Hono } from 'hono';
-import { eq } from 'drizzle-orm';
 
-import { db } from '@smooth/db/client';
+import { db, eq } from '@smooth/db/index';
 import { workerRuns } from '@smooth/db/schema/workers';
 
 import { getBackend } from '../backend/registry.js';

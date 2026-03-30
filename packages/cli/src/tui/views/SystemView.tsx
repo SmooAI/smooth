@@ -32,8 +32,8 @@ export function SystemView({ client }: Props) {
                     <Text color={statusColor(health.leader?.status)}>
                         {statusIcon(health.leader?.status)} Leader: {health.leader?.status} (uptime: {Math.round(health.leader?.uptime ?? 0)}s)
                     </Text>
-                    <Text color={statusColor(health.postgres?.status)}>
-                        {statusIcon(health.postgres?.status)} PostgreSQL: {health.postgres?.status}
+                    <Text color={statusColor(health.database?.status)}>
+                        {statusIcon(health.database?.status)} Database: {health.database?.status} ({health.database?.path ?? 'unknown'})
                     </Text>
                     <Text color={statusColor(health.sandbox?.status)}>
                         {statusIcon(health.sandbox?.status)} Sandbox: {health.sandbox?.status} ({health.sandbox?.backend ?? 'unknown'}, {health.sandbox?.activeSandboxes ?? 0}/{health.sandbox?.maxConcurrency ?? 0})

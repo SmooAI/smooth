@@ -1,11 +1,12 @@
-import { jsonb, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { integer, sqliteTable, text } from 'drizzle-orm/sqlite-core';
+import { sql } from 'drizzle-orm';
 
-export const memories = pgTable('memories', {
-    id: uuid('id').primaryKey().defaultRandom(),
+export const memories = sqliteTable('memories', {
+    id: text('id').primaryKey().$defaultFn(() => crypto.randomUUID()),
     content: text('content').notNull(),
-    metadata: jsonb('metadata').$type<Record<string, unknown>>().default({}),
-    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+    metadata: text('metadata', { mode: 'json' }).$type<Record<string, unknown>>().default({}),
+    createdAt: integer('created_at', { mode: 'timestamp' }).default(sql`(unixepoch())`).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp' }).default(sql`(unixepoch())`).notNull(),
 });
 
 export type Memory = typeof memories.$inferSelect;

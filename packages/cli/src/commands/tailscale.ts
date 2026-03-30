@@ -25,8 +25,8 @@ export function registerTailscaleCommand(program: Command) {
             console.log('4. Web will be available at: https://smooth.<tailnet>.ts.net');
             console.log('5. API at: https://smooth-api.<tailnet>.ts.net');
             console.log('');
-            console.log('Configure auth key in docker/.env:');
-            console.log('  TS_AUTHKEY=tskey-auth-...');
+            console.log('Configure auth key:');
+            console.log('  th config set tailscale.authkey tskey-auth-...');
         });
 
     // Default: status

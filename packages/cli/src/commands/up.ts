@@ -1,51 +1,71 @@
 import type { Command } from 'commander';
 import { execSync, spawn } from 'node:child_process';
 
+function isMsbInstalled(): boolean {
+    try {
+        execSync('msb --version', { stdio: 'pipe' });
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function isMsbServerRunning(): boolean {
+    try {
+        execSync('msb server status', { stdio: 'pipe' });
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function installMsb(): boolean {
+    console.log('  Installing microsandbox...');
+    try {
+        execSync('curl -sSL https://get.microsandbox.dev | sh', {
+            stdio: 'inherit',
+            timeout: 60_000,
+        });
+        return true;
+    } catch {
+        console.error('  Failed to install microsandbox.');
+        console.error('  Manual install: curl -sSL https://get.microsandbox.dev | sh');
+        return false;
+    }
+}
+
 export function registerUpCommand(program: Command) {
     program
         .command('up')
-        .description('Start Smooth platform (Colima + PostgreSQL + Microsandbox + Leader)')
+        .description('Start Smooth platform')
         .option('--no-leader', 'Skip starting the leader service')
         .action((opts) => {
-            // 1. Validate Docker runtime (Colima preferred, Docker Desktop also works)
-            console.log('Checking Docker runtime...');
-            try {
-                execSync('docker info', { stdio: 'pipe' });
-                console.log('  Docker runtime: available');
-            } catch {
-                console.error('  Docker runtime: not found');
-                console.error('');
-                console.error('Install Colima (preferred):');
-                console.error('  brew install colima');
-                console.error('  colima start --cpu 4 --memory 8');
-                console.error('');
-                console.error('Or use Docker Desktop: https://docker.com/products/docker-desktop/');
-                process.exit(1);
+            // 1. Check/install Microsandbox
+            console.log('Checking Microsandbox...');
+            if (!isMsbInstalled()) {
+                console.log('  Microsandbox not found. Installing...');
+                if (!installMsb()) {
+                    process.exit(1);
+                }
+            } else {
+                console.log('  Microsandbox: installed');
             }
 
-            // 2. Start PostgreSQL
-            console.log('Starting PostgreSQL...');
-            execSync('docker compose -f docker/docker-compose.yml up -d postgres', { stdio: 'inherit' });
-
-            // 3. Validate/start Microsandbox server
-            console.log('Checking Microsandbox server...');
-            try {
-                execSync('msb server status', { stdio: 'pipe' });
-                console.log('  Microsandbox: running');
-            } catch {
-                console.log('  Microsandbox: starting...');
+            // 2. Start Microsandbox server
+            if (!isMsbServerRunning()) {
+                console.log('  Starting Microsandbox server...');
                 try {
                     execSync('msb server start --dev', { stdio: 'pipe', timeout: 10_000 });
-                    console.log('  Microsandbox: started');
+                    console.log('  Microsandbox server: started');
                 } catch {
-                    console.error('  Microsandbox: failed to start');
-                    console.error('  Install: curl -sSL https://get.microsandbox.dev | sh');
-                    console.error('  Then: msb server start --dev');
-                    // Non-fatal — leader can start without sandbox server
+                    console.error('  Failed to start Microsandbox server.');
+                    console.error('  Try manually: msb server start --dev');
                 }
+            } else {
+                console.log('  Microsandbox server: running');
             }
 
-            // 4. Start leader natively
+            // 3. Start leader natively (SQLite DB auto-creates on first access)
             if (opts.leader !== false) {
                 console.log('Starting leader service...');
                 const leader = spawn('pnpm', ['--filter', '@smooth/leader', 'dev'], {
@@ -60,12 +80,11 @@ export function registerUpCommand(program: Command) {
                 console.log('');
                 console.log('Smooth is running:');
                 console.log('  Leader:      http://localhost:4400');
-                console.log('  PostgreSQL:  localhost:5433');
-                console.log('  Sandbox:     Microsandbox (local)');
+                console.log('  Database:    ~/.smooth/smooth.db (SQLite)');
+                console.log('  Sandbox:     Microsandbox (local microVMs)');
             } else {
                 console.log('');
-                console.log('Smooth infrastructure is running (leader skipped):');
-                console.log('  PostgreSQL:  localhost:5433');
+                console.log('Smooth infrastructure ready (leader skipped):');
                 console.log('  Start leader manually: pnpm --filter @smooth/leader dev');
             }
         });

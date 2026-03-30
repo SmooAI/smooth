@@ -1,10 +1,13 @@
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
 import { defineConfig } from 'drizzle-kit';
 
 export default defineConfig({
-    dialect: 'postgresql',
+    dialect: 'sqlite',
     schema: './src/schema/index.ts',
     out: './src/migrations',
     dbCredentials: {
-        url: process.env.DATABASE_URL ?? 'postgresql://smooth:smooth_dev_password@localhost:5433/smooth',
+        url: process.env.SMOOTH_DB_PATH ?? join(homedir(), '.smooth', 'smooth.db'),
     },
 });

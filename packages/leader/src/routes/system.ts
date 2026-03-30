@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 
-import { db } from '@smooth/db/client';
+import { db, getDbPath } from '@smooth/db/client';
 import { config } from '@smooth/db/schema/config';
 import type { SystemHealth } from '@smooth/shared/types';
 
@@ -14,7 +14,7 @@ systemRoutes.get('/health', async (c) => {
 
     const health: SystemHealth = {
         leader: { status: 'healthy', uptime: process.uptime() },
-        postgres: { status: 'healthy', connectionCount: 0 },
+        database: { status: 'healthy', path: getDbPath() },
         sandbox: {
             status: 'healthy',
             backend: backend.name,
@@ -25,12 +25,12 @@ systemRoutes.get('/health', async (c) => {
         beads: { status: 'healthy', openIssues: 0 },
     };
 
-    // Test PostgreSQL
+    // Test SQLite
     try {
-        await db.select().from(config).limit(1);
-        health.postgres.status = 'healthy';
+        db.select().from(config).limit(1).all();
+        health.database.status = 'healthy';
     } catch {
-        health.postgres.status = 'down';
+        health.database.status = 'down';
     }
 
     // Test sandbox backend
