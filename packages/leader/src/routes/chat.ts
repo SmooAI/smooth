@@ -38,7 +38,7 @@ chatRoutes.post('/', async (c) => {
             // Use opencode run — handles auth, model selection, streaming
             const proc = spawn(OPENCODE_BIN, ['run', parsed.content, '-m', 'opencode/claude-sonnet-4-6'], {
                 stdio: ['pipe', 'pipe', 'pipe'],
-                env: { ...process.env, TERM: 'dumb', NO_COLOR: '1' },
+                env: { ...process.env, NO_COLOR: '1' },
             });
 
             let fullContent = '';
