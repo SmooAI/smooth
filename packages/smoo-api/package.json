@@ -1,8 +1,16 @@
 {
     "name": "@smooth/smoo-api",
     "version": "0.1.0",
-    "private": true,
+    "license": "MIT",
     "type": "module",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/SmooAI/smooth.git",
+        "directory": "packages/smoo-api"
+    },
+    "publishConfig": {
+        "access": "public"
+    },
     "exports": {
         "./*": "./src/*"
     },

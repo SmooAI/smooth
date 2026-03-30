@@ -1,8 +1,16 @@
 {
     "name": "@smooth/leader",
     "version": "0.1.0",
-    "private": true,
+    "license": "MIT",
     "type": "module",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/SmooAI/smooth.git",
+        "directory": "packages/leader"
+    },
+    "publishConfig": {
+        "access": "public"
+    },
     "exports": {
         "./*": "./src/*"
     },
@@ -17,6 +25,7 @@
         "@smooth/shared": "workspace:*",
         "@smooth/db": "workspace:*",
         "@smooth/auth": "workspace:*",
+        "@opencode-ai/sdk": "^1.3.0",
         "@langchain/core": "^1.1.0",
         "@langchain/langgraph": "^1.2.0",
         "@langchain/langgraph-checkpoint-sqlite": "^1.0.0",

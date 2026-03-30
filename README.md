@@ -186,4 +186,4 @@ git merge SMOODEV-XX-desc --no-ff && git push
 
 ## License
 
-Private - Smoo AI
+MIT - Smoo AI

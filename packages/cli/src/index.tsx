@@ -3,6 +3,7 @@
 
 import { Command } from 'commander';
 
+import { registerAuthCommand } from './commands/auth.js';
 import { registerApproveCommand } from './commands/approve.js';
 import { registerConfigCommand } from './commands/config.js';
 import { registerDbCommand } from './commands/db.js';
@@ -23,10 +24,11 @@ import { registerWorktreeCommand } from './commands/worktree.js';
 
 const program = new Command()
     .name('th')
-    .description('Smooth — AI Agent Orchestration Platform')
+    .description('Smoo AI CLI — agent orchestration, config management, and platform tools')
     .version('0.1.0');
 
 // Register all commands
+registerAuthCommand(program);
 registerStatusCommand(program);
 registerTuiCommand(program);
 registerWebCommand(program);
