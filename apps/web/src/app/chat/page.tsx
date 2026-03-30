@@ -84,17 +84,14 @@ export default function ChatPage() {
                 <input
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && send()}
+                    onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
                     placeholder="Message the leader... (@ for context search)"
                     className="flex-1 bg-neutral-900 border border-neutral-800 rounded-lg px-4 py-3 text-neutral-100 text-sm outline-none focus:border-cyan-600 transition-colors placeholder:text-neutral-600"
                 />
                 <button
-                    onClick={send}
-                    disabled={streaming || !input.trim()}
-                    className={cn(
-                        'bg-cyan-500 text-black rounded-lg px-6 py-3 font-semibold flex items-center gap-2 transition-opacity cursor-pointer',
-                        (streaming || !input.trim()) && 'opacity-50 cursor-not-allowed',
-                    )}
+                    onClick={() => send()}
+                    type="button"
+                    className="bg-cyan-500 text-black rounded-lg px-6 py-3 font-semibold flex items-center gap-2 cursor-pointer hover:bg-cyan-400"
                 >
                     <Send size={16} />
                     Send
