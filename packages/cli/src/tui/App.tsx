@@ -1,10 +1,11 @@
 import { Box, useInput } from 'ink';
-import React, { useState } from 'react';
+import React, { useCallback, useState } from 'react';
 
 import { LeaderClient } from '../client/leader-client.js';
 import { getActiveServerUrl, getApiKey } from '../config.js';
 import { Header } from './components/Header.js';
 import { StatusBar } from './components/StatusBar.js';
+import { useMouse } from './hooks/useMouse.js';
 import { BeadsView } from './views/BeadsView.js';
 import { ChatView } from './views/ChatView.js';
 import { DashboardView } from './views/DashboardView.js';
@@ -26,6 +27,29 @@ export function App({ serverUrl }: AppProps) {
     const client = new LeaderClient(url, getApiKey(url));
     const [activeTab, setActiveTab] = useState<Tab>('Dashboard');
 
+    // Mouse support — click header tabs to switch views
+    const handleMouse = useCallback(
+        (event: { x: number; y: number; button: string; type: string }) => {
+            if (event.type !== 'press' || event.button !== 'left') return;
+
+            // Tab bar is on y=3 (inside header border)
+            if (event.y === 3) {
+                let col = 2;
+                for (const tab of TABS) {
+                    const label = `${TABS.indexOf(tab) + 1}:${tab}`;
+                    if (event.x >= col && event.x < col + label.length + 1) {
+                        setActiveTab(tab);
+                        return;
+                    }
+                    col += label.length + 1;
+                }
+            }
+        },
+        [],
+    );
+
+    useMouse(handleMouse);
+
     useInput((input, key) => {
         if (key.tab) {
             const idx = TABS.indexOf(activeTab);
@@ -33,27 +57,18 @@ export function App({ serverUrl }: AppProps) {
             setActiveTab(next);
         }
 
-        // Number keys for quick tab switching
         const num = parseInt(input, 10);
         if (num >= 1 && num <= TABS.length) {
             setActiveTab(TABS[num - 1]);
         }
 
-        // / to jump to chat
-        if (input === '/') {
-            setActiveTab('Chat');
-        }
-
-        // q to quit
-        if (input === 'q' && activeTab !== 'Chat') {
-            process.exit(0);
-        }
+        if (input === '/') setActiveTab('Chat');
+        if (input === 'q' && activeTab !== 'Chat') process.exit(0);
     });
 
     return (
         <Box flexDirection="column" width="100%">
             <Header serverUrl={url} activeTab={activeTab} tabs={[...TABS]} />
-
             <Box flexDirection="column" paddingX={1} flexGrow={1}>
                 {activeTab === 'Dashboard' && <DashboardView client={client} />}
                 {activeTab === 'Projects' && <ProjectsView client={client} />}
@@ -64,7 +79,6 @@ export function App({ serverUrl }: AppProps) {
                 {activeTab === 'Reviews' && <ReviewsView client={client} />}
                 {activeTab === 'System' && <SystemView client={client} />}
             </Box>
-
             <StatusBar activeTab={activeTab} />
         </Box>
     );
