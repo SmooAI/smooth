@@ -48,7 +48,7 @@ The tool system is extensible — add custom MCP tools for your specific workflo
 You describe work to the leader. The leader breaks it down, assigns Smooth Operators, and they execute through a structured lifecycle:
 
 ```
-ASSESS → PLAN → ORCHESTRATE → EXECUTE → FINALIZE → REVIEW
+ASSESS → PLAN → ORCHESTRATE → EXECUTE → FINALIZE → REVIEW (adversarial)
 ```
 
 Every piece of work gets adversarial review from a separate operator that challenges assumptions, checks for edge cases, and either approves, requests rework, or rejects. All state is durable through [Beads](https://github.com/SmooAI/beads) — nothing gets lost.
@@ -139,32 +139,72 @@ th tailscale status              # Tailscale node info
 
 ## Architecture
 
-```
-                    ┌─────────────────────────────────┐
-                    │         User Interfaces          │
-                    │  ┌─────────┐    ┌────────────┐  │
-                    │  │ th CLI  │    │  Next.js   │  │
-                    │  │ (Ink)   │    │  Web App   │  │
-                    │  └────┬────┘    └─────┬──────┘  │
-                    └───────┼───────────────┼─────────┘
-                            │               │
-                     ┌──────┴───────────────┴──────┐
-                     │   Leader (Hono + LangGraph)  │
-                     └──────┬───────────────┬──────┘
-                            │               │
-                   ┌────────┴──┐     ┌──────┴────────┐
-                   │  SQLite   │     │  Execution    │
-                   │  + Beads  │     │  Backend      │
-                   └───────────┘     └───────┬───────┘
-                          ┌──────────────────┼──────────┐
-                    ┌─────┴─────┐    ┌──────┴──────┐   │
-                    │ Smooth    │    │  Smooth     │  ...
-                    │ Operator 1│    │  Operator 2 │
-                    │(microVM)  │    │ (microVM)   │
-                    └───────────┘    └─────────────┘
+```mermaid
+graph TB
+    subgraph UI["User Interfaces"]
+        CLI["th CLI<br/><small>React Ink TUI</small>"]
+        Web["Next.js Web App<br/><small>Tailwind CSS 4</small>"]
+    end
+
+    subgraph Leader["Leader Service"]
+        Hono["Hono API"]
+        LG["LangGraph<br/>Orchestrator"]
+        Hono --> LG
+    end
+
+    subgraph State["Durable State"]
+        SQLite["SQLite<br/><small>system data</small>"]
+        Beads["Beads<br/><small>work graph</small>"]
+        Audit["Audit Logs<br/><small>rotating files</small>"]
+    end
+
+    subgraph Backend["Execution Backend"]
+        direction LR
+        EB["ExecutionBackend<br/><small>interface</small>"]
+        MSB["Microsandbox<br/><small>local microVMs</small>"]
+        Lambda["AWS Lambda<br/><small>future</small>"]
+        EB -.-> MSB
+        EB -.-> Lambda
+    end
+
+    subgraph Operators["Smooth Operators"]
+        OP1["Operator 1<br/><small>OpenCode in microVM</small>"]
+        OP2["Operator 2<br/><small>OpenCode in microVM</small>"]
+        OP3["Operator N<br/><small>OpenCode in microVM</small>"]
+    end
+
+    CLI --> Hono
+    Web --> Hono
+    LG --> State
+    LG --> EB
+    MSB --> Operators
+
+    style UI fill:#0e1117,stroke:#30363d,color:#e6edf3
+    style Leader fill:#0e1117,stroke:#06b6d4,color:#e6edf3
+    style State fill:#0e1117,stroke:#30363d,color:#e6edf3
+    style Backend fill:#0e1117,stroke:#30363d,color:#e6edf3
+    style Operators fill:#0e1117,stroke:#22c55e,color:#e6edf3
+    style Lambda fill:#0e1117,stroke:#525252,color:#737373
 ```
 
 The **leader** (LangGraph + Hono) orchestrates **Smooth Operators** (OpenCode in Microsandbox microVMs). **Beads** is the durable system of record for all work state. **SQLite** handles system data. The execution layer is pluggable — local Microsandbox today, AWS Lambda for hosted customer workloads in the future.
+
+### Operator Lifecycle
+
+```mermaid
+graph LR
+    A["ASSESS"] --> P["PLAN"] --> O["ORCHESTRATE"] --> E["EXECUTE"] --> F["FINALIZE"] --> R["REVIEW"]
+    R -->|approved| Done["Done"]
+    R -->|rework| E
+
+    style A fill:#1e3a5f,stroke:#3b82f6,color:#e6edf3
+    style P fill:#1e3a5f,stroke:#3b82f6,color:#e6edf3
+    style O fill:#1e3a5f,stroke:#3b82f6,color:#e6edf3
+    style E fill:#14532d,stroke:#22c55e,color:#e6edf3
+    style F fill:#1e3a5f,stroke:#3b82f6,color:#e6edf3
+    style R fill:#422006,stroke:#eab308,color:#e6edf3
+    style Done fill:#14532d,stroke:#22c55e,color:#e6edf3
+```
 
 ## Packages
 
