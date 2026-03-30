@@ -19,7 +19,7 @@ const INJECTION_PATTERNS = [
     // Hidden instruction markers
     { name: 'hidden_instruction', pattern: /<!--\s*(?:SYSTEM|INSTRUCTION|PROMPT|IMPORTANT)\s*:/i },
     { name: 'base64_instruction', pattern: /(?:decode|execute|eval)\s+(?:this\s+)?base64/i },
-    { name: 'invisible_chars', pattern: /[\u200B\u200C\u200D\uFEFF\u2060]{3,}/ }, // Zero-width chars used to hide text
+    { name: 'invisible_chars', pattern: /[\u200B\u200C\uFEFF\u2060]{3,}/ }, // Zero-width chars used to hide text
 
     // Tool manipulation
     { name: 'tool_override', pattern: /(?:override|bypass|skip|disable)\s+(?:the\s+)?(?:security|safety|hook|guard|permission|validation)/i },

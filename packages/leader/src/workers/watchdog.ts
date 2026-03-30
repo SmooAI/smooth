@@ -4,7 +4,6 @@ import { createAuditLogger } from '@smooai/smooth-shared/audit-log';
 
 import { getBackend, getEventStream } from '../backend/registry.js';
 import { getLastProgressTimestamp } from '../beads/messaging.js';
-import { checkpointManager } from './checkpoint.js';
 
 const audit = createAuditLogger('leader');
 

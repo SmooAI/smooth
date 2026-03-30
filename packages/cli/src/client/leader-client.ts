@@ -109,6 +109,24 @@ export class LeaderClient {
         await this.request(`/api/workers/${id}`, { method: 'DELETE' });
     }
 
+    // ── Steering ────────────────────────────────────────────
+
+    async pauseOperator(beadId: string): Promise<void> {
+        await this.request(`/api/steering/${beadId}/pause`, { method: 'POST' });
+    }
+
+    async steerOperator(beadId: string, message: string): Promise<void> {
+        await this.request(`/api/steering/${beadId}/steer`, { method: 'POST', body: JSON.stringify({ message }) });
+    }
+
+    async resumeOperator(beadId: string): Promise<void> {
+        await this.request(`/api/steering/${beadId}/resume`, { method: 'POST' });
+    }
+
+    async cancelOperator(beadId: string): Promise<void> {
+        await this.request(`/api/steering/${beadId}/cancel`, { method: 'POST' });
+    }
+
     // ── Messages ────────────────────────────────────────────
 
     async getInbox(): Promise<InboxResponse> {
