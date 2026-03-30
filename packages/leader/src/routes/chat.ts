@@ -1,6 +1,8 @@
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
-import { execSync, spawn } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 import { ChatMessageSchema } from '@smooai/smooth-shared/schemas';
 import { createAuditLogger } from '@smooai/smooth-shared/audit-log';
@@ -9,71 +11,106 @@ export const chatRoutes = new Hono();
 
 const audit = createAuditLogger('leader');
 
-/** Find the opencode binary */
-function findOpencode(): string {
-    const paths = [`${process.env.HOME}/.opencode/bin/opencode`, '/opt/homebrew/bin/opencode', '/usr/local/bin/opencode', 'opencode'];
-    for (const p of paths) {
-        try {
-            execSync(`${p} --version`, { stdio: 'pipe' });
-            return p;
-        } catch {
-            /* continue */
-        }
+/** Get OpenCode Zen API key from opencode's auth store */
+function getZenApiKey(): string | null {
+    const authPath = join(homedir(), '.local', 'share', 'opencode', 'auth.json');
+    if (!existsSync(authPath)) return null;
+    try {
+        const auth = JSON.parse(readFileSync(authPath, 'utf8'));
+        return auth.opencode?.key ?? null;
+    } catch {
+        return null;
     }
-    return 'opencode';
 }
 
-const OPENCODE_BIN = findOpencode();
-
-/** Send a chat message — uses opencode run for LLM access (CLI > everything) */
+/** Send a chat message — calls OpenCode Zen API directly (OpenAI-compatible) */
 chatRoutes.post('/', async (c) => {
     const body = await c.req.json();
     const parsed = ChatMessageSchema.parse(body);
+
+    const apiKey = getZenApiKey();
+    if (!apiKey) {
+        return streamSSE(c, async (stream) => {
+            await stream.writeSSE({
+                event: 'text',
+                data: JSON.stringify({ type: 'text', content: 'No LLM provider configured. Run: th auth login opencode-zen' }),
+            });
+            await stream.writeSSE({ event: 'done', data: JSON.stringify({ type: 'done', content: '' }) });
+        });
+    }
 
     audit.promptSent('chat', parsed.content);
     const start = Date.now();
 
     return streamSSE(c, async (stream) => {
         try {
-            // Use opencode run — handles auth, model selection, streaming
-            const proc = spawn(OPENCODE_BIN, ['run', parsed.content, '-m', 'opencode/claude-sonnet-4-6'], {
-                stdio: ['pipe', 'pipe', 'pipe'],
-                env: { ...process.env, NO_COLOR: '1' },
+            // OpenCode Zen API: https://opencode.ai/zen/v1 (OpenAI-compatible)
+            const response = await fetch('https://opencode.ai/zen/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    model: 'claude-sonnet-4-6',
+                    stream: true,
+                    messages: [
+                        {
+                            role: 'system',
+                            content: `You are Smooth, an AI agent orchestration leader. You help users manage projects, assign work to Smooth Operators (AI agents in sandboxes), review work, and coordinate tasks.
+
+Available commands: th run <bead-id>, th operators, th pause/steer/cancel <bead-id>, th auth status, th status`,
+                        },
+                        { role: 'user', content: parsed.content },
+                    ],
+                }),
             });
 
+            if (!response.ok) {
+                const errBody = await response.text().catch(() => '');
+                await stream.writeSSE({
+                    event: 'text',
+                    data: JSON.stringify({ type: 'text', content: `LLM error (${response.status}): ${errBody.slice(0, 200)}` }),
+                });
+                await stream.writeSSE({ event: 'done', data: JSON.stringify({ type: 'done', content: '' }) });
+                return;
+            }
+
+            const reader = response.body?.getReader();
+            if (!reader) {
+                await stream.writeSSE({ event: 'text', data: JSON.stringify({ type: 'text', content: 'No response stream.' }) });
+                await stream.writeSSE({ event: 'done', data: JSON.stringify({ type: 'done', content: '' }) });
+                return;
+            }
+
+            const decoder = new TextDecoder();
             let fullContent = '';
 
-            proc.stdout.on('data', async (chunk: Buffer) => {
-                // Strip ANSI codes
-                const clean = chunk.toString().replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
 
-                if (clean.trim()) {
-                    fullContent += clean;
-                    await stream.writeSSE({
-                        event: 'text',
-                        data: JSON.stringify({ type: 'text', content: clean }),
-                    });
+                for (const line of decoder.decode(value).split('\n')) {
+                    if (!line.startsWith('data: ')) continue;
+                    const data = line.slice(6);
+                    if (data === '[DONE]') break;
+
+                    try {
+                        const delta = JSON.parse(data).choices?.[0]?.delta?.content;
+                        if (delta) {
+                            fullContent += delta;
+                            await stream.writeSSE({ event: 'text', data: JSON.stringify({ type: 'text', content: delta }) });
+                        }
+                    } catch { /* skip */ }
                 }
-            });
-
-            await new Promise<void>((resolve, reject) => {
-                proc.on('close', (code) => {
-                    if (code !== 0 && !fullContent) {
-                        reject(new Error(`opencode exited with code ${code}`));
-                    } else {
-                        resolve();
-                    }
-                });
-                proc.on('error', reject);
-            });
+            }
 
             audit.promptReceived('chat', fullContent.slice(0, 200), Date.now() - start);
             await stream.writeSSE({ event: 'done', data: JSON.stringify({ type: 'done', content: '' }) });
         } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error);
             await stream.writeSSE({
                 event: 'text',
-                data: JSON.stringify({ type: 'text', content: `Error: ${msg}. Is opencode authenticated? Run: th auth login opencode-zen` }),
+                data: JSON.stringify({ type: 'text', content: `Error: ${(error as Error).message}` }),
             });
             await stream.writeSSE({ event: 'done', data: JSON.stringify({ type: 'done', content: '' }) });
         }
