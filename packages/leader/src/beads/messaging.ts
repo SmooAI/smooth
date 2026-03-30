@@ -88,3 +88,11 @@ function inferActionType(content: string): InboxItem['actionType'] {
     if (lower.includes('question') || lower.includes('?')) return 'response';
     return 'info';
 }
+
+/** Get the timestamp of the last progress message on a bead */
+export async function getLastProgressTimestamp(beadId: string): Promise<Date | null> {
+    const messages = await readMessages(beadId, 'progress');
+    if (messages.length === 0) return null;
+    const last = messages[messages.length - 1];
+    return last.createdAt ? new Date(last.createdAt) : new Date();
+}

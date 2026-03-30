@@ -9,8 +9,11 @@ import { createAuditLogger, flushAuditLogs, getAuditDir } from '@smooai/smooth-s
 
 import { initializeBackend, shutdownBackend } from './backend/registry.js';
 import { ensureBeadsDir, getBeadsDir } from './beads/client.js';
+import { watchdog } from './workers/watchdog.js';
 import { beadsRoutes } from './routes/beads.js';
 import { chatRoutes } from './routes/chat.js';
+import { execRoutes } from './routes/exec.js';
+import { steeringRoutes } from './routes/steering.js';
 import { healthRoutes } from './routes/health.js';
 import { jiraRoutes } from './routes/jira.js';
 import { messagesRoutes } from './routes/messages.js';
@@ -37,6 +40,8 @@ app.route('/api/system', systemRoutes);
 app.route('/api/jira', jiraRoutes);
 app.route('/api/chat', chatRoutes);
 app.route('/api/stream', streamRoutes);
+app.route('/api/workers', execRoutes);
+app.route('/api/steering', steeringRoutes);
 
 const port = parseInt(process.env.PORT ?? '4400', 10);
 
@@ -63,6 +68,9 @@ async function start() {
     // Make audit logger available globally for routes
     (globalThis as any).__smoothAudit = leaderAudit;
 
+    // Start operator watchdog
+    watchdog.start();
+
     serve({
         fetch: app.fetch,
         port,
@@ -73,6 +81,7 @@ async function start() {
     // Graceful shutdown
     const shutdown = async () => {
         console.log('Shutting down...');
+        watchdog.stop();
         await flushAuditLogs();
         await shutdownBackend();
         process.exit(0);

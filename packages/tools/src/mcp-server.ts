@@ -12,9 +12,14 @@ import { ToolRegistry } from './registry.js';
 import { artifactWriteTool } from './tools/artifact.js';
 import { beadsContextTool } from './tools/beads-context.js';
 import { beadsMessageTool } from './tools/beads-message.js';
+import { codeSearchTool } from './tools/code-search.js';
+import { findDefinitionTool } from './tools/find-definition.js';
+import { lintFixTool } from './tools/lint-fix.js';
 import { progressAppendTool } from './tools/progress.js';
+import { repoMapTool } from './tools/repo-map.js';
 import { reviewRequestTool } from './tools/review-request.js';
 import { spawnSubtaskTool } from './tools/spawn-subtask.js';
+import { testRunTool } from './tools/test-run.js';
 import { workflowTransitionTool } from './tools/workflow.js';
 
 // Build tool context from environment
@@ -35,6 +40,11 @@ registry.register(artifactWriteTool);
 registry.register(workflowTransitionTool);
 registry.register(spawnSubtaskTool);
 registry.register(reviewRequestTool);
+registry.register(lintFixTool);
+registry.register(testRunTool);
+registry.register(repoMapTool);
+registry.register(codeSearchTool);
+registry.register(findDefinitionTool);
 
 // Register guardrail hooks
 registry.registerHook(promptInjectionHook); // Must be first — blocks injected instructions

@@ -17,6 +17,7 @@ import { registerProjectCommand } from './commands/project.js';
 import { registerRunCommand } from './commands/run.js';
 import { registerSmooCommand } from './commands/smoo.js';
 import { registerStatusCommand } from './commands/status.js';
+import { registerSteerCommand } from './commands/steer.js';
 import { registerTailscaleCommand } from './commands/tailscale.js';
 import { registerTuiCommand } from './commands/tui.js';
 import { registerUpCommand } from './commands/up.js';
@@ -44,6 +45,7 @@ registerUpCommand(program);
 registerDownCommand(program);
 registerWorktreeCommand(program);
 registerTailscaleCommand(program);
+registerSteerCommand(program);
 registerLoginCommand(program);
 
 program.parse();
