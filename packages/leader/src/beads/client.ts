@@ -1,11 +1,20 @@
-/** Typed wrapper around the bd CLI for Beads operations */
+/** Typed wrapper around the bd CLI for Beads operations
+ *
+ * Beads database lives at ~/.smooth/.beads/ (global instance, not tied to any git repo).
+ */
 
 import { execFile } from 'node:child_process';
+import { existsSync, mkdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 import type { Bead, BeadComment, BeadDetail, BeadStatus, BeadType, Dependency, DependencyType } from '@smooth/shared/beads-types';
 
 const exec = promisify(execFile);
+
+/** Global beads directory — not tied to any git repo */
+const BEADS_DIR = process.env.BEADS_DIR ?? join(homedir(), '.smooth', '.beads');
 
 interface BdOptions {
     cwd?: string;
@@ -14,9 +23,21 @@ interface BdOptions {
 
 const DEFAULT_TIMEOUT = 30_000;
 
+/** Ensure the beads directory exists. Call once at startup. */
+export function ensureBeadsDir(): void {
+    if (!existsSync(BEADS_DIR)) {
+        mkdirSync(BEADS_DIR, { recursive: true });
+    }
+}
+
+/** Get the beads directory path */
+export function getBeadsDir(): string {
+    return BEADS_DIR;
+}
+
 async function bd(args: string[], options: BdOptions = {}): Promise<string> {
     const { stdout } = await exec('bd', args, {
-        cwd: options.cwd ?? process.env.BEADS_DIR ?? process.cwd(),
+        cwd: options.cwd ?? BEADS_DIR,
         timeout: options.timeout ?? DEFAULT_TIMEOUT,
     });
     return stdout.trim();

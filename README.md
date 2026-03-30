@@ -10,9 +10,9 @@ A local-first, general-purpose AI agent orchestration system that coordinates mu
 [![Next.js](https://img.shields.io/badge/Next.js-16-000000?logo=next.js&logoColor=white)](https://nextjs.org/)
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![LangGraph](https://img.shields.io/badge/LangGraph-1.2-1C3C3C?logo=langchain&logoColor=white)](https://langchain-ai.github.io/langgraphjs/)
-[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
+[![SQLite](https://img.shields.io/badge/SQLite-WAL-003B57?logo=sqlite&logoColor=white)](https://sqlite.org/)
+[![Microsandbox](https://img.shields.io/badge/Microsandbox-microVM-FF6B6B)](https://microsandbox.dev/)
 [![Tailscale](https://img.shields.io/badge/Tailscale-Forward-4C566A?logo=tailscale&logoColor=white)](https://tailscale.com/)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Drizzle](https://img.shields.io/badge/Drizzle-ORM-C5F74F?logo=drizzle&logoColor=black)](https://orm.drizzle.team/)
 
 </div>
@@ -31,28 +31,32 @@ A local-first, general-purpose AI agent orchestration system that coordinates mu
                     └───────┼───────────────┼─────────┘
                             │               │
                      ┌──────┴───────────────┴──────┐
-                     │     Leader (Hono + LangGraph)│
+                     │   Leader (Hono + LangGraph)  │
                      └──────┬───────────────┬──────┘
                             │               │
                    ┌────────┴──┐     ┌──────┴────────┐
-                   │ PostgreSQL│     │  Docker API   │
+                   │  SQLite   │     │  Execution    │
+                   │  + Beads  │     │  Backend      │
                    └───────────┘     └───────┬───────┘
                           ┌──────────────────┼──────────┐
                     ┌─────┴─────┐    ┌──────┴──────┐   │
-                    │  Worker 1 │    │  Worker 2   │  ...
-                    │ (OpenCode)│    │ (OpenCode)  │
+                    │ Smooth    │    │  Smooth     │  ...
+                    │ Operator 1│    │  Operator 2 │
+                    │(microVM)  │    │ (microVM)   │
                     └───────────┘    └─────────────┘
 ```
 
-**Leader** (custom LangGraph service) orchestrates **Smooth Operators** (OpenCode agents in Docker sandboxes). All durable state flows through **Beads**. Communication via Beads-backed messaging. Adversarial review on every task.
+**Leader** (custom LangGraph service) orchestrates **Smooth Operators** (OpenCode agents in Microsandbox microVMs). All durable state flows through **Beads**. Communication via Beads-backed messaging. Adversarial review on every task.
+
+**Zero external dependencies.** No Docker. No PostgreSQL. Just Node.js and Microsandbox (auto-installed).
 
 ## Tech Stack
 
 | Layer | Technology |
 |---|---|
 | **Orchestration** | LangGraph (TypeScript), custom leader node |
-| **Smooth Operators** | OpenCode (Zen subscription), Docker sandboxes |
-| **State** | Beads (durable SoR), PostgreSQL (Drizzle ORM) |
+| **Smooth Operators** | OpenCode (Zen), Microsandbox microVMs |
+| **State** | Beads (durable SoR), SQLite (Drizzle ORM) |
 | **Web** | Next.js 16, React 19, Tailwind CSS 4, Shadcn UI, AI SDK Elements |
 | **CLI/TUI** | React Ink 6, @inkjs/ui, Commander.js |
 | **Auth** | Better Auth (sessions + API keys), Tailscale identity headers |
@@ -68,43 +72,48 @@ smooth/
 │   └── web/                    # Next.js 16 web interface
 ├── packages/
 │   ├── leader/                 # LangGraph orchestration service
+│   │   └── src/backend/        # Pluggable ExecutionBackend (Microsandbox, future Lambda)
 │   ├── cli/                    # `th` CLI + React Ink TUI
 │   ├── shared/                 # Shared types + Zod schemas
-│   ├── db/                     # Drizzle ORM schemas
+│   ├── db/                     # Drizzle ORM (SQLite)
 │   ├── auth/                   # Better Auth config
-│   ├── tools/                  # Custom MCP tools for Smooth Operators
+│   ├── tools/                  # MCP tools for Smooth Operators
 │   └── smoo-api/               # SmooAI platform API client
 ├── docker/
-│   ├── docker-compose.yml      # Full stack deployment
-│   ├── leader/                 # Leader Dockerfile
-│   ├── postgres/               # Init, backup, restore
-│   └── worker/                 # OpenCode worker image
-└── .beads/                     # Beads issue tracking
+│   └── worker/                 # Smooth Operator OCI image
+└── ~/.smooth/                  # Local state (auto-created)
+    ├── smooth.db               # SQLite database
+    ├── .beads/                 # Beads issue graph
+    ├── artifacts/              # Operator work artifacts
+    ├── config.json             # CLI config
+    └── credentials.json        # API keys
 ```
 
 ## Prerequisites
 
 - Node.js 24+ (see `.nvmrc`)
 - pnpm 10.6+
-- Docker & Docker Compose
 - Tailscale (optional, for private networking)
+
+That's it. Microsandbox is auto-installed by `th up`.
 
 ## Getting Started
 
 ```bash
-# Clone
+# Clone and install
 git clone git@github.com:SmooAI/smooth.git
 cd smooth
-
-# Install dependencies
 pnpm install
 
-# Start PostgreSQL
-pnpm docker:up
-
-# Start development
-pnpm dev
+# Start everything
+th up
 ```
+
+`th up` will:
+1. Install Microsandbox if not found
+2. Start the Microsandbox server
+3. Auto-create SQLite database at `~/.smooth/smooth.db`
+4. Start the leader service
 
 ## The `th` CLI
 
@@ -120,11 +129,12 @@ th inbox                    # Pending messages
 th operators                # Active Smooth Operators
 th jira sync                # Sync with Jira
 th smoo agents              # List SmooAI agents
-th db backup                # Backup PostgreSQL
+th db status                # Database info
+th db backup                # Backup SQLite
 th tailscale status         # Tailscale node status
 ```
 
-## Worker Lifecycle
+## Smooth Operator Lifecycle
 
 Every task follows a structured lifecycle with adversarial review:
 
@@ -135,9 +145,20 @@ ASSESS → PLAN → ORCHESTRATE → EXECUTE → FINALIZE → REVIEW
 - **Assess**: Inspect bead context, graph neighbors, previous work
 - **Plan**: Define bounded steps, tools, expected outputs
 - **Orchestrate**: Coordinate sub-work, spawn child beads
-- **Execute**: Work inside Docker sandbox with MCP tools
+- **Execute**: Work inside Microsandbox microVM with MCP tools
 - **Finalize**: Summarize, link artifacts, identify unlocked work
-- **Review**: Adversarial review worker inspects diffs, tests, artifacts
+- **Review**: Adversarial review operator inspects diffs, tests, artifacts
+
+## Execution Backend
+
+Smooth uses a pluggable `ExecutionBackend` interface. The orchestration layer never touches container/VM internals directly.
+
+| Backend | Status | Use |
+|---|---|---|
+| `local-microsandbox` | **Default** | Local dev. Hardware-isolated microVMs via Microsandbox. |
+| `aws-lambda` | Future | Hosted customer workloads. Lambda + S3 + DynamoDB. |
+
+Switch backend: `SMOOTH_BACKEND=aws-lambda th up`
 
 ## Development
 

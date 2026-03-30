@@ -3,7 +3,11 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 
+import { ensureSchema } from '@smooth/db/migrate';
+import { getDbPath } from '@smooth/db/client';
+
 import { initializeBackend, shutdownBackend } from './backend/registry.js';
+import { ensureBeadsDir, getBeadsDir } from './beads/client.js';
 import { beadsRoutes } from './routes/beads.js';
 import { chatRoutes } from './routes/chat.js';
 import { healthRoutes } from './routes/health.js';
@@ -37,6 +41,14 @@ const port = parseInt(process.env.PORT ?? '4400', 10);
 
 async function start() {
     console.log('Smooth leader starting...');
+
+    // Auto-create SQLite tables
+    ensureSchema();
+    console.log(`Database: ${getDbPath()}`);
+
+    // Ensure Beads directory exists
+    ensureBeadsDir();
+    console.log(`Beads: ${getBeadsDir()}`);
 
     // Initialize execution backend
     const backend = await initializeBackend();

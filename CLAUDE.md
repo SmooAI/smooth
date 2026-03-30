@@ -69,21 +69,21 @@ smooth/
 │   ├── shared/             # Shared types + Zod schemas
 │   ├── db/                 # Drizzle ORM schemas + client
 │   ├── auth/               # Better Auth (sessions + API keys)
-│   ├── tools/              # Custom MCP tools for workers
+│   ├── tools/              # MCP tools for Smooth Operators
 │   └── smoo-api/           # SmooAI platform M2M API client
 ├── docker/
-│   ├── docker-compose.yml  # PostgreSQL + services
-│   ├── leader/             # Leader Dockerfile
-│   ├── postgres/           # Init, backup, restore scripts
-│   └── worker/             # OpenCode worker Dockerfile
-└── .beads/                 # Issue tracking (gitignored data)
+│   └── worker/             # Smooth Operator OCI image
+└── ~/.smooth/              # Local state (auto-created)
+    ├── smooth.db           # SQLite database
+    ├── .beads/             # Beads issue graph
+    └── artifacts/          # Operator work artifacts
 ```
 
 ### Key Technologies
 
 - **Orchestration**: LangGraph (TypeScript), custom leader node
-- **Workers**: OpenCode (Zen), Docker sandboxes
-- **State**: Beads (durable SoR), PostgreSQL (Drizzle ORM)
+- **Smooth Operators**: OpenCode (Zen), Microsandbox microVMs
+- **State**: Beads (durable SoR), SQLite (Drizzle ORM)
 - **Web**: Next.js 16, React 19, Tailwind CSS 4, Shadcn UI, AI SDK Elements
 - **CLI/TUI**: React Ink 6, @inkjs/ui, Commander.js
 - **Auth**: Better Auth + Tailscale identity headers
@@ -109,16 +109,15 @@ pnpm check-all            # Full CI check
 pnpm pre-commit-check     # Pre-commit validation
 ```
 
-### Docker
+### Starting Smooth
 
 ```bash
-pnpm docker:up            # Start PostgreSQL
-pnpm docker:down          # Stop (preserves data)
-pnpm docker:logs          # Stream logs
-pnpm docker:ps            # Container status
+th up                     # Start everything (auto-installs Microsandbox if needed)
+th down                   # Stop leader + optionally msb server
+th status                 # System health check
 ```
 
-**NEVER use `docker compose down -v`** — this destroys the PostgreSQL data volume. Use `th db backup` first.
+No Docker required. SQLite auto-creates at `~/.smooth/smooth.db`. Microsandbox auto-installs on first `th up`.
 
 ### Package-specific
 
@@ -164,14 +163,15 @@ pnpm changeset
 
 ---
 
-## 7. PostgreSQL Data Protection
+## 7. Data
 
-The PostgreSQL volume (`smooth-pgdata`) contains leader memory, checkpoints, and auth data.
+All Smooth state lives at `~/.smooth/`:
 
-- **Named volume**: Survives `docker compose down`
-- **Backup**: `bash docker/postgres/backup.sh`
-- **Restore**: `bash docker/postgres/restore.sh <file>`
-- **NEVER** run `docker compose down -v` or `docker volume rm smooth-pgdata`
+- **SQLite database**: `~/.smooth/smooth.db` — leader memory, worker runs, auth, config
+- **Beads**: `~/.smooth/.beads/` — projects, tasks, dependencies, messages, reviews
+- **Artifacts**: `~/.smooth/artifacts/` — operator work output
+- **Backup**: `th db backup` copies the SQLite file
+- **Clean reset**: `rm -rf ~/.smooth` starts fresh
 
 ---
 
