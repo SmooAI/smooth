@@ -321,6 +321,50 @@ export class LocalMicrosandboxBackend implements ExecutionBackend {
         return timedOut;
     }
 
+    async exec(sandboxId: string, command: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+        const entry = this.sandboxes.get(sandboxId);
+        if (!entry) throw new Error(`Sandbox ${sandboxId} not found`);
+
+        const sandboxName = entry.handle.backendRef.microsandboxName as string;
+        try {
+            const { stdout, stderr } = await exec('msb', ['exec', sandboxName, '--', ...command]);
+            return { stdout, stderr: stderr ?? '', exitCode: 0 };
+        } catch (error: any) {
+            return {
+                stdout: error.stdout ?? '',
+                stderr: error.stderr ?? error.message ?? '',
+                exitCode: error.code ?? 1,
+            };
+        }
+    }
+
+    async snapshotWorkspace(sandboxId: string): Promise<Buffer> {
+        const entry = this.sandboxes.get(sandboxId);
+        if (!entry) throw new Error(`Sandbox ${sandboxId} not found`);
+
+        const sandboxName = entry.handle.backendRef.microsandboxName as string;
+        // Create tarball of workspace inside sandbox, then read it out
+        await exec('msb', ['exec', sandboxName, '--', 'tar', 'czf', '/tmp/workspace-snapshot.tar.gz', '-C', '/workspace', '.']);
+        // Copy the tarball out of the sandbox
+        const { stdout } = await exec('msb', ['exec', sandboxName, '--', 'cat', '/tmp/workspace-snapshot.tar.gz']);
+        return Buffer.from(stdout, 'binary');
+    }
+
+    async restoreWorkspace(sandboxId: string, snapshot: Buffer): Promise<void> {
+        const entry = this.sandboxes.get(sandboxId);
+        if (!entry) throw new Error(`Sandbox ${sandboxId} not found`);
+
+        const sandboxName = entry.handle.backendRef.microsandboxName as string;
+        // Write snapshot into sandbox and extract
+        const { writeFileSync, unlinkSync } = await import('node:fs');
+        const tmpPath = `/tmp/restore-${sandboxId}.tar.gz`;
+        writeFileSync(tmpPath, snapshot);
+        // Copy into sandbox and extract
+        await exec('msb', ['exec', sandboxName, '--', 'rm', '-rf', '/workspace/*']);
+        await exec('msb', ['exec', sandboxName, '--', 'tar', 'xzf', '/tmp/workspace-snapshot.tar.gz', '-C', '/workspace']);
+        unlinkSync(tmpPath);
+    }
+
     // ── Private helpers ─────────────────────────────────────
 
     private async isSandboxRunning(sandboxId: string): Promise<boolean> {

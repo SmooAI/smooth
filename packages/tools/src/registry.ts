@@ -1,16 +1,22 @@
-/** Tool registry — manages available tools and executes them with context */
+/** Tool registry — manages available tools, hooks, and executes them with context */
 
 import type { ToolPermission } from '@smooai/smooth-shared/worker-types';
-
 import { createAuditLogger } from '@smooai/smooth-shared/audit-log';
 
+import type { Hook } from './hooks/types.js';
+import { HookPipeline } from './hooks/pipeline.js';
 import type { SmoothTool, ToolContext } from './types.js';
 
 export class ToolRegistry {
     private tools = new Map<string, SmoothTool>();
+    private pipeline = new HookPipeline();
 
     register(tool: SmoothTool): void {
         this.tools.set(tool.name, tool);
+    }
+
+    registerHook(hook: Hook): void {
+        this.pipeline.register(hook);
     }
 
     get(name: string): SmoothTool | undefined {
@@ -27,7 +33,7 @@ export class ToolRegistry {
         return Array.from(this.tools.values());
     }
 
-    /** Execute a tool with permission checking and audit logging */
+    /** Execute a tool with hooks, permission checking, and audit logging */
     async execute(name: string, input: unknown, ctx: ToolContext): Promise<unknown> {
         const tool = this.tools.get(name);
         if (!tool) {
@@ -42,6 +48,12 @@ export class ToolRegistry {
 
         // Validate input
         const parsed = tool.inputSchema.parse(input);
+
+        // Run pre-hooks (guardrails)
+        const preResult = await this.pipeline.runPreHooks(name, parsed, ctx);
+        if (!preResult.allow) {
+            throw new Error(`Hook blocked tool ${name}: ${preResult.reason}`);
+        }
 
         // Execute and measure
         const start = Date.now();
@@ -61,6 +73,12 @@ export class ToolRegistry {
 
         // Validate output
         const validated = tool.outputSchema.parse(result);
+
+        // Run post-hooks (tracking, validation)
+        const postResult = await this.pipeline.runPostHooks(name, parsed, validated, ctx);
+        if (!postResult.allow) {
+            throw new Error(`Post-hook rejected tool ${name}: ${postResult.reason}`);
+        }
 
         // Audit log — always
         audit.toolCall(name, parsed, validated, durationMs);

@@ -5,6 +5,9 @@ import type { ToolContext } from './types.js';
 
 /** MCP server that exposes Smooth tools to OpenCode workers */
 
+import { postWriteHook } from './hooks/post-write.js';
+import { preWriteHook } from './hooks/pre-write.js';
+import { promptInjectionHook } from './hooks/prompt-injection.js';
 import { ToolRegistry } from './registry.js';
 import { artifactWriteTool } from './tools/artifact.js';
 import { beadsContextTool } from './tools/beads-context.js';
@@ -32,6 +35,11 @@ registry.register(artifactWriteTool);
 registry.register(workflowTransitionTool);
 registry.register(spawnSubtaskTool);
 registry.register(reviewRequestTool);
+
+// Register guardrail hooks
+registry.registerHook(promptInjectionHook); // Must be first — blocks injected instructions
+registry.registerHook(preWriteHook); // Blocks secrets and path traversal
+registry.registerHook(postWriteHook); // Tracks file changes
 
 // Get available tools based on permissions
 const available = registry.getAvailable(ctx.permissions);

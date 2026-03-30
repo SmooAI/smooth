@@ -78,6 +78,13 @@ export interface ExecutionBackend {
     activeCount(): number;
     maxConcurrency(): number;
 
+    // Command execution inside sandbox
+    exec(sandboxId: string, command: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }>;
+
+    // Workspace snapshots (for crash recovery)
+    snapshotWorkspace(sandboxId: string): Promise<Buffer>;
+    restoreWorkspace(sandboxId: string, snapshot: Buffer): Promise<void>;
+
     // Artifacts
     collectArtifacts(sandboxId: string): Promise<string[]>;
 
@@ -95,7 +102,20 @@ export interface ArtifactStore {
 
 /** Execution events for observability and SSE streaming */
 export interface ExecutionEvent {
-    type: 'sandbox_created' | 'sandbox_destroyed' | 'phase_started' | 'phase_completed' | 'prompt_sent' | 'prompt_completed' | 'timeout' | 'error';
+    type:
+        | 'sandbox_created'
+        | 'sandbox_destroyed'
+        | 'phase_started'
+        | 'phase_completed'
+        | 'prompt_sent'
+        | 'prompt_completed'
+        | 'timeout'
+        | 'error'
+        | 'watchdog_stuck'
+        | 'watchdog_restart'
+        | 'watchdog_killed'
+        | 'checkpoint_saved'
+        | 'checkpoint_restored';
     sandboxId: string;
     operatorId: string;
     beadId?: string;
