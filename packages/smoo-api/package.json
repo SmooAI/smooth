@@ -20,6 +20,8 @@
         "test": "vitest run"
     },
     "dependencies": {
+        "@smooai/fetch": "^3.0.0",
+        "@smooai/logger": "^4.0.0",
         "zod": "^3.24.0"
     },
     "devDependencies": {
