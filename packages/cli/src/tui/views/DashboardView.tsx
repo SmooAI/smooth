@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
 import { Box, Text } from 'ink';
+import React, { useEffect, useState } from 'react';
 
 import type { LeaderClient } from '../../client/leader-client.js';
 
@@ -16,7 +16,7 @@ export function DashboardView({ client }: Props) {
             .getHealth()
             .then((h) => setHealth(h as unknown as Record<string, unknown>))
             .catch((e) => setError((e as Error).message));
-    }, []);
+    }, [client]);
 
     if (error) {
         return (

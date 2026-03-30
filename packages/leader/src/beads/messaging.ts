@@ -1,8 +1,9 @@
 /** Beads-backed message bus — all durable communication via bead comments */
 
 import type { MessageDirection } from '@smooai/smooth-shared/message-types';
-import { MESSAGE_PREFIXES } from '@smooai/smooth-shared/message-types';
 import type { InboxItem, Message } from '@smooai/smooth-shared/message-types';
+
+import { MESSAGE_PREFIXES } from '@smooai/smooth-shared/message-types';
 
 import { addComment, getComments, listBeads } from './client.js';
 

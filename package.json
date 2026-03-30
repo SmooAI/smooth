@@ -10,7 +10,7 @@
         "typecheck": "turbo run typecheck --filter='!@smooai/smooth'",
         "lint": "oxlint --config .oxlintrc.json .",
         "lint:fix": "oxlint --config .oxlintrc.json --fix .",
-        "format": "oxfmt --write .",
+        "format": "oxfmt .",
         "format:check": "oxfmt --check .",
         "sync": "syncpack fix-mismatches",
         "pre-commit-check": "pnpm sync && pnpm lint:fix && pnpm typecheck && pnpm test && pnpm format",

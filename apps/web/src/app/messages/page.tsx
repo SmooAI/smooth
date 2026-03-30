@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+
 import { api } from '@/lib/api';
 
 export default function MessagesPage() {
@@ -25,9 +26,7 @@ export default function MessagesPage() {
                         <div className="flex items-center gap-2 mb-2">
                             <span className="text-cyan-400 font-mono text-sm">{item.message?.beadId}</span>
                             <span className="font-semibold">{item.beadTitle}</span>
-                            {item.requiresAction && (
-                                <span className="bg-yellow-900/50 text-yellow-400 px-2 py-0.5 rounded text-xs">{item.actionType}</span>
-                            )}
+                            {item.requiresAction && <span className="bg-yellow-900/50 text-yellow-400 px-2 py-0.5 rounded text-xs">{item.actionType}</span>}
                         </div>
                         <div className="text-neutral-400 text-sm">{item.message?.content}</div>
                     </div>

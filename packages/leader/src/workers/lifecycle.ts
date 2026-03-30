@@ -108,10 +108,7 @@ export async function runPhase(
 }
 
 /** Run the full lifecycle for a Smooth Operator */
-export async function runFullLifecycle(
-    sandboxId: string,
-    beadId: string,
-): Promise<{ success: boolean; phasesCompleted: WorkerPhase[]; error?: string }> {
+export async function runFullLifecycle(sandboxId: string, beadId: string): Promise<{ success: boolean; phasesCompleted: WorkerPhase[]; error?: string }> {
     const phases: WorkerPhase[] = ['assess', 'plan', 'orchestrate', 'execute', 'finalize'];
     const completed: WorkerPhase[] = [];
 

@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
-import { BeadFiltersSchema, ChatMessageSchema, CreateProjectSchema, ReviewVerdictSchema, SendMessageSchema, SetConfigSchema, WorkerPlanSchema } from './schemas.js';
+import {
+    BeadFiltersSchema,
+    ChatMessageSchema,
+    CreateProjectSchema,
+    ReviewVerdictSchema,
+    SendMessageSchema,
+    SetConfigSchema,
+    WorkerPlanSchema,
+} from './schemas.js';
 
 describe('BeadFiltersSchema', () => {
     it('accepts empty filters', () => {

@@ -1,10 +1,12 @@
 /** Smooth Operator pool management — backend-agnostic queue and scheduling */
 
 import type { ToolPermission, WorkerPhase } from '@smooai/smooth-shared/worker-types';
+
 import { PHASE_TIMEOUTS } from '@smooai/smooth-shared/worker-types';
 
-import { getBackend } from '../backend/registry.js';
 import type { SandboxHandle } from '../backend/types.js';
+
+import { getBackend } from '../backend/registry.js';
 
 export interface OperatorRequest {
     beadId: string;

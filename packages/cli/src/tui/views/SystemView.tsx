@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
 import { Box, Text } from 'ink';
+import React, { useEffect, useState } from 'react';
 
 import type { LeaderClient } from '../../client/leader-client.js';
 
@@ -17,7 +17,7 @@ export function SystemView({ client }: Props) {
             .then((r) => setHealth(r.data))
             .catch(() => {})
             .finally(() => setLoading(false));
-    }, []);
+    }, [client]);
 
     if (loading) return <Text dimColor>Loading system health...</Text>;
 
@@ -36,7 +36,8 @@ export function SystemView({ client }: Props) {
                         {statusIcon(health.database?.status)} Database: {health.database?.status} ({health.database?.path ?? 'unknown'})
                     </Text>
                     <Text color={statusColor(health.sandbox?.status)}>
-                        {statusIcon(health.sandbox?.status)} Sandbox: {health.sandbox?.status} ({health.sandbox?.backend ?? 'unknown'}, {health.sandbox?.activeSandboxes ?? 0}/{health.sandbox?.maxConcurrency ?? 0})
+                        {statusIcon(health.sandbox?.status)} Sandbox: {health.sandbox?.status} ({health.sandbox?.backend ?? 'unknown'},{' '}
+                        {health.sandbox?.activeSandboxes ?? 0}/{health.sandbox?.maxConcurrency ?? 0})
                     </Text>
                     <Text color={statusColor(health.tailscale?.status)}>
                         {statusIcon(health.tailscale?.status)} Tailscale: {health.tailscale?.status}

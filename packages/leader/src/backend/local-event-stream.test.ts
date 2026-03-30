@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { LocalEventStream } from './local-event-stream.js';
 import type { ExecutionEvent } from './types.js';
+
+import { LocalEventStream } from './local-event-stream.js';
 
 function makeEvent(type: ExecutionEvent['type'] = 'sandbox_created'): ExecutionEvent {
     return {

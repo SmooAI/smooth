@@ -1,4 +1,5 @@
 import type { Command } from 'commander';
+
 import { copyFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';

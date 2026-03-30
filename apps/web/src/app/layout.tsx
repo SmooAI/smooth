@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+
 import { LayoutDashboard, FolderKanban, Circle, Bot, MessageSquare, Mail, ShieldCheck, Settings } from 'lucide-react';
 
 import './globals.css';

@@ -7,14 +7,14 @@ export function jiraStatusToBeadStatus(jiraStatus: string): BeadStatus | null {
     const normalized = jiraStatus.toLowerCase();
     const map: Record<string, BeadStatus> = {
         'to do': 'open',
-        'open': 'open',
-        'backlog': 'open',
+        open: 'open',
+        backlog: 'open',
         'in progress': 'in_progress',
         'in review': 'in_progress',
-        'blocked': 'blocked',
-        'done': 'closed',
-        'closed': 'closed',
-        'resolved': 'closed',
+        blocked: 'blocked',
+        done: 'closed',
+        closed: 'closed',
+        resolved: 'closed',
     };
     return map[normalized] ?? null;
 }

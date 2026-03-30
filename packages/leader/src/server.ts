@@ -1,10 +1,10 @@
-import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 
-import { ensureSchema } from '@smooai/smooth-db/migrate';
+import { serve } from '@hono/node-server';
 import { getDbPath } from '@smooai/smooth-db/client';
+import { ensureSchema } from '@smooai/smooth-db/migrate';
 
 import { initializeBackend, shutdownBackend } from './backend/registry.js';
 import { ensureBeadsDir, getBeadsDir } from './beads/client.js';

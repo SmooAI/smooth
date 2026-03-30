@@ -95,15 +95,7 @@ export interface ArtifactStore {
 
 /** Execution events for observability and SSE streaming */
 export interface ExecutionEvent {
-    type:
-        | 'sandbox_created'
-        | 'sandbox_destroyed'
-        | 'phase_started'
-        | 'phase_completed'
-        | 'prompt_sent'
-        | 'prompt_completed'
-        | 'timeout'
-        | 'error';
+    type: 'sandbox_created' | 'sandbox_destroyed' | 'phase_started' | 'phase_completed' | 'prompt_sent' | 'prompt_completed' | 'timeout' | 'error';
     sandboxId: string;
     operatorId: string;
     beadId?: string;

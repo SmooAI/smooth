@@ -50,13 +50,7 @@ async function bdJson<T>(args: string[], options?: BdOptions): Promise<T> {
 
 // ── Issue CRUD ──────────────────────────────────────────────
 
-export async function createBead(opts: {
-    title: string;
-    description: string;
-    type?: BeadType;
-    priority?: number;
-    labels?: string[];
-}): Promise<string> {
+export async function createBead(opts: { title: string; description: string; type?: BeadType; priority?: number; labels?: string[] }): Promise<string> {
     const args = ['create', '--title', opts.title, '--description', opts.description];
     if (opts.type) args.push('--type', opts.type);
     if (opts.priority !== undefined) args.push('--priority', String(opts.priority));
@@ -75,11 +69,7 @@ export async function getBead(id: string): Promise<BeadDetail> {
     return bdJson<BeadDetail>(['show', id]);
 }
 
-export async function listBeads(filters?: {
-    status?: BeadStatus;
-    type?: string;
-    label?: string;
-}): Promise<Bead[]> {
+export async function listBeads(filters?: { status?: BeadStatus; type?: string; label?: string }): Promise<Bead[]> {
     const args = ['list'];
     if (filters?.status) args.push(`--status=${filters.status}`);
     if (filters?.type) args.push(`--type=${filters.type}`);
@@ -87,13 +77,16 @@ export async function listBeads(filters?: {
     return bdJson<Bead[]>(args);
 }
 
-export async function updateBead(id: string, updates: {
-    status?: BeadStatus;
-    priority?: number;
-    title?: string;
-    addLabel?: string;
-    removeLabel?: string;
-}): Promise<void> {
+export async function updateBead(
+    id: string,
+    updates: {
+        status?: BeadStatus;
+        priority?: number;
+        title?: string;
+        addLabel?: string;
+        removeLabel?: string;
+    },
+): Promise<void> {
     const args = ['update', id];
     if (updates.status) args.push(`--status=${updates.status}`);
     if (updates.priority !== undefined) args.push(`--priority=${updates.priority}`);

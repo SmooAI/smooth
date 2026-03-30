@@ -1,7 +1,7 @@
 import type { Command } from 'commander';
 
-import { getActiveServerUrl, getApiKey } from '../config.js';
 import { LeaderClient } from '../client/leader-client.js';
+import { getActiveServerUrl, getApiKey } from '../config.js';
 
 export function registerProjectCommand(program: Command) {
     const project = program.command('project').description('Project management');

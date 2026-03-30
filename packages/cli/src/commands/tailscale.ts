@@ -1,4 +1,5 @@
 import type { Command } from 'commander';
+
 import { execSync } from 'node:child_process';
 
 export function registerTailscaleCommand(program: Command) {

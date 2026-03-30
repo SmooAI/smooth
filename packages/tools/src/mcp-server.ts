@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+import type { ToolPermission } from '@smooai/smooth-shared/worker-types';
+
+import type { ToolContext } from './types.js';
+
 /** MCP server that exposes Smooth tools to OpenCode workers */
 
 import { ToolRegistry } from './registry.js';
@@ -9,8 +13,6 @@ import { progressAppendTool } from './tools/progress.js';
 import { reviewRequestTool } from './tools/review-request.js';
 import { spawnSubtaskTool } from './tools/spawn-subtask.js';
 import { workflowTransitionTool } from './tools/workflow.js';
-import type { ToolContext } from './types.js';
-import type { ToolPermission } from '@smooai/smooth-shared/worker-types';
 
 // Build tool context from environment
 const ctx: ToolContext = {
@@ -18,9 +20,7 @@ const ctx: ToolContext = {
     workerId: process.env.WORKER_ID ?? '',
     runId: process.env.RUN_ID ?? '',
     leaderUrl: process.env.LEADER_URL ?? 'http://leader:4400',
-    permissions: (process.env.PERMISSIONS?.split(',') ?? [
-        'beads:read', 'beads:write', 'beads:message', 'fs:read', 'fs:write',
-    ]) as ToolPermission[],
+    permissions: (process.env.PERMISSIONS?.split(',') ?? ['beads:read', 'beads:write', 'beads:message', 'fs:read', 'fs:write']) as ToolPermission[],
 };
 
 // Register all tools

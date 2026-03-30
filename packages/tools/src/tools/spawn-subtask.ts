@@ -2,7 +2,7 @@
 
 import { z } from 'zod';
 
-import type { SmoothTool, ToolContext } from '../types.js';
+import type { SmoothTool } from '../types.js';
 
 export const spawnSubtaskTool: SmoothTool = {
     name: 'spawn_subtask',
@@ -32,7 +32,7 @@ export const spawnSubtaskTool: SmoothTool = {
             }),
         });
 
-        const data = await response.json() as { data: { id: string } };
+        const data = (await response.json()) as { data: { id: string } };
 
         // Report to leader
         await fetch(`${ctx.leaderUrl}/api/messages`, {

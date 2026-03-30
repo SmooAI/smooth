@@ -2,7 +2,7 @@
 
 import { z } from 'zod';
 
-import type { SmoothTool, ToolContext } from '../types.js';
+import type { SmoothTool } from '../types.js';
 
 export const beadsMessageTool: SmoothTool = {
     name: 'beads_message',
@@ -39,7 +39,7 @@ export const beadsMessageTool: SmoothTool = {
 
         // Read
         const response = await fetch(`${ctx.leaderUrl}/api/messages/${beadId}`);
-        const data = await response.json() as { data: unknown[] };
+        const data = (await response.json()) as { data: unknown[] };
         return { ok: true, messages: data.data };
     },
 };

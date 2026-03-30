@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
+import React, { useEffect, useState } from 'react';
 
 import type { LeaderClient } from '../../client/leader-client.js';
 
@@ -18,7 +18,7 @@ export function BeadsView({ client }: Props) {
             .then((r) => setBeads(r.data as any[]))
             .catch(() => {})
             .finally(() => setLoading(false));
-    }, []);
+    }, [client]);
 
     useInput((input, key) => {
         if (input === 'j' || key.downArrow) setSelected((s) => Math.min(s + 1, beads.length - 1));

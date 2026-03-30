@@ -1,6 +1,6 @@
-import { drizzleAdapter } from '@better-auth/drizzle-adapter';
 import { betterAuth } from 'better-auth';
 
+import { drizzleAdapter } from '@better-auth/drizzle-adapter';
 import { db } from '@smooai/smooth-db/client';
 
 export const auth = betterAuth({

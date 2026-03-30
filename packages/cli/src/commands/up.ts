@@ -1,4 +1,5 @@
 import type { Command } from 'commander';
+
 import { execSync, spawn } from 'node:child_process';
 
 function isMsbInstalled(): boolean {

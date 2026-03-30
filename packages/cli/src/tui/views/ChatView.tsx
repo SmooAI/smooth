@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
+import React, { useCallback, useEffect, useState } from 'react';
 
 import type { LeaderClient } from '../../client/leader-client.js';
 
@@ -19,9 +19,7 @@ interface Props {
 }
 
 export function ChatView({ client }: Props) {
-    const [messages, setMessages] = useState<ChatMessage[]>([
-        { role: 'assistant', content: 'Welcome to Smooth. How can I help?' },
-    ]);
+    const [messages, setMessages] = useState<ChatMessage[]>([{ role: 'assistant', content: 'Welcome to Smooth. How can I help?' }]);
     const [input, setInput] = useState('');
     const [focused, setFocused] = useState(true);
     const [streaming, setStreaming] = useState(false);
@@ -139,7 +137,7 @@ export function ChatView({ client }: Props) {
                 setAtResults([...beadResults, ...results].slice(0, 8));
             })
             .catch(() => setAtResults(results.slice(0, 8)));
-    }, [atQuery, showAtSearch]);
+    }, [atQuery, showAtSearch, client]);
 
     const sendMessage = useCallback(async () => {
         const content = input.trim();

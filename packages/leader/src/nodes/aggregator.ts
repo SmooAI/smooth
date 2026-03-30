@@ -1,6 +1,7 @@
 /** Aggregator node — collects Smooth Operator updates and determines next actions */
 
 import type { OrchestratorStateType } from '../graph/state.js';
+
 import { getBackend } from '../backend/registry.js';
 import { listBeads } from '../beads/client.js';
 import { readMessages } from '../beads/messaging.js';

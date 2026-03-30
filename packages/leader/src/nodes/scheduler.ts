@@ -1,9 +1,10 @@
 /** Scheduler node — evaluates ready beads and prioritizes work */
 
 import type { OrchestratorStateType } from '../graph/state.js';
+
 import { getReady, listBeads } from '../beads/client.js';
 
-export async function schedulerNode(state: OrchestratorStateType): Promise<Partial<OrchestratorStateType>> {
+export async function schedulerNode(_state: OrchestratorStateType): Promise<Partial<OrchestratorStateType>> {
     try {
         // Get beads ready for work (open, no blockers)
         const ready = await getReady();

@@ -12,7 +12,6 @@ import type {
     ProjectListResponse,
     ProjectResponse,
     ReviewListResponse,
-    SSEEvent,
     WorkerListResponse,
     WorkerResponse,
 } from '@smooai/smooth-shared/api-types';
@@ -50,7 +49,7 @@ export class LeaderClient {
     // ── Auth ────────────────────────────────────────────────
 
     async whoami(): Promise<{ user: { email: string; name: string }; server: string }> {
-        const health = await this.request<HealthResponse>('/health');
+        await this.request<HealthResponse>('/health');
         return { user: { email: 'user@smooth.local', name: 'User' }, server: this.baseUrl };
     }
 

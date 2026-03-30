@@ -1,6 +1,7 @@
 /** Policy node — gates actions requiring human approval */
 
 import type { OrchestratorStateType } from '../graph/state.js';
+
 import { sendMessage } from '../beads/messaging.js';
 
 /** Actions that require human approval before proceeding */

@@ -56,7 +56,7 @@ export class ToolRegistry {
     }
 }
 
-async function logToolCall(ctx: ToolContext, toolName: string, input: unknown, output: unknown): Promise<void> {
+async function logToolCall(ctx: ToolContext, toolName: string, input: unknown, _output: unknown): Promise<void> {
     try {
         await fetch(`${ctx.leaderUrl}/api/messages`, {
             method: 'POST',

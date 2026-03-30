@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
-import { ToolRegistry } from './registry.js';
 import type { SmoothTool, ToolContext } from './types.js';
+
+import { ToolRegistry } from './registry.js';
 
 const mockCtx: ToolContext = {
     beadId: 'test-bead',

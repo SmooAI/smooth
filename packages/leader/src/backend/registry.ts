@@ -1,6 +1,7 @@
 /** Backend registry — resolves and manages the active ExecutionBackend */
 
 import type { EventStream, ExecutionBackend } from './types.js';
+
 import { LocalEventStream } from './local-event-stream.js';
 
 export type BackendType = 'local-microsandbox' | 'aws-lambda';

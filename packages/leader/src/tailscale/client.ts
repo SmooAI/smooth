@@ -84,10 +84,7 @@ export async function discoverSmoothServices(): Promise<{ web?: string; api?: st
  * Create an ephemeral auth key for registering a new Smooth Operator node.
  * Requires Tailscale API key configured in environment.
  */
-export async function createAuthKey(opts?: {
-    tags?: string[];
-    ephemeral?: boolean;
-}): Promise<TailscaleAuthKey | null> {
+export async function createAuthKey(opts?: { tags?: string[]; ephemeral?: boolean }): Promise<TailscaleAuthKey | null> {
     const apiKey = process.env.TAILSCALE_API_KEY;
     const tailnet = process.env.TAILSCALE_TAILNET;
 

@@ -1,8 +1,9 @@
 import { Hono } from 'hono';
 
+import type { SystemHealth } from '@smooai/smooth-shared/types';
+
 import { db, getDbPath } from '@smooai/smooth-db/client';
 import { config } from '@smooai/smooth-db/schema/config';
-import type { SystemHealth } from '@smooai/smooth-shared/types';
 
 import { getBackend } from '../backend/registry.js';
 import { getTailscaleStatus } from '../tailscale/client.js';

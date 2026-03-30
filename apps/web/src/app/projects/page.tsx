@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+
 import { api } from '@/lib/api';
 
 export default function ProjectsPage() {
@@ -27,7 +28,9 @@ export default function ProjectsPage() {
                 {projects.map((p, i) => (
                     <div key={i} className="bg-neutral-900 border border-neutral-800 rounded-lg p-4">
                         <div className="font-semibold">{p.title ?? p.name}</div>
-                        <div className="text-neutral-500 text-sm">{p.id} &middot; {p.status ?? 'open'}</div>
+                        <div className="text-neutral-500 text-sm">
+                            {p.id} &middot; {p.status ?? 'open'}
+                        </div>
                     </div>
                 ))}
             </div>

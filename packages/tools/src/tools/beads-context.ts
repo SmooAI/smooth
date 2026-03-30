@@ -2,7 +2,7 @@
 
 import { z } from 'zod';
 
-import type { SmoothTool, ToolContext } from '../types.js';
+import type { SmoothTool } from '../types.js';
 
 export const beadsContextTool: SmoothTool = {
     name: 'beads_context',
@@ -21,21 +21,23 @@ export const beadsContextTool: SmoothTool = {
     handler: async (input, ctx) => {
         const beadId = input.beadId ?? ctx.beadId;
         const response = await fetch(`${ctx.leaderUrl}/api/beads/${beadId}`);
-        const data = await response.json() as { data: unknown };
+        const data = (await response.json()) as { data: unknown };
 
         let neighbors: unknown[] = [];
         if (input.includeNeighbors) {
             // Get related beads via graph
             try {
                 const graphResponse = await fetch(`${ctx.leaderUrl}/api/beads/graph`);
-                const graphData = await graphResponse.json() as { data: unknown };
+                const graphData = (await graphResponse.json()) as { data: unknown };
                 neighbors = Array.isArray(graphData.data) ? graphData.data : [];
-            } catch { /* best effort */ }
+            } catch {
+                /* best effort */
+            }
         }
 
         // Get message thread
         const threadResponse = await fetch(`${ctx.leaderUrl}/api/messages/${beadId}`);
-        const threadData = await threadResponse.json() as { data: unknown[] };
+        const threadData = (await threadResponse.json()) as { data: unknown[] };
 
         return {
             bead: data.data,

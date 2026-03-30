@@ -1,7 +1,7 @@
 import type { Command } from 'commander';
 
-import { getActiveServerUrl, getApiKey } from '../config.js';
 import { LeaderClient } from '../client/leader-client.js';
+import { getActiveServerUrl, getApiKey } from '../config.js';
 
 export function registerOperatorsCommand(program: Command) {
     const ops = program.command('operators').alias('workers').description('Smooth Operator management');

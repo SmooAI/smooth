@@ -1,7 +1,8 @@
 'use client';
 
-import { useEffect, useState } from 'react';
 import { Activity, Database, Shield } from 'lucide-react';
+import { useEffect, useState } from 'react';
+
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
@@ -44,7 +45,17 @@ export default function DashboardPage() {
     );
 }
 
-function StatusCard({ icon: Icon, title, status, detail }: { icon: React.ComponentType<{ size?: number; className?: string }>; title: string; status: string; detail: string }) {
+function StatusCard({
+    icon: Icon,
+    title,
+    status,
+    detail,
+}: {
+    icon: React.ComponentType<{ size?: number; className?: string }>;
+    title: string;
+    status: string;
+    detail: string;
+}) {
     const dotColor = status === 'healthy' ? 'bg-green-500' : status === 'degraded' ? 'bg-yellow-500' : 'bg-red-500';
 
     return (

@@ -1,6 +1,6 @@
 /** Client-side API helper for calling the leader through Next.js rewrites */
 
-const BASE = '';  // Proxied through next.config.ts rewrites
+const BASE = ''; // Proxied through next.config.ts rewrites
 
 export async function api<T>(path: string, options?: RequestInit): Promise<T> {
     const response = await fetch(`${BASE}${path}`, {

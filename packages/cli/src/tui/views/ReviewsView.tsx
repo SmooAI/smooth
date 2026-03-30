@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
 import { Box, Text } from 'ink';
+import React, { useEffect, useState } from 'react';
 
 import type { LeaderClient } from '../../client/leader-client.js';
 
@@ -17,7 +17,7 @@ export function ReviewsView({ client }: Props) {
             .then((r) => setReviews(r.data as any[]))
             .catch(() => {})
             .finally(() => setLoading(false));
-    }, []);
+    }, [client]);
 
     if (loading) return <Text dimColor>Loading reviews...</Text>;
 

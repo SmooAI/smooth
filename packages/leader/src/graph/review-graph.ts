@@ -86,7 +86,12 @@ async function spawnReviewerNode(state: ReviewStateType): Promise<Partial<Review
 async function collectVerdictNode(state: ReviewStateType): Promise<Partial<ReviewStateType>> {
     // In a real implementation, we'd wait for the review operator to complete
     // and parse its structured output. For now, the verdict comes from messages.
-    await sendMessage(state.beadId, 'leader→human', `Review in progress for bead ${state.beadId}. Awaiting verdict from Smooth Operator ${state.reviewOperatorId}.`, 'leader');
+    await sendMessage(
+        state.beadId,
+        'leader→human',
+        `Review in progress for bead ${state.beadId}. Awaiting verdict from Smooth Operator ${state.reviewOperatorId}.`,
+        'leader',
+    );
 
     // Placeholder — actual verdict comes from the review operator's structured output
     return {
@@ -108,12 +113,22 @@ async function handleReworkNode(state: ReviewStateType): Promise<Partial<ReviewS
     if (newCount >= state.maxReworks) {
         // Escalate to human
         await updateBead(state.beadId, { removeLabel: 'review:pending', addLabel: 'review:escalated' });
-        await sendMessage(state.beadId, 'leader→human', `Review rework limit reached (${state.maxReworks}) for bead ${state.beadId}. Human review required.`, 'leader');
+        await sendMessage(
+            state.beadId,
+            'leader→human',
+            `Review rework limit reached (${state.maxReworks}) for bead ${state.beadId}. Human review required.`,
+            'leader',
+        );
         return { reworkCount: newCount, verdict: 'rejected' };
     }
 
     await updateBead(state.beadId, { removeLabel: 'review:pending', addLabel: 'review:rework' });
-    await sendMessage(state.beadId, 'worker→leader', `Rework requested (attempt ${newCount}/${state.maxReworks}). Findings: ${state.findings.join('; ')}`, 'leader');
+    await sendMessage(
+        state.beadId,
+        'worker→leader',
+        `Rework requested (attempt ${newCount}/${state.maxReworks}). Findings: ${state.findings.join('; ')}`,
+        'leader',
+    );
 
     return { reworkCount: newCount };
 }

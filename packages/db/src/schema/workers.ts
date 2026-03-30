@@ -1,8 +1,10 @@
-import { integer, sqliteTable, text } from 'drizzle-orm/sqlite-core';
 import { sql } from 'drizzle-orm';
+import { integer, sqliteTable, text } from 'drizzle-orm/sqlite-core';
 
 export const workerRuns = sqliteTable('worker_runs', {
-    id: text('id').primaryKey().$defaultFn(() => crypto.randomUUID()),
+    id: text('id')
+        .primaryKey()
+        .$defaultFn(() => crypto.randomUUID()),
     beadId: text('bead_id').notNull(),
     workerId: text('worker_id').notNull(),
     sandboxId: text('sandbox_id'),

@@ -1,9 +1,8 @@
+import { Box, useInput } from 'ink';
 import React, { useState } from 'react';
-import { Box, Text, useInput } from 'ink';
 
-import { getActiveServerUrl, getApiKey } from '../config.js';
 import { LeaderClient } from '../client/leader-client.js';
-
+import { getActiveServerUrl, getApiKey } from '../config.js';
 import { Header } from './components/Header.js';
 import { StatusBar } from './components/StatusBar.js';
 import { BeadsView } from './views/BeadsView.js';
@@ -30,9 +29,7 @@ export function App({ serverUrl }: AppProps) {
     useInput((input, key) => {
         if (key.tab) {
             const idx = TABS.indexOf(activeTab);
-            const next = key.shift
-                ? TABS[(idx - 1 + TABS.length) % TABS.length]
-                : TABS[(idx + 1) % TABS.length];
+            const next = key.shift ? TABS[(idx - 1 + TABS.length) % TABS.length] : TABS[(idx + 1) % TABS.length];
             setActiveTab(next);
         }
 

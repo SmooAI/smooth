@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+
 import { api, apiPost } from '@/lib/api';
 
 export default function ReviewsPage() {
@@ -42,10 +43,16 @@ export default function ReviewsPage() {
                             <span className="bg-yellow-900/50 text-yellow-400 px-2 py-0.5 rounded text-xs">pending</span>
                         </div>
                         <div className="flex gap-2">
-                            <button onClick={() => approve(r.id)} className="bg-green-800 hover:bg-green-700 text-white text-sm rounded-md px-4 py-1.5 cursor-pointer transition-colors">
+                            <button
+                                onClick={() => approve(r.id)}
+                                className="bg-green-800 hover:bg-green-700 text-white text-sm rounded-md px-4 py-1.5 cursor-pointer transition-colors"
+                            >
                                 Approve
                             </button>
-                            <button onClick={() => reject(r.id)} className="bg-red-800 hover:bg-red-700 text-white text-sm rounded-md px-4 py-1.5 cursor-pointer transition-colors">
+                            <button
+                                onClick={() => reject(r.id)}
+                                className="bg-red-800 hover:bg-red-700 text-white text-sm rounded-md px-4 py-1.5 cursor-pointer transition-colors"
+                            >
                                 Reject
                             </button>
                         </div>

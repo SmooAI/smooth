@@ -1,8 +1,6 @@
 /** Bidirectional Jira ↔ Beads sync engine */
 
-import type { BeadStatus } from '@smooai/smooth-shared/beads-types';
-
-import { closeBead, createBead, listBeads, updateBead } from '../beads/client.js';
+import { createBead, listBeads, updateBead } from '../beads/client.js';
 import { JiraClient } from './client.js';
 import { beadStatusToJira, beadTypeToJiraIssueType, jiraPriorityToBeadPriority, jiraStatusToBeadStatus } from './mapper.js';
 

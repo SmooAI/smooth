@@ -2,7 +2,7 @@
 
 import { z } from 'zod';
 
-import type { SmoothTool, ToolContext } from '../types.js';
+import type { SmoothTool } from '../types.js';
 
 export const artifactWriteTool: SmoothTool = {
     name: 'artifact_write',

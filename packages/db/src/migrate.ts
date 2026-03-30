@@ -5,10 +5,6 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
-import { memories } from './schema/memory.js';
-import { workerRuns } from './schema/workers.js';
-import { config } from './schema/config.js';
-
 const defaultDbPath = join(homedir(), '.smooth', 'smooth.db');
 
 /**

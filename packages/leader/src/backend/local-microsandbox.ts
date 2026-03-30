@@ -5,9 +5,11 @@ import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 
 import type { WorkerPhase } from '@smooai/smooth-shared/worker-types';
+
 import { PHASE_TIMEOUTS } from '@smooai/smooth-shared/worker-types';
 
 import type { ExecutionBackend, PromptResult, SandboxConfig, SandboxHandle, SandboxStatus } from './types.js';
+
 import { getEventStream } from './registry.js';
 
 const exec = promisify(execFile);
@@ -42,6 +44,7 @@ export class LocalMicrosandboxBackend implements ExecutionBackend {
             } catch (error) {
                 throw new Error(
                     `Microsandbox server failed to start. Install: curl -sSL https://get.microsandbox.dev | sh\nError: ${(error as Error).message}`,
+                    { cause: error },
                 );
             }
         }
@@ -73,18 +76,30 @@ export class LocalMicrosandboxBackend implements ExecutionBackend {
         // msb supports OCI images, directory mounts, resource limits
         const msbArgs = [
             'run',
-            '--name', sandboxName,
-            '--image', process.env.SMOOTH_WORKER_IMAGE ?? 'smooth-operator:latest',
-            '--memory', String(config.resourceLimits?.memoryMb ?? 4096),
-            '--cpus', String(config.resourceLimits?.cpus ?? 2),
-            '--port', `${hostPort}:4096`,
-            '--mount', `${config.workspacePath}:/workspace`,
-            '--env', `LEADER_URL=${LEADER_URL}`,
-            '--env', `BEAD_ID=${config.beadId}`,
-            '--env', `WORKER_ID=${config.operatorId}`,
-            '--env', `RUN_ID=${randomUUID()}`,
-            '--env', `SMOOTH_PHASE=${config.phase}`,
-            '--env', `OPENCODE_CONFIG=${JSON.stringify(openCodeConfig)}`,
+            '--name',
+            sandboxName,
+            '--image',
+            process.env.SMOOTH_WORKER_IMAGE ?? 'smooth-operator:latest',
+            '--memory',
+            String(config.resourceLimits?.memoryMb ?? 4096),
+            '--cpus',
+            String(config.resourceLimits?.cpus ?? 2),
+            '--port',
+            `${hostPort}:4096`,
+            '--mount',
+            `${config.workspacePath}:/workspace`,
+            '--env',
+            `LEADER_URL=${LEADER_URL}`,
+            '--env',
+            `BEAD_ID=${config.beadId}`,
+            '--env',
+            `WORKER_ID=${config.operatorId}`,
+            '--env',
+            `RUN_ID=${randomUUID()}`,
+            '--env',
+            `SMOOTH_PHASE=${config.phase}`,
+            '--env',
+            `OPENCODE_CONFIG=${JSON.stringify(openCodeConfig)}`,
         ];
 
         // Add custom env vars
@@ -97,7 +112,7 @@ export class LocalMicrosandboxBackend implements ExecutionBackend {
         try {
             await exec('msb', msbArgs);
         } catch (error) {
-            throw new Error(`Failed to create sandbox ${sandboxName}: ${(error as Error).message}`);
+            throw new Error(`Failed to create sandbox ${sandboxName}: ${(error as Error).message}`, { cause: error });
         }
 
         const handle: SandboxHandle = {
