@@ -1,5 +1,5 @@
 {
-    "name": "@smooth/cli",
+    "name": "@smooai/smooth-cli",
     "version": "0.1.0",
     "license": "MIT",
     "type": "module",
@@ -21,7 +21,7 @@
         "test": "vitest run"
     },
     "dependencies": {
-        "@smooth/shared": "workspace:*",
+        "@smooai/smooth-shared": "workspace:*",
         "@smooai/config": "^3.1.0",
         "commander": "^13.1.0",
         "ink": "^6.0.0",

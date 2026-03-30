@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 
-import { db, eq } from '@smooth/db/index';
-import { workerRuns } from '@smooth/db/schema/workers';
+import { db, eq } from '@smooai/smooth-db/index';
+import { workerRuns } from '@smooai/smooth-db/schema/workers';
 
 import { getBackend } from '../backend/registry.js';
 

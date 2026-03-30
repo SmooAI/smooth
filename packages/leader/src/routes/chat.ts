@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 
-import { ChatMessageSchema } from '@smooth/shared/schemas';
+import { ChatMessageSchema } from '@smooai/smooth-shared/schemas';
 
 export const chatRoutes = new Hono();
 

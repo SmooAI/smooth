@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 
-import { CreateProjectSchema } from '@smooth/shared/schemas';
+import { CreateProjectSchema } from '@smooai/smooth-shared/schemas';
 
 import { createBead, listBeads } from '../beads/client.js';
 

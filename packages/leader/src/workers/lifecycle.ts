@@ -3,7 +3,7 @@
  * Uses the ExecutionBackend interface — no Docker, no driver, no container details.
  */
 
-import type { WorkerPhase } from '@smooth/shared/worker-types';
+import type { WorkerPhase } from '@smooai/smooth-shared/worker-types';
 
 import { getBackend } from '../backend/registry.js';
 import { updateBead } from '../beads/client.js';

@@ -122,10 +122,10 @@ No Docker required. SQLite auto-creates at `~/.smooth/smooth.db`. Microsandbox a
 ### Package-specific
 
 ```bash
-pnpm --filter @smooth/leader test
-pnpm --filter @smooth/shared build
-pnpm --filter @smooth/db generate      # Drizzle migration
-pnpm --filter @smooth/db migrate       # Apply migration
+pnpm --filter @smooai/smooth-leader test
+pnpm --filter @smooai/smooth-shared build
+pnpm --filter @smooai/smooth-db generate      # Drizzle migration
+pnpm --filter @smooai/smooth-db migrate       # Apply migration
 ```
 
 ---
@@ -155,7 +155,7 @@ pnpm --filter @smooth/db migrate       # Apply migration
 
 ## 6. Changesets
 
-Always add changesets when `@smooth/*` packages change (including private packages):
+Always add changesets when `@smooai/smooth-*` packages change (including private packages):
 
 ```bash
 pnpm changeset

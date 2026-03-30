@@ -15,7 +15,7 @@ import type {
     SSEEvent,
     WorkerListResponse,
     WorkerResponse,
-} from '@smooth/shared/api-types';
+} from '@smooai/smooth-shared/api-types';
 
 export class LeaderClient {
     private baseUrl: string;

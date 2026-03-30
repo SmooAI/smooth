@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 
-import { BeadFiltersSchema } from '@smooth/shared/schemas';
+import { BeadFiltersSchema } from '@smooai/smooth-shared/schemas';
 
 import { getBead, getGraph, getReady, listBeads, search } from '../beads/client.js';
 

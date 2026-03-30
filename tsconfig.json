@@ -15,13 +15,13 @@
         "outDir": "./dist",
         "baseUrl": "./",
         "paths": {
-            "@smooth/shared/*": ["packages/shared/src/*"],
-            "@smooth/db/*": ["packages/db/src/*"],
-            "@smooth/auth/*": ["packages/auth/src/*"],
-            "@smooth/smoo-api/*": ["packages/smoo-api/src/*"],
-            "@smooth/leader/*": ["packages/leader/src/*"],
-            "@smooth/cli/*": ["packages/cli/src/*"],
-            "@smooth/tools/*": ["packages/tools/src/*"]
+            "@smooai/smooth-shared/*": ["packages/shared/src/*"],
+            "@smooai/smooth-db/*": ["packages/db/src/*"],
+            "@smooai/smooth-auth/*": ["packages/auth/src/*"],
+            "@smooai/smooth-smoo-api/*": ["packages/smoo-api/src/*"],
+            "@smooai/smooth-leader/*": ["packages/leader/src/*"],
+            "@smooai/smooth-cli/*": ["packages/cli/src/*"],
+            "@smooai/smooth-tools/*": ["packages/tools/src/*"]
         }
     },
     "include": ["./**/*.ts", "./**/*.tsx"],

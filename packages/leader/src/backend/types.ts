@@ -1,6 +1,6 @@
 /** Backend-agnostic execution interfaces for Smooth Operator sandboxes */
 
-import type { ToolPermission, WorkerPhase } from '@smooth/shared/worker-types';
+import type { ToolPermission, WorkerPhase } from '@smooai/smooth-shared/worker-types';
 
 /** Opaque handle to a running sandbox. Backend-agnostic. */
 export interface SandboxHandle {

@@ -10,7 +10,7 @@ import { reviewRequestTool } from './tools/review-request.js';
 import { spawnSubtaskTool } from './tools/spawn-subtask.js';
 import { workflowTransitionTool } from './tools/workflow.js';
 import type { ToolContext } from './types.js';
-import type { ToolPermission } from '@smooth/shared/worker-types';
+import type { ToolPermission } from '@smooai/smooth-shared/worker-types';
 
 // Build tool context from environment
 const ctx: ToolContext = {

@@ -1,6 +1,6 @@
 import type { z } from 'zod';
 
-import type { ToolPermission } from '@smooth/shared/worker-types';
+import type { ToolPermission } from '@smooai/smooth-shared/worker-types';
 
 export interface ToolContext {
     beadId: string;

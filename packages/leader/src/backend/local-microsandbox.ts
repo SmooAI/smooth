@@ -4,8 +4,8 @@ import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 
-import type { WorkerPhase } from '@smooth/shared/worker-types';
-import { PHASE_TIMEOUTS } from '@smooth/shared/worker-types';
+import type { WorkerPhase } from '@smooai/smooth-shared/worker-types';
+import { PHASE_TIMEOUTS } from '@smooai/smooth-shared/worker-types';
 
 import type { ExecutionBackend, PromptResult, SandboxConfig, SandboxHandle, SandboxStatus } from './types.js';
 import { getEventStream } from './registry.js';

@@ -68,7 +68,7 @@ export function registerUpCommand(program: Command) {
             // 3. Start leader natively (SQLite DB auto-creates on first access)
             if (opts.leader !== false) {
                 console.log('Starting leader service...');
-                const leader = spawn('pnpm', ['--filter', '@smooth/leader', 'dev'], {
+                const leader = spawn('pnpm', ['--filter', '@smooai/smooth-leader', 'dev'], {
                     stdio: 'inherit',
                     detached: false,
                 });
@@ -85,7 +85,7 @@ export function registerUpCommand(program: Command) {
             } else {
                 console.log('');
                 console.log('Smooth infrastructure ready (leader skipped):');
-                console.log('  Start leader manually: pnpm --filter @smooth/leader dev');
+                console.log('  Start leader manually: pnpm --filter @smooai/smooth-leader dev');
             }
         });
 }

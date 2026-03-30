@@ -9,7 +9,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
-import type { Bead, BeadComment, BeadDetail, BeadStatus, BeadType, Dependency, DependencyType } from '@smooth/shared/beads-types';
+import type { Bead, BeadComment, BeadDetail, BeadStatus, BeadType, Dependency, DependencyType } from '@smooai/smooth-shared/beads-types';
 
 const exec = promisify(execFile);
 

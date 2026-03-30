@@ -1,6 +1,6 @@
 /** Bead ↔ Jira field mapping */
 
-import type { BeadStatus } from '@smooth/shared/beads-types';
+import type { BeadStatus } from '@smooai/smooth-shared/beads-types';
 
 /** Map Jira status names to bead statuses */
 export function jiraStatusToBeadStatus(jiraStatus: string): BeadStatus | null {

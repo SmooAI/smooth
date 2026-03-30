@@ -1,6 +1,6 @@
 /** Tool registry — manages available tools and executes them with context */
 
-import type { ToolPermission } from '@smooth/shared/worker-types';
+import type { ToolPermission } from '@smooai/smooth-shared/worker-types';
 
 import type { SmoothTool, ToolContext } from './types.js';
 

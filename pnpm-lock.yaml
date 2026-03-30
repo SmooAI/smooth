@@ -35,7 +35,7 @@ importers:
 
   apps/web:
     dependencies:
-      '@smooth/shared':
+      '@smooai/smooth-shared':
         specifier: workspace:*
         version: link:../../packages/shared
       clsx:
@@ -81,7 +81,7 @@ importers:
       '@better-auth/drizzle-adapter':
         specifier: ^1.5.0
         version: 1.5.6(@better-auth/core@1.5.6(@better-auth/utils@0.3.1)(@better-fetch/fetch@1.1.21)(@opentelemetry/api@1.9.1)(better-call@1.3.2(zod@4.3.6))(jose@6.2.2)(kysely@0.28.14)(nanostores@1.2.0))(@better-auth/utils@0.3.1)(drizzle-orm@0.43.1(@opentelemetry/api@1.9.1)(@types/better-sqlite3@7.6.13)(better-sqlite3@12.8.0)(kysely@0.28.14)(pg@8.20.0)(postgres@3.4.8))
-      '@smooth/db':
+      '@smooai/smooth-db':
         specifier: workspace:*
         version: link:../db
       better-auth:
@@ -106,7 +106,7 @@ importers:
       '@smooai/config':
         specifier: ^3.1.0
         version: 3.1.0(@types/node@22.19.15)(@types/react@19.2.14)(next@16.2.1(@opentelemetry/api@1.9.1)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react@19.2.4)(typescript@5.9.3)(zod@4.3.6)
-      '@smooth/shared':
+      '@smooai/smooth-shared':
         specifier: workspace:*
         version: link:../shared
       commander:
@@ -192,13 +192,13 @@ importers:
       '@opencode-ai/sdk':
         specifier: ^1.3.0
         version: 1.3.7
-      '@smooth/auth':
+      '@smooai/smooth-auth':
         specifier: workspace:*
         version: link:../auth
-      '@smooth/db':
+      '@smooai/smooth-db':
         specifier: workspace:*
         version: link:../db
-      '@smooth/shared':
+      '@smooai/smooth-shared':
         specifier: workspace:*
         version: link:../shared
       hono:
@@ -258,7 +258,7 @@ importers:
 
   packages/tools:
     dependencies:
-      '@smooth/shared':
+      '@smooai/smooth-shared':
         specifier: workspace:*
         version: link:../shared
       zod:

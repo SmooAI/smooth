@@ -1,5 +1,5 @@
 {
-    "name": "@smooth/auth",
+    "name": "@smooai/smooth-auth",
     "version": "0.1.0",
     "license": "MIT",
     "type": "module",
@@ -20,7 +20,7 @@
         "test": "vitest run"
     },
     "dependencies": {
-        "@smooth/db": "workspace:*",
+        "@smooai/smooth-db": "workspace:*",
         "better-auth": "^1.5.0",
         "@better-auth/drizzle-adapter": "^1.5.0"
     },

@@ -1,5 +1,5 @@
 {
-    "name": "@smooth/tools",
+    "name": "@smooai/smooth-tools",
     "version": "0.1.0",
     "license": "MIT",
     "type": "module",
@@ -23,7 +23,7 @@
         "test": "vitest run"
     },
     "dependencies": {
-        "@smooth/shared": "workspace:*",
+        "@smooai/smooth-shared": "workspace:*",
         "zod": "^3.24.0"
     },
     "devDependencies": {

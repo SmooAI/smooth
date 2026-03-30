@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 
-import { SendMessageSchema } from '@smooth/shared/schemas';
+import { SendMessageSchema } from '@smooai/smooth-shared/schemas';
 
 import { readMessages, sendMessage, getInbox } from '../beads/messaging.js';
 

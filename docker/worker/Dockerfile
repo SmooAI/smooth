@@ -4,7 +4,7 @@ FROM node:24-slim
 RUN apt-get update && \
     apt-get install -y git ripgrep curl && \
     rm -rf /var/lib/apt/lists/* && \
-    npm install -g opencode @smooth/tools
+    npm install -g opencode @smooai/smooth-tools
 
 # Workspace mount point (target repo gets mounted here)
 WORKDIR /workspace

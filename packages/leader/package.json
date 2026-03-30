@@ -1,5 +1,5 @@
 {
-    "name": "@smooth/leader",
+    "name": "@smooai/smooth-leader",
     "version": "0.1.0",
     "license": "MIT",
     "type": "module",
@@ -22,9 +22,9 @@
         "test": "vitest run"
     },
     "dependencies": {
-        "@smooth/shared": "workspace:*",
-        "@smooth/db": "workspace:*",
-        "@smooth/auth": "workspace:*",
+        "@smooai/smooth-shared": "workspace:*",
+        "@smooai/smooth-db": "workspace:*",
+        "@smooai/smooth-auth": "workspace:*",
         "@opencode-ai/sdk": "^1.3.0",
         "@langchain/core": "^1.1.0",
         "@langchain/langgraph": "^1.2.0",
