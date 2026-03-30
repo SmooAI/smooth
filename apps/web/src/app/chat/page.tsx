@@ -3,6 +3,7 @@
 import { Send } from 'lucide-react';
 import { useCallback, useRef, useState } from 'react';
 
+import { AtAutocomplete, insertAtResult, type SearchResult } from '@/components/at-autocomplete';
 import Markdown from '@/components/markdown';
 
 interface ChatMessage {
@@ -14,7 +15,24 @@ export default function ChatPage() {
     const [messages, setMessages] = useState<ChatMessage[]>([{ role: 'assistant', content: 'Welcome to Smooth. How can I help?' }]);
     const [input, setInput] = useState('');
     const [streaming, setStreaming] = useState(false);
+    const [cursorPos, setCursorPos] = useState(0);
     const bottomRef = useRef<HTMLDivElement>(null);
+    const inputRef = useRef<HTMLInputElement>(null);
+
+    const handleAtSelect = useCallback(
+        (result: SearchResult) => {
+            const { newInput, newCursor } = insertAtResult(input, cursorPos, result);
+            setInput(newInput);
+            setCursorPos(newCursor);
+            setTimeout(() => {
+                if (inputRef.current) {
+                    inputRef.current.focus();
+                    inputRef.current.setSelectionRange(newCursor, newCursor);
+                }
+            }, 0);
+        },
+        [input, cursorPos],
+    );
 
     const send = useCallback(async () => {
         const content = input.trim();
@@ -85,11 +103,18 @@ export default function ChatPage() {
                 <div ref={bottomRef} />
             </div>
 
-            {/* Input */}
-            <div className="flex gap-2">
+            {/* Input with @ autocomplete */}
+            <div className="flex gap-2 relative">
+                <AtAutocomplete input={input} cursorPosition={cursorPos} onSelect={handleAtSelect} />
                 <input
+                    ref={inputRef}
                     value={input}
-                    onChange={(e) => setInput(e.target.value)}
+                    onChange={(e) => {
+                        setInput(e.target.value);
+                        setCursorPos(e.target.selectionStart ?? e.target.value.length);
+                    }}
+                    onKeyUp={(e) => setCursorPos((e.target as HTMLInputElement).selectionStart ?? 0)}
+                    onClick={(e) => setCursorPos((e.target as HTMLInputElement).selectionStart ?? 0)}
                     onKeyDown={(e) => {
                         if (e.key === 'Enter' && !e.shiftKey) {
                             e.preventDefault();

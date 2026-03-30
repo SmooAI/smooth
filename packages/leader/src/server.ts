@@ -17,6 +17,7 @@ import { jiraRoutes } from './routes/jira.js';
 import { messagesRoutes } from './routes/messages.js';
 import { projectsRoutes } from './routes/projects.js';
 import { reviewsRoutes } from './routes/reviews.js';
+import { searchRoutes } from './routes/search.js';
 import { steeringRoutes } from './routes/steering.js';
 import { streamRoutes } from './routes/stream.js';
 import { systemRoutes } from './routes/system.js';
@@ -43,6 +44,7 @@ app.route('/api/chat', chatRoutes);
 app.route('/api/stream', streamRoutes);
 app.route('/api/workers', execRoutes);
 app.route('/api/steering', steeringRoutes);
+app.route('/api/search', searchRoutes);
 app.route('/', wsApp);
 
 const port = parseInt(process.env.PORT ?? '4400', 10);
