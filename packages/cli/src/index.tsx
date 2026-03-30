@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /** th — Smooth CLI entry point */
 
 import { Command } from 'commander';
