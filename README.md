@@ -1,20 +1,57 @@
 <div align="center">
 
+<img src="images/logo.png" alt="Smoo AI" width="120" />
+
 # Smooth
 
-**AI Agent Orchestration Platform**
+**The Smoo AI CLI — Agent Orchestration & Platform Tools**
 
-A local-first, general-purpose AI agent orchestration system that coordinates Smooth Operators to work on any project through a structured leader/worker model with adversarial review.
+Coordinate teams of AI agents to build, research, analyze, and ship.
+One CLI for everything Smoo AI.
 
-[![npm](https://img.shields.io/npm/v/@smooai/smooth-cli?label=@smooai/smooth-cli&color=06b6d4)](https://www.npmjs.com/package/@smooai/smooth-cli)
+[![npm](https://img.shields.io/npm/v/@smooai/smooth-cli?label=%40smooai%2Fsmooth-cli&color=06b6d4)](https://www.npmjs.com/package/@smooai/smooth-cli)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Next.js](https://img.shields.io/badge/Next.js-16-000000?logo=next.js&logoColor=white)](https://nextjs.org/)
 [![LangGraph](https://img.shields.io/badge/LangGraph-1.2-1C3C3C?logo=langchain&logoColor=white)](https://langchain-ai.github.io/langgraphjs/)
-[![SQLite](https://img.shields.io/badge/SQLite-WAL-003B57?logo=sqlite&logoColor=white)](https://sqlite.org/)
-[![Microsandbox](https://img.shields.io/badge/Microsandbox-microVM-FF6B6B)](https://microsandbox.dev/)
-[![Tailscale](https://img.shields.io/badge/Tailscale-Forward-4C566A?logo=tailscale&logoColor=white)](https://tailscale.com/)
 
 </div>
+
+---
+
+## What is Smooth?
+
+Smooth is the central CLI and orchestration platform for [Smoo AI](https://smoo.ai). It does two things:
+
+1. **Agent Orchestration** — Spin up teams of AI agents (Smooth Operators) that work on real projects inside hardware-isolated sandboxes. They assess, plan, execute, and review work autonomously with structured adversarial review.
+
+2. **Smoo AI Platform CLI** — Manage config schemas, interact with the SmooAI API, sync with Jira, and control your Smoo AI infrastructure from one command.
+
+### Why sandboxed agents?
+
+AI agents that write code, run tests, and modify files need real isolation — not just Docker namespaces. Smooth runs each operator in a [Microsandbox](https://microsandbox.dev) microVM with hardware-level isolation via hypervisor. They can't escape, can't damage the host, and can't interfere with each other. You get the freedom of letting agents do real work with the safety of knowing they're truly contained.
+
+### What can Smooth Operators do?
+
+Anything you can describe:
+
+- **Coding** — Write features, fix bugs, refactor code, add tests across any repo
+- **Research** — Investigate codebases, analyze architectures, produce reports
+- **Testing** — Run test suites, identify coverage gaps, write missing tests
+- **Documentation** — Generate docs, READMEs, architecture decision records
+- **Analysis** — Review PRs, audit dependencies, assess security posture
+- **Operations** — Manage deployments, sync configurations, triage issues
+
+The tool system is extensible — add custom MCP tools for your specific workflows.
+
+### How it works
+
+You describe work to the leader. The leader breaks it down, assigns Smooth Operators, and they execute through a structured lifecycle:
+
+```
+ASSESS → PLAN → ORCHESTRATE → EXECUTE → FINALIZE → REVIEW
+```
+
+Every piece of work gets adversarial review from a separate operator that challenges assumptions, checks for edge cases, and either approves, requests rework, or rejects. All state is durable through [Beads](https://github.com/SmooAI/beads) — nothing gets lost.
 
 ---
 
@@ -27,15 +64,78 @@ npm install -g @smooai/smooth-cli
 ## Quick Start
 
 ```bash
-# Authenticate with your LLM provider
+# 1. Authenticate with your LLM provider
 th auth login anthropic --api-key sk-ant-...
 
-# Start Smooth
+# 2. Start Smooth
 th up
 
-# Open the terminal UI
+# 3. Open the terminal UI
 th tui
 ```
+
+No Docker. No PostgreSQL. No external services. Just Node.js. Microsandbox auto-installs on first `th up`.
+
+---
+
+## The `th` CLI
+
+### Authentication
+
+Supports the same providers as OpenCode — use whichever LLM you prefer:
+
+```bash
+th auth login anthropic          # Claude
+th auth login openai             # GPT-4
+th auth login openrouter         # Multi-model routing
+th auth login groq               # Fast inference
+th auth login google             # Gemini
+th auth login opencode-zen       # OpenCode Zen subscription
+th auth providers                # Show configured providers
+th auth status                   # Full auth overview
+```
+
+### Orchestration
+
+```bash
+th up                            # Start everything (auto-installs Microsandbox)
+th down                          # Stop
+th status                        # System health
+th tui                           # Full terminal UI (8 views + chat)
+th web                           # Open web interface
+```
+
+### Work Management
+
+```bash
+th project create <name>         # Create a project
+th run <bead-id>                 # Trigger work on a bead
+th approve <bead-id>             # Approve a review
+th inbox                         # Messages needing attention
+th operators                     # Active Smooth Operators
+```
+
+### Smoo AI Platform
+
+```bash
+th smoo config push              # Push config schema to platform
+th smoo config pull              # Pull config values
+th smoo config set <key> <value> # Set config value
+th smoo config list              # List all values
+th smoo agents                   # List SmooAI agents
+th jira sync                     # Bidirectional Jira sync
+```
+
+### System
+
+```bash
+th config show                   # Local settings
+th db status                     # Database info
+th db backup                     # Backup SQLite
+th tailscale status              # Tailscale node info
+```
+
+---
 
 ## Architecture
 
@@ -64,91 +164,31 @@ th tui
                     └───────────┘    └─────────────┘
 ```
 
-**Leader** orchestrates **Smooth Operators** (OpenCode agents in Microsandbox microVMs). All durable state flows through **Beads**. Adversarial review on every task.
-
-**Zero external dependencies.** No Docker. No PostgreSQL. Just Node.js.
-
-## The `th` CLI
-
-```bash
-# Auth — multi-provider (Anthropic, OpenAI, OpenRouter, Groq, Google, OpenCode Zen)
-th auth login <provider>        # Add provider credentials
-th auth providers               # List configured providers
-th auth status                  # Full auth overview
-
-# Orchestration
-th up                           # Start Smooth (auto-installs Microsandbox)
-th down                         # Stop Smooth
-th status                       # System health
-th tui                          # Full terminal UI
-th web                          # Open web interface
-
-# Work
-th project create <name>        # Create project
-th run <bead-id>                # Trigger work on bead
-th approve <bead-id>            # Approve review
-th inbox                        # Pending messages
-th operators                    # Active Smooth Operators
-
-# SmooAI Platform
-th smoo config push/pull/set/get/list/diff  # Config schema management
-th smoo agents                  # List SmooAI agents
-th jira sync                    # Sync with Jira
-
-# System
-th db status                    # Database info
-th db backup                    # Backup SQLite
-th config show/set              # Local settings
-th tailscale status             # Tailscale node status
-```
-
-## Tech Stack
-
-| Layer | Technology |
-|---|---|
-| **Orchestration** | LangGraph (TypeScript), custom leader node |
-| **Smooth Operators** | OpenCode, Microsandbox microVMs |
-| **State** | Beads (durable SoR), SQLite (Drizzle ORM) |
-| **Web** | Next.js 16, React 19, Tailwind CSS 4 |
-| **CLI/TUI** | React Ink 6, Commander.js |
-| **Auth** | Multi-provider (same as OpenCode), Better Auth, Tailscale identity |
-| **API** | Hono, Zod validation, SSE streaming |
-| **Config** | @smooai/config integration for schema management |
-| **Networking** | Tailscale (Serve, MagicDNS, Tags, ACLs) |
+The **leader** (LangGraph + Hono) orchestrates **Smooth Operators** (OpenCode in Microsandbox microVMs). **Beads** is the durable system of record for all work state. **SQLite** handles system data. The execution layer is pluggable — local Microsandbox today, AWS Lambda for hosted customer workloads in the future.
 
 ## Packages
 
-| Package | npm | Description |
-|---|---|---|
-| `@smooai/smooth-cli` | [![npm](https://img.shields.io/npm/v/@smooai/smooth-cli?label=)](https://www.npmjs.com/package/@smooai/smooth-cli) | `th` CLI binary + React Ink TUI |
-| `@smooai/smooth-leader` | [![npm](https://img.shields.io/npm/v/@smooai/smooth-leader?label=)](https://www.npmjs.com/package/@smooai/smooth-leader) | LangGraph orchestration service |
-| `@smooai/smooth-shared` | [![npm](https://img.shields.io/npm/v/@smooai/smooth-shared?label=)](https://www.npmjs.com/package/@smooai/smooth-shared) | Shared types + Zod schemas |
-| `@smooai/smooth-db` | [![npm](https://img.shields.io/npm/v/@smooai/smooth-db?label=)](https://www.npmjs.com/package/@smooai/smooth-db) | SQLite via Drizzle ORM |
-| `@smooai/smooth-tools` | [![npm](https://img.shields.io/npm/v/@smooai/smooth-tools?label=)](https://www.npmjs.com/package/@smooai/smooth-tools) | MCP tools for Smooth Operators |
-| `@smooai/smooth-auth` | [![npm](https://img.shields.io/npm/v/@smooai/smooth-auth?label=)](https://www.npmjs.com/package/@smooai/smooth-auth) | Better Auth (SQLite) |
-| `@smooai/smooth-smoo-api` | [![npm](https://img.shields.io/npm/v/@smooai/smooth-smoo-api?label=)](https://www.npmjs.com/package/@smooai/smooth-smoo-api) | SmooAI M2M API client |
+| Package | Description |
+|---|---|
+| [`@smooai/smooth-cli`](https://www.npmjs.com/package/@smooai/smooth-cli) | `th` CLI binary + React Ink TUI |
+| [`@smooai/smooth-leader`](https://www.npmjs.com/package/@smooai/smooth-leader) | LangGraph orchestration service |
+| [`@smooai/smooth-shared`](https://www.npmjs.com/package/@smooai/smooth-shared) | Shared types + Zod schemas |
+| [`@smooai/smooth-db`](https://www.npmjs.com/package/@smooai/smooth-db) | SQLite via Drizzle ORM |
+| [`@smooai/smooth-tools`](https://www.npmjs.com/package/@smooai/smooth-tools) | MCP tools for Smooth Operators |
+| [`@smooai/smooth-auth`](https://www.npmjs.com/package/@smooai/smooth-auth) | Better Auth (SQLite) |
+| [`@smooai/smooth-smoo-api`](https://www.npmjs.com/package/@smooai/smooth-smoo-api) | SmooAI M2M API client |
 
-## Smooth Operator Lifecycle
+## Tech Stack
 
-```
-ASSESS → PLAN → ORCHESTRATE → EXECUTE → FINALIZE → REVIEW
-```
-
-- **Assess**: Inspect bead context, graph neighbors, previous work
-- **Plan**: Define bounded steps, tools, expected outputs
-- **Orchestrate**: Coordinate sub-work, spawn child beads
-- **Execute**: Work inside Microsandbox microVM with MCP tools
-- **Finalize**: Summarize, link artifacts, identify unlocked work
-- **Review**: Adversarial review operator inspects diffs, tests, artifacts
-
-## Execution Backend
-
-Pluggable `ExecutionBackend` interface — orchestration never touches VM internals.
-
-| Backend | Status | Use |
-|---|---|---|
-| `local-microsandbox` | **Default** | Local dev. Hardware-isolated microVMs. |
-| `aws-lambda` | Future | Hosted customer workloads. |
+| | |
+|---|---|
+| **Orchestration** | LangGraph, Hono, Zod |
+| **Smooth Operators** | OpenCode, Microsandbox microVMs |
+| **Storage** | SQLite (Drizzle ORM), Beads |
+| **Web** | Next.js 16, React 19, Tailwind CSS 4 |
+| **CLI** | React Ink 6, Commander.js |
+| **Auth** | Multi-provider LLM auth, Better Auth, Tailscale |
+| **Config** | @smooai/config integration |
 
 ## Development
 
@@ -156,10 +196,7 @@ Pluggable `ExecutionBackend` interface — orchestration never touches VM intern
 git clone https://github.com/SmooAI/smooth.git
 cd smooth
 pnpm install
-pnpm build
-pnpm test               # 30 tests
-pnpm typecheck
-pnpm lint
+pnpm build && pnpm test
 ```
 
 ## License
