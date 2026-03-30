@@ -2,6 +2,8 @@
 
 import type { ToolPermission } from '@smooai/smooth-shared/worker-types';
 
+import { createAuditLogger } from '@smooai/smooth-shared/audit-log';
+
 import type { SmoothTool, ToolContext } from './types.js';
 
 export class ToolRegistry {
@@ -25,7 +27,7 @@ export class ToolRegistry {
         return Array.from(this.tools.values());
     }
 
-    /** Execute a tool with permission checking and logging */
+    /** Execute a tool with permission checking and audit logging */
     async execute(name: string, input: unknown, ctx: ToolContext): Promise<unknown> {
         const tool = this.tools.get(name);
         if (!tool) {
@@ -41,22 +43,38 @@ export class ToolRegistry {
         // Validate input
         const parsed = tool.inputSchema.parse(input);
 
-        // Execute
-        const result = await tool.handler(parsed, ctx);
+        // Execute and measure
+        const start = Date.now();
+        const audit = createAuditLogger(ctx.workerId, ctx.beadId);
+
+        let result: unknown;
+        try {
+            result = await tool.handler(parsed, ctx);
+        } catch (error) {
+            const durationMs = Date.now() - start;
+            audit.toolCall(name, parsed, undefined, durationMs);
+            audit.error(`Tool ${name} failed: ${error instanceof Error ? error.message : String(error)}`);
+            throw error;
+        }
+
+        const durationMs = Date.now() - start;
 
         // Validate output
         const validated = tool.outputSchema.parse(result);
 
-        // Log to beads if configured
+        // Audit log — always
+        audit.toolCall(name, parsed, validated, durationMs);
+
+        // Also log to beads if configured
         if (tool.logToBeads) {
-            await logToolCall(ctx, name, parsed, validated);
+            await logToolCall(ctx, name, parsed);
         }
 
         return validated;
     }
 }
 
-async function logToolCall(ctx: ToolContext, toolName: string, input: unknown, _output: unknown): Promise<void> {
+async function logToolCall(ctx: ToolContext, toolName: string, input: unknown): Promise<void> {
     try {
         await fetch(`${ctx.leaderUrl}/api/messages`, {
             method: 'POST',

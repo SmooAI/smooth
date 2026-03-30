@@ -5,6 +5,8 @@
 
 import type { WorkerPhase } from '@smooai/smooth-shared/worker-types';
 
+import { createAuditLogger } from '@smooai/smooth-shared/audit-log';
+
 import { getBackend } from '../backend/registry.js';
 import { updateBead } from '../beads/client.js';
 import { appendProgress, sendMessage } from '../beads/messaging.js';
@@ -82,6 +84,10 @@ export async function runPhase(
     phase: WorkerPhase,
 ): Promise<{ completed: boolean; nextPhase: WorkerPhase | 'done'; output: string }> {
     const backend = getBackend();
+    const audit = createAuditLogger(sandboxId, beadId);
+    const phaseStart = Date.now();
+
+    audit.phaseStarted(phase, beadId);
 
     // Update bead with current phase
     await updateBead(beadId, { addLabel: `phase:${phase}` });
@@ -99,6 +105,7 @@ export async function runPhase(
         .join('\n');
 
     // Record progress
+    audit.phaseCompleted(phase, beadId, Date.now() - phaseStart);
     await appendProgress(beadId, `Completed ${phase} phase`, sandboxId);
     await sendMessage(beadId, 'worker→leader', `Phase ${phase} complete: ${output.slice(0, 200)}`, sandboxId);
 

@@ -6,11 +6,14 @@ import { promisify } from 'node:util';
 
 import type { WorkerPhase } from '@smooai/smooth-shared/worker-types';
 
+import { createAuditLogger } from '@smooai/smooth-shared/audit-log';
 import { PHASE_TIMEOUTS } from '@smooai/smooth-shared/worker-types';
 
 import type { ExecutionBackend, PromptResult, SandboxConfig, SandboxHandle, SandboxStatus } from './types.js';
 
 import { getEventStream } from './registry.js';
+
+const audit = createAuditLogger('leader');
 
 const exec = promisify(execFile);
 
@@ -138,6 +141,7 @@ export class LocalMicrosandboxBackend implements ExecutionBackend {
             timestamp: now,
         });
 
+        audit.sandboxCreated(config.operatorId, { beadId: config.beadId, phase: config.phase, hostPort });
         console.log(`[microsandbox] Spawned Smooth Operator ${config.operatorId} on port ${hostPort} for bead ${config.beadId}`);
         return handle;
     }
@@ -171,6 +175,7 @@ export class LocalMicrosandboxBackend implements ExecutionBackend {
             timestamp: new Date(),
         });
 
+        audit.sandboxDestroyed(sandboxId);
         console.log(`[microsandbox] Destroyed Smooth Operator ${sandboxId}`);
     }
 

@@ -5,6 +5,7 @@ import { logger } from 'hono/logger';
 import { serve } from '@hono/node-server';
 import { getDbPath } from '@smooai/smooth-db/client';
 import { ensureSchema } from '@smooai/smooth-db/migrate';
+import { createAuditLogger, flushAuditLogs, getAuditDir } from '@smooai/smooth-shared/audit-log';
 
 import { initializeBackend, shutdownBackend } from './backend/registry.js';
 import { ensureBeadsDir, getBeadsDir } from './beads/client.js';
@@ -54,6 +55,14 @@ async function start() {
     const backend = await initializeBackend();
     console.log(`Execution backend: ${backend.name}`);
 
+    // Audit logging
+    const leaderAudit = createAuditLogger('leader');
+    leaderAudit.phaseStarted('startup');
+    console.log(`Audit logs: ${getAuditDir()}`);
+
+    // Make audit logger available globally for routes
+    (globalThis as any).__smoothAudit = leaderAudit;
+
     serve({
         fetch: app.fetch,
         port,
@@ -64,6 +73,7 @@ async function start() {
     // Graceful shutdown
     const shutdown = async () => {
         console.log('Shutting down...');
+        await flushAuditLogs();
         await shutdownBackend();
         process.exit(0);
     };
