@@ -22,6 +22,7 @@ import { reviewsRoutes } from './routes/reviews.js';
 import { streamRoutes } from './routes/stream.js';
 import { systemRoutes } from './routes/system.js';
 import { workersRoutes } from './routes/workers.js';
+import { wsApp, initWebSocket } from './routes/ws.js';
 
 const app = new Hono();
 
@@ -42,6 +43,7 @@ app.route('/api/chat', chatRoutes);
 app.route('/api/stream', streamRoutes);
 app.route('/api/workers', execRoutes);
 app.route('/api/steering', steeringRoutes);
+app.route('/', wsApp);
 
 const port = parseInt(process.env.PORT ?? '4400', 10);
 
@@ -71,10 +73,13 @@ async function start() {
     // Start operator watchdog
     watchdog.start();
 
-    serve({
+    const server = serve({
         fetch: app.fetch,
         port,
     });
+
+    // Initialize WebSocket with heartbeat + event broadcasting
+    initWebSocket(server);
 
     console.log(`Smooth leader running at http://localhost:${port}`);
 

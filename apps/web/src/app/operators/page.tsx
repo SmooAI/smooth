@@ -3,7 +3,8 @@
 import { Pause, Play, Send, X } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 
-import { api, apiPost } from '@/lib/api';
+import { api } from '@/lib/api';
+import { useWebSocket } from '@/lib/use-websocket';
 
 export default function OperatorsPage() {
     const [operators, setOperators] = useState<any[]>([]);
@@ -18,26 +19,32 @@ export default function OperatorsPage() {
             .finally(() => setLoading(false));
     }, []);
 
+    // WebSocket for real-time updates + steering commands
+    const { status: wsStatus, steer: wsSendSteer } = useWebSocket({
+        topics: ['sandbox_created', 'sandbox_destroyed', 'phase_started', 'phase_completed', 'watchdog_stuck', 'watchdog_killed'],
+        onEvent: () => load(),
+    });
+
     useEffect(() => {
         load();
-        const interval = setInterval(load, 5000);
+        const interval = setInterval(load, wsStatus === 'connected' ? 30_000 : 5_000);
         return () => clearInterval(interval);
-    }, [load]);
+    }, [load, wsStatus]);
 
-    const pause = async (beadId: string) => {
-        await apiPost(`/api/steering/${beadId}/pause`, {});
-        load();
+    const pause = (beadId: string) => {
+        wsSendSteer(beadId, 'pause');
+        setTimeout(load, 500);
     };
-    const resume = async (beadId: string) => {
-        await apiPost(`/api/steering/${beadId}/resume`, {});
-        load();
+    const resume = (beadId: string) => {
+        wsSendSteer(beadId, 'resume');
+        setTimeout(load, 500);
     };
-    const cancel = async (beadId: string) => {
-        await apiPost(`/api/steering/${beadId}/cancel`, {});
-        load();
+    const cancel = (beadId: string) => {
+        wsSendSteer(beadId, 'cancel');
+        setTimeout(load, 500);
     };
-    const steer = async (beadId: string, message: string) => {
-        await apiPost(`/api/steering/${beadId}/steer`, { message });
+    const steer = (beadId: string, message: string) => {
+        wsSendSteer(beadId, 'steer', message);
         setSteerBeadId(null);
         setSteerMsg('');
     };

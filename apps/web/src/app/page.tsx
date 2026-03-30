@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 
 import { api } from '@/lib/api';
+import { useWebSocket } from '@/lib/use-websocket';
 import { cn } from '@/lib/utils';
 
 export default function DashboardPage() {
@@ -21,11 +22,18 @@ export default function DashboardPage() {
         api<{ data: any[] }>('/api/messages/inbox').then((r) => setInbox(r.data)).catch(() => {});
     }, []);
 
+    // WebSocket for real-time events — triggers reload on relevant events
+    const { status: wsStatus } = useWebSocket({
+        topics: ['*'],
+        onEvent: () => load(),
+    });
+
     useEffect(() => {
         load();
-        const interval = setInterval(load, 5000);
+        // Fallback polling in case WebSocket is down
+        const interval = setInterval(load, wsStatus === 'connected' ? 30_000 : 5_000);
         return () => clearInterval(interval);
-    }, [load]);
+    }, [load, wsStatus]);
 
     return (
         <div>
@@ -101,7 +109,12 @@ export default function DashboardPage() {
             )}
 
             {!health && !error && <p className="text-neutral-500">Loading...</p>}
-            <p className="text-neutral-700 text-xs mt-6">Auto-refresh: 5s</p>
+            <div className="flex items-center gap-2 mt-6">
+                <div className={cn('w-2 h-2 rounded-full', wsStatus === 'connected' ? 'bg-green-500' : wsStatus === 'reconnecting' ? 'bg-yellow-500' : 'bg-red-500')} />
+                <span className="text-neutral-700 text-xs">
+                    {wsStatus === 'connected' ? 'Live (WebSocket)' : wsStatus === 'reconnecting' ? 'Reconnecting...' : 'Polling (5s)'}
+                </span>
+            </div>
         </div>
     );
 }
