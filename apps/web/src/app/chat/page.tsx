@@ -36,6 +36,7 @@ export default function ChatPage() {
 
             const decoder = new TextDecoder();
             let assistantContent = '';
+            let assistantAdded = false;
 
             while (true) {
                 const { done, value } = await reader.read();
@@ -46,17 +47,22 @@ export default function ChatPage() {
                     if (!line.startsWith('data: ')) continue;
                     try {
                         const event = JSON.parse(line.slice(6));
-                        if (event.type === 'text') assistantContent += event.content;
+                        if (event.type === 'text') {
+                            assistantContent += event.content;
+                            if (!assistantAdded) {
+                                setMessages((prev) => [...prev, { role: 'assistant', content: assistantContent }]);
+                                assistantAdded = true;
+                            } else {
+                                // Update the last message in place for streaming effect
+                                setMessages((prev) => [...prev.slice(0, -1), { role: 'assistant', content: assistantContent }]);
+                            }
+                        }
                         if (event.type === 'reasoning') setMessages((prev) => [...prev, { role: 'reasoning', content: event.content }]);
                         if (event.type === 'tool_call') setMessages((prev) => [...prev, { role: 'tool', content: event.content }]);
                     } catch {
                         /* ignore */
                     }
                 }
-            }
-
-            if (assistantContent) {
-                setMessages((prev) => [...prev, { role: 'assistant', content: assistantContent }]);
             }
         } catch (error) {
             setMessages((prev) => [...prev, { role: 'assistant', content: `Error: ${(error as Error).message}` }]);
