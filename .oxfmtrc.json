@@ -1,0 +1,16 @@
+{
+    "printWidth": 160,
+    "tabWidth": 4,
+    "useTabs": false,
+    "semi": true,
+    "singleQuote": true,
+    "trailingComma": "all",
+    "bracketSpacing": true,
+    "arrowParens": "always",
+    "experimentalSortImports": {
+        "sortImportDeclarations": "source",
+        "sortImportDeclarationSpecifiers": "source",
+        "groupImportDeclarations": true
+    },
+    "experimentalSortPackageJson": true
+}

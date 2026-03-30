@@ -1,0 +1,26 @@
+{
+    "name": "@smooth/db",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "exports": {
+        "./*": "./src/*"
+    },
+    "scripts": {
+        "build": "tsup",
+        "typecheck": "tsc --noEmit",
+        "test": "vitest run",
+        "generate": "drizzle-kit generate",
+        "migrate": "drizzle-kit migrate"
+    },
+    "dependencies": {
+        "drizzle-orm": "^0.43.0",
+        "postgres": "^3.4.0"
+    },
+    "devDependencies": {
+        "drizzle-kit": "^0.31.0",
+        "tsup": "^8.4.0",
+        "typescript": "^5.8.3",
+        "vitest": "^3.1.0"
+    }
+}

@@ -1,0 +1,48 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build
+dist/
+.next/
+.turbo/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.local
+.env.*.local
+.envrc.currentEnv
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Test
+test-results/
+playwright-report/
+coverage/
+
+# Docker
+docker/postgres/backups/
+
+# Beads (data is gitignored, config is not)
+.beads/dolt/
+.beads/*.jsonl
+
+# Claude Code
+.claude/worktree-bypass
+
+# Misc
+*.tgz

@@ -1,0 +1,29 @@
+{
+    "compilerOptions": {
+        "strict": true,
+        "strictNullChecks": true,
+        "declaration": true,
+        "declarationMap": true,
+        "esModuleInterop": true,
+        "isolatedModules": true,
+        "module": "ESNext",
+        "moduleResolution": "Bundler",
+        "skipLibCheck": true,
+        "noEmit": true,
+        "target": "ES2022",
+        "lib": ["ES2023"],
+        "outDir": "./dist",
+        "baseUrl": "./",
+        "paths": {
+            "@smooth/shared/*": ["packages/shared/src/*"],
+            "@smooth/db/*": ["packages/db/src/*"],
+            "@smooth/auth/*": ["packages/auth/src/*"],
+            "@smooth/smoo-api/*": ["packages/smoo-api/src/*"],
+            "@smooth/leader/*": ["packages/leader/src/*"],
+            "@smooth/cli/*": ["packages/cli/src/*"],
+            "@smooth/tools/*": ["packages/tools/src/*"]
+        }
+    },
+    "include": ["./**/*.ts", "./**/*.tsx"],
+    "exclude": ["dist", "node_modules", "*.js"]
+}
