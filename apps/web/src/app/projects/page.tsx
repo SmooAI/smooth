@@ -16,14 +16,18 @@ export default function ProjectsPage() {
 
     return (
         <div>
-            <h1 style={{ fontSize: 24, fontWeight: 700, marginBottom: 24 }}>Projects</h1>
-            {loading && <p style={{ color: '#737373' }}>Loading...</p>}
-            {!loading && projects.length === 0 && <p style={{ color: '#737373' }}>No projects. Create one: <code>th project create &lt;name&gt;</code></p>}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <h1 className="text-2xl font-bold mb-6">Projects</h1>
+            {loading && <p className="text-neutral-500">Loading...</p>}
+            {!loading && projects.length === 0 && (
+                <p className="text-neutral-500">
+                    No projects. Create one: <code className="bg-neutral-800 px-2 py-0.5 rounded text-sm">th project create &lt;name&gt;</code>
+                </p>
+            )}
+            <div className="flex flex-col gap-2">
                 {projects.map((p, i) => (
-                    <div key={i} style={{ background: '#171717', border: '1px solid #262626', borderRadius: 8, padding: 16 }}>
-                        <div style={{ fontWeight: 600 }}>{p.title ?? p.name}</div>
-                        <div style={{ color: '#737373', fontSize: 13 }}>{p.id} &middot; {p.status ?? 'open'}</div>
+                    <div key={i} className="bg-neutral-900 border border-neutral-800 rounded-lg p-4">
+                        <div className="font-semibold">{p.title ?? p.name}</div>
+                        <div className="text-neutral-500 text-sm">{p.id} &middot; {p.status ?? 'open'}</div>
                     </div>
                 ))}
             </div>

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
+import { cn } from '@/lib/utils';
 
 export default function BeadsPage() {
     const [beads, setBeads] = useState<any[]>([]);
@@ -14,20 +15,21 @@ export default function BeadsPage() {
             .finally(() => setLoading(false));
     }, []);
 
-    const statusColor = (s: string) => (s === 'closed' ? '#22c55e' : s === 'blocked' ? '#ef4444' : s === 'in_progress' ? '#eab308' : '#737373');
+    const statusClass = (s: string) =>
+        s === 'closed' ? 'text-green-500' : s === 'blocked' ? 'text-red-500' : s === 'in_progress' ? 'text-yellow-500' : 'text-neutral-500';
 
     return (
         <div>
-            <h1 style={{ fontSize: 24, fontWeight: 700, marginBottom: 24 }}>Beads</h1>
-            {loading && <p style={{ color: '#737373' }}>Loading...</p>}
-            {!loading && beads.length === 0 && <p style={{ color: '#737373' }}>No beads found.</p>}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <h1 className="text-2xl font-bold mb-6">Beads</h1>
+            {loading && <p className="text-neutral-500">Loading...</p>}
+            {!loading && beads.length === 0 && <p className="text-neutral-500">No beads found.</p>}
+            <div className="flex flex-col gap-2">
                 {beads.map((b, i) => (
-                    <div key={i} style={{ background: '#171717', border: '1px solid #262626', borderRadius: 8, padding: 16, display: 'flex', gap: 12, alignItems: 'center' }}>
-                        <span style={{ color: statusColor(b.status), fontSize: 12, fontWeight: 600, textTransform: 'uppercase' }}>{b.status}</span>
-                        <span style={{ color: '#06b6d4', fontFamily: 'monospace', fontSize: 13 }}>{b.id}</span>
-                        <span style={{ flex: 1 }}>{b.title}</span>
-                        <span style={{ color: '#525252', fontSize: 12 }}>P{b.priority}</span>
+                    <div key={i} className="bg-neutral-900 border border-neutral-800 rounded-lg p-4 flex gap-3 items-center">
+                        <span className={cn('text-xs font-semibold uppercase', statusClass(b.status))}>{b.status}</span>
+                        <span className="text-cyan-400 font-mono text-sm">{b.id}</span>
+                        <span className="flex-1">{b.title}</span>
+                        <span className="text-neutral-600 text-xs">P{b.priority}</span>
                     </div>
                 ))}
             </div>

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
+import { cn } from '@/lib/utils';
 
 export default function SystemPage() {
     const [health, setHealth] = useState<any>(null);
@@ -14,15 +15,12 @@ export default function SystemPage() {
             .finally(() => setLoading(false));
     }, []);
 
-    const statusColor = (s: string) => (s === 'healthy' || s === 'connected' ? '#22c55e' : s === 'degraded' ? '#eab308' : '#ef4444');
-    const statusDot = (s: string) => <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: statusColor(s), marginRight: 8 }} />;
-
     return (
         <div>
-            <h1 style={{ fontSize: 24, fontWeight: 700, marginBottom: 24 }}>System Health</h1>
-            {loading && <p style={{ color: '#737373' }}>Loading...</p>}
+            <h1 className="text-2xl font-bold mb-6">System Health</h1>
+            {loading && <p className="text-neutral-500">Loading...</p>}
             {health && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <div className="flex flex-col gap-3">
                     <HealthRow label="Leader" status={health.leader?.status} detail={`Uptime: ${Math.round(health.leader?.uptime ?? 0)}s`} />
                     <HealthRow label="Database" status={health.database?.status} detail={health.database?.path ?? 'unknown'} />
                     <HealthRow
@@ -39,13 +37,14 @@ export default function SystemPage() {
 }
 
 function HealthRow({ label, status, detail }: { label: string; status: string; detail: string }) {
-    const color = status === 'healthy' || status === 'connected' ? '#22c55e' : status === 'degraded' ? '#eab308' : '#ef4444';
+    const dotColor = status === 'healthy' || status === 'connected' ? 'bg-green-500' : status === 'degraded' ? 'bg-yellow-500' : 'bg-red-500';
+
     return (
-        <div style={{ background: '#171717', border: '1px solid #262626', borderRadius: 8, padding: 16, display: 'flex', alignItems: 'center', gap: 12 }}>
-            <div style={{ width: 10, height: 10, borderRadius: '50%', background: color }} />
-            <div style={{ fontWeight: 600, width: 100 }}>{label}</div>
-            <div style={{ color: '#737373', fontSize: 13 }}>{status}</div>
-            <div style={{ color: '#525252', fontSize: 13, marginLeft: 'auto' }}>{detail}</div>
+        <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-4 flex items-center gap-3">
+            <div className={cn('w-2.5 h-2.5 rounded-full', dotColor)} />
+            <div className="font-semibold w-24">{label}</div>
+            <div className="text-neutral-500 text-sm">{status}</div>
+            <div className="text-neutral-600 text-sm ml-auto">{detail}</div>
         </div>
     );
 }

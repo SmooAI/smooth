@@ -1,7 +1,9 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { Activity, Database, Shield } from 'lucide-react';
 import { api } from '@/lib/api';
+import { cn } from '@/lib/utils';
 
 interface Health {
     ok: boolean;
@@ -21,36 +23,38 @@ export default function DashboardPage() {
 
     return (
         <div>
-            <h1 style={{ fontSize: 24, fontWeight: 700, marginBottom: 24 }}>Dashboard</h1>
+            <h1 className="text-2xl font-bold mb-6">Dashboard</h1>
 
             {error && (
-                <div style={{ background: '#451a1a', border: '1px solid #991b1b', borderRadius: 8, padding: 16, marginBottom: 16 }}>
+                <div className="bg-red-950/50 border border-red-900 rounded-lg p-4 mb-4">
                     <strong>Cannot reach leader:</strong> {error}
                 </div>
             )}
 
             {health && (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16 }}>
-                    <StatusCard title="Leader" status="healthy" detail={`Uptime: ${Math.round(health.uptime)}s`} />
-                    <StatusCard title="Database" status="healthy" detail="SQLite (~/.smooth/smooth.db)" />
-                    <StatusCard title="Sandbox" status="healthy" detail="Microsandbox (local)" />
+                <div className="grid grid-cols-3 gap-4">
+                    <StatusCard icon={Activity} title="Leader" status="healthy" detail={`Uptime: ${Math.round(health.uptime)}s`} />
+                    <StatusCard icon={Database} title="Database" status="healthy" detail="SQLite (~/.smooth/smooth.db)" />
+                    <StatusCard icon={Shield} title="Sandbox" status="healthy" detail="Microsandbox (local)" />
                 </div>
             )}
 
-            {!health && !error && <p style={{ color: '#737373' }}>Loading...</p>}
+            {!health && !error && <p className="text-neutral-500">Loading...</p>}
         </div>
     );
 }
 
-function StatusCard({ title, status, detail }: { title: string; status: string; detail: string }) {
-    const color = status === 'healthy' ? '#22c55e' : status === 'degraded' ? '#eab308' : '#ef4444';
+function StatusCard({ icon: Icon, title, status, detail }: { icon: React.ComponentType<{ size?: number; className?: string }>; title: string; status: string; detail: string }) {
+    const dotColor = status === 'healthy' ? 'bg-green-500' : status === 'degraded' ? 'bg-yellow-500' : 'bg-red-500';
+
     return (
-        <div style={{ background: '#171717', border: '1px solid #262626', borderRadius: 8, padding: 16 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                <div style={{ width: 8, height: 8, borderRadius: '50%', background: color }} />
-                <span style={{ fontWeight: 600 }}>{title}</span>
+        <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-4">
+            <div className="flex items-center gap-2 mb-2">
+                <div className={cn('w-2 h-2 rounded-full', dotColor)} />
+                <Icon size={14} className="text-neutral-500" />
+                <span className="font-semibold">{title}</span>
             </div>
-            <div style={{ color: '#a3a3a3', fontSize: 13 }}>{detail}</div>
+            <div className="text-neutral-500 text-sm">{detail}</div>
         </div>
     );
 }

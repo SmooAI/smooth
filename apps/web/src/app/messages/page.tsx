@@ -16,22 +16,20 @@ export default function MessagesPage() {
 
     return (
         <div>
-            <h1 style={{ fontSize: 24, fontWeight: 700, marginBottom: 24 }}>Messages</h1>
-            {loading && <p style={{ color: '#737373' }}>Loading...</p>}
-            {!loading && inbox.length === 0 && <p style={{ color: '#737373' }}>No messages requiring attention.</p>}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <h1 className="text-2xl font-bold mb-6">Messages</h1>
+            {loading && <p className="text-neutral-500">Loading...</p>}
+            {!loading && inbox.length === 0 && <p className="text-neutral-500">No messages requiring attention.</p>}
+            <div className="flex flex-col gap-3">
                 {inbox.map((item, i) => (
-                    <div key={i} style={{ background: '#171717', border: '1px solid #262626', borderRadius: 8, padding: 16 }}>
-                        <div style={{ display: 'flex', gap: 8, marginBottom: 8, alignItems: 'center' }}>
-                            <span style={{ color: '#06b6d4', fontFamily: 'monospace', fontSize: 13 }}>{item.message?.beadId}</span>
-                            <span style={{ fontWeight: 600 }}>{item.beadTitle}</span>
+                    <div key={i} className="bg-neutral-900 border border-neutral-800 rounded-lg p-4">
+                        <div className="flex items-center gap-2 mb-2">
+                            <span className="text-cyan-400 font-mono text-sm">{item.message?.beadId}</span>
+                            <span className="font-semibold">{item.beadTitle}</span>
                             {item.requiresAction && (
-                                <span style={{ background: '#422006', color: '#fbbf24', padding: '2px 8px', borderRadius: 4, fontSize: 11 }}>
-                                    {item.actionType}
-                                </span>
+                                <span className="bg-yellow-900/50 text-yellow-400 px-2 py-0.5 rounded text-xs">{item.actionType}</span>
                             )}
                         </div>
-                        <div style={{ color: '#a3a3a3', fontSize: 14 }}>{item.message?.content}</div>
+                        <div className="text-neutral-400 text-sm">{item.message?.content}</div>
                     </div>
                 ))}
             </div>

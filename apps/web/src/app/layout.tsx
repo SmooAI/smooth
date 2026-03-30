@@ -1,46 +1,45 @@
 import type { Metadata } from 'next';
+import { LayoutDashboard, FolderKanban, Circle, Bot, MessageSquare, Mail, ShieldCheck, Settings } from 'lucide-react';
+
+import './globals.css';
 
 export const metadata: Metadata = {
     title: 'Smooth — AI Agent Orchestration',
     description: 'Orchestrate Smooth Operators to work on any project',
 };
 
+const NAV_ITEMS = [
+    { href: '/', label: 'Dashboard', icon: LayoutDashboard },
+    { href: '/projects', label: 'Projects', icon: FolderKanban },
+    { href: '/beads', label: 'Beads', icon: Circle },
+    { href: '/operators', label: 'Operators', icon: Bot },
+    { href: '/chat', label: 'Chat', icon: MessageSquare },
+    { href: '/messages', label: 'Messages', icon: Mail },
+    { href: '/reviews', label: 'Reviews', icon: ShieldCheck },
+    { href: '/system', label: 'System', icon: Settings },
+];
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
     return (
-        <html lang="en">
-            <body style={{ margin: 0, fontFamily: 'system-ui, -apple-system, sans-serif', backgroundColor: '#0a0a0a', color: '#e5e5e5' }}>
-                <div style={{ display: 'flex', minHeight: '100vh' }}>
-                    <nav style={{ width: 220, borderRight: '1px solid #262626', padding: '16px', display: 'flex', flexDirection: 'column', gap: 4 }}>
-                        <div style={{ fontSize: 20, fontWeight: 700, color: '#06b6d4', marginBottom: 16 }}>SMOOTH</div>
-                        <NavLink href="/">Dashboard</NavLink>
-                        <NavLink href="/projects">Projects</NavLink>
-                        <NavLink href="/beads">Beads</NavLink>
-                        <NavLink href="/operators">Operators</NavLink>
-                        <NavLink href="/chat">Chat</NavLink>
-                        <NavLink href="/messages">Messages</NavLink>
-                        <NavLink href="/reviews">Reviews</NavLink>
-                        <NavLink href="/system">System</NavLink>
+        <html lang="en" className="dark">
+            <body>
+                <div className="flex min-h-screen">
+                    <nav className="w-56 border-r border-neutral-800 p-4 flex flex-col gap-1">
+                        <div className="text-xl font-bold text-cyan-400 mb-4 px-3">SMOOTH</div>
+                        {NAV_ITEMS.map(({ href, label, icon: Icon }) => (
+                            <a
+                                key={href}
+                                href={href}
+                                className="flex items-center gap-3 px-3 py-2 rounded-md text-sm text-neutral-400 hover:text-neutral-100 hover:bg-neutral-800/50 transition-colors"
+                            >
+                                <Icon size={16} />
+                                {label}
+                            </a>
+                        ))}
                     </nav>
-                    <main style={{ flex: 1, padding: 24 }}>{children}</main>
+                    <main className="flex-1 p-6">{children}</main>
                 </div>
             </body>
         </html>
-    );
-}
-
-function NavLink({ href, children }: { href: string; children: React.ReactNode }) {
-    return (
-        <a
-            href={href}
-            style={{
-                color: '#a3a3a3',
-                textDecoration: 'none',
-                padding: '8px 12px',
-                borderRadius: 6,
-                fontSize: 14,
-            }}
-        >
-            {children}
-        </a>
     );
 }

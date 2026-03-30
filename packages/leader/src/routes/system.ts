@@ -5,6 +5,7 @@ import { config } from '@smooth/db/schema/config';
 import type { SystemHealth } from '@smooth/shared/types';
 
 import { getBackend } from '../backend/registry.js';
+import { getTailscaleStatus } from '../tailscale/client.js';
 
 export const systemRoutes = new Hono();
 
@@ -21,7 +22,7 @@ systemRoutes.get('/health', async (c) => {
             activeSandboxes: backend.activeCount(),
             maxConcurrency: backend.maxConcurrency(),
         },
-        tailscale: { status: 'disconnected' },
+        tailscale: { status: 'disconnected' as const },
         beads: { status: 'healthy', openIssues: 0 },
     };
 
@@ -31,6 +32,16 @@ systemRoutes.get('/health', async (c) => {
         health.database.status = 'healthy';
     } catch {
         health.database.status = 'down';
+    }
+
+    // Test Tailscale
+    try {
+        const ts = await getTailscaleStatus();
+        if (ts.connected) {
+            health.tailscale = { status: 'connected', hostname: ts.hostname };
+        }
+    } catch {
+        // Tailscale not available
     }
 
     // Test sandbox backend

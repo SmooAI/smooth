@@ -30,28 +30,22 @@ export default function ReviewsPage() {
 
     return (
         <div>
-            <h1 style={{ fontSize: 24, fontWeight: 700, marginBottom: 24 }}>Reviews</h1>
-            {loading && <p style={{ color: '#737373' }}>Loading...</p>}
-            {!loading && reviews.length === 0 && <p style={{ color: '#737373' }}>No pending reviews.</p>}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <h1 className="text-2xl font-bold mb-6">Reviews</h1>
+            {loading && <p className="text-neutral-500">Loading...</p>}
+            {!loading && reviews.length === 0 && <p className="text-neutral-500">No pending reviews.</p>}
+            <div className="flex flex-col gap-3">
                 {reviews.map((r, i) => (
-                    <div key={i} style={{ background: '#171717', border: '1px solid #262626', borderRadius: 8, padding: 16 }}>
-                        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12 }}>
-                            <span style={{ color: '#06b6d4', fontFamily: 'monospace', fontSize: 13 }}>{r.id}</span>
+                    <div key={i} className="bg-neutral-900 border border-neutral-800 rounded-lg p-4">
+                        <div className="flex items-center gap-2 mb-3">
+                            <span className="text-cyan-400 font-mono text-sm">{r.id}</span>
                             <span>{r.title}</span>
-                            <span style={{ background: '#422006', color: '#fbbf24', padding: '2px 8px', borderRadius: 4, fontSize: 11 }}>pending</span>
+                            <span className="bg-yellow-900/50 text-yellow-400 px-2 py-0.5 rounded text-xs">pending</span>
                         </div>
-                        <div style={{ display: 'flex', gap: 8 }}>
-                            <button
-                                onClick={() => approve(r.id)}
-                                style={{ background: '#166534', color: '#fff', border: 'none', borderRadius: 6, padding: '6px 16px', cursor: 'pointer' }}
-                            >
+                        <div className="flex gap-2">
+                            <button onClick={() => approve(r.id)} className="bg-green-800 hover:bg-green-700 text-white text-sm rounded-md px-4 py-1.5 cursor-pointer transition-colors">
                                 Approve
                             </button>
-                            <button
-                                onClick={() => reject(r.id)}
-                                style={{ background: '#991b1b', color: '#fff', border: 'none', borderRadius: 6, padding: '6px 16px', cursor: 'pointer' }}
-                            >
+                            <button onClick={() => reject(r.id)} className="bg-red-800 hover:bg-red-700 text-white text-sm rounded-md px-4 py-1.5 cursor-pointer transition-colors">
                                 Reject
                             </button>
                         </div>

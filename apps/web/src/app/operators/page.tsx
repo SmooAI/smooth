@@ -16,18 +16,16 @@ export default function OperatorsPage() {
 
     return (
         <div>
-            <h1 style={{ fontSize: 24, fontWeight: 700, marginBottom: 24 }}>Smooth Operators</h1>
-            {loading && <p style={{ color: '#737373' }}>Loading...</p>}
-            {!loading && operators.length === 0 && <p style={{ color: '#737373' }}>No active Smooth Operators.</p>}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <h1 className="text-2xl font-bold mb-6">Smooth Operators</h1>
+            {loading && <p className="text-neutral-500">Loading...</p>}
+            {!loading && operators.length === 0 && <p className="text-neutral-500">No active Smooth Operators.</p>}
+            <div className="flex flex-col gap-2">
                 {operators.map((op, i) => (
-                    <div key={i} style={{ background: '#171717', border: '1px solid #262626', borderRadius: 8, padding: 16 }}>
-                        <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-                            <span style={{ color: '#06b6d4', fontFamily: 'monospace' }}>{op.workerId}</span>
-                            <span style={{ color: '#eab308', fontSize: 12, fontWeight: 600 }}>[{op.phase}]</span>
-                            <span style={{ color: '#737373', fontSize: 13 }}>bead: {op.beadId}</span>
-                            <span style={{ marginLeft: 'auto', color: '#525252', fontSize: 12 }}>{op.status}</span>
-                        </div>
+                    <div key={i} className="bg-neutral-900 border border-neutral-800 rounded-lg p-4 flex items-center gap-3">
+                        <span className="text-cyan-400 font-mono">{op.workerId}</span>
+                        <span className="text-yellow-500 text-xs font-semibold">[{op.phase}]</span>
+                        <span className="text-neutral-500 text-sm">bead: {op.beadId}</span>
+                        <span className="ml-auto text-neutral-600 text-xs">{op.status}</span>
                     </div>
                 ))}
             </div>

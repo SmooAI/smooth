@@ -1,6 +1,8 @@
 'use client';
 
 import { useCallback, useRef, useState } from 'react';
+import { Send } from 'lucide-react';
+import { cn } from '@/lib/utils';
 
 interface ChatMessage {
     role: 'user' | 'assistant' | 'tool' | 'reasoning';
@@ -46,7 +48,9 @@ export default function ChatPage() {
                         if (event.type === 'text') assistantContent += event.content;
                         if (event.type === 'reasoning') setMessages((prev) => [...prev, { role: 'reasoning', content: event.content }]);
                         if (event.type === 'tool_call') setMessages((prev) => [...prev, { role: 'tool', content: event.content }]);
-                    } catch { /* ignore */ }
+                    } catch {
+                        /* ignore */
+                    }
                 }
             }
 
@@ -62,50 +66,36 @@ export default function ChatPage() {
     }, [input, streaming]);
 
     return (
-        <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 48px)' }}>
-            <h1 style={{ fontSize: 24, fontWeight: 700, marginBottom: 16 }}>Chat with Leader</h1>
+        <div className="flex flex-col h-[calc(100vh-48px)]">
+            <h1 className="text-2xl font-bold mb-4">Chat with Leader</h1>
 
             {/* Messages */}
-            <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 16 }}>
+            <div className="flex-1 overflow-auto flex flex-col gap-3 mb-4">
                 {messages.map((msg, i) => (
                     <MessageBubble key={i} message={msg} />
                 ))}
-                {streaming && <div style={{ color: '#525252', fontStyle: 'italic' }}>Thinking...</div>}
+                {streaming && <div className="text-neutral-600 italic text-sm">Thinking...</div>}
                 <div ref={bottomRef} />
             </div>
 
             {/* Input */}
-            <div style={{ display: 'flex', gap: 8 }}>
+            <div className="flex gap-2">
                 <input
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && send()}
                     placeholder="Message the leader... (@ for context search)"
-                    style={{
-                        flex: 1,
-                        background: '#171717',
-                        border: '1px solid #262626',
-                        borderRadius: 8,
-                        padding: '12px 16px',
-                        color: '#e5e5e5',
-                        fontSize: 14,
-                        outline: 'none',
-                    }}
+                    className="flex-1 bg-neutral-900 border border-neutral-800 rounded-lg px-4 py-3 text-neutral-100 text-sm outline-none focus:border-cyan-600 transition-colors placeholder:text-neutral-600"
                 />
                 <button
                     onClick={send}
                     disabled={streaming || !input.trim()}
-                    style={{
-                        background: '#06b6d4',
-                        color: '#000',
-                        border: 'none',
-                        borderRadius: 8,
-                        padding: '12px 24px',
-                        fontWeight: 600,
-                        cursor: streaming ? 'not-allowed' : 'pointer',
-                        opacity: streaming || !input.trim() ? 0.5 : 1,
-                    }}
+                    className={cn(
+                        'bg-cyan-500 text-black rounded-lg px-6 py-3 font-semibold flex items-center gap-2 transition-opacity cursor-pointer',
+                        (streaming || !input.trim()) && 'opacity-50 cursor-not-allowed',
+                    )}
                 >
+                    <Send size={16} />
                     Send
                 </button>
             </div>
@@ -113,25 +103,25 @@ export default function ChatPage() {
     );
 }
 
+const bubbleClasses: Record<string, string> = {
+    user: 'bg-blue-900/40 rounded-lg px-3 py-2 self-end max-w-[80%]',
+    assistant: 'bg-neutral-900 border border-neutral-800 rounded-lg px-3 py-2 max-w-[80%]',
+    tool: 'bg-indigo-950/40 border border-indigo-900/50 rounded-lg px-3 py-2 text-sm text-indigo-300 max-w-[80%]',
+    reasoning: 'italic text-neutral-600 px-3 py-1 text-sm',
+};
+
+const roleLabels: Record<string, string> = {
+    user: 'You',
+    assistant: 'Smooth',
+    tool: 'Tool',
+    reasoning: '',
+};
+
 function MessageBubble({ message }: { message: ChatMessage }) {
-    const styles: Record<string, React.CSSProperties> = {
-        user: { background: '#1e3a5f', borderRadius: 8, padding: '8px 12px', alignSelf: 'flex-end', maxWidth: '80%' },
-        assistant: { background: '#171717', border: '1px solid #262626', borderRadius: 8, padding: '8px 12px', maxWidth: '80%' },
-        tool: { background: '#1a1a2e', border: '1px solid #312e81', borderRadius: 8, padding: '8px 12px', fontSize: 13, color: '#a5b4fc', maxWidth: '80%' },
-        reasoning: { fontStyle: 'italic', color: '#525252', padding: '4px 12px', fontSize: 13 },
-    };
-
-    const labels: Record<string, string> = {
-        user: 'You',
-        assistant: 'Smooth',
-        tool: 'Tool',
-        reasoning: '',
-    };
-
     return (
-        <div style={styles[message.role]}>
-            {labels[message.role] && <div style={{ fontSize: 11, color: '#737373', marginBottom: 4 }}>{labels[message.role]}</div>}
-            <div style={{ whiteSpace: 'pre-wrap' }}>{message.content}</div>
+        <div className={bubbleClasses[message.role]}>
+            {roleLabels[message.role] && <div className="text-[11px] text-neutral-500 mb-1">{roleLabels[message.role]}</div>}
+            <div className="whitespace-pre-wrap">{message.content}</div>
         </div>
     );
 }
