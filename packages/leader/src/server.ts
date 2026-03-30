@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 
+import { initializeBackend, shutdownBackend } from './backend/registry.js';
 import { beadsRoutes } from './routes/beads.js';
 import { chatRoutes } from './routes/chat.js';
 import { healthRoutes } from './routes/health.js';
@@ -34,13 +35,33 @@ app.route('/api/stream', streamRoutes);
 
 const port = parseInt(process.env.PORT ?? '4400', 10);
 
-console.log(`Smooth leader starting on port ${port}...`);
+async function start() {
+    console.log('Smooth leader starting...');
 
-serve({
-    fetch: app.fetch,
-    port,
+    // Initialize execution backend
+    const backend = await initializeBackend();
+    console.log(`Execution backend: ${backend.name}`);
+
+    serve({
+        fetch: app.fetch,
+        port,
+    });
+
+    console.log(`Smooth leader running at http://localhost:${port}`);
+
+    // Graceful shutdown
+    const shutdown = async () => {
+        console.log('Shutting down...');
+        await shutdownBackend();
+        process.exit(0);
+    };
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
+}
+
+start().catch((error) => {
+    console.error('Failed to start leader:', error);
+    process.exit(1);
 });
-
-console.log(`Smooth leader running at http://localhost:${port}`);
 
 export { app };

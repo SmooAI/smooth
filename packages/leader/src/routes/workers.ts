@@ -4,6 +4,8 @@ import { eq } from 'drizzle-orm';
 import { db } from '@smooth/db/client';
 import { workerRuns } from '@smooth/db/schema/workers';
 
+import { getBackend } from '../backend/registry.js';
+
 export const workersRoutes = new Hono();
 
 /** List active Smooth Operators */
@@ -28,9 +30,13 @@ workersRoutes.get('/:id', async (c) => {
 workersRoutes.delete('/:id', async (c) => {
     const id = c.req.param('id');
 
+    // Destroy the sandbox via backend
+    const backend = getBackend();
+    await backend.destroySandbox(id);
+
+    // Update database record
     await db.update(workerRuns).set({ status: 'failed', completedAt: new Date() }).where(eq(workerRuns.workerId, id));
 
-    // TODO: Actually stop the Docker container (Phase 2)
     console.log(`[workers] Killed Smooth Operator ${id}`);
 
     return c.json({ ok: true });

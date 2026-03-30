@@ -7,7 +7,8 @@ export type WorkerStatus = 'pending' | 'running' | 'completed' | 'failed' | 'tim
 export interface Worker {
     id: string;
     beadId: string;
-    containerId: string;
+    sandboxId: string;
+    backendType: string;
     phase: WorkerPhase;
     status: WorkerStatus;
     startedAt: string;

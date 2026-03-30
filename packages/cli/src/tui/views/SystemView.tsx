@@ -35,8 +35,8 @@ export function SystemView({ client }: Props) {
                     <Text color={statusColor(health.postgres?.status)}>
                         {statusIcon(health.postgres?.status)} PostgreSQL: {health.postgres?.status}
                     </Text>
-                    <Text color={statusColor(health.docker?.status)}>
-                        {statusIcon(health.docker?.status)} Docker: {health.docker?.status} ({health.docker?.runningContainers ?? 0} containers)
+                    <Text color={statusColor(health.sandbox?.status)}>
+                        {statusIcon(health.sandbox?.status)} Sandbox: {health.sandbox?.status} ({health.sandbox?.backend ?? 'unknown'}, {health.sandbox?.activeSandboxes ?? 0}/{health.sandbox?.maxConcurrency ?? 0})
                     </Text>
                     <Text color={statusColor(health.tailscale?.status)}>
                         {statusIcon(health.tailscale?.status)} Tailscale: {health.tailscale?.status}

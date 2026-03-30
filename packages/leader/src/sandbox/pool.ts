@@ -1,8 +1,10 @@
-/** Smooth Operator pool management — warm pool and scheduling */
+/** Smooth Operator pool management — backend-agnostic queue and scheduling */
 
 import type { ToolPermission, WorkerPhase } from '@smooth/shared/worker-types';
+import { PHASE_TIMEOUTS } from '@smooth/shared/worker-types';
 
-import { destroyOperator, enforceTimeouts, getActiveCount, getActiveOperators, hasCapacity, healthCheck, spawnOperator, type OperatorConfig, type RunningOperator } from './manager.js';
+import { getBackend } from '../backend/registry.js';
+import type { SandboxHandle } from '../backend/types.js';
 
 export interface OperatorRequest {
     beadId: string;
@@ -17,10 +19,12 @@ export interface OperatorRequest {
 /** Queue of pending operator requests when at capacity */
 const requestQueue: OperatorRequest[] = [];
 
-/** Request a Smooth Operator — spawns immediately or queues if at capacity */
-export async function requestOperator(req: OperatorRequest): Promise<RunningOperator | null> {
-    if (hasCapacity()) {
-        return spawnOperator({
+/** Request a Smooth Operator — creates sandbox immediately or queues if at capacity */
+export async function requestOperator(req: OperatorRequest): Promise<SandboxHandle | null> {
+    const backend = getBackend();
+
+    if (backend.hasCapacity()) {
+        return backend.createSandbox({
             operatorId: req.operatorId,
             beadId: req.beadId,
             workspacePath: req.workspacePath,
@@ -28,6 +32,7 @@ export async function requestOperator(req: OperatorRequest): Promise<RunningOper
             systemPrompt: req.systemPrompt,
             model: req.model,
             phase: req.phase,
+            timeoutSeconds: PHASE_TIMEOUTS[req.phase],
         });
     }
 
@@ -38,13 +43,14 @@ export async function requestOperator(req: OperatorRequest): Promise<RunningOper
 }
 
 /** Process queued requests when capacity frees up */
-export async function processQueue(): Promise<RunningOperator[]> {
-    const spawned: RunningOperator[] = [];
+export async function processQueue(): Promise<SandboxHandle[]> {
+    const backend = getBackend();
+    const spawned: SandboxHandle[] = [];
 
-    while (hasCapacity() && requestQueue.length > 0) {
+    while (backend.hasCapacity() && requestQueue.length > 0) {
         const req = requestQueue.shift()!;
         try {
-            const operator = await spawnOperator({
+            const handle = await backend.createSandbox({
                 operatorId: req.operatorId,
                 beadId: req.beadId,
                 workspacePath: req.workspacePath,
@@ -52,8 +58,9 @@ export async function processQueue(): Promise<RunningOperator[]> {
                 systemPrompt: req.systemPrompt,
                 model: req.model,
                 phase: req.phase,
+                timeoutSeconds: PHASE_TIMEOUTS[req.phase],
             });
-            spawned.push(operator);
+            spawned.push(handle);
         } catch (error) {
             console.error(`[pool] Failed to spawn queued operator for bead ${req.beadId}:`, error);
         }
@@ -66,28 +73,32 @@ export async function processQueue(): Promise<RunningOperator[]> {
 export async function maintenanceCycle(): Promise<{
     timedOut: string[];
     cleaned: string[];
-    spawned: RunningOperator[];
+    spawned: SandboxHandle[];
 }> {
-    // Enforce timeouts
-    const timedOut = await enforceTimeouts();
+    const backend = getBackend();
 
-    // Health check
-    const { unhealthy } = await healthCheck();
+    const timedOut = await backend.enforceTimeouts();
+
+    const { unhealthy } = await backend.healthCheck();
     for (const id of unhealthy) {
-        await destroyOperator(id);
+        await backend.destroySandbox(id);
     }
 
-    // Process queue with freed capacity
     const spawned = await processQueue();
 
     return { timedOut, cleaned: unhealthy, spawned };
 }
 
 /** Get pool status */
-export function getPoolStatus() {
+export async function getPoolStatus() {
+    const backend = getBackend();
+    const sandboxes = await backend.listSandboxes();
+
     return {
-        active: getActiveCount(),
+        active: backend.activeCount(),
+        maxConcurrency: backend.maxConcurrency(),
         queued: requestQueue.length,
-        operators: getActiveOperators(),
+        backend: backend.name,
+        sandboxes,
     };
 }

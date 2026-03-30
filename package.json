@@ -18,10 +18,11 @@
         "changeset": "changeset",
         "db:generate": "pnpm --filter @smooth/db generate",
         "db:migrate": "pnpm --filter @smooth/db migrate",
-        "docker:up": "docker compose -f docker/docker-compose.yml up -d",
-        "docker:down": "docker compose -f docker/docker-compose.yml down",
-        "docker:logs": "docker compose -f docker/docker-compose.yml logs -f",
-        "docker:ps": "docker compose -f docker/docker-compose.yml ps"
+        "postgres:up": "docker compose -f docker/docker-compose.yml up -d postgres",
+        "postgres:down": "docker compose -f docker/docker-compose.yml down",
+        "postgres:logs": "docker compose -f docker/docker-compose.yml logs -f postgres",
+        "postgres:ps": "docker compose -f docker/docker-compose.yml ps",
+        "leader:dev": "pnpm --filter @smooth/leader dev"
     },
     "devDependencies": {
         "@changesets/cli": "^2.29.4",

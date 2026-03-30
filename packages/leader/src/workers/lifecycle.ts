@@ -1,10 +1,13 @@
-/** Smooth Operator lifecycle state machine: assess → plan → orchestrate → execute → finalize */
+/** Smooth Operator lifecycle state machine: assess → plan → orchestrate → execute → finalize
+ *
+ * Uses the ExecutionBackend interface — no Docker, no driver, no container details.
+ */
 
 import type { WorkerPhase } from '@smooth/shared/worker-types';
 
+import { getBackend } from '../backend/registry.js';
 import { updateBead } from '../beads/client.js';
 import { appendProgress, sendMessage } from '../beads/messaging.js';
-import { createDriver } from './driver.js';
 
 /** Phase transition rules */
 const PHASE_TRANSITIONS: Record<WorkerPhase, WorkerPhase | 'done'> = {
@@ -74,27 +77,20 @@ When done, mark the task as finalized.`,
 
 /** Run a single phase of the Smooth Operator lifecycle */
 export async function runPhase(
-    operatorId: string,
-    containerId: string,
+    sandboxId: string,
     beadId: string,
     phase: WorkerPhase,
 ): Promise<{ completed: boolean; nextPhase: WorkerPhase | 'done'; output: string }> {
-    const driver = createDriver(operatorId, containerId);
-
-    // Wait for OpenCode to be ready
-    const ready = await driver.waitForReady();
-    if (!ready) {
-        return { completed: false, nextPhase: phase, output: 'Smooth Operator failed to start' };
-    }
+    const backend = getBackend();
 
     // Update bead with current phase
     await updateBead(beadId, { addLabel: `phase:${phase}` });
-    await appendProgress(beadId, `Starting ${phase} phase`, operatorId);
+    await appendProgress(beadId, `Starting ${phase} phase`, sandboxId);
 
-    // Create session and run phase prompt
-    const session = await driver.createSession(`${beadId}-${phase}`);
+    // Create session and run phase prompt via backend
+    const session = await backend.createSession(sandboxId, `${beadId}-${phase}`);
     const prompt = PHASE_PROMPTS[phase];
-    const result = await driver.prompt(session.id, prompt);
+    const result = await backend.prompt(sandboxId, session.id, prompt);
 
     // Extract output from assistant messages
     const output = result.messages
@@ -103,8 +99,8 @@ export async function runPhase(
         .join('\n');
 
     // Record progress
-    await appendProgress(beadId, `Completed ${phase} phase`, operatorId);
-    await sendMessage(beadId, 'worker→leader', `Phase ${phase} complete: ${output.slice(0, 200)}`, operatorId);
+    await appendProgress(beadId, `Completed ${phase} phase`, sandboxId);
+    await sendMessage(beadId, 'worker→leader', `Phase ${phase} complete: ${output.slice(0, 200)}`, sandboxId);
 
     const nextPhase = PHASE_TRANSITIONS[phase];
 
@@ -113,8 +109,7 @@ export async function runPhase(
 
 /** Run the full lifecycle for a Smooth Operator */
 export async function runFullLifecycle(
-    operatorId: string,
-    containerId: string,
+    sandboxId: string,
     beadId: string,
 ): Promise<{ success: boolean; phasesCompleted: WorkerPhase[]; error?: string }> {
     const phases: WorkerPhase[] = ['assess', 'plan', 'orchestrate', 'execute', 'finalize'];
@@ -122,25 +117,16 @@ export async function runFullLifecycle(
 
     for (const phase of phases) {
         try {
-            const result = await runPhase(operatorId, containerId, beadId, phase);
+            const result = await runPhase(sandboxId, beadId, phase);
 
             if (!result.completed) {
-                return {
-                    success: false,
-                    phasesCompleted: completed,
-                    error: `Phase ${phase} failed: ${result.output}`,
-                };
+                return { success: false, phasesCompleted: completed, error: `Phase ${phase} failed: ${result.output}` };
             }
 
             completed.push(phase);
-
             if (result.nextPhase === 'done') break;
         } catch (error) {
-            return {
-                success: false,
-                phasesCompleted: completed,
-                error: `Phase ${phase} threw: ${error instanceof Error ? error.message : String(error)}`,
-            };
+            return { success: false, phasesCompleted: completed, error: `Phase ${phase} threw: ${error instanceof Error ? error.message : String(error)}` };
         }
     }
 

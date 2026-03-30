@@ -12,7 +12,7 @@ export interface Project {
 export interface SystemHealth {
     leader: { status: 'healthy' | 'degraded' | 'down'; uptime: number };
     postgres: { status: 'healthy' | 'degraded' | 'down'; connectionCount: number };
-    docker: { status: 'healthy' | 'degraded' | 'down'; runningContainers: number };
+    sandbox: { status: 'healthy' | 'degraded' | 'down'; backend: string; activeSandboxes: number; maxConcurrency: number };
     tailscale: { status: 'connected' | 'disconnected'; hostname?: string };
     beads: { status: 'healthy' | 'degraded' | 'down'; openIssues: number };
 }

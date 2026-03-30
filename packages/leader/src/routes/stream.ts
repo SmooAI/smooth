@@ -1,9 +1,11 @@
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 
+import { getEventStream } from '../backend/registry.js';
+
 export const streamRoutes = new Hono();
 
-/** SSE endpoint for live system updates */
+/** SSE endpoint for live system updates — wired to ExecutionBackend EventStream */
 streamRoutes.get('/', async (c) => {
     return streamSSE(c, async (stream) => {
         // Send initial connection event
@@ -16,8 +18,27 @@ streamRoutes.get('/', async (c) => {
             }),
         });
 
-        // Keep connection alive with heartbeat
-        // TODO: Wire up actual events from orchestrator (worker status, bead updates, etc.)
+        // Subscribe to execution backend events
+        const events = getEventStream();
+        const unsubscribe = events.on('*', (event) => {
+            stream
+                .writeSSE({
+                    event: event.type,
+                    data: JSON.stringify({
+                        type: event.type,
+                        sandboxId: event.sandboxId,
+                        operatorId: event.operatorId,
+                        beadId: event.beadId,
+                        data: event.data,
+                        timestamp: event.timestamp.toISOString(),
+                    }),
+                })
+                .catch(() => {
+                    // Stream closed
+                });
+        });
+
+        // Heartbeat
         const interval = setInterval(async () => {
             try {
                 await stream.writeSSE({
@@ -36,6 +57,7 @@ streamRoutes.get('/', async (c) => {
         // Clean up on disconnect
         stream.onAbort(() => {
             clearInterval(interval);
+            unsubscribe();
         });
 
         // Keep the stream open
