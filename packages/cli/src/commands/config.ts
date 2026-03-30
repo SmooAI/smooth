@@ -3,7 +3,7 @@ import type { Command } from 'commander';
 import { loadConfig, setConfigValue } from '../config.js';
 
 export function registerConfigCommand(program: Command) {
-    const cfg = program.command('config').description('View/set configuration');
+    const cfg = program.command('config').description('View/set local Smooth configuration');
 
     cfg.command('show')
         .description('Show current configuration')
