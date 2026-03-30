@@ -4,39 +4,92 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 **Use Context7 MCP server for up-to-date library documentation.**
 
-> **CRITICAL: All feature work MUST happen in a git worktree.** Never edit source code or commit directly on `main` in `~/dev/smooai/smooth/`. The main worktree stays on `main` and is only used for merging, pulling, and creating new worktrees. A `PreToolUse` hook enforces this.
+> **CRITICAL: All feature work MUST happen in a git worktree.** Never edit source code or commit directly on `main` in `~/dev/smooai/smooth/`. The main worktree stays on `main` and is only used for merging, pulling, and creating new worktrees. A `PreToolUse` hook enforces this — see `.claude/hooks/enforce-worktree.sh`.
 
 ## Project Overview
 
-Smooth is a local-first, general-purpose AI agent orchestration platform. It coordinates multiple AI agents (OpenCode workers in Docker sandboxes) to work on any project through a structured leader/worker model with adversarial review. Beads is the durable system of record.
+Smooth is the Smoo AI CLI and orchestration platform. It coordinates multiple AI agents (Smooth Operators in Microsandbox microVMs) to work on any project through a structured leader/worker model with adversarial security review. Beads is the durable system of record.
 
 ---
 
-## 1. Git Workflow — Worktrees
+## 1. Issue Tracking — Beads + Jira Integration
+
+**Philosophy**: Beads tracks local work context and dependencies. Jira (SMOODEV project) is the external source of truth for project management.
+
+### Beads has built-in Jira sync
+
+Configure once (already done for this repo):
+
+```bash
+bd config set jira.url "https://smooai.atlassian.net"
+bd config set jira.project "SMOODEV"
+bd config set jira.username "$JIRA_EMAIL"
+# API token from JIRA_API_TOKEN env var (or bd config set jira.api_token)
+```
+
+### Creating work
+
+1. **Create a Jira ticket first** via REST API or Jira UI
+2. **Create a matching beads issue**:
+    ```bash
+    bd create --title="SMOODEV-XX: Title" --description="What and why" --type=task --priority=2 --add-label=<label>
+    ```
+3. **Or use `bd jira sync --pull`** to import Jira issues into beads automatically.
+
+### Beads quick reference
+
+```bash
+bd ready                              # Show issues ready to work on
+bd list --status=open                 # All open issues
+bd list --status=in_progress          # Active work
+bd show <id>                          # Issue details with dependencies
+bd update <id> --status=in_progress   # Claim work
+bd close <id1> <id2> ...              # Close completed issues
+bd dep add <issue> <depends-on>       # Add dependency
+bd blocked                            # Show blocked issues
+bd sync                               # Sync with git remote
+bd jira sync                          # Bidirectional Jira sync
+```
+
+### Available labels
+
+`backend`, `cli`, `db`, `frontend`, `hooks`, `infra`, `leader`, `operator`, `security`, `testing`, `tools`, `tui`, `web`, `websocket`
+
+---
+
+## 2. Git Workflow — Worktrees, Branches, Merging
 
 ### Working directory structure
 
+All work happens from `~/dev/smooai/`. The main worktree is at `~/dev/smooai/smooth/`. Feature worktrees live alongside it:
+
 ```
 ~/dev/smooai/
-├── smooth/                              # Main worktree (ALWAYS on main)
-├── smooth-SMOODEV-XX-short-desc/        # Feature worktree
+├── smooth/                              # Main worktree (ALWAYS on main, kept up to date)
+├── smooth-SMOODEV-33-operator-cli/      # Feature worktree
+├── smooth-SMOODEV-45-test-coverage/     # Feature worktree
 └── ...
 ```
 
+**IMPORTANT:** `~/dev/smooai/smooth/` must ALWAYS stay on the `main` branch and be kept up to date. **Never do feature work directly on main.** All feature work goes in worktrees. After merging a feature branch, always `git pull --rebase` in the main worktree to keep it current.
+
 ### Branch naming
 
-Always prefix with Jira ticket: `SMOODEV-XX-short-description`
+Always prefix with the Jira ticket number: `SMOODEV-XX-short-description`
 
 ### Commit messages
 
-Always prefix with Jira ticket, explain why: `SMOODEV-XX: Add validation to prevent duplicate submissions`
+Always prefix with the Jira ticket. Explain **why**, not just what: `SMOODEV-XX: Add survey validation to prevent duplicate submissions`
 
-### Creating a worktree
+### Worktree workflow (MANDATORY for all feature work)
 
 ```bash
+# Create worktree from main
 cd ~/dev/smooai/smooth
-git worktree add ../smooth-SMOODEV-XX-desc -b SMOODEV-XX-desc main
-cd ../smooth-SMOODEV-XX-desc
+git worktree add ../smooth-SMOODEV-XX-short-desc -b SMOODEV-XX-short-desc main
+
+# Work in the worktree
+cd ../smooth-SMOODEV-XX-short-desc
 pnpm install
 ```
 
@@ -45,68 +98,65 @@ pnpm install
 ```bash
 cd ~/dev/smooai/smooth
 git checkout main && git pull --rebase
-git merge SMOODEV-XX-desc --no-ff
+git merge SMOODEV-XX-short-desc --no-ff
 git push
 ```
 
 ### Cleanup
 
 ```bash
-git worktree remove ~/dev/smooai/smooth-SMOODEV-XX-desc
-git branch -d SMOODEV-XX-desc
+git worktree remove ~/dev/smooai/smooth-SMOODEV-XX-short-desc
+git branch -d SMOODEV-XX-short-desc
 ```
 
 ---
 
-## 2. Project Structure
+## 3. Project Structure
 
 ```
 smooth/
-├── apps/web/               # Next.js 16 web interface
+├── apps/web/               # Next.js 16 web interface (Tailwind CSS 4)
 ├── packages/
-│   ├── leader/             # LangGraph orchestration service (Hono HTTP)
-│   ├── cli/                # `th` CLI + React Ink TUI
-│   ├── shared/             # Shared types + Zod schemas
-│   ├── db/                 # Drizzle ORM schemas + client
+│   ├── leader/             # LangGraph orchestration + Hono API + WebSocket
+│   │   └── src/backend/    # Pluggable ExecutionBackend (Microsandbox, future Lambda)
+│   ├── cli/                # `th` CLI + React Ink TUI (23 commands)
+│   ├── shared/             # Shared types, Zod schemas, audit logging
+│   ├── db/                 # Drizzle ORM (SQLite at ~/.smooth/smooth.db)
 │   ├── auth/               # Better Auth (sessions + API keys)
-│   ├── tools/              # MCP tools for Smooth Operators
+│   ├── tools/              # 12 operator tools + 3 guardrail hooks
 │   └── smoo-api/           # SmooAI platform M2M API client
-├── docker/
-│   └── worker/             # Smooth Operator OCI image
-└── ~/.smooth/              # Local state (auto-created)
-    ├── smooth.db           # SQLite database
-    ├── .beads/             # Beads issue graph
-    └── artifacts/          # Operator work artifacts
+├── docker/worker/          # Smooth Operator OCI image
+└── .beads/                 # Issue tracking (Jira-synced)
 ```
 
 ### Key Technologies
 
 - **Orchestration**: LangGraph (TypeScript), custom leader node
-- **Smooth Operators**: OpenCode (Zen), Microsandbox microVMs
+- **Smooth Operators**: OpenCode, Microsandbox microVMs (hardware isolation)
 - **State**: Beads (durable SoR), SQLite (Drizzle ORM)
-- **Web**: Next.js 16, React 19, Tailwind CSS 4, Shadcn UI, AI SDK Elements
-- **CLI/TUI**: React Ink 6, @inkjs/ui, Commander.js
-- **Auth**: Better Auth + Tailscale identity headers
-- **API**: Hono, Zod validation, SSE streaming
+- **Web**: Next.js 16, React 19, Tailwind CSS 4
+- **CLI/TUI**: React Ink 6, Commander.js
+- **Auth**: Multi-provider LLM auth, Better Auth, Tailscale identity
+- **API**: Hono, WebSocket (real-time events + steering), Zod validation
+- **Config**: @smooai/config integration for schema management
 - **Networking**: Tailscale (Serve, MagicDNS, Tags, ACLs)
-- **Toolchain**: pnpm, Turborepo, oxlint, oxfmt, tsgo, Vitest, Changesets
+- **Toolchain**: pnpm, Turborepo, oxlint, oxfmt, Vitest, Changesets
 
 ---
 
-## 3. Build, Test, and Development Commands
+## 4. Build, Test, and Development Commands
 
 ```bash
 pnpm install              # Install all dependencies
-pnpm dev                  # Start development
 pnpm build                # Build all packages
-pnpm test                 # Run all tests
+pnpm test                 # Run all tests (48 passing)
 pnpm typecheck            # TypeScript type checking
 pnpm lint                 # oxlint
 pnpm lint:fix             # oxlint --fix
 pnpm format               # oxfmt
 pnpm format:check         # oxfmt --check
 pnpm check-all            # Full CI check
-pnpm pre-commit-check     # Pre-commit validation
+pnpm pre-commit-check     # Pre-commit validation (sync + lint + typecheck + test + format)
 ```
 
 ### Starting Smooth
@@ -125,12 +175,12 @@ No Docker required. SQLite auto-creates at `~/.smooth/smooth.db`. Microsandbox a
 pnpm --filter @smooai/smooth-leader test
 pnpm --filter @smooai/smooth-shared build
 pnpm --filter @smooai/smooth-db generate      # Drizzle migration
-pnpm --filter @smooai/smooth-db migrate       # Apply migration
+pnpm --filter @smooai/smooth-db migrate        # Apply migration
 ```
 
 ---
 
-## 4. Coding Style
+## 5. Coding Style
 
 - 4-space indentation, 160-character line width
 - oxfmt for formatting, oxlint for linting
@@ -144,7 +194,7 @@ pnpm --filter @smooai/smooth-db migrate       # Apply migration
 
 ---
 
-## 5. Testing
+## 6. Testing
 
 - Vitest for unit/integration tests
 - Colocated as `*.test.ts`
@@ -153,7 +203,7 @@ pnpm --filter @smooai/smooth-db migrate       # Apply migration
 
 ---
 
-## 6. Changesets
+## 7. Changesets
 
 Always add changesets when `@smooai/smooth-*` packages change (including private packages):
 
@@ -163,19 +213,21 @@ pnpm changeset
 
 ---
 
-## 7. Data
+## 8. Data
 
 All Smooth state lives at `~/.smooth/`:
 
 - **SQLite database**: `~/.smooth/smooth.db` — leader memory, worker runs, auth, config
-- **Beads**: `~/.smooth/.beads/` — projects, tasks, dependencies, messages, reviews
+- **Audit logs**: `~/.smooth/audit/` — rotating tool usage logs per operator
+- **Providers**: `~/.smooth/providers.json` — LLM provider credentials
 - **Artifacts**: `~/.smooth/artifacts/` — operator work output
+- **Config**: `~/.smooth/config.json` — CLI settings
 - **Backup**: `th db backup` copies the SQLite file
 - **Clean reset**: `rm -rf ~/.smooth` starts fresh
 
 ---
 
-## 8. Pre-Push Code Review
+## 9. Pre-Push Code Review
 
 Before merging, review all changes as an SME:
 
@@ -184,3 +236,15 @@ git diff main...HEAD
 ```
 
 Check: security, code quality, test coverage, best practices. Fix issues, don't just note them.
+
+---
+
+## 10. Landing the Plane
+
+When ending a work session, complete ALL steps:
+
+1. Run `pnpm pre-commit-check` — must pass
+2. Add changesets when `@smooai/smooth-*` packages changed
+3. Close beads issues: `bd close <id1> <id2> ...`
+4. Push to remote: `git push`
+5. Verify CI green: `gh run list`

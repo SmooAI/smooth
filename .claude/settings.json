@@ -1,4 +1,5 @@
 {
+    "$schema": "https://json.schemastore.org/claude-code-settings.json",
     "hooks": {
         "PreToolUse": [
             {
@@ -6,7 +7,7 @@
                 "hooks": [
                     {
                         "type": "command",
-                        "command": "bash .claude/hooks/enforce-worktree.sh \"$TOOL_INPUT\""
+                        "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/enforce-worktree.sh"
                     }
                 ]
             },
@@ -15,17 +16,29 @@
                 "hooks": [
                     {
                         "type": "command",
-                        "command": "bash .claude/hooks/enforce-worktree.sh \"$TOOL_INPUT\""
+                        "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/enforce-worktree.sh"
+                    }
+                ]
+            }
+        ],
+        "PostToolUse": [
+            {
+                "matcher": "Bash",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/enforce-beads-labels.sh"
                     }
                 ]
             }
         ],
         "SessionStart": [
             {
+                "matcher": "startup",
                 "hooks": [
                     {
                         "type": "command",
-                        "command": "bash .claude/hooks/auto-in-progress.sh"
+                        "command": "BRANCH=$(git -C \"$HOME/dev/smooai/smooth\" symbolic-ref --short HEAD 2>/dev/null); DIR=$(pwd); MAIN=\"$HOME/dev/smooai/smooth\"; if [[ \"$DIR\" == \"$MAIN\" || \"$DIR\" == \"$MAIN/\"* ]] && [[ \"$BRANCH\" == \"main\" ]]; then echo '⚠️  You are in the MAIN worktree (~/dev/smooai/smooth/) on the main branch. Do NOT do feature work here. Create a worktree first: git worktree add ../smooth-SMOODEV-XX-desc -b SMOODEV-XX-desc main'; fi"
                     }
                 ]
             }
