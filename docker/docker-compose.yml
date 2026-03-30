@@ -21,6 +21,25 @@ services:
     networks:
       - smooth-net
 
+  leader:
+    build:
+      context: ..
+      dockerfile: docker/leader/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "4400:4400"
+    environment:
+      DATABASE_URL: postgresql://smooth:${POSTGRES_PASSWORD:-smooth_dev_password}@postgres:5432/smooth
+      BEADS_DIR: /data/.beads
+    volumes:
+      - smooth-beads:/data/.beads
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - smooth-net
+
 networks:
   smooth-net:
     driver: bridge
@@ -30,3 +49,5 @@ volumes:
     external: false
     labels:
       com.smooth.protect: "true"
+  smooth-beads:
+    external: false

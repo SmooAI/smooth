@@ -44,14 +44,14 @@ A local-first, general-purpose AI agent orchestration system that coordinates mu
                     └───────────┘    └─────────────┘
 ```
 
-**Leader** (custom LangGraph service) orchestrates **Workers** (OpenCode in Docker sandboxes). All durable state flows through **Beads**. Communication via Beads-backed messaging. Adversarial review on every task.
+**Leader** (custom LangGraph service) orchestrates **Smooth Operators** (OpenCode agents in Docker sandboxes). All durable state flows through **Beads**. Communication via Beads-backed messaging. Adversarial review on every task.
 
 ## Tech Stack
 
 | Layer | Technology |
 |---|---|
 | **Orchestration** | LangGraph (TypeScript), custom leader node |
-| **Workers** | OpenCode (Zen subscription), Docker sandboxes |
+| **Smooth Operators** | OpenCode (Zen subscription), Docker sandboxes |
 | **State** | Beads (durable SoR), PostgreSQL (Drizzle ORM) |
 | **Web** | Next.js 16, React 19, Tailwind CSS 4, Shadcn UI, AI SDK Elements |
 | **CLI/TUI** | React Ink 6, @inkjs/ui, Commander.js |
@@ -72,7 +72,7 @@ smooth/
 │   ├── shared/                 # Shared types + Zod schemas
 │   ├── db/                     # Drizzle ORM schemas
 │   ├── auth/                   # Better Auth config
-│   ├── tools/                  # Custom MCP tools for workers
+│   ├── tools/                  # Custom MCP tools for Smooth Operators
 │   └── smoo-api/               # SmooAI platform API client
 ├── docker/
 │   ├── docker-compose.yml      # Full stack deployment
@@ -117,7 +117,7 @@ th project create <name>    # Create project
 th run <bead-id>            # Trigger work on bead
 th approve <bead-id>        # Approve review
 th inbox                    # Pending messages
-th workers                  # Active workers
+th operators                # Active Smooth Operators
 th jira sync                # Sync with Jira
 th smoo agents              # List SmooAI agents
 th db backup                # Backup PostgreSQL
