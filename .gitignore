@@ -1,3 +1,8 @@
+# Environment (secrets)
+.envrc.local
+.env.local
+.env*.local
+
 # Dependencies
 node_modules/
 .pnp
@@ -48,3 +53,7 @@ coverage/
 
 # Misc
 *.tgz
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+.beads-credential-key
