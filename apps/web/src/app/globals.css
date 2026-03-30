@@ -1,14 +1,24 @@
 @import 'tailwindcss';
 
 :root {
-    --background: #0a0a0a;
-    --foreground: #e5e5e5;
-    --muted: #737373;
-    --border: #262626;
-    --card: #171717;
-    --accent: #06b6d4;
+    /* Smoo AI brand colors */
+    --smoo-green: #00a6a6;
+    --smoo-orange: #f49f0a;
+    --smoo-dark-blue: #020618;
+    --smoo-dark-blue-700: #0a1f7a;
+    --smoo-dark-blue-850: #040d30;
+    --smoo-dark-blue-950: #01040e;
+
+    /* Theme */
+    --background: var(--smoo-dark-blue);
+    --foreground: #f8fafc;
+    --muted: #a3a3a3;
+    --border: #0a1f7a;
+    --card: var(--smoo-dark-blue-850);
+    --accent: var(--smoo-green);
+    --accent-secondary: var(--smoo-orange);
     --success: #22c55e;
-    --warning: #eab308;
+    --warning: var(--smoo-orange);
     --danger: #ef4444;
 }
 
@@ -17,9 +27,4 @@ body {
     color: var(--foreground);
     font-family: system-ui, -apple-system, sans-serif;
     margin: 0;
-}
-
-/* Utility class for cn() */
-.cn {
-    /* placeholder */
 }

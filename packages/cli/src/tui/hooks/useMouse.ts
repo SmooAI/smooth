@@ -36,8 +36,10 @@ export function useMouse(onMouseEvent?: (event: MouseEvent) => void) {
     const handleData = useCallback((data: Buffer) => {
         const str = data.toString();
 
-        // Parse SGR mouse events: \x1b[<button;x;yM or \x1b[<button;x;ym
-        const sgrMatch = str.match(/\x1b\[<(\d+);(\d+);(\d+)([Mm])/);
+        // Parse SGR mouse events: ESC[<button;x;yM or ESC[<button;x;ym
+        const ESC = String.fromCharCode(27);
+        const sgrPattern = new RegExp(`${ESC.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\[<(\\d+);(\\d+);(\\d+)([Mm])`);
+        const sgrMatch = str.match(sgrPattern);
         if (sgrMatch) {
             const buttonCode = parseInt(sgrMatch[1], 10);
             const x = parseInt(sgrMatch[2], 10);
@@ -63,8 +65,9 @@ export function useMouse(onMouseEvent?: (event: MouseEvent) => void) {
             return;
         }
 
-        // Parse legacy mouse events: \x1b[Mbxy
-        if (str.length >= 6 && str.startsWith('\x1b[M')) {
+        // Parse legacy mouse events: ESC[Mbxy
+        const legacyPrefix = ESC + '[M';
+        if (str.length >= 6 && str.startsWith(legacyPrefix)) {
             const buttonCode = str.charCodeAt(3) - 32;
             const x = str.charCodeAt(4) - 32;
             const y = str.charCodeAt(5) - 32;
@@ -89,17 +92,18 @@ export function useMouse(onMouseEvent?: (event: MouseEvent) => void) {
         if (!stdin) return;
 
         // Enable SGR mouse mode (better coordinates, supports > 223 columns)
+        const ESC = String.fromCharCode(27);
         setRawMode(true);
-        process.stdout.write('\x1b[?1000h'); // Enable mouse click tracking
-        process.stdout.write('\x1b[?1006h'); // Enable SGR extended mouse mode
+        process.stdout.write(`${ESC}[?1000h`); // Enable mouse click tracking
+        process.stdout.write(`${ESC}[?1006h`); // Enable SGR extended mouse mode
 
         stdin.on('data', handleData);
 
         return () => {
             stdin.off('data', handleData);
             // Disable mouse tracking
-            process.stdout.write('\x1b[?1006l');
-            process.stdout.write('\x1b[?1000l');
+            process.stdout.write(`${ESC}[?1006l`);
+            process.stdout.write(`${ESC}[?1000l`);
         };
     }, [stdin, setRawMode, handleData]);
 

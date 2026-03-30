@@ -1,11 +1,12 @@
 import type { Metadata } from 'next';
+import Image from 'next/image';
 
-import { LayoutDashboard, FolderKanban, Circle, Bot, MessageSquare, Mail, ShieldCheck, Settings } from 'lucide-react';
+import { Bot, Circle, FolderKanban, LayoutDashboard, Mail, MessageSquare, Settings, ShieldCheck } from 'lucide-react';
 
 import './globals.css';
 
 export const metadata: Metadata = {
-    title: 'Smooth — AI Agent Orchestration',
+    title: 'Smooth — Smoo AI Agent Orchestration',
     description: 'Orchestrate Smooth Operators to work on any project',
 };
 
@@ -24,14 +25,20 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     return (
         <html lang="en" className="dark">
             <body>
-                <div className="flex min-h-screen">
-                    <nav className="w-56 border-r border-neutral-800 p-4 flex flex-col gap-1">
-                        <div className="text-xl font-bold text-cyan-400 mb-4 px-3">SMOOTH</div>
+                <div className="flex min-h-screen" style={{ background: 'var(--background)' }}>
+                    <nav className="w-56 p-4 flex flex-col gap-1" style={{ borderRight: '1px solid var(--border)' }}>
+                        <div className="mb-4 px-3 py-1">
+                            <Image src="/logo.svg" alt="Smoo AI" width={140} height={32} priority />
+                        </div>
+                        <div className="text-xs font-semibold uppercase tracking-wider px-3 mb-2" style={{ color: 'var(--muted)' }}>
+                            Smooth
+                        </div>
                         {NAV_ITEMS.map(({ href, label, icon: Icon }) => (
                             <a
                                 key={href}
                                 href={href}
-                                className="flex items-center gap-3 px-3 py-2 rounded-md text-sm text-neutral-400 hover:text-neutral-100 hover:bg-neutral-800/50 transition-colors"
+                                className="flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors"
+                                style={{ color: 'var(--muted)' }}
                             >
                                 <Icon size={16} />
                                 {label}
