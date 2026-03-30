@@ -3,6 +3,7 @@
 import { Send } from 'lucide-react';
 import { useCallback, useRef, useState } from 'react';
 
+import Markdown from '@/components/markdown';
 import { cn } from '@/lib/utils';
 
 interface ChatMessage {
@@ -125,7 +126,11 @@ function MessageBubble({ message }: { message: ChatMessage }) {
     return (
         <div className={bubbleClasses[message.role]}>
             {roleLabels[message.role] && <div className="text-[11px] text-neutral-500 mb-1">{roleLabels[message.role]}</div>}
-            <div className="whitespace-pre-wrap">{message.content}</div>
+            {message.role === 'assistant' ? (
+                <Markdown>{message.content}</Markdown>
+            ) : (
+                <div className="whitespace-pre-wrap">{message.content}</div>
+            )}
         </div>
     );
 }
