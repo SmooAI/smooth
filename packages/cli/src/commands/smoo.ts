@@ -1,23 +1,34 @@
 /** th smoo — SmooAI platform API + config schema management
  *
- * `th smoo config <cmd>` wraps the @smooai/config CLI (smooai-config binary)
- * for schema push/pull/set/get/list/diff operations.
+ * `th smoo config <cmd>` calls @smooai/config CLI directly as a dependency.
+ * No global install needed — it's bundled with th.
  */
 
 import type { Command } from 'commander';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
+import { resolve } from 'node:path';
 
 import { loadConfig } from '../config.js';
 
-function runSmooConfig(args: string): void {
+/** Resolve the smooai-config binary from node_modules */
+function getSmooConfigBin(): string {
+    // Try to resolve from the package's bin entry
     try {
-        execSync(`smooai-config ${args}`, { stdio: 'inherit' });
-    } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-            console.error('smooai-config not found.');
-            console.error('Install: pnpm add -g @smooai/config');
-            process.exit(1);
-        }
+        const pkgPath = require.resolve('@smooai/config/package.json');
+        const pkg = require(pkgPath);
+        const binPath = resolve(pkgPath, '..', pkg.bin['smooai-config']);
+        return binPath;
+    } catch {
+        // Fallback: look in node_modules/.bin
+        return 'smooai-config';
+    }
+}
+
+function runSmooConfig(args: string[]): void {
+    const bin = getSmooConfigBin();
+    try {
+        execFileSync('node', [bin, ...args], { stdio: 'inherit' });
+    } catch {
         process.exit(1);
     }
 }
@@ -25,15 +36,15 @@ function runSmooConfig(args: string): void {
 export function registerSmooCommand(program: Command) {
     const smoo = program.command('smoo').description('SmooAI platform — API, config schemas, and values');
 
-    // ── th smoo config ─── wraps @smooai/config CLI ──────────
+    // ── th smoo config ─── @smooai/config CLI (bundled) ──────
 
-    const cfg = smoo.command('config').description('Config schema and value management (via @smooai/config)');
+    const cfg = smoo.command('config').description('Config schema and value management (@smooai/config)');
 
     cfg.command('init')
         .description('Initialize .smooai-config/ directory with templates')
         .option('--language <lang>', 'Project language (typescript, python, go, rust)')
         .action((opts) => {
-            runSmooConfig(`init${opts.language ? ` --language ${opts.language}` : ''}`);
+            runSmooConfig(['init', ...(opts.language ? ['--language', opts.language] : [])]);
         });
 
     cfg.command('login')
@@ -42,10 +53,11 @@ export function registerSmooCommand(program: Command) {
         .option('--org-id <id>', 'Organization ID')
         .option('--base-url <url>', 'API base URL')
         .action((opts) => {
-            const flags = [opts.apiKey ? `--api-key ${opts.apiKey}` : '', opts.orgId ? `--org-id ${opts.orgId}` : '', opts.baseUrl ? `--base-url ${opts.baseUrl}` : '']
-                .filter(Boolean)
-                .join(' ');
-            runSmooConfig(`login ${flags}`);
+            const args = ['login'];
+            if (opts.apiKey) args.push('--api-key', opts.apiKey);
+            if (opts.orgId) args.push('--org-id', opts.orgId);
+            if (opts.baseUrl) args.push('--base-url', opts.baseUrl);
+            runSmooConfig(args);
         });
 
     cfg.command('push')
@@ -54,17 +66,18 @@ export function registerSmooCommand(program: Command) {
         .option('--description <desc>', 'Change description')
         .option('-y, --yes', 'Skip confirmation')
         .action((opts) => {
-            const flags = [opts.schemaName ? `--schema-name ${opts.schemaName}` : '', opts.description ? `--description "${opts.description}"` : '', opts.yes ? '--yes' : '']
-                .filter(Boolean)
-                .join(' ');
-            runSmooConfig(`push ${flags}`);
+            const args = ['push'];
+            if (opts.schemaName) args.push('--schema-name', opts.schemaName);
+            if (opts.description) args.push('--description', opts.description);
+            if (opts.yes) args.push('--yes');
+            runSmooConfig(args);
         });
 
     cfg.command('pull')
         .description('Pull config values from Smoo AI platform')
         .option('-e, --environment <env>', 'Environment name', 'development')
         .action((opts) => {
-            runSmooConfig(`pull --environment ${opts.environment}`);
+            runSmooConfig(['pull', '--environment', opts.environment]);
         });
 
     cfg.command('set <key> <value>')
@@ -73,34 +86,34 @@ export function registerSmooCommand(program: Command) {
         .option('--tier <tier>', 'Config tier (public, secret, feature_flag)')
         .option('--schema-name <name>', 'Schema name')
         .action((key, value, opts) => {
-            const flags = [`--environment ${opts.environment}`, opts.tier ? `--tier ${opts.tier}` : '', opts.schemaName ? `--schema-name ${opts.schemaName}` : '']
-                .filter(Boolean)
-                .join(' ');
-            runSmooConfig(`set "${key}" "${value}" ${flags}`);
+            const args = ['set', key, value, '--environment', opts.environment];
+            if (opts.tier) args.push('--tier', opts.tier);
+            if (opts.schemaName) args.push('--schema-name', opts.schemaName);
+            runSmooConfig(args);
         });
 
     cfg.command('get <key>')
         .description('Get a config value from Smoo AI platform')
         .option('-e, --environment <env>', 'Environment name', 'development')
         .action((key, opts) => {
-            runSmooConfig(`get "${key}" --environment ${opts.environment}`);
+            runSmooConfig(['get', key, '--environment', opts.environment]);
         });
 
     cfg.command('list')
         .description('List all config values for an environment')
         .option('-e, --environment <env>', 'Environment name', 'development')
         .action((opts) => {
-            runSmooConfig(`list --environment ${opts.environment}`);
+            runSmooConfig(['list', '--environment', opts.environment]);
         });
 
     cfg.command('diff')
         .description('Compare local schema vs remote schema')
         .option('--schema-name <name>', 'Schema name')
         .action((opts) => {
-            runSmooConfig(`diff${opts.schemaName ? ` --schema-name ${opts.schemaName}` : ''}`);
+            runSmooConfig(['diff', ...(opts.schemaName ? ['--schema-name', opts.schemaName] : [])]);
         });
 
-    // ── th smoo agents/jobs/knowledge ─── M2M API commands ───
+    // ── th smoo agents/jobs ─── M2M API commands ─────────────
 
     smoo.command('agents')
         .description('List SmooAI agents')
