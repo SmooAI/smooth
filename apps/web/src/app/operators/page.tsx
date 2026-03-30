@@ -57,7 +57,13 @@ export default function OperatorsPage() {
             <div className="flex flex-col gap-3">
                 {operators.map((op, i) => {
                     const phaseColor =
-                        op.phase === 'execute' ? 'text-yellow-500' : op.phase === 'finalize' ? 'text-green-500' : op.phase === 'review' ? 'text-purple-400' : 'text-neutral-400';
+                        op.phase === 'execute'
+                            ? 'text-yellow-500'
+                            : op.phase === 'finalize'
+                              ? 'text-green-500'
+                              : op.phase === 'review'
+                                ? 'text-purple-400'
+                                : 'text-neutral-400';
 
                     return (
                         <div key={i} className="bg-neutral-900 border border-neutral-800 rounded-lg p-4">
@@ -70,16 +76,32 @@ export default function OperatorsPage() {
 
                             {/* Steering controls */}
                             <div className="flex items-center gap-2">
-                                <button onClick={() => pause(op.beadId)} className="flex items-center gap-1 bg-yellow-900/40 hover:bg-yellow-900/60 text-yellow-400 text-xs rounded px-3 py-1.5 cursor-pointer transition-colors" title="Pause operator">
+                                <button
+                                    onClick={() => pause(op.beadId)}
+                                    className="flex items-center gap-1 bg-yellow-900/40 hover:bg-yellow-900/60 text-yellow-400 text-xs rounded px-3 py-1.5 cursor-pointer transition-colors"
+                                    title="Pause operator"
+                                >
                                     <Pause size={12} /> Pause
                                 </button>
-                                <button onClick={() => resume(op.beadId)} className="flex items-center gap-1 bg-green-900/40 hover:bg-green-900/60 text-green-400 text-xs rounded px-3 py-1.5 cursor-pointer transition-colors" title="Resume operator">
+                                <button
+                                    onClick={() => resume(op.beadId)}
+                                    className="flex items-center gap-1 bg-green-900/40 hover:bg-green-900/60 text-green-400 text-xs rounded px-3 py-1.5 cursor-pointer transition-colors"
+                                    title="Resume operator"
+                                >
                                     <Play size={12} /> Resume
                                 </button>
-                                <button onClick={() => setSteerBeadId(steerBeadId === op.beadId ? null : op.beadId)} className="flex items-center gap-1 bg-blue-900/40 hover:bg-blue-900/60 text-blue-400 text-xs rounded px-3 py-1.5 cursor-pointer transition-colors" title="Send guidance">
+                                <button
+                                    onClick={() => setSteerBeadId(steerBeadId === op.beadId ? null : op.beadId)}
+                                    className="flex items-center gap-1 bg-blue-900/40 hover:bg-blue-900/60 text-blue-400 text-xs rounded px-3 py-1.5 cursor-pointer transition-colors"
+                                    title="Send guidance"
+                                >
                                     <Send size={12} /> Steer
                                 </button>
-                                <button onClick={() => cancel(op.beadId)} className="flex items-center gap-1 bg-red-900/40 hover:bg-red-900/60 text-red-400 text-xs rounded px-3 py-1.5 cursor-pointer transition-colors ml-auto" title="Cancel operator">
+                                <button
+                                    onClick={() => cancel(op.beadId)}
+                                    className="flex items-center gap-1 bg-red-900/40 hover:bg-red-900/60 text-red-400 text-xs rounded px-3 py-1.5 cursor-pointer transition-colors ml-auto"
+                                    title="Cancel operator"
+                                >
                                     <X size={12} /> Cancel
                                 </button>
                             </div>

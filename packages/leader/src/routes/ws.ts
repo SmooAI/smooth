@@ -19,13 +19,15 @@
  *   - Server tracks connected clients and cleans up dead connections
  */
 
-import { createNodeWebSocket } from '@hono/node-ws';
-import type { ServerType } from '@hono/node-server';
 import { Hono } from 'hono';
 
+import type { ServerType } from '@hono/node-server';
+
+import { createNodeWebSocket } from '@hono/node-ws';
 import { createAuditLogger } from '@smooai/smooth-shared/audit-log';
 
 import type { ExecutionEvent } from '../backend/types.js';
+
 import { getBackend } from '../backend/registry.js';
 import { getEventStream } from '../backend/registry.js';
 import { updateBead } from '../beads/client.js';

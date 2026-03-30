@@ -47,7 +47,11 @@ export const testRunTool: SmoothTool = {
                 failed: json.numFailedTests ?? 0,
                 skipped: json.numPendingTests ?? 0,
                 errors: (json.testResults ?? [])
-                    .flatMap((tr: any) => (tr.assertionResults ?? []).filter((ar: any) => ar.status === 'failed').map((ar: any) => ({ test: ar.fullName, message: ar.failureMessages?.[0] ?? '', file: tr.name })))
+                    .flatMap((tr: any) =>
+                        (tr.assertionResults ?? [])
+                            .filter((ar: any) => ar.status === 'failed')
+                            .map((ar: any) => ({ test: ar.fullName, message: ar.failureMessages?.[0] ?? '', file: tr.name })),
+                    )
                     .slice(0, 10),
                 allPassed: json.numFailedTests === 0,
                 output: result.stdout.slice(0, 2000),

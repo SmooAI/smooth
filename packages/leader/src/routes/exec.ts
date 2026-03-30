@@ -7,7 +7,28 @@ import { getBackend } from '../backend/registry.js';
 export const execRoutes = new Hono();
 
 /** Allowlisted command prefixes that operators can run */
-const ALLOWED_COMMANDS = ['npx', 'pnpm', 'npm', 'node', 'grep', 'find', 'cat', 'head', 'tail', 'wc', 'sort', 'ls', 'git', 'python', 'pytest', 'ruff', 'vitest', 'jest', 'tsc', 'oxlint'];
+const ALLOWED_COMMANDS = [
+    'npx',
+    'pnpm',
+    'npm',
+    'node',
+    'grep',
+    'find',
+    'cat',
+    'head',
+    'tail',
+    'wc',
+    'sort',
+    'ls',
+    'git',
+    'python',
+    'pytest',
+    'ruff',
+    'vitest',
+    'jest',
+    'tsc',
+    'oxlint',
+];
 
 execRoutes.post('/:id/exec', async (c) => {
     const sandboxId = c.req.param('id');

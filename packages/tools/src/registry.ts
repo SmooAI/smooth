@@ -1,11 +1,13 @@
 /** Tool registry — manages available tools, hooks, and executes them with context */
 
 import type { ToolPermission } from '@smooai/smooth-shared/worker-types';
+
 import { createAuditLogger } from '@smooai/smooth-shared/audit-log';
 
 import type { Hook } from './hooks/types.js';
-import { HookPipeline } from './hooks/pipeline.js';
 import type { SmoothTool, ToolContext } from './types.js';
+
+import { HookPipeline } from './hooks/pipeline.js';
 
 export class ToolRegistry {
     private tools = new Map<string, SmoothTool>();

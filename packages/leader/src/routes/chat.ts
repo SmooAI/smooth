@@ -4,8 +4,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-import { ChatMessageSchema } from '@smooai/smooth-shared/schemas';
 import { createAuditLogger } from '@smooai/smooth-shared/audit-log';
+import { ChatMessageSchema } from '@smooai/smooth-shared/schemas';
 
 export const chatRoutes = new Hono();
 
@@ -101,7 +101,9 @@ Available commands: th run <bead-id>, th operators, th pause/steer/cancel <bead-
                             fullContent += delta;
                             await stream.writeSSE({ event: 'text', data: JSON.stringify({ type: 'text', content: delta }) });
                         }
-                    } catch { /* skip */ }
+                    } catch {
+                        /* skip */
+                    }
                 }
             }
 

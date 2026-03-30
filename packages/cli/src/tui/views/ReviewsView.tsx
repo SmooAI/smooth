@@ -76,7 +76,7 @@ export function ReviewsView({ client }: Props) {
             })}
             {reviews.length > 0 && (
                 <Box marginTop={1}>
-                    <Text dimColor>Keys: [a]pprove  [r]ework  [arrows] navigate</Text>
+                    <Text dimColor>Keys: [a]pprove [r]ework [arrows] navigate</Text>
                 </Box>
             )}
             {actionMsg && <Text color="green">{actionMsg}</Text>}

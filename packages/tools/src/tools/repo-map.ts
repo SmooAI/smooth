@@ -26,7 +26,27 @@ export const repoMapTool: SmoothTool = {
         const treeResp = await fetch(`${ctx.leaderUrl}/api/workers/${ctx.workerId}/exec`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ command: ['find', inp.path, '-maxdepth', String(inp.depth), '-type', 'f', '-name', '*.ts', '-o', '-name', '*.tsx', '-o', '-name', '*.js', '-o', '-name', '*.py'] }),
+            body: JSON.stringify({
+                command: [
+                    'find',
+                    inp.path,
+                    '-maxdepth',
+                    String(inp.depth),
+                    '-type',
+                    'f',
+                    '-name',
+                    '*.ts',
+                    '-o',
+                    '-name',
+                    '*.tsx',
+                    '-o',
+                    '-name',
+                    '*.js',
+                    '-o',
+                    '-name',
+                    '*.py',
+                ],
+            }),
         });
 
         const treeResult = (await treeResp.json()) as { stdout: string };
@@ -39,7 +59,17 @@ export const repoMapTool: SmoothTool = {
             const exportResp = await fetch(`${ctx.leaderUrl}/api/workers/${ctx.workerId}/exec`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ command: ['grep', '-rn', '--include=*.ts', '--include=*.tsx', '-E', 'export\\s+(function|class|interface|type|const|enum|default)', inp.path] }),
+                body: JSON.stringify({
+                    command: [
+                        'grep',
+                        '-rn',
+                        '--include=*.ts',
+                        '--include=*.tsx',
+                        '-E',
+                        'export\\s+(function|class|interface|type|const|enum|default)',
+                        inp.path,
+                    ],
+                }),
             });
 
             const exportResult = (await exportResp.json()) as { stdout: string };

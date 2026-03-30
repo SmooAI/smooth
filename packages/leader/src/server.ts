@@ -9,20 +9,20 @@ import { createAuditLogger, flushAuditLogs, getAuditDir } from '@smooai/smooth-s
 
 import { initializeBackend, shutdownBackend } from './backend/registry.js';
 import { ensureBeadsDir, getBeadsDir } from './beads/client.js';
-import { watchdog } from './workers/watchdog.js';
 import { beadsRoutes } from './routes/beads.js';
 import { chatRoutes } from './routes/chat.js';
 import { execRoutes } from './routes/exec.js';
-import { steeringRoutes } from './routes/steering.js';
 import { healthRoutes } from './routes/health.js';
 import { jiraRoutes } from './routes/jira.js';
 import { messagesRoutes } from './routes/messages.js';
 import { projectsRoutes } from './routes/projects.js';
 import { reviewsRoutes } from './routes/reviews.js';
+import { steeringRoutes } from './routes/steering.js';
 import { streamRoutes } from './routes/stream.js';
 import { systemRoutes } from './routes/system.js';
 import { workersRoutes } from './routes/workers.js';
 import { wsApp, initWebSocket } from './routes/ws.js';
+import { watchdog } from './workers/watchdog.js';
 
 const app = new Hono();
 

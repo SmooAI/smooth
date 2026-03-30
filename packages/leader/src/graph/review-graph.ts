@@ -4,7 +4,6 @@
  */
 
 import { Annotation, END, START, StateGraph } from '@langchain/langgraph';
-
 import { createAuditLogger } from '@smooai/smooth-shared/audit-log';
 
 import { updateBead } from '../beads/client.js';

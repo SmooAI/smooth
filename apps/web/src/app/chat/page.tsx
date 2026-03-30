@@ -4,7 +4,6 @@ import { Send } from 'lucide-react';
 import { useCallback, useRef, useState } from 'react';
 
 import Markdown from '@/components/markdown';
-import { cn } from '@/lib/utils';
 
 interface ChatMessage {
     role: 'user' | 'assistant' | 'tool' | 'reasoning';
@@ -91,7 +90,12 @@ export default function ChatPage() {
                 <input
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
+                    onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                            e.preventDefault();
+                            send();
+                        }
+                    }}
                     placeholder="Message the leader... (@ for context search)"
                     className="flex-1 bg-neutral-900 border border-neutral-800 rounded-lg px-4 py-3 text-neutral-100 text-sm outline-none focus:border-cyan-600 transition-colors placeholder:text-neutral-600"
                 />
@@ -126,11 +130,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
     return (
         <div className={bubbleClasses[message.role]}>
             {roleLabels[message.role] && <div className="text-[11px] text-neutral-500 mb-1">{roleLabels[message.role]}</div>}
-            {message.role === 'assistant' ? (
-                <Markdown>{message.content}</Markdown>
-            ) : (
-                <div className="whitespace-pre-wrap">{message.content}</div>
-            )}
+            {message.role === 'assistant' ? <Markdown>{message.content}</Markdown> : <div className="whitespace-pre-wrap">{message.content}</div>}
         </div>
     );
 }

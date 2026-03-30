@@ -2,9 +2,9 @@
 
 import { createAuditLogger } from '@smooai/smooth-shared/audit-log';
 
+import { LocalArtifactStore } from '../backend/local-artifact-store.js';
 import { getBackend } from '../backend/registry.js';
 import { getEventStream } from '../backend/registry.js';
-import { LocalArtifactStore } from '../backend/local-artifact-store.js';
 
 const audit = createAuditLogger('leader');
 const artifactStore = new LocalArtifactStore();
@@ -34,7 +34,10 @@ export class CheckpointManager {
     async restoreCheckpoint(sandboxId: string, beadId: string): Promise<boolean> {
         const backend = getBackend();
         const keys = await artifactStore.list(beadId);
-        const checkpoints = keys.filter((k) => k.includes('checkpoint-')).sort().reverse();
+        const checkpoints = keys
+            .filter((k) => k.includes('checkpoint-'))
+            .sort()
+            .reverse();
 
         if (checkpoints.length === 0) return false;
 

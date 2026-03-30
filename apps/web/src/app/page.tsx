@@ -16,10 +16,18 @@ export default function DashboardPage() {
     const [error, setError] = useState<string | null>(null);
 
     const load = useCallback(() => {
-        api<{ data: any }>('/api/system/health').then((r) => setHealth(r.data)).catch((e) => setError(e.message));
-        api<{ data: any[] }>('/api/workers').then((r) => setOperators(r.data)).catch(() => {});
-        api<{ data: any[] }>('/api/reviews').then((r) => setReviews(r.data)).catch(() => {});
-        api<{ data: any[] }>('/api/messages/inbox').then((r) => setInbox(r.data)).catch(() => {});
+        api<{ data: any }>('/api/system/health')
+            .then((r) => setHealth(r.data))
+            .catch((e) => setError(e.message));
+        api<{ data: any[] }>('/api/workers')
+            .then((r) => setOperators(r.data))
+            .catch(() => {});
+        api<{ data: any[] }>('/api/reviews')
+            .then((r) => setReviews(r.data))
+            .catch(() => {});
+        api<{ data: any[] }>('/api/messages/inbox')
+            .then((r) => setInbox(r.data))
+            .catch(() => {});
     }, []);
 
     // WebSocket for real-time events — triggers reload on relevant events
@@ -56,7 +64,12 @@ export default function DashboardPage() {
                         status={health.sandbox?.status}
                         detail={`${health.sandbox?.activeSandboxes ?? 0}/${health.sandbox?.maxConcurrency ?? 0}`}
                     />
-                    <StatusCard icon={ShieldCheck} title="Tailscale" status={health.tailscale?.status === 'connected' ? 'healthy' : 'down'} detail={health.tailscale?.hostname ?? 'disconnected'} />
+                    <StatusCard
+                        icon={ShieldCheck}
+                        title="Tailscale"
+                        status={health.tailscale?.status === 'connected' ? 'healthy' : 'down'}
+                        detail={health.tailscale?.hostname ?? 'disconnected'}
+                    />
                 </div>
             )}
 
@@ -74,7 +87,13 @@ export default function DashboardPage() {
                     <div className="flex flex-col gap-2">
                         {operators.slice(0, 8).map((op, i) => {
                             const phaseColor =
-                                op.phase === 'execute' ? 'text-yellow-500' : op.phase === 'finalize' ? 'text-green-500' : op.phase === 'review' ? 'text-purple-400' : 'text-neutral-400';
+                                op.phase === 'execute'
+                                    ? 'text-yellow-500'
+                                    : op.phase === 'finalize'
+                                      ? 'text-green-500'
+                                      : op.phase === 'review'
+                                        ? 'text-purple-400'
+                                        : 'text-neutral-400';
                             return (
                                 <div key={i} className="bg-neutral-900 border border-neutral-800 rounded-lg p-3 flex items-center gap-3">
                                     <span className="text-cyan-400 font-mono text-sm">{op.workerId}</span>
@@ -110,7 +129,12 @@ export default function DashboardPage() {
 
             {!health && !error && <p className="text-neutral-500">Loading...</p>}
             <div className="flex items-center gap-2 mt-6">
-                <div className={cn('w-2 h-2 rounded-full', wsStatus === 'connected' ? 'bg-green-500' : wsStatus === 'reconnecting' ? 'bg-yellow-500' : 'bg-red-500')} />
+                <div
+                    className={cn(
+                        'w-2 h-2 rounded-full',
+                        wsStatus === 'connected' ? 'bg-green-500' : wsStatus === 'reconnecting' ? 'bg-yellow-500' : 'bg-red-500',
+                    )}
+                />
                 <span className="text-neutral-700 text-xs">
                     {wsStatus === 'connected' ? 'Live (WebSocket)' : wsStatus === 'reconnecting' ? 'Reconnecting...' : 'Polling (5s)'}
                 </span>
@@ -143,7 +167,17 @@ function StatusCard({
     );
 }
 
-function MetricCard({ icon: Icon, label, value, color }: { icon: React.ComponentType<{ size?: number; className?: string }>; label: string; value: number; color: string }) {
+function MetricCard({
+    icon: Icon,
+    label,
+    value,
+    color,
+}: {
+    icon: React.ComponentType<{ size?: number; className?: string }>;
+    label: string;
+    value: number;
+    color: string;
+}) {
     const colorClass = color === 'cyan' ? 'text-cyan-400' : color === 'yellow' ? 'text-yellow-400' : 'text-blue-400';
     return (
         <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-4">

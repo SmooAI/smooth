@@ -1,14 +1,19 @@
+import type { Tokens } from 'marked';
+
 /** Render code block tokens with optional basic syntax highlighting */
 
 import { Box, Text } from 'ink';
 import React from 'react';
-import type { Tokens } from 'marked';
 
 import type { MarkdownTheme } from './types.js';
 
 /** Basic keyword highlighting for common languages */
 const KEYWORD_PATTERNS: Array<{ pattern: RegExp; color: string }> = [
-    { pattern: /\b(const|let|var|function|class|interface|type|import|export|from|return|if|else|for|while|switch|case|break|default|new|this|async|await|throw|try|catch|finally|typeof|instanceof)\b/g, color: 'magenta' },
+    {
+        pattern:
+            /\b(const|let|var|function|class|interface|type|import|export|from|return|if|else|for|while|switch|case|break|default|new|this|async|await|throw|try|catch|finally|typeof|instanceof)\b/g,
+        color: 'magenta',
+    },
     { pattern: /\b(true|false|null|undefined|NaN|Infinity)\b/g, color: 'yellow' },
     { pattern: /(["'`])(?:(?!\1|\\).|\\.)*\1/g, color: 'green' },
     { pattern: /\/\/.*$/gm, color: 'gray' },
@@ -45,7 +50,11 @@ function highlightLine(line: string): React.ReactNode[] {
         if (pos < seg.start) {
             nodes.push(<Text key={`t${i}`}>{line.slice(pos, seg.start)}</Text>);
         }
-        nodes.push(<Text key={`h${i}`} color={seg.color}>{seg.text}</Text>);
+        nodes.push(
+            <Text key={`h${i}`} color={seg.color}>
+                {seg.text}
+            </Text>,
+        );
         pos = seg.end;
     }
     if (pos < line.length) {
@@ -61,9 +70,7 @@ export function renderCodeBlock(token: Tokens.Code, theme: MarkdownTheme, key: n
 
     return (
         <Box key={key} flexDirection="column" borderStyle="round" borderColor={theme.codeBlock.borderColor} paddingX={1} marginBottom={1}>
-            {lang && (
-                <Text dimColor>{lang}</Text>
-            )}
+            {lang && <Text dimColor>{lang}</Text>}
             {lines.map((line, i) => (
                 <Text key={i} color={theme.codeBlock.color}>
                     {lang ? highlightLine(line) : line}

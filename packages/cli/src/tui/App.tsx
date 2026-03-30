@@ -28,25 +28,22 @@ export function App({ serverUrl }: AppProps) {
     const [activeTab, setActiveTab] = useState<Tab>('Dashboard');
 
     // Mouse support — click header tabs to switch views
-    const handleMouse = useCallback(
-        (event: { x: number; y: number; button: string; type: string }) => {
-            if (event.type !== 'press' || event.button !== 'left') return;
+    const handleMouse = useCallback((event: { x: number; y: number; button: string; type: string }) => {
+        if (event.type !== 'press' || event.button !== 'left') return;
 
-            // Tab bar is on y=3 (inside header border)
-            if (event.y === 3) {
-                let col = 2;
-                for (const tab of TABS) {
-                    const label = `${TABS.indexOf(tab) + 1}:${tab}`;
-                    if (event.x >= col && event.x < col + label.length + 1) {
-                        setActiveTab(tab);
-                        return;
-                    }
-                    col += label.length + 1;
+        // Tab bar is on y=3 (inside header border)
+        if (event.y === 3) {
+            let col = 2;
+            for (const tab of TABS) {
+                const label = `${TABS.indexOf(tab) + 1}:${tab}`;
+                if (event.x >= col && event.x < col + label.length + 1) {
+                    setActiveTab(tab);
+                    return;
                 }
+                col += label.length + 1;
             }
-        },
-        [],
-    );
+        }
+    }, []);
 
     useMouse(handleMouse);
 

@@ -1,8 +1,9 @@
+import type { Token, Tokens } from 'marked';
+
 /** Render inline markdown tokens into Ink Text components */
 
 import { Text } from 'ink';
 import React from 'react';
-import type { Token, Tokens } from 'marked';
 
 import type { MarkdownTheme } from './types.js';
 

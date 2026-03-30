@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { scanForInjection } from './prompt-injection.js';
 import { SECRET_PATTERNS } from './pre-write.js';
+import { scanForInjection } from './prompt-injection.js';
 
 describe('Secret detection', () => {
     it('detects AWS access keys', () => {

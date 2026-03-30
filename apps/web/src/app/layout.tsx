@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
-import Image from 'next/image';
 
 import { Bot, Circle, FolderKanban, LayoutDashboard, Mail, MessageSquare, Settings, ShieldCheck } from 'lucide-react';
+import Image from 'next/image';
 
 import './globals.css';
 

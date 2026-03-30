@@ -15,10 +15,22 @@ export function DashboardView({ client }: Props) {
     const [error, setError] = useState<string | null>(null);
 
     const load = useCallback(() => {
-        client.getSystemHealth().then((r) => setHealth(r.data)).catch((e) => setError((e as Error).message));
-        client.listOperators().then((r) => setOperators(r.data as any[])).catch(() => {});
-        client.getPendingReviews().then((r) => setReviews(r.data as any[])).catch(() => {});
-        client.getInbox().then((r) => setInbox(r.data as any[])).catch(() => {});
+        client
+            .getSystemHealth()
+            .then((r) => setHealth(r.data))
+            .catch((e) => setError((e as Error).message));
+        client
+            .listOperators()
+            .then((r) => setOperators(r.data as any[]))
+            .catch(() => {});
+        client
+            .getPendingReviews()
+            .then((r) => setReviews(r.data as any[]))
+            .catch(() => {});
+        client
+            .getInbox()
+            .then((r) => setInbox(r.data as any[]))
+            .catch(() => {});
     }, [client]);
 
     useEffect(() => {
@@ -30,7 +42,9 @@ export function DashboardView({ client }: Props) {
     if (error) {
         return (
             <Box flexDirection="column">
-                <Text bold color="red">Cannot reach leader</Text>
+                <Text bold color="red">
+                    Cannot reach leader
+                </Text>
                 <Text dimColor>{error}</Text>
             </Box>
         );
@@ -54,7 +68,8 @@ export function DashboardView({ client }: Props) {
                     {statusIcon(health.database?.status)} Database: {health.database?.status}
                 </Text>
                 <Text color={statusColor(health.sandbox?.status)}>
-                    {statusIcon(health.sandbox?.status)} Sandbox: {health.sandbox?.backend ?? 'unknown'} ({health.sandbox?.activeSandboxes ?? 0}/{health.sandbox?.maxConcurrency ?? 0})
+                    {statusIcon(health.sandbox?.status)} Sandbox: {health.sandbox?.backend ?? 'unknown'} ({health.sandbox?.activeSandboxes ?? 0}/
+                    {health.sandbox?.maxConcurrency ?? 0})
                 </Text>
                 <Text color={statusColor(health.tailscale?.status)}>
                     {statusIcon(health.tailscale?.status)} Tailscale: {health.tailscale?.status}
@@ -66,8 +81,18 @@ export function DashboardView({ client }: Props) {
                 <Text bold>Activity</Text>
                 <Text>
                     {operators.length} operator{operators.length !== 1 ? 's' : ''} active
-                    {reviews.length > 0 && <Text color="yellow"> | {reviews.length} review{reviews.length !== 1 ? 's' : ''} pending</Text>}
-                    {inbox.length > 0 && <Text color="cyan"> | {inbox.length} message{inbox.length !== 1 ? 's' : ''}</Text>}
+                    {reviews.length > 0 && (
+                        <Text color="yellow">
+                            {' '}
+                            | {reviews.length} review{reviews.length !== 1 ? 's' : ''} pending
+                        </Text>
+                    )}
+                    {inbox.length > 0 && (
+                        <Text color="cyan">
+                            {' '}
+                            | {inbox.length} message{inbox.length !== 1 ? 's' : ''}
+                        </Text>
+                    )}
                 </Text>
             </Box>
 

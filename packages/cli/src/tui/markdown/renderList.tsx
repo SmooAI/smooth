@@ -1,10 +1,12 @@
+import type { Tokens } from 'marked';
+
 /** Render list tokens into Ink components */
 
 import { Box, Text } from 'ink';
 import React from 'react';
-import type { Tokens } from 'marked';
 
 import type { MarkdownTheme } from './types.js';
+
 import { renderInlineTokens } from './renderInline.js';
 import { renderToken } from './renderMarkdown.js';
 
@@ -16,18 +18,8 @@ export function renderList(token: Tokens.List, theme: MarkdownTheme, key: number
     );
 }
 
-function renderListItem(
-    item: Tokens.ListItem,
-    theme: MarkdownTheme,
-    index: number,
-    ordered: boolean,
-    start: number | '',
-): React.ReactNode {
-    const bullet = ordered ? (
-        <Text color={theme.listNumber.color}>{`${(start || 1) + index}. `}</Text>
-    ) : (
-        <Text color={theme.listBullet.color}>{'  ● '}</Text>
-    );
+function renderListItem(item: Tokens.ListItem, theme: MarkdownTheme, index: number, ordered: boolean, start: number | ''): React.ReactNode {
+    const bullet = ordered ? <Text color={theme.listNumber.color}>{`${(start || 1) + index}. `}</Text> : <Text color={theme.listBullet.color}>{'  ● '}</Text>;
 
     // List items can contain nested blocks (paragraphs, sublists)
     const content = item.tokens.map((t, i) => {

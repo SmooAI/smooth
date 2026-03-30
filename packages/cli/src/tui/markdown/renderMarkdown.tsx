@@ -7,13 +7,13 @@
  */
 
 import { Box, Text } from 'ink';
-import React from 'react';
 import { Lexer, type Token, type Tokens } from 'marked';
+import React from 'react';
 
-import { DEFAULT_THEME, type MarkdownTheme } from './types.js';
+import { renderCodeBlock } from './renderCodeBlock.js';
 import { renderInlineTokens } from './renderInline.js';
 import { renderList } from './renderList.js';
-import { renderCodeBlock } from './renderCodeBlock.js';
+import { DEFAULT_THEME, type MarkdownTheme } from './types.js';
 
 /** Parse markdown string and render as Ink components */
 export function renderMarkdown(markdown: string, theme: MarkdownTheme = DEFAULT_THEME): React.ReactNode {
@@ -26,11 +26,7 @@ export function renderMarkdown(markdown: string, theme: MarkdownTheme = DEFAULT_
         return <Text>{markdown}</Text>;
     }
 
-    return (
-        <Box flexDirection="column">
-            {tokens.map((token, i) => renderToken(token, theme, i))}
-        </Box>
-    );
+    return <Box flexDirection="column">{tokens.map((token, i) => renderToken(token, theme, i))}</Box>;
 }
 
 /** Render a single block-level token */
@@ -52,9 +48,7 @@ export function renderToken(token: Token, theme: MarkdownTheme, key: number): Re
             const para = token as Tokens.Paragraph;
             return (
                 <Box key={key} marginBottom={1}>
-                    <Text color={theme.paragraph.color}>
-                        {renderInlineTokens(para.tokens, theme, key)}
-                    </Text>
+                    <Text color={theme.paragraph.color}>{renderInlineTokens(para.tokens, theme, key)}</Text>
                 </Box>
             );
         }
@@ -120,15 +114,11 @@ function renderTable(table: Tokens.Table, theme: MarkdownTheme, key: number): Re
     return (
         <Box key={key} flexDirection="column" marginBottom={1}>
             {/* Header */}
-            <Text bold>
-                {table.header.map((h, i) => pad(h.text, colWidths[i])).join('│')}
-            </Text>
+            <Text bold>{table.header.map((h, i) => pad(h.text, colWidths[i])).join('│')}</Text>
             <Text dimColor>{separator}</Text>
             {/* Rows */}
             {table.rows.map((row, ri) => (
-                <Text key={ri}>
-                    {row.map((cell, ci) => pad(cell.text, colWidths[ci])).join('│')}
-                </Text>
+                <Text key={ri}>{row.map((cell, ci) => pad(cell.text, colWidths[ci])).join('│')}</Text>
             ))}
         </Box>
     );

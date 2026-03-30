@@ -89,7 +89,7 @@ export function OperatorsView({ client }: Props) {
             })}
             {operators.length > 0 && (
                 <Box marginTop={1}>
-                    <Text dimColor>Keys: [p]ause  [r]esume  [x] cancel  [arrows] navigate</Text>
+                    <Text dimColor>Keys: [p]ause [r]esume [x] cancel [arrows] navigate</Text>
                 </Box>
             )}
             {actionMsg && <Text color="green">{actionMsg}</Text>}

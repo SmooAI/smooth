@@ -51,7 +51,7 @@ export function useMouse(onMouseEvent?: (event: MouseEvent) => void) {
             else if ((buttonCode & 3) === 2) button = 'right';
             else if (buttonCode & 64) button = buttonCode & 1 ? 'scroll-down' : 'scroll-up';
 
-            const type: MouseEvent['type'] = isRelease ? 'release' : (buttonCode & 32) ? 'move' : 'press';
+            const type: MouseEvent['type'] = isRelease ? 'release' : buttonCode & 32 ? 'move' : 'press';
 
             const event: MouseEvent = { x, y, button, type };
 
@@ -115,13 +115,6 @@ export function useMouse(onMouseEvent?: (event: MouseEvent) => void) {
 }
 
 /** Check if a click is within a rectangular region */
-export function isClickInRegion(
-    mouseX: number,
-    mouseY: number,
-    regionX: number,
-    regionY: number,
-    width: number,
-    height: number,
-): boolean {
+export function isClickInRegion(mouseX: number, mouseY: number, regionX: number, regionY: number, width: number, height: number): boolean {
     return mouseX >= regionX && mouseX < regionX + width && mouseY >= regionY && mouseY < regionY + height;
 }
