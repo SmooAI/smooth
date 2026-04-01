@@ -9,13 +9,13 @@ use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Tabs};
 use ratatui::Terminal;
 
 use crate::theme;
-use crate::views::{chat, dashboard};
+use crate::views::{beads, chat, dashboard, messages, operators, reviews, system};
 
 /// Available tabs.
 const TAB_NAMES: &[&str] = &["Dashboard", "Beads", "Operators", "Chat", "Messages", "Reviews", "System"];
@@ -26,7 +26,13 @@ pub struct App {
     pub leader_url: String,
     pub health: dashboard::HealthData,
     pub chat_state: chat::ChatState,
+    pub beads_state: beads::BeadsState,
+    pub operators_state: operators::OperatorsState,
+    pub messages_state: messages::MessagesState,
+    pub reviews_state: reviews::ReviewsState,
     pub should_quit: bool,
+    /// Cached tab positions for mouse hit-testing: (start_col, end_col) for each tab.
+    tab_regions: Vec<(u16, u16)>,
 }
 
 impl App {
@@ -36,7 +42,12 @@ impl App {
             leader_url: leader_url.to_string(),
             health: dashboard::HealthData::default(),
             chat_state: chat::ChatState::default(),
+            beads_state: beads::BeadsState::default(),
+            operators_state: operators::OperatorsState::default(),
+            messages_state: messages::MessagesState::default(),
+            reviews_state: reviews::ReviewsState::default(),
             should_quit: false,
+            tab_regions: Vec::new(),
         }
     }
 
@@ -62,6 +73,27 @@ impl App {
         }
     }
 
+    /// Fetch beads from leader.
+    pub async fn refresh_beads(&mut self) {
+        let url = format!("{}/api/beads", self.leader_url);
+        if let Ok(resp) = reqwest::get(&url).await {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
+                    self.beads_state.beads = data
+                        .iter()
+                        .map(|b| beads::Bead {
+                            id: b.get("id").and_then(|v| v.as_str()).unwrap_or("").into(),
+                            title: b.get("title").and_then(|v| v.as_str()).unwrap_or("").into(),
+                            status: b.get("status").and_then(|v| v.as_str()).unwrap_or("").into(),
+                            priority: b.get("priority").and_then(|v| v.as_str()).unwrap_or("").into(),
+                        })
+                        .collect();
+                }
+            }
+        }
+        self.beads_state.loading = false;
+    }
+
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
         match code {
             KeyCode::Char('q') if self.active_tab != 3 => self.should_quit = true,
@@ -72,7 +104,7 @@ impl App {
             KeyCode::BackTab => {
                 self.active_tab = (self.active_tab + TAB_NAMES.len() - 1) % TAB_NAMES.len();
             }
-            KeyCode::Char(c) if ('1'..='7').contains(&c) => {
+            KeyCode::Char(c) if ('1'..='7').contains(&c) && self.active_tab != 3 => {
                 let idx = (c as usize) - ('1' as usize);
                 if idx < TAB_NAMES.len() {
                     self.active_tab = idx;
@@ -95,22 +127,42 @@ impl App {
     }
 
     fn handle_mouse(&mut self, col: u16, row: u16) {
-        // Tab bar is at row 2, tabs start after the header
-        if row == 2 {
-            let mut x: u16 = 1;
-            for (i, name) in TAB_NAMES.iter().enumerate() {
-                let width = name.len() as u16 + 3; // " Name "
-                if col >= x && col < x + width {
+        // Tab bar is rows 0-2 (3-line block with borders). Row 1 has the tab text.
+        if row == 1 {
+            for (i, &(start, end)) in self.tab_regions.iter().enumerate() {
+                if col >= start && col < end {
                     self.active_tab = i;
                     return;
                 }
-                x += width;
             }
         }
     }
 }
 
-fn ui(f: &mut ratatui::Frame, app: &App) {
+/// Build gradient "Smoo" title spans — orange to green.
+fn gradient_title() -> Vec<Span<'static>> {
+    // S -> m -> o -> o with color interpolation from orange (#f49f0a) to green (#00a6a6)
+    let colors = [
+        Color::Rgb(244, 159, 10),  // S — orange
+        Color::Rgb(183, 137, 40),  // m
+        Color::Rgb(122, 150, 70),  // o
+        Color::Rgb(61, 168, 100),  // o
+        Color::Rgb(0, 166, 166),   // . — green
+        Color::Rgb(0, 166, 166),   // A — green
+        Color::Rgb(0, 166, 166),   // I — green
+    ];
+    let text = ['S', 'm', 'o', 'o', '.', 'A', 'I'];
+
+    let mut spans = vec![Span::raw(" ")];
+    for (ch, color) in text.iter().zip(colors.iter()) {
+        spans.push(Span::styled(ch.to_string(), Style::default().fg(*color).add_modifier(Modifier::BOLD)));
+    }
+    spans.push(Span::styled(" / ", theme::muted()));
+    spans.push(Span::styled("SMOOTH ", Style::default().fg(theme::SMOO_GREEN).add_modifier(Modifier::BOLD)));
+    spans
+}
+
+fn ui(f: &mut ratatui::Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)])
@@ -126,26 +178,41 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
         })
         .collect();
 
+    // Calculate tab regions for mouse hit-testing.
+    // ratatui Tabs widget renders: "│ Tab1 │ Tab2 │ ..." inside the border.
+    // The border takes 1 col on each side, and each tab is separated by " │ ".
+    let mut regions = Vec::new();
+    let mut x: u16 = 2; // start after left border + initial padding
+    for name in TAB_NAMES {
+        let tab_width = name.len() as u16 + 2; // " Name "
+        regions.push((x, x + tab_width));
+        x += tab_width + 3; // " │ " separator
+    }
+    app.tab_regions = regions;
+
     let tabs = Tabs::new(titles)
         .select(app.active_tab)
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme::SMOO_GREEN))
-                .title(Span::styled(" SMOO.AI / SMOOTH ", theme::title())),
+                .title(Line::from(gradient_title())),
         )
-        .highlight_style(theme::active_tab());
+        .highlight_style(theme::active_tab())
+        .divider("│");
     f.render_widget(tabs, chunks[0]);
 
     // Content
     let content_area = chunks[1];
     match app.active_tab {
         0 => dashboard::render(f, content_area, &app.health),
+        1 => beads::render(f, content_area, &app.beads_state),
+        2 => operators::render(f, content_area, &app.operators_state),
         3 => chat::render(f, content_area, &app.chat_state),
-        _ => {
-            let placeholder = Paragraph::new(Line::from(Span::styled(format!("{} — coming soon", TAB_NAMES[app.active_tab]), theme::muted())));
-            f.render_widget(placeholder, content_area);
-        }
+        4 => messages::render(f, content_area, &app.messages_state),
+        5 => reviews::render(f, content_area, &app.reviews_state),
+        6 => system::render(f, content_area, &app.health, &app.leader_url),
+        _ => {}
     }
 
     // Status bar
@@ -174,13 +241,14 @@ pub async fn run(leader_url: &str) -> Result<()> {
 
     let mut app = App::new(leader_url);
 
-    // Initial health fetch
+    // Initial data fetch
     app.refresh_health().await;
+    app.refresh_beads().await;
 
     let mut last_refresh = std::time::Instant::now();
 
     loop {
-        terminal.draw(|f| ui(f, &app))?;
+        terminal.draw(|f| ui(f, &mut app))?;
 
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {
@@ -196,9 +264,10 @@ pub async fn run(leader_url: &str) -> Result<()> {
             }
         }
 
-        // Periodic health refresh (every 5s)
+        // Periodic refresh (every 5s)
         if last_refresh.elapsed() > Duration::from_secs(5) {
             app.refresh_health().await;
+            app.refresh_beads().await;
             last_refresh = std::time::Instant::now();
         }
 
