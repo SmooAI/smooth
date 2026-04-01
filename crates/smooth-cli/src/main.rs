@@ -222,9 +222,13 @@ async fn main() -> Result<()> {
         Commands::Up { no_leader, port } => cmd_up(no_leader, port).await,
         Commands::Down => cmd_down().await,
         Commands::Status => cmd_status().await,
+        Commands::Tui { server } => {
+            let url = server.unwrap_or_else(|| "http://localhost:4400".into());
+            smooth_tui::app::run(&url).await
+        }
         Commands::Db { cmd } => cmd_db(cmd),
         _ => {
-            tracing::warn!("Command not yet implemented in Rust version");
+            println!("Command not yet implemented in Rust version. Coming soon!");
             Ok(())
         }
     }
