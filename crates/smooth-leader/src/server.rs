@@ -107,6 +107,9 @@ pub struct SteerBody {
 // ── Router ─────────────────────────────────────────────────
 
 /// Build the axum router with all routes.
+///
+/// The embedded web UI (SPA) is served as a fallback so that API routes
+/// take priority and unknown paths return index.html for client-side routing.
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         // Health
@@ -139,6 +142,8 @@ pub fn build_router(state: AppState) -> Router {
         // Jira
         .route("/api/jira/status", get(jira_status_handler))
         .route("/api/jira/sync", post(jira_sync_handler))
+        // Embedded web UI (SPA fallback — must be last)
+        .fallback_service(smooth_web::web_router())
         // Middleware
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())

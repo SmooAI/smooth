@@ -238,7 +238,7 @@ async fn main() -> Result<()> {
         Commands::Cancel { bead_id } => cmd_steer(&bead_id, "cancel", None).await,
         Commands::Audit { cmd } => cmd_audit(cmd),
         Commands::Web => {
-            println!("Web UI: http://localhost:3100");
+            println!("Web UI: http://localhost:4400");
             println!("Start with: th up");
             Ok(())
         }
@@ -271,7 +271,7 @@ async fn cmd_up(no_leader: bool, port: u16) -> Result<()> {
         return Ok(());
     }
 
-    // Start leader
+    // Start leader (API + embedded web UI on same port)
     let state = smooth_leader::server::AppState {
         db,
         start_time: Instant::now(),
@@ -279,19 +279,10 @@ async fn cmd_up(no_leader: bool, port: u16) -> Result<()> {
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     println!("  Leader: http://localhost:{port} ✓");
-
-    // Start web UI on port 3100 (embedded SPA)
-    let web_addr = SocketAddr::from(([0, 0, 0, 0], 3100));
-    let web_router = smooth_web::web_router();
-    let web_listener = tokio::net::TcpListener::bind(web_addr).await?;
-    println!("  Web UI: http://localhost:3100 ✓");
+    println!("  Web UI: http://localhost:{port} ✓");
     println!();
 
-    // Run both servers concurrently
-    tokio::select! {
-        result = smooth_leader::server::start(state, addr) => result,
-        result = axum::serve(web_listener, web_router) => result.map_err(Into::into),
-    }
+    smooth_leader::server::start(state, addr).await
 }
 
 async fn cmd_down() -> Result<()> {

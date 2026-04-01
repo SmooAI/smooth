@@ -27,6 +27,7 @@ futures-util.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 dirs-next.workspace = true
+smooth-web = { path = "../smooth-web" }
 
 [dev-dependencies]
 tempfile.workspace = true
