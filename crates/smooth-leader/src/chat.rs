@@ -13,6 +13,7 @@ Available commands: th run <bead-id>, th operators, th pause/steer/cancel <bead-
 
 /// OpenCode auth entry from `~/.local/share/opencode/auth.json`.
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct OpenCodeAuth {
     key: String,
 }
