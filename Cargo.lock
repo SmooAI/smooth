@@ -2446,6 +2446,8 @@ dependencies = [
  "axum-extra",
  "chrono",
  "dirs-next",
+ "futures-core",
+ "futures-util",
  "globwalk",
  "ignore",
  "reqwest",

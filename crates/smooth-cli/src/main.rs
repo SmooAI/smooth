@@ -43,30 +43,17 @@ enum Commands {
         cmd: AuthCommands,
     },
     /// Trigger work on a bead
-    Run {
-        bead_id: String,
-    },
+    Run { bead_id: String },
     /// Pause a running Smooth Operator
-    Pause {
-        bead_id: String,
-    },
+    Pause { bead_id: String },
     /// Resume a paused Smooth Operator
-    Resume {
-        bead_id: String,
-    },
+    Resume { bead_id: String },
     /// Send guidance to a running Smooth Operator
-    Steer {
-        bead_id: String,
-        message: String,
-    },
+    Steer { bead_id: String, message: String },
     /// Cancel a running Smooth Operator
-    Cancel {
-        bead_id: String,
-    },
+    Cancel { bead_id: String },
     /// Approve a pending review
-    Approve {
-        bead_id: String,
-    },
+    Approve { bead_id: String },
     /// Show messages requiring attention
     Inbox,
     /// Smooth Operator management
@@ -128,13 +115,9 @@ enum AuthCommands {
     /// List configured providers
     Providers,
     /// Get or set default provider
-    Default {
-        provider: Option<String>,
-    },
+    Default { provider: Option<String> },
     /// Remove a provider
-    Remove {
-        provider: String,
-    },
+    Remove { provider: String },
     /// Show authentication status
     Status,
 }
@@ -229,7 +212,9 @@ enum TailscaleCommands {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize tracing
-    tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env().add_directive("smooth=info".parse()?)).init();
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env().add_directive("smooth=info".parse()?))
+        .init();
 
     let cli = Cli::parse();
 
