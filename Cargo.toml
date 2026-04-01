@@ -68,6 +68,7 @@ futures-util = "0.3"
 anyhow = "1"
 thiserror = "2"
 dirs-next = "2"
+urlencoding = "2"
 tempfile = "3"
 
 # Embed web assets

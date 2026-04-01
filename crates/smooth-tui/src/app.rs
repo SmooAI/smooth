@@ -102,11 +102,108 @@ impl App {
         self.beads_state.loading = false;
     }
 
+    /// Fetch autocomplete results from leader.
+    pub async fn refresh_autocomplete(&mut self) {
+        let ac = &self.chat_state.autocomplete;
+        if !ac.active || ac.query.is_empty() {
+            return;
+        }
+        let query = ac.query.clone();
+        let url = format!("{}/api/search?q={}", self.leader_url, urlencoding::encode(&query));
+        if let Ok(resp) = reqwest::get(&url).await {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
+                    self.chat_state.autocomplete.results = data
+                        .iter()
+                        .map(|r| chat::SearchResult {
+                            result_type: r.get("type").and_then(|v| v.as_str()).unwrap_or("").into(),
+                            id: r.get("id").and_then(|v| v.as_str()).unwrap_or("").into(),
+                            label: r.get("label").and_then(|v| v.as_str()).unwrap_or("").into(),
+                            detail: r.get("detail").and_then(|v| v.as_str()).map(String::from),
+                        })
+                        .collect();
+                    // Clamp selected index
+                    let len = self.chat_state.autocomplete.results.len();
+                    if self.chat_state.autocomplete.selected >= len {
+                        self.chat_state.autocomplete.selected = len.saturating_sub(1);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check if input has an active @ query and update autocomplete state.
+    fn update_autocomplete_state(&mut self) {
+        // Find the last @ in the input that isn't followed by a space
+        if let Some(at_pos) = self.chat_state.input.rfind('@') {
+            let after_at = &self.chat_state.input[at_pos + 1..];
+            // Active if there's no space after @ (still typing the query)
+            if !after_at.contains(' ') {
+                self.chat_state.autocomplete.active = true;
+                self.chat_state.autocomplete.query = after_at.to_string();
+                self.chat_state.autocomplete.at_pos = Some(at_pos);
+                return;
+            }
+        }
+        self.chat_state.autocomplete.active = false;
+        self.chat_state.autocomplete.results.clear();
+        self.chat_state.autocomplete.selected = 0;
+        self.chat_state.autocomplete.at_pos = None;
+    }
+
+    /// Accept the currently selected autocomplete result.
+    fn accept_autocomplete(&mut self) {
+        let ac = &self.chat_state.autocomplete;
+        if let Some(result) = ac.results.get(ac.selected) {
+            let replacement = match result.result_type.as_str() {
+                "bead" => format!("@{} ", result.id),
+                _ => format!("@{} ", result.id),
+            };
+            if let Some(at_pos) = ac.at_pos {
+                self.chat_state.input.truncate(at_pos);
+                self.chat_state.input.push_str(&replacement);
+            }
+        }
+        self.chat_state.autocomplete.active = false;
+        self.chat_state.autocomplete.results.clear();
+        self.chat_state.autocomplete.selected = 0;
+        self.chat_state.autocomplete.at_pos = None;
+    }
+
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        // Handle autocomplete navigation first
+        if self.active_tab == 3 && self.chat_state.autocomplete.active && !self.chat_state.autocomplete.results.is_empty() {
+            match code {
+                KeyCode::Up => {
+                    let len = self.chat_state.autocomplete.results.len();
+                    self.chat_state.autocomplete.selected = (self.chat_state.autocomplete.selected + len - 1) % len;
+                    return;
+                }
+                KeyCode::Down => {
+                    let len = self.chat_state.autocomplete.results.len();
+                    self.chat_state.autocomplete.selected = (self.chat_state.autocomplete.selected + 1) % len;
+                    return;
+                }
+                KeyCode::Enter | KeyCode::Tab => {
+                    self.accept_autocomplete();
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.chat_state.autocomplete.active = false;
+                    self.chat_state.autocomplete.results.clear();
+                    return;
+                }
+                _ => {} // Fall through to normal input handling
+            }
+        }
+
         match code {
             KeyCode::Char('q') if self.active_tab != 3 => self.should_quit = true,
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => self.should_quit = true,
-            KeyCode::Tab => {
+            KeyCode::Esc if self.active_tab == 3 => {
+                // Esc in chat without autocomplete — switch away
+            }
+            KeyCode::Tab if self.active_tab != 3 || self.chat_state.input.is_empty() => {
                 self.active_tab = (self.active_tab + 1) % TAB_NAMES.len();
             }
             KeyCode::BackTab => {
@@ -121,15 +218,18 @@ impl App {
             // Chat input
             KeyCode::Char(c) if self.active_tab == 3 => {
                 self.chat_state.input.push(c);
+                self.update_autocomplete_state();
             }
             KeyCode::Backspace if self.active_tab == 3 => {
                 self.chat_state.input.pop();
+                self.update_autocomplete_state();
             }
             KeyCode::Enter if self.active_tab == 3 && !self.chat_state.input.is_empty() && !self.chat_state.streaming => {
                 let content = std::mem::take(&mut self.chat_state.input);
                 self.chat_state.messages.push(chat::ChatMessage { role: "user".into(), content: content.clone() });
                 self.chat_state.streaming = true;
-                self.chat_state.scroll_offset = 0; // auto-scroll to bottom
+                self.chat_state.scroll_offset = 0;
+                self.chat_state.autocomplete = chat::AutocompleteState::default();
 
                 // Send to leader API in background
                 if let Some(tx) = &self.chat_tx {
@@ -167,7 +267,7 @@ impl App {
                 self.chat_state.scroll_offset = self.chat_state.scroll_offset.saturating_sub(1);
             }
             KeyCode::End if self.active_tab == 3 => {
-                self.chat_state.scroll_offset = 0; // 0 = auto-scroll to bottom
+                self.chat_state.scroll_offset = 0;
             }
             _ => {}
         }
@@ -303,6 +403,7 @@ pub async fn run(leader_url: &str) -> Result<()> {
     app.refresh_beads().await;
 
     let mut last_refresh = std::time::Instant::now();
+    let mut last_ac_query = String::new();
 
     loop {
         terminal.draw(|f| ui(f, &mut app))?;
@@ -322,6 +423,14 @@ pub async fn run(leader_url: &str) -> Result<()> {
                 },
                 _ => {}
             }
+        }
+
+        // Fetch autocomplete results when query changes
+        if app.chat_state.autocomplete.active && app.chat_state.autocomplete.query != last_ac_query {
+            last_ac_query.clone_from(&app.chat_state.autocomplete.query);
+            app.refresh_autocomplete().await;
+        } else if !app.chat_state.autocomplete.active {
+            last_ac_query.clear();
         }
 
         // Check for chat responses
