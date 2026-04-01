@@ -21,6 +21,7 @@ pub struct ChatState {
     pub messages: Vec<ChatMessage>,
     pub input: String,
     pub streaming: bool,
+    pub scroll_offset: u16,
 }
 
 impl Default for ChatState {
@@ -32,6 +33,7 @@ impl Default for ChatState {
             }],
             input: String::new(),
             streaming: false,
+            scroll_offset: 0,
         }
     }
 }
@@ -70,8 +72,29 @@ pub fn render(f: &mut Frame, area: Rect, state: &ChatState) {
         msg_lines.push(Line::from(Span::styled("Thinking...", theme::muted())));
     }
 
+    // Auto-scroll to bottom: calculate total lines after wrapping
+    let visible_height = chunks[1].height.saturating_sub(1); // account for border
+    let content_width = chunks[1].width.saturating_sub(2) as usize; // account for borders
+    let total_lines: u16 = msg_lines
+        .iter()
+        .map(|line| {
+            let line_len: usize = line.spans.iter().map(|s| s.content.len()).sum();
+            if line_len == 0 || content_width == 0 {
+                1
+            } else {
+                ((line_len + content_width - 1) / content_width) as u16
+            }
+        })
+        .sum();
+
+    // Auto-scroll to show latest messages
+    let scroll = if total_lines > visible_height { total_lines - visible_height } else { 0 };
+    // Use manual offset if user scrolled up, otherwise auto-scroll
+    let effective_scroll = if state.scroll_offset > 0 { state.scroll_offset } else { scroll };
+
     let messages = Paragraph::new(msg_lines)
         .wrap(Wrap { trim: false })
+        .scroll((effective_scroll, 0))
         .block(Block::default().borders(Borders::LEFT).border_style(Style::default().fg(theme::SMOO_GREEN)));
     f.render_widget(messages, chunks[1]);
 

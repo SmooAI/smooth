@@ -129,6 +129,7 @@ impl App {
                 let content = std::mem::take(&mut self.chat_state.input);
                 self.chat_state.messages.push(chat::ChatMessage { role: "user".into(), content: content.clone() });
                 self.chat_state.streaming = true;
+                self.chat_state.scroll_offset = 0; // auto-scroll to bottom
 
                 // Send to leader API in background
                 if let Some(tx) = &self.chat_tx {
@@ -152,6 +153,22 @@ impl App {
                     });
                 }
             }
+            // Chat scroll
+            KeyCode::PageUp if self.active_tab == 3 => {
+                self.chat_state.scroll_offset = self.chat_state.scroll_offset.saturating_add(10);
+            }
+            KeyCode::PageDown if self.active_tab == 3 => {
+                self.chat_state.scroll_offset = self.chat_state.scroll_offset.saturating_sub(10);
+            }
+            KeyCode::Up if self.active_tab == 3 => {
+                self.chat_state.scroll_offset = self.chat_state.scroll_offset.saturating_add(1);
+            }
+            KeyCode::Down if self.active_tab == 3 => {
+                self.chat_state.scroll_offset = self.chat_state.scroll_offset.saturating_sub(1);
+            }
+            KeyCode::End if self.active_tab == 3 => {
+                self.chat_state.scroll_offset = 0; // 0 = auto-scroll to bottom
+            }
             _ => {}
         }
     }
@@ -164,6 +181,16 @@ impl App {
                     self.active_tab = i;
                     return;
                 }
+            }
+        }
+    }
+
+    fn handle_scroll(&mut self, up: bool) {
+        if self.active_tab == 3 {
+            if up {
+                self.chat_state.scroll_offset = self.chat_state.scroll_offset.saturating_add(3);
+            } else {
+                self.chat_state.scroll_offset = self.chat_state.scroll_offset.saturating_sub(3);
             }
         }
     }
@@ -285,11 +312,14 @@ pub async fn run(leader_url: &str) -> Result<()> {
                 Event::Key(key) => {
                     app.handle_key(key.code, key.modifiers);
                 }
-                Event::Mouse(mouse) => {
-                    if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                Event::Mouse(mouse) => match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
                         app.handle_mouse(mouse.column, mouse.row);
                     }
-                }
+                    MouseEventKind::ScrollUp => app.handle_scroll(true),
+                    MouseEventKind::ScrollDown => app.handle_scroll(false),
+                    _ => {}
+                },
                 _ => {}
             }
         }
@@ -298,6 +328,7 @@ pub async fn run(leader_url: &str) -> Result<()> {
         if let Some(rx) = &mut app.chat_rx {
             if let Ok(response) = rx.try_recv() {
                 app.chat_state.streaming = false;
+                app.chat_state.scroll_offset = 0; // auto-scroll to bottom
                 app.chat_state.messages.push(chat::ChatMessage {
                     role: "assistant".into(),
                     content: response,
