@@ -262,9 +262,19 @@ async fn cmd_up(no_leader: bool, port: u16) -> Result<()> {
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     println!("  Leader: http://localhost:{port} ✓");
+
+    // Start web UI on port 3100 (embedded SPA)
+    let web_addr = SocketAddr::from(([0, 0, 0, 0], 3100));
+    let web_router = smooth_web::web_router();
+    let web_listener = tokio::net::TcpListener::bind(web_addr).await?;
+    println!("  Web UI: http://localhost:3100 ✓");
     println!();
 
-    smooth_leader::server::start(state, addr).await
+    // Run both servers concurrently
+    tokio::select! {
+        result = smooth_leader::server::start(state, addr) => result,
+        result = axum::serve(web_listener, web_router) => result.map_err(Into::into),
+    }
 }
 
 async fn cmd_down() -> Result<()> {

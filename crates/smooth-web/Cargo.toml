@@ -7,9 +7,11 @@ repository.workspace = true
 description = "Smooth web dashboard — embedded Vite SPA served by axum"
 
 [dependencies]
-axum.workspace = true
-rust-embed = { workspace = true, features = ["mime-guess"] }
+axum = { workspace = true }
+axum-extra.workspace = true
+rust-embed = { workspace = true }
 tower.workspace = true
+mime_guess = "2"
 
 [lints]
 workspace = true
