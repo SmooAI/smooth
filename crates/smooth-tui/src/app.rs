@@ -13,6 +13,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Tabs};
 use ratatui::Terminal;
+use tokio::sync::mpsc;
 
 use crate::theme;
 use crate::views::{beads, chat, dashboard, messages, operators, reviews, system};
@@ -33,10 +34,15 @@ pub struct App {
     pub should_quit: bool,
     /// Cached tab positions for mouse hit-testing: (start_col, end_col) for each tab.
     tab_regions: Vec<(u16, u16)>,
+    /// Channel for sending chat requests to background tasks.
+    chat_tx: Option<mpsc::Sender<String>>,
+    /// Channel for receiving chat responses from background tasks.
+    chat_rx: Option<mpsc::Receiver<String>>,
 }
 
 impl App {
     pub fn new(leader_url: &str) -> Self {
+        let (tx, rx) = mpsc::channel(16);
         Self {
             active_tab: 0,
             leader_url: leader_url.to_string(),
@@ -48,6 +54,8 @@ impl App {
             reviews_state: reviews::ReviewsState::default(),
             should_quit: false,
             tab_regions: Vec::new(),
+            chat_tx: Some(tx),
+            chat_rx: Some(rx),
         }
     }
 
@@ -117,10 +125,32 @@ impl App {
             KeyCode::Backspace if self.active_tab == 3 => {
                 self.chat_state.input.pop();
             }
-            KeyCode::Enter if self.active_tab == 3 && !self.chat_state.input.is_empty() => {
+            KeyCode::Enter if self.active_tab == 3 && !self.chat_state.input.is_empty() && !self.chat_state.streaming => {
                 let content = std::mem::take(&mut self.chat_state.input);
-                self.chat_state.messages.push(chat::ChatMessage { role: "user".into(), content });
-                // TODO: send to leader API and stream response
+                self.chat_state.messages.push(chat::ChatMessage { role: "user".into(), content: content.clone() });
+                self.chat_state.streaming = true;
+
+                // Send to leader API in background
+                if let Some(tx) = &self.chat_tx {
+                    let url = format!("{}/api/chat", self.leader_url);
+                    let tx = tx.clone();
+                    tokio::spawn(async move {
+                        let client = reqwest::Client::new();
+                        let result = client
+                            .post(&url)
+                            .json(&serde_json::json!({"content": content}))
+                            .send()
+                            .await;
+                        let response = match result {
+                            Ok(resp) => match resp.json::<serde_json::Value>().await {
+                                Ok(json) => json.get("data").and_then(|d| d.as_str()).unwrap_or("No response").to_string(),
+                                Err(e) => format!("Error: {e}"),
+                            },
+                            Err(e) => format!("Error: {e}"),
+                        };
+                        let _ = tx.send(response).await;
+                    });
+                }
             }
             _ => {}
         }
@@ -261,6 +291,17 @@ pub async fn run(leader_url: &str) -> Result<()> {
                     }
                 }
                 _ => {}
+            }
+        }
+
+        // Check for chat responses
+        if let Some(rx) = &mut app.chat_rx {
+            if let Ok(response) = rx.try_recv() {
+                app.chat_state.streaming = false;
+                app.chat_state.messages.push(chat::ChatMessage {
+                    role: "assistant".into(),
+                    content: response,
+                });
             }
         }
 
