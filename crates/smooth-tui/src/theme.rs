@@ -1,0 +1,1 @@
+//! Smoo AI theme colors.

@@ -1,0 +1,29 @@
+[package]
+name = "smooth-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Smoo AI CLI — agent orchestration, config management, and platform tools"
+
+[[bin]]
+name = "th"
+path = "src/main.rs"
+
+[dependencies]
+smooth-leader.workspace = true
+smooth-tui.workspace = true
+smooth-web.workspace = true
+clap.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+reqwest.workspace = true
+chrono.workspace = true
+dirs-next.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "smooth-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Smooth web dashboard — embedded Vite SPA served by axum"
+
+[dependencies]
+axum.workspace = true
+rust-embed = { workspace = true, features = ["mime-guess"] }
+tower.workspace = true
+
+[lints]
+workspace = true

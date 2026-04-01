@@ -1,0 +1,77 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/SmooAI/smooth"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP server
+axum = "0.8"
+axum-extra = { version = "0.10", features = ["typed-header"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
+
+# Database
+rusqlite = { version = "0.39", features = ["bundled"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# TUI
+ratatui = "0.30"
+crossterm = "0.29"
+
+# Markdown
+pulldown-cmark = "0.13"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# File search
+globwalk = "0.9"
+ignore = "0.4"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+# Misc
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+thiserror = "2"
+dirs-next = "2"
+tempfile = "3"
+
+# Embed web assets
+rust-embed = "8"
+
+# Workspace crates
+smooth-leader = { path = "crates/smooth-leader" }
+smooth-tui = { path = "crates/smooth-tui" }
+smooth-web = { path = "crates/smooth-web" }
