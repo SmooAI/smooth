@@ -4,247 +4,121 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 **Use Context7 MCP server for up-to-date library documentation.**
 
-> **CRITICAL: All feature work MUST happen in a git worktree.** Never edit source code or commit directly on `main` in `~/dev/smooai/smooth/`. The main worktree stays on `main` and is only used for merging, pulling, and creating new worktrees. A `PreToolUse` hook enforces this — see `.claude/hooks/enforce-worktree.sh`.
+> **CRITICAL: All feature work MUST happen in a git worktree.** Never edit source code or commit directly on `main` in `~/dev/smooai/smooth/`. A `PreToolUse` hook enforces this.
 
 ## Project Overview
 
-Smooth is the Smoo AI CLI and orchestration platform. It coordinates multiple AI agents (Smooth Operators in Microsandbox microVMs) to work on any project through a structured leader/worker model with adversarial security review. Beads is the durable system of record.
+Smooth is the Smoo AI CLI and orchestration platform — a **single Rust binary** (`th`) that coordinates Smooth Operators (AI agents in Microsandbox microVMs). Zero runtime dependencies.
 
 ---
 
-## 1. Issue Tracking — Beads + Jira Integration
-
-**Philosophy**: Beads tracks local work context and dependencies. Jira (SMOODEV project) is the external source of truth for project management.
-
-### Beads has built-in Jira sync
-
-Configure once (already done for this repo):
-
-```bash
-bd config set jira.url "https://smooai.atlassian.net"
-bd config set jira.project "SMOODEV"
-bd config set jira.username "$JIRA_EMAIL"
-# API token from JIRA_API_TOKEN env var (or bd config set jira.api_token)
-```
-
-### Creating work
-
-1. **Create a Jira ticket first** via REST API or Jira UI
-2. **Create a matching beads issue**:
-    ```bash
-    bd create --title="SMOODEV-XX: Title" --description="What and why" --type=task --priority=2 --add-label=<label>
-    ```
-3. **Or use `bd jira sync --pull`** to import Jira issues into beads automatically.
-
-### Beads quick reference
-
-```bash
-bd ready                              # Show issues ready to work on
-bd list --status=open                 # All open issues
-bd list --status=in_progress          # Active work
-bd show <id>                          # Issue details with dependencies
-bd update <id> --status=in_progress   # Claim work
-bd close <id1> <id2> ...              # Close completed issues
-bd dep add <issue> <depends-on>       # Add dependency
-bd blocked                            # Show blocked issues
-bd sync                               # Sync with git remote
-bd jira sync                          # Bidirectional Jira sync
-```
-
-### Available labels
-
-`backend`, `cli`, `db`, `frontend`, `hooks`, `infra`, `leader`, `operator`, `security`, `testing`, `tools`, `tui`, `web`, `websocket`
-
----
-
-## 2. Git Workflow — Worktrees, Branches, Merging
-
-### Working directory structure
-
-All work happens from `~/dev/smooai/`. The main worktree is at `~/dev/smooai/smooth/`. Feature worktrees live alongside it:
-
-```
-~/dev/smooai/
-├── smooth/                              # Main worktree (ALWAYS on main, kept up to date)
-├── smooth-SMOODEV-33-operator-cli/      # Feature worktree
-├── smooth-SMOODEV-45-test-coverage/     # Feature worktree
-└── ...
-```
-
-**IMPORTANT:** `~/dev/smooai/smooth/` must ALWAYS stay on the `main` branch and be kept up to date. **Never do feature work directly on main.** All feature work goes in worktrees. After merging a feature branch, always `git pull --rebase` in the main worktree to keep it current.
-
-### Branch naming
-
-Always prefix with the Jira ticket number: `SMOODEV-XX-short-description`
-
-### Commit messages
-
-Always prefix with the Jira ticket. Explain **why**, not just what: `SMOODEV-XX: Add survey validation to prevent duplicate submissions`
-
-### Worktree workflow (MANDATORY for all feature work)
-
-```bash
-# Create worktree from main
-cd ~/dev/smooai/smooth
-git worktree add ../smooth-SMOODEV-XX-short-desc -b SMOODEV-XX-short-desc main
-
-# Work in the worktree
-cd ../smooth-SMOODEV-XX-short-desc
-pnpm install
-```
-
-### Merging to main
-
-```bash
-cd ~/dev/smooai/smooth
-git checkout main && git pull --rebase
-git merge SMOODEV-XX-short-desc --no-ff
-git push
-```
-
-### Cleanup
-
-```bash
-git worktree remove ~/dev/smooai/smooth-SMOODEV-XX-short-desc
-git branch -d SMOODEV-XX-short-desc
-```
-
----
-
-## 3. Project Structure
+## 1. Workspace Structure
 
 ```
 smooth/
-├── apps/web/               # Next.js 16 web interface (Tailwind CSS 4)
-├── packages/
-│   ├── leader/             # LangGraph orchestration + Hono API + WebSocket
-│   │   └── src/backend/    # Pluggable ExecutionBackend (Microsandbox, future Lambda)
-│   ├── cli/                # `th` CLI + React Ink TUI (23 commands)
-│   ├── shared/             # Shared types, Zod schemas, audit logging
-│   ├── db/                 # Drizzle ORM (SQLite at ~/.smooth/smooth.db)
-│   ├── auth/               # Better Auth (sessions + API keys)
-│   ├── tools/              # 12 operator tools + 3 guardrail hooks
-│   └── smoo-api/           # SmooAI platform M2M API client
-├── docker/worker/          # Smooth Operator OCI image
-└── .beads/                 # Issue tracking (Jira-synced)
+├── crates/
+│   ├── smooth-cli/          # Binary crate — clap CLI (23 commands)
+│   ├── smooth-leader/       # Library — axum server, orchestrator, sandbox, tools
+│   ├── smooth-tui/          # Library — ratatui terminal dashboard
+│   └── smooth-web/          # Library — embedded Vite SPA via rust-embed
+│       └── web/             # React + Vite source (TypeScript)
+├── Cargo.toml               # Workspace root
+├── rustfmt.toml             # Format: 160 width, field init shorthand
+├── install.sh               # Curl installer
+├── .beads/                  # Issue tracking (Jira-synced)
+└── .claude/hooks/           # Worktree enforcement
 ```
 
-### Key Technologies
+### Key Crates
 
-- **Orchestration**: LangGraph (TypeScript), custom leader node
-- **Smooth Operators**: OpenCode, Microsandbox microVMs (hardware isolation)
-- **State**: Beads (durable SoR), SQLite (Drizzle ORM)
-- **Web**: Next.js 16, React 19, Tailwind CSS 4
-- **CLI/TUI**: React Ink 6, Commander.js
-- **Auth**: Multi-provider LLM auth, Better Auth, Tailscale identity
-- **API**: Hono, WebSocket (real-time events + steering), Zod validation
-- **Config**: @smooai/config integration for schema management
-- **Networking**: Tailscale (Serve, MagicDNS, Tags, ACLs)
-- **Toolchain**: pnpm, Turborepo, oxlint, oxfmt, Vitest, Changesets
+- **smooth-cli** (`crates/smooth-cli/src/main.rs`): clap entry point, all command handlers
+- **smooth-leader** (`crates/smooth-leader/src/`): axum server, 20+ routes, orchestrator state machine, sandbox pool, tool registry, beads/jira/tailscale clients, audit logging
+- **smooth-tui** (`crates/smooth-tui/src/`): ratatui app, views (dashboard, chat), markdown renderer, theme
+- **smooth-web** (`crates/smooth-web/`): rust-embed serves compiled Vite SPA
 
 ---
 
-## 4. Build, Test, and Development Commands
+## 2. Build, Test, Format, Lint
 
 ```bash
-pnpm install              # Install all dependencies
-pnpm build                # Build all packages
-pnpm test                 # Run all tests (48 passing)
-pnpm typecheck            # TypeScript type checking
-pnpm lint                 # oxlint
-pnpm lint:fix             # oxlint --fix
-pnpm format               # oxfmt
-pnpm format:check         # oxfmt --check
-pnpm check-all            # Full CI check
-pnpm pre-commit-check     # Pre-commit validation (sync + lint + typecheck + test + format)
+cargo build                  # Build all crates
+cargo test                   # Run all tests (35 passing)
+cargo fmt                    # Format (rustfmt.toml: 160 width)
+cargo clippy                 # Lint (pedantic + nursery)
+cargo build --release -p smooth-cli  # Release binary (~10MB)
 ```
 
-### Starting Smooth
+### Web UI (crates/smooth-web/web/)
 
 ```bash
-th up                     # Start everything (auto-installs Microsandbox if needed)
-th down                   # Stop leader + optionally msb server
-th status                 # System health check
-```
-
-No Docker required. SQLite auto-creates at `~/.smooth/smooth.db`. Microsandbox auto-installs on first `th up`.
-
-### Package-specific
-
-```bash
-pnpm --filter @smooai/smooth-leader test
-pnpm --filter @smooai/smooth-shared build
-pnpm --filter @smooai/smooth-db generate      # Drizzle migration
-pnpm --filter @smooai/smooth-db migrate        # Apply migration
+cd crates/smooth-web/web
+pnpm install
+pnpm build                   # Builds to dist/, embedded in binary
+pnpm dev                     # Vite dev server at :3100
 ```
 
 ---
 
-## 5. Coding Style
+## 3. Coding Style
 
-- 4-space indentation, 160-character line width
+### Rust
+- Edition 2021, max_width 160, field init shorthand
+- `unsafe_code = "forbid"`, `unused_must_use = "deny"`
+- clippy pedantic + nursery (warn)
+- `anyhow` for errors, `thiserror` for library errors
+- `tracing` for logging
+
+### Web (TypeScript/React)
+- Vite + React 19 + Tailwind CSS 4
 - oxfmt for formatting, oxlint for linting
-- Single quotes, trailing commas, bracket spacing
-- Packages and directories: kebab-case
-- Components: PascalCase
-- Hooks: useCamelCase
-- Zod for all API validation and structured output
-- Drizzle ORM for database access
-- Let errors propagate to global handler (no unnecessary try/catch)
 
 ---
 
-## 6. Testing
+## 4. Key Modules (smooth-leader)
 
-- Vitest for unit/integration tests
-- Colocated as `*.test.ts`
-- Every batch of work MUST include tests
-- All tests must pass before merging
+| Module | Purpose |
+|---|---|
+| `server.rs` | axum router, all API routes |
+| `orchestrator.rs` | State machine: Idle → Scheduling → Dispatching → Monitoring → Reviewing |
+| `sandbox.rs` | msb CLI wrapper: create, destroy, exec, status |
+| `pool.rs` | Sandbox capacity (max 3), port allocation |
+| `tools.rs` | Tool registry + hooks (secret detection, prompt injection) |
+| `beads.rs` | bd CLI wrapper (list, create, update, close, comment) |
+| `chat.rs` | OpenCode Zen API (streaming + non-streaming) |
+| `search.rs` | @ autocomplete (beads + globwalk files + path expansion) |
+| `audit.rs` | Rotating file appender at ~/.smooth/audit/ |
+| `db.rs` | rusqlite: memories, worker_runs, config tables |
+| `jira.rs` | Jira REST client + bidirectional sync |
+| `tailscale.rs` | tailscale CLI status wrapper |
+| `ws.rs` | WebSocket message types (Phase 4+) |
 
 ---
 
-## 7. Changesets
+## 5. Data
 
-Always add changesets when `@smooai/smooth-*` packages change (including private packages):
+All state at `~/.smooth/`:
+- `smooth.db` — SQLite (WAL mode)
+- `.beads/` — Beads issue graph
+- `audit/` — Rotating tool usage logs per actor
+- `providers.json` — LLM credentials
+- `config.json` — CLI settings
+
+---
+
+## 6. Git Workflow
+
+Same as smooai: worktrees, SMOODEV-XX branch naming, beads + Jira sync.
 
 ```bash
-pnpm changeset
+git worktree add ../smooth-SMOODEV-XX-desc -b SMOODEV-XX-desc main
+# work in worktree
+git checkout main && git pull --rebase && git merge SMOODEV-XX-desc --no-ff && git push
 ```
 
 ---
 
-## 8. Data
+## 7. Testing
 
-All Smooth state lives at `~/.smooth/`:
-
-- **SQLite database**: `~/.smooth/smooth.db` — leader memory, worker runs, auth, config
-- **Audit logs**: `~/.smooth/audit/` — rotating tool usage logs per operator
-- **Providers**: `~/.smooth/providers.json` — LLM provider credentials
-- **Artifacts**: `~/.smooth/artifacts/` — operator work output
-- **Config**: `~/.smooth/config.json` — CLI settings
-- **Backup**: `th db backup` copies the SQLite file
-- **Clean reset**: `rm -rf ~/.smooth` starts fresh
-
----
-
-## 9. Pre-Push Code Review
-
-Before merging, review all changes as an SME:
-
-```bash
-git diff main...HEAD
-```
-
-Check: security, code quality, test coverage, best practices. Fix issues, don't just note them.
-
----
-
-## 10. Landing the Plane
-
-When ending a work session, complete ALL steps:
-
-1. Run `pnpm pre-commit-check` — must pass
-2. Add changesets when `@smooai/smooth-*` packages changed
-3. Close beads issues: `bd close <id1> <id2> ...`
-4. Push to remote: `git push`
-5. Verify CI green: `gh run list`
+- Tests colocated in each module (`#[cfg(test)]`)
+- `cargo test` runs all
+- 35 tests: db, audit, search, beads, jira, tailscale, server, chat, orchestrator, sandbox, pool, tools, ws, markdown
