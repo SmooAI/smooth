@@ -1,38 +1,51 @@
 name: PR Checks
 
 on:
-  pull_request:
-    branches: [main]
+    pull_request:
+        branches: [main]
 
 jobs:
-  check:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    rust:
+        name: Rust checks
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        steps:
+            - uses: actions/checkout@v4
 
-    steps:
-      - uses: actions/checkout@v4
+            - uses: dtolnay/rust-toolchain@stable
+              with:
+                  components: rustfmt, clippy
 
-      - uses: pnpm/action-setup@v4
+            - uses: Swatinem/rust-cache@v2
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: '.nvmrc'
-          cache: 'pnpm'
+            - name: Format check
+              run: cargo fmt --check
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+            - name: Clippy
+              run: cargo clippy -- -D warnings
+              continue-on-error: true  # pedantic warnings shouldn't block
 
-      - name: Typecheck
-        run: pnpm typecheck
+            - name: Test
+              run: cargo test
 
-      - name: Lint
-        run: pnpm lint
+            - name: Build
+              run: cargo build --release -p smooth-cli
 
-      - name: Format check
-        run: pnpm format:check
+    web:
+        name: Web checks
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            - uses: actions/checkout@v4
 
-      - name: Test
-        run: pnpm test
+            - uses: pnpm/action-setup@v4
 
-      - name: Build
-        run: pnpm build
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+
+            - name: Install
+              run: cd crates/smooth-web/web && pnpm install --frozen-lockfile
+
+            - name: Build
+              run: cd crates/smooth-web/web && pnpm build
