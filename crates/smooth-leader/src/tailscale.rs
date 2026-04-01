@@ -12,9 +12,18 @@ pub struct TailscaleStatus {
     pub ip: Option<String>,
 }
 
+/// Find the tailscale CLI binary path.
+fn tailscale_bin() -> &'static str {
+    // App Store version puts CLI inside the .app bundle
+    if std::path::Path::new("/Applications/Tailscale.app/Contents/MacOS/Tailscale").exists() {
+        return "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
+    }
+    "tailscale"
+}
+
 /// Get Tailscale status by running `tailscale status --json`.
 pub fn get_status() -> TailscaleStatus {
-    let output = Command::new("tailscale").args(["status", "--json"]).output();
+    let output = Command::new(tailscale_bin()).args(["status", "--json"]).output();
 
     let Ok(output) = output else {
         return TailscaleStatus {
