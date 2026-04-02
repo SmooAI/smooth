@@ -71,7 +71,12 @@ pub fn search_files(query: &str, base_path: &Path) -> Vec<SearchResult> {
 /// Expand path (supports ~) and list entries.
 pub fn search_paths(query: &str) -> Vec<SearchResult> {
     let expanded = if query.starts_with('~') {
-        dirs_next::home_dir().unwrap_or_default().join(&query[1..])
+        let rest = query[1..].trim_start_matches('/');
+        if rest.is_empty() {
+            dirs_next::home_dir().unwrap_or_default()
+        } else {
+            dirs_next::home_dir().unwrap_or_default().join(rest)
+        }
     } else {
         PathBuf::from(query)
     };
