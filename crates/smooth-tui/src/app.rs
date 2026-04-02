@@ -32,17 +32,26 @@ pub struct App {
     pub messages_state: messages::MessagesState,
     pub reviews_state: reviews::ReviewsState,
     pub should_quit: bool,
+    /// Connection error message (empty = connected).
+    pub connection_error: String,
     /// Cached tab positions for mouse hit-testing: (start_col, end_col) for each tab.
     tab_regions: Vec<(u16, u16)>,
     /// Channel for sending chat requests to background tasks.
     chat_tx: Option<mpsc::Sender<String>>,
     /// Channel for receiving chat responses from background tasks.
     chat_rx: Option<mpsc::Receiver<String>>,
+    /// HTTP client with timeout.
+    http: reqwest::Client,
 }
 
 impl App {
     pub fn new(leader_url: &str) -> Self {
         let (tx, rx) = mpsc::channel(16);
+        let http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap_or_default();
         Self {
             active_tab: 0,
             leader_url: leader_url.to_string(),
@@ -53,30 +62,46 @@ impl App {
             messages_state: messages::MessagesState::default(),
             reviews_state: reviews::ReviewsState::default(),
             should_quit: false,
+            connection_error: String::new(),
             tab_regions: Vec::new(),
             chat_tx: Some(tx),
             chat_rx: Some(rx),
+            http,
         }
     }
 
     /// Fetch health data from leader.
     pub async fn refresh_health(&mut self) {
         let url = format!("{}/api/system/health", self.leader_url);
-        if let Ok(resp) = reqwest::get(&url).await {
-            if let Ok(json) = resp.json::<serde_json::Value>().await {
-                if let Some(data) = json.get("data") {
-                    self.health.leader_status = data.pointer("/leader/status").and_then(|v| v.as_str()).unwrap_or("unknown").into();
-                    self.health.leader_uptime = data.pointer("/leader/uptime").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    self.health.db_status = data.pointer("/database/status").and_then(|v| v.as_str()).unwrap_or("unknown").into();
-                    self.health.db_path = data.pointer("/database/path").and_then(|v| v.as_str()).unwrap_or("").into();
-                    self.health.sandbox_status = data.pointer("/sandbox/status").and_then(|v| v.as_str()).unwrap_or("unknown").into();
-                    self.health.sandbox_active = data.pointer("/sandbox/active_sandboxes").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                    self.health.sandbox_max = data.pointer("/sandbox/max_concurrency").and_then(|v| v.as_u64()).unwrap_or(3) as u32;
-                    self.health.tailscale_status = data.pointer("/tailscale/status").and_then(|v| v.as_str()).unwrap_or("disconnected").into();
-                    self.health.tailscale_hostname = data.pointer("/tailscale/hostname").and_then(|v| v.as_str()).map(String::from);
-                    self.health.beads_status = data.pointer("/beads/status").and_then(|v| v.as_str()).unwrap_or("unknown").into();
-                    self.health.beads_open = data.pointer("/beads/open_issues").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        match self.http.get(&url).send().await {
+            Ok(resp) => {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    if let Some(data) = json.get("data") {
+                        self.connection_error.clear();
+                        self.health.leader_status = data.pointer("/leader/status").and_then(|v| v.as_str()).unwrap_or("unknown").into();
+                        self.health.leader_uptime = data.pointer("/leader/uptime").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        self.health.db_status = data.pointer("/database/status").and_then(|v| v.as_str()).unwrap_or("unknown").into();
+                        self.health.db_path = data.pointer("/database/path").and_then(|v| v.as_str()).unwrap_or("").into();
+                        self.health.sandbox_status = data.pointer("/sandbox/status").and_then(|v| v.as_str()).unwrap_or("unknown").into();
+                        self.health.sandbox_active = data.pointer("/sandbox/active_sandboxes").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                        self.health.sandbox_max = data.pointer("/sandbox/max_concurrency").and_then(|v| v.as_u64()).unwrap_or(3) as u32;
+                        self.health.tailscale_status = data.pointer("/tailscale/status").and_then(|v| v.as_str()).unwrap_or("disconnected").into();
+                        self.health.tailscale_hostname = data.pointer("/tailscale/hostname").and_then(|v| v.as_str()).map(String::from);
+                        self.health.beads_status = data.pointer("/beads/status").and_then(|v| v.as_str()).unwrap_or("unknown").into();
+                        self.health.beads_open = data.pointer("/beads/open_issues").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                    }
                 }
+            }
+            Err(e) => {
+                let msg = if e.is_connect() {
+                    format!("Cannot connect to leader at {}", self.leader_url)
+                } else if e.is_timeout() {
+                    format!("Connection timed out to {}", self.leader_url)
+                } else {
+                    format!("Error: {e}")
+                };
+                self.connection_error = msg;
+                self.health = dashboard::HealthData::default();
             }
         }
     }
@@ -84,7 +109,7 @@ impl App {
     /// Fetch beads from leader.
     pub async fn refresh_beads(&mut self) {
         let url = format!("{}/api/beads", self.leader_url);
-        if let Ok(resp) = reqwest::get(&url).await {
+        if let Ok(resp) = self.http.get(&url).send().await {
             if let Ok(json) = resp.json::<serde_json::Value>().await {
                 if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
                     self.beads_state.beads = data
@@ -359,8 +384,31 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         .divider("│");
     f.render_widget(tabs, chunks[0]);
 
+    // Connection error banner
+    let content_area = if !app.connection_error.is_empty() {
+        let split = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(0)])
+            .split(chunks[1]);
+
+        let error_msg = Paragraph::new(Line::from(vec![
+            Span::styled(" ○ ", Style::default().fg(Color::Red)),
+            Span::styled(&app.connection_error, Style::default().fg(Color::Red)),
+            Span::styled("  — retrying every 5s", theme::muted()),
+        ]))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Red))
+                .title(Span::styled(" Disconnected ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))),
+        );
+        f.render_widget(error_msg, split[0]);
+        split[1]
+    } else {
+        chunks[1]
+    };
+
     // Content
-    let content_area = chunks[1];
     match app.active_tab {
         0 => dashboard::render(f, content_area, &app.health),
         1 => beads::render(f, content_area, &app.beads_state),
