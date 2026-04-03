@@ -2583,6 +2583,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "smooth-narc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "smooth-operator",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "smooth-operator"
 version = "0.1.0"
 dependencies = [
