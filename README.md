@@ -70,50 +70,158 @@ Every piece of work gets adversarial review from a separate operator that challe
 
 ```mermaid
 graph TB
-    subgraph Binary["th (single 10MB binary)"]
-        subgraph Leader["Leader Server (axum)"]
-            API["REST API<br/><small>20+ routes</small>"]
-            WS["WebSocket<br/><small>real-time events</small>"]
-            Web["Embedded Web UI<br/><small>Vite SPA</small>"]
-        end
-
-        subgraph TUI["Terminal UI (ratatui)"]
-            Dash["Dashboard"]
-            Chat["Chat"]
-            Ops["Operators"]
-        end
-
-        DB["SQLite<br/><small>rusqlite</small>"]
-        Audit["Audit Logs<br/><small>rotating files</small>"]
+    subgraph Host["Host Machine"]
+        MSB["msb server<br/><small>Microsandbox daemon</small>"]
     end
 
-    subgraph External["External Services"]
-        MSB["Microsandbox<br/><small>microVM sandboxes</small>"]
-        OC["OpenCode Zen<br/><small>LLM API</small>"]
-        Beads["Beads<br/><small>work tracking</small>"]
+    subgraph Boardroom["The Boardroom (microsandbox)"]
+        BS["Big Smooth<br/><small>orchestrator, READ-ONLY</small>"]
+        AR["Archivist<br/><small>central log aggregator</small>"]
+        BW["Wonk<br/><small>Boardroom access control</small>"]
+        BG["Goalie<br/><small>Boardroom network proxy</small>"]
+        BN["Narc<br/><small>blocks Big Smooth writes</small>"]
+        BSc["Scribe<br/><small>Boardroom logging</small>"]
     end
 
-    subgraph Operators["Smooth Operators"]
-        OP1["Operator 1<br/><small>microVM</small>"]
-        OP2["Operator 2<br/><small>microVM</small>"]
+    subgraph Op1["Operator VM 1 (microsandbox)"]
+        OC1["OpenCode<br/><small>AI agent</small>"]
+        W1["Wonk<br/><small>access control</small>"]
+        G1["Goalie<br/><small>network + fs proxy</small>"]
+        N1["Narc<br/><small>tool surveillance</small>"]
+        S1["Scribe<br/><small>structured logging</small>"]
     end
 
-    Leader --> DB
-    Leader --> MSB
-    Leader --> OC
-    Leader --> Beads
-    MSB --> Operators
+    subgraph Op2["Operator VM 2 (microsandbox)"]
+        OC2["OpenCode<br/><small>AI agent</small>"]
+        W2["Wonk"] & G2["Goalie"] & N2["Narc"] & S2["Scribe"]
+    end
 
-    style Binary fill:#020618,stroke:#00a6a6,color:#f8fafc
-    style Leader fill:#040d30,stroke:#0a1f7a,color:#f8fafc
-    style TUI fill:#040d30,stroke:#0a1f7a,color:#f8fafc
-    style External fill:#020618,stroke:#30363d,color:#f8fafc
-    style Operators fill:#020618,stroke:#22c55e,color:#f8fafc
+    MSB --> Boardroom
+    MSB --> Op1
+    MSB --> Op2
+    BS -->|orchestrates| Op1
+    BS -->|orchestrates| Op2
+    S1 -->|events| AR
+    S2 -->|events| AR
+
+    style Host fill:#020618,stroke:#30363d,color:#f8fafc
+    style Boardroom fill:#040d30,stroke:#f49f0a,color:#f8fafc
+    style Op1 fill:#040d30,stroke:#22c55e,color:#f8fafc
+    style Op2 fill:#040d30,stroke:#22c55e,color:#f8fafc
 ```
 
-**`th up` starts two servers from a single binary:**
-- Leader API on `:4400` — REST + WebSocket for all orchestration
-- Web UI on `:3100` — embedded React/Vite dashboard (compiled into the binary)
+### The Cast
+
+Everything runs inside [Microsandbox](https://github.com/nicholasgasior/microsandbox) microVMs — including the orchestrator.
+
+| Service | Role | Where it runs |
+|---|---|---|
+| **Big Smooth** | Orchestrator. Schedules work, generates policies, handles access requests. **READ-ONLY** — cannot write to the filesystem. | The Boardroom |
+| **Archivist** | Central log aggregator. Receives events from all Scribes across all VMs. Can write, but only to log paths. | The Boardroom |
+| **Wonk** | Access control authority. Reads policy TOML, answers "is this allowed?" for every network request, tool call, bead access, and CLI command. No LLM. | Every VM |
+| **Goalie** | Network + filesystem proxy. Dumb pipe — forwards or blocks based on Wonk's answer. iptables + FUSE enforced at kernel level. | Every VM |
+| **Narc** | Tool surveillance + prompt injection guard. Two-tier detection: fast regex pre-filters + LLM-as-a-judge for ambiguous cases. | Every VM |
+| **Scribe** | Structured logging service. All services log through Scribe, which writes to on-pod SQLite and feeds Archivist. | Every VM |
+
+**The Board** = Big Smooth + Archivist (leadership). **The Boardroom** = the VM where The Board operates, with its own Wonk, Goalie, Narc, and Scribe.
+
+**Smooth Operators** = the AI agents. The only ones who write code.
+
+### Inside each MicroVM
+
+```mermaid
+graph LR
+    subgraph VM["MicroVM (--scope none)"]
+        Operator["Operator / Big Smooth"]
+        Wonk["Wonk<br/><small>:8400</small>"]
+        Goalie["Goalie<br/><small>:8480 proxy</small>"]
+        Narc["Narc"]
+        Scribe["Scribe<br/><small>:8401</small>"]
+    end
+
+    Operator -->|HTTP_PROXY| Goalie
+    Goalie -->|"is this allowed?"| Wonk
+    Narc -->|intercepts| Operator
+    Narc -->|"check tool"| Wonk
+    Operator --> Scribe
+    Wonk --> Scribe
+    Goalie --> Scribe
+    Narc --> Scribe
+
+    style VM fill:#040d30,stroke:#0a1f7a,color:#f8fafc
+```
+
+- **Wonk** reads `/etc/smooth/policy.toml`, listens on `127.0.0.1:8400`, hot-reloads on file change
+- **Goalie** listens on `127.0.0.1:8480` as HTTP proxy. iptables rejects all outbound TCP except from the Goalie UID. FUSE mount at `/workspace` for filesystem access control.
+- **Narc** intercepts tool calls and incoming prompts. Regex fast path catches obvious secrets and write violations. Ambiguous cases go to a small/fast LLM (Haiku, Flash, GPT-4o-mini) for a yes/no verdict.
+- **Scribe** listens on `127.0.0.1:8401`, writes to on-pod SQLite and JSON-lines, feeds events to Archivist.
+
+### Security Model
+
+```mermaid
+graph TD
+    subgraph Enforcement["Kernel-Level Enforcement"]
+        IPT["iptables<br/><small>only Goalie UID can make outbound connections</small>"]
+        FUSE["FUSE mount<br/><small>all file I/O goes through Goalie</small>"]
+        SCOPE["--scope none<br/><small>microsandbox blocks direct internet</small>"]
+    end
+
+    subgraph Policy["Policy-Driven Access Control"]
+        TOML["policy.toml<br/><small>generated by Big Smooth per operator</small>"]
+        NET["Network allowlist<br/><small>domain + path matching</small>"]
+        FS["Filesystem deny patterns<br/><small>*.env, *.pem, .ssh/*</small>"]
+        TOOL["Tool allowlist<br/><small>per-phase tool access</small>"]
+        BEAD["Bead scoping<br/><small>operator sees only assigned beads + deps</small>"]
+        MCP["MCP server allowlist<br/><small>deny unknown servers by default</small>"]
+    end
+
+    subgraph Detection["Two-Tier Threat Detection (Narc)"]
+        REGEX["Regex fast path<br/><small>secrets, write guard, known patterns</small>"]
+        LLM["LLM judge<br/><small>Haiku/Flash for ambiguous cases</small>"]
+    end
+
+    TOML --> NET & FS & TOOL & BEAD & MCP
+    IPT --> NET
+    FUSE --> FS
+
+    style Enforcement fill:#14532d,stroke:#22c55e,color:#f8fafc
+    style Policy fill:#040d30,stroke:#0a1f7a,color:#f8fafc
+    style Detection fill:#422006,stroke:#f49f0a,color:#f8fafc
+```
+
+**Key invariants:**
+- Big Smooth **never writes**. Narc in the Boardroom enforces this — any write attempt is instantly blocked.
+- Archivist **can write**, but only to log paths. Writes to any other path are blocked.
+- Operators can only see their assigned beads and dependencies (scoped by auth token).
+- All outbound traffic goes through Goalie. No process can bypass the proxy — enforced at the kernel level.
+
+### Continuous Access Negotiation
+
+Operators can request expanded access at runtime. The flow:
+
+```mermaid
+sequenceDiagram
+    participant Op as Operator
+    participant G as Goalie
+    participant W as Wonk
+    participant BS as Big Smooth
+
+    Op->>G: GET api.stripe.com/v1/charges
+    G->>W: is this allowed?
+    W-->>G: BLOCKED (not in allowlist)
+    G-->>Op: 403 Blocked
+    G->>W: request access
+    W->>BS: POST /api/access/request
+    BS->>BS: auto-approve? check bead labels?
+    alt auto-approved
+        BS-->>W: approved + updated policy
+        W-->>W: hot-reload policy
+        Note over Op,G: retry succeeds
+    else needs human
+        BS->>BS: send to inbox
+        Note over BS: th access approve <bead> <domain>
+    end
+```
 
 ### Operator Lifecycle
 
@@ -132,6 +240,17 @@ graph LR
     style R fill:#422006,stroke:#f49f0a,color:#f8fafc
     style Done fill:#14532d,stroke:#22c55e,color:#f8fafc
 ```
+
+### Phase-Based Access Defaults
+
+| Phase | Network | Filesystem | Beads |
+|---|---|---|---|
+| Assess | LLM + registries | Read-only | Own bead + deps (depth 1) |
+| Plan | LLM + registries | Read-only | Own bead + deps (depth 2) |
+| Orchestrate | LLM + registries + leader | Read-only | Own bead + deps (depth 2) |
+| Execute | LLM + registries + GitHub | Read-write | Own bead + deps (depth 2) |
+| Finalize | LLM + registries + GitHub | Read-write | Own bead + deps (depth 2) |
+| Review | LLM + registries | Read-only | Target bead + own bead |
 
 ---
 
@@ -165,6 +284,15 @@ th approve <bead-id>             # Approve a review
 th inbox                         # Messages needing attention
 ```
 
+### Access Control
+
+```bash
+th access pending                # List pending access requests
+th access approve <bead> <domain>  # Approve domain access
+th access deny <bead> <domain>     # Deny domain access
+th access policy <operator-id>     # Show current policy
+```
+
 ### System
 
 ```bash
@@ -190,6 +318,8 @@ th worktree create/list/merge    # Git worktrees
 | **Sandboxes** | Microsandbox (hardware-isolated microVMs) |
 | **LLM** | OpenCode Zen API (OpenAI-compatible) |
 | **Work tracking** | Beads (durable SoR) |
+| **Policy** | TOML-based, hot-reloadable via notify + ArcSwap |
+| **Logging** | smooai-logger (structured, context-aware) |
 | **Linting** | clippy (pedantic + nursery) |
 | **Formatting** | rustfmt (160 max width) |
 
@@ -199,7 +329,11 @@ th worktree create/list/merge    # Git worktrees
 smooth/
 ├── crates/
 │   ├── smooth-cli/          # Binary — clap CLI (23 commands)
-│   ├── smooth-leader/       # Library — axum server, orchestrator, sandbox
+│   ├── smooth-bigsmooth/    # Library — orchestrator, policy generation
+│   ├── smooth-policy/       # Library — shared policy types, TOML parsing
+│   ├── smooth-wonk/         # Binary — in-VM access control authority
+│   ├── smooth-goalie/       # Binary — in-VM network + filesystem proxy
+│   ├── smooth-narc/         # Binary — in-VM tool surveillance + LLM judge
 │   ├── smooth-tui/          # Library — ratatui terminal dashboard
 │   └── smooth-web/          # Library — embedded Vite SPA
 │       └── web/             # React + Vite source
@@ -223,8 +357,8 @@ cargo fmt
 # Lint
 cargo clippy
 
-# Run dev
-cargo run -p smooth-cli -- up
+# Run dev (with auto-reload)
+cargo watch -x 'run -p smooth-cli -- up'
 
 # Release build (~10MB)
 cargo build --release -p smooth-cli

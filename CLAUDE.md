@@ -17,8 +17,12 @@ Smooth is the Smoo AI CLI and orchestration platform — a **single Rust binary*
 ```
 smooth/
 ├── crates/
-│   ├── smooth-cli/          # Binary crate — clap CLI (23 commands)
-│   ├── smooth-leader/       # Library — axum server, orchestrator, sandbox, tools
+│   ├── smooth-cli/          # Binary — clap CLI (23 commands)
+│   ├── smooth-bigsmooth/    # Library — orchestrator, policy generation, sandbox
+│   ├── smooth-policy/       # Library — shared policy types, TOML parsing
+│   ├── smooth-wonk/         # Binary — in-VM access control authority
+│   ├── smooth-goalie/       # Binary — in-VM network + filesystem proxy
+│   ├── smooth-narc/         # Binary — in-VM tool surveillance + LLM judge
 │   ├── smooth-tui/          # Library — ratatui terminal dashboard
 │   └── smooth-web/          # Library — embedded Vite SPA via rust-embed
 │       └── web/             # React + Vite source (TypeScript)
@@ -32,7 +36,11 @@ smooth/
 ### Key Crates
 
 - **smooth-cli** (`crates/smooth-cli/src/main.rs`): clap entry point, all command handlers
-- **smooth-leader** (`crates/smooth-leader/src/`): axum server, 20+ routes, orchestrator state machine, sandbox pool, tool registry, beads/jira/tailscale clients, audit logging
+- **smooth-bigsmooth** (`crates/smooth-bigsmooth/src/`): axum server, 20+ routes, orchestrator state machine, sandbox pool, tool registry, policy generation, beads/jira/tailscale clients, audit logging
+- **smooth-policy** (`crates/smooth-policy/src/`): shared policy types (network, filesystem, beads, tools, MCP), TOML parsing, glob matching
+- **smooth-wonk** (`crates/smooth-wonk/src/`): in-VM access control authority, policy hot-reload, access negotiation with Big Smooth
+- **smooth-goalie** (`crates/smooth-goalie/src/`): in-VM HTTP/HTTPS forward proxy + FUSE filesystem proxy, delegates all decisions to Wonk
+- **smooth-narc** (`crates/smooth-narc/src/`): in-VM tool surveillance, prompt injection guard, regex pre-filters + LLM-as-a-judge
 - **smooth-tui** (`crates/smooth-tui/src/`): ratatui app, views (dashboard, chat), markdown renderer, theme
 - **smooth-web** (`crates/smooth-web/`): rust-embed serves compiled Vite SPA
 
@@ -74,15 +82,16 @@ pnpm dev                     # Vite dev server at :3100
 
 ---
 
-## 4. Key Modules (smooth-leader)
+## 4. Key Modules (smooth-bigsmooth)
 
 | Module | Purpose |
 |---|---|
-| `server.rs` | axum router, all API routes |
+| `server.rs` | axum router, all API routes (20+), access control routes |
 | `orchestrator.rs` | State machine: Idle → Scheduling → Dispatching → Monitoring → Reviewing |
-| `sandbox.rs` | msb CLI wrapper: create, destroy, exec, status |
+| `sandbox.rs` | msb CLI wrapper: create, destroy, exec, status; token gen, policy mount |
 | `pool.rs` | Sandbox capacity (max 3), port allocation |
 | `tools.rs` | Tool registry + hooks (secret detection, prompt injection) |
+| `policy.rs` | Policy generation, phase defaults, access request handling |
 | `beads.rs` | bd CLI wrapper (list, create, update, close, comment) |
 | `chat.rs` | OpenCode Zen API (streaming + non-streaming) |
 | `search.rs` | @ autocomplete (beads + globwalk files + path expansion) |
@@ -90,7 +99,20 @@ pnpm dev                     # Vite dev server at :3100
 | `db.rs` | rusqlite: memories, worker_runs, config tables |
 | `jira.rs` | Jira REST client + bidirectional sync |
 | `tailscale.rs` | tailscale CLI status wrapper |
-| `ws.rs` | WebSocket message types (Phase 4+) |
+| `ws.rs` | WebSocket message types |
+
+### Security Architecture
+
+The sandbox access control system uses named services running inside each microVM:
+
+- **Big Smooth** — READ-ONLY orchestrator in "The Boardroom" VM
+- **Archivist** — central log aggregator (can write only to log paths)
+- **Wonk** — per-VM access control authority (rule engine, no LLM)
+- **Goalie** — per-VM network + FUSE filesystem proxy (iptables enforced)
+- **Narc** — per-VM tool surveillance + prompt injection guard (regex + LLM judge)
+- **Scribe** — per-VM structured logging, feeds Archivist
+
+See README.md for full architecture diagrams and the plan file for implementation details.
 
 ---
 
