@@ -78,6 +78,12 @@ rust-embed = "8"
 toml = "0.8"
 globset = "0.4"
 
+# Proxy
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http-body-util = "0.1"
+bytes = "1"
+
 # Workspace crates
 smooth-leader = { path = "crates/smooth-leader" }
 smooth-policy = { path = "crates/smooth-policy" }
