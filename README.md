@@ -122,8 +122,9 @@ Everything runs inside [Microsandbox](https://github.com/nicholasgasior/microsan
 | **Goalie** | Network + filesystem proxy. Dumb pipe — forwards or blocks based on Wonk's answer. iptables + FUSE enforced at kernel level. | Every VM |
 | **Narc** | Tool surveillance + prompt injection guard. Two-tier detection: fast regex pre-filters + LLM-as-a-judge for ambiguous cases. | Every VM |
 | **Scribe** | Structured logging service. All services log through Scribe, which writes to on-pod SQLite and feeds Archivist. | Every VM |
+| **Rewind** | LLM checkpointing + session resume. Captures conversation state after tool calls and phase transitions. Enables interrupted operators to resume from last checkpoint. | Every VM |
 
-**The Board** = Big Smooth + Archivist (leadership). **The Boardroom** = the VM where The Board operates, with its own Wonk, Goalie, Narc, and Scribe.
+**The Board** = Big Smooth + Archivist (leadership). **The Boardroom** = the VM where The Board operates, with its own Wonk, Goalie, Narc, Scribe, and Rewind.
 
 **Smooth Operators** = the AI agents. The only ones who write code.
 
@@ -335,6 +336,9 @@ smooth/
 │   ├── smooth-wonk/         # Binary — in-VM access control authority
 │   ├── smooth-goalie/       # Binary — in-VM network + filesystem proxy
 │   ├── smooth-narc/         # Binary — in-VM tool surveillance + LLM judge
+│   ├── smooth-scribe/       # Binary — in-VM structured logging + OTel
+│   ├── smooth-archivist/    # Binary — central log + trace aggregator
+│   ├── smooth-rewind/       # Binary — in-VM LLM checkpointing + session resume
 │   ├── smooth-tui/          # Library — ratatui terminal dashboard
 │   └── smooth-web/          # Library — embedded Vite SPA
 │       └── web/             # React + Vite source
