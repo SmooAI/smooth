@@ -139,8 +139,68 @@ git checkout main && git pull --rebase && git merge SMOODEV-XX-desc --no-ff && g
 
 ---
 
-## 7. Testing
+## 7. Testing — MANDATORY
+
+> **CRITICAL: Every crate, every module, every public function MUST have tests.** No code lands without passing tests. This is non-negotiable.
 
 - Tests colocated in each module (`#[cfg(test)]`)
-- `cargo test` runs all
-- 35 tests: db, audit, search, beads, jira, tailscale, server, chat, orchestrator, sandbox, pool, tools, ws, markdown
+- `cargo test` runs all — **must pass before any commit**
+- `cargo clippy` must be clean (zero warnings) before commit
+- `cargo fmt -- --check` must pass before commit
+- Test categories:
+  - **Unit tests**: every public function, every error path, every edge case
+  - **Integration tests**: cross-module interactions (e.g., policy → sandbox, wonk → goalie)
+  - **Property tests**: where applicable (e.g., policy round-trip serialization)
+- When adding a new module: write tests FIRST or alongside, never "add tests later"
+- When fixing a bug: add a regression test that fails without the fix
+- Security-critical code (policy enforcement, access control, secret detection) requires **exhaustive** test coverage including adversarial inputs
+
+---
+
+## 8. Landing the Plane (Session Completion)
+
+**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
+
+### Mandatory checklist
+
+1. **Run quality gates** (if code changed):
+
+    ```bash
+    cargo fmt -- --check
+    cargo clippy
+    cargo test
+    cargo build
+    ```
+
+2. **Close beads issues** for completed work:
+
+    ```bash
+    bd close <id1> <id2> ...
+    ```
+
+3. **Merge to main** if on feature branch:
+
+    ```bash
+    cd ~/dev/smooai/smooth
+    git checkout main && git pull --rebase
+    git merge <branch> --no-ff
+    ```
+
+4. **Push to remote**:
+
+    ```bash
+    git push
+    git status  # MUST show "up to date with origin"
+    ```
+
+5. **Clean up** — remove worktrees, delete merged branches
+
+6. **Verify** — all changes committed AND pushed
+
+### Critical rules
+
+- Work is NOT complete until `git push` succeeds
+- NEVER stop before pushing — that leaves work stranded locally
+- NEVER say "ready to push when you are" — YOU must push
+- All tests, clippy, and format checks must pass
+- If push fails, resolve and retry until it succeeds

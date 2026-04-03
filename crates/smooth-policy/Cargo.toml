@@ -1,0 +1,20 @@
+[package]
+name = "smooth-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Smooth policy types — TOML-based access control for Microsandbox operators"
+
+[dependencies]
+serde.workspace = true
+toml.workspace = true
+globset.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

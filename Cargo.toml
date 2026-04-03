@@ -74,7 +74,12 @@ tempfile = "3"
 # Embed web assets
 rust-embed = "8"
 
+# TOML + glob
+toml = "0.8"
+globset = "0.4"
+
 # Workspace crates
 smooth-leader = { path = "crates/smooth-leader" }
+smooth-policy = { path = "crates/smooth-policy" }
 smooth-tui = { path = "crates/smooth-tui" }
 smooth-web = { path = "crates/smooth-web" }
