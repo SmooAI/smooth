@@ -20,6 +20,10 @@ unwrap_used = "warn"
 expect_used = "warn"
 module_name_repetitions = "allow"
 must_use_candidate = "allow"
+return_self_not_must_use = "allow"
+doc_markdown = "allow"
+significant_drop_tightening = "allow"
+missing_const_for_fn = "allow"
 
 [workspace.dependencies]
 # Async runtime
@@ -88,7 +92,13 @@ bytes = "1"
 notify = { version = "8", default-features = false, features = ["macos_kqueue"] }
 arc-swap = "1"
 
+# Async streams
+async-trait = "0.1"
+tokio-stream = "0.1"
+pin-project-lite = "0.2"
+
 # Workspace crates
+smooth-operator = { path = "crates/smooth-operator" }
 smooth-leader = { path = "crates/smooth-leader" }
 smooth-policy = { path = "crates/smooth-policy" }
 smooth-tui = { path = "crates/smooth-tui" }
