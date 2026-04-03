@@ -35,7 +35,7 @@ tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
 rusqlite = { version = "0.39", features = ["bundled"] }
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # TUI
 ratatui = "0.30"
@@ -83,6 +83,10 @@ hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 http-body-util = "0.1"
 bytes = "1"
+
+# Hot-reload
+notify = { version = "8", default-features = false, features = ["macos_kqueue"] }
+arc-swap = "1"
 
 # Workspace crates
 smooth-leader = { path = "crates/smooth-leader" }
