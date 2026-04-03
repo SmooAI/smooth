@@ -139,8 +139,18 @@ git checkout main && git pull --rebase && git merge SMOODEV-XX-desc --no-ff && g
 
 ---
 
-## 7. Testing
+## 7. Testing — MANDATORY
+
+> **CRITICAL: Every crate, every module, every public function MUST have tests.** No code lands without passing tests. This is non-negotiable.
 
 - Tests colocated in each module (`#[cfg(test)]`)
-- `cargo test` runs all
-- 35 tests: db, audit, search, beads, jira, tailscale, server, chat, orchestrator, sandbox, pool, tools, ws, markdown
+- `cargo test` runs all — **must pass before any commit**
+- `cargo clippy` must be clean (zero warnings) before commit
+- `cargo fmt -- --check` must pass before commit
+- Test categories:
+  - **Unit tests**: every public function, every error path, every edge case
+  - **Integration tests**: cross-module interactions (e.g., policy → sandbox, wonk → goalie)
+  - **Property tests**: where applicable (e.g., policy round-trip serialization)
+- When adding a new module: write tests FIRST or alongside, never "add tests later"
+- When fixing a bug: add a regression test that fails without the fix
+- Security-critical code (policy enforcement, access control, secret detection) requires **exhaustive** test coverage including adversarial inputs
