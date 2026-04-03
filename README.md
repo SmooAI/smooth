@@ -117,7 +117,7 @@ Everything runs inside [Microsandbox](https://github.com/nicholasgasior/microsan
 | Service | Role | Where it runs |
 |---|---|---|
 | **Big Smooth** | Orchestrator. Schedules work, generates policies, handles access requests. **READ-ONLY** — cannot write to the filesystem. | The Boardroom |
-| **Archivist** | Central log aggregator. Receives events from all Scribes across all VMs. Can write, but only to log paths. | The Boardroom |
+| **Archivist** | Central log + trace aggregator. Receives events and OTLP traces from all Scribes. Stores traces in SQLite, optionally forwards to external OTel backends (Jaeger, Tempo, Honeycomb). Can write, but only to log paths. | The Boardroom |
 | **Wonk** | Access control authority. Reads policy TOML, answers "is this allowed?" for every network request, tool call, bead access, and CLI command. No LLM. | Every VM |
 | **Goalie** | Network + filesystem proxy. Dumb pipe — forwards or blocks based on Wonk's answer. iptables + FUSE enforced at kernel level. | Every VM |
 | **Narc** | Tool surveillance + prompt injection guard. Two-tier detection: fast regex pre-filters + LLM-as-a-judge for ambiguous cases. | Every VM |
@@ -154,7 +154,7 @@ graph LR
 - **Wonk** reads `/etc/smooth/policy.toml`, listens on `127.0.0.1:8400`, hot-reloads on file change
 - **Goalie** listens on `127.0.0.1:8480` as HTTP proxy. iptables rejects all outbound TCP except from the Goalie UID. FUSE mount at `/workspace` for filesystem access control.
 - **Narc** intercepts tool calls and incoming prompts. Regex fast path catches obvious secrets and write violations. Ambiguous cases go to a small/fast LLM (Haiku, Flash, GPT-4o-mini) for a yes/no verdict.
-- **Scribe** listens on `127.0.0.1:8401`, writes to on-pod SQLite and JSON-lines, feeds events to Archivist.
+- **Scribe** listens on `127.0.0.1:8401`, writes to on-pod SQLite and JSON-lines, feeds events to Archivist. Bridges `tracing` spans to OpenTelemetry via `tracing-opentelemetry`, generating trace hierarchies for operator lifecycles, prompts, tool calls, and network requests. Exports OTLP traces to Archivist with W3C traceparent propagation across VM boundaries.
 
 ### Security Model
 
@@ -320,6 +320,7 @@ th worktree create/list/merge    # Git worktrees
 | **Work tracking** | Beads (durable SoR) |
 | **Policy** | TOML-based, hot-reloadable via notify + ArcSwap |
 | **Logging** | smooai-logger (structured, context-aware) |
+| **Tracing** | OpenTelemetry (tracing-opentelemetry bridge, OTLP export) |
 | **Linting** | clippy (pedantic + nursery) |
 | **Formatting** | rustfmt (160 max width) |
 
