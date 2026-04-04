@@ -15,5 +15,5 @@ pub mod tool;
 pub use agent::{Agent, AgentConfig, AgentEvent};
 pub use checkpoint::{Checkpoint, CheckpointStore, MemoryCheckpointStore};
 pub use conversation::{Conversation, Message, Role};
-pub use llm::{LlmClient, LlmConfig, LlmResponse};
+pub use llm::{accumulate_stream_events, LlmClient, LlmConfig, LlmResponse, StreamEvent};
 pub use tool::{Tool, ToolCall, ToolRegistry, ToolResult};
