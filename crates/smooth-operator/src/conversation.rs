@@ -1,6 +1,85 @@
+use std::hash::{DefaultHasher, Hash, Hasher};
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+/// Marker that splits a system prompt into a cacheable static portion and a
+/// frequently-changing dynamic portion (project context, CLAUDE.md, etc.).
+const PROMPT_CACHE_BOUNDARY: &str = "__PROMPT_CACHE_BOUNDARY__";
+
+/// Prompt cache that splits a system prompt at [`PROMPT_CACHE_BOUNDARY`].
+///
+/// Content **above** the marker is static (role instructions, tool schemas) and
+/// is hashed once for cache-key deduplication.  Content **below** is dynamic
+/// (project context, CLAUDE.md) and can be swapped without invalidating the
+/// static cache.
+#[derive(Debug, Clone)]
+pub struct PromptCache {
+    static_portion: String,
+    dynamic_portion: String,
+    static_hash: String,
+    static_tokens: usize,
+}
+
+impl PromptCache {
+    /// Create from a system prompt, splitting at the boundary marker.
+    /// If no marker is found the entire prompt is treated as dynamic.
+    pub fn from_system_prompt(prompt: &str) -> Self {
+        let (static_portion, dynamic_portion) = prompt.find(PROMPT_CACHE_BOUNDARY).map_or_else(
+            || (String::new(), prompt.to_string()),
+            |idx| {
+                let static_part = prompt[..idx].to_string();
+                let after_marker = idx + PROMPT_CACHE_BOUNDARY.len();
+                let dynamic_part = if after_marker < prompt.len() {
+                    prompt[after_marker..].to_string()
+                } else {
+                    String::new()
+                };
+                (static_part, dynamic_part)
+            },
+        );
+
+        let static_hash = Self::compute_hash(&static_portion);
+        let static_tokens = static_portion.len() / 4 + usize::from(!static_portion.is_empty());
+
+        Self {
+            static_portion,
+            dynamic_portion,
+            static_hash,
+            static_tokens,
+        }
+    }
+
+    /// Get the full system prompt (static + boundary + dynamic combined).
+    pub fn full_prompt(&self) -> String {
+        if self.static_portion.is_empty() {
+            return self.dynamic_portion.clone();
+        }
+        format!("{}{}{}", self.static_portion, PROMPT_CACHE_BOUNDARY, self.dynamic_portion)
+    }
+
+    /// Update only the dynamic portion (CLAUDE.md, project context).
+    pub fn update_dynamic(&mut self, dynamic: &str) {
+        self.dynamic_portion = dynamic.to_string();
+    }
+
+    /// Get the static hash for cache key deduplication.
+    pub fn static_hash(&self) -> &str {
+        &self.static_hash
+    }
+
+    /// Estimated token savings from caching the static portion.
+    pub fn cached_tokens(&self) -> usize {
+        self.static_tokens
+    }
+
+    fn compute_hash(input: &str) -> String {
+        let mut hasher = DefaultHasher::new();
+        input.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    }
+}
 
 /// Role of a message participant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -243,6 +322,13 @@ impl Conversation {
     /// Get the last assistant message content, if any.
     pub fn last_assistant_content(&self) -> Option<&str> {
         self.messages.iter().rev().find(|m| m.role == Role::Assistant).map(|m| m.content.as_str())
+    }
+
+    /// Replace any existing system messages with the cached prompt from a [`PromptCache`].
+    pub fn with_cached_system_prompt(mut self, cache: &PromptCache) -> Self {
+        self.messages.retain(|m| m.role != Role::System);
+        self.messages.insert(0, Message::system(cache.full_prompt()));
+        self
     }
 
     /// Check if conversation needs compaction (> 80% of `max_context_tokens`).
@@ -747,6 +833,101 @@ mod tests {
         // Tokens should be reduced
         assert!(result.tokens_after < tokens_before);
         // System prompt preserved
+        assert_eq!(conv.messages[0].role, Role::System);
+    }
+
+    // ── PromptCache tests ──────────────────────────────────────────
+
+    #[test]
+    fn prompt_cache_splits_at_boundary() {
+        let prompt = format!("static rules here{}dynamic context here", PROMPT_CACHE_BOUNDARY);
+        let cache = PromptCache::from_system_prompt(&prompt);
+        assert_eq!(cache.static_portion, "static rules here");
+        assert_eq!(cache.dynamic_portion, "dynamic context here");
+    }
+
+    #[test]
+    fn prompt_cache_no_marker_treats_all_as_dynamic() {
+        let prompt = "no marker in this prompt";
+        let cache = PromptCache::from_system_prompt(prompt);
+        assert!(cache.static_portion.is_empty());
+        assert_eq!(cache.dynamic_portion, prompt);
+    }
+
+    #[test]
+    fn full_prompt_combines_static_boundary_dynamic() {
+        let static_part = "You are an assistant.";
+        let dynamic_part = "Project: Smooth";
+        let prompt = format!("{static_part}{PROMPT_CACHE_BOUNDARY}{dynamic_part}");
+        let cache = PromptCache::from_system_prompt(&prompt);
+        assert_eq!(cache.full_prompt(), prompt);
+    }
+
+    #[test]
+    fn update_dynamic_only_changes_dynamic_portion() {
+        let prompt = format!("static{PROMPT_CACHE_BOUNDARY}old dynamic");
+        let mut cache = PromptCache::from_system_prompt(&prompt);
+        let original_hash = cache.static_hash().to_string();
+
+        cache.update_dynamic("new dynamic");
+
+        assert_eq!(cache.dynamic_portion, "new dynamic");
+        assert_eq!(cache.static_portion, "static");
+        assert_eq!(cache.static_hash(), original_hash, "static hash should not change");
+    }
+
+    #[test]
+    fn static_hash_is_deterministic() {
+        let prompt = format!("same static{PROMPT_CACHE_BOUNDARY}dynamic");
+        let cache1 = PromptCache::from_system_prompt(&prompt);
+        let cache2 = PromptCache::from_system_prompt(&prompt);
+        assert_eq!(cache1.static_hash(), cache2.static_hash());
+    }
+
+    #[test]
+    fn static_hash_changes_when_static_changes() {
+        let prompt_a = format!("static A{PROMPT_CACHE_BOUNDARY}dynamic");
+        let prompt_b = format!("static B{PROMPT_CACHE_BOUNDARY}dynamic");
+        let cache_a = PromptCache::from_system_prompt(&prompt_a);
+        let cache_b = PromptCache::from_system_prompt(&prompt_b);
+        assert_ne!(cache_a.static_hash(), cache_b.static_hash());
+    }
+
+    #[test]
+    fn cached_tokens_returns_static_token_estimate() {
+        // "static text" is 11 chars => 11/4 + 1 = 3
+        let prompt = format!("static text{PROMPT_CACHE_BOUNDARY}dynamic");
+        let cache = PromptCache::from_system_prompt(&prompt);
+        assert_eq!(cache.cached_tokens(), 11 / 4 + 1);
+
+        // No marker => empty static => 0 tokens
+        let cache_no_static = PromptCache::from_system_prompt("all dynamic");
+        assert_eq!(cache_no_static.cached_tokens(), 0);
+    }
+
+    #[test]
+    fn with_cached_system_prompt_replaces_system_messages() {
+        let mut conv = Conversation::new(100_000)
+            .with_system_prompt("old system prompt 1")
+            .with_system_prompt("old system prompt 2");
+        conv.push(Message::user("hello"));
+        conv.push(Message::assistant("hi"));
+
+        let prompt = format!("new static{PROMPT_CACHE_BOUNDARY}new dynamic");
+        let cache = PromptCache::from_system_prompt(&prompt);
+
+        let conv = conv.with_cached_system_prompt(&cache);
+
+        // Should have exactly one system message
+        let system_msgs: Vec<&Message> = conv.messages.iter().filter(|m| m.role == Role::System).collect();
+        assert_eq!(system_msgs.len(), 1);
+        assert_eq!(system_msgs[0].content, cache.full_prompt());
+
+        // Non-system messages preserved
+        assert!(conv.messages.iter().any(|m| m.role == Role::User && m.content == "hello"));
+        assert!(conv.messages.iter().any(|m| m.role == Role::Assistant && m.content == "hi"));
+
+        // System message is first
         assert_eq!(conv.messages[0].role, Role::System);
     }
 }
