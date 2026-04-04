@@ -6,7 +6,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::layout::compute_layout;
-use crate::state::{AppState, ChatRole};
+use crate::state::{AppState, ChatRole, ToolStatus};
 use crate::theme;
 
 /// Render the full TUI frame from the current application state.
@@ -47,6 +47,54 @@ fn render_chat(frame: &mut Frame, state: &AppState, area: Rect) {
         // Content lines
         for content_line in msg.content.lines() {
             lines.push(Line::from(Span::raw(content_line.to_string())));
+        }
+
+        // Tool call blocks (only rendered for assistant messages with tool calls)
+        for tc in &msg.tool_calls {
+            let (icon, icon_style) = match tc.status {
+                ToolStatus::Pending => ("⏳", theme::muted()),
+                ToolStatus::Running => ("⚙", theme::user_label()),
+                ToolStatus::Done => ("✓", theme::success()),
+                ToolStatus::Error => ("✗", theme::error()),
+            };
+
+            #[allow(clippy::cast_precision_loss)]
+            let duration_str = tc.duration_ms.map_or_else(String::new, |ms| {
+                let secs = ms as f64 / 1000.0;
+                format!(" ({secs:.1}s)")
+            });
+
+            let status_label = match tc.status {
+                ToolStatus::Pending => "pending...".to_string(),
+                ToolStatus::Running => "running...".to_string(),
+                ToolStatus::Done => format!("done{duration_str}"),
+                ToolStatus::Error => format!("error{duration_str}"),
+            };
+
+            let collapse_indicator = if tc.output.is_some() {
+                if tc.collapsed {
+                    " ▶"
+                } else {
+                    " ▼"
+                }
+            } else {
+                ""
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(format!("{icon} "), icon_style),
+                Span::styled(format!("{}(\"{}\")", tc.tool_name, tc.arguments_preview), theme::muted()),
+                Span::raw(format!(" ── {status_label}{collapse_indicator}")),
+            ]));
+
+            // Show output if not collapsed
+            if !tc.collapsed {
+                if let Some(ref output) = tc.output {
+                    for output_line in output.lines() {
+                        lines.push(Line::from(Span::styled(format!("  │ {output_line}"), theme::muted())));
+                    }
+                }
+            }
         }
 
         // Blank line between messages
