@@ -41,7 +41,7 @@ pub struct RateLimitInfo {
 }
 
 /// API format for the LLM provider.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ApiFormat {
     #[default]
     OpenAiCompat,
