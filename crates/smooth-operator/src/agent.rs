@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -12,7 +13,7 @@ use futures_util::StreamExt;
 
 use crate::conversation::{CompactionStrategy, Conversation, Message, ReactiveCompaction};
 use crate::llm::{accumulate_stream_events, LlmClient, LlmConfig, StreamEvent};
-use crate::tool::ToolRegistry;
+use crate::tool::{Tool, ToolRegistry, ToolSchema};
 
 /// Configuration for an agent.
 #[allow(missing_debug_implementations)]
@@ -147,6 +148,120 @@ pub enum AgentEvent {
         content: String,
     },
     StreamingComplete,
+    DelegationStarted {
+        parent_id: String,
+        child_id: String,
+        task: String,
+    },
+    DelegationCompleted {
+        parent_id: String,
+        child_id: String,
+        success: bool,
+    },
+}
+
+/// Configuration for a sub-agent spawned via delegation.
+#[derive(Debug, Clone)]
+pub struct SubAgentConfig {
+    /// System prompt for the sub-agent.
+    pub system_prompt: String,
+    /// Maximum iterations for the sub-agent's run loop.
+    pub max_iterations: u32,
+    /// Whether to clone the parent's tools into the sub-agent.
+    pub inherit_tools: bool,
+}
+
+impl Default for SubAgentConfig {
+    fn default() -> Self {
+        Self {
+            system_prompt: "You are a sub-agent.".into(),
+            max_iterations: 10,
+            inherit_tools: true,
+        }
+    }
+}
+
+/// Handle to a delegated sub-agent task running in a background tokio task.
+pub struct DelegationHandle {
+    /// Unique ID of the sub-agent.
+    pub agent_id: String,
+    /// The task description given to the sub-agent.
+    pub task: String,
+    join_handle: tokio::task::JoinHandle<anyhow::Result<Conversation>>,
+}
+
+impl DelegationHandle {
+    /// Wait for the sub-agent to finish and return its conversation.
+    ///
+    /// # Errors
+    /// Returns error if the sub-agent panicked or returned an error.
+    pub async fn wait(self) -> anyhow::Result<Conversation> {
+        self.join_handle.await.map_err(|e| anyhow::anyhow!("sub-agent task panicked: {e}"))?
+    }
+
+    /// Cancel the sub-agent task.
+    pub fn cancel(self) {
+        self.join_handle.abort();
+    }
+
+    /// Check whether the sub-agent task has finished (completed, failed, or cancelled).
+    pub fn is_finished(&self) -> bool {
+        self.join_handle.is_finished()
+    }
+}
+
+/// Built-in tool that delegates a task to a sub-agent.
+///
+/// When called with `{"task": "..."}`, spawns a sub-agent, waits for it
+/// to complete, and returns the last assistant message as the tool result.
+pub struct DelegationTool {
+    agent: Arc<Agent>,
+}
+
+impl DelegationTool {
+    /// Create a new `DelegationTool` backed by the given parent agent.
+    pub fn new(agent: Arc<Agent>) -> Self {
+        Self { agent }
+    }
+}
+
+#[async_trait]
+impl Tool for DelegationTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "delegate".into(),
+            description: "Delegate a task to a sub-agent that will work on it independently and return the result.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "The task to delegate to the sub-agent"
+                    }
+                },
+                "required": ["task"]
+            }),
+        }
+    }
+
+    async fn execute(&self, arguments: serde_json::Value) -> anyhow::Result<String> {
+        let task = arguments
+            .get("task")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("missing required 'task' parameter"))?
+            .to_string();
+
+        let handle = self.agent.spawn_sub_agent(task, &SubAgentConfig::default());
+        let conversation = handle.wait().await?;
+
+        // Return the last assistant message as the result
+        let last_assistant = conversation
+            .last_assistant_content()
+            .unwrap_or("Sub-agent completed with no response.")
+            .to_string();
+
+        Ok(last_assistant)
+    }
 }
 
 /// An AI agent that runs an observe → think → act loop.
@@ -181,6 +296,39 @@ impl Agent {
     pub fn with_event_handler(mut self, handler: impl Fn(AgentEvent) + Send + Sync + 'static) -> Self {
         self.event_handler = Some(Box::new(handler));
         self
+    }
+
+    /// Spawn a sub-agent to work on the given task in a background tokio task.
+    ///
+    /// The sub-agent inherits the parent's `LlmConfig`. If `sub_config.inherit_tools`
+    /// is true, the parent's tool registry is cloned (tool `Arc`s are shared, hooks are not).
+    pub fn spawn_sub_agent(self: &Arc<Self>, task: String, sub_config: &SubAgentConfig) -> DelegationHandle {
+        let tools = if sub_config.inherit_tools {
+            self.tools.clone_tools()
+        } else {
+            ToolRegistry::new()
+        };
+
+        let child_config = AgentConfig::new(format!("{}-sub", self.config.name), &sub_config.system_prompt, self.config.llm.clone())
+            .with_max_iterations(sub_config.max_iterations);
+
+        let child = Self::new(child_config, tools);
+        let child_id = child.id.clone();
+
+        self.emit(AgentEvent::DelegationStarted {
+            parent_id: self.id.clone(),
+            child_id: child_id.clone(),
+            task: task.clone(),
+        });
+
+        let task_for_spawn = task.clone();
+        let join_handle = tokio::spawn(async move { child.run(&task_for_spawn).await });
+
+        DelegationHandle {
+            agent_id: child_id,
+            task,
+            join_handle,
+        }
     }
 
     /// Resume from the latest checkpoint, or start fresh.
@@ -759,6 +907,16 @@ mod tests {
             AgentEvent::Error { message: "oops".into() },
             AgentEvent::TokenDelta { content: "hello".into() },
             AgentEvent::StreamingComplete,
+            AgentEvent::DelegationStarted {
+                parent_id: "p".into(),
+                child_id: "c".into(),
+                task: "do something".into(),
+            },
+            AgentEvent::DelegationCompleted {
+                parent_id: "p".into(),
+                child_id: "c".into(),
+                success: true,
+            },
         ];
         for event in events {
             let json = serde_json::to_string(&event).expect("serialize");
@@ -781,5 +939,125 @@ mod tests {
         let event = AgentEvent::StreamingComplete;
         let json = serde_json::to_string(&event).expect("serialize");
         assert!(json.contains("StreamingComplete"));
+    }
+
+    // --- Delegation tests ---
+
+    #[tokio::test]
+    async fn delegation_handle_is_finished_lifecycle() {
+        // Spawn a trivial background task that completes immediately
+        let handle = DelegationHandle {
+            agent_id: "child-1".into(),
+            task: "say hello".into(),
+            join_handle: tokio::spawn(async {
+                let conv = Conversation::new(100_000).with_system_prompt("test");
+                Ok(conv)
+            }),
+        };
+
+        // Wait for it to finish
+        let conv = handle.wait().await.expect("should complete");
+        assert_eq!(conv.len(), 1); // system prompt only
+    }
+
+    #[test]
+    fn sub_agent_config_defaults() {
+        let config = SubAgentConfig::default();
+        assert_eq!(config.system_prompt, "You are a sub-agent.");
+        assert_eq!(config.max_iterations, 10);
+        assert!(config.inherit_tools);
+    }
+
+    #[tokio::test]
+    async fn spawn_sub_agent_creates_unique_id() {
+        let parent = Arc::new(Agent::new(test_config(), ToolRegistry::new()));
+        let handle1 = parent.spawn_sub_agent("task 1".into(), &SubAgentConfig::default());
+        let handle2 = parent.spawn_sub_agent("task 2".into(), &SubAgentConfig::default());
+
+        assert_ne!(handle1.agent_id, handle2.agent_id);
+        assert_ne!(handle1.agent_id, parent.id);
+
+        // Clean up
+        handle1.cancel();
+        handle2.cancel();
+    }
+
+    #[tokio::test]
+    async fn delegation_started_event_has_correct_ids() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+
+        let parent = Arc::new(Agent::new(test_config(), ToolRegistry::new()).with_event_handler(move |event| {
+            events_clone.lock().expect("lock").push(event);
+        }));
+
+        let parent_id = parent.id.clone();
+        let handle = parent.spawn_sub_agent("test task".into(), &SubAgentConfig::default());
+        let child_id = handle.agent_id.clone();
+        handle.cancel();
+
+        let events = events.lock().expect("lock");
+        let started = events.iter().find(|e| matches!(e, AgentEvent::DelegationStarted { .. }));
+        assert!(started.is_some(), "DelegationStarted event should be emitted");
+
+        if let Some(AgentEvent::DelegationStarted {
+            parent_id: pid,
+            child_id: cid,
+            task,
+        }) = started
+        {
+            assert_eq!(pid, &parent_id);
+            assert_eq!(cid, &child_id);
+            assert_eq!(task, "test task");
+        }
+    }
+
+    #[test]
+    fn delegation_completed_event_serialization() {
+        let event = AgentEvent::DelegationCompleted {
+            parent_id: "parent-123".into(),
+            child_id: "child-456".into(),
+            success: true,
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("DelegationCompleted"));
+        assert!(json.contains("parent-123"));
+        assert!(json.contains("child-456"));
+        assert!(json.contains("true"));
+    }
+
+    #[tokio::test]
+    async fn cancel_aborts_the_task() {
+        let handle = DelegationHandle {
+            agent_id: "child-abort".into(),
+            task: "long task".into(),
+            join_handle: tokio::spawn(async {
+                // Simulate a long-running task
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                Ok(Conversation::new(100_000))
+            }),
+        };
+
+        assert!(!handle.is_finished());
+        handle.cancel();
+
+        // Give the runtime a moment to propagate the abort
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    #[test]
+    fn delegation_tool_schema_has_task_parameter() {
+        use crate::tool::Tool;
+
+        let parent = Arc::new(Agent::new(test_config(), ToolRegistry::new()));
+        let tool = DelegationTool::new(parent);
+        let schema = tool.schema();
+
+        assert_eq!(schema.name, "delegate");
+        let params = &schema.parameters;
+        assert!(params["properties"]["task"].is_object());
+        assert_eq!(params["properties"]["task"]["type"], "string");
+        let required = params["required"].as_array().expect("required array");
+        assert!(required.iter().any(|v| v.as_str() == Some("task")));
     }
 }

@@ -17,7 +17,7 @@ pub mod memory;
 pub mod providers;
 pub mod tool;
 
-pub use agent::{Agent, AgentConfig, AgentEvent};
+pub use agent::{Agent, AgentConfig, AgentEvent, DelegationHandle, DelegationTool, SubAgentConfig};
 pub use checkpoint::{Checkpoint, CheckpointStore, MemoryCheckpointStore};
 pub use conversation::{CompactionResult, CompactionStrategy, Conversation, Message, Role};
 pub use cost::{BudgetExceeded, CostBudget, CostEntry, CostTracker, ModelPricing};
