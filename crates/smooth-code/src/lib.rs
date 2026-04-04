@@ -7,6 +7,7 @@
 
 pub mod app;
 pub mod layout;
+pub mod permissions;
 pub mod render;
 pub mod state;
 pub mod theme;
