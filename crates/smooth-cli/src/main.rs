@@ -704,11 +704,8 @@ async fn cmd_doctor() -> Result<()> {
         }
     }
 
-    // 6. Check Microsandbox
-    match std::process::Command::new("msb").arg("version").output() {
-        Ok(output) if output.status.success() => println!("  ✓ Microsandbox: available"),
-        _ => println!("  ○ Microsandbox: not found (optional, needed for operators)"),
-    }
+    // 6. Sandboxes (built-in via microsandbox crate)
+    println!("  ✓ Sandboxes: built-in (microsandbox)");
 
     println!();
     if issues == 0 {
