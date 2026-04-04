@@ -224,7 +224,7 @@ async fn golden_e2e_build_web_server() -> anyhow::Result<()> {
     println!("Working directory: {}", base_dir.display());
 
     // 2. Configure agent
-    let llm_config = LlmConfig::opencode_zen(&api_key);
+    let llm_config = LlmConfig::opencode_zen(&api_key).with_model("kimi-k2.5");
     let budget = CostBudget {
         max_cost_usd: Some(2.0),
         max_tokens: None,
