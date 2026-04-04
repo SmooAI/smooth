@@ -50,6 +50,17 @@ pub trait Tool: Send + Sync {
     async fn execute(&self, arguments: serde_json::Value) -> anyhow::Result<String>;
 }
 
+#[async_trait]
+impl Tool for Box<dyn Tool> {
+    fn schema(&self) -> ToolSchema {
+        (**self).schema()
+    }
+
+    async fn execute(&self, arguments: serde_json::Value) -> anyhow::Result<String> {
+        (**self).execute(arguments).await
+    }
+}
+
 /// Registry of available tools with pre/post hooks.
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
