@@ -8,12 +8,13 @@ use std::time::Instant;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-/// Smoo AI CLI — agent orchestration, config management, and platform tools.
+/// Smooth — AI agent orchestration platform.
+/// Run with no arguments to launch the interactive TUI.
 #[derive(Parser)]
 #[command(name = "th", version, about, long_about = None)]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -105,6 +106,10 @@ enum Commands {
         #[command(subcommand)]
         cmd: AccessCommands,
     },
+    /// Launch interactive coding assistant (same as running th with no args)
+    Code,
+    /// System health check and auto-fix
+    Doctor,
 }
 
 #[derive(Subcommand)]
@@ -249,33 +254,36 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Up { no_leader, port } => cmd_up(no_leader, port).await,
-        Commands::Down => cmd_down().await,
-        Commands::Status => cmd_status().await,
-        Commands::Tui { server } => {
+        // No subcommand = launch smooth-code (THE Smooth experience)
+        None | Some(Commands::Code) => cmd_code().await,
+        Some(Commands::Doctor) => cmd_doctor().await,
+        Some(Commands::Up { no_leader, port }) => cmd_up(no_leader, port).await,
+        Some(Commands::Down) => cmd_down().await,
+        Some(Commands::Status) => cmd_status().await,
+        Some(Commands::Tui { server }) => {
             let url = server.unwrap_or_else(|| "http://localhost:4400".into());
             smooth_tui::app::run(&url).await
         }
-        Commands::Db { cmd } => cmd_db(cmd),
-        Commands::Auth { cmd } => cmd_auth(cmd).await,
-        Commands::Operators => cmd_operators().await,
-        Commands::Inbox => cmd_inbox().await,
-        Commands::Run { bead_id } => cmd_run(&bead_id).await,
-        Commands::Approve { bead_id } => cmd_approve(&bead_id).await,
-        Commands::Pause { bead_id } => cmd_steer(&bead_id, "pause", None).await,
-        Commands::Resume { bead_id } => cmd_steer(&bead_id, "resume", None).await,
-        Commands::Steer { bead_id, message } => cmd_steer(&bead_id, "steer", Some(&message)).await,
-        Commands::Cancel { bead_id } => cmd_steer(&bead_id, "cancel", None).await,
-        Commands::Audit { cmd } => cmd_audit(cmd),
-        Commands::Web => {
+        Some(Commands::Db { cmd }) => cmd_db(cmd),
+        Some(Commands::Auth { cmd }) => cmd_auth(cmd).await,
+        Some(Commands::Operators) => cmd_operators().await,
+        Some(Commands::Inbox) => cmd_inbox().await,
+        Some(Commands::Run { bead_id }) => cmd_run(&bead_id).await,
+        Some(Commands::Approve { bead_id }) => cmd_approve(&bead_id).await,
+        Some(Commands::Pause { bead_id }) => cmd_steer(&bead_id, "pause", None).await,
+        Some(Commands::Resume { bead_id }) => cmd_steer(&bead_id, "resume", None).await,
+        Some(Commands::Steer { bead_id, message }) => cmd_steer(&bead_id, "steer", Some(&message)).await,
+        Some(Commands::Cancel { bead_id }) => cmd_steer(&bead_id, "cancel", None).await,
+        Some(Commands::Audit { cmd }) => cmd_audit(cmd),
+        Some(Commands::Web) => {
             println!("Web UI: http://localhost:4400");
             println!("Start with: th up");
             Ok(())
         }
-        Commands::Worktree { cmd } => cmd_worktree(cmd),
-        Commands::Tailscale { cmd } => cmd_tailscale(cmd),
-        Commands::Access { cmd } => cmd_access(cmd).await,
-        _ => {
+        Some(Commands::Worktree { cmd }) => cmd_worktree(cmd),
+        Some(Commands::Tailscale { cmd }) => cmd_tailscale(cmd),
+        Some(Commands::Access { cmd }) => cmd_access(cmd).await,
+        Some(_) => {
             println!("Command not yet implemented. Coming soon!");
             Ok(())
         }
@@ -590,6 +598,125 @@ async fn cmd_access(cmd: AccessCommands) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+/// Launch smooth-code — THE Smooth experience.
+/// Auto-starts Big Smooth if not running.
+async fn cmd_code() -> Result<()> {
+    // Check if Big Smooth is running
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(2)).build()?;
+    let health = client.get("http://localhost:4400/health").send().await;
+
+    if health.is_err() || !health.as_ref().is_ok_and(|r| r.status().is_success()) {
+        println!("Starting Smooth...");
+
+        // Start Big Smooth in background
+        let db_path = smooth_bigsmooth::db::default_db_path();
+        let db = smooth_bigsmooth::db::Database::open(&db_path)?;
+        let state = smooth_bigsmooth::server::AppState {
+            db,
+            start_time: std::time::Instant::now(),
+        };
+        let addr: SocketAddr = "127.0.0.1:4400".parse()?;
+
+        tokio::spawn(async move {
+            if let Err(e) = smooth_bigsmooth::server::start(state, addr).await {
+                tracing::error!(error = %e, "Big Smooth failed");
+            }
+        });
+
+        // Wait for health check (up to 5s)
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if client.get("http://localhost:4400/health").send().await.is_ok_and(|r| r.status().is_success()) {
+                break;
+            }
+        }
+    }
+
+    // Launch smooth-code TUI
+    let working_dir = std::env::current_dir()?;
+    smooth_code::app::run(working_dir).await
+}
+
+/// System health check and auto-fix.
+async fn cmd_doctor() -> Result<()> {
+    println!("Smooth Doctor — checking system health...\n");
+
+    let mut issues = 0;
+
+    // 1. Check Big Smooth API
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(2)).build()?;
+    match client.get("http://localhost:4400/health").send().await {
+        Ok(r) if r.status().is_success() => println!("  ✓ Big Smooth API: healthy"),
+        Ok(r) => {
+            println!("  ✗ Big Smooth API: unhealthy (status {})", r.status());
+            issues += 1;
+        }
+        Err(_) => {
+            println!("  ✗ Big Smooth API: not running (start with: th up)");
+            issues += 1;
+        }
+    }
+
+    // 2. Check database
+    let db_path = smooth_bigsmooth::db::default_db_path();
+    if db_path.exists() {
+        match smooth_bigsmooth::db::Database::open(&db_path) {
+            Ok(_) => println!("  ✓ Database: OK ({})", db_path.display()),
+            Err(e) => {
+                println!("  ✗ Database: error ({e})");
+                issues += 1;
+            }
+        }
+    } else {
+        println!("  ○ Database: not created yet (will be created on first run)");
+    }
+
+    // 3. Check providers
+    let providers_path = dirs_next::home_dir().map(|h| h.join(".smooth/providers.json"));
+    if let Some(ref path) = providers_path {
+        if path.exists() {
+            println!("  ✓ Providers: configured ({})", path.display());
+        } else {
+            println!("  ✗ Providers: not configured (run: th auth login <provider>)");
+            issues += 1;
+        }
+    }
+
+    // 4. Check smooth home dir
+    let smooth_home = dirs_next::home_dir().map(|h| h.join(".smooth"));
+    if let Some(ref dir) = smooth_home {
+        if dir.exists() {
+            println!("  ✓ Smooth home: {}", dir.display());
+        } else {
+            println!("  ○ Smooth home: will be created at {}", dir.display());
+        }
+    }
+
+    // 5. Check Beads
+    match std::process::Command::new("bd").arg("stats").output() {
+        Ok(output) if output.status.success() => println!("  ✓ Beads: available"),
+        _ => {
+            println!("  ✗ Beads: not found (install from https://github.com/SmooAI/beads)");
+            issues += 1;
+        }
+    }
+
+    // 6. Check Microsandbox
+    match std::process::Command::new("msb").arg("version").output() {
+        Ok(output) if output.status.success() => println!("  ✓ Microsandbox: available"),
+        _ => println!("  ○ Microsandbox: not found (optional, needed for operators)"),
+    }
+
+    println!();
+    if issues == 0 {
+        println!("All checks passed. Smooth is ready.");
+    } else {
+        println!("{issues} issue(s) found. Fix them and run: th doctor");
+    }
+
     Ok(())
 }
 

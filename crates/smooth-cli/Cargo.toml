@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 smooth-bigsmooth.workspace = true
+smooth-code.workspace = true
 smooth-tui.workspace = true
 smooth-web.workspace = true
 axum.workspace = true
