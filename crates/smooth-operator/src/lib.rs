@@ -16,6 +16,7 @@ pub mod llm;
 pub mod memory;
 pub mod providers;
 pub mod tool;
+pub mod workflow;
 
 pub use agent::{Agent, AgentConfig, AgentEvent, DelegationHandle, DelegationTool, SubAgentConfig};
 pub use checkpoint::{Checkpoint, CheckpointStore, MemoryCheckpointStore};
@@ -27,3 +28,4 @@ pub use llm::{accumulate_stream_events, LlmClient, LlmConfig, LlmResponse, Strea
 pub use memory::{InMemoryMemory, Memory, MemoryEntry, MemoryType};
 pub use providers::{Activity, ModelRouting, ModelSlot, ProviderConfig, ProviderRegistry};
 pub use tool::{Tool, ToolCall, ToolRegistry, ToolResult};
+pub use workflow::{EdgeTarget, FnNode, Node, State, Workflow, WorkflowBuilder};
