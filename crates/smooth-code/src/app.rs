@@ -1,5 +1,6 @@
 //! Main event loop for the Smooth Coding TUI.
 
+use std::fmt::Write as _;
 use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -14,7 +15,9 @@ use ratatui::Terminal;
 use smooth_operator::AgentEvent;
 use tokio::sync::mpsc;
 
+use crate::commands::{parse_input, CommandOutput, CommandRegistry, InputKind};
 use crate::render;
+use crate::session::{Session, SessionManager};
 use crate::state::{AppState, ChatMessage, Mode};
 
 /// Run the Smooth Coding TUI.
@@ -48,6 +51,15 @@ pub async fn run(working_dir: PathBuf) -> anyhow::Result<()> {
 
     let result = event_loop(&mut terminal, &state, &event_tx, event_rx);
 
+    // Auto-save on quit
+    {
+        let s = state.lock().expect("state lock poisoned");
+        if let Ok(mgr) = SessionManager::new() {
+            let session = Session::from_state(&s);
+            let _ = mgr.save(&session);
+        }
+    }
+
     // Restore terminal
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen, crossterm::event::DisableMouseCapture)?;
@@ -65,7 +77,23 @@ fn event_loop(
     event_tx: &mpsc::UnboundedSender<AgentEvent>,
     mut event_rx: mpsc::UnboundedReceiver<AgentEvent>,
 ) -> anyhow::Result<()> {
+    let command_registry = CommandRegistry::new();
+    let mut last_save = std::time::Instant::now();
+    let auto_save_interval = Duration::from_secs(30);
+
     loop {
+        // Auto-save every 30s if there are messages
+        if last_save.elapsed() >= auto_save_interval {
+            let s = state.lock().expect("state lock poisoned");
+            if !s.messages.is_empty() {
+                if let Ok(mgr) = SessionManager::new() {
+                    let session = Session::from_state(&s);
+                    let _ = mgr.save(&session);
+                }
+            }
+            drop(s);
+            last_save = std::time::Instant::now();
+        }
         // Draw
         {
             let mut s = state.lock().expect("state lock poisoned");
@@ -104,7 +132,7 @@ fn event_loop(
                 }
 
                 match s.mode {
-                    Mode::Input => handle_input_mode(key, &mut s, Arc::clone(state), event_tx.clone()),
+                    Mode::Input => handle_input_mode(key, &mut s, Arc::clone(state), event_tx.clone(), &command_registry),
                     Mode::Normal => handle_normal_mode(key, &mut s),
                 }
             }
@@ -143,7 +171,14 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
 }
 
 /// Handle key events in input mode.
-fn handle_input_mode(key: event::KeyEvent, state: &mut AppState, _state_arc: Arc<Mutex<AppState>>, event_tx: mpsc::UnboundedSender<AgentEvent>) {
+#[allow(clippy::needless_pass_by_value)] // Arc is cloned into async tasks
+fn handle_input_mode(
+    key: event::KeyEvent,
+    state: &mut AppState,
+    state_arc: Arc<Mutex<AppState>>,
+    event_tx: mpsc::UnboundedSender<AgentEvent>,
+    command_registry: &CommandRegistry,
+) {
     match key.code {
         KeyCode::Enter => {
             let input = state.take_input();
@@ -151,17 +186,68 @@ fn handle_input_mode(key: event::KeyEvent, state: &mut AppState, _state_arc: Arc
                 return;
             }
 
-            state.add_message(ChatMessage::user(&input));
-            state.thinking = true;
-
-            // Spawn agent task with channel-based streaming
-            let message = input;
-            let tx = event_tx;
-            tokio::spawn(async move {
-                if let Err(e) = run_agent_streaming(&message, tx.clone()).await {
-                    let _ = tx.send(AgentEvent::Error { message: e.to_string() });
+            match parse_input(&input) {
+                InputKind::SlashCommand { name, args } => {
+                    match command_registry.execute(name, args, state) {
+                        Some(Ok(CommandOutput::Message(msg))) => {
+                            state.add_message(ChatMessage::system(msg));
+                        }
+                        Some(Ok(CommandOutput::Clear | CommandOutput::Quit | CommandOutput::None)) => {
+                            // Clear: already handled by handler
+                            // Quit: should_quit already set by handler
+                            // None: no visible output
+                        }
+                        Some(Err(e)) => {
+                            state.add_message(ChatMessage::system(format!("Command error: {e}")));
+                        }
+                        None => {
+                            state.add_message(ChatMessage::system(format!("Unknown command: /{name}. Type /help for available commands.")));
+                        }
+                    }
                 }
-            });
+                InputKind::BangCommand(cmd) => {
+                    let cmd = cmd.to_string();
+                    let state_arc = Arc::clone(&state_arc);
+                    tokio::spawn(async move {
+                        let output = tokio::process::Command::new("sh").arg("-c").arg(&cmd).output().await;
+                        match output {
+                            Ok(out) => {
+                                let stdout = String::from_utf8_lossy(&out.stdout);
+                                let stderr = String::from_utf8_lossy(&out.stderr);
+                                let mut result = stdout.to_string();
+                                if !stderr.is_empty() {
+                                    if !result.is_empty() {
+                                        result.push('\n');
+                                    }
+                                    let _ = write!(result, "stderr: {stderr}");
+                                }
+                                if result.is_empty() {
+                                    result = "(no output)".to_string();
+                                }
+                                let mut s = state_arc.lock().expect("state lock poisoned");
+                                s.add_message(ChatMessage::system(format!("$ {cmd}\n{result}")));
+                            }
+                            Err(e) => {
+                                let mut s = state_arc.lock().expect("state lock poisoned");
+                                s.add_message(ChatMessage::system(format!("Shell error: {e}")));
+                            }
+                        }
+                    });
+                }
+                InputKind::Normal(_) => {
+                    state.add_message(ChatMessage::user(&input));
+                    state.thinking = true;
+
+                    // Spawn agent task with channel-based streaming
+                    let message = input;
+                    let tx = event_tx;
+                    tokio::spawn(async move {
+                        if let Err(e) = run_agent_streaming(&message, tx.clone()).await {
+                            let _ = tx.send(AgentEvent::Error { message: e.to_string() });
+                        }
+                    });
+                }
+            }
         }
         KeyCode::Backspace => state.input_backspace(),
         KeyCode::Left => state.input_move_left(),
