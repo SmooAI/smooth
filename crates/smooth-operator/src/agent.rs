@@ -18,6 +18,7 @@ pub struct AgentConfig {
     pub max_iterations: u32,
     pub max_context_tokens: usize,
     pub checkpoint_strategy: CheckpointStrategy,
+    pub parallel_tools: bool,
 }
 
 impl AgentConfig {
@@ -29,11 +30,17 @@ impl AgentConfig {
             max_iterations: 50,
             max_context_tokens: 100_000,
             checkpoint_strategy: CheckpointStrategy::default(),
+            parallel_tools: false,
         }
     }
 
     pub fn with_max_iterations(mut self, max: u32) -> Self {
         self.max_iterations = max;
+        self
+    }
+
+    pub fn with_parallel_tools(mut self, enabled: bool) -> Self {
+        self.parallel_tools = enabled;
         self
     }
 
@@ -186,24 +193,45 @@ impl Agent {
                 return Ok(conversation);
             }
 
-            for tool_call in &response.tool_calls {
-                self.emit(AgentEvent::ToolCallStart {
-                    iteration,
-                    tool_name: tool_call.name.clone(),
-                });
+            if self.config.parallel_tools {
+                for tool_call in &response.tool_calls {
+                    self.emit(AgentEvent::ToolCallStart {
+                        iteration,
+                        tool_name: tool_call.name.clone(),
+                    });
+                }
 
-                let result = self.tools.execute(tool_call).await;
+                let results = self.tools.execute_parallel(&response.tool_calls).await;
 
-                self.emit(AgentEvent::ToolCallComplete {
-                    iteration,
-                    tool_name: tool_call.name.clone(),
-                    is_error: result.is_error,
-                });
+                for (tool_call, result) in response.tool_calls.iter().zip(&results) {
+                    self.emit(AgentEvent::ToolCallComplete {
+                        iteration,
+                        tool_name: tool_call.name.clone(),
+                        is_error: result.is_error,
+                    });
+                    conversation.push(Message::tool_result(&tool_call.id, &result.content));
+                    self.maybe_checkpoint(&conversation, iteration, CheckpointEvent::ToolCallComplete);
+                }
+            } else {
+                for tool_call in &response.tool_calls {
+                    self.emit(AgentEvent::ToolCallStart {
+                        iteration,
+                        tool_name: tool_call.name.clone(),
+                    });
 
-                conversation.push(Message::tool_result(&tool_call.id, &result.content));
+                    let result = self.tools.execute(tool_call).await;
 
-                // Maybe checkpoint after each tool call
-                self.maybe_checkpoint(&conversation, iteration, CheckpointEvent::ToolCallComplete);
+                    self.emit(AgentEvent::ToolCallComplete {
+                        iteration,
+                        tool_name: tool_call.name.clone(),
+                        is_error: result.is_error,
+                    });
+
+                    conversation.push(Message::tool_result(&tool_call.id, &result.content));
+
+                    // Maybe checkpoint after each tool call
+                    self.maybe_checkpoint(&conversation, iteration, CheckpointEvent::ToolCallComplete);
+                }
             }
         }
 
@@ -291,22 +319,43 @@ impl Agent {
                 return Ok(conversation);
             }
 
-            for tool_call in &response.tool_calls {
-                let _ = tx.send(AgentEvent::ToolCallStart {
-                    iteration,
-                    tool_name: tool_call.name.clone(),
-                });
+            if self.config.parallel_tools {
+                for tool_call in &response.tool_calls {
+                    let _ = tx.send(AgentEvent::ToolCallStart {
+                        iteration,
+                        tool_name: tool_call.name.clone(),
+                    });
+                }
 
-                let result = self.tools.execute(tool_call).await;
+                let results = self.tools.execute_parallel(&response.tool_calls).await;
 
-                let _ = tx.send(AgentEvent::ToolCallComplete {
-                    iteration,
-                    tool_name: tool_call.name.clone(),
-                    is_error: result.is_error,
-                });
+                for (tool_call, result) in response.tool_calls.iter().zip(&results) {
+                    let _ = tx.send(AgentEvent::ToolCallComplete {
+                        iteration,
+                        tool_name: tool_call.name.clone(),
+                        is_error: result.is_error,
+                    });
+                    conversation.push(Message::tool_result(&tool_call.id, &result.content));
+                    self.maybe_checkpoint(&conversation, iteration, CheckpointEvent::ToolCallComplete);
+                }
+            } else {
+                for tool_call in &response.tool_calls {
+                    let _ = tx.send(AgentEvent::ToolCallStart {
+                        iteration,
+                        tool_name: tool_call.name.clone(),
+                    });
 
-                conversation.push(Message::tool_result(&tool_call.id, &result.content));
-                self.maybe_checkpoint(&conversation, iteration, CheckpointEvent::ToolCallComplete);
+                    let result = self.tools.execute(tool_call).await;
+
+                    let _ = tx.send(AgentEvent::ToolCallComplete {
+                        iteration,
+                        tool_name: tool_call.name.clone(),
+                        is_error: result.is_error,
+                    });
+
+                    conversation.push(Message::tool_result(&tool_call.id, &result.content));
+                    self.maybe_checkpoint(&conversation, iteration, CheckpointEvent::ToolCallComplete);
+                }
             }
         }
 
@@ -358,6 +407,15 @@ mod tests {
     fn agent_config_builder() {
         let config = test_config().with_max_iterations(10).with_checkpoint_strategy(CheckpointStrategy::Never);
         assert_eq!(config.max_iterations, 10);
+    }
+
+    #[test]
+    fn agent_config_parallel_tools() {
+        let config = test_config().with_parallel_tools(true);
+        assert!(config.parallel_tools);
+
+        let config = test_config();
+        assert!(!config.parallel_tools);
     }
 
     #[test]
