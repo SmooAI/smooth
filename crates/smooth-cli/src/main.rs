@@ -108,7 +108,26 @@ enum Commands {
         cmd: AccessCommands,
     },
     /// Launch interactive coding assistant (same as running th with no args)
-    Code,
+    Code {
+        /// Run in headless mode (non-interactive)
+        #[arg(long)]
+        headless: bool,
+        /// Message to send (headless mode)
+        #[arg(long)]
+        message: Option<String>,
+        /// Read message from file
+        #[arg(long)]
+        file: Option<String>,
+        /// Model to use
+        #[arg(long)]
+        model: Option<String>,
+        /// Budget limit in USD
+        #[arg(long)]
+        budget: Option<f64>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Issue tracking (built-in, replaces beads)
     Issues {
         #[command(subcommand)]
@@ -340,7 +359,15 @@ async fn main() -> Result<()> {
 
     match cli.command {
         // No subcommand = launch smooth-code (THE Smooth experience)
-        None | Some(Commands::Code) => cmd_code().await,
+        None => cmd_code(false, None, None, None, None, false).await,
+        Some(Commands::Code {
+            headless,
+            message,
+            file,
+            model,
+            budget,
+            json,
+        }) => cmd_code(headless, message, file, model, budget, json).await,
         Some(Commands::Doctor) => cmd_doctor().await,
         Some(Commands::Up { no_leader, port }) => cmd_up(no_leader, port).await,
         Some(Commands::Down) => cmd_down().await,
@@ -687,9 +714,34 @@ async fn cmd_access(cmd: AccessCommands) -> Result<()> {
     Ok(())
 }
 
+/// Read all bytes from stdin if data is available (piped input).
+fn read_stdin() -> Option<String> {
+    use std::io::Read;
+    // Only read if stdin is not a terminal (i.e. data is piped in)
+    if atty::is(atty::Stream::Stdin) {
+        return None;
+    }
+    let mut buf = String::new();
+    std::io::stdin().read_to_string(&mut buf).ok()?;
+    if buf.trim().is_empty() {
+        None
+    } else {
+        Some(buf)
+    }
+}
+
 /// Launch smooth-code — THE Smooth experience.
 /// Auto-starts Big Smooth if not running.
-async fn cmd_code() -> Result<()> {
+async fn cmd_code(headless: bool, message: Option<String>, file: Option<String>, model: Option<String>, budget: Option<f64>, json: bool) -> Result<()> {
+    if headless {
+        let working_dir = std::env::current_dir()?;
+        let msg = message
+            .or_else(|| file.and_then(|f| std::fs::read_to_string(f).ok()))
+            .or_else(read_stdin)
+            .ok_or_else(|| anyhow::anyhow!("--message, --file, or stdin required for headless mode"))?;
+        return smooth_code::headless::run_headless(working_dir, msg, model, budget, json).await;
+    }
+
     // Check if Big Smooth is running
     let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(2)).build()?;
     let health = client.get("http://localhost:4400/health").send().await;
