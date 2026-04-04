@@ -10,6 +10,7 @@ use uuid::Uuid;
 use crate::autocomplete::AutocompleteState;
 use crate::files::FileTree;
 use crate::git::GitState;
+use crate::model_picker::ModelPickerState;
 
 /// Status of a tool call invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,6 +183,8 @@ pub struct AppState {
     pub autocomplete: AutocompleteState,
     /// Current git repository state (populated by `GitState::refresh`).
     pub git_state: Option<GitState>,
+    /// Model picker popup state.
+    pub model_picker: ModelPickerState,
 }
 
 impl AppState {
@@ -206,6 +209,7 @@ impl AppState {
             file_tree,
             autocomplete: AutocompleteState::default(),
             git_state: None,
+            model_picker: ModelPickerState::new(),
         }
     }
 
