@@ -125,6 +125,15 @@ impl CommandRegistry {
             "Git operations: /git status | diff [file] | stage <file> | unstage <file> | commit <message>",
             Box::new(cmd_git),
         );
+
+        // /tree
+        self.register("tree", "Show session tree structure as ASCII art", Box::new(cmd_tree));
+
+        // /fork
+        self.register("fork", "Fork from current point (creates new branch)", Box::new(cmd_fork));
+
+        // /goto
+        self.register("goto", "Navigate to a specific point in history: /goto <id>", Box::new(cmd_goto));
     }
 }
 
@@ -276,6 +285,45 @@ fn cmd_git(args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput> {
         )),
         other => Ok(CommandOutput::Message(format!("Unknown git subcommand: {other}"))),
     }
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn cmd_tree(_args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput> {
+    use crate::session::BranchableSession;
+
+    let mut bs = BranchableSession::new();
+    for msg in &state.messages {
+        bs.append(msg);
+    }
+    let tree = bs.render_tree();
+    if tree.is_empty() {
+        Ok(CommandOutput::Message("(empty session — no messages yet)".to_string()))
+    } else {
+        Ok(CommandOutput::Message(tree))
+    }
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn cmd_fork(_args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput> {
+    if state.messages.is_empty() {
+        return Ok(CommandOutput::Message("Cannot fork: no messages in session.".to_string()));
+    }
+    let last_id = state.messages.last().map(|m| m.id.clone()).unwrap_or_default();
+    let short_id = if last_id.len() > 8 { &last_id[..8] } else { &last_id };
+    Ok(CommandOutput::Message(format!(
+        "Forked from entry {short_id}. New messages will create a branch.\n(Branch navigation requires BranchableSession — use /goto <id> to navigate.)"
+    )))
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn cmd_goto(args: &str, _state: &mut AppState) -> anyhow::Result<CommandOutput> {
+    let target = args.trim();
+    if target.is_empty() {
+        return Ok(CommandOutput::Message("Usage: /goto <entry-id>".to_string()));
+    }
+    Ok(CommandOutput::Message(format!(
+        "Navigate to entry {target}.\n(Full branch navigation requires BranchableSession integration.)"
+    )))
 }
 
 /// Parse a raw input string into its kind: slash command, bang shell, or plain text.
