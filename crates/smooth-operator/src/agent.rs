@@ -1,9 +1,11 @@
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::checkpoint::{Checkpoint, CheckpointEvent, CheckpointStore, CheckpointStrategy};
 use crate::cost::{CostBudget, CostTracker, ModelPricing};
+use crate::human::{HumanRequest, HumanResponse};
 use crate::knowledge::KnowledgeBase;
 use crate::memory::Memory;
 use futures_util::StreamExt;
@@ -26,6 +28,8 @@ pub struct AgentConfig {
     pub memory: Option<Arc<dyn Memory>>,
     pub knowledge: Option<Arc<dyn KnowledgeBase>>,
     pub budget: Option<CostBudget>,
+    pub human_tx: Option<UnboundedSender<HumanRequest>>,
+    pub human_rx: Option<Arc<tokio::sync::Mutex<UnboundedReceiver<HumanResponse>>>>,
 }
 
 impl AgentConfig {
@@ -42,6 +46,8 @@ impl AgentConfig {
             memory: None,
             knowledge: None,
             budget: None,
+            human_tx: None,
+            human_rx: None,
         }
     }
 
@@ -77,6 +83,12 @@ impl AgentConfig {
 
     pub fn with_budget(mut self, budget: CostBudget) -> Self {
         self.budget = Some(budget);
+        self
+    }
+
+    pub fn with_human_channel(mut self, tx: UnboundedSender<HumanRequest>, rx: Arc<tokio::sync::Mutex<UnboundedReceiver<HumanResponse>>>) -> Self {
+        self.human_tx = Some(tx);
+        self.human_rx = Some(rx);
         self
     }
 }
@@ -121,6 +133,12 @@ pub enum AgentEvent {
     BudgetExceeded {
         spent_usd: f64,
         limit_usd: f64,
+    },
+    HumanInputRequired {
+        request: HumanRequest,
+    },
+    HumanInputReceived {
+        response: HumanResponse,
     },
     Error {
         message: String,
