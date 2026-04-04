@@ -1,8 +1,9 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
 use crate::checkpoint::{Checkpoint, CheckpointEvent, CheckpointStore, CheckpointStrategy};
+use crate::cost::{CostBudget, CostTracker, ModelPricing};
 use crate::knowledge::KnowledgeBase;
 use crate::memory::Memory;
 use futures_util::StreamExt;
@@ -24,6 +25,7 @@ pub struct AgentConfig {
     pub parallel_tools: bool,
     pub memory: Option<Arc<dyn Memory>>,
     pub knowledge: Option<Arc<dyn KnowledgeBase>>,
+    pub budget: Option<CostBudget>,
 }
 
 impl AgentConfig {
@@ -39,6 +41,7 @@ impl AgentConfig {
             parallel_tools: false,
             memory: None,
             knowledge: None,
+            budget: None,
         }
     }
 
@@ -69,6 +72,11 @@ impl AgentConfig {
 
     pub fn with_knowledge(mut self, knowledge: Arc<dyn KnowledgeBase>) -> Self {
         self.knowledge = Some(knowledge);
+        self
+    }
+
+    pub fn with_budget(mut self, budget: CostBudget) -> Self {
+        self.budget = Some(budget);
         self
     }
 }
@@ -110,6 +118,10 @@ pub enum AgentEvent {
         agent_id: String,
         max: u32,
     },
+    BudgetExceeded {
+        spent_usd: f64,
+        limit_usd: f64,
+    },
     Error {
         message: String,
     },
@@ -127,6 +139,7 @@ pub struct Agent {
     checkpoint_store: Option<Arc<dyn CheckpointStore>>,
     event_handler: Option<Box<dyn Fn(AgentEvent) + Send + Sync>>,
     reactive_compaction: std::sync::Mutex<ReactiveCompaction>,
+    pub cost_tracker: Arc<Mutex<CostTracker>>,
 }
 
 impl Agent {
@@ -138,6 +151,7 @@ impl Agent {
             checkpoint_store: None,
             event_handler: None,
             reactive_compaction: std::sync::Mutex::new(ReactiveCompaction::new()),
+            cost_tracker: Arc::new(Mutex::new(CostTracker::default())),
         }
     }
 
@@ -169,6 +183,7 @@ impl Agent {
     ///
     /// # Errors
     /// Returns error if the LLM call or tool execution fails fatally.
+    #[allow(clippy::too_many_lines)]
     pub async fn run(&self, user_message: impl Into<String>) -> anyhow::Result<Conversation> {
         let mut conversation = self.resume_or_new()?;
         let user_msg: String = user_message.into();
@@ -258,6 +273,11 @@ impl Agent {
                 content_preview,
                 tool_call_count: response.tool_calls.len(),
             });
+
+            // Record cost and check budget
+            if self.record_cost_and_check_budget(&response) {
+                return Ok(conversation);
+            }
 
             // If LLM returned content, add it as assistant message
             if !response.content.is_empty() || !response.tool_calls.is_empty() {
@@ -448,6 +468,11 @@ impl Agent {
                 tool_call_count: response.tool_calls.len(),
             });
 
+            // Record cost and check budget
+            if self.record_cost_and_check_budget(&response) {
+                return Ok(conversation);
+            }
+
             if !response.content.is_empty() || !response.tool_calls.is_empty() {
                 let mut msg = Message::assistant(&response.content);
                 msg.tool_calls.clone_from(&response.tool_calls);
@@ -571,6 +596,29 @@ impl Agent {
         }
     }
 
+    /// Record cost for an LLM response and check budget. Returns `true` if budget was exceeded.
+    fn record_cost_and_check_budget(&self, response: &crate::llm::LlmResponse) -> bool {
+        let model = &self.config.llm.model;
+        let pricing = ModelPricing::for_model(model);
+
+        {
+            let mut tracker = self.cost_tracker.lock().expect("lock cost_tracker");
+            tracker.record(model, &response.usage, &pricing);
+
+            if let Some(budget) = &self.config.budget {
+                if let Err(exceeded) = tracker.check_budget(budget) {
+                    self.emit(AgentEvent::BudgetExceeded {
+                        spent_usd: exceeded.spent_usd,
+                        limit_usd: exceeded.limit_usd.unwrap_or(0.0),
+                    });
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
     fn emit(&self, event: AgentEvent) {
         if let Some(handler) = &self.event_handler {
             handler(event);
@@ -686,6 +734,10 @@ mod tests {
                 iterations: 5,
             },
             AgentEvent::MaxIterationsReached { agent_id: "a".into(), max: 50 },
+            AgentEvent::BudgetExceeded {
+                spent_usd: 5.0,
+                limit_usd: 3.0,
+            },
             AgentEvent::Error { message: "oops".into() },
             AgentEvent::TokenDelta { content: "hello".into() },
             AgentEvent::StreamingComplete,
