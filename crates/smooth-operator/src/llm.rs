@@ -926,7 +926,13 @@ pub fn load_opencode_api_key() -> anyhow::Result<String> {
     let auth_path = home.join(".local/share/opencode/auth.json");
     let contents = std::fs::read_to_string(&auth_path)?;
     let auth: serde_json::Value = serde_json::from_str(&contents)?;
-    auth["token"].as_str().map(String::from).ok_or_else(|| anyhow::anyhow!("no token in auth.json"))
+    // Try multiple key locations in the auth file
+    auth["token"]
+        .as_str()
+        .or_else(|| auth["opencode"]["key"].as_str())
+        .or_else(|| auth["key"].as_str())
+        .map(String::from)
+        .ok_or_else(|| anyhow::anyhow!("no token in auth.json"))
 }
 
 #[cfg(test)]
