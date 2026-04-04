@@ -8,6 +8,7 @@ description = "Smooth Coding — AI-assisted coding TUI"
 
 [dependencies]
 smooth-operator.workspace = true
+async-trait.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 pulldown-cmark.workspace = true
