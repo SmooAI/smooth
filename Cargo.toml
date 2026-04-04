@@ -106,3 +106,4 @@ smooth-web = { path = "crates/smooth-web" }
 smooth-scribe = { path = "crates/smooth-scribe" }
 smooth-archivist = { path = "crates/smooth-archivist" }
 smooth-plugin = { path = "crates/smooth-plugin" }
+smooth-coding = { path = "crates/smooth-coding" }
