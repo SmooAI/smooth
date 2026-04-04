@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use crate::git::GitState;
 use crate::state::AppState;
 
 /// Output produced by a slash command handler.
@@ -117,6 +118,13 @@ impl CommandRegistry {
 
         // /compact
         self.register("compact", "Trigger context compaction", Box::new(cmd_compact));
+
+        // /git
+        self.register(
+            "git",
+            "Git operations: /git status | diff [file] | stage <file> | unstage <file> | commit <message>",
+            Box::new(cmd_git),
+        );
     }
 }
 
@@ -201,6 +209,68 @@ fn cmd_status(_args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput
 fn cmd_compact(_args: &str, _state: &mut AppState) -> anyhow::Result<CommandOutput> {
     // Placeholder — real compaction would summarise older messages.
     Ok(CommandOutput::Message("Context compaction triggered (not yet implemented).".to_string()))
+}
+
+fn cmd_git(args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput> {
+    let args = args.trim();
+    let (sub, rest) = args.split_once(' ').unwrap_or((args, ""));
+    let rest = rest.trim();
+
+    match sub {
+        "status" => {
+            let git_state = GitState::refresh(&state.working_dir)?;
+            state.git_state = Some(git_state.clone());
+
+            if !git_state.is_repo {
+                return Ok(CommandOutput::Message("Not a git repository.".to_string()));
+            }
+
+            let mut lines = vec![format!("Branch: {}", git_state.branch)];
+            if git_state.files.is_empty() {
+                lines.push("Working tree clean.".to_string());
+            } else {
+                lines.push(format!("{} changed file(s):", git_state.files.len()));
+                for f in &git_state.files {
+                    lines.push(format!("  {:>10}  {}", f.status, f.path));
+                }
+            }
+            Ok(CommandOutput::Message(lines.join("\n")))
+        }
+        "diff" => {
+            let file = if rest.is_empty() { "." } else { rest };
+            let diff = GitState::diff(&state.working_dir, file)?;
+            if diff.is_empty() {
+                Ok(CommandOutput::Message("No diff output.".to_string()))
+            } else {
+                Ok(CommandOutput::Message(diff))
+            }
+        }
+        "stage" => {
+            if rest.is_empty() {
+                return Ok(CommandOutput::Message("Usage: /git stage <file>".to_string()));
+            }
+            GitState::stage(&state.working_dir, rest)?;
+            Ok(CommandOutput::Message(format!("Staged: {rest}")))
+        }
+        "unstage" => {
+            if rest.is_empty() {
+                return Ok(CommandOutput::Message("Usage: /git unstage <file>".to_string()));
+            }
+            GitState::unstage(&state.working_dir, rest)?;
+            Ok(CommandOutput::Message(format!("Unstaged: {rest}")))
+        }
+        "commit" => {
+            if rest.is_empty() {
+                return Ok(CommandOutput::Message("Usage: /git commit <message>".to_string()));
+            }
+            GitState::commit(&state.working_dir, rest)?;
+            Ok(CommandOutput::Message(format!("Committed: {rest}")))
+        }
+        "" => Ok(CommandOutput::Message(
+            "Usage: /git status | diff [file] | stage <file> | unstage <file> | commit <message>".to_string(),
+        )),
+        other => Ok(CommandOutput::Message(format!("Unknown git subcommand: {other}"))),
+    }
 }
 
 /// Parse a raw input string into its kind: slash command, bang shell, or plain text.

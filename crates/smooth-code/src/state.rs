@@ -7,6 +7,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::git::GitState;
+
 /// Status of a tool call invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToolStatus {
@@ -172,6 +174,8 @@ pub struct AppState {
     pub thinking: bool,
     /// Current frame index for the braille spinner animation.
     pub spinner_frame: usize,
+    /// Current git repository state (populated by `GitState::refresh`).
+    pub git_state: Option<GitState>,
 }
 
 impl AppState {
@@ -192,6 +196,7 @@ impl AppState {
             should_quit: false,
             thinking: false,
             spinner_frame: 0,
+            git_state: None,
         }
     }
 
