@@ -2662,6 +2662,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "smooth-narc",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
