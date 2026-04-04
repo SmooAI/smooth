@@ -52,6 +52,13 @@ jobs:
                   pnpm install --frozen-lockfile
                   pnpm build
 
+            - name: Install nextest
+              uses: taiki-e/install-action@nextest
+
+            - name: Test
+              run: cargo nextest run --profile ci
+              continue-on-error: true
+
             - name: Build binary
               run: cargo build --release --target ${{ matrix.target }} -p smooth-cli
               env:
