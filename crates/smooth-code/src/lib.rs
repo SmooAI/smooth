@@ -8,6 +8,7 @@
 pub mod app;
 pub mod autocomplete;
 pub mod commands;
+pub mod extensions;
 pub mod files;
 pub mod git;
 pub mod layout;

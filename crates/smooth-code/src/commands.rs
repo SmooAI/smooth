@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use crate::extensions::ExtensionRegistry;
 use crate::git::GitState;
 use crate::state::AppState;
 
@@ -134,6 +135,27 @@ impl CommandRegistry {
 
         // /goto
         self.register("goto", "Navigate to a specific point in history: /goto <id>", Box::new(cmd_goto));
+
+        // /skill
+        self.register("skill", "Invoke a skill: /skill (list) or /skill:<name> [args]", Box::new(cmd_skill));
+    }
+
+    /// Execute a slash command, handling `/skill:name` syntax by splitting the colon-separated
+    /// skill name from the command prefix.
+    ///
+    /// Returns `None` if the command is not found.
+    pub fn execute_input(&self, name: &str, args: &str, state: &mut AppState) -> Option<anyhow::Result<CommandOutput>> {
+        // Check for `/skill:name` pattern
+        if let Some(skill_name) = name.strip_prefix("skill:") {
+            // Reconstruct args as "skill_name rest_of_args"
+            let combined = if args.is_empty() {
+                skill_name.to_string()
+            } else {
+                format!("{skill_name} {args}")
+            };
+            return self.execute("skill", &combined, state);
+        }
+        self.execute(name, args, state)
     }
 }
 
@@ -324,6 +346,47 @@ fn cmd_goto(args: &str, _state: &mut AppState) -> anyhow::Result<CommandOutput> 
     Ok(CommandOutput::Message(format!(
         "Navigate to entry {target}.\n(Full branch navigation requires BranchableSession integration.)"
     )))
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn cmd_skill(args: &str, _state: &mut AppState) -> anyhow::Result<CommandOutput> {
+    let args = args.trim();
+
+    // Build a registry and load the default skills directory
+    let mut registry = ExtensionRegistry::new();
+    let skills_dir = registry.skills_dir().to_path_buf();
+    if skills_dir.is_dir() {
+        let _ = registry.load_skills_dir(&skills_dir);
+    }
+
+    if args.is_empty() {
+        // /skill with no args — list available skills
+        let skills = registry.list_skills();
+        if skills.is_empty() {
+            return Ok(CommandOutput::Message("No skills available. Add .md files to ~/.smooth/skills/".to_string()));
+        }
+        let mut lines = vec!["Available skills:".to_string()];
+        for s in &skills {
+            lines.push(format!("  /skill:{} — {}", s.name, s.description));
+        }
+        Ok(CommandOutput::Message(lines.join("\n")))
+    } else {
+        // /skill:name [args] — the name is the first word of args
+        let (skill_name, _rest) = args.split_once(' ').unwrap_or((args, ""));
+
+        registry.find_skill(skill_name).map_or_else(
+            || {
+                Ok(CommandOutput::Message(format!(
+                    "Unknown skill: {skill_name}. Use /skill to list available skills."
+                )))
+            },
+            |skill| {
+                let vars = HashMap::new();
+                let rendered = skill.render(&vars);
+                Ok(CommandOutput::Message(rendered))
+            },
+        )
+    }
 }
 
 /// Parse a raw input string into its kind: slash command, bang shell, or plain text.
