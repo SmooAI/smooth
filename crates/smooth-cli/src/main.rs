@@ -100,6 +100,11 @@ enum Commands {
         #[command(subcommand)]
         cmd: TailscaleCommands,
     },
+    /// Operator access control
+    Access {
+        #[command(subcommand)]
+        cmd: AccessCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -209,6 +214,31 @@ enum TailscaleCommands {
     Status,
 }
 
+#[derive(Subcommand)]
+enum AccessCommands {
+    /// List pending access requests
+    Pending,
+    /// Approve domain access for a bead
+    Approve {
+        /// Bead ID
+        bead: String,
+        /// Domain to approve
+        domain: String,
+    },
+    /// Deny domain access for a bead
+    Deny {
+        /// Bead ID
+        bead: String,
+        /// Domain to deny
+        domain: String,
+    },
+    /// Show current policy for an operator
+    Policy {
+        /// Operator ID
+        operator_id: String,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize tracing
@@ -244,6 +274,7 @@ async fn main() -> Result<()> {
         }
         Commands::Worktree { cmd } => cmd_worktree(cmd),
         Commands::Tailscale { cmd } => cmd_tailscale(cmd),
+        Commands::Access { cmd } => cmd_access(cmd).await,
         _ => {
             println!("Command not yet implemented. Coming soon!");
             Ok(())
@@ -494,6 +525,69 @@ fn cmd_worktree(cmd: WorktreeCommands) -> Result<()> {
                 }
             }
             println!("Merged {branch} to main");
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_access(cmd: AccessCommands) -> Result<()> {
+    let client = reqwest::Client::new();
+    let base = "http://localhost:4400/api/access";
+
+    match cmd {
+        AccessCommands::Pending => {
+            let resp = client.get(format!("{base}/pending")).send().await?;
+            let body: serde_json::Value = resp.json().await?;
+            if let Some(requests) = body.as_array() {
+                if requests.is_empty() {
+                    println!("No pending access requests.");
+                } else {
+                    println!("{:<12} {:<20} {:<30} {}", "Bead", "Operator", "Resource", "Reason");
+                    println!("{}", "-".repeat(80));
+                    for req in requests {
+                        println!(
+                            "{:<12} {:<20} {:<30} {}",
+                            req["bead_id"].as_str().unwrap_or("-"),
+                            req["operator_id"].as_str().unwrap_or("-"),
+                            req["resource"].as_str().unwrap_or("-"),
+                            req["reason"].as_str().unwrap_or("-"),
+                        );
+                    }
+                }
+            }
+        }
+        AccessCommands::Approve { bead, domain } => {
+            let resp = client
+                .post(format!("{base}/approve"))
+                .json(&serde_json::json!({"bead_id": bead, "domain": domain}))
+                .send()
+                .await?;
+            if resp.status().is_success() {
+                println!("Approved {domain} for {bead}");
+            } else {
+                println!("Failed: {}", resp.text().await?);
+            }
+        }
+        AccessCommands::Deny { bead, domain } => {
+            let resp = client
+                .post(format!("{base}/deny"))
+                .json(&serde_json::json!({"bead_id": bead, "domain": domain}))
+                .send()
+                .await?;
+            if resp.status().is_success() {
+                println!("Denied {domain} for {bead}");
+            } else {
+                println!("Failed: {}", resp.text().await?);
+            }
+        }
+        AccessCommands::Policy { operator_id } => {
+            let resp = client.get(format!("http://localhost:4400/api/operators/{operator_id}/policy")).send().await?;
+            if resp.status().is_success() {
+                let body: serde_json::Value = resp.json().await?;
+                println!("{}", serde_json::to_string_pretty(&body)?);
+            } else {
+                println!("Operator {operator_id} not found or no policy set");
+            }
         }
     }
     Ok(())
