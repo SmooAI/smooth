@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::checkpoint::{Checkpoint, CheckpointEvent, CheckpointStore, CheckpointStrategy};
 use futures_util::StreamExt;
 
-use crate::conversation::{Conversation, Message};
+use crate::conversation::{CompactionStrategy, Conversation, Message};
 use crate::llm::{accumulate_stream_events, LlmClient, LlmConfig, StreamEvent};
 use crate::tool::ToolRegistry;
 
@@ -18,6 +18,7 @@ pub struct AgentConfig {
     pub max_iterations: u32,
     pub max_context_tokens: usize,
     pub checkpoint_strategy: CheckpointStrategy,
+    pub compaction_strategy: CompactionStrategy,
     pub parallel_tools: bool,
 }
 
@@ -30,6 +31,7 @@ impl AgentConfig {
             max_iterations: 50,
             max_context_tokens: 100_000,
             checkpoint_strategy: CheckpointStrategy::default(),
+            compaction_strategy: CompactionStrategy::default(),
             parallel_tools: false,
         }
     }
@@ -46,6 +48,11 @@ impl AgentConfig {
 
     pub fn with_checkpoint_strategy(mut self, strategy: CheckpointStrategy) -> Self {
         self.checkpoint_strategy = strategy;
+        self
+    }
+
+    pub fn with_compaction_strategy(mut self, strategy: CompactionStrategy) -> Self {
+        self.compaction_strategy = strategy;
         self
     }
 }
@@ -154,6 +161,17 @@ impl Agent {
         let tool_schemas = self.tools.schemas();
 
         for iteration in 1..=self.config.max_iterations {
+            // Compact if approaching context limit
+            if conversation.needs_compaction() {
+                let result = conversation.compact(&self.config.compaction_strategy, None);
+                tracing::info!(
+                    messages_removed = result.messages_removed,
+                    tokens_before = result.tokens_before,
+                    tokens_after = result.tokens_after,
+                    "compacted conversation"
+                );
+            }
+
             // Observe: get context window
             let context = conversation.context_window();
             let context_refs: Vec<&Message> = context.into_iter().collect();
@@ -261,6 +279,17 @@ impl Agent {
         let tool_schemas = self.tools.schemas();
 
         for iteration in 1..=self.config.max_iterations {
+            // Compact if approaching context limit
+            if conversation.needs_compaction() {
+                let result = conversation.compact(&self.config.compaction_strategy, None);
+                tracing::info!(
+                    messages_removed = result.messages_removed,
+                    tokens_before = result.tokens_before,
+                    tokens_after = result.tokens_after,
+                    "compacted conversation"
+                );
+            }
+
             let context = conversation.context_window();
             let context_refs: Vec<&Message> = context.into_iter().collect();
 
