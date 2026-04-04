@@ -3,6 +3,8 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::checkpoint::{Checkpoint, CheckpointEvent, CheckpointStore, CheckpointStrategy};
+use crate::knowledge::KnowledgeBase;
+use crate::memory::Memory;
 use futures_util::StreamExt;
 
 use crate::conversation::{CompactionStrategy, Conversation, Message};
@@ -10,7 +12,7 @@ use crate::llm::{accumulate_stream_events, LlmClient, LlmConfig, StreamEvent};
 use crate::tool::ToolRegistry;
 
 /// Configuration for an agent.
-#[derive(Debug, Clone)]
+#[allow(missing_debug_implementations)]
 pub struct AgentConfig {
     pub name: String,
     pub system_prompt: String,
@@ -20,6 +22,8 @@ pub struct AgentConfig {
     pub checkpoint_strategy: CheckpointStrategy,
     pub compaction_strategy: CompactionStrategy,
     pub parallel_tools: bool,
+    pub memory: Option<Arc<dyn Memory>>,
+    pub knowledge: Option<Arc<dyn KnowledgeBase>>,
 }
 
 impl AgentConfig {
@@ -33,6 +37,8 @@ impl AgentConfig {
             checkpoint_strategy: CheckpointStrategy::default(),
             compaction_strategy: CompactionStrategy::default(),
             parallel_tools: false,
+            memory: None,
+            knowledge: None,
         }
     }
 
@@ -53,6 +59,16 @@ impl AgentConfig {
 
     pub fn with_compaction_strategy(mut self, strategy: CompactionStrategy) -> Self {
         self.compaction_strategy = strategy;
+        self
+    }
+
+    pub fn with_memory(mut self, memory: Arc<dyn Memory>) -> Self {
+        self.memory = Some(memory);
+        self
+    }
+
+    pub fn with_knowledge(mut self, knowledge: Arc<dyn KnowledgeBase>) -> Self {
+        self.knowledge = Some(knowledge);
         self
     }
 }
@@ -153,7 +169,15 @@ impl Agent {
     /// Returns error if the LLM call or tool execution fails fatally.
     pub async fn run(&self, user_message: impl Into<String>) -> anyhow::Result<Conversation> {
         let mut conversation = self.resume_or_new()?;
-        conversation.push(Message::user(user_message));
+        let user_msg: String = user_message.into();
+
+        // Inject memory/knowledge context before the user message
+        let context_messages = self.build_context_messages(&user_msg);
+        for msg in context_messages {
+            conversation.push(msg);
+        }
+
+        conversation.push(Message::user(user_msg));
 
         self.emit(AgentEvent::Started { agent_id: self.id.clone() });
 
@@ -269,9 +293,18 @@ impl Agent {
     ///
     /// # Errors
     /// Returns error if the LLM call or tool execution fails fatally.
+    #[allow(clippy::too_many_lines)]
     pub async fn run_with_channel(&self, user_message: impl Into<String>, tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>) -> anyhow::Result<Conversation> {
         let mut conversation = self.resume_or_new()?;
-        conversation.push(Message::user(user_message));
+        let user_msg: String = user_message.into();
+
+        // Inject memory/knowledge context before the user message
+        let context_messages = self.build_context_messages(&user_msg);
+        for msg in context_messages {
+            conversation.push(msg);
+        }
+
+        conversation.push(Message::user(user_msg));
 
         let _ = tx.send(AgentEvent::Started { agent_id: self.id.clone() });
 
@@ -394,6 +427,46 @@ impl Agent {
         });
 
         Ok(conversation)
+    }
+
+    /// Build context injection messages from memory and knowledge based on the last user message.
+    fn build_context_messages(&self, last_user_message: &str) -> Vec<Message> {
+        use std::fmt::Write;
+        let mut context_parts = Vec::new();
+
+        if let Some(memory) = &self.config.memory {
+            match memory.recall(last_user_message, 5) {
+                Ok(entries) if !entries.is_empty() => {
+                    let mut buf = String::from("[Recalled memories]\n");
+                    for entry in &entries {
+                        let _ = writeln!(buf, "- ({:?}, relevance={:.2}): {}", entry.memory_type, entry.relevance, entry.content);
+                    }
+                    context_parts.push(buf);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to recall memories");
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(knowledge) = &self.config.knowledge {
+            match knowledge.query(last_user_message, 3) {
+                Ok(results) if !results.is_empty() => {
+                    let mut buf = String::from("[Relevant knowledge]\n");
+                    for result in &results {
+                        let _ = writeln!(buf, "- (source={}, score={:.2}): {}", result.source, result.score, result.chunk);
+                    }
+                    context_parts.push(buf);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to query knowledge base");
+                }
+                _ => {}
+            }
+        }
+
+        context_parts.into_iter().map(Message::system).collect()
     }
 
     fn maybe_checkpoint(&self, conversation: &Conversation, iteration: u32, event: CheckpointEvent) {
