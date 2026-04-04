@@ -3,8 +3,10 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::checkpoint::{Checkpoint, CheckpointEvent, CheckpointStore, CheckpointStrategy};
+use futures_util::StreamExt;
+
 use crate::conversation::{Conversation, Message};
-use crate::llm::{LlmClient, LlmConfig};
+use crate::llm::{accumulate_stream_events, LlmClient, LlmConfig, StreamEvent};
 use crate::tool::ToolRegistry;
 
 /// Configuration for an agent.
@@ -81,6 +83,10 @@ pub enum AgentEvent {
     Error {
         message: String,
     },
+    TokenDelta {
+        content: String,
+    },
+    StreamingComplete,
 }
 
 /// An AI agent that runs an observe → think → act loop.
@@ -202,6 +208,109 @@ impl Agent {
         }
 
         self.emit(AgentEvent::MaxIterationsReached {
+            agent_id: self.id.clone(),
+            max: self.config.max_iterations,
+        });
+
+        Ok(conversation)
+    }
+
+    /// Run the agent loop with streaming LLM responses, sending events through a channel.
+    ///
+    /// This is the streaming counterpart to `run()`. Instead of using the closure-based
+    /// event handler, all events (including token deltas) are sent through the provided
+    /// `mpsc::UnboundedSender`. This is designed for TUI consumption.
+    ///
+    /// # Errors
+    /// Returns error if the LLM call or tool execution fails fatally.
+    pub async fn run_with_channel(&self, user_message: impl Into<String>, tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>) -> anyhow::Result<Conversation> {
+        let mut conversation = self.resume_or_new()?;
+        conversation.push(Message::user(user_message));
+
+        let _ = tx.send(AgentEvent::Started { agent_id: self.id.clone() });
+
+        let llm = LlmClient::new(self.config.llm.clone());
+        let tool_schemas = self.tools.schemas();
+
+        for iteration in 1..=self.config.max_iterations {
+            let context = conversation.context_window();
+            let context_refs: Vec<&Message> = context.into_iter().collect();
+
+            let _ = tx.send(AgentEvent::LlmRequest {
+                iteration,
+                message_count: context_refs.len(),
+            });
+
+            // Stream the LLM response
+            let mut stream = llm.chat_stream(&context_refs, &tool_schemas).await?;
+
+            // Forward token deltas through the channel while accumulating
+            let (accumulator_tx, accumulator_rx) = tokio::sync::mpsc::channel::<anyhow::Result<StreamEvent>>(256);
+
+            // Tap into the stream: send deltas to channel, forward all to accumulator
+            while let Some(event_result) = stream.next().await {
+                match &event_result {
+                    Ok(StreamEvent::Delta { content }) => {
+                        let _ = tx.send(AgentEvent::TokenDelta { content: content.clone() });
+                    }
+                    Ok(StreamEvent::Done { .. }) => {
+                        let _ = tx.send(AgentEvent::StreamingComplete);
+                    }
+                    _ => {}
+                }
+                if accumulator_tx.send(event_result).await.is_err() {
+                    break;
+                }
+            }
+            drop(accumulator_tx);
+
+            // Accumulate the forwarded events into a full response
+            let rx_stream = tokio_stream::wrappers::ReceiverStream::new(accumulator_rx);
+            let response = accumulate_stream_events(Box::pin(rx_stream)).await?;
+
+            let content_preview = response.content.chars().take(100).collect::<String>();
+            let _ = tx.send(AgentEvent::LlmResponse {
+                iteration,
+                content_preview,
+                tool_call_count: response.tool_calls.len(),
+            });
+
+            if !response.content.is_empty() || !response.tool_calls.is_empty() {
+                let mut msg = Message::assistant(&response.content);
+                msg.tool_calls.clone_from(&response.tool_calls);
+                conversation.push(msg);
+            }
+
+            self.maybe_checkpoint(&conversation, iteration, CheckpointEvent::LlmResponse);
+
+            if response.tool_calls.is_empty() {
+                let _ = tx.send(AgentEvent::Completed {
+                    agent_id: self.id.clone(),
+                    iterations: iteration,
+                });
+                return Ok(conversation);
+            }
+
+            for tool_call in &response.tool_calls {
+                let _ = tx.send(AgentEvent::ToolCallStart {
+                    iteration,
+                    tool_name: tool_call.name.clone(),
+                });
+
+                let result = self.tools.execute(tool_call).await;
+
+                let _ = tx.send(AgentEvent::ToolCallComplete {
+                    iteration,
+                    tool_name: tool_call.name.clone(),
+                    is_error: result.is_error,
+                });
+
+                conversation.push(Message::tool_result(&tool_call.id, &result.content));
+                self.maybe_checkpoint(&conversation, iteration, CheckpointEvent::ToolCallComplete);
+            }
+        }
+
+        let _ = tx.send(AgentEvent::MaxIterationsReached {
             agent_id: self.id.clone(),
             max: self.config.max_iterations,
         });
@@ -335,10 +444,29 @@ mod tests {
             },
             AgentEvent::MaxIterationsReached { agent_id: "a".into(), max: 50 },
             AgentEvent::Error { message: "oops".into() },
+            AgentEvent::TokenDelta { content: "hello".into() },
+            AgentEvent::StreamingComplete,
         ];
         for event in events {
             let json = serde_json::to_string(&event).expect("serialize");
             assert!(!json.is_empty());
         }
+    }
+
+    #[test]
+    fn token_delta_event_serialization() {
+        let event = AgentEvent::TokenDelta {
+            content: "streaming text".into(),
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("TokenDelta"));
+        assert!(json.contains("streaming text"));
+    }
+
+    #[test]
+    fn streaming_complete_event_serialization() {
+        let event = AgentEvent::StreamingComplete;
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("StreamingComplete"));
     }
 }
