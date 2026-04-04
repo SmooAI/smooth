@@ -76,6 +76,18 @@ impl ToolCallState {
     }
 }
 
+/// Which panel currently has keyboard focus.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum FocusPanel {
+    /// The chat / message list.
+    Chat,
+    /// The text input area.
+    #[default]
+    Input,
+    /// The sidebar file browser.
+    Sidebar,
+}
+
 /// The current input mode of the TUI.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -151,6 +163,8 @@ impl ChatMessage {
 pub struct AppState {
     /// Current input mode.
     pub mode: Mode,
+    /// Which panel currently has keyboard focus.
+    pub focus: FocusPanel,
     /// Working directory for the coding session.
     pub working_dir: PathBuf,
     /// Unique session identifier.
@@ -193,6 +207,7 @@ impl AppState {
         let file_tree = FileTree::from_dir(&working_dir).ok();
         Self {
             mode: Mode::default(),
+            focus: FocusPanel::default(),
             working_dir,
             session_id: Uuid::new_v4().to_string(),
             messages: Vec::new(),

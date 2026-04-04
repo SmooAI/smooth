@@ -1,12 +1,13 @@
 //! Main render function — draws the full TUI frame.
 
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::layout::compute_layout;
-use crate::state::{AppState, ChatRole, ToolStatus};
+use crate::state::{AppState, ChatRole, FocusPanel, ToolStatus};
 use crate::theme;
 
 /// Render the full TUI frame from the current application state.
@@ -26,17 +27,52 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     }
 }
 
+/// The ASCII art banner rows for the welcome screen.
+const BANNER_ROWS: [&str; 6] = [
+    " \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2588}\u{2557}   \u{2588}\u{2588}\u{2588}\u{2557} \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557}  \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557} \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2557}  \u{2588}\u{2588}\u{2557}",
+    " \u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557} \u{2588}\u{2588}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2550}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2550}\u{2588}\u{2588}\u{2557}\u{255a}\u{2550}\u{2550}\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{255d}\u{2588}\u{2588}\u{2551}  \u{2588}\u{2588}\u{2551}",
+    " \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2554}\u{2588}\u{2588}\u{2588}\u{2588}\u{2554}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2551}",
+    " \u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551}\u{255a}\u{2588}\u{2588}\u{2554}\u{255d}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2588}\u{2588}\u{2551}",
+    " \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551} \u{255a}\u{2550}\u{255d} \u{2588}\u{2588}\u{2551}\u{255a}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2554}\u{255d}\u{255a}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2554}\u{255d}   \u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}  \u{2588}\u{2588}\u{2551}",
+    " \u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}\u{255a}\u{2550}\u{255d}     \u{255a}\u{2550}\u{255d} \u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}  \u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}    \u{255a}\u{2550}\u{255d}   \u{255a}\u{2550}\u{255d}  \u{255a}\u{2550}\u{255d}",
+];
+
+/// Render the welcome banner with gradient colors when there are no messages.
+fn render_welcome_banner(lines: &mut Vec<Line<'_>>) {
+    let total_rows = BANNER_ROWS.len();
+    // Add a blank line at top for spacing
+    lines.push(Line::from(""));
+    for (i, row) in BANNER_ROWS.iter().enumerate() {
+        let style = theme::gradient_row(i, total_rows);
+        lines.push(Line::from(Span::styled(*row, style)).alignment(Alignment::Center));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("AI Agent Orchestration Platform", theme::muted())).alignment(Alignment::Center));
+    lines.push(Line::from(Span::styled("smoo.ai", Style::default().fg(theme::SMOO_GRAY_500))).alignment(Alignment::Center));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("Type a message to get started. /help for commands.", theme::muted())).alignment(Alignment::Center));
+    lines.push(Line::from(""));
+}
+
 /// Render the chat message area.
 fn render_chat(frame: &mut Frame, state: &AppState, area: Rect) {
     let block = Block::default()
         .title(Span::styled(" Smooth Coding ", theme::title()))
         .borders(Borders::ALL)
-        .border_style(theme::muted());
+        .border_style(theme::panel_border(state.focus == FocusPanel::Chat));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let mut lines: Vec<Line<'_>> = Vec::new();
+
+    // Show welcome banner when there are no messages
+    if state.messages.is_empty() && !state.thinking {
+        render_welcome_banner(&mut lines);
+        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, inner);
+        return;
+    }
 
     for msg in &state.messages {
         let (label, label_style) = match msg.role {
@@ -148,7 +184,10 @@ fn render_chat(frame: &mut Frame, state: &AppState, area: Rect) {
 
 /// Render the text input area.
 fn render_input(frame: &mut Frame, state: &AppState, area: Rect) {
-    let block = Block::default().title(" Message ").borders(Borders::ALL).border_style(theme::input_style());
+    let block = Block::default()
+        .title(" Message ")
+        .borders(Borders::ALL)
+        .border_style(theme::panel_border(state.focus == FocusPanel::Input));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -184,7 +223,10 @@ fn render_status(frame: &mut Frame, state: &AppState, area: Rect) {
 
 /// Render the sidebar panel with the file tree.
 fn render_sidebar(frame: &mut Frame, state: &AppState, area: Rect) {
-    let block = Block::default().title(" Files ").borders(Borders::ALL).border_style(theme::muted());
+    let block = Block::default()
+        .title(" Files ")
+        .borders(Borders::ALL)
+        .border_style(theme::panel_border(state.focus == FocusPanel::Sidebar));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -230,14 +272,14 @@ fn render_sidebar(frame: &mut Frame, state: &AppState, area: Rect) {
             let text = format!("{indent}{prefix}{}", entry.name);
 
             if global_idx == file_tree.selected {
-                ListItem::new(Span::styled(
-                    text,
-                    ratatui::style::Style::default().bg(theme::SMOO_GREEN).fg(ratatui::style::Color::Black),
-                ))
+                ListItem::new(Span::styled(text, Style::default().bg(theme::SMOO_GREEN).fg(ratatui::style::Color::Black)))
             } else if entry.is_dir {
                 ListItem::new(Span::styled(text, theme::title()))
             } else {
-                ListItem::new(Span::raw(text))
+                // Color file name by extension
+                let ext = entry.name.rsplit('.').next().unwrap_or("");
+                let color = theme::file_color(ext);
+                ListItem::new(Span::styled(text, Style::default().fg(color)))
             }
         })
         .collect();
