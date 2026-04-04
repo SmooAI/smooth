@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::layout::compute_layout;
-use crate::state::{AppState, ChatRole, FocusPanel, ToolStatus};
+use crate::state::{AppState, ChatRole, FocusPanel, HealthStatus, ToolStatus};
 use crate::theme;
 
 /// Render the full TUI frame from the current application state.
@@ -211,12 +211,22 @@ fn render_status(frame: &mut Frame, state: &AppState, area: Rect) {
         .filter(|g| g.is_repo)
         .map_or(String::new(), |g| format!("{} \u{2387} | ", g.branch));
 
-    let status_text = format!(
-        " {branch_indicator}{} | tokens: {} | Ctrl+C quit | Ctrl+B sidebar ",
-        state.model_name, state.total_tokens
-    );
+    let (health_dot, health_style) = match state.health_status {
+        HealthStatus::Healthy => ("\u{25cf}", Style::default().fg(theme::SUCCESS_GREEN)),
+        HealthStatus::Warnings(_) => ("\u{25cf}", Style::default().fg(theme::SMOO_ORANGE)),
+        HealthStatus::Unknown => ("\u{25cf}", Style::default().fg(theme::SMOO_GRAY_700)),
+    };
 
-    let paragraph = Paragraph::new(status_text).style(theme::status_style()).alignment(Alignment::Left);
+    let status_left = format!(" {branch_indicator}{} | tokens: {} | ", state.model_name, state.total_tokens);
+    let status_right = " | Ctrl+C quit | Ctrl+B sidebar ";
+
+    let line = Line::from(vec![
+        Span::styled(status_left, theme::status_style()),
+        Span::styled(health_dot, health_style),
+        Span::styled(status_right, theme::status_style()),
+    ]);
+
+    let paragraph = Paragraph::new(line).alignment(Alignment::Left);
 
     frame.render_widget(paragraph, area);
 }

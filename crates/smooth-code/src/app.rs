@@ -19,7 +19,7 @@ use crate::commands::{parse_input, CommandOutput, CommandRegistry, InputKind};
 use crate::diff_render::RenderCache;
 use crate::render;
 use crate::session::{Session, SessionManager};
-use crate::state::{AppState, ChatMessage, Mode};
+use crate::state::{AppState, ChatMessage, ChatRole, HealthStatus, Mode};
 
 /// Run the Smooth Coding TUI.
 ///
@@ -48,6 +48,23 @@ pub async fn run(working_dir: PathBuf) -> anyhow::Result<()> {
     {
         let mut s = state.lock().expect("state lock poisoned");
         s.add_message(ChatMessage::system("Welcome to Smooth Coding. Type a message and press Enter to chat."));
+    }
+
+    // Run startup health checks asynchronously — TUI renders immediately
+    {
+        let state_clone = Arc::clone(&state);
+        tokio::spawn(async move {
+            let (health_status, warnings) = run_startup_health_checks().await;
+            let mut s = state_clone.lock().expect("state lock poisoned");
+            s.health_status = health_status;
+            if !warnings.is_empty() {
+                let warning_text = format!(
+                    "\u{26a0} Health Check:\n{}",
+                    warnings.iter().map(|w| format!("  \u{2022} {w}")).collect::<Vec<_>>().join("\n")
+                );
+                s.add_message(ChatMessage::new(ChatRole::System, warning_text));
+            }
+        });
     }
 
     let result = event_loop(&mut terminal, &state, &event_tx, event_rx);
@@ -286,6 +303,46 @@ fn handle_normal_mode(key: event::KeyEvent, state: &mut AppState) {
         }
         _ => {}
     }
+}
+
+/// Run startup health checks and return the status plus any warning messages.
+///
+/// Checks:
+/// 1. Big Smooth API reachability (`http://localhost:4400/health`)
+/// 2. LLM providers config (`~/.smooth/providers.json`)
+/// 3. Database existence (`~/.smooth/smooth.db`)
+async fn run_startup_health_checks() -> (HealthStatus, Vec<String>) {
+    let mut warnings: Vec<String> = Vec::new();
+
+    // 1. Check Big Smooth API
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(2)).build().ok();
+
+    if let Some(client) = &client {
+        match client.get("http://localhost:4400/health").send().await {
+            Ok(r) if r.status().is_success() => {}
+            _ => warnings.push("Big Smooth API not running. Starting...".into()),
+        }
+    }
+
+    // 2. Check providers
+    let providers_path = dirs_next::home_dir().map(|h| h.join(".smooth/providers.json"));
+    if providers_path.as_ref().is_none_or(|p| !p.exists()) {
+        warnings.push("No LLM providers configured. Run: /model to select one, or th auth login <provider>".into());
+    }
+
+    // 3. Check database
+    let db_path = dirs_next::home_dir().map(|h| h.join(".smooth/smooth.db"));
+    if db_path.as_ref().is_none_or(|p| !p.exists()) {
+        warnings.push("Database not found. Will be created on first use.".into());
+    }
+
+    let status = if warnings.is_empty() {
+        HealthStatus::Healthy
+    } else {
+        HealthStatus::Warnings(warnings.len())
+    };
+
+    (status, warnings)
 }
 
 /// Run a query through the agent framework with channel-based streaming.

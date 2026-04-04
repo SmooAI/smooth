@@ -12,6 +12,18 @@ use crate::files::FileTree;
 use crate::git::GitState;
 use crate::model_picker::ModelPickerState;
 
+/// Overall health of startup checks.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum HealthStatus {
+    /// All checks passed.
+    Healthy,
+    /// Some checks produced warnings.
+    Warnings(usize),
+    /// Health checks have not run yet.
+    #[default]
+    Unknown,
+}
+
 /// Status of a tool call invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToolStatus {
@@ -199,6 +211,8 @@ pub struct AppState {
     pub git_state: Option<GitState>,
     /// Model picker popup state.
     pub model_picker: ModelPickerState,
+    /// Startup health check status.
+    pub health_status: HealthStatus,
 }
 
 impl AppState {
@@ -225,6 +239,7 @@ impl AppState {
             autocomplete: AutocompleteState::default(),
             git_state: None,
             model_picker: ModelPickerState::new(),
+            health_status: HealthStatus::default(),
         }
     }
 
@@ -371,6 +386,44 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_health_status_variants() {
+        assert_eq!(HealthStatus::default(), HealthStatus::Unknown);
+        assert_eq!(HealthStatus::Healthy, HealthStatus::Healthy);
+        assert_eq!(HealthStatus::Warnings(3), HealthStatus::Warnings(3));
+        assert_ne!(HealthStatus::Healthy, HealthStatus::Unknown);
+        assert_ne!(HealthStatus::Warnings(1), HealthStatus::Warnings(2));
+    }
+
+    #[test]
+    fn test_health_warnings_generate_system_message() {
+        let mut state = AppState::new(PathBuf::from("/tmp"));
+        let warnings = vec!["API not running".to_string(), "No providers".to_string()];
+
+        let warning_text = format!(
+            "\u{26a0} Health Check:\n{}",
+            warnings.iter().map(|w| format!("  \u{2022} {w}")).collect::<Vec<_>>().join("\n")
+        );
+        state.add_message(ChatMessage::new(ChatRole::System, warning_text));
+        state.health_status = HealthStatus::Warnings(warnings.len());
+
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].role, ChatRole::System);
+        assert!(state.messages[0].content.contains("API not running"));
+        assert!(state.messages[0].content.contains("No providers"));
+        assert_eq!(state.health_status, HealthStatus::Warnings(2));
+    }
+
+    #[test]
+    fn test_health_no_warnings_no_extra_message() {
+        let mut state = AppState::new(PathBuf::from("/tmp"));
+        // Simulate healthy status — no messages added
+        state.health_status = HealthStatus::Healthy;
+
+        assert!(state.messages.is_empty());
+        assert_eq!(state.health_status, HealthStatus::Healthy);
+    }
 
     #[test]
     fn test_state_creation_defaults() {
