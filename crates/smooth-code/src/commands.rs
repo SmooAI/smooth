@@ -152,11 +152,16 @@ fn cmd_clear(_args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput>
 fn cmd_model(args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput> {
     let args = args.trim();
     if args.is_empty() {
-        Ok(CommandOutput::Message(format!("Current model: {}", state.model_name)))
+        // No args — open the model picker popup
+        state.model_picker.activate();
+        Ok(CommandOutput::None)
     } else {
         let old = state.model_name.clone();
         state.model_name = args.to_string();
-        Ok(CommandOutput::Message(format!("Model switched: {old} -> {}", state.model_name)))
+        Ok(CommandOutput::Message(format!(
+            "Model switched: {old} -> {} (current: {})",
+            state.model_name, state.model_name
+        )))
     }
 }
 

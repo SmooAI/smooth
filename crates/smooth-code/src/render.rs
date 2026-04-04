@@ -1,6 +1,6 @@
 //! Main render function — draws the full TUI frame.
 
-use ratatui::layout::{Alignment, Rect};
+use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
@@ -19,6 +19,10 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 
     if let Some(sidebar_rect) = regions.sidebar {
         render_sidebar(frame, state, sidebar_rect);
+    }
+
+    if state.model_picker.active {
+        render_model_picker(frame, state, frame.area());
     }
 }
 
@@ -232,6 +236,51 @@ fn render_sidebar(frame: &mut Frame, state: &AppState, area: Rect) {
                 ))
             } else if entry.is_dir {
                 ListItem::new(Span::styled(text, theme::title()))
+            } else {
+                ListItem::new(Span::raw(text))
+            }
+        })
+        .collect();
+
+    let list = List::new(items);
+    frame.render_widget(list, inner);
+}
+
+/// Render the model picker as a centered popup overlay.
+fn render_model_picker(frame: &mut Frame, state: &AppState, area: Rect) {
+    let picker = &state.model_picker;
+
+    // Size the popup: width ~50 cols, height = options + 2 (border)
+    let popup_width = 50.min(area.width.saturating_sub(4));
+    #[allow(clippy::cast_possible_truncation)]
+    let provider_count = picker.providers.len().min(usize::from(u16::MAX) - 2) as u16;
+    let popup_height = (provider_count + 2).min(area.height.saturating_sub(2));
+
+    let [popup_y] = Layout::vertical([Constraint::Length(popup_height)]).flex(Flex::Center).areas(area);
+    let [popup_area] = Layout::horizontal([Constraint::Length(popup_width)]).flex(Flex::Center).areas(popup_y);
+
+    // Clear the area behind the popup
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default().title(" Select Model ").borders(Borders::ALL).border_style(theme::title());
+
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    let items: Vec<ListItem<'_>> = picker
+        .providers
+        .iter()
+        .enumerate()
+        .map(|(i, opt)| {
+            let prefix = if i == picker.selected { "▸ " } else { "  " };
+            let provider_tag = format!(" ({})", opt.provider);
+            let text = format!("{prefix}{}{provider_tag}", opt.display_name);
+
+            if i == picker.selected {
+                ListItem::new(Span::styled(
+                    text,
+                    ratatui::style::Style::default().bg(theme::SMOO_GREEN).fg(ratatui::style::Color::Black),
+                ))
             } else {
                 ListItem::new(Span::raw(text))
             }

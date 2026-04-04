@@ -11,6 +11,7 @@ pub mod commands;
 pub mod files;
 pub mod git;
 pub mod layout;
+pub mod model_picker;
 pub mod permissions;
 pub mod render;
 pub mod session;
