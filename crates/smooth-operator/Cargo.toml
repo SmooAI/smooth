@@ -6,6 +6,10 @@ license.workspace = true
 repository.workspace = true
 description = "Smooth Operator — Rust-native AI agent framework with built-in checkpointing, tool system, and LLM client"
 
+[features]
+default = []
+sqlite = ["rusqlite"]
+
 [dependencies]
 tokio.workspace = true
 tokio-stream.workspace = true
@@ -22,10 +26,12 @@ bytes.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
 dirs-next.workspace = true
+rusqlite = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+rusqlite.workspace = true
 
 [lints]
 workspace = true
