@@ -108,6 +108,8 @@ pub struct ChatMessage {
     pub timestamp: DateTime<Utc>,
     /// Tool calls associated with this message (only meaningful for assistant messages).
     pub tool_calls: Vec<ToolCallState>,
+    /// Whether this message is currently being streamed from the agent.
+    pub streaming: bool,
 }
 
 impl ChatMessage {
@@ -119,6 +121,7 @@ impl ChatMessage {
             content: content.into(),
             timestamp: Utc::now(),
             tool_calls: Vec::new(),
+            streaming: false,
         }
     }
 
@@ -167,6 +170,8 @@ pub struct AppState {
     pub should_quit: bool,
     /// Whether the agent is currently processing a request.
     pub thinking: bool,
+    /// Current frame index for the braille spinner animation.
+    pub spinner_frame: usize,
 }
 
 impl AppState {
@@ -186,6 +191,7 @@ impl AppState {
             total_tokens: 0,
             should_quit: false,
             thinking: false,
+            spinner_frame: 0,
         }
     }
 
@@ -280,6 +286,52 @@ impl AppState {
                 }
             }
         }
+    }
+
+    /// Braille spinner frames used for streaming animation.
+    const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+    /// Advance the spinner to the next frame, cycling through all 10 braille frames.
+    pub fn advance_spinner(&mut self) {
+        self.spinner_frame = (self.spinner_frame + 1) % Self::SPINNER_FRAMES.len();
+    }
+
+    /// Get the current spinner character.
+    pub fn spinner_char(&self) -> &str {
+        Self::SPINNER_FRAMES[self.spinner_frame % Self::SPINNER_FRAMES.len()]
+    }
+
+    /// Start streaming: create an empty assistant message with `streaming = true`.
+    pub fn start_streaming(&mut self) {
+        let mut msg = ChatMessage::assistant("");
+        msg.streaming = true;
+        self.add_message(msg);
+        self.thinking = true;
+    }
+
+    /// Append content to the last streaming assistant message.
+    ///
+    /// No-op if the last message is not a streaming assistant message.
+    pub fn append_stream_content(&mut self, content: &str) {
+        if let Some(msg) = self.messages.last_mut() {
+            if msg.role == ChatRole::Assistant && msg.streaming {
+                msg.content.push_str(content);
+                // Auto-scroll to bottom when not manually scrolled
+                if !self.user_scrolled {
+                    self.scroll_offset = 0;
+                }
+            }
+        }
+    }
+
+    /// Finish streaming: set `streaming = false` on the last message and clear thinking.
+    pub fn finish_streaming(&mut self) {
+        if let Some(msg) = self.messages.last_mut() {
+            if msg.role == ChatRole::Assistant && msg.streaming {
+                msg.streaming = false;
+            }
+        }
+        self.thinking = false;
     }
 }
 
@@ -490,5 +542,75 @@ mod tests {
         // The preview should be 80 chars + "..."
         assert_eq!(tc.arguments_preview.len(), 83);
         assert!(tc.arguments_preview.ends_with("..."));
+    }
+
+    #[test]
+    fn test_streaming_field_defaults_to_false() {
+        let msg = ChatMessage::user("hello");
+        assert!(!msg.streaming);
+        let msg = ChatMessage::assistant("hi");
+        assert!(!msg.streaming);
+        let msg = ChatMessage::system("init");
+        assert!(!msg.streaming);
+    }
+
+    #[test]
+    fn test_start_streaming_creates_streaming_message() {
+        let mut state = AppState::new(PathBuf::from("/tmp"));
+        state.start_streaming();
+
+        assert_eq!(state.messages.len(), 1);
+        let msg = &state.messages[0];
+        assert_eq!(msg.role, ChatRole::Assistant);
+        assert!(msg.content.is_empty());
+        assert!(msg.streaming);
+        assert!(state.thinking);
+    }
+
+    #[test]
+    fn test_append_stream_content() {
+        let mut state = AppState::new(PathBuf::from("/tmp"));
+        state.start_streaming();
+
+        state.append_stream_content("Hello");
+        assert_eq!(state.messages[0].content, "Hello");
+
+        state.append_stream_content(", world!");
+        assert_eq!(state.messages[0].content, "Hello, world!");
+
+        // Append to non-streaming message is a no-op
+        state.messages[0].streaming = false;
+        state.append_stream_content(" extra");
+        assert_eq!(state.messages[0].content, "Hello, world!");
+    }
+
+    #[test]
+    fn test_finish_streaming() {
+        let mut state = AppState::new(PathBuf::from("/tmp"));
+        state.start_streaming();
+        state.append_stream_content("done");
+        state.finish_streaming();
+
+        assert!(!state.messages[0].streaming);
+        assert!(!state.thinking);
+        assert_eq!(state.messages[0].content, "done");
+    }
+
+    #[test]
+    fn test_advance_spinner_cycles() {
+        let mut state = AppState::new(PathBuf::from("/tmp"));
+        assert_eq!(state.spinner_frame, 0);
+        assert_eq!(state.spinner_char(), "⠋");
+
+        state.advance_spinner();
+        assert_eq!(state.spinner_frame, 1);
+        assert_eq!(state.spinner_char(), "⠙");
+
+        // Cycle through all 10 frames back to 0
+        for _ in 0..9 {
+            state.advance_spinner();
+        }
+        assert_eq!(state.spinner_frame, 0);
+        assert_eq!(state.spinner_char(), "⠋");
     }
 }
