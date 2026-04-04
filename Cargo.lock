@@ -2538,6 +2538,7 @@ name = "smooth-bigsmooth"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "axum-extra",
  "chrono",
@@ -2550,6 +2551,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "smooth-operator",
  "smooth-policy",
  "smooth-web",
  "tempfile",
