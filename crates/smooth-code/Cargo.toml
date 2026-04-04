@@ -22,6 +22,7 @@ uuid.workspace = true
 dirs-next.workspace = true
 futures-util.workspace = true
 ignore.workspace = true
+reqwest.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
