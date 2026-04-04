@@ -1,0 +1,25 @@
+[package]
+name = "smooth-coding"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Smooth Coding — AI-assisted coding TUI"
+
+[dependencies]
+smooth-operator.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+pulldown-cmark.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+dirs-next.workspace = true
+futures-util.workspace = true
+
+[lints]
+workspace = true

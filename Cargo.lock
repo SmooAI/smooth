@@ -2586,6 +2586,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "smooth-coding"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "crossterm",
+ "dirs-next",
+ "futures-util",
+ "pulldown-cmark",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "smooth-operator",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "smooth-goalie"
 version = "0.1.0"
 dependencies = [
@@ -2636,6 +2655,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
