@@ -1,3 +1,4 @@
+pub mod hook;
 pub mod log_entry;
 pub mod server;
 pub mod store;

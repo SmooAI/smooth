@@ -10,8 +10,14 @@ description = "Smooth Wonk — in-VM access control authority, policy hot-reload
 name = "smooth-wonk"
 path = "src/main.rs"
 
+[lib]
+name = "smooth_wonk"
+path = "src/lib.rs"
+
 [dependencies]
+smooth-operator.workspace = true
 smooth-policy.workspace = true
+async-trait.workspace = true
 tokio.workspace = true
 axum.workspace = true
 arc-swap.workspace = true
