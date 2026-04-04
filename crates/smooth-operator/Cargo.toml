@@ -32,6 +32,7 @@ rusqlite = { workspace = true, optional = true }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 rusqlite.workspace = true
+smooth-narc = { path = "../smooth-narc" }
 
 [lints]
 workspace = true
