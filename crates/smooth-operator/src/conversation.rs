@@ -4,6 +4,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::llm::ApiFormat;
+
 /// Marker that splits a system prompt into a cacheable static portion and a
 /// frequently-changing dynamic portion (project context, CLAUDE.md, etc.).
 const PROMPT_CACHE_BOUNDARY: &str = "__PROMPT_CACHE_BOUNDARY__";
@@ -485,6 +487,95 @@ impl Conversation {
     }
 }
 
+/// Convert conversation messages for a different LLM provider.
+/// Handles thinking blocks, tool call formats, and provider quirks.
+pub struct ContextHandoff;
+
+impl ContextHandoff {
+    /// Convert thinking blocks when switching between providers.
+    /// Claude uses native thinking blocks; others need `<thinking>` XML tags.
+    ///
+    /// - **Claude -> OpenAI**: wrap thinking content in `<thinking>...</thinking>` XML tags,
+    ///   prepend to assistant message content.
+    /// - **OpenAI -> Claude**: extract `<thinking>...</thinking>` from content, separate into
+    ///   a thinking field (stored as prefix comment for future use).
+    /// - **Same provider**: no-op.
+    pub fn convert_thinking(messages: &mut [Message], from: &ApiFormat, to: &ApiFormat) {
+        if from == to {
+            return;
+        }
+
+        match (from, to) {
+            (ApiFormat::Anthropic, ApiFormat::OpenAiCompat) => {
+                // Claude -> OpenAI: find assistant messages that have a thinking block
+                // indicated by content starting with "[thinking]" (internal marker) and
+                // wrap it in XML tags prepended to the visible content.
+                for msg in messages.iter_mut().filter(|m| m.role == Role::Assistant) {
+                    if let Some(rest) = msg.content.strip_prefix("[thinking]") {
+                        if let Some(end_idx) = rest.find("[/thinking]") {
+                            let thinking = &rest[..end_idx];
+                            let visible = &rest[end_idx + "[/thinking]".len()..];
+                            msg.content = format!("<thinking>{thinking}</thinking>{visible}");
+                        }
+                    }
+                }
+            }
+            (ApiFormat::OpenAiCompat, ApiFormat::Anthropic) => {
+                // OpenAI -> Claude: extract <thinking>...</thinking> XML blocks from content.
+                for msg in messages.iter_mut().filter(|m| m.role == Role::Assistant) {
+                    if let Some(start) = msg.content.find("<thinking>") {
+                        if let Some(end) = msg.content.find("</thinking>") {
+                            let thinking_start = start + "<thinking>".len();
+                            let thinking = &msg.content[thinking_start..end];
+                            let visible = format!("{}{}", &msg.content[..start], &msg.content[end + "</thinking>".len()..]);
+                            msg.content = format!("[thinking]{thinking}[/thinking]{visible}");
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Strip provider-specific metadata that another provider won't understand.
+    ///
+    /// Removes `tool_call_id` from tool-role messages and clears tool call IDs,
+    /// as some providers (basic OpenAI-compat) don't support them.
+    pub fn strip_provider_metadata(messages: &mut [Message]) {
+        for msg in messages.iter_mut() {
+            msg.tool_call_id = None;
+            for tc in &mut msg.tool_calls {
+                tc.id = String::new();
+            }
+        }
+    }
+
+    /// Prepare a conversation for handoff to a different provider.
+    ///
+    /// Returns a **new** `Conversation` — the original is not mutated.
+    ///
+    /// Steps:
+    /// 1. Clone the conversation.
+    /// 2. Convert thinking blocks.
+    /// 3. Strip provider metadata.
+    /// 4. Fix empty assistant messages (add placeholder).
+    pub fn prepare(conversation: &Conversation, from: &ApiFormat, to: &ApiFormat) -> Conversation {
+        let mut conv = conversation.clone();
+
+        Self::convert_thinking(&mut conv.messages, from, to);
+        Self::strip_provider_metadata(&mut conv.messages);
+
+        // Some providers error on empty assistant content — add a placeholder.
+        for msg in conv.messages.iter_mut().filter(|m| m.role == Role::Assistant) {
+            if msg.content.trim().is_empty() {
+                msg.content = "(continued)".to_string();
+            }
+        }
+
+        conv
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -929,5 +1020,75 @@ mod tests {
 
         // System message is first
         assert_eq!(conv.messages[0].role, Role::System);
+    }
+
+    // ── ContextHandoff tests ──────────────────────────────────────
+
+    #[test]
+    fn handoff_claude_to_openai_wraps_thinking_in_xml() {
+        let mut messages = vec![Message::assistant("[thinking]I need to reason[/thinking]The answer is 42")];
+        ContextHandoff::convert_thinking(&mut messages, &ApiFormat::Anthropic, &ApiFormat::OpenAiCompat);
+        assert_eq!(messages[0].content, "<thinking>I need to reason</thinking>The answer is 42");
+    }
+
+    #[test]
+    fn handoff_openai_to_claude_extracts_thinking_from_xml() {
+        let mut messages = vec![Message::assistant("<thinking>I need to reason</thinking>The answer is 42")];
+        ContextHandoff::convert_thinking(&mut messages, &ApiFormat::OpenAiCompat, &ApiFormat::Anthropic);
+        assert_eq!(messages[0].content, "[thinking]I need to reason[/thinking]The answer is 42");
+    }
+
+    #[test]
+    fn handoff_same_provider_is_noop() {
+        let original_content = "<thinking>thoughts</thinking>visible";
+        let mut messages = vec![Message::assistant(original_content)];
+        ContextHandoff::convert_thinking(&mut messages, &ApiFormat::OpenAiCompat, &ApiFormat::OpenAiCompat);
+        assert_eq!(messages[0].content, original_content);
+    }
+
+    #[test]
+    fn strip_provider_metadata_removes_tool_call_ids() {
+        let mut messages = vec![Message::tool_result("call-123", "result"), {
+            let mut m = Message::assistant("used a tool");
+            m.tool_calls = vec![crate::tool::ToolCall {
+                id: "call-456".into(),
+                name: "read_file".into(),
+                arguments: serde_json::json!({}),
+            }];
+            m
+        }];
+        ContextHandoff::strip_provider_metadata(&mut messages);
+        assert_eq!(messages[0].tool_call_id, None);
+        assert!(messages[1].tool_calls[0].id.is_empty());
+    }
+
+    #[test]
+    fn handoff_empty_assistant_messages_get_placeholder() {
+        let mut conv = Conversation::new(100_000);
+        conv.push(Message::assistant(""));
+        conv.push(Message::assistant("   "));
+        conv.push(Message::assistant("real content"));
+
+        let result = ContextHandoff::prepare(&conv, &ApiFormat::Anthropic, &ApiFormat::OpenAiCompat);
+        assert_eq!(result.messages[0].content, "(continued)");
+        assert_eq!(result.messages[1].content, "(continued)");
+        assert_eq!(result.messages[2].content, "real content");
+    }
+
+    #[test]
+    fn prepare_returns_new_conversation_without_mutating_original() {
+        let mut conv = Conversation::new(100_000);
+        conv.push(Message::assistant("[thinking]thoughts[/thinking]visible"));
+        conv.push(Message::tool_result("call-1", "data"));
+
+        let result = ContextHandoff::prepare(&conv, &ApiFormat::Anthropic, &ApiFormat::OpenAiCompat);
+
+        // Original unchanged
+        assert_eq!(conv.messages[0].content, "[thinking]thoughts[/thinking]visible");
+        assert_eq!(conv.messages[1].tool_call_id, Some("call-1".to_string()));
+
+        // Result is converted
+        assert_eq!(result.messages[0].content, "<thinking>thoughts</thinking>visible");
+        assert_eq!(result.messages[1].tool_call_id, None);
     }
 }
