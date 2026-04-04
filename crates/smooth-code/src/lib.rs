@@ -12,6 +12,7 @@ pub mod diff_render;
 pub mod extensions;
 pub mod files;
 pub mod git;
+pub mod headless;
 pub mod layout;
 pub mod model_picker;
 pub mod permissions;

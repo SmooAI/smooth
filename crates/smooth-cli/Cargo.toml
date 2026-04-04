@@ -28,6 +28,7 @@ reqwest.workspace = true
 chrono.workspace = true
 dirs-next.workspace = true
 owo-colors.workspace = true
+atty.workspace = true
 
 [lints]
 workspace = true
