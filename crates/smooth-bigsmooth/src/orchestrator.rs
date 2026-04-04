@@ -7,8 +7,8 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use serde::Serialize;
+use smooth_issues::{IssueStatus, IssueStore, IssueUpdate};
 
-use crate::beads;
 use crate::pool::SandboxPool;
 use crate::sandbox::SandboxHandle;
 
@@ -79,17 +79,18 @@ pub enum OrchestratorState {
 pub struct Orchestrator {
     pub state: OrchestratorState,
     pub pool: SandboxPool,
+    pub issue_store: IssueStore,
     pub active_workers: HashMap<String, SandboxHandle>,
     pub completed_beads: Vec<String>,
 }
 
 impl Orchestrator {
     /// Create a new orchestrator.
-    #[must_use]
-    pub fn new(max_operators: usize) -> Self {
+    pub fn new(max_operators: usize, issue_store: IssueStore) -> Self {
         Self {
             state: OrchestratorState::Idle,
             pool: SandboxPool::new(max_operators),
+            issue_store,
             active_workers: HashMap::new(),
             completed_beads: Vec::new(),
         }
@@ -106,9 +107,9 @@ impl Orchestrator {
         }
     }
 
-    /// Schedule: find ready beads.
+    /// Schedule: find ready issues.
     async fn schedule(&mut self) -> Result<()> {
-        let ready = beads::get_ready().unwrap_or_default();
+        let ready = self.issue_store.ready().unwrap_or_default();
         let ready_ids: Vec<String> = ready.iter().map(|b| b.id.clone()).collect();
 
         if ready_ids.is_empty() {
@@ -140,7 +141,13 @@ impl Orchestrator {
                 Ok(handle) => {
                     let operator_id = handle.operator_id.clone();
                     tracing::info!("Dispatched operator {operator_id} for bead {bead_id}");
-                    let _ = beads::update_bead_status(bead_id, "in_progress");
+                    let _ = self.issue_store.update(
+                        bead_id,
+                        &IssueUpdate {
+                            status: Some(IssueStatus::InProgress),
+                            ..Default::default()
+                        },
+                    );
                     self.active_workers.insert(bead_id.clone(), handle);
                     assignments.insert(bead_id.clone(), operator_id);
                 }
@@ -206,7 +213,7 @@ impl Orchestrator {
         // TODO: spawn review operator
 
         // For now, auto-approve
-        let _ = beads::update_bead_status(&bead_id, "closed");
+        let _ = self.issue_store.close(&[&bead_id]);
 
         self.state = if self.active_workers.is_empty() {
             OrchestratorState::Idle
@@ -254,17 +261,19 @@ mod tests {
 
     #[test]
     fn test_orchestrator_new() {
-        let orch = Orchestrator::new(3);
+        let store = IssueStore::open_in_memory().unwrap();
+        let orch = Orchestrator::new(3, store);
         assert_eq!(orch.state_name(), "idle");
         assert!(orch.active_workers.is_empty());
     }
 
     #[tokio::test]
     async fn test_orchestrator_step_idle() {
-        let mut orch = Orchestrator::new(3);
-        // Step from idle should try to schedule
+        let store = IssueStore::open_in_memory().unwrap();
+        let mut orch = Orchestrator::new(3, store);
+        // Step from idle — no issues, stays idle
         let result = orch.step().await;
-        // May fail if bd is not available, that's ok
-        assert!(result.is_ok() || result.is_err());
+        assert!(result.is_ok());
+        assert_eq!(orch.state_name(), "idle");
     }
 }

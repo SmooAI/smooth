@@ -1,9 +1,11 @@
 //! Big Smooth — orchestrator, policy generation, sandbox management, API server.
 
 pub mod audit;
+#[deprecated(note = "use `issues` module instead")]
 pub mod beads;
 pub mod chat;
 pub mod db;
+pub mod issues;
 pub mod jira;
 pub mod orchestrator;
 pub mod policy;

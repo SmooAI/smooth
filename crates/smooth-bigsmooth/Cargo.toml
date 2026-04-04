@@ -7,6 +7,7 @@ repository.workspace = true
 description = "Big Smooth — orchestrator, policy generation, sandbox management, API server"
 
 [dependencies]
+smooth-issues.workspace = true
 smooth-operator = { path = "../smooth-operator" }
 smooth-policy.workspace = true
 smooth-web = { path = "../smooth-web" }
