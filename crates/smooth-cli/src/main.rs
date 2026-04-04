@@ -109,6 +109,11 @@ enum Commands {
     },
     /// Launch interactive coding assistant (same as running th with no args)
     Code,
+    /// Issue tracking (built-in, replaces beads)
+    Issues {
+        #[command(subcommand)]
+        cmd: IssueCommands,
+    },
     /// System health check and auto-fix
     Doctor,
 }
@@ -245,6 +250,85 @@ enum AccessCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum IssueCommands {
+    /// Create a new issue
+    Create {
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long, default_value = "task")]
+        r#type: String,
+        #[arg(long, default_value = "2")]
+        priority: u8,
+        #[arg(long)]
+        label: Vec<String>,
+    },
+    /// List issues
+    List {
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Show issue details
+    Show { id: String },
+    /// Update an issue
+    Update {
+        id: String,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        priority: Option<u8>,
+        #[arg(long)]
+        assign: Option<String>,
+    },
+    /// Close issues
+    Close { ids: Vec<String> },
+    /// Reopen an issue
+    Reopen { id: String },
+    /// Add dependency
+    Dep {
+        #[command(subcommand)]
+        cmd: DepCommands,
+    },
+    /// Add comment
+    Comment { id: String, content: String },
+    /// Search issues
+    Search { query: String },
+    /// Show statistics
+    Stats,
+    /// Show ready issues (open, no blockers)
+    Ready,
+    /// Show blocked issues
+    Blocked,
+    /// Add/remove labels
+    Label {
+        id: String,
+        #[command(subcommand)]
+        cmd: LabelCommands,
+    },
+    /// Migrate from beads
+    MigrateFromBeads,
+}
+
+#[derive(Subcommand)]
+enum DepCommands {
+    /// Add a dependency (issue depends on blocker)
+    Add { issue: String, depends_on: String },
+    /// Remove a dependency
+    Remove { issue: String, depends_on: String },
+}
+
+#[derive(Subcommand)]
+enum LabelCommands {
+    /// Add a label
+    Add { label: String },
+    /// Remove a label
+    Remove { label: String },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize tracing
@@ -275,6 +359,7 @@ async fn main() -> Result<()> {
         Some(Commands::Resume { bead_id }) => cmd_steer(&bead_id, "resume", None).await,
         Some(Commands::Steer { bead_id, message }) => cmd_steer(&bead_id, "steer", Some(&message)).await,
         Some(Commands::Cancel { bead_id }) => cmd_steer(&bead_id, "cancel", None).await,
+        Some(Commands::Issues { cmd }) => cmd_issues(cmd).await,
         Some(Commands::Audit { cmd }) => cmd_audit(cmd),
         Some(Commands::Web) => {
             println!("Web UI: http://localhost:4400");
@@ -699,17 +784,27 @@ async fn cmd_doctor() -> Result<()> {
         }
     }
 
-    // 5. Check Beads
-    match std::process::Command::new("bd").arg("stats").output() {
-        Ok(output) if output.status.success() => println!("  {} Beads: {}", "✓".green().bold(), "available".green()),
-        _ => {
-            println!(
-                "  {} Beads: {}",
-                "✗".red().bold(),
-                "not found (install from https://github.com/SmooAI/beads)".red()
-            );
-            issues += 1;
+    // 5. Check smooth-issues
+    let issue_store = smooth_issues::IssueStore::open(&db_path);
+    match issue_store {
+        Ok(store) => {
+            let stats = store.stats();
+            match stats {
+                Ok(s) => {
+                    println!(
+                        "  {} Issues: {} open, {} in progress, {} closed",
+                        "✓".green().bold(),
+                        s.open,
+                        s.in_progress,
+                        s.closed
+                    );
+                }
+                Err(_) => {
+                    println!("  {} Issues: {}", "○".dimmed(), "will initialize on first use".dimmed());
+                }
+            }
         }
+        Err(_) => println!("  {} Issues: {}", "○".dimmed(), "will initialize on first use".dimmed()),
     }
 
     // 6. Sandboxes (built-in via microsandbox crate)
@@ -720,6 +815,338 @@ async fn cmd_doctor() -> Result<()> {
         println!("{}", "All checks passed. Smooth is ready.".green().bold());
     } else {
         println!("{}", format!("{issues} issue(s) found. Fix them and run: th doctor").yellow().bold());
+    }
+
+    Ok(())
+}
+
+// ── Issues ─────────────────────────────────────────────────────────
+
+fn open_issue_store() -> Result<smooth_issues::IssueStore> {
+    let db_path = smooth_bigsmooth::db::default_db_path();
+    smooth_issues::IssueStore::open(&db_path)
+}
+
+fn format_issue_line(issue: &smooth_issues::Issue) -> String {
+    let labels_str = if issue.labels.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", issue.labels.join(", "))
+    };
+    format!(
+        "{} {} {} P{} {}{}",
+        issue.status,
+        issue.id.dimmed(),
+        "\u{25CF}".dimmed(),
+        issue.priority.as_u8(),
+        issue.title,
+        labels_str.dimmed()
+    )
+}
+
+async fn cmd_issues(cmd: IssueCommands) -> Result<()> {
+    let store = open_issue_store()?;
+
+    match cmd {
+        IssueCommands::Create {
+            title,
+            description,
+            r#type,
+            priority,
+            label,
+        } => {
+            let issue_type = smooth_issues::IssueType::from_str_loose(&r#type).unwrap_or(smooth_issues::IssueType::Task);
+            let prio = smooth_issues::Priority::from_u8(priority).unwrap_or(smooth_issues::Priority::Medium);
+
+            let new = smooth_issues::NewIssue {
+                title,
+                description: description.unwrap_or_default(),
+                issue_type,
+                priority: prio,
+                assigned_to: None,
+                parent_id: None,
+                labels: label,
+            };
+            let issue = store.create(&new)?;
+            println!("{} Created {}", "✓".green().bold(), issue.id.green().bold());
+            println!("  {}", format_issue_line(&issue));
+        }
+
+        IssueCommands::List { status } => {
+            let query = if let Some(ref s) = status {
+                let st = smooth_issues::IssueStatus::from_str_loose(s).ok_or_else(|| anyhow::anyhow!("unknown status: {s}"))?;
+                smooth_issues::IssueQuery::new().with_status(st)
+            } else {
+                smooth_issues::IssueQuery::new()
+            };
+            let issues = store.list(&query)?;
+            if issues.is_empty() {
+                println!("No issues found.");
+            } else {
+                for issue in &issues {
+                    println!("{}", format_issue_line(issue));
+                }
+                println!("\n{} issue(s)", issues.len());
+            }
+        }
+
+        IssueCommands::Show { id } => {
+            let issue = store.get(&id)?.ok_or_else(|| anyhow::anyhow!("issue not found: {id}"))?;
+            println!("{} {}", issue.status, issue.title.bold());
+            println!("  {} {} | {} | {}", "ID:".dimmed(), issue.id, issue.priority, issue.issue_type);
+            if let Some(ref assignee) = issue.assigned_to {
+                println!("  {} {assignee}", "Assigned:".dimmed());
+            }
+            if !issue.labels.is_empty() {
+                println!("  {} {}", "Labels:".dimmed(), issue.labels.join(", "));
+            }
+            if !issue.description.is_empty() {
+                println!("\n{}", issue.description);
+            }
+
+            // Show dependencies
+            let deps = store.get_deps(&issue.id)?;
+            if !deps.is_empty() {
+                println!("\n{}", "Dependencies:".dimmed());
+                for dep in &deps {
+                    if let Ok(Some(blocker)) = store.get(&dep.depends_on) {
+                        println!("  {} {}: {}", dep.dep_type.as_str(), blocker.id, blocker.title);
+                    }
+                }
+            }
+
+            // Show comments
+            let comments = store.get_comments(&issue.id)?;
+            if !comments.is_empty() {
+                println!("\n{}", "Comments:".dimmed());
+                for c in &comments {
+                    println!("  {} {}", c.created_at.format("%Y-%m-%d %H:%M").to_string().dimmed(), c.content);
+                }
+            }
+
+            // Show history
+            let history = store.get_history(&issue.id)?;
+            if !history.is_empty() {
+                println!("\n{}", "History:".dimmed());
+                for h in &history {
+                    println!(
+                        "  {} {} {} → {}",
+                        h.changed_at.format("%Y-%m-%d %H:%M").to_string().dimmed(),
+                        h.field,
+                        h.old_value.as_deref().unwrap_or("-").dimmed(),
+                        h.new_value.as_deref().unwrap_or("-")
+                    );
+                }
+            }
+        }
+
+        IssueCommands::Update {
+            id,
+            status,
+            title,
+            priority,
+            assign,
+        } => {
+            let updates = smooth_issues::IssueUpdate {
+                title,
+                status: status.as_deref().and_then(smooth_issues::IssueStatus::from_str_loose),
+                priority: priority.and_then(smooth_issues::Priority::from_u8),
+                assigned_to: assign.map(|a| if a.is_empty() { None } else { Some(a) }),
+                ..Default::default()
+            };
+            let updated = store.update(&id, &updates)?;
+            println!("{} Updated {}", "✓".green().bold(), updated.id);
+            println!("  {}", format_issue_line(&updated));
+        }
+
+        IssueCommands::Close { ids } => {
+            let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+            let count = store.close(&id_refs)?;
+            println!("{} Closed {count} issue(s)", "✓".green().bold());
+        }
+
+        IssueCommands::Reopen { id } => {
+            let issue = store.reopen(&id)?;
+            println!("{} Reopened {}", "✓".green().bold(), issue.id);
+            println!("  {}", format_issue_line(&issue));
+        }
+
+        IssueCommands::Dep { cmd } => match cmd {
+            DepCommands::Add { issue, depends_on } => {
+                store.add_dep(&issue, &depends_on)?;
+                println!("{} {issue} now depends on {depends_on}", "✓".green().bold());
+            }
+            DepCommands::Remove { issue, depends_on } => {
+                store.remove_dep(&issue, &depends_on)?;
+                println!("{} Removed dependency {issue} → {depends_on}", "✓".green().bold());
+            }
+        },
+
+        IssueCommands::Comment { id, content } => {
+            let comment = store.add_comment(&id, &content)?;
+            println!("{} Comment added ({})", "✓".green().bold(), comment.id.dimmed());
+        }
+
+        IssueCommands::Search { query } => {
+            let results = store.search(&query)?;
+            if results.is_empty() {
+                println!("No issues matching \"{query}\".");
+            } else {
+                for issue in &results {
+                    println!("{}", format_issue_line(issue));
+                }
+                println!("\n{} result(s)", results.len());
+            }
+        }
+
+        IssueCommands::Stats => {
+            let stats = store.stats()?;
+            println!("{}", "Issue Statistics".bold().cyan());
+            println!("  {} Open:        {}", "\u{25CB}".dimmed(), stats.open);
+            println!("  {} In Progress: {}", "\u{25D0}".yellow(), stats.in_progress);
+            println!("  {} Closed:      {}", "\u{2713}".green(), stats.closed);
+            println!("  {} Deferred:    {}", "\u{2744}".blue(), stats.deferred);
+            println!("  ─────────────────");
+            println!("  Total:         {}", stats.total);
+        }
+
+        IssueCommands::Ready => {
+            let issues = store.ready()?;
+            if issues.is_empty() {
+                println!("No ready issues.");
+            } else {
+                println!("{}", "Ready Issues (open, no blockers):".bold().cyan());
+                for issue in &issues {
+                    println!("  {}", format_issue_line(issue));
+                }
+                println!("\n{} issue(s)", issues.len());
+            }
+        }
+
+        IssueCommands::Blocked => {
+            let issues = store.blocked()?;
+            if issues.is_empty() {
+                println!("No blocked issues.");
+            } else {
+                println!("{}", "Blocked Issues:".bold().red());
+                for issue in &issues {
+                    let blockers = store.get_blockers(&issue.id)?;
+                    let blocker_ids: Vec<&str> = blockers.iter().map(|b| b.id.as_str()).collect();
+                    println!("  {} (blocked by: {})", format_issue_line(issue), blocker_ids.join(", ").dimmed());
+                }
+                println!("\n{} issue(s)", issues.len());
+            }
+        }
+
+        IssueCommands::Label { id, cmd } => match cmd {
+            LabelCommands::Add { label } => {
+                store.add_label(&id, &label)?;
+                println!("{} Added label \"{label}\" to {id}", "✓".green().bold());
+            }
+            LabelCommands::Remove { label } => {
+                store.remove_label(&id, &label)?;
+                println!("{} Removed label \"{label}\" from {id}", "✓".green().bold());
+            }
+        },
+
+        IssueCommands::MigrateFromBeads => {
+            cmd_migrate_from_beads(&store)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_migrate_from_beads(store: &smooth_issues::IssueStore) -> Result<()> {
+    println!("{}", "Migrating from Beads...".bold().cyan());
+
+    let mut total = 0;
+    let mut migrated = 0;
+    let mut skipped = 0;
+
+    // Try to get beads issues as JSON
+    for status in &["open", "in_progress", "closed", "deferred"] {
+        let output = std::process::Command::new("bd")
+            .args(["list", &format!("--status={status}"), "--json"])
+            .output();
+
+        let output = match output {
+            Ok(o) if o.status.success() => o,
+            Ok(_) => continue,
+            Err(e) => {
+                if status == &"open" {
+                    // First try — bd might not be installed
+                    println!("  {} Cannot run bd: {e}", "✗".red().bold());
+                    println!("  Make sure beads (bd) is installed and in PATH.");
+                    return Ok(());
+                }
+                continue;
+            }
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let beads: Vec<serde_json::Value> = match serde_json::from_str(&stdout) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        for bead in &beads {
+            total += 1;
+            let bead_title = bead["title"].as_str().unwrap_or("Untitled");
+            let bead_desc = bead["description"].as_str().unwrap_or("");
+            let bead_type = bead["type"].as_str().unwrap_or("task");
+            let bead_priority = bead["priority"].as_u64().unwrap_or(2);
+            let bead_labels: Vec<String> = bead["labels"]
+                .as_array()
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+
+            let issue_type = smooth_issues::IssueType::from_str_loose(bead_type).unwrap_or(smooth_issues::IssueType::Task);
+            #[allow(clippy::cast_possible_truncation)]
+            let priority = smooth_issues::Priority::from_u8(bead_priority as u8).unwrap_or(smooth_issues::Priority::Medium);
+
+            let new = smooth_issues::NewIssue {
+                title: bead_title.to_string(),
+                description: bead_desc.to_string(),
+                issue_type,
+                priority,
+                assigned_to: bead["assigned_to"].as_str().map(String::from),
+                parent_id: None,
+                labels: bead_labels,
+            };
+
+            match store.create(&new) {
+                Ok(issue) => {
+                    // If the bead was closed/in_progress/deferred, update status
+                    let target_status = smooth_issues::IssueStatus::from_str_loose(status);
+                    if let Some(st) = target_status {
+                        if st != smooth_issues::IssueStatus::Open {
+                            let _ = store.update(
+                                &issue.id,
+                                &smooth_issues::IssueUpdate {
+                                    status: Some(st),
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                    }
+                    migrated += 1;
+                    println!("  {} {} ← {}", "✓".green(), issue.id, bead_title.dimmed());
+                }
+                Err(e) => {
+                    skipped += 1;
+                    println!("  {} {}: {e}", "✗".red(), bead_title);
+                }
+            }
+        }
+    }
+
+    println!();
+    println!("{}", "Migration Summary".bold());
+    println!("  Total beads found: {total}");
+    println!("  Migrated:          {}", format!("{migrated}").green());
+    if skipped > 0 {
+        println!("  Skipped/errors:    {}", format!("{skipped}").red());
     }
 
     Ok(())

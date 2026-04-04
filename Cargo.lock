@@ -2586,6 +2586,7 @@ dependencies = [
  "serde_json",
  "smooth-bigsmooth",
  "smooth-code",
+ "smooth-issues",
  "smooth-tui",
  "smooth-web",
  "tokio",
