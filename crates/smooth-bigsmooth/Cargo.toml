@@ -7,6 +7,7 @@ repository.workspace = true
 description = "Big Smooth — orchestrator, policy generation, sandbox management, API server"
 
 [dependencies]
+smooth-operator = { path = "../smooth-operator" }
 smooth-policy.workspace = true
 smooth-web = { path = "../smooth-web" }
 axum.workspace = true
@@ -32,6 +33,7 @@ dirs-next.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
