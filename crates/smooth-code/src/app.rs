@@ -16,6 +16,7 @@ use smooth_operator::AgentEvent;
 use tokio::sync::mpsc;
 
 use crate::commands::{parse_input, CommandOutput, CommandRegistry, InputKind};
+use crate::diff_render::RenderCache;
 use crate::render;
 use crate::session::{Session, SessionManager};
 use crate::state::{AppState, ChatMessage, Mode};
@@ -94,12 +95,14 @@ fn event_loop(
             drop(s);
             last_save = std::time::Instant::now();
         }
-        // Draw
+        // Draw with synchronized output to eliminate flicker
         {
             let mut s = state.lock().expect("state lock poisoned");
             // Advance spinner each frame for animation
             s.advance_spinner();
+            print!("{}", RenderCache::begin_sync());
             terminal.draw(|f| render::render(f, &s))?;
+            print!("{}", RenderCache::end_sync());
         }
 
         // Drain all pending agent events without blocking
