@@ -413,10 +413,9 @@ async fn cmd_up(no_leader: bool, port: u16) -> Result<()> {
     let db = smooth_bigsmooth::db::Database::open(&db_path)?;
     println!("  Database: {} ✓", db_path.display());
 
-    // Check beads directory
-    let beads_dir = dirs_next::home_dir().unwrap_or_default().join(".smooth").join(".beads");
-    std::fs::create_dir_all(&beads_dir)?;
-    println!("  Beads: {} ✓", beads_dir.display());
+    // Initialize issue store (shares the same SQLite file)
+    let issue_store = smooth_issues::IssueStore::open(&db_path)?;
+    println!("  Issues:   {} ✓", db_path.display());
 
     if no_leader {
         println!("\nSmooth infrastructure ready (leader skipped).");
@@ -426,6 +425,7 @@ async fn cmd_up(no_leader: bool, port: u16) -> Result<()> {
     // Start leader (API + embedded web UI on same port)
     let state = smooth_bigsmooth::server::AppState {
         db,
+        issue_store,
         start_time: Instant::now(),
     };
 
@@ -752,8 +752,10 @@ async fn cmd_code(headless: bool, message: Option<String>, file: Option<String>,
         // Start Big Smooth in background
         let db_path = smooth_bigsmooth::db::default_db_path();
         let db = smooth_bigsmooth::db::Database::open(&db_path)?;
+        let issue_store = smooth_issues::IssueStore::open(&db_path)?;
         let state = smooth_bigsmooth::server::AppState {
             db,
+            issue_store,
             start_time: std::time::Instant::now(),
         };
         let addr: SocketAddr = "127.0.0.1:4400".parse()?;
