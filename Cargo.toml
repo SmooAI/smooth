@@ -92,6 +92,9 @@ bytes = "1"
 notify = { version = "8", default-features = false, features = ["macos_kqueue"] }
 arc-swap = "1"
 
+# Colors
+owo-colors = "4"
+
 # Async streams
 async-trait = "0.1"
 tokio-stream = "0.1"

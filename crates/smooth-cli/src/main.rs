@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use owo_colors::OwoColorize;
 
 /// Smooth — AI agent orchestration platform.
 /// Run with no arguments to launch the interactive TUI.
@@ -642,20 +643,23 @@ async fn cmd_code() -> Result<()> {
 
 /// System health check and auto-fix.
 async fn cmd_doctor() -> Result<()> {
-    println!("Smooth Doctor — checking system health...\n");
+    println!("{}", "Smooth Doctor".bold().cyan());
+    println!("{}", "checking system health...\n".dimmed());
 
     let mut issues = 0;
 
     // 1. Check Big Smooth API
     let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(2)).build()?;
     match client.get("http://localhost:4400/health").send().await {
-        Ok(r) if r.status().is_success() => println!("  ✓ Big Smooth API: healthy"),
+        Ok(r) if r.status().is_success() => {
+            println!("  {} Big Smooth API: {}", "✓".green().bold(), "healthy".green());
+        }
         Ok(r) => {
-            println!("  ✗ Big Smooth API: unhealthy (status {})", r.status());
+            println!("  {} Big Smooth API: {}", "✗".red().bold(), format!("unhealthy (status {})", r.status()).red());
             issues += 1;
         }
         Err(_) => {
-            println!("  ✗ Big Smooth API: not running (start with: th up)");
+            println!("  {} Big Smooth API: {}", "✗".red().bold(), "not running (start with: th up)".red());
             issues += 1;
         }
     }
@@ -664,23 +668,23 @@ async fn cmd_doctor() -> Result<()> {
     let db_path = smooth_bigsmooth::db::default_db_path();
     if db_path.exists() {
         match smooth_bigsmooth::db::Database::open(&db_path) {
-            Ok(_) => println!("  ✓ Database: OK ({})", db_path.display()),
+            Ok(_) => println!("  {} Database: {}", "✓".green().bold(), format!("OK ({})", db_path.display()).green()),
             Err(e) => {
-                println!("  ✗ Database: error ({e})");
+                println!("  {} Database: {}", "✗".red().bold(), format!("error ({e})").red());
                 issues += 1;
             }
         }
     } else {
-        println!("  ○ Database: not created yet (will be created on first run)");
+        println!("  {} Database: {}", "○".dimmed(), "not created yet (will be created on first run)".dimmed());
     }
 
     // 3. Check providers
     let providers_path = dirs_next::home_dir().map(|h| h.join(".smooth/providers.json"));
     if let Some(ref path) = providers_path {
         if path.exists() {
-            println!("  ✓ Providers: configured ({})", path.display());
+            println!("  {} Providers: {}", "✓".green().bold(), format!("configured ({})", path.display()).green());
         } else {
-            println!("  ✗ Providers: not configured (run: th auth login <provider>)");
+            println!("  {} Providers: {}", "✗".red().bold(), "not configured (run: th auth login <provider>)".red());
             issues += 1;
         }
     }
@@ -689,29 +693,33 @@ async fn cmd_doctor() -> Result<()> {
     let smooth_home = dirs_next::home_dir().map(|h| h.join(".smooth"));
     if let Some(ref dir) = smooth_home {
         if dir.exists() {
-            println!("  ✓ Smooth home: {}", dir.display());
+            println!("  {} Smooth home: {}", "✓".green().bold(), format!("{}", dir.display()).green());
         } else {
-            println!("  ○ Smooth home: will be created at {}", dir.display());
+            println!("  {} Smooth home: {}", "○".dimmed(), format!("will be created at {}", dir.display()).dimmed());
         }
     }
 
     // 5. Check Beads
     match std::process::Command::new("bd").arg("stats").output() {
-        Ok(output) if output.status.success() => println!("  ✓ Beads: available"),
+        Ok(output) if output.status.success() => println!("  {} Beads: {}", "✓".green().bold(), "available".green()),
         _ => {
-            println!("  ✗ Beads: not found (install from https://github.com/SmooAI/beads)");
+            println!(
+                "  {} Beads: {}",
+                "✗".red().bold(),
+                "not found (install from https://github.com/SmooAI/beads)".red()
+            );
             issues += 1;
         }
     }
 
     // 6. Sandboxes (built-in via microsandbox crate)
-    println!("  ✓ Sandboxes: built-in (microsandbox)");
+    println!("  {} Sandboxes: {}", "✓".green().bold(), "built-in (microsandbox)".green());
 
     println!();
     if issues == 0 {
-        println!("All checks passed. Smooth is ready.");
+        println!("{}", "All checks passed. Smooth is ready.".green().bold());
     } else {
-        println!("{issues} issue(s) found. Fix them and run: th doctor");
+        println!("{}", format!("{issues} issue(s) found. Fix them and run: th doctor").yellow().bold());
     }
 
     Ok(())

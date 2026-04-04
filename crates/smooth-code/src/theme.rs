@@ -110,6 +110,62 @@ pub fn success() -> Style {
     Style::default().fg(SUCCESS_GREEN)
 }
 
+// ── Gradient and dynamic color helpers ───────────────────────
+
+/// Interpolate between `SMOO_ORANGE` and `SMOO_GREEN` based on row position.
+///
+/// `row` 0 returns pure orange, `row == total - 1` returns pure green.
+/// `total` must be >= 1; if 1, returns orange.
+pub fn gradient_row(row: usize, total: usize) -> Style {
+    let total = total.max(1);
+    let t = if total <= 1 { 0.0 } else { row as f64 / (total as f64 - 1.0) };
+
+    // SMOO_ORANGE = (244, 159, 10), SMOO_GREEN = (0, 166, 166)
+    let r = lerp_u8(244, 0, t);
+    let g = lerp_u8(159, 166, t);
+    let b = lerp_u8(10, 166, t);
+
+    Style::default().fg(Color::Rgb(r, g, b)).add_modifier(Modifier::BOLD)
+}
+
+/// Return a color for a file based on its extension.
+pub fn file_color(extension: &str) -> Color {
+    match extension {
+        "rs" => SMOO_ORANGE,
+        "ts" | "tsx" | "js" | "jsx" => SMOO_BLUE_400,
+        "md" => SMOO_GREEN,
+        "json" => Color::Rgb(255, 255, 100),                  // yellow
+        "toml" | "yaml" | "yml" => Color::Rgb(100, 220, 220), // cyan
+        _ => Color::White,
+    }
+}
+
+/// Style for a tool-call status border.
+pub fn tool_status_border(status: crate::state::ToolStatus) -> Style {
+    use crate::state::ToolStatus;
+    match status {
+        ToolStatus::Pending => Style::default().fg(MUTED),
+        ToolStatus::Running => Style::default().fg(SMOO_ORANGE),
+        ToolStatus::Done => Style::default().fg(SUCCESS_GREEN),
+        ToolStatus::Error => Style::default().fg(ERROR_RED),
+    }
+}
+
+/// Panel border style — bright when active (focused), dim when inactive.
+pub fn panel_border(active: bool) -> Style {
+    if active {
+        Style::default().fg(SMOO_GREEN).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(SMOO_GRAY_700)
+    }
+}
+
+/// Linear interpolation between two u8 values.
+fn lerp_u8(a: u8, b: u8, t: f64) -> u8 {
+    let result = f64::from(a) + (f64::from(b) - f64::from(a)) * t;
+    result.round().clamp(0.0, 255.0) as u8
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,5 +218,79 @@ mod tests {
 
         let ss = status_style();
         assert_eq!(ss.fg, Some(MUTED));
+    }
+
+    #[test]
+    fn test_gradient_row_interpolates_correctly() {
+        // First row = pure SMOO_ORANGE
+        let first = gradient_row(0, 6);
+        assert_eq!(first.fg, Some(Color::Rgb(244, 159, 10)));
+
+        // Last row = pure SMOO_GREEN
+        let last = gradient_row(5, 6);
+        assert_eq!(last.fg, Some(Color::Rgb(0, 166, 166)));
+
+        // Middle row should be somewhere between
+        let mid = gradient_row(3, 6);
+        if let Some(Color::Rgb(r, g, b)) = mid.fg {
+            assert!(r < 244, "mid red should be less than orange red");
+            assert!(r > 0, "mid red should be greater than green red");
+            assert!(b > 10, "mid blue should be greater than orange blue");
+            assert!(b < 166, "mid blue should be less than green blue");
+            // green channel stays close (159 -> 166)
+            assert!(g >= 159);
+            assert!(g <= 166);
+        } else {
+            panic!("expected Rgb color");
+        }
+
+        // Edge case: total=1 returns orange
+        let single = gradient_row(0, 1);
+        assert_eq!(single.fg, Some(Color::Rgb(244, 159, 10)));
+    }
+
+    #[test]
+    fn test_file_color_returns_different_colors() {
+        let rs = file_color("rs");
+        let ts = file_color("ts");
+        let md = file_color("md");
+        let json = file_color("json");
+        let toml = file_color("toml");
+        let other = file_color("xyz");
+
+        assert_eq!(rs, SMOO_ORANGE);
+        assert_eq!(ts, SMOO_BLUE_400);
+        assert_eq!(md, SMOO_GREEN);
+        // Ensure json/toml/other are all distinct
+        assert_ne!(json, toml);
+        assert_ne!(json, other);
+        assert_eq!(other, Color::White);
+    }
+
+    #[test]
+    fn test_tool_status_border_returns_correct_colors() {
+        use crate::state::ToolStatus;
+
+        let pending = tool_status_border(ToolStatus::Pending);
+        assert_eq!(pending.fg, Some(MUTED));
+
+        let running = tool_status_border(ToolStatus::Running);
+        assert_eq!(running.fg, Some(SMOO_ORANGE));
+
+        let done = tool_status_border(ToolStatus::Done);
+        assert_eq!(done.fg, Some(SUCCESS_GREEN));
+
+        let error = tool_status_border(ToolStatus::Error);
+        assert_eq!(error.fg, Some(ERROR_RED));
+    }
+
+    #[test]
+    fn test_panel_border_active_vs_inactive() {
+        let active = panel_border(true);
+        let inactive = panel_border(false);
+
+        assert_ne!(active.fg, inactive.fg);
+        assert_eq!(active.fg, Some(SMOO_GREEN));
+        assert_eq!(inactive.fg, Some(SMOO_GRAY_700));
     }
 }
