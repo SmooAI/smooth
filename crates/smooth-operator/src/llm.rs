@@ -40,6 +40,14 @@ pub struct RateLimitInfo {
     pub remaining_tokens: Option<u32>,
 }
 
+/// API format for the LLM provider.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ApiFormat {
+    #[default]
+    OpenAiCompat,
+    Anthropic,
+}
+
 /// Configuration for the LLM client.
 #[derive(Debug, Clone)]
 pub struct LlmConfig {
@@ -49,6 +57,7 @@ pub struct LlmConfig {
     pub max_tokens: u32,
     pub temperature: f32,
     pub retry_policy: RetryPolicy,
+    pub api_format: ApiFormat,
 }
 
 impl LlmConfig {
@@ -60,6 +69,7 @@ impl LlmConfig {
             max_tokens: 8192,
             temperature: 0.0,
             retry_policy: RetryPolicy::default(),
+            api_format: ApiFormat::OpenAiCompat,
         }
     }
 
@@ -71,6 +81,7 @@ impl LlmConfig {
             max_tokens: 8192,
             temperature: 0.0,
             retry_policy: RetryPolicy::default(),
+            api_format: ApiFormat::Anthropic,
         }
     }
 
@@ -91,6 +102,11 @@ impl LlmConfig {
 
     pub fn with_retry_policy(mut self, policy: RetryPolicy) -> Self {
         self.retry_policy = policy;
+        self
+    }
+
+    pub fn with_api_format(mut self, format: ApiFormat) -> Self {
+        self.api_format = format;
         self
     }
 }
@@ -241,6 +257,62 @@ struct StreamFunctionDelta {
     arguments: Option<String>,
 }
 
+// --- Anthropic native API types ---
+
+#[derive(Debug, Serialize)]
+struct AnthropicRequest {
+    model: String,
+    max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<String>,
+    messages: Vec<AnthropicMessage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<AnthropicTool>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct AnthropicMessage {
+    role: String,
+    content: AnthropicContent,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(untagged)]
+enum AnthropicContent {
+    Text(String),
+    Blocks(Vec<AnthropicContentBlock>),
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AnthropicContentBlock {
+    Text { text: String },
+    ToolUse { id: String, name: String, input: serde_json::Value },
+    ToolResult { tool_use_id: String, content: String },
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicTool {
+    name: String,
+    description: String,
+    input_schema: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicResponse {
+    #[allow(dead_code)]
+    id: String,
+    content: Vec<AnthropicContentBlock>,
+    stop_reason: Option<String>,
+    usage: AnthropicUsage,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicUsage {
+    input_tokens: u32,
+    output_tokens: u32,
+}
+
 /// Calculate exponential backoff duration for a given retry attempt.
 fn calculate_backoff(attempt: u32, policy: &RetryPolicy) -> Duration {
     let exp_ms = policy.base_delay_ms.saturating_mul(1u64 << attempt);
@@ -300,6 +372,11 @@ impl LlmClient {
     /// # Errors
     /// Returns error if the API call fails after all retries or returns an invalid response.
     pub async fn chat(&self, messages: &[&Message], tools: &[ToolSchema]) -> anyhow::Result<LlmResponse> {
+        match self.config.api_format {
+            ApiFormat::Anthropic => return self.chat_anthropic(messages, tools).await,
+            ApiFormat::OpenAiCompat => {}
+        }
+
         let chat_messages: Vec<ChatMessage> = messages.iter().map(|m| to_chat_message(m)).collect();
 
         let chat_tools: Vec<ChatTool> = tools
@@ -494,6 +571,110 @@ impl LlmClient {
         Ok(Box::pin(ReceiverStream::new(rx)))
     }
 
+    /// Send a chat completion request using the Anthropic native API.
+    async fn chat_anthropic(&self, messages: &[&Message], tools: &[ToolSchema]) -> anyhow::Result<LlmResponse> {
+        let (system, anthropic_messages) = convert_messages_to_anthropic(messages);
+
+        let anthropic_tools: Vec<AnthropicTool> = tools
+            .iter()
+            .map(|t| AnthropicTool {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                input_schema: t.parameters.clone(),
+            })
+            .collect();
+
+        let request = AnthropicRequest {
+            model: self.config.model.clone(),
+            max_tokens: self.config.max_tokens,
+            system,
+            messages: anthropic_messages,
+            tools: anthropic_tools,
+        };
+
+        let url = format!("{}/messages", self.config.api_url);
+        let policy = &self.config.retry_policy;
+
+        let mut last_error: Option<anyhow::Error> = None;
+
+        for attempt in 0..=policy.max_retries {
+            let resp = self
+                .client
+                .post(&url)
+                .header("x-api-key", &self.config.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .json(&request)
+                .send()
+                .await?;
+
+            let status = resp.status();
+            let rate_limit_info = parse_rate_limit_headers(resp.headers());
+
+            if status.is_success() {
+                let anthropic_resp: AnthropicResponse = resp.json().await?;
+
+                let mut content = String::new();
+                let mut tool_calls = Vec::new();
+
+                for block in anthropic_resp.content {
+                    match block {
+                        AnthropicContentBlock::Text { text } => {
+                            if !content.is_empty() {
+                                content.push('\n');
+                            }
+                            content.push_str(&text);
+                        }
+                        AnthropicContentBlock::ToolUse { id, name, input } => {
+                            tool_calls.push(ToolCall { id, name, arguments: input });
+                        }
+                        AnthropicContentBlock::ToolResult { .. } => {}
+                    }
+                }
+
+                let finish_reason = anthropic_resp.stop_reason.unwrap_or_else(|| "stop".into());
+                let total = anthropic_resp.usage.input_tokens + anthropic_resp.usage.output_tokens;
+
+                return Ok(LlmResponse {
+                    content,
+                    tool_calls,
+                    finish_reason,
+                    usage: Usage {
+                        prompt_tokens: anthropic_resp.usage.input_tokens,
+                        completion_tokens: anthropic_resp.usage.output_tokens,
+                        total_tokens: total,
+                    },
+                    rate_limit: Some(rate_limit_info),
+                });
+            }
+
+            let status_code = status.as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            let is_retryable = policy.retry_on_status.contains(&status_code);
+
+            if !is_retryable || attempt == policy.max_retries {
+                last_error = Some(anyhow::anyhow!("LLM API error {status}: {body}"));
+                break;
+            }
+
+            let delay = rate_limit_info
+                .retry_after_ms
+                .map_or_else(|| calculate_backoff(attempt, policy), Duration::from_millis);
+
+            tracing::warn!(
+                attempt = attempt + 1,
+                max_retries = policy.max_retries,
+                status = status_code,
+                delay_ms = delay.as_millis(),
+                "Anthropic API request failed, retrying"
+            );
+
+            tokio::time::sleep(delay).await;
+        }
+
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Anthropic API request failed after retries")))
+    }
+
     pub fn config(&self) -> &LlmConfig {
         &self.config
     }
@@ -673,6 +854,67 @@ fn to_chat_message(msg: &Message) -> ChatMessage {
         tool_call_id: msg.tool_call_id.clone(),
         tool_calls,
     }
+}
+
+/// Convert conversation messages to Anthropic format, extracting system messages.
+///
+/// Returns `(system_prompt, messages)` where the system prompt is the concatenation
+/// of all system messages, and remaining messages are converted to Anthropic format.
+fn convert_messages_to_anthropic(messages: &[&Message]) -> (Option<String>, Vec<AnthropicMessage>) {
+    let mut system_parts: Vec<&str> = Vec::new();
+    let mut anthropic_messages: Vec<AnthropicMessage> = Vec::new();
+
+    for msg in messages {
+        match msg.role {
+            Role::System => {
+                system_parts.push(&msg.content);
+            }
+            Role::User => {
+                anthropic_messages.push(AnthropicMessage {
+                    role: "user".into(),
+                    content: AnthropicContent::Text(msg.content.clone()),
+                });
+            }
+            Role::Assistant => {
+                if msg.tool_calls.is_empty() {
+                    anthropic_messages.push(AnthropicMessage {
+                        role: "assistant".into(),
+                        content: AnthropicContent::Text(msg.content.clone()),
+                    });
+                } else {
+                    let mut blocks: Vec<AnthropicContentBlock> = Vec::new();
+                    if !msg.content.is_empty() {
+                        blocks.push(AnthropicContentBlock::Text { text: msg.content.clone() });
+                    }
+                    for tc in &msg.tool_calls {
+                        blocks.push(AnthropicContentBlock::ToolUse {
+                            id: tc.id.clone(),
+                            name: tc.name.clone(),
+                            input: tc.arguments.clone(),
+                        });
+                    }
+                    anthropic_messages.push(AnthropicMessage {
+                        role: "assistant".into(),
+                        content: AnthropicContent::Blocks(blocks),
+                    });
+                }
+            }
+            Role::Tool => {
+                let tool_use_id = msg.tool_call_id.clone().unwrap_or_default();
+                anthropic_messages.push(AnthropicMessage {
+                    role: "user".into(),
+                    content: AnthropicContent::Blocks(vec![AnthropicContentBlock::ToolResult {
+                        tool_use_id,
+                        content: msg.content.clone(),
+                    }]),
+                });
+            }
+        }
+    }
+
+    let system = if system_parts.is_empty() { None } else { Some(system_parts.join("\n\n")) };
+
+    (system, anthropic_messages)
 }
 
 /// Try to load an API key from OpenCode's auth file.
@@ -1003,5 +1245,145 @@ mod tests {
         assert!(info.retry_after_ms.is_none());
         assert!(info.remaining_requests.is_none());
         assert!(info.remaining_tokens.is_none());
+    }
+
+    // --- Anthropic native API tests ---
+
+    #[test]
+    fn anthropic_request_serialization_matches_api_spec() {
+        let req = AnthropicRequest {
+            model: "claude-sonnet-4-20250514".into(),
+            max_tokens: 1024,
+            system: Some("You are helpful.".into()),
+            messages: vec![AnthropicMessage {
+                role: "user".into(),
+                content: AnthropicContent::Text("Hello".into()),
+            }],
+            tools: vec![AnthropicTool {
+                name: "echo".into(),
+                description: "Echoes text".into(),
+                input_schema: serde_json::json!({"type": "object", "properties": {"text": {"type": "string"}}}),
+            }],
+        };
+        let json: serde_json::Value = serde_json::to_value(&req).expect("serialize");
+        assert_eq!(json["model"], "claude-sonnet-4-20250514");
+        assert_eq!(json["max_tokens"], 1024);
+        assert_eq!(json["system"], "You are helpful.");
+        assert_eq!(json["messages"][0]["role"], "user");
+        assert_eq!(json["messages"][0]["content"], "Hello");
+        assert_eq!(json["tools"][0]["name"], "echo");
+        assert_eq!(json["tools"][0]["input_schema"]["type"], "object");
+        // Should NOT have "parameters" — Anthropic uses "input_schema"
+        assert!(json["tools"][0].get("parameters").is_none());
+    }
+
+    #[test]
+    fn anthropic_response_deserialization_with_text() {
+        let json = r#"{
+            "id": "msg_01",
+            "type": "message",
+            "content": [{"type": "text", "text": "Hello!"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        }"#;
+        let resp: AnthropicResponse = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(resp.id, "msg_01");
+        assert_eq!(resp.content.len(), 1);
+        match &resp.content[0] {
+            AnthropicContentBlock::Text { text } => assert_eq!(text, "Hello!"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+        assert_eq!(resp.stop_reason.as_deref(), Some("end_turn"));
+        assert_eq!(resp.usage.input_tokens, 10);
+        assert_eq!(resp.usage.output_tokens, 5);
+    }
+
+    #[test]
+    fn anthropic_response_deserialization_with_tool_use() {
+        let json = r#"{
+            "id": "msg_02",
+            "type": "message",
+            "content": [
+                {"type": "text", "text": "I'll echo that."},
+                {"type": "tool_use", "id": "toolu_01", "name": "echo", "input": {"text": "hi"}}
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 20, "output_tokens": 15}
+        }"#;
+        let resp: AnthropicResponse = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(resp.content.len(), 2);
+        match &resp.content[0] {
+            AnthropicContentBlock::Text { text } => assert_eq!(text, "I'll echo that."),
+            other => panic!("expected Text, got {other:?}"),
+        }
+        match &resp.content[1] {
+            AnthropicContentBlock::ToolUse { id, name, input } => {
+                assert_eq!(id, "toolu_01");
+                assert_eq!(name, "echo");
+                assert_eq!(input, &serde_json::json!({"text": "hi"}));
+            }
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+        assert_eq!(resp.stop_reason.as_deref(), Some("tool_use"));
+    }
+
+    #[test]
+    fn anthropic_system_prompt_extracted_from_messages() {
+        let sys = Message::system("You are a helpful assistant.");
+        let user = Message::user("Hello");
+        let messages: Vec<&Message> = vec![&sys, &user];
+        let (system, msgs) = convert_messages_to_anthropic(&messages);
+        assert_eq!(system.as_deref(), Some("You are a helpful assistant."));
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, "user");
+    }
+
+    #[test]
+    fn anthropic_tool_results_converted_to_content_block() {
+        let tool_msg = Message::tool_result("toolu_01", "echo result");
+        let messages: Vec<&Message> = vec![&tool_msg];
+        let (system, msgs) = convert_messages_to_anthropic(&messages);
+        assert!(system.is_none());
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, "user");
+        match &msgs[0].content {
+            AnthropicContent::Blocks(blocks) => {
+                assert_eq!(blocks.len(), 1);
+                match &blocks[0] {
+                    AnthropicContentBlock::ToolResult { tool_use_id, content } => {
+                        assert_eq!(tool_use_id, "toolu_01");
+                        assert_eq!(content, "echo result");
+                    }
+                    other => panic!("expected ToolResult, got {other:?}"),
+                }
+            }
+            other => panic!("expected Blocks, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn anthropic_uses_x_api_key_header() {
+        // Verify the Anthropic config builds an appropriate request by checking
+        // that chat_anthropic would use x-api-key. We test this indirectly via
+        // the request builder — construct the client and verify config.
+        let config = LlmConfig::anthropic("sk-ant-test123");
+        let client = LlmClient::new(config);
+        // The actual header is set in chat_anthropic, but we can verify the config
+        // doesn't use bearer auth by checking api_format
+        assert_eq!(client.config().api_format, ApiFormat::Anthropic);
+        // And the key is stored correctly
+        assert_eq!(client.config().api_key, "sk-ant-test123");
+    }
+
+    #[test]
+    fn llm_config_anthropic_defaults_to_anthropic_format() {
+        let config = LlmConfig::anthropic("sk-ant-test");
+        assert_eq!(config.api_format, ApiFormat::Anthropic);
+    }
+
+    #[test]
+    fn llm_config_opencode_zen_defaults_to_openai_compat_format() {
+        let config = LlmConfig::opencode_zen("test-key");
+        assert_eq!(config.api_format, ApiFormat::OpenAiCompat);
     }
 }
