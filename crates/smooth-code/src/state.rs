@@ -4,7 +4,72 @@ use std::fmt;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+/// Status of a tool call invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ToolStatus {
+    /// Queued but not yet started.
+    Pending,
+    /// Currently executing.
+    Running,
+    /// Completed successfully.
+    Done,
+    /// Completed with an error.
+    Error,
+}
+
+impl fmt::Display for ToolStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Pending => write!(f, "pending"),
+            Self::Running => write!(f, "running"),
+            Self::Done => write!(f, "done"),
+            Self::Error => write!(f, "error"),
+        }
+    }
+}
+
+/// State for a single tool call associated with an assistant message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallState {
+    /// Unique identifier for this tool call.
+    pub id: String,
+    /// Name of the tool being invoked.
+    pub tool_name: String,
+    /// First 80 characters of the serialized arguments.
+    pub arguments_preview: String,
+    /// Tool output (stdout/result), if available.
+    pub output: Option<String>,
+    /// Current execution status.
+    pub status: ToolStatus,
+    /// Whether the output is collapsed in the UI.
+    pub collapsed: bool,
+    /// When the tool call was initiated.
+    pub started_at: DateTime<Utc>,
+    /// Execution duration in milliseconds, set when finished.
+    pub duration_ms: Option<u64>,
+}
+
+impl ToolCallState {
+    /// Create a new `ToolCallState` with `Running` status and a truncated arguments preview.
+    pub fn new(id: impl Into<String>, tool_name: impl Into<String>, arguments: &serde_json::Value) -> Self {
+        let args_str = arguments.to_string();
+        let arguments_preview = if args_str.len() > 80 { format!("{}...", &args_str[..80]) } else { args_str };
+
+        Self {
+            id: id.into(),
+            tool_name: tool_name.into(),
+            arguments_preview,
+            output: None,
+            status: ToolStatus::Running,
+            collapsed: true,
+            started_at: Utc::now(),
+            duration_ms: None,
+        }
+    }
+}
 
 /// The current input mode of the TUI.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +106,8 @@ pub struct ChatMessage {
     pub role: ChatRole,
     pub content: String,
     pub timestamp: DateTime<Utc>,
+    /// Tool calls associated with this message (only meaningful for assistant messages).
+    pub tool_calls: Vec<ToolCallState>,
 }
 
 impl ChatMessage {
@@ -51,6 +118,7 @@ impl ChatMessage {
             role,
             content: content.into(),
             timestamp: Utc::now(),
+            tool_calls: Vec::new(),
         }
     }
 
@@ -173,6 +241,45 @@ impl AppState {
     pub fn input_clear(&mut self) {
         self.input.clear();
         self.input_cursor = 0;
+    }
+
+    /// Add a tool call to the last assistant message.
+    ///
+    /// If the last message is not an assistant message, this is a no-op.
+    pub fn add_tool_call(&mut self, id: &str, tool_name: &str, arguments: &serde_json::Value) {
+        if let Some(msg) = self.messages.last_mut() {
+            if msg.role == ChatRole::Assistant {
+                msg.tool_calls.push(ToolCallState::new(id, tool_name, arguments));
+            }
+        }
+    }
+
+    /// Update an existing tool call by ID — set output, error status, and duration.
+    ///
+    /// Searches all messages for the matching tool call.
+    pub fn update_tool_call(&mut self, id: &str, output: &str, is_error: bool, duration_ms: u64) {
+        for msg in &mut self.messages {
+            for tc in &mut msg.tool_calls {
+                if tc.id == id {
+                    tc.output = Some(output.to_string());
+                    tc.status = if is_error { ToolStatus::Error } else { ToolStatus::Done };
+                    tc.duration_ms = Some(duration_ms);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Toggle the collapsed state of a tool call by ID.
+    pub fn toggle_tool_collapse(&mut self, id: &str) {
+        for msg in &mut self.messages {
+            for tc in &mut msg.tool_calls {
+                if tc.id == id {
+                    tc.collapsed = !tc.collapsed;
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -303,5 +410,85 @@ mod tests {
     #[test]
     fn test_mode_default() {
         assert_eq!(Mode::default(), Mode::Input);
+    }
+
+    #[test]
+    fn test_tool_call_state_creation() {
+        let args = serde_json::json!({"file": "src/main.rs"});
+        let tc = ToolCallState::new("tc-1", "edit_file", &args);
+        assert_eq!(tc.id, "tc-1");
+        assert_eq!(tc.tool_name, "edit_file");
+        assert_eq!(tc.status, ToolStatus::Running);
+        assert!(tc.collapsed);
+        assert!(tc.output.is_none());
+        assert!(tc.duration_ms.is_none());
+    }
+
+    #[test]
+    fn test_tool_status_display() {
+        assert_eq!(format!("{}", ToolStatus::Pending), "pending");
+        assert_eq!(format!("{}", ToolStatus::Running), "running");
+        assert_eq!(format!("{}", ToolStatus::Done), "done");
+        assert_eq!(format!("{}", ToolStatus::Error), "error");
+    }
+
+    #[test]
+    fn test_add_tool_call_to_last_assistant_message() {
+        let mut state = AppState::new(PathBuf::from("/tmp"));
+        state.add_message(ChatMessage::assistant("thinking..."));
+        let args = serde_json::json!({"cmd": "cargo test"});
+        state.add_tool_call("tc-1", "bash", &args);
+
+        assert_eq!(state.messages[0].tool_calls.len(), 1);
+        assert_eq!(state.messages[0].tool_calls[0].tool_name, "bash");
+
+        // Adding to a user message is a no-op
+        state.add_message(ChatMessage::user("hello"));
+        state.add_tool_call("tc-2", "read_file", &serde_json::json!({}));
+        assert!(state.messages[1].tool_calls.is_empty());
+    }
+
+    #[test]
+    fn test_update_tool_call_done_and_error() {
+        let mut state = AppState::new(PathBuf::from("/tmp"));
+        state.add_message(ChatMessage::assistant("working"));
+        state.add_tool_call("tc-1", "bash", &serde_json::json!({}));
+        state.add_tool_call("tc-2", "read_file", &serde_json::json!({}));
+
+        // Update tc-1 as done
+        state.update_tool_call("tc-1", "ok", false, 2300);
+        let tc1 = &state.messages[0].tool_calls[0];
+        assert_eq!(tc1.status, ToolStatus::Done);
+        assert_eq!(tc1.output.as_deref(), Some("ok"));
+        assert_eq!(tc1.duration_ms, Some(2300));
+
+        // Update tc-2 as error
+        state.update_tool_call("tc-2", "File not found", true, 50);
+        let tc2 = &state.messages[0].tool_calls[1];
+        assert_eq!(tc2.status, ToolStatus::Error);
+        assert_eq!(tc2.output.as_deref(), Some("File not found"));
+    }
+
+    #[test]
+    fn test_toggle_tool_collapse() {
+        let mut state = AppState::new(PathBuf::from("/tmp"));
+        state.add_message(ChatMessage::assistant("hi"));
+        state.add_tool_call("tc-1", "bash", &serde_json::json!({}));
+
+        assert!(state.messages[0].tool_calls[0].collapsed);
+        state.toggle_tool_collapse("tc-1");
+        assert!(!state.messages[0].tool_calls[0].collapsed);
+        state.toggle_tool_collapse("tc-1");
+        assert!(state.messages[0].tool_calls[0].collapsed);
+    }
+
+    #[test]
+    fn test_arguments_preview_truncation() {
+        let long_value = "x".repeat(200);
+        let args = serde_json::json!({"data": long_value});
+        let tc = ToolCallState::new("tc-1", "write_file", &args);
+        // The preview should be 80 chars + "..."
+        assert_eq!(tc.arguments_preview.len(), 83);
+        assert!(tc.arguments_preview.ends_with("..."));
     }
 }
