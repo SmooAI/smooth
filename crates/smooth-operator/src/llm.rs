@@ -1,14 +1,44 @@
 use std::collections::HashMap;
 use std::pin::Pin;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use futures_core::Stream;
 use futures_util::StreamExt;
+use reqwest::header::HeaderMap;
 use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::conversation::{Message, Role};
 use crate::tool::{ToolCall, ToolSchema};
+
+/// Policy controlling retry behavior for transient LLM API errors.
+#[derive(Debug, Clone)]
+pub struct RetryPolicy {
+    pub max_retries: u32,
+    pub base_delay_ms: u64,
+    pub max_delay_ms: u64,
+    pub retry_on_status: Vec<u16>,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_retries: 3,
+            base_delay_ms: 1000,
+            max_delay_ms: 60_000,
+            retry_on_status: vec![429, 500, 502, 503],
+        }
+    }
+}
+
+/// Rate-limit information extracted from LLM API response headers.
+#[derive(Debug, Clone, Default)]
+pub struct RateLimitInfo {
+    pub retry_after_ms: Option<u64>,
+    pub remaining_requests: Option<u32>,
+    pub remaining_tokens: Option<u32>,
+}
 
 /// Configuration for the LLM client.
 #[derive(Debug, Clone)]
@@ -18,6 +48,7 @@ pub struct LlmConfig {
     pub model: String,
     pub max_tokens: u32,
     pub temperature: f32,
+    pub retry_policy: RetryPolicy,
 }
 
 impl LlmConfig {
@@ -28,6 +59,7 @@ impl LlmConfig {
             model: "anthropic/claude-sonnet-4-20250514".into(),
             max_tokens: 8192,
             temperature: 0.0,
+            retry_policy: RetryPolicy::default(),
         }
     }
 
@@ -38,6 +70,7 @@ impl LlmConfig {
             model: "claude-sonnet-4-20250514".into(),
             max_tokens: 8192,
             temperature: 0.0,
+            retry_policy: RetryPolicy::default(),
         }
     }
 
@@ -55,6 +88,11 @@ impl LlmConfig {
         self.max_tokens = max;
         self
     }
+
+    pub fn with_retry_policy(mut self, policy: RetryPolicy) -> Self {
+        self.retry_policy = policy;
+        self
+    }
 }
 
 /// Response from the LLM.
@@ -64,6 +102,7 @@ pub struct LlmResponse {
     pub tool_calls: Vec<ToolCall>,
     pub finish_reason: String,
     pub usage: Usage,
+    pub rate_limit: Option<RateLimitInfo>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -202,6 +241,46 @@ struct StreamFunctionDelta {
     arguments: Option<String>,
 }
 
+/// Calculate exponential backoff duration for a given retry attempt.
+fn calculate_backoff(attempt: u32, policy: &RetryPolicy) -> Duration {
+    let exp_ms = policy.base_delay_ms.saturating_mul(1u64 << attempt);
+    let jitter_ms = u64::from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().subsec_nanos() % 500);
+    let total_ms = exp_ms.saturating_add(jitter_ms).min(policy.max_delay_ms);
+    Duration::from_millis(total_ms)
+}
+
+/// Extract rate-limit information from HTTP response headers.
+fn parse_rate_limit_headers(headers: &HeaderMap) -> RateLimitInfo {
+    let retry_after_ms = headers
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<f64>().ok())
+        .and_then(|secs| {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            if secs >= 0.0 {
+                Some((secs * 1000.0) as u64)
+            } else {
+                None
+            }
+        });
+
+    let remaining_requests = headers
+        .get("x-ratelimit-remaining-requests")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u32>().ok());
+
+    let remaining_tokens = headers
+        .get("x-ratelimit-remaining-tokens")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u32>().ok());
+
+    RateLimitInfo {
+        retry_after_ms,
+        remaining_requests,
+        remaining_tokens,
+    }
+}
+
 /// LLM client using OpenAI-compatible chat completion API.
 pub struct LlmClient {
     config: LlmConfig,
@@ -216,10 +295,10 @@ impl LlmClient {
         }
     }
 
-    /// Send a chat completion request.
+    /// Send a chat completion request with automatic retry on transient errors.
     ///
     /// # Errors
-    /// Returns error if the API call fails or returns an invalid response.
+    /// Returns error if the API call fails after all retries or returns an invalid response.
     pub async fn chat(&self, messages: &[&Message], tools: &[ToolSchema]) -> anyhow::Result<LlmResponse> {
         let chat_messages: Vec<ChatMessage> = messages.iter().map(|m| to_chat_message(m)).collect();
 
@@ -244,45 +323,75 @@ impl LlmClient {
         };
 
         let url = format!("{}/chat/completions", self.config.api_url);
+        let policy = &self.config.retry_policy;
 
-        let resp = self.client.post(&url).bearer_auth(&self.config.api_key).json(&request).send().await?;
+        let mut last_error: Option<anyhow::Error> = None;
 
-        if !resp.status().is_success() {
+        for attempt in 0..=policy.max_retries {
+            let resp = self.client.post(&url).bearer_auth(&self.config.api_key).json(&request).send().await?;
+
             let status = resp.status();
+            let rate_limit_info = parse_rate_limit_headers(resp.headers());
+
+            if status.is_success() {
+                let chat_resp: ChatResponse = resp.json().await?;
+                let choice = chat_resp.choices.into_iter().next().ok_or_else(|| anyhow::anyhow!("no choices in response"))?;
+
+                let tool_calls = choice
+                    .message
+                    .tool_calls
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|tc| {
+                        let args: serde_json::Value = serde_json::from_str(&tc.function.arguments).ok()?;
+                        Some(ToolCall {
+                            id: tc.id,
+                            name: tc.function.name,
+                            arguments: args,
+                        })
+                    })
+                    .collect();
+
+                let usage = chat_resp.usage.map_or_else(Usage::default, |u| Usage {
+                    prompt_tokens: u.prompt_tokens,
+                    completion_tokens: u.completion_tokens,
+                    total_tokens: u.total_tokens,
+                });
+
+                return Ok(LlmResponse {
+                    content: choice.message.content.unwrap_or_default(),
+                    tool_calls,
+                    finish_reason: choice.finish_reason.unwrap_or_else(|| "stop".into()),
+                    usage,
+                    rate_limit: Some(rate_limit_info),
+                });
+            }
+
+            let status_code = status.as_u16();
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("LLM API error {status}: {body}");
+            let is_retryable = policy.retry_on_status.contains(&status_code);
+
+            if !is_retryable || attempt == policy.max_retries {
+                last_error = Some(anyhow::anyhow!("LLM API error {status}: {body}"));
+                break;
+            }
+
+            let delay = rate_limit_info
+                .retry_after_ms
+                .map_or_else(|| calculate_backoff(attempt, policy), Duration::from_millis);
+
+            tracing::warn!(
+                attempt = attempt + 1,
+                max_retries = policy.max_retries,
+                status = status_code,
+                delay_ms = delay.as_millis(),
+                "LLM API request failed, retrying"
+            );
+
+            tokio::time::sleep(delay).await;
         }
 
-        let chat_resp: ChatResponse = resp.json().await?;
-        let choice = chat_resp.choices.into_iter().next().ok_or_else(|| anyhow::anyhow!("no choices in response"))?;
-
-        let tool_calls = choice
-            .message
-            .tool_calls
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|tc| {
-                let args: serde_json::Value = serde_json::from_str(&tc.function.arguments).ok()?;
-                Some(ToolCall {
-                    id: tc.id,
-                    name: tc.function.name,
-                    arguments: args,
-                })
-            })
-            .collect();
-
-        let usage = chat_resp.usage.map_or_else(Usage::default, |u| Usage {
-            prompt_tokens: u.prompt_tokens,
-            completion_tokens: u.completion_tokens,
-            total_tokens: u.total_tokens,
-        });
-
-        Ok(LlmResponse {
-            content: choice.message.content.unwrap_or_default(),
-            tool_calls,
-            finish_reason: choice.finish_reason.unwrap_or_else(|| "stop".into()),
-            usage,
-        })
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("LLM API request failed after retries")))
     }
 
     /// Send a streaming chat completion request.
@@ -533,6 +642,7 @@ pub async fn accumulate_stream_events(mut stream: Pin<Box<dyn Stream<Item = anyh
         tool_calls,
         finish_reason,
         usage,
+        rate_limit: None,
     })
 }
 
@@ -806,5 +916,92 @@ mod tests {
         assert_eq!(response.tool_calls[0].id, "call-1");
         assert_eq!(response.tool_calls[0].arguments, serde_json::json!({"text": "hi"}));
         assert_eq!(response.finish_reason, "tool_calls");
+    }
+
+    // --- Retry and rate-limit tests ---
+
+    #[test]
+    fn retry_policy_default_values() {
+        let policy = RetryPolicy::default();
+        assert_eq!(policy.max_retries, 3);
+        assert_eq!(policy.base_delay_ms, 1000);
+        assert_eq!(policy.max_delay_ms, 60_000);
+        assert_eq!(policy.retry_on_status, vec![429, 500, 502, 503]);
+    }
+
+    #[test]
+    fn calculate_backoff_exponential_growth() {
+        let policy = RetryPolicy {
+            base_delay_ms: 1000,
+            max_delay_ms: 60_000,
+            ..RetryPolicy::default()
+        };
+        // Jitter is 0-499ms, so check that the base exponential component is correct
+        let d0 = calculate_backoff(0, &policy);
+        let d1 = calculate_backoff(1, &policy);
+        let d2 = calculate_backoff(2, &policy);
+
+        // attempt 0: 1000ms + jitter(0-499)  => [1000, 1499]
+        assert!(d0.as_millis() >= 1000);
+        assert!(d0.as_millis() < 1500);
+        // attempt 1: 2000ms + jitter => [2000, 2499]
+        assert!(d1.as_millis() >= 2000);
+        assert!(d1.as_millis() < 2500);
+        // attempt 2: 4000ms + jitter => [4000, 4499]
+        assert!(d2.as_millis() >= 4000);
+        assert!(d2.as_millis() < 4500);
+    }
+
+    #[test]
+    fn calculate_backoff_capped_at_max_delay() {
+        let policy = RetryPolicy {
+            base_delay_ms: 30_000,
+            max_delay_ms: 60_000,
+            ..RetryPolicy::default()
+        };
+        // attempt 2: 30000 * 4 = 120000, should be capped to 60000
+        let d = calculate_backoff(2, &policy);
+        assert!(d.as_millis() <= 60_000);
+    }
+
+    #[test]
+    fn retryable_status_codes() {
+        let policy = RetryPolicy::default();
+        assert!(policy.retry_on_status.contains(&429));
+        assert!(policy.retry_on_status.contains(&500));
+        assert!(policy.retry_on_status.contains(&502));
+        assert!(policy.retry_on_status.contains(&503));
+        assert!(!policy.retry_on_status.contains(&400));
+        assert!(!policy.retry_on_status.contains(&401));
+        assert!(!policy.retry_on_status.contains(&404));
+    }
+
+    #[test]
+    fn parse_rate_limit_headers_extracts_retry_after() {
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", "2.5".parse().unwrap());
+        let info = parse_rate_limit_headers(&headers);
+        assert_eq!(info.retry_after_ms, Some(2500));
+        assert!(info.remaining_requests.is_none());
+        assert!(info.remaining_tokens.is_none());
+    }
+
+    #[test]
+    fn parse_rate_limit_headers_extracts_ratelimit_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-ratelimit-remaining-requests", "42".parse().unwrap());
+        headers.insert("x-ratelimit-remaining-tokens", "10000".parse().unwrap());
+        let info = parse_rate_limit_headers(&headers);
+        assert!(info.retry_after_ms.is_none());
+        assert_eq!(info.remaining_requests, Some(42));
+        assert_eq!(info.remaining_tokens, Some(10000));
+    }
+
+    #[test]
+    fn rate_limit_info_default_is_all_none() {
+        let info = RateLimitInfo::default();
+        assert!(info.retry_after_ms.is_none());
+        assert!(info.remaining_requests.is_none());
+        assert!(info.remaining_tokens.is_none());
     }
 }
