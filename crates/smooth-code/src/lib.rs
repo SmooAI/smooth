@@ -6,7 +6,9 @@
 //! Entry point: [`app::run`] — call from smooth-cli's `Code` command.
 
 pub mod app;
+pub mod autocomplete;
 pub mod commands;
+pub mod files;
 pub mod git;
 pub mod layout;
 pub mod permissions;

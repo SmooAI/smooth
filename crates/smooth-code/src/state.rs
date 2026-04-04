@@ -7,6 +7,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::autocomplete::AutocompleteState;
+use crate::files::FileTree;
 use crate::git::GitState;
 
 /// Status of a tool call invocation.
@@ -174,6 +176,10 @@ pub struct AppState {
     pub thinking: bool,
     /// Current frame index for the braille spinner animation.
     pub spinner_frame: usize,
+    /// File tree for the sidebar browser.
+    pub file_tree: Option<FileTree>,
+    /// Autocomplete state for @ references.
+    pub autocomplete: AutocompleteState,
     /// Current git repository state (populated by `GitState::refresh`).
     pub git_state: Option<GitState>,
 }
@@ -181,6 +187,7 @@ pub struct AppState {
 impl AppState {
     /// Create a new `AppState` for the given working directory.
     pub fn new(working_dir: PathBuf) -> Self {
+        let file_tree = FileTree::from_dir(&working_dir).ok();
         Self {
             mode: Mode::default(),
             working_dir,
@@ -196,6 +203,8 @@ impl AppState {
             should_quit: false,
             thinking: false,
             spinner_frame: 0,
+            file_tree,
+            autocomplete: AutocompleteState::default(),
             git_state: None,
         }
     }

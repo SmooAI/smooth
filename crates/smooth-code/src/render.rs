@@ -18,7 +18,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     render_status(frame, state, regions.status);
 
     if let Some(sidebar_rect) = regions.sidebar {
-        render_sidebar(frame, sidebar_rect);
+        render_sidebar(frame, state, sidebar_rect);
     }
 }
 
@@ -178,16 +178,66 @@ fn render_status(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-/// Render the sidebar panel (placeholder for now).
-fn render_sidebar(frame: &mut Frame, area: Rect) {
-    let block = Block::default().title(" Context ").borders(Borders::ALL).border_style(theme::muted());
+/// Render the sidebar panel with the file tree.
+fn render_sidebar(frame: &mut Frame, state: &AppState, area: Rect) {
+    let block = Block::default().title(" Files ").borders(Borders::ALL).border_style(theme::muted());
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    frame.render_widget(Clear, inner);
 
-    let items: Vec<ListItem<'_>> = vec![ListItem::new(Span::styled("(no context files)", theme::muted()))];
+    let Some(file_tree) = &state.file_tree else {
+        let items: Vec<ListItem<'_>> = vec![ListItem::new(Span::styled("(no files)", theme::muted()))];
+        let list = List::new(items);
+        frame.render_widget(list, inner);
+        return;
+    };
+
+    let height = inner.height as usize;
+    if height == 0 || file_tree.entries.is_empty() {
+        return;
+    }
+
+    // Calculate the visible window manually (read-only, no mutation).
+    let scroll = file_tree.scroll_offset;
+    let selected = file_tree.selected;
+
+    // Determine effective scroll offset (same logic as visible_entries but without &mut).
+    let eff_scroll = if selected >= scroll + height {
+        selected + 1 - height
+    } else if selected < scroll {
+        selected
+    } else {
+        scroll
+    };
+
+    let end = (eff_scroll + height).min(file_tree.entries.len());
+    let visible = &file_tree.entries[eff_scroll..end];
+
+    let items: Vec<ListItem<'_>> = visible
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            let global_idx = eff_scroll + i;
+            let indent = "  ".repeat(entry.depth);
+
+            let prefix = if entry.is_dir { "\u{25b8} " } else { "  " };
+
+            let text = format!("{indent}{prefix}{}", entry.name);
+
+            if global_idx == file_tree.selected {
+                ListItem::new(Span::styled(
+                    text,
+                    ratatui::style::Style::default().bg(theme::SMOO_GREEN).fg(ratatui::style::Color::Black),
+                ))
+            } else if entry.is_dir {
+                ListItem::new(Span::styled(text, theme::title()))
+            } else {
+                ListItem::new(Span::raw(text))
+            }
+        })
+        .collect();
 
     let list = List::new(items);
-    frame.render_widget(Clear, inner);
     frame.render_widget(list, inner);
 }

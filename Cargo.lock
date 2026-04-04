@@ -2591,15 +2591,18 @@ name = "smooth-code"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "crossterm",
  "dirs-next",
  "futures-util",
+ "ignore",
  "pulldown-cmark",
  "ratatui",
  "serde",
  "serde_json",
  "smooth-operator",
+ "tempfile",
  "tokio",
  "tracing",
  "uuid",
