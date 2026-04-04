@@ -1,0 +1,5 @@
+[profile.ci]
+# Output JUnit XML for CTRF reporting
+junit.path = "junit.xml"
+# Fail fast in CI
+fail-fast = true

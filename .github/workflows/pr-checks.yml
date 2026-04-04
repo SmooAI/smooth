@@ -18,6 +18,9 @@ jobs:
 
             - uses: Swatinem/rust-cache@v2
 
+            - name: Install nextest
+              uses: taiki-e/install-action@nextest
+
             - name: Format check
               run: cargo fmt --check
 
@@ -26,7 +29,17 @@ jobs:
               continue-on-error: true  # pedantic warnings shouldn't block
 
             - name: Test
-              run: cargo test
+              run: cargo nextest run --profile ci
+              env:
+                  NEXTEST_EXPERIMENTAL_LIBTEST_JSON: 1
+
+            - name: Publish test report
+              if: always()
+              uses: ctrf-io/github-test-reporter@v1
+              with:
+                  report-path: target/nextest/ci/junit.xml
+                  report-format: junit
+              continue-on-error: true
 
             - name: Build
               run: cargo build --release -p smooth-cli
