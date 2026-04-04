@@ -426,6 +426,19 @@ impl Default for ToolRegistry {
     }
 }
 
+impl ToolRegistry {
+    /// Clone the registry's tools (as `Arc` references) into a new registry.
+    /// Hooks are NOT carried over — the new registry starts with no hooks.
+    #[must_use]
+    pub fn clone_tools(&self) -> Self {
+        Self {
+            tools: self.tools.clone(),
+            hooks: vec![],
+            parallel_config: self.parallel_config.clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
