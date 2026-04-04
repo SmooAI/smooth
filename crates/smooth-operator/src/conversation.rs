@@ -76,6 +76,34 @@ impl Message {
     }
 }
 
+/// Strategy for compacting a conversation when it approaches the context limit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CompactionStrategy {
+    /// Drop oldest non-system messages (current behavior, made explicit).
+    SlidingWindow,
+    /// Snip tool call/result pairs, keeping only tool names and error status.
+    SnipToolResults { keep_recent: usize },
+    /// Replace old messages with a summary message (requires LLM call).
+    Summarize { keep_recent: usize },
+    /// Multi-layer: snip tool results first, then summarize if still over.
+    Layered { snip_keep: usize, summarize_keep: usize },
+}
+
+impl Default for CompactionStrategy {
+    fn default() -> Self {
+        Self::SnipToolResults { keep_recent: 10 }
+    }
+}
+
+/// Result of a compaction operation.
+#[derive(Debug, Clone)]
+pub struct CompactionResult {
+    pub messages_removed: usize,
+    pub tokens_before: usize,
+    pub tokens_after: usize,
+    pub summary_injected: bool,
+}
+
 /// A conversation is an ordered list of messages with context management.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
@@ -148,6 +176,159 @@ impl Conversation {
     /// Get the last assistant message content, if any.
     pub fn last_assistant_content(&self) -> Option<&str> {
         self.messages.iter().rev().find(|m| m.role == Role::Assistant).map(|m| m.content.as_str())
+    }
+
+    /// Check if conversation needs compaction (> 80% of `max_context_tokens`).
+    pub fn needs_compaction(&self) -> bool {
+        self.total_tokens() > self.max_context_tokens * 4 / 5
+    }
+
+    /// Compact the conversation using the given strategy.
+    ///
+    /// For `Summarize` and the summarize phase of `Layered`, pass a summary string
+    /// (the caller is responsible for the LLM call). If no summary is provided and
+    /// summarization is needed, the step is skipped.
+    pub fn compact(&mut self, strategy: &CompactionStrategy, summary: Option<&str>) -> CompactionResult {
+        let tokens_before = self.total_tokens();
+        let messages_before = self.messages.len();
+
+        match strategy {
+            CompactionStrategy::SlidingWindow => {
+                self.compact_sliding_window();
+            }
+            CompactionStrategy::SnipToolResults { keep_recent } => {
+                self.compact_snip_tool_results(*keep_recent);
+            }
+            CompactionStrategy::Summarize { keep_recent } => {
+                self.compact_summarize(*keep_recent, summary);
+            }
+            CompactionStrategy::Layered { snip_keep, summarize_keep } => {
+                // First apply snip
+                self.compact_snip_tool_results(*snip_keep);
+                // If still over budget (60%), apply summarize
+                if self.total_tokens() > self.max_context_tokens * 3 / 5 {
+                    self.compact_summarize(*summarize_keep, summary);
+                }
+            }
+        }
+
+        let tokens_after = self.total_tokens();
+        let messages_after = self.messages.len();
+        let summary_injected = summary.is_some() && matches!(strategy, CompactionStrategy::Summarize { .. } | CompactionStrategy::Layered { .. });
+
+        CompactionResult {
+            messages_removed: messages_before.saturating_sub(messages_after),
+            tokens_before,
+            tokens_after,
+            summary_injected,
+        }
+    }
+
+    /// Drop oldest non-system messages until under 60% capacity.
+    fn compact_sliding_window(&mut self) {
+        let target = self.max_context_tokens * 3 / 5;
+        while self.total_tokens() > target {
+            // Find the first non-system message and remove it
+            if let Some(idx) = self.messages.iter().position(|m| m.role != Role::System) {
+                self.messages.remove(idx);
+            } else {
+                break; // only system messages left
+            }
+        }
+    }
+
+    /// Replace old tool call + tool result pairs with compact one-liners.
+    /// Messages within `keep_recent` of the end are preserved.
+    fn compact_snip_tool_results(&mut self, keep_recent: usize) {
+        let len = self.messages.len();
+        if len <= keep_recent {
+            return;
+        }
+        let boundary = len - keep_recent;
+
+        // Collect tool_call_ids from Tool-role messages in the snip zone
+        let tool_result_ids: std::collections::HashSet<String> = self.messages[..boundary]
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .filter_map(|m| m.tool_call_id.clone())
+            .collect();
+
+        // Build replacement: for each assistant message with tool_calls in the zone,
+        // replace it and its corresponding tool results with a compact summary.
+        let mut new_messages: Vec<Message> = Vec::new();
+        let mut consumed_tool_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for (i, msg) in self.messages.iter().enumerate() {
+            if i >= boundary {
+                // Keep recent messages as-is
+                new_messages.push(msg.clone());
+                continue;
+            }
+
+            match msg.role {
+                Role::Assistant if !msg.tool_calls.is_empty() => {
+                    // Snip: replace tool calls with compact summaries
+                    for tc in &msg.tool_calls {
+                        if tool_result_ids.contains(&tc.id) {
+                            // Find the corresponding tool result to check error status
+                            let is_error = self.messages[..boundary]
+                                .iter()
+                                .any(|m| m.role == Role::Tool && m.tool_call_id.as_deref() == Some(&tc.id) && m.content.to_lowercase().contains("error"));
+                            let status = if is_error { "error" } else { "ok" };
+                            new_messages.push(Message::system(format!("[tool: {}, result: {}]", tc.name, status)));
+                            consumed_tool_ids.insert(tc.id.clone());
+                        }
+                    }
+                    // If the assistant message also had content, keep it
+                    if !msg.content.is_empty() {
+                        let mut content_msg = Message::assistant(&msg.content);
+                        content_msg.timestamp = msg.timestamp;
+                        new_messages.push(content_msg);
+                    }
+                }
+                Role::Tool if msg.tool_call_id.as_ref().is_some_and(|id| consumed_tool_ids.contains(id)) => {
+                    // Already replaced by the snip above — skip
+                }
+                _ => {
+                    new_messages.push(msg.clone());
+                }
+            }
+        }
+
+        self.messages = new_messages;
+    }
+
+    /// Replace messages older than `keep_recent` with a single summary message.
+    fn compact_summarize(&mut self, keep_recent: usize, summary: Option<&str>) {
+        let Some(summary_text) = summary else {
+            return; // caller didn't provide a summary, skip
+        };
+
+        let len = self.messages.len();
+        if len <= keep_recent {
+            return;
+        }
+        let boundary = len - keep_recent;
+
+        // Keep system messages + inject summary + keep recent
+        let mut new_messages: Vec<Message> = Vec::new();
+
+        // Preserve system messages from the old zone
+        for msg in &self.messages[..boundary] {
+            if msg.role == Role::System {
+                new_messages.push(msg.clone());
+            }
+        }
+
+        // Inject summary
+        new_messages.push(Message::system(format!("[conversation summary]: {summary_text}")));
+
+        // Keep recent messages
+        for msg in &self.messages[boundary..] {
+            new_messages.push(msg.clone());
+        }
+
+        self.messages = new_messages;
     }
 }
 
@@ -236,5 +417,188 @@ mod tests {
         assert!(conv.is_empty());
         assert_eq!(conv.total_tokens(), 0);
         assert_eq!(conv.last_assistant_content(), None);
+    }
+
+    // ── Compaction tests ────────────────────────────────────────────
+
+    /// Helper: build an assistant message with tool_calls attached.
+    fn assistant_with_tool_calls(content: &str, tool_calls: Vec<crate::tool::ToolCall>) -> Message {
+        let mut msg = Message::assistant(content);
+        msg.tool_calls = tool_calls;
+        msg
+    }
+
+    #[test]
+    fn sliding_window_drops_oldest_keeps_system() {
+        // System prompt ~4 tokens, each user msg ~5 tokens. max=30 => 60% target=18
+        let mut conv = Conversation::new(30).with_system_prompt("Sys");
+        for i in 0..10 {
+            conv.push(Message::user(format!("msg-{i:03}"))); // 7 chars => ~2 tokens each
+        }
+        let before_len = conv.len();
+        let result = conv.compact(&CompactionStrategy::SlidingWindow, None);
+
+        // System prompt must survive
+        assert_eq!(conv.messages[0].role, Role::System);
+        assert_eq!(conv.messages[0].content, "Sys");
+        // Messages were removed
+        assert!(conv.len() < before_len);
+        assert!(result.messages_removed > 0);
+        // Under 60% budget
+        assert!(conv.total_tokens() <= 30 * 3 / 5);
+    }
+
+    #[test]
+    fn snip_tool_results_replaces_pairs() {
+        let mut conv = Conversation::new(100_000).with_system_prompt("Sys");
+        conv.push(Message::user("do something"));
+        // Assistant with a tool call
+        conv.push(assistant_with_tool_calls(
+            "",
+            vec![crate::tool::ToolCall {
+                id: "tc1".into(),
+                name: "read_file".into(),
+                arguments: serde_json::json!({}),
+            }],
+        ));
+        // Tool result
+        conv.push(Message::tool_result("tc1", "file contents here, lots of data"));
+        // More recent messages
+        conv.push(Message::user("thanks"));
+        conv.push(Message::assistant("you're welcome"));
+
+        let result = conv.compact(&CompactionStrategy::SnipToolResults { keep_recent: 2 }, None);
+
+        // The tool call pair should be replaced with a one-liner
+        let snipped: Vec<&Message> = conv.messages.iter().filter(|m| m.content.contains("[tool: read_file")).collect();
+        assert_eq!(snipped.len(), 1);
+        assert!(snipped[0].content.contains("result: ok"));
+        assert!(result.messages_removed > 0);
+        // Original verbose tool result should be gone
+        assert!(!conv.messages.iter().any(|m| m.content.contains("file contents here")));
+    }
+
+    #[test]
+    fn snip_tool_results_preserves_recent() {
+        let mut conv = Conversation::new(100_000).with_system_prompt("Sys");
+        // Old tool pair
+        conv.push(assistant_with_tool_calls(
+            "",
+            vec![crate::tool::ToolCall {
+                id: "tc-old".into(),
+                name: "old_tool".into(),
+                arguments: serde_json::json!({}),
+            }],
+        ));
+        conv.push(Message::tool_result("tc-old", "old result"));
+        // Recent tool pair (within keep_recent)
+        conv.push(assistant_with_tool_calls(
+            "",
+            vec![crate::tool::ToolCall {
+                id: "tc-new".into(),
+                name: "new_tool".into(),
+                arguments: serde_json::json!({}),
+            }],
+        ));
+        conv.push(Message::tool_result("tc-new", "new result"));
+        conv.push(Message::assistant("done"));
+
+        conv.compact(&CompactionStrategy::SnipToolResults { keep_recent: 3 }, None);
+
+        // Recent tool result should still be present verbatim
+        assert!(conv.messages.iter().any(|m| m.content == "new result"));
+        // Old tool result should be snipped
+        assert!(!conv.messages.iter().any(|m| m.content == "old result"));
+    }
+
+    #[test]
+    fn needs_compaction_true_at_80_percent() {
+        // max=100, each msg ~2 tokens (4 chars + 1). Need >80 tokens.
+        let mut conv = Conversation::new(100);
+        // System prompt: "S" => 1 token. We need ~80 more tokens.
+        conv = conv.with_system_prompt("S");
+        // Each "XXXX" message is 4 chars => 2 tokens. We need 40 of them for 80 tokens.
+        for _ in 0..45 {
+            conv.push(Message::user("XXXX"));
+        }
+        assert!(conv.total_tokens() > 80, "total_tokens={} should be >80", conv.total_tokens());
+        assert!(conv.needs_compaction());
+    }
+
+    #[test]
+    fn needs_compaction_false_below_threshold() {
+        let mut conv = Conversation::new(100_000).with_system_prompt("Sys");
+        conv.push(Message::user("Hello"));
+        assert!(!conv.needs_compaction());
+    }
+
+    #[test]
+    fn compaction_result_token_counts() {
+        let mut conv = Conversation::new(30).with_system_prompt("S");
+        for i in 0..10 {
+            conv.push(Message::user(format!("message-{i:04}")));
+        }
+        let result = conv.compact(&CompactionStrategy::SlidingWindow, None);
+        assert!(result.tokens_before > result.tokens_after);
+        assert!(result.tokens_before > 0);
+        assert!(result.tokens_after > 0);
+    }
+
+    #[test]
+    fn compaction_preserves_message_ordering() {
+        let mut conv = Conversation::new(30).with_system_prompt("System");
+        for i in 0..10 {
+            conv.push(Message::user(format!("u{i}")));
+            conv.push(Message::assistant(format!("a{i}")));
+        }
+        conv.compact(&CompactionStrategy::SlidingWindow, None);
+
+        // First message must be the system prompt
+        assert_eq!(conv.messages[0].role, Role::System);
+        assert_eq!(conv.messages[0].content, "System");
+
+        // No system messages after the first (except compaction-injected ones)
+        // The remaining messages should be in chronological order
+        let non_system: Vec<&Message> = conv.messages.iter().skip(1).collect();
+        for w in non_system.windows(2) {
+            assert!(w[0].timestamp <= w[1].timestamp, "messages out of order");
+        }
+    }
+
+    #[test]
+    fn layered_applies_snip_then_checks_budget() {
+        let mut conv = Conversation::new(100).with_system_prompt("S");
+        // Add tool pairs that are large
+        for i in 0..5 {
+            let id = format!("tc{i}");
+            conv.push(assistant_with_tool_calls(
+                "",
+                vec![crate::tool::ToolCall {
+                    id: id.clone(),
+                    name: format!("tool_{i}"),
+                    arguments: serde_json::json!({}),
+                }],
+            ));
+            // Big tool results to inflate token count
+            conv.push(Message::tool_result(&id, &"x".repeat(40)));
+        }
+        conv.push(Message::user("final"));
+        conv.push(Message::assistant("ok"));
+
+        let tokens_before = conv.total_tokens();
+        let result = conv.compact(
+            &CompactionStrategy::Layered {
+                snip_keep: 2,
+                summarize_keep: 2,
+            },
+            None,
+        );
+
+        // Should have removed messages
+        assert!(result.messages_removed > 0);
+        // Tokens should be reduced
+        assert!(result.tokens_after < tokens_before);
+        // System prompt preserved
+        assert_eq!(conv.messages[0].role, Role::System);
     }
 }
