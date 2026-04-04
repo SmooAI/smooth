@@ -1,0 +1,309 @@
+//! Slash command registry for the Smooth Coding TUI.
+//!
+//! Provides a [`CommandRegistry`] that maps `/command` names to handlers.
+//! Built-in commands include `/help`, `/clear`, `/model`, `/save`,
+//! `/sessions`, `/quit`, `/status`, and `/compact`.
+
+use std::collections::HashMap;
+use std::fmt;
+
+use crate::state::AppState;
+
+/// Output produced by a slash command handler.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandOutput {
+    /// Display a system message in the chat area.
+    Message(String),
+    /// Clear the chat history.
+    Clear,
+    /// Exit the TUI.
+    Quit,
+    /// No visible output.
+    None,
+}
+
+impl fmt::Display for CommandOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Message(msg) => write!(f, "{msg}"),
+            Self::Clear => write!(f, "[clear]"),
+            Self::Quit => write!(f, "[quit]"),
+            Self::None => write!(f, "[none]"),
+        }
+    }
+}
+
+/// A function that handles a slash command invocation.
+pub type CommandHandler = Box<dyn Fn(&str, &mut AppState) -> anyhow::Result<CommandOutput> + Send + Sync>;
+
+/// Definition of a single slash command.
+pub struct CommandDef {
+    /// The command name (without the leading `/`).
+    pub name: String,
+    /// Human-readable description shown in `/help`.
+    pub description: String,
+    /// The handler function.
+    pub handler: CommandHandler,
+}
+
+/// Registry of all available slash commands.
+pub struct CommandRegistry {
+    commands: HashMap<String, CommandDef>,
+}
+
+impl Default for CommandRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CommandRegistry {
+    /// Create a new registry pre-populated with the built-in commands.
+    pub fn new() -> Self {
+        let mut reg = Self { commands: HashMap::new() };
+        reg.register_builtins();
+        reg
+    }
+
+    /// Register a command in the registry.
+    pub fn register(&mut self, name: impl Into<String>, description: impl Into<String>, handler: CommandHandler) {
+        let name = name.into();
+        self.commands.insert(
+            name.clone(),
+            CommandDef {
+                name,
+                description: description.into(),
+                handler,
+            },
+        );
+    }
+
+    /// Execute a command by name, passing the argument string and mutable state.
+    ///
+    /// Returns `None` if the command is not found.
+    pub fn execute(&self, name: &str, args: &str, state: &mut AppState) -> Option<anyhow::Result<CommandOutput>> {
+        self.commands.get(name).map(|def| (def.handler)(args, state))
+    }
+
+    /// Return a sorted list of `(name, description)` pairs for all registered commands.
+    pub fn list_commands(&self) -> Vec<(String, String)> {
+        let mut cmds: Vec<_> = self.commands.values().map(|d| (d.name.clone(), d.description.clone())).collect();
+        cmds.sort_by(|a, b| a.0.cmp(&b.0));
+        cmds
+    }
+
+    /// Register all built-in commands.
+    fn register_builtins(&mut self) {
+        // /help
+        self.register("help", "List all available commands", Box::new(cmd_help));
+
+        // /clear
+        self.register("clear", "Clear chat history", Box::new(cmd_clear));
+
+        // /model
+        self.register("model", "Show or switch model: /model [name]", Box::new(cmd_model));
+
+        // /save
+        self.register("save", "Force save the current session", Box::new(cmd_save));
+
+        // /sessions
+        self.register("sessions", "List saved sessions", Box::new(cmd_sessions));
+
+        // /quit
+        self.register("quit", "Exit the TUI", Box::new(cmd_quit));
+
+        // /status
+        self.register("status", "Show system status (tokens, cost, model)", Box::new(cmd_status));
+
+        // /compact
+        self.register("compact", "Trigger context compaction", Box::new(cmd_compact));
+    }
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn cmd_help(_args: &str, _state: &mut AppState) -> anyhow::Result<CommandOutput> {
+    // Build the help text from a temporary registry to avoid borrowing issues.
+    let reg = CommandRegistry::new();
+    let cmds = reg.list_commands();
+    let mut lines = vec!["Available commands:".to_string()];
+    for (name, desc) in &cmds {
+        lines.push(format!("  /{name} — {desc}"));
+    }
+    Ok(CommandOutput::Message(lines.join("\n")))
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn cmd_clear(_args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput> {
+    state.messages.clear();
+    state.scroll_offset = 0;
+    state.user_scrolled = false;
+    Ok(CommandOutput::Clear)
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn cmd_model(args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput> {
+    let args = args.trim();
+    if args.is_empty() {
+        Ok(CommandOutput::Message(format!("Current model: {}", state.model_name)))
+    } else {
+        let old = state.model_name.clone();
+        state.model_name = args.to_string();
+        Ok(CommandOutput::Message(format!("Model switched: {old} -> {}", state.model_name)))
+    }
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn cmd_save(_args: &str, _state: &mut AppState) -> anyhow::Result<CommandOutput> {
+    // Actual save logic is handled by the caller after seeing this output.
+    Ok(CommandOutput::Message("Session saved.".to_string()))
+}
+
+fn cmd_sessions(_args: &str, _state: &mut AppState) -> anyhow::Result<CommandOutput> {
+    use crate::session::SessionManager;
+
+    let mgr = SessionManager::new()?;
+    let summaries = mgr.list()?;
+    if summaries.is_empty() {
+        return Ok(CommandOutput::Message("No saved sessions.".to_string()));
+    }
+    let mut lines = vec!["Saved sessions:".to_string()];
+    for s in &summaries {
+        lines.push(format!(
+            "  {} — {} ({} msgs, {})",
+            s.id,
+            s.preview,
+            s.message_count,
+            s.updated_at.format("%Y-%m-%d %H:%M")
+        ));
+    }
+    Ok(CommandOutput::Message(lines.join("\n")))
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn cmd_quit(_args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput> {
+    state.should_quit = true;
+    Ok(CommandOutput::Quit)
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn cmd_status(_args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput> {
+    let status = format!(
+        "Model: {}\nTokens used: {}\nMessages: {}\nSession: {}",
+        state.model_name,
+        state.total_tokens,
+        state.messages.len(),
+        state.session_id,
+    );
+    Ok(CommandOutput::Message(status))
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn cmd_compact(_args: &str, _state: &mut AppState) -> anyhow::Result<CommandOutput> {
+    // Placeholder — real compaction would summarise older messages.
+    Ok(CommandOutput::Message("Context compaction triggered (not yet implemented).".to_string()))
+}
+
+/// Parse a raw input string into its kind: slash command, bang shell, or plain text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputKind<'a> {
+    /// A slash command with name and arguments.
+    SlashCommand { name: &'a str, args: &'a str },
+    /// A bang shell command.
+    BangCommand(&'a str),
+    /// A normal chat message.
+    Normal(&'a str),
+}
+
+/// Classify raw input text.
+pub fn parse_input(input: &str) -> InputKind<'_> {
+    let trimmed = input.trim();
+    trimmed.strip_prefix('/').map_or_else(
+        || trimmed.strip_prefix('!').map_or_else(|| InputKind::Normal(trimmed), InputKind::BangCommand),
+        |rest| {
+            let (name, args) = rest.split_once(' ').unwrap_or((rest, ""));
+            InputKind::SlashCommand { name, args }
+        },
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    #[test]
+    fn test_register_and_execute() {
+        let mut reg = CommandRegistry { commands: HashMap::new() };
+        reg.register(
+            "ping",
+            "Reply with pong",
+            Box::new(|_args, _state| Ok(CommandOutput::Message("pong".to_string()))),
+        );
+
+        let mut state = AppState::new(PathBuf::from("/tmp"));
+        let result = reg.execute("ping", "", &mut state);
+        assert!(result.is_some());
+        let output = result.expect("command should exist").expect("handler should succeed");
+        assert_eq!(output, CommandOutput::Message("pong".to_string()));
+    }
+
+    #[test]
+    fn test_help_lists_all_commands() {
+        let reg = CommandRegistry::new();
+        let cmds = reg.list_commands();
+        let names: Vec<_> = cmds.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"help"));
+        assert!(names.contains(&"clear"));
+        assert!(names.contains(&"model"));
+        assert!(names.contains(&"save"));
+        assert!(names.contains(&"sessions"));
+        assert!(names.contains(&"quit"));
+        assert!(names.contains(&"status"));
+        assert!(names.contains(&"compact"));
+    }
+
+    #[test]
+    fn test_clear_empties_messages() {
+        let mut state = AppState::new(PathBuf::from("/tmp"));
+        state.add_message(crate::state::ChatMessage::user("hello"));
+        state.add_message(crate::state::ChatMessage::assistant("hi"));
+        assert_eq!(state.messages.len(), 2);
+
+        let reg = CommandRegistry::new();
+        let output = reg.execute("clear", "", &mut state).expect("clear exists").expect("handler ok");
+        assert_eq!(output, CommandOutput::Clear);
+        assert!(state.messages.is_empty());
+    }
+
+    #[test]
+    fn test_command_output_message_adds_system_message() {
+        let mut state = AppState::new(PathBuf::from("/tmp"));
+        let reg = CommandRegistry::new();
+        let output = reg.execute("status", "", &mut state).expect("status exists").expect("handler ok");
+        match output {
+            CommandOutput::Message(msg) => {
+                assert!(msg.contains("Model:"));
+                assert!(msg.contains("Tokens used:"));
+            }
+            other => panic!("Expected Message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_command_parsing_slash_vs_bang_vs_normal() {
+        // Slash command
+        assert_eq!(parse_input("/help"), InputKind::SlashCommand { name: "help", args: "" });
+        assert_eq!(parse_input("/model gpt-4o"), InputKind::SlashCommand { name: "model", args: "gpt-4o" });
+
+        // Bang command
+        assert_eq!(parse_input("!ls -la"), InputKind::BangCommand("ls -la"));
+
+        // Normal text
+        assert_eq!(parse_input("hello world"), InputKind::Normal("hello world"));
+
+        // Edge cases
+        assert_eq!(parse_input("  /quit  "), InputKind::SlashCommand { name: "quit", args: "" });
+        assert_eq!(parse_input("  !pwd  "), InputKind::BangCommand("pwd"));
+    }
+}
