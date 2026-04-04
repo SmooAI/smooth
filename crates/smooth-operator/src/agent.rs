@@ -7,7 +7,7 @@ use crate::knowledge::KnowledgeBase;
 use crate::memory::Memory;
 use futures_util::StreamExt;
 
-use crate::conversation::{CompactionStrategy, Conversation, Message};
+use crate::conversation::{CompactionStrategy, Conversation, Message, ReactiveCompaction};
 use crate::llm::{accumulate_stream_events, LlmClient, LlmConfig, StreamEvent};
 use crate::tool::ToolRegistry;
 
@@ -126,6 +126,7 @@ pub struct Agent {
     tools: ToolRegistry,
     checkpoint_store: Option<Arc<dyn CheckpointStore>>,
     event_handler: Option<Box<dyn Fn(AgentEvent) + Send + Sync>>,
+    reactive_compaction: std::sync::Mutex<ReactiveCompaction>,
 }
 
 impl Agent {
@@ -136,6 +137,7 @@ impl Agent {
             tools,
             checkpoint_store: None,
             event_handler: None,
+            reactive_compaction: std::sync::Mutex::new(ReactiveCompaction::new()),
         }
     }
 
@@ -205,8 +207,50 @@ impl Agent {
                 message_count: context_refs.len(),
             });
 
-            // Think: call LLM
-            let response = llm.chat(&context_refs, &tool_schemas).await?;
+            // Think: call LLM (with reactive compaction on context-length errors)
+            let response = match llm.chat(&context_refs, &tool_schemas).await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    if err_msg.contains("prompt_too_long") || err_msg.contains("context_length_exceeded") {
+                        // Check circuit breaker before attempting reactive compaction
+                        {
+                            let rc = self.reactive_compaction.lock().expect("lock reactive_compaction");
+                            if rc.is_circuit_open() {
+                                return Err(anyhow::anyhow!(
+                                    "reactive compaction circuit breaker open after {} consecutive failures: {err_msg}",
+                                    rc.stats().consecutive_failures
+                                ));
+                            }
+                        }
+
+                        // Compact the conversation reactively
+                        let result = conversation.compact(&self.config.compaction_strategy, None);
+                        tracing::warn!(
+                            messages_removed = result.messages_removed,
+                            tokens_before = result.tokens_before,
+                            tokens_after = result.tokens_after,
+                            "reactive compaction triggered by context length error"
+                        );
+
+                        // Retry with compacted context
+                        let retry_context = conversation.context_window();
+                        let retry_refs: Vec<&Message> = retry_context.into_iter().collect();
+                        match llm.chat(&retry_refs, &tool_schemas).await {
+                            Ok(resp) => {
+                                self.reactive_compaction.lock().expect("lock reactive_compaction").record_success();
+                                resp
+                            }
+                            Err(retry_err) => {
+                                self.reactive_compaction.lock().expect("lock reactive_compaction").record_failure();
+                                return Err(retry_err);
+                            }
+                        }
+                    } else {
+                        return Err(e);
+                    }
+                }
+            };
 
             let content_preview = response.content.chars().take(100).collect::<String>();
             self.emit(AgentEvent::LlmResponse {
@@ -331,8 +375,47 @@ impl Agent {
                 message_count: context_refs.len(),
             });
 
-            // Stream the LLM response
-            let mut stream = llm.chat_stream(&context_refs, &tool_schemas).await?;
+            // Stream the LLM response (with reactive compaction on context-length errors)
+            let mut stream = match llm.chat_stream(&context_refs, &tool_schemas).await {
+                Ok(s) => s,
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    if err_msg.contains("prompt_too_long") || err_msg.contains("context_length_exceeded") {
+                        {
+                            let rc = self.reactive_compaction.lock().expect("lock reactive_compaction");
+                            if rc.is_circuit_open() {
+                                return Err(anyhow::anyhow!(
+                                    "reactive compaction circuit breaker open after {} consecutive failures: {err_msg}",
+                                    rc.stats().consecutive_failures
+                                ));
+                            }
+                        }
+
+                        let result = conversation.compact(&self.config.compaction_strategy, None);
+                        tracing::warn!(
+                            messages_removed = result.messages_removed,
+                            tokens_before = result.tokens_before,
+                            tokens_after = result.tokens_after,
+                            "reactive compaction triggered by context length error (streaming)"
+                        );
+
+                        let retry_context = conversation.context_window();
+                        let retry_refs: Vec<&Message> = retry_context.into_iter().collect();
+                        match llm.chat_stream(&retry_refs, &tool_schemas).await {
+                            Ok(s) => {
+                                self.reactive_compaction.lock().expect("lock reactive_compaction").record_success();
+                                s
+                            }
+                            Err(retry_err) => {
+                                self.reactive_compaction.lock().expect("lock reactive_compaction").record_failure();
+                                return Err(retry_err);
+                            }
+                        }
+                    } else {
+                        return Err(e);
+                    }
+                }
+            };
 
             // Forward token deltas through the channel while accumulating
             let (accumulator_tx, accumulator_rx) = tokio::sync::mpsc::channel::<anyhow::Result<StreamEvent>>(256);

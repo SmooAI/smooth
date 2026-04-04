@@ -95,6 +95,73 @@ impl Default for CompactionStrategy {
     }
 }
 
+/// Tracks compaction attempts with a circuit breaker to avoid infinite retry loops.
+///
+/// When reactive compaction is triggered (e.g., by a "context too long" LLM error),
+/// this struct records successes and failures. After `max_consecutive_failures` failures
+/// in a row, the circuit "opens" and further compaction attempts should be skipped.
+#[derive(Debug, Clone)]
+pub struct ReactiveCompaction {
+    consecutive_failures: u32,
+    max_consecutive_failures: u32,
+    total_compactions: u32,
+    total_failures: u32,
+}
+
+impl ReactiveCompaction {
+    /// Create a new tracker with a default threshold of 3 consecutive failures.
+    pub fn new() -> Self {
+        Self {
+            consecutive_failures: 0,
+            max_consecutive_failures: 3,
+            total_compactions: 0,
+            total_failures: 0,
+        }
+    }
+
+    /// Record a successful compaction, resetting the consecutive failure counter.
+    pub fn record_success(&mut self) {
+        self.consecutive_failures = 0;
+        self.total_compactions += 1;
+    }
+
+    /// Record a failed compaction attempt.
+    pub fn record_failure(&mut self) {
+        self.consecutive_failures += 1;
+        self.total_failures += 1;
+    }
+
+    /// Returns `true` if the circuit breaker is open (too many consecutive failures).
+    pub fn is_circuit_open(&self) -> bool {
+        self.consecutive_failures >= self.max_consecutive_failures
+    }
+
+    /// Return a snapshot of compaction statistics.
+    pub fn stats(&self) -> CompactionStats {
+        CompactionStats {
+            total_compactions: self.total_compactions,
+            total_failures: self.total_failures,
+            consecutive_failures: self.consecutive_failures,
+            circuit_open: self.is_circuit_open(),
+        }
+    }
+}
+
+impl Default for ReactiveCompaction {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Snapshot of compaction statistics from [`ReactiveCompaction`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompactionStats {
+    pub total_compactions: u32,
+    pub total_failures: u32,
+    pub consecutive_failures: u32,
+    pub circuit_open: bool,
+}
+
 /// Result of a compaction operation.
 #[derive(Debug, Clone)]
 pub struct CompactionResult {
@@ -563,6 +630,87 @@ mod tests {
         for w in non_system.windows(2) {
             assert!(w[0].timestamp <= w[1].timestamp, "messages out of order");
         }
+    }
+
+    // ── ReactiveCompaction tests ─────────────────────────────────────
+
+    #[test]
+    fn reactive_compaction_starts_with_zero_failures() {
+        let rc = ReactiveCompaction::new();
+        assert_eq!(rc.consecutive_failures, 0);
+        assert_eq!(rc.total_compactions, 0);
+        assert_eq!(rc.total_failures, 0);
+        assert!(!rc.is_circuit_open());
+    }
+
+    #[test]
+    fn record_success_resets_consecutive_counter() {
+        let mut rc = ReactiveCompaction::new();
+        rc.record_failure();
+        rc.record_failure();
+        assert_eq!(rc.consecutive_failures, 2);
+        rc.record_success();
+        assert_eq!(rc.consecutive_failures, 0);
+        assert_eq!(rc.total_compactions, 1);
+        // total_failures should still reflect the history
+        assert_eq!(rc.total_failures, 2);
+    }
+
+    #[test]
+    fn record_failure_increments_consecutive_counter() {
+        let mut rc = ReactiveCompaction::new();
+        rc.record_failure();
+        assert_eq!(rc.consecutive_failures, 1);
+        rc.record_failure();
+        assert_eq!(rc.consecutive_failures, 2);
+        assert_eq!(rc.total_failures, 2);
+    }
+
+    #[test]
+    fn circuit_opens_after_max_consecutive_failures() {
+        let mut rc = ReactiveCompaction::new();
+        for _ in 0..3 {
+            rc.record_failure();
+        }
+        assert!(rc.is_circuit_open());
+    }
+
+    #[test]
+    fn circuit_stays_closed_below_threshold() {
+        let mut rc = ReactiveCompaction::new();
+        rc.record_failure();
+        rc.record_failure();
+        assert!(!rc.is_circuit_open());
+    }
+
+    #[test]
+    fn stats_reports_correctly() {
+        let mut rc = ReactiveCompaction::new();
+        rc.record_success();
+        rc.record_failure();
+        rc.record_success();
+        rc.record_failure();
+        rc.record_failure();
+        let stats = rc.stats();
+        assert_eq!(stats.total_compactions, 2);
+        assert_eq!(stats.total_failures, 3);
+        assert_eq!(stats.consecutive_failures, 2);
+        assert!(!stats.circuit_open);
+    }
+
+    #[test]
+    fn compaction_stats_serialization() {
+        let stats = CompactionStats {
+            total_compactions: 5,
+            total_failures: 2,
+            consecutive_failures: 1,
+            circuit_open: false,
+        };
+        let json = serde_json::to_string(&stats).expect("serialize");
+        assert!(json.contains("\"total_compactions\":5"));
+        assert!(json.contains("\"circuit_open\":false"));
+        let parsed: CompactionStats = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, stats);
     }
 
     #[test]
