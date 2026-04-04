@@ -2645,6 +2645,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "smooth-plugin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "serde",
+ "serde_json",
+ "smooth-operator",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "smooth-policy"
 version = "0.1.0"
 dependencies = [
