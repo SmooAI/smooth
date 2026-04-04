@@ -45,8 +45,18 @@ fn render_chat(frame: &mut Frame, state: &AppState, area: Rect) {
         lines.push(Line::from(Span::styled(format!("{label}:"), label_style)));
 
         // Content lines
-        for content_line in msg.content.lines() {
-            lines.push(Line::from(Span::raw(content_line.to_string())));
+        let content_lines_vec: Vec<&str> = msg.content.lines().collect();
+        let last_content_idx = content_lines_vec.len().saturating_sub(1);
+        for (i, content_line) in content_lines_vec.iter().enumerate() {
+            if msg.streaming && !msg.content.is_empty() && i == last_content_idx {
+                // Append blinking block cursor to the last line of a streaming message
+                lines.push(Line::from(vec![
+                    Span::raw(content_line.to_string()),
+                    Span::styled("█", theme::assistant_label()),
+                ]));
+            } else {
+                lines.push(Line::from(Span::raw(content_line.to_string())));
+            }
         }
 
         // Tool call blocks (only rendered for assistant messages with tool calls)
@@ -101,8 +111,18 @@ fn render_chat(frame: &mut Frame, state: &AppState, area: Rect) {
         lines.push(Line::from(""));
     }
 
-    // Thinking indicator
-    if state.thinking {
+    // Streaming indicator — spinner when waiting for first token
+    // When streaming with content, the blinking block cursor is appended
+    // to the last content line above — handled in the content rendering loop.
+    if let Some(last_msg) = state.messages.last() {
+        if last_msg.streaming && last_msg.content.is_empty() {
+            let spinner = state.spinner_char();
+            lines.push(Line::from(Span::styled(format!("{spinner} Generating..."), theme::muted())));
+        }
+    }
+
+    // Thinking indicator (non-streaming fallback)
+    if state.thinking && state.messages.last().is_none_or(|m| !m.streaming) {
         lines.push(Line::from(Span::styled("Thinking...", theme::muted())));
     }
 

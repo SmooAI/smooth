@@ -11,6 +11,9 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScree
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
+use smooth_operator::AgentEvent;
+use tokio::sync::mpsc;
+
 use crate::render;
 use crate::state::{AppState, ChatMessage, Mode};
 
@@ -35,6 +38,7 @@ pub async fn run(working_dir: PathBuf) -> anyhow::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let state = Arc::new(Mutex::new(AppState::new(working_dir)));
+    let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentEvent>();
 
     // Add welcome message
     {
@@ -42,7 +46,7 @@ pub async fn run(working_dir: PathBuf) -> anyhow::Result<()> {
         s.add_message(ChatMessage::system("Welcome to Smooth Coding. Type a message and press Enter to chat."));
     }
 
-    let result = event_loop(&mut terminal, &state);
+    let result = event_loop(&mut terminal, &state, &event_tx, event_rx);
 
     // Restore terminal
     disable_raw_mode()?;
@@ -53,16 +57,31 @@ pub async fn run(working_dir: PathBuf) -> anyhow::Result<()> {
 }
 
 /// The main event loop — draws the UI and handles input events.
-fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, state: &Arc<Mutex<AppState>>) -> anyhow::Result<()> {
+///
+/// Processes both terminal key events and agent streaming events via the channel.
+fn event_loop(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    state: &Arc<Mutex<AppState>>,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    mut event_rx: mpsc::UnboundedReceiver<AgentEvent>,
+) -> anyhow::Result<()> {
     loop {
         // Draw
         {
-            let s = state.lock().expect("state lock poisoned");
+            let mut s = state.lock().expect("state lock poisoned");
+            // Advance spinner each frame for animation
+            s.advance_spinner();
             terminal.draw(|f| render::render(f, &s))?;
         }
 
-        // Poll for events with 100ms timeout to allow UI updates
-        if event::poll(Duration::from_millis(100))? {
+        // Drain all pending agent events without blocking
+        while let Ok(agent_event) = event_rx.try_recv() {
+            let mut s = state.lock().expect("state lock poisoned");
+            handle_agent_event(&mut s, agent_event);
+        }
+
+        // Poll for terminal events with 50ms timeout for responsive streaming UI
+        if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 let mut s = state.lock().expect("state lock poisoned");
 
@@ -85,7 +104,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, state: &Arc
                 }
 
                 match s.mode {
-                    Mode::Input => handle_input_mode(key, &mut s, Arc::clone(state)),
+                    Mode::Input => handle_input_mode(key, &mut s, Arc::clone(state), event_tx.clone()),
                     Mode::Normal => handle_normal_mode(key, &mut s),
                 }
             }
@@ -101,8 +120,30 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, state: &Arc
     Ok(())
 }
 
+/// Map an `AgentEvent` to the appropriate state mutation.
+fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
+    match event {
+        AgentEvent::Started { .. } => {
+            state.start_streaming();
+        }
+        AgentEvent::TokenDelta { content } => {
+            state.append_stream_content(&content);
+        }
+        AgentEvent::Completed { .. } | AgentEvent::StreamingComplete | AgentEvent::MaxIterationsReached { .. } => {
+            state.finish_streaming();
+        }
+        AgentEvent::Error { message } => {
+            state.finish_streaming();
+            state.add_message(ChatMessage::system(format!("Error: {message}")));
+        }
+        // Other events (LlmRequest, LlmResponse, ToolCallStart, ToolCallComplete, CheckpointSaved)
+        // are informational — no state change needed for now.
+        _ => {}
+    }
+}
+
 /// Handle key events in input mode.
-fn handle_input_mode(key: event::KeyEvent, state: &mut AppState, state_arc: Arc<Mutex<AppState>>) {
+fn handle_input_mode(key: event::KeyEvent, state: &mut AppState, _state_arc: Arc<Mutex<AppState>>, event_tx: mpsc::UnboundedSender<AgentEvent>) {
     match key.code {
         KeyCode::Enter => {
             let input = state.take_input();
@@ -113,20 +154,13 @@ fn handle_input_mode(key: event::KeyEvent, state: &mut AppState, state_arc: Arc<
             state.add_message(ChatMessage::user(&input));
             state.thinking = true;
 
-            // Spawn agent task — uses Agent::run() for full (non-streaming) response
+            // Spawn agent task with channel-based streaming
             let message = input;
+            let tx = event_tx;
             tokio::spawn(async move {
-                let response = run_agent_query(&message).await;
-                let mut s = state_arc.lock().expect("state lock poisoned");
-                match response {
-                    Ok(content) => {
-                        s.add_message(ChatMessage::assistant(content));
-                    }
-                    Err(e) => {
-                        s.add_message(ChatMessage::system(format!("Error: {e}")));
-                    }
+                if let Err(e) = run_agent_streaming(&message, tx.clone()).await {
+                    let _ = tx.send(AgentEvent::Error { message: e.to_string() });
                 }
-                s.thinking = false;
             });
         }
         KeyCode::Backspace => state.input_backspace(),
@@ -165,11 +199,11 @@ fn handle_normal_mode(key: event::KeyEvent, state: &mut AppState) {
     }
 }
 
-/// Run a query through the agent framework (non-streaming).
+/// Run a query through the agent framework with channel-based streaming.
 ///
-/// This creates a temporary Agent with a coding-focused system prompt
-/// and returns the full response text.
-async fn run_agent_query(message: &str) -> anyhow::Result<String> {
+/// Sends `AgentEvent`s through the channel as the agent processes.
+/// The caller's event loop picks them up via `try_recv()`.
+async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent>) -> anyhow::Result<()> {
     use smooth_operator::{Agent, AgentConfig, LlmConfig, ToolRegistry};
 
     // Try to get API key from environment
@@ -192,15 +226,7 @@ async fn run_agent_query(message: &str) -> anyhow::Result<String> {
     let tools = ToolRegistry::new();
     let agent = Agent::new(config, tools);
 
-    let conversation = agent.run(message).await?;
+    let _conversation = agent.run_with_channel(message, tx).await?;
 
-    // Extract the last assistant message
-    let messages = conversation.context_window();
-    let response = messages
-        .iter()
-        .rev()
-        .find(|m| m.role == smooth_operator::Role::Assistant)
-        .map_or_else(|| "No response received.".to_string(), |m| m.content.clone());
-
-    Ok(response)
+    Ok(())
 }
