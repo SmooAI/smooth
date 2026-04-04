@@ -162,7 +162,16 @@ fn render_input(frame: &mut Frame, state: &AppState, area: Rect) {
 
 /// Render the bottom status bar.
 fn render_status(frame: &mut Frame, state: &AppState, area: Rect) {
-    let status_text = format!(" {} | tokens: {} | Ctrl+C quit | Ctrl+B sidebar ", state.model_name, state.total_tokens);
+    let branch_indicator = state
+        .git_state
+        .as_ref()
+        .filter(|g| g.is_repo)
+        .map_or(String::new(), |g| format!("{} \u{2387} | ", g.branch));
+
+    let status_text = format!(
+        " {branch_indicator}{} | tokens: {} | Ctrl+C quit | Ctrl+B sidebar ",
+        state.model_name, state.total_tokens
+    );
 
     let paragraph = Paragraph::new(status_text).style(theme::status_style()).alignment(Alignment::Left);
 
