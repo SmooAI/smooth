@@ -317,7 +317,8 @@ th worktree create/list/merge    # Git worktrees
 | **Web** | React 19 + Vite + Tailwind CSS 4 (embedded) |
 | **Markdown** | pulldown-cmark (TUI), react-markdown (web) |
 | **Sandboxes** | Microsandbox (hardware-isolated microVMs) |
-| **LLM** | OpenCode Zen API (OpenAI-compatible) |
+| **Agent framework** | smooth-operator (Rust-native, built-in checkpointing) |
+| **LLM** | OpenAI-compatible (OpenCode Zen, Anthropic, OpenAI) |
 | **Work tracking** | Beads (durable SoR) |
 | **Policy** | TOML-based, hot-reloadable via notify + ArcSwap |
 | **Logging** | smooai-logger (structured, context-aware) |
@@ -330,15 +331,15 @@ th worktree create/list/merge    # Git worktrees
 ```
 smooth/
 ├── crates/
-│   ├── smooth-cli/          # Binary — clap CLI (23 commands)
-│   ├── smooth-bigsmooth/    # Library — orchestrator, policy generation
+│   ├── smooth-cli/          # Binary — clap CLI (27 commands)
+│   ├── smooth-bigsmooth/    # Library — orchestrator, policy gen, session mgmt
+│   ├── smooth-operator/     # Library — Rust-native AI agent framework
 │   ├── smooth-policy/       # Library — shared policy types, TOML parsing
 │   ├── smooth-wonk/         # Binary — in-VM access control authority
 │   ├── smooth-goalie/       # Binary — in-VM network + filesystem proxy
-│   ├── smooth-narc/         # Binary — in-VM tool surveillance + LLM judge
-│   ├── smooth-scribe/       # Binary — in-VM structured logging + OTel
-│   ├── smooth-archivist/    # Binary — central log + trace aggregator
-│   ├── smooth-groove/       # Binary — in-VM LLM checkpointing + session resume
+│   ├── smooth-narc/         # Library — tool surveillance + secret detection
+│   ├── smooth-scribe/       # Library — per-VM structured logging
+│   ├── smooth-archivist/    # Library — central log aggregator
 │   ├── smooth-tui/          # Library — ratatui terminal dashboard
 │   └── smooth-web/          # Library — embedded Vite SPA
 │       └── web/             # React + Vite source
@@ -353,7 +354,7 @@ smooth/
 # Build
 cargo build
 
-# Test (35 tests)
+# Test (200+ tests across 10 crates)
 cargo test
 
 # Format

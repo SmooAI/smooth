@@ -35,13 +35,16 @@ smooth/
 
 ### Key Crates
 
-- **smooth-cli** (`crates/smooth-cli/src/main.rs`): clap entry point, all command handlers
-- **smooth-bigsmooth** (`crates/smooth-bigsmooth/src/`): axum server, 20+ routes, orchestrator state machine, sandbox pool, tool registry, policy generation, beads/jira/tailscale clients, audit logging
-- **smooth-policy** (`crates/smooth-policy/src/`): shared policy types (network, filesystem, beads, tools, MCP), TOML parsing, glob matching
-- **smooth-wonk** (`crates/smooth-wonk/src/`): in-VM access control authority, policy hot-reload, access negotiation with Big Smooth
-- **smooth-goalie** (`crates/smooth-goalie/src/`): in-VM HTTP/HTTPS forward proxy + FUSE filesystem proxy, delegates all decisions to Wonk
-- **smooth-narc** (`crates/smooth-narc/src/`): in-VM tool surveillance, prompt injection guard, regex pre-filters + LLM-as-a-judge
-- **smooth-tui** (`crates/smooth-tui/src/`): ratatui app, views (dashboard, chat), markdown renderer, theme
+- **smooth-cli** (`crates/smooth-cli/`): clap entry point, 27 commands including `th access` for policy control
+- **smooth-bigsmooth** (`crates/smooth-bigsmooth/`): axum server, 20+ routes, orchestrator, sandbox pool, policy generation, session management, beads/jira/tailscale
+- **smooth-operator** (`crates/smooth-operator/`): Rust-native AI agent framework — LLM client, tool system with hooks, agent loop, conversation management, built-in checkpointing (Groove)
+- **smooth-policy** (`crates/smooth-policy/`): shared policy types (network, filesystem, beads, tools, MCP), TOML parsing, glob matching, phase defaults
+- **smooth-wonk** (`crates/smooth-wonk/`): in-VM access control authority, policy hot-reload via notify+ArcSwap, access negotiation with Big Smooth
+- **smooth-goalie** (`crates/smooth-goalie/`): in-VM HTTP/HTTPS forward proxy, delegates all decisions to Wonk, JSON-lines audit logging
+- **smooth-narc** (`crates/smooth-narc/`): tool surveillance via ToolHook, secret detection (10 patterns), prompt injection guard (6 patterns), write guard, severity-based alerts
+- **smooth-scribe** (`crates/smooth-scribe/`): per-VM structured logging service, LogEntry with trace context, query/filter support
+- **smooth-archivist** (`crates/smooth-archivist/`): central log aggregator, batch ingest from all Scribes, cross-VM query, stats, SSE event stream
+- **smooth-tui** (`crates/smooth-tui/`): ratatui app, views (dashboard, chat, beads, operators, reviews), markdown renderer, theme
 - **smooth-web** (`crates/smooth-web/`): rust-embed serves compiled Vite SPA
 
 ---
@@ -50,7 +53,7 @@ smooth/
 
 ```bash
 cargo build                  # Build all crates
-cargo test                   # Run all tests (35 passing)
+cargo test                   # Run all tests (200+ across 10 crates)
 cargo fmt                    # Format (rustfmt.toml: 160 width)
 cargo clippy                 # Lint (pedantic + nursery)
 cargo build --release -p smooth-cli  # Release binary (~10MB)
@@ -99,6 +102,7 @@ pnpm dev                     # Vite dev server at :3100
 | `db.rs` | rusqlite: memories, worker_runs, config tables |
 | `jira.rs` | Jira REST client + bidirectional sync |
 | `tailscale.rs` | tailscale CLI status wrapper |
+| `session.rs` | Session persistence, message history, orchestrator snapshots, inbox |
 | `ws.rs` | WebSocket message types |
 
 ### Security Architecture
@@ -111,8 +115,19 @@ The sandbox access control system uses named services running inside each microV
 - **Goalie** — per-VM network + FUSE filesystem proxy (iptables enforced)
 - **Narc** — per-VM tool surveillance + prompt injection guard (regex + LLM judge)
 - **Scribe** — per-VM structured logging, feeds Archivist
+- **Groove** — LLM checkpointing + session resume (built into smooth-operator)
 
 See README.md for full architecture diagrams and the plan file for implementation details.
+
+### smooth-operator (Agent Framework)
+
+| Module | Purpose |
+|---|---|
+| `agent.rs` | Observe → think → act loop, event emission, checkpoint integration |
+| `llm.rs` | OpenAI-compatible chat completion client, streaming-ready |
+| `tool.rs` | Tool trait + ToolRegistry with pre/post hooks (Narc integration) |
+| `conversation.rs` | Message history, context window management, token estimation |
+| `checkpoint.rs` | Checkpoint + CheckpointStore trait, configurable strategies |
 
 ---
 
