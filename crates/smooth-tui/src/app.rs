@@ -298,8 +298,9 @@ impl App {
     }
 
     fn handle_mouse(&mut self, col: u16, row: u16) {
-        // Tab bar is rows 0-2 (3-line block with borders). Row 1 has the tab text.
-        if row == 1 {
+        // Tab bar is rows 0-2 (3-line block with borders).
+        // Accept clicks anywhere in the tab bar area for forgiving click targets.
+        if row <= 2 {
             for (i, &(start, end)) in self.tab_regions.iter().enumerate() {
                 if col >= start && col < end {
                     self.active_tab = i;
@@ -307,15 +308,24 @@ impl App {
                 }
             }
         }
+
+        // Dashboard view: clicking in the content area with row > 3
+        // could navigate to specific tabs based on the card clicked.
+        // (Future: add click regions for dashboard cards)
     }
 
     fn handle_scroll(&mut self, up: bool) {
-        if self.active_tab == 3 {
-            if up {
-                self.chat_state.scroll_offset = self.chat_state.scroll_offset.saturating_add(3);
-            } else {
-                self.chat_state.scroll_offset = self.chat_state.scroll_offset.saturating_sub(3);
+        // Scroll support for chat and any future scrollable views
+        match self.active_tab {
+            3 => {
+                // Chat tab
+                if up {
+                    self.chat_state.scroll_offset = self.chat_state.scroll_offset.saturating_add(3);
+                } else {
+                    self.chat_state.scroll_offset = self.chat_state.scroll_offset.saturating_sub(3);
+                }
             }
+            _ => {} // Other tabs don't scroll yet
         }
     }
 }
