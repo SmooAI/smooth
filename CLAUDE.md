@@ -23,7 +23,7 @@ smooth/
 │   ├── smooth-wonk/         # Binary — in-VM access control authority
 │   ├── smooth-goalie/       # Binary — in-VM network + filesystem proxy
 │   ├── smooth-narc/         # Binary — in-VM tool surveillance + LLM judge
-│   ├── smooth-tui/          # Library — ratatui terminal dashboard
+│   ├── smooth-code/          # Library — ratatui terminal dashboard
 │   └── smooth-web/          # Library — embedded Vite SPA via rust-embed
 │       └── web/             # React + Vite source (TypeScript)
 ├── Cargo.toml               # Workspace root
@@ -44,7 +44,7 @@ smooth/
 - **smooth-narc** (`crates/smooth-narc/`): tool surveillance via ToolHook, secret detection (10 patterns), prompt injection guard (6 patterns), write guard, severity-based alerts
 - **smooth-scribe** (`crates/smooth-scribe/`): per-VM structured logging service, LogEntry with trace context, query/filter support
 - **smooth-archivist** (`crates/smooth-archivist/`): central log aggregator, batch ingest from all Scribes, cross-VM query, stats, SSE event stream
-- **smooth-tui** (`crates/smooth-tui/`): ratatui app, views (dashboard, chat, beads, operators, reviews), markdown renderer, theme
+- **smooth-code** (`crates/smooth-code/`): ratatui app, views (dashboard, chat, beads, operators, reviews), markdown renderer, theme
 - **smooth-web** (`crates/smooth-web/`): rust-embed serves compiled Vite SPA
 
 ---
@@ -142,7 +142,52 @@ All state at `~/.smooth/`:
 
 ---
 
-## 6. Git Workflow
+## 6. Issue Tracking — Beads + Jira Integration
+
+**Philosophy**: Beads tracks local work context and dependencies. Jira (SMOODEV project) is the external source of truth for project management.
+
+### Beads has built-in Jira sync
+
+Configure once (already done for this repo):
+
+```bash
+bd config set jira.url "https://smooai.atlassian.net"
+bd config set jira.project "SMOODEV"
+bd config set jira.username "$JIRA_EMAIL"
+# API token from JIRA_API_TOKEN env var (or bd config set jira.api_token)
+```
+
+### Creating work
+
+1. **Create a Jira ticket first** via REST API or Jira UI
+2. **Create a matching beads issue**: `bd create --title="SMOODEV-XX: Title" --description="..." --type=task --priority=2`
+3. **Or use `bd jira sync --pull`** to import Jira issues into beads automatically
+
+### Syncing
+
+```bash
+bd jira sync --push     # Push beads status → Jira
+bd jira sync --pull     # Pull Jira tickets → beads
+bd jira sync            # Bidirectional sync
+```
+
+### Beads quick reference
+
+```bash
+bd ready                              # Show issues ready to work on
+bd list --status=open                 # All open issues
+bd list --status=in_progress          # Active work
+bd show <id>                          # Issue details with dependencies
+bd update <id> --status=in_progress   # Claim work
+bd close <id1> <id2> ...              # Close completed issues
+bd dep add <issue> <depends-on>       # Add dependency
+bd blocked                            # Show blocked issues
+bd jira sync                          # Bidirectional Jira sync
+```
+
+---
+
+## 7. Git Workflow
 
 Same as smooai: worktrees, SMOODEV-XX branch naming, beads + Jira sync.
 
@@ -154,7 +199,7 @@ git checkout main && git pull --rebase && git merge SMOODEV-XX-desc --no-ff && g
 
 ---
 
-## 7. Testing — MANDATORY
+## 8. Testing — MANDATORY
 
 > **CRITICAL: Every crate, every module, every public function MUST have tests.** No code lands without passing tests. This is non-negotiable.
 
@@ -172,7 +217,7 @@ git checkout main && git pull --rebase && git merge SMOODEV-XX-desc --no-ff && g
 
 ---
 
-## 8. Landing the Plane (Session Completion)
+## 9. Landing the Plane (Session Completion)
 
 **When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
 
