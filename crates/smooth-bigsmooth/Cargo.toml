@@ -1,12 +1,14 @@
 [package]
-name = "smooth-leader"
+name = "smooth-bigsmooth"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Smooth leader service — axum server, orchestrator, sandbox management"
+description = "Big Smooth — orchestrator, policy generation, sandbox management, API server"
 
 [dependencies]
+smooth-policy.workspace = true
+smooth-web = { path = "../smooth-web" }
 axum.workspace = true
 axum-extra.workspace = true
 tower.workspace = true
@@ -27,7 +29,7 @@ futures-util.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 dirs-next.workspace = true
-smooth-web = { path = "../smooth-web" }
+toml.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

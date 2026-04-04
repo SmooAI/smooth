@@ -257,8 +257,8 @@ async fn cmd_up(no_leader: bool, port: u16) -> Result<()> {
     println!("Smoo AI / Smooth starting...");
 
     // Initialize database
-    let db_path = smooth_leader::db::default_db_path();
-    let db = smooth_leader::db::Database::open(&db_path)?;
+    let db_path = smooth_bigsmooth::db::default_db_path();
+    let db = smooth_bigsmooth::db::Database::open(&db_path)?;
     println!("  Database: {} ✓", db_path.display());
 
     // Check beads directory
@@ -272,7 +272,7 @@ async fn cmd_up(no_leader: bool, port: u16) -> Result<()> {
     }
 
     // Start leader (API + embedded web UI on same port)
-    let state = smooth_leader::server::AppState {
+    let state = smooth_bigsmooth::server::AppState {
         db,
         start_time: Instant::now(),
     };
@@ -282,7 +282,7 @@ async fn cmd_up(no_leader: bool, port: u16) -> Result<()> {
     println!("  Web UI: http://localhost:{port} ✓");
     println!();
 
-    smooth_leader::server::start(state, addr).await
+    smooth_bigsmooth::server::start(state, addr).await
 }
 
 async fn cmd_down() -> Result<()> {
@@ -308,7 +308,7 @@ async fn cmd_status() -> Result<()> {
 }
 
 fn cmd_db(cmd: DbCommands) -> Result<()> {
-    let db_path = smooth_leader::db::default_db_path();
+    let db_path = smooth_bigsmooth::db::default_db_path();
     match cmd {
         DbCommands::Status => {
             if db_path.exists() {
@@ -340,7 +340,7 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
     match cmd {
         AuthCommands::Status => {
             println!("Authentication Status\n====================\n");
-            let has_zen = smooth_leader::chat::is_authenticated();
+            let has_zen = smooth_bigsmooth::chat::is_authenticated();
             println!(
                 "OpenCode Zen: {}",
                 if has_zen {
@@ -362,7 +362,7 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
             }
         }
         AuthCommands::Providers => {
-            if smooth_leader::chat::is_authenticated() {
+            if smooth_bigsmooth::chat::is_authenticated() {
                 println!("opencode-zen: authenticated (default)");
             } else {
                 println!("No providers configured. Run: th auth login");
@@ -440,7 +440,7 @@ async fn cmd_steer(bead_id: &str, action: &str, message: Option<&str>) -> Result
 }
 
 fn cmd_audit(cmd: AuditCommands) -> Result<()> {
-    let dir = smooth_leader::audit::get_audit_dir();
+    let dir = smooth_bigsmooth::audit::get_audit_dir();
     match cmd {
         AuditCommands::Path => println!("{}", dir.display()),
         AuditCommands::List => {
@@ -502,7 +502,7 @@ fn cmd_worktree(cmd: WorktreeCommands) -> Result<()> {
 fn cmd_tailscale(cmd: TailscaleCommands) -> Result<()> {
     match cmd {
         TailscaleCommands::Status => {
-            let s = smooth_leader::tailscale::get_status();
+            let s = smooth_bigsmooth::tailscale::get_status();
             println!("Tailscale: {}", if s.connected { "connected" } else { "disconnected" });
             if let Some(h) = &s.hostname {
                 println!("  Hostname: {h}");

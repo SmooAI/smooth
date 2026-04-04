@@ -131,7 +131,7 @@ pub fn get_comments(id: &str) -> Result<Vec<serde_json::Value>> {
 
 /// Check if bd is available.
 pub fn is_available() -> bool {
-    Command::new("bd").arg("--version").output().map_or(false, |o| o.status.success())
+    Command::new("bd").arg("--version").output().is_ok_and(|o| o.status.success())
 }
 
 #[cfg(test)]

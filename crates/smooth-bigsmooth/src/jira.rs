@@ -61,7 +61,7 @@ pub async fn check_connection(config: &JiraConfig) -> bool {
         .basic_auth(&config.email, Some(&config.api_token))
         .send()
         .await
-        .map_or(false, |r| r.status().is_success())
+        .is_ok_and(|r| r.status().is_success())
 }
 
 #[cfg(test)]
