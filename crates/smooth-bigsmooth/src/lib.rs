@@ -11,6 +11,7 @@ pub mod pool;
 pub mod sandbox;
 pub mod search;
 pub mod server;
+pub mod session;
 pub mod tailscale;
 pub mod tools;
 pub mod ws;
