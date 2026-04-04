@@ -6,6 +6,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::llm::{ApiFormat, LlmConfig};
 
+/// Preset model configurations for common provider setups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Preset {
+    /// OpenRouter + Chinese models — cheapest option
+    LowCost,
+    /// OpenAI models — uses Codex/ChatGPT subscription
+    Codex,
+    /// Anthropic models — highest quality, most expensive
+    Anthropic,
+}
+
 /// Configuration for a single LLM provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
@@ -162,6 +173,55 @@ pub struct ProviderRegistry {
 }
 
 impl ProviderRegistry {
+    /// Create a registry pre-configured with a preset model configuration.
+    ///
+    /// Each preset registers the appropriate provider and sets up per-activity
+    /// model routing optimized for the preset's goals (cost, quality, etc.).
+    pub fn from_preset(preset: Preset, api_key: &str) -> Self {
+        let mut registry = Self::new();
+
+        match preset {
+            Preset::LowCost => {
+                registry.register_provider(ProviderConfig::openrouter(api_key));
+                registry.routing = ModelRouting {
+                    thinking: ModelSlot::new("openrouter", "deepseek/deepseek-r1"),
+                    coding: ModelSlot::new("openrouter", "minimax/minimax-m2.5").with_fallback(ModelSlot::new("openrouter", "deepseek/deepseek-v3")),
+                    planning: ModelSlot::new("openrouter", "moonshot/kimi-k2.5"),
+                    reviewing: ModelSlot::new("openrouter", "zhipu/glm-5.1"),
+                    judge: ModelSlot::new("openrouter", "google/gemini-flash-2.0"),
+                    summarize: ModelSlot::new("openrouter", "minimax/minimax-m2.5"),
+                    default: ModelSlot::new("openrouter", "deepseek/deepseek-v3"),
+                };
+            }
+            Preset::Codex => {
+                registry.register_provider(ProviderConfig::openai(api_key));
+                registry.routing = ModelRouting {
+                    thinking: ModelSlot::new("openai", "o3-mini"),
+                    coding: ModelSlot::new("openai", "gpt-4o"),
+                    planning: ModelSlot::new("openai", "gpt-4o"),
+                    reviewing: ModelSlot::new("openai", "gpt-4o"),
+                    judge: ModelSlot::new("openai", "gpt-4o-mini"),
+                    summarize: ModelSlot::new("openai", "gpt-4o-mini"),
+                    default: ModelSlot::new("openai", "gpt-4o"),
+                };
+            }
+            Preset::Anthropic => {
+                registry.register_provider(ProviderConfig::anthropic(api_key));
+                registry.routing = ModelRouting {
+                    thinking: ModelSlot::new("anthropic", "claude-opus-4-20250514"),
+                    coding: ModelSlot::new("anthropic", "claude-sonnet-4-20250514"),
+                    planning: ModelSlot::new("anthropic", "claude-sonnet-4-20250514"),
+                    reviewing: ModelSlot::new("anthropic", "claude-sonnet-4-20250514"),
+                    judge: ModelSlot::new("anthropic", "claude-haiku-4-5-20251001"),
+                    summarize: ModelSlot::new("anthropic", "claude-haiku-4-5-20251001"),
+                    default: ModelSlot::new("anthropic", "claude-sonnet-4-20250514"),
+                };
+            }
+        }
+
+        registry
+    }
+
     /// Create a new empty registry with default routing.
     pub fn new() -> Self {
         Self {
@@ -571,5 +631,139 @@ mod tests {
         let config = registry.llm_config_for(Activity::Coding).unwrap();
         assert_eq!(config.api_url, "https://tertiary.example.com/v1");
         assert_eq!(config.model, "model-c");
+    }
+
+    // 13. LowCost preset creates correct routing
+    #[test]
+    fn low_cost_preset_creates_correct_routing() {
+        let registry = ProviderRegistry::from_preset(Preset::LowCost, "or-key");
+
+        let thinking = registry.llm_config_for(Activity::Thinking).unwrap();
+        assert_eq!(thinking.model, "deepseek/deepseek-r1");
+        assert_eq!(thinking.api_url, "https://openrouter.ai/api/v1");
+
+        let coding = registry.llm_config_for(Activity::Coding).unwrap();
+        assert_eq!(coding.model, "minimax/minimax-m2.5");
+
+        let planning = registry.llm_config_for(Activity::Planning).unwrap();
+        assert_eq!(planning.model, "moonshot/kimi-k2.5");
+
+        let reviewing = registry.llm_config_for(Activity::Reviewing).unwrap();
+        assert_eq!(reviewing.model, "zhipu/glm-5.1");
+
+        let judge = registry.llm_config_for(Activity::Judge).unwrap();
+        assert_eq!(judge.model, "google/gemini-flash-2.0");
+
+        let summarize = registry.llm_config_for(Activity::Summarize).unwrap();
+        assert_eq!(summarize.model, "minimax/minimax-m2.5");
+
+        let default = registry.default_llm_config().unwrap();
+        assert_eq!(default.model, "deepseek/deepseek-v3");
+    }
+
+    // 14. Codex preset creates correct routing
+    #[test]
+    fn codex_preset_creates_correct_routing() {
+        let registry = ProviderRegistry::from_preset(Preset::Codex, "oai-key");
+
+        let thinking = registry.llm_config_for(Activity::Thinking).unwrap();
+        assert_eq!(thinking.model, "o3-mini");
+        assert_eq!(thinking.api_url, "https://api.openai.com/v1");
+
+        let coding = registry.llm_config_for(Activity::Coding).unwrap();
+        assert_eq!(coding.model, "gpt-4o");
+
+        let planning = registry.llm_config_for(Activity::Planning).unwrap();
+        assert_eq!(planning.model, "gpt-4o");
+
+        let reviewing = registry.llm_config_for(Activity::Reviewing).unwrap();
+        assert_eq!(reviewing.model, "gpt-4o");
+
+        let judge = registry.llm_config_for(Activity::Judge).unwrap();
+        assert_eq!(judge.model, "gpt-4o-mini");
+
+        let summarize = registry.llm_config_for(Activity::Summarize).unwrap();
+        assert_eq!(summarize.model, "gpt-4o-mini");
+
+        let default = registry.default_llm_config().unwrap();
+        assert_eq!(default.model, "gpt-4o");
+    }
+
+    // 15. Anthropic preset creates correct routing
+    #[test]
+    fn anthropic_preset_creates_correct_routing() {
+        let registry = ProviderRegistry::from_preset(Preset::Anthropic, "ant-key");
+
+        let thinking = registry.llm_config_for(Activity::Thinking).unwrap();
+        assert_eq!(thinking.model, "claude-opus-4-20250514");
+        assert_eq!(thinking.api_url, "https://api.anthropic.com/v1");
+        assert_eq!(thinking.api_format, ApiFormat::Anthropic);
+
+        let coding = registry.llm_config_for(Activity::Coding).unwrap();
+        assert_eq!(coding.model, "claude-sonnet-4-20250514");
+
+        let judge = registry.llm_config_for(Activity::Judge).unwrap();
+        assert_eq!(judge.model, "claude-haiku-4-5-20251001");
+
+        let summarize = registry.llm_config_for(Activity::Summarize).unwrap();
+        assert_eq!(summarize.model, "claude-haiku-4-5-20251001");
+
+        let default = registry.default_llm_config().unwrap();
+        assert_eq!(default.model, "claude-sonnet-4-20250514");
+    }
+
+    // 16. from_preset registers the provider
+    #[test]
+    fn from_preset_registers_provider() {
+        let low_cost = ProviderRegistry::from_preset(Preset::LowCost, "lc-key");
+        assert!(low_cost.get_provider("openrouter").is_some());
+        assert_eq!(low_cost.get_provider("openrouter").unwrap().api_key, "lc-key");
+
+        let codex = ProviderRegistry::from_preset(Preset::Codex, "cx-key");
+        assert!(codex.get_provider("openai").is_some());
+        assert_eq!(codex.get_provider("openai").unwrap().api_key, "cx-key");
+
+        let anthropic = ProviderRegistry::from_preset(Preset::Anthropic, "an-key");
+        assert!(anthropic.get_provider("anthropic").is_some());
+        assert_eq!(anthropic.get_provider("anthropic").unwrap().api_key, "an-key");
+    }
+
+    // 17. llm_config_for works with preset
+    #[test]
+    fn llm_config_for_works_with_preset() {
+        let registry = ProviderRegistry::from_preset(Preset::Codex, "test-key");
+
+        // Every activity should resolve without error
+        for activity in [
+            Activity::Thinking,
+            Activity::Coding,
+            Activity::Planning,
+            Activity::Reviewing,
+            Activity::Judge,
+            Activity::Summarize,
+        ] {
+            let config = registry.llm_config_for(activity);
+            assert!(config.is_ok(), "Activity {activity:?} should resolve for Codex preset");
+            assert_eq!(config.unwrap().api_key, "test-key");
+        }
+
+        let default = registry.default_llm_config();
+        assert!(default.is_ok());
+        assert_eq!(default.unwrap().api_key, "test-key");
+    }
+
+    // 18. Preset serialization roundtrip
+    #[test]
+    fn preset_serialization_roundtrip() {
+        for preset in [Preset::LowCost, Preset::Codex, Preset::Anthropic] {
+            let json = serde_json::to_string(&preset).unwrap();
+            let deserialized: Preset = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized, preset);
+        }
+
+        // Verify specific serialized values
+        assert_eq!(serde_json::to_string(&Preset::LowCost).unwrap(), "\"LowCost\"");
+        assert_eq!(serde_json::to_string(&Preset::Codex).unwrap(), "\"Codex\"");
+        assert_eq!(serde_json::to_string(&Preset::Anthropic).unwrap(), "\"Anthropic\"");
     }
 }
