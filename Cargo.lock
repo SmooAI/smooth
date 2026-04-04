@@ -2630,6 +2630,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "smooth-issues"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "smooth-narc"
 version = "0.1.0"
 dependencies = [

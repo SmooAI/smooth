@@ -108,3 +108,4 @@ smooth-wonk = { path = "crates/smooth-wonk" }
 smooth-archivist = { path = "crates/smooth-archivist" }
 smooth-plugin = { path = "crates/smooth-plugin" }
 smooth-code = { path = "crates/smooth-code" }
+smooth-issues = { path = "crates/smooth-issues" }
