@@ -39,7 +39,10 @@ pub fn render(f: &mut Frame, area: Rect, state: &ReviewsState) {
         let empty = Paragraph::new(vec![
             Line::from(Span::styled("No pending reviews.", theme::muted())),
             Line::default(),
-            Line::from(Span::styled("When operators complete work, their changes appear here for approval.", theme::muted())),
+            Line::from(Span::styled(
+                "When operators complete work, their changes appear here for approval.",
+                theme::muted(),
+            )),
         ]);
         f.render_widget(empty, chunks[1]);
         return;

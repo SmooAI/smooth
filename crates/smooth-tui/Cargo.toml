@@ -7,7 +7,7 @@ repository.workspace = true
 description = "Smooth TUI — ratatui terminal dashboard"
 
 [dependencies]
-smooth-leader.workspace = true
+smooth-bigsmooth.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 pulldown-cmark.workspace = true

@@ -36,12 +36,18 @@ pub struct ToolContext {
     pub permissions: Vec<Permission>,
 }
 
+/// Handler function type for tool execution.
+pub type ToolHandler = Box<dyn Fn(serde_json::Value, &ToolContext) -> Result<serde_json::Value> + Send + Sync>;
+
+/// Handler function type for hook execution.
+pub type HookHandler = Box<dyn Fn(&str, &serde_json::Value) -> Result<()> + Send + Sync>;
+
 /// A registered tool.
 pub struct Tool {
     pub name: String,
     pub description: String,
     pub permissions: Vec<Permission>,
-    pub handler: Box<dyn Fn(serde_json::Value, &ToolContext) -> Result<serde_json::Value> + Send + Sync>,
+    pub handler: ToolHandler,
 }
 
 /// Hook that runs before or after tool execution.
@@ -53,7 +59,7 @@ pub enum HookPhase {
 pub struct Hook {
     pub name: String,
     pub phase: HookPhase,
-    pub handler: Box<dyn Fn(&str, &serde_json::Value) -> Result<()> + Send + Sync>,
+    pub handler: HookHandler,
 }
 
 /// Tool registry with permission-based access control.

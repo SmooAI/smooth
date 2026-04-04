@@ -83,7 +83,7 @@ fn msb(args: &[&str]) -> Result<String> {
 
 /// Check if msb is available.
 pub fn is_available() -> bool {
-    Command::new("msb").arg("--version").output().map_or(false, |o| o.status.success())
+    Command::new("msb").arg("--version").output().is_ok_and(|o| o.status.success())
 }
 
 /// Check if msb server is running.
@@ -160,7 +160,7 @@ pub fn destroy_sandbox(msb_name: &str) -> Result<()> {
 
 /// Get sandbox status.
 pub fn get_status(msb_name: &str) -> SandboxStatus {
-    let running = msb(&["status", msb_name]).map_or(false, |out| out.to_lowercase().contains("running"));
+    let running = msb(&["status", msb_name]).is_ok_and(|out| out.to_lowercase().contains("running"));
 
     let healthy = if running {
         // TODO: check health endpoint

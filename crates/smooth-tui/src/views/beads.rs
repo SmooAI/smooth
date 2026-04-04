@@ -48,13 +48,15 @@ pub fn render(f: &mut Frame, area: Rect, state: &BeadsState) {
     }
 
     if state.beads.is_empty() {
-        let empty = Paragraph::new(Line::from(Span::styled("No open beads. Create one with: bd create --title=\"...\"", theme::muted())));
+        let empty = Paragraph::new(Line::from(Span::styled(
+            "No open beads. Create one with: bd create --title=\"...\"",
+            theme::muted(),
+        )));
         f.render_widget(empty, chunks[1]);
         return;
     }
 
-    let header = Row::new(vec!["ID", "Title", "Status", "Priority"])
-        .style(Style::default().fg(theme::SMOO_GREEN).add_modifier(Modifier::BOLD));
+    let header = Row::new(vec!["ID", "Title", "Status", "Priority"]).style(Style::default().fg(theme::SMOO_GREEN).add_modifier(Modifier::BOLD));
 
     let rows: Vec<Row> = state
         .beads
@@ -74,13 +76,16 @@ pub fn render(f: &mut Frame, area: Rect, state: &BeadsState) {
         })
         .collect();
 
-    let table = Table::new(rows, [Constraint::Length(8), Constraint::Min(30), Constraint::Length(14), Constraint::Length(10)])
-        .header(header)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::SMOO_GREEN))
-                .title("Open Issues"),
-        );
+    let table = Table::new(
+        rows,
+        [Constraint::Length(8), Constraint::Min(30), Constraint::Length(14), Constraint::Length(10)],
+    )
+    .header(header)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme::SMOO_GREEN))
+            .title("Open Issues"),
+    );
     f.render_widget(table, chunks[1]);
 }

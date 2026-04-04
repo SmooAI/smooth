@@ -47,8 +47,7 @@ pub fn render(f: &mut Frame, area: Rect, state: &OperatorsState) {
         return;
     }
 
-    let header = Row::new(vec!["ID", "Bead", "Status", "Runtime"])
-        .style(Style::default().fg(theme::SMOO_GREEN).add_modifier(Modifier::BOLD));
+    let header = Row::new(vec!["ID", "Bead", "Status", "Runtime"]).style(Style::default().fg(theme::SMOO_GREEN).add_modifier(Modifier::BOLD));
 
     let rows: Vec<Row> = state
         .operators
@@ -68,13 +67,16 @@ pub fn render(f: &mut Frame, area: Rect, state: &OperatorsState) {
         })
         .collect();
 
-    let table = Table::new(rows, [Constraint::Length(10), Constraint::Length(12), Constraint::Length(10), Constraint::Length(10)])
-        .header(header)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::SMOO_GREEN))
-                .title("Active Operators"),
-        );
+    let table = Table::new(
+        rows,
+        [Constraint::Length(10), Constraint::Length(12), Constraint::Length(10), Constraint::Length(10)],
+    )
+    .header(header)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme::SMOO_GREEN))
+            .title("Active Operators"),
+    );
     f.render_widget(table, chunks[1]);
 }

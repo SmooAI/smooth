@@ -13,28 +13,60 @@ struct SecretPattern {
 }
 
 static AWS_ACCESS_KEY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"AKIA[0-9A-Z]{16}").expect("valid regex"));
-static AWS_SECRET_KEY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)aws[_\-]?secret[_\-]?access[_\-]?key\s*[=:]\s*[A-Za-z0-9/+=]{40}").expect("valid regex"));
+static AWS_SECRET_KEY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)aws[_\-]?secret[_\-]?access[_\-]?key\s*[=:]\s*[A-Za-z0-9/+=]{40}").expect("valid regex"));
 static ANTHROPIC_KEY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"sk-ant-[A-Za-z0-9\-_]{20,}").expect("valid regex"));
 static OPENAI_KEY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"sk-[A-Za-z0-9]{20,}").expect("valid regex"));
 static GITHUB_TOKEN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"gh[posr]_[A-Za-z0-9_]{36,}").expect("valid regex"));
 static PRIVATE_KEY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"-----BEGIN\s+(RSA\s+)?PRIVATE\s+KEY-----").expect("valid regex"));
-static GENERIC_SECRET: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?i)(secret|password|token|api[_\-]?key)\s*[=:]\s*["']?[A-Za-z0-9/+=\-_]{8,}"#).expect("valid regex"));
+static GENERIC_SECRET: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?i)(secret|password|token|api[_\-]?key)\s*[=:]\s*["']?[A-Za-z0-9/+=\-_]{8,}"#).expect("valid regex"));
 static BEARER_TOKEN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"Bearer\s+[A-Za-z0-9\-_.~+/]+=*").expect("valid regex"));
 static BASE64_KEY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)(key|secret|password)\s*[=:]\s*[A-Za-z0-9+/]{32,}={0,2}").expect("valid regex"));
 static STRIPE_KEY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[sr]k_(live|test)_[A-Za-z0-9]{20,}").expect("valid regex"));
 
 static SECRET_PATTERNS: LazyLock<Vec<SecretPattern>> = LazyLock::new(|| {
     vec![
-        SecretPattern { name: "AWS Access Key", regex: &AWS_ACCESS_KEY },
-        SecretPattern { name: "AWS Secret Key", regex: &AWS_SECRET_KEY },
-        SecretPattern { name: "Anthropic API Key", regex: &ANTHROPIC_KEY },
-        SecretPattern { name: "OpenAI API Key", regex: &OPENAI_KEY },
-        SecretPattern { name: "GitHub Token", regex: &GITHUB_TOKEN },
-        SecretPattern { name: "Private Key", regex: &PRIVATE_KEY },
-        SecretPattern { name: "Generic Secret", regex: &GENERIC_SECRET },
-        SecretPattern { name: "Bearer Token", regex: &BEARER_TOKEN },
-        SecretPattern { name: "Base64 Encoded Key", regex: &BASE64_KEY },
-        SecretPattern { name: "Stripe Key", regex: &STRIPE_KEY },
+        SecretPattern {
+            name: "AWS Access Key",
+            regex: &AWS_ACCESS_KEY,
+        },
+        SecretPattern {
+            name: "AWS Secret Key",
+            regex: &AWS_SECRET_KEY,
+        },
+        SecretPattern {
+            name: "Anthropic API Key",
+            regex: &ANTHROPIC_KEY,
+        },
+        SecretPattern {
+            name: "OpenAI API Key",
+            regex: &OPENAI_KEY,
+        },
+        SecretPattern {
+            name: "GitHub Token",
+            regex: &GITHUB_TOKEN,
+        },
+        SecretPattern {
+            name: "Private Key",
+            regex: &PRIVATE_KEY,
+        },
+        SecretPattern {
+            name: "Generic Secret",
+            regex: &GENERIC_SECRET,
+        },
+        SecretPattern {
+            name: "Bearer Token",
+            regex: &BEARER_TOKEN,
+        },
+        SecretPattern {
+            name: "Base64 Encoded Key",
+            regex: &BASE64_KEY,
+        },
+        SecretPattern {
+            name: "Stripe Key",
+            regex: &STRIPE_KEY,
+        },
     ]
 });
 
@@ -168,21 +200,43 @@ struct InjectionPattern {
     regex: &'static LazyLock<Regex>,
 }
 
-static IGNORE_INSTRUCTIONS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)ignore\s+(all\s+)?(previous|prior|above)\s+(instructions|prompts|rules)").expect("valid regex"));
-static ROLE_HIJACK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)(you\s+are\s+now|act\s+as|pretend\s+(to\s+be|you\s+are)|from\s+now\s+on\s+you\s+are)").expect("valid regex"));
+static IGNORE_INSTRUCTIONS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)ignore\s+(all\s+)?(previous|prior|above)\s+(instructions|prompts|rules)").expect("valid regex"));
+static ROLE_HIJACK: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)(you\s+are\s+now|act\s+as|pretend\s+(to\s+be|you\s+are)|from\s+now\s+on\s+you\s+are)").expect("valid regex"));
 static SYSTEM_PROMPT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)(system\s*:\s*|<\|system\|>|\[SYSTEM\])").expect("valid regex"));
 static JAILBREAK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)(DAN\s+mode|developer\s+mode|do\s+anything\s+now|jailbreak)").expect("valid regex"));
 static BASE64_SMUGGLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)(decode|eval|execute)\s+(this\s+)?(base64|encoded)").expect("valid regex"));
-static DATA_EXFIL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)(send|post|upload|exfiltrate|transmit)\s+(all\s+)?(data|files|secrets|credentials|keys|tokens)\s+(to|from)").expect("valid regex"));
+static DATA_EXFIL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(send|post|upload|exfiltrate|transmit)\s+(all\s+)?(data|files|secrets|credentials|keys|tokens)\s+(to|from)").expect("valid regex")
+});
 
 static INJECTION_PATTERNS: LazyLock<Vec<InjectionPattern>> = LazyLock::new(|| {
     vec![
-        InjectionPattern { name: "ignore_instructions", regex: &IGNORE_INSTRUCTIONS },
-        InjectionPattern { name: "role_hijack", regex: &ROLE_HIJACK },
-        InjectionPattern { name: "system_prompt", regex: &SYSTEM_PROMPT },
-        InjectionPattern { name: "jailbreak", regex: &JAILBREAK },
-        InjectionPattern { name: "base64_smuggling", regex: &BASE64_SMUGGLE },
-        InjectionPattern { name: "data_exfiltration", regex: &DATA_EXFIL },
+        InjectionPattern {
+            name: "ignore_instructions",
+            regex: &IGNORE_INSTRUCTIONS,
+        },
+        InjectionPattern {
+            name: "role_hijack",
+            regex: &ROLE_HIJACK,
+        },
+        InjectionPattern {
+            name: "system_prompt",
+            regex: &SYSTEM_PROMPT,
+        },
+        InjectionPattern {
+            name: "jailbreak",
+            regex: &JAILBREAK,
+        },
+        InjectionPattern {
+            name: "base64_smuggling",
+            regex: &BASE64_SMUGGLE,
+        },
+        InjectionPattern {
+            name: "data_exfiltration",
+            regex: &DATA_EXFIL,
+        },
     ]
 });
 

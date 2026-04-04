@@ -2514,6 +2514,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
+name = "smooth-bigsmooth"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "axum-extra",
+ "chrono",
+ "dirs-next",
+ "futures-core",
+ "futures-util",
+ "globwalk",
+ "ignore",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "smooth-policy",
+ "smooth-web",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-appender",
+ "uuid",
+]
+
+[[package]]
 name = "smooth-cli"
 version = "0.1.0"
 dependencies = [
@@ -2525,7 +2555,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "smooth-leader",
+ "smooth-bigsmooth",
  "smooth-tui",
  "smooth-web",
  "tokio",
@@ -2552,34 +2582,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "smooth-leader"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "axum-extra",
- "chrono",
- "dirs-next",
- "futures-core",
- "futures-util",
- "globwalk",
- "ignore",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "smooth-web",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tower",
- "tower-http",
- "tracing",
- "tracing-appender",
- "uuid",
 ]
 
 [[package]]
@@ -2645,7 +2647,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "smooth-leader",
+ "smooth-bigsmooth",
  "tokio",
  "urlencoding",
 ]

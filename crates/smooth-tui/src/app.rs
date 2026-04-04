@@ -251,7 +251,10 @@ impl App {
             }
             KeyCode::Enter if self.active_tab == 3 && !self.chat_state.input.is_empty() && !self.chat_state.streaming => {
                 let content = std::mem::take(&mut self.chat_state.input);
-                self.chat_state.messages.push(chat::ChatMessage { role: "user".into(), content: content.clone() });
+                self.chat_state.messages.push(chat::ChatMessage {
+                    role: "user".into(),
+                    content: content.clone(),
+                });
                 self.chat_state.streaming = true;
                 self.chat_state.scroll_offset = 0;
                 self.chat_state.autocomplete = chat::AutocompleteState::default();
@@ -262,11 +265,7 @@ impl App {
                     let tx = tx.clone();
                     tokio::spawn(async move {
                         let client = reqwest::Client::new();
-                        let result = client
-                            .post(&url)
-                            .json(&serde_json::json!({"content": content}))
-                            .send()
-                            .await;
+                        let result = client.post(&url).json(&serde_json::json!({"content": content})).send().await;
                         let response = match result {
                             Ok(resp) => match resp.json::<serde_json::Value>().await {
                                 Ok(json) => json.get("data").and_then(|d| d.as_str()).unwrap_or("No response").to_string(),
@@ -325,13 +324,13 @@ impl App {
 fn gradient_title() -> Vec<Span<'static>> {
     // S -> m -> o -> o with color interpolation from orange (#f49f0a) to green (#00a6a6)
     let colors = [
-        Color::Rgb(244, 159, 10),  // S — orange
-        Color::Rgb(183, 137, 40),  // m
-        Color::Rgb(122, 150, 70),  // o
-        Color::Rgb(61, 168, 100),  // o
-        Color::Rgb(0, 166, 166),   // . — green
-        Color::Rgb(0, 166, 166),   // A — green
-        Color::Rgb(0, 166, 166),   // I — green
+        Color::Rgb(244, 159, 10), // S — orange
+        Color::Rgb(183, 137, 40), // m
+        Color::Rgb(122, 150, 70), // o
+        Color::Rgb(61, 168, 100), // o
+        Color::Rgb(0, 166, 166),  // . — green
+        Color::Rgb(0, 166, 166),  // A — green
+        Color::Rgb(0, 166, 166),  // I — green
     ];
     let text = ['S', 'm', 'o', 'o', '.', 'A', 'I'];
 

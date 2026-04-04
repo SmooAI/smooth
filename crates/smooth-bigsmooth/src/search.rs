@@ -70,16 +70,17 @@ pub fn search_files(query: &str, base_path: &Path) -> Vec<SearchResult> {
 
 /// Expand path (supports ~) and list entries.
 pub fn search_paths(query: &str) -> Vec<SearchResult> {
-    let expanded = if query.starts_with('~') {
-        let rest = query[1..].trim_start_matches('/');
-        if rest.is_empty() {
-            dirs_next::home_dir().unwrap_or_default()
-        } else {
-            dirs_next::home_dir().unwrap_or_default().join(rest)
-        }
-    } else {
-        PathBuf::from(query)
-    };
+    let expanded = query.strip_prefix('~').map_or_else(
+        || PathBuf::from(query),
+        |rest| {
+            let rest = rest.trim_start_matches('/');
+            if rest.is_empty() {
+                dirs_next::home_dir().unwrap_or_default()
+            } else {
+                dirs_next::home_dir().unwrap_or_default().join(rest)
+            }
+        },
+    );
 
     // If it's a directory, list contents
     if expanded.is_dir() {
@@ -91,7 +92,7 @@ pub fn search_paths(query: &str) -> Vec<SearchResult> {
             .take(15)
             .map(|e| {
                 let name = e.file_name().to_string_lossy().into_owned();
-                let is_dir = e.file_type().map_or(false, |ft| ft.is_dir());
+                let is_dir = e.file_type().is_ok_and(|ft| ft.is_dir());
                 let id = format!("{}/{name}", query.trim_end_matches('/'));
                 SearchResult {
                     result_type: "path".into(),
@@ -119,7 +120,7 @@ pub fn search_paths(query: &str) -> Vec<SearchResult> {
             .take(15)
             .map(|e| {
                 let name = e.file_name().to_string_lossy().into_owned();
-                let is_dir = e.file_type().map_or(false, |ft| ft.is_dir());
+                let is_dir = e.file_type().is_ok_and(|ft| ft.is_dir());
                 let parent_query = query.rsplit_once('/').map_or("", |p| p.0);
                 SearchResult {
                     result_type: "path".into(),

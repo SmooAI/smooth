@@ -11,7 +11,7 @@ name = "th"
 path = "src/main.rs"
 
 [dependencies]
-smooth-leader.workspace = true
+smooth-bigsmooth.workspace = true
 smooth-tui.workspace = true
 smooth-web.workspace = true
 axum.workspace = true
