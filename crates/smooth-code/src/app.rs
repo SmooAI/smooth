@@ -183,14 +183,7 @@ async fn run_agent_query(message: &str) -> anyhow::Result<String> {
         ));
     }
 
-    let llm_config = LlmConfig {
-        api_url: "https://api.anthropic.com/v1".to_string(),
-        api_key,
-        model: "claude-sonnet-4-20250514".to_string(),
-        max_tokens: 8192,
-        temperature: 0.3,
-        retry_policy: smooth_operator::llm::RetryPolicy::default(),
-    };
+    let llm_config = LlmConfig::opencode_zen(api_key).with_temperature(0.3);
 
     let system_prompt = "You are Smooth Coding, an AI coding assistant. Help the user with their coding questions. Be concise and helpful.";
 
