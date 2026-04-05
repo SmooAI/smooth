@@ -1,17 +1,31 @@
 //! Axum HTTP server — all REST routes, middleware, CORS.
 
+use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::time::Instant;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use axum::extract::{Path, Query, State};
+use axum::response::sse::{Event, Sse};
 use axum::response::Json;
 use axum::routing::{get, post};
 use axum::Router;
+use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
+use smooth_narc::NarcHook;
+use smooth_operator::cost::CostBudget;
+use smooth_operator::providers::ProviderRegistry;
+use smooth_operator::tool::{ToolCall, ToolHook, ToolResult};
+use smooth_operator::{Agent, AgentConfig, AgentEvent};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::db::Database;
+
+/// Default idle timeout: 30 minutes.
+const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 30 * 60;
 
 /// Shared application state.
 #[derive(Clone)]
@@ -19,6 +33,28 @@ pub struct AppState {
     pub db: Database,
     pub issue_store: smooth_issues::IssueStore,
     pub start_time: Instant,
+    pub last_activity: Arc<Mutex<Instant>>,
+    pub idle_timeout: Duration,
+}
+
+impl AppState {
+    /// Create a new `AppState` with default idle timeout.
+    pub fn new(db: Database, issue_store: smooth_issues::IssueStore) -> Self {
+        Self {
+            db,
+            issue_store,
+            start_time: Instant::now(),
+            last_activity: Arc::new(Mutex::new(Instant::now())),
+            idle_timeout: Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS),
+        }
+    }
+
+    /// Touch the activity timestamp — call from every handler.
+    fn touch(&self) {
+        if let Ok(mut last) = self.last_activity.lock() {
+            *last = Instant::now();
+        }
+    }
 }
 
 // ── Response types ─────────────────────────────────────────
@@ -105,6 +141,33 @@ pub struct SteerBody {
     message: Option<String>,
 }
 
+// ── Task request/types ────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct TaskRequest {
+    pub message: String,
+    pub model: Option<String>,
+    pub budget: Option<f64>,
+    pub working_dir: Option<String>,
+}
+
+// ── NarcHook wrapper for ToolHook ─────────────────────────
+
+struct SharedNarcHook {
+    inner: Arc<NarcHook>,
+}
+
+#[async_trait]
+impl ToolHook for SharedNarcHook {
+    async fn pre_call(&self, call: &ToolCall) -> anyhow::Result<()> {
+        self.inner.pre_call(call).await
+    }
+
+    async fn post_call(&self, call: &ToolCall, result: &ToolResult) -> anyhow::Result<()> {
+        self.inner.post_call(call, result).await
+    }
+}
+
 // ── Router ─────────────────────────────────────────────────
 
 /// Build the axum router with all routes.
@@ -118,6 +181,8 @@ pub fn build_router(state: AppState) -> Router {
         // System
         .route("/api/system/health", get(system_health_handler))
         .route("/api/system/config", get(get_config_handler).put(set_config_handler))
+        // Tasks (headless agent execution)
+        .route("/api/tasks", post(run_task_handler))
         // Issues
         .route("/api/issues", get(list_issues_handler).post(create_issue_handler))
         .route("/api/issues/ready", get(ready_issues_handler))
@@ -159,6 +224,24 @@ pub fn build_router(state: AppState) -> Router {
 
 /// Start the leader HTTP server.
 pub async fn start(state: AppState, addr: SocketAddr) -> anyhow::Result<()> {
+    // Spawn idle timeout checker
+    let idle_state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            let elapsed = {
+                let Ok(last) = idle_state.last_activity.lock() else {
+                    continue;
+                };
+                last.elapsed()
+            };
+            if elapsed > idle_state.idle_timeout {
+                tracing::info!("Idle timeout reached ({:.0}s), shutting down", idle_state.idle_timeout.as_secs_f64());
+                std::process::exit(0);
+            }
+        }
+    });
+
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("Smooth leader running at http://{addr}");
@@ -169,6 +252,7 @@ pub async fn start(state: AppState, addr: SocketAddr) -> anyhow::Result<()> {
 // ── Health ─────────────────────────────────────────────────
 
 async fn health_handler(State(state): State<AppState>) -> Json<HealthResponse> {
+    state.touch();
     Json(HealthResponse {
         ok: true,
         service: "smooth-leader".into(),
@@ -179,6 +263,7 @@ async fn health_handler(State(state): State<AppState>) -> Json<HealthResponse> {
 }
 
 async fn system_health_handler(State(state): State<AppState>) -> Json<ApiResponse<SystemHealth>> {
+    state.touch();
     let db_ok = state.db.get_config("__health_check").is_ok();
     let ts = crate::tailscale::get_status();
 
@@ -213,7 +298,8 @@ async fn system_health_handler(State(state): State<AppState>) -> Json<ApiRespons
 
 // ── Config ─────────────────────────────────────────────────
 
-async fn get_config_handler(State(_state): State<AppState>) -> Json<ApiResponse<serde_json::Value>> {
+async fn get_config_handler(State(state): State<AppState>) -> Json<ApiResponse<serde_json::Value>> {
+    state.touch();
     Json(ApiResponse {
         data: serde_json::json!({}),
         ok: true,
@@ -221,9 +307,157 @@ async fn get_config_handler(State(_state): State<AppState>) -> Json<ApiResponse<
 }
 
 async fn set_config_handler(State(state): State<AppState>, Json(body): Json<ConfigBody>) -> Json<ApiResponse<()>> {
+    state.touch();
     let value_str = serde_json::to_string(&body.value).unwrap_or_default();
     let _ = state.db.set_config(&body.key, &value_str);
     Json(ApiResponse { data: (), ok: true })
+}
+
+// ── Tasks (headless agent execution via SSE) ──────────────
+
+async fn run_task_handler(State(state): State<AppState>, Json(req): Json<TaskRequest>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    state.touch();
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+
+    // Determine working directory
+    let working_dir = req
+        .working_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    // Create issue for tracking
+    let issue_id = crate::issues::create_issue(
+        &state.issue_store,
+        &format!("Task: {}", truncate_str(&req.message, 60)),
+        &req.message,
+        "task",
+        2,
+    )
+    .ok()
+    .map(|i| i.id);
+
+    if let Some(ref id) = issue_id {
+        let update = smooth_issues::IssueUpdate {
+            status: Some(smooth_issues::IssueStatus::InProgress),
+            ..Default::default()
+        };
+        let _ = state.issue_store.update(id, &update);
+    }
+
+    let issue_store = state.issue_store.clone();
+    let message = req.message.clone();
+    let model = req.model.clone();
+    let budget = req.budget;
+
+    // Spawn the agent in a background task
+    tokio::spawn(async move {
+        let result = run_agent_task(working_dir, message, model, budget, tx.clone()).await;
+
+        match result {
+            Ok(cost) => {
+                // Send cost event
+                let _ = tx.send(AgentEvent::Completed {
+                    agent_id: "task".into(),
+                    iterations: 0,
+                });
+                // Send a custom cost event (via Error channel as a convention)
+                // We use a synthetic event type that the client knows about
+                drop(tx);
+
+                // Close the issue on success
+                if let Some(ref id) = issue_id {
+                    let _ = issue_store.close(&[id]);
+                }
+
+                tracing::info!(cost_usd = cost, "Task completed successfully");
+            }
+            Err(e) => {
+                let _ = tx.send(AgentEvent::Error { message: e.to_string() });
+                drop(tx);
+                tracing::error!(error = %e, "Task failed");
+            }
+        }
+    });
+
+    // Convert the receiver into an SSE stream
+    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx);
+    let sse_stream = futures_util::StreamExt::map(stream, |event| {
+        let data = serde_json::to_string(&event).unwrap_or_else(|_| r#"{"type":"Error","message":"serialization failed"}"#.into());
+        Ok(Event::default().data(data))
+    });
+
+    Sse::new(sse_stream)
+}
+
+/// Run an agent task and return the total cost.
+async fn run_agent_task(
+    working_dir: PathBuf,
+    message: String,
+    model: Option<String>,
+    budget: Option<f64>,
+    tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+) -> anyhow::Result<f64> {
+    // 1. Load LLM config from providers.json
+    let providers_path = dirs_next::home_dir()
+        .map(|h| h.join(".smooth/providers.json"))
+        .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
+
+    let mut llm_config = if providers_path.exists() {
+        let registry = ProviderRegistry::load_from_file(&providers_path).map_err(|e| anyhow::anyhow!("Failed to load providers.json: {e}"))?;
+        registry
+            .default_llm_config()
+            .map_err(|e| anyhow::anyhow!("No default provider configured: {e}"))?
+            .with_temperature(0.3)
+    } else {
+        anyhow::bail!("No LLM providers configured. Run: th auth login <provider>");
+    };
+
+    // 2. Override model if specified
+    if let Some(ref m) = model {
+        llm_config = llm_config.with_model(m);
+    }
+
+    // 3. Create AgentConfig
+    let system_prompt = "You are Smooth Coding, an AI coding assistant. \
+        Help the user with their coding task. Use the provided tools to read, write, and execute code. \
+        Be concise and thorough.";
+
+    let mut config = AgentConfig::new("smooth-task", system_prompt, llm_config).with_max_iterations(50);
+
+    // 4. Set budget if specified
+    if let Some(max_usd) = budget {
+        config = config.with_budget(CostBudget {
+            max_cost_usd: Some(max_usd),
+            max_tokens: None,
+        });
+    }
+
+    // 5. Create tools scoped to working directory
+    let mut tools = smooth_code::tools::create_tools(&working_dir);
+
+    // 6. Register NarcHook for security
+    let narc_hook = Arc::new(NarcHook::new(false));
+    tools.add_hook(SharedNarcHook { inner: Arc::clone(&narc_hook) });
+
+    // 7. Run agent with channel for SSE streaming
+    let agent = Agent::new(config, tools);
+    let _conversation = agent.run_with_channel(&message, tx).await?;
+
+    // 8. Return cost
+    #[allow(clippy::expect_used)]
+    let cost = agent.cost_tracker.lock().expect("lock cost_tracker").total_cost_usd;
+    Ok(cost)
+}
+
+/// Truncate a string to at most `max_len` characters, appending "..." if truncated.
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max_len.saturating_sub(3)).collect();
+        format!("{truncated}...")
+    }
 }
 
 // ── Issues ─────────────────────────────────────────────────
@@ -263,11 +497,13 @@ pub struct UpdateIssueBody {
 }
 
 async fn list_issues_handler(State(state): State<AppState>, Query(params): Query<ListIssuesParams>) -> Json<ApiResponse<Vec<smooth_issues::Issue>>> {
+    state.touch();
     let issues = crate::issues::list_issues(&state.issue_store, params.status.as_deref()).unwrap_or_default();
     Json(ApiResponse { data: issues, ok: true })
 }
 
 async fn get_issue_handler(State(state): State<AppState>, Path(id): Path<String>) -> Json<ApiResponse<serde_json::Value>> {
+    state.touch();
     let issue = crate::issues::get_issue(&state.issue_store, &id).unwrap_or(None);
     let data = match issue {
         Some(i) => serde_json::to_value(i).unwrap_or(serde_json::json!(null)),
@@ -277,11 +513,13 @@ async fn get_issue_handler(State(state): State<AppState>, Path(id): Path<String>
 }
 
 async fn ready_issues_handler(State(state): State<AppState>) -> Json<ApiResponse<Vec<smooth_issues::Issue>>> {
+    state.touch();
     let issues = crate::issues::get_ready(&state.issue_store).unwrap_or_default();
     Json(ApiResponse { data: issues, ok: true })
 }
 
 async fn create_issue_handler(State(state): State<AppState>, Json(body): Json<CreateIssueBody>) -> Json<ApiResponse<serde_json::Value>> {
+    state.touch();
     match crate::issues::create_issue(&state.issue_store, &body.title, &body.description, &body.issue_type, body.priority) {
         Ok(issue) => Json(ApiResponse {
             data: serde_json::to_value(issue).unwrap_or(serde_json::json!(null)),
@@ -299,6 +537,7 @@ async fn update_issue_handler(
     Path(id): Path<String>,
     Json(body): Json<UpdateIssueBody>,
 ) -> Json<ApiResponse<serde_json::Value>> {
+    state.touch();
     let update = smooth_issues::IssueUpdate {
         title: body.title,
         description: body.description,
@@ -320,6 +559,7 @@ async fn update_issue_handler(
 }
 
 async fn close_issue_handler(State(state): State<AppState>, Path(id): Path<String>) -> Json<ApiResponse<serde_json::Value>> {
+    state.touch();
     match state.issue_store.close(&[&id]) {
         Ok(count) => Json(ApiResponse {
             data: serde_json::json!({"closed": count}),
@@ -333,55 +573,64 @@ async fn close_issue_handler(State(state): State<AppState>, Path(id): Path<Strin
 }
 
 async fn stats_handler(State(state): State<AppState>) -> Json<ApiResponse<smooth_issues::IssueStats>> {
+    state.touch();
     let stats = crate::issues::stats(&state.issue_store).unwrap_or_default();
     Json(ApiResponse { data: stats, ok: true })
 }
 
 // ── Workers ────────────────────────────────────────────────
 
-async fn list_workers_handler() -> Json<ApiResponse<Vec<serde_json::Value>>> {
+async fn list_workers_handler(State(state): State<AppState>) -> Json<ApiResponse<Vec<serde_json::Value>>> {
+    state.touch();
     // TODO: Query worker_runs from SQLite
     Json(ApiResponse { data: vec![], ok: true })
 }
 
-async fn get_worker_handler(Path(id): Path<String>) -> Json<ApiResponse<serde_json::Value>> {
+async fn get_worker_handler(State(state): State<AppState>, Path(id): Path<String>) -> Json<ApiResponse<serde_json::Value>> {
+    state.touch();
     Json(ApiResponse {
         data: serde_json::json!({"id": id, "status": "unknown"}),
         ok: true,
     })
 }
 
-async fn kill_worker_handler(Path(id): Path<String>) -> Json<ApiResponse<()>> {
+async fn kill_worker_handler(State(state): State<AppState>, Path(id): Path<String>) -> Json<ApiResponse<()>> {
+    state.touch();
     tracing::info!("Kill worker {id}");
     Json(ApiResponse { data: (), ok: true })
 }
 
 // ── Messages ───────────────────────────────────────────────
 
-async fn inbox_handler() -> Json<ApiResponse<Vec<serde_json::Value>>> {
+async fn inbox_handler(State(state): State<AppState>) -> Json<ApiResponse<Vec<serde_json::Value>>> {
+    state.touch();
     Json(ApiResponse { data: vec![], ok: true })
 }
 
 // ── Reviews ────────────────────────────────────────────────
 
-async fn list_reviews_handler() -> Json<ApiResponse<Vec<serde_json::Value>>> {
+async fn list_reviews_handler(State(state): State<AppState>) -> Json<ApiResponse<Vec<serde_json::Value>>> {
+    state.touch();
     Json(ApiResponse { data: vec![], ok: true })
 }
 
 async fn approve_review_handler(State(state): State<AppState>, Path(bead_id): Path<String>) -> Json<ApiResponse<()>> {
+    state.touch();
     tracing::info!("Approve review for {bead_id}");
     let _ = state.issue_store.close(&[&bead_id]);
     Json(ApiResponse { data: (), ok: true })
 }
 
-async fn reject_review_handler(Path(bead_id): Path<String>) -> Json<ApiResponse<()>> {
+async fn reject_review_handler(State(state): State<AppState>, Path(bead_id): Path<String>) -> Json<ApiResponse<()>> {
+    state.touch();
     tracing::info!("Reject review for {bead_id}");
     Json(ApiResponse { data: (), ok: true })
 }
 
 // ── Chat ───────────────────────────────────────────────────
 
-async fn chat_handler(Json(body): Json<ChatBody>) -> Json<ApiResponse<String>> {
+async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>) -> Json<ApiResponse<String>> {
+    state.touch();
     match crate::chat::chat(&body.content).await {
         Ok(response) => Json(ApiResponse { data: response, ok: true }),
         Err(e) => Json(ApiResponse {
@@ -394,6 +643,7 @@ async fn chat_handler(Json(body): Json<ChatBody>) -> Json<ApiResponse<String>> {
 // ── Search ─────────────────────────────────────────────────
 
 async fn search_handler(State(state): State<AppState>, Query(params): Query<SearchParams>) -> Json<ApiResponse<Vec<crate::search::SearchResult>>> {
+    state.touch();
     let query = params.q.unwrap_or_default();
     if query.is_empty() {
         return Json(ApiResponse { data: vec![], ok: true });
@@ -407,6 +657,7 @@ async fn search_handler(State(state): State<AppState>, Query(params): Query<Sear
 // ── Steering ───────────────────────────────────────────────
 
 async fn pause_handler(State(state): State<AppState>, Path(bead_id): Path<String>) -> Json<ApiResponse<String>> {
+    state.touch();
     tracing::info!("Pause operator on {bead_id}");
     let _ = state.issue_store.add_comment(&bead_id, "[STEERING:PAUSE] Operator paused by human.");
     Json(ApiResponse {
@@ -416,6 +667,7 @@ async fn pause_handler(State(state): State<AppState>, Path(bead_id): Path<String
 }
 
 async fn resume_handler(State(state): State<AppState>, Path(bead_id): Path<String>) -> Json<ApiResponse<String>> {
+    state.touch();
     tracing::info!("Resume operator on {bead_id}");
     let _ = state.issue_store.add_comment(&bead_id, "[STEERING:RESUME] Operator resumed.");
     Json(ApiResponse {
@@ -425,6 +677,7 @@ async fn resume_handler(State(state): State<AppState>, Path(bead_id): Path<Strin
 }
 
 async fn steer_handler(State(state): State<AppState>, Path(bead_id): Path<String>, Json(body): Json<SteerBody>) -> Json<ApiResponse<String>> {
+    state.touch();
     let msg = body.message.unwrap_or_default();
     tracing::info!("Steer operator on {bead_id}: {msg}");
     let _ = state.issue_store.add_comment(&bead_id, &format!("[STEERING:GUIDANCE] {msg}"));
@@ -435,6 +688,7 @@ async fn steer_handler(State(state): State<AppState>, Path(bead_id): Path<String
 }
 
 async fn cancel_handler(State(state): State<AppState>, Path(bead_id): Path<String>) -> Json<ApiResponse<String>> {
+    state.touch();
     tracing::info!("Cancel operator on {bead_id}");
     let _ = state.issue_store.add_comment(&bead_id, "[STEERING:CANCEL] Operator cancelled.");
     Json(ApiResponse {
@@ -446,6 +700,7 @@ async fn cancel_handler(State(state): State<AppState>, Path(bead_id): Path<Strin
 // ── Jira ───────────────────────────────────────────────────
 
 async fn jira_status_handler(State(state): State<AppState>) -> Json<ApiResponse<crate::jira::SyncStatus>> {
+    state.touch();
     let config = crate::jira::JiraConfig::from_db(&state.db);
     let connected = if let Some(ref c) = config {
         crate::jira::check_connection(c).await
@@ -462,7 +717,8 @@ async fn jira_status_handler(State(state): State<AppState>) -> Json<ApiResponse<
     })
 }
 
-async fn jira_sync_handler(State(_state): State<AppState>) -> Json<ApiResponse<crate::jira::SyncResult>> {
+async fn jira_sync_handler(State(state): State<AppState>) -> Json<ApiResponse<crate::jira::SyncResult>> {
+    state.touch();
     Json(ApiResponse {
         data: crate::jira::SyncResult {
             pulled: 0,
@@ -506,12 +762,53 @@ mod tests {
     async fn test_router_builds() {
         let db = Database::open(&PathBuf::from(":memory:")).unwrap();
         let issue_store = smooth_issues::IssueStore::open_in_memory().unwrap();
-        let state = AppState {
-            db,
-            issue_store,
-            start_time: Instant::now(),
-        };
+        let state = AppState::new(db, issue_store);
         let _router = build_router(state);
         // If we get here without panic, the router is valid
+    }
+
+    #[test]
+    fn test_app_state_touch_updates_activity() {
+        let db = Database::open(&PathBuf::from(":memory:")).unwrap();
+        let issue_store = smooth_issues::IssueStore::open_in_memory().unwrap();
+        let state = AppState::new(db, issue_store);
+
+        let before = *state.last_activity.lock().unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+        state.touch();
+        let after = *state.last_activity.lock().unwrap();
+        assert!(after > before);
+    }
+
+    #[test]
+    fn test_truncate_str_short() {
+        assert_eq!(truncate_str("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_str_long() {
+        let result = truncate_str("this is a very long message that needs truncation", 20);
+        assert!(result.len() <= 20);
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_task_request_deserializes() {
+        let json = r#"{"message":"Build X","model":"kimi-k2.5","budget":2.0}"#;
+        let req: TaskRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.message, "Build X");
+        assert_eq!(req.model.as_deref(), Some("kimi-k2.5"));
+        assert_eq!(req.budget, Some(2.0));
+        assert!(req.working_dir.is_none());
+    }
+
+    #[test]
+    fn test_task_request_minimal() {
+        let json = r#"{"message":"Do something"}"#;
+        let req: TaskRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.message, "Do something");
+        assert!(req.model.is_none());
+        assert!(req.budget.is_none());
+        assert!(req.working_dir.is_none());
     }
 }

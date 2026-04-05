@@ -1,192 +1,13 @@
 //! Headless (non-interactive) mode for smooth-code.
 //!
-//! Runs the agent without any TUI — output streams to stdout,
-//! tool call diagnostics go to stderr. Suitable for scripting and CI.
+//! Runs as a client of Big Smooth — sends tasks via POST /api/tasks and
+//! streams SSE events to stdout/stderr. Suitable for scripting and CI.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::time::Duration;
 
-use async_trait::async_trait;
 use serde::Serialize;
-use smooth_operator::cost::CostBudget;
-use smooth_operator::llm::LlmConfig;
-use smooth_operator::providers::ProviderRegistry;
-use smooth_operator::tool::{Tool, ToolSchema};
-use smooth_operator::{Agent, AgentConfig, AgentEvent, ToolRegistry};
-
-// ---------------------------------------------------------------------------
-// Tool implementations (same as golden E2E test, scoped to working_dir)
-// ---------------------------------------------------------------------------
-
-struct WriteFileTool {
-    base_dir: PathBuf,
-}
-
-#[async_trait]
-impl Tool for WriteFileTool {
-    fn schema(&self) -> ToolSchema {
-        ToolSchema {
-            name: "write_file".into(),
-            description: "Write content to a file. Creates parent directories automatically.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Relative file path within the project directory"
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "Content to write to the file"
-                    }
-                },
-                "required": ["path", "content"]
-            }),
-        }
-    }
-
-    async fn execute(&self, arguments: serde_json::Value) -> anyhow::Result<String> {
-        let path = arguments
-            .get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing 'path' parameter"))?;
-        let content = arguments
-            .get("content")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing 'content' parameter"))?;
-
-        let full_path = self.base_dir.join(path);
-        if let Some(parent) = full_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        tokio::fs::write(&full_path, content).await?;
-        Ok(format!("wrote {} bytes to {path}", content.len()))
-    }
-}
-
-struct ReadFileTool {
-    base_dir: PathBuf,
-}
-
-#[async_trait]
-impl Tool for ReadFileTool {
-    fn schema(&self) -> ToolSchema {
-        ToolSchema {
-            name: "read_file".into(),
-            description: "Read the contents of a file.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Relative file path within the project directory"
-                    }
-                },
-                "required": ["path"]
-            }),
-        }
-    }
-
-    async fn execute(&self, arguments: serde_json::Value) -> anyhow::Result<String> {
-        let path = arguments
-            .get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing 'path' parameter"))?;
-
-        let full_path = self.base_dir.join(path);
-        let content = tokio::fs::read_to_string(&full_path).await?;
-        Ok(content)
-    }
-
-    fn is_read_only(&self) -> bool {
-        true
-    }
-}
-
-struct BashTool {
-    base_dir: PathBuf,
-}
-
-#[async_trait]
-impl Tool for BashTool {
-    fn schema(&self) -> ToolSchema {
-        ToolSchema {
-            name: "bash".into(),
-            description: "Run a shell command in the project directory. Returns stdout and stderr.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "The shell command to execute"
-                    }
-                },
-                "required": ["command"]
-            }),
-        }
-    }
-
-    async fn execute(&self, arguments: serde_json::Value) -> anyhow::Result<String> {
-        let command = arguments
-            .get("command")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing 'command' parameter"))?;
-
-        let output = tokio::process::Command::new("bash")
-            .arg("-c")
-            .arg(command)
-            .current_dir(&self.base_dir)
-            .output()
-            .await?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let exit_code = output.status.code().unwrap_or(-1);
-
-        Ok(format!("exit code: {exit_code}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"))
-    }
-
-    fn is_concurrent_safe(&self) -> bool {
-        false
-    }
-}
-
-struct ListFilesTool {
-    base_dir: PathBuf,
-}
-
-#[async_trait]
-impl Tool for ListFilesTool {
-    fn schema(&self) -> ToolSchema {
-        ToolSchema {
-            name: "list_files".into(),
-            description: "List all files in the project directory recursively.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "required": []
-            }),
-        }
-    }
-
-    async fn execute(&self, _arguments: serde_json::Value) -> anyhow::Result<String> {
-        let output = tokio::process::Command::new("find")
-            .arg(".")
-            .arg("-type")
-            .arg("f")
-            .current_dir(&self.base_dir)
-            .output()
-            .await?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(stdout.into_owned())
-    }
-
-    fn is_read_only(&self) -> bool {
-        true
-    }
-}
 
 // ---------------------------------------------------------------------------
 // JSON output types
@@ -208,26 +29,33 @@ pub struct HeadlessToolCall {
 }
 
 // ---------------------------------------------------------------------------
-// Create the 4 tools scoped to a directory
+// Big Smooth lifecycle helpers
 // ---------------------------------------------------------------------------
 
-/// Build a [`ToolRegistry`] with write_file, read_file, bash, and list_files
-/// scoped to the given working directory.
-pub fn create_headless_tools(working_dir: &Path) -> ToolRegistry {
-    let mut tools = ToolRegistry::new();
-    tools.register(WriteFileTool {
-        base_dir: working_dir.to_path_buf(),
-    });
-    tools.register(ReadFileTool {
-        base_dir: working_dir.to_path_buf(),
-    });
-    tools.register(BashTool {
-        base_dir: working_dir.to_path_buf(),
-    });
-    tools.register(ListFilesTool {
-        base_dir: working_dir.to_path_buf(),
-    });
-    tools
+/// Start Big Smooth by spawning `th up` as a background process and waiting
+/// for it to become healthy.
+async fn start_bigsmooth_background() -> anyhow::Result<()> {
+    // Find the `th` binary — it should be on PATH or be `self`
+    let th_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("th"));
+
+    // Spawn `th up` as a detached background process
+    let _child = tokio::process::Command::new(&th_bin)
+        .arg("up")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("Failed to spawn Big Smooth (th up): {e}"))?;
+
+    // Wait for health check (up to 10s)
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(2)).build()?;
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if client.get("http://localhost:4400/health").send().await.is_ok_and(|r| r.status().is_success()) {
+            return Ok(());
+        }
+    }
+
+    anyhow::bail!("Big Smooth failed to start within 10 seconds")
 }
 
 // ---------------------------------------------------------------------------
@@ -236,137 +64,168 @@ pub fn create_headless_tools(working_dir: &Path) -> ToolRegistry {
 
 /// Run smooth-code in headless (non-interactive) mode.
 ///
-/// Output streams to stdout, tool call diagnostics go to stderr.
+/// Connects to Big Smooth (starting it if needed), posts a task via
+/// POST /api/tasks, and streams SSE events to stdout/stderr.
 ///
 /// # Errors
-/// Returns an error if no API key is found, the message is empty,
-/// or the agent encounters an unrecoverable error.
+/// Returns an error if the message is empty, Big Smooth cannot be reached,
+/// or the task fails.
 pub async fn run_headless(working_dir: PathBuf, message: String, model: Option<String>, budget: Option<f64>, json_output: bool) -> anyhow::Result<()> {
     if message.trim().is_empty() {
         anyhow::bail!("message must not be empty");
     }
 
-    // 1. Load LLM config from providers.json
-    let providers_path = dirs_next::home_dir()
-        .map(|h| h.join(".smooth/providers.json"))
-        .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
+    // 1. Ensure Big Smooth is running
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(300)).build()?;
 
-    let mut llm_config = if providers_path.exists() {
-        let registry = ProviderRegistry::load_from_file(&providers_path).map_err(|e| anyhow::anyhow!("Failed to load providers.json: {e}"))?;
-        registry
-            .default_llm_config()
-            .map_err(|e| anyhow::anyhow!("No default provider configured: {e}"))?
-            .with_temperature(0.3)
-    } else {
-        anyhow::bail!("No LLM providers configured. Run: th auth login <provider>");
-    };
+    let health_client = reqwest::Client::builder().timeout(Duration::from_secs(2)).build()?;
+    let health = health_client.get("http://localhost:4400/health").send().await;
 
-    // 2. Override model if specified
-    if let Some(ref m) = model {
-        llm_config = llm_config.with_model(m);
+    if health.is_err() || !health.as_ref().is_ok_and(|r| r.status().is_success()) {
+        eprintln!("Starting Big Smooth...");
+        start_bigsmooth_background().await?;
     }
 
-    // 3. Create AgentConfig
-    let system_prompt = "You are Smooth Coding, an AI coding assistant running in headless mode. \
-        Help the user with their coding task. Use the provided tools to read, write, and execute code. \
-        Be concise and thorough.";
-
-    let mut config = AgentConfig::new("smooth-coding-headless", system_prompt, llm_config).with_max_iterations(50);
-
-    // 4. Set budget if specified
-    if let Some(max_usd) = budget {
-        config = config.with_budget(CostBudget {
-            max_cost_usd: Some(max_usd),
-            max_tokens: None,
-        });
-    }
-
-    // 5. Create tools
-    let tools = create_headless_tools(&working_dir);
-
-    // 6. Track tool calls for JSON output
-    let tool_calls: Arc<Mutex<Vec<HeadlessToolCall>>> = Arc::new(Mutex::new(Vec::new()));
-    let content_buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
-
-    let tool_calls_clone = Arc::clone(&tool_calls);
-    let content_buf_clone = Arc::clone(&content_buf);
-    let is_json = json_output;
-
-    // 7. Run agent with event handler
-    let agent = Agent::new(config, tools).with_event_handler(move |event| match &event {
-        AgentEvent::TokenDelta { content } => {
-            // Accumulate content
-            if let Ok(mut buf) = content_buf_clone.lock() {
-                buf.push_str(content);
-            }
-            // Stream to stdout unless JSON mode
-            if !is_json {
-                print!("{content}");
-                let _ = std::io::stdout().flush();
-            }
-        }
-        AgentEvent::ToolCallStart { tool_name, .. } => {
-            eprintln!("[tool] {tool_name}(...)");
-        }
-        AgentEvent::ToolCallComplete { tool_name, is_error, .. } => {
-            let status = if *is_error { "error" } else { "ok" };
-            eprintln!("[tool] {tool_name} -> {status}");
-            if let Ok(mut calls) = tool_calls_clone.lock() {
-                calls.push(HeadlessToolCall {
-                    name: tool_name.clone(),
-                    success: !is_error,
-                });
-            }
-        }
-        AgentEvent::Error { message } => {
-            eprintln!("[error] {message}");
-        }
-        AgentEvent::Completed { iterations, .. } => {
-            eprintln!("[done] completed in {iterations} iterations");
-        }
-        AgentEvent::MaxIterationsReached { max, .. } => {
-            eprintln!("[warn] hit max iterations ({max})");
-        }
-        AgentEvent::BudgetExceeded { spent_usd, limit_usd } => {
-            eprintln!("[warn] budget exceeded: ${spent_usd:.4} / ${limit_usd:.4}");
-        }
-        _ => {}
+    // 2. POST /api/tasks with message
+    let task_req = serde_json::json!({
+        "message": message,
+        "model": model,
+        "budget": budget,
+        "working_dir": working_dir.to_string_lossy(),
     });
 
-    let _conversation = agent.run(&message).await?;
+    let resp = client
+        .post("http://localhost:4400/api/tasks")
+        .json(&task_req)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to connect to Big Smooth: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("Big Smooth returned {status}: {body}");
+    }
+
+    // 3. Stream SSE events
+    let mut content_buf = String::new();
+    let mut tool_calls: Vec<HeadlessToolCall> = Vec::new();
+    let mut cost = 0.0_f64;
+
+    let mut stream = resp.bytes_stream();
+    let mut line_buf = String::new();
+
+    use futures_util::StreamExt;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        let text = String::from_utf8_lossy(&chunk);
+
+        for ch in text.chars() {
+            if ch == '\n' {
+                process_sse_line(&line_buf, json_output, &mut content_buf, &mut tool_calls, &mut cost);
+                line_buf.clear();
+            } else {
+                line_buf.push(ch);
+            }
+        }
+    }
+
+    // Process any remaining data
+    if !line_buf.is_empty() {
+        process_sse_line(&line_buf, json_output, &mut content_buf, &mut tool_calls, &mut cost);
+    }
 
     // Ensure trailing newline for plain text output
     if !json_output {
         println!();
     }
 
-    // 8. JSON output mode
+    // JSON output mode
     if json_output {
-        #[allow(clippy::expect_used)]
-        let cost = agent.cost_tracker.lock().expect("lock cost_tracker").total_cost_usd;
-
-        #[allow(clippy::expect_used)]
-        let tool_calls_vec = {
-            let guard = tool_calls.lock().expect("lock tool_calls");
-            guard.clone()
-        };
-
-        #[allow(clippy::expect_used)]
-        let content = {
-            let guard = content_buf.lock().expect("lock content_buf");
-            guard.clone()
-        };
-
         let output = HeadlessOutput {
-            content,
-            tool_calls: tool_calls_vec,
+            content: content_buf,
+            tool_calls,
             cost,
         };
-
         println!("{}", serde_json::to_string_pretty(&output)?);
     }
 
     Ok(())
+}
+
+/// Process a single SSE line, dispatching based on event type.
+fn process_sse_line(line: &str, json_output: bool, content_buf: &mut String, tool_calls: &mut Vec<HeadlessToolCall>, cost: &mut f64) {
+    // SSE format: "data: {...json...}"
+    let data = if let Some(d) = line.strip_prefix("data: ") {
+        d
+    } else {
+        return;
+    };
+
+    let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else {
+        return;
+    };
+
+    let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+    match event_type {
+        "TokenDelta" => {
+            if let Some(content) = event.get("content").and_then(|c| c.as_str()) {
+                content_buf.push_str(content);
+                if !json_output {
+                    print!("{content}");
+                    let _ = std::io::stdout().flush();
+                }
+            }
+        }
+        "ToolCallStart" => {
+            if let Some(tool_name) = event.get("tool_name").and_then(|n| n.as_str()) {
+                eprintln!("[tool] {tool_name}(...)");
+            }
+        }
+        "ToolCallComplete" => {
+            if let Some(tool_name) = event.get("tool_name").and_then(|n| n.as_str()) {
+                let is_error = event.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false);
+                let status = if is_error { "error" } else { "ok" };
+                eprintln!("[tool] {tool_name} -> {status}");
+                tool_calls.push(HeadlessToolCall {
+                    name: tool_name.to_string(),
+                    success: !is_error,
+                });
+            }
+        }
+        "Error" => {
+            if let Some(message) = event.get("message").and_then(|m| m.as_str()) {
+                eprintln!("[error] {message}");
+            }
+        }
+        "Completed" => {
+            if let Some(iterations) = event.get("iterations").and_then(|i| i.as_u64()) {
+                eprintln!("[done] completed in {iterations} iterations");
+            }
+            // Extract cost from the event if present
+            if let Some(c) = event.get("cost").and_then(|c| c.as_f64()) {
+                *cost = c;
+            }
+        }
+        "MaxIterationsReached" => {
+            if let Some(max) = event.get("max").and_then(|m| m.as_u64()) {
+                eprintln!("[warn] hit max iterations ({max})");
+            }
+        }
+        "BudgetExceeded" => {
+            let spent = event.get("spent_usd").and_then(|s| s.as_f64()).unwrap_or(0.0);
+            let limit = event.get("limit_usd").and_then(|l| l.as_f64()).unwrap_or(0.0);
+            eprintln!("[warn] budget exceeded: ${spent:.4} / ${limit:.4}");
+        }
+        "TaskCost" => {
+            // Custom event emitted by /api/tasks after agent completes
+            if let Some(c) = event.get("cost").and_then(|c| c.as_f64()) {
+                *cost = c;
+            }
+        }
+        _ => {}
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -386,27 +245,8 @@ mod tests {
         assert!(err_msg.contains("empty"), "error should mention empty message, got: {err_msg}");
     }
 
-    #[tokio::test]
-    async fn tool_write_file_creates_file() {
-        let dir = tempfile::tempdir().expect("create tempdir");
-        let tool = WriteFileTool {
-            base_dir: dir.path().to_path_buf(),
-        };
-
-        let args = serde_json::json!({
-            "path": "hello.txt",
-            "content": "hello world"
-        });
-        let result = tool.execute(args).await;
-        assert!(result.is_ok(), "write_file should succeed: {result:?}");
-
-        let content = std::fs::read_to_string(dir.path().join("hello.txt")).expect("read file");
-        assert_eq!(content, "hello world");
-    }
-
-    #[tokio::test]
-    async fn json_output_format_is_valid() {
-        // Verify the JSON serialization of HeadlessOutput
+    #[test]
+    fn json_output_format_is_valid() {
         let output = HeadlessOutput {
             content: "Hello from the agent".into(),
             tool_calls: vec![
@@ -432,21 +272,59 @@ mod tests {
         assert!((parsed["cost"].as_f64().expect("cost") - 0.0042).abs() < f64::EPSILON);
     }
 
-    #[tokio::test]
-    async fn budget_config_is_respected() {
-        // Verify that CostBudget is correctly constructed from a dollar amount
-        let budget_usd = 1.5;
-        let budget = CostBudget {
-            max_cost_usd: Some(budget_usd),
-            max_tokens: None,
-        };
-        assert_eq!(budget.max_cost_usd, Some(1.5));
-        assert!(budget.max_tokens.is_none());
+    #[test]
+    fn process_sse_line_token_delta() {
+        let mut content = String::new();
+        let mut tools = Vec::new();
+        let mut cost = 0.0;
 
-        // Verify the config builder accepts it
-        let llm_config = LlmConfig::openrouter("test-key");
-        let config = AgentConfig::new("test", "prompt", llm_config).with_budget(budget);
-        assert!(config.budget.is_some());
-        assert_eq!(config.budget.as_ref().expect("budget").max_cost_usd, Some(1.5));
+        process_sse_line(r#"data: {"type":"TokenDelta","content":"hello "}"#, false, &mut content, &mut tools, &mut cost);
+        process_sse_line(r#"data: {"type":"TokenDelta","content":"world"}"#, false, &mut content, &mut tools, &mut cost);
+
+        assert_eq!(content, "hello world");
+    }
+
+    #[test]
+    fn process_sse_line_tool_call() {
+        let mut content = String::new();
+        let mut tools = Vec::new();
+        let mut cost = 0.0;
+
+        process_sse_line(
+            r#"data: {"type":"ToolCallComplete","tool_name":"write_file","is_error":false,"iteration":1}"#,
+            false,
+            &mut content,
+            &mut tools,
+            &mut cost,
+        );
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "write_file");
+        assert!(tools[0].success);
+    }
+
+    #[test]
+    fn process_sse_line_cost() {
+        let mut content = String::new();
+        let mut tools = Vec::new();
+        let mut cost = 0.0;
+
+        process_sse_line(r#"data: {"type":"TaskCost","cost":0.0042}"#, false, &mut content, &mut tools, &mut cost);
+
+        assert!((cost - 0.0042).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn process_sse_line_ignores_non_data() {
+        let mut content = String::new();
+        let mut tools = Vec::new();
+        let mut cost = 0.0;
+
+        process_sse_line("event: message", false, &mut content, &mut tools, &mut cost);
+        process_sse_line(": comment", false, &mut content, &mut tools, &mut cost);
+        process_sse_line("", false, &mut content, &mut tools, &mut cost);
+
+        assert!(content.is_empty());
+        assert!(tools.is_empty());
     }
 }

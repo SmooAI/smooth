@@ -3,7 +3,6 @@
 //! Single binary for agent orchestration, config management, and platform tools.
 
 use std::net::SocketAddr;
-use std::time::Instant;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -413,11 +412,7 @@ async fn cmd_up(no_leader: bool, port: u16) -> Result<()> {
     }
 
     // Start leader (API + embedded web UI on same port)
-    let state = smooth_bigsmooth::server::AppState {
-        db,
-        issue_store,
-        start_time: Instant::now(),
-    };
+    let state = smooth_bigsmooth::server::AppState::new(db, issue_store);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     println!("  Leader: http://localhost:{port} ✓");
@@ -771,11 +766,7 @@ async fn cmd_code(headless: bool, message: Option<String>, file: Option<String>,
         let db_path = smooth_bigsmooth::db::default_db_path();
         let db = smooth_bigsmooth::db::Database::open(&db_path)?;
         let issue_store = smooth_issues::IssueStore::open(&db_path)?;
-        let state = smooth_bigsmooth::server::AppState {
-            db,
-            issue_store,
-            start_time: std::time::Instant::now(),
-        };
+        let state = smooth_bigsmooth::server::AppState::new(db, issue_store);
         let addr: SocketAddr = "127.0.0.1:4400".parse()?;
 
         tokio::spawn(async move {
