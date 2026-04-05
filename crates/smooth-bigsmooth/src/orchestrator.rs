@@ -159,7 +159,7 @@ impl Orchestrator {
                 break;
             }
 
-            match self.pool.create_operator(bead_id) {
+            match self.pool.create_operator(bead_id).await {
                 Ok(handle) => {
                     let operator_id = handle.operator_id.clone();
                     let ws_url = format!("ws://localhost:{}/ws", handle.host_port);
@@ -286,7 +286,7 @@ impl Orchestrator {
         // Also check sandbox status for operators without active WS connections
         for (bead_id, handle) in &self.active_workers {
             if !completed.contains(bead_id) && !failed.iter().any(|(id, _)| id == bead_id) {
-                let status = crate::sandbox::get_status(&handle.msb_name);
+                let status = crate::sandbox::get_status(&handle.msb_name).await;
                 if !status.running {
                     completed.push(bead_id.clone());
                 }
@@ -300,7 +300,7 @@ impl Orchestrator {
             self.state = OrchestratorState::Reviewing { bead_id: all_done[0].clone() };
             for id in &all_done {
                 if let Some(handle) = self.active_workers.remove(id) {
-                    self.pool.release(&handle.operator_id);
+                    self.pool.release(&handle.operator_id).await;
                     self.completed_beads.push(id.clone());
                 }
             }
@@ -336,7 +336,7 @@ impl Orchestrator {
 
         // Destroy sandbox if it wasn't already cleaned up in monitor
         if let Some(handle) = self.active_workers.remove(&bead_id) {
-            let _ = crate::sandbox::destroy_sandbox(&handle.msb_name);
+            let _ = crate::sandbox::destroy_sandbox(&handle.msb_name).await;
         }
 
         // TODO: spawn review operator

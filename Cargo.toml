@@ -35,8 +35,12 @@ axum-extra = { version = "0.10", features = ["typed-header"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
 
-# Database
-rusqlite = { version = "0.39", features = ["bundled"] }
+# Database — pinned to 0.32 so `libsqlite3-sys 0.30` is the single version in
+# the tree. `microsandbox` (via sea-orm → sqlx → libsqlite3-sys 0.30) and
+# `rusqlite` both link the `sqlite3` native library, so their versions must
+# unify. rusqlite 0.32 uses the same APIs we care about (Connection, params!,
+# query, prepare, Row, types::ToSql).
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
@@ -105,6 +109,10 @@ pin-project-lite = "0.2"
 
 # WebSocket client
 tokio-tungstenite = "0.26"
+
+# Microsandbox — hardware-isolated microVM runtime for Smooth Operators.
+# Used directly via the Rust SDK so we do not need the external `msb` CLI.
+microsandbox = "0.3"
 
 # Workspace crates
 smooth-operator = { path = "crates/smooth-operator" }
