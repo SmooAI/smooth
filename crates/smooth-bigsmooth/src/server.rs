@@ -660,7 +660,33 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
     let pearl_store = state.pearl_store.clone();
     let last_activity = state.last_activity.clone();
 
-    // READ-ONLY metadata: Big Smooth tracks the issue, but the work happens
+    // Guard against the kernel-cmdline printable-ASCII constraint BEFORE we
+    // start spinning anything up. microsandbox stuffs env vars into the VM
+    // via the kernel command line, which rejects anything outside
+    // ` `..`~` (printable ASCII) with a cryptic `InvalidAscii` panic. If the
+    // task message has an em dash, smart quote, tab, or any other funny
+    // byte, fail here with a clear error that tells the caller why. This
+    // is strictly better than the previous behavior of booting a VM that
+    // then crashes inside krun.
+    if let Some((pos, byte)) = message.bytes().enumerate().find(|&(_, b)| !(b' '..=b'~').contains(&b)) {
+        let context_start = pos.saturating_sub(12);
+        let context_end = (pos + 12).min(message.len());
+        let context = message.get(context_start..context_end).unwrap_or("");
+        let err = format!(
+            "sandboxed dispatch requires a printable-ASCII task message; byte 0x{byte:02x} at offset {pos} is not allowed. \
+             microsandbox passes env vars via the kernel command line, which only accepts ' '..'~'. \
+             Rewrite the offending character (often an em dash `—`, smart quote, tab, or non-BMP unicode). \
+             Context: ...{context}..."
+        );
+        let _ = event_tx.send(ServerEvent::TaskError {
+            task_id: task_id.clone(),
+            message: err.clone(),
+        });
+        tracing::error!("sandboxed dispatch: {err}");
+        return;
+    }
+
+    // READ-ONLY metadata: Big Smooth tracks the pearl, but the work happens
     // inside the sandbox.
     let pearl_id = crate::pearls::create_pearl(&pearl_store, &format!("Task: {}", truncate_str(&message, 60)), &message, "task", 2)
         .ok()
