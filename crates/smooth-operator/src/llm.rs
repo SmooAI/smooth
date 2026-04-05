@@ -155,7 +155,12 @@ struct ChatRequest {
 #[derive(Debug, Serialize)]
 struct ChatMessage {
     role: String,
-    content: String,
+    /// Content is optional: when an assistant message has tool_calls and no
+    /// prose, some OpenAI-compat providers (notably OpenCode Zen's Anthropic
+    /// translator) reject `content: ""` with a 400. Sending `content: null`
+    /// (via Option::None → skip) works for all providers we've tested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -222,11 +227,27 @@ struct ChatUsage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum StreamEvent {
-    Delta { content: String },
-    ToolCallStart { id: String, name: String },
-    ToolCallArgumentsDelta { id: String, arguments_chunk: String },
+    Delta {
+        content: String,
+    },
+    /// Reasoning tokens from reasoning-models (Kimi, DeepSeek R1, MiniMax). Surfaced
+    /// for progress visibility but NOT accumulated into the final response content.
+    Reasoning {
+        content: String,
+    },
+    ToolCallStart {
+        index: usize,
+        id: String,
+        name: String,
+    },
+    ToolCallArgumentsDelta {
+        index: usize,
+        arguments_chunk: String,
+    },
     Usage(Usage),
-    Done { finish_reason: String },
+    Done {
+        finish_reason: String,
+    },
 }
 
 /// A streaming chat completion chunk (OpenAI SSE format).
@@ -250,6 +271,13 @@ struct StreamDelta {
     content: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<StreamToolCallDelta>>,
+    /// Reasoning tokens (Kimi K2.5, DeepSeek R1, etc.). Emitted before `content`
+    /// in reasoning-model responses. We surface these so the agent sees progress.
+    #[serde(default)]
+    reasoning_content: Option<String>,
+    /// Alternate reasoning field used by some OpenRouter providers (MiniMax, etc.)
+    #[serde(default)]
+    reasoning: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -374,10 +402,15 @@ pub struct LlmClient {
 
 impl LlmClient {
     pub fn new(config: LlmConfig) -> Self {
-        Self {
-            config,
-            client: reqwest::Client::new(),
-        }
+        // 120s request timeout — long enough for streaming responses with reasoning tokens,
+        // short enough to fail fast if the LLM endpoint hangs (otherwise the agent
+        // loop will stall indefinitely on a dead connection).
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        Self { config, client }
     }
 
     /// Send a chat completion request with automatic retry on transient errors.
@@ -533,6 +566,19 @@ impl LlmClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
+            // Dump the failed request to a rotating file so 4xx/5xx are debuggable.
+            let req_json = serde_json::to_string_pretty(&request_body).unwrap_or_default();
+            if let Some(home) = dirs_next::home_dir() {
+                let dump_dir = home.join(".smooth/llm-errors");
+                let _ = std::fs::create_dir_all(&dump_dir);
+                let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3f");
+                let dump_path = dump_dir.join(format!("{ts}-{}.json", status.as_u16()));
+                let dump_contents = format!("// status={status}\n// body={body}\n{req_json}\n");
+                let _ = std::fs::write(&dump_path, dump_contents);
+                tracing::error!(status = %status, response_body = %body, dump = %dump_path.display(), "LLM stream request failed (full request dumped)");
+            } else {
+                tracing::error!(status = %status, response_body = %body, "LLM stream request failed");
+            }
             anyhow::bail!("LLM API error {status}: {body}");
         }
 
@@ -544,7 +590,21 @@ impl LlmClient {
             let mut buffer = String::new();
             let mut stream = byte_stream;
 
-            while let Some(chunk_result) = stream.next().await {
+            // Per-chunk idle timeout: if no bytes arrive for 60s, abort the stream.
+            // This catches the case where an LLM endpoint opens an SSE stream and
+            // then stalls indefinitely (e.g. during reasoning). Total request
+            // timeout on the reqwest::Client (120s) also applies as an upper bound.
+            const CHUNK_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+            loop {
+                let chunk_result = match tokio::time::timeout(CHUNK_IDLE_TIMEOUT, stream.next()).await {
+                    Ok(Some(r)) => r,
+                    Ok(None) => break, // stream ended normally
+                    Err(_) => {
+                        let _ = tx.send(Err(anyhow::anyhow!("stream idle timeout: no data for {CHUNK_IDLE_TIMEOUT:?}"))).await;
+                        return;
+                    }
+                };
                 let chunk: Bytes = match chunk_result {
                     Ok(c) => c,
                     Err(e) => {
@@ -734,23 +794,42 @@ fn parse_sse_line(line: &str) -> Vec<anyhow::Result<StreamEvent>> {
             }
         }
 
-        // Tool call deltas
+        // Reasoning tokens (Kimi K2.5, DeepSeek R1, MiniMax). Surface them so the
+        // agent sees progress and the stream doesn't appear to hang during long
+        // reasoning phases. Both field names seen in the wild.
+        if let Some(reasoning) = &choice.delta.reasoning_content {
+            if !reasoning.is_empty() {
+                events.push(Ok(StreamEvent::Reasoning { content: reasoning.clone() }));
+            }
+        }
+        if let Some(reasoning) = &choice.delta.reasoning {
+            if !reasoning.is_empty() {
+                events.push(Ok(StreamEvent::Reasoning { content: reasoning.clone() }));
+            }
+        }
+
+        // Tool call deltas — key on `index`, which is always present, because
+        // providers like MiniMax only send the `id` in the first chunk and
+        // subsequent argument chunks only carry the index.
         if let Some(tool_calls) = &choice.delta.tool_calls {
             for tc in tool_calls {
                 if let Some(func) = &tc.function {
-                    // If we have both an id and a name, this is a new tool call
-                    if let (Some(id), Some(name)) = (&tc.id, &func.name) {
+                    // ToolCallStart: emit whenever we see a `name` (usually in the
+                    // first chunk). ID may be absent for some providers — synthesize
+                    // one from the index when needed.
+                    if let Some(name) = &func.name {
+                        let id = tc.id.clone().unwrap_or_else(|| format!("call_{}", tc.index));
                         events.push(Ok(StreamEvent::ToolCallStart {
-                            id: id.clone(),
+                            index: tc.index,
+                            id,
                             name: name.clone(),
                         }));
                     }
-                    // If we have arguments, emit argument delta
+                    // Arguments delta: always keyed by index (matches the ToolCallStart).
                     if let Some(args) = &func.arguments {
                         if !args.is_empty() {
-                            let id = tc.id.clone().unwrap_or_else(|| format!("index-{}", tc.index));
                             events.push(Ok(StreamEvent::ToolCallArgumentsDelta {
-                                id,
+                                index: tc.index,
                                 arguments_chunk: args.clone(),
                             }));
                         }
@@ -790,28 +869,33 @@ pub async fn accumulate_stream_events(mut stream: Pin<Box<dyn Stream<Item = anyh
     let mut finish_reason = String::from("stop");
     let mut usage = Usage::default();
 
-    // Track tool calls: id -> (name, accumulated_arguments)
-    let mut tool_call_map: HashMap<String, (String, String)> = HashMap::new();
-    // Track ordering
-    let mut tool_call_order: Vec<String> = Vec::new();
+    // Track tool calls keyed by index (stable across chunks; `id` is only sent once
+    // on some providers like MiniMax, `index` is sent on every chunk). Value is
+    // (id, name, accumulated_arguments).
+    let mut tool_call_map: HashMap<usize, (String, String, String)> = HashMap::new();
+    let mut tool_call_order: Vec<usize> = Vec::new();
 
     while let Some(event_result) = stream.next().await {
         match event_result? {
             StreamEvent::Delta { content: delta } => {
                 content.push_str(&delta);
             }
-            StreamEvent::ToolCallStart { id, name } => {
-                if !tool_call_map.contains_key(&id) {
-                    tool_call_order.push(id.clone());
-                }
-                tool_call_map.insert(id, (name, String::new()));
+            StreamEvent::Reasoning { .. } => {
+                // Reasoning tokens are surfaced downstream for progress visibility
+                // but intentionally NOT accumulated into the final response content.
             }
-            StreamEvent::ToolCallArgumentsDelta { id, arguments_chunk } => {
-                let entry = tool_call_map.entry(id.clone()).or_insert_with(|| {
-                    tool_call_order.push(id);
-                    (String::new(), String::new())
+            StreamEvent::ToolCallStart { index, id, name } => {
+                if !tool_call_map.contains_key(&index) {
+                    tool_call_order.push(index);
+                }
+                tool_call_map.insert(index, (id, name, String::new()));
+            }
+            StreamEvent::ToolCallArgumentsDelta { index, arguments_chunk } => {
+                let entry = tool_call_map.entry(index).or_insert_with(|| {
+                    tool_call_order.push(index);
+                    (format!("call_{index}"), String::new(), String::new())
                 });
-                entry.1.push_str(&arguments_chunk);
+                entry.2.push_str(&arguments_chunk);
             }
             StreamEvent::Usage(u) => {
                 usage = u;
@@ -824,8 +908,12 @@ pub async fn accumulate_stream_events(mut stream: Pin<Box<dyn Stream<Item = anyh
 
     let tool_calls: Vec<ToolCall> = tool_call_order
         .into_iter()
-        .filter_map(|id| {
-            let (name, args_str) = tool_call_map.remove(&id)?;
+        .filter_map(|index| {
+            let (id, name, args_str) = tool_call_map.remove(&index)?;
+            // Skip tool calls with no name — means the stream was malformed.
+            if name.is_empty() {
+                return None;
+            }
             let arguments: serde_json::Value = serde_json::from_str(&args_str).unwrap_or(serde_json::Value::Null);
             Some(ToolCall { id, name, arguments })
         })
@@ -861,9 +949,17 @@ fn to_chat_message(msg: &Message) -> ChatMessage {
         })
         .collect();
 
+    // Omit empty content when the message has tool_calls or is a tool result;
+    // some providers reject `content: ""` in those cases.
+    let content = if msg.content.is_empty() && (!msg.tool_calls.is_empty() || msg.role == Role::Tool) {
+        None
+    } else {
+        Some(msg.content.clone())
+    };
+
     ChatMessage {
         role: role.into(),
-        content: msg.content.clone(),
+        content,
         tool_call_id: msg.tool_call_id.clone(),
         tool_calls,
     }
@@ -978,8 +1074,33 @@ mod tests {
         let msg = Message::user("Hello");
         let chat = to_chat_message(&msg);
         assert_eq!(chat.role, "user");
-        assert_eq!(chat.content, "Hello");
+        assert_eq!(chat.content.as_deref(), Some("Hello"));
         assert!(chat.tool_call_id.is_none());
+    }
+
+    #[test]
+    fn to_chat_message_assistant_with_tool_calls_omits_empty_content() {
+        // Regression: some providers reject `content: ""` on assistant messages
+        // that have tool_calls. We must send `content: null` (omit) in that case.
+        let mut msg = Message::assistant("");
+        msg.tool_calls.push(ToolCall {
+            id: "c1".into(),
+            name: "foo".into(),
+            arguments: serde_json::json!({}),
+        });
+        let chat = to_chat_message(&msg);
+        assert!(chat.content.is_none(), "empty content on tool-call message must be None");
+        assert_eq!(chat.tool_calls.len(), 1);
+
+        // Non-empty content should still be passed through
+        let mut msg2 = Message::assistant("I'll call a tool.");
+        msg2.tool_calls.push(ToolCall {
+            id: "c2".into(),
+            name: "foo".into(),
+            arguments: serde_json::json!({}),
+        });
+        let chat2 = to_chat_message(&msg2);
+        assert_eq!(chat2.content.as_deref(), Some("I'll call a tool."));
     }
 
     #[test]
@@ -996,7 +1117,7 @@ mod tests {
             model: "test-model".into(),
             messages: vec![ChatMessage {
                 role: "user".into(),
-                content: "hello".into(),
+                content: Some("hello".into()),
                 tool_call_id: None,
                 tool_calls: vec![],
             }],
@@ -1069,6 +1190,7 @@ mod tests {
     #[test]
     fn stream_event_tool_call_start_serialization() {
         let event = StreamEvent::ToolCallStart {
+            index: 0,
             id: "call-1".into(),
             name: "echo".into(),
         };
@@ -1078,11 +1200,74 @@ mod tests {
         assert!(json.contains("\"name\":\"echo\""));
         let parsed: StreamEvent = serde_json::from_str(&json).expect("deserialize");
         match parsed {
-            StreamEvent::ToolCallStart { id, name } => {
+            StreamEvent::ToolCallStart { index, id, name } => {
+                assert_eq!(index, 0);
                 assert_eq!(id, "call-1");
                 assert_eq!(name, "echo");
             }
             _ => panic!("expected ToolCallStart"),
+        }
+    }
+
+    #[test]
+    fn stream_event_reasoning_serialization() {
+        let event = StreamEvent::Reasoning { content: "thinking...".into() };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("\"type\":\"Reasoning\""));
+        assert!(json.contains("\"content\":\"thinking...\""));
+        let parsed: StreamEvent = serde_json::from_str(&json).expect("deserialize");
+        match parsed {
+            StreamEvent::Reasoning { content } => assert_eq!(content, "thinking..."),
+            _ => panic!("expected Reasoning"),
+        }
+    }
+
+    #[test]
+    fn parse_sse_line_extracts_reasoning_content() {
+        let line = r#"data: {"choices":[{"delta":{"reasoning_content":"let me think"},"finish_reason":null}]}"#;
+        let events = parse_sse_line(line);
+        assert_eq!(events.len(), 1);
+        match events[0].as_ref().expect("ok") {
+            StreamEvent::Reasoning { content } => assert_eq!(content, "let me think"),
+            other => panic!("expected Reasoning, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_sse_line_extracts_reasoning_alternate_field() {
+        let line = r#"data: {"choices":[{"delta":{"reasoning":"minimax thinking"},"finish_reason":null}]}"#;
+        let events = parse_sse_line(line);
+        assert_eq!(events.len(), 1);
+        match events[0].as_ref().expect("ok") {
+            StreamEvent::Reasoning { content } => assert_eq!(content, "minimax thinking"),
+            other => panic!("expected Reasoning, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_sse_line_minimax_tool_call_split_across_chunks() {
+        // MiniMax sends the tool call id+name in the first chunk and subsequent
+        // chunks only carry `index` + arguments. Accumulator must key on index.
+        let chunk1 = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"write_file","arguments":""}}]},"finish_reason":null}]}"#;
+        let chunk2 = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"a.txt\"}"}}]},"finish_reason":null}]}"#;
+        let e1 = parse_sse_line(chunk1);
+        let e2 = parse_sse_line(chunk2);
+        assert_eq!(e1.len(), 1, "first chunk should emit ToolCallStart");
+        match e1[0].as_ref().expect("ok") {
+            StreamEvent::ToolCallStart { index, id, name } => {
+                assert_eq!(*index, 0);
+                assert_eq!(id, "call_abc");
+                assert_eq!(name, "write_file");
+            }
+            other => panic!("expected ToolCallStart, got {other:?}"),
+        }
+        assert_eq!(e2.len(), 1, "second chunk should emit ArgumentsDelta");
+        match e2[0].as_ref().expect("ok") {
+            StreamEvent::ToolCallArgumentsDelta { index, arguments_chunk } => {
+                assert_eq!(*index, 0);
+                assert!(arguments_chunk.contains("a.txt"));
+            }
+            other => panic!("expected ArgumentsDelta, got {other:?}"),
         }
     }
 
@@ -1154,15 +1339,16 @@ mod tests {
     async fn accumulate_stream_events_collects_tool_calls() {
         let events = vec![
             Ok(StreamEvent::ToolCallStart {
+                index: 0,
                 id: "call-1".into(),
                 name: "echo".into(),
             }),
             Ok(StreamEvent::ToolCallArgumentsDelta {
-                id: "call-1".into(),
+                index: 0,
                 arguments_chunk: r#"{"tex"#.into(),
             }),
             Ok(StreamEvent::ToolCallArgumentsDelta {
-                id: "call-1".into(),
+                index: 0,
                 arguments_chunk: r#"t":"hi"}"#.into(),
             }),
             Ok(StreamEvent::Done {
@@ -1177,6 +1363,50 @@ mod tests {
         assert_eq!(response.tool_calls[0].id, "call-1");
         assert_eq!(response.tool_calls[0].arguments, serde_json::json!({"text": "hi"}));
         assert_eq!(response.finish_reason, "tool_calls");
+    }
+
+    #[tokio::test]
+    async fn accumulate_stream_events_handles_minimax_split_tool_call() {
+        // Regression: MiniMax sends id+name in chunk 1, only index+args in chunk 2.
+        // Must result in a single coherent tool call, not two broken ones.
+        let events = vec![
+            Ok(StreamEvent::ToolCallStart {
+                index: 0,
+                id: "call_abc".into(),
+                name: "write_file".into(),
+            }),
+            Ok(StreamEvent::ToolCallArgumentsDelta {
+                index: 0,
+                arguments_chunk: r#"{"path":"x.rs","content":"fn main() {}"}"#.into(),
+            }),
+            Ok(StreamEvent::Done {
+                finish_reason: "tool_calls".into(),
+            }),
+        ];
+        let stream: Pin<Box<dyn Stream<Item = anyhow::Result<StreamEvent>> + Send>> = Box::pin(futures_util::stream::iter(events));
+        let response = accumulate_stream_events(stream).await.expect("accumulate");
+        assert_eq!(response.tool_calls.len(), 1, "should have exactly 1 tool call, not 2");
+        assert_eq!(response.tool_calls[0].name, "write_file");
+        assert_eq!(response.tool_calls[0].id, "call_abc");
+        assert_eq!(response.tool_calls[0].arguments["path"], "x.rs");
+    }
+
+    #[tokio::test]
+    async fn accumulate_stream_events_drops_reasoning_from_content() {
+        let events = vec![
+            Ok(StreamEvent::Reasoning {
+                content: "let me think".into(),
+            }),
+            Ok(StreamEvent::Delta { content: "Hello".into() }),
+            Ok(StreamEvent::Reasoning {
+                content: "more thinking".into(),
+            }),
+            Ok(StreamEvent::Delta { content: " world".into() }),
+            Ok(StreamEvent::Done { finish_reason: "stop".into() }),
+        ];
+        let stream: Pin<Box<dyn Stream<Item = anyhow::Result<StreamEvent>> + Send>> = Box::pin(futures_util::stream::iter(events));
+        let response = accumulate_stream_events(stream).await.expect("accumulate");
+        assert_eq!(response.content, "Hello world", "reasoning must NOT leak into content");
     }
 
     // --- Retry and rate-limit tests ---

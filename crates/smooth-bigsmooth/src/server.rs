@@ -470,16 +470,22 @@ async fn dispatch_ws_task(state: &AppState, message: String, model: Option<Strin
     }
 
     let tid = task_id.clone();
+    let last_activity = state.last_activity.clone();
     tokio::spawn(async move {
         let (agent_tx, mut agent_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
         // Bridge agent events to broadcast channel
         let bridge_tx = event_tx.clone();
         let bridge_tid = tid.clone();
+        let bridge_last_activity = last_activity.clone();
         let bridge_handle = tokio::spawn(async move {
             let mut iterations = 0u32;
             let start = Instant::now();
             while let Some(agent_event) = agent_rx.recv().await {
+                // Touch last_activity so idle timer doesn't fire mid-task
+                if let Ok(mut last) = bridge_last_activity.lock() {
+                    *last = Instant::now();
+                }
                 let server_event = match agent_event {
                     AgentEvent::TokenDelta { content } => Some(ServerEvent::TokenDelta {
                         task_id: bridge_tid.clone(),
@@ -517,6 +523,11 @@ async fn dispatch_ws_task(state: &AppState, message: String, model: Option<Strin
 
         // Run the actual agent
         let result = run_agent_task(working_dir, message, model, budget, agent_tx).await;
+
+        // Touch on completion so the idle timer starts fresh from now
+        if let Ok(mut last) = last_activity.lock() {
+            *last = Instant::now();
+        }
 
         // Wait for bridge to drain
         let iterations = bridge_handle.await.unwrap_or(0);

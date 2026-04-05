@@ -142,6 +142,7 @@ mod tests {
             tool_call_id: "test-call".into(),
             content: content.into(),
             is_error: false,
+            details: None,
         }
     }
 
