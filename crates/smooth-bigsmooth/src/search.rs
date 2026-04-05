@@ -1,9 +1,10 @@
-//! Search — powers @ autocomplete (beads, files, paths).
+//! Search — powers @ autocomplete (issues, files, paths).
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
+use smooth_issues::{IssueQuery, IssueStore};
 
 /// A search result for @ autocomplete.
 #[derive(Debug, Clone, Serialize)]
@@ -15,19 +16,19 @@ pub struct SearchResult {
     pub detail: Option<String>,
 }
 
-/// Search beads by title/ID.
-pub fn search_beads(query: &str) -> Vec<SearchResult> {
-    let beads = crate::beads::list_beads(None).unwrap_or_default();
+/// Search issues by title/ID using `IssueStore`.
+pub fn search_issues(query: &str, issue_store: &IssueStore) -> Vec<SearchResult> {
+    let issues = issue_store.list(&IssueQuery::new()).unwrap_or_default();
     let q = query.to_lowercase();
-    beads
+    issues
         .into_iter()
-        .filter(|b| b.id.to_lowercase().contains(&q) || b.title.to_lowercase().contains(&q))
+        .filter(|i| i.id.to_lowercase().contains(&q) || i.title.to_lowercase().contains(&q))
         .take(10)
-        .map(|b| SearchResult {
-            result_type: "bead".into(),
-            id: b.id.clone(),
-            label: format!("{}: {}", b.id, b.title),
-            detail: Some(format!("{} P{}", b.status, b.priority)),
+        .map(|i| SearchResult {
+            result_type: "issue".into(),
+            id: i.id.clone(),
+            label: format!("{}: {}", i.id, i.title),
+            detail: Some(format!("{} {}", i.status, i.priority)),
         })
         .collect()
 }
@@ -135,13 +136,13 @@ pub fn search_paths(query: &str) -> Vec<SearchResult> {
     vec![]
 }
 
-/// Combined search: beads + files + paths.
-pub fn search_all(query: &str, base_path: &Path) -> Vec<SearchResult> {
+/// Combined search: issues + files + paths.
+pub fn search_all(query: &str, base_path: &Path, issue_store: &IssueStore) -> Vec<SearchResult> {
     if query.starts_with('~') || query.starts_with('/') {
         return search_paths(query);
     }
 
-    let mut results = search_beads(query);
+    let mut results = search_issues(query, issue_store);
     results.extend(search_files(query, base_path));
     results.truncate(15);
     results
@@ -151,6 +152,67 @@ pub fn search_all(query: &str, base_path: &Path) -> Vec<SearchResult> {
 mod tests {
     use super::*;
     use std::fs;
+
+    use smooth_issues::{IssueType as IType, NewIssue, Priority as Prio};
+
+    fn test_store() -> IssueStore {
+        IssueStore::open_in_memory().unwrap()
+    }
+
+    fn new_issue(title: &str) -> NewIssue {
+        NewIssue {
+            title: title.into(),
+            description: String::new(),
+            issue_type: IType::Task,
+            priority: Prio::Medium,
+            assigned_to: None,
+            parent_id: None,
+            labels: vec![],
+        }
+    }
+
+    #[test]
+    fn test_search_issues_by_title() {
+        let store = test_store();
+        let mut login_issue = new_issue("Fix login bug");
+        login_issue.description = "Users cannot log in".into();
+        store.create(&login_issue).unwrap();
+        store.create(&new_issue("Add dashboard widget")).unwrap();
+
+        let results = search_issues("login", &store);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].label.contains("Fix login bug"));
+        assert_eq!(results[0].result_type, "issue");
+    }
+
+    #[test]
+    fn test_search_issues_by_id() {
+        let store = test_store();
+        let issue = store.create(&new_issue("Some task")).unwrap();
+
+        let results = search_issues(&issue.id, &store);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].id == issue.id);
+    }
+
+    #[test]
+    fn test_search_issues_empty_query() {
+        let store = test_store();
+        store.create(&new_issue("Task one")).unwrap();
+
+        // Empty query matches everything (contains "")
+        let results = search_issues("", &store);
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_search_issues_no_match() {
+        let store = test_store();
+        store.create(&new_issue("Fix login bug")).unwrap();
+
+        let results = search_issues("zzzznotfound", &store);
+        assert!(results.is_empty());
+    }
 
     #[test]
     fn test_search_files() {
@@ -177,5 +239,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let results = search_files("", dir.path());
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_search_all_issues_and_files() {
+        let store = test_store();
+        store.create(&new_issue("hello world task")).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("hello.rs"), "").unwrap();
+
+        let results = search_all("hello", dir.path(), &store);
+        // Should have both issue and file results
+        assert!(results.iter().any(|r| r.result_type == "issue"));
+        assert!(results.iter().any(|r| r.result_type == "file"));
+    }
+
+    #[test]
+    fn test_search_all_path_mode() {
+        let store = test_store();
+        let results = search_all("~/", Path::new("/tmp"), &store);
+        // Path queries bypass issue+file search
+        assert!(results.iter().all(|r| r.result_type == "path"));
     }
 }
