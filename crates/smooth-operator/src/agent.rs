@@ -663,27 +663,68 @@ impl Agent {
             // Forward token deltas through the channel while accumulating
             let (accumulator_tx, accumulator_rx) = tokio::sync::mpsc::channel::<anyhow::Result<StreamEvent>>(256);
 
-            // Tap into the stream: send deltas to channel, forward all to accumulator
-            while let Some(event_result) = stream.next().await {
-                match &event_result {
-                    Ok(StreamEvent::Delta { content }) => {
-                        let _ = tx.send(AgentEvent::TokenDelta { content: content.clone() });
-                        self.report_to_bigsmooth(ReporterEvent::TokenDelta { content: content.clone() });
-                    }
-                    Ok(StreamEvent::Done { .. }) => {
-                        let _ = tx.send(AgentEvent::StreamingComplete);
-                    }
-                    _ => {}
-                }
-                if accumulator_tx.send(event_result).await.is_err() {
-                    break;
-                }
-            }
-            drop(accumulator_tx);
+            // Hard per-iteration wall clock — if a single LLM turn takes longer than
+            // this, abort and move on. Guards against provider streams that go into
+            // TCP CLOSE_WAIT without producing EOF (observed on Anthropic/Kimi via
+            // OpenCode Zen). Applies to BOTH the tap loop and accumulator.
+            const ITERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+            // Per-item idle timeout inside the tap loop — same guard, shorter scope.
+            const ITEM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
-            // Accumulate the forwarded events into a full response
+            let tap_tx = tx.clone();
+            let tap_loop = async {
+                loop {
+                    let event_result = match tokio::time::timeout(ITEM_IDLE_TIMEOUT, stream.next()).await {
+                        Ok(Some(r)) => r,
+                        Ok(None) => break, // stream ended cleanly
+                        Err(_) => {
+                            // Idle timeout — surface as an error so accumulator fails fast.
+                            let _ = accumulator_tx
+                                .send(Err(anyhow::anyhow!("LLM stream idle timeout: no event for {ITEM_IDLE_TIMEOUT:?}")))
+                                .await;
+                            return;
+                        }
+                    };
+                    match &event_result {
+                        Ok(StreamEvent::Delta { content }) => {
+                            let _ = tap_tx.send(AgentEvent::TokenDelta { content: content.clone() });
+                        }
+                        Ok(StreamEvent::Reasoning { content }) => {
+                            // Surface reasoning tokens as TokenDelta so progress is visible
+                            // during long reasoning phases (Kimi K2.5, DeepSeek R1, etc.).
+                            // The accumulator drops these from the final response content.
+                            let _ = tap_tx.send(AgentEvent::TokenDelta { content: content.clone() });
+                        }
+                        Ok(StreamEvent::Done { .. }) => {
+                            let _ = tap_tx.send(AgentEvent::StreamingComplete);
+                        }
+                        _ => {}
+                    }
+                    if accumulator_tx.send(event_result).await.is_err() {
+                        break;
+                    }
+                }
+                drop(accumulator_tx);
+            };
+
             let rx_stream = tokio_stream::wrappers::ReceiverStream::new(accumulator_rx);
-            let response = accumulate_stream_events(Box::pin(rx_stream)).await?;
+            let accumulate_fut = accumulate_stream_events(Box::pin(rx_stream));
+
+            // Run tap and accumulate concurrently, under a hard wall-clock cap.
+            let (_, accumulated) = match tokio::time::timeout(ITERATION_TIMEOUT, async {
+                let (_, acc) = tokio::join!(tap_loop, accumulate_fut);
+                acc
+            })
+            .await
+            {
+                Ok(result) => ((), result?),
+                Err(_) => {
+                    return Err(anyhow::anyhow!(
+                        "LLM iteration timeout: no completion within {ITERATION_TIMEOUT:?} on iteration {iteration}"
+                    ));
+                }
+            };
+            let response = accumulated;
 
             let content_preview = response.content.chars().take(100).collect::<String>();
             let _ = tx.send(AgentEvent::LlmResponse {

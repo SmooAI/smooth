@@ -147,7 +147,7 @@ impl ConnectionManager {
     pub fn should_reconnect(&self) -> bool {
         self.config
             .max_reconnect_attempts
-            .map_or(true, |max| self.reconnect_attempts.load(Ordering::SeqCst) < max)
+            .is_none_or(|max| self.reconnect_attempts.load(Ordering::SeqCst) < max)
     }
 
     /// Current connection state.
