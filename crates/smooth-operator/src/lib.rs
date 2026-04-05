@@ -7,6 +7,7 @@
 //! agent workloads with security-first design.
 
 pub mod agent;
+pub mod bigsmooth_client;
 pub mod checkpoint;
 pub mod conversation;
 pub mod cost;
@@ -19,6 +20,7 @@ pub mod tool;
 pub mod workflow;
 
 pub use agent::{Agent, AgentConfig, AgentEvent, DelegationHandle, DelegationTool, SubAgentConfig};
+pub use bigsmooth_client::{BigSmoothReporter, ControlEvent, ReporterEvent};
 pub use checkpoint::{Checkpoint, CheckpointStore, MemoryCheckpointStore};
 pub use conversation::{CompactionResult, CompactionStrategy, Conversation, Message, Role};
 pub use cost::{BudgetExceeded, CostBudget, CostEntry, CostTracker, ModelPricing};
