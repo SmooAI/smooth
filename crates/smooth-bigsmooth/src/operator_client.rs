@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use smooth_operator::ws_resilience::{ConnectionManager, ConnectionState, MessageBuffer, ResiliencyConfig};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite;
 
@@ -75,12 +76,18 @@ pub enum OperatorEvent {
 
 /// WebSocket client for Big Smooth to communicate with a single operator
 /// running inside a sandbox.
+///
+/// Includes connection resiliency: automatic reconnection with exponential
+/// backoff, heartbeat keep-alive, and an outbound message buffer for commands
+/// sent while disconnected.
 pub struct OperatorClient {
     operator_id: String,
     url: String,
     ws_tx: Option<mpsc::UnboundedSender<String>>,
     event_rx: Option<mpsc::UnboundedReceiver<OperatorEvent>>,
     connected: Arc<AtomicBool>,
+    conn_mgr: Arc<ConnectionManager>,
+    msg_buffer: Arc<MessageBuffer>,
 }
 
 impl OperatorClient {
@@ -89,20 +96,35 @@ impl OperatorClient {
     /// `url` should be the full WebSocket URL, e.g.
     /// `"ws://sandbox-host:9090/ws"`.
     pub fn new(operator_id: &str, url: &str) -> Self {
+        Self::with_config(operator_id, url, ResiliencyConfig::default())
+    }
+
+    /// Create a new client with custom resiliency configuration.
+    pub fn with_config(operator_id: &str, url: &str, config: ResiliencyConfig) -> Self {
+        let buffer_size = config.message_buffer_size;
         Self {
             operator_id: operator_id.to_string(),
             url: url.to_string(),
             ws_tx: None,
             event_rx: None,
             connected: Arc::new(AtomicBool::new(false)),
+            conn_mgr: Arc::new(ConnectionManager::new(config)),
+            msg_buffer: Arc::new(MessageBuffer::new(buffer_size)),
         }
     }
 
     /// Connect to the operator's WebSocket server.
+    ///
+    /// On success, spawns a heartbeat task and marks the connection as
+    /// `Connected`.  Any commands buffered while disconnected are drained and
+    /// sent immediately.
     pub async fn connect(&mut self) -> anyhow::Result<()> {
-        let (ws_stream, _) = tokio_tungstenite::connect_async(&self.url)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to connect to operator {}: {e}", self.operator_id))?;
+        self.conn_mgr.set_connecting();
+
+        let (ws_stream, _) = tokio_tungstenite::connect_async(&self.url).await.map_err(|e| {
+            self.conn_mgr.disconnected();
+            anyhow::anyhow!("Failed to connect to operator {}: {e}", self.operator_id)
+        })?;
 
         let (mut ws_sink, mut ws_source) = ws_stream.split();
 
@@ -114,10 +136,12 @@ impl OperatorClient {
 
         // Write loop
         let connected_write = Arc::clone(&connected);
+        let conn_mgr_write = Arc::clone(&self.conn_mgr);
         tokio::spawn(async move {
             while let Some(text) = send_rx.recv().await {
                 if ws_sink.send(tungstenite::Message::Text(text.into())).await.is_err() {
                     connected_write.store(false, Ordering::SeqCst);
+                    conn_mgr_write.disconnected();
                     break;
                 }
             }
@@ -126,6 +150,7 @@ impl OperatorClient {
 
         // Read loop
         let connected_read = Arc::clone(&connected);
+        let conn_mgr_read = Arc::clone(&self.conn_mgr);
         tokio::spawn(async move {
             while let Some(Ok(msg)) = ws_source.next().await {
                 let text = match msg {
@@ -141,12 +166,60 @@ impl OperatorClient {
                 }
             }
             connected_read.store(false, Ordering::SeqCst);
+            conn_mgr_read.disconnected();
         });
 
-        self.ws_tx = Some(send_tx);
+        self.ws_tx = Some(send_tx.clone());
         self.event_rx = Some(event_rx);
 
+        // Mark connected + reset attempts
+        self.conn_mgr.connected();
+
+        // Drain buffered messages
+        for msg in self.msg_buffer.drain() {
+            let _ = send_tx.send(msg);
+        }
+
+        // Spawn heartbeat task
+        let hb_tx = send_tx;
+        let hb_connected = Arc::clone(&self.connected);
+        let hb_interval = self.conn_mgr.config().heartbeat_interval;
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(hb_interval).await;
+                if !hb_connected.load(Ordering::SeqCst) {
+                    break;
+                }
+                let ping = serde_json::to_string(&OperatorCommand::Heartbeat).unwrap_or_default();
+                if hb_tx.send(ping).is_err() {
+                    break;
+                }
+            }
+        });
+
         Ok(())
+    }
+
+    /// Attempt to reconnect using exponential backoff.
+    ///
+    /// Returns `Ok(())` once reconnected or `Err` if max attempts exhausted.
+    pub async fn reconnect(&mut self) -> anyhow::Result<()> {
+        while self.conn_mgr.should_reconnect() {
+            self.conn_mgr.set_reconnecting();
+            let attempt = self.conn_mgr.reconnect_attempts();
+            let backoff = self.conn_mgr.backoff_duration(attempt.saturating_sub(1));
+            tokio::time::sleep(backoff).await;
+
+            match self.connect().await {
+                Ok(()) => return Ok(()),
+                Err(_) => continue,
+            }
+        }
+        anyhow::bail!(
+            "Max reconnect attempts ({}) exhausted for operator {}",
+            self.conn_mgr.reconnect_attempts(),
+            self.operator_id
+        )
     }
 
     /// Assign a task to this operator.
@@ -188,11 +261,17 @@ impl OperatorClient {
         self.connected.load(Ordering::SeqCst)
     }
 
+    /// Returns the current connection state for monitoring.
+    pub fn connection_state(&self) -> ConnectionState {
+        self.conn_mgr.state()
+    }
+
     /// Disconnect and clean up.
     pub fn disconnect(&mut self) {
         self.ws_tx.take();
         self.event_rx.take();
         self.connected.store(false, Ordering::SeqCst);
+        self.conn_mgr.disconnected();
     }
 
     /// Returns the operator ID.
@@ -201,14 +280,26 @@ impl OperatorClient {
     }
 
     /// Send a command to the operator.
+    ///
+    /// If the connection is down, the command is buffered and will be sent when
+    /// the connection is re-established.
     async fn send_command(&self, cmd: &OperatorCommand) -> anyhow::Result<()> {
-        let tx = self
-            .ws_tx
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Not connected to operator {}", self.operator_id))?;
         let json = serde_json::to_string(cmd)?;
-        tx.send(json)
-            .map_err(|e| anyhow::anyhow!("Failed to send to operator {}: {e}", self.operator_id))
+
+        if let Some(tx) = self.ws_tx.as_ref() {
+            if self.connected.load(Ordering::SeqCst) {
+                return tx
+                    .send(json)
+                    .map_err(|e| anyhow::anyhow!("Failed to send to operator {}: {e}", self.operator_id));
+            }
+        }
+
+        // Disconnected — buffer the message
+        if self.msg_buffer.enqueue(json) {
+            Ok(())
+        } else {
+            anyhow::bail!("Message buffer full — cannot queue command for operator {}", self.operator_id)
+        }
     }
 }
 

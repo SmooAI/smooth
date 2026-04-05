@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use smooth_operator::ws_resilience::{ConnectionManager, ConnectionState, MessageBuffer, ResiliencyConfig};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite;
 
@@ -96,22 +97,36 @@ pub enum ServerEvent {
 // ---------------------------------------------------------------------------
 
 /// WebSocket client for communicating with Big Smooth.
+///
+/// Includes connection resiliency: automatic reconnection with exponential
+/// backoff, heartbeat keep-alive, and an outbound message buffer for messages
+/// sent while disconnected.
 pub struct BigSmoothClient {
     url: String,
     ws_tx: Option<mpsc::UnboundedSender<String>>,
     event_rx: Option<mpsc::UnboundedReceiver<ServerEvent>>,
     connected: Arc<AtomicBool>,
+    conn_mgr: Arc<ConnectionManager>,
+    msg_buffer: Arc<MessageBuffer>,
 }
 
 impl BigSmoothClient {
     /// Create a new client targeting the given Big Smooth base URL
     /// (e.g. `"http://localhost:4400"`).
     pub fn new(url: &str) -> Self {
+        Self::with_config(url, ResiliencyConfig::default())
+    }
+
+    /// Create a new client with custom resiliency configuration.
+    pub fn with_config(url: &str, config: ResiliencyConfig) -> Self {
+        let buffer_size = config.message_buffer_size;
         Self {
             url: url.trim_end_matches('/').to_string(),
             ws_tx: None,
             event_rx: None,
             connected: Arc::new(AtomicBool::new(false)),
+            conn_mgr: Arc::new(ConnectionManager::new(config)),
+            msg_buffer: Arc::new(MessageBuffer::new(buffer_size)),
         }
     }
 
@@ -119,15 +134,21 @@ impl BigSmoothClient {
     ///
     /// If Big Smooth is not running, attempts to start it by spawning `th up`
     /// in the background and waiting up to 10 seconds for health.
+    ///
+    /// On success, spawns a heartbeat task and marks the connection as
+    /// `Connected`.  Any messages buffered while disconnected are drained and
+    /// sent immediately.
     pub async fn connect(&mut self) -> anyhow::Result<()> {
+        self.conn_mgr.set_connecting();
         self.ensure_server().await?;
 
         let ws_url = self.url.replace("http://", "ws://").replace("https://", "wss://");
         let ws_url = format!("{ws_url}/ws");
 
-        let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url)
-            .await
-            .map_err(|e| anyhow::anyhow!("WebSocket connection failed: {e}"))?;
+        let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url).await.map_err(|e| {
+            self.conn_mgr.disconnected();
+            anyhow::anyhow!("WebSocket connection failed: {e}")
+        })?;
 
         let (mut ws_sink, mut ws_source) = ws_stream.split();
 
@@ -148,8 +169,9 @@ impl BigSmoothClient {
             let _ = ws_sink.send(tungstenite::Message::Close(None)).await;
         });
 
-        // Read loop
+        // Read loop — on disconnect, mark state and trigger reconnect
         let connected_read = Arc::clone(&connected);
+        let conn_mgr_read = Arc::clone(&self.conn_mgr);
         tokio::spawn(async move {
             while let Some(Ok(msg)) = ws_source.next().await {
                 let text = match msg {
@@ -168,21 +190,66 @@ impl BigSmoothClient {
                 }
             }
             connected_read.store(false, Ordering::SeqCst);
+            conn_mgr_read.disconnected();
         });
 
-        self.ws_tx = Some(send_tx);
+        self.ws_tx = Some(send_tx.clone());
         self.event_rx = Some(event_rx);
 
         // Wait for Connected event (up to 5s)
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         while !self.connected.load(Ordering::SeqCst) {
             if tokio::time::Instant::now() >= deadline {
+                self.conn_mgr.disconnected();
                 anyhow::bail!("Timed out waiting for Connected event from Big Smooth");
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
+        // Mark connected + reset attempts
+        self.conn_mgr.connected();
+
+        // Drain buffered messages
+        for msg in self.msg_buffer.drain() {
+            let _ = send_tx.send(msg);
+        }
+
+        // Spawn heartbeat task
+        let hb_tx = send_tx;
+        let hb_connected = Arc::clone(&self.connected);
+        let hb_interval = self.conn_mgr.config().heartbeat_interval;
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(hb_interval).await;
+                if !hb_connected.load(Ordering::SeqCst) {
+                    break;
+                }
+                let ping = serde_json::to_string(&ClientEvent::Ping).unwrap_or_default();
+                if hb_tx.send(ping).is_err() {
+                    break;
+                }
+            }
+        });
+
         Ok(())
+    }
+
+    /// Attempt to reconnect using exponential backoff.
+    ///
+    /// Returns `Ok(())` once reconnected or `Err` if max attempts exhausted.
+    pub async fn reconnect(&mut self) -> anyhow::Result<()> {
+        while self.conn_mgr.should_reconnect() {
+            self.conn_mgr.set_reconnecting();
+            let attempt = self.conn_mgr.reconnect_attempts();
+            let backoff = self.conn_mgr.backoff_duration(attempt.saturating_sub(1));
+            tokio::time::sleep(backoff).await;
+
+            match self.connect().await {
+                Ok(()) => return Ok(()),
+                Err(_) => continue,
+            }
+        }
+        anyhow::bail!("Max reconnect attempts ({}) exhausted", self.conn_mgr.reconnect_attempts())
     }
 
     /// Send a task start and return a receiver for streaming server events.
@@ -245,11 +312,30 @@ impl BigSmoothClient {
         self.connected.load(Ordering::SeqCst)
     }
 
+    /// Returns the current connection state for UI display.
+    pub fn connection_state(&self) -> ConnectionState {
+        self.conn_mgr.state()
+    }
+
     /// Send a raw [`ClientEvent`] to Big Smooth.
+    ///
+    /// If the connection is down, the message is buffered (up to the configured
+    /// limit) and will be sent when the connection is re-established.
     pub async fn send(&self, event: &ClientEvent) -> anyhow::Result<()> {
-        let tx = self.ws_tx.as_ref().ok_or_else(|| anyhow::anyhow!("Not connected"))?;
         let json = serde_json::to_string(event)?;
-        tx.send(json).map_err(|e| anyhow::anyhow!("Failed to send: {e}"))
+
+        if let Some(tx) = self.ws_tx.as_ref() {
+            if self.connected.load(Ordering::SeqCst) {
+                return tx.send(json).map_err(|e| anyhow::anyhow!("Failed to send: {e}"));
+            }
+        }
+
+        // Disconnected — buffer the message
+        if self.msg_buffer.enqueue(json) {
+            Ok(())
+        } else {
+            anyhow::bail!("Message buffer full — cannot queue message while disconnected")
+        }
     }
 
     /// Receive the next server event (blocking).
@@ -372,11 +458,17 @@ mod tests {
     async fn send_serializes_and_sends_via_channel() {
         // Create a client with a manually wired-up channel
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        let config = ResiliencyConfig::default();
+        let buffer_size = config.message_buffer_size;
+        let conn_mgr = Arc::new(ConnectionManager::new(config));
+        conn_mgr.connected();
         let client = BigSmoothClient {
             url: "http://localhost:4400".into(),
             ws_tx: Some(tx),
             event_rx: None,
             connected: Arc::new(AtomicBool::new(true)),
+            conn_mgr,
+            msg_buffer: Arc::new(MessageBuffer::new(buffer_size)),
         };
 
         let event = ClientEvent::Ping;
