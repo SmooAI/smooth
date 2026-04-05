@@ -779,6 +779,66 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
             env.insert("SMOOTH_BUDGET_USD".into(), b.to_string());
         }
 
+        // Generate a task-type-specific policy TOML for Wonk inside the VM.
+        // We default to TaskType::Coding in the `execute` phase, which gives
+        // the in-VM agent full file/bash/search access. Follow-up: thread
+        // TaskType + Phase through TaskStart so the policy matches the
+        // orchestrator's current state.
+        //
+        // The policy TOML is multi-line and microsandbox passes env vars via
+        // the kernel command line, which rejects non-printable ASCII
+        // (newlines included). So instead of shipping it via env var, we
+        // write it to a per-task host tempdir, bind-mount that dir RO into
+        // the VM, and point the runner at the file via SMOOTH_POLICY_FILE.
+        // The tempdir is intentionally leaked: /tmp is tmpfs on macOS HVF
+        // hosts and gets reclaimed on reboot; the cleanup cost of tracking
+        // every per-task dir isn't worth the complexity.
+        let mut policy_dir_guard: Option<tempfile::TempDir> = None;
+        let operator_token = crate::policy::generate_operator_token(&tid);
+        match crate::policy::generate_policy_for_task(
+            &tid,
+            &issue_id.clone().unwrap_or_default(),
+            "execute",
+            &operator_token,
+            &[],
+            crate::policy::TaskType::Coding,
+        ) {
+            Ok(policy_toml) => match tempfile::Builder::new().prefix("smooth-policy-").tempdir() {
+                Ok(dir) => {
+                    let policy_file = dir.path().join("policy.toml");
+                    if let Err(e) = std::fs::write(&policy_file, &policy_toml) {
+                        tracing::warn!(task_id = tid, error = %e, "failed to write policy tempfile; runner will use default");
+                    }
+                    policy_dir_guard = Some(dir);
+                }
+                Err(e) => {
+                    tracing::warn!(task_id = tid, error = %e, "failed to create policy tempdir; runner will use default");
+                }
+            },
+            Err(e) => {
+                tracing::warn!(task_id = tid, error = %e, "policy generation failed; runner will use default");
+            }
+        }
+
+        // If we managed to write a policy file, point the runner at it and
+        // add a bind mount for the dir.
+        let policy_mount = if let Some(ref dir) = policy_dir_guard {
+            let host = dir
+                .path()
+                .canonicalize()
+                .unwrap_or_else(|_| dir.path().to_path_buf())
+                .to_string_lossy()
+                .to_string();
+            env.insert("SMOOTH_POLICY_FILE".into(), "/opt/smooth/policy/policy.toml".into());
+            Some(BindMount {
+                host_path: host,
+                guest_path: "/opt/smooth/policy".into(),
+                readonly: true,
+            })
+        } else {
+            None
+        };
+
         let config = SandboxConfig {
             bead_id: issue_id.clone().unwrap_or_default(),
             workspace_path: "/workspace".into(),
@@ -794,7 +854,10 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
                     guest_path: "/workspace".into(),
                     readonly: false,
                 },
-            ],
+            ]
+            .into_iter()
+            .chain(policy_mount)
+            .collect(),
             ..SandboxConfig::default()
         };
 
