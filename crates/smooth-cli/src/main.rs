@@ -291,6 +291,8 @@ enum IssueCommands {
         status: Option<String>,
         #[arg(long)]
         title: Option<String>,
+        #[arg(long, alias = "desc")]
+        description: Option<String>,
         #[arg(long)]
         priority: Option<u8>,
         #[arg(long)]
@@ -1007,11 +1009,13 @@ async fn cmd_issues(cmd: IssueCommands) -> Result<()> {
             id,
             status,
             title,
+            description,
             priority,
             assign,
         } => {
             let updates = smooth_issues::IssueUpdate {
                 title,
+                description,
                 status: status.as_deref().and_then(smooth_issues::IssueStatus::from_str_loose),
                 priority: priority.and_then(smooth_issues::Priority::from_u8),
                 assigned_to: assign.map(|a| if a.is_empty() { None } else { Some(a) }),
