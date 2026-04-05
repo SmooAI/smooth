@@ -393,14 +393,14 @@ async fn chat_handler(Json(body): Json<ChatBody>) -> Json<ApiResponse<String>> {
 
 // ── Search ─────────────────────────────────────────────────
 
-async fn search_handler(Query(params): Query<SearchParams>) -> Json<ApiResponse<Vec<crate::search::SearchResult>>> {
+async fn search_handler(State(state): State<AppState>, Query(params): Query<SearchParams>) -> Json<ApiResponse<Vec<crate::search::SearchResult>>> {
     let query = params.q.unwrap_or_default();
     if query.is_empty() {
         return Json(ApiResponse { data: vec![], ok: true });
     }
 
     let cwd = std::env::current_dir().unwrap_or_default();
-    let results = crate::search::search_all(&query, &cwd);
+    let results = crate::search::search_all(&query, &cwd, &state.issue_store);
     Json(ApiResponse { data: results, ok: true })
 }
 
