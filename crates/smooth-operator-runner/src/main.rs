@@ -366,6 +366,11 @@ struct Cast {
     #[allow(dead_code)]
     goalie_url: String,
     scribe_store: Arc<MemoryLogStore>,
+    /// Absolute path to Goalie's JSON-lines audit log inside the VM. The
+    /// runner reads this back into the final cast summary so tests (and
+    /// humans reading the [runner stderr] forward) can see every allowed
+    /// and denied network request the sandbox actually attempted.
+    goalie_audit_path: String,
 }
 
 /// Spawn Wonk, Scribe, and Goalie in-process on ephemeral localhost ports.
@@ -436,6 +441,7 @@ async fn spawn_cast(policy_toml: &str, operator_id: &str) -> anyhow::Result<Cast
         scribe_url: format!("http://{scribe_addr}"),
         goalie_url: format!("http://{goalie_addr}"),
         scribe_store,
+        goalie_audit_path: audit_path,
     })
 }
 
@@ -578,18 +584,36 @@ async fn main() {
     // Drain the emitter before we exit.
     let _ = emit_task.await;
 
-    // Cast summary on stderr: Narc alert count, Scribe log count, runtime
-    // verdict. Big Smooth forwards this verbatim as a [runner stderr]
-    // TokenDelta so operators can audit what every in-VM security service
-    // saw during the run. A parseable prefix (`[cast-summary]`) lets tests
-    // scrape it without false matches on log output.
+    // Cast summary on stderr: Narc alert count, Scribe log count, Goalie
+    // audit entries, runtime verdict. Big Smooth forwards this verbatim
+    // as a [runner stderr] TokenDelta so operators can audit what every
+    // in-VM security service saw during the run. A parseable prefix
+    // (`[cast-summary]`) lets tests scrape it without false matches on
+    // log output.
     let narc_alerts = narc.alerts();
     let scribe_entries = cast.scribe_store.query(&LogQuery::default());
+    let goalie_audit_entries: Vec<serde_json::Value> = std::fs::read_to_string(&cast.goalie_audit_path)
+        .ok()
+        .map(|contents| {
+            contents
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let goalie_denied_count = goalie_audit_entries
+        .iter()
+        .filter(|e| e.get("allowed").and_then(serde_json::Value::as_bool) == Some(false))
+        .count();
     let summary = serde_json::json!({
         "narc_alert_count": narc_alerts.len(),
         "narc_alerts": narc_alerts,
         "scribe_entry_count": scribe_entries.len(),
         "scribe_entries_sample": scribe_entries.iter().take(10).collect::<Vec<_>>(),
+        "goalie_audit_count": goalie_audit_entries.len(),
+        "goalie_denied_count": goalie_denied_count,
+        "goalie_audit": goalie_audit_entries,
         "wonk_url": cast.wonk_url,
         "scribe_url": cast.scribe_url,
         "goalie_url": cast.goalie_url,
