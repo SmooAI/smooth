@@ -40,8 +40,8 @@ th auth login opencode-zen
 # Start Smooth (leader API + embedded web dashboard)
 th up
 
-# Open the terminal UI
-th tui
+# Open the interactive coding assistant
+th code
 ```
 
 No Docker. No Node.js. No runtime dependencies. One 10MB binary.
@@ -263,7 +263,7 @@ graph LR
 th up                            # Start everything
 th down                          # Stop
 th status                        # System health
-th tui                           # Terminal UI (ratatui)
+th code                          # Interactive coding assistant (ratatui)
 ```
 
 ### Authentication
@@ -340,7 +340,7 @@ smooth/
 │   ├── smooth-narc/         # Library — tool surveillance + secret detection
 │   ├── smooth-scribe/       # Library — per-VM structured logging
 │   ├── smooth-archivist/    # Library — central log aggregator
-│   ├── smooth-tui/          # Library — ratatui terminal dashboard
+│   ├── smooth-code/         # Library — ratatui terminal dashboard
 │   └── smooth-web/          # Library — embedded Vite SPA
 │       └── web/             # React + Vite source
 ├── Cargo.toml               # Workspace root

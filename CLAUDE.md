@@ -23,7 +23,7 @@ smooth/
 │   ├── smooth-wonk/         # Binary — in-VM access control authority
 │   ├── smooth-goalie/       # Binary — in-VM network + filesystem proxy
 │   ├── smooth-narc/         # Binary — in-VM tool surveillance + LLM judge
-│   ├── smooth-code/          # Library — ratatui terminal dashboard
+│   ├── smooth-code/         # Library — ratatui terminal dashboard
 │   └── smooth-web/          # Library — embedded Vite SPA via rust-embed
 │       └── web/             # React + Vite source (TypeScript)
 ├── Cargo.toml               # Workspace root
