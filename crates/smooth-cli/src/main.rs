@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand};
 use owo_colors::OwoColorize;
 
 /// Smooth — AI agent orchestration platform.
-/// Run with no arguments to launch the interactive TUI.
+/// Run with no arguments to launch the interactive coding assistant.
 #[derive(Parser)]
 #[command(name = "th", version, about, long_about = None)]
 struct Cli {
@@ -33,12 +33,6 @@ enum Commands {
     Down,
     /// Show system health
     Status,
-    /// Launch full terminal UI
-    Tui {
-        /// Leader server URL
-        #[arg(long)]
-        server: Option<String>,
-    },
     /// Provider authentication
     Auth {
         #[command(subcommand)]
@@ -372,10 +366,6 @@ async fn main() -> Result<()> {
         Some(Commands::Up { no_leader, port }) => cmd_up(no_leader, port).await,
         Some(Commands::Down) => cmd_down().await,
         Some(Commands::Status) => cmd_status().await,
-        Some(Commands::Tui { server }) => {
-            let url = server.unwrap_or_else(|| "http://localhost:4400".into());
-            smooth_tui::app::run(&url).await
-        }
         Some(Commands::Db { cmd }) => cmd_db(cmd),
         Some(Commands::Auth { cmd }) => cmd_auth(cmd).await,
         Some(Commands::Operators) => cmd_operators().await,

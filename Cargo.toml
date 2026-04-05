@@ -107,7 +107,6 @@ pin-project-lite = "0.2"
 smooth-operator = { path = "crates/smooth-operator" }
 smooth-bigsmooth = { path = "crates/smooth-bigsmooth" }
 smooth-policy = { path = "crates/smooth-policy" }
-smooth-tui = { path = "crates/smooth-tui" }
 smooth-web = { path = "crates/smooth-web" }
 smooth-scribe = { path = "crates/smooth-scribe" }
 smooth-wonk = { path = "crates/smooth-wonk" }
