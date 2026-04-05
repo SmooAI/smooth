@@ -61,6 +61,19 @@ pub struct LlmConfig {
 }
 
 impl LlmConfig {
+    /// OpenRouter — recommended default provider. OpenAI-compatible proxy for many models.
+    pub fn openrouter(api_key: impl Into<String>) -> Self {
+        Self {
+            api_url: "https://openrouter.ai/api/v1".into(),
+            api_key: api_key.into(),
+            model: "openai/gpt-4o".into(),
+            max_tokens: 8192,
+            temperature: 0.0,
+            retry_policy: RetryPolicy::default(),
+            api_format: ApiFormat::OpenAiCompat,
+        }
+    }
+
     pub fn opencode_zen(api_key: impl Into<String>) -> Self {
         Self {
             api_url: "https://opencode.ai/zen/v1".into(),

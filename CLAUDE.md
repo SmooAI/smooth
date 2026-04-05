@@ -29,7 +29,6 @@ smooth/
 ├── Cargo.toml               # Workspace root
 ├── rustfmt.toml             # Format: 160 width, field init shorthand
 ├── install.sh               # Curl installer
-├── .beads/                  # Issue tracking (Jira-synced)
 └── .claude/hooks/           # Worktree enforcement
 ```
 
@@ -96,7 +95,7 @@ pnpm dev                     # Vite dev server at :3100
 | `tools.rs` | Tool registry + hooks (secret detection, prompt injection) |
 | `policy.rs` | Policy generation, phase defaults, access request handling |
 | `beads.rs` | bd CLI wrapper (list, create, update, close, comment) |
-| `chat.rs` | OpenCode Zen API (streaming + non-streaming) |
+| `chat.rs` | **DEPRECATED** — legacy OpenCode Zen API (use smooth-operator ProviderRegistry) |
 | `search.rs` | @ autocomplete (beads + globwalk files + path expansion) |
 | `audit.rs` | Rotating file appender at ~/.smooth/audit/ |
 | `db.rs` | rusqlite: memories, worker_runs, config tables |
@@ -135,54 +134,29 @@ See README.md for full architecture diagrams and the plan file for implementatio
 
 All state at `~/.smooth/`:
 - `smooth.db` — SQLite (WAL mode)
-- `.beads/` — Beads issue graph
+- `issues.db` — Built-in issue tracking (in smooth.db)
 - `audit/` — Rotating tool usage logs per actor
 - `providers.json` — LLM credentials
 - `config.json` — CLI settings
 
 ---
 
-## 6. Issue Tracking — Beads + Jira Integration
+## 6. Issue Tracking — Built-in + Jira Integration
 
-**Philosophy**: Beads tracks local work context and dependencies. Jira (SMOODEV project) is the external source of truth for project management.
+**Philosophy**: Built-in issue tracking (`th issues`) replaces beads. Jira (SMOODEV project) is the external source of truth for project management.
 
-### Beads has built-in Jira sync
-
-Configure once (already done for this repo):
+### Quick reference
 
 ```bash
-bd config set jira.url "https://smooai.atlassian.net"
-bd config set jira.project "SMOODEV"
-bd config set jira.username "$JIRA_EMAIL"
-# API token from JIRA_API_TOKEN env var (or bd config set jira.api_token)
-```
-
-### Creating work
-
-1. **Create a Jira ticket first** via REST API or Jira UI
-2. **Create a matching beads issue**: `bd create --title="SMOODEV-XX: Title" --description="..." --type=task --priority=2`
-3. **Or use `bd jira sync --pull`** to import Jira issues into beads automatically
-
-### Syncing
-
-```bash
-bd jira sync --push     # Push beads status → Jira
-bd jira sync --pull     # Pull Jira tickets → beads
-bd jira sync            # Bidirectional sync
-```
-
-### Beads quick reference
-
-```bash
-bd ready                              # Show issues ready to work on
-bd list --status=open                 # All open issues
-bd list --status=in_progress          # Active work
-bd show <id>                          # Issue details with dependencies
-bd update <id> --status=in_progress   # Claim work
-bd close <id1> <id2> ...              # Close completed issues
-bd dep add <issue> <depends-on>       # Add dependency
-bd blocked                            # Show blocked issues
-bd jira sync                          # Bidirectional Jira sync
+th issues create --title="SMOODEV-XX: Title" --description="..."
+th issues list --status=open          # All open issues
+th issues list --status=in_progress   # Active work
+th issues show <id>                   # Issue details with dependencies
+th issues update <id> --status=in_progress   # Claim work
+th issues close <id1> <id2> ...       # Close completed issues
+th issues ready                       # Show ready issues (open, no blockers)
+th issues blocked                     # Show blocked issues
+th issues migrate-from-beads          # One-time migration from beads (requires bd CLI)
 ```
 
 ---
