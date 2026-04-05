@@ -23,6 +23,7 @@ dirs-next.workspace = true
 futures-util.workspace = true
 ignore.workspace = true
 reqwest.workspace = true
+tokio-tungstenite.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

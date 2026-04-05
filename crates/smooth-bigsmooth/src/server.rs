@@ -7,9 +7,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::response::sse::{Event, Sse};
-use axum::response::Json;
+use axum::response::{IntoResponse, Json};
 use axum::routing::{get, post};
 use axum::Router;
 use futures_util::stream::Stream;
@@ -19,13 +20,18 @@ use smooth_operator::cost::CostBudget;
 use smooth_operator::providers::ProviderRegistry;
 use smooth_operator::tool::{ToolCall, ToolHook, ToolResult};
 use smooth_operator::{Agent, AgentConfig, AgentEvent};
+use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::db::Database;
+use crate::events::{ClientEvent, ServerEvent};
 
 /// Default idle timeout: 30 minutes.
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 30 * 60;
+
+/// Default broadcast channel capacity.
+const BROADCAST_CHANNEL_CAPACITY: usize = 256;
 
 /// Shared application state.
 #[derive(Clone)]
@@ -35,17 +41,21 @@ pub struct AppState {
     pub start_time: Instant,
     pub last_activity: Arc<Mutex<Instant>>,
     pub idle_timeout: Duration,
+    /// Broadcast channel for pushing [`ServerEvent`]s to all connected WebSocket clients.
+    pub event_tx: broadcast::Sender<ServerEvent>,
 }
 
 impl AppState {
     /// Create a new `AppState` with default idle timeout.
     pub fn new(db: Database, issue_store: smooth_issues::IssueStore) -> Self {
+        let (event_tx, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         Self {
             db,
             issue_store,
             start_time: Instant::now(),
             last_activity: Arc::new(Mutex::new(Instant::now())),
             idle_timeout: Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS),
+            event_tx,
         }
     }
 
@@ -214,6 +224,8 @@ pub fn build_router(state: AppState) -> Router {
         // Jira
         .route("/api/jira/status", get(jira_status_handler))
         .route("/api/jira/sync", post(jira_sync_handler))
+        // WebSocket — primary real-time channel
+        .route("/ws", get(ws_handler))
         // Embedded web UI (SPA fallback — must be last)
         .fallback_service(smooth_web::web_router())
         // Middleware
@@ -247,6 +259,289 @@ pub async fn start(state: AppState, addr: SocketAddr) -> anyhow::Result<()> {
     tracing::info!("Smooth leader running at http://{addr}");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+// ── WebSocket ─────────────────────────────────────────────
+
+/// Heartbeat interval for WebSocket connections.
+const WS_HEARTBEAT_SECS: u64 = 30;
+
+async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_ws(socket, state))
+}
+
+async fn handle_ws(socket: WebSocket, state: AppState) {
+    use futures_util::{SinkExt, StreamExt};
+
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let (mut ws_tx, mut ws_rx) = socket.split();
+
+    // Send Connected event
+    let connected = ServerEvent::Connected {
+        session_id: session_id.clone(),
+    };
+    if let Ok(json) = serde_json::to_string(&connected) {
+        let _ = ws_tx.send(Message::Text(json.into())).await;
+    }
+
+    // Subscribe to broadcast channel for server events
+    let mut event_rx = state.event_tx.subscribe();
+
+    // Spawn a task that forwards broadcast events and heartbeats to the client
+    let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
+
+    // Forward broadcast → internal_tx
+    let broadcast_tx = internal_tx.clone();
+    let broadcast_handle = tokio::spawn(async move {
+        loop {
+            match event_rx.recv().await {
+                Ok(event) => {
+                    if let Ok(json) = serde_json::to_string(&event) {
+                        if broadcast_tx.send(Message::Text(json.into())).is_err() {
+                            break;
+                        }
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(lagged = n, "WebSocket client lagged behind broadcast");
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    // Heartbeat → internal_tx
+    let heartbeat_tx = internal_tx;
+    let heartbeat_handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(WS_HEARTBEAT_SECS));
+        loop {
+            interval.tick().await;
+            let pong = ServerEvent::Pong;
+            if let Ok(json) = serde_json::to_string(&pong) {
+                if heartbeat_tx.send(Message::Text(json.into())).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    // Write loop: drain internal_rx into WebSocket
+    let write_handle = tokio::spawn(async move {
+        while let Some(msg) = internal_rx.recv().await {
+            if ws_tx.send(msg).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // Read loop: process incoming client messages
+    while let Some(Ok(msg)) = ws_rx.next().await {
+        state.touch();
+        let text = match msg {
+            Message::Text(t) => t.to_string(),
+            Message::Close(_) => break,
+            _ => continue,
+        };
+
+        let Ok(event) = serde_json::from_str::<ClientEvent>(&text) else {
+            let err = ServerEvent::Error {
+                message: "invalid event JSON".into(),
+            };
+            if let Ok(json) = serde_json::to_string(&err) {
+                let _ = state.event_tx.send(err);
+                // Also try direct send (may fail if no subscribers, that's fine)
+                let _ = json;
+            }
+            continue;
+        };
+
+        handle_client_event(&state, event).await;
+    }
+
+    // Client disconnected — clean up
+    broadcast_handle.abort();
+    heartbeat_handle.abort();
+    write_handle.abort();
+    tracing::debug!(session_id, "WebSocket client disconnected");
+}
+
+/// Dispatch a single [`ClientEvent`] received over WebSocket.
+async fn handle_client_event(state: &AppState, event: ClientEvent) {
+    match event {
+        ClientEvent::Ping => {
+            let _ = state.event_tx.send(ServerEvent::Pong);
+        }
+        ClientEvent::TaskStart {
+            message,
+            model,
+            budget,
+            working_dir,
+        } => {
+            dispatch_ws_task(state, message, model, budget, working_dir).await;
+        }
+        ClientEvent::TaskCancel { task_id } => {
+            tracing::info!(task_id, "Task cancel requested via WebSocket");
+            // Cancellation is fire-and-forget for now; agent loop will
+            // be extended with a cancellation token in a future PR.
+        }
+        ClientEvent::Steer { task_id, action, message } => {
+            tracing::info!(task_id, action, "Steer via WebSocket");
+            let comment = format!("[STEERING:{action}] {}", message.unwrap_or_default());
+            let _ = state.issue_store.add_comment(&task_id, &comment);
+        }
+        ClientEvent::IssueCreate {
+            title,
+            description,
+            issue_type,
+            priority,
+        } => {
+            let desc = description.as_deref().unwrap_or("");
+            let itype = issue_type.as_deref().unwrap_or("task");
+            let prio = priority.unwrap_or(2);
+            match crate::issues::create_issue(&state.issue_store, &title, desc, itype, prio) {
+                Ok(issue) => {
+                    let _ = state.event_tx.send(ServerEvent::IssueCreated { id: issue.id, title });
+                }
+                Err(e) => {
+                    let _ = state.event_tx.send(ServerEvent::Error { message: e.to_string() });
+                }
+            }
+        }
+        ClientEvent::IssueUpdate { id, status, priority } => {
+            let update = smooth_issues::IssueUpdate {
+                status: status.as_deref().and_then(smooth_issues::IssueStatus::from_str_loose),
+                priority: priority.and_then(smooth_issues::Priority::from_u8),
+                ..Default::default()
+            };
+            match state.issue_store.update(&id, &update) {
+                Ok(_issue) => {
+                    let _ = state.event_tx.send(ServerEvent::IssueUpdated {
+                        id,
+                        status: status.unwrap_or_else(|| "updated".into()),
+                    });
+                }
+                Err(e) => {
+                    let _ = state.event_tx.send(ServerEvent::Error { message: e.to_string() });
+                }
+            }
+        }
+        ClientEvent::IssueClose { ids } => {
+            let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+            match state.issue_store.close(&refs) {
+                Ok(count) => {
+                    for id in &ids {
+                        let _ = state.event_tx.send(ServerEvent::IssueUpdated {
+                            id: id.clone(),
+                            status: "closed".into(),
+                        });
+                    }
+                    tracing::info!(count, "Closed issues via WebSocket");
+                }
+                Err(e) => {
+                    let _ = state.event_tx.send(ServerEvent::Error { message: e.to_string() });
+                }
+            }
+        }
+    }
+}
+
+/// Spawn an agent task from a WebSocket `TaskStart` event, broadcasting
+/// [`ServerEvent`]s as the agent progresses.
+async fn dispatch_ws_task(state: &AppState, message: String, model: Option<String>, budget: Option<f64>, working_dir: Option<String>) {
+    let working_dir = working_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    let task_id = uuid::Uuid::new_v4().to_string();
+    let event_tx = state.event_tx.clone();
+
+    // Create an issue for tracking
+    let issue_store = state.issue_store.clone();
+    let issue_id = crate::issues::create_issue(&issue_store, &format!("Task: {}", truncate_str(&message, 60)), &message, "task", 2)
+        .ok()
+        .map(|i| i.id);
+
+    if let Some(ref id) = issue_id {
+        let update = smooth_issues::IssueUpdate {
+            status: Some(smooth_issues::IssueStatus::InProgress),
+            ..Default::default()
+        };
+        let _ = issue_store.update(id, &update);
+    }
+
+    let tid = task_id.clone();
+    tokio::spawn(async move {
+        let (agent_tx, mut agent_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+
+        // Bridge agent events to broadcast channel
+        let bridge_tx = event_tx.clone();
+        let bridge_tid = tid.clone();
+        let bridge_handle = tokio::spawn(async move {
+            let mut iterations = 0u32;
+            let start = Instant::now();
+            while let Some(agent_event) = agent_rx.recv().await {
+                let server_event = match agent_event {
+                    AgentEvent::TokenDelta { content } => Some(ServerEvent::TokenDelta {
+                        task_id: bridge_tid.clone(),
+                        content,
+                    }),
+                    AgentEvent::ToolCallStart { tool_name, .. } => Some(ServerEvent::ToolCallStart {
+                        task_id: bridge_tid.clone(),
+                        tool_name,
+                        arguments: String::new(),
+                    }),
+                    AgentEvent::ToolCallComplete { tool_name, is_error, .. } => Some(ServerEvent::ToolCallComplete {
+                        task_id: bridge_tid.clone(),
+                        tool_name,
+                        result: String::new(),
+                        is_error,
+                        duration_ms: start.elapsed().as_millis() as u64,
+                    }),
+                    AgentEvent::Completed { iterations: iters, .. } => {
+                        iterations = iters;
+                        None // We send TaskComplete after the agent loop returns
+                    }
+                    AgentEvent::Error { message } => Some(ServerEvent::TaskError {
+                        task_id: bridge_tid.clone(),
+                        message,
+                    }),
+                    _ => None,
+                };
+
+                if let Some(evt) = server_event {
+                    let _ = bridge_tx.send(evt);
+                }
+            }
+            iterations
+        });
+
+        // Run the actual agent
+        let result = run_agent_task(working_dir, message, model, budget, agent_tx).await;
+
+        // Wait for bridge to drain
+        let iterations = bridge_handle.await.unwrap_or(0);
+
+        match result {
+            Ok(cost) => {
+                let _ = event_tx.send(ServerEvent::TaskComplete {
+                    task_id: tid.clone(),
+                    iterations,
+                    cost_usd: cost,
+                });
+                if let Some(ref id) = issue_id {
+                    let _ = issue_store.close(&[id]);
+                }
+                tracing::info!(task_id = tid, cost_usd = cost, "WS task completed");
+            }
+            Err(e) => {
+                let _ = event_tx.send(ServerEvent::TaskError {
+                    task_id: tid.clone(),
+                    message: e.to_string(),
+                });
+                tracing::error!(task_id = tid, error = %e, "WS task failed");
+            }
+        }
+    });
 }
 
 // ── Health ─────────────────────────────────────────────────
@@ -349,6 +644,8 @@ async fn run_task_handler(State(state): State<AppState>, Json(req): Json<TaskReq
     let message = req.message.clone();
     let model = req.model.clone();
     let budget = req.budget;
+    let event_tx = state.event_tx.clone();
+    let task_id = uuid::Uuid::new_v4().to_string();
 
     // Spawn the agent in a background task
     tokio::spawn(async move {
@@ -361,8 +658,12 @@ async fn run_task_handler(State(state): State<AppState>, Json(req): Json<TaskReq
                     agent_id: "task".into(),
                     iterations: 0,
                 });
-                // Send a custom cost event (via Error channel as a convention)
-                // We use a synthetic event type that the client knows about
+                // Also broadcast to WebSocket clients
+                let _ = event_tx.send(ServerEvent::TaskComplete {
+                    task_id: task_id.clone(),
+                    iterations: 0,
+                    cost_usd: cost,
+                });
                 drop(tx);
 
                 // Close the issue on success
@@ -374,6 +675,11 @@ async fn run_task_handler(State(state): State<AppState>, Json(req): Json<TaskReq
             }
             Err(e) => {
                 let _ = tx.send(AgentEvent::Error { message: e.to_string() });
+                // Also broadcast to WebSocket clients
+                let _ = event_tx.send(ServerEvent::TaskError {
+                    task_id: task_id.clone(),
+                    message: e.to_string(),
+                });
                 drop(tx);
                 tracing::error!(error = %e, "Task failed");
             }

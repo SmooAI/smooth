@@ -103,6 +103,9 @@ async-trait = "0.1"
 tokio-stream = "0.1"
 pin-project-lite = "0.2"
 
+# WebSocket client
+tokio-tungstenite = "0.26"
+
 # Workspace crates
 smooth-operator = { path = "crates/smooth-operator" }
 smooth-bigsmooth = { path = "crates/smooth-bigsmooth" }
