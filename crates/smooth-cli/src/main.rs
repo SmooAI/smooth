@@ -135,7 +135,7 @@ enum Commands {
 enum AuthCommands {
     /// Add or update a provider
     Login {
-        /// Provider: opencode-zen, anthropic, openai, openrouter, groq, google
+        /// Provider: openrouter, openai, anthropic, ollama, google
         provider: Option<String>,
         /// API key
         #[arg(long)]
@@ -479,38 +479,66 @@ fn cmd_db(cmd: DbCommands) -> Result<()> {
 }
 
 async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
+    let providers_path = dirs_next::home_dir().map(|h| h.join(".smooth/providers.json"));
+
     match cmd {
         AuthCommands::Status => {
             println!("Authentication Status\n====================\n");
-            let has_zen = smooth_bigsmooth::chat::is_authenticated();
-            println!(
-                "OpenCode Zen: {}",
-                if has_zen {
-                    "authenticated"
+
+            // Check providers.json for configured providers
+            if let Some(ref path) = providers_path {
+                if path.exists() {
+                    match smooth_operator::providers::ProviderRegistry::load_from_file(path) {
+                        Ok(registry) => {
+                            let providers = registry.list_providers();
+                            if providers.is_empty() {
+                                println!("Providers:    {}", "none configured — run: th auth login <provider>".red());
+                            } else {
+                                println!("Providers:    {} configured ({})", providers.len(), providers.join(", "));
+                            }
+                        }
+                        Err(_) => {
+                            println!("Providers:    {}", "providers.json exists but cannot be read".red());
+                        }
+                    }
                 } else {
-                    "not authenticated — run: th auth login"
+                    println!("Providers:    {}", "not configured — run: th auth login <provider>".red());
                 }
-            );
+            }
+
             let leader_up = reqwest::get("http://localhost:4400/health").await.is_ok();
             println!("Leader:       {}", if leader_up { "running" } else { "not running — run: th up" });
         }
         AuthCommands::Login { provider, .. } => {
-            let provider = provider.unwrap_or_else(|| "opencode-zen".into());
-            if provider == "opencode-zen" {
-                println!("Run: opencode providers login -p opencode");
-                let _ = std::process::Command::new("opencode").args(["providers", "login", "-p", "opencode"]).status();
-            } else {
-                println!("Provider {provider}: set API key via environment variable");
-            }
+            let provider = provider.unwrap_or_else(|| "openrouter".into());
+            println!("Provider {provider}: set API key via environment variable or providers.json");
+            println!("  e.g. export OPENROUTER_API_KEY=sk-...");
+            println!("  Then: th auth login {provider} --api-key $OPENROUTER_API_KEY");
         }
         AuthCommands::Providers => {
-            if smooth_bigsmooth::chat::is_authenticated() {
-                println!("opencode-zen: authenticated (default)");
-            } else {
-                println!("No providers configured. Run: th auth login");
+            if let Some(ref path) = providers_path {
+                if path.exists() {
+                    match smooth_operator::providers::ProviderRegistry::load_from_file(path) {
+                        Ok(registry) => {
+                            let providers = registry.list_providers();
+                            if providers.is_empty() {
+                                println!("No providers configured. Run: th auth login <provider>");
+                            } else {
+                                for id in &providers {
+                                    println!("{id}: configured");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            println!("Error reading providers.json: {e}");
+                        }
+                    }
+                } else {
+                    println!("No providers configured. Run: th auth login <provider>");
+                }
             }
         }
-        AuthCommands::Default { provider } => println!("Default: {}", provider.unwrap_or_else(|| "opencode-zen".into())),
+        AuthCommands::Default { provider } => println!("Default: {}", provider.unwrap_or_else(|| "openrouter".into())),
         AuthCommands::Remove { provider } => println!("Removed: {provider}"),
     }
     Ok(())
@@ -1121,7 +1149,7 @@ fn cmd_migrate_from_beads(store: &smooth_issues::IssueStore) -> Result<()> {
                 if status == &"open" {
                     // First try — bd might not be installed
                     println!("  {} Cannot run bd: {e}", "✗".red().bold());
-                    println!("  Make sure beads (bd) is installed and in PATH.");
+                    println!("  beads not installed (migration requires bd CLI)");
                     return Ok(());
                 }
                 continue;

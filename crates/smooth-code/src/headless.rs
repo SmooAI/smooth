@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde::Serialize;
 use smooth_operator::cost::CostBudget;
-use smooth_operator::llm::{load_opencode_api_key, LlmConfig};
+use smooth_operator::llm::LlmConfig;
+use smooth_operator::providers::ProviderRegistry;
 use smooth_operator::tool::{Tool, ToolSchema};
 use smooth_operator::{Agent, AgentConfig, AgentEvent, ToolRegistry};
 
@@ -245,14 +246,22 @@ pub async fn run_headless(working_dir: PathBuf, message: String, model: Option<S
         anyhow::bail!("message must not be empty");
     }
 
-    // 1. Load API key (from env or OpenCode auth)
-    let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .or_else(|_| std::env::var("OPENAI_API_KEY"))
-        .or_else(|_| load_opencode_api_key())
-        .map_err(|_| anyhow::anyhow!("No API key found. Set ANTHROPIC_API_KEY or OPENAI_API_KEY environment variable."))?;
+    // 1. Load LLM config from providers.json
+    let providers_path = dirs_next::home_dir()
+        .map(|h| h.join(".smooth/providers.json"))
+        .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
 
-    // 2. Create LlmConfig (use model if specified)
-    let mut llm_config = LlmConfig::opencode_zen(&api_key).with_temperature(0.3);
+    let mut llm_config = if providers_path.exists() {
+        let registry = ProviderRegistry::load_from_file(&providers_path).map_err(|e| anyhow::anyhow!("Failed to load providers.json: {e}"))?;
+        registry
+            .default_llm_config()
+            .map_err(|e| anyhow::anyhow!("No default provider configured: {e}"))?
+            .with_temperature(0.3)
+    } else {
+        anyhow::bail!("No LLM providers configured. Run: th auth login <provider>");
+    };
+
+    // 2. Override model if specified
     if let Some(ref m) = model {
         llm_config = llm_config.with_model(m);
     }
@@ -435,7 +444,7 @@ mod tests {
         assert!(budget.max_tokens.is_none());
 
         // Verify the config builder accepts it
-        let llm_config = LlmConfig::opencode_zen("test-key");
+        let llm_config = LlmConfig::openrouter("test-key");
         let config = AgentConfig::new("test", "prompt", llm_config).with_budget(budget);
         assert!(config.budget.is_some());
         assert_eq!(config.budget.as_ref().expect("budget").max_cost_usd, Some(1.5));

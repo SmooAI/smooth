@@ -1,4 +1,10 @@
 //! Chat — OpenCode Zen API streaming via reqwest.
+//!
+//! DEPRECATED: This module is hardcoded to OpenCode Zen and should not be used
+//! for new code. Use `smooth_operator::LlmClient` + `ProviderRegistry` instead,
+//! which supports all configured providers (openrouter, anthropic, openai, etc.).
+//!
+//! Kept temporarily because `server.rs` routes still reference it.
 
 use std::fs;
 
@@ -19,6 +25,7 @@ struct OpenCodeAuth {
 }
 
 /// Get the OpenCode Zen API key from the auth store.
+#[deprecated(note = "Use smooth-operator ProviderRegistry instead")]
 pub fn get_zen_api_key() -> Option<String> {
     let auth_path = dirs_next::home_dir()?.join(".local/share/opencode/auth.json");
     let content = fs::read_to_string(auth_path).ok()?;
@@ -27,8 +34,10 @@ pub fn get_zen_api_key() -> Option<String> {
 }
 
 /// Check if OpenCode Zen is authenticated.
+#[deprecated(note = "Use smooth-operator ProviderRegistry instead")]
 #[must_use]
 pub fn is_authenticated() -> bool {
+    #[allow(deprecated)]
     get_zen_api_key().is_some()
 }
 
@@ -48,7 +57,9 @@ struct ChatMessage {
 
 /// Stream a chat response from OpenCode Zen.
 /// Returns chunks of text as they arrive.
+#[deprecated(note = "Use smooth-operator LlmClient + ProviderRegistry instead")]
 pub async fn stream_chat(user_message: &str) -> Result<impl futures_core::Stream<Item = Result<String>>> {
+    #[allow(deprecated)]
     let api_key = get_zen_api_key().context("OpenCode Zen not authenticated. Run: th auth login opencode-zen")?;
 
     let client = reqwest::Client::new();
@@ -104,7 +115,9 @@ pub async fn stream_chat(user_message: &str) -> Result<impl futures_core::Stream
 }
 
 /// Non-streaming chat — returns complete response.
+#[deprecated(note = "Use smooth-operator LlmClient + ProviderRegistry instead")]
 pub async fn chat(user_message: &str) -> Result<String> {
+    #[allow(deprecated)]
     let api_key = get_zen_api_key().context("OpenCode Zen not authenticated. Run: th auth login opencode-zen")?;
 
     let client = reqwest::Client::new();
@@ -148,11 +161,13 @@ pub async fn chat(user_message: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    #[allow(deprecated)]
     use super::*;
 
     #[test]
     fn test_get_zen_api_key() {
         // Just verify it doesn't panic — key may or may not be present
+        #[allow(deprecated)]
         let _ = get_zen_api_key();
     }
 

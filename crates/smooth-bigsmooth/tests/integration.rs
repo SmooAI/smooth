@@ -8,7 +8,7 @@ use http_body_util::BodyExt;
 use hyper::Request;
 use smooth_bigsmooth::db::Database;
 use smooth_bigsmooth::orchestrator::{Orchestrator, OrchestratorState};
-use smooth_bigsmooth::server::{AppState, build_router};
+use smooth_bigsmooth::server::{build_router, AppState};
 use smooth_issues::IssueStore;
 use tower::ServiceExt;
 
@@ -90,7 +90,9 @@ async fn create_issue_via_api() {
                 .method("POST")
                 .uri("/api/issues")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"title":"Test issue","description":"Integration test","type":"task","priority":2}"#))
+                .body(Body::from(
+                    r#"{"title":"Test issue","description":"Integration test","type":"task","priority":2}"#,
+                ))
                 .expect("request"),
         )
         .await
@@ -268,7 +270,12 @@ async fn stats_via_api() {
         labels: Vec::new(),
     };
     store.create(&new).expect("create 1");
-    let b = store.create(&smooth_issues::NewIssue { title: "B".into(), ..new.clone() }).expect("create 2");
+    let b = store
+        .create(&smooth_issues::NewIssue {
+            title: "B".into(),
+            ..new.clone()
+        })
+        .expect("create 2");
     store.close(&[&b.id]).expect("close B");
 
     let resp = app
@@ -348,7 +355,12 @@ async fn orchestrator_schedules_ready_issues() {
         labels: Vec::new(),
     };
     store.create(&new).expect("create 1");
-    store.create(&smooth_issues::NewIssue { title: "Ready task 2".into(), ..new }).expect("create 2");
+    store
+        .create(&smooth_issues::NewIssue {
+            title: "Ready task 2".into(),
+            ..new
+        })
+        .expect("create 2");
 
     let mut orch = Orchestrator::new(3, store);
     assert_eq!(orch.state_name(), "idle");

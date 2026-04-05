@@ -350,20 +350,29 @@ async fn run_startup_health_checks() -> (HealthStatus, Vec<String>) {
 /// Sends `AgentEvent`s through the channel as the agent processes.
 /// The caller's event loop picks them up via `try_recv()`.
 async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent>) -> anyhow::Result<()> {
-    use smooth_operator::{Agent, AgentConfig, LlmConfig, ToolRegistry};
+    use smooth_operator::providers::ProviderRegistry;
+    use smooth_operator::{Agent, AgentConfig, ToolRegistry};
 
-    // Try to get API key from environment
-    let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .or_else(|_| std::env::var("OPENAI_API_KEY"))
-        .unwrap_or_default();
-
-    if api_key.is_empty() {
-        return Err(anyhow::anyhow!(
-            "No API key found. Set ANTHROPIC_API_KEY or OPENAI_API_KEY environment variable."
-        ));
-    }
-
-    let llm_config = LlmConfig::opencode_zen(api_key).with_temperature(0.3);
+    // Load LLM config from providers.json, falling back to env vars
+    let llm_config = {
+        let providers_path = dirs_next::home_dir().map(|h| h.join(".smooth/providers.json"));
+        if let Some(ref path) = providers_path {
+            if path.exists() {
+                if let Ok(registry) = ProviderRegistry::load_from_file(path) {
+                    registry
+                        .default_llm_config()
+                        .map_err(|e| anyhow::anyhow!("Failed to load LLM config from providers.json: {e}"))?
+                        .with_temperature(0.3)
+                } else {
+                    return Err(anyhow::anyhow!("providers.json exists but cannot be parsed. Run: th auth login <provider>"));
+                }
+            } else {
+                return Err(anyhow::anyhow!("No LLM providers configured. Run: th auth login <provider>"));
+            }
+        } else {
+            return Err(anyhow::anyhow!("Cannot determine home directory"));
+        }
+    };
 
     let system_prompt = "You are Smooth Coding, an AI coding assistant. Help the user with their coding questions. Be concise and helpful.";
 
