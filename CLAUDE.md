@@ -104,6 +104,23 @@ pnpm dev                     # Vite dev server at :3100
 | `session.rs` | Session persistence, message history, orchestrator snapshots, inbox |
 | `ws.rs` | WebSocket message types |
 
+### Dispatch modes
+
+Big Smooth's WebSocket `TaskStart` handler can dispatch tasks one of two ways:
+
+- **In-process** (default): the agent loop runs inside Big Smooth's own process
+  with tools executing against the host filesystem. Fast, works without any
+  special setup, but Big Smooth is NOT read-only on this path.
+- **Sandboxed** (`SMOOTH_SANDBOXED=1`): Big Smooth spawns a real microVM via
+  the embedded `microsandbox` crate, runs the task inside the VM, and streams
+  events back over the broadcast channel. Big Smooth performs zero writes and
+  zero tool execution — it is strictly the READ-ONLY orchestrator the
+  security architecture promises.
+
+The sandboxed path is the one the architecture actually describes. The
+in-process path is kept for backwards compatibility and for the existing
+headless E2E tests. New features should target the sandboxed path.
+
 ### Security Architecture
 
 The sandbox access control system uses named services running inside each microVM:
