@@ -1,10 +1,10 @@
 [package]
-name = "smooth-issues"
+name = "smooth-pearls"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Smooth Issues — built-in issue tracker with SQLite + optional DoltLite backend"
+description = "Smooth Pearls — built-in pearl tracker (formerly issues). SQLite-backed dependency-graph work items, inspired by the beads system."
 
 [dependencies]
 rusqlite.workspace = true
@@ -14,6 +14,7 @@ chrono.workspace = true
 uuid.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 smooth-operator.workspace = true
 async-trait.workspace = true
 

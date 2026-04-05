@@ -1,20 +1,20 @@
 //! Query builder for filtering issues.
 
-use crate::types::{IssueStatus, IssueType, Priority};
+use crate::types::{PearlStatus, PearlType, Priority};
 
 /// Query parameters for listing/filtering issues.
 #[derive(Debug, Clone, Default)]
-pub struct IssueQuery {
-    pub status: Option<IssueStatus>,
+pub struct PearlQuery {
+    pub status: Option<PearlStatus>,
     pub priority: Option<Priority>,
-    pub issue_type: Option<IssueType>,
+    pub pearl_type: Option<PearlType>,
     pub label: Option<String>,
     pub assigned_to: Option<String>,
     pub parent_id: Option<String>,
     pub limit: usize,
 }
 
-impl IssueQuery {
+impl PearlQuery {
     /// Create a new query with default limit of 100.
     #[must_use]
     pub fn new() -> Self {
@@ -26,7 +26,7 @@ impl IssueQuery {
 
     /// Filter by status.
     #[must_use]
-    pub fn with_status(mut self, status: IssueStatus) -> Self {
+    pub fn with_status(mut self, status: PearlStatus) -> Self {
         self.status = Some(status);
         self
     }
@@ -38,10 +38,10 @@ impl IssueQuery {
         self
     }
 
-    /// Filter by issue type.
+    /// Filter by pearl type.
     #[must_use]
-    pub fn with_type(mut self, issue_type: IssueType) -> Self {
-        self.issue_type = Some(issue_type);
+    pub fn with_type(mut self, pearl_type: PearlType) -> Self {
+        self.pearl_type = Some(pearl_type);
         self
     }
 
@@ -59,7 +59,7 @@ impl IssueQuery {
         self
     }
 
-    /// Filter by parent issue.
+    /// Filter by parent pearl.
     #[must_use]
     pub fn with_parent(mut self, parent_id: impl Into<String>) -> Self {
         self.parent_id = Some(parent_id.into());

@@ -22,7 +22,7 @@ use tokio_tungstenite::tungstenite;
 #[serde(tag = "type")]
 pub enum OperatorCommand {
     TaskAssign {
-        issue_id: String,
+        pearl_id: String,
         message: String,
         model: Option<String>,
         policy_toml: String,
@@ -223,9 +223,9 @@ impl OperatorClient {
     }
 
     /// Assign a task to this operator.
-    pub async fn assign_task(&self, issue_id: &str, message: &str, model: Option<&str>, policy_toml: &str) -> anyhow::Result<()> {
+    pub async fn assign_task(&self, pearl_id: &str, message: &str, model: Option<&str>, policy_toml: &str) -> anyhow::Result<()> {
         self.send_command(&OperatorCommand::TaskAssign {
-            issue_id: issue_id.to_string(),
+            pearl_id: pearl_id.to_string(),
             message: message.to_string(),
             model: model.map(ToString::to_string),
             policy_toml: policy_toml.to_string(),
@@ -324,27 +324,27 @@ mod tests {
     #[test]
     fn operator_command_task_assign_serialization() {
         let cmd = OperatorCommand::TaskAssign {
-            issue_id: "issue-1".into(),
+            pearl_id: "issue-1".into(),
             message: "fix the bug".into(),
             model: Some("claude-sonnet".into()),
             policy_toml: "[network]\nallow_all = false".into(),
         };
         let json = serde_json::to_string(&cmd).expect("serialize");
         assert!(json.contains(r#""type":"TaskAssign"#));
-        assert!(json.contains(r#""issue_id":"issue-1"#));
+        assert!(json.contains(r#""pearl_id":"issue-1"#));
         assert!(json.contains(r#""message":"fix the bug"#));
         assert!(json.contains(r#""model":"claude-sonnet"#));
 
         // Roundtrip
         let parsed: OperatorCommand = serde_json::from_str(&json).expect("deserialize");
         if let OperatorCommand::TaskAssign {
-            issue_id,
+            pearl_id,
             message,
             model,
             policy_toml,
         } = parsed
         {
-            assert_eq!(issue_id, "issue-1");
+            assert_eq!(pearl_id, "issue-1");
             assert_eq!(message, "fix the bug");
             assert_eq!(model.as_deref(), Some("claude-sonnet"));
             assert!(policy_toml.contains("allow_all"));

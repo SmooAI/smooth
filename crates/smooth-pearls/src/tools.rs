@@ -8,30 +8,30 @@ use serde_json::json;
 
 use smooth_operator::tool::{Tool, ToolSchema};
 
-use crate::query::IssueQuery;
-use crate::store::IssueStore;
-use crate::types::{IssueStatus, IssueType, IssueUpdate, NewIssue, Priority};
+use crate::query::PearlQuery;
+use crate::store::PearlStore;
+use crate::types::{NewPearl, PearlStatus, PearlType, PearlUpdate, Priority};
 
-// ── CreateIssueTool ─────────────────────────────────────────────────────────
+// ── CreatePearlTool ─────────────────────────────────────────────────────────
 
-/// Creates a new issue in the tracker.
-pub struct CreateIssueTool {
-    pub store: Arc<IssueStore>,
+/// Creates a new pearl in the tracker.
+pub struct CreatePearlTool {
+    pub store: Arc<PearlStore>,
 }
 
 #[async_trait]
-impl Tool for CreateIssueTool {
+impl Tool for CreatePearlTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
-            name: "create_issue".to_string(),
-            description: "Create a new issue in the tracker.".to_string(),
+            name: "create_pearl".to_string(),
+            description: "Create a new pearl in the tracker.".to_string(),
             parameters: json!({
                 "type": "object",
                 "required": ["title", "description", "type", "priority"],
                 "properties": {
                     "title": {
                         "type": "string",
-                        "description": "Short summary of the issue"
+                        "description": "Short summary of the pearl"
                     },
                     "description": {
                         "type": "string",
@@ -40,7 +40,7 @@ impl Tool for CreateIssueTool {
                     "type": {
                         "type": "string",
                         "enum": ["task", "bug", "feature"],
-                        "description": "Issue type"
+                        "description": "Pearl type"
                     },
                     "priority": {
                         "type": "number",
@@ -59,21 +59,21 @@ impl Tool for CreateIssueTool {
         let priority_raw = arguments["priority"].as_u64().ok_or_else(|| anyhow::anyhow!("missing 'priority'"))?;
         let priority_num = u8::try_from(priority_raw).map_err(|_| anyhow::anyhow!("priority out of range: {priority_raw}"))?;
 
-        let issue_type = IssueType::from_str_loose(type_str).ok_or_else(|| anyhow::anyhow!("invalid issue type: {type_str}"))?;
+        let pearl_type = PearlType::from_str_loose(type_str).ok_or_else(|| anyhow::anyhow!("invalid pearl type: {type_str}"))?;
         let priority = Priority::from_u8(priority_num).ok_or_else(|| anyhow::anyhow!("invalid priority: {priority_num}"))?;
 
-        let new_issue = NewIssue {
+        let new_issue = NewPearl {
             title: title.to_string(),
             description: description.to_string(),
-            issue_type,
+            pearl_type,
             priority,
             assigned_to: None,
             parent_id: None,
             labels: Vec::new(),
         };
 
-        let issue = self.store.create(&new_issue)?;
-        Ok(format!("Created issue {}: {}", issue.id, issue.title))
+        let pearl = self.store.create(&new_issue)?;
+        Ok(format!("Created pearl {}: {}", pearl.id, pearl.title))
     }
 
     fn is_read_only(&self) -> bool {
@@ -81,18 +81,18 @@ impl Tool for CreateIssueTool {
     }
 }
 
-// ── ListIssuesTool ──────────────────────────────────────────────────────────
+// ── ListPearlsTool ──────────────────────────────────────────────────────────
 
 /// Lists issues with optional status filter.
-pub struct ListIssuesTool {
-    pub store: Arc<IssueStore>,
+pub struct ListPearlsTool {
+    pub store: Arc<PearlStore>,
 }
 
 #[async_trait]
-impl Tool for ListIssuesTool {
+impl Tool for ListPearlsTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
-            name: "list_issues".to_string(),
+            name: "list_pearls".to_string(),
             description: "List issues, optionally filtered by status.".to_string(),
             parameters: json!({
                 "type": "object",
@@ -108,10 +108,10 @@ impl Tool for ListIssuesTool {
     }
 
     async fn execute(&self, arguments: serde_json::Value) -> anyhow::Result<String> {
-        let mut query = IssueQuery::new();
+        let mut query = PearlQuery::new();
 
         if let Some(status_str) = arguments.get("status").and_then(serde_json::Value::as_str) {
-            let status = IssueStatus::from_str_loose(status_str).ok_or_else(|| anyhow::anyhow!("invalid status: {status_str}"))?;
+            let status = PearlStatus::from_str_loose(status_str).ok_or_else(|| anyhow::anyhow!("invalid status: {status_str}"))?;
             query = query.with_status(status);
         }
 
@@ -122,8 +122,8 @@ impl Tool for ListIssuesTool {
         }
 
         let mut output = String::new();
-        for issue in &issues {
-            let _ = writeln!(output, "{} {} [{}] {}", issue.status, issue.id, issue.priority, issue.title);
+        for pearl in &issues {
+            let _ = writeln!(output, "{} {} [{}] {}", pearl.status, pearl.id, pearl.priority, pearl.title);
         }
         Ok(output.trim_end().to_string())
     }
@@ -133,26 +133,26 @@ impl Tool for ListIssuesTool {
     }
 }
 
-// ── ShowIssueTool ───────────────────────────────────────────────────────────
+// ── ShowPearlTool ───────────────────────────────────────────────────────────
 
-/// Shows full details for a single issue.
-pub struct ShowIssueTool {
-    pub store: Arc<IssueStore>,
+/// Shows full details for a single pearl.
+pub struct ShowPearlTool {
+    pub store: Arc<PearlStore>,
 }
 
 #[async_trait]
-impl Tool for ShowIssueTool {
+impl Tool for ShowPearlTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "show_issue".to_string(),
-            description: "Show full details of an issue including description, dependencies, and comments.".to_string(),
+            description: "Show full details of an pearl including description, dependencies, and comments.".to_string(),
             parameters: json!({
                 "type": "object",
                 "required": ["id"],
                 "properties": {
                     "id": {
                         "type": "string",
-                        "description": "Issue ID (e.g., th-abc123)"
+                        "description": "Pearl ID (e.g., th-abc123)"
                     }
                 }
             }),
@@ -162,27 +162,27 @@ impl Tool for ShowIssueTool {
     async fn execute(&self, arguments: serde_json::Value) -> anyhow::Result<String> {
         let id = arguments["id"].as_str().ok_or_else(|| anyhow::anyhow!("missing 'id'"))?;
 
-        let issue = self.store.get(id)?.ok_or_else(|| anyhow::anyhow!("issue not found: {id}"))?;
+        let pearl = self.store.get(id)?.ok_or_else(|| anyhow::anyhow!("pearl not found: {id}"))?;
         let deps = self.store.get_deps(id)?;
         let comments = self.store.get_comments(id)?;
 
         let mut output = String::new();
-        let _ = writeln!(output, "{} {} [{}] {}", issue.status, issue.id, issue.priority, issue.title);
-        let _ = writeln!(output, "Type: {}", issue.issue_type);
-        let _ = writeln!(output, "Created: {}", issue.created_at.format("%Y-%m-%d %H:%M"));
+        let _ = writeln!(output, "{} {} [{}] {}", pearl.status, pearl.id, pearl.priority, pearl.title);
+        let _ = writeln!(output, "Type: {}", pearl.pearl_type);
+        let _ = writeln!(output, "Created: {}", pearl.created_at.format("%Y-%m-%d %H:%M"));
 
-        if !issue.description.is_empty() {
-            let _ = writeln!(output, "\n{}", issue.description);
+        if !pearl.description.is_empty() {
+            let _ = writeln!(output, "\n{}", pearl.description);
         }
 
-        if !issue.labels.is_empty() {
-            let _ = writeln!(output, "\nLabels: {}", issue.labels.join(", "));
+        if !pearl.labels.is_empty() {
+            let _ = writeln!(output, "\nLabels: {}", pearl.labels.join(", "));
         }
 
         if !deps.is_empty() {
             output.push_str("\nDependencies:\n");
             for dep in &deps {
-                let _ = writeln!(output, "  {} {} {}", dep.dep_type.as_str(), dep.depends_on, dep.issue_id);
+                let _ = writeln!(output, "  {} {} {}", dep.dep_type.as_str(), dep.depends_on, dep.pearl_id);
             }
         }
 
@@ -201,26 +201,26 @@ impl Tool for ShowIssueTool {
     }
 }
 
-// ── UpdateIssueTool ─────────────────────────────────────────────────────────
+// ── UpdatePearlTool ─────────────────────────────────────────────────────────
 
-/// Updates fields on an existing issue.
-pub struct UpdateIssueTool {
-    pub store: Arc<IssueStore>,
+/// Updates fields on an existing pearl.
+pub struct UpdatePearlTool {
+    pub store: Arc<PearlStore>,
 }
 
 #[async_trait]
-impl Tool for UpdateIssueTool {
+impl Tool for UpdatePearlTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
-            name: "update_issue".to_string(),
-            description: "Update an existing issue's status, priority, or title.".to_string(),
+            name: "update_pearl".to_string(),
+            description: "Update an existing pearl's status, priority, or title.".to_string(),
             parameters: json!({
                 "type": "object",
                 "required": ["id"],
                 "properties": {
                     "id": {
                         "type": "string",
-                        "description": "Issue ID (e.g., th-abc123)"
+                        "description": "Pearl ID (e.g., th-abc123)"
                     },
                     "status": {
                         "type": "string",
@@ -244,10 +244,10 @@ impl Tool for UpdateIssueTool {
     async fn execute(&self, arguments: serde_json::Value) -> anyhow::Result<String> {
         let id = arguments["id"].as_str().ok_or_else(|| anyhow::anyhow!("missing 'id'"))?;
 
-        let mut updates = IssueUpdate::default();
+        let mut updates = PearlUpdate::default();
 
         if let Some(status_str) = arguments.get("status").and_then(serde_json::Value::as_str) {
-            updates.status = Some(IssueStatus::from_str_loose(status_str).ok_or_else(|| anyhow::anyhow!("invalid status: {status_str}"))?);
+            updates.status = Some(PearlStatus::from_str_loose(status_str).ok_or_else(|| anyhow::anyhow!("invalid status: {status_str}"))?);
         }
 
         if let Some(priority_num) = arguments.get("priority").and_then(serde_json::Value::as_u64) {
@@ -260,7 +260,7 @@ impl Tool for UpdateIssueTool {
         }
 
         self.store.update(id, &updates)?;
-        Ok(format!("Updated issue {id}"))
+        Ok(format!("Updated pearl {id}"))
     }
 
     fn is_read_only(&self) -> bool {
@@ -268,18 +268,18 @@ impl Tool for UpdateIssueTool {
     }
 }
 
-// ── CloseIssueTool ──────────────────────────────────────────────────────────
+// ── ClosePearlTool ──────────────────────────────────────────────────────────
 
 /// Closes one or more issues.
-pub struct CloseIssueTool {
-    pub store: Arc<IssueStore>,
+pub struct ClosePearlTool {
+    pub store: Arc<PearlStore>,
 }
 
 #[async_trait]
-impl Tool for CloseIssueTool {
+impl Tool for ClosePearlTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
-            name: "close_issue".to_string(),
+            name: "close_pearl".to_string(),
             description: "Close one or more issues.".to_string(),
             parameters: json!({
                 "type": "object",
@@ -288,7 +288,7 @@ impl Tool for CloseIssueTool {
                     "ids": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "List of issue IDs to close"
+                        "description": "List of pearl IDs to close"
                     }
                 }
             }),
@@ -301,7 +301,7 @@ impl Tool for CloseIssueTool {
         let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
 
         let count = self.store.close(&id_refs)?;
-        Ok(format!("Closed {count} issue(s)"))
+        Ok(format!("Closed {count} pearl(s)"))
     }
 
     fn is_read_only(&self) -> bool {
@@ -309,26 +309,26 @@ impl Tool for CloseIssueTool {
     }
 }
 
-// ── CommentIssueTool ────────────────────────────────────────────────────────
+// ── CommentPearlTool ────────────────────────────────────────────────────────
 
-/// Adds a comment to an issue.
-pub struct CommentIssueTool {
-    pub store: Arc<IssueStore>,
+/// Adds a comment to an pearl.
+pub struct CommentPearlTool {
+    pub store: Arc<PearlStore>,
 }
 
 #[async_trait]
-impl Tool for CommentIssueTool {
+impl Tool for CommentPearlTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "comment_issue".to_string(),
-            description: "Add a comment to an issue.".to_string(),
+            description: "Add a comment to an pearl.".to_string(),
             parameters: json!({
                 "type": "object",
                 "required": ["id", "content"],
                 "properties": {
                     "id": {
                         "type": "string",
-                        "description": "Issue ID (e.g., th-abc123)"
+                        "description": "Pearl ID (e.g., th-abc123)"
                     },
                     "content": {
                         "type": "string",
@@ -354,14 +354,14 @@ impl Tool for CommentIssueTool {
 
 // ── Registration helper ─────────────────────────────────────────────────────
 
-/// Register all issue tools with a `ToolRegistry`.
-pub fn register_issue_tools(registry: &mut smooth_operator::ToolRegistry, store: Arc<IssueStore>) {
-    registry.register(CreateIssueTool { store: Arc::clone(&store) });
-    registry.register(ListIssuesTool { store: Arc::clone(&store) });
-    registry.register(ShowIssueTool { store: Arc::clone(&store) });
-    registry.register(UpdateIssueTool { store: Arc::clone(&store) });
-    registry.register(CloseIssueTool { store: Arc::clone(&store) });
-    registry.register(CommentIssueTool { store });
+/// Register all pearl tools with a `ToolRegistry`.
+pub fn register_pearl_tools(registry: &mut smooth_operator::ToolRegistry, store: Arc<PearlStore>) {
+    registry.register(CreatePearlTool { store: Arc::clone(&store) });
+    registry.register(ListPearlsTool { store: Arc::clone(&store) });
+    registry.register(ShowPearlTool { store: Arc::clone(&store) });
+    registry.register(UpdatePearlTool { store: Arc::clone(&store) });
+    registry.register(ClosePearlTool { store: Arc::clone(&store) });
+    registry.register(CommentPearlTool { store });
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -370,17 +370,17 @@ pub fn register_issue_tools(registry: &mut smooth_operator::ToolRegistry, store:
 mod tests {
     use super::*;
 
-    fn test_store() -> Arc<IssueStore> {
-        Arc::new(IssueStore::open_in_memory().expect("open in-memory store"))
+    fn test_store() -> Arc<PearlStore> {
+        Arc::new(PearlStore::open_in_memory().expect("open in-memory store"))
     }
 
     #[test]
-    fn test_create_issue_schema_has_correct_parameters() {
+    fn test_create_pearl_schema_has_correct_parameters() {
         let store = test_store();
-        let tool = CreateIssueTool { store };
+        let tool = CreatePearlTool { store };
         let schema = tool.schema();
 
-        assert_eq!(schema.name, "create_issue");
+        assert_eq!(schema.name, "create_pearl");
         let params = &schema.parameters;
         let props = params["properties"].as_object().expect("properties should be an object");
         assert!(props.contains_key("title"));
@@ -393,9 +393,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_issue_execute_creates_issue() {
+    async fn test_create_pearl_execute_creates_issue() {
         let store = test_store();
-        let tool = CreateIssueTool { store: Arc::clone(&store) };
+        let tool = CreatePearlTool { store: Arc::clone(&store) };
 
         let args = json!({
             "title": "Fix login bug",
@@ -405,27 +405,27 @@ mod tests {
         });
 
         let result = tool.execute(args).await.expect("execute should succeed");
-        assert!(result.starts_with("Created issue th-"));
+        assert!(result.starts_with("Created pearl th-"));
         assert!(result.contains("Fix login bug"));
 
-        // Verify issue exists in the store
-        let issues = store.list(&IssueQuery::new()).expect("list should succeed");
+        // Verify pearl exists in the store
+        let issues = store.list(&PearlQuery::new()).expect("list should succeed");
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].title, "Fix login bug");
-        assert_eq!(issues[0].issue_type, IssueType::Bug);
+        assert_eq!(issues[0].pearl_type, PearlType::Bug);
         assert_eq!(issues[0].priority, Priority::High);
     }
 
     #[tokio::test]
-    async fn test_list_issues_returns_formatted_list() {
+    async fn test_list_pearls_returns_formatted_list() {
         let store = test_store();
 
         // Create a couple of issues
         store
-            .create(&NewIssue {
-                title: "First issue".to_string(),
+            .create(&NewPearl {
+                title: "First pearl".to_string(),
                 description: String::new(),
-                issue_type: IssueType::Task,
+                pearl_type: PearlType::Task,
                 priority: Priority::Medium,
                 assigned_to: None,
                 parent_id: None,
@@ -434,10 +434,10 @@ mod tests {
             .expect("create first");
 
         store
-            .create(&NewIssue {
-                title: "Second issue".to_string(),
+            .create(&NewPearl {
+                title: "Second pearl".to_string(),
                 description: String::new(),
-                issue_type: IssueType::Bug,
+                pearl_type: PearlType::Bug,
                 priority: Priority::High,
                 assigned_to: None,
                 parent_id: None,
@@ -445,23 +445,23 @@ mod tests {
             })
             .expect("create second");
 
-        let tool = ListIssuesTool { store };
+        let tool = ListPearlsTool { store };
         let result = tool.execute(json!({})).await.expect("execute should succeed");
 
-        assert!(result.contains("First issue"));
-        assert!(result.contains("Second issue"));
+        assert!(result.contains("First pearl"));
+        assert!(result.contains("Second pearl"));
         // Should contain status icons
         assert!(result.contains("\u{25CB}")); // ○ for open
     }
 
     #[tokio::test]
-    async fn test_update_issue_changes_status() {
+    async fn test_update_pearl_changes_status() {
         let store = test_store();
-        let issue = store
-            .create(&NewIssue {
+        let pearl = store
+            .create(&NewPearl {
                 title: "Update me".to_string(),
                 description: String::new(),
-                issue_type: IssueType::Task,
+                pearl_type: PearlType::Task,
                 priority: Priority::Medium,
                 assigned_to: None,
                 parent_id: None,
@@ -469,28 +469,28 @@ mod tests {
             })
             .expect("create");
 
-        let tool = UpdateIssueTool { store: Arc::clone(&store) };
+        let tool = UpdatePearlTool { store: Arc::clone(&store) };
         let result = tool
             .execute(json!({
-                "id": issue.id,
+                "id": pearl.id,
                 "status": "in_progress"
             }))
             .await
             .expect("execute should succeed");
 
-        assert!(result.contains(&issue.id));
-        let updated = store.get(&issue.id).expect("get").expect("issue exists");
-        assert_eq!(updated.status, IssueStatus::InProgress);
+        assert!(result.contains(&pearl.id));
+        let updated = store.get(&pearl.id).expect("get").expect("pearl exists");
+        assert_eq!(updated.status, PearlStatus::InProgress);
     }
 
     #[tokio::test]
-    async fn test_close_issue_closes_issues() {
+    async fn test_close_pearl_closes_issues() {
         let store = test_store();
         let a = store
-            .create(&NewIssue {
+            .create(&NewPearl {
                 title: "Close me".to_string(),
                 description: String::new(),
-                issue_type: IssueType::Task,
+                pearl_type: PearlType::Task,
                 priority: Priority::Medium,
                 assigned_to: None,
                 parent_id: None,
@@ -499,10 +499,10 @@ mod tests {
             .expect("create");
 
         let b = store
-            .create(&NewIssue {
+            .create(&NewPearl {
                 title: "Close me too".to_string(),
                 description: String::new(),
-                issue_type: IssueType::Task,
+                pearl_type: PearlType::Task,
                 priority: Priority::Low,
                 assigned_to: None,
                 parent_id: None,
@@ -510,26 +510,26 @@ mod tests {
             })
             .expect("create");
 
-        let tool = CloseIssueTool { store: Arc::clone(&store) };
+        let tool = ClosePearlTool { store: Arc::clone(&store) };
         let result = tool.execute(json!({ "ids": [a.id, b.id] })).await.expect("execute should succeed");
 
-        assert_eq!(result, "Closed 2 issue(s)");
+        assert_eq!(result, "Closed 2 pearl(s)");
 
         let a_closed = store.get(&a.id).expect("get").expect("exists");
-        assert_eq!(a_closed.status, IssueStatus::Closed);
+        assert_eq!(a_closed.status, PearlStatus::Closed);
 
         let b_closed = store.get(&b.id).expect("get").expect("exists");
-        assert_eq!(b_closed.status, IssueStatus::Closed);
+        assert_eq!(b_closed.status, PearlStatus::Closed);
     }
 
     #[tokio::test]
     async fn test_comment_issue_adds_comment() {
         let store = test_store();
-        let issue = store
-            .create(&NewIssue {
+        let pearl = store
+            .create(&NewPearl {
                 title: "Comment target".to_string(),
                 description: String::new(),
-                issue_type: IssueType::Task,
+                pearl_type: PearlType::Task,
                 priority: Priority::Medium,
                 assigned_to: None,
                 parent_id: None,
@@ -537,18 +537,18 @@ mod tests {
             })
             .expect("create");
 
-        let tool = CommentIssueTool { store: Arc::clone(&store) };
+        let tool = CommentPearlTool { store: Arc::clone(&store) };
         let result = tool
             .execute(json!({
-                "id": issue.id,
+                "id": pearl.id,
                 "content": "This is a test comment"
             }))
             .await
             .expect("execute should succeed");
 
-        assert!(result.contains(&issue.id));
+        assert!(result.contains(&pearl.id));
 
-        let comments = store.get_comments(&issue.id).expect("get_comments");
+        let comments = store.get_comments(&pearl.id).expect("get_comments");
         assert_eq!(comments.len(), 1);
         assert_eq!(comments[0].content, "This is a test comment");
     }

@@ -69,7 +69,7 @@ pub enum ServerEvent {
         task_id: String,
         message: String,
     },
-    IssueCreated {
+    PearlCreated {
         id: String,
         title: String,
     },
