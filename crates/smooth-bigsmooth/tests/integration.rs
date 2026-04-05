@@ -69,7 +69,7 @@ async fn system_health() {
     assert_eq!(data["leader"]["status"], "healthy");
     assert_eq!(data["database"]["status"], "healthy");
     assert_eq!(data["sandbox"]["status"], "healthy");
-    assert!(data["beads"]["open_issues"].as_u64().is_some());
+    assert!(data["pearls"]["open_pearls"].as_u64().is_some());
 }
 
 // ── 3. Create issue via API ───────────────────────────────────
@@ -82,7 +82,7 @@ async fn create_pearl_via_api() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/issues")
+                .uri("/api/pearls")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     r#"{"title":"Test issue","description":"Integration test","type":"task","priority":2}"#,
@@ -121,7 +121,7 @@ async fn list_pearls_via_api() {
     store.create(&new).expect("create 2");
 
     let resp = app
-        .oneshot(Request::builder().uri("/api/issues").body(Body::empty()).expect("request"))
+        .oneshot(Request::builder().uri("/api/pearls").body(Body::empty()).expect("request"))
         .await
         .expect("response");
 
@@ -154,7 +154,7 @@ async fn get_pearl_via_api() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri(&format!("/api/issues/{}", created.id))
+                .uri(&format!("/api/pearls/{}", created.id))
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -190,7 +190,7 @@ async fn close_pearl_via_api() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/api/issues/{}/close", created.id))
+                .uri(&format!("/api/pearls/{}/close", created.id))
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -234,7 +234,7 @@ async fn ready_issues_via_api() {
     store.close(&[&closed.id]).expect("close");
 
     let resp = app
-        .oneshot(Request::builder().uri("/api/issues/ready").body(Body::empty()).expect("request"))
+        .oneshot(Request::builder().uri("/api/pearls/ready").body(Body::empty()).expect("request"))
         .await
         .expect("response");
 
@@ -273,7 +273,7 @@ async fn stats_via_api() {
     store.close(&[&b.id]).expect("close B");
 
     let resp = app
-        .oneshot(Request::builder().uri("/api/issues/stats").body(Body::empty()).expect("request"))
+        .oneshot(Request::builder().uri("/api/pearls/stats").body(Body::empty()).expect("request"))
         .await
         .expect("response");
 
@@ -303,10 +303,10 @@ async fn beads_backward_compat() {
     };
     let created = store.create(&new).expect("create");
 
-    // /api/beads should list issues (alias for /api/issues).
+    // /api/pearls should list issues (alias for /api/pearls).
     let resp = app
         .clone()
-        .oneshot(Request::builder().uri("/api/beads").body(Body::empty()).expect("request"))
+        .oneshot(Request::builder().uri("/api/pearls").body(Body::empty()).expect("request"))
         .await
         .expect("response");
 
@@ -316,11 +316,11 @@ async fn beads_backward_compat() {
     let data = body["data"].as_array().expect("array");
     assert_eq!(data.len(), 1);
 
-    // /api/beads/:id should return the specific issue.
+    // /api/pearls/:id should return the specific issue.
     let resp2 = app
         .oneshot(
             Request::builder()
-                .uri(&format!("/api/beads/{}", created.id))
+                .uri(&format!("/api/pearls/{}", created.id))
                 .body(Body::empty())
                 .expect("request"),
         )
