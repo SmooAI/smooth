@@ -383,10 +383,18 @@ struct Cast {
 /// All three bind to `127.0.0.1:0` and their URLs are returned in [`Cast`].
 async fn spawn_cast(policy_toml: &str, operator_id: &str) -> anyhow::Result<Cast> {
     // --- Scribe ---
-    let scribe_store = Arc::new(MemoryLogStore::new());
-    let scribe_state = ScribeAppState {
-        store: Arc::clone(&scribe_store),
+    // If SMOOTH_ARCHIVIST_URL is set, mirror every log entry to the
+    // Boardroom's Archivist via a background forwarder. Otherwise run
+    // standalone (legacy behavior, fine for host-mode sandboxed tests).
+    let archivist_url = std::env::var("SMOOTH_ARCHIVIST_URL").ok().filter(|s| !s.trim().is_empty());
+    let scribe_state = if let Some(url) = archivist_url {
+        tracing::info!(archivist = %url, operator = operator_id, "spawning scribe with archivist forwarder");
+        let forwarder = smooth_scribe::spawn_forwarder(url, operator_id.to_string());
+        ScribeAppState::with_forwarder(forwarder)
+    } else {
+        ScribeAppState::local_only()
     };
+    let scribe_store = Arc::clone(&scribe_state.store);
     let scribe_router = scribe_router_with_state(scribe_state);
     let scribe_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let scribe_addr = scribe_listener.local_addr()?;

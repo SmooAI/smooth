@@ -6,13 +6,31 @@ license.workspace = true
 repository.workspace = true
 description = "Big Smooth — orchestrator, policy generation, sandbox management, API server"
 
+[features]
+default = ["direct-sandbox"]
+# Enables the in-process `DirectSandboxClient`, which links microsandbox
+# transitively via `smooth-bootstrap-bill/server`. Required on the host
+# (`th up` dev mode, integration tests that boot VMs directly). Disabled
+# when cross-compiling the Boardroom binary for
+# aarch64-unknown-linux-musl, because microsandbox's `msb_krun_devices`
+# can't compile for musl/aarch64 (Linux VM ioctls absent from musl libc).
+direct-sandbox = ["smooth-bootstrap-bill/server"]
+
 [dependencies]
 smooth-pearls.workspace = true
+smooth-bootstrap-bill = { workspace = true, default-features = false }
 smooth-operator = { path = "../smooth-operator" }
 smooth-code = { path = "../smooth-code" }
-smooth-narc = { path = "../smooth-narc" }
 smooth-policy.workspace = true
 smooth-web = { path = "../smooth-web" }
+# Boardroom cast — Big Smooth hosts these as tokio tasks when it boots
+# inside a Boardroom VM (SMOOTH_BOARDROOM_MODE=1). They mirror the per-VM
+# cast every Operator spawns inside its own pod.
+smooth-wonk.workspace = true
+smooth-goalie.workspace = true
+smooth-narc.workspace = true
+smooth-scribe.workspace = true
+smooth-archivist.workspace = true
 axum = { workspace = true, features = ["ws"] }
 axum-extra.workspace = true
 tower.workspace = true
@@ -27,6 +45,7 @@ globwalk.workspace = true
 ignore.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
+tracing-subscriber.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 futures-core.workspace = true
@@ -37,7 +56,6 @@ thiserror.workspace = true
 dirs-next.workspace = true
 toml.workspace = true
 tokio-tungstenite.workspace = true
-microsandbox.workspace = true
 tempfile.workspace = true
 
 [dev-dependencies]
@@ -47,12 +65,6 @@ tokio = { workspace = true, features = ["test-util"] }
 tower = { workspace = true, features = ["util"] }
 hyper.workspace = true
 http-body-util.workspace = true
-# Cast members used by tests/cast_integration.rs for cross-cast flows.
-smooth-wonk = { path = "../smooth-wonk" }
-smooth-goalie = { path = "../smooth-goalie" }
-smooth-narc = { path = "../smooth-narc" }
-smooth-scribe = { path = "../smooth-scribe" }
-smooth-archivist = { path = "../smooth-archivist" }
 
 [lints]
 workspace = true

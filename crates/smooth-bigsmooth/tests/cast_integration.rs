@@ -69,7 +69,10 @@ async fn spawn_wonk(policy_toml: &str) -> (String, PolicyHolder) {
 /// Spin up Scribe with a fresh in-memory store. Returns the base URL + the store handle.
 async fn spawn_scribe() -> (String, Arc<MemoryLogStore>) {
     let store = Arc::new(MemoryLogStore::new());
-    let state = ScribeAppState { store: Arc::clone(&store) };
+    let state = ScribeAppState {
+        store: Arc::clone(&store),
+        forwarder: None,
+    };
     let router = scribe_router_with_state(state);
 
     let (listener, addr) = bind_ephemeral().await;

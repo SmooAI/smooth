@@ -43,6 +43,10 @@ pub struct AppState {
     pub idle_timeout: Duration,
     /// Broadcast channel for pushing [`ServerEvent`]s to all connected WebSocket clients.
     pub event_tx: broadcast::Sender<ServerEvent>,
+    /// When running inside a Boardroom microVM (`SMOOTH_BOARDROOM_MODE=1`),
+    /// this carries the URLs of the in-process cast (Wonk/Goalie/Narc/
+    /// Scribe/Archivist). `None` in host-mode / dev-mode.
+    pub boardroom: Option<crate::boardroom::BoardroomHandles>,
 }
 
 impl AppState {
@@ -56,7 +60,15 @@ impl AppState {
             last_activity: Arc::new(Mutex::new(Instant::now())),
             idle_timeout: Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS),
             event_tx,
+            boardroom: None,
         }
+    }
+
+    /// Attach Boardroom cast handles to an existing state. Chainable.
+    #[must_use]
+    pub fn with_boardroom(mut self, handles: crate::boardroom::BoardroomHandles) -> Self {
+        self.boardroom = Some(handles);
+        self
     }
 
     /// Touch the activity timestamp — call from every handler.
@@ -231,7 +243,31 @@ pub fn build_router(state: AppState) -> Router {
 }
 
 /// Start the leader HTTP server.
-pub async fn start(state: AppState, addr: SocketAddr) -> anyhow::Result<()> {
+///
+/// On first call this also:
+/// - Initialises the process-global sandbox client (Direct vs Bill,
+///   selected by the `SMOOTH_BOOTSTRAP_BILL_URL` env var).
+/// - If `SMOOTH_BOARDROOM_MODE=1`, spawns the Boardroom cast (Wonk/Goalie/
+///   Narc/Scribe/Archivist) as tokio tasks in this process and attaches
+///   their handles to `AppState`. Idempotent if the state already carries
+///   boardroom handles.
+pub async fn start(mut state: AppState, addr: SocketAddr) -> anyhow::Result<()> {
+    // Pick the sandbox client (Direct or Bill) exactly once.
+    crate::sandbox::init_sandbox_client();
+
+    // Boardroom bootstrap.
+    if state.boardroom.is_none() && std::env::var("SMOOTH_BOARDROOM_MODE").map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on")).unwrap_or(false) {
+        match crate::boardroom::spawn_boardroom_cast().await {
+            Ok(handles) => {
+                tracing::info!(archivist = %handles.archivist_url, "Big Smooth running in Boardroom mode");
+                state.boardroom = Some(handles);
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "boardroom: failed to spawn cast; continuing without it");
+            }
+        }
+    }
+
     // Spawn idle timeout checker
     let idle_state = state.clone();
     tokio::spawn(async move {
@@ -607,14 +643,24 @@ async fn dispatch_ws_task_in_process(state: &AppState, message: String, model: O
 /// will mount into each sandbox.
 ///
 /// Resolution order:
-///  1. `SMOOTH_OPERATOR_RUNNER` env var (absolute path, overrides everything)
-///  2. `<CARGO_MANIFEST_DIR>/../../target/aarch64-unknown-linux-musl/release/smooth-operator-runner`
-///  3. `./target/aarch64-unknown-linux-musl/release/smooth-operator-runner` (cwd)
+///  1. `SMOOTH_OPERATOR_RUNNER_HOST_PATH` env var — an **opaque host path**
+///     used only for bind-mount source. The file does not need to exist
+///     in Big Smooth's own filesystem view. Set when Big Smooth runs
+///     inside the Boardroom VM and passes host paths through to Bill.
+///  2. `SMOOTH_OPERATOR_RUNNER` env var (absolute path, must exist locally)
+///  3. `<CARGO_MANIFEST_DIR>/../../target/aarch64-unknown-linux-musl/release/smooth-operator-runner`
+///  4. `./target/aarch64-unknown-linux-musl/release/smooth-operator-runner` (cwd)
 ///
 /// Returns `None` if no binary is found; callers should fall back to the
 /// legacy echo path with a clear error message so developers know they need
 /// to run `scripts/build-operator-runner.sh`.
 fn find_operator_runner_binary() -> Option<std::path::PathBuf> {
+    if let Ok(host_path) = std::env::var("SMOOTH_OPERATOR_RUNNER_HOST_PATH") {
+        // Trust the caller (the Boardroom bootstrap). We cannot check the
+        // file because it lives on the host, not inside our VM.
+        return Some(std::path::PathBuf::from(host_path));
+    }
+
     if let Ok(explicit) = std::env::var("SMOOTH_OPERATOR_RUNNER") {
         let p = std::path::PathBuf::from(explicit);
         if p.is_file() {
@@ -659,6 +705,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
     let event_tx = state.event_tx.clone();
     let pearl_store = state.pearl_store.clone();
     let last_activity = state.last_activity.clone();
+    let boardroom_handles = state.boardroom.clone();
 
     // Guard against the kernel-cmdline printable-ASCII constraint BEFORE we
     // start spinning anything up. microsandbox stuffs env vars into the VM
@@ -716,14 +763,22 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
         }
     };
 
-    // Working dir on the host — the agent reads/writes here from inside the VM.
-    // Fall back to cwd if not provided. If the caller gave us a path that
-    // doesn't exist yet, create it so the bind mount has something to point at.
+    // Working dir on the host — the agent reads/writes here from inside the
+    // operator VM. Two cases:
+    //
+    //   * **Host mode** (Direct sandbox): Big Smooth IS on the host. We can
+    //     dereference `working_dir` ourselves, create it if missing, etc.
+    //   * **Boardroom mode** (Bill sandbox, brokered): Big Smooth runs
+    //     inside its own microVM and the `working_dir` is an **opaque host
+    //     path** (from the test harness / operator). It does not exist in
+    //     our filesystem view — we must not stat, canonicalize, or create
+    //     it. Bill will bind-mount it on the host.
+    let brokered = std::env::var("SMOOTH_BOOTSTRAP_BILL_URL").map(|v| !v.trim().is_empty()).unwrap_or(false);
     let host_workspace: std::path::PathBuf = working_dir
         .as_ref()
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
-    if !host_workspace.exists() {
+    if !brokered && !host_workspace.exists() {
         if let Err(e) = std::fs::create_dir_all(&host_workspace) {
             let _ = state.event_tx.send(ServerEvent::TaskError {
                 task_id: task_id.clone(),
@@ -799,6 +854,14 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
         env.insert("SMOOTH_OPERATOR_ID".into(), tid.clone());
         if let Some(b) = budget {
             env.insert("SMOOTH_BUDGET_USD".into(), b.to_string());
+        }
+        // In Boardroom mode, tell every operator VM how to reach the
+        // Boardroom's Archivist. The Scribe forwarder inside the operator
+        // will POST batches to this URL so cross-VM logs actually land.
+        if let Some(ref room) = boardroom_handles {
+            if let Some(archivist_url) = room.operator_facing_archivist_url() {
+                env.insert("SMOOTH_ARCHIVIST_URL".into(), archivist_url);
+            }
         }
 
         // Generate a task-type-specific policy TOML for Wonk inside the VM.
@@ -895,7 +958,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
             Err(e) => {
                 let _ = event_tx.send(ServerEvent::TaskError {
                     task_id: tid.clone(),
-                    message: format!("sandbox create failed: {e}"),
+                    message: format!("sandbox create failed: {e:#}"),
                 });
                 tracing::error!(task_id = tid, error = %e, "sandboxed dispatch: create_sandbox failed");
                 return;
