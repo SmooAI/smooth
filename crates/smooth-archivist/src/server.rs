@@ -5,6 +5,7 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 
+use crate::event_archive::{ArchivedEvent, EventArchive, EventFilter, MemoryEventArchive};
 use crate::ingest::{IngestBatch, IngestResult};
 use crate::store::{ArchiveQuery, ArchiveStats, ArchiveStore, MemoryArchiveStore};
 
@@ -12,12 +13,14 @@ use crate::store::{ArchiveQuery, ArchiveStats, ArchiveStore, MemoryArchiveStore}
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<MemoryArchiveStore>,
+    pub event_archive: Arc<MemoryEventArchive>,
 }
 
 /// Build the axum router for the Archivist HTTP server.
 pub fn build_router() -> Router {
     let state = AppState {
         store: Arc::new(MemoryArchiveStore::new()),
+        event_archive: Arc::new(MemoryEventArchive::new()),
     };
     build_router_with_state(state)
 }
@@ -28,6 +31,8 @@ pub fn build_router_with_state(state: AppState) -> Router {
         .route("/ingest", post(post_ingest))
         .route("/query", get(get_query))
         .route("/stats", get(get_stats))
+        .route("/api/archive", get(get_archive))
+        .route("/api/archive/count", get(get_archive_count))
         .route("/health", get(health))
         .with_state(state)
 }
@@ -43,6 +48,28 @@ async fn get_query(State(state): State<AppState>, axum::extract::Query(query): a
 
 async fn get_stats(State(state): State<AppState>) -> Json<ArchiveStats> {
     Json(state.store.stats())
+}
+
+async fn get_archive(
+    State(state): State<AppState>,
+    axum::extract::Query(filter): axum::extract::Query<EventFilter>,
+) -> Result<Json<Vec<ArchivedEvent>>, (StatusCode, String)> {
+    state
+        .event_archive
+        .query(&filter)
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+async fn get_archive_count(
+    State(state): State<AppState>,
+    axum::extract::Query(filter): axum::extract::Query<EventFilter>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    state
+        .event_archive
+        .count(&filter)
+        .map(|count| Json(serde_json::json!({ "count": count })))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 async fn health() -> &'static str {
@@ -66,6 +93,7 @@ mod tests {
     fn app_with_state() -> (Router, AppState) {
         let state = AppState {
             store: Arc::new(MemoryArchiveStore::new()),
+            event_archive: Arc::new(MemoryEventArchive::new()),
         };
         (build_router_with_state(state.clone()), state)
     }
