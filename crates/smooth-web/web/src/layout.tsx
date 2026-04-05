@@ -3,7 +3,7 @@ import { LayoutDashboard, Circle, Bot, MessageSquare, Settings } from 'lucide-re
 
 const NAV = [
     { path: '/', label: 'Dashboard', icon: LayoutDashboard },
-    { path: '/beads', label: 'Beads', icon: Circle },
+    { path: '/pearls', label: 'Pearls', icon: Circle },
     { path: '/operators', label: 'Operators', icon: Bot },
     { path: '/chat', label: 'Chat', icon: MessageSquare },
     { path: '/system', label: 'System', icon: Settings },

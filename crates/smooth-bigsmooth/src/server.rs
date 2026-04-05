@@ -90,7 +90,7 @@ pub struct SystemHealth {
     pub database: DatabaseHealth,
     pub sandbox: SandboxHealth,
     pub tailscale: TailscaleHealth,
-    pub beads: BeadsHealth,
+    pub pearls: PearlsHealth,
 }
 
 #[derive(Serialize)]
@@ -120,9 +120,9 @@ pub struct TailscaleHealth {
 }
 
 #[derive(Serialize)]
-pub struct BeadsHealth {
+pub struct PearlsHealth {
     pub status: String,
-    pub open_issues: u32,
+    pub open_pearls: u32,
 }
 
 // ── Query params ───────────────────────────────────────────
@@ -193,23 +193,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/system/config", get(get_config_handler).put(set_config_handler))
         // Tasks (headless agent execution)
         .route("/api/tasks", post(run_task_handler))
-        // Pearls (canonical)
+        // Pearls — the only spelling. No /api/issues, no /api/beads.
         .route("/api/pearls", get(list_pearls_handler).post(create_pearl_handler))
         .route("/api/pearls/ready", get(ready_pearls_handler))
         .route("/api/pearls/stats", get(stats_handler))
         .route("/api/pearls/{id}", get(get_pearl_handler).patch(update_pearl_handler))
         .route("/api/pearls/{id}/close", post(close_pearl_handler))
-        // Backward-compat aliases. The rename lineage is beads → issues →
-        // pearls; clients that still hit `/api/issues` or `/api/beads` keep
-        // working unchanged. New code should prefer `/api/pearls/*`.
-        .route("/api/issues", get(list_pearls_handler).post(create_pearl_handler))
-        .route("/api/issues/ready", get(ready_pearls_handler))
-        .route("/api/issues/stats", get(stats_handler))
-        .route("/api/issues/{id}", get(get_pearl_handler).patch(update_pearl_handler))
-        .route("/api/issues/{id}/close", post(close_pearl_handler))
-        .route("/api/beads", get(list_pearls_handler))
-        .route("/api/beads/{id}", get(get_pearl_handler))
-        .route("/api/beads/ready", get(ready_pearls_handler))
         // Workers
         .route("/api/workers", get(list_workers_handler))
         .route("/api/workers/{id}", get(get_worker_handler).delete(kill_worker_handler))
@@ -1087,9 +1076,9 @@ async fn system_health_handler(State(state): State<AppState>) -> Json<ApiRespons
                 status: if ts.connected { "connected" } else { "disconnected" }.into(),
                 hostname: ts.hostname,
             },
-            beads: BeadsHealth {
+            pearls: PearlsHealth {
                 status: "healthy".into(),
-                open_issues: state.pearl_store.stats().map_or(0, |s| (s.open + s.in_progress) as u32),
+                open_pearls: state.pearl_store.stats().map_or(0, |s| (s.open + s.in_progress) as u32),
             },
         },
         ok: true,

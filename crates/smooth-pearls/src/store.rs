@@ -122,11 +122,9 @@ impl PearlStore {
             };
             let table_exists = |table: &str| -> Result<bool> {
                 Ok(conn
-                    .query_row(
-                        "SELECT name FROM sqlite_master WHERE type='table' AND name = ?1",
-                        params![table],
-                        |row| row.get::<_, String>(0),
-                    )
+                    .query_row("SELECT name FROM sqlite_master WHERE type='table' AND name = ?1", params![table], |row| {
+                        row.get::<_, String>(0)
+                    })
                     .optional()?
                     .is_some())
             };

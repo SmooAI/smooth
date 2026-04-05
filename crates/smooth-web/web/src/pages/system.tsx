@@ -17,7 +17,7 @@ export function SystemPage() {
                         { label: 'Database', status: health.database?.status, detail: health.database?.path },
                         { label: 'Sandbox', status: health.sandbox?.status, detail: `${health.sandbox?.backend} (${health.sandbox?.active_sandboxes}/${health.sandbox?.max_concurrency})` },
                         { label: 'Tailscale', status: health.tailscale?.status, detail: health.tailscale?.hostname ?? 'disconnected' },
-                        { label: 'Beads', status: health.beads?.status, detail: `${health.beads?.open_issues} open` },
+                        { label: 'Pearls', status: health.pearls?.status, detail: `${health.pearls?.open_pearls ?? 0} open` },
                     ].map((row) => (
                         <div key={row.label} className="rounded-lg p-4 flex items-center gap-3" style={{ background: 'var(--smoo-dark-blue-850)', border: '1px solid var(--border)' }}>
                             <div className={`w-2.5 h-2.5 rounded-full ${dot(row.status)}`} />

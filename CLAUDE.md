@@ -180,12 +180,15 @@ All state at `~/.smooth/`:
 
 **Philosophy**: Built-in pearl tracking (`th pearls`) replaces the older
 `th issues` command (and before that, beads). Jira (SMOODEV project) is
-the external source of truth for project management. The CLI still accepts
-`th issues` as a hidden alias so existing scripts keep working.
+the external source of truth for project management.
+
+**Pearls is the only spelling.** There are no `th issues` or `th beads`
+aliases — those have been removed. Any existing scripts or docs should
+be updated to use `th pearls`.
 
 **Naming lineage**: beads → issues → pearls. The database migrates in-place
-on first open after the rename lands; the old `issues` table is renamed to
-`pearls` and the `issue_type` column is renamed to `pearl_type`.
+on first open; the old `issues` table is renamed to `pearls` and the
+`issue_type` column is renamed to `pearl_type`.
 
 ### Quick reference
 

@@ -121,11 +121,10 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Pearl tracking (built-in work-item tracker, formerly `issues`).
+    /// Pearl tracking (built-in work-item tracker).
     ///
-    /// Lineage: beads → issues → pearls. The old `th issues` spelling is
-    /// kept as a hidden alias for backwards compatibility.
-    #[command(alias = "issues")]
+    /// Lineage: beads → issues → pearls. There is no alias — pearls is the
+    /// only spelling.
     Pearls {
         #[command(subcommand)]
         cmd: PearlCommands,
