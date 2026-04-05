@@ -23,18 +23,18 @@ pub enum ClientEvent {
         action: String,
         message: Option<String>,
     },
-    IssueCreate {
+    PearlCreate {
         title: String,
         description: Option<String>,
-        issue_type: Option<String>,
+        pearl_type: Option<String>,
         priority: Option<u8>,
     },
-    IssueUpdate {
+    PearlUpdate {
         id: String,
         status: Option<String>,
         priority: Option<u8>,
     },
-    IssueClose {
+    PearlClose {
         ids: Vec<String>,
     },
     Ping,
@@ -72,11 +72,11 @@ pub enum ServerEvent {
     },
 
     // ── Issues ───────────────────────────────────────────────
-    IssueCreated {
+    PearlCreated {
         id: String,
         title: String,
     },
-    IssueUpdated {
+    PearlUpdated {
         id: String,
         status: String,
     },
@@ -214,11 +214,11 @@ mod tests {
                 is_error: false,
                 duration_ms: 42,
             },
-            ServerEvent::IssueCreated {
+            ServerEvent::PearlCreated {
                 id: "i1".into(),
                 title: "Bug".into(),
             },
-            ServerEvent::IssueUpdated {
+            ServerEvent::PearlUpdated {
                 id: "i1".into(),
                 status: "done".into(),
             },
@@ -254,9 +254,9 @@ mod tests {
             r#"{"type":"TaskStart","message":"do it","model":null,"budget":null,"working_dir":null}"#,
             r#"{"type":"TaskCancel","task_id":"t1"}"#,
             r#"{"type":"Steer","task_id":"t1","action":"pause","message":null}"#,
-            r#"{"type":"IssueCreate","title":"Bug","description":null,"issue_type":null,"priority":null}"#,
-            r#"{"type":"IssueUpdate","id":"i1","status":"done","priority":null}"#,
-            r#"{"type":"IssueClose","ids":["i1","i2"]}"#,
+            r#"{"type":"PearlCreate","title":"Bug","description":null,"pearl_type":null,"priority":null}"#,
+            r#"{"type":"PearlUpdate","id":"i1","status":"done","priority":null}"#,
+            r#"{"type":"PearlClose","ids":["i1","i2"]}"#,
             r#"{"type":"Ping"}"#,
         ];
 
@@ -294,11 +294,11 @@ mod tests {
                 task_id: "t".into(),
                 message: "m".into(),
             },
-            ServerEvent::IssueCreated {
+            ServerEvent::PearlCreated {
                 id: "i".into(),
                 title: "t".into(),
             },
-            ServerEvent::IssueUpdated {
+            ServerEvent::PearlUpdated {
                 id: "i".into(),
                 status: "s".into(),
             },

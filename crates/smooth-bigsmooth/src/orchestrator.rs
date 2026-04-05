@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use serde::Serialize;
-use smooth_issues::{IssueStatus, IssueStore, IssueUpdate};
+use smooth_pearls::{PearlStatus, PearlStore, PearlUpdate};
 use tokio::sync::broadcast;
 
 use crate::events::ServerEvent;
@@ -82,7 +82,7 @@ pub enum OrchestratorState {
 pub struct Orchestrator {
     pub state: OrchestratorState,
     pub pool: SandboxPool,
-    pub issue_store: IssueStore,
+    pub pearl_store: PearlStore,
     pub active_workers: HashMap<String, SandboxHandle>,
     pub completed_beads: Vec<String>,
     /// WebSocket clients for communicating with each operator (keyed by bead_id).
@@ -93,11 +93,11 @@ pub struct Orchestrator {
 
 impl Orchestrator {
     /// Create a new orchestrator.
-    pub fn new(max_operators: usize, issue_store: IssueStore) -> Self {
+    pub fn new(max_operators: usize, pearl_store: PearlStore) -> Self {
         Self {
             state: OrchestratorState::Idle,
             pool: SandboxPool::new(max_operators),
-            issue_store,
+            pearl_store,
             active_workers: HashMap::new(),
             completed_beads: Vec::new(),
             operator_clients: HashMap::new(),
@@ -131,7 +131,7 @@ impl Orchestrator {
 
     /// Schedule: find ready issues.
     async fn schedule(&mut self) -> Result<()> {
-        let ready = self.issue_store.ready().unwrap_or_default();
+        let ready = self.pearl_store.ready().unwrap_or_default();
         let ready_ids: Vec<String> = ready.iter().map(|b| b.id.clone()).collect();
 
         if ready_ids.is_empty() {
@@ -165,10 +165,10 @@ impl Orchestrator {
                     let ws_url = format!("ws://localhost:{}/ws", handle.host_port);
                     tracing::info!("Dispatched operator {operator_id} for bead {bead_id}");
 
-                    let _ = self.issue_store.update(
+                    let _ = self.pearl_store.update(
                         bead_id,
-                        &IssueUpdate {
-                            status: Some(IssueStatus::InProgress),
+                        &PearlUpdate {
+                            status: Some(PearlStatus::InProgress),
                             ..Default::default()
                         },
                     );
@@ -179,7 +179,7 @@ impl Orchestrator {
                         Ok(()) => {
                             // Look up the issue title/description for the task message
                             let message = self
-                                .issue_store
+                                .pearl_store
                                 .get(bead_id)
                                 .ok()
                                 .flatten()
@@ -342,7 +342,7 @@ impl Orchestrator {
         // TODO: spawn review operator
 
         // For now, auto-approve
-        let _ = self.issue_store.close(&[&bead_id]);
+        let _ = self.pearl_store.close(&[&bead_id]);
 
         self.state = if self.active_workers.is_empty() {
             OrchestratorState::Idle
@@ -390,7 +390,7 @@ mod tests {
 
     #[test]
     fn test_orchestrator_new() {
-        let store = IssueStore::open_in_memory().unwrap();
+        let store = PearlStore::open_in_memory().unwrap();
         let orch = Orchestrator::new(3, store);
         assert_eq!(orch.state_name(), "idle");
         assert!(orch.active_workers.is_empty());
@@ -399,7 +399,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_orchestrator_step_idle() {
-        let store = IssueStore::open_in_memory().unwrap();
+        let store = PearlStore::open_in_memory().unwrap();
         let mut orch = Orchestrator::new(3, store);
         // Step from idle — no issues, stays idle
         let result = orch.step().await;
@@ -411,7 +411,7 @@ mod tests {
     fn test_orchestrator_dispatch_creates_operator_client_map() {
         // Verify that the orchestrator has an operator_clients map ready for dispatch.
         // Actual sandbox creation requires msb, so we test the data structure setup.
-        let store = IssueStore::open_in_memory().unwrap();
+        let store = PearlStore::open_in_memory().unwrap();
         let orch = Orchestrator::new(3, store);
 
         assert!(orch.operator_clients.is_empty());
@@ -422,7 +422,7 @@ mod tests {
     #[tokio::test]
     async fn test_orchestrator_monitor_forwards_events_to_broadcast() {
         // Set up orchestrator with a broadcast channel
-        let store = IssueStore::open_in_memory().unwrap();
+        let store = PearlStore::open_in_memory().unwrap();
         let (tx, mut rx) = broadcast::channel::<ServerEvent>(16);
         let mut orch = Orchestrator::new(3, store).with_event_tx(tx);
 
@@ -441,7 +441,7 @@ mod tests {
 
     #[test]
     fn test_orchestrator_with_event_tx() {
-        let store = IssueStore::open_in_memory().unwrap();
+        let store = PearlStore::open_in_memory().unwrap();
         let (tx, _rx) = broadcast::channel::<ServerEvent>(16);
         let orch = Orchestrator::new(3, store).with_event_tx(tx);
         assert!(orch.event_tx.is_some());
@@ -449,7 +449,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_orchestrator_review_cleans_up_operator_client() {
-        let store = IssueStore::open_in_memory().unwrap();
+        let store = PearlStore::open_in_memory().unwrap();
         let mut orch = Orchestrator::new(3, store);
 
         // Insert a mock (disconnected) operator client

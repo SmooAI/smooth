@@ -37,7 +37,7 @@ const BROADCAST_CHANNEL_CAPACITY: usize = 256;
 #[derive(Clone)]
 pub struct AppState {
     pub db: Database,
-    pub issue_store: smooth_issues::IssueStore,
+    pub pearl_store: smooth_pearls::PearlStore,
     pub start_time: Instant,
     pub last_activity: Arc<Mutex<Instant>>,
     pub idle_timeout: Duration,
@@ -47,11 +47,11 @@ pub struct AppState {
 
 impl AppState {
     /// Create a new `AppState` with default idle timeout.
-    pub fn new(db: Database, issue_store: smooth_issues::IssueStore) -> Self {
+    pub fn new(db: Database, pearl_store: smooth_pearls::PearlStore) -> Self {
         let (event_tx, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         Self {
             db,
-            issue_store,
+            pearl_store,
             start_time: Instant::now(),
             last_activity: Arc::new(Mutex::new(Instant::now())),
             idle_timeout: Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS),
@@ -193,16 +193,23 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/system/config", get(get_config_handler).put(set_config_handler))
         // Tasks (headless agent execution)
         .route("/api/tasks", post(run_task_handler))
-        // Issues
-        .route("/api/issues", get(list_issues_handler).post(create_issue_handler))
-        .route("/api/issues/ready", get(ready_issues_handler))
+        // Pearls (canonical)
+        .route("/api/pearls", get(list_pearls_handler).post(create_pearl_handler))
+        .route("/api/pearls/ready", get(ready_pearls_handler))
+        .route("/api/pearls/stats", get(stats_handler))
+        .route("/api/pearls/{id}", get(get_pearl_handler).patch(update_pearl_handler))
+        .route("/api/pearls/{id}/close", post(close_pearl_handler))
+        // Backward-compat aliases. The rename lineage is beads → issues →
+        // pearls; clients that still hit `/api/issues` or `/api/beads` keep
+        // working unchanged. New code should prefer `/api/pearls/*`.
+        .route("/api/issues", get(list_pearls_handler).post(create_pearl_handler))
+        .route("/api/issues/ready", get(ready_pearls_handler))
         .route("/api/issues/stats", get(stats_handler))
-        .route("/api/issues/{id}", get(get_issue_handler).patch(update_issue_handler))
-        .route("/api/issues/{id}/close", post(close_issue_handler))
-        // Backward-compat aliases for /api/beads
-        .route("/api/beads", get(list_issues_handler))
-        .route("/api/beads/{id}", get(get_issue_handler))
-        .route("/api/beads/ready", get(ready_issues_handler))
+        .route("/api/issues/{id}", get(get_pearl_handler).patch(update_pearl_handler))
+        .route("/api/issues/{id}/close", post(close_pearl_handler))
+        .route("/api/beads", get(list_pearls_handler))
+        .route("/api/beads/{id}", get(get_pearl_handler))
+        .route("/api/beads/ready", get(ready_pearls_handler))
         // Workers
         .route("/api/workers", get(list_workers_handler))
         .route("/api/workers/{id}", get(get_worker_handler).delete(kill_worker_handler))
@@ -387,35 +394,35 @@ async fn handle_client_event(state: &AppState, event: ClientEvent) {
         ClientEvent::Steer { task_id, action, message } => {
             tracing::info!(task_id, action, "Steer via WebSocket");
             let comment = format!("[STEERING:{action}] {}", message.unwrap_or_default());
-            let _ = state.issue_store.add_comment(&task_id, &comment);
+            let _ = state.pearl_store.add_comment(&task_id, &comment);
         }
-        ClientEvent::IssueCreate {
+        ClientEvent::PearlCreate {
             title,
             description,
-            issue_type,
+            pearl_type,
             priority,
         } => {
             let desc = description.as_deref().unwrap_or("");
-            let itype = issue_type.as_deref().unwrap_or("task");
+            let itype = pearl_type.as_deref().unwrap_or("task");
             let prio = priority.unwrap_or(2);
-            match crate::issues::create_issue(&state.issue_store, &title, desc, itype, prio) {
+            match crate::pearls::create_pearl(&state.pearl_store, &title, desc, itype, prio) {
                 Ok(issue) => {
-                    let _ = state.event_tx.send(ServerEvent::IssueCreated { id: issue.id, title });
+                    let _ = state.event_tx.send(ServerEvent::PearlCreated { id: issue.id, title });
                 }
                 Err(e) => {
                     let _ = state.event_tx.send(ServerEvent::Error { message: e.to_string() });
                 }
             }
         }
-        ClientEvent::IssueUpdate { id, status, priority } => {
-            let update = smooth_issues::IssueUpdate {
-                status: status.as_deref().and_then(smooth_issues::IssueStatus::from_str_loose),
-                priority: priority.and_then(smooth_issues::Priority::from_u8),
+        ClientEvent::PearlUpdate { id, status, priority } => {
+            let update = smooth_pearls::PearlUpdate {
+                status: status.as_deref().and_then(smooth_pearls::PearlStatus::from_str_loose),
+                priority: priority.and_then(smooth_pearls::Priority::from_u8),
                 ..Default::default()
             };
-            match state.issue_store.update(&id, &update) {
+            match state.pearl_store.update(&id, &update) {
                 Ok(_issue) => {
-                    let _ = state.event_tx.send(ServerEvent::IssueUpdated {
+                    let _ = state.event_tx.send(ServerEvent::PearlUpdated {
                         id,
                         status: status.unwrap_or_else(|| "updated".into()),
                     });
@@ -425,12 +432,12 @@ async fn handle_client_event(state: &AppState, event: ClientEvent) {
                 }
             }
         }
-        ClientEvent::IssueClose { ids } => {
+        ClientEvent::PearlClose { ids } => {
             let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
-            match state.issue_store.close(&refs) {
+            match state.pearl_store.close(&refs) {
                 Ok(count) => {
                     for id in &ids {
-                        let _ = state.event_tx.send(ServerEvent::IssueUpdated {
+                        let _ = state.event_tx.send(ServerEvent::PearlUpdated {
                             id: id.clone(),
                             status: "closed".into(),
                         });
@@ -495,17 +502,17 @@ async fn dispatch_ws_task_in_process(state: &AppState, message: String, model: O
     let event_tx = state.event_tx.clone();
 
     // Create an issue for tracking
-    let issue_store = state.issue_store.clone();
-    let issue_id = crate::issues::create_issue(&issue_store, &format!("Task: {}", truncate_str(&message, 60)), &message, "task", 2)
+    let pearl_store = state.pearl_store.clone();
+    let pearl_id = crate::pearls::create_pearl(&pearl_store, &format!("Task: {}", truncate_str(&message, 60)), &message, "task", 2)
         .ok()
         .map(|i| i.id);
 
-    if let Some(ref id) = issue_id {
-        let update = smooth_issues::IssueUpdate {
-            status: Some(smooth_issues::IssueStatus::InProgress),
+    if let Some(ref id) = pearl_id {
+        let update = smooth_pearls::PearlUpdate {
+            status: Some(smooth_pearls::PearlStatus::InProgress),
             ..Default::default()
         };
-        let _ = issue_store.update(id, &update);
+        let _ = pearl_store.update(id, &update);
     }
 
     let tid = task_id.clone();
@@ -578,8 +585,8 @@ async fn dispatch_ws_task_in_process(state: &AppState, message: String, model: O
                     iterations,
                     cost_usd: cost,
                 });
-                if let Some(ref id) = issue_id {
-                    let _ = issue_store.close(&[id]);
+                if let Some(ref id) = pearl_id {
+                    let _ = pearl_store.close(&[id]);
                 }
                 tracing::info!(task_id = tid, cost_usd = cost, "WS task completed");
             }
@@ -661,19 +668,19 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
 
     let task_id = uuid::Uuid::new_v4().to_string();
     let event_tx = state.event_tx.clone();
-    let issue_store = state.issue_store.clone();
+    let pearl_store = state.pearl_store.clone();
     let last_activity = state.last_activity.clone();
 
     // READ-ONLY metadata: Big Smooth tracks the issue, but the work happens
     // inside the sandbox.
-    let issue_id = crate::issues::create_issue(&issue_store, &format!("Task: {}", truncate_str(&message, 60)), &message, "task", 2)
+    let pearl_id = crate::pearls::create_pearl(&pearl_store, &format!("Task: {}", truncate_str(&message, 60)), &message, "task", 2)
         .ok()
         .map(|i| i.id);
-    if let Some(ref id) = issue_id {
-        let _ = issue_store.update(
+    if let Some(ref id) = pearl_id {
+        let _ = pearl_store.update(
             id,
-            &smooth_issues::IssueUpdate {
-                status: Some(smooth_issues::IssueStatus::InProgress),
+            &smooth_pearls::PearlUpdate {
+                status: Some(smooth_pearls::PearlStatus::InProgress),
                 ..Default::default()
             },
         );
@@ -797,7 +804,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
         let operator_token = crate::policy::generate_operator_token(&tid);
         match crate::policy::generate_policy_for_task(
             &tid,
-            &issue_id.clone().unwrap_or_default(),
+            &pearl_id.clone().unwrap_or_default(),
             "execute",
             &operator_token,
             &[],
@@ -840,7 +847,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
         };
 
         let config = SandboxConfig {
-            bead_id: issue_id.clone().unwrap_or_default(),
+            bead_id: pearl_id.clone().unwrap_or_default(),
             workspace_path: "/workspace".into(),
             env,
             mounts: vec![
@@ -1012,8 +1019,8 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
                 iterations: agent_iterations,
                 cost_usd: 0.0,
             });
-            if let Some(ref id) = issue_id {
-                let _ = issue_store.close(&[id]);
+            if let Some(ref id) = pearl_id {
+                let _ = pearl_store.close(&[id]);
             }
             tracing::info!(task_id = tid, iterations = agent_iterations, "sandboxed WS task completed");
         } else {
@@ -1082,7 +1089,7 @@ async fn system_health_handler(State(state): State<AppState>) -> Json<ApiRespons
             },
             beads: BeadsHealth {
                 status: "healthy".into(),
-                open_issues: state.issue_store.stats().map_or(0, |s| (s.open + s.in_progress) as u32),
+                open_issues: state.pearl_store.stats().map_or(0, |s| (s.open + s.in_progress) as u32),
             },
         },
         ok: true,
@@ -1120,8 +1127,8 @@ async fn run_task_handler(State(state): State<AppState>, Json(req): Json<TaskReq
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
     // Create issue for tracking
-    let issue_id = crate::issues::create_issue(
-        &state.issue_store,
+    let pearl_id = crate::pearls::create_pearl(
+        &state.pearl_store,
         &format!("Task: {}", truncate_str(&req.message, 60)),
         &req.message,
         "task",
@@ -1130,15 +1137,15 @@ async fn run_task_handler(State(state): State<AppState>, Json(req): Json<TaskReq
     .ok()
     .map(|i| i.id);
 
-    if let Some(ref id) = issue_id {
-        let update = smooth_issues::IssueUpdate {
-            status: Some(smooth_issues::IssueStatus::InProgress),
+    if let Some(ref id) = pearl_id {
+        let update = smooth_pearls::PearlUpdate {
+            status: Some(smooth_pearls::PearlStatus::InProgress),
             ..Default::default()
         };
-        let _ = state.issue_store.update(id, &update);
+        let _ = state.pearl_store.update(id, &update);
     }
 
-    let issue_store = state.issue_store.clone();
+    let pearl_store = state.pearl_store.clone();
     let message = req.message.clone();
     let model = req.model.clone();
     let budget = req.budget;
@@ -1165,8 +1172,8 @@ async fn run_task_handler(State(state): State<AppState>, Json(req): Json<TaskReq
                 drop(tx);
 
                 // Close the issue on success
-                if let Some(ref id) = issue_id {
-                    let _ = issue_store.close(&[id]);
+                if let Some(ref id) = pearl_id {
+                    let _ = pearl_store.close(&[id]);
                 }
 
                 tracing::info!(cost_usd = cost, "Task completed successfully");
@@ -1267,22 +1274,22 @@ fn truncate_str(s: &str, max_len: usize) -> String {
 // ── Issues ─────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-pub struct ListIssuesParams {
+pub struct ListPearlsParams {
     status: Option<String>,
 }
 
 #[derive(Deserialize)]
-pub struct CreateIssueBody {
+pub struct CreatePearlBody {
     title: String,
     #[serde(default)]
     description: String,
-    #[serde(rename = "type", default = "default_issue_type")]
-    issue_type: String,
+    #[serde(rename = "type", default = "default_pearl_type")]
+    pearl_type: String,
     #[serde(default = "default_priority")]
     priority: u8,
 }
 
-fn default_issue_type() -> String {
+fn default_pearl_type() -> String {
     "task".into()
 }
 
@@ -1291,24 +1298,24 @@ const fn default_priority() -> u8 {
 }
 
 #[derive(Deserialize)]
-pub struct UpdateIssueBody {
+pub struct UpdatePearlBody {
     status: Option<String>,
     title: Option<String>,
     description: Option<String>,
     priority: Option<u8>,
     #[serde(rename = "type")]
-    issue_type: Option<String>,
+    pearl_type: Option<String>,
 }
 
-async fn list_issues_handler(State(state): State<AppState>, Query(params): Query<ListIssuesParams>) -> Json<ApiResponse<Vec<smooth_issues::Issue>>> {
+async fn list_pearls_handler(State(state): State<AppState>, Query(params): Query<ListPearlsParams>) -> Json<ApiResponse<Vec<smooth_pearls::Pearl>>> {
     state.touch();
-    let issues = crate::issues::list_issues(&state.issue_store, params.status.as_deref()).unwrap_or_default();
+    let issues = crate::pearls::list_pearls(&state.pearl_store, params.status.as_deref()).unwrap_or_default();
     Json(ApiResponse { data: issues, ok: true })
 }
 
-async fn get_issue_handler(State(state): State<AppState>, Path(id): Path<String>) -> Json<ApiResponse<serde_json::Value>> {
+async fn get_pearl_handler(State(state): State<AppState>, Path(id): Path<String>) -> Json<ApiResponse<serde_json::Value>> {
     state.touch();
-    let issue = crate::issues::get_issue(&state.issue_store, &id).unwrap_or(None);
+    let issue = crate::pearls::get_pearl(&state.pearl_store, &id).unwrap_or(None);
     let data = match issue {
         Some(i) => serde_json::to_value(i).unwrap_or(serde_json::json!(null)),
         None => serde_json::json!(null),
@@ -1316,15 +1323,15 @@ async fn get_issue_handler(State(state): State<AppState>, Path(id): Path<String>
     Json(ApiResponse { data, ok: true })
 }
 
-async fn ready_issues_handler(State(state): State<AppState>) -> Json<ApiResponse<Vec<smooth_issues::Issue>>> {
+async fn ready_pearls_handler(State(state): State<AppState>) -> Json<ApiResponse<Vec<smooth_pearls::Pearl>>> {
     state.touch();
-    let issues = crate::issues::get_ready(&state.issue_store).unwrap_or_default();
+    let issues = crate::pearls::get_ready(&state.pearl_store).unwrap_or_default();
     Json(ApiResponse { data: issues, ok: true })
 }
 
-async fn create_issue_handler(State(state): State<AppState>, Json(body): Json<CreateIssueBody>) -> Json<ApiResponse<serde_json::Value>> {
+async fn create_pearl_handler(State(state): State<AppState>, Json(body): Json<CreatePearlBody>) -> Json<ApiResponse<serde_json::Value>> {
     state.touch();
-    match crate::issues::create_issue(&state.issue_store, &body.title, &body.description, &body.issue_type, body.priority) {
+    match crate::pearls::create_pearl(&state.pearl_store, &body.title, &body.description, &body.pearl_type, body.priority) {
         Ok(issue) => Json(ApiResponse {
             data: serde_json::to_value(issue).unwrap_or(serde_json::json!(null)),
             ok: true,
@@ -1336,21 +1343,21 @@ async fn create_issue_handler(State(state): State<AppState>, Json(body): Json<Cr
     }
 }
 
-async fn update_issue_handler(
+async fn update_pearl_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(body): Json<UpdateIssueBody>,
+    Json(body): Json<UpdatePearlBody>,
 ) -> Json<ApiResponse<serde_json::Value>> {
     state.touch();
-    let update = smooth_issues::IssueUpdate {
+    let update = smooth_pearls::PearlUpdate {
         title: body.title,
         description: body.description,
-        status: body.status.as_deref().and_then(smooth_issues::IssueStatus::from_str_loose),
-        priority: body.priority.and_then(smooth_issues::Priority::from_u8),
-        issue_type: body.issue_type.as_deref().and_then(smooth_issues::IssueType::from_str_loose),
+        status: body.status.as_deref().and_then(smooth_pearls::PearlStatus::from_str_loose),
+        priority: body.priority.and_then(smooth_pearls::Priority::from_u8),
+        pearl_type: body.pearl_type.as_deref().and_then(smooth_pearls::PearlType::from_str_loose),
         ..Default::default()
     };
-    match state.issue_store.update(&id, &update) {
+    match state.pearl_store.update(&id, &update) {
         Ok(issue) => Json(ApiResponse {
             data: serde_json::to_value(issue).unwrap_or(serde_json::json!(null)),
             ok: true,
@@ -1362,9 +1369,9 @@ async fn update_issue_handler(
     }
 }
 
-async fn close_issue_handler(State(state): State<AppState>, Path(id): Path<String>) -> Json<ApiResponse<serde_json::Value>> {
+async fn close_pearl_handler(State(state): State<AppState>, Path(id): Path<String>) -> Json<ApiResponse<serde_json::Value>> {
     state.touch();
-    match state.issue_store.close(&[&id]) {
+    match state.pearl_store.close(&[&id]) {
         Ok(count) => Json(ApiResponse {
             data: serde_json::json!({"closed": count}),
             ok: true,
@@ -1376,9 +1383,9 @@ async fn close_issue_handler(State(state): State<AppState>, Path(id): Path<Strin
     }
 }
 
-async fn stats_handler(State(state): State<AppState>) -> Json<ApiResponse<smooth_issues::IssueStats>> {
+async fn stats_handler(State(state): State<AppState>) -> Json<ApiResponse<smooth_pearls::PearlStats>> {
     state.touch();
-    let stats = crate::issues::stats(&state.issue_store).unwrap_or_default();
+    let stats = crate::pearls::stats(&state.pearl_store).unwrap_or_default();
     Json(ApiResponse { data: stats, ok: true })
 }
 
@@ -1421,7 +1428,7 @@ async fn list_reviews_handler(State(state): State<AppState>) -> Json<ApiResponse
 async fn approve_review_handler(State(state): State<AppState>, Path(bead_id): Path<String>) -> Json<ApiResponse<()>> {
     state.touch();
     tracing::info!("Approve review for {bead_id}");
-    let _ = state.issue_store.close(&[&bead_id]);
+    let _ = state.pearl_store.close(&[&bead_id]);
     Json(ApiResponse { data: (), ok: true })
 }
 
@@ -1454,7 +1461,7 @@ async fn search_handler(State(state): State<AppState>, Query(params): Query<Sear
     }
 
     let cwd = std::env::current_dir().unwrap_or_default();
-    let results = crate::search::search_all(&query, &cwd, &state.issue_store);
+    let results = crate::search::search_all(&query, &cwd, &state.pearl_store);
     Json(ApiResponse { data: results, ok: true })
 }
 
@@ -1463,7 +1470,7 @@ async fn search_handler(State(state): State<AppState>, Query(params): Query<Sear
 async fn pause_handler(State(state): State<AppState>, Path(bead_id): Path<String>) -> Json<ApiResponse<String>> {
     state.touch();
     tracing::info!("Pause operator on {bead_id}");
-    let _ = state.issue_store.add_comment(&bead_id, "[STEERING:PAUSE] Operator paused by human.");
+    let _ = state.pearl_store.add_comment(&bead_id, "[STEERING:PAUSE] Operator paused by human.");
     Json(ApiResponse {
         data: "paused".into(),
         ok: true,
@@ -1473,7 +1480,7 @@ async fn pause_handler(State(state): State<AppState>, Path(bead_id): Path<String
 async fn resume_handler(State(state): State<AppState>, Path(bead_id): Path<String>) -> Json<ApiResponse<String>> {
     state.touch();
     tracing::info!("Resume operator on {bead_id}");
-    let _ = state.issue_store.add_comment(&bead_id, "[STEERING:RESUME] Operator resumed.");
+    let _ = state.pearl_store.add_comment(&bead_id, "[STEERING:RESUME] Operator resumed.");
     Json(ApiResponse {
         data: "resumed".into(),
         ok: true,
@@ -1484,7 +1491,7 @@ async fn steer_handler(State(state): State<AppState>, Path(bead_id): Path<String
     state.touch();
     let msg = body.message.unwrap_or_default();
     tracing::info!("Steer operator on {bead_id}: {msg}");
-    let _ = state.issue_store.add_comment(&bead_id, &format!("[STEERING:GUIDANCE] {msg}"));
+    let _ = state.pearl_store.add_comment(&bead_id, &format!("[STEERING:GUIDANCE] {msg}"));
     Json(ApiResponse {
         data: "steered".into(),
         ok: true,
@@ -1494,7 +1501,7 @@ async fn steer_handler(State(state): State<AppState>, Path(bead_id): Path<String
 async fn cancel_handler(State(state): State<AppState>, Path(bead_id): Path<String>) -> Json<ApiResponse<String>> {
     state.touch();
     tracing::info!("Cancel operator on {bead_id}");
-    let _ = state.issue_store.add_comment(&bead_id, "[STEERING:CANCEL] Operator cancelled.");
+    let _ = state.pearl_store.add_comment(&bead_id, "[STEERING:CANCEL] Operator cancelled.");
     Json(ApiResponse {
         data: "cancelled".into(),
         ok: true,
@@ -1565,8 +1572,8 @@ mod tests {
     #[tokio::test]
     async fn test_router_builds() {
         let db = Database::open(&PathBuf::from(":memory:")).unwrap();
-        let issue_store = smooth_issues::IssueStore::open_in_memory().unwrap();
-        let state = AppState::new(db, issue_store);
+        let pearl_store = smooth_pearls::PearlStore::open_in_memory().unwrap();
+        let state = AppState::new(db, pearl_store);
         let _router = build_router(state);
         // If we get here without panic, the router is valid
     }
@@ -1574,8 +1581,8 @@ mod tests {
     #[test]
     fn test_app_state_touch_updates_activity() {
         let db = Database::open(&PathBuf::from(":memory:")).unwrap();
-        let issue_store = smooth_issues::IssueStore::open_in_memory().unwrap();
-        let state = AppState::new(db, issue_store);
+        let pearl_store = smooth_pearls::PearlStore::open_in_memory().unwrap();
+        let state = AppState::new(db, pearl_store);
 
         let before = *state.last_activity.lock().unwrap();
         std::thread::sleep(Duration::from_millis(10));

@@ -35,9 +35,10 @@ smooth/
 ### Key Crates
 
 - **smooth-cli** (`crates/smooth-cli/`): clap entry point, 27 commands including `th access` for policy control
-- **smooth-bigsmooth** (`crates/smooth-bigsmooth/`): axum server, 20+ routes, orchestrator, sandbox pool, policy generation, session management, issues/jira/tailscale
+- **smooth-bigsmooth** (`crates/smooth-bigsmooth/`): axum server, 20+ routes, orchestrator, sandbox pool, policy generation, session management, pearls/jira/tailscale
 - **smooth-operator** (`crates/smooth-operator/`): Rust-native AI agent framework — LLM client, tool system with hooks, agent loop, conversation management, built-in checkpointing (Groove)
-- **smooth-policy** (`crates/smooth-policy/`): shared policy types (network, filesystem, issues, tools, MCP), TOML parsing, glob matching, phase defaults
+- **smooth-policy** (`crates/smooth-policy/`): shared policy types (network, filesystem, pearls, tools, MCP), TOML parsing, glob matching, phase defaults
+- **smooth-pearls** (`crates/smooth-pearls/`): built-in pearl tracker (dependency-graph work items). SQLite-backed, inspired by beads. Types: `Pearl`, `PearlStore`, `PearlStatus`, `PearlUpdate`, `PearlQuery`, etc. Lineage: beads → issues → pearls.
 - **smooth-wonk** (`crates/smooth-wonk/`): in-VM access control authority, policy hot-reload via notify+ArcSwap, access negotiation with Big Smooth
 - **smooth-goalie** (`crates/smooth-goalie/`): in-VM HTTP/HTTPS forward proxy, delegates all decisions to Wonk, JSON-lines audit logging
 - **smooth-narc** (`crates/smooth-narc/`): tool surveillance via ToolHook, secret detection (10 patterns), prompt injection guard (6 patterns), write guard, severity-based alerts
@@ -95,9 +96,9 @@ pnpm dev                     # Vite dev server at :3100
 | `pool.rs` | Sandbox capacity (max 3), port allocation |
 | `tools.rs` | Tool registry + hooks (secret detection, prompt injection) |
 | `policy.rs` | Policy generation, phase defaults, access request handling |
-| `issues.rs` | IssueStore wrapper (list, create, update, close, comment) |
+| `pearls.rs` | `PearlStore` wrapper (list, create, update, close, comment) |
 | `chat.rs` | **DEPRECATED** — legacy OpenCode Zen API (use smooth-operator ProviderRegistry) |
-| `search.rs` | @ autocomplete (issues + globwalk files + path expansion) |
+| `search.rs` | @ autocomplete (pearls + globwalk files + path expansion) |
 | `audit.rs` | Rotating file appender at ~/.smooth/audit/ |
 | `db.rs` | rusqlite: memories, worker_runs, config tables |
 | `jira.rs` | Jira REST client + bidirectional sync |
@@ -168,29 +169,35 @@ See README.md for full architecture diagrams and the plan file for implementatio
 
 All state at `~/.smooth/`:
 - `smooth.db` — SQLite (WAL mode)
-- `issues.db` — Built-in issue tracking (in smooth.db)
+- `pearls` table inside `smooth.db` — Built-in pearl tracking (formerly `issues`; migrated in-place on open)
 - `audit/` — Rotating tool usage logs per actor
 - `providers.json` — LLM credentials
 - `config.json` — CLI settings
 
 ---
 
-## 6. Issue Tracking — Built-in + Jira Integration
+## 6. Pearl Tracking — Built-in + Jira Integration
 
-**Philosophy**: Built-in issue tracking (`th issues`) replaces beads. Jira (SMOODEV project) is the external source of truth for project management.
+**Philosophy**: Built-in pearl tracking (`th pearls`) replaces the older
+`th issues` command (and before that, beads). Jira (SMOODEV project) is
+the external source of truth for project management. The CLI still accepts
+`th issues` as a hidden alias so existing scripts keep working.
+
+**Naming lineage**: beads → issues → pearls. The database migrates in-place
+on first open after the rename lands; the old `issues` table is renamed to
+`pearls` and the `issue_type` column is renamed to `pearl_type`.
 
 ### Quick reference
 
 ```bash
-th issues create --title="SMOODEV-XX: Title" --description="..."
-th issues list --status=open          # All open issues
-th issues list --status=in_progress   # Active work
-th issues show <id>                   # Issue details with dependencies
-th issues update <id> --status=in_progress   # Claim work
-th issues close <id1> <id2> ...       # Close completed issues
-th issues ready                       # Show ready issues (open, no blockers)
-th issues blocked                     # Show blocked issues
-th issues migrate-from-beads          # One-time migration from beads (requires bd CLI)
+th pearls create --title="SMOODEV-XX: Title" --description="..."
+th pearls list --status=open          # All open pearls
+th pearls list --status=in_progress   # Active work
+th pearls show <id>                   # Pearl details with dependencies
+th pearls update <id> --status=in_progress   # Claim work
+th pearls close <id1> <id2> ...       # Close completed pearls
+th pearls ready                       # Show ready pearls (open, no blockers)
+th pearls blocked                     # Show blocked pearls
 ```
 
 ---
@@ -250,10 +257,10 @@ Never edit source code or commit directly on `main`. Always use worktrees.
     cargo build
     ```
 
-2. **Close issues** for completed work:
+2. **Close pearls** for completed work:
 
     ```bash
-    th issues close <id1> <id2> ...
+    th pearls close <id1> <id2> ...
     ```
 
 3. **Merge to main** if on feature branch:

@@ -1,4 +1,4 @@
-//! Integration tests for Big Smooth server + IssueStore + Orchestrator.
+//! Integration tests for Big Smooth server + PearlStore + Orchestrator.
 
 use axum::body::Body;
 use axum::Router;
@@ -7,20 +7,20 @@ use hyper::Request;
 use smooth_bigsmooth::db::Database;
 use smooth_bigsmooth::orchestrator::{Orchestrator, OrchestratorState};
 use smooth_bigsmooth::server::{build_router, AppState};
-use smooth_issues::IssueStore;
+use smooth_pearls::PearlStore;
 use tower::ServiceExt;
 
 /// Build a self-contained test app backed by a temp SQLite database.
-fn test_app() -> (Router, IssueStore) {
+fn test_app() -> (Router, PearlStore) {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("test.db");
     let db = Database::open(&db_path).expect("open db");
-    let issue_store = IssueStore::open(&db_path).expect("open issue store");
-    let state = AppState::new(db, issue_store.clone());
+    let pearl_store = PearlStore::open(&db_path).expect("open issue store");
+    let state = AppState::new(db, pearl_store.clone());
     let router = build_router(state);
     // Leak tempdir so it isn't deleted while tests run.
     std::mem::forget(dir);
-    (router, issue_store)
+    (router, pearl_store)
 }
 
 /// Parse a JSON response body into a `serde_json::Value`.
@@ -75,7 +75,7 @@ async fn system_health() {
 // ── 3. Create issue via API ───────────────────────────────────
 
 #[tokio::test]
-async fn create_issue_via_api() {
+async fn create_pearl_via_api() {
     let (app, _store) = test_app();
 
     let resp = app
@@ -104,15 +104,15 @@ async fn create_issue_via_api() {
 // ── 4. List issues via API ────────────────────────────────────
 
 #[tokio::test]
-async fn list_issues_via_api() {
+async fn list_pearls_via_api() {
     let (app, store) = test_app();
 
     // Seed two issues directly via the store.
-    let new = smooth_issues::NewIssue {
+    let new = smooth_pearls::NewPearl {
         title: "Alpha".into(),
         description: String::new(),
-        issue_type: smooth_issues::IssueType::Task,
-        priority: smooth_issues::Priority::Medium,
+        pearl_type: smooth_pearls::PearlType::Task,
+        priority: smooth_pearls::Priority::Medium,
         assigned_to: None,
         parent_id: None,
         labels: Vec::new(),
@@ -137,14 +137,14 @@ async fn list_issues_via_api() {
 // ── 5. Get issue via API ──────────────────────────────────────
 
 #[tokio::test]
-async fn get_issue_via_api() {
+async fn get_pearl_via_api() {
     let (app, store) = test_app();
 
-    let new = smooth_issues::NewIssue {
+    let new = smooth_pearls::NewPearl {
         title: "Find me".into(),
         description: "details".into(),
-        issue_type: smooth_issues::IssueType::Task,
-        priority: smooth_issues::Priority::High,
+        pearl_type: smooth_pearls::PearlType::Task,
+        priority: smooth_pearls::Priority::High,
         assigned_to: None,
         parent_id: None,
         labels: Vec::new(),
@@ -172,14 +172,14 @@ async fn get_issue_via_api() {
 // ── 6. Close issue via API ────────────────────────────────────
 
 #[tokio::test]
-async fn close_issue_via_api() {
+async fn close_pearl_via_api() {
     let (app, store) = test_app();
 
-    let new = smooth_issues::NewIssue {
+    let new = smooth_pearls::NewPearl {
         title: "Close me".into(),
         description: String::new(),
-        issue_type: smooth_issues::IssueType::Task,
-        priority: smooth_issues::Priority::Medium,
+        pearl_type: smooth_pearls::PearlType::Task,
+        priority: smooth_pearls::Priority::Medium,
         assigned_to: None,
         parent_id: None,
         labels: Vec::new(),
@@ -205,7 +205,7 @@ async fn close_issue_via_api() {
 
     // Verify via store.
     let issue = store.get(&created.id).expect("get").expect("exists");
-    assert_eq!(issue.status, smooth_issues::IssueStatus::Closed);
+    assert_eq!(issue.status, smooth_pearls::PearlStatus::Closed);
 }
 
 // ── 7. Ready issues via API ──────────────────────────────────
@@ -215,18 +215,18 @@ async fn ready_issues_via_api() {
     let (app, store) = test_app();
 
     // Create two issues, close one — only the open one should be "ready".
-    let new = smooth_issues::NewIssue {
+    let new = smooth_pearls::NewPearl {
         title: "Open issue".into(),
         description: String::new(),
-        issue_type: smooth_issues::IssueType::Task,
-        priority: smooth_issues::Priority::Medium,
+        pearl_type: smooth_pearls::PearlType::Task,
+        priority: smooth_pearls::Priority::Medium,
         assigned_to: None,
         parent_id: None,
         labels: Vec::new(),
     };
     store.create(&new).expect("create open");
 
-    let closed_new = smooth_issues::NewIssue {
+    let closed_new = smooth_pearls::NewPearl {
         title: "Closed issue".into(),
         ..new.clone()
     };
@@ -254,18 +254,18 @@ async fn ready_issues_via_api() {
 async fn stats_via_api() {
     let (app, store) = test_app();
 
-    let new = smooth_issues::NewIssue {
+    let new = smooth_pearls::NewPearl {
         title: "A".into(),
         description: String::new(),
-        issue_type: smooth_issues::IssueType::Task,
-        priority: smooth_issues::Priority::Medium,
+        pearl_type: smooth_pearls::PearlType::Task,
+        priority: smooth_pearls::Priority::Medium,
         assigned_to: None,
         parent_id: None,
         labels: Vec::new(),
     };
     store.create(&new).expect("create 1");
     let b = store
-        .create(&smooth_issues::NewIssue {
+        .create(&smooth_pearls::NewPearl {
             title: "B".into(),
             ..new.clone()
         })
@@ -292,11 +292,11 @@ async fn stats_via_api() {
 async fn beads_backward_compat() {
     let (app, store) = test_app();
 
-    let new = smooth_issues::NewIssue {
+    let new = smooth_pearls::NewPearl {
         title: "Bead compat".into(),
         description: String::new(),
-        issue_type: smooth_issues::IssueType::Task,
-        priority: smooth_issues::Priority::Medium,
+        pearl_type: smooth_pearls::PearlType::Task,
+        priority: smooth_pearls::Priority::Medium,
         assigned_to: None,
         parent_id: None,
         labels: Vec::new(),
@@ -336,21 +336,21 @@ async fn beads_backward_compat() {
 
 #[tokio::test]
 async fn orchestrator_schedules_ready_issues() {
-    let store = IssueStore::open_in_memory().expect("in-memory store");
+    let store = PearlStore::open_in_memory().expect("in-memory store");
 
     // Seed ready issues.
-    let new = smooth_issues::NewIssue {
+    let new = smooth_pearls::NewPearl {
         title: "Ready task 1".into(),
         description: String::new(),
-        issue_type: smooth_issues::IssueType::Task,
-        priority: smooth_issues::Priority::High,
+        pearl_type: smooth_pearls::PearlType::Task,
+        priority: smooth_pearls::Priority::High,
         assigned_to: None,
         parent_id: None,
         labels: Vec::new(),
     };
     store.create(&new).expect("create 1");
     store
-        .create(&smooth_issues::NewIssue {
+        .create(&smooth_pearls::NewPearl {
             title: "Ready task 2".into(),
             ..new
         })

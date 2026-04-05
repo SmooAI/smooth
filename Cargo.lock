@@ -5084,9 +5084,9 @@ dependencies = [
  "smooth-archivist",
  "smooth-code",
  "smooth-goalie",
- "smooth-issues",
  "smooth-narc",
  "smooth-operator",
+ "smooth-pearls",
  "smooth-policy",
  "smooth-scribe",
  "smooth-web",
@@ -5120,8 +5120,8 @@ dependencies = [
  "serde_json",
  "smooth-bigsmooth",
  "smooth-code",
- "smooth-issues",
  "smooth-operator",
+ "smooth-pearls",
  "smooth-web",
  "tokio",
  "tracing",
@@ -5171,23 +5171,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "smooth-issues"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "rusqlite",
- "serde",
- "serde_json",
- "smooth-operator",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -5251,6 +5234,24 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "smooth-pearls"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "smooth-operator",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

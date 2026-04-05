@@ -121,10 +121,14 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Issue tracking (built-in, replaces beads)
-    Issues {
+    /// Pearl tracking (built-in work-item tracker, formerly `issues`).
+    ///
+    /// Lineage: beads → issues → pearls. The old `th issues` spelling is
+    /// kept as a hidden alias for backwards compatibility.
+    #[command(alias = "issues")]
+    Pearls {
         #[command(subcommand)]
-        cmd: IssueCommands,
+        cmd: PearlCommands,
     },
     /// System health check and auto-fix
     Doctor,
@@ -263,7 +267,7 @@ enum AccessCommands {
 }
 
 #[derive(Subcommand)]
-enum IssueCommands {
+enum PearlCommands {
     /// Create a new issue
     Create {
         #[arg(long)]
@@ -277,7 +281,7 @@ enum IssueCommands {
         #[arg(long)]
         label: Vec<String>,
     },
-    /// List issues
+    /// List pearls
     List {
         #[arg(long)]
         status: Option<String>,
@@ -298,7 +302,7 @@ enum IssueCommands {
         #[arg(long)]
         assign: Option<String>,
     },
-    /// Close issues
+    /// Close pearls
     Close { ids: Vec<String> },
     /// Reopen an issue
     Reopen { id: String },
@@ -309,13 +313,13 @@ enum IssueCommands {
     },
     /// Add comment
     Comment { id: String, content: String },
-    /// Search issues
+    /// Search pearls
     Search { query: String },
     /// Show statistics
     Stats,
-    /// Show ready issues (open, no blockers)
+    /// Show ready pearls (open, no blockers)
     Ready,
-    /// Show blocked issues
+    /// Show blocked pearls
     Blocked,
     /// Add/remove labels
     Label {
@@ -377,7 +381,7 @@ async fn main() -> Result<()> {
         Some(Commands::Resume { bead_id }) => cmd_steer(&bead_id, "resume", None).await,
         Some(Commands::Steer { bead_id, message }) => cmd_steer(&bead_id, "steer", Some(&message)).await,
         Some(Commands::Cancel { bead_id }) => cmd_steer(&bead_id, "cancel", None).await,
-        Some(Commands::Issues { cmd }) => cmd_issues(cmd).await,
+        Some(Commands::Pearls { cmd }) => cmd_pearls(cmd).await,
         Some(Commands::Audit { cmd }) => cmd_audit(cmd),
         Some(Commands::Web) => {
             println!("Web UI: http://localhost:4400");
@@ -405,8 +409,8 @@ async fn cmd_up(no_leader: bool, port: u16) -> Result<()> {
     println!("  Database: {} ✓", db_path.display());
 
     // Initialize issue store (shares the same SQLite file)
-    let issue_store = smooth_issues::IssueStore::open(&db_path)?;
-    println!("  Issues:   {} ✓", db_path.display());
+    let pearl_store = smooth_pearls::PearlStore::open(&db_path)?;
+    println!("  Pearls:  {} ✓", db_path.display());
 
     if no_leader {
         println!("\nSmooth infrastructure ready (leader skipped).");
@@ -414,7 +418,7 @@ async fn cmd_up(no_leader: bool, port: u16) -> Result<()> {
     }
 
     // Start leader (API + embedded web UI on same port)
-    let state = smooth_bigsmooth::server::AppState::new(db, issue_store);
+    let state = smooth_bigsmooth::server::AppState::new(db, pearl_store);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     println!("  Leader: http://localhost:{port} ✓");
@@ -767,8 +771,8 @@ async fn cmd_code(headless: bool, message: Option<String>, file: Option<String>,
         // Start Big Smooth in background
         let db_path = smooth_bigsmooth::db::default_db_path();
         let db = smooth_bigsmooth::db::Database::open(&db_path)?;
-        let issue_store = smooth_issues::IssueStore::open(&db_path)?;
-        let state = smooth_bigsmooth::server::AppState::new(db, issue_store);
+        let pearl_store = smooth_pearls::PearlStore::open(&db_path)?;
+        let state = smooth_bigsmooth::server::AppState::new(db, pearl_store);
         let addr: SocketAddr = "127.0.0.1:4400".parse()?;
 
         tokio::spawn(async move {
@@ -850,8 +854,8 @@ async fn cmd_doctor() -> Result<()> {
     }
 
     // 5. Check smooth-issues
-    let issue_store = smooth_issues::IssueStore::open(&db_path);
-    match issue_store {
+    let pearl_store = smooth_pearls::PearlStore::open(&db_path);
+    match pearl_store {
         Ok(store) => {
             let stats = store.stats();
             match stats {
@@ -885,14 +889,14 @@ async fn cmd_doctor() -> Result<()> {
     Ok(())
 }
 
-// ── Issues ─────────────────────────────────────────────────────────
+// ── Pearls ─────────────────────────────────────────────────────────
 
-fn open_issue_store() -> Result<smooth_issues::IssueStore> {
+fn open_pearl_store() -> Result<smooth_pearls::PearlStore> {
     let db_path = smooth_bigsmooth::db::default_db_path();
-    smooth_issues::IssueStore::open(&db_path)
+    smooth_pearls::PearlStore::open(&db_path)
 }
 
-fn format_issue_line(issue: &smooth_issues::Issue) -> String {
+fn format_pearl_line(issue: &smooth_pearls::Pearl) -> String {
     let labels_str = if issue.labels.is_empty() {
         String::new()
     } else {
@@ -909,24 +913,24 @@ fn format_issue_line(issue: &smooth_issues::Issue) -> String {
     )
 }
 
-async fn cmd_issues(cmd: IssueCommands) -> Result<()> {
-    let store = open_issue_store()?;
+async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
+    let store = open_pearl_store()?;
 
     match cmd {
-        IssueCommands::Create {
+        PearlCommands::Create {
             title,
             description,
             r#type,
             priority,
             label,
         } => {
-            let issue_type = smooth_issues::IssueType::from_str_loose(&r#type).unwrap_or(smooth_issues::IssueType::Task);
-            let prio = smooth_issues::Priority::from_u8(priority).unwrap_or(smooth_issues::Priority::Medium);
+            let pearl_type = smooth_pearls::PearlType::from_str_loose(&r#type).unwrap_or(smooth_pearls::PearlType::Task);
+            let prio = smooth_pearls::Priority::from_u8(priority).unwrap_or(smooth_pearls::Priority::Medium);
 
-            let new = smooth_issues::NewIssue {
+            let new = smooth_pearls::NewPearl {
                 title,
                 description: description.unwrap_or_default(),
-                issue_type,
+                pearl_type,
                 priority: prio,
                 assigned_to: None,
                 parent_id: None,
@@ -934,31 +938,31 @@ async fn cmd_issues(cmd: IssueCommands) -> Result<()> {
             };
             let issue = store.create(&new)?;
             println!("{} Created {}", "✓".green().bold(), issue.id.green().bold());
-            println!("  {}", format_issue_line(&issue));
+            println!("  {}", format_pearl_line(&issue));
         }
 
-        IssueCommands::List { status } => {
+        PearlCommands::List { status } => {
             let query = if let Some(ref s) = status {
-                let st = smooth_issues::IssueStatus::from_str_loose(s).ok_or_else(|| anyhow::anyhow!("unknown status: {s}"))?;
-                smooth_issues::IssueQuery::new().with_status(st)
+                let st = smooth_pearls::PearlStatus::from_str_loose(s).ok_or_else(|| anyhow::anyhow!("unknown status: {s}"))?;
+                smooth_pearls::PearlQuery::new().with_status(st)
             } else {
-                smooth_issues::IssueQuery::new()
+                smooth_pearls::PearlQuery::new()
             };
             let issues = store.list(&query)?;
             if issues.is_empty() {
-                println!("No issues found.");
+                println!("No pearls found.");
             } else {
                 for issue in &issues {
-                    println!("{}", format_issue_line(issue));
+                    println!("{}", format_pearl_line(issue));
                 }
                 println!("\n{} issue(s)", issues.len());
             }
         }
 
-        IssueCommands::Show { id } => {
+        PearlCommands::Show { id } => {
             let issue = store.get(&id)?.ok_or_else(|| anyhow::anyhow!("issue not found: {id}"))?;
             println!("{} {}", issue.status, issue.title.bold());
-            println!("  {} {} | {} | {}", "ID:".dimmed(), issue.id, issue.priority, issue.issue_type);
+            println!("  {} {} | {} | {}", "ID:".dimmed(), issue.id, issue.priority, issue.pearl_type);
             if let Some(ref assignee) = issue.assigned_to {
                 println!("  {} {assignee}", "Assigned:".dimmed());
             }
@@ -1005,7 +1009,7 @@ async fn cmd_issues(cmd: IssueCommands) -> Result<()> {
             }
         }
 
-        IssueCommands::Update {
+        PearlCommands::Update {
             id,
             status,
             title,
@@ -1013,32 +1017,32 @@ async fn cmd_issues(cmd: IssueCommands) -> Result<()> {
             priority,
             assign,
         } => {
-            let updates = smooth_issues::IssueUpdate {
+            let updates = smooth_pearls::PearlUpdate {
                 title,
                 description,
-                status: status.as_deref().and_then(smooth_issues::IssueStatus::from_str_loose),
-                priority: priority.and_then(smooth_issues::Priority::from_u8),
+                status: status.as_deref().and_then(smooth_pearls::PearlStatus::from_str_loose),
+                priority: priority.and_then(smooth_pearls::Priority::from_u8),
                 assigned_to: assign.map(|a| if a.is_empty() { None } else { Some(a) }),
                 ..Default::default()
             };
             let updated = store.update(&id, &updates)?;
             println!("{} Updated {}", "✓".green().bold(), updated.id);
-            println!("  {}", format_issue_line(&updated));
+            println!("  {}", format_pearl_line(&updated));
         }
 
-        IssueCommands::Close { ids } => {
+        PearlCommands::Close { ids } => {
             let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
             let count = store.close(&id_refs)?;
             println!("{} Closed {count} issue(s)", "✓".green().bold());
         }
 
-        IssueCommands::Reopen { id } => {
+        PearlCommands::Reopen { id } => {
             let issue = store.reopen(&id)?;
             println!("{} Reopened {}", "✓".green().bold(), issue.id);
-            println!("  {}", format_issue_line(&issue));
+            println!("  {}", format_pearl_line(&issue));
         }
 
-        IssueCommands::Dep { cmd } => match cmd {
+        PearlCommands::Dep { cmd } => match cmd {
             DepCommands::Add { issue, depends_on } => {
                 store.add_dep(&issue, &depends_on)?;
                 println!("{} {issue} now depends on {depends_on}", "✓".green().bold());
@@ -1049,24 +1053,24 @@ async fn cmd_issues(cmd: IssueCommands) -> Result<()> {
             }
         },
 
-        IssueCommands::Comment { id, content } => {
+        PearlCommands::Comment { id, content } => {
             let comment = store.add_comment(&id, &content)?;
             println!("{} Comment added ({})", "✓".green().bold(), comment.id.dimmed());
         }
 
-        IssueCommands::Search { query } => {
+        PearlCommands::Search { query } => {
             let results = store.search(&query)?;
             if results.is_empty() {
                 println!("No issues matching \"{query}\".");
             } else {
                 for issue in &results {
-                    println!("{}", format_issue_line(issue));
+                    println!("{}", format_pearl_line(issue));
                 }
                 println!("\n{} result(s)", results.len());
             }
         }
 
-        IssueCommands::Stats => {
+        PearlCommands::Stats => {
             let stats = store.stats()?;
             println!("{}", "Issue Statistics".bold().cyan());
             println!("  {} Open:        {}", "\u{25CB}".dimmed(), stats.open);
@@ -1077,20 +1081,20 @@ async fn cmd_issues(cmd: IssueCommands) -> Result<()> {
             println!("  Total:         {}", stats.total);
         }
 
-        IssueCommands::Ready => {
+        PearlCommands::Ready => {
             let issues = store.ready()?;
             if issues.is_empty() {
                 println!("No ready issues.");
             } else {
                 println!("{}", "Ready Issues (open, no blockers):".bold().cyan());
                 for issue in &issues {
-                    println!("  {}", format_issue_line(issue));
+                    println!("  {}", format_pearl_line(issue));
                 }
                 println!("\n{} issue(s)", issues.len());
             }
         }
 
-        IssueCommands::Blocked => {
+        PearlCommands::Blocked => {
             let issues = store.blocked()?;
             if issues.is_empty() {
                 println!("No blocked issues.");
@@ -1099,13 +1103,13 @@ async fn cmd_issues(cmd: IssueCommands) -> Result<()> {
                 for issue in &issues {
                     let blockers = store.get_blockers(&issue.id)?;
                     let blocker_ids: Vec<&str> = blockers.iter().map(|b| b.id.as_str()).collect();
-                    println!("  {} (blocked by: {})", format_issue_line(issue), blocker_ids.join(", ").dimmed());
+                    println!("  {} (blocked by: {})", format_pearl_line(issue), blocker_ids.join(", ").dimmed());
                 }
                 println!("\n{} issue(s)", issues.len());
             }
         }
 
-        IssueCommands::Label { id, cmd } => match cmd {
+        PearlCommands::Label { id, cmd } => match cmd {
             LabelCommands::Add { label } => {
                 store.add_label(&id, &label)?;
                 println!("{} Added label \"{label}\" to {id}", "✓".green().bold());
@@ -1116,7 +1120,7 @@ async fn cmd_issues(cmd: IssueCommands) -> Result<()> {
             }
         },
 
-        IssueCommands::MigrateFromBeads => {
+        PearlCommands::MigrateFromBeads => {
             cmd_migrate_from_beads(&store)?;
         }
     }
@@ -1124,7 +1128,7 @@ async fn cmd_issues(cmd: IssueCommands) -> Result<()> {
     Ok(())
 }
 
-fn cmd_migrate_from_beads(store: &smooth_issues::IssueStore) -> Result<()> {
+fn cmd_migrate_from_beads(store: &smooth_pearls::PearlStore) -> Result<()> {
     println!("{}", "Migrating from Beads...".bold().cyan());
 
     let mut total = 0;
@@ -1168,14 +1172,14 @@ fn cmd_migrate_from_beads(store: &smooth_issues::IssueStore) -> Result<()> {
                 .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                 .unwrap_or_default();
 
-            let issue_type = smooth_issues::IssueType::from_str_loose(bead_type).unwrap_or(smooth_issues::IssueType::Task);
+            let pearl_type = smooth_pearls::PearlType::from_str_loose(bead_type).unwrap_or(smooth_pearls::PearlType::Task);
             #[allow(clippy::cast_possible_truncation)]
-            let priority = smooth_issues::Priority::from_u8(bead_priority as u8).unwrap_or(smooth_issues::Priority::Medium);
+            let priority = smooth_pearls::Priority::from_u8(bead_priority as u8).unwrap_or(smooth_pearls::Priority::Medium);
 
-            let new = smooth_issues::NewIssue {
+            let new = smooth_pearls::NewPearl {
                 title: bead_title.to_string(),
                 description: bead_desc.to_string(),
-                issue_type,
+                pearl_type,
                 priority,
                 assigned_to: bead["assigned_to"].as_str().map(String::from),
                 parent_id: None,
@@ -1185,12 +1189,12 @@ fn cmd_migrate_from_beads(store: &smooth_issues::IssueStore) -> Result<()> {
             match store.create(&new) {
                 Ok(issue) => {
                     // If the bead was closed/in_progress/deferred, update status
-                    let target_status = smooth_issues::IssueStatus::from_str_loose(status);
+                    let target_status = smooth_pearls::PearlStatus::from_str_loose(status);
                     if let Some(st) = target_status {
-                        if st != smooth_issues::IssueStatus::Open {
+                        if st != smooth_pearls::PearlStatus::Open {
                             let _ = store.update(
                                 &issue.id,
-                                &smooth_issues::IssueUpdate {
+                                &smooth_pearls::PearlUpdate {
                                     status: Some(st),
                                     ..Default::default()
                                 },

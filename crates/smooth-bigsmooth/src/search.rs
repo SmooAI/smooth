@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use smooth_issues::{IssueQuery, IssueStore};
+use smooth_pearls::{PearlQuery, PearlStore};
 
 /// A search result for @ autocomplete.
 #[derive(Debug, Clone, Serialize)]
@@ -16,9 +16,9 @@ pub struct SearchResult {
     pub detail: Option<String>,
 }
 
-/// Search issues by title/ID using `IssueStore`.
-pub fn search_issues(query: &str, issue_store: &IssueStore) -> Vec<SearchResult> {
-    let issues = issue_store.list(&IssueQuery::new()).unwrap_or_default();
+/// Search issues by title/ID using `PearlStore`.
+pub fn search_pearls(query: &str, pearl_store: &PearlStore) -> Vec<SearchResult> {
+    let issues = pearl_store.list(&PearlQuery::new()).unwrap_or_default();
     let q = query.to_lowercase();
     issues
         .into_iter()
@@ -137,12 +137,12 @@ pub fn search_paths(query: &str) -> Vec<SearchResult> {
 }
 
 /// Combined search: issues + files + paths.
-pub fn search_all(query: &str, base_path: &Path, issue_store: &IssueStore) -> Vec<SearchResult> {
+pub fn search_all(query: &str, base_path: &Path, pearl_store: &PearlStore) -> Vec<SearchResult> {
     if query.starts_with('~') || query.starts_with('/') {
         return search_paths(query);
     }
 
-    let mut results = search_issues(query, issue_store);
+    let mut results = search_pearls(query, pearl_store);
     results.extend(search_files(query, base_path));
     results.truncate(15);
     results
@@ -153,17 +153,17 @@ mod tests {
     use super::*;
     use std::fs;
 
-    use smooth_issues::{IssueType as IType, NewIssue, Priority as Prio};
+    use smooth_pearls::{NewPearl, PearlType as IType, Priority as Prio};
 
-    fn test_store() -> IssueStore {
-        IssueStore::open_in_memory().unwrap()
+    fn test_store() -> PearlStore {
+        PearlStore::open_in_memory().unwrap()
     }
 
-    fn new_issue(title: &str) -> NewIssue {
-        NewIssue {
+    fn new_issue(title: &str) -> NewPearl {
+        NewPearl {
             title: title.into(),
             description: String::new(),
-            issue_type: IType::Task,
+            pearl_type: IType::Task,
             priority: Prio::Medium,
             assigned_to: None,
             parent_id: None,
@@ -172,45 +172,45 @@ mod tests {
     }
 
     #[test]
-    fn test_search_issues_by_title() {
+    fn test_search_pearls_by_title() {
         let store = test_store();
         let mut login_issue = new_issue("Fix login bug");
         login_issue.description = "Users cannot log in".into();
         store.create(&login_issue).unwrap();
         store.create(&new_issue("Add dashboard widget")).unwrap();
 
-        let results = search_issues("login", &store);
+        let results = search_pearls("login", &store);
         assert_eq!(results.len(), 1);
         assert!(results[0].label.contains("Fix login bug"));
         assert_eq!(results[0].result_type, "issue");
     }
 
     #[test]
-    fn test_search_issues_by_id() {
+    fn test_search_pearls_by_id() {
         let store = test_store();
         let issue = store.create(&new_issue("Some task")).unwrap();
 
-        let results = search_issues(&issue.id, &store);
+        let results = search_pearls(&issue.id, &store);
         assert_eq!(results.len(), 1);
         assert!(results[0].id == issue.id);
     }
 
     #[test]
-    fn test_search_issues_empty_query() {
+    fn test_search_pearls_empty_query() {
         let store = test_store();
         store.create(&new_issue("Task one")).unwrap();
 
         // Empty query matches everything (contains "")
-        let results = search_issues("", &store);
+        let results = search_pearls("", &store);
         assert!(!results.is_empty());
     }
 
     #[test]
-    fn test_search_issues_no_match() {
+    fn test_search_pearls_no_match() {
         let store = test_store();
         store.create(&new_issue("Fix login bug")).unwrap();
 
-        let results = search_issues("zzzznotfound", &store);
+        let results = search_pearls("zzzznotfound", &store);
         assert!(results.is_empty());
     }
 
