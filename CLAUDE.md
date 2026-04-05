@@ -163,13 +163,23 @@ th issues migrate-from-beads          # One-time migration from beads (requires 
 
 ## 7. Git Workflow
 
-Same as smooai: worktrees, SMOODEV-XX branch naming, th issues + Jira sync.
+> **CRITICAL: All feature work MUST happen in a worktree.** Use `th worktree` commands.
 
 ```bash
-git worktree add ../smooth-SMOODEV-XX-desc -b SMOODEV-XX-desc main
-# work in worktree
-git checkout main && git pull --rebase && git merge SMOODEV-XX-desc --no-ff && git push
+# Create worktree for feature work
+th worktree create SMOODEV-XX-desc
+
+# List active worktrees
+th worktree list
+
+# When done: merge to main
+th worktree merge SMOODEV-XX-desc
+
+# Clean up
+th worktree remove SMOODEV-XX-desc
 ```
+
+Never edit source code or commit directly on `main`. Always use worktrees.
 
 ---
 
