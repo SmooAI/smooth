@@ -35,15 +35,15 @@ smooth/
 ### Key Crates
 
 - **smooth-cli** (`crates/smooth-cli/`): clap entry point, 27 commands including `th access` for policy control
-- **smooth-bigsmooth** (`crates/smooth-bigsmooth/`): axum server, 20+ routes, orchestrator, sandbox pool, policy generation, session management, beads/jira/tailscale
+- **smooth-bigsmooth** (`crates/smooth-bigsmooth/`): axum server, 20+ routes, orchestrator, sandbox pool, policy generation, session management, issues/jira/tailscale
 - **smooth-operator** (`crates/smooth-operator/`): Rust-native AI agent framework — LLM client, tool system with hooks, agent loop, conversation management, built-in checkpointing (Groove)
-- **smooth-policy** (`crates/smooth-policy/`): shared policy types (network, filesystem, beads, tools, MCP), TOML parsing, glob matching, phase defaults
+- **smooth-policy** (`crates/smooth-policy/`): shared policy types (network, filesystem, issues, tools, MCP), TOML parsing, glob matching, phase defaults
 - **smooth-wonk** (`crates/smooth-wonk/`): in-VM access control authority, policy hot-reload via notify+ArcSwap, access negotiation with Big Smooth
 - **smooth-goalie** (`crates/smooth-goalie/`): in-VM HTTP/HTTPS forward proxy, delegates all decisions to Wonk, JSON-lines audit logging
 - **smooth-narc** (`crates/smooth-narc/`): tool surveillance via ToolHook, secret detection (10 patterns), prompt injection guard (6 patterns), write guard, severity-based alerts
 - **smooth-scribe** (`crates/smooth-scribe/`): per-VM structured logging service, LogEntry with trace context, query/filter support
 - **smooth-archivist** (`crates/smooth-archivist/`): central log aggregator, batch ingest from all Scribes, cross-VM query, stats, SSE event stream
-- **smooth-code** (`crates/smooth-code/`): ratatui app, views (dashboard, chat, beads, operators, reviews), markdown renderer, theme
+- **smooth-code** (`crates/smooth-code/`): ratatui AI coding TUI — streaming chat, tool calls, file browser, git, sessions, model picker, extensions
 - **smooth-web** (`crates/smooth-web/`): rust-embed serves compiled Vite SPA
 
 ---
@@ -94,9 +94,9 @@ pnpm dev                     # Vite dev server at :3100
 | `pool.rs` | Sandbox capacity (max 3), port allocation |
 | `tools.rs` | Tool registry + hooks (secret detection, prompt injection) |
 | `policy.rs` | Policy generation, phase defaults, access request handling |
-| `beads.rs` | bd CLI wrapper (list, create, update, close, comment) |
+| `issues.rs` | IssueStore wrapper (list, create, update, close, comment) |
 | `chat.rs` | **DEPRECATED** — legacy OpenCode Zen API (use smooth-operator ProviderRegistry) |
-| `search.rs` | @ autocomplete (beads + globwalk files + path expansion) |
+| `search.rs` | @ autocomplete (issues + globwalk files + path expansion) |
 | `audit.rs` | Rotating file appender at ~/.smooth/audit/ |
 | `db.rs` | rusqlite: memories, worker_runs, config tables |
 | `jira.rs` | Jira REST client + bidirectional sync |
@@ -163,7 +163,7 @@ th issues migrate-from-beads          # One-time migration from beads (requires 
 
 ## 7. Git Workflow
 
-Same as smooai: worktrees, SMOODEV-XX branch naming, beads + Jira sync.
+Same as smooai: worktrees, SMOODEV-XX branch naming, th issues + Jira sync.
 
 ```bash
 git worktree add ../smooth-SMOODEV-XX-desc -b SMOODEV-XX-desc main
@@ -206,10 +206,10 @@ git checkout main && git pull --rebase && git merge SMOODEV-XX-desc --no-ff && g
     cargo build
     ```
 
-2. **Close beads issues** for completed work:
+2. **Close issues** for completed work:
 
     ```bash
-    bd close <id1> <id2> ...
+    th issues close <id1> <id2> ...
     ```
 
 3. **Merge to main** if on feature branch:
