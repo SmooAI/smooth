@@ -4,6 +4,7 @@ pub mod audit;
 
 pub mod chat;
 pub mod db;
+pub mod events;
 pub mod issues;
 pub mod jira;
 pub mod orchestrator;

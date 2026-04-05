@@ -1,13 +1,72 @@
 //! Headless (non-interactive) mode for smooth-code.
 //!
-//! Runs as a client of Big Smooth — sends tasks via POST /api/tasks and
-//! streams SSE events to stdout/stderr. Suitable for scripting and CI.
+//! Runs as a client of Big Smooth — connects to the `/ws` WebSocket endpoint,
+//! sends a `TaskStart` event, and streams `ServerEvent`s to stdout/stderr.
+//! Falls back to the SSE `/api/tasks` endpoint if WebSocket connection fails.
 
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use serde::Serialize;
+use futures_util::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
+use tokio_tungstenite::tungstenite;
+
+// ---------------------------------------------------------------------------
+// WebSocket event types (mirrors smooth-bigsmooth::events)
+// ---------------------------------------------------------------------------
+
+/// Client-to-server event sent over WebSocket.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum ClientEvent {
+    TaskStart {
+        message: String,
+        model: Option<String>,
+        budget: Option<f64>,
+        working_dir: Option<String>,
+    },
+}
+
+/// Server-to-client event received over WebSocket.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum ServerEvent {
+    TokenDelta {
+        task_id: String,
+        content: String,
+    },
+    ToolCallStart {
+        task_id: String,
+        tool_name: String,
+        arguments: String,
+    },
+    ToolCallComplete {
+        task_id: String,
+        tool_name: String,
+        result: String,
+        is_error: bool,
+        duration_ms: u64,
+    },
+    TaskComplete {
+        task_id: String,
+        iterations: u32,
+        cost_usd: f64,
+    },
+    TaskError {
+        task_id: String,
+        message: String,
+    },
+    Pong,
+    Error {
+        message: String,
+    },
+    Connected {
+        session_id: String,
+    },
+    #[serde(other)]
+    Unknown,
+}
 
 // ---------------------------------------------------------------------------
 // JSON output types
@@ -64,8 +123,10 @@ async fn start_bigsmooth_background() -> anyhow::Result<()> {
 
 /// Run smooth-code in headless (non-interactive) mode.
 ///
-/// Connects to Big Smooth (starting it if needed), posts a task via
-/// POST /api/tasks, and streams SSE events to stdout/stderr.
+/// Connects to Big Smooth over WebSocket at `ws://localhost:4400/ws`,
+/// sends a `TaskStart` event, and streams `ServerEvent`s to stdout/stderr.
+///
+/// Falls back to the legacy SSE `/api/tasks` endpoint if WebSocket fails.
 ///
 /// # Errors
 /// Returns an error if the message is empty, Big Smooth cannot be reached,
@@ -76,8 +137,6 @@ pub async fn run_headless(working_dir: PathBuf, message: String, model: Option<S
     }
 
     // 1. Ensure Big Smooth is running
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(300)).build()?;
-
     let health_client = reqwest::Client::builder().timeout(Duration::from_secs(2)).build()?;
     let health = health_client.get("http://localhost:4400/health").send().await;
 
@@ -86,7 +145,128 @@ pub async fn run_headless(working_dir: PathBuf, message: String, model: Option<S
         start_bigsmooth_background().await?;
     }
 
-    // 2. POST /api/tasks with message
+    // 2. Try WebSocket first, fall back to SSE
+    let ws_url = "ws://localhost:4400/ws";
+    match tokio_tungstenite::connect_async(ws_url).await {
+        Ok((ws_stream, _)) => run_headless_ws(ws_stream, working_dir, message, model, budget, json_output).await,
+        Err(e) => {
+            tracing::debug!(error = %e, "WebSocket connection failed, falling back to SSE");
+            run_headless_sse(working_dir, message, model, budget, json_output).await
+        }
+    }
+}
+
+/// Run headless via WebSocket connection.
+async fn run_headless_ws(
+    ws_stream: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    working_dir: PathBuf,
+    message: String,
+    model: Option<String>,
+    budget: Option<f64>,
+    json_output: bool,
+) -> anyhow::Result<()> {
+    let (mut ws_tx, mut ws_rx) = ws_stream.split();
+
+    // Wait for Connected event
+    let mut connected = false;
+    if let Some(Ok(tungstenite::Message::Text(text))) = ws_rx.next().await {
+        if let Ok(ServerEvent::Connected { .. }) = serde_json::from_str(&text) {
+            connected = true;
+        }
+    }
+    if !connected {
+        anyhow::bail!("Did not receive Connected event from Big Smooth");
+    }
+
+    // Send TaskStart
+    let task_start = ClientEvent::TaskStart {
+        message,
+        model,
+        budget,
+        working_dir: Some(working_dir.to_string_lossy().into_owned()),
+    };
+    let json = serde_json::to_string(&task_start)?;
+    ws_tx
+        .send(tungstenite::Message::Text(json.into()))
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to send TaskStart: {e}"))?;
+
+    // Stream events
+    let mut content_buf = String::new();
+    let mut tool_calls: Vec<HeadlessToolCall> = Vec::new();
+    let mut cost = 0.0_f64;
+
+    while let Some(Ok(msg)) = ws_rx.next().await {
+        let text = match msg {
+            tungstenite::Message::Text(t) => t.to_string(),
+            tungstenite::Message::Close(_) => break,
+            _ => continue,
+        };
+
+        let Ok(event) = serde_json::from_str::<ServerEvent>(&text) else {
+            continue;
+        };
+
+        match event {
+            ServerEvent::TokenDelta { content, .. } => {
+                content_buf.push_str(&content);
+                if !json_output {
+                    print!("{content}");
+                    let _ = std::io::stdout().flush();
+                }
+            }
+            ServerEvent::ToolCallStart { tool_name, .. } => {
+                eprintln!("[tool] {tool_name}(...)");
+            }
+            ServerEvent::ToolCallComplete { tool_name, is_error, .. } => {
+                let status = if is_error { "error" } else { "ok" };
+                eprintln!("[tool] {tool_name} -> {status}");
+                tool_calls.push(HeadlessToolCall {
+                    name: tool_name,
+                    success: !is_error,
+                });
+            }
+            ServerEvent::TaskComplete { iterations, cost_usd, .. } => {
+                cost = cost_usd;
+                eprintln!("[done] completed in {iterations} iterations");
+                break;
+            }
+            ServerEvent::TaskError { message, .. } => {
+                eprintln!("[error] {message}");
+                anyhow::bail!("Task failed: {message}");
+            }
+            ServerEvent::Error { message } => {
+                eprintln!("[error] {message}");
+            }
+            ServerEvent::Pong | ServerEvent::Connected { .. } | ServerEvent::Unknown => {}
+        }
+    }
+
+    // Close WebSocket cleanly
+    let _ = ws_tx.send(tungstenite::Message::Close(None)).await;
+
+    // Trailing newline for plain text
+    if !json_output {
+        println!();
+    }
+
+    // JSON output mode
+    if json_output {
+        let output = HeadlessOutput {
+            content: content_buf,
+            tool_calls,
+            cost,
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    }
+
+    Ok(())
+}
+
+/// Fallback: run headless via SSE (legacy `/api/tasks` endpoint).
+async fn run_headless_sse(working_dir: PathBuf, message: String, model: Option<String>, budget: Option<f64>, json_output: bool) -> anyhow::Result<()> {
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(300)).build()?;
+
     let task_req = serde_json::json!({
         "message": message,
         "model": model,
@@ -107,7 +287,6 @@ pub async fn run_headless(working_dir: PathBuf, message: String, model: Option<S
         anyhow::bail!("Big Smooth returned {status}: {body}");
     }
 
-    // 3. Stream SSE events
     let mut content_buf = String::new();
     let mut tool_calls: Vec<HeadlessToolCall> = Vec::new();
     let mut cost = 0.0_f64;
@@ -115,7 +294,6 @@ pub async fn run_headless(working_dir: PathBuf, message: String, model: Option<S
     let mut stream = resp.bytes_stream();
     let mut line_buf = String::new();
 
-    use futures_util::StreamExt;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
         let text = String::from_utf8_lossy(&chunk);
@@ -130,17 +308,14 @@ pub async fn run_headless(working_dir: PathBuf, message: String, model: Option<S
         }
     }
 
-    // Process any remaining data
     if !line_buf.is_empty() {
         process_sse_line(&line_buf, json_output, &mut content_buf, &mut tool_calls, &mut cost);
     }
 
-    // Ensure trailing newline for plain text output
     if !json_output {
         println!();
     }
 
-    // JSON output mode
     if json_output {
         let output = HeadlessOutput {
             content: content_buf,
@@ -203,7 +378,6 @@ fn process_sse_line(line: &str, json_output: bool, content_buf: &mut String, too
             if let Some(iterations) = event.get("iterations").and_then(|i| i.as_u64()) {
                 eprintln!("[done] completed in {iterations} iterations");
             }
-            // Extract cost from the event if present
             if let Some(c) = event.get("cost").and_then(|c| c.as_f64()) {
                 *cost = c;
             }
@@ -219,7 +393,6 @@ fn process_sse_line(line: &str, json_output: bool, content_buf: &mut String, too
             eprintln!("[warn] budget exceeded: ${spent:.4} / ${limit:.4}");
         }
         "TaskCost" => {
-            // Custom event emitted by /api/tasks after agent completes
             if let Some(c) = event.get("cost").and_then(|c| c.as_f64()) {
                 *cost = c;
             }
