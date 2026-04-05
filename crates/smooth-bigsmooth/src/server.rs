@@ -995,8 +995,12 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
         });
         touch();
 
-        // Exec the runner inside the VM. Env vars were set at create time;
-        // we just invoke the binary.
+        // Exec the runner inside the VM. The agent has a bash tool and can
+        // install whatever dev tools it needs (apk add cargo rust, etc.)
+        // as part of its own workflow. No pre-installation — the agent
+        // discovers its environment and adapts. Quality checks are the
+        // agent's responsibility: it should compile, test, and iterate
+        // before reporting done.
         let runner_in_vm = format!("/opt/smooth/bin/{runner_name}");
         let _ = event_tx.send(ServerEvent::ToolCallStart {
             task_id: tid.clone(),

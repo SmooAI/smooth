@@ -326,19 +326,21 @@ async fn run_rust_leg(
     workspace: &std::path::Path,
     llm: &smooth_operator::llm::LlmConfig,
 ) -> (u32, u32, (String, i64, String)) {
-    let task_message = concat!(
-        "You are implementing a small Rust crate called task_api. ",
-        "The workspace at /workspace already contains Cargo.toml and tests/spec_test.rs. ",
-        "Step 1: read tests/spec_test.rs in full to understand the HTTP contract. ",
-        "Step 2: create src/lib.rs exporting pub fn app() -> axum::Router implementing every endpoint: ",
-        "GET /health returning JSON with status and version, ",
-        "POST /tasks creating a task with title required, description, priority default medium, tags default empty, auto id, created_at, status open, returns 201, ",
-        "GET /tasks listing with optional status and priority filters, ",
-        "GET /tasks/:id returning 404 if not found, ",
-        "PATCH /tasks/:id for partial updates, DELETE /tasks/:id returning 204. ",
-        "Use Mutex<HashMap<String, Task>> for state. Return 422 if title missing. ",
-        "Do not modify Cargo.toml or tests. Only create src/lib.rs."
+    // Write full instructions to a file in the workspace (bind-mounted
+    // from host). The env var SMOOTH_TASK gets a short pointer; the
+    // runner will also check /workspace/.smooth-task for details.
+    // This avoids the kernel cmdline TooLarge limit.
+    let task_detail = concat!(
+        "Read tests/spec_test.rs. Create src/lib.rs: pub fn app() -> axum::Router. ",
+        "Endpoints: GET /health (json status+version), POST /tasks (201, title required else 422, ",
+        "auto id+created_at, default priority medium, status open, tags empty), ",
+        "GET /tasks (optional status/priority filters), GET /tasks/:id (404 if missing), ",
+        "PATCH /tasks/:id, DELETE /tasks/:id (204). Use Mutex<HashMap> state. ",
+        "Only create src/lib.rs. Then: apk add cargo rust, cargo test -- --test-threads=1. ",
+        "Fix errors and retest until all tests pass. Quality checks mandatory."
     );
+    std::fs::write(workspace.join(".smooth-task"), task_detail).expect("write task detail");
+    let task_message = "Rust task_api crate. Read /workspace/.smooth-task for full instructions.";
     send_task_and_wait(ws, task_message, workspace).await;
 
     let lib_rs = workspace.join("src/lib.rs");
@@ -378,21 +380,17 @@ async fn run_ts_leg(
     workspace: &std::path::Path,
     llm: &smooth_operator::llm::LlmConfig,
 ) -> (u32, u32, (String, i64, String)) {
-    let task_message = concat!(
-        "You are implementing a small TypeScript Hono API called task_api. ",
-        "The workspace at /workspace already contains package.json, tsconfig.json, pnpm-lock.yaml, ",
-        "vitest.config.ts, and tests/spec.test.ts. ",
-        "Step 1: read tests/spec.test.ts to understand the HTTP contract. ",
-        "Step 2: create src/server.ts exporting function app(): Hono implementing every endpoint: ",
-        "GET /health returning JSON status ok and version, ",
-        "POST /tasks creating a task with title required (422 if missing), description, priority default medium, tags default empty, auto id via crypto.randomUUID, created_at ISO string, status open, returns 201, ",
-        "GET /tasks listing with optional status and priority query filters, ",
-        "GET /tasks/:id returning 404 if not found, ",
-        "PATCH /tasks/:id for partial updates, DELETE /tasks/:id returning 204. ",
-        "Use a module-level Map<string, Task> for state. ",
-        "Do not modify package.json, tsconfig.json, lockfile, vitest config, or tests. Only create src/server.ts. ",
-        "Do not run pnpm install -- it will be run on the host after you finish."
+    let task_detail = concat!(
+        "Read tests/spec.test.ts. Create src/server.ts: export default Hono app. ",
+        "Endpoints: GET /health (json status+version), POST /tasks (201, title required else 422, ",
+        "auto id via crypto.randomUUID, created_at ISO, default priority medium, status open, tags empty), ",
+        "GET /tasks (optional status/priority filters), GET /tasks/:id (404 if missing), ",
+        "PATCH /tasks/:id, DELETE /tasks/:id (204). Use Map<string,Task> state. ",
+        "Only create src/server.ts. Then: apk add nodejs npm, npm install -g pnpm, pnpm install, pnpm test. ",
+        "Fix errors and retest until all tests pass. Quality checks mandatory."
     );
+    std::fs::write(workspace.join(".smooth-task"), task_detail).expect("write task detail");
+    let task_message = "TypeScript Hono task_api. Read /workspace/.smooth-task for full instructions.";
     send_task_and_wait(ws, task_message, workspace).await;
 
     let server_ts = workspace.join("src/server.ts");
@@ -448,7 +446,7 @@ async fn send_task_and_wait(ws: &mut tokio_tungstenite::WebSocketStream<tokio_tu
         "type": "TaskStart",
         "message": message,
         "model": null,
-        "budget": 1.0,
+        "budget": 3.0,
         "working_dir": workspace.to_string_lossy(),
     });
     ws.send(Message::Text(task_start.to_string().into())).await.expect("send TaskStart");
