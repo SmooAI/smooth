@@ -90,7 +90,7 @@ pnpm dev                     # Vite dev server at :3100
 |---|---|
 | `server.rs` | axum router, all API routes (20+), access control routes |
 | `orchestrator.rs` | State machine: Idle → Scheduling → Dispatching → Monitoring → Reviewing |
-| `sandbox.rs` | msb CLI wrapper: create, destroy, exec, status; token gen, policy mount |
+| `sandbox.rs` | Embedded [`microsandbox`] Rust SDK: create, destroy, exec, status. No external `msb` CLI — hardware-isolated microVMs boot directly from the binary. |
 | `pool.rs` | Sandbox capacity (max 3), port allocation |
 | `tools.rs` | Tool registry + hooks (secret detection, prompt injection) |
 | `policy.rs` | Policy generation, phase defaults, access request handling |
