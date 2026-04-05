@@ -234,10 +234,7 @@ pub async fn destroy_sandbox(msb_name: &str) -> Result<()> {
     // cleanup to the Arc drop (the crate handles lifecycle internally).
     match Arc::try_unwrap(arc) {
         Ok(sandbox) => {
-            sandbox
-                .stop_and_wait()
-                .await
-                .with_context(|| format!("Failed to stop sandbox '{msb_name}'"))?;
+            sandbox.stop_and_wait().await.with_context(|| format!("Failed to stop sandbox '{msb_name}'"))?;
         }
         Err(arc_shared) => {
             tracing::debug!(
@@ -398,10 +395,7 @@ mod tests {
         };
 
         // SMOKE_SANDBOX_PORT lets the operator pick a free port on CI if needed.
-        let port = std::env::var("SMOOTH_SMOKE_PORT")
-            .ok()
-            .and_then(|s| s.parse::<u16>().ok())
-            .unwrap_or(24096);
+        let port = std::env::var("SMOOTH_SMOKE_PORT").ok().and_then(|s| s.parse::<u16>().ok()).unwrap_or(24096);
 
         let handle = create_sandbox(&config, port).await.expect("create sandbox");
         assert!(handle.msb_name.starts_with("smooth-operator-"));

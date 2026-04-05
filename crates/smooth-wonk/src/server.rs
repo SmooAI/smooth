@@ -14,6 +14,17 @@ pub struct AppState {
     negotiator: Negotiator,
 }
 
+impl AppState {
+    /// Construct an `AppState` directly from a policy holder and negotiator.
+    ///
+    /// Intended for tests and in-process embedding that want to skip
+    /// [`run_server`]'s listener binding.
+    #[must_use]
+    pub fn new(policy: PolicyHolder, negotiator: Negotiator) -> Self {
+        Self { policy, negotiator }
+    }
+}
+
 /// Run the Wonk HTTP server.
 ///
 /// # Errors
