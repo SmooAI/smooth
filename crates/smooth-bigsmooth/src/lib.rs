@@ -7,6 +7,7 @@ pub mod db;
 pub mod events;
 pub mod issues;
 pub mod jira;
+pub mod operator_client;
 pub mod orchestrator;
 pub mod policy;
 pub mod pool;

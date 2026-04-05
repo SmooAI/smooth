@@ -1,72 +1,17 @@
 //! Headless (non-interactive) mode for smooth-code.
 //!
-//! Runs as a client of Big Smooth — connects to the `/ws` WebSocket endpoint,
-//! sends a `TaskStart` event, and streams `ServerEvent`s to stdout/stderr.
+//! Uses [`BigSmoothClient`] to connect to Big Smooth over WebSocket,
+//! send a `TaskStart` event, and stream `ServerEvent`s to stdout/stderr.
 //! Falls back to the SSE `/api/tasks` endpoint if WebSocket connection fails.
 
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use futures_util::{SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
-use tokio_tungstenite::tungstenite;
+use futures_util::StreamExt;
+use serde::Serialize;
 
-// ---------------------------------------------------------------------------
-// WebSocket event types (mirrors smooth-bigsmooth::events)
-// ---------------------------------------------------------------------------
-
-/// Client-to-server event sent over WebSocket.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-enum ClientEvent {
-    TaskStart {
-        message: String,
-        model: Option<String>,
-        budget: Option<f64>,
-        working_dir: Option<String>,
-    },
-}
-
-/// Server-to-client event received over WebSocket.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-enum ServerEvent {
-    TokenDelta {
-        task_id: String,
-        content: String,
-    },
-    ToolCallStart {
-        task_id: String,
-        tool_name: String,
-        arguments: String,
-    },
-    ToolCallComplete {
-        task_id: String,
-        tool_name: String,
-        result: String,
-        is_error: bool,
-        duration_ms: u64,
-    },
-    TaskComplete {
-        task_id: String,
-        iterations: u32,
-        cost_usd: f64,
-    },
-    TaskError {
-        task_id: String,
-        message: String,
-    },
-    Pong,
-    Error {
-        message: String,
-    },
-    Connected {
-        session_id: String,
-    },
-    #[serde(other)]
-    Unknown,
-}
+use crate::client::{BigSmoothClient, ServerEvent};
 
 // ---------------------------------------------------------------------------
 // JSON output types
@@ -88,43 +33,13 @@ pub struct HeadlessToolCall {
 }
 
 // ---------------------------------------------------------------------------
-// Big Smooth lifecycle helpers
-// ---------------------------------------------------------------------------
-
-/// Start Big Smooth by spawning `th up` as a background process and waiting
-/// for it to become healthy.
-async fn start_bigsmooth_background() -> anyhow::Result<()> {
-    // Find the `th` binary — it should be on PATH or be `self`
-    let th_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("th"));
-
-    // Spawn `th up` as a detached background process
-    let _child = tokio::process::Command::new(&th_bin)
-        .arg("up")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("Failed to spawn Big Smooth (th up): {e}"))?;
-
-    // Wait for health check (up to 10s)
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(2)).build()?;
-    for _ in 0..100 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        if client.get("http://localhost:4400/health").send().await.is_ok_and(|r| r.status().is_success()) {
-            return Ok(());
-        }
-    }
-
-    anyhow::bail!("Big Smooth failed to start within 10 seconds")
-}
-
-// ---------------------------------------------------------------------------
 // Headless entry point
 // ---------------------------------------------------------------------------
 
 /// Run smooth-code in headless (non-interactive) mode.
 ///
-/// Connects to Big Smooth over WebSocket at `ws://localhost:4400/ws`,
-/// sends a `TaskStart` event, and streams `ServerEvent`s to stdout/stderr.
+/// Connects to Big Smooth via [`BigSmoothClient`], sends a task, and
+/// streams events to stdout/stderr.
 ///
 /// Falls back to the legacy SSE `/api/tasks` endpoint if WebSocket fails.
 ///
@@ -136,77 +51,35 @@ pub async fn run_headless(working_dir: PathBuf, message: String, model: Option<S
         anyhow::bail!("message must not be empty");
     }
 
-    // 1. Ensure Big Smooth is running
-    let health_client = reqwest::Client::builder().timeout(Duration::from_secs(2)).build()?;
-    let health = health_client.get("http://localhost:4400/health").send().await;
+    let mut client = BigSmoothClient::new("http://localhost:4400");
 
-    if health.is_err() || !health.as_ref().is_ok_and(|r| r.status().is_success()) {
-        eprintln!("Starting Big Smooth...");
-        start_bigsmooth_background().await?;
-    }
-
-    // 2. Try WebSocket first, fall back to SSE
-    let ws_url = "ws://localhost:4400/ws";
-    match tokio_tungstenite::connect_async(ws_url).await {
-        Ok((ws_stream, _)) => run_headless_ws(ws_stream, working_dir, message, model, budget, json_output).await,
+    match client.connect().await {
+        Ok(()) => run_headless_client(client, working_dir, message, model, budget, json_output).await,
         Err(e) => {
-            tracing::debug!(error = %e, "WebSocket connection failed, falling back to SSE");
+            tracing::debug!(error = %e, "BigSmoothClient connection failed, falling back to SSE");
             run_headless_sse(working_dir, message, model, budget, json_output).await
         }
     }
 }
 
-/// Run headless via WebSocket connection.
-async fn run_headless_ws(
-    ws_stream: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+/// Run headless via [`BigSmoothClient`].
+async fn run_headless_client(
+    mut client: BigSmoothClient,
     working_dir: PathBuf,
     message: String,
     model: Option<String>,
     budget: Option<f64>,
     json_output: bool,
 ) -> anyhow::Result<()> {
-    let (mut ws_tx, mut ws_rx) = ws_stream.split();
+    let mut events = client
+        .run_task(&message, model.as_deref(), budget, Some(&working_dir.to_string_lossy()))
+        .await?;
 
-    // Wait for Connected event
-    let mut connected = false;
-    if let Some(Ok(tungstenite::Message::Text(text))) = ws_rx.next().await {
-        if let Ok(ServerEvent::Connected { .. }) = serde_json::from_str(&text) {
-            connected = true;
-        }
-    }
-    if !connected {
-        anyhow::bail!("Did not receive Connected event from Big Smooth");
-    }
-
-    // Send TaskStart
-    let task_start = ClientEvent::TaskStart {
-        message,
-        model,
-        budget,
-        working_dir: Some(working_dir.to_string_lossy().into_owned()),
-    };
-    let json = serde_json::to_string(&task_start)?;
-    ws_tx
-        .send(tungstenite::Message::Text(json.into()))
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to send TaskStart: {e}"))?;
-
-    // Stream events
     let mut content_buf = String::new();
     let mut tool_calls: Vec<HeadlessToolCall> = Vec::new();
     let mut cost = 0.0_f64;
 
-    while let Some(Ok(msg)) = ws_rx.next().await {
-        let text = match msg {
-            tungstenite::Message::Text(t) => t.to_string(),
-            tungstenite::Message::Close(_) => break,
-            _ => continue,
-        };
-
-        let Ok(event) = serde_json::from_str::<ServerEvent>(&text) else {
-            continue;
-        };
-
+    while let Some(event) = events.recv().await {
         match event {
             ServerEvent::TokenDelta { content, .. } => {
                 content_buf.push_str(&content);
@@ -228,7 +101,7 @@ async fn run_headless_ws(
             }
             ServerEvent::TaskComplete { iterations, cost_usd, .. } => {
                 cost = cost_usd;
-                eprintln!("[done] completed in {iterations} iterations");
+                eprintln!("[done] {iterations} iterations, ${cost_usd:.4}");
                 break;
             }
             ServerEvent::TaskError { message, .. } => {
@@ -238,12 +111,9 @@ async fn run_headless_ws(
             ServerEvent::Error { message } => {
                 eprintln!("[error] {message}");
             }
-            ServerEvent::Pong | ServerEvent::Connected { .. } | ServerEvent::Unknown => {}
+            _ => {}
         }
     }
-
-    // Close WebSocket cleanly
-    let _ = ws_tx.send(tungstenite::Message::Close(None)).await;
 
     // Trailing newline for plain text
     if !json_output {
