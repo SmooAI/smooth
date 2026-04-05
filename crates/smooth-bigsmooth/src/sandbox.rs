@@ -31,6 +31,17 @@ use microsandbox::Sandbox;
 use serde::Serialize;
 use uuid::Uuid;
 
+/// A bind mount from a host path into the sandbox.
+#[derive(Debug, Clone)]
+pub struct BindMount {
+    /// Absolute path on the host.
+    pub host_path: String,
+    /// Path inside the guest.
+    pub guest_path: String,
+    /// Whether the mount is read-only.
+    pub readonly: bool,
+}
+
 /// Configuration for creating a sandbox.
 #[derive(Debug, Clone)]
 pub struct SandboxConfig {
@@ -45,6 +56,8 @@ pub struct SandboxConfig {
     pub cpus: u32,
     pub memory_mb: u32,
     pub timeout_seconds: u64,
+    /// Host → guest bind mounts applied to the microVM.
+    pub mounts: Vec<BindMount>,
 }
 
 impl Default for SandboxConfig {
@@ -61,6 +74,7 @@ impl Default for SandboxConfig {
             cpus: 2,
             memory_mb: 4096,
             timeout_seconds: 30 * 60,
+            mounts: Vec::new(),
         }
     }
 }
@@ -190,6 +204,21 @@ pub async fn create_sandbox(config: &SandboxConfig, host_port: u16) -> Result<Sa
     // Inject environment variables (LLM API key, model, etc.).
     for (k, v) in &config.env {
         builder = builder.env(k, v);
+    }
+
+    // Apply bind mounts. The closure-based volume API requires owned strings
+    // because it runs after our references go out of scope.
+    for mount in &config.mounts {
+        let host = mount.host_path.clone();
+        let readonly = mount.readonly;
+        builder = builder.volume(mount.guest_path.clone(), move |m| {
+            let m = m.bind(host);
+            if readonly {
+                m.readonly()
+            } else {
+                m
+            }
+        });
     }
 
     let sandbox = builder

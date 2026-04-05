@@ -607,16 +607,65 @@ async fn dispatch_ws_task_in_process(state: &AppState, message: String, model: O
 // unaffected.
 // ---------------------------------------------------------------------------
 
-async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, _model: Option<String>, _budget: Option<f64>, working_dir: Option<String>) {
-    use crate::sandbox::{self, SandboxConfig};
+/// Locate the cross-compiled `smooth-operator-runner` binary that Big Smooth
+/// will mount into each sandbox.
+///
+/// Resolution order:
+///  1. `SMOOTH_OPERATOR_RUNNER` env var (absolute path, overrides everything)
+///  2. `<CARGO_MANIFEST_DIR>/../../target/aarch64-unknown-linux-musl/release/smooth-operator-runner`
+///  3. `./target/aarch64-unknown-linux-musl/release/smooth-operator-runner` (cwd)
+///
+/// Returns `None` if no binary is found; callers should fall back to the
+/// legacy echo path with a clear error message so developers know they need
+/// to run `scripts/build-operator-runner.sh`.
+fn find_operator_runner_binary() -> Option<std::path::PathBuf> {
+    if let Ok(explicit) = std::env::var("SMOOTH_OPERATOR_RUNNER") {
+        let p = std::path::PathBuf::from(explicit);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+
+    // Walk up from CARGO_MANIFEST_DIR looking for target/aarch64-unknown-linux-musl/release.
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let mut dir = std::path::PathBuf::from(manifest);
+    for _ in 0..5 {
+        let candidate = dir
+            .join("target")
+            .join("aarch64-unknown-linux-musl")
+            .join("release")
+            .join("smooth-operator-runner");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+
+    // Last resort: look relative to the current working directory.
+    let cwd_candidate = std::env::current_dir()
+        .ok()?
+        .join("target")
+        .join("aarch64-unknown-linux-musl")
+        .join("release")
+        .join("smooth-operator-runner");
+    if cwd_candidate.is_file() {
+        return Some(cwd_candidate);
+    }
+    None
+}
+
+async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Option<String>, budget: Option<f64>, working_dir: Option<String>) {
+    use crate::sandbox::{self, BindMount, SandboxConfig};
 
     let task_id = uuid::Uuid::new_v4().to_string();
     let event_tx = state.event_tx.clone();
     let issue_store = state.issue_store.clone();
     let last_activity = state.last_activity.clone();
 
-    // READ-ONLY metadata: Big Smooth still tracks the issue, but the work
-    // itself happens in the sandbox.
+    // READ-ONLY metadata: Big Smooth tracks the issue, but the work happens
+    // inside the sandbox.
     let issue_id = crate::issues::create_issue(&issue_store, &format!("Task: {}", truncate_str(&message, 60)), &message, "task", 2)
         .ok()
         .map(|i| i.id);
@@ -630,11 +679,74 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, _model: O
         );
     }
 
-    let workspace = working_dir.unwrap_or_else(|| "/workspace".to_string());
+    // Resolve the runner binary and working directory upfront. Both are
+    // needed as host paths to mount into the VM.
+    let runner_bin = match find_operator_runner_binary() {
+        Some(p) => p,
+        None => {
+            let err = "smooth-operator-runner binary not found. Run scripts/build-operator-runner.sh to cross-compile it, or set SMOOTH_OPERATOR_RUNNER=/absolute/path.";
+            let _ = event_tx.send(ServerEvent::TaskError {
+                task_id: task_id.clone(),
+                message: err.into(),
+            });
+            tracing::error!("sandboxed dispatch: {err}");
+            return;
+        }
+    };
+
+    // Working dir on the host — the agent reads/writes here from inside the VM.
+    // Fall back to cwd if not provided. If the caller gave us a path that
+    // doesn't exist yet, create it so the bind mount has something to point at.
+    let host_workspace: std::path::PathBuf = working_dir
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+    if !host_workspace.exists() {
+        if let Err(e) = std::fs::create_dir_all(&host_workspace) {
+            let _ = state.event_tx.send(ServerEvent::TaskError {
+                task_id: task_id.clone(),
+                message: format!("failed to create host workspace {}: {e}", host_workspace.display()),
+            });
+            return;
+        }
+    }
+
+    // Resolve the binary's parent directory so we can mount the whole folder
+    // (virtiofs prefers directory mounts). The binary will end up at
+    // /opt/smooth/bin/smooth-operator-runner inside the VM.
+    let Some(runner_dir) = runner_bin.parent().map(std::path::Path::to_path_buf) else {
+        let _ = event_tx.send(ServerEvent::TaskError {
+            task_id: task_id.clone(),
+            message: "smooth-operator-runner binary has no parent directory".into(),
+        });
+        return;
+    };
+
+    // Canonicalize host paths so bind mounts resolve correctly.
+    let runner_dir_str = runner_dir.canonicalize().unwrap_or(runner_dir).to_string_lossy().to_string();
+    let workspace_canon = host_workspace.canonicalize().unwrap_or(host_workspace.clone()).to_string_lossy().to_string();
+    let runner_name = runner_bin
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "smooth-operator-runner".into());
+
     let tid = task_id.clone();
 
+    // LLM config — Big Smooth loads providers.json from the host and passes
+    // them into the sandbox as env vars. The runner never touches the host
+    // filesystem; all secrets come in via env.
+    let (api_url, api_key, final_model) = match load_llm_config_for_runner(&model) {
+        Ok(x) => x,
+        Err(e) => {
+            let _ = event_tx.send(ServerEvent::TaskError {
+                task_id: tid.clone(),
+                message: format!("no LLM provider configured: {e}"),
+            });
+            return;
+        }
+    };
+
     tokio::spawn(async move {
-        // Refresh idle timer so Big Smooth doesn't shut down mid-task.
         let touch = || {
             if let Ok(mut last) = last_activity.lock() {
                 *last = std::time::Instant::now();
@@ -642,27 +754,56 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, _model: O
         };
         touch();
 
-        // Tell the client we're going sandboxed so it sees the path distinction.
         let _ = event_tx.send(ServerEvent::ToolCallStart {
             task_id: tid.clone(),
             tool_name: "sandbox.create".into(),
-            arguments: serde_json::json!({ "workspace": workspace, "task": truncate_str(&message, 120) }).to_string(),
+            arguments: serde_json::json!({
+                "workspace": workspace_canon,
+                "runner_bin": runner_dir_str,
+                "task": truncate_str(&message, 120)
+            })
+            .to_string(),
         });
 
-        // 1. Create the sandbox. `alpine` is pulled by microsandbox on first
-        //    use and cached thereafter.
+        // Build the sandbox config with two bind mounts:
+        //   /opt/smooth/bin (RO) — runner binary directory
+        //   /workspace       (RW) — user's working dir
+        let mut env = std::collections::HashMap::new();
+        env.insert("SMOOTH_TASK".into(), message.clone());
+        env.insert("SMOOTH_API_URL".into(), api_url);
+        env.insert("SMOOTH_API_KEY".into(), api_key);
+        env.insert("SMOOTH_MODEL".into(), final_model);
+        env.insert("SMOOTH_WORKSPACE".into(), "/workspace".into());
+        env.insert("SMOOTH_OPERATOR_ID".into(), tid.clone());
+        if let Some(b) = budget {
+            env.insert("SMOOTH_BUDGET_USD".into(), b.to_string());
+        }
+
         let config = SandboxConfig {
             bead_id: issue_id.clone().unwrap_or_default(),
-            workspace_path: workspace.clone(),
+            workspace_path: "/workspace".into(),
+            env,
+            mounts: vec![
+                BindMount {
+                    host_path: runner_dir_str.clone(),
+                    guest_path: "/opt/smooth/bin".into(),
+                    readonly: true,
+                },
+                BindMount {
+                    host_path: workspace_canon.clone(),
+                    guest_path: "/workspace".into(),
+                    readonly: false,
+                },
+            ],
             ..SandboxConfig::default()
         };
 
-        // Pick an ephemeral host port so this works even if something is
-        // already on 14096.
-        let host_port = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
-            Ok(l) => l.local_addr().map(|a| a.port()).unwrap_or(0),
-            Err(_) => 0,
-        };
+        let host_port = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .ok()
+            .and_then(|l| l.local_addr().ok())
+            .map(|a| a.port())
+            .unwrap_or(0);
 
         let handle = match sandbox::create_sandbox(&config, host_port).await {
             Ok(h) => h,
@@ -685,26 +826,17 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, _model: O
         });
         touch();
 
-        // 2. Hand the task off to the sandbox. Today we exec a shell snippet
-        //    that echoes the task and lists the workspace — this is the
-        //    architectural smoke test that proves dispatch works end-to-end.
-        //    Once a full operator OCI image exists, replace this exec with
-        //    an operator entrypoint that runs the agent + Wonk + Goalie +
-        //    Narc + Scribe inside the VM.
-        let sh = format!(
-            "echo '=== Smooth sandboxed task ===' && echo 'operator: {op}' && echo 'task:' && cat <<'__TASK__'\n{msg}\n__TASK__\necho '=== workspace ===' && ls -la / 2>&1 | head -20 && echo '=== done ==='",
-            op = handle.operator_id,
-            msg = message.replace("__TASK__", "\\_\\_TASK\\_\\_"),
-        );
-
+        // Exec the runner inside the VM. Env vars were set at create time;
+        // we just invoke the binary.
+        let runner_in_vm = format!("/opt/smooth/bin/{runner_name}");
         let _ = event_tx.send(ServerEvent::ToolCallStart {
             task_id: tid.clone(),
             tool_name: "sandbox.exec".into(),
-            arguments: sh.chars().take(200).collect::<String>(),
+            arguments: runner_in_vm.clone(),
         });
 
         let exec_started = std::time::Instant::now();
-        let (stdout, stderr, code) = match sandbox::exec_in_sandbox(&handle.msb_name, &["sh", "-c", &sh]).await {
+        let (stdout, stderr, code) = match sandbox::exec_in_sandbox(&handle.msb_name, &[runner_in_vm.as_str()]).await {
             Ok(r) => r,
             Err(e) => {
                 let _ = event_tx.send(ServerEvent::TaskError {
@@ -717,18 +849,85 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, _model: O
         };
         touch();
 
-        // Stream the captured stdout to the client as a TokenDelta so the
-        // headless client prints it the same way it prints agent output today.
-        if !stdout.is_empty() {
-            let _ = event_tx.send(ServerEvent::TokenDelta {
-                task_id: tid.clone(),
-                content: stdout.clone(),
-            });
+        // The runner emits one JSON AgentEvent per line on stdout. Parse each
+        // line and translate to ServerEvents. Any non-JSON line is forwarded
+        // as a raw TokenDelta (helps with debugging).
+        let mut agent_iterations: u32 = 0;
+        let mut saw_completed = false;
+        for line in stdout.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<serde_json::Value>(line) {
+                Ok(event) => {
+                    let Some(ty) = event.get("type").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    match ty {
+                        "TokenDelta" => {
+                            if let Some(content) = event.get("content").and_then(|v| v.as_str()) {
+                                let _ = event_tx.send(ServerEvent::TokenDelta {
+                                    task_id: tid.clone(),
+                                    content: content.to_string(),
+                                });
+                            }
+                        }
+                        "ToolCallStart" => {
+                            let tool_name = event.get("tool_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let _ = event_tx.send(ServerEvent::ToolCallStart {
+                                task_id: tid.clone(),
+                                tool_name,
+                                arguments: String::new(),
+                            });
+                        }
+                        "ToolCallComplete" => {
+                            let tool_name = event.get("tool_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let is_error = event.get("is_error").and_then(serde_json::Value::as_bool).unwrap_or(false);
+                            let _ = event_tx.send(ServerEvent::ToolCallComplete {
+                                task_id: tid.clone(),
+                                tool_name,
+                                result: String::new(),
+                                is_error,
+                                duration_ms: 0,
+                            });
+                        }
+                        "Completed" => {
+                            saw_completed = true;
+                            if let Some(iters) = event.get("iterations").and_then(serde_json::Value::as_u64) {
+                                agent_iterations = u32::try_from(iters).unwrap_or(u32::MAX);
+                            }
+                        }
+                        "Error" => {
+                            if let Some(message) = event.get("message").and_then(|v| v.as_str()) {
+                                let _ = event_tx.send(ServerEvent::TaskError {
+                                    task_id: tid.clone(),
+                                    message: message.to_string(),
+                                });
+                            }
+                        }
+                        // Started / LlmRequest / LlmResponse / etc. are
+                        // informational — we don't forward them yet but can
+                        // later if clients want richer visibility.
+                        _ => {}
+                    }
+                }
+                Err(_) => {
+                    // Non-JSON line — forward as TokenDelta so the user can
+                    // see any debugging output the runner prints directly.
+                    let _ = event_tx.send(ServerEvent::TokenDelta {
+                        task_id: tid.clone(),
+                        content: format!("{line}\n"),
+                    });
+                }
+            }
         }
         if !stderr.is_empty() {
+            // Runner stderr is tracing output + NarcHook alert summaries.
+            // Forward it so operators can audit what the in-VM stack saw.
             let _ = event_tx.send(ServerEvent::TokenDelta {
                 task_id: tid.clone(),
-                content: format!("[stderr] {stderr}"),
+                content: format!("[runner stderr]\n{stderr}"),
             });
         }
 
@@ -740,32 +939,44 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, _model: O
             duration_ms: u64::try_from(exec_started.elapsed().as_millis()).unwrap_or(u64::MAX),
         });
 
-        // 3. Tear down the VM.
         if let Err(e) = sandbox::destroy_sandbox(&handle.msb_name).await {
             tracing::warn!(task_id = tid, error = %e, "sandboxed dispatch: destroy_sandbox failed");
         }
 
-        // 4. Report final status. An exit code of 0 is success.
-        if code == 0 {
+        if code == 0 && saw_completed {
             let _ = event_tx.send(ServerEvent::TaskComplete {
                 task_id: tid.clone(),
-                iterations: 1,
+                iterations: agent_iterations,
                 cost_usd: 0.0,
             });
             if let Some(ref id) = issue_id {
                 let _ = issue_store.close(&[id]);
             }
-            tracing::info!(task_id = tid, "sandboxed WS task completed");
+            tracing::info!(task_id = tid, iterations = agent_iterations, "sandboxed WS task completed");
         } else {
             let _ = event_tx.send(ServerEvent::TaskError {
                 task_id: tid.clone(),
-                message: format!("sandbox exec exited with code {code}: {stderr}"),
+                message: format!("sandboxed runner exited with code {code}"),
             });
             tracing::error!(task_id = tid, exit = code, "sandboxed WS task failed");
         }
 
         touch();
     });
+}
+
+/// Load LLM config for the in-VM runner. Big Smooth reads its own
+/// providers.json (which it already does for the in-process path) and
+/// projects the relevant fields into env vars the runner can consume.
+fn load_llm_config_for_runner(model_override: &Option<String>) -> anyhow::Result<(String, String, String)> {
+    let providers_path = dirs_next::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("no home directory"))?
+        .join(".smooth/providers.json");
+    let registry = smooth_operator::providers::ProviderRegistry::load_from_file(&providers_path)
+        .map_err(|e| anyhow::anyhow!("reading {}: {e}", providers_path.display()))?;
+    let llm = registry.default_llm_config().map_err(|e| anyhow::anyhow!("default provider: {e}"))?;
+    let model = model_override.clone().unwrap_or(llm.model);
+    Ok((llm.api_url, llm.api_key, model))
 }
 
 // ── Health ─────────────────────────────────────────────────
