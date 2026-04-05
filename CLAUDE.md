@@ -41,6 +41,7 @@ smooth/
 - **smooth-wonk** (`crates/smooth-wonk/`): in-VM access control authority, policy hot-reload via notify+ArcSwap, access negotiation with Big Smooth
 - **smooth-goalie** (`crates/smooth-goalie/`): in-VM HTTP/HTTPS forward proxy, delegates all decisions to Wonk, JSON-lines audit logging
 - **smooth-narc** (`crates/smooth-narc/`): tool surveillance via ToolHook, secret detection (10 patterns), prompt injection guard (6 patterns), write guard, severity-based alerts
+- **smooth-operator-runner** (`crates/smooth-operator-runner/`): Binary that runs *inside* each microVM. Hosts the agent loop + file/bash tools + NarcHook, streams JSON-lines `AgentEvent`s on stdout. Cross-compiled to `aarch64-unknown-linux-musl`; Big Smooth mounts it into the sandbox at runtime. Build with `scripts/build-operator-runner.sh`.
 - **smooth-scribe** (`crates/smooth-scribe/`): per-VM structured logging service, LogEntry with trace context, query/filter support
 - **smooth-archivist** (`crates/smooth-archivist/`): central log aggregator, batch ingest from all Scribes, cross-VM query, stats, SSE event stream
 - **smooth-code** (`crates/smooth-code/`): ratatui AI coding TUI — streaming chat, tool calls, file browser, git, sessions, model picker, extensions
@@ -112,13 +113,29 @@ Big Smooth's WebSocket `TaskStart` handler can dispatch tasks one of two ways:
   with tools executing against the host filesystem. Fast, works without any
   special setup, but Big Smooth is NOT read-only on this path.
 - **Sandboxed** (`SMOOTH_SANDBOXED=1`): Big Smooth spawns a real microVM via
-  the embedded `microsandbox` crate, runs the task inside the VM, and streams
-  events back over the broadcast channel. Big Smooth performs zero writes and
-  zero tool execution — it is strictly the READ-ONLY orchestrator the
-  security architecture promises.
+  the embedded `microsandbox` crate, mounts the cross-compiled
+  `smooth-operator-runner` binary at `/opt/smooth/bin`, bind-mounts the
+  user's working directory at `/workspace`, and execs the runner inside the
+  VM. The runner hosts the agent loop, NarcHook tool surveillance, and file
+  tools; it streams `AgentEvent`s as JSON-lines on stdout, which Big Smooth
+  parses and forwards to WebSocket clients. Big Smooth performs zero writes,
+  zero tool execution, and zero LLM calls — it is strictly the READ-ONLY
+  orchestrator the security architecture promises.
 
-The sandboxed path is the one the architecture actually describes. The
-in-process path is kept for backwards compatibility and for the existing
+The sandboxed path requires a one-time dev setup to build the runner
+binary for the sandbox's target triple. On a fresh clone:
+
+```bash
+rustup target add aarch64-unknown-linux-musl
+cargo install --locked cargo-zigbuild
+pip3 install ziglang                          # provides python-zig for cargo-zigbuild
+bash scripts/build-operator-runner.sh         # produces target/aarch64-unknown-linux-musl/release/smooth-operator-runner
+```
+
+Re-run `scripts/build-operator-runner.sh` after changing anything under
+`crates/smooth-operator-runner/` or its transitive deps.
+
+The in-process path is kept for backwards compatibility and for the existing
 headless E2E tests. New features should target the sandboxed path.
 
 ### Security Architecture

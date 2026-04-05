@@ -70,27 +70,33 @@ async fn sandboxed_dispatch_boots_vm_and_streams_events_back() {
         .expect("some event")
         .expect("ok");
 
+    // Create a real host workspace for the bind mount. The sandboxed dispatch
+    // mounts this directory into the VM at /workspace; any file the in-VM
+    // runner writes there will be visible on the host afterwards.
+    let workspace = tempfile::tempdir().expect("tempdir for workspace");
+    let workspace_path = workspace.path().to_string_lossy().to_string();
+
     // Send a TaskStart. The handler will route through dispatch_ws_task →
-    // dispatch_ws_task_sandboxed, which spawns a microVM and execs a shell
-    // snippet that echoes the task.
+    // dispatch_ws_task_sandboxed, which mounts the cross-compiled runner +
+    // workspace into a microVM and execs the runner inside.
     let task_start = serde_json::json!({
         "type": "TaskStart",
-        "message": "sandboxed dispatch smoke test",
+        "message": "Write a file named hello.txt in the workspace with the content 'hello from the vm'.",
         "model": null,
-        "budget": null,
-        "working_dir": "/workspace"
+        "budget": 0.5,
+        "working_dir": workspace_path
     });
     ws.send(Message::Text(task_start.to_string().into())).await.expect("send TaskStart");
 
-    // Collect events for up to 60 seconds. First-run VM boot takes a couple
-    // of seconds; subsequent runs are sub-second.
+    // Collect events. The in-VM runner makes real LLM calls, so budget
+    // enough time for VM boot (~5s cold) + a couple of agent iterations.
     let mut saw_sandbox_create = false;
     let mut saw_sandbox_exec = false;
     let mut saw_token_delta = false;
     let mut saw_task_complete = false;
     let mut task_error: Option<String> = None;
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
     while tokio::time::Instant::now() < deadline {
         let next = tokio::time::timeout(Duration::from_secs(5), ws.next()).await;
         let Ok(Some(Ok(msg))) = next else { continue };
@@ -132,6 +138,20 @@ async fn sandboxed_dispatch_boots_vm_and_streams_events_back() {
     assert!(saw_sandbox_create, "expected a sandbox.create event");
     assert!(saw_sandbox_exec, "expected a sandbox.exec event");
     assert!(saw_token_delta, "expected at least one TokenDelta from sandbox stdout");
+
+    // The in-VM runner wrote a file to the workspace mount; because this is
+    // a bind mount, we should see the file on the host too. This is the
+    // acid test that the full architecture works — Big Smooth never
+    // touched the filesystem, but the agent's work persists because the
+    // sandbox's workspace IS the host tempdir.
+    let hello_path = workspace.path().join("hello.txt");
+    assert!(
+        hello_path.exists(),
+        "in-VM runner should have written {}, but the file doesn't exist on the host",
+        hello_path.display()
+    );
+    let contents = std::fs::read_to_string(&hello_path).expect("read hello.txt");
+    assert!(contents.to_ascii_lowercase().contains("hello"), "unexpected file contents: {contents:?}");
     assert!(saw_task_complete, "expected TaskComplete at end of run");
 }
 

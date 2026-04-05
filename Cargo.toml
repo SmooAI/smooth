@@ -57,7 +57,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json", "stream"] }
+# Use rustls-tls instead of the default native-tls so the crate (and its
+# downstream users — notably smooth-operator-runner cross-compiled to
+# aarch64-unknown-linux-musl) builds without a system OpenSSL install.
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "charset", "http2"] }
 
 # File search
 globwalk = "0.9"
