@@ -25,6 +25,7 @@ async-trait.workspace = true
 bytes.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
+tokio-tungstenite.workspace = true
 dirs-next.workspace = true
 rusqlite = { workspace = true, optional = true }
 

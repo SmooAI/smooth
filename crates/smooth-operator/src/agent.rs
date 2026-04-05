@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
+use crate::bigsmooth_client::{BigSmoothReporter, ControlEvent, ReporterEvent};
 use crate::checkpoint::{Checkpoint, CheckpointEvent, CheckpointStore, CheckpointStrategy};
 use crate::cost::{CostBudget, CostTracker, ModelPricing};
 use crate::human::{HumanRequest, HumanResponse};
@@ -31,6 +32,8 @@ pub struct AgentConfig {
     pub budget: Option<CostBudget>,
     pub human_tx: Option<UnboundedSender<HumanRequest>>,
     pub human_rx: Option<Arc<tokio::sync::Mutex<UnboundedReceiver<HumanResponse>>>>,
+    /// Optional reporter for communicating back to Big Smooth from inside a sandbox.
+    pub reporter: Option<Arc<tokio::sync::Mutex<BigSmoothReporter>>>,
 }
 
 impl AgentConfig {
@@ -49,6 +52,7 @@ impl AgentConfig {
             budget: None,
             human_tx: None,
             human_rx: None,
+            reporter: None,
         }
     }
 
@@ -90,6 +94,12 @@ impl AgentConfig {
     pub fn with_human_channel(mut self, tx: UnboundedSender<HumanRequest>, rx: Arc<tokio::sync::Mutex<UnboundedReceiver<HumanResponse>>>) -> Self {
         self.human_tx = Some(tx);
         self.human_rx = Some(rx);
+        self
+    }
+
+    /// Set a `BigSmoothReporter` for reporting progress back to Big Smooth.
+    pub fn with_reporter(mut self, reporter: Arc<tokio::sync::Mutex<BigSmoothReporter>>) -> Self {
+        self.reporter = Some(reporter);
         self
     }
 }
@@ -368,6 +378,26 @@ impl Agent {
         let tool_schemas = self.tools.schemas();
 
         for iteration in 1..=self.config.max_iterations {
+            // Check for steering commands from Big Smooth
+            if let Some(control) = self.check_steering() {
+                match control {
+                    ControlEvent::Cancel => {
+                        tracing::info!("Received cancel from Big Smooth");
+                        self.report_to_bigsmooth(ReporterEvent::TaskError {
+                            message: "Cancelled by Big Smooth".into(),
+                        });
+                        return Ok(conversation);
+                    }
+                    ControlEvent::Steer { action, message } => {
+                        tracing::info!(action, ?message, "Received steering command from Big Smooth");
+                        // Inject steering as a system message
+                        let steer_msg = format!("[STEERING: {action}] {}", message.unwrap_or_default());
+                        conversation.push(Message::system(steer_msg));
+                    }
+                    _ => {}
+                }
+            }
+
             // Compact if approaching context limit
             if conversation.needs_compaction() {
                 let result = conversation.compact(&self.config.compaction_strategy, None);
@@ -462,6 +492,11 @@ impl Agent {
                     agent_id: self.id.clone(),
                     iterations: iteration,
                 });
+                let cost = self.cost_tracker.lock().expect("lock cost_tracker").total_cost_usd;
+                self.report_to_bigsmooth(ReporterEvent::TaskComplete {
+                    iterations: iteration,
+                    cost_usd: cost,
+                });
                 return Ok(conversation);
             }
 
@@ -470,6 +505,10 @@ impl Agent {
                     self.emit(AgentEvent::ToolCallStart {
                         iteration,
                         tool_name: tool_call.name.clone(),
+                    });
+                    self.report_to_bigsmooth(ReporterEvent::ToolCallStart {
+                        tool_name: tool_call.name.clone(),
+                        arguments: tool_call.arguments.to_string(),
                     });
                 }
 
@@ -481,6 +520,12 @@ impl Agent {
                         tool_name: tool_call.name.clone(),
                         is_error: result.is_error,
                     });
+                    self.report_to_bigsmooth(ReporterEvent::ToolCallComplete {
+                        tool_name: tool_call.name.clone(),
+                        result: result.content.chars().take(500).collect(),
+                        is_error: result.is_error,
+                        duration_ms: 0,
+                    });
                     conversation.push(Message::tool_result(&tool_call.id, &result.content));
                     self.maybe_checkpoint(&conversation, iteration, CheckpointEvent::ToolCallComplete);
                 }
@@ -490,13 +535,25 @@ impl Agent {
                         iteration,
                         tool_name: tool_call.name.clone(),
                     });
+                    self.report_to_bigsmooth(ReporterEvent::ToolCallStart {
+                        tool_name: tool_call.name.clone(),
+                        arguments: tool_call.arguments.to_string(),
+                    });
 
+                    let start = std::time::Instant::now();
                     let result = self.tools.execute(tool_call).await;
+                    let duration_ms = start.elapsed().as_millis() as u64;
 
                     self.emit(AgentEvent::ToolCallComplete {
                         iteration,
                         tool_name: tool_call.name.clone(),
                         is_error: result.is_error,
+                    });
+                    self.report_to_bigsmooth(ReporterEvent::ToolCallComplete {
+                        tool_name: tool_call.name.clone(),
+                        result: result.content.chars().take(500).collect(),
+                        is_error: result.is_error,
+                        duration_ms,
                     });
 
                     conversation.push(Message::tool_result(&tool_call.id, &result.content));
@@ -611,6 +668,7 @@ impl Agent {
                 match &event_result {
                     Ok(StreamEvent::Delta { content }) => {
                         let _ = tx.send(AgentEvent::TokenDelta { content: content.clone() });
+                        self.report_to_bigsmooth(ReporterEvent::TokenDelta { content: content.clone() });
                     }
                     Ok(StreamEvent::Done { .. }) => {
                         let _ = tx.send(AgentEvent::StreamingComplete);
@@ -789,6 +847,30 @@ impl Agent {
         if let Some(handler) = &self.event_handler {
             handler(event);
         }
+    }
+
+    /// Report an event to Big Smooth via the reporter (if configured). Fire-and-forget.
+    fn report_to_bigsmooth(&self, event: ReporterEvent) {
+        if let Some(reporter) = &self.config.reporter {
+            let reporter = Arc::clone(reporter);
+            tokio::spawn(async move {
+                let guard = reporter.lock().await;
+                if let Err(e) = guard.report(event).await {
+                    tracing::warn!(error = %e, "failed to report to Big Smooth");
+                }
+            });
+        }
+    }
+
+    /// Check for steering commands from Big Smooth. Returns Some(ControlEvent) if one is pending.
+    fn check_steering(&self) -> Option<ControlEvent> {
+        if let Some(reporter) = &self.config.reporter {
+            // Use try_lock to avoid blocking the agent loop
+            if let Ok(mut guard) = reporter.try_lock() {
+                return guard.try_recv_control();
+            }
+        }
+        None
     }
 }
 
@@ -1010,6 +1092,17 @@ mod tests {
             assert_eq!(cid, &child_id);
             assert_eq!(task, "test task");
         }
+    }
+
+    #[test]
+    fn agent_config_with_reporter_builder() {
+        let reporter = Arc::new(tokio::sync::Mutex::new(BigSmoothReporter::new()));
+        let config = test_config().with_reporter(reporter);
+        assert!(config.reporter.is_some());
+
+        // Default should be None
+        let config2 = test_config();
+        assert!(config2.reporter.is_none());
     }
 
     #[test]

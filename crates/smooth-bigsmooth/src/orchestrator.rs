@@ -8,7 +8,10 @@ use std::collections::HashMap;
 use anyhow::Result;
 use serde::Serialize;
 use smooth_issues::{IssueStatus, IssueStore, IssueUpdate};
+use tokio::sync::broadcast;
 
+use crate::events::ServerEvent;
+use crate::operator_client::{OperatorClient, OperatorEvent};
 use crate::pool::SandboxPool;
 use crate::sandbox::SandboxHandle;
 
@@ -82,6 +85,10 @@ pub struct Orchestrator {
     pub issue_store: IssueStore,
     pub active_workers: HashMap<String, SandboxHandle>,
     pub completed_beads: Vec<String>,
+    /// WebSocket clients for communicating with each operator (keyed by bead_id).
+    pub operator_clients: HashMap<String, OperatorClient>,
+    /// Broadcast sender for forwarding events to TUI/web clients.
+    pub event_tx: Option<broadcast::Sender<ServerEvent>>,
 }
 
 impl Orchestrator {
@@ -93,6 +100,21 @@ impl Orchestrator {
             issue_store,
             active_workers: HashMap::new(),
             completed_beads: Vec::new(),
+            operator_clients: HashMap::new(),
+            event_tx: None,
+        }
+    }
+
+    /// Set the broadcast sender for forwarding operator events to connected clients.
+    pub fn with_event_tx(mut self, event_tx: broadcast::Sender<ServerEvent>) -> Self {
+        self.event_tx = Some(event_tx);
+        self
+    }
+
+    /// Broadcast a `ServerEvent` to all connected clients (if event_tx is set).
+    fn broadcast(&self, event: ServerEvent) {
+        if let Some(tx) = &self.event_tx {
+            let _ = tx.send(event);
         }
     }
 
@@ -140,7 +162,9 @@ impl Orchestrator {
             match self.pool.create_operator(bead_id) {
                 Ok(handle) => {
                     let operator_id = handle.operator_id.clone();
+                    let ws_url = format!("ws://localhost:{}/ws", handle.host_port);
                     tracing::info!("Dispatched operator {operator_id} for bead {bead_id}");
+
                     let _ = self.issue_store.update(
                         bead_id,
                         &IssueUpdate {
@@ -148,6 +172,30 @@ impl Orchestrator {
                             ..Default::default()
                         },
                     );
+
+                    // Create OperatorClient and connect to the operator's WS server
+                    let mut client = OperatorClient::new(&operator_id, &ws_url);
+                    match client.connect().await {
+                        Ok(()) => {
+                            // Look up the issue title/description for the task message
+                            let message = self
+                                .issue_store
+                                .get(bead_id)
+                                .ok()
+                                .flatten()
+                                .map(|issue| format!("{}: {}", issue.title, issue.description))
+                                .unwrap_or_else(|| format!("Work on bead {bead_id}"));
+
+                            if let Err(e) = client.assign_task(bead_id, &message, None, "").await {
+                                tracing::error!("Failed to assign task for {bead_id}: {e}");
+                            }
+                            self.operator_clients.insert(bead_id.clone(), client);
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to connect to operator {operator_id}: {e}");
+                        }
+                    }
+
                     self.active_workers.insert(bead_id.clone(), handle);
                     assignments.insert(bead_id.clone(), operator_id);
                 }
@@ -166,21 +214,91 @@ impl Orchestrator {
         Ok(())
     }
 
-    /// Monitor: check active operators.
+    /// Monitor: check active operators and poll for events from operator clients.
     async fn monitor(&mut self) -> Result<()> {
-        // Check for completed / timed out workers
         let mut completed = Vec::new();
+        let mut failed = Vec::new();
 
-        for (bead_id, handle) in &self.active_workers {
-            let status = crate::sandbox::get_status(&handle.msb_name);
-            if !status.running {
-                completed.push(bead_id.clone());
+        // Poll each operator client for events (non-blocking via try_recv)
+        let bead_ids: Vec<String> = self.operator_clients.keys().cloned().collect();
+        for bead_id in &bead_ids {
+            if let Some(client) = self.operator_clients.get_mut(bead_id) {
+                // Use tokio::time::timeout for a near-instant non-blocking poll
+                let poll_result = tokio::time::timeout(std::time::Duration::from_millis(10), client.recv()).await;
+
+                if let Ok(Some(event)) = poll_result {
+                    match event {
+                        OperatorEvent::TaskComplete { iterations, cost_usd } => {
+                            tracing::info!(bead_id, iterations, cost_usd, "Operator completed task");
+                            self.broadcast(ServerEvent::TaskComplete {
+                                task_id: bead_id.clone(),
+                                iterations,
+                                cost_usd,
+                            });
+                            completed.push(bead_id.clone());
+                        }
+                        OperatorEvent::TaskError { message } => {
+                            tracing::error!(bead_id, message, "Operator task failed");
+                            self.broadcast(ServerEvent::TaskError {
+                                task_id: bead_id.clone(),
+                                message: message.clone(),
+                            });
+                            failed.push((bead_id.clone(), message));
+                        }
+                        OperatorEvent::NarcAlert { severity, category, message } => {
+                            self.broadcast(ServerEvent::NarcAlert { severity, category, message });
+                        }
+                        OperatorEvent::TokenDelta { content } => {
+                            self.broadcast(ServerEvent::TokenDelta {
+                                task_id: bead_id.clone(),
+                                content,
+                            });
+                        }
+                        OperatorEvent::ToolCallStart { tool_name, arguments } => {
+                            self.broadcast(ServerEvent::ToolCallStart {
+                                task_id: bead_id.clone(),
+                                tool_name,
+                                arguments,
+                            });
+                        }
+                        OperatorEvent::ToolCallComplete {
+                            tool_name,
+                            result,
+                            is_error,
+                            duration_ms,
+                        } => {
+                            self.broadcast(ServerEvent::ToolCallComplete {
+                                task_id: bead_id.clone(),
+                                tool_name,
+                                result,
+                                is_error,
+                                duration_ms,
+                            });
+                        }
+                        OperatorEvent::CheckpointSaved { .. } | OperatorEvent::Heartbeat => {
+                            // Informational only, no broadcast needed
+                        }
+                    }
+                }
             }
         }
 
-        if !completed.is_empty() {
-            self.state = OrchestratorState::Reviewing { bead_id: completed[0].clone() };
-            for id in &completed {
+        // Also check sandbox status for operators without active WS connections
+        for (bead_id, handle) in &self.active_workers {
+            if !completed.contains(bead_id) && !failed.iter().any(|(id, _)| id == bead_id) {
+                let status = crate::sandbox::get_status(&handle.msb_name);
+                if !status.running {
+                    completed.push(bead_id.clone());
+                }
+            }
+        }
+
+        // Transition completed/failed beads to review
+        let all_done: Vec<String> = completed.into_iter().chain(failed.into_iter().map(|(id, _)| id)).collect();
+
+        if !all_done.is_empty() {
+            self.state = OrchestratorState::Reviewing { bead_id: all_done[0].clone() };
+            for id in &all_done {
                 if let Some(handle) = self.active_workers.remove(id) {
                     self.pool.release(&handle.operator_id);
                     self.completed_beads.push(id.clone());
@@ -210,6 +328,17 @@ impl Orchestrator {
         };
 
         tracing::info!("Reviewing bead {bead_id}");
+
+        // Disconnect and clean up the operator client
+        if let Some(mut client) = self.operator_clients.remove(&bead_id) {
+            client.disconnect();
+        }
+
+        // Destroy sandbox if it wasn't already cleaned up in monitor
+        if let Some(handle) = self.active_workers.remove(&bead_id) {
+            let _ = crate::sandbox::destroy_sandbox(&handle.msb_name);
+        }
+
         // TODO: spawn review operator
 
         // For now, auto-approve
@@ -265,6 +394,7 @@ mod tests {
         let orch = Orchestrator::new(3, store);
         assert_eq!(orch.state_name(), "idle");
         assert!(orch.active_workers.is_empty());
+        assert!(orch.operator_clients.is_empty());
     }
 
     #[tokio::test]
@@ -275,5 +405,63 @@ mod tests {
         let result = orch.step().await;
         assert!(result.is_ok());
         assert_eq!(orch.state_name(), "idle");
+    }
+
+    #[test]
+    fn test_orchestrator_dispatch_creates_operator_client_map() {
+        // Verify that the orchestrator has an operator_clients map ready for dispatch.
+        // Actual sandbox creation requires msb, so we test the data structure setup.
+        let store = IssueStore::open_in_memory().unwrap();
+        let orch = Orchestrator::new(3, store);
+
+        assert!(orch.operator_clients.is_empty());
+        assert_eq!(orch.pool.active_count(), 0);
+        assert!(orch.pool.has_capacity());
+    }
+
+    #[tokio::test]
+    async fn test_orchestrator_monitor_forwards_events_to_broadcast() {
+        // Set up orchestrator with a broadcast channel
+        let store = IssueStore::open_in_memory().unwrap();
+        let (tx, mut rx) = broadcast::channel::<ServerEvent>(16);
+        let mut orch = Orchestrator::new(3, store).with_event_tx(tx);
+
+        // Manually broadcast a token delta (simulating what monitor does)
+        orch.broadcast(ServerEvent::TokenDelta {
+            task_id: "bead-1".into(),
+            content: "hello from operator".into(),
+        });
+
+        // Verify the broadcast was received
+        let received = rx.try_recv().expect("should receive broadcast event");
+        let json = serde_json::to_string(&received).expect("serialize");
+        assert!(json.contains("TokenDelta"));
+        assert!(json.contains("hello from operator"));
+    }
+
+    #[test]
+    fn test_orchestrator_with_event_tx() {
+        let store = IssueStore::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel::<ServerEvent>(16);
+        let orch = Orchestrator::new(3, store).with_event_tx(tx);
+        assert!(orch.event_tx.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_orchestrator_review_cleans_up_operator_client() {
+        let store = IssueStore::open_in_memory().unwrap();
+        let mut orch = Orchestrator::new(3, store);
+
+        // Insert a mock (disconnected) operator client
+        let client = OperatorClient::new("op-1", "ws://localhost:9999/ws");
+        orch.operator_clients.insert("bead-1".into(), client);
+
+        // Put in reviewing state
+        orch.state = OrchestratorState::Reviewing { bead_id: "bead-1".into() };
+
+        // Review should clean up
+        let result = orch.review().await;
+        assert!(result.is_ok());
+        assert!(orch.operator_clients.is_empty());
     }
 }
