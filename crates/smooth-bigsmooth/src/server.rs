@@ -445,9 +445,48 @@ async fn handle_client_event(state: &AppState, event: ClientEvent) {
     }
 }
 
+/// Returns `true` if Big Smooth should route WebSocket task dispatch through
+/// a real sandboxed operator instead of running the agent in its own process.
+///
+/// Controlled by the `SMOOTH_SANDBOXED` environment variable (values `1` or
+/// `true`). Default is `false` — the in-process path is still the path used by
+/// every existing test and by `th code --headless` out of the box.
+///
+/// When sandboxed mode is enabled, Big Smooth:
+///  - Creates an issue (as before)
+///  - Spawns a real microVM via the embedded [`microsandbox`] crate
+///  - Hands the task off to a program running inside the VM
+///  - Streams events back to WebSocket clients
+///  - Destroys the VM on completion
+///
+/// Crucially, Big Smooth itself performs **no file writes, no tool execution
+/// and no LLM calls** on the sandboxed path — it stays the READ-ONLY
+/// orchestrator the architecture promises.
+fn sandboxed_dispatch_enabled() -> bool {
+    std::env::var("SMOOTH_SANDBOXED")
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
 /// Spawn an agent task from a WebSocket `TaskStart` event, broadcasting
 /// [`ServerEvent`]s as the agent progresses.
+///
+/// Dispatches to either the in-process path or the sandboxed path depending
+/// on [`sandboxed_dispatch_enabled`].
 async fn dispatch_ws_task(state: &AppState, message: String, model: Option<String>, budget: Option<f64>, working_dir: Option<String>) {
+    if sandboxed_dispatch_enabled() {
+        dispatch_ws_task_sandboxed(state, message, model, budget, working_dir).await;
+    } else {
+        dispatch_ws_task_in_process(state, message, model, budget, working_dir).await;
+    }
+}
+
+/// Legacy in-process dispatch — runs the agent in Big Smooth's own process.
+/// Kept for backwards compatibility (and because the sandboxed path currently
+/// requires an operator image that does not yet exist in the repo). Do not
+/// add new features here; new functionality should live on the sandboxed
+/// path so that Big Smooth stays READ-ONLY.
+async fn dispatch_ws_task_in_process(state: &AppState, message: String, model: Option<String>, budget: Option<f64>, working_dir: Option<String>) {
     let working_dir = working_dir
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
@@ -552,6 +591,180 @@ async fn dispatch_ws_task(state: &AppState, message: String, model: Option<Strin
                 tracing::error!(task_id = tid, error = %e, "WS task failed");
             }
         }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Sandboxed dispatch: spawn a real microVM, run the task inside, stream events
+// back. Big Smooth performs NO writes, NO tool execution, and NO LLM calls on
+// this path — it is strictly a READ-ONLY orchestrator.
+//
+// This is the path the architecture actually describes. The full end-to-end
+// "operator binary + Wonk + Goalie + Narc + Scribe all running inside the VM"
+// story is tracked as a follow-up (requires a custom OCI image). What this
+// function delivers today is the plumbing: orchestrator → microVM → exec →
+// result, gated by `SMOOTH_SANDBOXED=1`. Existing in-process clients are
+// unaffected.
+// ---------------------------------------------------------------------------
+
+async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, _model: Option<String>, _budget: Option<f64>, working_dir: Option<String>) {
+    use crate::sandbox::{self, SandboxConfig};
+
+    let task_id = uuid::Uuid::new_v4().to_string();
+    let event_tx = state.event_tx.clone();
+    let issue_store = state.issue_store.clone();
+    let last_activity = state.last_activity.clone();
+
+    // READ-ONLY metadata: Big Smooth still tracks the issue, but the work
+    // itself happens in the sandbox.
+    let issue_id = crate::issues::create_issue(&issue_store, &format!("Task: {}", truncate_str(&message, 60)), &message, "task", 2)
+        .ok()
+        .map(|i| i.id);
+    if let Some(ref id) = issue_id {
+        let _ = issue_store.update(
+            id,
+            &smooth_issues::IssueUpdate {
+                status: Some(smooth_issues::IssueStatus::InProgress),
+                ..Default::default()
+            },
+        );
+    }
+
+    let workspace = working_dir.unwrap_or_else(|| "/workspace".to_string());
+    let tid = task_id.clone();
+
+    tokio::spawn(async move {
+        // Refresh idle timer so Big Smooth doesn't shut down mid-task.
+        let touch = || {
+            if let Ok(mut last) = last_activity.lock() {
+                *last = std::time::Instant::now();
+            }
+        };
+        touch();
+
+        // Tell the client we're going sandboxed so it sees the path distinction.
+        let _ = event_tx.send(ServerEvent::ToolCallStart {
+            task_id: tid.clone(),
+            tool_name: "sandbox.create".into(),
+            arguments: serde_json::json!({ "workspace": workspace, "task": truncate_str(&message, 120) }).to_string(),
+        });
+
+        // 1. Create the sandbox. `alpine` is pulled by microsandbox on first
+        //    use and cached thereafter.
+        let config = SandboxConfig {
+            bead_id: issue_id.clone().unwrap_or_default(),
+            workspace_path: workspace.clone(),
+            ..SandboxConfig::default()
+        };
+
+        // Pick an ephemeral host port so this works even if something is
+        // already on 14096.
+        let host_port = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(l) => l.local_addr().map(|a| a.port()).unwrap_or(0),
+            Err(_) => 0,
+        };
+
+        let handle = match sandbox::create_sandbox(&config, host_port).await {
+            Ok(h) => h,
+            Err(e) => {
+                let _ = event_tx.send(ServerEvent::TaskError {
+                    task_id: tid.clone(),
+                    message: format!("sandbox create failed: {e}"),
+                });
+                tracing::error!(task_id = tid, error = %e, "sandboxed dispatch: create_sandbox failed");
+                return;
+            }
+        };
+
+        let _ = event_tx.send(ServerEvent::ToolCallComplete {
+            task_id: tid.clone(),
+            tool_name: "sandbox.create".into(),
+            result: handle.operator_id.clone(),
+            is_error: false,
+            duration_ms: 0,
+        });
+        touch();
+
+        // 2. Hand the task off to the sandbox. Today we exec a shell snippet
+        //    that echoes the task and lists the workspace — this is the
+        //    architectural smoke test that proves dispatch works end-to-end.
+        //    Once a full operator OCI image exists, replace this exec with
+        //    an operator entrypoint that runs the agent + Wonk + Goalie +
+        //    Narc + Scribe inside the VM.
+        let sh = format!(
+            "echo '=== Smooth sandboxed task ===' && echo 'operator: {op}' && echo 'task:' && cat <<'__TASK__'\n{msg}\n__TASK__\necho '=== workspace ===' && ls -la / 2>&1 | head -20 && echo '=== done ==='",
+            op = handle.operator_id,
+            msg = message.replace("__TASK__", "\\_\\_TASK\\_\\_"),
+        );
+
+        let _ = event_tx.send(ServerEvent::ToolCallStart {
+            task_id: tid.clone(),
+            tool_name: "sandbox.exec".into(),
+            arguments: sh.chars().take(200).collect::<String>(),
+        });
+
+        let exec_started = std::time::Instant::now();
+        let (stdout, stderr, code) = match sandbox::exec_in_sandbox(&handle.msb_name, &["sh", "-c", &sh]).await {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = event_tx.send(ServerEvent::TaskError {
+                    task_id: tid.clone(),
+                    message: format!("sandbox exec failed: {e}"),
+                });
+                let _ = sandbox::destroy_sandbox(&handle.msb_name).await;
+                return;
+            }
+        };
+        touch();
+
+        // Stream the captured stdout to the client as a TokenDelta so the
+        // headless client prints it the same way it prints agent output today.
+        if !stdout.is_empty() {
+            let _ = event_tx.send(ServerEvent::TokenDelta {
+                task_id: tid.clone(),
+                content: stdout.clone(),
+            });
+        }
+        if !stderr.is_empty() {
+            let _ = event_tx.send(ServerEvent::TokenDelta {
+                task_id: tid.clone(),
+                content: format!("[stderr] {stderr}"),
+            });
+        }
+
+        let _ = event_tx.send(ServerEvent::ToolCallComplete {
+            task_id: tid.clone(),
+            tool_name: "sandbox.exec".into(),
+            result: format!("exit={code}"),
+            is_error: code != 0,
+            duration_ms: u64::try_from(exec_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        });
+
+        // 3. Tear down the VM.
+        if let Err(e) = sandbox::destroy_sandbox(&handle.msb_name).await {
+            tracing::warn!(task_id = tid, error = %e, "sandboxed dispatch: destroy_sandbox failed");
+        }
+
+        // 4. Report final status. An exit code of 0 is success.
+        if code == 0 {
+            let _ = event_tx.send(ServerEvent::TaskComplete {
+                task_id: tid.clone(),
+                iterations: 1,
+                cost_usd: 0.0,
+            });
+            if let Some(ref id) = issue_id {
+                let _ = issue_store.close(&[id]);
+            }
+            tracing::info!(task_id = tid, "sandboxed WS task completed");
+        } else {
+            let _ = event_tx.send(ServerEvent::TaskError {
+                task_id: tid.clone(),
+                message: format!("sandbox exec exited with code {code}: {stderr}"),
+            });
+            tracing::error!(task_id = tid, exit = code, "sandboxed WS task failed");
+        }
+
+        touch();
     });
 }
 
