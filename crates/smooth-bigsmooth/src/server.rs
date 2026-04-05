@@ -906,24 +906,44 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
         }
 
         // If we managed to write a policy file, point the runner at it and
-        // add a bind mount for the dir.
-        let policy_mount = if let Some(ref dir) = policy_dir_guard {
-            let host = dir
-                .path()
-                .canonicalize()
-                .unwrap_or_else(|_| dir.path().to_path_buf())
-                .to_string_lossy()
-                .to_string();
-            env.insert("SMOOTH_POLICY_FILE".into(), "/opt/smooth/policy/policy.toml".into());
-            Some(BindMount {
-                host_path: host,
-                guest_path: "/opt/smooth/policy".into(),
-                readonly: true,
-            })
+        // add a bind mount for the dir. In Boardroom mode the tempdir is
+        // inside the Boardroom VM's filesystem — Bill can't bind-mount it
+        // into the operator VM because it doesn't exist on the host. Skip
+        // the mount; the runner will use its default policy which covers
+        // the execute phase. Future: pipe policy content through Bill's
+        // protocol so the file lands on the host.
+        let in_boardroom = boardroom_handles.is_some();
+        let policy_mount = if !in_boardroom {
+            if let Some(ref dir) = policy_dir_guard {
+                let host = dir
+                    .path()
+                    .canonicalize()
+                    .unwrap_or_else(|_| dir.path().to_path_buf())
+                    .to_string_lossy()
+                    .to_string();
+                env.insert("SMOOTH_POLICY_FILE".into(), "/opt/smooth/policy/policy.toml".into());
+                Some(BindMount {
+                    host_path: host,
+                    guest_path: "/opt/smooth/policy".into(),
+                    readonly: true,
+                })
+            } else {
+                None
+            }
         } else {
+            tracing::info!(task_id = tid, "boardroom mode: skipping policy bind mount (runner will use default policy)");
             None
         };
 
+        // Operator VMs need to reach Bill on host loopback so Big Smooth
+        // (running inside the Boardroom VM) can request exec/destroy, AND
+        // their in-VM Scribe needs to reach the Boardroom's Archivist for
+        // log forwarding. Both destinations are 127.0.0.1:<port> from the
+        // guest's perspective, which microsandbox's default `public_only`
+        // policy denies. Always opt operator VMs in — Wonk's in-VM policy
+        // still enforces fine-grained network allowlists for tool traffic,
+        // so this only unlocks the sandbox↔host control plane, not
+        // arbitrary agent access.
         let config = SandboxConfig {
             bead_id: pearl_id.clone().unwrap_or_default(),
             workspace_path: "/workspace".into(),
@@ -943,6 +963,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
             .into_iter()
             .chain(policy_mount)
             .collect(),
+            allow_host_loopback: true,
             ..SandboxConfig::default()
         };
 

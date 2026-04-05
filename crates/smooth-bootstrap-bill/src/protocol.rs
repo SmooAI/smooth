@@ -58,6 +58,18 @@ pub struct SandboxSpec {
     /// Optional caller-chosen timeout in seconds, for diagnostics only.
     /// Bill does not enforce this; callers track their own deadlines.
     pub timeout_seconds: u64,
+    /// Opt the sandbox out of microsandbox's default `public_only` network
+    /// policy (which denies loopback + RFC1918 outbound). When true, Bill
+    /// applies `NetworkPolicy::allow_all()` to this sandbox, so the guest
+    /// can TCP to `127.0.0.1:<port>` and reach host services like Bill
+    /// itself or the Boardroom's Archivist.
+    ///
+    /// Under the hood, microsandbox's TCP proxy calls `TcpStream::connect`
+    /// on the host with the guest's destination address verbatim. With the
+    /// default policy that path is blocked for loopback/private
+    /// destinations; with `allow_all()` it goes through.
+    #[serde(default)]
+    pub allow_host_loopback: bool,
 }
 
 /// A request Bill accepts.
@@ -145,6 +157,7 @@ mod tests {
             }],
             ports: vec![PortMapping { host_port: 0, guest_port: 4096 }],
             timeout_seconds: 1800,
+            allow_host_loopback: false,
         };
         let req = BillRequest::Spawn { spec };
         let json = serde_json::to_string(&req).expect("serialize");

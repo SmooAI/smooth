@@ -141,14 +141,25 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
     // Big Smooth dispatches the agent in-process inside the Boardroom VM
     // and the work never lands on the host.
     boardroom_env.insert("SMOOTH_SANDBOXED".into(), "1".into());
-    // microsandbox VMs don't resolve `host.containers.internal` by default
-    // — that name is container-runtime-specific (podman/docker desktop).
-    // Use the slirp user-mode gateway IP, which microsandbox's VM NIC
-    // routes to the host.
-    let host_gateway = std::env::var("SMOOTH_VM_HOST_GATEWAY").unwrap_or_else(|_| "10.0.2.2".into());
+    // Reaching the host from inside a microVM:
+    //
+    // microsandbox's TCP proxy intercepts all non-loopback outbound TCP
+    // and does `TcpStream::connect(dst)` on the HOST with the guest's
+    // original destination address. 127.0.0.1 NEVER works because the
+    // guest kernel handles loopback internally — the packet never
+    // reaches microsandbox's virtual NIC.
+    //
+    // The solution: use the HOST's real network interface IP. Bill is on
+    // 0.0.0.0:<port>, so any routable IP that reaches the host works.
+    // We detect the primary interface IP at test time and pass it in.
+    // The `allow_host_loopback: true` flag on the SandboxSpec tells
+    // Bill to apply `NetworkPolicy::allow_all()`, which permits
+    // private-network (192.168.x, etc.) outbound through the proxy.
+    let host_ip = detect_host_ip();
+    eprintln!("host IP for VM→host connectivity: {host_ip}");
     boardroom_env.insert(
         "SMOOTH_BOOTSTRAP_BILL_URL".into(),
-        format!("http://{host_gateway}:{bill_host_port}"),
+        format!("http://{host_ip}:{bill_host_port}"),
     );
     boardroom_env.insert(
         "SMOOTH_OPERATOR_RUNNER_HOST_PATH".into(),
@@ -187,6 +198,10 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
             PortMapping { host_port: archivist_host_port, guest_port: 4401 },
         ],
         timeout_seconds: 1800,
+        // The Boardroom VM must reach Bill on host loopback
+        // (127.0.0.1:<bill_port>) so Big Smooth can request operator pods.
+        // Default microsandbox policy denies loopback/private outbound.
+        allow_host_loopback: true,
     };
 
     let (resolved_name, host_ports, _created_at) = bill_client.spawn(spec).await.expect("spawn boardroom");
@@ -376,7 +391,7 @@ async fn run_ts_leg(
         "PATCH /tasks/:id for partial updates, DELETE /tasks/:id returning 204. ",
         "Use a module-level Map<string, Task> for state. ",
         "Do not modify package.json, tsconfig.json, lockfile, vitest config, or tests. Only create src/server.ts. ",
-        "Do not run pnpm install — it will be run on the host after you finish."
+        "Do not run pnpm install -- it will be run on the host after you finish."
     );
     send_task_and_wait(ws, task_message, workspace).await;
 
@@ -497,4 +512,28 @@ fn tail_lines(s: &str, max_bytes: usize) -> String {
     } else {
         format!("...[truncated]...\n{}", &s[s.len() - max_bytes..])
     }
+}
+
+/// Detect the host's primary non-loopback IPv4 address.
+///
+/// This is needed because microsandbox VMs cannot reach the host via
+/// 127.0.0.1 (that stays inside the guest kernel's own loopback). The
+/// TCP proxy on the host intercepts outbound packets from the guest and
+/// calls `TcpStream::connect(dst)` with the guest's original destination.
+/// Using the host's real interface IP (e.g., 192.168.1.50 on WiFi) means
+/// the proxy's connect call reaches Bill on 0.0.0.0.
+///
+/// Falls back to the `SMOOTH_VM_HOST_GATEWAY` env var if detection fails.
+fn detect_host_ip() -> String {
+    if let Ok(ip) = std::env::var("SMOOTH_VM_HOST_GATEWAY") {
+        return ip;
+    }
+    // Use a UDP connect trick: open a UDP socket "connected" to a public
+    // IP (no actual traffic), then read back the local address the kernel
+    // selected. This gives us the interface IP the OS would use to route
+    // to the internet, which is exactly what we want.
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind UDP probe");
+    socket.connect("8.8.8.8:53").expect("connect UDP probe");
+    let local = socket.local_addr().expect("local addr");
+    local.ip().to_string()
 }

@@ -90,10 +90,25 @@ impl BoardroomHandles {
     /// so we can build the right URL for operator env.
     #[must_use]
     pub fn operator_facing_archivist_url(&self) -> Option<String> {
-        std::env::var("SMOOTH_ARCHIVIST_HOST_PORT")
+        let port = std::env::var("SMOOTH_ARCHIVIST_HOST_PORT")
             .ok()
-            .and_then(|p| p.parse::<u16>().ok())
-            .map(|port| format!("http://host.containers.internal:{port}"))
+            .and_then(|p| p.parse::<u16>().ok())?;
+        // The operator VM needs to reach the Boardroom's Archivist via
+        // the host network. 127.0.0.1 won't work from inside a microVM
+        // (the guest kernel handles loopback locally). We derive the
+        // host's real IP from SMOOTH_BOOTSTRAP_BILL_URL, which already
+        // contains it (the test / launcher set it via detect_host_ip).
+        let host = std::env::var("SMOOTH_BOOTSTRAP_BILL_URL")
+            .ok()
+            .and_then(|u| {
+                u.trim_start_matches("http://")
+                    .trim_start_matches("https://")
+                    .split(':')
+                    .next()
+                    .map(String::from)
+            })
+            .unwrap_or_else(|| "127.0.0.1".into());
+        Some(format!("http://{host}:{port}"))
     }
 }
 

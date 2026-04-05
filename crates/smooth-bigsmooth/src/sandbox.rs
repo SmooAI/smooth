@@ -75,6 +75,12 @@ pub struct SandboxConfig {
     pub timeout_seconds: u64,
     /// Host → guest bind mounts applied to the microVM.
     pub mounts: Vec<BindMount>,
+    /// Let the guest reach host loopback (127.0.0.1, 10.x, 192.168.x) via
+    /// microsandbox's TCP proxy. Required when the operator needs to talk
+    /// back to Bill or to the Boardroom's Archivist. Defaults to false
+    /// because the untrusted agent inside a standalone operator VM
+    /// shouldn't be able to probe host services by default.
+    pub allow_host_loopback: bool,
 }
 
 impl Default for SandboxConfig {
@@ -92,6 +98,7 @@ impl Default for SandboxConfig {
             memory_mb: 4096,
             timeout_seconds: 30 * 60,
             mounts: Vec::new(),
+            allow_host_loopback: false,
         }
     }
 }
@@ -175,6 +182,7 @@ impl SandboxClient for DirectSandboxClient {
                 guest_port: 4096,
             }],
             timeout_seconds: config.timeout_seconds,
+            allow_host_loopback: config.allow_host_loopback,
         };
         let (resolved_name, resolved_ports, created_at) = bill_server::spawn_sandbox(spec).await?;
         let resolved_host_port = resolved_ports.first().map_or(host_port, |p| p.host_port);
@@ -274,6 +282,7 @@ impl SandboxClient for BillSandboxClient {
                 guest_port: 4096,
             }],
             timeout_seconds: config.timeout_seconds,
+            allow_host_loopback: config.allow_host_loopback,
         };
         let (resolved_name, resolved_ports, created_at) = self.client.spawn(spec).await?;
         let resolved_host_port = resolved_ports.first().map_or(host_port, |p| p.host_port);

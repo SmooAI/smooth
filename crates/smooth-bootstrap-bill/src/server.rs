@@ -12,7 +12,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result};
-use microsandbox::Sandbox;
+use microsandbox::{NetworkPolicy, Sandbox};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -144,6 +144,18 @@ pub async fn spawn_sandbox(spec: SandboxSpec) -> Result<(String, Vec<PortMapping
                 m
             }
         });
+    }
+
+    // Opt-in: let the guest reach host loopback + RFC1918 addresses.
+    // microsandbox's default policy is `public_only`, which denies
+    // loopback/private outbound — fine for untrusted operator work, but
+    // the Boardroom VM (and operator VMs dispatched by a Boardroom-mode
+    // Big Smooth) must be able to talk back to Bill on 127.0.0.1 and to
+    // the Boardroom's Archivist. When this flag is set we apply
+    // `allow_all()` which removes those denies.
+    if spec.allow_host_loopback {
+        tracing::info!(name = %spec.name, "bill: applying NetworkPolicy::allow_all() (host loopback enabled)");
+        builder = builder.network(|n| n.policy(NetworkPolicy::allow_all()));
     }
 
     let sandbox = builder
@@ -288,15 +300,15 @@ async fn dispatch(request: BillRequest) -> BillResponse {
                 host_ports,
                 created_at,
             },
-            Err(e) => BillResponse::Error { message: e.to_string() },
+            Err(e) => BillResponse::Error { message: format!("{e:#}") },
         },
         BillRequest::Exec { name, argv } => match exec_sandbox(&name, &argv).await {
             Ok((stdout, stderr, exit_code)) => BillResponse::ExecResult { stdout, stderr, exit_code },
-            Err(e) => BillResponse::Error { message: e.to_string() },
+            Err(e) => BillResponse::Error { message: format!("{e:#}") },
         },
         BillRequest::Destroy { name } => match destroy_sandbox(&name).await {
             Ok(()) => BillResponse::Destroyed,
-            Err(e) => BillResponse::Error { message: e.to_string() },
+            Err(e) => BillResponse::Error { message: format!("{e:#}") },
         },
         BillRequest::List => BillResponse::SandboxList { names: list() },
     }
@@ -350,6 +362,7 @@ mod tests {
             mounts: vec![],
             ports: vec![],
             timeout_seconds: 60,
+            allow_host_loopback: false,
         };
         let err = spawn_sandbox(spec).await.unwrap_err();
         let msg = err.to_string();
