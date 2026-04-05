@@ -46,6 +46,12 @@ tokio = { workspace = true, features = ["test-util"] }
 tower = { workspace = true, features = ["util"] }
 hyper.workspace = true
 http-body-util.workspace = true
+# Cast members used by tests/cast_integration.rs for cross-cast flows.
+smooth-wonk = { path = "../smooth-wonk" }
+smooth-goalie = { path = "../smooth-goalie" }
+smooth-narc = { path = "../smooth-narc" }
+smooth-scribe = { path = "../smooth-scribe" }
+smooth-archivist = { path = "../smooth-archivist" }
 
 [lints]
 workspace = true

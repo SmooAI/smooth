@@ -6,6 +6,10 @@ license.workspace = true
 repository.workspace = true
 description = "Smooth Goalie — in-VM HTTP forward proxy, delegates access decisions to Wonk"
 
+[lib]
+name = "smooth_goalie"
+path = "src/lib.rs"
+
 [[bin]]
 name = "smooth-goalie"
 path = "src/main.rs"

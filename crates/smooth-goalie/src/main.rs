@@ -1,8 +1,5 @@
-mod audit;
-mod proxy;
-mod wonk;
-
 use clap::Parser;
+use smooth_goalie::{audit, proxy, wonk};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]

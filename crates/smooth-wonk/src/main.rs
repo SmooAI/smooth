@@ -1,8 +1,5 @@
-mod negotiate;
-mod policy;
-mod server;
-
 use clap::Parser;
+use smooth_wonk::{negotiate, policy, server};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
