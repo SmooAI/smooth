@@ -14,9 +14,12 @@ chrono.workspace = true
 uuid.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
+smooth-operator.workspace = true
+async-trait.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true
