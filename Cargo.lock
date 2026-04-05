@@ -2572,6 +2572,8 @@ dependencies = [
  "futures-core",
  "futures-util",
  "globwalk",
+ "http-body-util",
+ "hyper",
  "ignore",
  "reqwest",
  "rusqlite",
@@ -2664,12 +2666,15 @@ name = "smooth-issues"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "rusqlite",
  "serde",
  "serde_json",
+ "smooth-operator",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "uuid",
 ]
 
