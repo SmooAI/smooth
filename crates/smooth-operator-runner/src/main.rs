@@ -43,11 +43,20 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use smooth_goalie::{audit::AuditLogger, proxy::run_proxy, wonk::WonkClient};
 use smooth_narc::NarcHook;
 use smooth_operator::cost::CostBudget;
 use smooth_operator::llm::LlmConfig;
 use smooth_operator::tool::{Tool, ToolCall, ToolHook, ToolRegistry, ToolResult, ToolSchema};
 use smooth_operator::{Agent, AgentConfig, AgentEvent};
+use smooth_policy::Policy;
+use smooth_scribe::hook::AuditHook as ScribeAuditHook;
+use smooth_scribe::server::{build_router_with_state as scribe_router_with_state, AppState as ScribeAppState};
+use smooth_scribe::store::{LogStore, MemoryLogStore, Query as LogQuery};
+use smooth_wonk::hook::WonkHook;
+use smooth_wonk::negotiate::Negotiator;
+use smooth_wonk::policy::PolicyHolder;
+use smooth_wonk::server::{build_router as wonk_router, AppState as WonkAppState};
 use tracing_subscriber::EnvFilter;
 
 // ---------------------------------------------------------------------------
@@ -154,6 +163,14 @@ impl Tool for ListFilesTool {
 
 struct BashTool {
     base: PathBuf,
+    /// HTTP(S) proxy URL to forward into child processes via the standard
+    /// env vars. When set, any `curl` / `wget` / etc. the agent invokes is
+    /// routed through Goalie → Wonk for policy enforcement. The runner's
+    /// own HTTP traffic (LLM provider, in-VM Wonk/Scribe) intentionally
+    /// does NOT go through the proxy — setting HTTP_PROXY on the runner
+    /// process would loop WonkHook's localhost check request back through
+    /// Goalie and deadlock the policy check.
+    proxy_url: Option<String>,
 }
 
 #[async_trait]
@@ -177,12 +194,19 @@ impl Tool for BashTool {
             .get("command")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("missing 'command'"))?;
-        let out = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .current_dir(&self.base)
-            .output()
-            .await?;
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg(command).current_dir(&self.base);
+        if let Some(ref proxy) = self.proxy_url {
+            cmd.env("HTTP_PROXY", proxy)
+                .env("http_proxy", proxy)
+                .env("HTTPS_PROXY", proxy)
+                .env("https_proxy", proxy)
+                // Local in-VM services (Wonk, Scribe, Goalie itself) must
+                // not be proxied — they run on localhost.
+                .env("NO_PROXY", "127.0.0.1,localhost")
+                .env("no_proxy", "127.0.0.1,localhost");
+        }
+        let out = cmd.output().await?;
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
         let code = out.status.code().unwrap_or(-1);
@@ -228,11 +252,19 @@ struct RunnerConfig {
     workspace: PathBuf,
     operator_id: String,
     narc_write_guard: bool,
+    /// Policy TOML to feed into Wonk. Resolution order:
+    /// 1. `SMOOTH_POLICY_TOML` env var (the full TOML string inline)
+    /// 2. `SMOOTH_POLICY_FILE` env var (path to a TOML file)
+    /// 3. `/opt/smooth/policy.toml` if present
+    /// 4. A permissive default ([`default_policy_toml`]).
+    policy_toml: String,
 }
 
 impl RunnerConfig {
     fn from_env() -> anyhow::Result<Self> {
         let require = |k: &str| -> anyhow::Result<String> { std::env::var(k).map_err(|_| anyhow::anyhow!("required env var {k} is not set")) };
+
+        let policy_toml = resolve_policy_toml();
 
         Ok(Self {
             task: require("SMOOTH_TASK")?,
@@ -245,11 +277,166 @@ impl RunnerConfig {
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("/workspace")),
             operator_id: std::env::var("SMOOTH_OPERATOR_ID").unwrap_or_else(|_| "operator".into()),
+            // WriteGuard default is OFF in the runner: the microVM's workspace
+            // is a dedicated, throwaway bind mount and the agent is *expected*
+            // to write files into it. NarcHook's other detectors (secrets,
+            // injection) stay on regardless. Opt back in with
+            // `SMOOTH_NARC_WRITE_GUARD=1` for phases where writes should be
+            // audited or blocked.
             narc_write_guard: std::env::var("SMOOTH_NARC_WRITE_GUARD")
-                .map(|v| v != "0" && v.to_ascii_lowercase() != "false")
-                .unwrap_or(true),
+                .map(|v| v == "1" || v.to_ascii_lowercase() == "true")
+                .unwrap_or(false),
+            policy_toml,
         })
     }
+}
+
+/// Resolve a policy TOML string from env vars, a standard path, or the
+/// permissive default. This runs before Wonk's `PolicyHolder` is built.
+fn resolve_policy_toml() -> String {
+    if let Ok(inline) = std::env::var("SMOOTH_POLICY_TOML") {
+        if !inline.trim().is_empty() {
+            return inline;
+        }
+    }
+    if let Ok(file) = std::env::var("SMOOTH_POLICY_FILE") {
+        if let Ok(contents) = std::fs::read_to_string(&file) {
+            return contents;
+        }
+    }
+    if let Ok(contents) = std::fs::read_to_string("/opt/smooth/policy.toml") {
+        return contents;
+    }
+    default_policy_toml()
+}
+
+/// A permissive baseline policy. Wonk still checks every tool call and
+/// network request against this, but everything the operator reasonably
+/// needs is allowed. Big Smooth should generate a tighter policy per task
+/// and pass it via `SMOOTH_POLICY_TOML`.
+fn default_policy_toml() -> String {
+    r#"
+[metadata]
+operator_id = "runner"
+bead_id = ""
+phase = "execute"
+
+[auth]
+token = "runner-default"
+
+[network]
+[[network.allow]]
+domain = "opencode.ai"
+[[network.allow]]
+domain = "api.openai.com"
+[[network.allow]]
+domain = "api.anthropic.com"
+[[network.allow]]
+domain = "127.0.0.1"
+[[network.allow]]
+domain = "localhost"
+
+[filesystem]
+writable = true
+deny_patterns = ["*.env", "*.pem", ".ssh/*", "id_rsa*"]
+
+[tools]
+allow = ["read_file", "write_file", "list_files", "bash"]
+deny = []
+
+[beads]
+
+[mcp]
+
+[access_requests]
+"#
+    .to_string()
+}
+
+// ---------------------------------------------------------------------------
+// In-VM cast: Wonk + Goalie + Scribe spawned on ephemeral localhost ports.
+// ---------------------------------------------------------------------------
+
+/// Handles to the in-VM cast members. Returned from [`spawn_cast`] so the
+/// runner can (a) point the agent's hooks at them, and (b) inspect their
+/// state (e.g. the Scribe log store) for the final stderr summary.
+struct Cast {
+    wonk_url: String,
+    scribe_url: String,
+    #[allow(dead_code)]
+    goalie_url: String,
+    scribe_store: Arc<MemoryLogStore>,
+}
+
+/// Spawn Wonk, Scribe, and Goalie in-process on ephemeral localhost ports.
+///
+/// Wonk gets the runner's configured policy. Scribe is a fresh in-memory
+/// store (we dump it to stderr at the end). Goalie is pointed at Wonk and
+/// writes its JSON-lines audit log to `/tmp/goalie-<operator>.jsonl` inside
+/// the VM (which is tmpfs — ephemeral, fine for this round).
+///
+/// All three bind to `127.0.0.1:0` and their URLs are returned in [`Cast`].
+async fn spawn_cast(policy_toml: &str, operator_id: &str) -> anyhow::Result<Cast> {
+    // --- Scribe ---
+    let scribe_store = Arc::new(MemoryLogStore::new());
+    let scribe_state = ScribeAppState {
+        store: Arc::clone(&scribe_store),
+    };
+    let scribe_router = scribe_router_with_state(scribe_state);
+    let scribe_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let scribe_addr = scribe_listener.local_addr()?;
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(scribe_listener, scribe_router).await {
+            tracing::error!(error = %e, "in-VM Scribe server crashed");
+        }
+    });
+
+    // --- Wonk ---
+    let policy = Policy::from_toml(policy_toml).map_err(|e| anyhow::anyhow!("invalid policy TOML: {e}"))?;
+    let holder = PolicyHolder::from_policy(policy);
+    // There is no Big Smooth leader to negotiate with from inside this VM
+    // (the runner is self-contained), so we point the negotiator at a stub
+    // URL. access negotiation calls will fail closed, which is the safe
+    // default — we can wire it up later.
+    let negotiator = Negotiator::new("http://127.0.0.1:1/no-leader", holder.clone());
+    let wonk_state = Arc::new(WonkAppState::new(holder, negotiator));
+    let wonk_r = wonk_router(wonk_state);
+    let wonk_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let wonk_addr = wonk_listener.local_addr()?;
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(wonk_listener, wonk_r).await {
+            tracing::error!(error = %e, "in-VM Wonk server crashed");
+        }
+    });
+    let wonk_url = format!("http://{wonk_addr}");
+
+    // --- Goalie ---
+    // Audit log → tmpfs under /tmp. Bind to an ephemeral localhost port.
+    let audit_path = format!("/tmp/goalie-{operator_id}.jsonl");
+    let audit = AuditLogger::new(&audit_path)?;
+    let goalie_client = WonkClient::new(&wonk_url);
+    // run_proxy binds itself, so we pre-probe for a free port the same way
+    // Big Smooth's sandboxed dispatch does. Tight race, fine for a single
+    // in-VM spawn.
+    let goalie_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let goalie_addr = goalie_listener.local_addr()?;
+    drop(goalie_listener);
+    let goalie_listen = goalie_addr.to_string();
+    tokio::spawn(async move {
+        if let Err(e) = run_proxy(&goalie_listen, goalie_client, audit).await {
+            tracing::error!(error = %e, "in-VM Goalie proxy crashed");
+        }
+    });
+
+    // Give axum + hyper a beat to start accepting before the agent hits them.
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+    Ok(Cast {
+        wonk_url,
+        scribe_url: format!("http://{scribe_addr}"),
+        goalie_url: format!("http://{goalie_addr}"),
+        scribe_store,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -297,6 +484,32 @@ async fn main() {
         std::process::exit(2);
     }
 
+    // Spawn the in-VM security cast: Wonk (policy), Goalie (proxy), Scribe
+    // (log sink). All three run as tokio tasks bound to ephemeral localhost
+    // ports. The agent's tool hooks will talk to Wonk + Scribe over HTTP.
+    let cast = match spawn_cast(&config.policy_toml, &config.operator_id).await {
+        Ok(c) => c,
+        Err(e) => {
+            emit_event(&AgentEvent::Error {
+                message: format!("failed to spawn in-VM cast: {e}"),
+            });
+            std::process::exit(2);
+        }
+    };
+    tracing::info!(
+        wonk = %cast.wonk_url,
+        scribe = %cast.scribe_url,
+        goalie = %cast.goalie_url,
+        "in-VM cast spawned"
+    );
+
+    // Only the bash tool's child processes route through Goalie. The runner
+    // itself does NOT set HTTP_PROXY on its own env — if it did, WonkHook
+    // and ScribeAuditHook would pick up the proxy from env and loop their
+    // localhost check requests back through Goalie, deadlocking the policy
+    // check. The bash tool gets the proxy URL injected per-invocation.
+    let proxy_for_bash = Some(cast.goalie_url.clone());
+
     // Build the LLM config + agent config.
     let llm = LlmConfig {
         api_url: config.api_url.clone(),
@@ -333,10 +546,22 @@ async fn main() {
     });
     tools.register(BashTool {
         base: config.workspace.clone(),
+        proxy_url: proxy_for_bash,
     });
 
+    // Hook order is intentional:
+    //   1. Narc — fastest, catches secrets/injection/dangerous writes purely
+    //      in-process (no HTTP). Blocks the call outright on Block severity.
+    //   2. Wonk — HTTP check against the policy for tool name, network
+    //      domain, cli command, etc. Blocks the call if the policy denies.
+    //   3. Scribe audit — best-effort POST of pre_call/post_call log entries
+    //      to the in-VM Scribe for later aggregation.
+    //
+    // All three are `ToolHook` impls so they compose cleanly on the registry.
     let narc = Arc::new(NarcHook::new(config.narc_write_guard));
     tools.add_hook(SharedNarc { inner: Arc::clone(&narc) });
+    tools.add_hook(WonkHook::new(&cast.wonk_url));
+    tools.add_hook(ScribeAuditHook::new(&cast.scribe_url, &config.operator_id));
 
     // Run the agent on a channel and re-emit every AgentEvent as JSON-lines.
     let agent = Agent::new(agent_config, tools);
@@ -353,14 +578,24 @@ async fn main() {
     // Drain the emitter before we exit.
     let _ = emit_task.await;
 
-    // Report any NarcHook alerts that fired during the run as a final summary
-    // event. This lets Big Smooth see the security verdict without having to
-    // parse every tool result.
-    let alerts = narc.alerts();
-    if !alerts.is_empty() {
-        if let Ok(json) = serde_json::to_string(&alerts) {
-            eprintln!("[narc-alerts] {json}");
-        }
+    // Cast summary on stderr: Narc alert count, Scribe log count, runtime
+    // verdict. Big Smooth forwards this verbatim as a [runner stderr]
+    // TokenDelta so operators can audit what every in-VM security service
+    // saw during the run. A parseable prefix (`[cast-summary]`) lets tests
+    // scrape it without false matches on log output.
+    let narc_alerts = narc.alerts();
+    let scribe_entries = cast.scribe_store.query(&LogQuery::default());
+    let summary = serde_json::json!({
+        "narc_alert_count": narc_alerts.len(),
+        "narc_alerts": narc_alerts,
+        "scribe_entry_count": scribe_entries.len(),
+        "scribe_entries_sample": scribe_entries.iter().take(10).collect::<Vec<_>>(),
+        "wonk_url": cast.wonk_url,
+        "scribe_url": cast.scribe_url,
+        "goalie_url": cast.goalie_url,
+    });
+    if let Ok(line) = serde_json::to_string(&summary) {
+        eprintln!("[cast-summary] {line}");
     }
 
     match result {

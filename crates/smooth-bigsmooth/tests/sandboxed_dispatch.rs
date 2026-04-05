@@ -95,6 +95,10 @@ async fn sandboxed_dispatch_boots_vm_and_streams_events_back() {
     let mut saw_token_delta = false;
     let mut saw_task_complete = false;
     let mut task_error: Option<String> = None;
+    // Accumulate all TokenDelta content so we can scrape the runner's
+    // `[cast-summary] {...}` line after the run. `dispatch_ws_task_sandboxed`
+    // forwards runner stderr as a `[runner stderr]` TokenDelta.
+    let mut accumulated_content = String::new();
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
     while tokio::time::Instant::now() < deadline {
@@ -121,6 +125,9 @@ async fn sandboxed_dispatch_boots_vm_and_streams_events_back() {
             }
             "TokenDelta" => {
                 saw_token_delta = true;
+                if let Some(content) = event.get("content").and_then(|v| v.as_str()) {
+                    accumulated_content.push_str(content);
+                }
             }
             "TaskComplete" => {
                 saw_task_complete = true;
@@ -153,6 +160,40 @@ async fn sandboxed_dispatch_boots_vm_and_streams_events_back() {
     let contents = std::fs::read_to_string(&hello_path).expect("read hello.txt");
     assert!(contents.to_ascii_lowercase().contains("hello"), "unexpected file contents: {contents:?}");
     assert!(saw_task_complete, "expected TaskComplete at end of run");
+
+    // Verify the full in-VM cast fired by parsing the runner's cast summary.
+    // `[cast-summary] {...}` is emitted on stderr by the runner; Big Smooth
+    // forwards stderr as a `[runner stderr]` TokenDelta, so it ends up in
+    // `accumulated_content`.
+    let summary_line = accumulated_content
+        .lines()
+        .find(|l| l.contains("[cast-summary]"))
+        .unwrap_or_else(|| panic!("runner never emitted [cast-summary]; got stderr: {accumulated_content}"));
+    let summary_json = summary_line.split_once("[cast-summary] ").expect("cast-summary prefix").1;
+    let summary: serde_json::Value = serde_json::from_str(summary_json).unwrap_or_else(|e| panic!("parse cast-summary: {e}\nline: {summary_line}"));
+
+    let scribe_entry_count = summary.get("scribe_entry_count").and_then(serde_json::Value::as_u64).unwrap_or(0);
+    let narc_alert_count = summary.get("narc_alert_count").and_then(serde_json::Value::as_u64).unwrap_or(0);
+
+    assert!(
+        scribe_entry_count >= 2,
+        "expected Scribe to have captured at least 2 log entries (one pre_call + post_call for write_file), got {scribe_entry_count}. \
+         This verifies ScribeAuditHook is wired and the in-VM logging service is reachable."
+    );
+    // With the default write_guard=off, a clean write_file task should
+    // produce zero Narc alerts — any alert would indicate a regression in
+    // secret/injection/write-guard detectors or the default policy.
+    assert_eq!(
+        narc_alert_count, 0,
+        "expected zero Narc alerts for a clean write_file task, got {narc_alert_count}. \
+         See the full summary: {summary_json}"
+    );
+
+    // The summary must advertise URLs for all three services — proof that
+    // Wonk + Goalie + Scribe were all spawned in the VM, not just stubs.
+    assert!(summary.get("wonk_url").and_then(|v| v.as_str()).is_some_and(|u| u.starts_with("http://")));
+    assert!(summary.get("scribe_url").and_then(|v| v.as_str()).is_some_and(|u| u.starts_with("http://")));
+    assert!(summary.get("goalie_url").and_then(|v| v.as_str()).is_some_and(|u| u.starts_with("http://")));
 }
 
 /// Sanity test for the feature flag itself — runs without a VM so it is

@@ -443,4 +443,26 @@ mod tests {
         let status = get_status(&handle.msb_name).await;
         assert!(!status.running, "sandbox should be gone after destroy");
     }
+
+    /// Regression guard: microsandbox passes env vars via the kernel command
+    /// line, which is restricted to printable ASCII (no newlines, no tabs,
+    /// no non-ASCII bytes). This test documents the constraint so future
+    /// callers don't try to stuff multi-line content (like a policy TOML)
+    /// into an env var and spend hours debugging the resulting `InvalidAscii`
+    /// panic from `msb_krun_kernel::cmdline`. The workaround is to write
+    /// the content to a file and bind-mount the directory — see how
+    /// `dispatch_ws_task_sandboxed` handles `SMOOTH_POLICY_FILE`.
+    #[test]
+    fn env_var_values_must_be_printable_ascii_only() {
+        let policy = crate::policy::generate_policy_for_task("regression-op", "regression-bead", "execute", "tok", &[], crate::policy::TaskType::Coding)
+            .expect("generate policy");
+        // Multi-line TOML — has newlines by design.
+        assert!(policy.contains('\n'), "generated policy should be multi-line");
+        assert!(
+            policy.bytes().any(|b| b == b'\n'),
+            "If you're reading this because you just added a single-line policy format, \
+             update `dispatch_ws_task_sandboxed` — the file-mount workaround is no longer \
+             needed and you can go back to SMOOTH_POLICY_TOML env var."
+        );
+    }
 }
