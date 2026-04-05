@@ -1,7 +1,5 @@
 //! Integration tests for Big Smooth server + IssueStore + Orchestrator.
 
-use std::time::Instant;
-
 use axum::body::Body;
 use axum::Router;
 use http_body_util::BodyExt;
@@ -18,11 +16,7 @@ fn test_app() -> (Router, IssueStore) {
     let db_path = dir.path().join("test.db");
     let db = Database::open(&db_path).expect("open db");
     let issue_store = IssueStore::open(&db_path).expect("open issue store");
-    let state = AppState {
-        db,
-        issue_store: issue_store.clone(),
-        start_time: Instant::now(),
-    };
+    let state = AppState::new(db, issue_store.clone());
     let router = build_router(state);
     // Leak tempdir so it isn't deleted while tests run.
     std::mem::forget(dir);
