@@ -6,6 +6,14 @@ license.workspace = true
 repository.workspace = true
 description = "Smooth Pearls — built-in pearl tracker (formerly issues). SQLite-backed dependency-graph work items, inspired by the beads system."
 
+[features]
+default = []
+# Enable DoltLite backend: compiles the DoltLite C source (SQLite fork with
+# Prolly Tree storage + git-style version control) and links it as the
+# SQLite library for rusqlite. Pearl data is content-addressed and
+# git-committable. Adds dolt_commit(), dolt_log(), dolt_branch(), etc.
+doltlite = ["dep:cc"]
+
 [dependencies]
 rusqlite.workspace = true
 serde.workspace = true
@@ -13,10 +21,14 @@ serde_json.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 anyhow.workspace = true
+dirs-next.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 smooth-operator.workspace = true
 async-trait.workspace = true
+
+[build-dependencies]
+cc = { version = "1", optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
