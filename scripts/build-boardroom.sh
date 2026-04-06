@@ -55,4 +55,24 @@ fi
 
 SIZE=$(wc -c < "$BIN" | tr -d ' ')
 echo "==> Built $BIN ($(( SIZE / 1024 / 1024 )) MiB, statically linked aarch64 ELF)"
-echo "    Bootstrap Bill mounts this binary into the Boardroom VM at runtime."
+
+# Also cross-compile smooth-dolt for the Boardroom VM.
+# smooth-dolt is a Go binary; Go handles cross-compilation natively.
+DOLT_BIN="target/aarch64-unknown-linux-musl/release/smooth-dolt"
+echo "==> Cross-compiling smooth-dolt for linux/arm64"
+if [ -d "go/smooth-dolt" ]; then
+    cd go/smooth-dolt
+    GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -tags gms_pure_go -o "../../$DOLT_BIN" . 2>&1 || {
+        echo "warning: smooth-dolt cross-compile failed (pearl store will not work in Boardroom VM)" >&2
+        cd ../..
+    }
+    cd ../.. 2>/dev/null || true
+    if [ -f "$DOLT_BIN" ]; then
+        DOLT_SIZE=$(wc -c < "$DOLT_BIN" | tr -d ' ')
+        echo "==> Built $DOLT_BIN ($(( DOLT_SIZE / 1024 / 1024 )) MiB)"
+    fi
+else
+    echo "warning: go/smooth-dolt not found, skipping smooth-dolt build" >&2
+fi
+
+echo "    Bootstrap Bill mounts these binaries into the Boardroom VM at runtime."

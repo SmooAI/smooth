@@ -31,7 +31,9 @@ async fn main() -> anyhow::Result<()> {
         .try_init()
         .ok();
 
-    let db_path = std::env::var("SMOOTH_BOARDROOM_DB").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/root/.smooth/smooth.db"));
+    let db_path = std::env::var("SMOOTH_BOARDROOM_DB")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/root/.smooth/smooth.db"));
     let port: u16 = std::env::var("SMOOTH_BOARDROOM_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(4400);
 
     if let Some(parent) = db_path.parent() {
@@ -40,7 +42,16 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(db = %db_path.display(), port, "boardroom: opening db");
     let db = smooth_bigsmooth::db::Database::open(&db_path)?;
-    let pearl_store = smooth_pearls::PearlStore::open(&db_path)?;
+
+    // Pearl store: Dolt-backed. Try to open existing, or auto-init.
+    let dolt_dir = PathBuf::from("/root/.smooth/dolt");
+    let pearl_store = if dolt_dir.exists() {
+        tracing::info!(dolt = %dolt_dir.display(), "boardroom: opening existing Dolt pearl store");
+        smooth_pearls::PearlStore::open(&dolt_dir)?
+    } else {
+        tracing::info!(dolt = %dolt_dir.display(), "boardroom: initializing Dolt pearl store");
+        smooth_pearls::PearlStore::init(&dolt_dir)?
+    };
 
     // Force boardroom mode regardless of the env var if the caller used
     // this binary directly (it's dedicated to Boardroom mode — the

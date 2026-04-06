@@ -95,10 +95,7 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
         .expect("operator runner binary missing — run scripts/build-operator-runner.sh")
         .canonicalize()
         .expect("canon");
-    let _operator_runner_host_dir = operator_runner_host_path
-        .parent()
-        .expect("runner has parent")
-        .to_path_buf();
+    let _operator_runner_host_dir = operator_runner_host_path.parent().expect("runner has parent").to_path_buf();
     let boardroom_bin_path = find_workspace_target("aarch64-unknown-linux-musl/release/boardroom")
         .expect("boardroom binary missing — run scripts/build-boardroom.sh")
         .canonicalize()
@@ -157,10 +154,7 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
     // private-network (192.168.x, etc.) outbound through the proxy.
     let host_ip = detect_host_ip();
     eprintln!("host IP for VM→host connectivity: {host_ip}");
-    boardroom_env.insert(
-        "SMOOTH_BOOTSTRAP_BILL_URL".into(),
-        format!("http://{host_ip}:{bill_host_port}"),
-    );
+    boardroom_env.insert("SMOOTH_BOOTSTRAP_BILL_URL".into(), format!("http://{host_ip}:{bill_host_port}"));
     boardroom_env.insert(
         "SMOOTH_OPERATOR_RUNNER_HOST_PATH".into(),
         operator_runner_host_path.to_string_lossy().to_string(),
@@ -174,6 +168,8 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
     // Smooth finds the bind-mounted ~/.smooth/providers.json.
     boardroom_env.insert("HOME".into(), "/root".into());
     boardroom_env.insert("RUST_LOG".into(), "info,smooth_bigsmooth=debug".into());
+    // Tell the Boardroom VM where to find smooth-dolt for the pearl store.
+    boardroom_env.insert("SMOOTH_DOLT".into(), "/opt/smooth/bin/smooth-dolt".into());
     // Stable cache key so Rust deps compiled on the first test run
     // persist to ~/.smooth/pearl-env/boardroom-e2e-test/ and are reused
     // on subsequent runs. First run is cold (~5 min for cargo build);
@@ -199,11 +195,19 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
             },
         ],
         ports: vec![
-            PortMapping { host_port: 0, guest_port: 4400, bind_all: false },
+            PortMapping {
+                host_port: 0,
+                guest_port: 4400,
+                bind_all: false,
+            },
             // Archivist must be reachable from OTHER VMs via the host IP.
             // microsandbox publishes on 127.0.0.1 only; `bind_all: true`
             // tells Bill to run a TCP proxy on 0.0.0.0 as well.
-            PortMapping { host_port: archivist_host_port, guest_port: 4401, bind_all: true },
+            PortMapping {
+                host_port: archivist_host_port,
+                guest_port: 4401,
+                bind_all: true,
+            },
         ],
         timeout_seconds: 1800,
         // The Boardroom VM must reach Bill on host loopback
@@ -240,7 +244,10 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
         tokio::spawn(async move {
             match exec_client.exec(&exec_name, &["/opt/smooth/bin/boardroom".to_string()]).await {
                 Ok((stdout, stderr, code)) => {
-                    eprintln!("boardroom exec finished: code={code}\nstdout: {stdout}\nstderr tail: {}", &stderr[stderr.len().saturating_sub(2000)..]);
+                    eprintln!(
+                        "boardroom exec finished: code={code}\nstdout: {stdout}\nstderr tail: {}",
+                        &stderr[stderr.len().saturating_sub(2000)..]
+                    );
                 }
                 Err(e) => {
                     eprintln!("boardroom exec error: {e}");
@@ -309,6 +316,53 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
     eprintln!("archivist stats: {}", serde_json::to_string_pretty(&stats).unwrap_or_default());
     let by_vm = stats.get("by_vm").and_then(|v| v.as_object()).cloned().unwrap_or_default();
 
+    // --- Pearl + Session message assertions --------------------------------
+    eprintln!("\n===== PEARL + SESSION ASSERTIONS =====");
+
+    // Query Big Smooth's pearl stats — dispatch should have created pearls
+    // for each task leg (Rust + TS).
+    let pearl_stats_url = format!("http://127.0.0.1:{bigsmooth_host_port}/api/pearls/stats");
+    let pearl_stats: Option<serde_json::Value> = match reqwest::get(&pearl_stats_url).await {
+        Ok(resp) => resp.json::<serde_json::Value>().await.ok(),
+        Err(_) => None,
+    };
+    if let Some(ref stats) = pearl_stats {
+        let ok = stats["ok"].as_bool().unwrap_or(false);
+        if ok {
+            let data = &stats["data"];
+            let total = data["total"].as_u64().unwrap_or(0);
+            let closed = data["closed"].as_u64().unwrap_or(0);
+            eprintln!("pearl stats: total={total}, closed={closed}, open={}", data["open"].as_u64().unwrap_or(0));
+            // Dispatch creates a pearl per task. We dispatched 2 tasks (Rust + TS).
+            assert!(total >= 2, "expected at least 2 pearls from 2 dispatched tasks, got {total}");
+            // Both tasks completed, so pearls should be closed.
+            assert!(closed >= 2, "expected at least 2 closed pearls, got {closed}");
+        } else {
+            eprintln!("pearl stats: API returned ok=false (smooth-dolt may not be available in VM — build with scripts/build-boardroom.sh)");
+        }
+    } else {
+        eprintln!("pearl stats: could not query (pearl store may not be available in VM)");
+    }
+
+    // Query the pearl list for details
+    let pearls_url = format!("http://127.0.0.1:{bigsmooth_host_port}/api/pearls");
+    if let Ok(resp) = reqwest::get(&pearls_url).await {
+        if let Ok(body) = resp.json::<serde_json::Value>().await {
+            let pearls = body["data"].as_array();
+            if let Some(pearls) = pearls {
+                eprintln!("pearls ({}):", pearls.len());
+                for p in pearls {
+                    eprintln!(
+                        "  {} [{}] {}",
+                        p["id"].as_str().unwrap_or("?"),
+                        p["status"].as_str().unwrap_or("?"),
+                        p["title"].as_str().unwrap_or("?"),
+                    );
+                }
+            }
+        }
+    }
+
     // --- Final assertions --------------------------------------------------
     eprintln!("\n===== SUMMARY =====");
     let rust_total = rust_passed + rust_failed;
@@ -321,13 +375,23 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
     assert!(ts_total > 0, "ts leg produced zero tests — fixture broken or agent never wrote src/server.ts");
     let rust_rate = f64::from(rust_passed) / f64::from(rust_total);
     let ts_rate = f64::from(ts_passed) / f64::from(ts_total);
-    assert!(rust_rate >= 0.5, "rust leg {rust_passed}/{rust_total} ({:.0}%) below 50% floor", rust_rate * 100.0);
+    assert!(
+        rust_rate >= 0.5,
+        "rust leg {rust_passed}/{rust_total} ({:.0}%) below 50% floor",
+        rust_rate * 100.0
+    );
     assert!(ts_rate >= 0.5, "ts leg {ts_passed}/{ts_total} ({:.0}%) below 50% floor", ts_rate * 100.0);
 
     let (rust_verdict, rust_score, _) = rust_code;
     let (ts_verdict, ts_score, _) = ts_code;
-    assert!(rust_verdict == "pass" || rust_score >= 5, "rust judge rejected: verdict={rust_verdict} score={rust_score}");
-    assert!(ts_verdict == "pass" || ts_score >= 5, "ts judge rejected: verdict={ts_verdict} score={ts_score}");
+    assert!(
+        rust_verdict == "pass" || rust_score >= 5,
+        "rust judge rejected: verdict={rust_verdict} score={rust_score}"
+    );
+    assert!(
+        ts_verdict == "pass" || ts_score >= 5,
+        "ts judge rejected: verdict={ts_verdict} score={ts_score}"
+    );
 
     assert!(
         by_vm.len() >= 2,
@@ -399,7 +463,9 @@ async fn run_rust_leg(
     eprintln!("rust cargo test: {passed} passed, {failed} failed");
 
     let trimmed = tail_lines(&combined, 4000);
-    let judge = call_llm_judge(&llm.api_url, &llm.api_key, &llm.model, "rust", &generated, &trimmed, passed, failed).await.expect("judge rust");
+    let judge = call_llm_judge(&llm.api_url, &llm.api_key, &llm.model, "rust", &generated, &trimmed, passed, failed)
+        .await
+        .expect("judge rust");
     (passed, failed, judge)
 }
 
@@ -465,12 +531,19 @@ async fn run_ts_leg(
     eprintln!("vitest: {passed} passed, {failed} failed");
 
     let test_output = format!("{}\n---\n{}", tail_lines(&result_json, 2000), tail_lines(&vitest_stderr, 1500));
-    let judge = call_llm_judge(&llm.api_url, &llm.api_key, &llm.model, "typescript", &generated, &test_output, passed, failed).await.expect("judge ts");
+    let judge = call_llm_judge(&llm.api_url, &llm.api_key, &llm.model, "typescript", &generated, &test_output, passed, failed)
+        .await
+        .expect("judge ts");
     (passed, failed, judge)
 }
 
 /// Send a TaskStart and block until TaskComplete (or TaskError) arrives.
-async fn send_task_and_wait(ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, message: &str, workspace: &std::path::Path, model: Option<&str>) {
+async fn send_task_and_wait(
+    ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    message: &str,
+    workspace: &std::path::Path,
+    model: Option<&str>,
+) {
     let task_start = serde_json::json!({
         "type": "TaskStart",
         "message": message,
@@ -512,7 +585,13 @@ async fn send_task_and_wait(ws: &mut tokio_tungstenite::WebSocketStream<tokio_tu
             "TokenDelta" => {
                 if let Some(c) = event.get("content").and_then(|v| v.as_str()) {
                     // Only print stderr passthrough (prefixed) and short deltas.
-                    if c.contains("[runner stderr]") || c.contains("[cast-summary]") || c.contains("error") || c.contains("Error") || c.contains("archivist") || c.contains("ARCHIVIST") {
+                    if c.contains("[runner stderr]")
+                        || c.contains("[cast-summary]")
+                        || c.contains("error")
+                        || c.contains("Error")
+                        || c.contains("archivist")
+                        || c.contains("ARCHIVIST")
+                    {
                         eprintln!("  ws: TokenDelta {}", truncate(c, 300));
                     }
                 }
@@ -526,11 +605,19 @@ async fn send_task_and_wait(ws: &mut tokio_tungstenite::WebSocketStream<tokio_tu
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max { s.to_string() } else { format!("{}…", &s[..max]) }
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..max])
+    }
 }
 
 fn which_exists(cmd: &str) -> bool {
-    std::process::Command::new("which").arg(cmd).output().map(|o| o.status.success()).unwrap_or(false)
+    std::process::Command::new("which")
+        .arg(cmd)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn tail_lines(s: &str, max_bytes: usize) -> String {
