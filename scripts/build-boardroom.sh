@@ -62,10 +62,34 @@ DOLT_BIN="target/aarch64-unknown-linux-musl/release/smooth-dolt"
 echo "==> Cross-compiling smooth-dolt for linux/arm64"
 if [ -d "go/smooth-dolt" ]; then
     cd go/smooth-dolt
-    GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -tags gms_pure_go -o "../../$DOLT_BIN" . 2>&1 || {
-        echo "warning: smooth-dolt cross-compile failed (pearl store will not work in Boardroom VM)" >&2
-        cd ../..
-    }
+    # gozstd requires CGO. For cross-compile to linux/arm64, use zig as the
+    # C cross-compiler (same trick cargo-zigbuild uses).
+    # Find zig — may be installed via pip (ziglang package) in a Python user dir
+    ZIG_BIN=""
+    if command -v zig >/dev/null 2>&1; then
+        ZIG_BIN="zig"
+    else
+        for pydir in "$HOME/Library/Python"/*/lib/python/site-packages/ziglang; do
+            if [ -f "$pydir/zig" ]; then
+                ZIG_BIN="$pydir/zig"
+                break
+            fi
+        done
+    fi
+    if [ -n "$ZIG_BIN" ]; then
+        ZIG_CC="$ZIG_BIN cc -target aarch64-linux-musl"
+        CC="$ZIG_CC" CGO_ENABLED=1 GOOS=linux GOARCH=arm64 \
+            go build -tags gms_pure_go -o "../../$DOLT_BIN" . 2>&1 || {
+            # Fallback: try without CGO (will fail if gozstd is needed at runtime)
+            echo "  zig cross-compile failed, trying CGO_ENABLED=0..." >&2
+            GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -tags "gms_pure_go nozstd" -o "../../$DOLT_BIN" . 2>&1 || {
+                echo "warning: smooth-dolt cross-compile failed (pearl store will not work in Boardroom VM)" >&2
+                cd ../..
+            }
+        }
+    else
+        echo "warning: zig not found, cannot cross-compile smooth-dolt (install: pip3 install ziglang)" >&2
+    fi  # ZIG_BIN check
     cd ../.. 2>/dev/null || true
     if [ -f "$DOLT_BIN" ]; then
         DOLT_SIZE=$(wc -c < "$DOLT_BIN" | tr -d ' ')
