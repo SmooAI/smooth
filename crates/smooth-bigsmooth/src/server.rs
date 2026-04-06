@@ -265,7 +265,7 @@ pub async fn start(mut state: AppState, addr: SocketAddr) -> anyhow::Result<()> 
             .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
             .unwrap_or(false)
     {
-        match crate::boardroom::spawn_boardroom_cast().await {
+        match crate::boardroom::spawn_boardroom_cast(None).await {
             Ok(handles) => {
                 tracing::info!(archivist = %handles.archivist_url, "Big Smooth running in Boardroom mode");
                 state.boardroom = Some(handles);

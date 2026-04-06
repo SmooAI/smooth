@@ -71,7 +71,11 @@ async fn main() -> anyhow::Result<()> {
     // Scribe, and Archivist. The handles carry URLs that
     // dispatch_ws_task_sandboxed needs to inject SMOOTH_ARCHIVIST_URL
     // into every operator VM's env.
-    let handles = smooth_bigsmooth::boardroom::spawn_boardroom_cast()
+    // Clone the pearl_store for Diver (PearlStore wraps a SmoothDolt which
+    // can be reopened from the same directory).
+    let dolt_dir_for_diver = dolt_dir.clone();
+    let diver_pearl_store = smooth_pearls::PearlStore::open(&dolt_dir_for_diver).ok();
+    let handles = smooth_bigsmooth::boardroom::spawn_boardroom_cast(diver_pearl_store)
         .await
         .expect("boardroom: failed to spawn cast");
     // Diagnostic: confirm the env vars that operator_facing_archivist_url() depends on.

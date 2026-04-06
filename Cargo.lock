@@ -5083,6 +5083,7 @@ dependencies = [
  "smooth-archivist",
  "smooth-bootstrap-bill",
  "smooth-code",
+ "smooth-diver",
  "smooth-goalie",
  "smooth-narc",
  "smooth-operator",
@@ -5168,6 +5169,26 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.26.2",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "smooth-diver"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "http-body-util",
+ "hyper",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "smooth-pearls",
+ "tempfile",
+ "tokio",
+ "tower",
  "tracing",
  "uuid",
 ]
