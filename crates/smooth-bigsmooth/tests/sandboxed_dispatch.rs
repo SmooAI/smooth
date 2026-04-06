@@ -655,7 +655,15 @@ fn parse_cargo_test_summary(output: &str) -> Option<(u32, u32)> {
 
 /// Call an OpenAI-compatible chat completion endpoint as an LLM judge.
 /// Returns the judge's JSON response as a `serde_json::Value`.
-async fn call_llm_judge(api_url: &str, api_key: &str, model: &str, generated_code: &str, test_output: &str, passed: u32, failed: u32) -> anyhow::Result<serde_json::Value> {
+async fn call_llm_judge(
+    api_url: &str,
+    api_key: &str,
+    model: &str,
+    generated_code: &str,
+    test_output: &str,
+    passed: u32,
+    failed: u32,
+) -> anyhow::Result<serde_json::Value> {
     let url = format!("{}/chat/completions", api_url.trim_end_matches('/'));
     let prompt = format!(
         "You are a strict code review judge for an autonomous agent benchmark.\n\n\
@@ -695,7 +703,12 @@ async fn call_llm_judge(api_url: &str, api_key: &str, model: &str, generated_cod
         .ok_or_else(|| anyhow::anyhow!("no choices[0].message.content in judge response: {parsed}"))?;
     // The judge may wrap its JSON in a code fence despite our instructions.
     // Strip any ``` fences before parsing.
-    let stripped = content.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
+    let stripped = content
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
     let verdict: serde_json::Value = serde_json::from_str(stripped).map_err(|e| anyhow::anyhow!("parse judge verdict JSON: {e}; content: {content}"))?;
     Ok(verdict)
 }
@@ -848,7 +861,9 @@ async fn sandboxed_agent_passes_spec_tests_with_llm_judge() {
             combined.clone()
         }
     };
-    let verdict = call_llm_judge(&llm.api_url, &llm.api_key, &llm.model, &generated_code, &trimmed_output, passed, failed).await.expect("call LLM judge");
+    let verdict = call_llm_judge(&llm.api_url, &llm.api_key, &llm.model, &generated_code, &trimmed_output, passed, failed)
+        .await
+        .expect("call LLM judge");
     eprintln!("=== LLM judge verdict ===\n{}", serde_json::to_string_pretty(&verdict).unwrap_or_default());
     let judge_verdict = verdict.get("verdict").and_then(|v| v.as_str()).unwrap_or("");
     let judge_score = verdict.get("score").and_then(serde_json::Value::as_i64).unwrap_or(-1);

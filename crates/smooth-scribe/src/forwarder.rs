@@ -74,7 +74,10 @@ impl ForwarderHandle {
 #[must_use]
 pub fn spawn(archivist_url: String, source_vm: String) -> ForwarderHandle {
     let (tx, mut rx) = mpsc::channel::<LogEntry>(CHANNEL_CAPACITY);
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(5)).build().unwrap_or_else(|_| reqwest::Client::new());
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let url = format!("{}/ingest", archivist_url.trim_end_matches('/'));
 
     tokio::spawn(async move {

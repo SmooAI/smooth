@@ -22,7 +22,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 /// or call `kill` when done. We don't wrap in `Drop` here because tests
 /// usually want explicit control over teardown order.
 pub async fn spawn_bill_subprocess() -> anyhow::Result<(Child, std::net::SocketAddr)> {
-    let bill_bin = find_workspace_target("release/bootstrap-bill").ok_or_else(|| anyhow::anyhow!("bootstrap-bill binary not found. Run: cargo build --release --bin bootstrap-bill"))?;
+    let bill_bin = find_workspace_target("release/bootstrap-bill")
+        .ok_or_else(|| anyhow::anyhow!("bootstrap-bill binary not found. Run: cargo build --release --bin bootstrap-bill"))?;
 
     // Bind 0.0.0.0 so the Boardroom VM can reach Bill via host.containers.internal.
     let mut child = Command::new(&bill_bin)
@@ -198,7 +199,12 @@ pub async fn call_llm_judge(
         .and_then(|m| m.get("content"))
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("no choices[0].message.content in judge response"))?;
-    let stripped = content.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
+    let stripped = content
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
     let verdict_json: serde_json::Value = serde_json::from_str(stripped)?;
     let verdict = verdict_json.get("verdict").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let score = verdict_json.get("score").and_then(serde_json::Value::as_i64).unwrap_or(-1);

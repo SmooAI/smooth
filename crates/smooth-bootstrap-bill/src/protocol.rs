@@ -100,20 +100,13 @@ pub enum BillRequest {
     /// Liveness probe.
     Ping,
     /// Spawn a sandbox and register it under `spec.name`.
-    Spawn {
-        spec: SandboxSpec,
-    },
+    Spawn { spec: SandboxSpec },
     /// Run a command inside an already-spawned sandbox. The command is
     /// executed synchronously; Bill replies with the full stdout/stderr
     /// captured when the command exits.
-    Exec {
-        name: String,
-        argv: Vec<String>,
-    },
+    Exec { name: String, argv: Vec<String> },
     /// Stop the sandbox and remove it from the registry. Idempotent.
-    Destroy {
-        name: String,
-    },
+    Destroy { name: String },
     /// Report how many sandboxes Bill currently holds. Handy for panic-hook
     /// teardown assertions in tests.
     List,
@@ -176,7 +169,11 @@ mod tests {
                 guest_path: "/workspace".into(),
                 readonly: false,
             }],
-            ports: vec![PortMapping { host_port: 0, guest_port: 4096, bind_all: false }],
+            ports: vec![PortMapping {
+                host_port: 0,
+                guest_port: 4096,
+                bind_all: false,
+            }],
             timeout_seconds: 1800,
             allow_host_loopback: false,
             env_cache_key: None,
@@ -198,7 +195,11 @@ mod tests {
     fn response_roundtrip_spawned() {
         let resp = BillResponse::Spawned {
             name: "smooth-test".into(),
-            host_ports: vec![PortMapping { host_port: 42424, guest_port: 4096, bind_all: false }],
+            host_ports: vec![PortMapping {
+                host_port: 42424,
+                guest_port: 4096,
+                bind_all: false,
+            }],
             created_at: "2026-04-05T00:00:00Z".into(),
         };
         let json = serde_json::to_string(&resp).expect("serialize");

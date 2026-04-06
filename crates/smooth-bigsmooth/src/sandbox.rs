@@ -30,9 +30,9 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use smooth_bootstrap_bill::protocol::{BindMountSpec, PortMapping, SandboxSpec};
-use smooth_bootstrap_bill::BillClient;
 #[cfg(feature = "direct-sandbox")]
 use smooth_bootstrap_bill::server as bill_server;
+use smooth_bootstrap_bill::BillClient;
 
 /// A bind mount from a host path into the sandbox.
 ///
@@ -266,9 +266,7 @@ pub struct BillSandboxClient {
 impl BillSandboxClient {
     #[must_use]
     pub fn new(url: impl Into<String>) -> Self {
-        Self {
-            client: BillClient::new(url),
-        }
+        Self { client: BillClient::new(url) }
     }
 }
 
@@ -424,7 +422,10 @@ pub fn ensure_server() -> Result<()> {
 ///
 /// Returns an error if the VM fails to boot.
 pub async fn create_sandbox(config: &SandboxConfig, host_port: u16) -> Result<SandboxHandle> {
-    sandbox_client().create(config, host_port).await.with_context(|| format!("create sandbox for operator {}", config.operator_id))
+    sandbox_client()
+        .create(config, host_port)
+        .await
+        .with_context(|| format!("create sandbox for operator {}", config.operator_id))
 }
 
 /// Destroy a sandbox. Idempotent.

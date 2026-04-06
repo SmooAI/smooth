@@ -90,9 +90,7 @@ impl BoardroomHandles {
     /// so we can build the right URL for operator env.
     #[must_use]
     pub fn operator_facing_archivist_url(&self) -> Option<String> {
-        let port = std::env::var("SMOOTH_ARCHIVIST_HOST_PORT")
-            .ok()
-            .and_then(|p| p.parse::<u16>().ok())?;
+        let port = std::env::var("SMOOTH_ARCHIVIST_HOST_PORT").ok().and_then(|p| p.parse::<u16>().ok())?;
         // The operator VM needs to reach the Boardroom's Archivist via
         // the host network. 127.0.0.1 won't work from inside a microVM
         // (the guest kernel handles loopback locally). We derive the
@@ -169,8 +167,9 @@ pub async fn spawn_boardroom_cast() -> Result<BoardroomHandles> {
     // so the legal policy file format is exercised and any future
     // boardroom tool surface gets guardrails for free. Policy can be
     // tightened in a follow-up.
-    let default_policy_toml = crate::policy::generate_policy_for_task("boardroom", "boardroom", "execute", "boardroom-token", &[], crate::policy::TaskType::Coding)
-        .context("boardroom: generate default wonk policy")?;
+    let default_policy_toml =
+        crate::policy::generate_policy_for_task("boardroom", "boardroom", "execute", "boardroom-token", &[], crate::policy::TaskType::Coding)
+            .context("boardroom: generate default wonk policy")?;
     let policy = smooth_policy::Policy::from_toml(&default_policy_toml).map_err(|e| anyhow::anyhow!("boardroom: parse wonk policy: {e}"))?;
     let policy_holder = PolicyHolder::from_policy(policy);
     let negotiator = Negotiator::new("http://127.0.0.1:1/no-leader", policy_holder.clone());
