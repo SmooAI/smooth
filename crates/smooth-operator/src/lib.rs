@@ -9,6 +9,7 @@
 pub mod agent;
 pub mod bigsmooth_client;
 pub mod checkpoint;
+pub mod context;
 pub mod conversation;
 pub mod cost;
 pub mod human;

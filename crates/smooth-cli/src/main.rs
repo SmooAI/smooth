@@ -2,6 +2,8 @@
 //!
 //! Single binary for agent orchestration, config management, and platform tools.
 
+mod hooks;
+
 use std::net::SocketAddr;
 
 use anyhow::Result;
@@ -120,6 +122,11 @@ enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Git hook management (install, run).
+    Hooks {
+        #[command(subcommand)]
+        cmd: HooksCommands,
     },
     /// Pearl tracking (built-in work-item tracker).
     ///
@@ -263,6 +270,21 @@ enum AccessCommands {
         /// Operator ID
         operator_id: String,
     },
+}
+
+#[derive(Subcommand)]
+enum HooksCommands {
+    /// Install git hooks (.githooks/) with cargo quality gates + pearl integration
+    Install,
+    /// Run pearl-specific hook logic (called from .githooks/ scripts)
+    Run {
+        /// Hook name: pre-commit, pre-push, prepare-commit-msg, post-checkout, post-merge
+        hook: String,
+        /// Arguments passed by git to the hook
+        args: Vec<String>,
+    },
+    /// Check if hooks are properly installed
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -413,6 +435,7 @@ async fn main() -> Result<()> {
         Some(Commands::Resume { bead_id }) => cmd_steer(&bead_id, "resume", None).await,
         Some(Commands::Steer { bead_id, message }) => cmd_steer(&bead_id, "steer", Some(&message)).await,
         Some(Commands::Cancel { bead_id }) => cmd_steer(&bead_id, "cancel", None).await,
+        Some(Commands::Hooks { cmd }) => cmd_hooks(cmd),
         Some(Commands::Pearls { cmd }) => cmd_pearls(cmd).await,
         Some(Commands::Audit { cmd }) => cmd_audit(cmd),
         Some(Commands::Web) => {
@@ -847,6 +870,23 @@ async fn cmd_code(headless: bool, message: Option<String>, file: Option<String>,
     smooth_code::app::run(working_dir).await
 }
 
+fn cmd_hooks(cmd: HooksCommands) -> Result<()> {
+    match cmd {
+        HooksCommands::Install => {
+            let hooks_dir = hooks::install(None)?;
+            hooks::print_install_result(&hooks_dir);
+        }
+        HooksCommands::Run { hook, args } => {
+            hooks::run_hook(&hook, &args)?;
+        }
+        HooksCommands::Status => {
+            let status = hooks::check(None);
+            hooks::print_doctor_status(&status);
+        }
+    }
+    Ok(())
+}
+
 /// System health check and auto-fix.
 async fn cmd_doctor() -> Result<()> {
     println!("{}", "Smooth Doctor".bold().cyan());
@@ -974,6 +1014,23 @@ async fn cmd_doctor() -> Result<()> {
 
     // 8. Sandboxes (built-in via microsandbox crate)
     println!("  {} Sandboxes: {}", "✓".green().bold(), "built-in (microsandbox)".green());
+
+    // 9. Git hooks
+    let hooks_status = hooks::check(None);
+    if !hooks::print_doctor_status(&hooks_status) {
+        issues += 1;
+        // Auto-fix: install hooks
+        println!("    {} installing hooks...", "→".cyan());
+        match hooks::install(None) {
+            Ok(hooks_dir) => {
+                println!("    {} fixed: hooks installed at {}", "✓".green().bold(), hooks_dir.display());
+                issues -= 1;
+            }
+            Err(e) => {
+                println!("    {} could not auto-install hooks: {e}", "✗".red().bold());
+            }
+        }
+    }
 
     println!();
     if issues == 0 {
@@ -1259,6 +1316,16 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
                 println!("  Tables: pearls, pearl_dependencies, pearl_labels, pearl_comments, pearl_history, sessions, memories");
                 println!("  Run: th pearls remote add origin <git-remote-url>");
                 println!("  Then: th pearls push");
+            }
+
+            // Install git hooks if not already present
+            let hooks_status = hooks::check(None);
+            if !hooks_status.is_ok() {
+                println!();
+                match hooks::install(None) {
+                    Ok(hooks_dir) => hooks::print_install_result(&hooks_dir),
+                    Err(e) => eprintln!("  Could not install git hooks: {e}"),
+                }
             }
         }
 

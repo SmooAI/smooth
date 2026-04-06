@@ -611,11 +611,16 @@ async fn main() {
     } else {
         ""
     };
-    let system_prompt = format!(
+    let base_prompt = format!(
         "You are Smooth Operator, an AI coding agent running inside a hardware-isolated microVM. \
         Use read_file, write_file, list_files, and bash tools to complete the user task. \
         All paths are relative to your workspace.{pearl_note} Be concise and thorough.",
     );
+    let workspace_path = std::path::Path::new(&config.workspace);
+    let system_prompt = match smooth_operator::context::load_project_context(workspace_path) {
+        Some(ctx) => format!("{base_prompt}\n\n## Project Context\n\n{ctx}"),
+        None => base_prompt,
+    };
 
     let mut agent_config = AgentConfig::new(format!("op-{}", config.operator_id), &system_prompt, llm).with_max_iterations(config.max_iterations);
     if let Some(cap) = config.budget_usd {

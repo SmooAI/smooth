@@ -80,9 +80,7 @@ pub async fn spawn_sandbox(spec: SandboxSpec) -> Result<(String, Vec<PortMapping
     // panic from `msb_krun_vmm::builder`. Catch it here with a clean error.
     for (k, v) in &spec.env {
         if let Some((pos, byte)) = v.bytes().enumerate().find(|&(_, b)| !(b' '..=b'~').contains(&b)) {
-            anyhow::bail!(
-                "env var {k}: non-ASCII byte 0x{byte:02x} at offset {pos} (microsandbox requires printable ASCII env values)"
-            );
+            anyhow::bail!("env var {k}: non-ASCII byte 0x{byte:02x} at offset {pos} (microsandbox requires printable ASCII env values)");
         }
     }
     if lookup(&spec.name).is_some() {
@@ -355,11 +353,7 @@ async fn dispatch(request: BillRequest) -> BillResponse {
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
         BillRequest::Spawn { spec } => match spawn_sandbox(spec).await {
-            Ok((name, host_ports, created_at)) => BillResponse::Spawned {
-                name,
-                host_ports,
-                created_at,
-            },
+            Ok((name, host_ports, created_at)) => BillResponse::Spawned { name, host_ports, created_at },
             Err(e) => BillResponse::Error { message: format!("{e:#}") },
         },
         BillRequest::Exec { name, argv } => match exec_sandbox(&name, &argv).await {

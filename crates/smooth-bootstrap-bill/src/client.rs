@@ -39,7 +39,11 @@ impl BillClient {
         let s = self.url.trim();
         let s = s.strip_prefix("http://").or_else(|| s.strip_prefix("https://")).unwrap_or(s);
         let s = s.trim_end_matches('/');
-        if s.contains(':') { Ok(s.to_string()) } else { Ok(format!("{s}:4444")) }
+        if s.contains(':') {
+            Ok(s.to_string())
+        } else {
+            Ok(format!("{s}:4444"))
+        }
     }
 
     async fn send(&self, request: &BillRequest) -> Result<BillResponse> {

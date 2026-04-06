@@ -374,9 +374,14 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
         }
     };
 
-    let system_prompt = "You are Smooth Coding, an AI coding assistant. Help the user with their coding questions. Be concise and helpful.";
+    let base_prompt = "You are Smooth Coding, an AI coding assistant. Help the user with their coding questions. Be concise and helpful.";
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let system_prompt = match smooth_operator::context::load_project_context(&cwd) {
+        Some(ctx) => format!("{base_prompt}\n\n## Project Context\n\n{ctx}"),
+        None => base_prompt.to_string(),
+    };
 
-    let config = AgentConfig::new("smooth-coding", system_prompt, llm_config).with_max_iterations(1);
+    let config = AgentConfig::new("smooth-coding", &system_prompt, llm_config).with_max_iterations(1);
 
     let tools = ToolRegistry::new();
     let agent = Agent::new(config, tools);
