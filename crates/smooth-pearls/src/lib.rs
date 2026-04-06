@@ -1,15 +1,20 @@
 //! Smooth Pearls — built-in dependency-graph work-item tracker.
 //!
-//! Inspired by the beads system. Replaces the previous `smooth-issues` crate.
-//! Pearls have statuses, priorities, dependencies, labels, comments, and
-//! history, all backed by a single SQLite file under `~/.smooth/smooth.db`.
+//! Inspired by the beads system. Backed by embedded Dolt (via `smooth-dolt`
+//! Go binary) for version-controlled, git-syncable pearl data. Falls back
+//! to SQLite for backward compatibility.
+//!
+//! Per-project data lives in `.smooth/dolt/` (Dolt, pushed to `refs/dolt/data`
+//! on git origin). Global registry at `~/.smooth/` tracks all projects.
 
+pub mod dolt;
 pub mod query;
 #[allow(clippy::missing_errors_doc)]
 pub mod store;
 pub mod tools;
 pub mod types;
 
+pub use dolt::SmoothDolt;
 pub use query::PearlQuery;
 pub use store::PearlStore;
 pub use tools::register_pearl_tools;

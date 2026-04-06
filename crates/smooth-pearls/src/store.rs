@@ -335,9 +335,10 @@ impl PearlStore {
         let mut stmt = conn.prepare("SELECT * FROM pearls WHERE id = ?1")?;
         let pearl = stmt.query_row(params![id], Self::row_to_pearl)?;
         drop(stmt);
+        let pearl = Self::load_pearl_with_labels(&conn, pearl)?;
         drop(conn);
         self.dolt_commit(&format!("create pearl {id}: {}", new.title))?;
-        Self::load_pearl_with_labels(&self.lock()?, pearl)
+        Ok(pearl)
     }
 
     /// Get an pearl by ID.

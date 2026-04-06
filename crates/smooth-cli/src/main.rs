@@ -326,6 +326,25 @@ enum PearlCommands {
         #[command(subcommand)]
         cmd: LabelCommands,
     },
+    /// Initialize a Dolt pearl database in this repo (.smooth/dolt/)
+    Init,
+    /// Show Dolt commit history for pearls
+    Log {
+        /// Number of entries to show
+        #[arg(short, default_value = "20")]
+        n: usize,
+    },
+    /// Push pearl data to git remote (refs/dolt/data)
+    Push,
+    /// Pull pearl data from git remote
+    Pull,
+    /// Manage Dolt remotes for pearl sync
+    Remote {
+        #[command(subcommand)]
+        cmd: RemoteCommands,
+    },
+    /// Garbage collect the pearl database (compact for git)
+    Gc,
     /// Migrate from beads
     MigrateFromBeads,
 }
@@ -344,6 +363,16 @@ enum LabelCommands {
     Add { label: String },
     /// Remove a label
     Remove { label: String },
+}
+
+#[derive(Subcommand)]
+enum RemoteCommands {
+    /// Add a Dolt remote (e.g., git origin URL)
+    Add { name: String, url: String },
+    /// List configured remotes
+    List,
+    /// Remove a remote
+    Remove { name: String },
 }
 
 #[tokio::main]
@@ -1122,9 +1151,148 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
         PearlCommands::MigrateFromBeads => {
             cmd_migrate_from_beads(&store)?;
         }
+
+        // ── Dolt commands ────────────────────────────────────────────
+        PearlCommands::Init => {
+            let cwd = std::env::current_dir()?;
+            let dolt_dir = cwd.join(".smooth").join("dolt");
+            if dolt_dir.exists() {
+                println!("Pearl database already initialized at {}", dolt_dir.display());
+            } else {
+                let dolt = smooth_pearls::SmoothDolt::new(&dolt_dir)?;
+                let output = dolt.init()?;
+                println!("{output}");
+                // Create the pearls schema.
+                dolt.exec(
+                    "CREATE TABLE IF NOT EXISTS pearls (
+                        id VARCHAR(20) PRIMARY KEY,
+                        title TEXT NOT NULL,
+                        description TEXT DEFAULT '',
+                        status VARCHAR(20) NOT NULL DEFAULT 'open',
+                        priority INT NOT NULL DEFAULT 2,
+                        pearl_type VARCHAR(20) NOT NULL DEFAULT 'task',
+                        parent_id VARCHAR(20),
+                        assigned_to VARCHAR(100),
+                        created_by VARCHAR(100) DEFAULT 'user',
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        closed_at DATETIME,
+                        metadata JSON DEFAULT '{}'
+                    )")?;
+                dolt.exec(
+                    "CREATE TABLE IF NOT EXISTS pearl_dependencies (
+                        pearl_id VARCHAR(20) NOT NULL,
+                        depends_on VARCHAR(20) NOT NULL,
+                        dep_type VARCHAR(20) DEFAULT 'blocks',
+                        PRIMARY KEY (pearl_id, depends_on)
+                    )")?;
+                dolt.exec(
+                    "CREATE TABLE IF NOT EXISTS pearl_labels (
+                        pearl_id VARCHAR(20) NOT NULL,
+                        label VARCHAR(100) NOT NULL,
+                        PRIMARY KEY (pearl_id, label)
+                    )")?;
+                dolt.exec(
+                    "CREATE TABLE IF NOT EXISTS pearl_comments (
+                        id VARCHAR(20) PRIMARY KEY,
+                        pearl_id VARCHAR(20) NOT NULL,
+                        content TEXT NOT NULL,
+                        created_by VARCHAR(100) DEFAULT 'user',
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )")?;
+                dolt.exec(
+                    "CREATE TABLE IF NOT EXISTS sessions (
+                        id VARCHAR(40) PRIMARY KEY,
+                        title TEXT,
+                        model VARCHAR(100),
+                        started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        ended_at DATETIME,
+                        message_count INT DEFAULT 0,
+                        token_count INT DEFAULT 0
+                    )")?;
+                dolt.exec(
+                    "CREATE TABLE IF NOT EXISTS memories (
+                        id VARCHAR(40) PRIMARY KEY,
+                        content TEXT NOT NULL,
+                        source VARCHAR(100),
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )")?;
+                dolt.commit("initialize pearl schema")?;
+                println!("{} Pearl database initialized at {}", "✓".green().bold(), dolt_dir.display());
+                println!("  Tables: pearls, pearl_dependencies, pearl_labels, pearl_comments, sessions, memories");
+                println!("  Run: th pearls remote add origin <git-remote-url>");
+                println!("  Then: th pearls push");
+            }
+        }
+
+        PearlCommands::Log { n } => {
+            let dolt_dir = find_dolt_dir()?;
+            let dolt = smooth_pearls::SmoothDolt::new(&dolt_dir)?;
+            let entries = dolt.log(n)?;
+            if entries.is_empty() {
+                println!("No commits yet.");
+            } else {
+                for (line, _, _, _) in &entries {
+                    println!("{line}");
+                }
+            }
+        }
+
+        PearlCommands::Push => {
+            let dolt_dir = find_dolt_dir()?;
+            let dolt = smooth_pearls::SmoothDolt::new(&dolt_dir)?;
+            let output = dolt.push()?;
+            println!("{output}");
+        }
+
+        PearlCommands::Pull => {
+            let dolt_dir = find_dolt_dir()?;
+            let dolt = smooth_pearls::SmoothDolt::new(&dolt_dir)?;
+            let output = dolt.pull()?;
+            println!("{output}");
+        }
+
+        PearlCommands::Remote { cmd } => {
+            let dolt_dir = find_dolt_dir()?;
+            let dolt = smooth_pearls::SmoothDolt::new(&dolt_dir)?;
+            match cmd {
+                RemoteCommands::Add { name, url } => {
+                    let output = dolt.remote_add(&name, &url)?;
+                    println!("{output}");
+                }
+                RemoteCommands::List => {
+                    let output = dolt.remote_list()?;
+                    if output.is_empty() {
+                        println!("No remotes configured. Run: th pearls remote add origin <url>");
+                    } else {
+                        println!("{output}");
+                    }
+                }
+                RemoteCommands::Remove { name } => {
+                    // Remove via SQL: CALL DOLT_REMOTE('remove', ?)
+                    let output = dolt.exec(&format!("CALL DOLT_REMOTE('remove', '{name}')"))?;
+                    println!("removed remote {name}");
+                    let _ = output;
+                }
+            }
+        }
+
+        PearlCommands::Gc => {
+            let dolt_dir = find_dolt_dir()?;
+            let dolt = smooth_pearls::SmoothDolt::new(&dolt_dir)?;
+            let output = dolt.gc()?;
+            println!("{output}");
+        }
     }
 
     Ok(())
+}
+
+/// Find the .smooth/dolt/ directory by walking up from cwd.
+fn find_dolt_dir() -> Result<std::path::PathBuf> {
+    let cwd = std::env::current_dir()?;
+    smooth_pearls::dolt::find_repo_dolt_dir(&cwd)
+        .ok_or_else(|| anyhow::anyhow!("no .smooth/dolt/ found. Run: th pearls init"))
 }
 
 fn cmd_migrate_from_beads(store: &smooth_pearls::PearlStore) -> Result<()> {
