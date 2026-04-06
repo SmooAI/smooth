@@ -583,19 +583,8 @@ async fn main() {
         api_format: smooth_operator::llm::ApiFormat::OpenAiCompat,
     };
 
-    let system_prompt = "You are Smooth Operator, an AI coding agent running inside a hardware-isolated microVM. \
-        Use read_file, write_file, list_files, and bash tools to complete the user task. \
-        All paths are relative to your workspace. Be concise and thorough.";
-
-    let mut agent_config = AgentConfig::new(format!("op-{}", config.operator_id), system_prompt, llm).with_max_iterations(config.max_iterations);
-    if let Some(cap) = config.budget_usd {
-        agent_config = agent_config.with_budget(CostBudget {
-            max_cost_usd: Some(cap),
-            max_tokens: None,
-        });
-    }
-
-    // Tools + NarcHook
+    // Tools + NarcHook — register BEFORE building the system prompt so we
+    // can announce all available tools to the LLM.
     let mut tools = ToolRegistry::new();
     tools.register(ReadFileTool {
         base: config.workspace.clone(),
@@ -614,6 +603,30 @@ async fn main() {
     // Pearl tools — if workspace has .smooth/dolt/, register direct Dolt
     // pearl tools so the agent can create/list/close pearls locally.
     pearl_tools::register_pearl_tools(&mut tools, &config.workspace);
+
+    // Build system prompt with all available tools announced
+    let tool_list: Vec<String> = tools.schemas().iter().map(|s| format!("- **{}**: {}", s.name, s.description)).collect();
+    let system_prompt = format!(
+        "You are Smooth Operator, an AI coding agent running inside a hardware-isolated microVM. \
+        All file paths are relative to your workspace at /workspace.\n\n\
+        ## Available Tools\n\
+        {}\n\n\
+        ## Workflow\n\
+        1. If you have create_pearl and close_pearl tools, create a pearl FIRST to track your work.\n\
+        2. Complete the task using read_file, write_file, list_files, and bash.\n\
+        3. Run quality checks (compile, test) and fix errors until everything passes.\n\
+        4. If you created a pearl, close it when done.\n\n\
+        Be concise and thorough. Do not stop until the task is complete and verified.",
+        tool_list.join("\n"),
+    );
+
+    let mut agent_config = AgentConfig::new(format!("op-{}", config.operator_id), &system_prompt, llm).with_max_iterations(config.max_iterations);
+    if let Some(cap) = config.budget_usd {
+        agent_config = agent_config.with_budget(CostBudget {
+            max_cost_usd: Some(cap),
+            max_tokens: None,
+        });
+    }
 
     // Hook order is intentional:
     //   1. Narc — fastest, catches secrets/injection/dangerous writes purely
