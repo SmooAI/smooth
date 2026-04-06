@@ -187,6 +187,10 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
     // Tell the Boardroom the host port of its own Big Smooth API, so it
     // can pass SMOOTH_BIGSMOOTH_URL to operators for pearl tool access.
     boardroom_env.insert("SMOOTH_BIGSMOOTH_HOST_PORT".into(), bigsmooth_host_port_fixed.to_string());
+    // Pre-compute the full operator-facing Big Smooth URL so operators can
+    // call pearl tools. This is simpler than deriving it inside the VM.
+    let bigsmooth_operator_url = format!("http://{host_ip}:{bigsmooth_host_port_fixed}");
+    boardroom_env.insert("SMOOTH_BIGSMOOTH_OPERATOR_URL".into(), bigsmooth_operator_url);
 
     let spec = SandboxSpec {
         name: boardroom_name.clone(),

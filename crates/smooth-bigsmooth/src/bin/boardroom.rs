@@ -43,8 +43,12 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(db = %db_path.display(), port, "boardroom: opening db");
     let db = smooth_bigsmooth::db::Database::open(&db_path)?;
 
-    // Pearl store: Dolt-backed. Try to open existing, or auto-init.
-    let dolt_dir = PathBuf::from("/root/.smooth/dolt");
+    // Pearl store: Dolt-backed. Use a per-session temp dir so each
+    // Boardroom boot starts with a clean pearl database (no stale data
+    // from previous runs). The Dolt DB is ephemeral to the VM session.
+    let dolt_dir = std::env::var("SMOOTH_DOLT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/tmp/smooth-dolt"));
     let pearl_store = if dolt_dir.exists() {
         tracing::info!(dolt = %dolt_dir.display(), "boardroom: opening existing Dolt pearl store");
         smooth_pearls::PearlStore::open(&dolt_dir)?

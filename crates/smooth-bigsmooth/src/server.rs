@@ -916,24 +916,25 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
                 Some(archivist_url) => {
                     tracing::info!(task_id = tid, url = %archivist_url, "operator env: SMOOTH_ARCHIVIST_URL set");
                     env.insert("SMOOTH_ARCHIVIST_URL".into(), archivist_url.clone());
-                    // Derive Big Smooth URL from archivist URL — same host, port 4400
-                    // Archivist URL is http://<host_ip>:<archivist_port>, Big Smooth is on 4400
-                    // which is also port-forwarded. Use SMOOTH_BOOTSTRAP_BILL_URL host.
-                    if let Ok(bill_url) = std::env::var("SMOOTH_BOOTSTRAP_BILL_URL") {
-                        // Bill URL is http://<host_ip>:<bill_port>. Extract host_ip.
-                        if let Some(host_part) = bill_url.strip_prefix("http://") {
+                    // Pass Big Smooth's operator-facing URL to operators so they
+                    // can use pearl tools (create_pearl, close_pearl, etc.)
+                    // Check for pre-computed URL first, then derive from env.
+                    if let Ok(bs_url) = std::env::var("SMOOTH_BIGSMOOTH_OPERATOR_URL") {
+                        tracing::info!(task_id = tid, url = %bs_url, "operator env: SMOOTH_BIGSMOOTH_URL set (from SMOOTH_BIGSMOOTH_OPERATOR_URL)");
+                        env.insert("SMOOTH_BIGSMOOTH_URL".into(), bs_url);
+                    } else if let Ok(bs_port) = std::env::var("SMOOTH_BIGSMOOTH_HOST_PORT") {
+                        if let Some(host_part) = archivist_url.strip_prefix("http://") {
                             if let Some(host_ip) = host_part.split(':').next() {
-                                // Big Smooth's guest port 4400 is port-forwarded by Bill.
-                                // Get the actual host port from the sandbox's port mappings.
-                                // For now, use the SMOOTH_BIGSMOOTH_HOST_PORT env if set,
-                                // otherwise skip — the test will set it explicitly.
-                                if let Ok(bs_port) = std::env::var("SMOOTH_BIGSMOOTH_HOST_PORT") {
-                                    let bs_url = format!("http://{host_ip}:{bs_port}");
-                                    tracing::info!(task_id = tid, url = %bs_url, "operator env: SMOOTH_BIGSMOOTH_URL set");
-                                    env.insert("SMOOTH_BIGSMOOTH_URL".into(), bs_url);
-                                }
+                                let bs_url = format!("http://{host_ip}:{bs_port}");
+                                tracing::info!(task_id = tid, url = %bs_url, "operator env: SMOOTH_BIGSMOOTH_URL set (derived)");
+                                env.insert("SMOOTH_BIGSMOOTH_URL".into(), bs_url);
                             }
                         }
+                    } else {
+                        tracing::debug!(
+                            task_id = tid,
+                            "no SMOOTH_BIGSMOOTH_OPERATOR_URL or SMOOTH_BIGSMOOTH_HOST_PORT — operators will not have pearl tools"
+                        );
                     }
                 }
                 None => {
