@@ -207,6 +207,11 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
             },
         ],
         ports: vec![
+            // Big Smooth on 127.0.0.1 only (bind_all would conflict with microsandbox's own bind).
+            // Operators reach Big Smooth via the host IP + this port because microsandbox's
+            // TCP proxy handles outbound from VMs (the proxy does TcpStream::connect on the host
+            // with the guest's original dest — so connecting to host_ip:port works even without
+            // bind_all, because the VM's outbound goes through the proxy which connects on the host).
             PortMapping {
                 host_port: bigsmooth_host_port_fixed,
                 guest_port: 4400,
