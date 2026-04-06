@@ -970,6 +970,18 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
             .chain(policy_mount)
             .collect(),
             allow_host_loopback: true,
+            // Pearl env cache: pass the pearl ID so the sandbox client
+            // (Bill, running on the host) can derive the cache dir.
+            // Big Smooth can't compute host paths from inside the
+            // Boardroom VM — that's Bill's job.
+            // Pearl env cache key. If SMOOTH_ENV_CACHE_KEY is set (typically
+            // by the test harness for repeatable warm cache), use that
+            // stable key so deps persist across test runs. Otherwise use
+            // the pearl ID (each task gets its own cache, warm on retry).
+            env_cache_key: std::env::var("SMOOTH_ENV_CACHE_KEY").ok()
+                .filter(|k| !k.is_empty())
+                .or_else(|| pearl_id.clone())
+                .or_else(|| Some(tid.clone())),
             ..SandboxConfig::default()
         };
 

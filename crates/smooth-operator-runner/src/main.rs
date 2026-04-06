@@ -497,6 +497,42 @@ async fn main() {
         "smooth-operator-runner starting"
     );
 
+    // Pearl env cache: if /opt/smooth/cache is mounted (bind from host),
+    // point build tool caches there so deps persist across VM runs for
+    // the same pearl. First run compiles everything (~5 min for Rust);
+    // subsequent runs find deps already compiled (~5s). This is the
+    // single biggest enabler for agent iteration quality.
+    let cache_root = std::path::Path::new("/opt/smooth/cache");
+    if cache_root.exists() {
+        let cargo_home = cache_root.join(".cargo");
+        let npm_cache = cache_root.join(".npm");
+        let pnpm_store = cache_root.join(".pnpm-store");
+        // Create subdirs (first-run init).
+        for d in [&cargo_home, &npm_cache, &pnpm_store] {
+            let _ = std::fs::create_dir_all(d);
+        }
+        std::env::set_var("CARGO_HOME", &cargo_home);
+        // Persist compiled Rust deps across workspace resets. Without this,
+        // each new workspace tempdir starts a fresh target/ and recompiles
+        // ALL deps from source (~5 min). With CARGO_TARGET_DIR in the cache,
+        // deps compiled on the first run are reused on subsequent runs.
+        let cargo_target = cache_root.join("cargo-target");
+        let _ = std::fs::create_dir_all(&cargo_target);
+        std::env::set_var("CARGO_TARGET_DIR", &cargo_target);
+        std::env::set_var("npm_config_cache", &npm_cache);
+        std::env::set_var("pnpm_store_dir", &pnpm_store);
+        // Put cached cargo binaries on PATH so `cargo`, `rustfmt`, etc.
+        // are available if rustup was installed to the cache in a prior run.
+        if let Ok(path) = std::env::var("PATH") {
+            std::env::set_var("PATH", format!("{}:{path}", cargo_home.join("bin").display()));
+        }
+        tracing::info!(
+            cargo_home = %cargo_home.display(),
+            npm_cache = %npm_cache.display(),
+            "pearl env cache active at /opt/smooth/cache"
+        );
+    }
+
     // Make sure the workspace exists inside the VM.
     if let Err(e) = tokio::fs::create_dir_all(&config.workspace).await {
         emit_event(&AgentEvent::Error {

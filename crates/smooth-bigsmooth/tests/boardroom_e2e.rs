@@ -174,6 +174,11 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
     // Smooth finds the bind-mounted ~/.smooth/providers.json.
     boardroom_env.insert("HOME".into(), "/root".into());
     boardroom_env.insert("RUST_LOG".into(), "info,smooth_bigsmooth=debug".into());
+    // Stable cache key so Rust deps compiled on the first test run
+    // persist to ~/.smooth/pearl-env/boardroom-e2e-test/ and are reused
+    // on subsequent runs. First run is cold (~5 min for cargo build);
+    // every run after is warm (~5s).
+    boardroom_env.insert("SMOOTH_ENV_CACHE_KEY".into(), "boardroom-e2e-test".into());
 
     let spec = SandboxSpec {
         name: boardroom_name.clone(),
@@ -205,6 +210,9 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
         // (127.0.0.1:<bill_port>) so Big Smooth can request operator pods.
         // Default microsandbox policy denies loopback/private outbound.
         allow_host_loopback: true,
+        // Boardroom itself doesn't need env caching (it's Big Smooth, not
+        // an operator). Operator VMs get caching via the dispatch path.
+        env_cache_key: None,
     };
 
     let (resolved_name, host_ports, _created_at) = bill_client.spawn(spec).await.expect("spawn boardroom");
@@ -345,13 +353,18 @@ async fn run_rust_leg(
     // runner will also check /workspace/.smooth-task for details.
     // This avoids the kernel cmdline TooLarge limit.
     let task_detail = concat!(
-        "Read tests/spec_test.rs. Create src/lib.rs: pub fn app() -> axum::Router. ",
-        "Endpoints: GET /health (json status+version), POST /tasks (201, title required else 422, ",
-        "auto id+created_at, default priority medium, status open, tags empty), ",
-        "GET /tasks (optional status/priority filters), GET /tasks/:id (404 if missing), ",
-        "PATCH /tasks/:id, DELETE /tasks/:id (204). Use Mutex<HashMap> state. ",
-        "Only create src/lib.rs. Then: apk add cargo rust, cargo test -- --test-threads=1. ",
-        "Fix errors and retest until all tests pass. Quality checks mandatory."
+        "Read tests/spec_test.rs carefully. Create src/lib.rs: pub fn app() -> axum::Router. ",
+        "Endpoints: GET /health (json {status: ok, version: string}), POST /tasks (201, title required else 422, ",
+        "auto id via uuid, created_at via chrono::Utc::now, default priority medium, status open, tags default empty vec), ",
+        "GET /tasks (list as JSON array, optional ?status= and ?priority= query filters), GET /tasks/:id (404 if missing), ",
+        "PATCH /tasks/:id (partial update, 200 with updated task), DELETE /tasks/:id (204 no content). ",
+        "CRITICAL: use Arc<Mutex<HashMap<String, Task>>> as axum State. All handler return types must be concrete: ",
+        "use (StatusCode, Json<T>) or Json<T> consistently. Do NOT mix impl IntoResponse with different concrete types ",
+        "in the same function -- that causes type inference failures. For error returns use StatusCode alone. ",
+        "Only create src/lib.rs. ",
+        "THEN: run 'apk add cargo rust' and 'cargo check' in the workspace. Fix ALL compile errors. ",
+        "THEN: run 'cargo test -- --test-threads=1'. Fix any test failures. ",
+        "Repeat until all tests pass. Do not finish until cargo test succeeds. Quality checks are mandatory."
     );
     std::fs::write(workspace.join(".smooth-task"), task_detail).expect("write task detail");
     let task_message = "Rust task_api crate. Read /workspace/.smooth-task for full instructions.";
@@ -460,7 +473,7 @@ async fn send_task_and_wait(ws: &mut tokio_tungstenite::WebSocketStream<tokio_tu
         "type": "TaskStart",
         "message": message,
         "model": null,
-        "budget": 3.0,
+        "budget": 5.0,
         "working_dir": workspace.to_string_lossy(),
     });
     ws.send(Message::Text(task_start.to_string().into())).await.expect("send TaskStart");

@@ -14,7 +14,7 @@ default = ["server"]
 # because `microsandbox` pulls `msb_krun_devices` which references Linux
 # VM device ioctls that don't exist in musl's libc bindings. Inside the
 # Boardroom VM, Big Smooth only needs `BillClient` anyway.
-server = ["dep:microsandbox", "dep:chrono", "dep:uuid"]
+server = ["dep:microsandbox", "dep:chrono", "dep:uuid", "dep:dirs-next"]
 
 [dependencies]
 tokio = { workspace = true }
@@ -27,6 +27,7 @@ clap.workspace = true
 chrono = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 microsandbox = { workspace = true, optional = true }
+dirs-next = { workspace = true, optional = true }
 
 [[bin]]
 name = "bootstrap-bill"

@@ -147,6 +147,24 @@ pub async fn spawn_sandbox(spec: SandboxSpec) -> Result<(String, Vec<PortMapping
         });
     }
 
+    // Pearl env cache: Bill resolves the cache key to a host directory
+    // at ~/.smooth/pearl-env/<key>/ and bind-mounts it at /opt/smooth/cache.
+    // The runner sets CARGO_HOME etc. to paths inside this mount.
+    if let Some(ref cache_key) = spec.env_cache_key {
+        let cache_dir = dirs_next::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+            .join(".smooth")
+            .join("pearl-env")
+            .join(cache_key);
+        if !cache_dir.exists() {
+            std::fs::create_dir_all(&cache_dir).with_context(|| format!("bill: create pearl env cache: {}", cache_dir.display()))?;
+            tracing::info!(path = %cache_dir.display(), key = %cache_key, "bill: created pearl env cache dir");
+        }
+        let host = cache_dir.to_string_lossy().to_string();
+        builder = builder.volume("/opt/smooth/cache", move |m| m.bind(host));
+        tracing::info!(name = %spec.name, key = %cache_key, path = %cache_dir.display(), "bill: mounting pearl env cache at /opt/smooth/cache");
+    }
+
     // Opt-in: let the guest reach host loopback + RFC1918 addresses.
     // microsandbox's default policy is `public_only`, which denies
     // loopback/private outbound — fine for untrusted operator work, but
@@ -405,6 +423,7 @@ mod tests {
             ports: vec![],
             timeout_seconds: 60,
             allow_host_loopback: false,
+            env_cache_key: None,
         };
         let err = spawn_sandbox(spec).await.unwrap_err();
         let msg = err.to_string();

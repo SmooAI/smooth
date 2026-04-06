@@ -78,6 +78,19 @@ pub struct SandboxSpec {
     /// destinations; with `allow_all()` it goes through.
     #[serde(default)]
     pub allow_host_loopback: bool,
+    /// Optional host-side directory for pearl-scoped environment caching.
+    /// Bill bind-mounts this directory at `/opt/smooth/cache` (RW) inside
+    /// the VM. The runner sets CARGO_HOME, npm_config_cache, etc. to paths
+    /// inside this mount so compiled dependencies, installed packages, and
+    /// build artifacts persist across operator VM runs for the same pearl.
+    ///
+    /// First run is cold: tools install from scratch, deps compile.
+    /// Subsequent runs are warm: cached deps, cached packages.
+    ///
+    /// Bill creates the directory if it doesn't exist. Pass `None` to
+    /// skip caching (bare Alpine every time).
+    #[serde(default)]
+    pub env_cache_key: Option<String>,
 }
 
 /// A request Bill accepts.
@@ -166,6 +179,7 @@ mod tests {
             ports: vec![PortMapping { host_port: 0, guest_port: 4096, bind_all: false }],
             timeout_seconds: 1800,
             allow_host_loopback: false,
+            env_cache_key: None,
         };
         let req = BillRequest::Spawn { spec };
         let json = serde_json::to_string(&req).expect("serialize");

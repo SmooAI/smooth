@@ -81,6 +81,9 @@ pub struct SandboxConfig {
     /// because the untrusted agent inside a standalone operator VM
     /// shouldn't be able to probe host services by default.
     pub allow_host_loopback: bool,
+    /// Host-side directory for pearl env caching. Bill bind-mounts it at
+    /// `/opt/smooth/cache` so compiled deps persist across VM runs.
+    pub env_cache_key: Option<String>,
 }
 
 impl Default for SandboxConfig {
@@ -99,6 +102,7 @@ impl Default for SandboxConfig {
             timeout_seconds: 30 * 60,
             mounts: Vec::new(),
             allow_host_loopback: false,
+            env_cache_key: None,
         }
     }
 }
@@ -184,6 +188,7 @@ impl SandboxClient for DirectSandboxClient {
             }],
             timeout_seconds: config.timeout_seconds,
             allow_host_loopback: config.allow_host_loopback,
+            env_cache_key: config.env_cache_key.clone(),
         };
         let (resolved_name, resolved_ports, created_at) = bill_server::spawn_sandbox(spec).await?;
         let resolved_host_port = resolved_ports.first().map_or(host_port, |p| p.host_port);
@@ -285,6 +290,7 @@ impl SandboxClient for BillSandboxClient {
             }],
             timeout_seconds: config.timeout_seconds,
             allow_host_loopback: config.allow_host_loopback,
+            env_cache_key: config.env_cache_key.clone(),
         };
         let (resolved_name, resolved_ports, created_at) = self.client.spawn(spec).await?;
         let resolved_host_port = resolved_ports.first().map_or(host_port, |p| p.host_port);
