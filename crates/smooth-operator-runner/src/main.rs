@@ -604,20 +604,17 @@ async fn main() {
     // pearl tools so the agent can create/list/close pearls locally.
     pearl_tools::register_pearl_tools(&mut tools, &config.workspace);
 
-    // Build system prompt with all available tools announced
-    let tool_list: Vec<String> = tools.schemas().iter().map(|s| format!("- **{}**: {}", s.name, s.description)).collect();
+    // Build system prompt — keep it short. The LLM sees tool schemas automatically.
+    let has_pearl_tools = tools.schemas().iter().any(|s| s.name == "create_pearl");
+    let pearl_note = if has_pearl_tools {
+        " You also have create_pearl, list_pearls, and close_pearl tools for tracking work items."
+    } else {
+        ""
+    };
     let system_prompt = format!(
         "You are Smooth Operator, an AI coding agent running inside a hardware-isolated microVM. \
-        All file paths are relative to your workspace at /workspace.\n\n\
-        ## Available Tools\n\
-        {}\n\n\
-        ## Workflow\n\
-        1. If you have create_pearl and close_pearl tools, create a pearl FIRST to track your work.\n\
-        2. Complete the task using read_file, write_file, list_files, and bash.\n\
-        3. Run quality checks (compile, test) and fix errors until everything passes.\n\
-        4. If you created a pearl, close it when done.\n\n\
-        Be concise and thorough. Do not stop until the task is complete and verified.",
-        tool_list.join("\n"),
+        Use read_file, write_file, list_files, and bash tools to complete the user task. \
+        All paths are relative to your workspace.{pearl_note} Be concise and thorough.",
     );
 
     let mut agent_config = AgentConfig::new(format!("op-{}", config.operator_id), &system_prompt, llm).with_max_iterations(config.max_iterations);
