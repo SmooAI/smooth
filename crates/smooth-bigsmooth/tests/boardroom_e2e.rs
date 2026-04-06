@@ -194,8 +194,11 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
             },
         ],
         ports: vec![
-            PortMapping { host_port: 0, guest_port: 4400 },
-            PortMapping { host_port: archivist_host_port, guest_port: 4401 },
+            PortMapping { host_port: 0, guest_port: 4400, bind_all: false },
+            // Archivist must be reachable from OTHER VMs via the host IP.
+            // microsandbox publishes on 127.0.0.1 only; `bind_all: true`
+            // tells Bill to run a TCP proxy on 0.0.0.0 as well.
+            PortMapping { host_port: archivist_host_port, guest_port: 4401, bind_all: true },
         ],
         timeout_seconds: 1800,
         // The Boardroom VM must reach Bill on host loopback
@@ -269,6 +272,17 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
     let ts_fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hono_api_spec");
     copy_tree(&ts_fixture, ts_workspace.path());
     let (ts_passed, ts_failed, ts_code) = run_ts_leg(&mut ws, ts_workspace.path(), &llm).await;
+
+    // --- Archivist diagnostic: check if operators got the URL ---------------
+    for (name, ws) in [("rust", rust_workspace.path()), ("ts", ts_workspace.path())] {
+        let diag = ws.join(".archivist-diag.txt");
+        if diag.exists() {
+            let content = std::fs::read_to_string(&diag).unwrap_or_default();
+            eprintln!("archivist diag ({name}): {content}");
+        } else {
+            eprintln!("archivist diag ({name}): .archivist-diag.txt NOT FOUND (runner didn't write it?)");
+        }
+    }
 
     // --- Archivist cross-VM log assertion ----------------------------------
     eprintln!("\n===== ARCHIVIST CROSS-VM LOG ASSERTION =====");
@@ -483,7 +497,7 @@ async fn send_task_and_wait(ws: &mut tokio_tungstenite::WebSocketStream<tokio_tu
             "TokenDelta" => {
                 if let Some(c) = event.get("content").and_then(|v| v.as_str()) {
                     // Only print stderr passthrough (prefixed) and short deltas.
-                    if c.contains("[runner stderr]") || c.contains("[cast-summary]") || c.contains("error") || c.contains("Error") {
+                    if c.contains("[runner stderr]") || c.contains("[cast-summary]") || c.contains("error") || c.contains("Error") || c.contains("archivist") || c.contains("ARCHIVIST") {
                         eprintln!("  ws: TokenDelta {}", truncate(c, 300));
                     }
                 }

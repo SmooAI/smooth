@@ -29,6 +29,14 @@ pub struct BindMountSpec {
 pub struct PortMapping {
     pub host_port: u16,
     pub guest_port: u16,
+    /// When true, Bill runs a TCP proxy that re-publishes this port on
+    /// `0.0.0.0` in addition to microsandbox's default `127.0.0.1`.
+    /// This makes the port reachable from OTHER microVMs via the host's
+    /// real interface IP (which the TCP proxy inside those VMs connects
+    /// to). Without this, published ports are only accessible from the
+    /// host loopback — useless for cross-VM traffic like Archivist ingest.
+    #[serde(default)]
+    pub bind_all: bool,
 }
 
 /// Full spec for a sandbox Bill should spawn.
@@ -155,7 +163,7 @@ mod tests {
                 guest_path: "/workspace".into(),
                 readonly: false,
             }],
-            ports: vec![PortMapping { host_port: 0, guest_port: 4096 }],
+            ports: vec![PortMapping { host_port: 0, guest_port: 4096, bind_all: false }],
             timeout_seconds: 1800,
             allow_host_loopback: false,
         };
@@ -176,7 +184,7 @@ mod tests {
     fn response_roundtrip_spawned() {
         let resp = BillResponse::Spawned {
             name: "smooth-test".into(),
-            host_ports: vec![PortMapping { host_port: 42424, guest_port: 4096 }],
+            host_ports: vec![PortMapping { host_port: 42424, guest_port: 4096, bind_all: false }],
             created_at: "2026-04-05T00:00:00Z".into(),
         };
         let json = serde_json::to_string(&resp).expect("serialize");

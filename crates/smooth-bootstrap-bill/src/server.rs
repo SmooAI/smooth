@@ -126,6 +126,7 @@ pub async fn spawn_sandbox(spec: SandboxSpec) -> Result<(String, Vec<PortMapping
         resolved_ports.push(PortMapping {
             host_port,
             guest_port: port.guest_port,
+            bind_all: port.bind_all,
         });
     }
 
@@ -165,9 +166,50 @@ pub async fn spawn_sandbox(spec: SandboxSpec) -> Result<(String, Vec<PortMapping
 
     register(&spec.name, sandbox);
 
+    // For any port with `bind_all: true`, spawn a TCP forwarder on
+    // 0.0.0.0:port that proxies to 127.0.0.1:port. This makes the
+    // published port reachable from other microVMs via the host's real
+    // network IP, working around microsandbox's `127.0.0.1`-only bind.
+    for port in &resolved_ports {
+        if port.bind_all {
+            let hp = port.host_port;
+            tokio::spawn(async move {
+                if let Err(e) = run_bind_all_proxy(hp).await {
+                    tracing::warn!(port = hp, error = %e, "bill: bind_all proxy failed");
+                }
+            });
+            tracing::info!(host_port = hp, guest_port = port.guest_port, "bill: bind_all proxy started on 0.0.0.0:{hp}");
+        }
+    }
+
     let created_at = chrono::Utc::now().to_rfc3339();
     tracing::info!(name = %spec.name, "bill: sandbox spawned");
     Ok((spec.name, resolved_ports, created_at))
+}
+
+/// TCP proxy that re-publishes a `127.0.0.1`-bound port on `0.0.0.0`.
+///
+/// microsandbox publishes guest ports on 127.0.0.1 only (hardcoded in the
+/// builder). For cross-VM traffic (e.g., an operator's Scribe forwarding
+/// logs to the Boardroom's Archivist), the port must also be reachable
+/// via the host's real network interface. This tiny proxy accepts
+/// connections on `0.0.0.0:<port>` and forwards each one to
+/// `127.0.0.1:<port>` via tokio::io::copy_bidirectional.
+async fn run_bind_all_proxy(port: u16) -> anyhow::Result<()> {
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
+    loop {
+        let (mut inbound, _) = listener.accept().await?;
+        tokio::spawn(async move {
+            match tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await {
+                Ok(mut outbound) => {
+                    let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                }
+                Err(e) => {
+                    tracing::debug!(port, error = %e, "bind_all proxy: connect to 127.0.0.1 failed");
+                }
+            }
+        });
+    }
 }
 
 /// Execute a command inside a live sandbox. Blocks until the command exits.

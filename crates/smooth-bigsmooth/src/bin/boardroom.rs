@@ -47,7 +47,36 @@ async fn main() -> anyhow::Result<()> {
     // `th up` path on the host uses a different binary).
     std::env::set_var("SMOOTH_BOARDROOM_MODE", "1");
 
-    let state = smooth_bigsmooth::server::AppState::new(db, pearl_store);
+    // Initialize the sandbox client BEFORE spawning the cast or serving
+    // requests. In Boardroom mode, SMOOTH_BOOTSTRAP_BILL_URL is always
+    // set, so this picks the BillSandboxClient.
+    smooth_bigsmooth::sandbox::init_sandbox_client();
+
+    // Spawn the Boardroom's own security cast: Wonk, Goalie, Narc,
+    // Scribe, and Archivist. The handles carry URLs that
+    // dispatch_ws_task_sandboxed needs to inject SMOOTH_ARCHIVIST_URL
+    // into every operator VM's env.
+    let handles = smooth_bigsmooth::boardroom::spawn_boardroom_cast()
+        .await
+        .expect("boardroom: failed to spawn cast");
+    // Diagnostic: confirm the env vars that operator_facing_archivist_url() depends on.
+    let bill_url = std::env::var("SMOOTH_BOOTSTRAP_BILL_URL").unwrap_or_else(|_| "<NOT SET>".into());
+    let arch_port = std::env::var("SMOOTH_ARCHIVIST_HOST_PORT").unwrap_or_else(|_| "<NOT SET>".into());
+    tracing::info!(
+        bill_url = %bill_url,
+        archivist_host_port = %arch_port,
+        operator_facing = ?handles.operator_facing_archivist_url(),
+        "boardroom: archivist env diagnostic"
+    );
+    tracing::info!(
+        archivist = %handles.archivist_url,
+        wonk = %handles.wonk_url,
+        scribe = %handles.scribe_url,
+        goalie = %handles.goalie_url,
+        "boardroom: cast spawned"
+    );
+
+    let state = smooth_bigsmooth::server::AppState::new(db, pearl_store).with_boardroom(handles);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!(%addr, "boardroom: starting Big Smooth");
     smooth_bigsmooth::server::start(state, addr).await

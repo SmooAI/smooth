@@ -180,6 +180,7 @@ impl SandboxClient for DirectSandboxClient {
             ports: vec![PortMapping {
                 host_port,
                 guest_port: 4096,
+                bind_all: false,
             }],
             timeout_seconds: config.timeout_seconds,
             allow_host_loopback: config.allow_host_loopback,
@@ -280,6 +281,7 @@ impl SandboxClient for BillSandboxClient {
             ports: vec![PortMapping {
                 host_port,
                 guest_port: 4096,
+                bind_all: false,
             }],
             timeout_seconds: config.timeout_seconds,
             allow_host_loopback: config.allow_host_loopback,

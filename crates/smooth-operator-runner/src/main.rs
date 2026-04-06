@@ -387,11 +387,18 @@ async fn spawn_cast(policy_toml: &str, operator_id: &str) -> anyhow::Result<Cast
     // Boardroom's Archivist via a background forwarder. Otherwise run
     // standalone (legacy behavior, fine for host-mode sandboxed tests).
     let archivist_url = std::env::var("SMOOTH_ARCHIVIST_URL").ok().filter(|s| !s.trim().is_empty());
+    // Diagnostic: write the archivist URL to the workspace for host-side
+    // inspection. Uses SMOOTH_WORKSPACE since we don't have the config here.
+    if let Ok(ws) = std::env::var("SMOOTH_WORKSPACE") {
+        let diag = format!("SMOOTH_ARCHIVIST_URL={}", archivist_url.as_deref().unwrap_or("<NOT SET>"));
+        let _ = std::fs::write(format!("{ws}/.archivist-diag.txt"), &diag);
+    }
     let scribe_state = if let Some(url) = archivist_url {
         tracing::info!(archivist = %url, operator = operator_id, "spawning scribe with archivist forwarder");
         let forwarder = smooth_scribe::spawn_forwarder(url, operator_id.to_string());
         ScribeAppState::with_forwarder(forwarder)
     } else {
+        tracing::warn!(operator = operator_id, "SMOOTH_ARCHIVIST_URL not set — scribe will store logs locally only (no cross-VM forwarding)");
         ScribeAppState::local_only()
     };
     let scribe_store = Arc::clone(&scribe_state.store);
@@ -629,6 +636,14 @@ async fn main() {
     if let Ok(line) = serde_json::to_string(&summary) {
         eprintln!("[cast-summary] {line}");
     }
+
+    // Give the Scribe forwarder time to flush its last batch to
+    // Archivist before we exit. The forwarder runs as a spawned tokio
+    // task with a 500ms flush interval. `std::process::exit` kills the
+    // runtime instantly, losing buffered entries. A 2-second sleep
+    // before exit lets the forwarder's timer fire at least 3 times,
+    // draining any pending batches to the Archivist.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     match result {
         Ok(_conv) => {

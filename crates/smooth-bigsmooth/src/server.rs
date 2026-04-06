@@ -859,8 +859,14 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
         // Boardroom's Archivist. The Scribe forwarder inside the operator
         // will POST batches to this URL so cross-VM logs actually land.
         if let Some(ref room) = boardroom_handles {
-            if let Some(archivist_url) = room.operator_facing_archivist_url() {
-                env.insert("SMOOTH_ARCHIVIST_URL".into(), archivist_url);
+            match room.operator_facing_archivist_url() {
+                Some(archivist_url) => {
+                    tracing::info!(task_id = tid, url = %archivist_url, "operator env: SMOOTH_ARCHIVIST_URL set");
+                    env.insert("SMOOTH_ARCHIVIST_URL".into(), archivist_url);
+                }
+                None => {
+                    tracing::warn!(task_id = tid, "operator_facing_archivist_url() returned None — operator will NOT forward logs to Archivist. Check SMOOTH_ARCHIVIST_HOST_PORT and SMOOTH_BOOTSTRAP_BILL_URL env vars.");
+                }
             }
         }
 
