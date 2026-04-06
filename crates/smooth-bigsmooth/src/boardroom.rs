@@ -38,6 +38,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use smooth_archivist::server::{build_router_with_state as archivist_router, AppState as ArchivistState};
 use smooth_archivist::{event_archive::MemoryEventArchive, store::MemoryArchiveStore};
+use smooth_diver::server::{build_router_with_state as diver_router, AppState as DiverState};
+use smooth_diver::store::DiverStore;
 use smooth_scribe::server::{build_router_with_state as scribe_router, AppState as ScribeState};
 use smooth_scribe::{spawn_forwarder, ForwarderHandle};
 use smooth_wonk::policy::PolicyHolder;
@@ -66,6 +68,8 @@ pub struct BoardroomHandles {
     pub scribe_forwarder: Option<ForwarderHandle>,
     /// Wonk hook — wrapped in Arc because `WonkHook` itself is not Clone.
     pub wonk_hook: Arc<WonkHook>,
+    /// URL of the Boardroom's Diver (pearl lifecycle manager).
+    pub diver_url: String,
 }
 
 impl std::fmt::Debug for BoardroomHandles {
@@ -120,7 +124,7 @@ pub const ARCHIVIST_GUEST_PORT: u16 = 4401;
 ///
 /// Returns an error if any HTTP bind fails (port in use, permission
 /// denied, etc.) or if the default policy TOML cannot be parsed.
-pub async fn spawn_boardroom_cast() -> Result<BoardroomHandles> {
+pub async fn spawn_boardroom_cast(pearl_store: Option<smooth_pearls::PearlStore>) -> Result<BoardroomHandles> {
     tracing::info!("boardroom: spawning in-process cast");
 
     // --- Archivist ---------------------------------------------------------
@@ -209,6 +213,33 @@ pub async fn spawn_boardroom_cast() -> Result<BoardroomHandles> {
     // surveillance for free. For now it's held only for symmetry.
     let wonk_hook = Arc::new(WonkHook::new(&wonk_url));
 
+    // --- Diver (pearl lifecycle manager) ----------------------------------
+    // Diver wraps the PearlStore with lifecycle management: dispatch creates
+    // a pearl, complete closes it, operators can create sub-pearls, and
+    // Jira sync happens automatically when env vars are set.
+    let diver_url = if let Some(store) = pearl_store {
+        let diver_store = DiverStore::new(store);
+        let jira = smooth_diver::JiraClient::from_env().map(Arc::new);
+        let diver_state = DiverState {
+            store: Arc::new(diver_store),
+            jira,
+        };
+        let diver_r = diver_router(diver_state);
+        let diver_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.context("boardroom: bind diver")?;
+        let diver_addr = diver_listener.local_addr().context("boardroom: diver local addr")?;
+        let url = format!("http://{diver_addr}");
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(diver_listener, diver_r).await {
+                tracing::error!(error = %e, "boardroom: Diver server crashed");
+            }
+        });
+        tracing::info!(url = %url, "boardroom: Diver up");
+        url
+    } else {
+        tracing::warn!("boardroom: no PearlStore provided, Diver not started");
+        String::new()
+    };
+
     Ok(BoardroomHandles {
         wonk_url,
         goalie_url,
@@ -217,6 +248,7 @@ pub async fn spawn_boardroom_cast() -> Result<BoardroomHandles> {
         archivist_port: ARCHIVIST_GUEST_PORT,
         scribe_forwarder: Some(scribe_forwarder),
         wonk_hook,
+        diver_url,
     })
 }
 
@@ -238,7 +270,7 @@ mod tests {
             eprintln!("skipping: 0.0.0.0:{ARCHIVIST_GUEST_PORT} already in use");
             return;
         }
-        let handles = match spawn_boardroom_cast().await {
+        let handles = match spawn_boardroom_cast(None).await {
             Ok(h) => h,
             Err(e) => {
                 eprintln!("skipping: boardroom cast spawn failed: {e}");

@@ -1,0 +1,29 @@
+[package]
+name = "smooth-diver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Smooth Diver — Pearl lifecycle manager and project management service"
+
+[dependencies]
+tokio.workspace = true
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+uuid.workspace = true
+reqwest.workspace = true
+smooth-pearls.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tower = { workspace = true }
+http-body-util.workspace = true
+hyper.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
