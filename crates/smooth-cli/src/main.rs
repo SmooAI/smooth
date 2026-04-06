@@ -347,6 +347,8 @@ enum PearlCommands {
     Gc,
     /// Migrate from beads
     MigrateFromBeads,
+    /// Migrate pearls from legacy SQLite (smooth.db) into Dolt
+    MigrateFromSqlite,
     /// List all registered pearl projects
     Projects,
 }
@@ -926,7 +928,51 @@ async fn cmd_doctor() -> Result<()> {
         Err(_) => println!("  {} Issues: {}", "○".dimmed(), "will initialize on first use".dimmed()),
     }
 
-    // 6. Sandboxes (built-in via microsandbox crate)
+    // 6. Check ~/.smooth is a git repo (for backup)
+    if let Some(ref dir) = smooth_home {
+        if dir.exists() {
+            let git_dir = dir.join(".git");
+            if git_dir.exists() {
+                // Check if remote is configured
+                let remote = std::process::Command::new("git")
+                    .args(["remote", "-v"])
+                    .current_dir(dir)
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).to_string());
+                if remote.as_ref().is_some_and(|r| !r.trim().is_empty()) {
+                    println!("  {} Backup: {}", "✓".green().bold(), "~/.smooth is git repo with remote".green());
+                } else {
+                    println!(
+                        "  {} Backup: {}",
+                        "○".dimmed(),
+                        "~/.smooth is git repo but no remote (run: cd ~/.smooth && git remote add origin <url>)".dimmed()
+                    );
+                }
+            } else {
+                println!(
+                    "  {} Backup: {}",
+                    "○".dimmed(),
+                    "~/.smooth is not a git repo (run: cd ~/.smooth && git init)".dimmed()
+                );
+            }
+        }
+    }
+
+    // 7. Check for stale SQLite pearls that could be migrated
+    let sqlite_path = dirs_next::home_dir().map(|h| h.join(".smooth/smooth.db"));
+    if let Some(ref path) = sqlite_path {
+        if path.exists() && find_dolt_dir().is_ok() {
+            println!(
+                "  {} SQLite: {}",
+                "○".dimmed(),
+                "legacy smooth.db found — run: th pearls migrate-from-sqlite (to migrate to Dolt)".dimmed()
+            );
+        }
+    }
+
+    // 8. Sandboxes (built-in via microsandbox crate)
     println!("  {} Sandboxes: {}", "✓".green().bold(), "built-in (microsandbox)".green());
 
     println!();
@@ -1174,6 +1220,10 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             cmd_migrate_from_beads(&store)?;
         }
 
+        PearlCommands::MigrateFromSqlite => {
+            cmd_migrate_from_sqlite(&store)?;
+        }
+
         PearlCommands::Projects => {
             let registry = smooth_pearls::Registry::load()?;
             let projects = registry.list();
@@ -1371,6 +1421,152 @@ fn cmd_migrate_from_beads(store: &smooth_pearls::PearlStore) -> Result<()> {
     println!("  Migrated:          {}", format!("{migrated}").green());
     if skipped > 0 {
         println!("  Skipped/errors:    {}", format!("{skipped}").red());
+    }
+
+    Ok(())
+}
+
+fn cmd_migrate_from_sqlite(store: &smooth_pearls::PearlStore) -> Result<()> {
+    println!("{}", "Migrating pearls from SQLite to Dolt...".bold().cyan());
+
+    let db_path = smooth_bigsmooth::db::default_db_path();
+    if !db_path.exists() {
+        println!("  {} No SQLite database found at {}", "○".dimmed(), db_path.display());
+        return Ok(());
+    }
+
+    let conn = rusqlite::Connection::open(&db_path)?;
+
+    // Check if the pearls table exists in SQLite
+    let has_pearls: bool = conn
+        .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='pearls'", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap_or(0)
+        > 0;
+    if !has_pearls {
+        println!("  {} No pearls table in SQLite database", "○".dimmed());
+        return Ok(());
+    }
+
+    let mut stmt = conn.prepare("SELECT id, title, description, status, priority, pearl_type, assigned_to, parent_id FROM pearls")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, u8>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, Option<String>>(6)?,
+            row.get::<_, Option<String>>(7)?,
+        ))
+    })?;
+
+    let mut total = 0;
+    let mut migrated = 0;
+    let mut skipped = 0;
+
+    for row in rows {
+        let (old_id, title, description, status_str, priority_val, type_str, assigned_to, parent_id) = row?;
+        total += 1;
+
+        // Check if already exists in Dolt
+        if store.get(&old_id)?.is_some() {
+            skipped += 1;
+            println!("  {} {} already exists in Dolt", "○".dimmed(), old_id.dimmed());
+            continue;
+        }
+
+        let pearl_type = smooth_pearls::PearlType::from_str_loose(&type_str).unwrap_or(smooth_pearls::PearlType::Task);
+        let priority = smooth_pearls::Priority::from_u8(priority_val).unwrap_or(smooth_pearls::Priority::Medium);
+
+        // Load labels from SQLite
+        let labels: Vec<String> = if let Ok(mut label_stmt) = conn.prepare("SELECT label FROM labels WHERE pearl_id = ?1") {
+            label_stmt
+                .query_map(rusqlite::params![&old_id], |r| r.get(0))
+                .ok()
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        let new = smooth_pearls::NewPearl {
+            title,
+            description,
+            pearl_type,
+            priority,
+            assigned_to,
+            parent_id,
+            labels,
+        };
+
+        match store.create(&new) {
+            Ok(pearl) => {
+                // Update status if not open
+                let target_status = smooth_pearls::PearlStatus::from_str_loose(&status_str);
+                if let Some(st) = target_status {
+                    if st != smooth_pearls::PearlStatus::Open {
+                        let _ = store.update(
+                            &pearl.id,
+                            &smooth_pearls::PearlUpdate {
+                                status: Some(st),
+                                ..Default::default()
+                            },
+                        );
+                    }
+                }
+                migrated += 1;
+                println!("  {} {} ← {} ({})", "✓".green(), pearl.id, old_id.dimmed(), new.title.dimmed());
+            }
+            Err(e) => {
+                skipped += 1;
+                println!("  {} {}: {e}", "✗".red(), old_id);
+            }
+        }
+    }
+
+    // Migrate dependencies
+    let mut dep_count = 0;
+    if let Ok(mut stmt) = conn.prepare("SELECT pearl_id, depends_on FROM dependencies") {
+        let deps: Vec<(String, String)> = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .ok()
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default();
+        for (pearl_id, depends_on) in &deps {
+            let _ = store.add_dep(pearl_id, depends_on);
+            dep_count += 1;
+        }
+    }
+
+    // Migrate comments
+    let mut comment_count = 0;
+    if let Ok(mut stmt) = conn.prepare("SELECT pearl_id, content FROM comments ORDER BY created_at ASC") {
+        let comments: Vec<(String, String)> = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .ok()
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default();
+        for (pearl_id, content) in &comments {
+            let _ = store.add_comment(pearl_id, content);
+            comment_count += 1;
+        }
+    }
+
+    println!();
+    println!("{}", "Migration Summary".bold());
+    println!("  Total SQLite pearls: {total}");
+    println!("  Migrated:            {}", format!("{migrated}").green());
+    if skipped > 0 {
+        println!("  Skipped/existing:    {}", format!("{skipped}").dimmed());
+    }
+    if dep_count > 0 {
+        println!("  Dependencies:        {dep_count}");
+    }
+    if comment_count > 0 {
+        println!("  Comments:            {comment_count}");
     }
 
     Ok(())

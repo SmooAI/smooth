@@ -38,7 +38,7 @@ smooth/
 - **smooth-bigsmooth** (`crates/smooth-bigsmooth/`): axum server, 20+ routes, orchestrator, sandbox pool, policy generation, session management, pearls/jira/tailscale
 - **smooth-operator** (`crates/smooth-operator/`): Rust-native AI agent framework — LLM client, tool system with hooks, agent loop, conversation management, built-in checkpointing (Groove)
 - **smooth-policy** (`crates/smooth-policy/`): shared policy types (network, filesystem, pearls, tools, MCP), TOML parsing, glob matching, phase defaults
-- **smooth-pearls** (`crates/smooth-pearls/`): built-in pearl tracker (dependency-graph work items). SQLite-backed, inspired by beads. Types: `Pearl`, `PearlStore`, `PearlStatus`, `PearlUpdate`, `PearlQuery`, etc. Lineage: beads → issues → pearls.
+- **smooth-pearls** (`crates/smooth-pearls/`): built-in pearl tracker (dependency-graph work items). Dolt-backed via `smooth-dolt` Go binary for version control and git sync. Types: `Pearl`, `PearlStore`, `PearlStatus`, `PearlUpdate`, `PearlQuery`, `SmoothDolt`, `Registry`. Also stores session messages, orchestrator snapshots, and memories.
 - **smooth-wonk** (`crates/smooth-wonk/`): in-VM access control authority, policy hot-reload via notify+ArcSwap, access negotiation with Big Smooth
 - **smooth-goalie** (`crates/smooth-goalie/`): in-VM HTTP/HTTPS forward proxy, delegates all decisions to Wonk, JSON-lines audit logging
 - **smooth-narc** (`crates/smooth-narc/`): tool surveillance via ToolHook, secret detection (10 patterns), prompt injection guard (6 patterns), write guard, severity-based alerts
@@ -167,33 +167,56 @@ See README.md for full architecture diagrams and the plan file for implementatio
 
 ## 5. Data
 
-All state at `~/.smooth/`:
-- `smooth.db` — SQLite (WAL mode)
-- `pearls` table inside `smooth.db` — Built-in pearl tracking (formerly `issues`; migrated in-place on open)
+### Per-project (Dolt)
+Pearl data lives in `.smooth/dolt/` per project, backed by an embedded
+Dolt database (via the `smooth-dolt` Go binary). This gives full version
+control, git-syncable data, and push/pull to remotes.
+
+```
+.smooth/dolt/          # Dolt database (content-addressed, git-friendly)
+  └── pearls/          # Dolt "pearls" database
+```
+
+Tables: `pearls`, `pearl_dependencies`, `pearl_labels`, `pearl_comments`,
+`pearl_history`, `sessions`, `session_messages`, `orchestrator_snapshots`,
+`memories`.
+
+### Global (`~/.smooth/`)
+- `registry.json` — Multi-project registry (auto-updated on pearl store open)
+- `smooth.db` — Legacy SQLite (migrate with `th pearls migrate-from-sqlite`)
 - `audit/` — Rotating tool usage logs per actor
 - `providers.json` — LLM credentials
-- `config.json` — CLI settings
+- `pearl-env/` — Cached operator VM environments (keyed by pearl lineage)
+
+### Building smooth-dolt
+
+```bash
+# Requires Go 1.21+, ICU (macOS: brew install icu4c)
+scripts/build-smooth-dolt.sh
+# Produces target/release/smooth-dolt (~145MB, embedded Dolt engine)
+```
 
 ---
 
-## 6. Pearl Tracking — Built-in + Jira Integration
+## 6. Pearl Tracking — Dolt-backed + Jira Integration
 
-**Philosophy**: Built-in pearl tracking (`th pearls`) replaces the older
-`th issues` command (and before that, beads). Jira (SMOODEV project) is
-the external source of truth for project management.
+**Philosophy**: Built-in pearl tracking (`th pearls`) is the primary work
+tracker. Backed by embedded Dolt for version control and team sync.
+Jira (SMOODEV project) is the external source of truth for project management.
 
 **Pearls is the only spelling.** There are no `th issues` or `th beads`
-aliases — those have been removed. Any existing scripts or docs should
-be updated to use `th pearls`.
+aliases.
 
-**Naming lineage**: beads → issues → pearls. The database migrates in-place
-on first open; the old `issues` table is renamed to `pearls` and the
-`issue_type` column is renamed to `pearl_type`.
+**Storage**: Dolt-only. No SQLite fallback. Each project has its own
+`.smooth/dolt/` database. `~/.smooth/registry.json` tracks all projects.
+
+**Naming lineage**: beads → issues → pearls.
 
 ### Quick reference
 
 ```bash
-th pearls create --title="SMOODEV-XX: Title" --description="..."
+th pearls init                        # Initialize .smooth/dolt/ in current repo
+th pearls create --title="Title" --description="..."
 th pearls list --status=open          # All open pearls
 th pearls list --status=in_progress   # Active work
 th pearls show <id>                   # Pearl details with dependencies
@@ -201,6 +224,12 @@ th pearls update <id> --status=in_progress   # Claim work
 th pearls close <id1> <id2> ...       # Close completed pearls
 th pearls ready                       # Show ready pearls (open, no blockers)
 th pearls blocked                     # Show blocked pearls
+th pearls log                         # Dolt commit history
+th pearls push                        # Push to Dolt remote
+th pearls pull                        # Pull from Dolt remote
+th pearls projects                    # List all registered pearl projects
+th pearls migrate-from-sqlite         # Migrate legacy SQLite data to Dolt
+th pearls migrate-from-beads          # Migrate from beads (bd CLI)
 ```
 
 ---
