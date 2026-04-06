@@ -611,9 +611,9 @@ async fn main() {
         proxy_url: proxy_for_bash,
     });
 
-    // Pearl tools — if SMOOTH_BIGSMOOTH_URL is set, register HTTP-based
-    // pearl tools so the agent can create/list/close pearls via Big Smooth.
-    pearl_tools::register_pearl_tools(&mut tools);
+    // Pearl tools — if workspace has .smooth/dolt/, register direct Dolt
+    // pearl tools so the agent can create/list/close pearls locally.
+    pearl_tools::register_pearl_tools(&mut tools, &config.workspace);
 
     // Hook order is intentional:
     //   1. Narc — fastest, catches secrets/injection/dangerous writes purely

@@ -916,26 +916,9 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
                 Some(archivist_url) => {
                     tracing::info!(task_id = tid, url = %archivist_url, "operator env: SMOOTH_ARCHIVIST_URL set");
                     env.insert("SMOOTH_ARCHIVIST_URL".into(), archivist_url.clone());
-                    // Pass Big Smooth's operator-facing URL to operators so they
-                    // can use pearl tools (create_pearl, close_pearl, etc.)
-                    // Check for pre-computed URL first, then derive from env.
-                    if let Ok(bs_url) = std::env::var("SMOOTH_BIGSMOOTH_OPERATOR_URL") {
-                        tracing::info!(task_id = tid, url = %bs_url, "operator env: SMOOTH_BIGSMOOTH_URL set (from SMOOTH_BIGSMOOTH_OPERATOR_URL)");
-                        env.insert("SMOOTH_BIGSMOOTH_URL".into(), bs_url);
-                    } else if let Ok(bs_port) = std::env::var("SMOOTH_BIGSMOOTH_HOST_PORT") {
-                        if let Some(host_part) = archivist_url.strip_prefix("http://") {
-                            if let Some(host_ip) = host_part.split(':').next() {
-                                let bs_url = format!("http://{host_ip}:{bs_port}");
-                                tracing::info!(task_id = tid, url = %bs_url, "operator env: SMOOTH_BIGSMOOTH_URL set (derived)");
-                                env.insert("SMOOTH_BIGSMOOTH_URL".into(), bs_url);
-                            }
-                        }
-                    } else {
-                        tracing::debug!(
-                            task_id = tid,
-                            "no SMOOTH_BIGSMOOTH_OPERATOR_URL or SMOOTH_BIGSMOOTH_HOST_PORT — operators will not have pearl tools"
-                        );
-                    }
+                    // Pearl tools: operators access .smooth/dolt/ directly in the
+                    // workspace bind mount. No HTTP plumbing needed — the runner
+                    // auto-detects the Dolt dir and registers local pearl tools.
                 }
                 None => {
                     tracing::warn!(task_id = tid, "operator_facing_archivist_url() returned None — operator will NOT forward logs to Archivist. Check SMOOTH_ARCHIVIST_HOST_PORT and SMOOTH_BOOTSTRAP_BILL_URL env vars.");

@@ -1,38 +1,29 @@
-//! HTTP-based pearl tools for operators.
+//! Direct Dolt-backed pearl tools for operators.
 //!
-//! These tools call Big Smooth's pearl API so operators can create, list,
-//! update, and close pearls during task execution. Requires
-//! `SMOOTH_BIGSMOOTH_URL` to be set in the operator's environment.
+//! Operators work inside VMs with `/workspace` bind-mounted from the host.
+//! If that workspace (or an ancestor) has `.smooth/dolt/`, the operator can
+//! read/write pearls directly via the `smooth-dolt` binary at
+//! `/opt/smooth/bin/smooth-dolt`. No HTTP calls to Big Smooth needed.
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::json;
 use smooth_operator::tool::{Tool, ToolSchema};
 
-/// Base URL for Big Smooth's API (e.g., `http://192.168.1.50:4400`).
-#[derive(Clone)]
-pub struct PearlApiConfig {
-    pub base_url: String,
-    pub client: reqwest::Client,
-}
-
-impl PearlApiConfig {
-    pub fn new(base_url: String) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .unwrap_or_default();
-        Self { base_url, client }
-    }
+/// Shared pearl store handle for all pearl tools.
+pub struct PearlStoreHandle {
+    store: smooth_pearls::PearlStore,
 }
 
 // ── CreatePearlTool ─────────────────────────────────────────────────
 
-pub struct CreatePearlApiTool {
-    pub api: PearlApiConfig,
+pub struct CreatePearlTool {
+    pub handle: Arc<PearlStoreHandle>,
 }
 
 #[async_trait]
-impl Tool for CreatePearlApiTool {
+impl Tool for CreatePearlTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "create_pearl".to_string(),
@@ -52,28 +43,21 @@ impl Tool for CreatePearlApiTool {
     async fn execute(&self, arguments: serde_json::Value) -> anyhow::Result<String> {
         let title = arguments["title"].as_str().unwrap_or("Untitled");
         let description = arguments["description"].as_str().unwrap_or("");
-        let priority = arguments["priority"].as_u64().unwrap_or(2);
+        let priority_val = arguments["priority"].as_u64().unwrap_or(2) as u8;
+        let priority = smooth_pearls::Priority::from_u8(priority_val).unwrap_or(smooth_pearls::Priority::Medium);
 
-        let resp = self
-            .api
-            .client
-            .post(format!("{}/api/pearls", self.api.base_url))
-            .json(&json!({
-                "title": title,
-                "description": description,
-                "type": "task",
-                "priority": priority,
-            }))
-            .send()
-            .await?;
+        let new = smooth_pearls::NewPearl {
+            title: title.to_string(),
+            description: description.to_string(),
+            pearl_type: smooth_pearls::PearlType::Task,
+            priority,
+            assigned_to: None,
+            parent_id: None,
+            labels: Vec::new(),
+        };
 
-        let body: serde_json::Value = resp.json().await?;
-        if body["ok"].as_bool() == Some(true) {
-            let id = body["data"]["id"].as_str().unwrap_or("unknown");
-            Ok(format!("Created pearl {id}: {title}"))
-        } else {
-            Err(anyhow::anyhow!("create_pearl failed: {}", body))
-        }
+        let pearl = self.handle.store.create(&new)?;
+        Ok(format!("Created pearl {}: {}", pearl.id, pearl.title))
     }
 
     fn is_read_only(&self) -> bool {
@@ -83,12 +67,12 @@ impl Tool for CreatePearlApiTool {
 
 // ── ListPearlsTool ──────────────────────────────────────────────────
 
-pub struct ListPearlsApiTool {
-    pub api: PearlApiConfig,
+pub struct ListPearlsTool {
+    pub handle: Arc<PearlStoreHandle>,
 }
 
 #[async_trait]
-impl Tool for ListPearlsApiTool {
+impl Tool for ListPearlsTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "list_pearls".to_string(),
@@ -103,30 +87,23 @@ impl Tool for ListPearlsApiTool {
     }
 
     async fn execute(&self, arguments: serde_json::Value) -> anyhow::Result<String> {
-        let mut url = format!("{}/api/pearls", self.api.base_url);
-        if let Some(status) = arguments.get("status").and_then(|v| v.as_str()) {
-            url = format!("{url}?status={status}");
+        let mut query = smooth_pearls::PearlQuery::new();
+        if let Some(status_str) = arguments.get("status").and_then(|v| v.as_str()) {
+            if let Some(status) = smooth_pearls::PearlStatus::from_str_loose(status_str) {
+                query = query.with_status(status);
+            }
         }
 
-        let resp = self.api.client.get(&url).send().await?;
-        let body: serde_json::Value = resp.json().await?;
-
-        if let Some(pearls) = body["data"].as_array() {
-            if pearls.is_empty() {
-                return Ok("No pearls found.".to_string());
-            }
-            let mut output = String::new();
-            for p in pearls {
-                let id = p["id"].as_str().unwrap_or("?");
-                let status = p["status"].as_str().unwrap_or("?");
-                let priority = p["priority"].as_u64().unwrap_or(2);
-                let title = p["title"].as_str().unwrap_or("?");
-                output.push_str(&format!("[{status}] {id} P{priority} {title}\n"));
-            }
-            Ok(output.trim_end().to_string())
-        } else {
-            Ok("Could not retrieve pearls.".to_string())
+        let pearls = self.handle.store.list(&query)?;
+        if pearls.is_empty() {
+            return Ok("No pearls found.".to_string());
         }
+
+        let mut output = String::new();
+        for p in &pearls {
+            output.push_str(&format!("[{}] {} P{} {}\n", p.status.as_str(), p.id, p.priority.as_u8(), p.title));
+        }
+        Ok(output.trim_end().to_string())
     }
 
     fn is_read_only(&self) -> bool {
@@ -136,12 +113,12 @@ impl Tool for ListPearlsApiTool {
 
 // ── ClosePearlTool ──────────────────────────────────────────────────
 
-pub struct ClosePearlApiTool {
-    pub api: PearlApiConfig,
+pub struct ClosePearlTool {
+    pub handle: Arc<PearlStoreHandle>,
 }
 
 #[async_trait]
-impl Tool for ClosePearlApiTool {
+impl Tool for ClosePearlTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "close_pearl".to_string(),
@@ -158,14 +135,11 @@ impl Tool for ClosePearlApiTool {
 
     async fn execute(&self, arguments: serde_json::Value) -> anyhow::Result<String> {
         let id = arguments["id"].as_str().ok_or_else(|| anyhow::anyhow!("missing 'id'"))?;
-
-        let resp = self.api.client.post(format!("{}/api/pearls/{id}/close", self.api.base_url)).send().await?;
-
-        let body: serde_json::Value = resp.json().await?;
-        if body["ok"].as_bool() == Some(true) {
+        let count = self.handle.store.close(&[id])?;
+        if count > 0 {
             Ok(format!("Closed pearl {id}"))
         } else {
-            Err(anyhow::anyhow!("close_pearl failed: {}", body))
+            Ok(format!("Pearl {id} was already closed or not found"))
         }
     }
 
@@ -176,16 +150,29 @@ impl Tool for ClosePearlApiTool {
 
 // ── Registration ────────────────────────────────────────────────────
 
-/// Register pearl tools if `SMOOTH_BIGSMOOTH_URL` is set.
-pub fn register_pearl_tools(tools: &mut smooth_operator::ToolRegistry) {
-    let base_url = match std::env::var("SMOOTH_BIGSMOOTH_URL") {
-        Ok(url) => url,
-        Err(_) => return, // No Big Smooth URL — skip pearl tools
+/// Register pearl tools if a `.smooth/dolt/` directory exists in the
+/// workspace ancestry. Uses the `smooth-dolt` binary directly — no HTTP.
+pub fn register_pearl_tools(tools: &mut smooth_operator::ToolRegistry, workspace: &std::path::Path) {
+    // Walk up from workspace looking for .smooth/dolt/
+    let dolt_dir = match smooth_pearls::dolt::find_repo_dolt_dir(workspace) {
+        Some(d) => d,
+        None => {
+            tracing::debug!("no .smooth/dolt/ found in workspace ancestry — pearl tools not registered");
+            return;
+        }
     };
 
-    let api = PearlApiConfig::new(base_url);
-    tools.register(CreatePearlApiTool { api: api.clone() });
-    tools.register(ListPearlsApiTool { api: api.clone() });
-    tools.register(ClosePearlApiTool { api });
-    tracing::info!("registered pearl API tools (create_pearl, list_pearls, close_pearl)");
+    let store = match smooth_pearls::PearlStore::open(&dolt_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to open pearl store at {} — pearl tools not registered", dolt_dir.display());
+            return;
+        }
+    };
+
+    let handle = Arc::new(PearlStoreHandle { store });
+    tools.register(CreatePearlTool { handle: handle.clone() });
+    tools.register(ListPearlsTool { handle: handle.clone() });
+    tools.register(ClosePearlTool { handle });
+    tracing::info!(dolt = %dolt_dir.display(), "registered pearl tools (create_pearl, list_pearls, close_pearl)");
 }

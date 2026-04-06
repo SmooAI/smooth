@@ -16,6 +16,7 @@ smooth-narc = { path = "../smooth-narc" }
 smooth-scribe = { path = "../smooth-scribe" }
 smooth-wonk = { path = "../smooth-wonk" }
 smooth-goalie = { path = "../smooth-goalie" }
+smooth-pearls = { path = "../smooth-pearls" }
 smooth-policy.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
@@ -25,7 +26,6 @@ serde_json.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-reqwest.workspace = true
 
 [lints]
 workspace = true

@@ -304,6 +304,10 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
     let rust_workspace = tempfile::tempdir().expect("rust workspace tempdir");
     let rust_fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/task_api_spec");
     copy_tree(&rust_fixture, rust_workspace.path());
+    // Init a pearl store in the workspace so the operator can use pearl tools directly
+    if let Ok(_store) = smooth_pearls::PearlStore::init(&rust_workspace.path().join(".smooth").join("dolt")) {
+        eprintln!("  initialized .smooth/dolt/ in rust workspace for pearl tools");
+    }
     let (rust_passed, rust_failed, rust_code) = run_rust_leg(&mut ws, rust_workspace.path(), &llm).await;
 
     // --- TypeScript leg ----------------------------------------------------
@@ -311,6 +315,10 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
     let ts_workspace = tempfile::tempdir().expect("ts workspace tempdir");
     let ts_fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hono_api_spec");
     copy_tree(&ts_fixture, ts_workspace.path());
+    // Init a pearl store in the workspace for pearl tools
+    if let Ok(_store) = smooth_pearls::PearlStore::init(&ts_workspace.path().join(".smooth").join("dolt")) {
+        eprintln!("  initialized .smooth/dolt/ in ts workspace for pearl tools");
+    }
     let (ts_passed, ts_failed, ts_code) = run_ts_leg(&mut ws, ts_workspace.path(), &llm).await;
 
     // --- Archivist diagnostic: check if operators got the URL ---------------
