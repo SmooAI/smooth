@@ -39,6 +39,8 @@
 
 #![allow(clippy::expect_used)]
 
+mod pearl_tools;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -398,7 +400,10 @@ async fn spawn_cast(policy_toml: &str, operator_id: &str) -> anyhow::Result<Cast
         let forwarder = smooth_scribe::spawn_forwarder(url, operator_id.to_string());
         ScribeAppState::with_forwarder(forwarder)
     } else {
-        tracing::warn!(operator = operator_id, "SMOOTH_ARCHIVIST_URL not set — scribe will store logs locally only (no cross-VM forwarding)");
+        tracing::warn!(
+            operator = operator_id,
+            "SMOOTH_ARCHIVIST_URL not set — scribe will store logs locally only (no cross-VM forwarding)"
+        );
         ScribeAppState::local_only()
     };
     let scribe_store = Arc::clone(&scribe_state.store);
@@ -605,6 +610,10 @@ async fn main() {
         base: config.workspace.clone(),
         proxy_url: proxy_for_bash,
     });
+
+    // Pearl tools — if SMOOTH_BIGSMOOTH_URL is set, register HTTP-based
+    // pearl tools so the agent can create/list/close pearls via Big Smooth.
+    pearl_tools::register_pearl_tools(&mut tools);
 
     // Hook order is intentional:
     //   1. Narc — fastest, catches secrets/injection/dangerous writes purely

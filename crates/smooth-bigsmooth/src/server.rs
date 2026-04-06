@@ -217,8 +217,9 @@ pub fn build_router(state: AppState) -> Router {
         // Workers
         .route("/api/workers", get(list_workers_handler))
         .route("/api/workers/{id}", get(get_worker_handler).delete(kill_worker_handler))
-        // Messages
+        // Messages / Sessions
         .route("/api/messages/inbox", get(inbox_handler))
+        .route("/api/sessions/{id}/messages", get(session_messages_handler))
         // Reviews
         .route("/api/reviews", get(list_reviews_handler))
         .route("/api/reviews/{bead_id}/approve", post(approve_review_handler))
@@ -259,7 +260,11 @@ pub async fn start(mut state: AppState, addr: SocketAddr) -> anyhow::Result<()> 
     crate::sandbox::init_sandbox_client();
 
     // Boardroom bootstrap.
-    if state.boardroom.is_none() && std::env::var("SMOOTH_BOARDROOM_MODE").map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on")).unwrap_or(false) {
+    if state.boardroom.is_none()
+        && std::env::var("SMOOTH_BOARDROOM_MODE")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
+            .unwrap_or(false)
+    {
         match crate::boardroom::spawn_boardroom_cast().await {
             Ok(handles) => {
                 tracing::info!(archivist = %handles.archivist_url, "Big Smooth running in Boardroom mode");
@@ -903,13 +908,33 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
             env.insert("SMOOTH_BUDGET_USD".into(), b.to_string());
         }
         // In Boardroom mode, tell every operator VM how to reach the
-        // Boardroom's Archivist. The Scribe forwarder inside the operator
-        // will POST batches to this URL so cross-VM logs actually land.
+        // Boardroom's Archivist and Big Smooth's pearl API. The Scribe
+        // forwarder inside the operator will POST batches to the Archivist
+        // URL, and pearl tools will call Big Smooth's API.
         if let Some(ref room) = boardroom_handles {
             match room.operator_facing_archivist_url() {
                 Some(archivist_url) => {
                     tracing::info!(task_id = tid, url = %archivist_url, "operator env: SMOOTH_ARCHIVIST_URL set");
-                    env.insert("SMOOTH_ARCHIVIST_URL".into(), archivist_url);
+                    env.insert("SMOOTH_ARCHIVIST_URL".into(), archivist_url.clone());
+                    // Derive Big Smooth URL from archivist URL — same host, port 4400
+                    // Archivist URL is http://<host_ip>:<archivist_port>, Big Smooth is on 4400
+                    // which is also port-forwarded. Use SMOOTH_BOOTSTRAP_BILL_URL host.
+                    if let Ok(bill_url) = std::env::var("SMOOTH_BOOTSTRAP_BILL_URL") {
+                        // Bill URL is http://<host_ip>:<bill_port>. Extract host_ip.
+                        if let Some(host_part) = bill_url.strip_prefix("http://") {
+                            if let Some(host_ip) = host_part.split(':').next() {
+                                // Big Smooth's guest port 4400 is port-forwarded by Bill.
+                                // Get the actual host port from the sandbox's port mappings.
+                                // For now, use the SMOOTH_BIGSMOOTH_HOST_PORT env if set,
+                                // otherwise skip — the test will set it explicitly.
+                                if let Ok(bs_port) = std::env::var("SMOOTH_BIGSMOOTH_HOST_PORT") {
+                                    let bs_url = format!("http://{host_ip}:{bs_port}");
+                                    tracing::info!(task_id = tid, url = %bs_url, "operator env: SMOOTH_BIGSMOOTH_URL set");
+                                    env.insert("SMOOTH_BIGSMOOTH_URL".into(), bs_url);
+                                }
+                            }
+                        }
+                    }
                 }
                 None => {
                     tracing::warn!(task_id = tid, "operator_facing_archivist_url() returned None — operator will NOT forward logs to Archivist. Check SMOOTH_ARCHIVIST_HOST_PORT and SMOOTH_BOOTSTRAP_BILL_URL env vars.");
@@ -1025,7 +1050,8 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
             // by the test harness for repeatable warm cache), use that
             // stable key so deps persist across test runs. Otherwise use
             // the pearl ID (each task gets its own cache, warm on retry).
-            env_cache_key: std::env::var("SMOOTH_ENV_CACHE_KEY").ok()
+            env_cache_key: std::env::var("SMOOTH_ENV_CACHE_KEY")
+                .ok()
                 .filter(|k| !k.is_empty())
                 .or_else(|| pearl_id.clone())
                 .or_else(|| Some(tid.clone())),
@@ -1584,6 +1610,30 @@ async fn kill_worker_handler(State(state): State<AppState>, Path(id): Path<Strin
 async fn inbox_handler(State(state): State<AppState>) -> Json<ApiResponse<Vec<serde_json::Value>>> {
     state.touch();
     Json(ApiResponse { data: vec![], ok: true })
+}
+
+async fn session_messages_handler(
+    State(state): State<AppState>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Json<ApiResponse<Vec<serde_json::Value>>> {
+    state.touch();
+    use crate::session::SessionStore;
+    let msgs = state.session_store.get_messages(&session_id, 100).unwrap_or_default();
+    let data: Vec<serde_json::Value> = msgs
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "id": m.id,
+                "session_id": m.session_id,
+                "from": m.from,
+                "to": m.to,
+                "content": m.content,
+                "message_type": format!("{:?}", m.message_type),
+                "timestamp": m.timestamp.to_rfc3339(),
+            })
+        })
+        .collect();
+    Json(ApiResponse { data, ok: true })
 }
 
 // ── Reviews ────────────────────────────────────────────────
