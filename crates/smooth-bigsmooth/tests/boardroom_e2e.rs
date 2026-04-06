@@ -368,7 +368,9 @@ async fn run_rust_leg(
     );
     std::fs::write(workspace.join(".smooth-task"), task_detail).expect("write task detail");
     let task_message = "Rust task_api crate. Read /workspace/.smooth-task for full instructions.";
-    send_task_and_wait(ws, task_message, workspace).await;
+    // Kimi K2 is significantly stronger than gpt-5.4-mini at Rust code
+    // generation — fewer impl IntoResponse mistakes, better axum idioms.
+    send_task_and_wait(ws, task_message, workspace, Some("kimi-k2.5")).await;
 
     let lib_rs = workspace.join("src/lib.rs");
     assert!(lib_rs.exists(), "rust leg: src/lib.rs was not written");
@@ -418,7 +420,7 @@ async fn run_ts_leg(
     );
     std::fs::write(workspace.join(".smooth-task"), task_detail).expect("write task detail");
     let task_message = "TypeScript Hono task_api. Read /workspace/.smooth-task for full instructions.";
-    send_task_and_wait(ws, task_message, workspace).await;
+    send_task_and_wait(ws, task_message, workspace, Some("kimi-k2.5")).await;
 
     let server_ts = workspace.join("src/server.ts");
     assert!(server_ts.exists(), "ts leg: src/server.ts was not written");
@@ -468,11 +470,11 @@ async fn run_ts_leg(
 }
 
 /// Send a TaskStart and block until TaskComplete (or TaskError) arrives.
-async fn send_task_and_wait(ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, message: &str, workspace: &std::path::Path) {
+async fn send_task_and_wait(ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, message: &str, workspace: &std::path::Path, model: Option<&str>) {
     let task_start = serde_json::json!({
         "type": "TaskStart",
         "message": message,
-        "model": null,
+        "model": model,
         "budget": 5.0,
         "working_dir": workspace.to_string_lossy(),
     });
