@@ -396,6 +396,38 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
         }
     }
 
+    // --- Workspace pearl verification (agent-created pearls) ----------------
+    eprintln!("\n===== WORKSPACE PEARL VERIFICATION =====");
+    // The agents create/close pearls in the WORKSPACE's .smooth/dolt/, not
+    // the Boardroom's. Check the host-side Dolt DB for each workspace.
+    for (name, ws_path) in [("rust", rust_workspace.path()), ("ts", ts_workspace.path())] {
+        let ws_dolt = ws_path.join(".smooth").join("dolt");
+        if ws_dolt.exists() {
+            match smooth_pearls::PearlStore::open(&ws_dolt) {
+                Ok(store) => {
+                    let all = store.list(&smooth_pearls::PearlQuery::new()).unwrap_or_default();
+                    let closed: Vec<_> = all.iter().filter(|p| p.status == smooth_pearls::PearlStatus::Closed).collect();
+                    eprintln!("  {name} workspace: {} pearls ({} closed)", all.len(), closed.len());
+                    for p in &all {
+                        eprintln!("    {} [{}] {}", p.id, p.status.as_str(), p.title);
+                    }
+                    // The agent should have created at least 1 pearl and closed it
+                    assert!(
+                        !all.is_empty(),
+                        "{name} workspace: agent should have created at least 1 pearl via create_pearl tool"
+                    );
+                    assert!(
+                        !closed.is_empty(),
+                        "{name} workspace: agent should have closed at least 1 pearl via close_pearl tool"
+                    );
+                }
+                Err(e) => eprintln!("  {name} workspace: failed to open pearl store: {e}"),
+            }
+        } else {
+            eprintln!("  {name} workspace: no .smooth/dolt/ (pearl tools were not available)");
+        }
+    }
+
     // --- Session message verification --------------------------------------
     eprintln!("\n===== SESSION MESSAGE VERIFICATION =====");
 
@@ -480,7 +512,8 @@ async fn run_rust_leg(
     // runner will also check /workspace/.smooth-task for details.
     // This avoids the kernel cmdline TooLarge limit.
     let task_detail = concat!(
-        "Read tests/spec_test.rs carefully. Create src/lib.rs: pub fn app() -> axum::Router. ",
+        "STEP 1: Run create_pearl with title 'Rust API implementation' and description 'Build axum REST API per spec'.\n\n",
+        "STEP 2: Read tests/spec_test.rs carefully. Create src/lib.rs: pub fn app() -> axum::Router. ",
         "Endpoints: GET /health (json {status: ok, version: string}), POST /tasks (201, title required else 422, ",
         "auto id via uuid, created_at via chrono::Utc::now, default priority medium, status open, tags default empty vec), ",
         "GET /tasks (list as JSON array, optional ?status= and ?priority= query filters), GET /tasks/:id (404 if missing), ",
@@ -488,16 +521,15 @@ async fn run_rust_leg(
         "CRITICAL: use Arc<Mutex<HashMap<String, Task>>> as axum State. All handler return types must be concrete: ",
         "use (StatusCode, Json<T>) or Json<T> consistently. Do NOT mix impl IntoResponse with different concrete types ",
         "in the same function -- that causes type inference failures. For error returns use StatusCode alone. ",
-        "Only create src/lib.rs. ",
-        "THEN: run 'apk add cargo rust' and 'cargo check' in the workspace. Fix ALL compile errors. ",
-        "THEN: run 'cargo test -- --test-threads=1'. Fix any test failures. ",
-        "Repeat until all tests pass. Do not finish until cargo test succeeds. Quality checks are mandatory. ",
-        "PEARL MANAGEMENT: You have create_pearl, list_pearls, and close_pearl tools. ",
-        "Before starting, create a pearl with title 'Rust API implementation' to track your work. ",
-        "When all tests pass, close that pearl. This tracks your work in the project."
+        "Only create src/lib.rs.\n\n",
+        "STEP 3: Run 'apk add cargo rust' and 'cargo check' in the workspace. Fix ALL compile errors.\n\n",
+        "STEP 4: Run 'cargo test -- --test-threads=1'. Fix any test failures. ",
+        "Repeat until all tests pass. Do not finish until cargo test succeeds.\n\n",
+        "STEP 5: Run close_pearl with the pearl ID from step 1.\n\n",
+        "You MUST complete all 5 steps in order. Do not skip any step."
     );
     std::fs::write(workspace.join(".smooth-task"), task_detail).expect("write task detail");
-    let task_message = "Rust task_api crate. Read /workspace/.smooth-task for full instructions.";
+    let task_message = "Rust task_api crate. Read /workspace/.smooth-task for full instructions. Follow ALL steps.";
     // Kimi K2 is significantly stronger than gpt-5.4-mini at Rust code
     // generation — fewer impl IntoResponse mistakes, better axum idioms.
     send_task_and_wait(ws, task_message, workspace, Some("kimi-k2.5")).await;
@@ -542,19 +574,20 @@ async fn run_ts_leg(
     llm: &smooth_operator::llm::LlmConfig,
 ) -> (u32, u32, (String, i64, String)) {
     let task_detail = concat!(
-        "Read tests/spec.test.ts. Create src/server.ts: export default Hono app. ",
+        "STEP 1: Run create_pearl with title 'TypeScript API implementation' and description 'Build Hono REST API per spec'.\n\n",
+        "STEP 2: Read tests/spec.test.ts. Create src/server.ts: export default Hono app. ",
         "Endpoints: GET /health (json status+version), POST /tasks (201, title required else 422, ",
         "auto id via crypto.randomUUID, created_at ISO, default priority medium, status open, tags empty), ",
         "GET /tasks (optional status/priority filters), GET /tasks/:id (404 if missing), ",
         "PATCH /tasks/:id, DELETE /tasks/:id (204). Use Map<string,Task> state. ",
-        "Only create src/server.ts. Then: apk add nodejs npm, npm install -g pnpm, pnpm install, pnpm test. ",
-        "Fix errors and retest until all tests pass. Quality checks mandatory. ",
-        "PEARL MANAGEMENT: You have create_pearl, list_pearls, and close_pearl tools. ",
-        "Before starting, create a pearl with title 'TypeScript API implementation' to track your work. ",
-        "When all tests pass, close that pearl."
+        "Only create src/server.ts.\n\n",
+        "STEP 3: Run 'apk add nodejs npm', then 'npm install -g pnpm', then 'pnpm install', then 'pnpm test'. ",
+        "Fix errors and retest until all tests pass.\n\n",
+        "STEP 4: Run close_pearl with the pearl ID from step 1.\n\n",
+        "You MUST complete all 4 steps in order. Do not skip any step."
     );
     std::fs::write(workspace.join(".smooth-task"), task_detail).expect("write task detail");
-    let task_message = "TypeScript Hono task_api. Read /workspace/.smooth-task for full instructions.";
+    let task_message = "TypeScript Hono task_api. Read /workspace/.smooth-task for full instructions. Follow ALL steps.";
     send_task_and_wait(ws, task_message, workspace, Some("kimi-k2.5")).await;
 
     let server_ts = workspace.join("src/server.ts");
