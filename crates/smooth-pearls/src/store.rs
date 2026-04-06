@@ -242,6 +242,68 @@ impl PearlStore {
         Ok(pearl)
     }
 
+    // ── DoltLite version control ──────────────────────────────────────────
+
+    /// Auto-commit the current working set to DoltLite's internal version
+    /// history. On stock SQLite (no `doltlite` feature), this is a no-op.
+    ///
+    /// Called after every mutation (create, update, close, comment, etc.)
+    /// so the pearl DB has a full audit trail viewable via `th pearls log`.
+    fn dolt_commit(&self, message: &str) -> Result<()> {
+        let conn = self.lock()?;
+        // DoltLite exposes version control via SQL functions. If the
+        // database was opened with DoltLite (the feature is on AND the
+        // file is DoltLite format), these functions exist. If not, they
+        // fail with "no such function" — we catch that silently.
+        let add_result = conn.execute_batch("SELECT dolt_add('-A')");
+        if add_result.is_err() {
+            // Not a DoltLite database — plain SQLite. Skip silently.
+            return Ok(());
+        }
+        conn.execute("SELECT dolt_commit('-m', ?1)", params![message])?;
+        tracing::trace!(message, "doltlite: committed");
+        Ok(())
+    }
+
+    /// Query DoltLite's commit log. Returns a vec of (hash, author, date, message).
+    /// Returns an empty vec on plain SQLite.
+    pub fn dolt_log(&self, limit: usize) -> Result<Vec<(String, String, String, String)>> {
+        let conn = self.lock()?;
+        let mut stmt = match conn.prepare("SELECT commit_hash, committer, date, message FROM dolt_log LIMIT ?1") {
+            Ok(s) => s,
+            Err(_) => return Ok(Vec::new()), // not DoltLite
+        };
+        let rows = stmt
+            .query_map(params![limit as i64], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .filter_map(std::result::Result::ok)
+            .collect();
+        Ok(rows)
+    }
+
+    /// Run DoltLite garbage collection — compacts the database to a single
+    /// file, ideal for git commits. No-op on plain SQLite.
+    pub fn dolt_gc(&self) -> Result<()> {
+        let conn = self.lock()?;
+        let _ = conn.execute_batch("SELECT dolt_gc()");
+        Ok(())
+    }
+
+    /// Check if this store is backed by DoltLite (has dolt functions).
+    pub fn is_doltlite(&self) -> bool {
+        let conn = match self.lock() {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        conn.execute_batch("SELECT dolt_version()").is_ok()
+    }
+
     // ── CRUD ─────────────────────────────────────────────────────────────
 
     /// Create a new pearl.
@@ -273,7 +335,9 @@ impl PearlStore {
         let mut stmt = conn.prepare("SELECT * FROM pearls WHERE id = ?1")?;
         let pearl = stmt.query_row(params![id], Self::row_to_pearl)?;
         drop(stmt);
-        Self::load_pearl_with_labels(&conn, pearl)
+        drop(conn);
+        self.dolt_commit(&format!("create pearl {id}: {}", new.title))?;
+        Self::load_pearl_with_labels(&self.lock()?, pearl)
     }
 
     /// Get an pearl by ID.
@@ -451,6 +515,7 @@ impl PearlStore {
         }
 
         drop(conn);
+        self.dolt_commit(&format!("update pearl {id}"))?;
         self.get(id)?.ok_or_else(|| anyhow::anyhow!("pearl disappeared after update"))
     }
 
@@ -472,6 +537,11 @@ impl PearlStore {
                 );
             }
         }
+        drop(conn);
+        if count > 0 {
+            let closed: Vec<_> = ids.iter().take(3).copied().collect();
+            self.dolt_commit(&format!("close {} pearl(s): {}", count, closed.join(", ")))?;
+        }
         Ok(count)
     }
 
@@ -488,6 +558,7 @@ impl PearlStore {
             params![generate_id(), id, now],
         );
         drop(conn);
+        self.dolt_commit(&format!("reopen pearl {id}"))?;
         self.get(id)?.ok_or_else(|| anyhow::anyhow!("pearl not found: {id}"))
     }
 
@@ -495,6 +566,8 @@ impl PearlStore {
     pub fn delete(&self, id: &str) -> Result<()> {
         let conn = self.lock()?;
         conn.execute("DELETE FROM pearls WHERE id = ?1", params![id])?;
+        drop(conn);
+        self.dolt_commit(&format!("delete pearl {id}"))?;
         Ok(())
     }
 
@@ -507,6 +580,8 @@ impl PearlStore {
             "INSERT OR IGNORE INTO dependencies (pearl_id, depends_on, dep_type) VALUES (?1, ?2, ?3)",
             params![pearl_id, depends_on, PearlDepType::Blocks.as_str()],
         )?;
+        drop(conn);
+        self.dolt_commit(&format!("add dep: {pearl_id} depends on {depends_on}"))?;
         Ok(())
     }
 
@@ -517,6 +592,8 @@ impl PearlStore {
             "DELETE FROM dependencies WHERE pearl_id = ?1 AND depends_on = ?2",
             params![pearl_id, depends_on],
         )?;
+        drop(conn);
+        self.dolt_commit(&format!("remove dep: {pearl_id} no longer depends on {depends_on}"))?;
         Ok(())
     }
 
@@ -566,6 +643,8 @@ impl PearlStore {
     pub fn add_label(&self, id: &str, label: &str) -> Result<()> {
         let conn = self.lock()?;
         conn.execute("INSERT OR IGNORE INTO labels (pearl_id, label) VALUES (?1, ?2)", params![id, label])?;
+        drop(conn);
+        self.dolt_commit(&format!("label {id}: +{label}"))?;
         Ok(())
     }
 
@@ -573,6 +652,8 @@ impl PearlStore {
     pub fn remove_label(&self, id: &str, label: &str) -> Result<()> {
         let conn = self.lock()?;
         conn.execute("DELETE FROM labels WHERE pearl_id = ?1 AND label = ?2", params![id, label])?;
+        drop(conn);
+        self.dolt_commit(&format!("label {id}: -{label}"))?;
         Ok(())
     }
 
@@ -587,6 +668,9 @@ impl PearlStore {
             "INSERT INTO comments (id, pearl_id, content, created_at) VALUES (?1, ?2, ?3, ?4)",
             params![id, pearl_id, content, now],
         )?;
+        drop(conn);
+        let truncated = if content.len() > 60 { &content[..60] } else { content };
+        self.dolt_commit(&format!("comment on {pearl_id}: {truncated}"))?;
         Ok(PearlComment {
             id,
             pearl_id: pearl_id.to_string(),

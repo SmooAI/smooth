@@ -5242,7 +5242,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "cc",
  "chrono",
+ "dirs-next",
  "rusqlite",
  "serde",
  "serde_json",
