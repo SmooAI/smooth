@@ -1,0 +1,3 @@
+[submodule "crates/smooth-pearls/doltlite"]
+	path = crates/smooth-pearls/doltlite
+	url = https://github.com/timsehn/doltlite.git
