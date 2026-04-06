@@ -5076,12 +5076,12 @@ dependencies = [
  "http-body-util",
  "hyper",
  "ignore",
- "microsandbox",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",
  "serde_json",
  "smooth-archivist",
+ "smooth-bootstrap-bill",
  "smooth-code",
  "smooth-goalie",
  "smooth-narc",
@@ -5101,6 +5101,24 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-appender",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "smooth-bootstrap-bill"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "dirs-next",
+ "microsandbox",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 

@@ -5,6 +5,7 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 
+use crate::forwarder::ForwarderHandle;
 use crate::log_entry::LogEntry;
 use crate::store::{LogStore, MemoryLogStore, Query};
 
@@ -12,14 +13,35 @@ use crate::store::{LogStore, MemoryLogStore, Query};
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<MemoryLogStore>,
+    /// Optional Archivist forwarder. When `Some`, every `POST /log` entry
+    /// is cloned into the forwarder channel for cross-VM aggregation.
+    /// `None` keeps Scribe standalone (matching pre-Boardroom behavior).
+    pub forwarder: Option<ForwarderHandle>,
+}
+
+impl AppState {
+    /// Build a state that stores locally and does not forward anywhere.
+    #[must_use]
+    pub fn local_only() -> Self {
+        Self {
+            store: Arc::new(MemoryLogStore::new()),
+            forwarder: None,
+        }
+    }
+
+    /// Build a state that mirrors every entry to an Archivist forwarder.
+    #[must_use]
+    pub fn with_forwarder(forwarder: ForwarderHandle) -> Self {
+        Self {
+            store: Arc::new(MemoryLogStore::new()),
+            forwarder: Some(forwarder),
+        }
+    }
 }
 
 /// Build the axum router for the Scribe HTTP server.
 pub fn build_router() -> Router {
-    let state = AppState {
-        store: Arc::new(MemoryLogStore::new()),
-    };
-    build_router_with_state(state)
+    build_router_with_state(AppState::local_only())
 }
 
 /// Build the axum router with a provided state (useful for testing).
@@ -32,6 +54,9 @@ pub fn build_router_with_state(state: AppState) -> Router {
 }
 
 async fn post_log(State(state): State<AppState>, Json(entry): Json<LogEntry>) -> StatusCode {
+    if let Some(ref fwd) = state.forwarder {
+        fwd.try_forward(entry.clone());
+    }
     state.store.append(entry);
     StatusCode::CREATED
 }
@@ -89,9 +114,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_logs() {
-        let state = AppState {
-            store: Arc::new(MemoryLogStore::new()),
-        };
+        let state = AppState::local_only();
         state.store.append(LogEntry::new("svc-a", LogLevel::Info, "one"));
         state.store.append(LogEntry::new("svc-b", LogLevel::Warn, "two"));
 

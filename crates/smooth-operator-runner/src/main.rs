@@ -383,10 +383,25 @@ struct Cast {
 /// All three bind to `127.0.0.1:0` and their URLs are returned in [`Cast`].
 async fn spawn_cast(policy_toml: &str, operator_id: &str) -> anyhow::Result<Cast> {
     // --- Scribe ---
-    let scribe_store = Arc::new(MemoryLogStore::new());
-    let scribe_state = ScribeAppState {
-        store: Arc::clone(&scribe_store),
+    // If SMOOTH_ARCHIVIST_URL is set, mirror every log entry to the
+    // Boardroom's Archivist via a background forwarder. Otherwise run
+    // standalone (legacy behavior, fine for host-mode sandboxed tests).
+    let archivist_url = std::env::var("SMOOTH_ARCHIVIST_URL").ok().filter(|s| !s.trim().is_empty());
+    // Diagnostic: write the archivist URL to the workspace for host-side
+    // inspection. Uses SMOOTH_WORKSPACE since we don't have the config here.
+    if let Ok(ws) = std::env::var("SMOOTH_WORKSPACE") {
+        let diag = format!("SMOOTH_ARCHIVIST_URL={}", archivist_url.as_deref().unwrap_or("<NOT SET>"));
+        let _ = std::fs::write(format!("{ws}/.archivist-diag.txt"), &diag);
+    }
+    let scribe_state = if let Some(url) = archivist_url {
+        tracing::info!(archivist = %url, operator = operator_id, "spawning scribe with archivist forwarder");
+        let forwarder = smooth_scribe::spawn_forwarder(url, operator_id.to_string());
+        ScribeAppState::with_forwarder(forwarder)
+    } else {
+        tracing::warn!(operator = operator_id, "SMOOTH_ARCHIVIST_URL not set — scribe will store logs locally only (no cross-VM forwarding)");
+        ScribeAppState::local_only()
     };
+    let scribe_store = Arc::clone(&scribe_state.store);
     let scribe_router = scribe_router_with_state(scribe_state);
     let scribe_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let scribe_addr = scribe_listener.local_addr()?;
@@ -481,6 +496,42 @@ async fn main() {
         narc_write_guard = config.narc_write_guard,
         "smooth-operator-runner starting"
     );
+
+    // Pearl env cache: if /opt/smooth/cache is mounted (bind from host),
+    // point build tool caches there so deps persist across VM runs for
+    // the same pearl. First run compiles everything (~5 min for Rust);
+    // subsequent runs find deps already compiled (~5s). This is the
+    // single biggest enabler for agent iteration quality.
+    let cache_root = std::path::Path::new("/opt/smooth/cache");
+    if cache_root.exists() {
+        let cargo_home = cache_root.join(".cargo");
+        let npm_cache = cache_root.join(".npm");
+        let pnpm_store = cache_root.join(".pnpm-store");
+        // Create subdirs (first-run init).
+        for d in [&cargo_home, &npm_cache, &pnpm_store] {
+            let _ = std::fs::create_dir_all(d);
+        }
+        std::env::set_var("CARGO_HOME", &cargo_home);
+        // Persist compiled Rust deps across workspace resets. Without this,
+        // each new workspace tempdir starts a fresh target/ and recompiles
+        // ALL deps from source (~5 min). With CARGO_TARGET_DIR in the cache,
+        // deps compiled on the first run are reused on subsequent runs.
+        let cargo_target = cache_root.join("cargo-target");
+        let _ = std::fs::create_dir_all(&cargo_target);
+        std::env::set_var("CARGO_TARGET_DIR", &cargo_target);
+        std::env::set_var("npm_config_cache", &npm_cache);
+        std::env::set_var("pnpm_store_dir", &pnpm_store);
+        // Put cached cargo binaries on PATH so `cargo`, `rustfmt`, etc.
+        // are available if rustup was installed to the cache in a prior run.
+        if let Ok(path) = std::env::var("PATH") {
+            std::env::set_var("PATH", format!("{}:{path}", cargo_home.join("bin").display()));
+        }
+        tracing::info!(
+            cargo_home = %cargo_home.display(),
+            npm_cache = %npm_cache.display(),
+            "pearl env cache active at /opt/smooth/cache"
+        );
+    }
 
     // Make sure the workspace exists inside the VM.
     if let Err(e) = tokio::fs::create_dir_all(&config.workspace).await {
@@ -621,6 +672,14 @@ async fn main() {
     if let Ok(line) = serde_json::to_string(&summary) {
         eprintln!("[cast-summary] {line}");
     }
+
+    // Give the Scribe forwarder time to flush its last batch to
+    // Archivist before we exit. The forwarder runs as a spawned tokio
+    // task with a 500ms flush interval. `std::process::exit` kills the
+    // runtime instantly, losing buffered entries. A 2-second sleep
+    // before exit lets the forwarder's timer fire at least 3 times,
+    // draining any pending batches to the Archivist.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     match result {
         Ok(_conv) => {
