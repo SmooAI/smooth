@@ -5142,6 +5142,7 @@ dependencies = [
  "smooth-operator",
  "smooth-pearls",
  "smooth-web",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

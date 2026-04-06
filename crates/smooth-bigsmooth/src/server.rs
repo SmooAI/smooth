@@ -1407,12 +1407,17 @@ async fn run_agent_task(
         llm_config = llm_config.with_model(m);
     }
 
-    // 3. Create AgentConfig
-    let system_prompt = "You are Smooth Coding, an AI coding assistant. \
+    // 3. Create AgentConfig — enrich with project context from AGENTS.md
+    let base_prompt = "You are Smooth Coding, an AI coding assistant. \
         Help the user with their coding task. Use the provided tools to read, write, and execute code. \
         Be concise and thorough.";
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let system_prompt = match smooth_operator::context::load_project_context(&cwd) {
+        Some(ctx) => format!("{base_prompt}\n\n## Project Context\n\n{ctx}"),
+        None => base_prompt.to_string(),
+    };
 
-    let mut config = AgentConfig::new("smooth-task", system_prompt, llm_config).with_max_iterations(50);
+    let mut config = AgentConfig::new("smooth-task", &system_prompt, llm_config).with_max_iterations(50);
 
     // 4. Set budget if specified
     if let Some(max_usd) = budget {
