@@ -210,7 +210,7 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
             PortMapping {
                 host_port: bigsmooth_host_port_fixed,
                 guest_port: 4400,
-                bind_all: true,
+                bind_all: false,
             },
             // Archivist must be reachable from OTHER VMs via the host IP.
             // microsandbox publishes on 127.0.0.1 only; `bind_all: true`
