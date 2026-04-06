@@ -642,23 +642,6 @@ async fn main() {
     tools.add_hook(WonkHook::new(&cast.wonk_url));
     tools.add_hook(ScribeAuditHook::new(&cast.scribe_url, &config.operator_id));
 
-    // Enrich the task message with .smooth-task file if present.
-    // This ensures full instructions are in the USER message (highest priority),
-    // not buried in a tool result from read_file.
-    let task_message = {
-        let task_file = config.workspace.join(".smooth-task");
-        if task_file.exists() {
-            let detail = std::fs::read_to_string(&task_file).unwrap_or_default();
-            if detail.is_empty() {
-                config.task.clone()
-            } else {
-                format!("{}\n\n---\n\n{}", config.task, detail)
-            }
-        } else {
-            config.task.clone()
-        }
-    };
-
     // Run the agent on a channel and re-emit every AgentEvent as JSON-lines.
     let agent = Agent::new(agent_config, tools);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
@@ -669,7 +652,7 @@ async fn main() {
         }
     });
 
-    let result = agent.run_with_channel(&task_message, tx).await;
+    let result = agent.run_with_channel(&config.task, tx).await;
 
     // Drain the emitter before we exit.
     let _ = emit_task.await;

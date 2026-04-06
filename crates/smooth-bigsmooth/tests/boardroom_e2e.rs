@@ -529,7 +529,7 @@ async fn run_rust_leg(
         "You MUST complete all 5 steps in order. Do not skip any step."
     );
     std::fs::write(workspace.join(".smooth-task"), task_detail).expect("write task detail");
-    let task_message = "Rust task_api crate. Read /workspace/.smooth-task for full instructions. Follow ALL steps.";
+    let task_message = "FIRST: run create_pearl with title 'Rust API implementation'. THEN: read /workspace/.smooth-task and follow all steps. LAST: run close_pearl with the ID from step 1.";
     // Kimi K2 is significantly stronger than gpt-5.4-mini at Rust code
     // generation — fewer impl IntoResponse mistakes, better axum idioms.
     send_task_and_wait(ws, task_message, workspace, Some("kimi-k2.5")).await;
@@ -587,7 +587,7 @@ async fn run_ts_leg(
         "You MUST complete all 4 steps in order. Do not skip any step."
     );
     std::fs::write(workspace.join(".smooth-task"), task_detail).expect("write task detail");
-    let task_message = "TypeScript Hono task_api. Read /workspace/.smooth-task for full instructions. Follow ALL steps.";
+    let task_message = "FIRST: run create_pearl with title 'TypeScript API implementation'. THEN: read /workspace/.smooth-task and follow all steps. LAST: run close_pearl with the ID from step 1.";
     send_task_and_wait(ws, task_message, workspace, Some("kimi-k2.5")).await;
 
     let server_ts = workspace.join("src/server.ts");
