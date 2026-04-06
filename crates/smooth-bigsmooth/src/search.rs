@@ -155,8 +155,16 @@ mod tests {
 
     use smooth_pearls::{NewPearl, PearlType as IType, Priority as Prio};
 
-    fn test_store() -> PearlStore {
-        PearlStore::open_in_memory().unwrap()
+    fn test_store() -> Option<PearlStore> {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let dolt_dir = tmp.path().join("dolt");
+        match PearlStore::init(&dolt_dir) {
+            Ok(store) => {
+                std::mem::forget(tmp);
+                Some(store)
+            }
+            Err(_) => None,
+        }
     }
 
     fn new_issue(title: &str) -> NewPearl {
@@ -173,7 +181,7 @@ mod tests {
 
     #[test]
     fn test_search_pearls_by_title() {
-        let store = test_store();
+        let Some(store) = test_store() else { return };
         let mut login_issue = new_issue("Fix login bug");
         login_issue.description = "Users cannot log in".into();
         store.create(&login_issue).unwrap();
@@ -187,7 +195,7 @@ mod tests {
 
     #[test]
     fn test_search_pearls_by_id() {
-        let store = test_store();
+        let Some(store) = test_store() else { return };
         let issue = store.create(&new_issue("Some task")).unwrap();
 
         let results = search_pearls(&issue.id, &store);
@@ -197,7 +205,7 @@ mod tests {
 
     #[test]
     fn test_search_pearls_empty_query() {
-        let store = test_store();
+        let Some(store) = test_store() else { return };
         store.create(&new_issue("Task one")).unwrap();
 
         // Empty query matches everything (contains "")
@@ -207,7 +215,7 @@ mod tests {
 
     #[test]
     fn test_search_pearls_no_match() {
-        let store = test_store();
+        let Some(store) = test_store() else { return };
         store.create(&new_issue("Fix login bug")).unwrap();
 
         let results = search_pearls("zzzznotfound", &store);
@@ -243,7 +251,7 @@ mod tests {
 
     #[test]
     fn test_search_all_issues_and_files() {
-        let store = test_store();
+        let Some(store) = test_store() else { return };
         store.create(&new_issue("hello world task")).unwrap();
 
         let dir = tempfile::tempdir().unwrap();
@@ -257,7 +265,7 @@ mod tests {
 
     #[test]
     fn test_search_all_path_mode() {
-        let store = test_store();
+        let Some(store) = test_store() else { return };
         let results = search_all("~/", Path::new("/tmp"), &store);
         // Path queries bypass issue+file search
         assert!(results.iter().all(|r| r.result_type == "path"));

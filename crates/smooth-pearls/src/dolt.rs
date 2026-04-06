@@ -44,8 +44,10 @@ impl SmoothDolt {
     /// Execute a SQL query and return parsed JSON results.
     pub fn sql(&self, query: &str) -> Result<Vec<Value>> {
         let output = self.run(&["sql", &self.data_dir_str(), "-q", query])?;
-        let parsed: Vec<Value> = serde_json::from_str(&output)
-            .with_context(|| format!("parse smooth-dolt sql output: {output}"))?;
+        if output.is_empty() || output == "null" {
+            return Ok(Vec::new());
+        }
+        let parsed: Vec<Value> = serde_json::from_str(&output).with_context(|| format!("parse smooth-dolt sql output: {output}"))?;
         Ok(parsed)
     }
 

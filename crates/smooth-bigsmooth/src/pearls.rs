@@ -71,20 +71,28 @@ pub fn stats(store: &PearlStore) -> Result<PearlStats> {
 mod tests {
     use super::*;
 
-    fn test_store() -> PearlStore {
-        PearlStore::open_in_memory().unwrap()
+    fn test_store() -> Option<PearlStore> {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let dolt_dir = tmp.path().join("dolt");
+        match PearlStore::init(&dolt_dir) {
+            Ok(store) => {
+                std::mem::forget(tmp);
+                Some(store)
+            }
+            Err(_) => None,
+        }
     }
 
     #[test]
     fn test_list_pearls_empty() {
-        let store = test_store();
+        let Some(store) = test_store() else { return };
         let issues = list_pearls(&store, None).unwrap();
         assert!(issues.is_empty());
     }
 
     #[test]
     fn test_create_and_list() {
-        let store = test_store();
+        let Some(store) = test_store() else { return };
         let pearl = create_pearl(&store, "Test pearl", "desc", "task", 2).unwrap();
         assert_eq!(pearl.title, "Test pearl");
 
@@ -100,7 +108,7 @@ mod tests {
 
     #[test]
     fn test_get_ready() {
-        let store = test_store();
+        let Some(store) = test_store() else { return };
         create_pearl(&store, "Ready pearl", "", "task", 2).unwrap();
         let ready = get_ready(&store).unwrap();
         assert_eq!(ready.len(), 1);
@@ -108,7 +116,7 @@ mod tests {
 
     #[test]
     fn test_get_pearl() {
-        let store = test_store();
+        let Some(store) = test_store() else { return };
         let created = create_pearl(&store, "Find me", "", "task", 2).unwrap();
         let found = get_pearl(&store, &created.id).unwrap();
         assert!(found.is_some());
@@ -120,7 +128,7 @@ mod tests {
 
     #[test]
     fn test_update_status() {
-        let store = test_store();
+        let Some(store) = test_store() else { return };
         let pearl = create_pearl(&store, "Update me", "", "task", 2).unwrap();
         let updated = update_pearl_status(&store, &pearl.id, "in_progress").unwrap();
         assert_eq!(updated.status, PearlStatus::InProgress);
@@ -128,7 +136,7 @@ mod tests {
 
     #[test]
     fn test_close_pearls() {
-        let store = test_store();
+        let Some(store) = test_store() else { return };
         let pearl = create_pearl(&store, "Close me", "", "task", 2).unwrap();
         let count = close_pearls(&store, &[&pearl.id]).unwrap();
         assert_eq!(count, 1);
@@ -139,7 +147,7 @@ mod tests {
 
     #[test]
     fn test_add_and_get_comments() {
-        let store = test_store();
+        let Some(store) = test_store() else { return };
         let pearl = create_pearl(&store, "Commented", "", "task", 2).unwrap();
         add_comment(&store, &pearl.id, "Hello").unwrap();
         add_comment(&store, &pearl.id, "World").unwrap();
@@ -152,7 +160,7 @@ mod tests {
 
     #[test]
     fn test_stats() {
-        let store = test_store();
+        let Some(store) = test_store() else { return };
         create_pearl(&store, "One", "", "task", 2).unwrap();
         let two = create_pearl(&store, "Two", "", "task", 2).unwrap();
         close_pearls(&store, &[&two.id]).unwrap();

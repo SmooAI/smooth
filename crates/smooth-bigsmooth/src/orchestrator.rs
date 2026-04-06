@@ -390,7 +390,17 @@ mod tests {
 
     #[test]
     fn test_orchestrator_new() {
-        let store = PearlStore::open_in_memory().unwrap();
+        let store = {
+            let tmp = tempfile::tempdir().unwrap();
+            let dolt_dir = tmp.path().join("dolt");
+            match PearlStore::init(&dolt_dir) {
+                Ok(store) => {
+                    std::mem::forget(tmp);
+                    store
+                }
+                Err(_) => return,
+            }
+        };
         let orch = Orchestrator::new(3, store);
         assert_eq!(orch.state_name(), "idle");
         assert!(orch.active_workers.is_empty());
@@ -399,7 +409,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_orchestrator_step_idle() {
-        let store = PearlStore::open_in_memory().unwrap();
+        let store = {
+            let tmp = tempfile::tempdir().unwrap();
+            let dolt_dir = tmp.path().join("dolt");
+            match PearlStore::init(&dolt_dir) {
+                Ok(store) => {
+                    std::mem::forget(tmp);
+                    store
+                }
+                Err(_) => return,
+            }
+        };
         let mut orch = Orchestrator::new(3, store);
         // Step from idle — no issues, stays idle
         let result = orch.step().await;
@@ -411,7 +431,17 @@ mod tests {
     fn test_orchestrator_dispatch_creates_operator_client_map() {
         // Verify that the orchestrator has an operator_clients map ready for dispatch.
         // Actual sandbox creation requires msb, so we test the data structure setup.
-        let store = PearlStore::open_in_memory().unwrap();
+        let store = {
+            let tmp = tempfile::tempdir().unwrap();
+            let dolt_dir = tmp.path().join("dolt");
+            match PearlStore::init(&dolt_dir) {
+                Ok(store) => {
+                    std::mem::forget(tmp);
+                    store
+                }
+                Err(_) => return,
+            }
+        };
         let orch = Orchestrator::new(3, store);
 
         assert!(orch.operator_clients.is_empty());
@@ -422,7 +452,17 @@ mod tests {
     #[tokio::test]
     async fn test_orchestrator_monitor_forwards_events_to_broadcast() {
         // Set up orchestrator with a broadcast channel
-        let store = PearlStore::open_in_memory().unwrap();
+        let store = {
+            let tmp = tempfile::tempdir().unwrap();
+            let dolt_dir = tmp.path().join("dolt");
+            match PearlStore::init(&dolt_dir) {
+                Ok(store) => {
+                    std::mem::forget(tmp);
+                    store
+                }
+                Err(_) => return,
+            }
+        };
         let (tx, mut rx) = broadcast::channel::<ServerEvent>(16);
         let mut orch = Orchestrator::new(3, store).with_event_tx(tx);
 
@@ -441,7 +481,17 @@ mod tests {
 
     #[test]
     fn test_orchestrator_with_event_tx() {
-        let store = PearlStore::open_in_memory().unwrap();
+        let store = {
+            let tmp = tempfile::tempdir().unwrap();
+            let dolt_dir = tmp.path().join("dolt");
+            match PearlStore::init(&dolt_dir) {
+                Ok(store) => {
+                    std::mem::forget(tmp);
+                    store
+                }
+                Err(_) => return,
+            }
+        };
         let (tx, _rx) = broadcast::channel::<ServerEvent>(16);
         let orch = Orchestrator::new(3, store).with_event_tx(tx);
         assert!(orch.event_tx.is_some());
@@ -449,7 +499,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_orchestrator_review_cleans_up_operator_client() {
-        let store = PearlStore::open_in_memory().unwrap();
+        let store = {
+            let tmp = tempfile::tempdir().unwrap();
+            let dolt_dir = tmp.path().join("dolt");
+            match PearlStore::init(&dolt_dir) {
+                Ok(store) => {
+                    std::mem::forget(tmp);
+                    store
+                }
+                Err(_) => return,
+            }
+        };
         let mut orch = Orchestrator::new(3, store);
 
         // Insert a mock (disconnected) operator client

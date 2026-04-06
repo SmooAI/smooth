@@ -38,6 +38,7 @@ const BROADCAST_CHANNEL_CAPACITY: usize = 256;
 pub struct AppState {
     pub db: Database,
     pub pearl_store: smooth_pearls::PearlStore,
+    pub session_store: Arc<crate::session::DoltSessionStore>,
     pub start_time: Instant,
     pub last_activity: Arc<Mutex<Instant>>,
     pub idle_timeout: Duration,
@@ -48,10 +49,12 @@ pub struct AppState {
 impl AppState {
     /// Create a new `AppState` with default idle timeout.
     pub fn new(db: Database, pearl_store: smooth_pearls::PearlStore) -> Self {
+        let session_store = Arc::new(crate::session::DoltSessionStore::new(&pearl_store));
         let (event_tx, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         Self {
             db,
             pearl_store,
+            session_store,
             start_time: Instant::now(),
             last_activity: Arc::new(Mutex::new(Instant::now())),
             idle_timeout: Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS),
@@ -504,8 +507,24 @@ async fn dispatch_ws_task_in_process(state: &AppState, message: String, model: O
         let _ = pearl_store.update(id, &update);
     }
 
+    // Save the task message to Dolt session store
+    {
+        use crate::session::{MessageType, SessionMessage, SessionStore};
+        let msg = SessionMessage {
+            id: format!("msg-{}", &task_id[..8]),
+            session_id: task_id.clone(),
+            from: "user".to_string(),
+            to: "bigsmooth".to_string(),
+            content: message.clone(),
+            timestamp: chrono::Utc::now(),
+            message_type: MessageType::Command,
+        };
+        let _ = state.session_store.save_message(msg);
+    }
+
     let tid = task_id.clone();
     let last_activity = state.last_activity.clone();
+    let session_store = state.session_store.clone();
     tokio::spawn(async move {
         let (agent_tx, mut agent_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
@@ -577,6 +596,20 @@ async fn dispatch_ws_task_in_process(state: &AppState, message: String, model: O
                 if let Some(ref id) = pearl_id {
                     let _ = pearl_store.close(&[id]);
                 }
+                // Save completion message to Dolt
+                {
+                    use crate::session::{MessageType, SessionMessage, SessionStore};
+                    let msg = SessionMessage {
+                        id: format!("msg-done-{}", &tid[..8]),
+                        session_id: tid.clone(),
+                        from: "bigsmooth".to_string(),
+                        to: "user".to_string(),
+                        content: format!("Task completed. Iterations: {iterations}, cost: ${cost:.4}"),
+                        timestamp: chrono::Utc::now(),
+                        message_type: MessageType::StatusUpdate,
+                    };
+                    let _ = session_store.save_message(msg);
+                }
                 tracing::info!(task_id = tid, cost_usd = cost, "WS task completed");
             }
             Err(e) => {
@@ -584,6 +617,20 @@ async fn dispatch_ws_task_in_process(state: &AppState, message: String, model: O
                     task_id: tid.clone(),
                     message: e.to_string(),
                 });
+                // Save error message to Dolt
+                {
+                    use crate::session::{MessageType, SessionMessage, SessionStore};
+                    let msg = SessionMessage {
+                        id: format!("msg-err-{}", &tid[..8]),
+                        session_id: tid.clone(),
+                        from: "bigsmooth".to_string(),
+                        to: "user".to_string(),
+                        content: format!("Task failed: {e}"),
+                        timestamp: chrono::Utc::now(),
+                        message_type: MessageType::Alert,
+                    };
+                    let _ = session_store.save_message(msg);
+                }
                 tracing::error!(task_id = tid, error = %e, "WS task failed");
             }
         }
@@ -1587,7 +1634,10 @@ mod tests {
     #[tokio::test]
     async fn test_router_builds() {
         let db = Database::open(&PathBuf::from(":memory:")).unwrap();
-        let pearl_store = smooth_pearls::PearlStore::open_in_memory().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let Ok(pearl_store) = smooth_pearls::PearlStore::init(&tmp.path().join("dolt")) else {
+            return;
+        };
         let state = AppState::new(db, pearl_store);
         let _router = build_router(state);
         // If we get here without panic, the router is valid
@@ -1596,7 +1646,10 @@ mod tests {
     #[test]
     fn test_app_state_touch_updates_activity() {
         let db = Database::open(&PathBuf::from(":memory:")).unwrap();
-        let pearl_store = smooth_pearls::PearlStore::open_in_memory().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let Ok(pearl_store) = smooth_pearls::PearlStore::init(&tmp.path().join("dolt")) else {
+            return;
+        };
         let state = AppState::new(db, pearl_store);
 
         let before = *state.last_activity.lock().unwrap();

@@ -347,6 +347,8 @@ enum PearlCommands {
     Gc,
     /// Migrate from beads
     MigrateFromBeads,
+    /// List all registered pearl projects
+    Projects,
 }
 
 #[derive(Subcommand)]
@@ -436,9 +438,22 @@ async fn cmd_up(no_leader: bool, port: u16) -> Result<()> {
     let db = smooth_bigsmooth::db::Database::open(&db_path)?;
     println!("  Database: {} ✓", db_path.display());
 
-    // Initialize issue store (shares the same SQLite file)
-    let pearl_store = smooth_pearls::PearlStore::open(&db_path)?;
-    println!("  Pearls:  {} ✓", db_path.display());
+    // Initialize pearl store (Dolt-backed)
+    let pearl_store = match find_dolt_dir() {
+        Ok(dolt_dir) => {
+            let store = smooth_pearls::PearlStore::open(&dolt_dir)?;
+            println!("  Pearls:  {} ✓", dolt_dir.display());
+            store
+        }
+        Err(_) => {
+            // Auto-init Dolt in cwd if no .smooth/dolt/ found
+            let cwd = std::env::current_dir()?;
+            let dolt_dir = cwd.join(".smooth").join("dolt");
+            let store = smooth_pearls::PearlStore::init(&dolt_dir)?;
+            println!("  Pearls:  {} ✓ (auto-initialized)", dolt_dir.display());
+            store
+        }
+    };
 
     if no_leader {
         println!("\nSmooth infrastructure ready (leader skipped).");
@@ -799,7 +814,14 @@ async fn cmd_code(headless: bool, message: Option<String>, file: Option<String>,
         // Start Big Smooth in background
         let db_path = smooth_bigsmooth::db::default_db_path();
         let db = smooth_bigsmooth::db::Database::open(&db_path)?;
-        let pearl_store = smooth_pearls::PearlStore::open(&db_path)?;
+        let pearl_store = match find_dolt_dir() {
+            Ok(dolt_dir) => smooth_pearls::PearlStore::open(&dolt_dir)?,
+            Err(_) => {
+                let cwd = std::env::current_dir()?;
+                let dolt_dir = cwd.join(".smooth").join("dolt");
+                smooth_pearls::PearlStore::init(&dolt_dir)?
+            }
+        };
         let state = smooth_bigsmooth::server::AppState::new(db, pearl_store);
         let addr: SocketAddr = "127.0.0.1:4400".parse()?;
 
@@ -881,15 +903,15 @@ async fn cmd_doctor() -> Result<()> {
         }
     }
 
-    // 5. Check smooth-issues
-    let pearl_store = smooth_pearls::PearlStore::open(&db_path);
+    // 5. Check pearl store (Dolt)
+    let pearl_store = find_dolt_dir().and_then(|d| smooth_pearls::PearlStore::open(&d));
     match pearl_store {
         Ok(store) => {
             let stats = store.stats();
             match stats {
                 Ok(s) => {
                     println!(
-                        "  {} Issues: {} open, {} in progress, {} closed",
+                        "  {} Pearls: {} open, {} in progress, {} closed",
                         "✓".green().bold(),
                         s.open,
                         s.in_progress,
@@ -897,7 +919,7 @@ async fn cmd_doctor() -> Result<()> {
                     );
                 }
                 Err(_) => {
-                    println!("  {} Issues: {}", "○".dimmed(), "will initialize on first use".dimmed());
+                    println!("  {} Pearls: {}", "○".dimmed(), "run: th pearls init".dimmed());
                 }
             }
         }
@@ -920,8 +942,8 @@ async fn cmd_doctor() -> Result<()> {
 // ── Pearls ─────────────────────────────────────────────────────────
 
 fn open_pearl_store() -> Result<smooth_pearls::PearlStore> {
-    let db_path = smooth_bigsmooth::db::default_db_path();
-    smooth_pearls::PearlStore::open(&db_path)
+    let dolt_dir = find_dolt_dir()?;
+    smooth_pearls::PearlStore::open(&dolt_dir)
 }
 
 fn format_pearl_line(issue: &smooth_pearls::Pearl) -> String {
@@ -1152,6 +1174,29 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             cmd_migrate_from_beads(&store)?;
         }
 
+        PearlCommands::Projects => {
+            let registry = smooth_pearls::Registry::load()?;
+            let projects = registry.list();
+            if projects.is_empty() {
+                println!("No pearl projects registered yet.");
+                println!("Run {} in a project to register it.", "th pearls init".bold());
+            } else {
+                println!("{}", "Registered Pearl Projects".bold().cyan());
+                println!();
+                for entry in &projects {
+                    let exists = entry.path.join(".smooth").join("dolt").exists();
+                    let status = if exists {
+                        "✓".green().bold().to_string()
+                    } else {
+                        "✗".red().bold().to_string()
+                    };
+                    println!("  {} {} {}", status, entry.name.bold(), entry.path.display().to_string().dimmed());
+                    println!("    Last accessed: {}", entry.last_accessed.format("%Y-%m-%d %H:%M").to_string().dimmed());
+                }
+                println!("\n{} project(s)", projects.len());
+            }
+        }
+
         // ── Dolt commands ────────────────────────────────────────────
         PearlCommands::Init => {
             let cwd = std::env::current_dir()?;
@@ -1159,67 +1204,9 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             if dolt_dir.exists() {
                 println!("Pearl database already initialized at {}", dolt_dir.display());
             } else {
-                let dolt = smooth_pearls::SmoothDolt::new(&dolt_dir)?;
-                let output = dolt.init()?;
-                println!("{output}");
-                // Create the pearls schema.
-                dolt.exec(
-                    "CREATE TABLE IF NOT EXISTS pearls (
-                        id VARCHAR(20) PRIMARY KEY,
-                        title TEXT NOT NULL,
-                        description TEXT DEFAULT '',
-                        status VARCHAR(20) NOT NULL DEFAULT 'open',
-                        priority INT NOT NULL DEFAULT 2,
-                        pearl_type VARCHAR(20) NOT NULL DEFAULT 'task',
-                        parent_id VARCHAR(20),
-                        assigned_to VARCHAR(100),
-                        created_by VARCHAR(100) DEFAULT 'user',
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        closed_at DATETIME,
-                        metadata JSON DEFAULT '{}'
-                    )")?;
-                dolt.exec(
-                    "CREATE TABLE IF NOT EXISTS pearl_dependencies (
-                        pearl_id VARCHAR(20) NOT NULL,
-                        depends_on VARCHAR(20) NOT NULL,
-                        dep_type VARCHAR(20) DEFAULT 'blocks',
-                        PRIMARY KEY (pearl_id, depends_on)
-                    )")?;
-                dolt.exec(
-                    "CREATE TABLE IF NOT EXISTS pearl_labels (
-                        pearl_id VARCHAR(20) NOT NULL,
-                        label VARCHAR(100) NOT NULL,
-                        PRIMARY KEY (pearl_id, label)
-                    )")?;
-                dolt.exec(
-                    "CREATE TABLE IF NOT EXISTS pearl_comments (
-                        id VARCHAR(20) PRIMARY KEY,
-                        pearl_id VARCHAR(20) NOT NULL,
-                        content TEXT NOT NULL,
-                        created_by VARCHAR(100) DEFAULT 'user',
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                    )")?;
-                dolt.exec(
-                    "CREATE TABLE IF NOT EXISTS sessions (
-                        id VARCHAR(40) PRIMARY KEY,
-                        title TEXT,
-                        model VARCHAR(100),
-                        started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        ended_at DATETIME,
-                        message_count INT DEFAULT 0,
-                        token_count INT DEFAULT 0
-                    )")?;
-                dolt.exec(
-                    "CREATE TABLE IF NOT EXISTS memories (
-                        id VARCHAR(40) PRIMARY KEY,
-                        content TEXT NOT NULL,
-                        source VARCHAR(100),
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                    )")?;
-                dolt.commit("initialize pearl schema")?;
+                smooth_pearls::PearlStore::init(&dolt_dir)?;
                 println!("{} Pearl database initialized at {}", "✓".green().bold(), dolt_dir.display());
-                println!("  Tables: pearls, pearl_dependencies, pearl_labels, pearl_comments, sessions, memories");
+                println!("  Tables: pearls, pearl_dependencies, pearl_labels, pearl_comments, pearl_history, sessions, memories");
                 println!("  Run: th pearls remote add origin <git-remote-url>");
                 println!("  Then: th pearls push");
             }
@@ -1291,8 +1278,7 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
 /// Find the .smooth/dolt/ directory by walking up from cwd.
 fn find_dolt_dir() -> Result<std::path::PathBuf> {
     let cwd = std::env::current_dir()?;
-    smooth_pearls::dolt::find_repo_dolt_dir(&cwd)
-        .ok_or_else(|| anyhow::anyhow!("no .smooth/dolt/ found. Run: th pearls init"))
+    smooth_pearls::dolt::find_repo_dolt_dir(&cwd).ok_or_else(|| anyhow::anyhow!("no .smooth/dolt/ found. Run: th pearls init"))
 }
 
 fn cmd_migrate_from_beads(store: &smooth_pearls::PearlStore) -> Result<()> {

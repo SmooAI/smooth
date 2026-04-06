@@ -30,7 +30,8 @@ async fn spawn_bigsmooth() -> (String, TempDir) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let db_path = tmp.path().join("smooth.db");
     let db = smooth_bigsmooth::db::Database::open(&db_path).expect("open db");
-    let pearl_store = smooth_pearls::PearlStore::open(&db_path).expect("open issues");
+    let dolt_dir = tmp.path().join("dolt");
+    let pearl_store = smooth_pearls::PearlStore::init(&dolt_dir).expect("init pearl store");
 
     let state = smooth_bigsmooth::server::AppState::new(db, pearl_store);
     let router = smooth_bigsmooth::server::build_router(state);

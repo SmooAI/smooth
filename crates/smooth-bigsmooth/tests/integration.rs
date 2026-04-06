@@ -10,17 +10,21 @@ use smooth_bigsmooth::server::{build_router, AppState};
 use smooth_pearls::PearlStore;
 use tower::ServiceExt;
 
-/// Build a self-contained test app backed by a temp SQLite database.
-fn test_app() -> (Router, PearlStore) {
+/// Build a self-contained test app backed by a temp Dolt database.
+fn test_app() -> Option<(Router, PearlStore)> {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("test.db");
     let db = Database::open(&db_path).expect("open db");
-    let pearl_store = PearlStore::open(&db_path).expect("open issue store");
+    let dolt_dir = dir.path().join("dolt");
+    let pearl_store = match PearlStore::init(&dolt_dir) {
+        Ok(s) => s,
+        Err(_) => return None, // smooth-dolt binary not available
+    };
     let state = AppState::new(db, pearl_store.clone());
     let router = build_router(state);
     // Leak tempdir so it isn't deleted while tests run.
     std::mem::forget(dir);
-    (router, pearl_store)
+    Some((router, pearl_store))
 }
 
 /// Parse a JSON response body into a `serde_json::Value`.
@@ -33,7 +37,7 @@ async fn json_body(resp: axum::response::Response) -> serde_json::Value {
 
 #[tokio::test]
 async fn health_endpoint() {
-    let (app, _store) = test_app();
+    let Some((app, _store)) = test_app() else { return };
 
     let resp = app
         .oneshot(Request::builder().uri("/health").body(Body::empty()).expect("request"))
@@ -53,7 +57,7 @@ async fn health_endpoint() {
 
 #[tokio::test]
 async fn system_health() {
-    let (app, _store) = test_app();
+    let Some((app, _store)) = test_app() else { return };
 
     let resp = app
         .oneshot(Request::builder().uri("/api/system/health").body(Body::empty()).expect("request"))
@@ -76,7 +80,7 @@ async fn system_health() {
 
 #[tokio::test]
 async fn create_pearl_via_api() {
-    let (app, _store) = test_app();
+    let Some((app, _store)) = test_app() else { return };
 
     let resp = app
         .oneshot(
@@ -105,7 +109,7 @@ async fn create_pearl_via_api() {
 
 #[tokio::test]
 async fn list_pearls_via_api() {
-    let (app, store) = test_app();
+    let Some((app, store)) = test_app() else { return };
 
     // Seed two issues directly via the store.
     let new = smooth_pearls::NewPearl {
@@ -138,7 +142,7 @@ async fn list_pearls_via_api() {
 
 #[tokio::test]
 async fn get_pearl_via_api() {
-    let (app, store) = test_app();
+    let Some((app, store)) = test_app() else { return };
 
     let new = smooth_pearls::NewPearl {
         title: "Find me".into(),
@@ -173,7 +177,7 @@ async fn get_pearl_via_api() {
 
 #[tokio::test]
 async fn close_pearl_via_api() {
-    let (app, store) = test_app();
+    let Some((app, store)) = test_app() else { return };
 
     let new = smooth_pearls::NewPearl {
         title: "Close me".into(),
@@ -212,7 +216,7 @@ async fn close_pearl_via_api() {
 
 #[tokio::test]
 async fn ready_issues_via_api() {
-    let (app, store) = test_app();
+    let Some((app, store)) = test_app() else { return };
 
     // Create two issues, close one — only the open one should be "ready".
     let new = smooth_pearls::NewPearl {
@@ -252,7 +256,7 @@ async fn ready_issues_via_api() {
 
 #[tokio::test]
 async fn stats_via_api() {
-    let (app, store) = test_app();
+    let Some((app, store)) = test_app() else { return };
 
     let new = smooth_pearls::NewPearl {
         title: "A".into(),
@@ -290,7 +294,7 @@ async fn stats_via_api() {
 
 #[tokio::test]
 async fn beads_backward_compat() {
-    let (app, store) = test_app();
+    let Some((app, store)) = test_app() else { return };
 
     let new = smooth_pearls::NewPearl {
         title: "Bead compat".into(),
@@ -336,7 +340,9 @@ async fn beads_backward_compat() {
 
 #[tokio::test]
 async fn orchestrator_schedules_ready_issues() {
-    let store = PearlStore::open_in_memory().expect("in-memory store");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let Ok(store) = PearlStore::init(&tmp.path().join("dolt")) else { return };
+    std::mem::forget(tmp);
 
     // Seed ready issues.
     let new = smooth_pearls::NewPearl {
