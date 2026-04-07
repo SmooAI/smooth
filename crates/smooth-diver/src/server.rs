@@ -9,7 +9,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 
 use crate::jira::JiraClient;
-use crate::store::{CompleteRequest, CostEntry, DispatchRequest, DispatchResult, DiverStore};
+use crate::store::{CompleteRequest, CostEntry, DispatchRequest, DispatchResult, DiverStore, SessionMessage};
 
 /// Shared application state for the Diver server.
 #[derive(Clone)]
@@ -35,6 +35,7 @@ pub fn build_router_with_state(state: AppState) -> Router {
         .route("/pearl/{id}", get(get_pearl))
         .route("/pearl/{id}/cost", post(post_cost))
         .route("/pearl/{id}/costs", get(get_costs))
+        .route("/pearl/{id}/message", post(post_message))
         .route("/pearls", get(get_pearls))
         .with_state(state)
 }
@@ -50,6 +51,7 @@ async fn post_dispatch(State(state): State<AppState>, Json(req): Json<DispatchRe
     if let Some(ref jira) = state.jira {
         match jira.create_ticket(&req.title, &req.description).await {
             Ok(ticket) => {
+                state.store.set_jira_key(&result.pearl.id, &ticket.key);
                 result.jira_key = Some(ticket.key);
             }
             Err(e) => {
@@ -64,12 +66,18 @@ async fn post_dispatch(State(state): State<AppState>, Json(req): Json<DispatchRe
 async fn post_complete(State(state): State<AppState>, Json(req): Json<CompleteRequest>) -> Result<Json<smooth_pearls::Pearl>, (StatusCode, String)> {
     let pearl = state.store.complete(&req).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Transition Jira to Done if configured
+    // Transition Jira to Done and add completion comment
     if let Some(ref jira) = state.jira {
-        // We'd need the Jira key — for now, best-effort based on pearl title pattern
-        // Full bidirectional sync will track pearl_id → jira_key mapping
-        if let Err(e) = jira.transition_ticket(&pearl.id, "done").await {
-            tracing::warn!(error = %e, pearl = %pearl.id, "diver: failed to transition Jira (non-fatal)");
+        if let Some(jira_key) = state.store.jira_key(&req.pearl_id) {
+            if let Some(ref summary) = req.summary {
+                let comment = format!("[Smooth] Task completed: {summary}");
+                if let Err(e) = jira.add_comment(&jira_key, &comment).await {
+                    tracing::warn!(error = %e, "diver: failed to add Jira completion comment");
+                }
+            }
+            if let Err(e) = jira.transition_ticket(&jira_key, "done").await {
+                tracing::warn!(error = %e, jira_key = %jira_key, "diver: failed to transition Jira (non-fatal)");
+            }
         }
     }
 
@@ -107,6 +115,25 @@ async fn get_pearl(State(state): State<AppState>, Path(id): Path<String>) -> Res
 async fn post_cost(State(state): State<AppState>, Path(id): Path<String>, Json(mut entry): Json<CostEntry>) -> StatusCode {
     entry.pearl_id = id;
     state.store.record_cost(entry);
+    StatusCode::CREATED
+}
+
+/// Post a session message and sync to Jira as a comment.
+async fn post_message(State(state): State<AppState>, Path(id): Path<String>, Json(msg): Json<SessionMessage>) -> StatusCode {
+    // Save as pearl comment for local tracking
+    let comment_text = format!("[{} → {}] {}", msg.from, msg.to, msg.content);
+    let _ = state.store.pearl_store().add_comment(&id, &comment_text);
+
+    // Sync to Jira if configured
+    if let Some(ref jira) = state.jira {
+        if let Some(jira_key) = state.store.jira_key(&id) {
+            let jira_comment = format!("[Smooth: {} → {}] {}", msg.from, msg.to, msg.content);
+            if let Err(e) = jira.add_comment(&jira_key, &jira_comment).await {
+                tracing::warn!(error = %e, pearl = %id, "diver: failed to sync message to Jira");
+            }
+        }
+    }
+
     StatusCode::CREATED
 }
 

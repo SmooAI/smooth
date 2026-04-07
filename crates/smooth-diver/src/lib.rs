@@ -11,4 +11,4 @@ pub mod store;
 
 pub use jira::JiraClient;
 pub use server::{build_router, build_router_with_state, AppState};
-pub use store::{CompleteRequest, CostEntry, DispatchRequest, DispatchResult, DiverStore};
+pub use store::{CompleteRequest, CostEntry, DispatchRequest, DispatchResult, DiverStore, SessionMessage};

@@ -73,11 +73,24 @@ pub struct CostEntry {
     pub timestamp: DateTime<Utc>,
 }
 
+/// A session message to be synced to Jira.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionMessage {
+    pub pearl_id: String,
+    pub from: String,
+    pub to: String,
+    pub content: String,
+    #[serde(default)]
+    pub message_type: String,
+}
+
 /// The Diver store — wraps `PearlStore` with lifecycle management.
 pub struct DiverStore {
     pearl_store: PearlStore,
     /// In-memory cost ledger (will move to Dolt table later).
     costs: Mutex<Vec<CostEntry>>,
+    /// Pearl ID → Jira ticket key mapping.
+    jira_keys: Mutex<std::collections::HashMap<String, String>>,
 }
 
 impl DiverStore {
@@ -86,7 +99,20 @@ impl DiverStore {
         Self {
             pearl_store,
             costs: Mutex::new(Vec::new()),
+            jira_keys: Mutex::new(std::collections::HashMap::new()),
         }
+    }
+
+    /// Register a Jira key for a pearl.
+    pub fn set_jira_key(&self, pearl_id: &str, jira_key: &str) {
+        if let Ok(mut keys) = self.jira_keys.lock() {
+            keys.insert(pearl_id.to_string(), jira_key.to_string());
+        }
+    }
+
+    /// Get the Jira key for a pearl.
+    pub fn jira_key(&self, pearl_id: &str) -> Option<String> {
+        self.jira_keys.lock().ok().and_then(|keys| keys.get(pearl_id).cloned())
     }
 
     /// Access the underlying `PearlStore`.
