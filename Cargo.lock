@@ -5140,6 +5140,7 @@ dependencies = [
  "serde_json",
  "smooth-bigsmooth",
  "smooth-code",
+ "smooth-diver",
  "smooth-operator",
  "smooth-pearls",
  "smooth-web",
