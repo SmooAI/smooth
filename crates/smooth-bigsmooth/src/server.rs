@@ -1205,7 +1205,14 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
             tracing::warn!(task_id = tid, error = %e, "sandboxed dispatch: destroy_sandbox failed");
         }
 
-        if code == 0 && saw_completed {
+        // Exit code 0 = runner finished successfully. `saw_completed` is the
+        // in-band signal from AgentEvent::Completed, but the runner also emits
+        // it explicitly before exit. Treat exit 0 as success regardless — a
+        // clean exit means the agent loop returned Ok.
+        if code == 0 {
+            if !saw_completed {
+                tracing::warn!(task_id = tid, "runner exited 0 but no Completed event seen in stdout — treating as success");
+            }
             let _ = event_tx.send(ServerEvent::TaskComplete {
                 task_id: tid.clone(),
                 iterations: agent_iterations,
