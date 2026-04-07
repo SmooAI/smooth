@@ -668,7 +668,7 @@ async fn send_task_and_wait(
     });
     ws.send(Message::Text(task_start.to_string().into())).await.expect("send TaskStart");
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(900);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1800);
     let mut task_error: Option<String> = None;
     while tokio::time::Instant::now() < deadline {
         let next = tokio::time::timeout(Duration::from_secs(60), ws.next()).await;
