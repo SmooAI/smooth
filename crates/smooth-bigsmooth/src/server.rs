@@ -48,6 +48,10 @@ pub struct AppState {
     /// this carries the URLs of the in-process cast (Wonk/Goalie/Narc/
     /// Scribe/Archivist). `None` in host-mode / dev-mode.
     pub boardroom: Option<crate::boardroom::BoardroomHandles>,
+    /// Diver client — available when running in Boardroom mode with Diver.
+    /// When present, dispatch/complete go through Diver's HTTP API (with
+    /// Jira sync, cost tracking, etc.) instead of direct PearlStore calls.
+    pub diver: Option<crate::diver_client::DiverClient>,
 }
 
 impl AppState {
@@ -64,12 +68,16 @@ impl AppState {
             idle_timeout: Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS),
             event_tx,
             boardroom: None,
+            diver: None,
         }
     }
 
     /// Attach Boardroom cast handles to an existing state. Chainable.
     #[must_use]
     pub fn with_boardroom(mut self, handles: crate::boardroom::BoardroomHandles) -> Self {
+        if !handles.diver_url.is_empty() {
+            self.diver = Some(crate::diver_client::DiverClient::new(&handles.diver_url));
+        }
         self.boardroom = Some(handles);
         self
     }
@@ -785,20 +793,37 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
         return;
     }
 
-    // READ-ONLY metadata: Big Smooth tracks the pearl, but the work happens
-    // inside the sandbox.
-    let pearl_id = crate::pearls::create_pearl(&pearl_store, &format!("Task: {}", truncate_str(&message, 60)), &message, "task", 2)
-        .ok()
-        .map(|i| i.id);
-    if let Some(ref id) = pearl_id {
-        let _ = pearl_store.update(
-            id,
-            &smooth_pearls::PearlUpdate {
-                status: Some(smooth_pearls::PearlStatus::InProgress),
-                ..Default::default()
-            },
-        );
-    }
+    // Pearl lifecycle: dispatch through Diver when available (Boardroom mode),
+    // fall back to direct PearlStore when Diver is not running.
+    let diver = state.diver.clone();
+    let pearl_id: Option<String> = if let Some(ref diver_client) = diver {
+        match diver_client.dispatch(&format!("Task: {}", truncate_str(&message, 60)), &message, None).await {
+            Ok(id) => {
+                tracing::info!(pearl_id = %id, "dispatch: pearl created via Diver");
+                Some(id)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "dispatch: Diver dispatch failed, falling back to direct PearlStore");
+                crate::pearls::create_pearl(&pearl_store, &format!("Task: {}", truncate_str(&message, 60)), &message, "task", 2)
+                    .ok()
+                    .map(|i| i.id)
+            }
+        }
+    } else {
+        let id = crate::pearls::create_pearl(&pearl_store, &format!("Task: {}", truncate_str(&message, 60)), &message, "task", 2)
+            .ok()
+            .map(|i| i.id);
+        if let Some(ref id) = id {
+            let _ = pearl_store.update(
+                id,
+                &smooth_pearls::PearlUpdate {
+                    status: Some(smooth_pearls::PearlStatus::InProgress),
+                    ..Default::default()
+                },
+            );
+        }
+        id
+    };
 
     // Resolve the runner binary and working directory upfront. Both are
     // needed as host paths to mount into the VM.
@@ -1230,8 +1255,16 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
                 iterations: agent_iterations,
                 cost_usd: 0.0,
             });
+            // Close pearl via Diver or directly
             if let Some(ref id) = pearl_id {
-                let _ = pearl_store.close(&[id]);
+                if let Some(ref diver_client) = diver {
+                    if let Err(e) = diver_client.complete(id, Some("Task completed successfully"), None).await {
+                        tracing::warn!(error = %e, "diver complete failed, falling back to direct close");
+                        let _ = pearl_store.close(&[id]);
+                    }
+                } else {
+                    let _ = pearl_store.close(&[id]);
+                }
             }
             tracing::info!(task_id = tid, iterations = agent_iterations, "sandboxed WS task completed");
         } else {
