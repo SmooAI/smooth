@@ -667,9 +667,11 @@ impl Agent {
             // this, abort and move on. Guards against provider streams that go into
             // TCP CLOSE_WAIT without producing EOF (observed on Anthropic/Kimi via
             // OpenCode Zen). Applies to BOTH the tap loop and accumulator.
-            const ITERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+            const ITERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
             // Per-item idle timeout inside the tap loop — same guard, shorter scope.
-            const ITEM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+            // Reasoning models (MiniMax-M1, DeepSeek R1) can pause 60-120s between
+            // chunks during deep thinking. 120s idle is generous but safe.
+            const ITEM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
             let tap_tx = tx.clone();
             let tap_loop = async {
