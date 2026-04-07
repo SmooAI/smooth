@@ -3,13 +3,18 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use notify::{Event, EventKind, RecommendedWatcher, Watcher};
-use smooth_policy::Policy;
+use smooth_policy::{EnterprisePolicy, Policy};
 
 /// Thread-safe, hot-reloadable policy holder.
 /// Uses `ArcSwap` for lock-free reads and `notify` for filesystem watching.
+///
+/// If an `EnterprisePolicy` is set, it is automatically merged into every
+/// policy on load, update, and hot-reload. Enterprise rules cannot be
+/// overridden by per-task policies.
 #[derive(Clone)]
 pub struct PolicyHolder {
     inner: Arc<ArcSwap<Policy>>,
+    enterprise: Option<Arc<EnterprisePolicy>>,
     #[allow(dead_code)]
     path: PathBuf,
 }
@@ -21,19 +26,26 @@ impl PolicyHolder {
     /// Returns error if the file cannot be read or the TOML is invalid.
     pub fn load_and_watch(path: &str) -> anyhow::Result<Self> {
         let path = PathBuf::from(path);
-        let policy = load_policy_file(&path)?;
+        let mut policy = load_policy_file(&path)?;
+        let enterprise = EnterprisePolicy::load_default().map(Arc::new);
+        if let Some(ref ep) = enterprise {
+            policy.merge_enterprise(ep);
+            tracing::info!("enterprise policy applied on load");
+        }
         let inner = Arc::new(ArcSwap::from_pointee(policy));
 
         let holder = Self {
             inner: Arc::clone(&inner),
+            enterprise: enterprise.clone(),
             path: path.clone(),
         };
 
         // Start file watcher in background
         let watcher_inner = Arc::clone(&inner);
+        let watcher_enterprise = enterprise.clone();
         let watch_path = path.clone();
         tokio::spawn(async move {
-            if let Err(e) = watch_policy_file(watch_path, watcher_inner).await {
+            if let Err(e) = watch_policy_file(watch_path, watcher_inner, watcher_enterprise).await {
                 tracing::error!(error = %e, "policy watcher failed");
             }
         });
@@ -42,10 +54,21 @@ impl PolicyHolder {
         Ok(holder)
     }
 
-    /// Create a `PolicyHolder` from an in-memory policy (for testing).
+    /// Create a `PolicyHolder` from an in-memory policy (for testing or boardroom).
     #[allow(dead_code)]
     pub fn from_policy(policy: Policy) -> Self {
         Self {
+            inner: Arc::new(ArcSwap::from_pointee(policy)),
+            enterprise: None,
+            path: PathBuf::new(),
+        }
+    }
+
+    /// Create a `PolicyHolder` with an enterprise policy overlay.
+    pub fn from_policy_with_enterprise(mut policy: Policy, enterprise: EnterprisePolicy) -> Self {
+        policy.merge_enterprise(&enterprise);
+        Self {
+            enterprise: Some(Arc::new(enterprise)),
             inner: Arc::new(ArcSwap::from_pointee(policy)),
             path: PathBuf::new(),
         }
@@ -57,9 +80,13 @@ impl PolicyHolder {
     }
 
     /// Manually update the policy (used by negotiation when leader pushes new policy).
-    pub fn update(&self, policy: Policy) {
+    /// Enterprise rules are re-applied automatically.
+    pub fn update(&self, mut policy: Policy) {
+        if let Some(ref ep) = self.enterprise {
+            policy.merge_enterprise(ep);
+        }
         self.inner.store(Arc::new(policy));
-        tracing::info!("policy updated via negotiation");
+        tracing::info!("policy updated via negotiation (enterprise rules re-applied)");
     }
 }
 
@@ -68,7 +95,7 @@ fn load_policy_file(path: &Path) -> anyhow::Result<Policy> {
     Ok(Policy::from_toml(&contents)?)
 }
 
-async fn watch_policy_file(path: PathBuf, inner: Arc<ArcSwap<Policy>>) -> anyhow::Result<()> {
+async fn watch_policy_file(path: PathBuf, inner: Arc<ArcSwap<Policy>>, enterprise: Option<Arc<EnterprisePolicy>>) -> anyhow::Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
 
     let mut watcher = RecommendedWatcher::new(
@@ -93,9 +120,12 @@ async fn watch_policy_file(path: PathBuf, inner: Arc<ArcSwap<Policy>>) -> anyhow
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         match load_policy_file(&path) {
-            Ok(policy) => {
+            Ok(mut policy) => {
+                if let Some(ref ep) = enterprise {
+                    policy.merge_enterprise(ep);
+                }
                 inner.store(Arc::new(policy));
-                tracing::info!(path = %path.display(), "policy hot-reloaded");
+                tracing::info!(path = %path.display(), "policy hot-reloaded (enterprise rules applied)");
             }
             Err(e) => {
                 tracing::warn!(error = %e, "failed to reload policy, keeping current");
@@ -192,5 +222,43 @@ allow = ["code_search"]
         let policy = holder.load();
         assert_eq!(policy.metadata.operator_id, "test-op");
         assert!(policy.network.is_allowed("opencode.ai", "/zen"));
+    }
+
+    #[test]
+    fn enterprise_policy_blocks_network_on_create() {
+        let policy = Policy::from_toml(TEST_POLICY).expect("parse");
+        assert!(policy.network.is_allowed("opencode.ai", "/zen"));
+
+        let enterprise = EnterprisePolicy {
+            network: smooth_policy::EnterpriseNetworkPolicy {
+                deny_domains: vec!["opencode.ai".to_string()],
+            },
+            ..Default::default()
+        };
+
+        let holder = PolicyHolder::from_policy_with_enterprise(policy, enterprise);
+        let loaded = holder.load();
+        assert!(!loaded.network.is_allowed("opencode.ai", "/zen"));
+    }
+
+    #[test]
+    fn enterprise_policy_reapplied_on_update() {
+        let policy = Policy::from_toml(TEST_POLICY).expect("parse");
+        let enterprise = EnterprisePolicy {
+            tools: smooth_policy::EnterpriseToolsPolicy {
+                deny: vec!["code_search".to_string()],
+            },
+            ..Default::default()
+        };
+
+        let holder = PolicyHolder::from_policy_with_enterprise(policy, enterprise);
+        assert!(!holder.load().tools.can_use("code_search"));
+
+        // Even if someone pushes a policy that re-allows code_search,
+        // enterprise should block it
+        let new_policy = Policy::from_toml(TEST_POLICY).expect("parse");
+        assert!(new_policy.tools.can_use("code_search")); // allowed before merge
+        holder.update(new_policy);
+        assert!(!holder.load().tools.can_use("code_search")); // still blocked!
     }
 }
