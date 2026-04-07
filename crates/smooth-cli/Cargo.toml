@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 smooth-bigsmooth.workspace = true
 smooth-code.workspace = true
+smooth-diver.workspace = true
 smooth-pearls.workspace = true
 smooth-operator.workspace = true
 smooth-web.workspace = true
