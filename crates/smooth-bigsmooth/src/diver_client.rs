@@ -75,6 +75,26 @@ impl DiverClient {
         Ok(())
     }
 
+    /// Forward a session message to Diver for Jira sync.
+    /// Best-effort: errors are logged but don't propagate.
+    pub async fn post_message(&self, pearl_id: &str, from: &str, to: &str, content: &str) {
+        let body = serde_json::json!({
+            "pearl_id": pearl_id,
+            "from": from,
+            "to": to,
+            "content": content,
+        });
+        match self.http.post(format!("{}/pearl/{pearl_id}/message", self.base_url)).json(&body).send().await {
+            Ok(resp) if !resp.status().is_success() => {
+                tracing::debug!(pearl = %pearl_id, "diver message sync: {}", resp.status());
+            }
+            Err(e) => {
+                tracing::debug!(pearl = %pearl_id, error = %e, "diver message sync failed");
+            }
+            _ => {}
+        }
+    }
+
     /// Check if Diver is reachable.
     pub async fn health(&self) -> bool {
         self.http
