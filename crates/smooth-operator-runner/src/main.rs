@@ -707,6 +707,14 @@ async fn main() {
 
     match result {
         Ok(_conv) => {
+            // Emit Completed explicitly so Big Smooth sees it in stdout even
+            // if the channel-based emission raced with process exit. This is
+            // the authoritative "I'm done" signal — Big Smooth looks for
+            // `saw_completed` before sending TaskComplete to WS clients.
+            emit_event(&AgentEvent::Completed {
+                agent_id: config.operator_id.clone(),
+                iterations: 0, // exact count was in the channel event; this is the fallback
+            });
             tracing::info!("smooth-operator-runner completed successfully");
             std::process::exit(0);
         }
