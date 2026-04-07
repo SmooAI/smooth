@@ -402,12 +402,13 @@ pub struct LlmClient {
 
 impl LlmClient {
     pub fn new(config: LlmConfig) -> Self {
-        // No total request timeout — streaming responses from reasoning models
-        // (MiniMax-M1, Kimi K2.5, DeepSeek R1) can take minutes before the
-        // first token. The per-chunk idle timeout (60s in chat_stream) and the
-        // per-iteration wall clock (180s in agent.rs) guard against hangs.
-        // A total timeout would kill valid long-running streams.
+        // 10-minute total request timeout — generous enough for reasoning models
+        // (MiniMax-M1, Kimi K2.5) that can take 2-5 min before the first token,
+        // but prevents infinite hangs if the provider accepts the connection
+        // and goes silent. The per-chunk idle timeout (120s in chat_stream)
+        // and per-iteration wall clock (600s in agent.rs) provide tighter guards.
         let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(600))
             .connect_timeout(std::time::Duration::from_secs(30))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
