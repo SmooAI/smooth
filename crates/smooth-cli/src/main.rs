@@ -1077,22 +1077,32 @@ async fn cmd_jira_status() -> Result<()> {
         return Ok(());
     }
 
-    // Count open Jira tickets
+    // Count open Jira tickets by paginating the /search/jql endpoint
+    // (the new API doesn't return a `total` — we must count issues).
     let http = reqwest::Client::new();
-    let url = format!(
-        "{}/rest/api/3/search/jql?jql=project%3D{}+AND+status+!%3D+Done&maxResults=0",
-        config.url, config.project
-    );
-    match http.get(&url).basic_auth(&config.email, Some(&config.api_token)).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            let body: serde_json::Value = resp.json().await.unwrap_or_default();
-            let total = body["total"].as_u64().unwrap_or(0);
-            println!("  Open:    {} ticket(s) in {}", total, config.project);
+    let mut jira_count = 0u64;
+    let mut next_page: Option<String> = None;
+    loop {
+        let mut url = format!(
+            "{}/rest/api/3/search/jql?jql=project%3D{}+AND+status+!%3D+Done&maxResults=100",
+            config.url, config.project
+        );
+        if let Some(ref token) = next_page {
+            url.push_str(&format!("&nextPageToken={token}"));
         }
-        _ => {
-            println!("  Open:    could not query");
+        match http.get(&url).basic_auth(&config.email, Some(&config.api_token)).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let body: serde_json::Value = resp.json().await.unwrap_or_default();
+                jira_count += body["issues"].as_array().map_or(0, |a| a.len() as u64);
+                if body["isLast"].as_bool().unwrap_or(true) {
+                    break;
+                }
+                next_page = body["nextPageToken"].as_str().map(String::from);
+            }
+            _ => break,
         }
     }
+    println!("  Open:    {} ticket(s) in {}", jira_count, config.project);
 
     // Count local pearls
     if let Ok(store) = open_pearl_store() {
@@ -1119,13 +1129,26 @@ async fn cmd_jira_sync() -> Result<()> {
 
     // --- Pull: Jira → Pearls (create local pearls for Jira tickets) ---
     let http = reqwest::Client::new();
-    let url = format!(
-        "{}/rest/api/3/search/jql?jql=project%3D{}+AND+status+!%3D+Done+ORDER+BY+key+DESC&maxResults=100&fields=key,summary,status,description",
-        config.url, config.project
-    );
-    let resp = http.get(&url).basic_auth(&config.email, Some(&config.api_token)).send().await?;
-    let body: serde_json::Value = resp.json().await?;
-    let jira_issues = body["issues"].as_array().cloned().unwrap_or_default();
+    let mut jira_issues: Vec<serde_json::Value> = Vec::new();
+    let mut next_page: Option<String> = None;
+    loop {
+        let mut url = format!(
+            "{}/rest/api/3/search/jql?jql=project%3D{}+AND+status+!%3D+Done+ORDER+BY+key+DESC&maxResults=100&fields=key,summary,status,description",
+            config.url, config.project
+        );
+        if let Some(ref token) = next_page {
+            url.push_str(&format!("&nextPageToken={token}"));
+        }
+        let resp = http.get(&url).basic_auth(&config.email, Some(&config.api_token)).send().await?;
+        let body: serde_json::Value = resp.json().await?;
+        if let Some(issues) = body["issues"].as_array() {
+            jira_issues.extend(issues.iter().cloned());
+        }
+        if body["isLast"].as_bool().unwrap_or(true) {
+            break;
+        }
+        next_page = body["nextPageToken"].as_str().map(String::from);
+    }
 
     // Get all open pearls
     let open_pearls = store.list(&smooth_pearls::PearlQuery::new())?;
