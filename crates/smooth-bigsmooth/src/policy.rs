@@ -9,8 +9,8 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use smooth_policy::{
-    AccessRequestConfig, AuthConfig, BeadsPolicy, FilesystemPolicy, LeaderNetworkConfig, McpPolicy, NetworkPolicy, NetworkRule, Policy, PolicyMetadata,
-    ToolsPolicy,
+    AccessRequestConfig, AuthConfig, BeadsPolicy, EnterprisePolicy, FilesystemPolicy, LeaderNetworkConfig, McpPolicy, NetworkPolicy, NetworkRule, Policy,
+    PolicyMetadata, ToolsPolicy,
 };
 
 /// Generate a complete policy for an operator.
@@ -18,7 +18,7 @@ use smooth_policy::{
 /// # Errors
 /// Returns error if the policy cannot be serialized.
 pub fn generate_policy(operator_id: &str, bead_id: &str, phase: &str, token: &str, bead_deps: &[String]) -> anyhow::Result<String> {
-    let policy = Policy {
+    let mut policy = Policy {
         metadata: PolicyMetadata {
             operator_id: operator_id.to_string(),
             bead_id: bead_id.to_string(),
@@ -48,6 +48,11 @@ pub fn generate_policy(operator_id: &str, bead_id: &str, phase: &str, token: &st
             auto_approve_tools: vec!["lint_fix".into(), "test_run".into()],
         },
     };
+
+    // Merge enterprise policy if available
+    if let Some(ep) = EnterprisePolicy::load_default() {
+        policy.merge_enterprise(&ep);
+    }
 
     Ok(policy.to_toml()?)
 }
@@ -83,7 +88,7 @@ pub fn generate_policy_for_task(
     bead_deps: &[String],
     task_type: TaskType,
 ) -> anyhow::Result<String> {
-    let policy = Policy {
+    let mut policy = Policy {
         metadata: PolicyMetadata {
             operator_id: operator_id.to_string(),
             bead_id: bead_id.to_string(),
@@ -105,6 +110,11 @@ pub fn generate_policy_for_task(
         },
         access_requests: task_access_requests(task_type),
     };
+
+    // Merge enterprise policy if available
+    if let Some(ep) = EnterprisePolicy::load_default() {
+        policy.merge_enterprise(&ep);
+    }
 
     Ok(policy.to_toml()?)
 }

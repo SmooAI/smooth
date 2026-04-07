@@ -333,6 +333,155 @@ impl AccessRequestConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Enterprise Policy — permanent team-maintained firewall rules
+// ---------------------------------------------------------------------------
+
+/// Enterprise policy: permanent deny rules that cannot be overridden.
+///
+/// Loaded from `SMOOTH_ENTERPRISE_POLICY` env var or `.smooth/enterprise-policy.toml`.
+/// These rules are merged into every task policy and cannot be removed by
+/// agents or per-task settings.
+///
+/// ```toml
+/// [network]
+/// deny_domains = ["*.prod.internal", "prod-db.company.com"]
+///
+/// [filesystem]
+/// deny_patterns = ["/etc/passwd", ".env.production"]
+///
+/// [tools]
+/// deny = ["rm_rf", "drop_database"]
+///
+/// [mcp]
+/// deny_servers = ["untrusted-server"]
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EnterprisePolicy {
+    #[serde(default)]
+    pub network: EnterpriseNetworkPolicy,
+    #[serde(default)]
+    pub filesystem: EnterpriseFilesystemPolicy,
+    #[serde(default)]
+    pub tools: EnterpriseToolsPolicy,
+    #[serde(default)]
+    pub mcp: EnterpriseMcpPolicy,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EnterpriseNetworkPolicy {
+    /// Domains that are permanently blocked. Supports wildcards (e.g. `*.prod.internal`).
+    #[serde(default)]
+    pub deny_domains: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EnterpriseFilesystemPolicy {
+    /// Glob patterns for paths that are permanently denied.
+    #[serde(default)]
+    pub deny_patterns: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EnterpriseToolsPolicy {
+    /// Tools that are permanently denied — no task can allow them.
+    #[serde(default)]
+    pub deny: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EnterpriseMcpPolicy {
+    /// MCP servers that are permanently blocked.
+    #[serde(default)]
+    pub deny_servers: Vec<String>,
+}
+
+impl EnterprisePolicy {
+    /// Parse an enterprise policy from TOML.
+    ///
+    /// # Errors
+    /// Returns `PolicyError::Parse` if the TOML is invalid.
+    pub fn from_toml(s: &str) -> Result<Self> {
+        Ok(toml::from_str(s)?)
+    }
+
+    /// Serialize to TOML.
+    ///
+    /// # Errors
+    /// Returns `PolicyError::Serialize` if serialization fails.
+    pub fn to_toml(&self) -> Result<String> {
+        Ok(toml::to_string_pretty(self)?)
+    }
+
+    /// Load from file path, if it exists.
+    pub fn load_from_file(path: &Path) -> Option<Self> {
+        let content = std::fs::read_to_string(path).ok()?;
+        Self::from_toml(&content).ok()
+    }
+
+    /// Load from the default location: `SMOOTH_ENTERPRISE_POLICY` env var,
+    /// or `.smooth/enterprise-policy.toml` in the current directory.
+    pub fn load_default() -> Option<Self> {
+        // Check env var first
+        if let Ok(path) = std::env::var("SMOOTH_ENTERPRISE_POLICY") {
+            if let Some(policy) = Self::load_from_file(Path::new(&path)) {
+                return Some(policy);
+            }
+        }
+        // Fall back to .smooth/enterprise-policy.toml
+        let cwd = std::env::current_dir().ok()?;
+        Self::load_from_file(&cwd.join(".smooth").join("enterprise-policy.toml"))
+    }
+
+    /// Returns true if this policy has no rules.
+    pub fn is_empty(&self) -> bool {
+        self.network.deny_domains.is_empty() && self.filesystem.deny_patterns.is_empty() && self.tools.deny.is_empty() && self.mcp.deny_servers.is_empty()
+    }
+}
+
+impl Policy {
+    /// Merge enterprise policy into this task policy. Enterprise rules are
+    /// permanent and cannot be overridden:
+    ///
+    /// - **Network**: denied domains are removed from the allow list
+    /// - **Filesystem**: enterprise deny patterns are added to the deny list
+    /// - **Tools**: enterprise denied tools are added to the deny list and
+    ///   removed from the allow list
+    /// - **MCP**: enterprise denied servers are removed from allow_servers
+    pub fn merge_enterprise(&mut self, enterprise: &EnterprisePolicy) {
+        // Network: remove denied domains from allow list
+        if !enterprise.network.deny_domains.is_empty() {
+            self.network.allow.retain(|rule| {
+                !enterprise
+                    .network
+                    .deny_domains
+                    .iter()
+                    .any(|denied| domain_matches(denied, &rule.domain) || domain_matches(&rule.domain, denied))
+            });
+        }
+
+        // Filesystem: add enterprise deny patterns (dedup)
+        for pattern in &enterprise.filesystem.deny_patterns {
+            if !self.filesystem.deny_patterns.contains(pattern) {
+                self.filesystem.deny_patterns.push(pattern.clone());
+            }
+        }
+
+        // Tools: add enterprise denies, remove from allows
+        for tool in &enterprise.tools.deny {
+            if !self.tools.deny.contains(tool) {
+                self.tools.deny.push(tool.clone());
+            }
+            self.tools.allow.retain(|a| a != tool);
+        }
+
+        // MCP: remove denied servers from allow list
+        if !enterprise.mcp.deny_servers.is_empty() {
+            self.mcp.allow_servers.retain(|s| !enterprise.mcp.deny_servers.contains(s));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Phase defaults — generate policies per orchestration phase
 // ---------------------------------------------------------------------------
 
@@ -600,5 +749,163 @@ auto_approve_tools = ["lint_fix", "test_run"]
             writable: true,
         };
         assert!(!fs.is_denied("anything.txt").expect("glob"));
+    }
+
+    // ── Enterprise policy tests ──────────────────────────────────────
+
+    const ENTERPRISE_TOML: &str = r#"
+[network]
+deny_domains = ["*.prod.internal", "prod-db.company.com"]
+
+[filesystem]
+deny_patterns = ["/etc/passwd", "*.production.env"]
+
+[tools]
+deny = ["rm_rf", "drop_database", "workflow"]
+
+[mcp]
+deny_servers = ["untrusted-server"]
+"#;
+
+    #[test]
+    fn parse_enterprise_policy() {
+        let ep = EnterprisePolicy::from_toml(ENTERPRISE_TOML).expect("parse");
+        assert_eq!(ep.network.deny_domains.len(), 2);
+        assert_eq!(ep.filesystem.deny_patterns.len(), 2);
+        assert_eq!(ep.tools.deny.len(), 3);
+        assert_eq!(ep.mcp.deny_servers.len(), 1);
+    }
+
+    #[test]
+    fn enterprise_roundtrip() {
+        let ep = EnterprisePolicy::from_toml(ENTERPRISE_TOML).expect("parse");
+        let toml = ep.to_toml().expect("serialize");
+        let reparsed = EnterprisePolicy::from_toml(&toml).expect("reparse");
+        assert_eq!(reparsed.network.deny_domains.len(), 2);
+    }
+
+    #[test]
+    fn enterprise_empty() {
+        let ep = EnterprisePolicy::default();
+        assert!(ep.is_empty());
+        let ep = EnterprisePolicy::from_toml(ENTERPRISE_TOML).expect("parse");
+        assert!(!ep.is_empty());
+    }
+
+    #[test]
+    fn merge_removes_denied_network_domains() {
+        let mut policy = Policy::from_toml(EXAMPLE_POLICY).expect("parse");
+        let orig_count = policy.network.allow.len();
+        assert!(orig_count > 0);
+
+        // Enterprise blocks opencode.ai
+        let ep = EnterprisePolicy {
+            network: EnterpriseNetworkPolicy {
+                deny_domains: vec!["opencode.ai".to_string()],
+            },
+            ..Default::default()
+        };
+        policy.merge_enterprise(&ep);
+
+        // opencode.ai should be removed
+        assert_eq!(policy.network.allow.len(), orig_count - 1);
+        assert!(!policy.network.is_allowed("opencode.ai", "/anything"));
+        // Other domains still allowed
+        assert!(policy.network.is_allowed("registry.npmjs.org", "/express"));
+    }
+
+    #[test]
+    fn merge_removes_wildcard_denied_domains() {
+        let mut policy = Policy::from_toml(EXAMPLE_POLICY).expect("parse");
+
+        let ep = EnterprisePolicy {
+            network: EnterpriseNetworkPolicy {
+                deny_domains: vec!["*.github.com".to_string()],
+            },
+            ..Default::default()
+        };
+        policy.merge_enterprise(&ep);
+
+        assert!(!policy.network.is_allowed("api.github.com", "/repos/SmooAI/smooth"));
+    }
+
+    #[test]
+    fn merge_adds_filesystem_deny_patterns() {
+        let mut policy = Policy::from_toml(EXAMPLE_POLICY).expect("parse");
+        let orig_count = policy.filesystem.deny_patterns.len();
+
+        let ep = EnterprisePolicy {
+            filesystem: EnterpriseFilesystemPolicy {
+                deny_patterns: vec!["/etc/passwd".to_string(), "*.env".to_string()], // *.env already exists
+            },
+            ..Default::default()
+        };
+        policy.merge_enterprise(&ep);
+
+        // /etc/passwd added, *.env deduped
+        assert_eq!(policy.filesystem.deny_patterns.len(), orig_count + 1);
+        assert!(policy.filesystem.deny_patterns.contains(&"/etc/passwd".to_string()));
+    }
+
+    #[test]
+    fn merge_denies_tools_and_removes_from_allow() {
+        let mut policy = Policy::from_toml(EXAMPLE_POLICY).expect("parse");
+        assert!(policy.tools.can_use("beads_context")); // allowed
+
+        let ep = EnterprisePolicy {
+            tools: EnterpriseToolsPolicy {
+                deny: vec!["beads_context".to_string(), "evil_tool".to_string()],
+            },
+            ..Default::default()
+        };
+        policy.merge_enterprise(&ep);
+
+        // beads_context removed from allow AND added to deny
+        assert!(!policy.tools.can_use("beads_context"));
+        assert!(policy.tools.deny.contains(&"beads_context".to_string()));
+        assert!(policy.tools.deny.contains(&"evil_tool".to_string()));
+        assert!(!policy.tools.allow.contains(&"beads_context".to_string()));
+    }
+
+    #[test]
+    fn merge_removes_denied_mcp_servers() {
+        let mut policy = Policy::from_toml(EXAMPLE_POLICY).expect("parse");
+        assert!(policy.mcp.can_connect("smooth-tools"));
+
+        let ep = EnterprisePolicy {
+            mcp: EnterpriseMcpPolicy {
+                deny_servers: vec!["smooth-tools".to_string()],
+            },
+            ..Default::default()
+        };
+        policy.merge_enterprise(&ep);
+
+        assert!(!policy.mcp.can_connect("smooth-tools"));
+    }
+
+    #[test]
+    fn merge_empty_enterprise_is_noop() {
+        let mut policy = Policy::from_toml(EXAMPLE_POLICY).expect("parse");
+        let before = policy.to_toml().expect("serialize");
+
+        policy.merge_enterprise(&EnterprisePolicy::default());
+
+        let after = policy.to_toml().expect("serialize");
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn merge_full_enterprise_policy() {
+        let mut policy = Policy::from_toml(EXAMPLE_POLICY).expect("parse");
+        let ep = EnterprisePolicy::from_toml(ENTERPRISE_TOML).expect("parse");
+
+        policy.merge_enterprise(&ep);
+
+        // workflow was already in deny, should not duplicate
+        assert_eq!(policy.tools.deny.iter().filter(|t| *t == "workflow").count(), 1);
+        // rm_rf and drop_database added
+        assert!(policy.tools.deny.contains(&"rm_rf".to_string()));
+        // prod domains blocked
+        assert!(!policy.network.is_allowed("api.prod.internal", "/"));
     }
 }
