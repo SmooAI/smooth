@@ -904,6 +904,8 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
         env.insert("SMOOTH_MODEL".into(), final_model);
         env.insert("SMOOTH_WORKSPACE".into(), "/workspace".into());
         env.insert("SMOOTH_OPERATOR_ID".into(), tid.clone());
+        // Tell the operator where ~/.smooth is mounted inside the VM.
+        env.insert("SMOOTH_HOME".into(), "/root/.smooth".into());
         if let Some(b) = budget {
             env.insert("SMOOTH_BUDGET_USD".into(), b.to_string());
         }
@@ -1010,21 +1012,33 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
             bead_id: pearl_id.clone().unwrap_or_default(),
             workspace_path: "/workspace".into(),
             env,
-            mounts: vec![
-                BindMount {
-                    host_path: runner_dir_str.clone(),
-                    guest_path: "/opt/smooth/bin".into(),
-                    readonly: true,
-                },
-                BindMount {
-                    host_path: workspace_canon.clone(),
-                    guest_path: "/workspace".into(),
-                    readonly: false,
-                },
-            ]
-            .into_iter()
-            .chain(policy_mount)
-            .collect(),
+            mounts: {
+                let mut m = vec![
+                    BindMount {
+                        host_path: runner_dir_str.clone(),
+                        guest_path: "/opt/smooth/bin".into(),
+                        readonly: true,
+                    },
+                    BindMount {
+                        host_path: workspace_canon.clone(),
+                        guest_path: "/workspace".into(),
+                        readonly: false,
+                    },
+                ];
+                // Mount ~/.smooth for global config, registry, and pearl access.
+                // RW so operators can update pearls, write audit logs, etc.
+                if let Some(home) = dirs_next::home_dir() {
+                    let smooth_home = home.join(".smooth");
+                    if smooth_home.exists() {
+                        m.push(BindMount {
+                            host_path: smooth_home.to_string_lossy().to_string(),
+                            guest_path: "/root/.smooth".into(),
+                            readonly: false,
+                        });
+                    }
+                }
+                m.into_iter().chain(policy_mount).collect()
+            },
             allow_host_loopback: true,
             // Pearl env cache: pass the pearl ID so the sandbox client
             // (Bill, running on the host) can derive the cache dir.
