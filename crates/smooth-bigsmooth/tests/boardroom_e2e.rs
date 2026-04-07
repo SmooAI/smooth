@@ -191,6 +191,15 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
     // call pearl tools. This is simpler than deriving it inside the VM.
     let bigsmooth_operator_url = format!("http://{host_ip}:{bigsmooth_host_port_fixed}");
     boardroom_env.insert("SMOOTH_BIGSMOOTH_OPERATOR_URL".into(), bigsmooth_operator_url);
+    // Tell the Boardroom the host path to ~/.smooth so it can tell Bill to
+    // bind-mount it into operator VMs. Inside the VM, dirs_next gives /root
+    // which is the guest home, not the host home.
+    if let Some(home) = dirs_next::home_dir() {
+        let smooth_home = home.join(".smooth");
+        if smooth_home.exists() {
+            boardroom_env.insert("SMOOTH_HOME_HOST_PATH".into(), smooth_home.to_string_lossy().to_string());
+        }
+    }
 
     let spec = SandboxSpec {
         name: boardroom_name.clone(),

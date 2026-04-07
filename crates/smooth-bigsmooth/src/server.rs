@@ -1027,15 +1027,27 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
                 ];
                 // Mount ~/.smooth for global config, registry, and pearl access.
                 // RW so operators can update pearls, write audit logs, etc.
-                if let Some(home) = dirs_next::home_dir() {
-                    let smooth_home = home.join(".smooth");
-                    if smooth_home.exists() {
-                        m.push(BindMount {
-                            host_path: smooth_home.to_string_lossy().to_string(),
-                            guest_path: "/root/.smooth".into(),
-                            readonly: false,
-                        });
+                //
+                // In brokered mode (Boardroom VM), we can't resolve the host
+                // home directory — dirs_next gives the guest /root. Use
+                // SMOOTH_HOME_HOST_PATH if set (the launcher/test harness sets
+                // it to the real host ~/.smooth path). In host mode, resolve
+                // directly.
+                let smooth_home_host = std::env::var("SMOOTH_HOME_HOST_PATH").ok().or_else(|| {
+                    if brokered {
+                        None // can't resolve host path from inside VM
+                    } else {
+                        dirs_next::home_dir()
+                            .map(|h| h.join(".smooth").to_string_lossy().to_string())
+                            .filter(|p| std::path::Path::new(p).exists())
                     }
+                });
+                if let Some(host_path) = smooth_home_host {
+                    m.push(BindMount {
+                        host_path,
+                        guest_path: "/root/.smooth".into(),
+                        readonly: false,
+                    });
                 }
                 m.into_iter().chain(policy_mount).collect()
             },
