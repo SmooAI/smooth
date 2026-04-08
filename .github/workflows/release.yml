@@ -1,16 +1,99 @@
-name: Release
+name: Release (Changesets 🦋)
 
 on:
-    push:
-        tags: ['v*']
     workflow_dispatch:
+    push:
+        branches:
+            - main
 
-permissions:
-    contents: write
+concurrency:
+    group: release
+    cancel-in-progress: false
+
+env:
+    CI: true
 
 jobs:
+    version:
+        timeout-minutes: 30
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+            pull-requests: write
+            id-token: write
+            actions: write
+        outputs:
+            published: ${{ steps.changesets.outputs.published }}
+            publishedPackages: ${{ steps.changesets.outputs.publishedPackages }}
+        steps:
+            - name: Checkout code repository
+              uses: actions/checkout@v4
+              with:
+                  token: ${{ secrets.GH_PAT }}
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@v4
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: "pnpm"
+
+            - name: Setup Rust toolchain
+              uses: dtolnay/rust-toolchain@stable
+              with:
+                  components: rustfmt, clippy
+
+            - name: Cache Rust build artifacts
+              uses: Swatinem/rust-cache@v2
+              with:
+                  cache-on-failure: true
+
+            - name: Install dependencies
+              run: pnpm install
+
+            - name: Format check
+              run: cargo fmt --check
+
+            - name: Clippy
+              run: cargo clippy -- -D warnings
+              continue-on-error: true
+
+            - name: Test
+              run: cargo test
+
+            - name: Build
+              run: cargo build --release -p smooth-cli
+
+            - name: Version Update 🦋
+              id: changesets
+              uses: changesets/action@v1
+              with:
+                  commit: "🦋 New version release"
+                  title: "🦋 New version release"
+                  publish: pnpm ci:publish
+                  createGithubReleases: true
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+
+            - name: Auto-Merge Changeset PR
+              run: |
+                  PR_NUMBER=$(gh pr list --state open --head changeset-release/main --json number --jq '.[0].number')
+
+                  if [[ -n "$PR_NUMBER" && "$PR_NUMBER" != "null" ]]; then
+                    echo "Found Changeset PR #$PR_NUMBER, attempting to auto-merge..."
+                    gh pr merge "$PR_NUMBER" --auto --squash
+                  else
+                    echo "No open Changeset PR found, skipping merge."
+                  fi
+              env:
+                  GH_TOKEN: ${{ secrets.GH_PAT }}
+
     build:
         name: Build ${{ matrix.target }}
+        needs: version
+        if: needs.version.outputs.published == 'true'
         runs-on: ${{ matrix.os }}
         strategy:
             matrix:
@@ -26,6 +109,8 @@ jobs:
 
         steps:
             - uses: actions/checkout@v4
+              with:
+                  ref: main
 
             - name: Install Rust
               uses: dtolnay/rust-toolchain@stable
@@ -52,13 +137,6 @@ jobs:
                   pnpm install --frozen-lockfile
                   pnpm build
 
-            - name: Install nextest
-              uses: taiki-e/install-action@nextest
-
-            - name: Test
-              run: cargo nextest run --profile ci
-              continue-on-error: true
-
             - name: Build binary
               run: cargo build --release --target ${{ matrix.target }} -p smooth-cli
               env:
@@ -78,8 +156,11 @@ jobs:
 
     release:
         name: Create Release
-        needs: build
+        needs: [version, build]
+        if: needs.version.outputs.published == 'true'
         runs-on: ubuntu-latest
+        permissions:
+            contents: write
         steps:
             - uses: actions/checkout@v4
 
@@ -89,8 +170,13 @@ jobs:
                   path: dist/
                   merge-multiple: true
 
+            - name: Get version
+              id: version
+              run: echo "version=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
+
             - name: Create GitHub Release
               uses: softprops/action-gh-release@v2
               with:
+                  tag_name: v${{ steps.version.outputs.version }}
                   files: dist/*
                   generate_release_notes: true

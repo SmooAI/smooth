@@ -1,0 +1,33 @@
+{
+    "name": "@smooai/smooth",
+    "version": "0.1.0",
+    "private": true,
+    "description": "Security-first AI agent orchestration platform",
+    "homepage": "https://github.com/SmooAI/smooth#readme",
+    "bugs": {
+        "url": "https://github.com/SmooAI/smooth/issues"
+    },
+    "license": "MIT",
+    "author": {
+        "name": "SmooAI",
+        "email": "brent@smooai.com",
+        "url": "https://smooai.com"
+    },
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/SmooAI/smooth.git"
+    },
+    "scripts": {
+        "version:sync": "node scripts/sync-versions.mjs",
+        "ci:publish": "node scripts/ci-publish.mjs",
+        "changeset": "changeset",
+        "aichangeset": "changeset"
+    },
+    "devDependencies": {
+        "@changesets/cli": "^2.28.1"
+    },
+    "engines": {
+        "node": ">=22.0.0"
+    },
+    "packageManager": "pnpm@10.6.1"
+}

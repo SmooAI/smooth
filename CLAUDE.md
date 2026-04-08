@@ -274,7 +274,23 @@ Never edit source code or commit directly on `main`. Always use worktrees.
 
 ---
 
-## 9. Landing the Plane (Session Completion)
+## 9. Changesets & Versioning
+
+Always add changesets when landing work — this is how versions get bumped and changelogs generated.
+
+```bash
+pnpm changeset        # Interactive changeset creation
+```
+
+- Config: `.changeset/config.json`
+- `package.json` is the single source of truth for the version
+- `scripts/sync-versions.mjs` propagates the version to `Cargo.toml` workspace.package.version and `Cargo.lock`
+- Release automated via GitHub Actions (`release.yml`) — Changesets PR → auto-merge → multi-platform binary build → GitHub Release
+- Changesets describe what changed and why for the changelog
+
+---
+
+## 10. Landing the Plane (Session Completion)
 
 **When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
 

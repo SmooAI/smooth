@@ -4,6 +4,9 @@
 .env*.local
 .envrc.currentEnv
 
+# Node (changesets only)
+node_modules/
+
 # Rust build
 target/
 
