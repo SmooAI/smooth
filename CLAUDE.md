@@ -58,6 +58,7 @@ cargo test                   # Run all tests (200+ across 10 crates)
 cargo fmt                    # Format (rustfmt.toml: 160 width)
 cargo clippy                 # Lint (pedantic + nursery)
 cargo build --release -p smooth-cli  # Release binary (~10MB)
+pnpm install:th              # Install latest th to ~/.cargo/bin/
 ```
 
 ### Web UI (crates/smooth-web/web/)
@@ -303,6 +304,7 @@ pnpm changeset        # Interactive changeset creation
     cargo clippy
     cargo test
     cargo build
+    pnpm install:th    # Update ~/.cargo/bin/th to latest
     ```
 
 2. **Add changeset** for version bump:
