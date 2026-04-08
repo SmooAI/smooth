@@ -7,6 +7,7 @@ mod hooks;
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
+use dialoguer::{Input, Password, Select, theme::ColorfulTheme};
 use clap::{Parser, Subcommand};
 use owo_colors::OwoColorize;
 
@@ -673,11 +674,124 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
             let leader_up = reqwest::get("http://localhost:4400/health").await.is_ok();
             println!("Leader:       {}", if leader_up { "running" } else { "not running — run: th up" });
         }
-        AuthCommands::Login { provider, .. } => {
-            let provider = provider.unwrap_or_else(|| "openrouter".into());
-            println!("Provider {provider}: set API key via environment variable or providers.json");
-            println!("  e.g. export OPENROUTER_API_KEY=sk-...");
-            println!("  Then: th auth login {provider} --api-key $OPENROUTER_API_KEY");
+        AuthCommands::Login { provider, api_key } => {
+            let path = providers_path.as_ref().context("cannot determine home directory")?;
+
+            // Provider catalog: (id, display name, models, needs_key)
+            let catalog: Vec<(&str, &str, Vec<&str>, bool)> = vec![
+                ("kimi",       "Kimi Code",   vec!["kimi-k2.5", "kimi-k2", "moonshot-v1-auto"], true),
+                ("openrouter", "OpenRouter",   vec!["deepseek/deepseek-v3", "openai/gpt-4o", "anthropic/claude-sonnet-4", "moonshot/kimi-k2.5", "google/gemini-flash-2.0"], true),
+                ("openai",     "OpenAI",       vec!["gpt-4o", "gpt-4o-mini", "o3-mini", "gpt-5.4-mini"], true),
+                ("anthropic",  "Anthropic",    vec!["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-haiku-4-5-20251001"], true),
+                ("google",     "Google AI",    vec!["gemini-2.5-flash", "gemini-2.5-pro"], true),
+                ("ollama",     "Ollama (local)", vec!["llama3.3", "qwen3", "deepseek-r1"], false),
+            ];
+
+            // Step 1: Pick provider (interactive if not given)
+            let (provider_id, models, needs_key) = if let Some(ref p) = provider {
+                let entry = catalog.iter().find(|(id, ..)| *id == p.as_str());
+                match entry {
+                    Some((id, _, models, needs_key)) => (id.to_string(), models.clone(), *needs_key),
+                    None => {
+                        println!("Unknown provider: {p}");
+                        println!("Available: {}", catalog.iter().map(|(id, ..)| *id).collect::<Vec<_>>().join(", "));
+                        return Ok(());
+                    }
+                }
+            } else {
+                let display_names: Vec<&str> = catalog.iter().map(|(_, name, ..)| *name).collect();
+                let selection = Select::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Select a provider")
+                    .items(&display_names)
+                    .default(0)
+                    .interact()?;
+                let (id, _, models, needs_key) = &catalog[selection];
+                (id.to_string(), models.clone(), *needs_key)
+            };
+
+            // Step 2: Pick model
+            let model = if models.len() == 1 {
+                models[0].to_string()
+            } else {
+                let selection = Select::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Select a model")
+                    .items(&models)
+                    .default(0)
+                    .interact()?;
+                models[selection].to_string()
+            };
+
+            // Step 3: Get API key (interactive if not given)
+            let api_key = if !needs_key {
+                String::new()
+            } else if let Some(k) = api_key {
+                k
+            } else {
+                Password::with_theme(&ColorfulTheme::default())
+                    .with_prompt("API key")
+                    .interact()?
+            };
+
+            // Step 4: Test the connection
+            print!("Testing connection... ");
+            let config = match provider_id.as_str() {
+                "openrouter" => smooth_operator::providers::ProviderConfig::openrouter(&api_key),
+                "openai" => smooth_operator::providers::ProviderConfig::openai(&api_key),
+                "anthropic" => smooth_operator::providers::ProviderConfig::anthropic(&api_key),
+                "kimi" => smooth_operator::providers::ProviderConfig::kimi(&api_key),
+                "ollama" => smooth_operator::providers::ProviderConfig::ollama(),
+                "google" => smooth_operator::providers::ProviderConfig::google(&api_key),
+                _ => unreachable!(),
+            };
+
+            // Quick test: send a tiny request
+            let test_llm = smooth_operator::llm::LlmClient::new(smooth_operator::llm::LlmConfig {
+                api_url: config.api_url.clone(),
+                api_key: config.api_key.clone(),
+                model: model.clone(),
+                max_tokens: 32,
+                temperature: 0.0,
+                retry_policy: smooth_operator::llm::RetryPolicy::default(),
+                api_format: config.api_format.clone(),
+            });
+            let test_msg = smooth_operator::conversation::Message::user("Say 'ok' and nothing else.");
+            match test_llm.chat(&[&test_msg], &[]).await {
+                Ok(resp) => println!("{} ({})", "connected ✓".green(), resp.content.trim().chars().take(20).collect::<String>()),
+                Err(e) => {
+                    println!("{}", "failed ✗".red());
+                    println!("  Error: {e}");
+                    let proceed: bool = Input::with_theme(&ColorfulTheme::default())
+                        .with_prompt("Save anyway? (y/n)")
+                        .default("n".into())
+                        .interact_text()
+                        .map(|s: String| s.starts_with('y'))
+                        .unwrap_or(false);
+                    if !proceed {
+                        return Ok(());
+                    }
+                }
+            }
+
+            // Step 5: Save
+            let mut registry = if path.exists() {
+                smooth_operator::providers::ProviderRegistry::load_from_file(path).unwrap_or_default()
+            } else {
+                smooth_operator::providers::ProviderRegistry::default()
+            };
+
+            let mut provider_config = config;
+            provider_config.default_model = model;
+            registry.register_provider(provider_config);
+
+            let current_default_works = registry.default_llm_config().is_ok();
+            if !current_default_works || registry.list_providers().len() == 1 {
+                registry.set_default_provider(&provider_id);
+            }
+
+            registry.save_to_file(path)?;
+
+            println!("{}: configured ✓", provider_id.green().bold());
+            println!("  Saved to: {}", path.display());
         }
         AuthCommands::Providers => {
             if let Some(ref path) = providers_path {
@@ -702,8 +816,42 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
                 }
             }
         }
-        AuthCommands::Default { provider } => println!("Default: {}", provider.unwrap_or_else(|| "openrouter".into())),
-        AuthCommands::Remove { provider } => println!("Removed: {provider}"),
+        AuthCommands::Default { provider } => {
+            let path = providers_path.as_ref().context("cannot determine home directory")?;
+            if let Some(p) = provider {
+                if !path.exists() {
+                    println!("No providers configured. Run: th auth login {p} --api-key YOUR_KEY");
+                    return Ok(());
+                }
+                let mut registry = smooth_operator::providers::ProviderRegistry::load_from_file(path)?;
+                if registry.get_provider(&p).is_none() {
+                    println!("Provider {p} not configured. Run: th auth login {p} --api-key YOUR_KEY");
+                    return Ok(());
+                }
+                registry.set_default_provider(&p);
+                registry.save_to_file(path)?;
+                println!("Default provider set to: {}", p.green().bold());
+            } else if path.exists() {
+                let registry = smooth_operator::providers::ProviderRegistry::load_from_file(path)?;
+                match registry.default_llm_config() {
+                    Ok(config) => println!("Default: {} ({})", config.model, config.api_url),
+                    Err(_) => println!("No default configured"),
+                }
+            } else {
+                println!("No providers configured. Run: th auth login <provider> --api-key YOUR_KEY");
+            }
+        }
+        AuthCommands::Remove { provider } => {
+            let path = providers_path.as_ref().context("cannot determine home directory")?;
+            if !path.exists() {
+                println!("No providers configured.");
+                return Ok(());
+            }
+            let mut registry = smooth_operator::providers::ProviderRegistry::load_from_file(path)?;
+            registry.remove_provider(&provider);
+            registry.save_to_file(path)?;
+            println!("Removed: {}", provider.red().bold());
+        }
     }
     Ok(())
 }

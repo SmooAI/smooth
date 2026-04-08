@@ -246,6 +246,26 @@ impl ProviderRegistry {
         self.providers.insert(config.id.clone(), config);
     }
 
+    /// Remove a provider by ID.
+    pub fn remove_provider(&mut self, id: &str) {
+        self.providers.remove(id);
+    }
+
+    /// Set all routing slots to use the given provider with its default model.
+    pub fn set_default_provider(&mut self, provider_id: &str) {
+        let model = self.providers.get(provider_id).map(|p| p.default_model.clone()).unwrap_or_default();
+        let slot = ModelSlot::new(provider_id, &model);
+        self.routing = ModelRouting {
+            thinking: slot.clone(),
+            coding: slot.clone(),
+            planning: slot.clone(),
+            reviewing: slot.clone(),
+            judge: slot.clone(),
+            summarize: slot.clone(),
+            default: slot,
+        };
+    }
+
     /// Look up a provider by ID.
     pub fn get_provider(&self, id: &str) -> Option<&ProviderConfig> {
         self.providers.get(id)
