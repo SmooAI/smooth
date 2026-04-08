@@ -59,7 +59,7 @@ jobs:
             - name: Build web UI
               run: |
                   cd crates/smooth-web/web
-                  pnpm install --frozen-lockfile
+                  pnpm install --no-frozen-lockfile
                   pnpm build
 
             - name: Format check
@@ -143,7 +143,7 @@ jobs:
             - name: Build web UI
               run: |
                   cd crates/smooth-web/web
-                  pnpm install --frozen-lockfile
+                  pnpm install --no-frozen-lockfile
                   pnpm build
 
             - name: Build binary

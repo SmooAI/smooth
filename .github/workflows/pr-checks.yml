@@ -30,7 +30,7 @@ jobs:
             - name: Build web UI
               run: |
                   cd crates/smooth-web/web
-                  pnpm install --frozen-lockfile
+                  pnpm install --no-frozen-lockfile
                   pnpm build
 
             - name: Install nextest
@@ -73,7 +73,7 @@ jobs:
                   node-version: 22
 
             - name: Install
-              run: cd crates/smooth-web/web && pnpm install --frozen-lockfile
+              run: cd crates/smooth-web/web && pnpm install --no-frozen-lockfile
 
             - name: Build
               run: cd crates/smooth-web/web && pnpm build
