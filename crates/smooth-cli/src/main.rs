@@ -148,7 +148,7 @@ enum Commands {
 enum AuthCommands {
     /// Add or update a provider
     Login {
-        /// Provider: openrouter, openai, anthropic, kimi, ollama, google
+        /// Provider: kimi-code, kimi, openrouter, openai, anthropic, ollama, google
         provider: Option<String>,
         /// API key
         #[arg(long)]
@@ -679,7 +679,8 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
 
             // Provider catalog: (id, display name, models, needs_key)
             let catalog: Vec<(&str, &str, Vec<&str>, bool)> = vec![
-                ("kimi",       "Kimi Code",   vec!["kimi-k2.5", "kimi-k2", "moonshot-v1-auto"], true),
+                ("kimi-code",  "Kimi Code",   vec!["kimi-for-coding"], true),
+                ("kimi",       "Kimi",        vec!["kimi-k2.5", "kimi-k2", "moonshot-v1-auto"], true),
                 ("openrouter", "OpenRouter",   vec!["deepseek/deepseek-v3", "openai/gpt-4o", "anthropic/claude-sonnet-4", "moonshot/kimi-k2.5", "google/gemini-flash-2.0"], true),
                 ("openai",     "OpenAI",       vec!["gpt-4o", "gpt-4o-mini", "o3-mini", "gpt-5.4-mini"], true),
                 ("anthropic",  "Anthropic",    vec!["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-haiku-4-5-20251001"], true),
@@ -739,6 +740,7 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
                 "openai" => smooth_operator::providers::ProviderConfig::openai(&api_key),
                 "anthropic" => smooth_operator::providers::ProviderConfig::anthropic(&api_key),
                 "kimi" => smooth_operator::providers::ProviderConfig::kimi(&api_key),
+                "kimi-code" => smooth_operator::providers::ProviderConfig::kimi_code(&api_key),
                 "ollama" => smooth_operator::providers::ProviderConfig::ollama(),
                 "google" => smooth_operator::providers::ProviderConfig::google(&api_key),
                 _ => unreachable!(),

@@ -84,13 +84,25 @@ impl ProviderConfig {
     }
 
     /// Kimi Code — OpenAI-compatible API.
+    /// Kimi — Moonshot AI's general-purpose API (OpenAI-compatible).
     pub fn kimi(api_key: impl Into<String>) -> Self {
         Self {
             id: "kimi".into(),
-            api_url: "https://api.kimicode.com/v1".into(),
+            api_url: "https://api.moonshot.ai/v1".into(),
             api_key: api_key.into(),
             api_format: ApiFormat::OpenAiCompat,
             default_model: "kimi-k2.5".into(),
+        }
+    }
+
+    /// Kimi Code — Moonshot's coding-optimized API (Anthropic-compatible).
+    pub fn kimi_code(api_key: impl Into<String>) -> Self {
+        Self {
+            id: "kimi-code".into(),
+            api_url: "https://api.kimi.com/coding/v1".into(),
+            api_key: api_key.into(),
+            api_format: ApiFormat::Anthropic,
+            default_model: "kimi-for-coding".into(),
         }
     }
 }
@@ -380,6 +392,7 @@ impl ProviderRegistry {
             }
             "google" => ProviderConfig::google(&api_key),
             "kimi" => ProviderConfig::kimi(&api_key),
+            "kimi-code" => ProviderConfig::kimi_code(&api_key),
             _ => ProviderConfig::openrouter(&api_key),
         };
 
@@ -439,9 +452,14 @@ mod tests {
         assert_eq!(google.api_format, ApiFormat::OpenAiCompat);
 
         let kimi = ProviderConfig::kimi("key");
-        assert_eq!(kimi.api_url, "https://api.kimicode.com/v1");
+        assert_eq!(kimi.api_url, "https://api.moonshot.ai/v1");
         assert_eq!(kimi.default_model, "kimi-k2.5");
         assert_eq!(kimi.api_format, ApiFormat::OpenAiCompat);
+
+        let kimi_code = ProviderConfig::kimi_code("key");
+        assert_eq!(kimi_code.api_url, "https://api.kimi.com/coding/v1");
+        assert_eq!(kimi_code.default_model, "kimi-for-coding");
+        assert_eq!(kimi_code.api_format, ApiFormat::Anthropic);
     }
 
     // 2. ModelSlot creation + serialization
