@@ -18,13 +18,16 @@
         "url": "https://github.com/SmooAI/smooth.git"
     },
     "scripts": {
+        "prepare": "husky",
+        "pre-commit-check": "cargo fmt -- --check && cargo clippy --workspace --all-targets -- -D warnings",
         "version:sync": "node scripts/sync-versions.mjs",
         "ci:publish": "node scripts/ci-publish.mjs",
         "changeset": "changeset",
         "aichangeset": "changeset"
     },
     "devDependencies": {
-        "@changesets/cli": "^2.28.1"
+        "@changesets/cli": "^2.28.1",
+        "husky": "^9.1.7"
     },
     "engines": {
         "node": ">=22.0.0"
