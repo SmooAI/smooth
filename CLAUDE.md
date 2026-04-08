@@ -305,13 +305,19 @@ pnpm changeset        # Interactive changeset creation
     cargo build
     ```
 
-2. **Close pearls** for completed work:
+2. **Add changeset** for version bump:
+
+    ```bash
+    pnpm changeset    # Describe what changed and why
+    ```
+
+3. **Close pearls** for completed work:
 
     ```bash
     th pearls close <id1> <id2> ...
     ```
 
-3. **Merge to main** if on feature branch:
+4. **Merge to main** if on feature branch:
 
     ```bash
     cd ~/dev/smooai/smooth
@@ -319,16 +325,16 @@ pnpm changeset        # Interactive changeset creation
     git merge <branch> --no-ff
     ```
 
-4. **Push to remote**:
+5. **Push to remote**:
 
     ```bash
     git push
     git status  # MUST show "up to date with origin"
     ```
 
-5. **Clean up** — remove worktrees, delete merged branches
+6. **Clean up** — remove worktrees, delete merged branches
 
-6. **Verify** — all changes committed AND pushed
+7. **Verify** — all changes committed AND pushed
 
 ### Critical rules
 
