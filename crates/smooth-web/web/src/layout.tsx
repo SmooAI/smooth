@@ -1,5 +1,7 @@
 import { Link, Outlet, useLocation } from 'react-router-dom';
 import { LayoutDashboard, Circle, Bot, MessageSquare, Settings } from 'lucide-react';
+import { useProject } from './context';
+import { Select } from './components/ui/select';
 
 const NAV = [
     { path: '/', label: 'Dashboard', icon: LayoutDashboard },
@@ -11,14 +13,34 @@ const NAV = [
 
 export function Layout() {
     const location = useLocation();
+    const { projects, selectedProject, setSelectedProject } = useProject();
 
     return (
-        <div className="flex min-h-screen" style={{ background: 'var(--smoo-dark-blue)' }}>
-            <nav className="w-52 p-4 flex flex-col gap-1" style={{ borderRight: '1px solid var(--border)' }}>
+        <div className="flex min-h-screen bg-background">
+            <nav className="w-56 border-r border-border p-4 flex flex-col gap-1">
                 <div className="mb-4 px-3">
                     <img src="/logo.svg" alt="Smoo AI" className="h-8" />
                 </div>
-                <div className="text-xs font-semibold uppercase tracking-wider px-3 mb-2" style={{ color: 'var(--muted)' }}>
+
+                {projects.length > 0 && (
+                    <div className="mb-4 px-1">
+                        <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1.5 block px-2">
+                            Project
+                        </label>
+                        <Select
+                            value={selectedProject ?? ''}
+                            onChange={(e) => setSelectedProject(e.target.value)}
+                        >
+                            {projects.map((p) => (
+                                <option key={p.path} value={p.path}>
+                                    {p.name}
+                                </option>
+                            ))}
+                        </Select>
+                    </div>
+                )}
+
+                <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground px-3 mb-2">
                     Smooth
                 </div>
                 {NAV.map(({ path, label, icon: Icon }) => {
@@ -27,8 +49,12 @@ export function Layout() {
                         <Link
                             key={path}
                             to={path}
-                            className="flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors"
-                            style={{ color: active ? 'var(--smoo-green)' : 'var(--muted)', fontWeight: active ? 600 : 400 }}
+                            className={
+                                "flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors " +
+                                (active
+                                    ? "text-primary font-semibold bg-primary/10"
+                                    : "text-muted-foreground hover:text-foreground hover:bg-accent")
+                            }
                         >
                             <Icon size={16} />
                             {label}

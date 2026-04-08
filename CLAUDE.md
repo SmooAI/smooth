@@ -98,7 +98,6 @@ pnpm dev                     # Vite dev server at :3100
 | `tools.rs` | Tool registry + hooks (secret detection, prompt injection) |
 | `policy.rs` | Policy generation, phase defaults, access request handling |
 | `pearls.rs` | `PearlStore` wrapper (list, create, update, close, comment) |
-| `chat.rs` | **DEPRECATED** — legacy OpenCode Zen API (use smooth-operator ProviderRegistry) |
 | `search.rs` | @ autocomplete (pearls + globwalk files + path expansion) |
 | `audit.rs` | Rotating file appender at ~/.smooth/audit/ |
 | `db.rs` | rusqlite: memories, worker_runs, config tables |
