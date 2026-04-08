@@ -1,7 +1,7 @@
 //! Golden E2E test: Smooth builds a web server and security-reviews it.
 //!
 //! Run with: cargo test --test golden_e2e -- --ignored
-//! Requires: SMOOTH_E2E_API_KEY env var (OpenCode Zen key)
+//! Requires: SMOOTH_E2E_API_KEY env var
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use smooth_narc::{NarcHook, Severity};
 use smooth_operator::cost::CostBudget;
-use smooth_operator::llm::{load_opencode_api_key, LlmConfig};
+use smooth_operator::llm::LlmConfig;
 use smooth_operator::tool::{Tool, ToolCall, ToolHook, ToolResult, ToolSchema};
 use smooth_operator::{Agent, AgentConfig, AgentEvent, ToolRegistry};
 
@@ -213,9 +213,8 @@ impl Tool for ListFilesTool {
 #[allow(clippy::too_many_lines)]
 async fn golden_e2e_build_web_server() -> anyhow::Result<()> {
     // 1. Setup: load API key
-    let api_key = std::env::var("SMOOTH_E2E_API_KEY").or_else(|_| load_opencode_api_key());
-    let Ok(api_key) = api_key else {
-        println!("Skipping: no API key (set SMOOTH_E2E_API_KEY or configure OpenCode auth)");
+    let Ok(api_key) = std::env::var("SMOOTH_E2E_API_KEY") else {
+        println!("Skipping: no API key (set SMOOTH_E2E_API_KEY)");
         return Ok(());
     };
 
@@ -224,7 +223,7 @@ async fn golden_e2e_build_web_server() -> anyhow::Result<()> {
     println!("Working directory: {}", base_dir.display());
 
     // 2. Configure agent
-    let llm_config = LlmConfig::opencode_zen(&api_key).with_model("kimi-k2.5");
+    let llm_config = LlmConfig::openrouter(&api_key).with_model("kimi-k2.5");
     let budget = CostBudget {
         max_cost_usd: Some(2.0),
         max_tokens: None,

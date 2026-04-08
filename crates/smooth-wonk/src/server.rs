@@ -323,7 +323,7 @@ leader_url = "http://localhost:4400"
 
 [network]
 [[network.allow]]
-domain = "opencode.ai"
+domain = "openrouter.ai"
 
 [[network.allow]]
 domain = "api.github.com"
@@ -379,14 +379,14 @@ auto_approve_tools = ["lint_fix"]
         let bytes = resp.into_body().collect().await.expect("body").to_bytes();
         let summary: PolicySummary = serde_json::from_slice(&bytes).expect("parse");
         assert_eq!(summary.operator_id, "test-op");
-        assert!(summary.allowed_domains.contains(&"opencode.ai".to_string()));
+        assert!(summary.allowed_domains.contains(&"openrouter.ai".to_string()));
         assert!(summary.filesystem_writable);
     }
 
     #[tokio::test]
     async fn check_network_allowed() {
         let app = build_router(test_state());
-        let (status, body) = do_post(&app, "/check/network", r#"{"domain":"opencode.ai","path":"/zen","method":"POST"}"#).await;
+        let (status, body) = do_post(&app, "/check/network", r#"{"domain":"openrouter.ai","path":"/zen","method":"POST"}"#).await;
         assert_eq!(status, StatusCode::OK);
         let resp: CheckResponse = serde_json::from_str(&body).expect("parse");
         assert!(resp.allowed);

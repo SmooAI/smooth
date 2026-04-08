@@ -12,7 +12,7 @@
 //!   exposes to itself (currently minimal; reserved for future "Big Smooth
 //!   writes to its own tracking DB" style guardrails).
 //! * **Goalie** — HTTP forward proxy for any outbound network call Big
-//!   Smooth makes (e.g., to OpenCode Zen for LLM judge calls). Delegates
+//!   Smooth makes (e.g., to an LLM provider for judge calls). Delegates
 //!   decisions to Wonk.
 //! * **Narc** — tool surveillance hook. Presently wired but unused (Big
 //!   Smooth's tool surface inside the Boardroom is empty; included for

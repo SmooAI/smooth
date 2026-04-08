@@ -82,6 +82,17 @@ impl ProviderConfig {
             default_model: "gemini-2.0-flash".into(),
         }
     }
+
+    /// Kimi Code — OpenAI-compatible API.
+    pub fn kimi(api_key: impl Into<String>) -> Self {
+        Self {
+            id: "kimi".into(),
+            api_url: "https://api.kimicode.com/v1".into(),
+            api_key: api_key.into(),
+            api_format: ApiFormat::OpenAiCompat,
+            default_model: "kimi-k2.5".into(),
+        }
+    }
 }
 
 /// Activity type that determines which model slot to use.
@@ -348,6 +359,7 @@ impl ProviderRegistry {
                 c
             }
             "google" => ProviderConfig::google(&api_key),
+            "kimi" => ProviderConfig::kimi(&api_key),
             _ => ProviderConfig::openrouter(&api_key),
         };
 
@@ -405,6 +417,11 @@ mod tests {
         let google = ProviderConfig::google("key");
         assert!(google.api_url.contains("generativelanguage.googleapis.com"));
         assert_eq!(google.api_format, ApiFormat::OpenAiCompat);
+
+        let kimi = ProviderConfig::kimi("key");
+        assert_eq!(kimi.api_url, "https://api.kimicode.com/v1");
+        assert_eq!(kimi.default_model, "kimi-k2.5");
+        assert_eq!(kimi.api_format, ApiFormat::OpenAiCompat);
     }
 
     // 2. ModelSlot creation + serialization

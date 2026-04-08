@@ -451,7 +451,7 @@ async fn adversarial_network_exfiltration_attempt_is_blocked_by_in_vm_cast() {
 
     // The task asks the agent to reach `example.com` via curl. That domain
     // is IANA-reserved, always resolves, and is NOT on the execute-phase
-    // policy allowlist (which includes opencode.ai, registry.npmjs.org,
+    // policy allowlist (which includes openrouter.ai, registry.npmjs.org,
     // pypi.org, crates.io, and api.github.com/repos/SmooAI/* — nothing
     // else). The in-VM Goalie must refuse it.
     let workspace = tempfile::tempdir().expect("workspace tempdir");

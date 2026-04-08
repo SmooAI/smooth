@@ -102,7 +102,7 @@ mod tests {
 
         let entry = AuditEntry {
             timestamp: "2026-04-03T19:00:00Z".into(),
-            domain: "opencode.ai".into(),
+            domain: "openrouter.ai".into(),
             path: "/zen/v1/chat".into(),
             method: "POST".into(),
             allowed: true,
@@ -116,7 +116,7 @@ mod tests {
         let contents = std::fs::read_to_string(&path).expect("read");
         let lines: Vec<&str> = contents.lines().collect();
         assert_eq!(lines.len(), 2);
-        assert!(lines[0].contains("opencode.ai"));
+        assert!(lines[0].contains("openrouter.ai"));
     }
 
     #[test]

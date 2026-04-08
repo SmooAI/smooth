@@ -206,7 +206,7 @@ fn task_network_policy(phase: &str, task_type: TaskType) -> NetworkPolicy {
         TaskType::Coding => {
             let mut rules = vec![
                 NetworkRule {
-                    domain: "opencode.ai".into(),
+                    domain: "openrouter.ai".into(),
                     path: None,
                     methods: None,
                 },
@@ -248,7 +248,7 @@ fn task_network_policy(phase: &str, task_type: TaskType) -> NetworkPolicy {
         TaskType::Research => {
             vec![
                 NetworkRule {
-                    domain: "opencode.ai".into(),
+                    domain: "openrouter.ai".into(),
                     path: None,
                     methods: None,
                 },
@@ -291,7 +291,7 @@ fn task_network_policy(phase: &str, task_type: TaskType) -> NetworkPolicy {
         }
         TaskType::Review => {
             vec![NetworkRule {
-                domain: "opencode.ai".into(),
+                domain: "openrouter.ai".into(),
                 path: None,
                 methods: None,
             }]
@@ -417,7 +417,7 @@ mod tests {
         assert_eq!(policy.metadata.phase, "assess");
         assert!(!policy.filesystem.writable); // assess = read-only
         assert_eq!(policy.beads.max_depth, 1); // assess = depth 1
-        assert!(policy.network.is_allowed("opencode.ai", "/"));
+        assert!(policy.network.is_allowed("openrouter.ai", "/"));
         assert!(!policy.network.is_allowed("api.github.com", "/repos/SmooAI/smooth"));
         // no GitHub in assess
     }
@@ -556,7 +556,7 @@ mod tests {
         assert!(policy.tools.can_use("git_diff"), "review should have git_diff");
 
         // Minimal network: only LLM API
-        assert!(policy.network.is_allowed("opencode.ai", "/"), "review needs LLM");
+        assert!(policy.network.is_allowed("openrouter.ai", "/"), "review needs LLM");
         assert!(
             !policy.network.is_allowed("api.github.com", "/repos/SmooAI/smooth"),
             "review should not reach GitHub"

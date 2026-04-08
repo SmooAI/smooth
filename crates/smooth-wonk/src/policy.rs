@@ -153,7 +153,7 @@ leader_url = "http://localhost:4400"
 
 [network]
 [[network.allow]]
-domain = "opencode.ai"
+domain = "openrouter.ai"
 
 [filesystem]
 deny_patterns = ["*.env"]
@@ -194,7 +194,7 @@ allow = ["code_search"]
 
         let policy = load_policy_file(&path).expect("load");
         assert_eq!(policy.metadata.operator_id, "test-op");
-        assert!(policy.network.is_allowed("opencode.ai", "/anything"));
+        assert!(policy.network.is_allowed("openrouter.ai", "/anything"));
     }
 
     #[test]
@@ -221,24 +221,24 @@ allow = ["code_search"]
         let holder = PolicyHolder::load_and_watch(path.to_str().expect("path")).expect("load");
         let policy = holder.load();
         assert_eq!(policy.metadata.operator_id, "test-op");
-        assert!(policy.network.is_allowed("opencode.ai", "/zen"));
+        assert!(policy.network.is_allowed("openrouter.ai", "/zen"));
     }
 
     #[test]
     fn enterprise_policy_blocks_network_on_create() {
         let policy = Policy::from_toml(TEST_POLICY).expect("parse");
-        assert!(policy.network.is_allowed("opencode.ai", "/zen"));
+        assert!(policy.network.is_allowed("openrouter.ai", "/zen"));
 
         let enterprise = EnterprisePolicy {
             network: smooth_policy::EnterpriseNetworkPolicy {
-                deny_domains: vec!["opencode.ai".to_string()],
+                deny_domains: vec!["openrouter.ai".to_string()],
             },
             ..Default::default()
         };
 
         let holder = PolicyHolder::from_policy_with_enterprise(policy, enterprise);
         let loaded = holder.load();
-        assert!(!loaded.network.is_allowed("opencode.ai", "/zen"));
+        assert!(!loaded.network.is_allowed("openrouter.ai", "/zen"));
     }
 
     #[test]

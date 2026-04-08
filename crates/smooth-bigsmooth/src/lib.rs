@@ -3,7 +3,6 @@
 pub mod audit;
 pub mod boardroom;
 
-pub mod chat;
 pub mod db;
 pub mod diver_client;
 pub mod events;

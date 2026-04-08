@@ -665,8 +665,8 @@ impl Agent {
 
             // Hard per-iteration wall clock — if a single LLM turn takes longer than
             // this, abort and move on. Guards against provider streams that go into
-            // TCP CLOSE_WAIT without producing EOF (observed on Anthropic/Kimi via
-            // OpenCode Zen). Applies to BOTH the tap loop and accumulator.
+            // TCP CLOSE_WAIT without producing EOF (observed on some OpenAI-compat
+            // proxies). Applies to BOTH the tap loop and accumulator.
             const ITERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
             // Per-item idle timeout inside the tap loop — same guard, shorter scope.
             // Reasoning models (MiniMax-M1, DeepSeek R1) can pause 60-120s between
@@ -924,7 +924,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     fn test_config() -> AgentConfig {
-        AgentConfig::new("test-agent", "You are a test agent", LlmConfig::opencode_zen("fake-key"))
+        AgentConfig::new("test-agent", "You are a test agent", LlmConfig::openrouter("fake-key"))
     }
 
     #[test]

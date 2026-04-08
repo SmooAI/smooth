@@ -147,7 +147,7 @@ enum Commands {
 enum AuthCommands {
     /// Add or update a provider
     Login {
-        /// Provider: openrouter, openai, anthropic, ollama, google
+        /// Provider: openrouter, openai, anthropic, kimi, ollama, google
         provider: Option<String>,
         /// API key
         #[arg(long)]

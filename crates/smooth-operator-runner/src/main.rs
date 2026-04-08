@@ -23,7 +23,7 @@
 //!
 //! **Inputs (env vars):**
 //! - `SMOOTH_TASK` (required) — the user task the agent should execute
-//! - `SMOOTH_API_URL` (required) — OpenAI-compatible base URL, e.g. `https://opencode.ai/zen/v1`
+//! - `SMOOTH_API_URL` (required) — OpenAI-compatible base URL, e.g. `https://openrouter.ai/api/v1`
 //! - `SMOOTH_API_KEY` (required) — bearer token
 //! - `SMOOTH_MODEL` (optional, default `gpt-5.4-mini`) — model id
 //! - `SMOOTH_BUDGET_USD` (optional) — cost cap in USD
@@ -328,7 +328,7 @@ token = "runner-default"
 
 [network]
 [[network.allow]]
-domain = "opencode.ai"
+domain = "openrouter.ai"
 [[network.allow]]
 domain = "api.openai.com"
 [[network.allow]]

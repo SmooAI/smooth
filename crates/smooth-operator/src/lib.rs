@@ -1,7 +1,7 @@
 //! # Smooth Operator
 //!
 //! Rust-native AI agent framework with built-in checkpointing, tool system,
-//! and LLM client. Replaces OpenCode inside Smooth operator microVMs.
+//! and LLM client. AI agent framework for Smooth operator microVMs.
 //!
 //! Inspired by LangGraph, CrewAI, and Agno — purpose-built for orchestrated
 //! agent workloads with security-first design.

@@ -272,9 +272,9 @@ mod tests {
 
     #[test]
     fn extract_host_path_no_path() {
-        let uri: Uri = "http://opencode.ai".parse().expect("uri");
+        let uri: Uri = "http://openrouter.ai".parse().expect("uri");
         let (domain, path) = extract_host_path(&uri);
-        assert_eq!(domain, "opencode.ai");
+        assert_eq!(domain, "openrouter.ai");
         assert_eq!(path, "/");
     }
 
@@ -321,8 +321,8 @@ mod tests {
 
     #[test]
     fn extract_host_no_port() {
-        let authority = "opencode.ai";
+        let authority = "openrouter.ai";
         let domain = authority.split(':').next().unwrap_or(authority);
-        assert_eq!(domain, "opencode.ai");
+        assert_eq!(domain, "openrouter.ai");
     }
 }

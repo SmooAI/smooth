@@ -1715,7 +1715,26 @@ async fn reject_review_handler(State(state): State<AppState>, Path(bead_id): Pat
 
 async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>) -> Json<ApiResponse<String>> {
     state.touch();
-    match crate::chat::chat(&body.content).await {
+
+    let system_prompt = "You are Smooth, an AI agent orchestration leader. You help users manage projects, assign work to Smooth Operators (AI agents in sandboxes), review work, and coordinate tasks.\n\nAvailable commands: th run <pearl-id>, th operators, th pause/steer/cancel <pearl-id>, th auth status, th status";
+
+    let result: anyhow::Result<String> = (|| async {
+        let providers_path = dirs_next::home_dir()
+            .unwrap_or_default()
+            .join(".smooth/providers.json");
+        let registry = ProviderRegistry::load_from_file(&providers_path)
+            .map_err(|e| anyhow::anyhow!("no LLM providers configured: {e}"))?;
+        let config = registry.default_llm_config()
+            .map_err(|e| anyhow::anyhow!("no default provider: {e}"))?;
+        let llm = smooth_operator::llm::LlmClient::new(config);
+
+        let sys_msg = smooth_operator::conversation::Message::system(system_prompt);
+        let user_msg = smooth_operator::conversation::Message::user(&body.content);
+        let response = llm.chat(&[&sys_msg, &user_msg], &[]).await?;
+        Ok(response.content)
+    })().await;
+
+    match result {
         Ok(response) => Json(ApiResponse { data: response, ok: true }),
         Err(e) => Json(ApiResponse {
             data: format!("Error: {e}"),

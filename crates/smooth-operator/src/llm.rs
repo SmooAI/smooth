@@ -74,18 +74,6 @@ impl LlmConfig {
         }
     }
 
-    pub fn opencode_zen(api_key: impl Into<String>) -> Self {
-        Self {
-            api_url: "https://opencode.ai/zen/v1".into(),
-            api_key: api_key.into(),
-            model: "anthropic/claude-sonnet-4-20250514".into(),
-            max_tokens: 8192,
-            temperature: 0.0,
-            retry_policy: RetryPolicy::default(),
-            api_format: ApiFormat::OpenAiCompat,
-        }
-    }
-
     pub fn anthropic(api_key: impl Into<String>) -> Self {
         Self {
             api_url: "https://api.anthropic.com/v1".into(),
@@ -156,9 +144,9 @@ struct ChatRequest {
 struct ChatMessage {
     role: String,
     /// Content is optional: when an assistant message has tool_calls and no
-    /// prose, some OpenAI-compat providers (notably OpenCode Zen's Anthropic
-    /// translator) reject `content: ""` with a 400. Sending `content: null`
-    /// (via Option::None → skip) works for all providers we've tested.
+    /// prose, some OpenAI-compat providers reject `content: ""` with a 400.
+    /// Sending `content: null` (via Option::None → skip) works for all
+    /// providers we've tested.
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1028,34 +1016,9 @@ fn convert_messages_to_anthropic(messages: &[&Message]) -> (Option<String>, Vec<
     (system, anthropic_messages)
 }
 
-/// Try to load an API key from OpenCode's auth file.
-///
-/// # Errors
-/// Returns error if the file cannot be read or parsed.
-pub fn load_opencode_api_key() -> anyhow::Result<String> {
-    let home = dirs_next::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
-    let auth_path = home.join(".local/share/opencode/auth.json");
-    let contents = std::fs::read_to_string(&auth_path)?;
-    let auth: serde_json::Value = serde_json::from_str(&contents)?;
-    // Try multiple key locations in the auth file
-    auth["token"]
-        .as_str()
-        .or_else(|| auth["opencode"]["key"].as_str())
-        .or_else(|| auth["key"].as_str())
-        .map(String::from)
-        .ok_or_else(|| anyhow::anyhow!("no token in auth.json"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn opencode_zen_config() {
-        let config = LlmConfig::opencode_zen("test-key");
-        assert_eq!(config.api_url, "https://opencode.ai/zen/v1");
-        assert!(!config.api_key.is_empty());
-    }
 
     #[test]
     fn anthropic_config() {
@@ -1065,7 +1028,7 @@ mod tests {
 
     #[test]
     fn config_builder() {
-        let config = LlmConfig::opencode_zen("key").with_model("gpt-4o").with_temperature(0.7).with_max_tokens(4096);
+        let config = LlmConfig::openrouter("key").with_model("gpt-4o").with_temperature(0.7).with_max_tokens(4096);
         assert_eq!(config.model, "gpt-4o");
         assert!((config.temperature - 0.7).abs() < f32::EPSILON);
         assert_eq!(config.max_tokens, 4096);
@@ -1632,9 +1595,4 @@ mod tests {
         assert_eq!(config.api_format, ApiFormat::Anthropic);
     }
 
-    #[test]
-    fn llm_config_opencode_zen_defaults_to_openai_compat_format() {
-        let config = LlmConfig::opencode_zen("test-key");
-        assert_eq!(config.api_format, ApiFormat::OpenAiCompat);
-    }
 }

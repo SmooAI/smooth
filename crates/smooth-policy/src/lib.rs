@@ -488,7 +488,7 @@ impl Policy {
 pub fn phase_network_defaults(phase: &str) -> Vec<NetworkRule> {
     let mut rules = vec![
         NetworkRule {
-            domain: "opencode.ai".into(),
+            domain: "openrouter.ai".into(),
             path: None,
             methods: None,
         },
@@ -565,7 +565,7 @@ leader_url = "http://host.containers.internal:4400"
 max_response_bytes = 52428800
 
 [[network.allow]]
-domain = "opencode.ai"
+domain = "openrouter.ai"
 
 [[network.allow]]
 domain = "registry.npmjs.org"
@@ -625,7 +625,7 @@ auto_approve_tools = ["lint_fix", "test_run"]
     #[test]
     fn network_domain_matching() {
         let policy = Policy::from_toml(EXAMPLE_POLICY).expect("should parse");
-        assert!(policy.network.is_allowed("opencode.ai", "/zen/v1/chat"));
+        assert!(policy.network.is_allowed("openrouter.ai", "/zen/v1/chat"));
         assert!(policy.network.is_allowed("registry.npmjs.org", "/express"));
         assert!(policy.network.is_allowed("api.github.com", "/repos/SmooAI/smooth"));
         assert!(!policy.network.is_allowed("api.github.com", "/users/someone"));
@@ -637,8 +637,8 @@ auto_approve_tools = ["lint_fix", "test_run"]
         assert!(domain_matches("*.npmjs.org", "registry.npmjs.org"));
         assert!(domain_matches("*.npmjs.org", "npmjs.org"));
         assert!(!domain_matches("*.npmjs.org", "evil.org"));
-        assert!(domain_matches("opencode.ai", "opencode.ai"));
-        assert!(!domain_matches("opencode.ai", "notopencode.ai"));
+        assert!(domain_matches("openrouter.ai", "openrouter.ai"));
+        assert!(!domain_matches("openrouter.ai", "notopenrouter.ai"));
     }
 
     #[test]
@@ -798,18 +798,18 @@ deny_servers = ["untrusted-server"]
         let orig_count = policy.network.allow.len();
         assert!(orig_count > 0);
 
-        // Enterprise blocks opencode.ai
+        // Enterprise blocks openrouter.ai
         let ep = EnterprisePolicy {
             network: EnterpriseNetworkPolicy {
-                deny_domains: vec!["opencode.ai".to_string()],
+                deny_domains: vec!["openrouter.ai".to_string()],
             },
             ..Default::default()
         };
         policy.merge_enterprise(&ep);
 
-        // opencode.ai should be removed
+        // openrouter.ai should be removed
         assert_eq!(policy.network.allow.len(), orig_count - 1);
-        assert!(!policy.network.is_allowed("opencode.ai", "/anything"));
+        assert!(!policy.network.is_allowed("openrouter.ai", "/anything"));
         // Other domains still allowed
         assert!(policy.network.is_allowed("registry.npmjs.org", "/express"));
     }

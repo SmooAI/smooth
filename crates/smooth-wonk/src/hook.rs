@@ -198,7 +198,7 @@ mod tests {
 
     async fn mock_check_network(Json(body): Json<serde_json::Value>) -> Json<CheckResponse> {
         let domain = body["domain"].as_str().unwrap_or("");
-        if domain == "opencode.ai" {
+        if domain == "openrouter.ai" {
             Json(CheckResponse {
                 allowed: true,
                 reason: "domain in allowlist".into(),
@@ -274,7 +274,7 @@ mod tests {
     async fn pre_network_allowed() {
         let url = start_mock_wonk().await;
         let hook = WonkHook::new(&url);
-        assert!(hook.pre_network("https://opencode.ai/api", "GET").await.is_ok());
+        assert!(hook.pre_network("https://openrouter.ai/api", "GET").await.is_ok());
     }
 
     #[tokio::test]
