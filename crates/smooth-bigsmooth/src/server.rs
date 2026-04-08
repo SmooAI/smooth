@@ -216,6 +216,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/system/config", get(get_config_handler).put(set_config_handler))
         // Tasks (headless agent execution)
         .route("/api/tasks", post(run_task_handler))
+        // Projects (multi-project pearl support)
+        .route("/api/projects", get(list_projects_handler))
+        .route("/api/projects/pearls", get(project_pearls_handler))
         // Pearls — the only spelling. No /api/issues, no /api/beads.
         .route("/api/pearls", get(list_pearls_handler).post(create_pearl_handler))
         .route("/api/pearls/ready", get(ready_pearls_handler))
@@ -1518,6 +1521,115 @@ fn truncate_str(s: &str, max_len: usize) -> String {
         let truncated: String = s.chars().take(max_len.saturating_sub(3)).collect();
         format!("{truncated}...")
     }
+}
+
+// ── Projects (multi-project pearl support) ─────────────────
+
+#[derive(Serialize)]
+struct ProjectPearlCounts {
+    open: usize,
+    in_progress: usize,
+    closed: usize,
+}
+
+#[derive(Serialize)]
+struct ProjectInfo {
+    path: String,
+    name: String,
+    pearl_counts: ProjectPearlCounts,
+}
+
+/// Returns `true` if a registry entry should be filtered out (temp dirs, invalid roots,
+/// or missing `.smooth/dolt/` directory).
+fn is_invalid_project(path: &str) -> bool {
+    let p = std::path::Path::new(path);
+    path.starts_with("/var/folders")
+        || path == "/"
+        || path == "/root"
+        || p.components().count() <= 3 // filter bare home dirs like /Users/username
+        || !p.join(".smooth/dolt").exists()
+}
+
+async fn list_projects_handler(State(state): State<AppState>) -> Json<ApiResponse<Vec<ProjectInfo>>> {
+    state.touch();
+
+    let registry = match smooth_pearls::Registry::load() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to load project registry");
+            return Json(ApiResponse { data: vec![], ok: true });
+        }
+    };
+
+    let mut projects = Vec::new();
+    for entry in registry.list() {
+        let path_str = entry.path.to_string_lossy().to_string();
+        if is_invalid_project(&path_str) {
+            continue;
+        }
+
+        let dolt_dir = entry.path.join(".smooth").join("dolt");
+        let counts = match smooth_pearls::PearlStore::open(&dolt_dir) {
+            Ok(store) => match store.stats() {
+                Ok(stats) => ProjectPearlCounts {
+                    open: stats.open,
+                    in_progress: stats.in_progress,
+                    closed: stats.closed,
+                },
+                Err(_) => ProjectPearlCounts {
+                    open: 0,
+                    in_progress: 0,
+                    closed: 0,
+                },
+            },
+            Err(_) => ProjectPearlCounts {
+                open: 0,
+                in_progress: 0,
+                closed: 0,
+            },
+        };
+
+        projects.push(ProjectInfo {
+            path: path_str,
+            name: entry.name.clone(),
+            pearl_counts: counts,
+        });
+    }
+
+    Json(ApiResponse { data: projects, ok: true })
+}
+
+#[derive(Deserialize)]
+pub struct ProjectPearlsParams {
+    path: String,
+    status: Option<String>,
+}
+
+async fn project_pearls_handler(State(state): State<AppState>, Query(params): Query<ProjectPearlsParams>) -> Json<ApiResponse<Vec<smooth_pearls::Pearl>>> {
+    state.touch();
+
+    let project_path = std::path::Path::new(&params.path);
+    let dolt_dir = project_path.join(".smooth").join("dolt");
+
+    if !dolt_dir.exists() {
+        return Json(ApiResponse { data: vec![], ok: false });
+    }
+
+    let store = match smooth_pearls::PearlStore::open(&dolt_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, path = %params.path, "failed to open pearl store for project");
+            return Json(ApiResponse { data: vec![], ok: false });
+        }
+    };
+
+    let query = match params.status.as_deref() {
+        Some(s) => smooth_pearls::PearlQuery::new().with_status(smooth_pearls::PearlStatus::from_str_loose(s).unwrap_or(smooth_pearls::PearlStatus::Open)),
+        None => smooth_pearls::PearlQuery::new(),
+    };
+
+    let pearls = store.list(&query).unwrap_or_default();
+    Json(ApiResponse { data: pearls, ok: true })
 }
 
 // ── Issues ─────────────────────────────────────────────────

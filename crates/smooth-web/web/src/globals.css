@@ -1,17 +1,32 @@
-@import 'tailwindcss';
+@import "tailwindcss";
 
-:root {
-    --smoo-green: #00a6a6;
-    --smoo-orange: #f49f0a;
-    --smoo-dark-blue: #020618;
-    --smoo-dark-blue-850: #040d30;
-    --border: #0a1f7a;
-    --muted: #a3a3a3;
+@theme {
+    --color-background: oklch(0.145 0.015 260);
+    --color-foreground: oklch(0.95 0.01 260);
+    --color-card: oklch(0.17 0.02 260);
+    --color-card-foreground: oklch(0.95 0.01 260);
+    --color-primary: oklch(0.72 0.19 155);
+    --color-primary-foreground: oklch(0.15 0.02 260);
+    --color-secondary: oklch(0.25 0.02 260);
+    --color-secondary-foreground: oklch(0.95 0.01 260);
+    --color-muted: oklch(0.25 0.02 260);
+    --color-muted-foreground: oklch(0.6 0.02 260);
+    --color-accent: oklch(0.25 0.02 260);
+    --color-accent-foreground: oklch(0.95 0.01 260);
+    --color-destructive: oklch(0.55 0.2 25);
+    --color-destructive-foreground: oklch(0.95 0.01 260);
+    --color-border: oklch(0.3 0.02 260);
+    --color-input: oklch(0.3 0.02 260);
+    --color-ring: oklch(0.72 0.19 155);
+    --radius: 0.625rem;
+
+    /* Smoo brand */
+    --color-smoo-green: oklch(0.72 0.19 155);
+    --color-smoo-dark: oklch(0.12 0.015 260);
 }
 
 body {
-    background: var(--smoo-dark-blue);
-    color: #f8fafc;
-    font-family: system-ui, -apple-system, sans-serif;
-    margin: 0;
+    background: var(--color-background);
+    color: var(--color-foreground);
+    font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
 }
