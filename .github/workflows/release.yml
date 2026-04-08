@@ -87,12 +87,13 @@ jobs:
                   GITHUB_TOKEN: ${{ secrets.GH_PAT }}
 
             - name: Auto-Merge Changeset PR
+              continue-on-error: true
               run: |
                   PR_NUMBER=$(gh pr list --state open --head changeset-release/main --json number --jq '.[0].number')
 
                   if [[ -n "$PR_NUMBER" && "$PR_NUMBER" != "null" ]]; then
                     echo "Found Changeset PR #$PR_NUMBER, attempting to auto-merge..."
-                    gh pr merge "$PR_NUMBER" --auto --squash
+                    gh pr merge "$PR_NUMBER" --auto --squash || echo "Auto-merge not enabled for this repo — merge the changeset PR manually."
                   else
                     echo "No open Changeset PR found, skipping merge."
                   fi
