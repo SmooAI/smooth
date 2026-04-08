@@ -56,6 +56,12 @@ jobs:
             - name: Install dependencies
               run: pnpm install --no-frozen-lockfile
 
+            - name: Build web UI
+              run: |
+                  cd crates/smooth-web/web
+                  pnpm install --frozen-lockfile
+                  pnpm build
+
             - name: Format check
               run: cargo fmt --check
 

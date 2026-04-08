@@ -21,6 +21,18 @@ jobs:
 
             - uses: Swatinem/rust-cache@v2
 
+            - uses: pnpm/action-setup@v4
+
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+
+            - name: Build web UI
+              run: |
+                  cd crates/smooth-web/web
+                  pnpm install --frozen-lockfile
+                  pnpm build
+
             - name: Install nextest
               uses: taiki-e/install-action@nextest
 
