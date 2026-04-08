@@ -387,6 +387,14 @@ impl AppState {
 mod tests {
     use super::*;
 
+    /// Create a clean temp directory for tests instead of using `/tmp` which
+    /// may contain files that cause non-deterministic sort panics on CI.
+    fn test_dir() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().to_path_buf();
+        (dir, path)
+    }
+
     #[test]
     fn test_health_status_variants() {
         assert_eq!(HealthStatus::default(), HealthStatus::Unknown);
@@ -398,7 +406,8 @@ mod tests {
 
     #[test]
     fn test_health_warnings_generate_system_message() {
-        let mut state = AppState::new(PathBuf::from("/tmp"));
+        let (_dir, path) = test_dir();
+        let mut state = AppState::new(path);
         let warnings = vec!["API not running".to_string(), "No providers".to_string()];
 
         let warning_text = format!(
@@ -417,7 +426,8 @@ mod tests {
 
     #[test]
     fn test_health_no_warnings_no_extra_message() {
-        let mut state = AppState::new(PathBuf::from("/tmp"));
+        let (_dir, path) = test_dir();
+        let mut state = AppState::new(path);
         // Simulate healthy status — no messages added
         state.health_status = HealthStatus::Healthy;
 
@@ -427,9 +437,10 @@ mod tests {
 
     #[test]
     fn test_state_creation_defaults() {
-        let state = AppState::new(PathBuf::from("/tmp/test"));
+        let (_dir, path) = test_dir();
+        let state = AppState::new(path.clone());
         assert_eq!(state.mode, Mode::Input);
-        assert_eq!(state.working_dir, PathBuf::from("/tmp/test"));
+        assert_eq!(state.working_dir, path);
         assert!(state.messages.is_empty());
         assert!(state.input.is_empty());
         assert_eq!(state.input_cursor, 0);
@@ -458,7 +469,8 @@ mod tests {
 
     #[test]
     fn test_add_message() {
-        let mut state = AppState::new(PathBuf::from("/tmp"));
+        let (_dir, path) = test_dir();
+        let mut state = AppState::new(path);
         assert!(state.messages.is_empty());
 
         state.add_message(ChatMessage::user("test"));
@@ -468,7 +480,8 @@ mod tests {
 
     #[test]
     fn test_input_insert_and_cursor() {
-        let mut state = AppState::new(PathBuf::from("/tmp"));
+        let (_dir, path) = test_dir();
+        let mut state = AppState::new(path);
         state.input_insert('h');
         state.input_insert('i');
         assert_eq!(state.input, "hi");
@@ -477,7 +490,8 @@ mod tests {
 
     #[test]
     fn test_input_backspace() {
-        let mut state = AppState::new(PathBuf::from("/tmp"));
+        let (_dir, path) = test_dir();
+        let mut state = AppState::new(path);
         state.input_insert('a');
         state.input_insert('b');
         state.input_backspace();
@@ -492,7 +506,8 @@ mod tests {
 
     #[test]
     fn test_input_move_left_right() {
-        let mut state = AppState::new(PathBuf::from("/tmp"));
+        let (_dir, path) = test_dir();
+        let mut state = AppState::new(path);
         state.input_insert('a');
         state.input_insert('b');
         state.input_insert('c');
@@ -520,7 +535,8 @@ mod tests {
 
     #[test]
     fn test_take_input() {
-        let mut state = AppState::new(PathBuf::from("/tmp"));
+        let (_dir, path) = test_dir();
+        let mut state = AppState::new(path);
         state.input_insert('h');
         state.input_insert('i');
         let taken = state.take_input();
@@ -531,7 +547,8 @@ mod tests {
 
     #[test]
     fn test_input_clear() {
-        let mut state = AppState::new(PathBuf::from("/tmp"));
+        let (_dir, path) = test_dir();
+        let mut state = AppState::new(path);
         state.input_insert('x');
         state.input_clear();
         assert!(state.input.is_empty());
@@ -572,7 +589,8 @@ mod tests {
 
     #[test]
     fn test_add_tool_call_to_last_assistant_message() {
-        let mut state = AppState::new(PathBuf::from("/tmp"));
+        let (_dir, path) = test_dir();
+        let mut state = AppState::new(path);
         state.add_message(ChatMessage::assistant("thinking..."));
         let args = serde_json::json!({"cmd": "cargo test"});
         state.add_tool_call("tc-1", "bash", &args);
@@ -588,7 +606,8 @@ mod tests {
 
     #[test]
     fn test_update_tool_call_done_and_error() {
-        let mut state = AppState::new(PathBuf::from("/tmp"));
+        let (_dir, path) = test_dir();
+        let mut state = AppState::new(path);
         state.add_message(ChatMessage::assistant("working"));
         state.add_tool_call("tc-1", "bash", &serde_json::json!({}));
         state.add_tool_call("tc-2", "read_file", &serde_json::json!({}));
@@ -609,7 +628,8 @@ mod tests {
 
     #[test]
     fn test_toggle_tool_collapse() {
-        let mut state = AppState::new(PathBuf::from("/tmp"));
+        let (_dir, path) = test_dir();
+        let mut state = AppState::new(path);
         state.add_message(ChatMessage::assistant("hi"));
         state.add_tool_call("tc-1", "bash", &serde_json::json!({}));
 
@@ -642,7 +662,8 @@ mod tests {
 
     #[test]
     fn test_start_streaming_creates_streaming_message() {
-        let mut state = AppState::new(PathBuf::from("/tmp"));
+        let (_dir, path) = test_dir();
+        let mut state = AppState::new(path);
         state.start_streaming();
 
         assert_eq!(state.messages.len(), 1);
@@ -655,7 +676,8 @@ mod tests {
 
     #[test]
     fn test_append_stream_content() {
-        let mut state = AppState::new(PathBuf::from("/tmp"));
+        let (_dir, path) = test_dir();
+        let mut state = AppState::new(path);
         state.start_streaming();
 
         state.append_stream_content("Hello");
@@ -672,7 +694,8 @@ mod tests {
 
     #[test]
     fn test_finish_streaming() {
-        let mut state = AppState::new(PathBuf::from("/tmp"));
+        let (_dir, path) = test_dir();
+        let mut state = AppState::new(path);
         state.start_streaming();
         state.append_stream_content("done");
         state.finish_streaming();
@@ -684,7 +707,8 @@ mod tests {
 
     #[test]
     fn test_advance_spinner_cycles() {
-        let mut state = AppState::new(PathBuf::from("/tmp"));
+        let (_dir, path) = test_dir();
+        let mut state = AppState::new(path);
         assert_eq!(state.spinner_frame, 0);
         assert_eq!(state.spinner_char(), "⠋");
 
