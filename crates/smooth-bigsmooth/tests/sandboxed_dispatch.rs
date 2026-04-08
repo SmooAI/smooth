@@ -892,33 +892,28 @@ async fn sandboxed_agent_passes_spec_tests_with_llm_judge() {
     );
 }
 
-/// Sanity test for the feature flag itself — runs without a VM so it is
-/// always executed by `cargo test`.
+/// Verify the truthy-value parsing contract for SMOOTH_SANDBOXED.
+///
+/// We can't call `sandboxed_dispatch_enabled()` directly (private), so we
+/// replicate its parsing logic here as a regression guard. If the function's
+/// accepted values ever change, this test should be updated intentionally.
 #[tokio::test]
-async fn sandboxed_dispatch_flag_defaults_off() {
-    // Make sure the env var isn't set (in case a sibling test set it).
-    std::env::remove_var("SMOOTH_SANDBOXED");
-
-    // We can't reach `sandboxed_dispatch_enabled()` directly (it's private)
-    // but we can verify the contract: with the env var unset, the build
-    // is still green and the in-process path is the default. The
-    // assertion here is documentation: if we ever flip the default, this
-    // test should change intentionally.
-    assert!(std::env::var("SMOOTH_SANDBOXED").is_err());
-}
-
-#[tokio::test]
-async fn sandboxed_dispatch_flag_parses_various_truthy_values() {
-    // The flag should accept "1", "true", "yes", "on" and their uppercase
-    // variants. This is a regression guard — we don't want a user setting
-    // SMOOTH_SANDBOXED=True and silently getting the in-process path.
-    for val in ["1", "true", "TRUE", "True", "yes", "YES", "on", "ON"] {
-        std::env::set_var("SMOOTH_SANDBOXED", val);
-        assert_eq!(
-            std::env::var("SMOOTH_SANDBOXED").unwrap().to_ascii_lowercase(),
-            val.to_ascii_lowercase(),
-            "env var set round-trip"
-        );
+async fn sandboxed_dispatch_flag_truthy_parsing() {
+    // This mirrors the logic in sandboxed_dispatch_enabled():
+    //   std::env::var("SMOOTH_SANDBOXED")
+    //       .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+    //       .unwrap_or(false)
+    fn is_truthy(val: &str) -> bool {
+        matches!(val.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
     }
-    std::env::remove_var("SMOOTH_SANDBOXED");
+
+    // Truthy values
+    for val in ["1", "true", "TRUE", "True", "yes", "YES", "on", "ON"] {
+        assert!(is_truthy(val), "{val:?} should be truthy");
+    }
+
+    // Falsy / unrecognized values
+    for val in ["0", "false", "FALSE", "no", "off", "", "maybe"] {
+        assert!(!is_truthy(val), "{val:?} should not be truthy");
+    }
 }
