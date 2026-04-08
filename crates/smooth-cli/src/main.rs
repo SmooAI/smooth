@@ -6,7 +6,7 @@ mod hooks;
 
 use std::net::SocketAddr;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use owo_colors::OwoColorize;
 
@@ -29,6 +29,9 @@ enum Commands {
         /// Leader port
         #[arg(long, default_value = "4400")]
         port: u16,
+        /// Run in foreground (default: daemonize)
+        #[arg(long)]
+        foreground: bool,
     },
     /// Stop Smooth platform
     Down,
@@ -422,7 +425,7 @@ async fn main() -> Result<()> {
             json,
         }) => cmd_code(headless, message, file, model, budget, json).await,
         Some(Commands::Doctor) => cmd_doctor().await,
-        Some(Commands::Up { no_leader, port }) => cmd_up(no_leader, port).await,
+        Some(Commands::Up { no_leader, port, foreground }) => cmd_up(no_leader, port, foreground).await,
         Some(Commands::Down) => cmd_down().await,
         Some(Commands::Status) => cmd_status().await,
         Some(Commands::Db { cmd }) => cmd_db(cmd),
@@ -456,7 +459,80 @@ async fn main() -> Result<()> {
 
 // ── Command implementations ────────────────────────────────
 
-async fn cmd_up(no_leader: bool, port: u16) -> Result<()> {
+/// PID file for the daemon process.
+fn pid_file_path() -> std::path::PathBuf {
+    dirs_next::home_dir().unwrap_or_default().join(".smooth").join("smooth.pid")
+}
+
+/// Log file for daemon output.
+fn log_file_path() -> std::path::PathBuf {
+    dirs_next::home_dir().unwrap_or_default().join(".smooth").join("smooth.log")
+}
+
+async fn cmd_up(no_leader: bool, port: u16, foreground: bool) -> Result<()> {
+    // Daemon mode: re-exec ourselves with --foreground and redirect output to log file
+    if !foreground {
+        // Check if already running
+        let pid_path = pid_file_path();
+        if pid_path.exists() {
+            if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+                if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                    // Check if process is still alive
+                    let alive = std::process::Command::new("kill")
+                        .args(["-0", &pid.to_string()])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false);
+                    if alive {
+                        println!("Smooth is already running (pid {pid})");
+                        println!("  Web UI: http://localhost:{port}");
+                        println!("  Logs:   {}", log_file_path().display());
+                        println!("  Stop:   th down");
+                        return Ok(());
+                    }
+                }
+            }
+            // Stale pid file — remove it
+            let _ = std::fs::remove_file(&pid_path);
+        }
+
+        let log_path = log_file_path();
+        // Ensure ~/.smooth/ exists
+        if let Some(parent) = log_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)?;
+        let log_err = log_file.try_clone()?;
+
+        let exe = std::env::current_exe()?;
+        let mut args = vec!["up".to_string(), "--foreground".to_string(), "--port".to_string(), port.to_string()];
+        if no_leader {
+            args.push("--no-leader".to_string());
+        }
+
+        let child = std::process::Command::new(exe)
+            .args(&args)
+            .stdout(log_file)
+            .stderr(log_err)
+            .stdin(std::process::Stdio::null())
+            .spawn()?;
+
+        let pid = child.id();
+        std::fs::write(&pid_path, pid.to_string())?;
+
+        println!("Smooth started (pid {pid})");
+        println!("  Web UI: http://localhost:{port}");
+        println!("  Logs:   {}", log_path.display());
+        println!("  Stop:   th down");
+        return Ok(());
+    }
+
+    // Foreground mode — actual server startup
     println!("Smoo AI / Smooth starting...");
 
     // Initialize database
@@ -498,8 +574,26 @@ async fn cmd_up(no_leader: bool, port: u16) -> Result<()> {
 }
 
 async fn cmd_down() -> Result<()> {
-    println!("Stopping Smooth...");
-    println!("  Leader: stop with Ctrl+C");
+    let pid_path = pid_file_path();
+    if !pid_path.exists() {
+        println!("Smooth is not running (no pid file).");
+        return Ok(());
+    }
+
+    let pid_str = std::fs::read_to_string(&pid_path)?;
+    let pid: u32 = pid_str.trim().parse().context("invalid pid file")?;
+
+    // Send SIGTERM
+    let status = std::process::Command::new("kill")
+        .arg(pid.to_string())
+        .status()?;
+
+    if status.success() {
+        println!("Smooth stopped (pid {pid}).");
+    } else {
+        println!("Process {pid} not found — cleaning up stale pid file.");
+    }
+    std::fs::remove_file(&pid_path)?;
     Ok(())
 }
 
