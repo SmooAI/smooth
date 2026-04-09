@@ -1036,10 +1036,52 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
         // still enforces fine-grained network allowlists for tool traffic,
         // so this only unlocks the sandbox↔host control plane, not
         // arbitrary agent access.
+        // Pre-assign host ports for port forwarding declared in the policy.
+        // We parse the generated policy TOML to extract the port config, then
+        // pre-bind host ports so we can inject SMOOTH_PORT_MAP into the VM's
+        // env at creation time (env vars can't be added after boot).
+        let mut extra_ports = Vec::new();
+        let mut port_map_entries: Vec<String> = Vec::new();
+        if let Some(ref dir) = policy_dir_guard {
+            let policy_file = dir.path().join("policy.toml");
+            if let Ok(toml_str) = std::fs::read_to_string(&policy_file) {
+                if let Ok(policy) = smooth_policy::Policy::from_toml(&toml_str) {
+                    if policy.ports.enabled {
+                        // Pre-declare common dev server ports. The operator can
+                        // use `forward_port` tool to discover which host port
+                        // maps to their guest port.
+                        let common_ports: Vec<u16> = vec![3000, 3001, 4000, 5000, 5173, 8000, 8080, 8888];
+                        for guest_port in common_ports {
+                            if policy.ports.can_forward(guest_port) && extra_ports.len() < policy.ports.max_forwards as usize {
+                                // Pre-bind a host port
+                                if let Ok(listener) = tokio::net::TcpListener::bind("127.0.0.1:0").await {
+                                    if let Ok(addr) = listener.local_addr() {
+                                        let host_port = addr.port();
+                                        extra_ports.push(smooth_bootstrap_bill::protocol::PortMapping {
+                                            host_port,
+                                            guest_port,
+                                            bind_all: false,
+                                        });
+                                        port_map_entries.push(format!("{guest_port}:{host_port}"));
+                                        drop(listener); // release so Bill can rebind
+                                    }
+                                }
+                            }
+                        }
+                        if !port_map_entries.is_empty() {
+                            env.insert("SMOOTH_PORT_MAP".into(), port_map_entries.join(","));
+                            tracing::info!(task_id = tid, ports = %port_map_entries.join(","), "port forwarding: pre-mapped ports");
+                        }
+                    }
+                }
+            }
+        }
+
         let config = SandboxConfig {
             bead_id: pearl_id.clone().unwrap_or_default(),
             workspace_path: "/workspace".into(),
             env,
+            extra_ports,
             mounts: {
                 let mut m = vec![
                     BindMount {
@@ -1207,6 +1249,11 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
                                     message: message.to_string(),
                                 });
                             }
+                        }
+                        "PortForwardActive" => {
+                            let guest = event.get("guest_port").and_then(serde_json::Value::as_u64).unwrap_or(0) as u16;
+                            let host = event.get("host_port").and_then(serde_json::Value::as_u64).unwrap_or(0) as u16;
+                            tracing::info!(task_id = tid, guest_port = guest, host_port = host, "port forward active");
                         }
                         // Started / LlmRequest / LlmResponse / etc. are
                         // informational — we don't forward them yet but can

@@ -84,6 +84,9 @@ pub struct SandboxConfig {
     /// Host-side directory for pearl env caching. Bill bind-mounts it at
     /// `/opt/smooth/cache` so compiled deps persist across VM runs.
     pub env_cache_key: Option<String>,
+    /// Additional port mappings beyond the default operator WebSocket (guest:4096).
+    /// Each entry maps a guest port to a host port (0 = kernel-assigned).
+    pub extra_ports: Vec<PortMapping>,
 }
 
 impl Default for SandboxConfig {
@@ -103,6 +106,7 @@ impl Default for SandboxConfig {
             mounts: Vec::new(),
             allow_host_loopback: false,
             env_cache_key: None,
+            extra_ports: Vec::new(),
         }
     }
 }
@@ -117,6 +121,8 @@ pub struct SandboxHandle {
     /// for backwards compatibility with code that still uses that field.
     pub msb_name: String,
     pub host_port: u16,
+    /// All resolved port mappings (guest_port → host_port), including the default 4096.
+    pub port_mappings: Vec<(u16, u16)>,
     pub created_at: String,
     pub timeout_at: String,
 }
@@ -181,17 +187,22 @@ impl SandboxClient for DirectSandboxClient {
             memory_mb: config.memory_mb,
             env: config.env.clone(),
             mounts: config.mounts.iter().map(BindMountSpec::from).collect(),
-            ports: vec![PortMapping {
-                host_port,
-                guest_port: 4096,
-                bind_all: false,
-            }],
+            ports: {
+                let mut ports = vec![PortMapping {
+                    host_port,
+                    guest_port: 4096,
+                    bind_all: false,
+                }];
+                ports.extend(config.extra_ports.iter().cloned());
+                ports
+            },
             timeout_seconds: config.timeout_seconds,
             allow_host_loopback: config.allow_host_loopback,
             env_cache_key: config.env_cache_key.clone(),
         };
         let (resolved_name, resolved_ports, created_at) = bill_server::spawn_sandbox(spec).await?;
         let resolved_host_port = resolved_ports.first().map_or(host_port, |p| p.host_port);
+        let port_mappings: Vec<(u16, u16)> = resolved_ports.iter().map(|p| (p.guest_port, p.host_port)).collect();
         let timeout_at = chrono::DateTime::parse_from_rfc3339(&created_at)
             .ok()
             .map(|t| t + chrono::Duration::seconds(i64::try_from(config.timeout_seconds).unwrap_or(i64::MAX)))
@@ -203,6 +214,7 @@ impl SandboxClient for DirectSandboxClient {
             bead_id: config.bead_id.clone(),
             msb_name: resolved_name,
             host_port: resolved_host_port,
+            port_mappings,
             created_at,
             timeout_at,
         })
@@ -281,17 +293,22 @@ impl SandboxClient for BillSandboxClient {
             memory_mb: config.memory_mb,
             env: config.env.clone(),
             mounts: config.mounts.iter().map(BindMountSpec::from).collect(),
-            ports: vec![PortMapping {
-                host_port,
-                guest_port: 4096,
-                bind_all: false,
-            }],
+            ports: {
+                let mut ports = vec![PortMapping {
+                    host_port,
+                    guest_port: 4096,
+                    bind_all: false,
+                }];
+                ports.extend(config.extra_ports.iter().cloned());
+                ports
+            },
             timeout_seconds: config.timeout_seconds,
             allow_host_loopback: config.allow_host_loopback,
             env_cache_key: config.env_cache_key.clone(),
         };
         let (resolved_name, resolved_ports, created_at) = self.client.spawn(spec).await?;
         let resolved_host_port = resolved_ports.first().map_or(host_port, |p| p.host_port);
+        let port_mappings: Vec<(u16, u16)> = resolved_ports.iter().map(|p| (p.guest_port, p.host_port)).collect();
         let timeout_at = chrono::DateTime::parse_from_rfc3339(&created_at)
             .ok()
             .map(|t| t + chrono::Duration::seconds(i64::try_from(config.timeout_seconds).unwrap_or(i64::MAX)))
@@ -303,6 +320,7 @@ impl SandboxClient for BillSandboxClient {
             bead_id: config.bead_id.clone(),
             msb_name: resolved_name,
             host_port: resolved_host_port,
+            port_mappings,
             created_at,
             timeout_at,
         })
