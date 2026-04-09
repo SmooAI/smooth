@@ -4,7 +4,7 @@ import {
     Circle,
     Bot,
     MessageSquare,
-    Settings,
+    Network,
     ChevronRight,
 } from "lucide-react";
 import { useProject } from "./context";
@@ -24,7 +24,7 @@ const NAV = [
     { path: "/pearls", label: "Pearls", section: "Work", icon: Circle },
     { path: "/operators", label: "Operators", section: "Work", icon: Bot },
     { path: "/chat", label: "Chat", section: "Tools", icon: MessageSquare },
-    { path: "/system", label: "System", section: "Settings", icon: Settings },
+    { path: "/system", label: "System", section: "Settings", icon: Network },
 ];
 
 function Header() {
