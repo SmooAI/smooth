@@ -171,9 +171,16 @@ pub async fn spawn_boardroom_cast(pearl_store: Option<smooth_pearls::PearlStore>
     // so the legal policy file format is exercised and any future
     // boardroom tool surface gets guardrails for free. Policy can be
     // tightened in a follow-up.
-    let default_policy_toml =
-        crate::policy::generate_policy_for_task("boardroom", "boardroom", "execute", "boardroom-token", &[], crate::policy::TaskType::Coding)
-            .context("boardroom: generate default wonk policy")?;
+    let default_policy_toml = crate::policy::generate_policy_for_task(
+        "boardroom",
+        "boardroom",
+        "execute",
+        "boardroom-token",
+        &[],
+        crate::policy::TaskType::Coding,
+        vec![],
+    )
+    .context("boardroom: generate default wonk policy")?;
     let policy = smooth_policy::Policy::from_toml(&default_policy_toml).map_err(|e| anyhow::anyhow!("boardroom: parse wonk policy: {e}"))?;
     let policy_holder = PolicyHolder::from_policy(policy);
     let negotiator = Negotiator::new("http://127.0.0.1:1/no-leader", policy_holder.clone());

@@ -972,6 +972,30 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
         // every per-task dir isn't worth the complexity.
         let mut policy_dir_guard: Option<tempfile::TempDir> = None;
         let operator_token = crate::policy::generate_operator_token(&tid);
+        // Build mount mappings so Wonk can translate guest paths to host
+        // paths when checking filesystem deny patterns.
+        let policy_mounts = {
+            let mut pm = vec![smooth_policy::MountMapping {
+                guest_path: "/workspace".into(),
+                host_path: workspace_canon.clone(),
+            }];
+            // Mirror the ~/.smooth mount if it exists on the host.
+            if let Some(host_smooth) = std::env::var("SMOOTH_HOME_HOST_PATH").ok().or_else(|| {
+                if brokered {
+                    None
+                } else {
+                    dirs_next::home_dir()
+                        .map(|h| h.join(".smooth").to_string_lossy().to_string())
+                        .filter(|p| std::path::Path::new(p).exists())
+                }
+            }) {
+                pm.push(smooth_policy::MountMapping {
+                    guest_path: "/root/.smooth".into(),
+                    host_path: host_smooth,
+                });
+            }
+            pm
+        };
         match crate::policy::generate_policy_for_task(
             &tid,
             &pearl_id.clone().unwrap_or_default(),
@@ -979,6 +1003,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
             &operator_token,
             &[],
             crate::policy::TaskType::Coding,
+            policy_mounts,
         ) {
             Ok(policy_toml) => match tempfile::Builder::new().prefix("smooth-policy-").tempdir() {
                 Ok(dir) => {

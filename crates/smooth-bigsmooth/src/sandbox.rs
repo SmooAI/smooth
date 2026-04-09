@@ -527,8 +527,16 @@ mod tests {
     /// constraint is ultimately enforced by Bill / microsandbox.
     #[test]
     fn env_var_values_must_be_printable_ascii_only() {
-        let policy = crate::policy::generate_policy_for_task("regression-op", "regression-bead", "execute", "tok", &[], crate::policy::TaskType::Coding)
-            .expect("generate policy");
+        let policy = crate::policy::generate_policy_for_task(
+            "regression-op",
+            "regression-bead",
+            "execute",
+            "tok",
+            &[],
+            crate::policy::TaskType::Coding,
+            vec![],
+        )
+        .expect("generate policy");
         assert!(policy.contains('\n'), "generated policy should be multi-line");
         assert!(
             policy.bytes().any(|b| b == b'\n'),

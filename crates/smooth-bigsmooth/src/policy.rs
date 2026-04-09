@@ -9,15 +9,18 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use smooth_policy::{
-    AccessRequestConfig, AuthConfig, BeadsPolicy, EnterprisePolicy, FilesystemPolicy, LeaderNetworkConfig, McpPolicy, NetworkPolicy, NetworkRule, Policy,
-    PolicyMetadata, PortPolicy, ToolsPolicy,
+    AccessRequestConfig, AuthConfig, BeadsPolicy, EnterprisePolicy, FilesystemPolicy, LeaderNetworkConfig, McpPolicy, MountMapping, NetworkPolicy, NetworkRule,
+    Policy, PolicyMetadata, PortPolicy, ToolsPolicy,
 };
 
 /// Generate a complete policy for an operator.
 ///
+/// `mounts` maps guest (in-VM) path prefixes to host paths so that Wonk
+/// can translate paths before checking filesystem deny patterns.
+///
 /// # Errors
 /// Returns error if the policy cannot be serialized.
-pub fn generate_policy(operator_id: &str, bead_id: &str, phase: &str, token: &str, bead_deps: &[String]) -> anyhow::Result<String> {
+pub fn generate_policy(operator_id: &str, bead_id: &str, phase: &str, token: &str, bead_deps: &[String], mounts: Vec<MountMapping>) -> anyhow::Result<String> {
     let mut policy = Policy {
         metadata: PolicyMetadata {
             operator_id: operator_id.to_string(),
@@ -48,6 +51,7 @@ pub fn generate_policy(operator_id: &str, bead_id: &str, phase: &str, token: &st
             auto_approve_tools: vec!["lint_fix".into(), "test_run".into()],
         },
         ports: ports_policy(phase),
+        mounts,
     };
 
     // Merge enterprise policy if available
@@ -79,6 +83,9 @@ pub enum TaskType {
 /// tools, network, filesystem, and auto-approve rules to the given
 /// [`TaskType`].
 ///
+/// `mounts` maps guest (in-VM) path prefixes to host paths so that Wonk
+/// can translate paths before checking filesystem deny patterns.
+///
 /// # Errors
 /// Returns error if the policy cannot be serialized.
 pub fn generate_policy_for_task(
@@ -88,6 +95,7 @@ pub fn generate_policy_for_task(
     token: &str,
     bead_deps: &[String],
     task_type: TaskType,
+    mounts: Vec<MountMapping>,
 ) -> anyhow::Result<String> {
     let mut policy = Policy {
         metadata: PolicyMetadata {
@@ -111,6 +119,7 @@ pub fn generate_policy_for_task(
         },
         access_requests: task_access_requests(task_type),
         ports: task_ports_policy(phase, task_type),
+        mounts,
     };
 
     // Merge enterprise policy if available
@@ -440,7 +449,7 @@ mod tests {
 
     #[test]
     fn generate_assess_policy() {
-        let toml = generate_policy("op-1", "smooth-abc", "assess", "smth_op_token", &[]).expect("generate");
+        let toml = generate_policy("op-1", "smooth-abc", "assess", "smth_op_token", &[], vec![]).expect("generate");
         let policy = smooth_policy::Policy::from_toml(&toml).expect("parse");
 
         assert_eq!(policy.metadata.operator_id, "op-1");
@@ -455,7 +464,7 @@ mod tests {
 
     #[test]
     fn generate_execute_policy() {
-        let toml = generate_policy("op-2", "smooth-xyz", "execute", "smth_op_token2", &["smooth-dep1".into()]).expect("generate");
+        let toml = generate_policy("op-2", "smooth-xyz", "execute", "smth_op_token2", &["smooth-dep1".into()], vec![]).expect("generate");
         let policy = smooth_policy::Policy::from_toml(&toml).expect("parse");
 
         assert!(policy.filesystem.writable); // execute = writable
@@ -470,7 +479,7 @@ mod tests {
 
     #[test]
     fn generate_review_policy() {
-        let toml = generate_policy("op-3", "smooth-rev", "review", "smth_op_token3", &["smooth-target".into()]).expect("generate");
+        let toml = generate_policy("op-3", "smooth-rev", "review", "smth_op_token3", &["smooth-target".into()], vec![]).expect("generate");
         let policy = smooth_policy::Policy::from_toml(&toml).expect("parse");
 
         assert!(!policy.filesystem.writable); // review = read-only
@@ -480,7 +489,7 @@ mod tests {
 
     #[test]
     fn policy_roundtrip() {
-        let toml = generate_policy("op-1", "bead-1", "execute", "token", &[]).expect("generate");
+        let toml = generate_policy("op-1", "bead-1", "execute", "token", &[], vec![]).expect("generate");
         let policy = smooth_policy::Policy::from_toml(&toml).expect("parse");
         let toml2 = policy.to_toml().expect("re-serialize");
         let policy2 = smooth_policy::Policy::from_toml(&toml2).expect("re-parse");
@@ -489,7 +498,7 @@ mod tests {
 
     #[test]
     fn filesystem_deny_patterns_present() {
-        let toml = generate_policy("op-1", "bead-1", "execute", "token", &[]).expect("generate");
+        let toml = generate_policy("op-1", "bead-1", "execute", "token", &[], vec![]).expect("generate");
         let policy = smooth_policy::Policy::from_toml(&toml).expect("parse");
         assert!(policy.filesystem.is_denied(".env").expect("glob"));
         assert!(policy.filesystem.is_denied("secret.pem").expect("glob"));
@@ -499,7 +508,7 @@ mod tests {
 
     #[test]
     fn mcp_defaults() {
-        let toml = generate_policy("op-1", "bead-1", "execute", "token", &[]).expect("generate");
+        let toml = generate_policy("op-1", "bead-1", "execute", "token", &[], vec![]).expect("generate");
         let policy = smooth_policy::Policy::from_toml(&toml).expect("parse");
         assert!(policy.mcp.can_connect("smooth-tools"));
         assert!(!policy.mcp.can_connect("random-server"));
@@ -508,7 +517,7 @@ mod tests {
 
     #[test]
     fn access_request_auto_approve() {
-        let toml = generate_policy("op-1", "bead-1", "execute", "token", &[]).expect("generate");
+        let toml = generate_policy("op-1", "bead-1", "execute", "token", &[], vec![]).expect("generate");
         let policy = smooth_policy::Policy::from_toml(&toml).expect("parse");
         assert!(policy.access_requests.should_auto_approve_domain("registry.npmjs.org"));
         assert!(policy.access_requests.should_auto_approve_tool("lint_fix"));
@@ -525,7 +534,7 @@ mod tests {
     #[test]
     fn workflow_always_denied() {
         for phase in &["assess", "plan", "orchestrate", "execute", "finalize", "review"] {
-            let toml = generate_policy("op", "bead", phase, "tok", &[]).expect("generate");
+            let toml = generate_policy("op", "bead", phase, "tok", &[], vec![]).expect("generate");
             let policy = smooth_policy::Policy::from_toml(&toml).expect("parse");
             assert!(!policy.tools.can_use("workflow"), "workflow should be denied in {phase}");
         }
@@ -537,7 +546,7 @@ mod tests {
 
     #[test]
     fn coding_task_execute_has_write_tools_and_writable_fs() {
-        let toml = generate_policy_for_task("op-c", "bead-1", "execute", "tok", &[], TaskType::Coding).expect("generate");
+        let toml = generate_policy_for_task("op-c", "bead-1", "execute", "tok", &[], TaskType::Coding, vec![]).expect("generate");
         let policy = smooth_policy::Policy::from_toml(&toml).expect("parse");
 
         assert!(policy.filesystem.writable, "coding execute should be writable");
@@ -552,7 +561,7 @@ mod tests {
 
     #[test]
     fn coding_task_assess_is_read_only() {
-        let toml = generate_policy_for_task("op-c2", "bead-1", "assess", "tok", &[], TaskType::Coding).expect("generate");
+        let toml = generate_policy_for_task("op-c2", "bead-1", "assess", "tok", &[], TaskType::Coding, vec![]).expect("generate");
         let policy = smooth_policy::Policy::from_toml(&toml).expect("parse");
 
         assert!(!policy.filesystem.writable, "coding assess should be read-only");
@@ -564,7 +573,7 @@ mod tests {
     #[test]
     fn research_task_always_read_only_no_write_tools() {
         for phase in &["assess", "execute", "finalize", "review"] {
-            let toml = generate_policy_for_task("op-r", "bead-1", phase, "tok", &[], TaskType::Research).expect("generate");
+            let toml = generate_policy_for_task("op-r", "bead-1", phase, "tok", &[], TaskType::Research, vec![]).expect("generate");
             let policy = smooth_policy::Policy::from_toml(&toml).expect("parse");
 
             assert!(!policy.filesystem.writable, "research should always be read-only in {phase}");
@@ -578,7 +587,7 @@ mod tests {
 
     #[test]
     fn review_task_minimal_network_no_writes() {
-        let toml = generate_policy_for_task("op-v", "bead-1", "execute", "tok", &[], TaskType::Review).expect("generate");
+        let toml = generate_policy_for_task("op-v", "bead-1", "execute", "tok", &[], TaskType::Review, vec![]).expect("generate");
         let policy = smooth_policy::Policy::from_toml(&toml).expect("parse");
 
         assert!(!policy.filesystem.writable, "review should be read-only");
@@ -602,7 +611,7 @@ mod tests {
     #[test]
     fn all_task_types_include_beads_tools() {
         for task_type in [TaskType::Coding, TaskType::Research, TaskType::Review] {
-            let toml = generate_policy_for_task("op-b", "bead-1", "execute", "tok", &[], task_type).expect("generate");
+            let toml = generate_policy_for_task("op-b", "bead-1", "execute", "tok", &[], task_type, vec![]).expect("generate");
             let policy = smooth_policy::Policy::from_toml(&toml).expect("parse");
 
             assert!(policy.tools.can_use("beads_context"), "{task_type:?} should have beads_context");
@@ -622,5 +631,50 @@ mod tests {
         assert_eq!(serde_json::to_string(&TaskType::Coding).expect("ser"), "\"coding\"");
         assert_eq!(serde_json::to_string(&TaskType::Research).expect("ser"), "\"research\"");
         assert_eq!(serde_json::to_string(&TaskType::Review).expect("ser"), "\"review\"");
+    }
+
+    #[test]
+    fn generated_policy_includes_mounts() {
+        let mounts = vec![
+            MountMapping {
+                guest_path: "/workspace".into(),
+                host_path: "/home/user/project".into(),
+            },
+            MountMapping {
+                guest_path: "/root/.smooth".into(),
+                host_path: "/home/user/.smooth".into(),
+            },
+        ];
+        let toml = generate_policy("op-m", "bead-m", "execute", "tok", &[], mounts).expect("generate");
+        let policy = smooth_policy::Policy::from_toml(&toml).expect("parse");
+        assert_eq!(policy.mounts.len(), 2);
+        assert_eq!(policy.mounts[0].guest_path, "/workspace");
+        assert_eq!(policy.mounts[0].host_path, "/home/user/project");
+        assert_eq!(policy.mounts[1].guest_path, "/root/.smooth");
+        assert_eq!(policy.mounts[1].host_path, "/home/user/.smooth");
+    }
+
+    #[test]
+    fn generated_policy_mounts_enable_path_deny() {
+        let mounts = vec![MountMapping {
+            guest_path: "/workspace".into(),
+            host_path: "/home/user/project".into(),
+        }];
+        let toml = generate_policy_for_task("op-d", "bead-d", "execute", "tok", &[], TaskType::Coding, mounts).expect("generate");
+        let policy = smooth_policy::Policy::from_toml(&toml).expect("parse");
+
+        // Deny patterns should catch .env files via guest path translation
+        assert!(policy.is_guest_path_denied("/workspace/.env").expect("glob"));
+        assert!(policy.is_guest_path_denied("/workspace/secrets.pem").expect("glob"));
+        assert!(policy.is_guest_path_denied("/workspace/.ssh/id_rsa").expect("glob"));
+        // Normal files should pass
+        assert!(!policy.is_guest_path_denied("/workspace/src/main.rs").expect("glob"));
+    }
+
+    #[test]
+    fn generated_policy_empty_mounts_roundtrips() {
+        let toml = generate_policy("op-e", "bead-e", "execute", "tok", &[], vec![]).expect("generate");
+        let policy = smooth_policy::Policy::from_toml(&toml).expect("parse");
+        assert!(policy.mounts.is_empty());
     }
 }

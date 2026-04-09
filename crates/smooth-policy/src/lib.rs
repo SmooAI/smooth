@@ -26,6 +26,20 @@ pub enum PolicyError {
 pub type Result<T> = std::result::Result<T, PolicyError>;
 
 // ---------------------------------------------------------------------------
+// Mount mapping — guest-to-host path translation
+// ---------------------------------------------------------------------------
+
+/// Maps a guest (in-VM) path prefix to the corresponding host path.
+///
+/// Wonk uses these mappings to translate guest paths before checking
+/// filesystem deny patterns, which are expressed in host-relative terms.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MountMapping {
+    pub guest_path: String,
+    pub host_path: String,
+}
+
+// ---------------------------------------------------------------------------
 // Top-level Policy
 // ---------------------------------------------------------------------------
 
@@ -46,6 +60,8 @@ pub struct Policy {
     pub ports: PortPolicy,
     #[serde(default)]
     pub access_requests: AccessRequestConfig,
+    #[serde(default)]
+    pub mounts: Vec<MountMapping>,
 }
 
 impl Policy {
@@ -72,6 +88,57 @@ impl Policy {
             return Err(PolicyError::Validation("auth.token is required".into()));
         }
         Ok(())
+    }
+
+    /// Translate a guest (in-VM) path to the corresponding host path using
+    /// the mount table.  Returns the guest path unchanged when no mount
+    /// prefix matches.
+    #[must_use]
+    pub fn translate_guest_path(&self, guest_path: &str) -> String {
+        for m in &self.mounts {
+            if let Some(rest) = guest_path.strip_prefix(&m.guest_path) {
+                let rest = rest.strip_prefix('/').unwrap_or(rest);
+                if rest.is_empty() {
+                    return m.host_path.clone();
+                }
+                return format!("{}/{rest}", m.host_path);
+            }
+        }
+        guest_path.to_string()
+    }
+
+    /// Check if a guest path is denied by filesystem policy.
+    ///
+    /// The path is first translated to a host path via the mount table,
+    /// then the relative portion (after the host mount root) and the
+    /// raw filename are checked against deny patterns.
+    ///
+    /// # Errors
+    /// Returns `PolicyError::Glob` if any deny pattern is an invalid glob.
+    pub fn is_guest_path_denied(&self, guest_path: &str) -> Result<bool> {
+        let host_path = self.translate_guest_path(guest_path);
+
+        // Extract the relative portion after the matching host mount root.
+        let relative = self
+            .mounts
+            .iter()
+            .find(|m| host_path.starts_with(&m.host_path))
+            .and_then(|m| host_path.strip_prefix(&m.host_path))
+            .map_or(&*host_path, |s| s.trim_start_matches('/'));
+
+        // Check the relative path first (e.g. ".ssh/id_rsa", "foo.env").
+        if !relative.is_empty() && self.filesystem.is_denied(relative)? {
+            return Ok(true);
+        }
+
+        // Also check the basename alone for patterns like "*.env".
+        if let Some(basename) = Path::new(guest_path).file_name().and_then(|f| f.to_str()) {
+            if basename != relative && self.filesystem.is_denied(basename)? {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 }
 
@@ -1123,5 +1190,146 @@ disabled = false
         assert!(!policy.ports.can_forward(5432));
         // Other ports still work
         assert!(policy.ports.can_forward(8080));
+    }
+
+    // ── Mount mapping & guest path translation tests ────────────────
+
+    #[test]
+    fn translate_guest_path_with_matching_mount() {
+        let policy = Policy {
+            mounts: vec![MountMapping {
+                guest_path: "/workspace".into(),
+                host_path: "/home/user/project".into(),
+            }],
+            ..Policy::from_toml(EXAMPLE_POLICY).expect("parse")
+        };
+        assert_eq!(policy.translate_guest_path("/workspace/src/main.rs"), "/home/user/project/src/main.rs");
+        assert_eq!(policy.translate_guest_path("/workspace"), "/home/user/project");
+        assert_eq!(policy.translate_guest_path("/workspace/"), "/home/user/project");
+    }
+
+    #[test]
+    fn translate_guest_path_no_matching_mount() {
+        let policy = Policy {
+            mounts: vec![MountMapping {
+                guest_path: "/workspace".into(),
+                host_path: "/home/user/project".into(),
+            }],
+            ..Policy::from_toml(EXAMPLE_POLICY).expect("parse")
+        };
+        // No mount for /tmp — returned unchanged
+        assert_eq!(policy.translate_guest_path("/tmp/scratch.txt"), "/tmp/scratch.txt");
+    }
+
+    #[test]
+    fn translate_guest_path_empty_mounts() {
+        let policy = Policy::from_toml(EXAMPLE_POLICY).expect("parse");
+        assert_eq!(policy.translate_guest_path("/workspace/foo"), "/workspace/foo");
+    }
+
+    #[test]
+    fn translate_guest_path_multiple_mounts_first_match_wins() {
+        let policy = Policy {
+            mounts: vec![
+                MountMapping {
+                    guest_path: "/workspace".into(),
+                    host_path: "/home/user/project".into(),
+                },
+                MountMapping {
+                    guest_path: "/root/.smooth".into(),
+                    host_path: "/home/user/.smooth".into(),
+                },
+            ],
+            ..Policy::from_toml(EXAMPLE_POLICY).expect("parse")
+        };
+        assert_eq!(policy.translate_guest_path("/root/.smooth/providers.json"), "/home/user/.smooth/providers.json");
+    }
+
+    #[test]
+    fn is_guest_path_denied_env_file_in_workspace() {
+        let policy = Policy {
+            mounts: vec![MountMapping {
+                guest_path: "/workspace".into(),
+                host_path: "/home/user/project".into(),
+            }],
+            ..Policy::from_toml(EXAMPLE_POLICY).expect("parse")
+        };
+        // *.env should match via basename
+        assert!(policy.is_guest_path_denied("/workspace/.env").expect("glob"));
+        assert!(policy.is_guest_path_denied("/workspace/config/prod.env").expect("glob"));
+    }
+
+    #[test]
+    fn is_guest_path_denied_ssh_in_workspace() {
+        let policy = Policy {
+            mounts: vec![MountMapping {
+                guest_path: "/workspace".into(),
+                host_path: "/home/user/project".into(),
+            }],
+            ..Policy::from_toml(EXAMPLE_POLICY).expect("parse")
+        };
+        // .ssh/* pattern should match the relative path
+        assert!(policy.is_guest_path_denied("/workspace/.ssh/id_rsa").expect("glob"));
+    }
+
+    #[test]
+    fn is_guest_path_denied_normal_file_allowed() {
+        let policy = Policy {
+            mounts: vec![MountMapping {
+                guest_path: "/workspace".into(),
+                host_path: "/home/user/project".into(),
+            }],
+            ..Policy::from_toml(EXAMPLE_POLICY).expect("parse")
+        };
+        assert!(!policy.is_guest_path_denied("/workspace/src/main.rs").expect("glob"));
+        assert!(!policy.is_guest_path_denied("/workspace/Cargo.toml").expect("glob"));
+    }
+
+    #[test]
+    fn is_guest_path_denied_no_mounts_checks_raw_path() {
+        let policy = Policy::from_toml(EXAMPLE_POLICY).expect("parse");
+        // Without mounts, the raw guest path is checked directly
+        assert!(policy.is_guest_path_denied("/workspace/.env").expect("glob"));
+        assert!(!policy.is_guest_path_denied("/workspace/src/main.rs").expect("glob"));
+    }
+
+    #[test]
+    fn mount_mapping_toml_roundtrip() {
+        let mut policy = Policy::from_toml(EXAMPLE_POLICY).expect("parse");
+        policy.mounts = vec![
+            MountMapping {
+                guest_path: "/workspace".into(),
+                host_path: "/home/user/project".into(),
+            },
+            MountMapping {
+                guest_path: "/root/.smooth".into(),
+                host_path: "/home/user/.smooth".into(),
+            },
+        ];
+        let toml = policy.to_toml().expect("serialize");
+        let reparsed = Policy::from_toml(&toml).expect("reparse");
+        assert_eq!(reparsed.mounts.len(), 2);
+        assert_eq!(reparsed.mounts[0].guest_path, "/workspace");
+        assert_eq!(reparsed.mounts[0].host_path, "/home/user/project");
+        assert_eq!(reparsed.mounts[1].guest_path, "/root/.smooth");
+    }
+
+    #[test]
+    fn mount_mapping_default_is_empty() {
+        let policy = Policy::from_toml(EXAMPLE_POLICY).expect("parse");
+        assert!(policy.mounts.is_empty(), "mounts should default to empty");
+    }
+
+    #[test]
+    fn is_guest_path_denied_pem_file() {
+        let policy = Policy {
+            mounts: vec![MountMapping {
+                guest_path: "/workspace".into(),
+                host_path: "/home/user/project".into(),
+            }],
+            ..Policy::from_toml(EXAMPLE_POLICY).expect("parse")
+        };
+        assert!(policy.is_guest_path_denied("/workspace/cert.pem").expect("glob"));
+        assert!(policy.is_guest_path_denied("/workspace/deep/dir/secret.key").expect("glob"));
     }
 }
