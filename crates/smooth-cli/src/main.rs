@@ -862,15 +862,71 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
             };
 
             // Step 2: Pick model
+            // For providers with many models (llmgateway, openrouter), try fetching
+            // the live model list from /v1/models and let the user search/filter.
             let model = if models.len() == 1 {
                 models[0].to_string()
             } else {
-                let selection = Select::with_theme(&ColorfulTheme::default())
-                    .with_prompt("Select a model")
-                    .items(&models)
-                    .default(0)
-                    .interact()?;
-                models[selection].to_string()
+                let live_models = if matches!(provider_id.as_str(), "llmgateway" | "openrouter" | "ollama") {
+                    let api_url = match provider_id.as_str() {
+                        "llmgateway" => "https://api.llmgateway.io/v1/models",
+                        "openrouter" => "https://openrouter.ai/api/v1/models",
+                        "ollama" => "http://localhost:11434/v1/models",
+                        _ => "",
+                    };
+                    if !api_url.is_empty() {
+                        print!("  Fetching models... ");
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                        match reqwest::blocking::get(api_url) {
+                            Ok(resp) => match resp.json::<serde_json::Value>() {
+                                Ok(body) => {
+                                    let ids: Vec<String> = body
+                                        .get("data")
+                                        .and_then(|d| d.as_array())
+                                        .map(|arr| arr.iter().filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(String::from)).collect())
+                                        .unwrap_or_default();
+                                    println!("{} models available", ids.len());
+                                    ids
+                                }
+                                Err(_) => {
+                                    println!("failed to parse");
+                                    Vec::new()
+                                }
+                            },
+                            Err(_) => {
+                                println!("unavailable");
+                                Vec::new()
+                            }
+                        }
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                };
+
+                let all_models: Vec<String> = if live_models.is_empty() {
+                    models.iter().map(|s| s.to_string()).collect()
+                } else {
+                    live_models
+                };
+
+                if all_models.len() > 20 {
+                    // Too many for a simple select — use FuzzySelect for search
+                    let selection = dialoguer::FuzzySelect::with_theme(&ColorfulTheme::default())
+                        .with_prompt("Search and select a model")
+                        .items(&all_models)
+                        .default(0)
+                        .interact()?;
+                    all_models[selection].clone()
+                } else {
+                    let selection = Select::with_theme(&ColorfulTheme::default())
+                        .with_prompt("Select a model")
+                        .items(&all_models)
+                        .default(0)
+                        .interact()?;
+                    all_models[selection].clone()
+                }
             };
 
             // Step 3: Get API key (interactive if not given)
