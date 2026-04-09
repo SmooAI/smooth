@@ -487,10 +487,12 @@ async fn cmd_up(no_leader: bool, port: u16, foreground: bool) -> Result<()> {
                         .map(|s| s.success())
                         .unwrap_or(false);
                     if alive {
-                        println!("Smooth is already running (pid {pid})");
-                        println!("  Web UI: http://localhost:{port}");
-                        println!("  Logs:   {}", log_file_path().display());
-                        println!("  Stop:   th down");
+                        println!();
+                        println!("  {}", format!("Smooth is already running (pid {pid})").yellow());
+                        println!("    {}  {}", "Web UI".dimmed(), format!("http://localhost:{port}").cyan().bold());
+                        println!("    {}  {}", "Logs  ".dimmed(), log_file_path().display().to_string().dimmed());
+                        println!("    {}  {}", "Stop  ".dimmed(), "th down".dimmed());
+                        println!();
                         return Ok(());
                     }
                 }
@@ -523,26 +525,39 @@ async fn cmd_up(no_leader: bool, port: u16, foreground: bool) -> Result<()> {
         let pid = child.id();
         std::fs::write(&pid_path, pid.to_string())?;
 
-        println!("Smooth started (pid {pid})");
-        println!("  Web UI: http://localhost:{port}");
-        println!("  Logs:   {}", log_path.display());
-        println!("  Stop:   th down");
+        let banner_text = format!("  Smooth started (pid {pid})  ");
+        let border_len = banner_text.len();
+        println!();
+        println!("  {}", format!("\u{256d}{}\u{256e}", "\u{2500}".repeat(border_len)).dimmed());
+        println!(
+            "  {}  {}  {}",
+            "\u{2502}".to_string().dimmed(),
+            format!("\u{1f7e2}  Smooth started (pid {pid})").green().bold(),
+            "\u{2502}".to_string().dimmed()
+        );
+        println!("  {}", format!("\u{2570}{}\u{256f}", "\u{2500}".repeat(border_len)).dimmed());
+        println!("    {}  {}", "Web UI".dimmed(), format!("http://localhost:{port}").cyan().bold());
+        println!("    {}  {}", "Logs  ".dimmed(), log_path.display().to_string().dimmed());
+        println!("    {}  {}", "Stop  ".dimmed(), "th down".dimmed());
+        println!();
         return Ok(());
     }
 
     // Foreground mode — actual server startup
-    println!("Smoo AI / Smooth starting...");
+    println!();
+    println!("  {} / {}", "Smoo AI".bold(), "Smooth".green().bold());
+    println!();
 
     // Initialize database
     let db_path = smooth_bigsmooth::db::default_db_path();
     let db = smooth_bigsmooth::db::Database::open(&db_path)?;
-    println!("  Database: {} ✓", db_path.display());
+    println!("  {} Database   {}", "\u{2713}".green().bold(), db_path.display().to_string().dimmed());
 
     // Initialize pearl store (Dolt-backed)
     let pearl_store = match find_dolt_dir() {
         Ok(dolt_dir) => {
             let store = smooth_pearls::PearlStore::open(&dolt_dir)?;
-            println!("  Pearls:  {} ✓", dolt_dir.display());
+            println!("  {} Pearls     {}", "\u{2713}".green().bold(), dolt_dir.display().to_string().dimmed());
             store
         }
         Err(_) => {
@@ -550,13 +565,19 @@ async fn cmd_up(no_leader: bool, port: u16, foreground: bool) -> Result<()> {
             let cwd = std::env::current_dir()?;
             let dolt_dir = cwd.join(".smooth").join("dolt");
             let store = smooth_pearls::PearlStore::init(&dolt_dir)?;
-            println!("  Pearls:  {} ✓ (auto-initialized)", dolt_dir.display());
+            println!(
+                "  {} Pearls     {} {}",
+                "\u{2713}".green().bold(),
+                dolt_dir.display().to_string().dimmed(),
+                "(auto-initialized)".dimmed()
+            );
             store
         }
     };
 
     if no_leader {
-        println!("\nSmooth infrastructure ready (leader skipped).");
+        println!();
+        println!("  {}", "Smooth infrastructure ready (leader skipped).".green());
         return Ok(());
     }
 
@@ -564,8 +585,16 @@ async fn cmd_up(no_leader: bool, port: u16, foreground: bool) -> Result<()> {
     let state = smooth_bigsmooth::server::AppState::new(db, pearl_store);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    println!("  Leader: http://localhost:{port} ✓");
-    println!("  Web UI: http://localhost:{port} ✓");
+    println!(
+        "  {} Leader     {}",
+        "\u{2713}".green().bold(),
+        format!("http://localhost:{port}").cyan().bold()
+    );
+    println!(
+        "  {} Web UI     {}",
+        "\u{2713}".green().bold(),
+        format!("http://localhost:{port}").cyan().bold()
+    );
     println!();
 
     smooth_bigsmooth::server::start(state, addr).await
@@ -574,7 +603,7 @@ async fn cmd_up(no_leader: bool, port: u16, foreground: bool) -> Result<()> {
 async fn cmd_down() -> Result<()> {
     let pid_path = pid_file_path();
     if !pid_path.exists() {
-        println!("Smooth is not running (no pid file).");
+        println!("  {}", "Smooth is not running.".yellow());
         return Ok(());
     }
 
@@ -585,9 +614,14 @@ async fn cmd_down() -> Result<()> {
     let status = std::process::Command::new("kill").arg(pid.to_string()).status()?;
 
     if status.success() {
-        println!("Smooth stopped (pid {pid}).");
+        println!(
+            "  {} {} {}",
+            "\u{1f534}".to_string(),
+            "Smooth stopped".green().bold(),
+            format!("(pid {pid})").dimmed()
+        );
     } else {
-        println!("Process {pid} not found — cleaning up stale pid file.");
+        println!("  {} {}", "Cleaning up stale pid file".dimmed(), format!("(pid {pid})").dimmed());
     }
     std::fs::remove_file(&pid_path)?;
     Ok(())
@@ -598,15 +632,89 @@ async fn cmd_status() -> Result<()> {
     match reqwest::get(url).await {
         Ok(resp) => {
             let body: serde_json::Value = resp.json().await?;
-            println!("Smooth Leader: http://localhost:4400");
-            println!("{}", serde_json::to_string_pretty(&body)?);
+
+            // Version
+            let version = body["version"].as_str().unwrap_or("unknown");
+            println!();
+            println!(
+                "  {} {} {} {}",
+                "Smooth".bold(),
+                format!("v{version}").bold().green(),
+                "\u{2014}".dimmed(),
+                "http://localhost:4400".cyan().bold()
+            );
+
+            // Uptime
+            if let Some(uptime_secs) = body["uptime_seconds"].as_u64().or_else(|| body["uptime"].as_u64()) {
+                let formatted = if uptime_secs >= 3600 {
+                    format!("{}h {}m", uptime_secs / 3600, (uptime_secs % 3600) / 60)
+                } else if uptime_secs >= 60 {
+                    format!("{}m {}s", uptime_secs / 60, uptime_secs % 60)
+                } else {
+                    format!("{uptime_secs}s")
+                };
+                println!("  {}: {}", "Uptime".dimmed(), formatted);
+            }
+            println!();
+
+            // Leader
+            let leader_status = body["leader"].as_str().or_else(|| body["status"].as_str()).unwrap_or("healthy");
+            let (icon, label) = status_indicator(leader_status);
+            println!("  {icon} {:<12} {label}", "Leader");
+
+            // Database
+            let db_status = body["database"].as_str().unwrap_or("healthy");
+            let (icon, label) = status_indicator(db_status);
+            println!("  {icon} {:<12} {} {}", "Database", label, "(SQLite)".dimmed());
+
+            // Sandbox
+            let sandbox_status = body["sandbox"].as_str().or_else(|| body["sandboxes"].as_str()).unwrap_or("healthy");
+            let active = body["sandbox_active"].as_u64().or_else(|| body["sandboxes_active"].as_u64()).unwrap_or(0);
+            let max = body["sandbox_max"].as_u64().or_else(|| body["sandboxes_max"].as_u64()).unwrap_or(3);
+            let (icon, label) = status_indicator(sandbox_status);
+            println!("  {icon} {:<12} {} {}", "Sandbox", label, format!("({active}/{max} active)").dimmed());
+
+            // Tailscale
+            if let Some(ts) = body.get("tailscale") {
+                let ts_status = ts.as_str().unwrap_or("unknown");
+                let hostname = body["tailscale_hostname"].as_str().unwrap_or("");
+                let (icon, label) = status_indicator(ts_status);
+                let suffix = if hostname.is_empty() { String::new() } else { format!(" ({})", hostname) };
+                println!("  {icon} {:<12} {label}{}", "Tailscale", suffix.dimmed());
+            }
+
+            // Pearls
+            if let Ok(store) = open_pearl_store() {
+                if let Ok(stats) = store.stats() {
+                    println!(
+                        "  {} {:<12} {} open, {} active, {} closed",
+                        "\u{2713}".green().bold(),
+                        "Pearls",
+                        stats.open.to_string().bold(),
+                        stats.in_progress.to_string().bold(),
+                        stats.closed.to_string().dimmed()
+                    );
+                }
+            }
+            println!();
         }
         Err(_) => {
-            println!("Cannot reach leader at http://localhost:4400");
-            println!("Run: th up");
+            println!();
+            println!("  {}", "Smooth is not running.".yellow());
+            println!("  Start with: {}", "th up".bold());
+            println!();
         }
     }
     Ok(())
+}
+
+/// Return a colored status indicator (icon, colored label) for health status strings.
+fn status_indicator(status: &str) -> (String, String) {
+    match status {
+        "healthy" | "running" | "connected" | "ok" => ("\u{2713}".green().bold().to_string(), "healthy".green().to_string()),
+        "degraded" | "warning" => ("\u{26a0}".yellow().bold().to_string(), "degraded".yellow().to_string()),
+        _ => ("\u{2717}".red().bold().to_string(), status.red().to_string()),
+    }
 }
 
 fn cmd_db(cmd: DbCommands) -> Result<()> {
@@ -643,7 +751,9 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
 
     match cmd {
         AuthCommands::Status => {
-            println!("Authentication Status\n====================\n");
+            println!();
+            println!("  {}", "Auth Status".bold().cyan());
+            println!();
 
             // Check providers.json for configured providers
             if let Some(ref path) = providers_path {
@@ -652,22 +762,48 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
                         Ok(registry) => {
                             let providers = registry.list_providers();
                             if providers.is_empty() {
-                                println!("Providers:    {}", "none configured — run: th auth login <provider>".red());
+                                println!(
+                                    "  {} {:<12} {}",
+                                    "\u{2717}".red().bold(),
+                                    "Providers",
+                                    "none configured \u{2014} run: th auth login <provider>".red()
+                                );
                             } else {
-                                println!("Providers:    {} configured ({})", providers.len(), providers.join(", "));
+                                println!(
+                                    "  {} {:<12} {} configured ({})",
+                                    "\u{2713}".green().bold(),
+                                    "Providers",
+                                    providers.len().to_string().green().bold(),
+                                    providers.join(", ")
+                                );
                             }
                         }
                         Err(_) => {
-                            println!("Providers:    {}", "providers.json exists but cannot be read".red());
+                            println!(
+                                "  {} {:<12} {}",
+                                "\u{2717}".red().bold(),
+                                "Providers",
+                                "providers.json exists but cannot be read".red()
+                            );
                         }
                     }
                 } else {
-                    println!("Providers:    {}", "not configured — run: th auth login <provider>".red());
+                    println!(
+                        "  {} {:<12} {}",
+                        "\u{2717}".red().bold(),
+                        "Providers",
+                        "not configured \u{2014} run: th auth login <provider>".red()
+                    );
                 }
             }
 
             let leader_up = reqwest::get("http://localhost:4400/health").await.is_ok();
-            println!("Leader:       {}", if leader_up { "running" } else { "not running — run: th up" });
+            if leader_up {
+                println!("  {} {:<12} {}", "\u{2713}".green().bold(), "Leader", "running".green());
+            } else {
+                println!("  {} {:<12} {}", "\u{2717}".red().bold(), "Leader", "not running \u{2014} run: th up".red());
+            }
+            println!();
         }
         AuthCommands::Login { provider, api_key } => {
             let path = providers_path.as_ref().context("cannot determine home directory")?;
@@ -1081,6 +1217,35 @@ async fn cmd_code(headless: bool, message: Option<String>, file: Option<String>,
             .or_else(read_stdin)
             .ok_or_else(|| anyhow::anyhow!("--message, --file, or stdin required for headless mode"))?;
         return smooth_code::headless::run_headless(working_dir, msg, model, budget, json).await;
+    }
+
+    // Quick startup checks (non-blocking warnings)
+    {
+        let providers_path = dirs_next::home_dir().map(|h| h.join(".smooth/providers.json"));
+        if let Some(ref path) = providers_path {
+            if !path.exists() {
+                println!("  {} {}", "\u{26a0}".yellow().bold(), "No providers configured. Run: th auth login".yellow());
+            }
+        }
+        let dolt_on_path = std::process::Command::new("smooth-dolt")
+            .arg("--help")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok();
+        if !dolt_on_path {
+            let in_target = std::env::current_dir()
+                .ok()
+                .map(|d| d.join("target/release/smooth-dolt").exists())
+                .unwrap_or(false);
+            if !in_target {
+                println!(
+                    "  {} {}",
+                    "\u{26a0}".yellow().bold(),
+                    "smooth-dolt binary not found. Pearl sync may not work. Run: scripts/build-smooth-dolt.sh".yellow()
+                );
+            }
+        }
     }
 
     // Check if Big Smooth is running
