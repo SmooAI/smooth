@@ -10,7 +10,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use smooth_policy::{
     AccessRequestConfig, AuthConfig, BeadsPolicy, EnterprisePolicy, FilesystemPolicy, LeaderNetworkConfig, McpPolicy, NetworkPolicy, NetworkRule, Policy,
-    PolicyMetadata, ToolsPolicy,
+    PolicyMetadata, PortPolicy, ToolsPolicy,
 };
 
 /// Generate a complete policy for an operator.
@@ -47,6 +47,7 @@ pub fn generate_policy(operator_id: &str, bead_id: &str, phase: &str, token: &st
             auto_approve_domains: vec!["*.npmjs.org".into(), "*.pypi.org".into(), "*.crates.io".into()],
             auto_approve_tools: vec!["lint_fix".into(), "test_run".into()],
         },
+        ports: ports_policy(phase),
     };
 
     // Merge enterprise policy if available
@@ -109,6 +110,7 @@ pub fn generate_policy_for_task(
             allow_server_install: false,
         },
         access_requests: task_access_requests(task_type),
+        ports: task_ports_policy(phase, task_type),
     };
 
     // Merge enterprise policy if available
@@ -145,6 +147,7 @@ fn task_tools_policy(phase: &str, task_type: TaskType) -> ToolsPolicy {
                     "test_run".into(),
                     "spawn_subtask".into(),
                     "git_commit".into(),
+                    "forward_port".into(),
                 ]);
             }
             tools
@@ -339,6 +342,28 @@ fn task_access_requests(task_type: TaskType) -> AccessRequestConfig {
     }
 }
 
+fn ports_policy(phase: &str) -> PortPolicy {
+    PortPolicy {
+        enabled: matches!(phase, "execute" | "finalize"),
+        allow_range: (1024, 65535),
+        max_forwards: 5,
+        deny: vec![22],
+    }
+}
+
+fn task_ports_policy(phase: &str, task_type: TaskType) -> PortPolicy {
+    match task_type {
+        TaskType::Coding => PortPolicy {
+            enabled: matches!(phase, "execute" | "finalize"),
+            allow_range: (1024, 65535),
+            max_forwards: 5,
+            deny: vec![22],
+        },
+        // Research and review don't need port forwarding
+        TaskType::Research | TaskType::Review => PortPolicy::default(),
+    }
+}
+
 fn beads_policy(bead_id: &str, deps: &[String], phase: &str) -> BeadsPolicy {
     let mut accessible = vec![bead_id.to_string()];
     accessible.extend(deps.iter().cloned());
@@ -378,7 +403,13 @@ fn tools_policy(phase: &str) -> ToolsPolicy {
 
     // Extra tools in execute/finalize phases
     if matches!(phase, "execute" | "finalize") {
-        allow.extend(["artifact_write".into(), "lint_fix".into(), "test_run".into(), "spawn_subtask".into()]);
+        allow.extend([
+            "artifact_write".into(),
+            "lint_fix".into(),
+            "test_run".into(),
+            "spawn_subtask".into(),
+            "forward_port".into(),
+        ]);
     }
 
     ToolsPolicy {

@@ -168,6 +168,11 @@ pub enum AgentEvent {
         child_id: String,
         success: bool,
     },
+    /// An operator is exposing a guest port to the host.
+    PortForwardActive {
+        guest_port: u16,
+        host_port: u16,
+    },
 }
 
 /// Configuration for a sub-agent spawned via delegation.

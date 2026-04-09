@@ -49,6 +49,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/check/bead", post(check_bead))
         .route("/check/cli", post(check_cli))
         .route("/check/mcp", post(check_mcp))
+        .route("/check/port", post(check_port))
         .route("/request", post(request_access))
         .with_state(state)
 }
@@ -68,6 +69,8 @@ struct PolicySummary {
     denied_tools: Vec<String>,
     allowed_mcp_servers: Vec<String>,
     filesystem_writable: bool,
+    port_forwarding_enabled: bool,
+    port_allow_range: (u16, u16),
 }
 
 async fn get_policy(State(state): State<Arc<AppState>>) -> Json<PolicySummary> {
@@ -82,6 +85,8 @@ async fn get_policy(State(state): State<Arc<AppState>>) -> Json<PolicySummary> {
         denied_tools: p.tools.deny.clone(),
         allowed_mcp_servers: p.mcp.allow_servers.clone(),
         filesystem_writable: p.filesystem.writable,
+        port_forwarding_enabled: p.ports.enabled,
+        port_allow_range: p.ports.allow_range,
     })
 }
 
@@ -229,6 +234,36 @@ async fn check_mcp(State(state): State<Arc<AppState>>, Json(req): Json<McpCheck>
     };
 
     tracing::debug!(server = %req.server_name, allowed, "mcp check");
+    Json(CheckResponse { allowed, reason })
+}
+
+// ---------------------------------------------------------------------------
+// POST /check/port — "can I forward this port to the host?"
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct PortCheck {
+    guest_port: u16,
+}
+
+async fn check_port(State(state): State<Arc<AppState>>, Json(req): Json<PortCheck>) -> Json<CheckResponse> {
+    let policy = state.policy.load();
+    let allowed = policy.ports.can_forward(req.guest_port);
+
+    let reason = if !policy.ports.enabled {
+        "port forwarding is disabled for this task".to_string()
+    } else if allowed {
+        format!("port {} is within the allowed range", req.guest_port)
+    } else if policy.ports.deny.contains(&req.guest_port) {
+        format!("port {} is explicitly denied", req.guest_port)
+    } else {
+        format!(
+            "port {} is outside the allowed range ({}-{})",
+            req.guest_port, policy.ports.allow_range.0, policy.ports.allow_range.1
+        )
+    };
+
+    tracing::debug!(port = req.guest_port, allowed, "port check");
     Json(CheckResponse { allowed, reason })
 }
 

@@ -40,6 +40,7 @@
 #![allow(clippy::expect_used)]
 
 mod pearl_tools;
+mod port_forward;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -599,6 +600,8 @@ async fn main() {
         base: config.workspace.clone(),
         proxy_url: proxy_for_bash,
     });
+
+    tools.register(port_forward::ForwardPortTool);
 
     // Pearl tools — if workspace has .smooth/dolt/, register direct Dolt
     // pearl tools so the agent can create/list/close pearls locally.
