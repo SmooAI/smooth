@@ -25,6 +25,8 @@ jobs:
         outputs:
             published: ${{ steps.changesets.outputs.published }}
             publishedPackages: ${{ steps.changesets.outputs.publishedPackages }}
+            should_release: ${{ steps.check_release.outputs.should_release }}
+
         steps:
             - name: Checkout code repository
               uses: actions/checkout@v4
@@ -86,6 +88,19 @@ jobs:
               env:
                   GITHUB_TOKEN: ${{ secrets.GH_PAT }}
 
+            - name: Check if release needed
+              id: check_release
+              run: |
+                  # A release is needed when changesets says published OR when
+                  # the current commit is a changeset merge (version was just bumped).
+                  if [[ "${{ steps.changesets.outputs.published }}" == "true" ]]; then
+                    echo "should_release=true" >> $GITHUB_OUTPUT
+                  elif git log -1 --pretty=%s | grep -q "🦋 New version release"; then
+                    echo "should_release=true" >> $GITHUB_OUTPUT
+                  else
+                    echo "should_release=false" >> $GITHUB_OUTPUT
+                  fi
+
             - name: Auto-Merge Changeset PR
               continue-on-error: true
               run: |
@@ -103,7 +118,7 @@ jobs:
     build:
         name: Build ${{ matrix.target }}
         needs: version
-        if: needs.version.outputs.published == 'true'
+        if: needs.version.outputs.should_release == 'true'
         runs-on: ${{ matrix.os }}
         strategy:
             matrix:
@@ -167,7 +182,7 @@ jobs:
     release:
         name: Create Release
         needs: [version, build]
-        if: needs.version.outputs.published == 'true'
+        if: needs.version.outputs.should_release == 'true'
         runs-on: ubuntu-latest
         permissions:
             contents: write
