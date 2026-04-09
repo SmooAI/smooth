@@ -43,6 +43,8 @@ pub struct Policy {
     #[serde(default)]
     pub mcp: McpPolicy,
     #[serde(default)]
+    pub ports: PortPolicy,
+    #[serde(default)]
     pub access_requests: AccessRequestConfig,
 }
 
@@ -299,6 +301,52 @@ impl McpPolicy {
 }
 
 // ---------------------------------------------------------------------------
+// Ports
+// ---------------------------------------------------------------------------
+
+/// Port forwarding policy — controls which guest ports operators can expose to the host.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PortPolicy {
+    /// Whether port forwarding is enabled for this task.
+    pub enabled: bool,
+    /// Allowed guest port range (inclusive). Only ports in this range can be forwarded.
+    #[serde(default = "default_port_range")]
+    pub allow_range: (u16, u16),
+    /// Maximum simultaneous port forwards per operator.
+    #[serde(default = "default_max_forwards")]
+    pub max_forwards: u8,
+    /// Ports that are never allowed to be forwarded, regardless of allow_range.
+    #[serde(default)]
+    pub deny: Vec<u16>,
+}
+
+fn default_port_range() -> (u16, u16) {
+    (1024, 65535)
+}
+
+fn default_max_forwards() -> u8 {
+    5
+}
+
+impl Default for PortPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allow_range: default_port_range(),
+            max_forwards: default_max_forwards(),
+            deny: vec![],
+        }
+    }
+}
+
+impl PortPolicy {
+    /// Check if a guest port can be forwarded under this policy.
+    pub fn can_forward(&self, guest_port: u16) -> bool {
+        self.enabled && guest_port >= self.allow_range.0 && guest_port <= self.allow_range.1 && !self.deny.contains(&guest_port)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Access Requests
 // ---------------------------------------------------------------------------
 
@@ -354,6 +402,10 @@ impl AccessRequestConfig {
 ///
 /// [mcp]
 /// deny_servers = ["untrusted-server"]
+///
+/// [ports]
+/// deny_ports = [22, 3306]
+/// disabled = false
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EnterprisePolicy {
@@ -365,6 +417,8 @@ pub struct EnterprisePolicy {
     pub tools: EnterpriseToolsPolicy,
     #[serde(default)]
     pub mcp: EnterpriseMcpPolicy,
+    #[serde(default)]
+    pub ports: EnterprisePortPolicy,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -393,6 +447,16 @@ pub struct EnterpriseMcpPolicy {
     /// MCP servers that are permanently blocked.
     #[serde(default)]
     pub deny_servers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct EnterprisePortPolicy {
+    /// Ports that enterprise policy denies (merged into every task's deny list).
+    #[serde(default)]
+    pub deny_ports: Vec<u16>,
+    /// If true, port forwarding is completely disabled enterprise-wide.
+    #[serde(default)]
+    pub disabled: bool,
 }
 
 impl EnterprisePolicy {
@@ -434,7 +498,12 @@ impl EnterprisePolicy {
 
     /// Returns true if this policy has no rules.
     pub fn is_empty(&self) -> bool {
-        self.network.deny_domains.is_empty() && self.filesystem.deny_patterns.is_empty() && self.tools.deny.is_empty() && self.mcp.deny_servers.is_empty()
+        self.network.deny_domains.is_empty()
+            && self.filesystem.deny_patterns.is_empty()
+            && self.tools.deny.is_empty()
+            && self.mcp.deny_servers.is_empty()
+            && self.ports.deny_ports.is_empty()
+            && !self.ports.disabled
     }
 }
 
@@ -477,6 +546,16 @@ impl Policy {
         // MCP: remove denied servers from allow list
         if !enterprise.mcp.deny_servers.is_empty() {
             self.mcp.allow_servers.retain(|s| !enterprise.mcp.deny_servers.contains(s));
+        }
+
+        // Ports: merge enterprise deny list, disable if enterprise says so
+        if enterprise.ports.disabled {
+            self.ports.enabled = false;
+        }
+        for port in &enterprise.ports.deny_ports {
+            if !self.ports.deny.contains(port) {
+                self.ports.deny.push(*port);
+            }
         }
     }
 }
@@ -594,6 +673,12 @@ deny = ["workflow"]
 allow_servers = ["smooth-tools"]
 deny_unknown_servers = true
 allow_server_install = false
+
+[ports]
+enabled = true
+allow_range = [1024, 65535]
+max_forwards = 5
+deny = [22]
 
 [access_requests]
 enabled = true
@@ -765,6 +850,10 @@ deny = ["rm_rf", "drop_database", "workflow"]
 
 [mcp]
 deny_servers = ["untrusted-server"]
+
+[ports]
+deny_ports = [22, 3306]
+disabled = false
 "#;
 
     #[test]
@@ -774,6 +863,8 @@ deny_servers = ["untrusted-server"]
         assert_eq!(ep.filesystem.deny_patterns.len(), 2);
         assert_eq!(ep.tools.deny.len(), 3);
         assert_eq!(ep.mcp.deny_servers.len(), 1);
+        assert_eq!(ep.ports.deny_ports.len(), 2);
+        assert!(!ep.ports.disabled);
     }
 
     #[test]
@@ -907,5 +998,130 @@ deny_servers = ["untrusted-server"]
         assert!(policy.tools.deny.contains(&"rm_rf".to_string()));
         // prod domains blocked
         assert!(!policy.network.is_allowed("api.prod.internal", "/"));
+        // enterprise port denies merged
+        assert!(policy.ports.deny.contains(&22));
+        assert!(policy.ports.deny.contains(&3306));
+    }
+
+    // ── Port policy tests ───────────────────────────────────────────
+
+    #[test]
+    fn port_can_forward_allowed() {
+        let policy = PortPolicy {
+            enabled: true,
+            allow_range: (1024, 65535),
+            max_forwards: 5,
+            deny: vec![22],
+        };
+        assert!(policy.can_forward(3000));
+        assert!(policy.can_forward(8080));
+        assert!(policy.can_forward(1024)); // inclusive lower bound
+        assert!(policy.can_forward(65535)); // inclusive upper bound
+    }
+
+    #[test]
+    fn port_can_forward_denied() {
+        let policy = PortPolicy {
+            enabled: true,
+            allow_range: (1024, 65535),
+            max_forwards: 5,
+            deny: vec![22, 3306],
+        };
+        assert!(!policy.can_forward(22));
+        assert!(!policy.can_forward(3306));
+    }
+
+    #[test]
+    fn port_can_forward_out_of_range() {
+        let policy = PortPolicy {
+            enabled: true,
+            allow_range: (1024, 65535),
+            max_forwards: 5,
+            deny: vec![],
+        };
+        assert!(!policy.can_forward(80));
+        assert!(!policy.can_forward(443));
+        assert!(!policy.can_forward(0));
+        assert!(!policy.can_forward(1023));
+    }
+
+    #[test]
+    fn port_can_forward_disabled() {
+        let policy = PortPolicy {
+            enabled: false,
+            allow_range: (1024, 65535),
+            max_forwards: 5,
+            deny: vec![],
+        };
+        assert!(!policy.can_forward(3000));
+        assert!(!policy.can_forward(8080));
+    }
+
+    #[test]
+    fn port_policy_default() {
+        let policy = PortPolicy::default();
+        assert!(!policy.enabled);
+        assert_eq!(policy.allow_range, (1024, 65535));
+        assert_eq!(policy.max_forwards, 5);
+        assert!(policy.deny.is_empty());
+        // Default is disabled, so can_forward always false
+        assert!(!policy.can_forward(3000));
+    }
+
+    #[test]
+    fn port_policy_toml_roundtrip() {
+        let policy = Policy::from_toml(EXAMPLE_POLICY).expect("parse");
+        assert!(policy.ports.enabled);
+        assert_eq!(policy.ports.allow_range, (1024, 65535));
+        assert_eq!(policy.ports.max_forwards, 5);
+        assert_eq!(policy.ports.deny, vec![22]);
+
+        let serialized = policy.to_toml().expect("serialize");
+        let reparsed = Policy::from_toml(&serialized).expect("reparse");
+        assert_eq!(reparsed.ports, policy.ports);
+    }
+
+    #[test]
+    fn enterprise_merge_disables_ports() {
+        let mut policy = Policy::from_toml(EXAMPLE_POLICY).expect("parse");
+        assert!(policy.ports.enabled);
+
+        let ep = EnterprisePolicy {
+            ports: EnterprisePortPolicy {
+                deny_ports: vec![],
+                disabled: true,
+            },
+            ..Default::default()
+        };
+        policy.merge_enterprise(&ep);
+
+        assert!(!policy.ports.enabled);
+        assert!(!policy.ports.can_forward(3000));
+    }
+
+    #[test]
+    fn enterprise_merge_adds_deny_ports() {
+        let mut policy = Policy::from_toml(EXAMPLE_POLICY).expect("parse");
+        assert_eq!(policy.ports.deny, vec![22]);
+
+        let ep = EnterprisePolicy {
+            ports: EnterprisePortPolicy {
+                deny_ports: vec![22, 3306, 5432], // 22 already in deny
+                disabled: false,
+            },
+            ..Default::default()
+        };
+        policy.merge_enterprise(&ep);
+
+        // 22 deduped, 3306 and 5432 added
+        assert_eq!(policy.ports.deny.iter().filter(|&&p| p == 22).count(), 1);
+        assert!(policy.ports.deny.contains(&3306));
+        assert!(policy.ports.deny.contains(&5432));
+        // Ports in deny list should not be forwardable
+        assert!(!policy.ports.can_forward(22));
+        assert!(!policy.ports.can_forward(3306));
+        assert!(!policy.ports.can_forward(5432));
+        // Other ports still work
+        assert!(policy.ports.can_forward(8080));
     }
 }
