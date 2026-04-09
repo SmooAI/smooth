@@ -95,6 +95,17 @@ impl ProviderConfig {
         }
     }
 
+    /// LLM Gateway — unified API for 210+ models from 25+ providers.
+    pub fn llmgateway(api_key: impl Into<String>) -> Self {
+        Self {
+            id: "llmgateway".into(),
+            api_url: "https://api.llmgateway.io/v1".into(),
+            api_key: api_key.into(),
+            api_format: ApiFormat::OpenAiCompat,
+            default_model: "openai/gpt-4o".into(),
+        }
+    }
+
     /// Kimi Code — Moonshot's coding-optimized API (Anthropic-compatible).
     pub fn kimi_code(api_key: impl Into<String>) -> Self {
         Self {
@@ -393,6 +404,7 @@ impl ProviderRegistry {
             "google" => ProviderConfig::google(&api_key),
             "kimi" => ProviderConfig::kimi(&api_key),
             "kimi-code" => ProviderConfig::kimi_code(&api_key),
+            "llmgateway" => ProviderConfig::llmgateway(&api_key),
             _ => ProviderConfig::openrouter(&api_key),
         };
 

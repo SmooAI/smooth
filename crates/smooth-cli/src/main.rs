@@ -808,6 +808,12 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
 
             // Provider catalog: (id, display name, models, needs_key)
             let catalog: Vec<(&str, &str, Vec<&str>, bool)> = vec![
+                (
+                    "llmgateway",
+                    "LLM Gateway",
+                    vec!["openai/gpt-4o", "anthropic/claude-sonnet-4", "google/gemini-2.5-flash", "deepseek/deepseek-v3"],
+                    true,
+                ),
                 ("kimi-code", "Kimi Code", vec!["kimi-for-coding"], true),
                 ("kimi", "Kimi", vec!["kimi-k2.5", "kimi-k2", "moonshot-v1-auto"], true),
                 (
@@ -884,6 +890,7 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
                 "anthropic" => smooth_operator::providers::ProviderConfig::anthropic(&api_key),
                 "kimi" => smooth_operator::providers::ProviderConfig::kimi(&api_key),
                 "kimi-code" => smooth_operator::providers::ProviderConfig::kimi_code(&api_key),
+                "llmgateway" => smooth_operator::providers::ProviderConfig::llmgateway(&api_key),
                 "ollama" => smooth_operator::providers::ProviderConfig::ollama(),
                 "google" => smooth_operator::providers::ProviderConfig::google(&api_key),
                 _ => unreachable!(),
