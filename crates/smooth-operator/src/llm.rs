@@ -544,6 +544,10 @@ impl LlmClient {
             })
             .collect();
 
+        let tool_count = chat_tools.len();
+        let msg_count = chat_messages.len();
+        tracing::debug!(model = %self.config.model, tool_count, msg_count, "chat_stream: sending request");
+
         let request = ChatRequest {
             model: self.config.model.clone(),
             messages: chat_messages,

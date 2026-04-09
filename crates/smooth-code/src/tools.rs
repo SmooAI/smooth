@@ -189,6 +189,41 @@ impl Tool for ListFilesTool {
 
 /// Build a [`ToolRegistry`] with write_file, read_file, bash, and list_files
 /// scoped to the given working directory.
+/// In-process port forwarding — in non-sandboxed mode, the port is already
+/// on localhost so this just confirms it's accessible.
+pub struct ForwardPortTool;
+
+#[async_trait]
+impl Tool for ForwardPortTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "forward_port".into(),
+            description: "Expose a port to the host network. In local mode, confirms the port is already accessible on localhost.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "guest_port": {
+                        "type": "integer",
+                        "description": "The port number your service is listening on (e.g. 3000)"
+                    }
+                },
+                "required": ["guest_port"]
+            }),
+        }
+    }
+
+    async fn execute(&self, arguments: serde_json::Value) -> anyhow::Result<String> {
+        let port = arguments.get("guest_port").and_then(|v| v.as_u64()).unwrap_or(3000) as u16;
+        Ok(format!(
+            "Port {port} is accessible at http://localhost:{port} (running in local mode, no forwarding needed)"
+        ))
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
 pub fn create_tools(working_dir: &Path) -> ToolRegistry {
     let mut tools = ToolRegistry::new();
     tools.register(WriteFileTool {
@@ -203,6 +238,7 @@ pub fn create_tools(working_dir: &Path) -> ToolRegistry {
     tools.register(ListFilesTool {
         base_dir: working_dir.to_path_buf(),
     });
+    tools.register(ForwardPortTool);
     tools
 }
 

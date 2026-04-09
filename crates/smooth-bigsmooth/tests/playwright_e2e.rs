@@ -72,17 +72,21 @@ async fn operator_starts_dev_server_playwright_verifies() {
         .build()
         .expect("build reqwest client");
 
-    let task_message = r#"Create a simple Node.js HTTP server:
-1. Create a file called server.js with this content:
-   const http = require('http');
-   const server = http.createServer((req, res) => {
-     res.writeHead(200, {'Content-Type': 'text/html'});
-     res.end('<h1>Hello Smooth</h1>');
-   });
-   server.listen(3000, () => console.log('Server running on port 3000'));
-2. Start the server with: node server.js &
-3. Use the forward_port tool to expose port 3000 to the host
-4. Tell me the host port number"#;
+    let task_message = r#"IMPORTANT: You MUST use your tools (write_file, bash, forward_port) to complete this task. Do NOT just explain — actually do it.
+
+Step 1: Use the write_file tool to create server.js with this exact content:
+const http = require('http');
+const server = http.createServer((req, res) => {
+  res.writeHead(200, {'Content-Type': 'text/html'});
+  res.end('<h1>Hello Smooth</h1>');
+});
+server.listen(3000, () => console.log('Server running on port 3000'));
+
+Step 2: Use the bash tool to run: node server.js &
+
+Step 3: Use the forward_port tool with guest_port 3000
+
+Do all three steps now using your tools."#;
 
     let resp = client
         .post(format!("http://127.0.0.1:{port}/api/tasks"))
@@ -122,10 +126,33 @@ async fn operator_starts_dev_server_playwright_verifies() {
             if let Some(data) = line.strip_prefix("data: ") {
                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
                     if let Some(content) = event.get("content").and_then(|c| c.as_str()) {
+                        // Look for "localhost:PORT" pattern (local mode)
+                        if let Some(idx) = content.find("localhost:") {
+                            let after = &content[idx + 10..];
+                            if let Ok(p) = after.split(|c: char| !c.is_ascii_digit()).next().unwrap_or("").parse::<u16>() {
+                                if p >= 1024 {
+                                    forwarded_port = Some(p);
+                                }
+                            }
+                        }
+                        // Also look for forwarded ports in 10000-65535 range
                         for word in content.split_whitespace() {
                             if let Ok(p) = word.trim_matches(|c: char| !c.is_ascii_digit()).parse::<u16>() {
                                 if (10000..65535).contains(&p) {
                                     forwarded_port = Some(p);
+                                }
+                            }
+                        }
+                    }
+                    // Check tool_name for forward_port — if it completed, the port is 3000
+                    if let Some(tool_name) = event.get("tool_name").and_then(|t| t.as_str()) {
+                        if tool_name == "forward_port" {
+                            if let Some(ty) = event.get("type").and_then(|t| t.as_str()) {
+                                if ty == "ToolCallComplete" {
+                                    // In local mode, forward_port returns localhost:3000
+                                    if forwarded_port.is_none() {
+                                        forwarded_port = Some(3000);
+                                    }
                                 }
                             }
                         }
