@@ -94,13 +94,9 @@ impl ToolHook for WonkHook {
         self.check("/check/cli", body).await
     }
 
-    async fn pre_write(&self, _path: &str) -> anyhow::Result<()> {
-        // Filesystem writability is checked via the tool policy — send a tool
-        // check with a synthetic "write" context.
-        let body = serde_json::to_value(ToolCheckRequest {
-            tool_name: "write".to_string(),
-        })?;
-        self.check("/check/tool", body).await
+    async fn pre_write(&self, path: &str) -> anyhow::Result<()> {
+        let body = serde_json::json!({ "path": path });
+        self.check("/check/write", body).await
     }
 }
 
@@ -226,9 +222,25 @@ mod tests {
         }
     }
 
+    async fn mock_check_write(Json(body): Json<serde_json::Value>) -> Json<CheckResponse> {
+        let path = body["path"].as_str().unwrap_or("");
+        if path.ends_with(".env") || path.ends_with(".pem") {
+            Json(CheckResponse {
+                allowed: false,
+                reason: format!("{path} matches a filesystem deny pattern"),
+            })
+        } else {
+            Json(CheckResponse {
+                allowed: true,
+                reason: "path is allowed".into(),
+            })
+        }
+    }
+
     fn mock_wonk_router() -> Router {
         Router::new()
             .route("/check/tool", post(mock_check_tool))
+            .route("/check/write", post(mock_check_write))
             .route("/check/network", post(mock_check_network))
             .route("/check/cli", post(mock_check_cli))
     }
@@ -301,11 +313,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pre_write_uses_tool_check() {
+    async fn pre_write_allowed_normal_file() {
         let url = start_mock_wonk().await;
         let hook = WonkHook::new(&url);
-        // "write" is not in the mock allowlist, so it should be denied
-        let err = hook.pre_write("/some/path").await.unwrap_err();
+        assert!(hook.pre_write("/workspace/src/main.rs").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn pre_write_denied_env_file() {
+        let url = start_mock_wonk().await;
+        let hook = WonkHook::new(&url);
+        let err = hook.pre_write("/workspace/.env").await.unwrap_err();
+        assert!(err.to_string().contains("Wonk denied"));
+        assert!(err.to_string().contains("deny pattern"));
+    }
+
+    #[tokio::test]
+    async fn pre_write_denied_pem_file() {
+        let url = start_mock_wonk().await;
+        let hook = WonkHook::new(&url);
+        let err = hook.pre_write("/workspace/cert.pem").await.unwrap_err();
         assert!(err.to_string().contains("Wonk denied"));
     }
 

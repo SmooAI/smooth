@@ -46,6 +46,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/policy", get(get_policy))
         .route("/check/network", post(check_network))
         .route("/check/tool", post(check_tool))
+        .route("/check/write", post(check_write))
         .route("/check/bead", post(check_bead))
         .route("/check/cli", post(check_cli))
         .route("/check/mcp", post(check_mcp))
@@ -155,6 +156,54 @@ async fn check_tool(State(state): State<Arc<AppState>>, Json(req): Json<ToolChec
 
     tracing::debug!(tool = %req.tool_name, allowed, "tool check");
     Json(CheckResponse { allowed, reason })
+}
+
+// ---------------------------------------------------------------------------
+// POST /check/write — "can I write to this path?"
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct WriteCheck {
+    path: String,
+}
+
+async fn check_write(State(state): State<Arc<AppState>>, Json(req): Json<WriteCheck>) -> Json<CheckResponse> {
+    let policy = state.policy.load();
+
+    // First check: is filesystem writable at all?
+    if !policy.filesystem.writable {
+        tracing::debug!(path = %req.path, "write denied: filesystem is read-only");
+        return Json(CheckResponse {
+            allowed: false,
+            reason: "filesystem is read-only in this phase".into(),
+        });
+    }
+
+    // Second check: is this specific path denied by deny patterns?
+    match policy.is_guest_path_denied(&req.path) {
+        Ok(true) => {
+            tracing::debug!(path = %req.path, "write denied: path matches deny pattern");
+            Json(CheckResponse {
+                allowed: false,
+                reason: format!("{} matches a filesystem deny pattern", req.path),
+            })
+        }
+        Ok(false) => {
+            tracing::debug!(path = %req.path, "write allowed");
+            Json(CheckResponse {
+                allowed: true,
+                reason: "path is allowed".into(),
+            })
+        }
+        Err(e) => {
+            // Fail open on glob errors — don't block legitimate work
+            tracing::warn!(path = %req.path, error = %e, "glob error during write check, allowing");
+            Json(CheckResponse {
+                allowed: true,
+                reason: format!("glob error (allowing): {e}"),
+            })
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -383,6 +432,10 @@ deny_unknown_servers = true
 enabled = true
 auto_approve_domains = ["*.npmjs.org"]
 auto_approve_tools = ["lint_fix"]
+
+[[mounts]]
+guest_path = "/workspace"
+host_path = "/home/user/project"
 "#;
 
     fn test_state() -> Arc<AppState> {
@@ -567,5 +620,61 @@ auto_approve_tools = ["lint_fix"]
         assert!(!is_dangerous_cli("cargo test"));
         assert!(!is_dangerous_cli("cat file.txt"));
         assert!(!is_dangerous_cli("git status"));
+    }
+
+    // ── /check/write tests ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn check_write_allowed_normal_file() {
+        let app = build_router(test_state());
+        let (status, body) = do_post(&app, "/check/write", r#"{"path":"/workspace/src/main.rs"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        let resp: CheckResponse = serde_json::from_str(&body).expect("parse");
+        assert!(resp.allowed, "normal file should be allowed: {}", resp.reason);
+    }
+
+    #[tokio::test]
+    async fn check_write_denied_env_file() {
+        let app = build_router(test_state());
+        let (status, body) = do_post(&app, "/check/write", r#"{"path":"/workspace/.env"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        let resp: CheckResponse = serde_json::from_str(&body).expect("parse");
+        assert!(!resp.allowed, ".env file should be denied");
+        assert!(resp.reason.contains("deny pattern"), "reason should mention deny pattern: {}", resp.reason);
+    }
+
+    #[tokio::test]
+    async fn check_write_denied_pem_file() {
+        let app = build_router(test_state());
+        let (status, body) = do_post(&app, "/check/write", r#"{"path":"/workspace/cert.pem"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        let resp: CheckResponse = serde_json::from_str(&body).expect("parse");
+        assert!(!resp.allowed, ".pem file should be denied");
+    }
+
+    #[tokio::test]
+    async fn check_write_denied_readonly_filesystem() {
+        // Create a read-only policy
+        let policy_str = TEST_POLICY.replace("writable = true", "writable = false");
+        let policy = smooth_policy::Policy::from_toml(&policy_str).expect("parse");
+        let holder = PolicyHolder::from_policy(policy);
+        let negotiator = Negotiator::new("http://localhost:4400", holder.clone());
+        let state = Arc::new(AppState { policy: holder, negotiator });
+        let app = build_router(state);
+
+        let (status, body) = do_post(&app, "/check/write", r#"{"path":"/workspace/src/main.rs"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        let resp: CheckResponse = serde_json::from_str(&body).expect("parse");
+        assert!(!resp.allowed, "should be denied when filesystem is read-only");
+        assert!(resp.reason.contains("read-only"), "reason should mention read-only: {}", resp.reason);
+    }
+
+    #[tokio::test]
+    async fn check_write_denied_nested_env_file() {
+        let app = build_router(test_state());
+        let (status, body) = do_post(&app, "/check/write", r#"{"path":"/workspace/config/production.env"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        let resp: CheckResponse = serde_json::from_str(&body).expect("parse");
+        assert!(!resp.allowed, "nested .env file should be denied");
     }
 }
