@@ -52,6 +52,10 @@ pub struct AppState {
     /// When present, dispatch/complete go through Diver's HTTP API (with
     /// Jira sync, cost tracking, etc.) instead of direct PearlStore calls.
     pub diver: Option<crate::diver_client::DiverClient>,
+    /// The orchestration state machine. Runs as a background loop picking up
+    /// ready pearls and dispatching operators. Behind `Arc<tokio::sync::Mutex<>>`
+    /// since the background loop and API handlers both need access.
+    pub orchestrator: Arc<tokio::sync::Mutex<crate::orchestrator::Orchestrator>>,
 }
 
 impl AppState {
@@ -59,6 +63,7 @@ impl AppState {
     pub fn new(db: Database, pearl_store: smooth_pearls::PearlStore) -> Self {
         let session_store = Arc::new(crate::session::DoltSessionStore::new(&pearl_store));
         let (event_tx, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
+        let orchestrator = crate::orchestrator::Orchestrator::new(3, pearl_store.clone()).with_event_tx(event_tx.clone());
         Self {
             db,
             pearl_store,
@@ -69,6 +74,7 @@ impl AppState {
             event_tx,
             boardroom: None,
             diver: None,
+            orchestrator: Arc::new(tokio::sync::Mutex::new(orchestrator)),
         }
     }
 
@@ -114,6 +120,14 @@ pub struct SystemHealth {
     pub sandbox: SandboxHealth,
     pub tailscale: TailscaleHealth,
     pub pearls: PearlsHealth,
+    pub orchestrator: OrchestratorHealth,
+}
+
+#[derive(Serialize)]
+pub struct OrchestratorHealth {
+    pub state: String,
+    pub active_workers: u32,
+    pub completed: u32,
 }
 
 #[derive(Serialize)]
@@ -244,6 +258,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/steering/{bead_id}/resume", post(resume_handler))
         .route("/api/steering/{bead_id}/steer", post(steer_handler))
         .route("/api/steering/{bead_id}/cancel", post(cancel_handler))
+        // Orchestrator
+        .route("/api/orchestrator/status", get(orchestrator_status_handler))
         // Jira
         .route("/api/jira/status", get(jira_status_handler))
         .route("/api/jira/sync", post(jira_sync_handler))
@@ -304,6 +320,23 @@ pub async fn start(mut state: AppState, addr: SocketAddr) -> anyhow::Result<()> 
             }
         }
     });
+
+    // Spawn orchestrator loop — continuously picks up ready pearls and dispatches operators
+    let orch = state.orchestrator.clone();
+    tokio::spawn(async move {
+        loop {
+            {
+                let mut o = orch.lock().await;
+                if let Err(e) = o.step().await {
+                    tracing::debug!(error = %e, state = ?o.state, "orchestrator step error");
+                }
+            }
+            // Poll interval — 5s default. The lock is released between polls
+            // so API handlers can inspect orchestrator state without blocking.
+            tokio::time::sleep(Duration::from_millis(5000)).await;
+        }
+    });
+    tracing::info!("Orchestrator loop started (poll every 5s)");
 
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -1386,6 +1419,14 @@ async fn system_health_handler(State(state): State<AppState>) -> Json<ApiRespons
     let db_ok = state.db.get_config("__health_check").is_ok();
     let ts = crate::tailscale::get_status();
 
+    let orch = state.orchestrator.lock().await;
+    let orch_health = OrchestratorHealth {
+        state: orch.state_name().to_string(),
+        active_workers: orch.active_workers.len() as u32,
+        completed: orch.completed_beads.len() as u32,
+    };
+    drop(orch);
+
     Json(ApiResponse {
         data: SystemHealth {
             leader: LeaderHealth {
@@ -1410,9 +1451,25 @@ async fn system_health_handler(State(state): State<AppState>) -> Json<ApiRespons
                 status: "healthy".into(),
                 open_pearls: state.pearl_store.stats().map_or(0, |s| (s.open + s.in_progress) as u32),
             },
+            orchestrator: orch_health,
         },
         ok: true,
     })
+}
+
+// ── Orchestrator ──────────────────────────────────────────
+
+async fn orchestrator_status_handler(State(state): State<AppState>) -> Json<ApiResponse<serde_json::Value>> {
+    state.touch();
+    let orch = state.orchestrator.lock().await;
+    let status = serde_json::json!({
+        "state": orch.state_name(),
+        "active_workers": orch.active_workers.len(),
+        "completed": orch.completed_beads.len(),
+        "pool_max_concurrency": orch.pool.max_concurrency(),
+        "pool_active": orch.pool.active_count(),
+    });
+    Json(ApiResponse { data: status, ok: true })
 }
 
 // ── Config ─────────────────────────────────────────────────
