@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Activity, Database, Shield, ShieldCheck, Circle } from 'lucide-react';
 import { api } from '../api';
 import { useProject } from '../context';
@@ -8,7 +9,8 @@ import { Badge } from '../components/ui/badge';
 export function DashboardPage() {
     const [health, setHealth] = useState<any>(null);
     const [error, setError] = useState<string | null>(null);
-    const { projects } = useProject();
+    const { projects, setSelectedProject } = useProject();
+    const navigate = useNavigate();
 
     const load = useCallback(() => {
         api<{ data: any }>('/api/system/health').then((r) => setHealth(r.data)).catch((e) => setError(e.message));
@@ -30,10 +32,10 @@ export function DashboardPage() {
             )}
             {health && (
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-8">
-                    <HealthCard icon={Activity} title="Leader" status={health.leader?.status} detail={`${Math.round(health.leader?.uptime ?? 0)}s`} />
-                    <HealthCard icon={Database} title="Database" status={health.database?.status} detail="SQLite" />
-                    <HealthCard icon={Shield} title="Sandbox" status={health.sandbox?.status} detail={`${health.sandbox?.active_sandboxes ?? 0}/${health.sandbox?.max_concurrency ?? 0}`} />
-                    <HealthCard icon={ShieldCheck} title="Tailscale" status={health.tailscale?.status === 'connected' ? 'healthy' : 'down'} detail={health.tailscale?.hostname ?? 'off'} />
+                    <HealthCard icon={Activity} title="Leader" status={health.leader?.status} detail={`${Math.round(health.leader?.uptime ?? 0)}s`} onClick={() => navigate('/system')} />
+                    <HealthCard icon={Database} title="Database" status={health.database?.status} detail="SQLite" onClick={() => navigate('/system')} />
+                    <HealthCard icon={Shield} title="Sandbox" status={health.sandbox?.status} detail={`${health.sandbox?.active_sandboxes ?? 0}/${health.sandbox?.max_concurrency ?? 0}`} onClick={() => navigate('/system')} />
+                    <HealthCard icon={ShieldCheck} title="Tailscale" status={health.tailscale?.status === 'connected' ? 'healthy' : 'down'} detail={health.tailscale?.hostname ?? 'off'} onClick={() => navigate('/system')} />
                 </div>
             )}
 
@@ -42,7 +44,14 @@ export function DashboardPage() {
                     <h2 className="text-lg font-semibold mb-4">Pearl Summary</h2>
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                         {projects.map((project) => (
-                            <Card key={project.path}>
+                            <Card
+                                key={project.path}
+                                className="cursor-pointer hover:border-primary/50 transition-colors"
+                                onClick={() => {
+                                    setSelectedProject(project.path);
+                                    navigate('/pearls');
+                                }}
+                            >
                                 <CardHeader className="pb-3">
                                     <CardTitle className="text-sm flex items-center gap-2">
                                         <Circle size={14} className="text-primary" />
@@ -71,10 +80,10 @@ export function DashboardPage() {
     );
 }
 
-function HealthCard({ icon: Icon, title, status, detail }: { icon: any; title: string; status: string; detail: string }) {
+function HealthCard({ icon: Icon, title, status, detail, onClick }: { icon: any; title: string; status: string; detail: string; onClick?: () => void }) {
     const color = status === 'healthy' ? 'bg-green-500' : status === 'degraded' ? 'bg-yellow-500' : 'bg-red-500';
     return (
-        <Card>
+        <Card className={onClick ? 'cursor-pointer hover:border-primary/50 transition-colors' : ''} onClick={onClick}>
             <CardContent className="p-4">
                 <div className="flex items-center gap-2 mb-2">
                     <div className={`h-2 w-2 rounded-full shrink-0 ${color}`} />
