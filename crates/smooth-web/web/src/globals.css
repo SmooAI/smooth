@@ -23,6 +23,12 @@
     /* Smoo brand */
     --color-smoo-green: oklch(0.72 0.19 155);
     --color-smoo-dark: oklch(0.12 0.015 260);
+
+    /* Sidebar */
+    --color-sidebar: oklch(0.13 0.015 260);
+    --color-sidebar-foreground: oklch(0.9 0.01 260);
+    --color-sidebar-border: oklch(0.25 0.02 260);
+    --color-sidebar-accent: oklch(0.2 0.02 260);
 }
 
 body {
