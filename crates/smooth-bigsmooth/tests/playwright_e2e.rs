@@ -1,12 +1,10 @@
 //! E2E test: Operator creates a dev server in a sandbox, playwright tests it.
 //!
 //! Requires:
-//! - smooth-operator-runner cross-compiled (scripts/build-operator-runner.sh)
-//! - ~/.smooth/providers.json configured
-//! - SMOOTH_SANDBOXED=1 set **before** running the test binary
-//! - Node.js + playwright installed (npx playwright)
+//! - ~/.smooth/providers.json configured with an LLM provider
+//! - Node.js + playwright installed
 //!
-//!     SMOOTH_SANDBOXED=1 cargo test -p smooth-bigsmooth --test playwright_e2e -- --ignored --nocapture
+//!     cargo test -p smooai-smooth-bigsmooth --test playwright_e2e -- --ignored --nocapture
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -54,17 +52,8 @@ async fn start_server(router: axum::Router) -> u16 {
 #[tokio::test]
 #[ignore = "requires sandbox, LLM provider, and playwright — run with SMOOTH_SANDBOXED=1 --ignored --nocapture"]
 async fn operator_starts_dev_server_playwright_verifies() {
-    // SMOOTH_SANDBOXED must be set before the test binary launches (env var
-    // mutation is unsafe in Rust 1.83+). Verify it's present.
-    if std::env::var("SMOOTH_SANDBOXED")
-        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false)
-    {
-        eprintln!("SMOOTH_SANDBOXED is set — sandbox dispatch will be used");
-    } else {
-        eprintln!("SKIP: SMOOTH_SANDBOXED not set — set it before running: SMOOTH_SANDBOXED=1 cargo test ...");
-        return;
-    }
+    // Runs in whatever dispatch mode is configured (in-process or sandboxed).
+    // No SMOOTH_SANDBOXED gate — sandboxed should be the default.
 
     let Some((router, tmp)) = test_app() else {
         eprintln!("SKIP: smooth-dolt binary not available");
@@ -77,7 +66,8 @@ async fn operator_starts_dev_server_playwright_verifies() {
     // Send a task via SSE — ask the operator to create and start a simple
     // HTTP server, then expose it via forward_port.
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(300)) // 5 min — agent needs time
+        .read_timeout(Duration::from_secs(120)) // per-chunk timeout, not total
+        .connect_timeout(Duration::from_secs(30))
         .build()
         .expect("build reqwest client");
 
@@ -105,28 +95,56 @@ async fn operator_starts_dev_server_playwright_verifies() {
 
     assert!(resp.status().is_success(), "should get 200, got {}", resp.status());
 
-    // Read SSE events, looking for the forwarded port number.
-    let body = resp.text().await.expect("read body");
+    // Stream SSE events as they arrive (don't wait for entire body).
+    use futures_util::StreamExt;
+    let mut stream = resp.bytes_stream();
+    let mut buf = String::new();
     let mut forwarded_port: Option<u16> = None;
+    let mut done = false;
 
-    for line in body.lines() {
-        if let Some(data) = line.strip_prefix("data: ") {
-            if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                // Look for port forward info in TokenDelta content or ToolCallComplete.
-                if let Some(content) = event.get("content").and_then(|c| c.as_str()) {
-                    // Try to extract a port number from the response.
-                    for word in content.split_whitespace() {
-                        if let Ok(p) = word.trim_matches(|c: char| !c.is_ascii_digit()).parse::<u16>() {
-                            if (10000..65535).contains(&p) {
-                                forwarded_port = Some(p);
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[stream] error: {e}");
+                break;
+            }
+        };
+        let text = String::from_utf8_lossy(&chunk);
+        buf.push_str(&text);
+
+        // Process complete lines
+        while let Some(nl) = buf.find('\n') {
+            let line = buf[..nl].to_string();
+            buf.drain(..=nl);
+
+            if let Some(data) = line.strip_prefix("data: ") {
+                if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(content) = event.get("content").and_then(|c| c.as_str()) {
+                        for word in content.split_whitespace() {
+                            if let Ok(p) = word.trim_matches(|c: char| !c.is_ascii_digit()).parse::<u16>() {
+                                if (10000..65535).contains(&p) {
+                                    forwarded_port = Some(p);
+                                }
                             }
                         }
                     }
-                }
-                if let Some(ty) = event.get("type").and_then(|t| t.as_str()) {
-                    eprintln!("[event] {ty}");
+                    if let Some(ty) = event.get("type").and_then(|t| t.as_str()) {
+                        let detail = event.get("message").and_then(|m| m.as_str()).unwrap_or("");
+                        if detail.is_empty() {
+                            eprintln!("[event] {ty}");
+                        } else {
+                            eprintln!("[event] {ty}: {detail}");
+                        }
+                        if ty == "Completed" || ty == "Error" {
+                            done = true;
+                        }
+                    }
                 }
             }
+        }
+        if done {
+            break;
         }
     }
 
@@ -297,7 +315,12 @@ export default App
                     }
                 }
                 if let Some(ty) = event.get("type").and_then(|t| t.as_str()) {
-                    eprintln!("[event] {ty}");
+                    let detail = event.get("message").and_then(|m| m.as_str()).unwrap_or("");
+                    if detail.is_empty() {
+                        eprintln!("[event] {ty}");
+                    } else {
+                        eprintln!("[event] {ty}: {detail}");
+                    }
                 }
             }
         }

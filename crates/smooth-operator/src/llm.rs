@@ -395,11 +395,18 @@ impl LlmClient {
         // but prevents infinite hangs if the provider accepts the connection
         // and goes silent. The per-chunk idle timeout (120s in chat_stream)
         // and per-iteration wall clock (600s in agent.rs) provide tighter guards.
-        let client = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(600))
-            .connect_timeout(std::time::Duration::from_secs(30))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+            .connect_timeout(std::time::Duration::from_secs(30));
+
+        // Kimi Code API requires a recognized coding agent User-Agent for
+        // subscription authentication. Without this, the API returns 403
+        // "only available for Coding Agents". See: openclaw/openclaw#30099
+        if config.api_url.contains("api.kimi.com/coding") {
+            builder = builder.user_agent("claude-code/0.1.0");
+        }
+
+        let client = builder.build().unwrap_or_else(|_| reqwest::Client::new());
         Self { config, client }
     }
 
