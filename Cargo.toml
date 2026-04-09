@@ -119,9 +119,9 @@ tokio-tungstenite = "0.26"
 microsandbox = "0.3"
 
 # Workspace crates
-smooth-operator = { path = "crates/smooth-operator" }
+smooth-operator = { path = "crates/smooth-operator", version = "0.2.0" }
 smooth-bigsmooth = { path = "crates/smooth-bigsmooth" }
-smooth-policy = { path = "crates/smooth-policy" }
+smooth-policy = { path = "crates/smooth-policy", version = "0.2.0" }
 smooth-web = { path = "crates/smooth-web" }
 smooth-scribe = { path = "crates/smooth-scribe" }
 smooth-wonk = { path = "crates/smooth-wonk" }
@@ -130,6 +130,6 @@ smooth-narc = { path = "crates/smooth-narc" }
 smooth-archivist = { path = "crates/smooth-archivist" }
 smooth-plugin = { path = "crates/smooth-plugin" }
 smooth-code = { path = "crates/smooth-code" }
-smooth-pearls = { path = "crates/smooth-pearls" }
+smooth-pearls = { path = "crates/smooth-pearls", version = "0.2.0" }
 smooth-diver = { path = "crates/smooth-diver" }
 smooth-bootstrap-bill = { path = "crates/smooth-bootstrap-bill", default-features = false }

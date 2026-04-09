@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Smooth Operator — Rust-native AI agent framework with built-in checkpointing, tool system, and LLM client"
+readme = "README.md"
+keywords = ["ai", "agent", "llm", "tool-use", "orchestration"]
+categories = ["api-bindings", "asynchronous"]
 
 [features]
 default = []

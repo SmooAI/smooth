@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Smooth Pearls — built-in pearl tracker. Dolt-backed dependency-graph work items with version control and git sync."
+readme = "README.md"
+keywords = ["issue-tracker", "work-items", "dolt", "project-management"]
+categories = ["development-tools", "database"]
 
 [dependencies]
 serde.workspace = true

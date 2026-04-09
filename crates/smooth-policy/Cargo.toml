@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Smooth policy types — TOML-based access control for Microsandbox operators"
+readme = "README.md"
+keywords = ["policy", "access-control", "toml", "security", "ai-agents"]
+categories = ["config", "authentication"]
 
 [dependencies]
 serde.workspace = true
