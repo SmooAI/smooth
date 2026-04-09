@@ -1594,5 +1594,4 @@ mod tests {
         let config = LlmConfig::anthropic("sk-ant-test");
         assert_eq!(config.api_format, ApiFormat::Anthropic);
     }
-
 }

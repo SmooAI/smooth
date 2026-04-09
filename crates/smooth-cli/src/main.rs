@@ -7,8 +7,8 @@ mod hooks;
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
-use dialoguer::{Input, Password, Select, theme::ColorfulTheme};
 use clap::{Parser, Subcommand};
+use dialoguer::{theme::ColorfulTheme, Input, Password, Select};
 use owo_colors::OwoColorize;
 
 /// Smooth — AI agent orchestration platform.
@@ -504,10 +504,7 @@ async fn cmd_up(no_leader: bool, port: u16, foreground: bool) -> Result<()> {
         if let Some(parent) = log_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let log_file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)?;
+        let log_file = std::fs::OpenOptions::new().create(true).append(true).open(&log_path)?;
         let log_err = log_file.try_clone()?;
 
         let exe = std::env::current_exe()?;
@@ -585,9 +582,7 @@ async fn cmd_down() -> Result<()> {
     let pid: u32 = pid_str.trim().parse().context("invalid pid file")?;
 
     // Send SIGTERM
-    let status = std::process::Command::new("kill")
-        .arg(pid.to_string())
-        .status()?;
+    let status = std::process::Command::new("kill").arg(pid.to_string()).status()?;
 
     if status.success() {
         println!("Smooth stopped (pid {pid}).");
@@ -679,13 +674,29 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
 
             // Provider catalog: (id, display name, models, needs_key)
             let catalog: Vec<(&str, &str, Vec<&str>, bool)> = vec![
-                ("kimi-code",  "Kimi Code",   vec!["kimi-for-coding"], true),
-                ("kimi",       "Kimi",        vec!["kimi-k2.5", "kimi-k2", "moonshot-v1-auto"], true),
-                ("openrouter", "OpenRouter",   vec!["deepseek/deepseek-v3", "openai/gpt-4o", "anthropic/claude-sonnet-4", "moonshot/kimi-k2.5", "google/gemini-flash-2.0"], true),
-                ("openai",     "OpenAI",       vec!["gpt-4o", "gpt-4o-mini", "o3-mini", "gpt-5.4-mini"], true),
-                ("anthropic",  "Anthropic",    vec!["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-haiku-4-5-20251001"], true),
-                ("google",     "Google AI",    vec!["gemini-2.5-flash", "gemini-2.5-pro"], true),
-                ("ollama",     "Ollama (local)", vec!["llama3.3", "qwen3", "deepseek-r1"], false),
+                ("kimi-code", "Kimi Code", vec!["kimi-for-coding"], true),
+                ("kimi", "Kimi", vec!["kimi-k2.5", "kimi-k2", "moonshot-v1-auto"], true),
+                (
+                    "openrouter",
+                    "OpenRouter",
+                    vec![
+                        "deepseek/deepseek-v3",
+                        "openai/gpt-4o",
+                        "anthropic/claude-sonnet-4",
+                        "moonshot/kimi-k2.5",
+                        "google/gemini-flash-2.0",
+                    ],
+                    true,
+                ),
+                ("openai", "OpenAI", vec!["gpt-4o", "gpt-4o-mini", "o3-mini", "gpt-5.4-mini"], true),
+                (
+                    "anthropic",
+                    "Anthropic",
+                    vec!["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-haiku-4-5-20251001"],
+                    true,
+                ),
+                ("google", "Google AI", vec!["gemini-2.5-flash", "gemini-2.5-pro"], true),
+                ("ollama", "Ollama (local)", vec!["llama3.3", "qwen3", "deepseek-r1"], false),
             ];
 
             // Step 1: Pick provider (interactive if not given)
@@ -728,9 +739,7 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
             } else if let Some(k) = api_key {
                 k
             } else {
-                Password::with_theme(&ColorfulTheme::default())
-                    .with_prompt("API key")
-                    .interact()?
+                Password::with_theme(&ColorfulTheme::default()).with_prompt("API key").interact()?
             };
 
             // Step 4: Test the connection
