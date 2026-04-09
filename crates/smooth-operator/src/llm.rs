@@ -241,6 +241,8 @@ pub enum StreamEvent {
 /// A streaming chat completion chunk (OpenAI SSE format).
 #[derive(Debug, Deserialize)]
 struct StreamChunk {
+    /// Some providers (LLM Gateway, Azure) send usage-only chunks without choices.
+    #[serde(default)]
     choices: Vec<StreamChoice>,
     #[serde(default)]
     usage: Option<ChatUsage>,
