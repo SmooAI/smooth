@@ -92,27 +92,29 @@ export function PearlsPage() {
                 <p className="text-muted-foreground">No pearls found for this project.</p>
             )}
             {selectedProject && !loading && pearls.length > 0 && (
-                <div className="grid grid-cols-3 gap-6">
-                    {grouped.map((col) => (
-                        <div key={col.key}>
-                            <div className="flex items-center gap-2 mb-4">
-                                <Badge variant={col.variant}>{col.label}</Badge>
-                                <span className="text-sm text-muted-foreground">
-                                    {col.pearls.length}
-                                </span>
+                <div className="overflow-x-auto -mx-6 px-6 pb-4">
+                    <div className="flex gap-4 min-w-max md:min-w-0 md:grid md:grid-cols-3 md:gap-6">
+                        {grouped.map((col) => (
+                            <div key={col.key} className="w-72 shrink-0 md:w-auto">
+                                <div className="flex items-center gap-2 mb-4 sticky top-0 bg-background py-1">
+                                    <Badge variant={col.variant}>{col.label}</Badge>
+                                    <span className="text-sm text-muted-foreground">
+                                        {col.pearls.length}
+                                    </span>
+                                </div>
+                                <div>
+                                    {col.pearls.map((pearl) => (
+                                        <PearlCard key={pearl.id} pearl={pearl} />
+                                    ))}
+                                    {col.pearls.length === 0 && (
+                                        <p className="text-xs text-muted-foreground italic">
+                                            No {col.label.toLowerCase()} pearls
+                                        </p>
+                                    )}
+                                </div>
                             </div>
-                            <div>
-                                {col.pearls.map((pearl) => (
-                                    <PearlCard key={pearl.id} pearl={pearl} />
-                                ))}
-                                {col.pearls.length === 0 && (
-                                    <p className="text-xs text-muted-foreground italic">
-                                        No {col.label.toLowerCase()} pearls
-                                    </p>
-                                )}
-                            </div>
-                        </div>
-                    ))}
+                        ))}
+                    </div>
                 </div>
             )}
         </div>

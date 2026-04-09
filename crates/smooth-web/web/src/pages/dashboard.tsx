@@ -29,7 +29,7 @@ export function DashboardPage() {
                 </div>
             )}
             {health && (
-                <div className="grid grid-cols-4 gap-4 mb-8">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-8">
                     <HealthCard icon={Activity} title="Leader" status={health.leader?.status} detail={`${Math.round(health.leader?.uptime ?? 0)}s`} />
                     <HealthCard icon={Database} title="Database" status={health.database?.status} detail="SQLite" />
                     <HealthCard icon={Shield} title="Sandbox" status={health.sandbox?.status} detail={`${health.sandbox?.active_sandboxes ?? 0}/${health.sandbox?.max_concurrency ?? 0}`} />
@@ -72,14 +72,14 @@ export function DashboardPage() {
 }
 
 function HealthCard({ icon: Icon, title, status, detail }: { icon: any; title: string; status: string; detail: string }) {
-    const variant = status === 'healthy' ? 'success' : status === 'degraded' ? 'warning' : 'destructive';
+    const color = status === 'healthy' ? 'bg-green-500' : status === 'degraded' ? 'bg-yellow-500' : 'bg-red-500';
     return (
         <Card>
             <CardContent className="p-4">
                 <div className="flex items-center gap-2 mb-2">
-                    <Badge variant={variant} className="h-2 w-2 p-0 rounded-full" />
-                    <Icon size={14} className="text-muted-foreground" />
-                    <span className="font-semibold text-sm">{title}</span>
+                    <div className={`h-2 w-2 rounded-full shrink-0 ${color}`} />
+                    <Icon size={14} className="text-muted-foreground shrink-0" />
+                    <span className="font-semibold text-sm truncate">{title}</span>
                 </div>
                 <div className="text-xs text-muted-foreground">{detail}</div>
             </CardContent>
