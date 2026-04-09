@@ -885,9 +885,77 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
                 (id.to_string(), models.clone(), *needs_key)
             };
 
-            // Step 2: Pick model
-            // For providers with many models (llmgateway, openrouter), try fetching
-            // the live model list from /v1/models and let the user search/filter.
+            // Step 2: Get API key FIRST (needed before fetching models)
+            let api_key = if !needs_key {
+                String::new()
+            } else if let Some(k) = api_key {
+                k
+            } else {
+                Password::with_theme(&ColorfulTheme::default()).with_prompt("API key").interact()?
+            };
+
+            // Step 3: Choose a preset or single model
+            // For providers that support presets (openrouter, llmgateway), offer
+            // "Apply a preset" as the first option before individual model selection.
+
+            let provider_presets: Vec<(&str, &str, &str)> = smooth_operator::providers::Preset::ALL
+                .iter()
+                .filter(|(name, _, _)| {
+                    name.starts_with(&provider_id)
+                        || smooth_operator::providers::Preset::from_name(name)
+                            .map(|p| p.provider_id() == provider_id)
+                            .unwrap_or(false)
+                })
+                .copied()
+                .collect();
+
+            // Ask: preset or single model?
+            let use_preset = if !provider_presets.is_empty() {
+                let choices = vec![
+                    format!(
+                        "Apply a routing preset ({})",
+                        provider_presets.iter().map(|(n, _, _)| *n).collect::<Vec<_>>().join(", ")
+                    ),
+                    "Select a single model".to_string(),
+                ];
+                let selection = Select::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Setup mode")
+                    .items(&choices)
+                    .default(0)
+                    .interact()?;
+                selection == 0
+            } else {
+                false
+            };
+
+            if use_preset {
+                // Apply preset — save and done
+                let preset_choice = if provider_presets.len() == 1 {
+                    0
+                } else {
+                    let names: Vec<&str> = provider_presets.iter().map(|(_, title, _)| *title).collect();
+                    Select::with_theme(&ColorfulTheme::default())
+                        .with_prompt("Select a preset")
+                        .items(&names)
+                        .default(0)
+                        .interact()?
+                };
+
+                let preset_name = provider_presets[preset_choice].0;
+                let preset = smooth_operator::providers::Preset::from_name(preset_name).ok_or_else(|| anyhow::anyhow!("unknown preset"))?;
+
+                let registry = smooth_operator::providers::ProviderRegistry::from_preset(preset, &api_key);
+                registry.save_to_file(path)?;
+
+                println!("\n  {} {} with {} preset", "✓".green().bold(), provider_id.green().bold(), preset_name.cyan());
+                println!("  Saved to: {}\n", path.display().to_string().dimmed());
+
+                // Show routing
+                Box::pin(cmd_routing(RoutingCommands::Show)).await?;
+                return Ok(());
+            }
+
+            // Single model selection
             let model = if models.len() == 1 {
                 models[0].to_string()
             } else {
@@ -936,7 +1004,6 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
                 };
 
                 if all_models.len() > 20 {
-                    // Too many for a simple select — use FuzzySelect for search
                     let selection = dialoguer::FuzzySelect::with_theme(&ColorfulTheme::default())
                         .with_prompt("Search and select a model")
                         .items(&all_models)
@@ -951,15 +1018,6 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
                         .interact()?;
                     all_models[selection].clone()
                 }
-            };
-
-            // Step 3: Get API key (interactive if not given)
-            let api_key = if !needs_key {
-                String::new()
-            } else if let Some(k) = api_key {
-                k
-            } else {
-                Password::with_theme(&ColorfulTheme::default()).with_prompt("API key").interact()?
             };
 
             // Step 4: Test the connection

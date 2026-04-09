@@ -212,8 +212,8 @@ impl Default for ModelRouting {
             thinking: ModelSlot::new("openrouter", "deepseek/deepseek-r1"),
             coding: ModelSlot::new("openrouter", "openai/gpt-4o"),
             planning: ModelSlot::new("openrouter", "moonshot/kimi-k2.5"),
-            reviewing: ModelSlot::new("openrouter", "zhipu/glm-5.1"),
-            judge: ModelSlot::new("openrouter", "google/gemini-flash-2.0"),
+            reviewing: ModelSlot::new("openrouter", "z-ai/glm-5.1"),
+            judge: ModelSlot::new("openrouter", "google/gemini-2.5-flash"),
             summarize: ModelSlot::new("openrouter", "minimax/minimax-m2.5"),
             default: ModelSlot::new("openrouter", "openai/gpt-4o"),
         }
@@ -255,28 +255,32 @@ impl ProviderRegistry {
     pub fn from_preset(preset: Preset, api_key: &str) -> Self {
         let mut registry = Self::new();
 
-        let low_cost_routing = |provider: &str| ModelRouting {
-            // GLM-5.1 for thinking/planning (#1 SWE-Bench Pro, 58.4%)
-            // MiniMax-M2.5 for coding (80.2% SWE-bench Verified, $0.30/M)
-            // DeepSeek-V3.2 as default/reviewing ($0.28/M, great all-rounder)
-            // Gemini Flash for judge (cheapest fast model)
-            thinking: ModelSlot::new(provider, "zhipu/glm-5.1"),
-            coding: ModelSlot::new(provider, "minimax/minimax-m2.5").with_fallback(ModelSlot::new(provider, "deepseek/deepseek-v3.2")),
-            planning: ModelSlot::new(provider, "zhipu/glm-5.1"),
-            reviewing: ModelSlot::new(provider, "deepseek/deepseek-v3.2"),
-            judge: ModelSlot::new(provider, "google/gemini-flash-2.0"),
-            summarize: ModelSlot::new(provider, "deepseek/deepseek-v3.2"),
-            default: ModelSlot::new(provider, "deepseek/deepseek-v3.2"),
-        };
-
         match preset {
             Preset::OpenRouterLowCost => {
+                // OpenRouter uses provider-prefixed model IDs (e.g. z-ai/glm-5.1)
                 registry.register_provider(ProviderConfig::openrouter(api_key));
-                registry.routing = low_cost_routing("openrouter");
+                registry.routing = ModelRouting {
+                    thinking: ModelSlot::new("openrouter", "z-ai/glm-5.1"),
+                    coding: ModelSlot::new("openrouter", "minimax/minimax-m2.5").with_fallback(ModelSlot::new("openrouter", "deepseek/deepseek-v3.2")),
+                    planning: ModelSlot::new("openrouter", "z-ai/glm-5.1"),
+                    reviewing: ModelSlot::new("openrouter", "deepseek/deepseek-v3.2"),
+                    judge: ModelSlot::new("openrouter", "google/gemini-2.5-flash"),
+                    summarize: ModelSlot::new("openrouter", "deepseek/deepseek-v3.2"),
+                    default: ModelSlot::new("openrouter", "deepseek/deepseek-v3.2"),
+                };
             }
             Preset::LlmGatewayLowCost => {
+                // LLM Gateway uses bare model names. GLM-5.1 not yet available, using GLM-5.
                 registry.register_provider(ProviderConfig::llmgateway(api_key));
-                registry.routing = low_cost_routing("llmgateway");
+                registry.routing = ModelRouting {
+                    thinking: ModelSlot::new("llmgateway", "glm-5"),
+                    coding: ModelSlot::new("llmgateway", "minimax-m2.5").with_fallback(ModelSlot::new("llmgateway", "deepseek-v3.2")),
+                    planning: ModelSlot::new("llmgateway", "glm-5"),
+                    reviewing: ModelSlot::new("llmgateway", "deepseek-v3.2"),
+                    judge: ModelSlot::new("llmgateway", "gemini-2.5-flash"),
+                    summarize: ModelSlot::new("llmgateway", "deepseek-v3.2"),
+                    default: ModelSlot::new("llmgateway", "deepseek-v3.2"),
+                };
             }
             Preset::OpenAI => {
                 registry.register_provider(ProviderConfig::openai(api_key));
@@ -549,8 +553,8 @@ mod tests {
         assert_eq!(routing.thinking.model, "deepseek/deepseek-r1");
         assert_eq!(routing.coding.model, "openai/gpt-4o");
         assert_eq!(routing.planning.model, "moonshot/kimi-k2.5");
-        assert_eq!(routing.reviewing.model, "zhipu/glm-5.1");
-        assert_eq!(routing.judge.model, "google/gemini-flash-2.0");
+        assert_eq!(routing.reviewing.model, "z-ai/glm-5.1");
+        assert_eq!(routing.judge.model, "google/gemini-2.5-flash");
         assert_eq!(routing.summarize.model, "minimax/minimax-m2.5");
         assert_eq!(routing.default.model, "openai/gpt-4o");
     }
@@ -596,7 +600,7 @@ mod tests {
         assert_eq!(config.model, "openai/gpt-4o");
 
         let config = registry.llm_config_for(Activity::Judge).unwrap();
-        assert_eq!(config.model, "google/gemini-flash-2.0");
+        assert_eq!(config.model, "google/gemini-2.5-flash");
     }
 
     // 7. llm_config_for falls back when provider missing
@@ -767,10 +771,10 @@ mod tests {
         assert_eq!(planning.model, "moonshot/kimi-k2.5");
 
         let reviewing = registry.llm_config_for(Activity::Reviewing).unwrap();
-        assert_eq!(reviewing.model, "zhipu/glm-5.1");
+        assert_eq!(reviewing.model, "z-ai/glm-5.1");
 
         let judge = registry.llm_config_for(Activity::Judge).unwrap();
-        assert_eq!(judge.model, "google/gemini-flash-2.0");
+        assert_eq!(judge.model, "google/gemini-2.5-flash");
 
         let summarize = registry.llm_config_for(Activity::Summarize).unwrap();
         assert_eq!(summarize.model, "minimax/minimax-m2.5");
