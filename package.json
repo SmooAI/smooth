@@ -19,7 +19,7 @@
     "scripts": {
         "prepare": "husky",
         "pre-commit-check": "cargo fmt -- --check && cargo clippy --workspace --all-targets",
-        "install:th": "cargo install --path crates/smooth-cli",
+        "install:th": "cargo install --path crates/smooth-cli --force",
         "version:sync": "node scripts/sync-versions.mjs",
         "ci:publish": "node scripts/ci-publish.mjs",
         "changeset": "changeset",
