@@ -258,6 +258,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/steering/{bead_id}/resume", post(resume_handler))
         .route("/api/steering/{bead_id}/steer", post(steer_handler))
         .route("/api/steering/{bead_id}/cancel", post(cancel_handler))
+        // Delegation — operator-to-operator delegation via sub-pearls
+        .route("/api/delegate", post(delegate_handler))
+        .route("/api/delegate/{id}/status", get(delegate_status_handler))
         // Orchestrator
         .route("/api/orchestrator/status", get(orchestrator_status_handler))
         // Jira
@@ -2058,6 +2061,123 @@ async fn jira_status_handler(State(state): State<AppState>) -> Json<ApiResponse<
     })
 }
 
+// ── Delegation ────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct DelegateRequest {
+    /// The operator requesting delegation.
+    pub parent_operator_id: String,
+    /// The task to delegate.
+    pub task: String,
+    /// Optional model override; if absent the orchestrator picks one.
+    pub model: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct DelegateResponse {
+    pub delegation_id: String,
+    pub status: String,
+}
+
+#[derive(Serialize)]
+pub struct DelegateStatusResponse {
+    pub delegation_id: String,
+    pub status: String,
+    /// Last comment on the pearl, if completed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+}
+
+async fn delegate_handler(State(state): State<AppState>, Json(body): Json<DelegateRequest>) -> Json<ApiResponse<serde_json::Value>> {
+    state.touch();
+
+    // 1. Create a sub-pearl (subtask type) linked to the parent operator.
+    let title = format!("[delegated] {}", truncate_str(&body.task, 80));
+    let pearl = match crate::pearls::create_pearl(&state.pearl_store, &title, &body.task, "subtask", 1) {
+        Ok(p) => p,
+        Err(e) => {
+            return Json(ApiResponse {
+                data: serde_json::json!({"error": e.to_string()}),
+                ok: false,
+            });
+        }
+    };
+    let pearl_id = pearl.id.clone();
+
+    // 2. Leave as Open so the orchestrator's `ready()` picks it up on the
+    //    next scheduling cycle. The orchestrator will transition it to
+    //    InProgress when it dispatches an operator.
+
+    // 3. Add a comment noting delegation origin.
+    let comment = format!(
+        "[DELEGATION] Delegated by operator {} | model: {}",
+        body.parent_operator_id,
+        body.model.as_deref().unwrap_or("inherit")
+    );
+    let _ = state.pearl_store.add_comment(&pearl_id, &comment);
+
+    // 4. Notify the orchestrator so it can schedule dispatch.
+    {
+        let mut orch = state.orchestrator.lock().await;
+        orch.nudge();
+    }
+
+    let resp = DelegateResponse {
+        delegation_id: pearl_id,
+        status: "dispatched".into(),
+    };
+    Json(ApiResponse {
+        data: serde_json::to_value(resp).unwrap_or(serde_json::json!(null)),
+        ok: true,
+    })
+}
+
+async fn delegate_status_handler(State(state): State<AppState>, Path(id): Path<String>) -> Json<ApiResponse<serde_json::Value>> {
+    state.touch();
+
+    // Look up the pearl.
+    let pearl = match crate::pearls::get_pearl(&state.pearl_store, &id) {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return Json(ApiResponse {
+                data: serde_json::json!({"error": "delegation not found"}),
+                ok: false,
+            });
+        }
+        Err(e) => {
+            return Json(ApiResponse {
+                data: serde_json::json!({"error": e.to_string()}),
+                ok: false,
+            });
+        }
+    };
+
+    let (status_str, result) = match pearl.status {
+        smooth_pearls::PearlStatus::Closed => {
+            // Grab the last comment as the result.
+            let last_comment = state
+                .pearl_store
+                .get_comments(&id)
+                .ok()
+                .and_then(|comments| comments.last().map(|c| c.content.clone()));
+            ("completed".to_string(), last_comment)
+        }
+        smooth_pearls::PearlStatus::InProgress => ("in_progress".to_string(), None),
+        smooth_pearls::PearlStatus::Open => ("in_progress".to_string(), None),
+        smooth_pearls::PearlStatus::Deferred => ("failed".to_string(), None),
+    };
+
+    let resp = DelegateStatusResponse {
+        delegation_id: id,
+        status: status_str,
+        result,
+    };
+    Json(ApiResponse {
+        data: serde_json::to_value(resp).unwrap_or(serde_json::json!(null)),
+        ok: true,
+    })
+}
+
 async fn jira_sync_handler(State(state): State<AppState>) -> Json<ApiResponse<crate::jira::SyncResult>> {
     state.touch();
     Json(ApiResponse {
@@ -2074,6 +2194,7 @@ async fn jira_sync_handler(State(state): State<AppState>) -> Json<ApiResponse<cr
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use tower::ServiceExt;
 
     #[test]
     fn test_health_response_serializes() {
@@ -2157,5 +2278,186 @@ mod tests {
         assert!(req.model.is_none());
         assert!(req.budget.is_none());
         assert!(req.working_dir.is_none());
+    }
+
+    // ── Delegation tests ──────────────────────────────────────
+
+    #[test]
+    fn test_delegate_request_deserializes() {
+        let json = r#"{"parent_operator_id":"op-123","task":"Write unit tests","model":"kimi-k2.5"}"#;
+        let req: DelegateRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.parent_operator_id, "op-123");
+        assert_eq!(req.task, "Write unit tests");
+        assert_eq!(req.model.as_deref(), Some("kimi-k2.5"));
+    }
+
+    #[test]
+    fn test_delegate_request_minimal() {
+        let json = r#"{"parent_operator_id":"op-1","task":"Do something"}"#;
+        let req: DelegateRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.parent_operator_id, "op-1");
+        assert_eq!(req.task, "Do something");
+        assert!(req.model.is_none());
+    }
+
+    #[test]
+    fn test_delegate_response_serializes() {
+        let resp = DelegateResponse {
+            delegation_id: "th-abc123".into(),
+            status: "dispatched".into(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"delegation_id\":\"th-abc123\""));
+        assert!(json.contains("\"status\":\"dispatched\""));
+    }
+
+    #[test]
+    fn test_delegate_status_response_completed() {
+        let resp = DelegateStatusResponse {
+            delegation_id: "th-abc123".into(),
+            status: "completed".into(),
+            result: Some("All tests pass.".into()),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"status\":\"completed\""));
+        assert!(json.contains("All tests pass."));
+    }
+
+    #[test]
+    fn test_delegate_status_response_in_progress_no_result() {
+        let resp = DelegateStatusResponse {
+            delegation_id: "th-xyz789".into(),
+            status: "in_progress".into(),
+            result: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"status\":\"in_progress\""));
+        // result field should be absent (skip_serializing_if = None)
+        assert!(!json.contains("\"result\""));
+    }
+
+    #[tokio::test]
+    async fn test_delegate_endpoint_creates_pearl() {
+        let db = Database::open(&PathBuf::from(":memory:")).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let Ok(pearl_store) = smooth_pearls::PearlStore::init(&tmp.path().join("dolt")) else {
+            return; // Dolt binary not available, skip
+        };
+        let state = AppState::new(db, pearl_store);
+        let app = build_router(state.clone());
+
+        let body = serde_json::json!({
+            "parent_operator_id": "op-test",
+            "task": "Write unit tests for the auth module"
+        });
+
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/delegate")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), 200);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let resp: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["data"]["status"], "dispatched");
+        let delegation_id = resp["data"]["delegation_id"].as_str().unwrap();
+        assert!(delegation_id.starts_with("th-"), "pearl ID should start with th-");
+
+        // Verify the pearl was created in the store
+        let pearl = crate::pearls::get_pearl(&state.pearl_store, delegation_id)
+            .unwrap()
+            .expect("pearl should exist");
+        assert!(pearl.title.contains("[delegated]"));
+        assert_eq!(pearl.status, smooth_pearls::PearlStatus::Open);
+    }
+
+    #[tokio::test]
+    async fn test_delegate_status_endpoint_returns_status() {
+        let db = Database::open(&PathBuf::from(":memory:")).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let Ok(pearl_store) = smooth_pearls::PearlStore::init(&tmp.path().join("dolt")) else {
+            return;
+        };
+
+        // Create a pearl directly to check status.
+        let pearl = crate::pearls::create_pearl(&pearl_store, "test delegation", "test", "subtask", 1).unwrap();
+        let pearl_id = pearl.id.clone();
+
+        let state = AppState::new(db, pearl_store);
+        let app = build_router(state.clone());
+
+        // Check status — should be in_progress (Open maps to in_progress).
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri(&format!("/api/delegate/{pearl_id}/status"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), 200);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let resp: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["data"]["status"], "in_progress");
+        assert_eq!(resp["data"]["delegation_id"], pearl_id);
+
+        // Now close the pearl and check again.
+        let _ = state.pearl_store.close(&[&pearl_id]);
+        let app2 = build_router(state);
+        let response2 = app2
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri(&format!("/api/delegate/{pearl_id}/status"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body_bytes2 = axum::body::to_bytes(response2.into_body(), usize::MAX).await.unwrap();
+        let resp2: serde_json::Value = serde_json::from_slice(&body_bytes2).unwrap();
+        assert_eq!(resp2["data"]["status"], "completed");
+    }
+
+    #[tokio::test]
+    async fn test_delegate_status_not_found() {
+        let db = Database::open(&PathBuf::from(":memory:")).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let Ok(pearl_store) = smooth_pearls::PearlStore::init(&tmp.path().join("dolt")) else {
+            return;
+        };
+        let state = AppState::new(db, pearl_store);
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/api/delegate/th-nonexistent/status")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let resp: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(resp["ok"], false);
+        assert!(resp["data"]["error"].as_str().unwrap().contains("not found"));
     }
 }

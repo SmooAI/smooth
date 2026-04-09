@@ -111,6 +111,22 @@ impl Orchestrator {
         self
     }
 
+    /// Nudge the orchestrator back to the Idle state so it re-schedules on the
+    /// next step. Used when new work is injected externally (e.g. delegation).
+    pub fn nudge(&mut self) {
+        if matches!(self.state, OrchestratorState::Idle) {
+            // Already idle, nothing to do — the next step() will schedule.
+        } else {
+            tracing::info!("orchestrator nudged — will re-schedule on next step");
+        }
+        // Only reset to Idle if we're not actively dispatching or monitoring.
+        // In those states a nudge is a no-op; the new pearl will be picked up
+        // once the current cycle returns to Idle.
+        if matches!(self.state, OrchestratorState::Idle | OrchestratorState::Scheduling { .. }) {
+            self.state = OrchestratorState::Idle;
+        }
+    }
+
     /// Broadcast a `ServerEvent` to all connected clients (if event_tx is set).
     fn broadcast(&self, event: ServerEvent) {
         if let Some(tx) = &self.event_tx {

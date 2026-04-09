@@ -39,6 +39,7 @@
 
 #![allow(clippy::expect_used)]
 
+mod delegate;
 mod pearl_tools;
 mod port_forward;
 
@@ -602,6 +603,16 @@ async fn main() {
     });
 
     tools.register(port_forward::ForwardPortTool);
+
+    // Remote delegation tool — only in sandboxed mode (SMOOTH_API_URL points
+    // to Big Smooth on the host). In host/in-process mode the existing
+    // DelegationTool from smooth-operator handles delegation.
+    if let Ok(smooth_api_url) = std::env::var("SMOOTH_API_URL") {
+        if !smooth_api_url.trim().is_empty() {
+            tracing::info!(api_url = %smooth_api_url, "registering RemoteDelegateTool (sandboxed mode)");
+            tools.register(delegate::RemoteDelegateTool::new(&smooth_api_url, &config.operator_id));
+        }
+    }
 
     // Pearl tools — if workspace has .smooth/dolt/, register direct Dolt
     // pearl tools so the agent can create/list/close pearls locally.

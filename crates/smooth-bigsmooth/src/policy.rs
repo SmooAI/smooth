@@ -155,6 +155,7 @@ fn task_tools_policy(phase: &str, task_type: TaskType) -> ToolsPolicy {
                     "lint_fix".into(),
                     "test_run".into(),
                     "spawn_subtask".into(),
+                    "delegate".into(),
                     "git_commit".into(),
                     "forward_port".into(),
                 ]);
@@ -417,6 +418,7 @@ fn tools_policy(phase: &str) -> ToolsPolicy {
             "lint_fix".into(),
             "test_run".into(),
             "spawn_subtask".into(),
+            "delegate".into(),
             "forward_port".into(),
         ]);
     }
