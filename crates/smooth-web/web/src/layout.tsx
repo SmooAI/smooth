@@ -1,5 +1,12 @@
 import { Link, Outlet, useLocation } from "react-router-dom";
-import { LayoutDashboard, Circle, Bot, MessageSquare, Settings } from "lucide-react";
+import {
+    LayoutDashboard,
+    Circle,
+    Bot,
+    MessageSquare,
+    Settings,
+    ChevronRight,
+} from "lucide-react";
 import { useProject } from "./context";
 import { Select } from "./components/ui/select";
 import {
@@ -9,15 +16,58 @@ import {
     SidebarContent,
     SidebarTrigger,
     SidebarInset,
+    useSidebar,
 } from "./components/ui/sidebar";
 
 const NAV = [
-    { path: "/", label: "Dashboard", icon: LayoutDashboard },
-    { path: "/pearls", label: "Pearls", icon: Circle },
-    { path: "/operators", label: "Operators", icon: Bot },
-    { path: "/chat", label: "Chat", icon: MessageSquare },
-    { path: "/system", label: "System", icon: Settings },
+    { path: "/", label: "Dashboard", section: "Overview", icon: LayoutDashboard },
+    { path: "/pearls", label: "Pearls", section: "Work", icon: Circle },
+    { path: "/operators", label: "Operators", section: "Work", icon: Bot },
+    { path: "/chat", label: "Chat", section: "Tools", icon: MessageSquare },
+    { path: "/system", label: "System", section: "Settings", icon: Settings },
 ];
+
+function Header() {
+    const location = useLocation();
+    const { open, isMobile } = useSidebar();
+    const currentNav = NAV.find((n) => n.path === location.pathname) ?? NAV[0];
+    const isSidebarOpen = isMobile ? open : open;
+
+    return (
+        <header className="flex h-14 shrink-0 items-center gap-2 border-b border-border px-4">
+            <div className="flex w-full items-center justify-between">
+                <div className="flex items-center gap-2">
+                    <SidebarTrigger />
+                    <div className="h-4 w-px bg-border mx-1" />
+                    {/* Breadcrumbs */}
+                    <nav className="flex items-center gap-1 text-sm">
+                        <span className="text-muted-foreground hidden md:inline">
+                            Smooth
+                        </span>
+                        <ChevronRight
+                            size={14}
+                            className="text-muted-foreground/50 hidden md:inline"
+                        />
+                        <span className="text-muted-foreground hidden md:inline">
+                            {currentNav.section}
+                        </span>
+                        <ChevronRight
+                            size={14}
+                            className="text-muted-foreground/50 hidden md:inline"
+                        />
+                        <span className="font-medium">{currentNav.label}</span>
+                    </nav>
+                </div>
+                {/* Logo — shows when sidebar is closed */}
+                <img
+                    src="/logo.svg"
+                    alt="Smoo AI"
+                    className={`h-7 ${isSidebarOpen ? "hidden" : "md:hidden"}`}
+                />
+            </div>
+        </header>
+    );
+}
 
 export function Layout() {
     const location = useLocation();
@@ -76,9 +126,7 @@ export function Layout() {
             </Sidebar>
 
             <SidebarInset>
-                <header className="flex h-14 shrink-0 items-center gap-2 border-b border-border px-4">
-                    <SidebarTrigger />
-                </header>
+                <Header />
                 <main className="flex-1 p-6">
                     <Outlet />
                 </main>
