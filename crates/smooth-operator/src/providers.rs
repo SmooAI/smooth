@@ -25,12 +25,12 @@ impl Preset {
         (
             "openrouter-low-cost",
             "OpenRouter Low Cost",
-            "GLM-5.1 thinking (#1 SWE-Bench Pro), MiniMax-M2.5 coding, DeepSeek-V3.2 default — $0.28-0.30/M tokens",
+            "GLM-5.1 thinking (#1 SWE-Bench Pro), MiniMax-M2.7 coding (56% SWE-Pro, 10B params), DeepSeek-V3.2 default",
         ),
         (
             "llmgateway-low-cost",
             "LLM Gateway Low Cost",
-            "Same models via LLM Gateway — unified billing, 210+ model fallbacks",
+            "GLM-5 thinking, MiniMax-M2.7 coding, DeepSeek-V3.2 default — unified billing, 224 models",
         ),
         ("openai", "OpenAI", "o3-mini thinking, GPT-4o coding — OpenAI ecosystem"),
         ("anthropic", "Anthropic", "Claude Opus thinking, Sonnet coding — highest quality"),
@@ -257,11 +257,14 @@ impl ProviderRegistry {
 
         match preset {
             Preset::OpenRouterLowCost => {
-                // OpenRouter uses provider-prefixed model IDs (e.g. z-ai/glm-5.1)
+                // OpenRouter: provider-prefixed model IDs
+                // GLM-5.1 for thinking (#1 SWE-Bench Pro 58.4%)
+                // MiniMax-M2.7 for coding (56.2% SWE-Pro, 10B active params, cheapest tier-1)
+                // DeepSeek-V3.2 as default ($0.28/M, great all-rounder)
                 registry.register_provider(ProviderConfig::openrouter(api_key));
                 registry.routing = ModelRouting {
                     thinking: ModelSlot::new("openrouter", "z-ai/glm-5.1"),
-                    coding: ModelSlot::new("openrouter", "minimax/minimax-m2.5").with_fallback(ModelSlot::new("openrouter", "deepseek/deepseek-v3.2")),
+                    coding: ModelSlot::new("openrouter", "minimax/minimax-m2.7").with_fallback(ModelSlot::new("openrouter", "minimax/minimax-m2.5")),
                     planning: ModelSlot::new("openrouter", "z-ai/glm-5.1"),
                     reviewing: ModelSlot::new("openrouter", "deepseek/deepseek-v3.2"),
                     judge: ModelSlot::new("openrouter", "google/gemini-2.5-flash"),
@@ -270,11 +273,11 @@ impl ProviderRegistry {
                 };
             }
             Preset::LlmGatewayLowCost => {
-                // LLM Gateway uses bare model names. GLM-5.1 not yet available, using GLM-5.
+                // LLM Gateway: bare model names
                 registry.register_provider(ProviderConfig::llmgateway(api_key));
                 registry.routing = ModelRouting {
                     thinking: ModelSlot::new("llmgateway", "glm-5"),
-                    coding: ModelSlot::new("llmgateway", "minimax-m2.5").with_fallback(ModelSlot::new("llmgateway", "deepseek-v3.2")),
+                    coding: ModelSlot::new("llmgateway", "minimax-m2.7").with_fallback(ModelSlot::new("llmgateway", "minimax-m2.5")),
                     planning: ModelSlot::new("llmgateway", "glm-5"),
                     reviewing: ModelSlot::new("llmgateway", "deepseek-v3.2"),
                     judge: ModelSlot::new("llmgateway", "gemini-2.5-flash"),
