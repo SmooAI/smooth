@@ -203,7 +203,7 @@ struct RegistryFile {
 /// Registry of LLM providers with per-activity model routing.
 pub struct ProviderRegistry {
     providers: HashMap<String, ProviderConfig>,
-    routing: ModelRouting,
+    pub routing: ModelRouting,
 }
 
 impl ProviderRegistry {
@@ -216,15 +216,20 @@ impl ProviderRegistry {
 
         match preset {
             Preset::LowCost => {
+                // Best-in-class Chinese models via OpenRouter — high capability, low cost.
+                // GLM-5 for thinking/planning (SOTA open-source reasoning)
+                // MiniMax-M2.5 for coding (80.2% SWE-bench, $0.30/M input)
+                // DeepSeek-V3.2 as default ($0.28/M input, great all-rounder)
+                // Gemini Flash for judge (cheapest fast model)
                 registry.register_provider(ProviderConfig::openrouter(api_key));
                 registry.routing = ModelRouting {
-                    thinking: ModelSlot::new("openrouter", "deepseek/deepseek-r1"),
-                    coding: ModelSlot::new("openrouter", "minimax/minimax-m2.5").with_fallback(ModelSlot::new("openrouter", "deepseek/deepseek-v3")),
-                    planning: ModelSlot::new("openrouter", "moonshot/kimi-k2.5"),
-                    reviewing: ModelSlot::new("openrouter", "zhipu/glm-5.1"),
+                    thinking: ModelSlot::new("openrouter", "zhipu/glm-5"),
+                    coding: ModelSlot::new("openrouter", "minimax/minimax-m2.5").with_fallback(ModelSlot::new("openrouter", "deepseek/deepseek-v3.2")),
+                    planning: ModelSlot::new("openrouter", "zhipu/glm-5"),
+                    reviewing: ModelSlot::new("openrouter", "deepseek/deepseek-v3.2"),
                     judge: ModelSlot::new("openrouter", "google/gemini-flash-2.0"),
-                    summarize: ModelSlot::new("openrouter", "minimax/minimax-m2.5"),
-                    default: ModelSlot::new("openrouter", "deepseek/deepseek-v3"),
+                    summarize: ModelSlot::new("openrouter", "deepseek/deepseek-v3.2"),
+                    default: ModelSlot::new("openrouter", "deepseek/deepseek-v3.2"),
                 };
             }
             Preset::Codex => {

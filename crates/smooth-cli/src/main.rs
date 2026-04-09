@@ -140,8 +140,31 @@ enum Commands {
         #[command(subcommand)]
         cmd: PearlCommands,
     },
+    /// Configure per-activity model routing (which model for thinking, coding, etc.)
+    Routing {
+        #[command(subcommand)]
+        cmd: RoutingCommands,
+    },
     /// System health check and auto-fix
     Doctor,
+}
+
+#[derive(Subcommand)]
+enum RoutingCommands {
+    /// Show current routing configuration
+    Show,
+    /// Apply a preset routing configuration
+    Preset {
+        /// Preset name: low-cost, codex, anthropic
+        name: Option<String>,
+    },
+    /// Set routing for a specific activity
+    Set {
+        /// Activity: thinking, coding, planning, reviewing, judge, summarize
+        activity: String,
+        /// Model in provider/model format (e.g. openrouter/deepseek/deepseek-v3.2)
+        model: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -451,6 +474,7 @@ async fn main() -> Result<()> {
         Some(Commands::Tailscale { cmd }) => cmd_tailscale(cmd),
         Some(Commands::Access { cmd }) => cmd_access(cmd).await,
         Some(Commands::Jira { cmd }) => cmd_jira(cmd).await,
+        Some(Commands::Routing { cmd }) => cmd_routing(cmd).await,
         Some(_) => {
             println!("Command not yet implemented. Coming soon!");
             Ok(())
@@ -2352,5 +2376,170 @@ fn cmd_tailscale(cmd: TailscaleCommands) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+async fn cmd_routing(cmd: RoutingCommands) -> Result<()> {
+    let providers_path = dirs_next::home_dir()
+        .map(|h| h.join(".smooth/providers.json"))
+        .context("cannot determine home directory")?;
+
+    match cmd {
+        RoutingCommands::Show => {
+            if !providers_path.exists() {
+                println!("  {} No providers configured. Run: th auth login", "✗".red().bold());
+                return Ok(());
+            }
+            let registry = smooth_operator::providers::ProviderRegistry::load_from_file(&providers_path)?;
+
+            println!("\n  {}\n", "Model Routing".cyan().bold());
+
+            use smooth_operator::providers::Activity;
+            let activities = [
+                (Activity::Thinking, "Thinking", "deep reasoning, chain-of-thought"),
+                (Activity::Coding, "Coding", "code generation, edits, refactoring"),
+                (Activity::Planning, "Planning", "task decomposition, architecture"),
+                (Activity::Reviewing, "Reviewing", "code review, adversarial checks"),
+                (Activity::Judge, "Judge", "evaluation, scoring, pass/fail"),
+                (Activity::Summarize, "Summarize", "summaries, compression"),
+            ];
+
+            for (activity, label, desc) in &activities {
+                match registry.llm_config_for(*activity) {
+                    Ok(config) => {
+                        println!("  {} {:<12} {} {}", "✓".green().bold(), label.bold(), config.model.cyan(), desc.dimmed());
+                    }
+                    Err(_) => {
+                        println!("  {} {:<12} {}", "✗".red().bold(), label, "not configured".red());
+                    }
+                }
+            }
+            println!();
+        }
+
+        RoutingCommands::Preset { name } => {
+            let presets = vec![
+                (
+                    "low-cost",
+                    "Low Cost — GLM-5 thinking, MiniMax-M2.5 coding, DeepSeek-V3.2 default (via OpenRouter)",
+                    "Best bang-for-buck. Chinese frontier models at fraction of US pricing.\n  GLM-5 for thinking/planning (SOTA reasoning), MiniMax-M2.5 for coding (80.2% SWE-bench, $0.30/M),\n  DeepSeek-V3.2 as default ($0.28/M), Gemini Flash for judge.",
+                ),
+                (
+                    "codex",
+                    "Codex — GPT-4o, o3-mini thinking (via OpenAI)",
+                    "OpenAI ecosystem. o3-mini for reasoning, GPT-4o for everything else.",
+                ),
+                (
+                    "anthropic",
+                    "Anthropic — Claude Sonnet 4, Opus for thinking (via Anthropic)",
+                    "Highest quality. Claude Opus 4 for thinking, Sonnet 4 for coding/planning.",
+                ),
+            ];
+
+            let preset_name = if let Some(n) = name {
+                n
+            } else {
+                println!("\n  {}\n", "Routing Presets".cyan().bold());
+                for (name, title, desc) in &presets {
+                    println!("  {} {}", name.bold(), format!("— {title}").dimmed());
+                    println!("    {}", desc.dimmed());
+                    println!();
+                }
+
+                let names: Vec<&str> = presets.iter().map(|(_, title, _)| *title).collect();
+                let selection = Select::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Select a preset")
+                    .items(&names)
+                    .default(0)
+                    .interact()?;
+                presets[selection].0.to_string()
+            };
+
+            let preset = match preset_name.as_str() {
+                "low-cost" => smooth_operator::providers::Preset::LowCost,
+                "codex" => smooth_operator::providers::Preset::Codex,
+                "anthropic" => smooth_operator::providers::Preset::Anthropic,
+                other => {
+                    println!("Unknown preset: {other}");
+                    println!("Available: low-cost, codex, anthropic");
+                    return Ok(());
+                }
+            };
+
+            let required_provider = match preset_name.as_str() {
+                "low-cost" => "openrouter",
+                "codex" => "openai",
+                "anthropic" => "anthropic",
+                _ => "openrouter",
+            };
+
+            // Try to get key from existing config
+            let api_key = if providers_path.exists() {
+                let registry = smooth_operator::providers::ProviderRegistry::load_from_file(&providers_path)?;
+                registry.get_provider(required_provider).map(|p| p.api_key.clone())
+            } else {
+                None
+            };
+
+            let api_key = match api_key {
+                Some(k) => k,
+                None => {
+                    println!("  {} requires {} provider. Enter API key:", "⚠".yellow(), required_provider.bold());
+                    Password::with_theme(&ColorfulTheme::default()).with_prompt("API key").interact()?
+                }
+            };
+
+            let registry = smooth_operator::providers::ProviderRegistry::from_preset(preset, &api_key);
+            registry.save_to_file(&providers_path)?;
+
+            println!("\n  {} Preset {} applied\n", "✓".green().bold(), preset_name.green().bold());
+
+            // Recurse into Show to display the new routing
+            return Box::pin(cmd_routing(RoutingCommands::Show)).await;
+        }
+
+        RoutingCommands::Set { activity, model } => {
+            if !providers_path.exists() {
+                println!("  {} No providers configured. Run: th auth login", "✗".red().bold());
+                return Ok(());
+            }
+
+            let mut registry = smooth_operator::providers::ProviderRegistry::load_from_file(&providers_path)?;
+
+            // Parse model as "provider/model" or just "model" (uses first provider)
+            let (provider_id, model_name) = if let Some(slash_pos) = model.find('/') {
+                let p = &model[..slash_pos];
+                let m = &model[slash_pos + 1..];
+                (p.to_string(), m.to_string())
+            } else {
+                let providers = registry.list_providers();
+                if providers.is_empty() {
+                    println!("  {} No providers configured", "✗".red().bold());
+                    return Ok(());
+                }
+                (providers[0].to_string(), model.clone())
+            };
+
+            let slot = smooth_operator::providers::ModelSlot::new(&provider_id, &model_name);
+
+            match activity.as_str() {
+                "thinking" => registry.routing.thinking = slot,
+                "coding" => registry.routing.coding = slot,
+                "planning" => registry.routing.planning = slot,
+                "reviewing" => registry.routing.reviewing = slot,
+                "judge" => registry.routing.judge = slot,
+                "summarize" => registry.routing.summarize = slot,
+                other => {
+                    println!("Unknown activity: {other}");
+                    println!("Available: thinking, coding, planning, reviewing, judge, summarize");
+                    return Ok(());
+                }
+            }
+
+            registry.save_to_file(&providers_path)?;
+            println!("  {} {} → {}", "✓".green().bold(), activity.bold(), model.cyan());
+        }
+    }
+
     Ok(())
 }
