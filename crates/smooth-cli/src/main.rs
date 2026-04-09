@@ -2418,60 +2418,38 @@ async fn cmd_routing(cmd: RoutingCommands) -> Result<()> {
         }
 
         RoutingCommands::Preset { name } => {
-            let presets = vec![
-                (
-                    "low-cost",
-                    "Low Cost — GLM-5 thinking, MiniMax-M2.5 coding, DeepSeek-V3.2 default (via OpenRouter)",
-                    "Best bang-for-buck. Chinese frontier models at fraction of US pricing.\n  GLM-5 for thinking/planning (SOTA reasoning), MiniMax-M2.5 for coding (80.2% SWE-bench, $0.30/M),\n  DeepSeek-V3.2 as default ($0.28/M), Gemini Flash for judge.",
-                ),
-                (
-                    "codex",
-                    "Codex — GPT-4o, o3-mini thinking (via OpenAI)",
-                    "OpenAI ecosystem. o3-mini for reasoning, GPT-4o for everything else.",
-                ),
-                (
-                    "anthropic",
-                    "Anthropic — Claude Sonnet 4, Opus for thinking (via Anthropic)",
-                    "Highest quality. Claude Opus 4 for thinking, Sonnet 4 for coding/planning.",
-                ),
-            ];
+            let all_presets = smooth_operator::providers::Preset::ALL;
 
             let preset_name = if let Some(n) = name {
                 n
             } else {
                 println!("\n  {}\n", "Routing Presets".cyan().bold());
-                for (name, title, desc) in &presets {
+                for (name, title, desc) in all_presets {
                     println!("  {} {}", name.bold(), format!("— {title}").dimmed());
                     println!("    {}", desc.dimmed());
                     println!();
                 }
 
-                let names: Vec<&str> = presets.iter().map(|(_, title, _)| *title).collect();
+                let names: Vec<&str> = all_presets.iter().map(|(_, title, _)| *title).collect();
                 let selection = Select::with_theme(&ColorfulTheme::default())
                     .with_prompt("Select a preset")
                     .items(&names)
                     .default(0)
                     .interact()?;
-                presets[selection].0.to_string()
+                all_presets[selection].0.to_string()
             };
 
-            let preset = match preset_name.as_str() {
-                "low-cost" => smooth_operator::providers::Preset::LowCost,
-                "codex" => smooth_operator::providers::Preset::Codex,
-                "anthropic" => smooth_operator::providers::Preset::Anthropic,
-                other => {
-                    println!("Unknown preset: {other}");
-                    println!("Available: low-cost, codex, anthropic");
+            let preset = match smooth_operator::providers::Preset::from_name(&preset_name) {
+                Some(p) => p,
+                None => {
+                    let names: Vec<&str> = all_presets.iter().map(|(n, _, _)| *n).collect();
+                    println!("Unknown preset: {preset_name}");
+                    println!("Available: {}", names.join(", "));
                     return Ok(());
                 }
             };
 
-            let required_provider = match preset_name.as_str() {
-                "low-cost" => "openrouter",
-                "codex" => "openai",
-                "anthropic" => "anthropic",
-                _ => "openrouter",
-            };
+            let required_provider = preset.provider_id();
 
             // Try to get key from existing config
             let api_key = if providers_path.exists() {

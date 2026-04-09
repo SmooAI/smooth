@@ -9,12 +9,53 @@ use crate::llm::{ApiFormat, LlmConfig};
 /// Preset model configurations for common provider setups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Preset {
-    /// OpenRouter + Chinese models — cheapest option
-    LowCost,
-    /// OpenAI models — uses Codex/ChatGPT subscription
-    Codex,
-    /// Anthropic models — highest quality, most expensive
+    /// OpenRouter + Chinese frontier models — cheapest option
+    OpenRouterLowCost,
+    /// LLM Gateway + Chinese frontier models — cheapest via gateway
+    LlmGatewayLowCost,
+    /// OpenAI models — GPT-4o/o3
+    OpenAI,
+    /// Anthropic models — Claude Opus/Sonnet
     Anthropic,
+}
+
+impl Preset {
+    /// All available preset names.
+    pub const ALL: &[(&str, &str, &str)] = &[
+        (
+            "openrouter-low-cost",
+            "OpenRouter Low Cost",
+            "GLM-5.1 thinking (#1 SWE-Bench Pro), MiniMax-M2.5 coding, DeepSeek-V3.2 default — $0.28-0.30/M tokens",
+        ),
+        (
+            "llmgateway-low-cost",
+            "LLM Gateway Low Cost",
+            "Same models via LLM Gateway — unified billing, 210+ model fallbacks",
+        ),
+        ("openai", "OpenAI", "o3-mini thinking, GPT-4o coding — OpenAI ecosystem"),
+        ("anthropic", "Anthropic", "Claude Opus thinking, Sonnet coding — highest quality"),
+    ];
+
+    /// Parse a preset name from string.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "openrouter-low-cost" | "low-cost" => Some(Self::OpenRouterLowCost),
+            "llmgateway-low-cost" | "gateway-low-cost" => Some(Self::LlmGatewayLowCost),
+            "openai" | "codex" => Some(Self::OpenAI),
+            "anthropic" => Some(Self::Anthropic),
+            _ => None,
+        }
+    }
+
+    /// The provider ID this preset requires.
+    pub fn provider_id(&self) -> &str {
+        match self {
+            Self::OpenRouterLowCost => "openrouter",
+            Self::LlmGatewayLowCost => "llmgateway",
+            Self::OpenAI => "openai",
+            Self::Anthropic => "anthropic",
+        }
+    }
 }
 
 /// Configuration for a single LLM provider.
@@ -214,25 +255,30 @@ impl ProviderRegistry {
     pub fn from_preset(preset: Preset, api_key: &str) -> Self {
         let mut registry = Self::new();
 
+        let low_cost_routing = |provider: &str| ModelRouting {
+            // GLM-5.1 for thinking/planning (#1 SWE-Bench Pro, 58.4%)
+            // MiniMax-M2.5 for coding (80.2% SWE-bench Verified, $0.30/M)
+            // DeepSeek-V3.2 as default/reviewing ($0.28/M, great all-rounder)
+            // Gemini Flash for judge (cheapest fast model)
+            thinking: ModelSlot::new(provider, "zhipu/glm-5.1"),
+            coding: ModelSlot::new(provider, "minimax/minimax-m2.5").with_fallback(ModelSlot::new(provider, "deepseek/deepseek-v3.2")),
+            planning: ModelSlot::new(provider, "zhipu/glm-5.1"),
+            reviewing: ModelSlot::new(provider, "deepseek/deepseek-v3.2"),
+            judge: ModelSlot::new(provider, "google/gemini-flash-2.0"),
+            summarize: ModelSlot::new(provider, "deepseek/deepseek-v3.2"),
+            default: ModelSlot::new(provider, "deepseek/deepseek-v3.2"),
+        };
+
         match preset {
-            Preset::LowCost => {
-                // Best-in-class Chinese models via OpenRouter — high capability, low cost.
-                // GLM-5 for thinking/planning (SOTA open-source reasoning)
-                // MiniMax-M2.5 for coding (80.2% SWE-bench, $0.30/M input)
-                // DeepSeek-V3.2 as default ($0.28/M input, great all-rounder)
-                // Gemini Flash for judge (cheapest fast model)
+            Preset::OpenRouterLowCost => {
                 registry.register_provider(ProviderConfig::openrouter(api_key));
-                registry.routing = ModelRouting {
-                    thinking: ModelSlot::new("openrouter", "zhipu/glm-5"),
-                    coding: ModelSlot::new("openrouter", "minimax/minimax-m2.5").with_fallback(ModelSlot::new("openrouter", "deepseek/deepseek-v3.2")),
-                    planning: ModelSlot::new("openrouter", "zhipu/glm-5"),
-                    reviewing: ModelSlot::new("openrouter", "deepseek/deepseek-v3.2"),
-                    judge: ModelSlot::new("openrouter", "google/gemini-flash-2.0"),
-                    summarize: ModelSlot::new("openrouter", "deepseek/deepseek-v3.2"),
-                    default: ModelSlot::new("openrouter", "deepseek/deepseek-v3.2"),
-                };
+                registry.routing = low_cost_routing("openrouter");
             }
-            Preset::Codex => {
+            Preset::LlmGatewayLowCost => {
+                registry.register_provider(ProviderConfig::llmgateway(api_key));
+                registry.routing = low_cost_routing("llmgateway");
+            }
+            Preset::OpenAI => {
                 registry.register_provider(ProviderConfig::openai(api_key));
                 registry.routing = ModelRouting {
                     thinking: ModelSlot::new("openai", "o3-mini"),
