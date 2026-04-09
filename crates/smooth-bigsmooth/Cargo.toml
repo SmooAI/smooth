@@ -1,10 +1,13 @@
 [package]
-name = "smooth-bigsmooth"
+name = "smooai-smooth-bigsmooth"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Big Smooth — orchestrator, policy generation, sandbox management, API server"
+
+[lib]
+name = "smooth_bigsmooth"
 
 [features]
 default = ["direct-sandbox"]
@@ -19,10 +22,10 @@ direct-sandbox = ["smooth-bootstrap-bill/server"]
 [dependencies]
 smooth-pearls.workspace = true
 smooth-bootstrap-bill = { workspace = true, default-features = false }
-smooth-operator = { path = "../smooth-operator" }
-smooth-code = { path = "../smooth-code" }
+smooth-operator = { path = "../smooth-operator", package = "smooai-smooth-operator" }
+smooth-code = { path = "../smooth-code", package = "smooai-smooth-code" }
 smooth-policy.workspace = true
-smooth-web = { path = "../smooth-web" }
+smooth-web = { path = "../smooth-web", package = "smooai-smooth-web" }
 # Boardroom cast — Big Smooth hosts these as tokio tasks when it boots
 # inside a Boardroom VM (SMOOTH_BOARDROOM_MODE=1). They mirror the per-VM
 # cast every Operator spawns inside its own pod.

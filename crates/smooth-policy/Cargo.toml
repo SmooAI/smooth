@@ -1,5 +1,5 @@
 [package]
-name = "smooth-policy"
+name = "smooai-smooth-policy"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,9 @@ description = "Smooth policy types — TOML-based access control for Microsandbo
 readme = "README.md"
 keywords = ["policy", "access-control", "toml", "security", "ai-agents"]
 categories = ["config", "authentication"]
+
+[lib]
+name = "smooth_policy"
 
 [dependencies]
 serde.workspace = true

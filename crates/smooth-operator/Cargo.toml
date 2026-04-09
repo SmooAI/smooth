@@ -1,5 +1,5 @@
 [package]
-name = "smooth-operator"
+name = "smooai-smooth-operator"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,9 @@ description = "Smooth Operator — Rust-native AI agent framework with built-in 
 readme = "README.md"
 keywords = ["ai", "agent", "llm", "tool-use", "orchestration"]
 categories = ["api-bindings", "asynchronous"]
+
+[lib]
+name = "smooth_operator"
 
 [features]
 default = []
@@ -36,7 +39,7 @@ rusqlite = { workspace = true, optional = true }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 rusqlite.workspace = true
-smooth-narc = { path = "../smooth-narc" }
+smooth-narc = { path = "../smooth-narc", package = "smooai-smooth-narc" }
 
 [lints]
 workspace = true

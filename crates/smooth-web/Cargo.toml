@@ -1,10 +1,13 @@
 [package]
-name = "smooth-web"
+name = "smooai-smooth-web"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Smooth web dashboard — embedded Vite SPA served by axum"
+
+[lib]
+name = "smooth_web"
 
 [dependencies]
 axum = { workspace = true }

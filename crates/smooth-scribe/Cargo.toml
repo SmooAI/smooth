@@ -1,10 +1,13 @@
 [package]
-name = "smooth-scribe"
+name = "smooai-smooth-scribe"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Smooth Scribe — Per-VM structured logging service"
+
+[lib]
+name = "smooth_scribe"
 
 [dependencies]
 smooth-operator.workspace = true

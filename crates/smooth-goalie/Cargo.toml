@@ -1,5 +1,5 @@
 [package]
-name = "smooth-goalie"
+name = "smooai-smooth-goalie"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

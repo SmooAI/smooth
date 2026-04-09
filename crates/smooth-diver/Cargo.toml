@@ -1,10 +1,13 @@
 [package]
-name = "smooth-diver"
+name = "smooai-smooth-diver"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Smooth Diver — Pearl lifecycle manager and project management service"
+
+[lib]
+name = "smooth_diver"
 
 [dependencies]
 tokio.workspace = true

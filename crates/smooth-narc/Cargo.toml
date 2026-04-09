@@ -1,10 +1,13 @@
 [package]
-name = "smooth-narc"
+name = "smooai-smooth-narc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Smooth Narc — in-VM tool surveillance, secret detection, prompt injection guard"
+
+[lib]
+name = "smooth_narc"
 
 [dependencies]
 smooth-operator.workspace = true

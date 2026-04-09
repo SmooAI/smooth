@@ -1,10 +1,13 @@
 [package]
-name = "smooth-bootstrap-bill"
+name = "smooai-smooth-bootstrap-bill"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Bootstrap Bill — The Board's host-side broker. Owns microsandbox, spawns pods on behalf of Big Smooth and the rest of the Boardroom cast."
+
+[lib]
+name = "smooth_bootstrap_bill"
 
 [features]
 default = ["server"]

@@ -1,5 +1,5 @@
 [package]
-name = "smooth-operator-runner"
+name = "smooai-smooth-operator-runner"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,12 +11,12 @@ name = "smooth-operator-runner"
 path = "src/main.rs"
 
 [dependencies]
-smooth-operator = { path = "../smooth-operator" }
-smooth-narc = { path = "../smooth-narc" }
-smooth-scribe = { path = "../smooth-scribe" }
-smooth-wonk = { path = "../smooth-wonk" }
-smooth-goalie = { path = "../smooth-goalie" }
-smooth-pearls = { path = "../smooth-pearls" }
+smooth-operator = { path = "../smooth-operator", package = "smooai-smooth-operator" }
+smooth-narc = { path = "../smooth-narc", package = "smooai-smooth-narc" }
+smooth-scribe = { path = "../smooth-scribe", package = "smooai-smooth-scribe" }
+smooth-wonk = { path = "../smooth-wonk", package = "smooai-smooth-wonk" }
+smooth-goalie = { path = "../smooth-goalie", package = "smooai-smooth-goalie" }
+smooth-pearls = { path = "../smooth-pearls", package = "smooai-smooth-pearls" }
 smooth-policy.workspace = true
 tokio.workspace = true
 async-trait.workspace = true

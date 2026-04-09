@@ -1,10 +1,13 @@
 [package]
-name = "smooth-code"
+name = "smooai-smooth-code"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Smooth Coding — AI-assisted coding TUI"
+
+[lib]
+name = "smooth_code"
 
 [dependencies]
 smooth-operator.workspace = true

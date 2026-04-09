@@ -5079,7 +5079,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "smooth-archivist"
+name = "smooai-smooth-archivist"
 version = "0.2.0"
 dependencies = [
  "anyhow",
@@ -5090,7 +5090,7 @@ dependencies = [
  "hyper",
  "serde",
  "serde_json",
- "smooth-scribe",
+ "smooai-smooth-scribe",
  "tokio",
  "tower",
  "tracing",
@@ -5099,7 +5099,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "smooth-bigsmooth"
+name = "smooai-smooth-bigsmooth"
 version = "0.2.0"
 dependencies = [
  "anyhow",
@@ -5118,18 +5118,18 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "smooth-archivist",
- "smooth-bootstrap-bill",
- "smooth-code",
- "smooth-diver",
- "smooth-goalie",
- "smooth-narc",
- "smooth-operator",
- "smooth-pearls",
- "smooth-policy",
- "smooth-scribe",
- "smooth-web",
- "smooth-wonk",
+ "smooai-smooth-archivist",
+ "smooai-smooth-bootstrap-bill",
+ "smooai-smooth-code",
+ "smooai-smooth-diver",
+ "smooai-smooth-goalie",
+ "smooai-smooth-narc",
+ "smooai-smooth-operator",
+ "smooai-smooth-pearls",
+ "smooai-smooth-policy",
+ "smooai-smooth-scribe",
+ "smooai-smooth-web",
+ "smooai-smooth-wonk",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -5146,7 +5146,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "smooth-bootstrap-bill"
+name = "smooai-smooth-bootstrap-bill"
 version = "0.2.0"
 dependencies = [
  "anyhow",
@@ -5163,7 +5163,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "smooth-cli"
+name = "smooai-smooth-cli"
 version = "0.2.0"
 dependencies = [
  "anyhow",
@@ -5178,12 +5178,12 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "smooth-bigsmooth",
- "smooth-code",
- "smooth-diver",
- "smooth-operator",
- "smooth-pearls",
- "smooth-web",
+ "smooai-smooth-bigsmooth",
+ "smooai-smooth-code",
+ "smooai-smooth-diver",
+ "smooai-smooth-operator",
+ "smooai-smooth-pearls",
+ "smooai-smooth-web",
  "tempfile",
  "tokio",
  "tracing",
@@ -5191,7 +5191,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "smooth-code"
+name = "smooai-smooth-code"
 version = "0.2.0"
 dependencies = [
  "anyhow",
@@ -5206,7 +5206,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "smooth-operator",
+ "smooai-smooth-operator",
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.26.2",
@@ -5215,7 +5215,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "smooth-diver"
+name = "smooai-smooth-diver"
 version = "0.2.0"
 dependencies = [
  "anyhow",
@@ -5226,7 +5226,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "smooth-pearls",
+ "smooai-smooth-pearls",
  "tempfile",
  "tokio",
  "tower",
@@ -5235,7 +5235,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "smooth-goalie"
+name = "smooai-smooth-goalie"
 version = "0.2.0"
 dependencies = [
  "anyhow",
@@ -5248,7 +5248,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "smooth-policy",
+ "smooai-smooth-policy",
  "tempfile",
  "tokio",
  "tracing",
@@ -5256,7 +5256,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "smooth-narc"
+name = "smooai-smooth-narc"
 version = "0.2.0"
 dependencies = [
  "anyhow",
@@ -5266,7 +5266,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "smooth-operator",
+ "smooai-smooth-operator",
  "tempfile",
  "tokio",
  "tracing",
@@ -5274,7 +5274,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "smooth-operator"
+name = "smooai-smooth-operator"
 version = "0.2.0"
 dependencies = [
  "anyhow",
@@ -5288,7 +5288,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "smooth-narc",
+ "smooai-smooth-narc",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -5299,7 +5299,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "smooth-operator-runner"
+name = "smooai-smooth-operator-runner"
 version = "0.2.0"
 dependencies = [
  "anyhow",
@@ -5308,20 +5308,20 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "smooth-goalie",
- "smooth-narc",
- "smooth-operator",
- "smooth-pearls",
- "smooth-policy",
- "smooth-scribe",
- "smooth-wonk",
+ "smooai-smooth-goalie",
+ "smooai-smooth-narc",
+ "smooai-smooth-operator",
+ "smooai-smooth-pearls",
+ "smooai-smooth-policy",
+ "smooai-smooth-scribe",
+ "smooai-smooth-wonk",
  "tokio",
  "tracing",
  "tracing-subscriber",
 ]
 
 [[package]]
-name = "smooth-pearls"
+name = "smooai-smooth-pearls"
 version = "0.2.0"
 dependencies = [
  "anyhow",
@@ -5330,7 +5330,7 @@ dependencies = [
  "dirs-next",
  "serde",
  "serde_json",
- "smooth-operator",
+ "smooai-smooth-operator",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -5339,7 +5339,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "smooth-plugin"
+name = "smooai-smooth-plugin"
 version = "0.2.0"
 dependencies = [
  "anyhow",
@@ -5347,13 +5347,13 @@ dependencies = [
  "axum",
  "serde",
  "serde_json",
- "smooth-operator",
+ "smooai-smooth-operator",
  "tokio",
  "tracing",
 ]
 
 [[package]]
-name = "smooth-policy"
+name = "smooai-smooth-policy"
 version = "0.2.0"
 dependencies = [
  "chrono",
@@ -5365,7 +5365,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "smooth-scribe"
+name = "smooai-smooth-scribe"
 version = "0.2.0"
 dependencies = [
  "anyhow",
@@ -5377,7 +5377,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "smooth-operator",
+ "smooai-smooth-operator",
  "tokio",
  "tower",
  "tracing",
@@ -5386,7 +5386,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "smooth-web"
+name = "smooai-smooth-web"
 version = "0.2.0"
 dependencies = [
  "axum",
@@ -5397,7 +5397,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "smooth-wonk"
+name = "smooai-smooth-wonk"
 version = "0.2.0"
 dependencies = [
  "anyhow",
@@ -5412,8 +5412,8 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "smooth-operator",
- "smooth-policy",
+ "smooai-smooth-operator",
+ "smooai-smooth-policy",
  "tempfile",
  "tokio",
  "tower",

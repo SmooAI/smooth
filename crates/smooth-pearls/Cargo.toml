@@ -1,5 +1,5 @@
 [package]
-name = "smooth-pearls"
+name = "smooai-smooth-pearls"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,9 @@ description = "Smooth Pearls — built-in pearl tracker. Dolt-backed dependency-
 readme = "README.md"
 keywords = ["issue-tracker", "work-items", "dolt", "project-management"]
 categories = ["development-tools", "database"]
+
+[lib]
+name = "smooth_pearls"
 
 [dependencies]
 serde.workspace = true

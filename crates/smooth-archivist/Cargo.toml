@@ -1,10 +1,13 @@
 [package]
-name = "smooth-archivist"
+name = "smooai-smooth-archivist"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Smooth Archivist — Central log aggregator"
+
+[lib]
+name = "smooth_archivist"
 
 [dependencies]
 tokio.workspace = true
