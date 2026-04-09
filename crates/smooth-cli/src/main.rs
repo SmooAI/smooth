@@ -488,7 +488,9 @@ async fn cmd_up(no_leader: bool, port: u16, foreground: bool) -> Result<()> {
                         .unwrap_or(false);
                     if alive {
                         println!();
-                        println!("  {}", format!("Smooth is already running (pid {pid})").yellow());
+                        println!();
+                        println!("  {} {}", "●".yellow(), format!("Smooth is already running (pid {pid})").yellow());
+                        println!();
                         println!("    {}  {}", "Web UI".dimmed(), format!("http://localhost:{port}").cyan().bold());
                         println!("    {}  {}", "Logs  ".dimmed(), log_file_path().display().to_string().dimmed());
                         println!("    {}  {}", "Stop  ".dimmed(), "th down".dimmed());
@@ -525,17 +527,13 @@ async fn cmd_up(no_leader: bool, port: u16, foreground: bool) -> Result<()> {
         let pid = child.id();
         std::fs::write(&pid_path, pid.to_string())?;
 
-        let banner_text = format!("  Smooth started (pid {pid})  ");
-        let border_len = banner_text.len();
+        // The visible text (without ANSI) that goes inside the box
+        let inner = format!(" Smooth started (pid {pid}) ");
+        let w = inner.len() + 2; // +2 for left/right padding
         println!();
-        println!("  {}", format!("\u{256d}{}\u{256e}", "\u{2500}".repeat(border_len)).dimmed());
-        println!(
-            "  {}  {}  {}",
-            "\u{2502}".to_string().dimmed(),
-            format!("\u{1f7e2}  Smooth started (pid {pid})").green().bold(),
-            "\u{2502}".to_string().dimmed()
-        );
-        println!("  {}", format!("\u{2570}{}\u{256f}", "\u{2500}".repeat(border_len)).dimmed());
+        println!("  \x1b[2m\u{256d}{}\u{256e}\x1b[0m", "\u{2500}".repeat(w));
+        println!("  \x1b[2m\u{2502}\x1b[0m \x1b[32;1m{inner}\x1b[0m \x1b[2m\u{2502}\x1b[0m");
+        println!("  \x1b[2m\u{2570}{}\u{256f}\x1b[0m", "\u{2500}".repeat(w));
         println!("    {}  {}", "Web UI".dimmed(), format!("http://localhost:{port}").cyan().bold());
         println!("    {}  {}", "Logs  ".dimmed(), log_path.display().to_string().dimmed());
         println!("    {}  {}", "Stop  ".dimmed(), "th down".dimmed());
