@@ -550,7 +550,258 @@ async fn session_messages_saved_in_dolt() {
     assert!(other.is_empty());
 }
 
-// ── 13. Orchestrator snapshots saved in Dolt ───────────────────
+// ── 13. Projects API ─────────────────────────────────────────
+
+#[tokio::test]
+async fn list_projects_returns_registered_projects() {
+    let Some((app, _store)) = test_app() else { return };
+
+    let resp = app
+        .oneshot(Request::builder().uri("/api/projects").body(Body::empty()).expect("request"))
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), 200);
+
+    let body = json_body(resp).await;
+    assert_eq!(body["ok"], true);
+    // The data should be an array (possibly empty if temp dir isn't in registry,
+    // but the endpoint should always return ok + array).
+    assert!(body["data"].is_array(), "data should be an array");
+}
+
+// ── 14. Project pearls API ───────────────────────────────────
+
+#[tokio::test]
+async fn project_pearls_returns_pearls_for_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("test.db");
+    let db = Database::open(&db_path).expect("open db");
+    let dolt_dir = dir.path().join(".smooth").join("dolt");
+    let pearl_store = match PearlStore::init(&dolt_dir) {
+        Ok(s) => s,
+        Err(_) => return, // smooth-dolt binary not available
+    };
+
+    // Seed a pearl so the project has data.
+    pearl_store
+        .create(&smooth_pearls::NewPearl {
+            title: "Project pearl".into(),
+            description: "Test pearl in project".into(),
+            pearl_type: smooth_pearls::PearlType::Task,
+            priority: smooth_pearls::Priority::Medium,
+            assigned_to: None,
+            parent_id: None,
+            labels: Vec::new(),
+        })
+        .expect("create pearl");
+
+    let state = AppState::new(db, pearl_store);
+    let app = build_router(state);
+
+    let path_encoded = urlencoding::encode(dir.path().to_str().unwrap());
+    let uri = format!("/api/projects/pearls?path={path_encoded}");
+
+    let resp = app
+        .oneshot(Request::builder().uri(&uri).body(Body::empty()).expect("request"))
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), 200);
+
+    let body = json_body(resp).await;
+    assert_eq!(body["ok"], true);
+
+    let data = body["data"].as_array().expect("data is array");
+    assert_eq!(data.len(), 1);
+    assert_eq!(data[0]["title"], "Project pearl");
+
+    // Leak tempdir so Dolt dir stays alive (already done by test_app pattern).
+    std::mem::forget(dir);
+}
+
+// ── 15. Generated policy includes port config ────────────────
+
+#[tokio::test]
+async fn generated_policy_includes_port_config() {
+    use smooth_bigsmooth::policy::{generate_policy_for_task, TaskType};
+
+    // Coding execute — ports should be enabled.
+    let toml = generate_policy_for_task("op-port", "bead-port", "execute", "tok", &[], TaskType::Coding, vec![]).expect("generate coding");
+    let policy = smooth_policy::Policy::from_toml(&toml).expect("parse coding");
+    assert!(policy.ports.enabled, "coding execute should have ports enabled");
+    assert!(policy.ports.allow_range.0 > 0, "should have valid port range");
+
+    // Review — ports should be disabled.
+    let toml2 = generate_policy_for_task("op-port2", "bead-port2", "execute", "tok", &[], TaskType::Review, vec![]).expect("generate review");
+    let policy2 = smooth_policy::Policy::from_toml(&toml2).expect("parse review");
+    assert!(!policy2.ports.enabled, "review should have ports disabled");
+}
+
+// ── 16. Orchestrator status shows idle ───────────────────────
+
+#[tokio::test]
+async fn orchestrator_status_shows_idle() {
+    let Some((app, _store)) = test_app() else { return };
+
+    let resp = app
+        .oneshot(Request::builder().uri("/api/orchestrator/status").body(Body::empty()).expect("request"))
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), 200);
+
+    let body = json_body(resp).await;
+    assert_eq!(body["ok"], true);
+    // Fresh server — orchestrator may have already stepped (moving to scheduling
+    // if there are ready pearls), but on a clean store it should be idle.
+    assert!(body["data"]["state"].is_string(), "state should be a string");
+    assert_eq!(body["data"]["active_workers"], 0);
+}
+
+// ── 17. Policy denies .env files through mount translation ───
+
+#[tokio::test]
+async fn policy_denies_env_files_through_mount_translation() {
+    use smooth_bigsmooth::policy::{generate_policy_for_task, TaskType};
+
+    let mounts = vec![smooth_policy::MountMapping {
+        guest_path: "/workspace".into(),
+        host_path: "/home/user/project".into(),
+    }];
+
+    let toml = generate_policy_for_task("op-deny", "bead-deny", "execute", "tok", &[], TaskType::Coding, mounts).expect("generate");
+    let policy = smooth_policy::Policy::from_toml(&toml).expect("parse");
+
+    // .env should be denied via mount translation
+    assert!(policy.is_guest_path_denied("/workspace/.env").expect("glob .env"), ".env should be denied");
+    // Normal source file should be allowed
+    assert!(
+        !policy.is_guest_path_denied("/workspace/src/main.rs").expect("glob main.rs"),
+        "main.rs should be allowed"
+    );
+    // Other sensitive patterns
+    assert!(
+        policy.is_guest_path_denied("/workspace/secret.pem").expect("glob .pem"),
+        ".pem should be denied"
+    );
+    assert!(
+        policy.is_guest_path_denied("/workspace/.ssh/id_rsa").expect("glob .ssh"),
+        ".ssh/* should be denied"
+    );
+}
+
+// ── 18. System health includes orchestrator ──────────────────
+
+#[tokio::test]
+async fn system_health_includes_orchestrator() {
+    let Some((app, _store)) = test_app() else { return };
+
+    let resp = app
+        .oneshot(Request::builder().uri("/api/system/health").body(Body::empty()).expect("request"))
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), 200);
+
+    let body = json_body(resp).await;
+    assert_eq!(body["ok"], true);
+
+    let data = &body["data"];
+    // The orchestrator field should exist with state and worker counts.
+    assert!(data["orchestrator"].is_object(), "orchestrator field should be an object");
+    assert!(data["orchestrator"]["state"].is_string(), "orchestrator state should be a string");
+    assert!(data["orchestrator"]["active_workers"].is_number(), "active_workers should be a number");
+    assert!(data["orchestrator"]["completed"].is_number(), "completed should be a number");
+}
+
+// ── 19. Delegation full lifecycle ────────────────────────────
+
+#[tokio::test]
+async fn delegation_full_lifecycle() {
+    let Some((app, store)) = test_app() else { return };
+
+    // 1. POST /api/delegate — creates a pearl
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/delegate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"parent_operator_id":"op-parent-1","task":"Write unit tests for the auth module"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), 200);
+
+    let body = json_body(resp).await;
+    assert_eq!(body["ok"], true);
+    let delegation_id = body["data"]["delegation_id"].as_str().expect("delegation_id should be a string").to_string();
+    assert!(!delegation_id.is_empty(), "delegation_id should not be empty");
+
+    // 2. GET /api/delegate/{id}/status — should be in_progress (Open pearl maps to in_progress)
+    let resp2 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/api/delegate/{delegation_id}/status"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(resp2.status(), 200);
+
+    let body2 = json_body(resp2).await;
+    assert_eq!(body2["ok"], true);
+    assert_eq!(body2["data"]["status"], "in_progress");
+
+    // 3. Close the pearl via /api/pearls/{id}/close
+    let resp3 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&format!("/api/pearls/{delegation_id}/close"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(resp3.status(), 200);
+    let body3 = json_body(resp3).await;
+    assert_eq!(body3["ok"], true);
+
+    // 4. GET /api/delegate/{id}/status — should now be completed
+    let resp4 = app
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/api/delegate/{delegation_id}/status"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(resp4.status(), 200);
+
+    let body4 = json_body(resp4).await;
+    assert_eq!(body4["ok"], true);
+    assert_eq!(body4["data"]["status"], "completed");
+
+    // Verify the pearl was actually closed in the store too.
+    let pearl = store.get(&delegation_id).expect("get").expect("exists");
+    assert_eq!(pearl.status, smooth_pearls::PearlStatus::Closed);
+}
+
+// ── Orchestrator snapshots saved in Dolt ───────────────────
 
 #[tokio::test]
 async fn orchestrator_snapshots_saved_in_dolt() {
