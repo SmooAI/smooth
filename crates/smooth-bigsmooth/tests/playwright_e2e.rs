@@ -184,6 +184,225 @@ if (text?.includes('Hello Smooth')) {{
     eprintln!("operator_starts_dev_server_playwright_verifies: complete");
 }
 
+// ── Full E2E: operator builds a Vite React app, playwright tests interactions ──
+
+#[tokio::test]
+#[ignore = "requires sandbox, LLM provider, and playwright — run with SMOOTH_SANDBOXED=1 --ignored --nocapture"]
+async fn operator_builds_vite_app_playwright_tests_interactions() {
+    if !std::env::var("SMOOTH_SANDBOXED")
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+    {
+        eprintln!("SKIP: SMOOTH_SANDBOXED not set");
+        return;
+    }
+
+    let Some((router, tmp)) = test_app() else {
+        eprintln!("SKIP: smooth-dolt binary not available");
+        return;
+    };
+    let port = start_server(router).await;
+    eprintln!("Big Smooth started on port {port}");
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(600)) // 10 min — Vite scaffold + npm install takes time
+        .build()
+        .expect("build reqwest client");
+
+    let task_message = r#"Build a simple Vite React app with interactive components. Follow these exact steps:
+
+1. Run: npm create vite@latest myapp -- --template react
+2. cd myapp && npm install
+3. Replace src/App.jsx with this content:
+
+import { useState } from 'react'
+
+function App() {
+  const [count, setCount] = useState(0)
+  const [name, setName] = useState('')
+  const [submitted, setSubmitted] = useState(false)
+
+  return (
+    <div style={{ padding: '2rem', fontFamily: 'sans-serif' }}>
+      <h1 data-testid="title">Smooth Vite App</h1>
+
+      <section style={{ marginBottom: '2rem' }}>
+        <h2>Counter</h2>
+        <p data-testid="count">Count: {count}</p>
+        <button data-testid="increment" onClick={() => setCount(c => c + 1)}>
+          Increment
+        </button>
+        <button data-testid="decrement" onClick={() => setCount(c => c - 1)}>
+          Decrement
+        </button>
+      </section>
+
+      <section>
+        <h2>Greeting Form</h2>
+        {!submitted ? (
+          <div>
+            <input
+              data-testid="name-input"
+              placeholder="Enter your name"
+              value={name}
+              onChange={e => setName(e.target.value)}
+            />
+            <button
+              data-testid="submit-btn"
+              onClick={() => name && setSubmitted(true)}
+            >
+              Submit
+            </button>
+          </div>
+        ) : (
+          <p data-testid="greeting">Hello, {name}! Welcome to Smooth.</p>
+        )}
+      </section>
+    </div>
+  )
+}
+
+export default App
+
+4. Start the dev server: npx vite --host 0.0.0.0 --port 3000 &
+5. Wait 3 seconds for the server to start
+6. Use the forward_port tool to expose port 3000 to the host
+7. Tell me the host port number"#;
+
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/api/tasks"))
+        .json(&serde_json::json!({
+            "message": task_message,
+            "working_dir": tmp.path().to_string_lossy(),
+        }))
+        .send()
+        .await
+        .expect("POST /api/tasks should connect");
+
+    assert!(resp.status().is_success());
+
+    let body = resp.text().await.expect("read body");
+    let mut forwarded_port: Option<u16> = None;
+
+    for line in body.lines() {
+        if let Some(data) = line.strip_prefix("data: ") {
+            if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                if let Some(content) = event.get("content").and_then(|c| c.as_str()) {
+                    for word in content.split_whitespace() {
+                        if let Ok(p) = word.trim_matches(|c: char| !c.is_ascii_digit()).parse::<u16>() {
+                            if (10000..65535).contains(&p) {
+                                forwarded_port = Some(p);
+                            }
+                        }
+                    }
+                }
+                if let Some(ty) = event.get("type").and_then(|t| t.as_str()) {
+                    eprintln!("[event] {ty}");
+                }
+            }
+        }
+    }
+
+    if let Some(host_port) = forwarded_port {
+        eprintln!("Forwarded port detected: {host_port}");
+        eprintln!("Running Playwright interaction tests against http://localhost:{host_port}");
+
+        let script_path = tmp.path().join("test-vite-app.mjs");
+        std::fs::write(
+            &script_path,
+            format!(
+                r#"
+import {{ chromium }} from 'playwright';
+
+const browser = await chromium.launch();
+const page = await browser.newPage();
+
+// Navigate and wait for hydration
+await page.goto('http://localhost:{host_port}', {{ waitUntil: 'networkidle' }});
+
+// Test 1: Title is present
+const title = await page.textContent('[data-testid="title"]');
+console.log('Title:', title);
+if (!title?.includes('Smooth Vite App')) {{
+    console.error('FAIL: Title mismatch:', title);
+    process.exit(1);
+}}
+console.log('PASS: Title correct');
+
+// Test 2: Counter starts at 0
+let count = await page.textContent('[data-testid="count"]');
+console.log('Initial count:', count);
+if (!count?.includes('Count: 0')) {{
+    console.error('FAIL: Initial count should be 0:', count);
+    process.exit(1);
+}}
+console.log('PASS: Initial count is 0');
+
+// Test 3: Increment counter 3 times
+await page.click('[data-testid="increment"]');
+await page.click('[data-testid="increment"]');
+await page.click('[data-testid="increment"]');
+count = await page.textContent('[data-testid="count"]');
+console.log('After 3 increments:', count);
+if (!count?.includes('Count: 3')) {{
+    console.error('FAIL: Expected count 3:', count);
+    process.exit(1);
+}}
+console.log('PASS: Counter increments to 3');
+
+// Test 4: Decrement counter
+await page.click('[data-testid="decrement"]');
+count = await page.textContent('[data-testid="count"]');
+console.log('After decrement:', count);
+if (!count?.includes('Count: 2')) {{
+    console.error('FAIL: Expected count 2:', count);
+    process.exit(1);
+}}
+console.log('PASS: Counter decrements to 2');
+
+// Test 5: Form submission
+await page.fill('[data-testid="name-input"]', 'Brent');
+await page.click('[data-testid="submit-btn"]');
+const greeting = await page.textContent('[data-testid="greeting"]');
+console.log('Greeting:', greeting);
+if (!greeting?.includes('Hello, Brent! Welcome to Smooth.')) {{
+    console.error('FAIL: Greeting mismatch:', greeting);
+    process.exit(1);
+}}
+console.log('PASS: Form submits and shows greeting');
+
+await browser.close();
+console.log('ALL 5 TESTS PASSED');
+process.exit(0);
+"#
+            ),
+        )
+        .expect("write playwright script");
+
+        let output = tokio::process::Command::new("node").arg(&script_path).current_dir(tmp.path()).output().await;
+
+        match output {
+            Ok(o) => {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                eprintln!("Playwright stdout:\n{stdout}");
+                if !stderr.is_empty() {
+                    eprintln!("Playwright stderr:\n{stderr}");
+                }
+                assert!(o.status.success(), "Playwright tests should pass — 5 interaction tests");
+                assert!(stdout.contains("ALL 5 TESTS PASSED"), "Should see all tests pass");
+            }
+            Err(e) => {
+                eprintln!("Playwright failed to run: {e}");
+            }
+        }
+    } else {
+        eprintln!("No forwarded port detected — skipping Playwright tests");
+    }
+
+    eprintln!("operator_builds_vite_app_playwright_tests_interactions: complete");
+}
+
 // ── Simpler test: verify the task API accepts a dev-server task ──
 
 #[tokio::test]
