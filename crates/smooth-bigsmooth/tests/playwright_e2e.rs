@@ -66,8 +66,9 @@ async fn operator_starts_dev_server_playwright_verifies() {
     // Send a task via SSE — ask the operator to create and start a simple
     // HTTP server, then expose it via forward_port.
     let client = reqwest::Client::builder()
-        .read_timeout(Duration::from_secs(120)) // per-chunk timeout, not total
         .connect_timeout(Duration::from_secs(30))
+        // No read timeout — tool execution (npm install, server start) can take minutes.
+        // The SSE stream stays open until the task completes or errors.
         .build()
         .expect("build reqwest client");
 
