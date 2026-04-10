@@ -761,35 +761,35 @@ mod tests {
     // 13. LowCost preset creates correct routing
     #[test]
     fn low_cost_preset_creates_correct_routing() {
-        let registry = ProviderRegistry::from_preset(Preset::LowCost, "or-key");
+        let registry = ProviderRegistry::from_preset(Preset::OpenRouterLowCost, "or-key");
 
         let thinking = registry.llm_config_for(Activity::Thinking).unwrap();
-        assert_eq!(thinking.model, "deepseek/deepseek-r1");
+        assert_eq!(thinking.model, "z-ai/glm-5.1");
         assert_eq!(thinking.api_url, "https://openrouter.ai/api/v1");
 
         let coding = registry.llm_config_for(Activity::Coding).unwrap();
-        assert_eq!(coding.model, "minimax/minimax-m2.5");
+        assert_eq!(coding.model, "minimax/minimax-m2.7");
 
         let planning = registry.llm_config_for(Activity::Planning).unwrap();
-        assert_eq!(planning.model, "moonshot/kimi-k2.5");
+        assert_eq!(planning.model, "z-ai/glm-5.1");
 
         let reviewing = registry.llm_config_for(Activity::Reviewing).unwrap();
-        assert_eq!(reviewing.model, "z-ai/glm-5.1");
+        assert_eq!(reviewing.model, "deepseek/deepseek-v3.2");
 
         let judge = registry.llm_config_for(Activity::Judge).unwrap();
         assert_eq!(judge.model, "google/gemini-2.5-flash");
 
         let summarize = registry.llm_config_for(Activity::Summarize).unwrap();
-        assert_eq!(summarize.model, "minimax/minimax-m2.5");
+        assert_eq!(summarize.model, "deepseek/deepseek-v3.2");
 
         let default = registry.default_llm_config().unwrap();
-        assert_eq!(default.model, "deepseek/deepseek-v3");
+        assert_eq!(default.model, "deepseek/deepseek-v3.2");
     }
 
     // 14. Codex preset creates correct routing
     #[test]
     fn codex_preset_creates_correct_routing() {
-        let registry = ProviderRegistry::from_preset(Preset::Codex, "oai-key");
+        let registry = ProviderRegistry::from_preset(Preset::OpenAI, "oai-key");
 
         let thinking = registry.llm_config_for(Activity::Thinking).unwrap();
         assert_eq!(thinking.model, "o3-mini");
@@ -840,11 +840,11 @@ mod tests {
     // 16. from_preset registers the provider
     #[test]
     fn from_preset_registers_provider() {
-        let low_cost = ProviderRegistry::from_preset(Preset::LowCost, "lc-key");
+        let low_cost = ProviderRegistry::from_preset(Preset::OpenRouterLowCost, "lc-key");
         assert!(low_cost.get_provider("openrouter").is_some());
         assert_eq!(low_cost.get_provider("openrouter").unwrap().api_key, "lc-key");
 
-        let codex = ProviderRegistry::from_preset(Preset::Codex, "cx-key");
+        let codex = ProviderRegistry::from_preset(Preset::OpenAI, "cx-key");
         assert!(codex.get_provider("openai").is_some());
         assert_eq!(codex.get_provider("openai").unwrap().api_key, "cx-key");
 
@@ -856,7 +856,7 @@ mod tests {
     // 17. llm_config_for works with preset
     #[test]
     fn llm_config_for_works_with_preset() {
-        let registry = ProviderRegistry::from_preset(Preset::Codex, "test-key");
+        let registry = ProviderRegistry::from_preset(Preset::OpenAI, "test-key");
 
         // Every activity should resolve without error
         for activity in [
@@ -880,15 +880,15 @@ mod tests {
     // 18. Preset serialization roundtrip
     #[test]
     fn preset_serialization_roundtrip() {
-        for preset in [Preset::LowCost, Preset::Codex, Preset::Anthropic] {
+        for preset in [Preset::OpenRouterLowCost, Preset::LlmGatewayLowCost, Preset::OpenAI, Preset::Anthropic] {
             let json = serde_json::to_string(&preset).unwrap();
             let deserialized: Preset = serde_json::from_str(&json).unwrap();
             assert_eq!(deserialized, preset);
         }
 
         // Verify specific serialized values
-        assert_eq!(serde_json::to_string(&Preset::LowCost).unwrap(), "\"LowCost\"");
-        assert_eq!(serde_json::to_string(&Preset::Codex).unwrap(), "\"Codex\"");
+        assert_eq!(serde_json::to_string(&Preset::OpenRouterLowCost).unwrap(), "\"OpenRouterLowCost\"");
+        assert_eq!(serde_json::to_string(&Preset::OpenAI).unwrap(), "\"OpenAI\"");
         assert_eq!(serde_json::to_string(&Preset::Anthropic).unwrap(), "\"Anthropic\"");
     }
 }
