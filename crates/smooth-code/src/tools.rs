@@ -309,15 +309,16 @@ mod tests {
     }
 
     #[test]
-    fn create_tools_registers_four() {
+    fn create_tools_registers_five() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let tools = create_tools(dir.path());
         let schemas = tools.schemas();
-        assert_eq!(schemas.len(), 4);
+        assert_eq!(schemas.len(), 5);
         let names: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"write_file"));
         assert!(names.contains(&"read_file"));
         assert!(names.contains(&"bash"));
         assert!(names.contains(&"list_files"));
+        assert!(names.contains(&"forward_port"));
     }
 }
