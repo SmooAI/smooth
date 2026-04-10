@@ -75,7 +75,7 @@ jobs:
               run: cargo test
 
             - name: Build
-              run: cargo build --release -p smooth-cli
+              run: cargo build --release -p smooai-smooth-cli
 
             - name: Version Update 🦋
               id: changesets
@@ -163,7 +163,7 @@ jobs:
                   pnpm build
 
             - name: Build binary
-              run: cargo build --release --target ${{ matrix.target }} -p smooth-cli
+              run: cargo build --release --target ${{ matrix.target }} -p smooai-smooth-cli
               env:
                   CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
@@ -210,7 +210,7 @@ jobs:
               uses: dtolnay/rust-toolchain@stable
 
             - name: Publish smooth-policy to crates.io
-              run: cargo publish --allow-dirty -p smooth-policy
+              run: cargo publish --allow-dirty -p smooai-smooth-policy
               env:
                   CARGO_REGISTRY_TOKEN: ${{ secrets.SMOOAI_CARGO_REGISTRY_TOKEN }}
               continue-on-error: true
@@ -219,7 +219,7 @@ jobs:
               run: sleep 30
 
             - name: Publish smooth-operator to crates.io
-              run: cargo publish --allow-dirty -p smooth-operator
+              run: cargo publish --allow-dirty -p smooai-smooth-operator
               env:
                   CARGO_REGISTRY_TOKEN: ${{ secrets.SMOOAI_CARGO_REGISTRY_TOKEN }}
               continue-on-error: true
@@ -228,7 +228,7 @@ jobs:
               run: sleep 30
 
             - name: Publish smooth-pearls to crates.io
-              run: cargo publish --allow-dirty -p smooth-pearls
+              run: cargo publish --allow-dirty -p smooai-smooth-pearls
               env:
                   CARGO_REGISTRY_TOKEN: ${{ secrets.SMOOAI_CARGO_REGISTRY_TOKEN }}
               continue-on-error: true

@@ -57,7 +57,7 @@ jobs:
               continue-on-error: true
 
             - name: Build
-              run: cargo build --release -p smooth-cli
+              run: cargo build --release -p smooai-smooth-cli
 
     web:
         name: Web checks
