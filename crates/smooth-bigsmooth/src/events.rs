@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn all_client_event_variants_deserialize() {
-        let cases = vec![
+        let cases = [
             r#"{"type":"TaskStart","message":"do it","model":null,"budget":null,"working_dir":null}"#,
             r#"{"type":"TaskCancel","task_id":"t1"}"#,
             r#"{"type":"Steer","task_id":"t1","action":"pause","message":null}"#,

@@ -47,6 +47,16 @@ async fn spawn_bigsmooth() -> (String, TempDir) {
     (format!("http://{addr}"), tmp)
 }
 
+/// Truncate a string to `max` chars with an ellipsis suffix.
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max).collect();
+        format!("{truncated}…")
+    }
+}
+
 /// Open a WebSocket client against Big Smooth's `/ws` endpoint.
 async fn open_ws(bigsmooth_url: &str) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
     let ws_url = bigsmooth_url.replace("http://", "ws://") + "/ws";
@@ -717,6 +727,11 @@ async fn call_llm_judge(
 #[ignore = "boots a microVM, drives a real LLM agent, runs cargo test on host, and calls an LLM judge — requires hardware virtualization + ~/.smooth/providers.json"]
 async fn sandboxed_agent_passes_spec_tests_with_llm_judge() {
     std::env::set_var("SMOOTH_SANDBOXED", "1");
+    // Stable env cache key so the apk-installed rust toolchain and the
+    // compiled axum/serde/tokio deps persist across runs of this test. The
+    // first run takes ~5-10 min (apk add + first cargo build); subsequent
+    // runs reuse the cached toolchain + target dir and complete much faster.
+    std::env::set_var("SMOOTH_ENV_CACHE_KEY", "spec-test-task-api");
 
     // Load the same LLM config Big Smooth uses for the runner, so the
     // judge talks to the same provider the agent did. If no provider is
@@ -758,8 +773,13 @@ async fn sandboxed_agent_passes_spec_tests_with_llm_judge() {
         "PATCH /tasks/:id for partial updates, and DELETE /tasks/:id returning 204. ",
         "Use an in-memory store with Mutex<HashMap<String, Task>>. ",
         "Return 201 Created for POST /tasks, 400 or 422 if title is missing. ",
-        "Do not modify Cargo.toml or tests/. Do not run any commands that need network access. ",
-        "Only create src/lib.rs. Make it compile with the deps already in Cargo.toml."
+        "Do not modify Cargo.toml or tests/. Only create src/lib.rs. ",
+        "Step 3 (required): after writing src/lib.rs, run `cargo test` via the bash tool. ",
+        "Read the compiler errors and test failures, fix the problems in src/lib.rs, ",
+        "and re-run `cargo test`. Iterate until `cargo test` exits with code 0 and the ",
+        "test result line shows zero failures. Do not declare the task done until you ",
+        "have actually seen `cargo test` pass cleanly. ",
+        "If `cargo` is not installed in the sandbox, install it first with `apk add --no-cache cargo rust`."
     );
     let task_start = serde_json::json!({
         "type": "TaskStart",
@@ -770,11 +790,22 @@ async fn sandboxed_agent_passes_spec_tests_with_llm_judge() {
     });
     ws.send(Message::Text(task_start.to_string().into())).await.expect("send TaskStart");
 
-    // Give the agent plenty of time — one-shot code generation of a
-    // non-trivial file over a real LLM is not fast.
+    // Give the agent plenty of time. The first run has to apk-install rust
+    // (~30s), cargo-build axum + serde + tokio (~5 min cold), and then iterate
+    // on its own code several times. Subsequent runs reuse the env cache and
+    // are much faster, but the deadline must accommodate cold start.
     let mut saw_task_complete = false;
     let mut task_error: Option<String> = None;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
+    // Track what the agent actually did so we can debug iteration behavior.
+    let mut tool_calls: Vec<(String, String)> = Vec::new(); // (tool_name, args)
+    let mut bash_commands: Vec<String> = Vec::new();
+    // Accumulate runner stdout (forwarded as TokenDelta) so we can scrape the
+    // runner's own AgentEvent JSON-lines and see what tools the in-VM agent
+    // actually invoked. The host-side ToolCallStart events only cover
+    // sandbox.create / sandbox.exec — the agent's own tool calls live in the
+    // runner stdout that Big Smooth pipes back through TokenDelta.
+    let mut accumulated_stdout = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(900);
     while tokio::time::Instant::now() < deadline {
         let next = tokio::time::timeout(Duration::from_secs(30), ws.next()).await;
         let Ok(Some(Ok(msg))) = next else { continue };
@@ -787,6 +818,29 @@ async fn sandboxed_agent_passes_spec_tests_with_llm_judge() {
             continue;
         };
         match event.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+            "ToolCallStart" => {
+                let name = event.get("tool_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let args = event.get("arguments").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                eprintln!("[agent] tool: {name} args={}", truncate_str(&args, 200));
+                if name == "bash" {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&args) {
+                        if let Some(cmd) = parsed.get("command").and_then(|v| v.as_str()) {
+                            bash_commands.push(cmd.to_string());
+                        }
+                    }
+                }
+                tool_calls.push((name, args));
+            }
+            "ToolCallComplete" => {
+                let name = event.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+                let is_err = event.get("is_error").and_then(serde_json::Value::as_bool).unwrap_or(false);
+                eprintln!("[agent] tool {} {}", name, if is_err { "FAILED" } else { "ok" });
+            }
+            "TokenDelta" => {
+                if let Some(content) = event.get("content").and_then(|v| v.as_str()) {
+                    accumulated_stdout.push_str(content);
+                }
+            }
             "TaskComplete" => {
                 saw_task_complete = true;
                 break;
@@ -797,6 +851,53 @@ async fn sandboxed_agent_passes_spec_tests_with_llm_judge() {
             }
             _ => {}
         }
+    }
+    eprintln!("=== host-side tool call summary ===");
+    eprintln!("total host tool calls: {}", tool_calls.len());
+    eprintln!("bash commands run (host-side): {}", bash_commands.len());
+    for (i, cmd) in bash_commands.iter().enumerate() {
+        eprintln!("  {i}: {}", truncate_str(cmd, 200));
+    }
+    eprintln!("=== runner stdout (last 8000 chars) ===");
+    let tail = if accumulated_stdout.len() > 8000 {
+        &accumulated_stdout[accumulated_stdout.len() - 8000..]
+    } else {
+        &accumulated_stdout[..]
+    };
+    eprintln!("{tail}");
+    eprintln!("=== end runner stdout ===");
+    // Scrape the runner's own AgentEvent JSON-lines for tool call activity.
+    let mut in_vm_tools: Vec<(String, bool)> = Vec::new();
+    let mut in_vm_iterations = 0u32;
+    for line in accumulated_stdout.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with('{') {
+            continue;
+        }
+        let Ok(ev) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        match ev.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+            "ToolCallStart" => {
+                let name = ev.get("tool_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                in_vm_tools.push((name, false));
+            }
+            "ToolCallComplete" => {
+                if let Some(last) = in_vm_tools.last_mut() {
+                    last.1 = ev.get("is_error").and_then(serde_json::Value::as_bool).unwrap_or(false);
+                }
+            }
+            "Iteration" | "IterationStart" => {
+                in_vm_iterations += 1;
+            }
+            _ => {}
+        }
+    }
+    eprintln!("=== in-VM agent activity ===");
+    eprintln!("iterations seen: {in_vm_iterations}");
+    eprintln!("in-VM tool calls: {}", in_vm_tools.len());
+    for (i, (name, is_err)) in in_vm_tools.iter().enumerate() {
+        eprintln!("  {i}: {name}{}", if *is_err { " [error]" } else { "" });
     }
     assert!(task_error.is_none(), "sandboxed spec task failed: {task_error:?}");
     assert!(saw_task_complete, "agent did not reach TaskComplete within deadline");

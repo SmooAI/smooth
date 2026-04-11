@@ -47,7 +47,7 @@ pub fn generate_policy(operator_id: &str, bead_id: &str, phase: &str, token: &st
         },
         access_requests: AccessRequestConfig {
             enabled: true,
-            auto_approve_domains: vec!["*.npmjs.org".into(), "*.pypi.org".into(), "*.crates.io".into()],
+            auto_approve_domains: vec!["*.npmjs.org".into(), "*.pypi.org".into(), "*.crates.io".into(), "*.alpinelinux.org".into()],
             auto_approve_tools: vec!["lint_fix".into(), "test_run".into()],
         },
         ports: ports_policy(phase),
@@ -224,6 +224,31 @@ fn task_network_policy(phase: &str, task_type: TaskType) -> NetworkPolicy {
                     methods: None,
                 },
                 NetworkRule {
+                    domain: "api.llmgateway.io".into(),
+                    path: None,
+                    methods: None,
+                },
+                NetworkRule {
+                    domain: "api.openai.com".into(),
+                    path: None,
+                    methods: None,
+                },
+                NetworkRule {
+                    domain: "api.anthropic.com".into(),
+                    path: None,
+                    methods: None,
+                },
+                NetworkRule {
+                    domain: "api.kimi.com".into(),
+                    path: None,
+                    methods: None,
+                },
+                NetworkRule {
+                    domain: "api.moonshot.ai".into(),
+                    path: None,
+                    methods: None,
+                },
+                NetworkRule {
                     domain: "registry.npmjs.org".into(),
                     path: None,
                     methods: None,
@@ -248,6 +273,37 @@ fn task_network_policy(phase: &str, task_type: TaskType) -> NetworkPolicy {
                     path: None,
                     methods: None,
                 },
+                // Crate downloads + index — `crates.io` alone doesn't cover
+                // them; cargo will hang on registry sync without these.
+                NetworkRule {
+                    domain: "static.crates.io".into(),
+                    path: None,
+                    methods: None,
+                },
+                NetworkRule {
+                    domain: "index.crates.io".into(),
+                    path: None,
+                    methods: None,
+                },
+                // Alpine package mirrors — needed for `apk add` to bootstrap
+                // missing language toolchains (rust, build-base, etc.) when
+                // the operator microVM's base image lacks them.
+                NetworkRule {
+                    domain: "dl-cdn.alpinelinux.org".into(),
+                    path: None,
+                    methods: None,
+                },
+                // Rustup / official rust toolchain downloads.
+                NetworkRule {
+                    domain: "static.rust-lang.org".into(),
+                    path: None,
+                    methods: None,
+                },
+                NetworkRule {
+                    domain: "sh.rustup.rs".into(),
+                    path: None,
+                    methods: None,
+                },
             ];
             if matches!(phase, "execute" | "finalize") {
                 rules.push(NetworkRule {
@@ -262,6 +318,31 @@ fn task_network_policy(phase: &str, task_type: TaskType) -> NetworkPolicy {
             vec![
                 NetworkRule {
                     domain: "openrouter.ai".into(),
+                    path: None,
+                    methods: None,
+                },
+                NetworkRule {
+                    domain: "api.llmgateway.io".into(),
+                    path: None,
+                    methods: None,
+                },
+                NetworkRule {
+                    domain: "api.openai.com".into(),
+                    path: None,
+                    methods: None,
+                },
+                NetworkRule {
+                    domain: "api.anthropic.com".into(),
+                    path: None,
+                    methods: None,
+                },
+                NetworkRule {
+                    domain: "api.kimi.com".into(),
+                    path: None,
+                    methods: None,
+                },
+                NetworkRule {
+                    domain: "api.moonshot.ai".into(),
                     path: None,
                     methods: None,
                 },
@@ -303,11 +384,38 @@ fn task_network_policy(phase: &str, task_type: TaskType) -> NetworkPolicy {
             ]
         }
         TaskType::Review => {
-            vec![NetworkRule {
-                domain: "openrouter.ai".into(),
-                path: None,
-                methods: None,
-            }]
+            vec![
+                NetworkRule {
+                    domain: "openrouter.ai".into(),
+                    path: None,
+                    methods: None,
+                },
+                NetworkRule {
+                    domain: "api.llmgateway.io".into(),
+                    path: None,
+                    methods: None,
+                },
+                NetworkRule {
+                    domain: "api.openai.com".into(),
+                    path: None,
+                    methods: None,
+                },
+                NetworkRule {
+                    domain: "api.anthropic.com".into(),
+                    path: None,
+                    methods: None,
+                },
+                NetworkRule {
+                    domain: "api.kimi.com".into(),
+                    path: None,
+                    methods: None,
+                },
+                NetworkRule {
+                    domain: "api.moonshot.ai".into(),
+                    path: None,
+                    methods: None,
+                },
+            ]
         }
     };
 

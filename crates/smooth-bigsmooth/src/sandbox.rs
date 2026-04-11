@@ -373,7 +373,7 @@ pub fn init_sandbox_client() {
         #[cfg(feature = "direct-sandbox")]
         {
             tracing::info!("sandbox: using DirectSandboxClient (in-process mode)");
-            return Arc::new(DirectSandboxClient);
+            Arc::new(DirectSandboxClient)
         }
         #[cfg(not(feature = "direct-sandbox"))]
         {

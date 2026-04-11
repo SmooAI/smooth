@@ -905,7 +905,7 @@ mod tests {
                 }],
             ));
             // Big tool results to inflate token count
-            conv.push(Message::tool_result(&id, &"x".repeat(40)));
+            conv.push(Message::tool_result(&id, "x".repeat(40)));
         }
         conv.push(Message::user("final"));
         conv.push(Message::assistant("ok"));

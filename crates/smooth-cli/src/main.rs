@@ -635,15 +635,12 @@ async fn cmd_down() -> Result<()> {
     // Send SIGTERM
     let status = std::process::Command::new("kill").arg(pid.to_string()).status()?;
 
+    let pid_tag_owned = format!("(pid {pid})");
+    let pid_tag = pid_tag_owned.dimmed();
     if status.success() {
-        println!(
-            "  {} {} {}",
-            "\u{1f534}".to_string(),
-            "Smooth stopped".green().bold(),
-            format!("(pid {pid})").dimmed()
-        );
+        println!("  \u{1f534} {} {pid_tag}", "Smooth stopped".green().bold());
     } else {
-        println!("  {} {}", "Cleaning up stale pid file".dimmed(), format!("(pid {pid})").dimmed());
+        println!("  {} {pid_tag}", "Cleaning up stale pid file".dimmed());
     }
     std::fs::remove_file(&pid_path)?;
     Ok(())
@@ -1151,7 +1148,7 @@ async fn cmd_operators() -> Result<()> {
         Ok(resp) => {
             let json: serde_json::Value = resp.json().await?;
             let workers = json["data"].as_array();
-            if workers.map_or(true, Vec::is_empty) {
+            if workers.is_none_or(Vec::is_empty) {
                 println!("No active Smooth Operators.");
             } else {
                 for w in workers.unwrap_or(&vec![]) {
@@ -1169,7 +1166,7 @@ async fn cmd_inbox() -> Result<()> {
         Ok(resp) => {
             let json: serde_json::Value = resp.json().await?;
             let msgs = json["data"].as_array();
-            if msgs.map_or(true, Vec::is_empty) {
+            if msgs.is_none_or(Vec::is_empty) {
                 println!("No messages.");
             } else {
                 for m in msgs.unwrap_or(&vec![]) {
@@ -1283,7 +1280,7 @@ async fn cmd_access(cmd: AccessCommands) -> Result<()> {
                 if requests.is_empty() {
                     println!("No pending access requests.");
                 } else {
-                    println!("{:<12} {:<20} {:<30} {}", "Bead", "Operator", "Resource", "Reason");
+                    println!("{:<12} {:<20} {:<30} Reason", "Bead", "Operator", "Resource");
                     println!("{}", "-".repeat(80));
                     for req in requests {
                         println!(

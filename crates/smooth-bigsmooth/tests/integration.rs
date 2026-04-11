@@ -158,7 +158,7 @@ async fn get_pearl_via_api() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri(&format!("/api/pearls/{}", created.id))
+                .uri(format!("/api/pearls/{}", created.id))
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -194,7 +194,7 @@ async fn close_pearl_via_api() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/api/pearls/{}/close", created.id))
+                .uri(format!("/api/pearls/{}/close", created.id))
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -324,7 +324,7 @@ async fn beads_backward_compat() {
     let resp2 = app
         .oneshot(
             Request::builder()
-                .uri(&format!("/api/pearls/{}", created.id))
+                .uri(format!("/api/pearls/{}", created.id))
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -405,7 +405,7 @@ async fn pearl_full_lifecycle_through_dolt() {
         .oneshot(
             Request::builder()
                 .method("PATCH")
-                .uri(&format!("/api/pearls/{}", pearl.id))
+                .uri(format!("/api/pearls/{}", pearl.id))
                 .header("content-type", "application/json")
                 .body(Body::from(r#"{"status":"in_progress"}"#))
                 .expect("request"),
@@ -450,7 +450,7 @@ async fn pearl_full_lifecycle_through_dolt() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/api/pearls/{}/close", pearl.id))
+                .uri(format!("/api/pearls/{}/close", pearl.id))
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -749,7 +749,7 @@ async fn delegation_full_lifecycle() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(&format!("/api/delegate/{delegation_id}/status"))
+                .uri(format!("/api/delegate/{delegation_id}/status"))
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -768,7 +768,7 @@ async fn delegation_full_lifecycle() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/api/pearls/{delegation_id}/close"))
+                .uri(format!("/api/pearls/{delegation_id}/close"))
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -783,7 +783,7 @@ async fn delegation_full_lifecycle() {
     let resp4 = app
         .oneshot(
             Request::builder()
-                .uri(&format!("/api/delegate/{delegation_id}/status"))
+                .uri(format!("/api/delegate/{delegation_id}/status"))
                 .body(Body::empty())
                 .expect("request"),
         )

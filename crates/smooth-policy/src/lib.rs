@@ -639,6 +639,31 @@ pub fn phase_network_defaults(phase: &str) -> Vec<NetworkRule> {
             methods: None,
         },
         NetworkRule {
+            domain: "api.llmgateway.io".into(),
+            path: None,
+            methods: None,
+        },
+        NetworkRule {
+            domain: "api.openai.com".into(),
+            path: None,
+            methods: None,
+        },
+        NetworkRule {
+            domain: "api.anthropic.com".into(),
+            path: None,
+            methods: None,
+        },
+        NetworkRule {
+            domain: "api.kimi.com".into(),
+            path: None,
+            methods: None,
+        },
+        NetworkRule {
+            domain: "api.moonshot.ai".into(),
+            path: None,
+            methods: None,
+        },
+        NetworkRule {
             domain: "registry.npmjs.org".into(),
             path: None,
             methods: None,
@@ -650,6 +675,39 @@ pub fn phase_network_defaults(phase: &str) -> Vec<NetworkRule> {
         },
         NetworkRule {
             domain: "crates.io".into(),
+            path: None,
+            methods: None,
+        },
+        // Crate downloads + index live on static.crates.io / index.crates.io,
+        // not the bare crates.io domain. Without these the cargo registry
+        // sync hangs.
+        NetworkRule {
+            domain: "static.crates.io".into(),
+            path: None,
+            methods: None,
+        },
+        NetworkRule {
+            domain: "index.crates.io".into(),
+            path: None,
+            methods: None,
+        },
+        // Alpine package repositories — needed inside the operator microVM
+        // to `apk add` toolchains (rust, cargo, build-base, etc.) when the
+        // base image lacks them. Without this, the agent has no way to
+        // bootstrap missing language tooling.
+        NetworkRule {
+            domain: "dl-cdn.alpinelinux.org".into(),
+            path: None,
+            methods: None,
+        },
+        // Rustup / official Rust toolchain downloads.
+        NetworkRule {
+            domain: "static.rust-lang.org".into(),
+            path: None,
+            methods: None,
+        },
+        NetworkRule {
+            domain: "sh.rustup.rs".into(),
             path: None,
             methods: None,
         },
@@ -848,10 +906,28 @@ auto_approve_tools = ["lint_fix", "test_run"]
 
     #[test]
     fn phase_defaults() {
+        // Baseline = 6 LLM providers + 3 language registries (npm/pypi/crates)
+        // + static/index.crates.io + dl-cdn.alpinelinux.org + static.rust-lang.org
+        // + sh.rustup.rs = 13 rules at `assess`.
         let assess_rules = phase_network_defaults("assess");
-        assert_eq!(assess_rules.len(), 4); // LLM + 3 registries, no GitHub
+        let assess_domains: Vec<&str> = assess_rules.iter().map(|r| r.domain.as_str()).collect();
+        assert!(assess_domains.contains(&"api.openai.com"), "missing openai: {assess_domains:?}");
+        assert!(assess_domains.contains(&"crates.io"), "missing crates.io: {assess_domains:?}");
+        assert!(assess_domains.contains(&"dl-cdn.alpinelinux.org"), "missing alpine: {assess_domains:?}");
+        assert!(assess_domains.contains(&"static.rust-lang.org"), "missing rust-lang: {assess_domains:?}");
+        assert!(
+            !assess_domains.contains(&"api.github.com"),
+            "github should be execute/finalize only: {assess_domains:?}"
+        );
+
+        // Execute adds api.github.com on top of the baseline.
         let execute_rules = phase_network_defaults("execute");
-        assert_eq!(execute_rules.len(), 5); // + GitHub
+        let execute_domains: Vec<&str> = execute_rules.iter().map(|r| r.domain.as_str()).collect();
+        assert_eq!(execute_rules.len(), assess_rules.len() + 1);
+        assert!(
+            execute_domains.contains(&"api.github.com"),
+            "execute should include github: {execute_domains:?}"
+        );
 
         assert!(!phase_filesystem_writable("assess"));
         assert!(!phase_filesystem_writable("plan"));

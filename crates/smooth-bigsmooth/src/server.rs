@@ -550,8 +550,12 @@ async fn handle_client_event(state: &AppState, event: ClientEvent) {
 /// and no LLM calls** on the sandboxed path — it stays the READ-ONLY
 /// orchestrator the architecture promises.
 fn sandboxed_dispatch_enabled() -> bool {
-    std::env::var("SMOOTH_SANDBOXED")
-        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+    // Sandboxed is the default — the whole point of Smooth is hardware-isolated
+    // operators with Wonk/Goalie/Narc enforcement. Set SMOOTH_SANDBOXED=0 to opt
+    // OUT and use the legacy in-process path (only useful for tests that don't
+    // have microsandbox available).
+    !std::env::var("SMOOTH_SANDBOXED")
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"))
         .unwrap_or(false)
 }
 
@@ -962,7 +966,13 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
         //   /opt/smooth/bin (RO) — runner binary directory
         //   /workspace       (RW) — user's working dir
         let mut env = std::collections::HashMap::new();
-        env.insert("SMOOTH_TASK".into(), message.clone());
+        // Note: SMOOTH_TASK is set later, *after* we know whether the task
+        // message is small enough to fit in an env var or needs to land in a
+        // tempfile mounted at /opt/smooth/policy/task.txt. The kernel cmdline
+        // microsandbox builds for the VM has a hard size limit (~2 KB on
+        // aarch64), and a long task message (e.g. 1.5 KB of agent
+        // instructions) will overflow it and panic msb_krun_vmm with
+        // `TooLarge` before the VM ever boots.
         env.insert("SMOOTH_API_URL".into(), api_url);
         env.insert("SMOOTH_API_KEY".into(), api_key);
         env.insert("SMOOTH_MODEL".into(), final_model);
@@ -1066,6 +1076,46 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
         // the execute phase. Future: pipe policy content through Bill's
         // protocol so the file lands on the host.
         let in_boardroom = boardroom_handles.is_some();
+
+        // Make sure we have *some* tempdir in non-boardroom mode so we can
+        // hand the task message to the runner via a file (avoids the
+        // kernel-cmdline size limit on long messages). If policy generation
+        // failed earlier, fall back to a bare tempdir here.
+        if !in_boardroom && policy_dir_guard.is_none() {
+            if let Ok(dir) = tempfile::Builder::new().prefix("smooth-control-").tempdir() {
+                policy_dir_guard = Some(dir);
+            }
+        }
+
+        // Write the task message to a file in the control tempdir so the
+        // runner can read it via SMOOTH_TASK_FILE. The kernel cmdline that
+        // microsandbox builds for the VM has a hard size limit (~2 KB on
+        // aarch64) and a long task (e.g. 1.5 KB of agent instructions) will
+        // overflow it and panic msb_krun_vmm before the VM boots. The file
+        // path keeps the cmdline tiny regardless of message size.
+        let task_file_set = if let Some(ref dir) = policy_dir_guard {
+            let task_path = dir.path().join("task.txt");
+            match std::fs::write(&task_path, message.as_bytes()) {
+                Ok(()) => {
+                    env.insert("SMOOTH_TASK_FILE".into(), "/opt/smooth/policy/task.txt".into());
+                    true
+                }
+                Err(e) => {
+                    tracing::warn!(task_id = tid, error = %e, "failed to write task tempfile; falling back to SMOOTH_TASK env var");
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        if !task_file_set {
+            // Boardroom mode or tempdir creation failed: stuff the task in an
+            // env var. This still works for short messages but will overflow
+            // the kernel cmdline for long ones — Boardroom mode needs a
+            // brokered task-file path eventually.
+            env.insert("SMOOTH_TASK".into(), message.clone());
+        }
+
         let policy_mount = if !in_boardroom {
             if let Some(ref dir) = policy_dir_guard {
                 let host = dir
@@ -1074,7 +1124,12 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
                     .unwrap_or_else(|_| dir.path().to_path_buf())
                     .to_string_lossy()
                     .to_string();
-                env.insert("SMOOTH_POLICY_FILE".into(), "/opt/smooth/policy/policy.toml".into());
+                // Only point at the policy file if we actually wrote one
+                // (the task tempfile may live in a bare control tempdir
+                // when policy generation failed earlier).
+                if dir.path().join("policy.toml").exists() {
+                    env.insert("SMOOTH_POLICY_FILE".into(), "/opt/smooth/policy/policy.toml".into());
+                }
                 Some(BindMount {
                     host_path: host,
                     guest_path: "/opt/smooth/policy".into(),
@@ -1383,7 +1438,12 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
                 task_id: tid.clone(),
                 message: format!("sandboxed runner exited with code {code}"),
             });
-            tracing::error!(task_id = tid, exit = code, "sandboxed WS task failed");
+            tracing::error!(
+                task_id = tid,
+                exit = code,
+                stderr = %stderr.lines().take(20).collect::<Vec<_>>().join("\n"),
+                "sandboxed WS task failed"
+            );
         }
 
         touch();
@@ -1497,81 +1557,64 @@ async fn set_config_handler(State(state): State<AppState>, Json(body): Json<Conf
 async fn run_task_handler(State(state): State<AppState>, Json(req): Json<TaskRequest>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     state.touch();
 
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+    // Subscribe to the broadcast channel BEFORE dispatching so we don't miss
+    // events. The dispatched task broadcasts ServerEvents which we forward as
+    // AgentEvent SSE chunks for clients.
+    let mut event_rx = state.event_tx.subscribe();
+    let (sse_tx, sse_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
-    // Determine working directory
-    let working_dir = req
-        .working_dir
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-    // Create issue for tracking
-    let pearl_id = crate::pearls::create_pearl(
-        &state.pearl_store,
-        &format!("Task: {}", truncate_str(&req.message, 60)),
-        &req.message,
-        "task",
-        2,
-    )
-    .ok()
-    .map(|i| i.id);
-
-    if let Some(ref id) = pearl_id {
-        let update = smooth_pearls::PearlUpdate {
-            status: Some(smooth_pearls::PearlStatus::InProgress),
-            ..Default::default()
-        };
-        let _ = state.pearl_store.update(id, &update);
-    }
-
-    let pearl_store = state.pearl_store.clone();
+    // Dispatch via the unified ws task path — sandboxed if SMOOTH_SANDBOXED is
+    // set, in-process otherwise. Sandboxed is the security architecture path:
+    // operator runs inside a microVM with Wonk/Goalie/Narc enforcement.
+    let state_clone = state.clone();
     let message = req.message.clone();
     let model = req.model.clone();
     let budget = req.budget;
-    let event_tx = state.event_tx.clone();
-    let task_id = uuid::Uuid::new_v4().to_string();
+    let working_dir = req.working_dir.clone();
 
-    // Spawn the agent in a background task
     tokio::spawn(async move {
-        let result = run_agent_task(working_dir, message, model, budget, tx.clone()).await;
+        dispatch_ws_task(&state_clone, message, model, budget, working_dir).await;
+    });
 
-        match result {
-            Ok(cost) => {
-                // Send cost event
-                let _ = tx.send(AgentEvent::Completed {
-                    agent_id: "task".into(),
-                    iterations: 0,
-                });
-                // Also broadcast to WebSocket clients
-                let _ = event_tx.send(ServerEvent::TaskComplete {
-                    task_id: task_id.clone(),
-                    iterations: 0,
-                    cost_usd: cost,
-                });
-                drop(tx);
-
-                // Close the issue on success
-                if let Some(ref id) = pearl_id {
-                    let _ = pearl_store.close(&[id]);
+    // Bridge ServerEvent broadcast → AgentEvent SSE stream
+    tokio::spawn(async move {
+        loop {
+            match event_rx.recv().await {
+                Ok(event) => {
+                    let agent_event = match event {
+                        ServerEvent::TokenDelta { content, .. } => Some(AgentEvent::TokenDelta { content }),
+                        ServerEvent::ToolCallStart { tool_name, .. } => Some(AgentEvent::ToolCallStart { iteration: 0, tool_name }),
+                        ServerEvent::ToolCallComplete { tool_name, is_error, .. } => Some(AgentEvent::ToolCallComplete {
+                            iteration: 0,
+                            tool_name,
+                            is_error,
+                        }),
+                        ServerEvent::TaskComplete { iterations, .. } => {
+                            let _ = sse_tx.send(AgentEvent::Completed {
+                                agent_id: "task".into(),
+                                iterations,
+                            });
+                            break;
+                        }
+                        ServerEvent::TaskError { message, .. } => {
+                            let _ = sse_tx.send(AgentEvent::Error { message });
+                            break;
+                        }
+                        _ => None,
+                    };
+                    if let Some(e) = agent_event {
+                        if sse_tx.send(e).is_err() {
+                            break;
+                        }
+                    }
                 }
-
-                tracing::info!(cost_usd = cost, "Task completed successfully");
-            }
-            Err(e) => {
-                let _ = tx.send(AgentEvent::Error { message: e.to_string() });
-                // Also broadcast to WebSocket clients
-                let _ = event_tx.send(ServerEvent::TaskError {
-                    task_id: task_id.clone(),
-                    message: e.to_string(),
-                });
-                drop(tx);
-                tracing::error!(error = %e, "Task failed");
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break,
             }
         }
     });
 
-    // Convert the receiver into an SSE stream
-    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx);
+    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(sse_rx);
     let sse_stream = futures_util::StreamExt::map(stream, |event| {
         let data = serde_json::to_string(&event).unwrap_or_else(|_| r#"{"type":"Error","message":"serialization failed"}"#.into());
         Ok(Event::default().data(data))
@@ -1962,18 +2005,18 @@ async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>)
 
     let system_prompt = "You are Smooth, an AI agent orchestration leader. You help users manage projects, assign work to Smooth Operators (AI agents in sandboxes), review work, and coordinate tasks.\n\nAvailable commands: th run <pearl-id>, th operators, th pause/steer/cancel <pearl-id>, th auth status, th status";
 
-    let result: anyhow::Result<String> = (|| async {
+    async fn chat_inner(system_prompt: &str, user_content: &str) -> anyhow::Result<String> {
         let providers_path = dirs_next::home_dir().unwrap_or_default().join(".smooth/providers.json");
         let registry = ProviderRegistry::load_from_file(&providers_path).map_err(|e| anyhow::anyhow!("no LLM providers configured: {e}"))?;
         let config = registry.default_llm_config().map_err(|e| anyhow::anyhow!("no default provider: {e}"))?;
         let llm = smooth_operator::llm::LlmClient::new(config);
 
         let sys_msg = smooth_operator::conversation::Message::system(system_prompt);
-        let user_msg = smooth_operator::conversation::Message::user(&body.content);
+        let user_msg = smooth_operator::conversation::Message::user(user_content);
         let response = llm.chat(&[&sys_msg, &user_msg], &[]).await?;
         Ok(response.content)
-    })()
-    .await;
+    }
+    let result: anyhow::Result<String> = chat_inner(system_prompt, &body.content).await;
 
     match result {
         Ok(response) => Json(ApiResponse { data: response, ok: true }),
@@ -2401,7 +2444,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("GET")
-                    .uri(&format!("/api/delegate/{pearl_id}/status"))
+                    .uri(format!("/api/delegate/{pearl_id}/status"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -2422,7 +2465,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("GET")
-                    .uri(&format!("/api/delegate/{pearl_id}/status"))
+                    .uri(format!("/api/delegate/{pearl_id}/status"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )

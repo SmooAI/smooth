@@ -270,8 +270,20 @@ impl RunnerConfig {
 
         let policy_toml = resolve_policy_toml();
 
+        // Task can come from either SMOOTH_TASK (inline) or SMOOTH_TASK_FILE
+        // (path to a file). The file form is used for long task messages
+        // because env vars in microsandbox flow through the kernel cmdline,
+        // which has a hard size limit (~2 KB on aarch64). Big Smooth writes
+        // to /opt/smooth/task.txt and sets SMOOTH_TASK_FILE when the message
+        // would otherwise overflow.
+        let task = if let Ok(path) = std::env::var("SMOOTH_TASK_FILE") {
+            std::fs::read_to_string(&path).map_err(|e| anyhow::anyhow!("read SMOOTH_TASK_FILE {path}: {e}"))?
+        } else {
+            require("SMOOTH_TASK")?
+        };
+
         Ok(Self {
-            task: require("SMOOTH_TASK")?,
+            task,
             api_url: require("SMOOTH_API_URL")?,
             api_key: require("SMOOTH_API_KEY")?,
             model: std::env::var("SMOOTH_MODEL").unwrap_or_else(|_| "gpt-5.4-mini".into()),
@@ -288,7 +300,7 @@ impl RunnerConfig {
             // `SMOOTH_NARC_WRITE_GUARD=1` for phases where writes should be
             // audited or blocked.
             narc_write_guard: std::env::var("SMOOTH_NARC_WRITE_GUARD")
-                .map(|v| v == "1" || v.to_ascii_lowercase() == "true")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
             policy_toml,
         })
@@ -300,17 +312,28 @@ impl RunnerConfig {
 fn resolve_policy_toml() -> String {
     if let Ok(inline) = std::env::var("SMOOTH_POLICY_TOML") {
         if !inline.trim().is_empty() {
+            eprintln!("[runner] policy source: SMOOTH_POLICY_TOML inline ({} bytes)", inline.len());
             return inline;
         }
     }
     if let Ok(file) = std::env::var("SMOOTH_POLICY_FILE") {
-        if let Ok(contents) = std::fs::read_to_string(&file) {
-            return contents;
+        match std::fs::read_to_string(&file) {
+            Ok(contents) => {
+                eprintln!("[runner] policy source: SMOOTH_POLICY_FILE={file} ({} bytes)", contents.len());
+                return contents;
+            }
+            Err(e) => {
+                eprintln!("[runner] SMOOTH_POLICY_FILE={file} read failed: {e}");
+            }
         }
+    } else {
+        eprintln!("[runner] SMOOTH_POLICY_FILE env var not set");
     }
     if let Ok(contents) = std::fs::read_to_string("/opt/smooth/policy.toml") {
+        eprintln!("[runner] policy source: /opt/smooth/policy.toml fallback ({} bytes)", contents.len());
         return contents;
     }
+    eprintln!("[runner] policy source: HARDCODED DEFAULT (no SMOOTH_POLICY_TOML, SMOOTH_POLICY_FILE, or /opt/smooth/policy.toml)");
     default_policy_toml()
 }
 
@@ -551,6 +574,27 @@ async fn main() {
     // Spawn the in-VM security cast: Wonk (policy), Goalie (proxy), Scribe
     // (log sink). All three run as tokio tasks bound to ephemeral localhost
     // ports. The agent's tool hooks will talk to Wonk + Scribe over HTTP.
+    //
+    // Diagnostic: parse the policy TOML so we can echo the network allowlist
+    // and policy source path back through stdout. This makes it possible to
+    // verify from a test (which only sees runner stdout) which policy the
+    // sandbox is actually enforcing.
+    if let Ok(parsed) = smooth_policy::Policy::from_toml(&config.policy_toml) {
+        let domains: Vec<String> = parsed.network.allow.iter().map(|r| r.domain.clone()).collect();
+        emit_event(&AgentEvent::TokenDelta {
+            content: format!(
+                "[runner] loaded policy: phase={}, allowed_domains=[{}], total_rules={}\n",
+                parsed.metadata.phase,
+                domains.join(", "),
+                parsed.network.allow.len()
+            ),
+        });
+    } else {
+        emit_event(&AgentEvent::TokenDelta {
+            content: format!("[runner] FAILED to parse policy TOML ({} bytes)\n", config.policy_toml.len()),
+        });
+    }
+
     let cast = match spawn_cast(&config.policy_toml, &config.operator_id).await {
         Ok(c) => c,
         Err(e) => {
@@ -628,7 +672,23 @@ async fn main() {
     let base_prompt = format!(
         "You are Smooth Operator, an AI coding agent running inside a hardware-isolated microVM. \
         Use read_file, write_file, list_files, and bash tools to complete the user task. \
-        All paths are relative to your workspace.{pearl_note} Be concise and thorough.",
+        All paths are relative to your workspace.{pearl_note}\n\
+        \n\
+        ## Workflow — iterate until verified\n\
+        \n\
+        You are not done when you have written code. You are done when the code\n\
+        builds, type-checks, and any relevant tests pass. After every meaningful\n\
+        edit, run the project's check/build/test commands via the bash tool\n\
+        (`cargo check`, `cargo test`, `pnpm typecheck`, `pytest`, etc. — match\n\
+        the project's stack), read the output, and fix the errors in another\n\
+        round. Keep iterating until the checks pass cleanly. Do not declare the\n\
+        task complete while there are unresolved errors or failing tests.\n\
+        \n\
+        If a required tool is missing inside the sandbox (e.g. `cargo` not\n\
+        found), install it using the system package manager (`apk add` on\n\
+        alpine) before giving up — the sandbox is yours to set up.\n\
+        \n\
+        Be concise and thorough.",
     );
     let workspace_path = std::path::Path::new(&config.workspace);
     let system_prompt = match smooth_operator::context::load_project_context(workspace_path) {

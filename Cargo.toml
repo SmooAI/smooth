@@ -58,10 +58,16 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # HTTP client
-# Use rustls-tls instead of the default native-tls so the crate (and its
-# downstream users — notably smooth-operator-runner cross-compiled to
-# aarch64-unknown-linux-musl) builds without a system OpenSSL install.
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "charset", "http2"] }
+# Use rustls-tls-webpki-roots so the crate ships its own CA bundle (no system
+# certs needed). This is critical for smooth-operator-runner running inside
+# alpine microVMs which don't have ca-certificates installed by default.
+#
+# `hickory-dns` enables a pure-Rust DNS resolver instead of getaddrinfo. This
+# is critical for the in-VM runner because alpine's musl getaddrinfo has been
+# observed to return EAI_AGAIN against microsandbox's intercepted DNS — the
+# pure-Rust hickory resolver reads /etc/resolv.conf and sends UDP queries
+# directly, which the microsandbox DNS interceptor handles correctly.
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-webpki-roots", "charset", "http2", "hickory-dns"] }
 
 # File search
 globwalk = "0.9"

@@ -152,6 +152,7 @@ pub async fn wait_for_http_ok(url: &str, deadline: Duration) -> anyhow::Result<(
 /// Call an OpenAI-compatible chat completion endpoint as an LLM judge.
 /// Returns `(verdict, score, rationale)` as parsed from a strict JSON
 /// rubric response.
+#[allow(clippy::too_many_arguments)]
 pub async fn call_llm_judge(
     api_url: &str,
     api_key: &str,

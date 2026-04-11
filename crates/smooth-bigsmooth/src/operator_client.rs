@@ -380,7 +380,7 @@ mod tests {
 
     #[test]
     fn all_operator_event_variants_deserialize() {
-        let cases = vec![
+        let cases = [
             r#"{"type":"TokenDelta","content":"hello"}"#,
             r#"{"type":"ToolCallStart","tool_name":"bash","arguments":"ls"}"#,
             r#"{"type":"ToolCallComplete","tool_name":"bash","result":"files","is_error":false,"duration_ms":42}"#,

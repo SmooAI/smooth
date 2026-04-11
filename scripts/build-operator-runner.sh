@@ -42,7 +42,7 @@ if ! command -v python-zig >/dev/null 2>&1; then
 fi
 
 echo "==> Cross-compiling smooth-operator-runner for aarch64-unknown-linux-musl"
-cargo zigbuild --target aarch64-unknown-linux-musl --release -p smooth-operator-runner
+cargo zigbuild --target aarch64-unknown-linux-musl --release -p smooai-smooth-operator-runner
 
 BIN="target/aarch64-unknown-linux-musl/release/smooth-operator-runner"
 if [ ! -f "$BIN" ]; then

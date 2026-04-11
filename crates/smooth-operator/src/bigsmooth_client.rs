@@ -304,7 +304,7 @@ mod tests {
 
     #[test]
     fn all_control_event_variants_deserialize() {
-        let cases = vec![
+        let cases = [
             r#"{"type":"Steer","action":"resume","message":null}"#,
             r#"{"type":"Cancel"}"#,
             r#"{"type":"AccessResponse","approved":true,"reason":"allowed"}"#,

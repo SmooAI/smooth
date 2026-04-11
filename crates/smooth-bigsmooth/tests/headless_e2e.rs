@@ -250,7 +250,7 @@ async fn delegate_creates_sub_pearl() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(&format!("/api/delegate/{delegation_id}/status"))
+                .uri(format!("/api/delegate/{delegation_id}/status"))
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -271,7 +271,7 @@ async fn delegate_creates_sub_pearl() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(&format!("/api/delegate/{delegation_id}/status"))
+                .uri(format!("/api/delegate/{delegation_id}/status"))
                 .body(Body::empty())
                 .expect("request"),
         )

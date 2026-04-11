@@ -564,7 +564,23 @@ impl LlmClient {
             .ok_or_else(|| anyhow::anyhow!("serialized request is not a JSON object"))?
             .insert("stream".into(), serde_json::Value::Bool(true));
 
-        let resp = self.client.post(&url).bearer_auth(&self.config.api_key).json(&request_body).send().await?;
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.config.api_key)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| {
+                // Walk the error chain to get the root cause
+                let mut chain = vec![format!("{e}")];
+                let mut source: &dyn std::error::Error = &e;
+                while let Some(s) = source.source() {
+                    chain.push(format!("{s}"));
+                    source = s;
+                }
+                anyhow::anyhow!("HTTP request failed: {}", chain.join(" → "))
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();

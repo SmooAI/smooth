@@ -408,7 +408,7 @@ mod tests {
     fn test_health_warnings_generate_system_message() {
         let (_dir, path) = test_dir();
         let mut state = AppState::new(path);
-        let warnings = vec!["API not running".to_string(), "No providers".to_string()];
+        let warnings = ["API not running".to_string(), "No providers".to_string()];
 
         let warning_text = format!(
             "\u{26a0} Health Check:\n{}",

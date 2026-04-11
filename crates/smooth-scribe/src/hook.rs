@@ -136,7 +136,7 @@ mod tests {
         assert_eq!(entry.operator_id.as_deref(), Some("op-test"));
         assert_eq!(entry.fields.get("tool_call_id").map(String::as_str), Some("call-42"));
         assert_eq!(entry.fields.get("tool_name").map(String::as_str), Some("read_file"));
-        assert!(entry.fields.get("arguments").is_some());
+        assert!(entry.fields.contains_key("arguments"));
     }
 
     // -----------------------------------------------------------------------
