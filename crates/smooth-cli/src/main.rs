@@ -828,7 +828,25 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
             let path = providers_path.as_ref().context("cannot determine home directory")?;
 
             // Provider catalog: (id, display name, models, needs_key)
+            // First entry is the recommended default — it's surfaced at the
+            // top of the picker. SmooAI Gateway is the hosted LiteLLM-backed
+            // gateway run by SmooAI with billing, moderation, governance,
+            // and provider routing on the server side.
             let catalog: Vec<(&str, &str, Vec<&str>, bool)> = vec![
+                (
+                    "smooai-gateway",
+                    "SmooAI Gateway (recommended)",
+                    vec![
+                        "smooth-default",
+                        "smooth-coding",
+                        "smooth-thinking",
+                        "smooth-planning",
+                        "smooth-reviewing",
+                        "smooth-judge",
+                        "smooth-summarize",
+                    ],
+                    true,
+                ),
                 (
                     "llmgateway",
                     "LLM Gateway",

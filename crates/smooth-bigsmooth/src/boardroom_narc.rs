@@ -81,7 +81,8 @@ impl BoardroomNarc {
         self.inner.cache.len()
     }
 
-    /// The main entry point. Rule engine → cache → LLM judge → escalation.
+    /// The main entry point. Rule engine → cache → moderation pre-filter →
+    /// LLM judge → confidence coercion.
     ///
     /// # Errors
     ///
@@ -98,20 +99,36 @@ impl BoardroomNarc {
 
         let started = Instant::now();
 
-        // 1. Rule engine short-circuit.
+        // 1. Rule engine short-circuit — fast path for known-safe /
+        //    known-dangerous patterns, no LLM call.
         if let Some(decision) = rule_engine_decide(&request) {
             self.record("rule_engine", &request, &decision, started.elapsed().as_millis());
             self.inner.cache.put(&request, &decision);
             return decision;
         }
 
-        // 2. Cache hit.
+        // 2. Cache hit — same (bead, kind, resource) tuple was decided
+        //    recently. No network or LLM call.
         if let Some(decision) = self.inner.cache.get(&request) {
             self.record("cache", &request, &decision, started.elapsed().as_millis());
             return decision;
         }
 
-        // 3. LLM judge.
+        // 3. Moderation pre-filter. Before burning judge tokens on the
+        //    LLM, check whether the resource + agent reason tripwire the
+        //    provider's moderation endpoint. Flagged content becomes a
+        //    hard deny with a category-tagged reason. Errors during
+        //    moderation are treated as "no signal" and fall through to
+        //    the LLM judge — we never fail open, but we also don't block
+        //    legitimate work just because moderation is temporarily down.
+        if let Some(decision) = self.run_moderation_prefilter(&request).await {
+            self.record("moderation", &request, &decision, started.elapsed().as_millis());
+            self.inner.cache.put(&request, &decision);
+            return decision;
+        }
+
+        // 4. LLM judge — the most expensive step, only reached when the
+        //    rule engine, cache, and moderation pre-filter all passed.
         let decision = match self.run_llm_judge(&request).await {
             Ok(raw) => self.coerce_by_confidence(raw),
             Err(e) => JudgeDecision::escalate(format!("Narc LLM judge failed ({e}); escalating to human")),
@@ -120,6 +137,64 @@ impl BoardroomNarc {
         self.record("llm_judge", &request, &decision, started.elapsed().as_millis());
         self.inner.cache.put(&request, &decision);
         decision
+    }
+
+    /// Run the moderation pre-filter against the provider's OpenAI-compat
+    /// `/v1/moderations` endpoint. Returns `Some(deny_decision)` if the
+    /// content is flagged, `None` otherwise (either moderation passed or
+    /// moderation errored — errors are logged but don't short-circuit
+    /// the decision flow).
+    async fn run_moderation_prefilter(&self, request: &JudgeRequest) -> Option<JudgeDecision> {
+        let llm = self.inner.llm.as_ref()?;
+
+        // Only request types that have user-controlled natural-language
+        // content are worth moderating. A raw domain name or a port
+        // number carries no content to classify, and moderation on them
+        // just wastes a round-trip.
+        let moderation_input = match request.kind {
+            smooth_narc::judge::JudgeKind::Cli | smooth_narc::judge::JudgeKind::Tool => Some(build_moderation_input(request)),
+            smooth_narc::judge::JudgeKind::Network
+            | smooth_narc::judge::JudgeKind::File
+            | smooth_narc::judge::JudgeKind::Mcp
+            | smooth_narc::judge::JudgeKind::Port => {
+                // Moderate the agent's stated reason + task summary if
+                // either is present — these are the free-text fields that
+                // might carry abusive content. If neither is set, skip.
+                if request.agent_reason.is_some() || request.task_summary.is_some() {
+                    Some(build_moderation_input(request))
+                } else {
+                    None
+                }
+            }
+        };
+
+        let input = moderation_input?;
+
+        match llm.moderate(&input).await {
+            Ok(result) if result.flagged => {
+                let categories = result.flagged_categories();
+                let category_summary = if categories.is_empty() {
+                    "unspecified".to_string()
+                } else {
+                    categories.join(", ")
+                };
+                Some(JudgeDecision::deny(format!(
+                    "moderation pre-filter flagged content (categories: {category_summary})"
+                )))
+            }
+            Ok(_) => None,
+            Err(e) => {
+                // Don't fail open — just skip this layer and let the LLM
+                // judge (or rule engine) decide. Log the error loudly.
+                tracing::warn!(
+                    error = %e,
+                    kind = request.kind.as_str(),
+                    resource = %request.resource,
+                    "boardroom narc: moderation pre-filter errored; falling through to LLM judge"
+                );
+                None
+            }
+        }
     }
 
     /// Low-confidence approvals become escalations — Narc never silently
@@ -198,6 +273,42 @@ impl BoardroomNarc {
             resource = request.resource,
         )
     }
+}
+
+/// Build the string passed to the moderation endpoint. We concatenate the
+/// fields that might carry agent- or task-controlled natural language
+/// (task summary, agent reason, cli command, tool args) so a single
+/// moderation call covers every free-text dimension of a request.
+///
+/// Deliberately excludes structural fields like `operator_id`, `bead_id`,
+/// and `kind` — those come from our own pipeline and aren't user content.
+fn build_moderation_input(request: &JudgeRequest) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(ref summary) = request.task_summary {
+        parts.push(format!("Task: {summary}"));
+    }
+    if let Some(ref reason) = request.agent_reason {
+        parts.push(format!("Agent reason: {reason}"));
+    }
+    // For CLI and Tool requests, the resource itself IS the free-text
+    // content (shell command, tool arguments) so include it verbatim.
+    if matches!(request.kind, smooth_narc::judge::JudgeKind::Cli | smooth_narc::judge::JudgeKind::Tool) {
+        parts.push(format!("{}: {}", request.kind.as_str(), request.resource));
+    }
+    if let Some(ref detail) = request.detail {
+        if !detail.is_empty() {
+            parts.push(format!("Detail: {detail}"));
+        }
+    }
+    if parts.is_empty() {
+        // Fall back to the resource name so moderation has *something* to
+        // classify. For network requests this is a domain, which is
+        // almost never flagged by moderation — matching our expectation
+        // that network decisions are mostly handled by the rule engine
+        // and LLM judge, not by moderation.
+        parts.push(request.resource.clone());
+    }
+    parts.join("\n\n")
 }
 
 /// JSON shape we expect the LLM to emit. We're strict about parsing — if it

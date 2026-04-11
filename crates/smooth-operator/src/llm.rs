@@ -771,6 +771,123 @@ impl LlmClient {
     pub fn config(&self) -> &LlmConfig {
         &self.config
     }
+
+    /// Call the OpenAI-compatible `/v1/moderations` endpoint to classify
+    /// text as safe or unsafe. Used by Boardroom Narc as a pre-filter
+    /// before the LLM judge — flagged content is denied without burning
+    /// judge tokens.
+    ///
+    /// The endpoint must live at `{api_url}/moderations` and accept
+    /// OpenAI's request/response shape (LiteLLM, the SmooAI gateway, and
+    /// OpenAI itself all do). Returns the parsed response.
+    ///
+    /// # Errors
+    /// Returns an error if the HTTP call fails, the status is non-2xx, or
+    /// the response body doesn't match the expected shape. Callers should
+    /// treat moderation errors as "unknown" and fall through to the next
+    /// decision layer — never fail open.
+    pub async fn moderate(&self, input: &str) -> anyhow::Result<ModerationResult> {
+        // Only OpenAI-compat endpoints expose /moderations. Anthropic
+        // doesn't offer a moderation endpoint of its own; callers should
+        // route moderation through a gateway (LiteLLM / SmooAI Gateway /
+        // OpenAI) even when the primary chat provider is Anthropic.
+        if matches!(self.config.api_format, ApiFormat::Anthropic) {
+            return Err(anyhow::anyhow!(
+                "moderate() requires an OpenAI-compatible provider (current: Anthropic). Route moderation through a gateway."
+            ));
+        }
+
+        let url = format!("{}/moderations", self.config.api_url.trim_end_matches('/'));
+        let request = ModerationRequest {
+            input: input.to_string(),
+            model: None,
+        };
+
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.config.api_key)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| {
+                let mut chain = vec![format!("{e}")];
+                let mut source: &dyn std::error::Error = &e;
+                while let Some(s) = source.source() {
+                    chain.push(format!("{s}"));
+                    source = s;
+                }
+                anyhow::anyhow!("moderation HTTP request failed: {}", chain.join(" → "))
+            })?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("moderation endpoint returned {status}: {body}"));
+        }
+
+        let parsed: ModerationResponse = resp.json().await.map_err(|e| anyhow::anyhow!("failed to parse moderation response: {e}"))?;
+
+        let first = parsed
+            .results
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("moderation response contained zero results"))?;
+
+        Ok(ModerationResult {
+            flagged: first.flagged,
+            categories: first.categories.unwrap_or_default(),
+            category_scores: first.category_scores.unwrap_or_default(),
+        })
+    }
+}
+
+/// OpenAI-compatible moderation request body.
+#[derive(Debug, Serialize)]
+struct ModerationRequest {
+    input: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModerationResponse {
+    #[allow(dead_code)]
+    id: Option<String>,
+    #[allow(dead_code)]
+    model: Option<String>,
+    results: Vec<RawModerationResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawModerationResult {
+    flagged: bool,
+    categories: Option<HashMap<String, bool>>,
+    category_scores: Option<HashMap<String, f32>>,
+}
+
+/// The parsed moderation verdict, flattened from the OpenAI response
+/// shape. `flagged = true` means at least one category tripped the
+/// provider's safety threshold; `categories` and `category_scores` give
+/// callers the per-category detail for auditing and fine-grained
+/// policies.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModerationResult {
+    pub flagged: bool,
+    #[serde(default)]
+    pub categories: HashMap<String, bool>,
+    #[serde(default)]
+    pub category_scores: HashMap<String, f32>,
+}
+
+impl ModerationResult {
+    /// List the category names (`sexual`, `violence`, etc.) that tripped
+    /// the flag. Useful for logging and building human-readable deny
+    /// reasons.
+    #[must_use]
+    pub fn flagged_categories(&self) -> Vec<&str> {
+        self.categories.iter().filter_map(|(k, v)| if *v { Some(k.as_str()) } else { None }).collect()
+    }
 }
 
 /// Parse a single SSE line into zero or more `StreamEvent`s.

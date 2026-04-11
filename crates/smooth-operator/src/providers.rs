@@ -9,6 +9,11 @@ use crate::llm::{ApiFormat, LlmConfig};
 /// Preset model configurations for common provider setups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Preset {
+    /// SmooAI Gateway — the hosted LiteLLM-backed gateway run by SmooAI.
+    /// Handles billing, moderation, governance, and upstream provider
+    /// selection on the server side so callers only need one API key.
+    /// This is the recommended default for most users.
+    SmoaiGateway,
     /// OpenRouter + Chinese frontier models — cheapest option
     OpenRouterLowCost,
     /// LLM Gateway + Chinese frontier models — cheapest via gateway
@@ -20,8 +25,14 @@ pub enum Preset {
 }
 
 impl Preset {
-    /// All available preset names.
+    /// All available preset names. The first entry is the recommended
+    /// default — `th auth login` shows them in this order.
     pub const ALL: &[(&str, &str, &str)] = &[
+        (
+            "smooai-gateway",
+            "SmooAI Gateway (recommended)",
+            "Hosted LiteLLM gateway run by SmooAI — billing, moderation, governance, 100+ models. One key, one URL, no config.",
+        ),
         (
             "openrouter-low-cost",
             "OpenRouter Low Cost",
@@ -39,6 +50,7 @@ impl Preset {
     /// Parse a preset name from string.
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
+            "smooai-gateway" | "smooai" | "gateway" => Some(Self::SmoaiGateway),
             "openrouter-low-cost" | "low-cost" => Some(Self::OpenRouterLowCost),
             "llmgateway-low-cost" | "gateway-low-cost" => Some(Self::LlmGatewayLowCost),
             "openai" | "codex" => Some(Self::OpenAI),
@@ -50,6 +62,7 @@ impl Preset {
     /// The provider ID this preset requires.
     pub fn provider_id(&self) -> &str {
         match self {
+            Self::SmoaiGateway => "smooai-gateway",
             Self::OpenRouterLowCost => "openrouter",
             Self::LlmGatewayLowCost => "llmgateway",
             Self::OpenAI => "openai",
@@ -144,6 +157,30 @@ impl ProviderConfig {
             api_key: api_key.into(),
             api_format: ApiFormat::OpenAiCompat,
             default_model: "openai/gpt-4o".into(),
+        }
+    }
+
+    /// SmooAI Gateway — the hosted LiteLLM-backed gateway run by SmooAI.
+    ///
+    /// One API key, one URL, OpenAI-compatible. The gateway handles
+    /// provider selection, billing, moderation, governance, and cost
+    /// tracking on the server side. Consumers reference models by
+    /// semantic aliases (`smooth-coding`, `smooth-judge`, …) that the
+    /// gateway's LiteLLM config maps to whichever underlying model is
+    /// currently best — upgrades ship server-side with no client
+    /// release needed.
+    ///
+    /// The base URL is configurable via the `SMOOAI_GATEWAY_URL`
+    /// environment variable for self-hosted installs or dev overrides.
+    /// Defaults to the production endpoint.
+    pub fn smooai_gateway(api_key: impl Into<String>) -> Self {
+        let api_url = std::env::var("SMOOAI_GATEWAY_URL").unwrap_or_else(|_| "https://llm.smooai.com/v1".into());
+        Self {
+            id: "smooai-gateway".into(),
+            api_url,
+            api_key: api_key.into(),
+            api_format: ApiFormat::OpenAiCompat,
+            default_model: "smooth-default".into(),
         }
     }
 
@@ -256,6 +293,32 @@ impl ProviderRegistry {
         let mut registry = Self::new();
 
         match preset {
+            Preset::SmoaiGateway => {
+                // SmooAI Gateway uses semantic model aliases that the
+                // server-side LiteLLM config maps to whichever underlying
+                // model is currently best for each activity. Changing the
+                // underlying model is a server-side deploy — no client
+                // release needed.
+                //
+                // Aliases:
+                //   smooth-thinking  → frontier reasoning model
+                //   smooth-coding    → coding workhorse
+                //   smooth-planning  → planning / architecture model
+                //   smooth-reviewing → code review / critique model
+                //   smooth-judge     → cheap fast judge for Narc + guardrails
+                //   smooth-summarize → cheap summarizer
+                //   smooth-default   → balanced default
+                registry.register_provider(ProviderConfig::smooai_gateway(api_key));
+                registry.routing = ModelRouting {
+                    thinking: ModelSlot::new("smooai-gateway", "smooth-thinking"),
+                    coding: ModelSlot::new("smooai-gateway", "smooth-coding"),
+                    planning: ModelSlot::new("smooai-gateway", "smooth-planning"),
+                    reviewing: ModelSlot::new("smooai-gateway", "smooth-reviewing"),
+                    judge: ModelSlot::new("smooai-gateway", "smooth-judge"),
+                    summarize: ModelSlot::new("smooai-gateway", "smooth-summarize"),
+                    default: ModelSlot::new("smooai-gateway", "smooth-default"),
+                };
+            }
             Preset::OpenRouterLowCost => {
                 // OpenRouter: provider-prefixed model IDs
                 // GLM-5.1 for thinking (#1 SWE-Bench Pro 58.4%)
@@ -814,6 +877,67 @@ mod tests {
         assert_eq!(default.model, "gpt-4o");
     }
 
+    // 14b. SmooAI Gateway preset creates correct routing with semantic aliases
+    #[test]
+    fn smooai_gateway_preset_creates_correct_routing() {
+        // Clear any host override for a deterministic assert on the default
+        // production URL. We re-set it at the end so other tests see the
+        // same state they started with.
+        let prior = std::env::var("SMOOAI_GATEWAY_URL").ok();
+        std::env::remove_var("SMOOAI_GATEWAY_URL");
+
+        let registry = ProviderRegistry::from_preset(Preset::SmoaiGateway, "smooai-key");
+
+        // Every slot routes to the `smooai-gateway` provider with a
+        // semantic `smooth-*` alias. The alias → upstream model mapping
+        // lives in the gateway's LiteLLM config, not here.
+        let thinking = registry.llm_config_for(Activity::Thinking).unwrap();
+        assert_eq!(thinking.model, "smooth-thinking");
+        assert_eq!(thinking.api_url, "https://llm.smooai.com/v1");
+        assert_eq!(thinking.api_key, "smooai-key");
+
+        let coding = registry.llm_config_for(Activity::Coding).unwrap();
+        assert_eq!(coding.model, "smooth-coding");
+
+        let planning = registry.llm_config_for(Activity::Planning).unwrap();
+        assert_eq!(planning.model, "smooth-planning");
+
+        let reviewing = registry.llm_config_for(Activity::Reviewing).unwrap();
+        assert_eq!(reviewing.model, "smooth-reviewing");
+
+        let judge = registry.llm_config_for(Activity::Judge).unwrap();
+        assert_eq!(judge.model, "smooth-judge");
+
+        let summarize = registry.llm_config_for(Activity::Summarize).unwrap();
+        assert_eq!(summarize.model, "smooth-summarize");
+
+        let default = registry.default_llm_config().unwrap();
+        assert_eq!(default.model, "smooth-default");
+
+        // Restore any prior override.
+        if let Some(v) = prior {
+            std::env::set_var("SMOOAI_GATEWAY_URL", v);
+        }
+    }
+
+    // 14c. SMOOAI_GATEWAY_URL env var overrides the default base URL
+    #[test]
+    fn smooai_gateway_respects_env_url_override() {
+        let prior = std::env::var("SMOOAI_GATEWAY_URL").ok();
+        std::env::set_var("SMOOAI_GATEWAY_URL", "https://llm.dev.smooai.com/v1");
+
+        let registry = ProviderRegistry::from_preset(Preset::SmoaiGateway, "dev-key");
+        let cfg = registry.default_llm_config().unwrap();
+        assert_eq!(cfg.api_url, "https://llm.dev.smooai.com/v1");
+        assert_eq!(cfg.api_key, "dev-key");
+
+        // Restore prior state.
+        match prior {
+            Some(v) => std::env::set_var("SMOOAI_GATEWAY_URL", v),
+            None => std::env::remove_var("SMOOAI_GATEWAY_URL"),
+        }
+    }
+
     // 15. Anthropic preset creates correct routing
     #[test]
     fn anthropic_preset_creates_correct_routing() {
@@ -840,6 +964,10 @@ mod tests {
     // 16. from_preset registers the provider
     #[test]
     fn from_preset_registers_provider() {
+        let smooai = ProviderRegistry::from_preset(Preset::SmoaiGateway, "sg-key");
+        assert!(smooai.get_provider("smooai-gateway").is_some());
+        assert_eq!(smooai.get_provider("smooai-gateway").unwrap().api_key, "sg-key");
+
         let low_cost = ProviderRegistry::from_preset(Preset::OpenRouterLowCost, "lc-key");
         assert!(low_cost.get_provider("openrouter").is_some());
         assert_eq!(low_cost.get_provider("openrouter").unwrap().api_key, "lc-key");
@@ -851,6 +979,23 @@ mod tests {
         let anthropic = ProviderRegistry::from_preset(Preset::Anthropic, "an-key");
         assert!(anthropic.get_provider("anthropic").is_some());
         assert_eq!(anthropic.get_provider("anthropic").unwrap().api_key, "an-key");
+    }
+
+    // 16b. Preset names and aliases parse correctly
+    #[test]
+    fn preset_from_name_recognizes_smooai_gateway_aliases() {
+        assert_eq!(Preset::from_name("smooai-gateway"), Some(Preset::SmoaiGateway));
+        assert_eq!(Preset::from_name("smooai"), Some(Preset::SmoaiGateway));
+        assert_eq!(Preset::from_name("gateway"), Some(Preset::SmoaiGateway));
+        assert_eq!(Preset::from_name("bogus"), None);
+    }
+
+    // 16c. SmooAI Gateway is listed first in Preset::ALL (recommended default)
+    #[test]
+    fn smooai_gateway_is_first_in_preset_list() {
+        let first = Preset::ALL.first().expect("Preset::ALL must not be empty");
+        assert_eq!(first.0, "smooai-gateway");
+        assert!(first.1.contains("recommended"), "label should say recommended: {:?}", first.1);
     }
 
     // 17. llm_config_for works with preset
