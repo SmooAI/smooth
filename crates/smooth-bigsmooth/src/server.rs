@@ -56,6 +56,12 @@ pub struct AppState {
     /// ready pearls and dispatching operators. Behind `Arc<tokio::sync::Mutex<>>`
     /// since the background loop and API handlers both need access.
     pub orchestrator: Arc<tokio::sync::Mutex<crate::orchestrator::Orchestrator>>,
+    /// Boardroom Narc — central LLM-judge-backed access arbiter. Every
+    /// per-VM Wonk escalates to this when its local policy can't
+    /// auto-approve a `/check/*` request. Always present (constructed with
+    /// or without an LLM backend) so the `/api/narc/*` routes can unwrap
+    /// unconditionally.
+    pub boardroom_narc: crate::boardroom_narc::BoardroomNarc,
 }
 
 impl AppState {
@@ -64,6 +70,33 @@ impl AppState {
         let session_store = Arc::new(crate::session::DoltSessionStore::new(&pearl_store));
         let (event_tx, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         let orchestrator = crate::orchestrator::Orchestrator::new(3, pearl_store.clone()).with_event_tx(event_tx.clone());
+
+        // Construct the Boardroom Narc. If the host has an LLM provider
+        // configured, Narc uses the default provider for its judge; otherwise
+        // it runs rule-engine-only and escalates any unhandled request to a
+        // human. Load is best-effort — a missing providers.json is fine in
+        // dev + tests.
+        let narc_llm_config = dirs_next::home_dir().and_then(|home| {
+            let providers_path = home.join(".smooth/providers.json");
+            if !providers_path.exists() {
+                return None;
+            }
+            match smooth_operator::providers::ProviderRegistry::load_from_file(&providers_path) {
+                Ok(registry) => match registry.default_llm_config() {
+                    Ok(cfg) => Some(cfg),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "boardroom narc: no default LLM provider; Narc will escalate unknown requests to humans");
+                        None
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(error = %e, "boardroom narc: failed to load providers.json; Narc will escalate unknown requests to humans");
+                    None
+                }
+            }
+        });
+        let boardroom_narc = crate::boardroom_narc::BoardroomNarc::new(narc_llm_config);
+
         Self {
             db,
             pearl_store,
@@ -75,6 +108,7 @@ impl AppState {
             boardroom: None,
             diver: None,
             orchestrator: Arc::new(tokio::sync::Mutex::new(orchestrator)),
+            boardroom_narc,
         }
     }
 
@@ -266,6 +300,11 @@ pub fn build_router(state: AppState) -> Router {
         // Jira
         .route("/api/jira/status", get(jira_status_handler))
         .route("/api/jira/sync", post(jira_sync_handler))
+        // Boardroom Narc — central LLM-judge access arbiter. Per-VM Wonks
+        // POST their uncertain /check/* decisions here; Narc applies the
+        // rule engine, its decision cache, and (when unresolved) the LLM
+        // judge, then returns an approve/deny/escalate verdict.
+        .route("/api/narc/judge", post(narc_judge_handler))
         // WebSocket — primary real-time channel
         .route("/ws", get(ws_handler))
         // Embedded web UI (SPA fallback — must be last)
@@ -1000,6 +1039,34 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
                     tracing::warn!(task_id = tid, "operator_facing_archivist_url() returned None — operator will NOT forward logs to Archivist. Check SMOOTH_ARCHIVIST_HOST_PORT and SMOOTH_BOOTSTRAP_BILL_URL env vars.");
                 }
             }
+        }
+
+        // Every operator's Wonk escalates uncertain /check/* decisions to
+        // the central Boardroom Narc via this URL. From inside the VM, the
+        // host's loopback is reachable as `host.containers.internal` in
+        // Boardroom mode (Bill passes it through) and as `127.0.0.1` in
+        // host-mode (Direct sandbox backend on the same machine). The port
+        // is Big Smooth's listening port, which at the time of this writing
+        // is always 4400. An override via SMOOTH_NARC_URL short-circuits
+        // both cases — useful for tests and for pointing several boards at
+        // a shared Narc.
+        let narc_url = if let Ok(override_url) = std::env::var("SMOOTH_NARC_URL") {
+            if override_url.trim().is_empty() {
+                None
+            } else {
+                Some(override_url)
+            }
+        } else {
+            let host = if boardroom_handles.is_some() {
+                "host.containers.internal"
+            } else {
+                "127.0.0.1"
+            };
+            Some(format!("http://{host}:4400"))
+        };
+        if let Some(ref url) = narc_url {
+            tracing::info!(task_id = tid, url = %url, "operator env: SMOOTH_NARC_URL set");
+            env.insert("SMOOTH_NARC_URL".into(), url.clone());
         }
 
         // Generate a task-type-specific policy TOML for Wonk inside the VM.
@@ -2025,6 +2092,22 @@ async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>)
             ok: true,
         }),
     }
+}
+
+// ── Boardroom Narc — POST /api/narc/judge ─────────────────
+
+/// Arbitrate a runtime access request escalated from a per-VM Wonk.
+///
+/// Wonk calls this when its local policy can't auto-approve a `/check/*`
+/// request. Narc applies its rule engine, cache, and (when nothing else
+/// resolves the request) LLM judge, then returns an approve / deny /
+/// escalate_to_human verdict. Returns the decision directly as JSON — no
+/// `ApiResponse` envelope, because Wonk speaks the raw `JudgeDecision`
+/// wire format shared with `smooth-narc::judge`.
+async fn narc_judge_handler(State(state): State<AppState>, Json(request): Json<smooth_narc::judge::JudgeRequest>) -> Json<smooth_narc::judge::JudgeDecision> {
+    state.touch();
+    let decision = state.boardroom_narc.judge(request).await;
+    Json(decision)
 }
 
 // ── Search ─────────────────────────────────────────────────

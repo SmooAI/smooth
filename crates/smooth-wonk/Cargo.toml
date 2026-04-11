@@ -17,6 +17,7 @@ path = "src/lib.rs"
 [dependencies]
 smooth-operator.workspace = true
 smooth-policy.workspace = true
+smooth-narc.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 axum.workspace = true

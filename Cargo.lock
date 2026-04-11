@@ -5425,6 +5425,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "smooai-smooth-narc",
  "smooai-smooth-operator",
  "smooai-smooth-policy",
  "tempfile",

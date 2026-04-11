@@ -449,7 +449,21 @@ async fn spawn_cast(policy_toml: &str, operator_id: &str) -> anyhow::Result<Cast
     // URL. access negotiation calls will fail closed, which is the safe
     // default — we can wire it up later.
     let negotiator = Negotiator::new("http://127.0.0.1:1/no-leader", holder.clone());
-    let wonk_state = Arc::new(WonkAppState::new(holder, negotiator));
+
+    // Narc escalation client — every denied /check/network and
+    // /check/cli call that Wonk can't auto-approve locally gets forwarded
+    // to this URL, which points at Big Smooth's `/api/narc/judge` endpoint.
+    // If SMOOTH_NARC_URL isn't set (e.g. a standalone unit test), Wonk
+    // runs without an arbiter and hard-denies anything its local policy
+    // doesn't allow — the legacy behaviour.
+    let mut wonk_state = WonkAppState::new(holder, negotiator);
+    if let Ok(narc_url) = std::env::var("SMOOTH_NARC_URL") {
+        if !narc_url.trim().is_empty() {
+            tracing::info!(operator = operator_id, narc_url = %narc_url, "Wonk wiring Narc escalation client");
+            wonk_state = wonk_state.with_narc(smooth_wonk::NarcClient::new(narc_url));
+        }
+    }
+    let wonk_state = Arc::new(wonk_state);
     let wonk_r = wonk_router(wonk_state);
     let wonk_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let wonk_addr = wonk_listener.local_addr()?;

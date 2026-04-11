@@ -385,6 +385,7 @@ fn parse_rate_limit_headers(headers: &HeaderMap) -> RateLimitInfo {
 }
 
 /// LLM client using OpenAI-compatible chat completion API.
+#[derive(Clone)]
 pub struct LlmClient {
     config: LlmConfig,
     client: reqwest::Client,

@@ -1,27 +1,101 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use smooth_narc::judge::{Decision, JudgeKind, JudgeRequest};
 
+use crate::narc_client::NarcClient;
 use crate::negotiate::{AccessRequest, Negotiator};
 use crate::policy::PolicyHolder;
 
 pub struct AppState {
     policy: PolicyHolder,
     negotiator: Negotiator,
+    /// Optional escalation client for talking to Boardroom Narc. `None`
+    /// means Wonk is running in a legacy or test configuration without a
+    /// central arbiter — every denied request is returned as-is and the
+    /// operator sees a hard deny.
+    narc: Option<NarcClient>,
+    /// Runtime allowlist populated by Narc approvals. Each entry is a glob
+    /// plus an expiry; [`check_network`] consults this alongside the static
+    /// policy allowlist so that approvals don't have to round-trip to Narc
+    /// on every request. Uses the same `domain_matches`-compatible globs as
+    /// the policy file (`*.foo.com`, `foo.com`).
+    runtime_allow: Arc<Mutex<Vec<RuntimeAllowEntry>>>,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeAllowEntry {
+    glob: String,
+    expires_at: Instant,
 }
 
 impl AppState {
     /// Construct an `AppState` directly from a policy holder and negotiator.
     ///
     /// Intended for tests and in-process embedding that want to skip
-    /// [`run_server`]'s listener binding.
+    /// [`run_server`]'s listener binding. Wonk will run without Narc
+    /// escalation in this mode; use [`with_narc`] to attach one.
     #[must_use]
     pub fn new(policy: PolicyHolder, negotiator: Negotiator) -> Self {
-        Self { policy, negotiator }
+        Self {
+            policy,
+            negotiator,
+            narc: None,
+            runtime_allow: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Attach a Narc escalation client. Chainable.
+    #[must_use]
+    pub fn with_narc(mut self, narc: NarcClient) -> Self {
+        self.narc = Some(narc);
+        self
+    }
+
+    /// True if the given domain matches any live runtime allowlist entry.
+    /// Also garbage-collects expired entries on the way through.
+    fn runtime_allowed_domain(&self, domain: &str) -> bool {
+        let now = Instant::now();
+        let Ok(mut entries) = self.runtime_allow.lock() else {
+            return false;
+        };
+        entries.retain(|e| e.expires_at > now);
+        for entry in entries.iter() {
+            if glob_matches_domain(&entry.glob, domain) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn push_runtime_allow(&self, glob: String, ttl: Duration) {
+        let Ok(mut entries) = self.runtime_allow.lock() else {
+            return;
+        };
+        let expires_at = Instant::now() + ttl;
+        // Dedup — replace any existing entry with the same glob.
+        if let Some(existing) = entries.iter_mut().find(|e| e.glob == glob) {
+            existing.expires_at = expires_at;
+        } else {
+            entries.push(RuntimeAllowEntry { glob, expires_at });
+        }
+    }
+}
+
+/// Match a `*.foo.com` / `foo.com` glob against a concrete domain. Kept
+/// local here so Wonk doesn't have to import private policy helpers.
+fn glob_matches_domain(pattern: &str, domain: &str) -> bool {
+    let p = pattern.to_ascii_lowercase();
+    let d = domain.to_ascii_lowercase();
+    if let Some(stripped) = p.strip_prefix("*.") {
+        d == stripped || d.ends_with(&format!(".{stripped}"))
+    } else {
+        p == d
     }
 }
 
@@ -30,7 +104,7 @@ impl AppState {
 /// # Errors
 /// Returns error if the listener cannot bind.
 pub async fn run_server(listen_addr: &str, policy: PolicyHolder, negotiator: Negotiator) -> anyhow::Result<()> {
-    let state = Arc::new(AppState { policy, negotiator });
+    let state = Arc::new(AppState::new(policy, negotiator));
 
     let app = build_router(state);
 
@@ -121,16 +195,103 @@ pub struct CheckResponse {
 
 async fn check_network(State(state): State<Arc<AppState>>, Json(req): Json<NetworkCheck>) -> Json<CheckResponse> {
     let policy = state.policy.load();
-    let allowed = policy.network.is_allowed(&req.domain, &req.path);
 
-    let reason = if allowed {
-        "domain in allowlist".to_string()
-    } else {
-        format!("{} is not in the network allowlist", req.domain)
+    // 1. Static policy allowlist (the TOML Big Smooth baked at dispatch time).
+    if policy.network.is_allowed(&req.domain, &req.path) {
+        tracing::debug!(domain = %req.domain, path = %req.path, "network check: static allow");
+        return Json(CheckResponse {
+            allowed: true,
+            reason: "domain in static policy allowlist".into(),
+        });
+    }
+
+    // 2. Runtime allowlist — globs that Narc approved earlier in this VM's
+    //    lifetime. Avoids re-escalating every time the agent makes another
+    //    request against an already-blessed domain (pnpm install loops,
+    //    cargo fetching hundreds of crate files, etc.).
+    if state.runtime_allowed_domain(&req.domain) {
+        tracing::debug!(domain = %req.domain, "network check: runtime allow (Narc-approved)");
+        return Json(CheckResponse {
+            allowed: true,
+            reason: "domain approved by Boardroom Narc (runtime allowlist)".into(),
+        });
+    }
+
+    // 3. Auto-approve globs from the policy's access_requests config — the
+    //    old static escape hatch for common package registries etc. We
+    //    still honour it so existing policies keep working.
+    if policy.access_requests.should_auto_approve_domain(&req.domain) {
+        tracing::debug!(domain = %req.domain, "network check: auto_approve_domains match");
+        return Json(CheckResponse {
+            allowed: true,
+            reason: "domain in policy auto_approve_domains".into(),
+        });
+    }
+
+    // 4. Escalate to Boardroom Narc. If Narc isn't wired in (tests / legacy
+    //    mode), fall straight to deny.
+    let Some(ref narc) = state.narc else {
+        return Json(CheckResponse {
+            allowed: false,
+            reason: format!("{} is not in the network allowlist and no Narc arbiter is configured", req.domain),
+        });
     };
 
-    tracing::debug!(domain = %req.domain, path = %req.path, allowed, "network check");
-    Json(CheckResponse { allowed, reason })
+    let judge_request = JudgeRequest {
+        kind: JudgeKind::Network,
+        operator_id: policy.metadata.operator_id.clone(),
+        bead_id: policy.metadata.bead_id.clone(),
+        phase: policy.metadata.phase.clone(),
+        resource: req.domain.clone(),
+        detail: Some(req.path.clone()),
+        task_summary: None, // TODO: thread task summary through policy context
+        agent_reason: None,
+    };
+    let decision = narc.judge(&judge_request).await;
+    match decision.decision {
+        Decision::Approve => {
+            // Cache the approval in Wonk's runtime allowlist so subsequent
+            // requests against the same glob skip the round trip.
+            let glob = decision.add_to_allowlist_glob.clone().unwrap_or_else(|| req.domain.clone());
+            let ttl = decision
+                .cache_ttl_seconds
+                .map(std::time::Duration::from_secs)
+                .unwrap_or_else(|| std::time::Duration::from_secs(3600));
+            state.push_runtime_allow(glob, ttl);
+            tracing::info!(
+                domain = %req.domain,
+                confidence = decision.confidence,
+                reason = %decision.reason,
+                "network check: Narc approved"
+            );
+            Json(CheckResponse {
+                allowed: true,
+                reason: format!("Narc approved ({}): {}", decision.confidence, decision.reason),
+            })
+        }
+        Decision::Deny => {
+            tracing::warn!(
+                domain = %req.domain,
+                reason = %decision.reason,
+                "network check: Narc denied"
+            );
+            Json(CheckResponse {
+                allowed: false,
+                reason: format!("Narc denied: {}", decision.reason),
+            })
+        }
+        Decision::EscalateToHuman => {
+            tracing::warn!(
+                domain = %req.domain,
+                reason = %decision.reason,
+                "network check: Narc escalated to human — failing closed"
+            );
+            Json(CheckResponse {
+                allowed: false,
+                reason: format!("Narc escalated to human (fail closed): {}", decision.reason),
+            })
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -241,20 +402,72 @@ struct CliCheck {
 async fn check_cli(State(state): State<Arc<AppState>>, Json(req): Json<CliCheck>) -> Json<CheckResponse> {
     let policy = state.policy.load();
 
-    // CLI commands are checked against the filesystem and tools policies
+    // Static, fast-path rules first: dangerous commands on read-only
+    // filesystems are a hard deny regardless of Narc; safe commands are a
+    // hard allow without bothering Narc.
     let dangerous = is_dangerous_cli(&req.command);
     let writable = policy.filesystem.writable;
 
-    let (allowed, reason) = if dangerous && !writable {
-        (false, format!("command '{}' modifies files but filesystem is read-only", req.command))
-    } else if dangerous {
-        (true, "command allowed (filesystem is writable)".into())
-    } else {
-        (true, "command allowed".into())
+    if dangerous && !writable {
+        tracing::debug!(command = %req.command, "cli denied: dangerous + readonly fs");
+        return Json(CheckResponse {
+            allowed: false,
+            reason: format!("command '{}' modifies files but filesystem is read-only", req.command),
+        });
+    }
+
+    if !dangerous {
+        tracing::debug!(command = %req.command, "cli allowed: not dangerous");
+        return Json(CheckResponse {
+            allowed: true,
+            reason: "command allowed".into(),
+        });
+    }
+
+    // Dangerous command on a writable filesystem. If Narc is available,
+    // escalate so the central arbiter can apply its rule engine (which
+    // blocks things like `rm -rf /`) and optionally its LLM judge. If
+    // Narc isn't wired in, fall back to the legacy "allow if writable"
+    // behavior so test environments keep working.
+    let Some(ref narc) = state.narc else {
+        tracing::debug!(command = %req.command, "cli allowed (legacy: writable + no Narc)");
+        return Json(CheckResponse {
+            allowed: true,
+            reason: "command allowed (filesystem is writable, no Narc configured)".into(),
+        });
     };
 
-    tracing::debug!(command = %req.command, allowed, "cli check");
-    Json(CheckResponse { allowed, reason })
+    let judge_request = JudgeRequest {
+        kind: JudgeKind::Cli,
+        operator_id: policy.metadata.operator_id.clone(),
+        bead_id: policy.metadata.bead_id.clone(),
+        phase: policy.metadata.phase.clone(),
+        resource: req.command.clone(),
+        detail: None,
+        task_summary: None,
+        agent_reason: None,
+    };
+    let decision = narc.judge(&judge_request).await;
+    match decision.decision {
+        Decision::Approve => Json(CheckResponse {
+            allowed: true,
+            reason: format!("Narc approved dangerous cli: {}", decision.reason),
+        }),
+        Decision::Deny => {
+            tracing::warn!(command = %req.command, reason = %decision.reason, "cli denied by Narc");
+            Json(CheckResponse {
+                allowed: false,
+                reason: format!("Narc denied: {}", decision.reason),
+            })
+        }
+        Decision::EscalateToHuman => {
+            tracing::warn!(command = %req.command, reason = %decision.reason, "cli escalated by Narc — failing closed");
+            Json(CheckResponse {
+                allowed: false,
+                reason: format!("Narc escalated to human (fail closed): {}", decision.reason),
+            })
+        }
+    }
 }
 
 fn is_dangerous_cli(command: &str) -> bool {
@@ -442,7 +655,7 @@ host_path = "/home/user/project"
         let policy = smooth_policy::Policy::from_toml(TEST_POLICY).expect("parse");
         let holder = PolicyHolder::from_policy(policy);
         let negotiator = Negotiator::new("http://localhost:4400", holder.clone());
-        Arc::new(AppState { policy: holder, negotiator })
+        Arc::new(AppState::new(holder, negotiator))
     }
 
     async fn do_post(app: &Router, path: &str, body: &str) -> (StatusCode, String) {
@@ -553,7 +766,7 @@ host_path = "/home/user/project"
         let policy = smooth_policy::Policy::from_toml(&policy_str).expect("parse");
         let holder = PolicyHolder::from_policy(policy);
         let negotiator = Negotiator::new("http://localhost:4400", holder.clone());
-        let state = Arc::new(AppState { policy: holder, negotiator });
+        let state = Arc::new(AppState::new(holder, negotiator));
         let app = build_router(state);
 
         let (_, body) = do_post(&app, "/check/cli", r#"{"command":"rm -rf /workspace/src"}"#).await;
@@ -659,7 +872,7 @@ host_path = "/home/user/project"
         let policy = smooth_policy::Policy::from_toml(&policy_str).expect("parse");
         let holder = PolicyHolder::from_policy(policy);
         let negotiator = Negotiator::new("http://localhost:4400", holder.clone());
-        let state = Arc::new(AppState { policy: holder, negotiator });
+        let state = Arc::new(AppState::new(holder, negotiator));
         let app = build_router(state);
 
         let (status, body) = do_post(&app, "/check/write", r#"{"path":"/workspace/src/main.rs"}"#).await;
