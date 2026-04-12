@@ -73,6 +73,11 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 globwalk = "0.9"
 ignore = "0.4"
 
+# In-process ripgrep — the library crates behind `rg`. Powers the native
+# GrepTool so the agent can search code without shelling out.
+grep-regex = "0.1"
+grep-searcher = "0.1"
+
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

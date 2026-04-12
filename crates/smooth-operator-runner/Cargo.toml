@@ -27,6 +27,10 @@ reqwest.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+ignore.workspace = true
+globset.workspace = true
+grep-regex.workspace = true
+grep-searcher.workspace = true
 
 [lints]
 workspace = true

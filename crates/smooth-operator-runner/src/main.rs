@@ -76,11 +76,13 @@ impl Tool for ReadFileTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "read_file".into(),
-            description: "Read the contents of a file under the workspace.".into(),
+            description: "Read a file under the workspace. Supports line ranges via offset + limit to avoid reading huge files.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Relative path within the workspace" }
+                    "path": { "type": "string", "description": "Relative path within the workspace" },
+                    "offset": { "type": "integer", "description": "1-based start line (default: 1)" },
+                    "limit": { "type": "integer", "description": "Max lines to return (default: 2000)" }
                 },
                 "required": ["path"]
             }),
@@ -91,7 +93,24 @@ impl Tool for ReadFileTool {
         let rel = args.get("path").and_then(|v| v.as_str()).ok_or_else(|| anyhow::anyhow!("missing 'path'"))?;
         let path = self.base.join(rel);
         let content = tokio::fs::read_to_string(&path).await?;
-        Ok(content)
+        let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(1).max(1) as usize;
+        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(2000) as usize;
+
+        let lines: Vec<&str> = content.lines().collect();
+        let total = lines.len();
+        let start = (offset - 1).min(total);
+        let end = (start + limit).min(total);
+        let slice = &lines[start..end];
+
+        // Number each line like `cat -n` for easy reference in follow-up edits.
+        let mut result = String::new();
+        for (i, line) in slice.iter().enumerate() {
+            result.push_str(&format!("{}\t{}\n", start + i + 1, line));
+        }
+        if end < total {
+            result.push_str(&format!("... ({} more lines, {} total)\n", total - end, total));
+        }
+        Ok(result)
     }
 
     fn is_read_only(&self) -> bool {
@@ -144,20 +163,241 @@ impl Tool for ListFilesTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "list_files".into(),
-            description: "List files in the workspace recursively.".into(),
-            parameters: serde_json::json!({ "type": "object", "properties": {}, "required": [] }),
+            description:
+                "List files matching a glob pattern (e.g. '**/*.rs', 'src/**'). Respects .gitignore. Results sorted by modification time (newest first).".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "Glob pattern to match (default: '**/*' — all files)" }
+                },
+                "required": []
+            }),
         }
     }
 
-    async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
-        let out = tokio::process::Command::new("find")
-            .arg(".")
-            .arg("-type")
-            .arg("f")
-            .current_dir(&self.base)
-            .output()
-            .await?;
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {
+        let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("**/*");
+        let base = self.base.clone();
+        let pattern = pattern.to_string();
+        tokio::task::spawn_blocking(move || {
+            let mut entries: Vec<(String, std::time::SystemTime)> = Vec::new();
+            let walker = ignore::WalkBuilder::new(&base).hidden(false).build();
+            let glob = globset::GlobBuilder::new(&pattern)
+                .literal_separator(true)
+                .build()
+                .and_then(|g| globset::GlobSet::builder().add(g).build())
+                .ok();
+            for entry in walker.flatten() {
+                if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+                    continue;
+                }
+                let rel = entry.path().strip_prefix(&base).unwrap_or(entry.path());
+                let rel_str = rel.to_string_lossy();
+                if let Some(ref gs) = glob {
+                    if !gs.is_match(rel) {
+                        continue;
+                    }
+                }
+                let mtime = entry.metadata().ok().and_then(|m| m.modified().ok()).unwrap_or(std::time::UNIX_EPOCH);
+                entries.push((rel_str.to_string(), mtime));
+            }
+            entries.sort_by(|a, b| b.1.cmp(&a.1));
+            let max = 200;
+            let total = entries.len();
+            let mut result = String::new();
+            for (path, _) in entries.iter().take(max) {
+                result.push_str(path);
+                result.push('\n');
+            }
+            if total > max {
+                result.push_str(&format!("... ({total} total, showing {max})\n"));
+            }
+            Ok::<String, anyhow::Error>(result)
+        })
+        .await?
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EditFileTool — oldString → newString patching.
+//
+// Much more token-efficient than rewriting an entire file: the agent only
+// sends the fragment it wants to change, and a new fragment to replace it.
+// If oldString appears more than once, the edit fails unless replace_all
+// is set.
+// ---------------------------------------------------------------------------
+
+struct EditFileTool {
+    base: PathBuf,
+}
+
+#[async_trait]
+impl Tool for EditFileTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "edit_file".into(),
+            description: "Replace a specific string in a file with a new string. More efficient than rewriting the entire file — only send the changed fragment. The old_string must match exactly (including whitespace and indentation). If old_string appears more than once, set replace_all=true or provide more surrounding context to make it unique.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative path within the workspace" },
+                    "old_string": { "type": "string", "description": "The exact string to find and replace" },
+                    "new_string": { "type": "string", "description": "The replacement string" },
+                    "replace_all": { "type": "boolean", "description": "If true, replace ALL occurrences. Default false." }
+                },
+                "required": ["path", "old_string", "new_string"]
+            }),
+        }
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {
+        let rel = args.get("path").and_then(|v| v.as_str()).ok_or_else(|| anyhow::anyhow!("missing 'path'"))?;
+        let old_string = args
+            .get("old_string")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("missing 'old_string'"))?;
+        let new_string = args
+            .get("new_string")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("missing 'new_string'"))?;
+        let replace_all = args.get("replace_all").and_then(serde_json::Value::as_bool).unwrap_or(false);
+
+        let path = self.base.join(rel);
+        let content = tokio::fs::read_to_string(&path).await.map_err(|e| anyhow::anyhow!("read {rel}: {e}"))?;
+
+        let count = content.matches(old_string).count();
+        if count == 0 {
+            return Err(anyhow::anyhow!(
+                "old_string not found in {rel}. Make sure you match the exact text including whitespace and indentation."
+            ));
+        }
+        if count > 1 && !replace_all {
+            return Err(anyhow::anyhow!(
+                "old_string appears {count} times in {rel}. Provide more surrounding context to make it unique, or set replace_all=true."
+            ));
+        }
+
+        let new_content = if replace_all {
+            content.replace(old_string, new_string)
+        } else {
+            content.replacen(old_string, new_string, 1)
+        };
+        tokio::fs::write(&path, &new_content).await?;
+
+        let replacements = if replace_all { count } else { 1 };
+        Ok(format!(
+            "edited {rel}: {replacements} replacement(s), {} → {} bytes",
+            content.len(),
+            new_content.len()
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GrepTool — in-process ripgrep via grep-searcher + grep-regex.
+//
+// Searches file contents under the workspace for a regex pattern, respecting
+// .gitignore. Returns matching lines with file path + line number. Much
+// faster than shelling out to `grep` — the search runs in-process on a
+// thread pool with no subprocess overhead.
+// ---------------------------------------------------------------------------
+
+struct GrepTool {
+    base: PathBuf,
+}
+
+#[async_trait]
+impl Tool for GrepTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "grep".into(),
+            description:
+                "Search file contents for a regex pattern. Fast, in-process ripgrep. Respects .gitignore. Returns matching lines with file:line:content.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "Regex pattern to search for" },
+                    "path": { "type": "string", "description": "Relative dir or file to search in (default: entire workspace)" },
+                    "include": { "type": "string", "description": "Glob pattern to filter files, e.g. '*.rs', '*.{ts,tsx}'" }
+                },
+                "required": ["pattern"]
+            }),
+        }
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {
+        let pattern = args
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("missing 'pattern'"))?;
+        let sub_path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        let include = args.get("include").and_then(|v| v.as_str());
+
+        let base = self.base.clone();
+        let search_root = base.join(sub_path);
+        let pattern = pattern.to_string();
+        let include = include.map(std::string::ToString::to_string);
+
+        tokio::task::spawn_blocking(move || {
+            use grep_regex::RegexMatcher;
+            use grep_searcher::sinks::UTF8;
+            use grep_searcher::Searcher;
+
+            let matcher = RegexMatcher::new_line_matcher(&pattern).map_err(|e| anyhow::anyhow!("invalid regex: {e}"))?;
+
+            let mut walker_builder = ignore::WalkBuilder::new(&search_root);
+            walker_builder.hidden(false);
+            if let Some(ref inc) = include {
+                // The `types` system in the ignore crate maps file extensions
+                // to type names. For simple globs like "*.rs" we add it as a
+                // custom type and select it.
+                let mut types = ignore::types::TypesBuilder::new();
+                types.add("custom", inc).ok();
+                if let Ok(built) = types.select("custom").build() {
+                    walker_builder.types(built);
+                }
+            }
+
+            let mut results = String::new();
+            let mut match_count = 0usize;
+            let max_matches = 250;
+
+            for entry in walker_builder.build().flatten() {
+                if match_count >= max_matches {
+                    break;
+                }
+                if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+                    continue;
+                }
+                let file_path = entry.path().to_path_buf();
+                let rel = file_path.strip_prefix(&base).unwrap_or(&file_path);
+
+                let _ = Searcher::new().search_path(
+                    &matcher,
+                    &file_path,
+                    UTF8(|line_num, line| {
+                        if match_count < max_matches {
+                            let trimmed = if line.len() > 200 { &line[..200] } else { line.trim_end() };
+                            results.push_str(&format!("{}:{}:{}\n", rel.display(), line_num, trimmed));
+                            match_count += 1;
+                        }
+                        Ok(match_count < max_matches)
+                    }),
+                );
+            }
+            if match_count >= max_matches {
+                results.push_str(&format!("... (showing first {max_matches} matches)\n"));
+            }
+            if match_count == 0 {
+                results.push_str("no matches found\n");
+            }
+            Ok::<String, anyhow::Error>(results)
+        })
+        .await?
     }
 
     fn is_read_only(&self) -> bool {
@@ -182,11 +422,12 @@ impl Tool for BashTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "bash".into(),
-            description: "Run a shell command inside the workspace.".into(),
+            description: "Run a shell command inside the workspace. Use `timeout` to prevent hung builds.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "command": { "type": "string", "description": "The command to run" }
+                    "command": { "type": "string", "description": "The command to run" },
+                    "timeout": { "type": "integer", "description": "Max seconds before the command is killed (default: 120)" }
                 },
                 "required": ["command"]
             }),
@@ -198,6 +439,8 @@ impl Tool for BashTool {
             .get("command")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("missing 'command'"))?;
+        let timeout_secs = args.get("timeout").and_then(|v| v.as_u64()).unwrap_or(120);
+
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-c").arg(command).current_dir(&self.base);
         if let Some(ref proxy) = self.proxy_url {
@@ -210,11 +453,32 @@ impl Tool for BashTool {
                 .env("NO_PROXY", "127.0.0.1,localhost")
                 .env("no_proxy", "127.0.0.1,localhost");
         }
-        let out = cmd.output().await?;
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let code = out.status.code().unwrap_or(-1);
-        Ok(format!("exit code: {code}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"))
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output()).await;
+        match result {
+            Ok(Ok(out)) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let code = out.status.code().unwrap_or(-1);
+                // Truncate very long outputs to avoid blowing out the LLM context.
+                let max = 50_000;
+                let stdout_str = if stdout.len() > max {
+                    format!("{}...\n[truncated, {} total chars]", &stdout[..max], stdout.len())
+                } else {
+                    stdout.to_string()
+                };
+                let stderr_str = if stderr.len() > max {
+                    format!("{}...\n[truncated, {} total chars]", &stderr[..max], stderr.len())
+                } else {
+                    stderr.to_string()
+                };
+                Ok(format!("exit code: {code}\n--- stdout ---\n{stdout_str}\n--- stderr ---\n{stderr_str}"))
+            }
+            Ok(Err(e)) => Err(anyhow::anyhow!("command failed to start: {e}")),
+            Err(_) => Err(anyhow::anyhow!(
+                "command timed out after {timeout_secs}s — consider increasing the timeout or breaking the command into smaller steps"
+            )),
+        }
     }
 
     fn is_concurrent_safe(&self) -> bool {
@@ -653,6 +917,12 @@ async fn main() {
         base: config.workspace.clone(),
     });
     tools.register(ListFilesTool {
+        base: config.workspace.clone(),
+    });
+    tools.register(EditFileTool {
+        base: config.workspace.clone(),
+    });
+    tools.register(GrepTool {
         base: config.workspace.clone(),
     });
     tools.register(BashTool {
