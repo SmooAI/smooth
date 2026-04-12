@@ -9,7 +9,7 @@ use crate::llm::{ApiFormat, LlmConfig};
 /// Preset model configurations for common provider setups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Preset {
-    /// SmooAI Gateway — the hosted LiteLLM-backed gateway run by SmooAI.
+    /// Smoo AI Gateway — the hosted LiteLLM-backed gateway run by Smoo AI.
     /// Handles billing, moderation, governance, and upstream provider
     /// selection on the server side so callers only need one API key.
     /// This is the recommended default for most users.
@@ -30,8 +30,8 @@ impl Preset {
     pub const ALL: &[(&str, &str, &str)] = &[
         (
             "smooai-gateway",
-            "SmooAI Gateway (recommended)",
-            "Hosted LiteLLM gateway run by SmooAI — billing, moderation, governance, 100+ models. One key, one URL, no config.",
+            "Smoo AI Gateway (recommended)",
+            "Hosted LiteLLM gateway run by Smoo AI — billing, moderation, governance, 100+ models. One key, one URL, no config.",
         ),
         (
             "openrouter-low-cost",
@@ -160,7 +160,7 @@ impl ProviderConfig {
         }
     }
 
-    /// SmooAI Gateway — the hosted LiteLLM-backed gateway run by SmooAI.
+    /// Smoo AI Gateway — the hosted LiteLLM-backed gateway run by Smoo AI.
     ///
     /// One API key, one URL, OpenAI-compatible. The gateway handles
     /// provider selection, billing, moderation, governance, and cost
@@ -294,7 +294,7 @@ impl ProviderRegistry {
 
         match preset {
             Preset::SmoaiGateway => {
-                // SmooAI Gateway uses semantic model aliases that the
+                // Smoo AI Gateway uses semantic model aliases that the
                 // server-side LiteLLM config maps to whichever underlying
                 // model is currently best for each activity. Changing the
                 // underlying model is a server-side deploy — no client
@@ -877,7 +877,7 @@ mod tests {
         assert_eq!(default.model, "gpt-4o");
     }
 
-    // 14b. SmooAI Gateway preset creates correct routing with semantic aliases
+    // 14b. Smoo AI Gateway preset creates correct routing with semantic aliases
     #[test]
     fn smooai_gateway_preset_creates_correct_routing() {
         // Clear any host override for a deterministic assert on the default
@@ -990,7 +990,7 @@ mod tests {
         assert_eq!(Preset::from_name("bogus"), None);
     }
 
-    // 16c. SmooAI Gateway is listed first in Preset::ALL (recommended default)
+    // 16c. Smoo AI Gateway is listed first in Preset::ALL (recommended default)
     #[test]
     fn smooai_gateway_is_first_in_preset_list() {
         let first = Preset::ALL.first().expect("Preset::ALL must not be empty");

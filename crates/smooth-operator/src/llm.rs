@@ -778,7 +778,7 @@ impl LlmClient {
     /// judge tokens.
     ///
     /// The endpoint must live at `{api_url}/moderations` and accept
-    /// OpenAI's request/response shape (LiteLLM, the SmooAI gateway, and
+    /// OpenAI's request/response shape (LiteLLM, the Smoo AI gateway, and
     /// OpenAI itself all do). Returns the parsed response.
     ///
     /// # Errors
@@ -789,7 +789,7 @@ impl LlmClient {
     pub async fn moderate(&self, input: &str) -> anyhow::Result<ModerationResult> {
         // Only OpenAI-compat endpoints expose /moderations. Anthropic
         // doesn't offer a moderation endpoint of its own; callers should
-        // route moderation through a gateway (LiteLLM / SmooAI Gateway /
+        // route moderation through a gateway (LiteLLM / Smoo AI Gateway /
         // OpenAI) even when the primary chat provider is Anthropic.
         if matches!(self.config.api_format, ApiFormat::Anthropic) {
             return Err(anyhow::anyhow!(

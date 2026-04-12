@@ -79,7 +79,7 @@ enum Commands {
         #[command(subcommand)]
         cmd: JiraCommands,
     },
-    /// SmooAI platform tools
+    /// Smoo AI platform tools
     Smoo {
         #[command(subcommand)]
         cmd: SmooCommands,
@@ -228,7 +228,7 @@ enum SmooCommands {
         #[command(subcommand)]
         cmd: SmooConfigCommands,
     },
-    /// List SmooAI agents
+    /// List Smoo AI agents
     Agents,
 }
 
@@ -829,13 +829,13 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
 
             // Provider catalog: (id, display name, models, needs_key)
             // First entry is the recommended default — it's surfaced at the
-            // top of the picker. SmooAI Gateway is the hosted LiteLLM-backed
-            // gateway run by SmooAI with billing, moderation, governance,
+            // top of the picker. Smoo AI Gateway is the hosted LiteLLM-backed
+            // gateway run by Smoo AI with billing, moderation, governance,
             // and provider routing on the server side.
             let catalog: Vec<(&str, &str, Vec<&str>, bool)> = vec![
                 (
                     "smooai-gateway",
-                    "SmooAI Gateway (recommended)",
+                    "Smoo AI Gateway (recommended)",
                     vec![
                         "smooth-default",
                         "smooth-coding",
