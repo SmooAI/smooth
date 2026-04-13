@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 pub struct WonkClient {
     base_url: String,
     client: reqwest::Client,
+    /// Operator token from the policy's [auth] section. Sent on every
+    /// request as `Authorization: Bearer <token>`. Wonk's middleware
+    /// rejects unauthenticated callers with 401.
+    auth_token: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -23,9 +27,16 @@ pub struct WonkDecision {
 
 impl WonkClient {
     pub fn new(base_url: &str) -> Self {
+        Self::with_auth(base_url, String::new())
+    }
+
+    /// Construct a client that sends `Authorization: Bearer <token>` on
+    /// every request.
+    pub fn with_auth(base_url: &str, auth_token: impl Into<String>) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             client: reqwest::Client::new(),
+            auth_token: auth_token.into(),
         }
     }
 
@@ -41,7 +52,11 @@ impl WonkClient {
             method: method.to_string(),
         };
 
-        let resp = self.client.post(&url).json(&req).send().await?;
+        let mut builder = self.client.post(&url).json(&req);
+        if !self.auth_token.is_empty() {
+            builder = builder.bearer_auth(&self.auth_token);
+        }
+        let resp = builder.send().await?;
 
         if resp.status().is_success() {
             Ok(resp.json().await?)

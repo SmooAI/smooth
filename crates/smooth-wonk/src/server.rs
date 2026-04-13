@@ -126,7 +126,61 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/check/mcp", post(check_mcp))
         .route("/check/port", post(check_port))
         .route("/request", post(request_access))
+        .layer(axum::middleware::from_fn_with_state(Arc::clone(&state), require_operator_token))
         .with_state(state)
+}
+
+/// Bearer-token auth middleware.
+///
+/// Every `/check/*`, `/policy`, and `/request` call must present the
+/// operator token from the policy's `[auth]` section as
+/// `Authorization: Bearer <token>`. Closes the "any localhost process
+/// inside the VM can bypass Wonk" gap: without this, Wonk's HTTP
+/// surface trusts every caller on 127.0.0.1 including arbitrary
+/// binaries the agent downloaded via `apk add`.
+///
+/// The token is shared between Big Smooth (who issues it in the policy
+/// TOML) and the in-VM cast (Goalie reads it from the same policy to
+/// authenticate its own /check calls; the runner passes it to the
+/// agent's tool hooks).
+async fn require_operator_token(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, axum::http::StatusCode> {
+    let expected = state.policy.load().auth.token.clone();
+    // An empty expected token means auth is effectively disabled; fall
+    // through to the legacy behavior. In production policies, auth.token
+    // is validated as non-empty on policy load, so this only matters for
+    // tests that build a minimal policy by hand.
+    if expected.is_empty() {
+        return Ok(next.run(request).await);
+    }
+
+    let header = request
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "));
+    match header {
+        Some(token) if constant_time_eq(token, &expected) => Ok(next.run(request).await),
+        _ => Err(axum::http::StatusCode::UNAUTHORIZED),
+    }
+}
+
+/// Constant-time string comparison. Prevents timing-based token
+/// discovery from a hostile caller on the same host.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for i in 0..a.len() {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
 }
 
 // ---------------------------------------------------------------------------
@@ -659,11 +713,28 @@ host_path = "/home/user/project"
     }
 
     async fn do_post(app: &Router, path: &str, body: &str) -> (StatusCode, String) {
+        // TEST_POLICY's auth.token = "smth_op_test". Every `/check/*`
+        // call goes through require_operator_token middleware which
+        // rejects unauthenticated callers with 401.
         let req = Request::builder()
             .method("POST")
             .uri(path)
             .header("content-type", "application/json")
+            .header("authorization", "Bearer smth_op_test")
             .body(Body::from(body.to_string()))
+            .expect("request");
+        let resp = app.clone().oneshot(req).await.expect("response");
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        (status, String::from_utf8_lossy(&bytes).to_string())
+    }
+
+    async fn do_get(app: &Router, path: &str) -> (StatusCode, String) {
+        let req = Request::builder()
+            .method("GET")
+            .uri(path)
+            .header("authorization", "Bearer smth_op_test")
+            .body(Body::empty())
             .expect("request");
         let resp = app.clone().oneshot(req).await.expect("response");
         let status = resp.status();
@@ -674,14 +745,39 @@ host_path = "/home/user/project"
     #[tokio::test]
     async fn get_policy_returns_summary() {
         let app = build_router(test_state());
-        let req = Request::builder().uri("/policy").body(Body::empty()).expect("req");
-        let resp = app.oneshot(req).await.expect("resp");
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
-        let summary: PolicySummary = serde_json::from_slice(&bytes).expect("parse");
+        let (status, body) = do_get(&app, "/policy").await;
+        assert_eq!(status, StatusCode::OK);
+        let summary: PolicySummary = serde_json::from_str(&body).expect("parse");
         assert_eq!(summary.operator_id, "test-op");
         assert!(summary.allowed_domains.contains(&"openrouter.ai".to_string()));
         assert!(summary.filesystem_writable);
+    }
+
+    #[tokio::test]
+    async fn request_without_bearer_token_is_rejected() {
+        let app = build_router(test_state());
+        let req = Request::builder()
+            .method("POST")
+            .uri("/check/network")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"domain":"openrouter.ai"}"#))
+            .expect("req");
+        let resp = app.oneshot(req).await.expect("resp");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "missing Authorization should 401");
+    }
+
+    #[tokio::test]
+    async fn request_with_wrong_token_is_rejected() {
+        let app = build_router(test_state());
+        let req = Request::builder()
+            .method("POST")
+            .uri("/check/network")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer wrong-token")
+            .body(Body::from(r#"{"domain":"openrouter.ai"}"#))
+            .expect("req");
+        let resp = app.oneshot(req).await.expect("resp");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "wrong token should 401");
     }
 
     #[tokio::test]

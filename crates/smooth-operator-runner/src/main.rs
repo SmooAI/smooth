@@ -96,7 +96,7 @@ impl Tool for ReadFileTool {
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {
         let rel = args.get("path").and_then(|v| v.as_str()).ok_or_else(|| anyhow::anyhow!("missing 'path'"))?;
-        let path = self.base.join(rel);
+        let path = tool_support::resolve_workspace_path(&self.base, rel)?;
 
         // "Did you mean?" on file-not-found.
         if !path.exists() {
@@ -164,7 +164,7 @@ impl Tool for WriteFileTool {
             .get("content")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("missing 'content'"))?;
-        let path = self.base.join(rel);
+        let path = tool_support::resolve_workspace_path(&self.base, rel)?;
 
         // File-time conflict check.
         if let Some(warning) = self.file_tracker.check_before_write(&path) {
@@ -297,7 +297,7 @@ impl Tool for EditFileTool {
             .ok_or_else(|| anyhow::anyhow!("missing 'new_string'"))?;
         let replace_all = args.get("replace_all").and_then(serde_json::Value::as_bool).unwrap_or(false);
 
-        let path = self.base.join(rel);
+        let path = tool_support::resolve_workspace_path(&self.base, rel)?;
 
         // "Did you mean?" on file-not-found.
         if !path.exists() {
@@ -1331,6 +1331,10 @@ async fn spawn_cast(policy_toml: &str, operator_id: &str) -> anyhow::Result<Cast
 
     // --- Wonk ---
     let policy = Policy::from_toml(policy_toml).map_err(|e| anyhow::anyhow!("invalid policy TOML: {e}"))?;
+    // Stash the operator token so Goalie + anyone else in the VM who
+    // needs to call Wonk's HTTP surface can authenticate. Wonk's
+    // middleware rejects unauthenticated callers with 401.
+    let operator_token = policy.auth.token.clone();
     let holder = PolicyHolder::from_policy(policy);
     // There is no Big Smooth leader to negotiate with from inside this VM
     // (the runner is self-contained), so we point the negotiator at a stub
@@ -1366,7 +1370,7 @@ async fn spawn_cast(policy_toml: &str, operator_id: &str) -> anyhow::Result<Cast
     // Audit log → tmpfs under /tmp. Bind to an ephemeral localhost port.
     let audit_path = format!("/tmp/goalie-{operator_id}.jsonl");
     let audit = AuditLogger::new(&audit_path)?;
-    let goalie_client = WonkClient::new(&wonk_url);
+    let goalie_client = WonkClient::with_auth(&wonk_url, operator_token);
     // run_proxy binds itself, so we pre-probe for a free port the same way
     // Big Smooth's sandboxed dispatch does. Tight race, fine for a single
     // in-VM spawn.

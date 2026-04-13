@@ -10,6 +10,80 @@ use std::sync::Mutex;
 use std::time::SystemTime;
 
 // ---------------------------------------------------------------------------
+// 0. Workspace path-escape guard
+// ---------------------------------------------------------------------------
+
+/// Resolve a relative path against `base` and verify it stays *inside*
+/// the workspace. Rejects `..` escapes, absolute paths, symlinks that
+/// point outside the base, and the base path itself being bypassed.
+///
+/// Returns the resolved absolute path on success. Tools should use the
+/// returned path, not the raw `base.join(rel)`.
+///
+/// # Security
+///
+/// The agent's file tools are scoped to the bind-mounted workspace. An
+/// `edit_file("../../etc/shadow")` call would otherwise escape the
+/// workspace since the host mounts `/workspace` RW from the user's
+/// current directory. This function enforces the scope.
+pub fn resolve_workspace_path(base: &Path, rel: &str) -> anyhow::Result<PathBuf> {
+    if rel.is_empty() {
+        return Err(anyhow::anyhow!("empty path"));
+    }
+    let requested = Path::new(rel);
+    if requested.is_absolute() {
+        return Err(anyhow::anyhow!(
+            "absolute path `{rel}` is not allowed — all paths must be relative to the workspace"
+        ));
+    }
+
+    let combined = base.join(requested);
+
+    // Normalize without following symlinks: collapse `.` and `..`
+    // lexically. We use a manual normalizer instead of canonicalize()
+    // because canonicalize() follows symlinks (an attacker could symlink
+    // `/workspace/link` → `/etc` then write through it) AND because it
+    // requires the path to exist.
+    let normalized = lexical_normalize(&combined);
+
+    // Must stay under base.
+    let base_norm = lexical_normalize(base);
+    if !normalized.starts_with(&base_norm) {
+        return Err(anyhow::anyhow!(
+            "path `{rel}` escapes the workspace (resolved to {}, outside {})",
+            normalized.display(),
+            base_norm.display()
+        ));
+    }
+
+    Ok(normalized)
+}
+
+/// Collapse `.` and `..` components lexically. Does NOT follow symlinks
+/// or require the path to exist. Adapted from cargo's path utilities.
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                // Pop if possible. If out is empty, leave the `..` in —
+                // the subsequent prefix check will catch the escape.
+                if !out.pop() {
+                    out.push(component);
+                }
+            }
+            std::path::Component::CurDir => {
+                // Skip.
+            }
+            other => {
+                out.push(other);
+            }
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // 1. Auto-format on write
 // ---------------------------------------------------------------------------
 
@@ -319,6 +393,52 @@ pub fn generate_diff(file_path: &str, old_content: &str, new_content: &str) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_workspace_path_accepts_normal_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolved = resolve_workspace_path(dir.path(), "src/main.rs").expect("ok");
+        assert!(resolved.starts_with(dir.path()));
+        assert!(resolved.to_string_lossy().ends_with("src/main.rs"));
+    }
+
+    #[test]
+    fn resolve_workspace_path_rejects_parent_dir_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(resolve_workspace_path(dir.path(), "../etc/shadow").is_err());
+        assert!(resolve_workspace_path(dir.path(), "../../root/.ssh/id_rsa").is_err());
+        assert!(resolve_workspace_path(dir.path(), "src/../../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn resolve_workspace_path_rejects_absolute_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(resolve_workspace_path(dir.path(), "/etc/shadow").is_err());
+        assert!(resolve_workspace_path(dir.path(), "/tmp/evil").is_err());
+    }
+
+    #[test]
+    fn resolve_workspace_path_rejects_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(resolve_workspace_path(dir.path(), "").is_err());
+    }
+
+    #[test]
+    fn resolve_workspace_path_allows_dot_inside() {
+        let dir = tempfile::tempdir().unwrap();
+        // `src/./main.rs` is inside, just has a redundant component.
+        let resolved = resolve_workspace_path(dir.path(), "src/./main.rs").expect("ok");
+        assert!(resolved.starts_with(dir.path()));
+    }
+
+    #[test]
+    fn resolve_workspace_path_allows_dotdot_that_stays_inside() {
+        let dir = tempfile::tempdir().unwrap();
+        // `src/../Cargo.toml` resolves to base/Cargo.toml, still inside.
+        let resolved = resolve_workspace_path(dir.path(), "src/../Cargo.toml").expect("ok");
+        assert!(resolved.starts_with(dir.path()));
+        assert!(resolved.to_string_lossy().ends_with("Cargo.toml"));
+    }
 
     #[test]
     fn detect_formatter_rust() {

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use smooth_operator::tool::{ToolCall, ToolHook, ToolResult};
 
 use crate::alert::{Alert, Severity};
-use crate::detectors::{InjectionDetector, SecretDetector, WriteGuard};
+use crate::detectors::{CliGuard, InjectionDetector, SecretDetector, WriteGuard};
 
 /// Narc hook that implements tool surveillance.
 ///
@@ -61,7 +61,17 @@ impl NarcHook {
 #[async_trait]
 impl ToolHook for NarcHook {
     async fn pre_call(&self, call: &ToolCall) -> anyhow::Result<()> {
-        // 1. Write guard check — blocks
+        // 1. Cli guard — always-on block-list of obviously-dangerous
+        //    shell commands (rm -rf /, curl | sh, fork bombs, …).
+        //    Runs BEFORE write_guard because these patterns should be
+        //    blocked regardless of phase or opt-in state.
+        if let Some(reason) = CliGuard::check(&call.name, &call.arguments) {
+            let alert = Alert::new(Severity::Block, "cli_guard", &reason).with_tool(&call.name);
+            self.add_alert(alert);
+            anyhow::bail!("{reason}");
+        }
+
+        // 2. Write guard check — blocks
         if let Some(reason) = self.write_guard.check(&call.name, &call.arguments) {
             let alert = Alert::new(Severity::Block, "write_guard", &reason).with_tool(&call.name);
             self.add_alert(alert);

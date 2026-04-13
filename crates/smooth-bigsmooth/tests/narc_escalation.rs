@@ -116,8 +116,12 @@ async fn check_network(wonk_url: &str, domain: &str) -> (bool, String) {
         allowed: bool,
         reason: String,
     }
+    // EXAMPLE_POLICY at the top of this file has `token = "test-token"`;
+    // Wonk's middleware now requires Authorization: Bearer on every
+    // /check/* call.
     let resp = reqwest::Client::new()
         .post(format!("{wonk_url}/check/network"))
+        .bearer_auth("test-token")
         .json(&serde_json::json!({"domain": domain, "path": "/", "method": "GET"}))
         .send()
         .await
