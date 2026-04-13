@@ -756,6 +756,32 @@ impl RunnerConfig {
 
 /// Resolve a policy TOML string from env vars, a standard path, or the
 /// permissive default. This runs before Wonk's `PolicyHolder` is built.
+/// Resolve a prompt from multiple sources (in priority order):
+/// 1. Environment variable pointing to a file path
+/// 2. A well-known file in the workspace root
+/// 3. The compile-time embedded default
+///
+/// This lets users customize prompts per-project without recompiling.
+fn resolve_prompt(env_var: &str, workspace_filename: &str, workspace: &std::path::Path, embedded: &str) -> String {
+    // 1. Explicit file path via env var.
+    if let Ok(path) = std::env::var(env_var) {
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            tracing::info!(source = %path, env = env_var, "loaded prompt from env override");
+            return contents;
+        }
+    }
+    // 2. Well-known file in the workspace.
+    let workspace_file = workspace.join(workspace_filename);
+    if workspace_file.exists() {
+        if let Ok(contents) = std::fs::read_to_string(&workspace_file) {
+            tracing::info!(source = %workspace_file.display(), "loaded prompt from workspace file");
+            return contents;
+        }
+    }
+    // 3. Compile-time embedded default.
+    embedded.to_string()
+}
+
 fn resolve_policy_toml() -> String {
     if let Ok(inline) = std::env::var("SMOOTH_POLICY_TOML") {
         if !inline.trim().is_empty() {
@@ -1144,90 +1170,20 @@ async fn main() {
     // pearl tools so the agent can create/list/close pearls locally.
     pearl_tools::register_pearl_tools(&mut tools, &config.workspace);
 
-    // Build system prompt — keep it short. The LLM sees tool schemas automatically.
+    // Build system prompt from file. The prompt is embedded at compile time
+    // via include_str! so the runner binary is self-contained, but can be
+    // overridden at runtime by placing a `smooth-system-prompt.md` in the
+    // workspace root or by setting SMOOTH_SYSTEM_PROMPT to a file path.
     let has_pearl_tools = tools.schemas().iter().any(|s| s.name == "create_pearl");
     let pearl_note = if has_pearl_tools {
-        " You also have create_pearl, list_pearls, and close_pearl tools for tracking work items."
+        "\nYou also have create_pearl, list_pearls, and close_pearl tools for tracking work items."
     } else {
         ""
     };
-    let base_prompt = format!(
-        "You are Smooth Operator, an AI coding agent running inside a hardware-isolated microVM.\n\
-        All file paths are relative to your workspace.{pearl_note}\n\
-        \n\
-        ## How to find code\n\
-        \n\
-        1. Start with `grep` to locate relevant symbols, patterns, or strings.\n\
-        2. Use `list_files` with a glob pattern (e.g. `**/*.rs`) to find files by name.\n\
-        3. Use `read_file` with offset + limit to read specific sections — NEVER read\n\
-           an entire large file when you only need 20 lines.\n\
-        4. Use `lsp` for precise semantic navigation:\n\
-           - `goToDefinition` to jump to where a symbol is defined\n\
-           - `findReferences` to see everywhere a symbol is used\n\
-           - `hover` to get type signatures and docs\n\
-           - `documentSymbol` to list all functions/structs/types in a file\n\
-           - `workspaceSymbol` to search across the whole project\n\
-           - `diagnostics` to check for type errors without running the compiler\n\
-           The language server (rust-analyzer, typescript-language-server, ty, gopls)\n\
-           is auto-detected and lazily spawned — no setup needed.\n\
-        \n\
-        ## How to edit code\n\
-        \n\
-        CRITICAL: You MUST read a file before editing it. The edit_file tool will\n\
-        reject edits if the file was modified externally since your last read.\n\
-        \n\
-        - **edit_file** for targeted changes — send only the fragment you are\n\
-          changing (old_string -> new_string). This is the PREFERRED tool for\n\
-          modifying existing files. The best edits are the smallest correct ones.\n\
-        - **write_file** for creating NEW files only. Do not use write_file to\n\
-          modify existing files — use edit_file instead.\n\
-        - **apply_patch** for multi-hunk or multi-file changes where a unified\n\
-          diff is cleaner than multiple edit_file calls.\n\
-        \n\
-        After every write or edit, the file is automatically formatted (rustfmt,\n\
-        prettier, ruff, gofmt — detected from project config). You do not need\n\
-        to format manually.\n\
-        \n\
-        Prefer minimal, correct changes. Do not rewrite entire files when a\n\
-        targeted edit suffices. Do not add backward-compatibility code unless\n\
-        there is a concrete need. Do not clean up surrounding code that isn't\n\
-        related to your task.\n\
-        \n\
-        ## How to verify\n\
-        \n\
-        You are NOT done when you have written code. You are done when the code\n\
-        builds, type-checks, and passes tests.\n\
-        \n\
-        After every meaningful edit:\n\
-        1. Run the project's build/check command via `bash` (cargo check, pnpm\n\
-           typecheck, go build, etc. — match the project's stack)\n\
-        2. Read the errors\n\
-        3. Fix them with edit_file\n\
-        4. Repeat until clean\n\
-        5. Run tests (cargo test, pnpm test, pytest, go test)\n\
-        6. Fix any failures\n\
-        7. Only THEN declare the task complete\n\
-        \n\
-        Do NOT declare the task complete while there are unresolved errors or\n\
-        failing tests. This constraint is absolute.\n\
-        \n\
-        ## Error recovery\n\
-        \n\
-        If a tool returns an error, diagnose why before retrying. If edit_file\n\
-        says \"old_string not found\", re-read the file — it may have been\n\
-        modified by a previous edit or auto-format. If bash times out, break\n\
-        the command into smaller steps. If a tool suggests \"Did you mean?\",\n\
-        use the suggested path.\n\
-        \n\
-        ## Environment setup\n\
-        \n\
-        If a required tool is missing (cargo, node, pnpm, python, go, etc.),\n\
-        install it via the system package manager (`apk add` on Alpine) or the\n\
-        language-specific installer (rustup, nvm, etc.). The sandbox is yours\n\
-        to set up. Do not give up because a tool is missing.\n\
-        \n\
-        Be concise and thorough.",
-    );
+
+    let embedded_prompt = include_str!("../prompts/system.md");
+    let base_prompt = resolve_prompt("SMOOTH_SYSTEM_PROMPT", "smooth-system-prompt.md", &config.workspace, embedded_prompt);
+    let base_prompt = format!("{base_prompt}{pearl_note}");
     let workspace_path = std::path::Path::new(&config.workspace);
     let system_prompt = match smooth_operator::context::load_project_context(workspace_path) {
         Some(ctx) => format!("{base_prompt}\n\n## Project Context\n\n{ctx}"),
