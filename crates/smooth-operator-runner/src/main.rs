@@ -63,12 +63,15 @@ use smooth_wonk::policy::PolicyHolder;
 use smooth_wonk::server::{build_router as wonk_router, AppState as WonkAppState};
 use tracing_subscriber::EnvFilter;
 
+mod tool_support;
+
 // ---------------------------------------------------------------------------
 // Tools — scoped to SMOOTH_WORKSPACE.
 // ---------------------------------------------------------------------------
 
 struct ReadFileTool {
     base: PathBuf,
+    file_tracker: Arc<tool_support::FileTimeTracker>,
 }
 
 #[async_trait]
@@ -92,7 +95,20 @@ impl Tool for ReadFileTool {
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {
         let rel = args.get("path").and_then(|v| v.as_str()).ok_or_else(|| anyhow::anyhow!("missing 'path'"))?;
         let path = self.base.join(rel);
+
+        // "Did you mean?" on file-not-found.
+        if !path.exists() {
+            let suggestions = tool_support::suggest_similar_paths(&self.base, rel, 3);
+            let hint = if suggestions.is_empty() {
+                String::new()
+            } else {
+                format!(" Did you mean: {}?", suggestions.join(", "))
+            };
+            return Err(anyhow::anyhow!("file not found: {rel}.{hint}"));
+        }
+
         let content = tokio::fs::read_to_string(&path).await?;
+        self.file_tracker.record(&path);
         let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(1).max(1) as usize;
         let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(2000) as usize;
 
@@ -120,6 +136,7 @@ impl Tool for ReadFileTool {
 
 struct WriteFileTool {
     base: PathBuf,
+    file_tracker: Arc<tool_support::FileTimeTracker>,
 }
 
 #[async_trait]
@@ -146,10 +163,21 @@ impl Tool for WriteFileTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("missing 'content'"))?;
         let path = self.base.join(rel);
+
+        // File-time conflict check.
+        if let Some(warning) = self.file_tracker.check_before_write(&path) {
+            return Err(anyhow::anyhow!("{warning}"));
+        }
+
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
         tokio::fs::write(&path, content).await?;
+        self.file_tracker.update_after_write(&path);
+
+        // Auto-format the written file (best-effort).
+        tool_support::auto_format(&self.base, &path).await;
+
         Ok(format!("wrote {} bytes to {rel}", content.len()))
     }
 }
@@ -233,6 +261,7 @@ impl Tool for ListFilesTool {
 
 struct EditFileTool {
     base: PathBuf,
+    file_tracker: Arc<tool_support::FileTimeTracker>,
 }
 
 #[async_trait]
@@ -267,6 +296,23 @@ impl Tool for EditFileTool {
         let replace_all = args.get("replace_all").and_then(serde_json::Value::as_bool).unwrap_or(false);
 
         let path = self.base.join(rel);
+
+        // "Did you mean?" on file-not-found.
+        if !path.exists() {
+            let suggestions = tool_support::suggest_similar_paths(&self.base, rel, 3);
+            let hint = if suggestions.is_empty() {
+                String::new()
+            } else {
+                format!(" Did you mean: {}?", suggestions.join(", "))
+            };
+            return Err(anyhow::anyhow!("file not found: {rel}.{hint}"));
+        }
+
+        // File-time conflict check.
+        if let Some(warning) = self.file_tracker.check_before_write(&path) {
+            return Err(anyhow::anyhow!("{warning}"));
+        }
+
         let content = tokio::fs::read_to_string(&path).await.map_err(|e| anyhow::anyhow!("read {rel}: {e}"))?;
 
         let count = content.matches(old_string).count();
@@ -287,13 +333,50 @@ impl Tool for EditFileTool {
             content.replacen(old_string, new_string, 1)
         };
         tokio::fs::write(&path, &new_content).await?;
+        self.file_tracker.update_after_write(&path);
 
+        // Auto-format the edited file (best-effort).
+        tool_support::auto_format(&self.base, &path).await;
+
+        let diff = tool_support::generate_diff(rel, &content, &new_content);
         let replacements = if replace_all { count } else { 1 };
         Ok(format!(
-            "edited {rel}: {replacements} replacement(s), {} → {} bytes",
+            "edited {rel}: {replacements} replacement(s), {} → {} bytes\n\n{diff}",
             content.len(),
             new_content.len()
         ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ApplyPatchTool — apply a unified diff to workspace files.
+// ---------------------------------------------------------------------------
+
+struct ApplyPatchTool {
+    base: PathBuf,
+}
+
+#[async_trait]
+impl Tool for ApplyPatchTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "apply_patch".into(),
+            description: "Apply a unified diff patch to one or more files. Accepts standard unified diff format (--- a/file, +++ b/file, @@ hunks). More powerful than edit_file for multi-hunk or multi-file changes.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "patch": { "type": "string", "description": "The unified diff patch text" }
+                },
+                "required": ["patch"]
+            }),
+        }
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {
+        let patch_text = args.get("patch").and_then(|v| v.as_str()).ok_or_else(|| anyhow::anyhow!("missing 'patch'"))?;
+        let base = self.base.clone();
+        let patch_text = patch_text.to_string();
+        tokio::task::spawn_blocking(move || tool_support::apply_unified_patch(&base, &patch_text)).await?
     }
 }
 
@@ -909,17 +992,28 @@ async fn main() {
 
     // Tools + NarcHook — register BEFORE building the system prompt so we
     // can announce all available tools to the LLM.
+    //
+    // Shared state: file-time tracker ensures the agent can't silently
+    // clobber externally-modified files (multi-agent safety).
+    let file_tracker = Arc::new(tool_support::FileTimeTracker::new());
+
     let mut tools = ToolRegistry::new();
     tools.register(ReadFileTool {
         base: config.workspace.clone(),
+        file_tracker: Arc::clone(&file_tracker),
     });
     tools.register(WriteFileTool {
         base: config.workspace.clone(),
-    });
-    tools.register(ListFilesTool {
-        base: config.workspace.clone(),
+        file_tracker: Arc::clone(&file_tracker),
     });
     tools.register(EditFileTool {
+        base: config.workspace.clone(),
+        file_tracker: Arc::clone(&file_tracker),
+    });
+    tools.register(ApplyPatchTool {
+        base: config.workspace.clone(),
+    });
+    tools.register(ListFilesTool {
         base: config.workspace.clone(),
     });
     tools.register(GrepTool {

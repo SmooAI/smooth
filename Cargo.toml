@@ -78,6 +78,19 @@ ignore = "0.4"
 grep-regex = "0.1"
 grep-searcher = "0.1"
 
+# Fuzzy matching (nucleo — used by Helix/Zed editors). Powers "did you
+# mean?" suggestions when the agent misspells a file path.
+nucleo-matcher = "0.3"
+
+# Diff generation + patch application. `similar` generates unified diffs
+# for tool result metadata; `patch` parses and applies unified .patch
+# files for the apply_patch tool.
+similar = "2"
+
+# LSP client types — JSON-RPC message structures for communicating with
+# language servers (rust-analyzer, typescript-language-server, pyright).
+lsp-types = "0.97"
+
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
