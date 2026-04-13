@@ -2,7 +2,6 @@
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -16,10 +15,9 @@ use axum::Router;
 use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
 use smooth_narc::NarcHook;
-use smooth_operator::cost::CostBudget;
 use smooth_operator::providers::ProviderRegistry;
 use smooth_operator::tool::{ToolCall, ToolHook, ToolResult};
-use smooth_operator::{Agent, AgentConfig, AgentEvent};
+use smooth_operator::AgentEvent;
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;

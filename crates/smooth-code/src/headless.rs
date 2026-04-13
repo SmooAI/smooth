@@ -62,6 +62,68 @@ pub async fn run_headless(working_dir: PathBuf, message: String, model: Option<S
     }
 }
 
+/// Run smooth-code headless against a specific Big Smooth URL, returning
+/// structured output instead of printing to stdout.
+///
+/// Intended for integration tests that spawn their own Big Smooth on an
+/// ephemeral port and need to drive smooth-code's real WebSocket codepath.
+/// The returned `HeadlessOutput` contains the accumulated content, every
+/// tool call the agent made, and the final cost.
+///
+/// # Errors
+/// Returns an error if Big Smooth is unreachable at `url` or the task
+/// fails.
+pub async fn run_headless_capture(
+    url: &str,
+    working_dir: PathBuf,
+    message: String,
+    model: Option<String>,
+    budget: Option<f64>,
+) -> anyhow::Result<HeadlessOutput> {
+    if message.trim().is_empty() {
+        anyhow::bail!("message must not be empty");
+    }
+
+    let mut client = BigSmoothClient::new(url);
+    client.connect().await.map_err(|e| anyhow::anyhow!("connect to Big Smooth at {url}: {e}"))?;
+
+    let mut events = client
+        .run_task(&message, model.as_deref(), budget, Some(&working_dir.to_string_lossy()))
+        .await?;
+
+    let mut content_buf = String::new();
+    let mut tool_calls: Vec<HeadlessToolCall> = Vec::new();
+    let mut cost = 0.0_f64;
+
+    while let Some(event) = events.recv().await {
+        match event {
+            ServerEvent::TokenDelta { content, .. } => {
+                content_buf.push_str(&content);
+            }
+            ServerEvent::ToolCallComplete { tool_name, is_error, .. } => {
+                tool_calls.push(HeadlessToolCall {
+                    name: tool_name,
+                    success: !is_error,
+                });
+            }
+            ServerEvent::TaskComplete { cost_usd, .. } => {
+                cost = cost_usd;
+                break;
+            }
+            ServerEvent::TaskError { message, .. } => {
+                anyhow::bail!("task failed: {message}");
+            }
+            _ => {}
+        }
+    }
+
+    Ok(HeadlessOutput {
+        content: content_buf,
+        tool_calls,
+        cost,
+    })
+}
+
 /// Run headless via [`BigSmoothClient`].
 async fn run_headless_client(
     mut client: BigSmoothClient,
