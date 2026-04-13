@@ -993,6 +993,288 @@ async fn sandboxed_agent_passes_spec_tests_with_llm_judge() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Vitest (TypeScript) result parsing
+// ---------------------------------------------------------------------------
+
+fn parse_vitest_summary(json: &str) -> Option<(u32, u32)> {
+    let parsed: serde_json::Value = serde_json::from_str(json).ok()?;
+    let passed = parsed.get("numPassedTests")?.as_u64()? as u32;
+    let failed = parsed.get("numFailedTests")?.as_u64()? as u32;
+    Some((passed, failed))
+}
+
+// ---------------------------------------------------------------------------
+// TypeScript backend E2E: Hono task API
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "boots a microVM, installs Node.js, drives a real LLM agent, runs vitest on host, and calls an LLM judge"]
+async fn sandboxed_typescript_backend_passes_spec_tests_with_judge() {
+    std::env::set_var("SMOOTH_SANDBOXED", "1");
+    std::env::set_var("SMOOTH_ENV_CACHE_KEY", "spec-test-hono-api");
+
+    let providers_path = dirs_next::home_dir().expect("home dir").join(".smooth/providers.json");
+    if !providers_path.exists() {
+        eprintln!("SKIP: ~/.smooth/providers.json not found");
+        return;
+    }
+    let registry = smooth_operator::providers::ProviderRegistry::load_from_file(&providers_path).expect("load providers.json");
+    let llm = registry.default_llm_config().expect("default provider");
+
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hono_api_spec");
+    copy_tree(&fixture, workspace.path());
+    assert!(workspace.path().join("package.json").exists(), "fixture package.json missing");
+    assert!(workspace.path().join("tests/spec.test.ts").exists(), "fixture spec.test.ts missing");
+
+    let (bigsmooth_url, _tmp) = spawn_bigsmooth().await;
+    let mut ws = open_ws(&bigsmooth_url).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), ws.next()).await;
+
+    let task_message = concat!(
+        "You are implementing a small TypeScript API using the Hono framework. ",
+        "The workspace already contains package.json, tsconfig.json, and tests/spec.test.ts. ",
+        "Step 1: read tests/spec.test.ts in full to understand the required API contract. ",
+        "Step 2: create src/server.ts that exports a function `app()` returning a Hono instance. ",
+        "Implement every endpoint the tests exercise: GET /health (json status+version), ",
+        "POST /tasks (201, title required else 400/422, auto id, created_at ISO, ",
+        "default priority medium, status open, tags empty array), ",
+        "GET /tasks (optional status/priority query filters), ",
+        "GET /tasks/:id (404 if not found), PATCH /tasks/:id for partial updates, ",
+        "and DELETE /tasks/:id returning 204. Use a Map<string, Task> as in-memory store. ",
+        "Do not modify package.json or tests/. Only create src/server.ts. ",
+        "Step 3: install Node.js if needed (apk add nodejs npm, npm install -g pnpm), ",
+        "then run `pnpm install` and `pnpm test`. Read errors, fix src/server.ts, ",
+        "and re-run until all tests pass. Do not declare done until you see zero failures."
+    );
+
+    let task_start = serde_json::json!({
+        "type": "TaskStart",
+        "message": task_message,
+        "model": null,
+        "budget": 1.5,
+        "working_dir": workspace.path().to_string_lossy(),
+    });
+    ws.send(Message::Text(task_start.to_string().into())).await.expect("send TaskStart");
+
+    let mut saw_task_complete = false;
+    let mut task_error: Option<String> = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(900);
+    while tokio::time::Instant::now() < deadline {
+        let next = tokio::time::timeout(Duration::from_secs(30), ws.next()).await;
+        let Ok(Some(Ok(msg))) = next else { continue };
+        let text = match msg {
+            Message::Text(t) => t.to_string(),
+            Message::Close(_) => break,
+            _ => continue,
+        };
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        match event.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+            "TaskComplete" => {
+                saw_task_complete = true;
+                break;
+            }
+            "TaskError" => {
+                task_error = event.get("message").and_then(|v| v.as_str()).map(String::from);
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(task_error.is_none(), "sandboxed TS spec task failed: {task_error:?}");
+    assert!(saw_task_complete, "agent did not reach TaskComplete within deadline");
+
+    let server_ts = workspace.path().join("src/server.ts");
+    assert!(server_ts.exists(), "agent did not create src/server.ts");
+    let generated = std::fs::read_to_string(&server_ts).expect("read server.ts");
+    assert!(generated.len() > 100, "generated src/server.ts is too small ({} bytes)", generated.len());
+    eprintln!("=== generated src/server.ts ({} bytes) ===", generated.len());
+
+    // Run pnpm install + vitest on the HOST against the workspace bind mount.
+    let install = tokio::task::spawn_blocking({
+        let ws = workspace.path().to_path_buf();
+        move || {
+            std::process::Command::new("pnpm")
+                .args(["install", "--silent"])
+                .current_dir(&ws)
+                .output()
+                .expect("pnpm install")
+        }
+    })
+    .await
+    .expect("join pnpm install");
+    assert!(install.status.success(), "pnpm install failed: {}", String::from_utf8_lossy(&install.stderr));
+
+    let vitest = tokio::task::spawn_blocking({
+        let ws = workspace.path().to_path_buf();
+        move || {
+            std::process::Command::new("pnpm")
+                .args(["exec", "vitest", "run", "--reporter=json", "--outputFile=vitest-result.json"])
+                .current_dir(&ws)
+                .output()
+                .expect("vitest")
+        }
+    })
+    .await
+    .expect("join vitest");
+    let vitest_stderr = String::from_utf8_lossy(&vitest.stderr).to_string();
+    let result_json = std::fs::read_to_string(workspace.path().join("vitest-result.json")).unwrap_or_else(|_| "{}".into());
+    let (passed, failed) = parse_vitest_summary(&result_json).unwrap_or_else(|| {
+        panic!("could not parse vitest result json — did compilation fail?\nstderr: {vitest_stderr}");
+    });
+    eprintln!("typescript backend: {passed} passed, {failed} failed");
+    let total = passed + failed;
+    assert!(total > 0, "vitest reported zero tests — fixture is broken");
+    let pass_rate = f64::from(passed) / f64::from(total);
+    assert!(pass_rate >= 0.5, "expected >=50% pass rate, got {passed}/{total} = {:.1}%", pass_rate * 100.0);
+    eprintln!(
+        "sandboxed_typescript_backend_passes_spec_tests_with_judge: {passed}/{total} tests pass ({:.1}%) ✓",
+        pass_rate * 100.0
+    );
+}
+
+// ---------------------------------------------------------------------------
+// React frontend E2E: Vite + React + testing-library
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "boots a microVM, installs Node.js + React toolchain, drives a real LLM agent, runs vitest on host"]
+async fn sandboxed_react_frontend_passes_spec_tests() {
+    std::env::set_var("SMOOTH_SANDBOXED", "1");
+    std::env::set_var("SMOOTH_ENV_CACHE_KEY", "spec-test-react-app");
+
+    let providers_path = dirs_next::home_dir().expect("home dir").join(".smooth/providers.json");
+    if !providers_path.exists() {
+        eprintln!("SKIP: ~/.smooth/providers.json not found");
+        return;
+    }
+
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/react_app_spec");
+    copy_tree(&fixture, workspace.path());
+    assert!(workspace.path().join("package.json").exists(), "fixture package.json missing");
+    assert!(workspace.path().join("tests/app.test.tsx").exists(), "fixture app.test.tsx missing");
+
+    let (bigsmooth_url, _tmp) = spawn_bigsmooth().await;
+    let mut ws = open_ws(&bigsmooth_url).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), ws.next()).await;
+
+    let task_message = concat!(
+        "You are building a small React app with interactive components. ",
+        "The workspace already contains package.json, vite.config.ts, vitest.config.ts, ",
+        "tsconfig.json, index.html, and tests/app.test.tsx. ",
+        "Step 1: read tests/app.test.tsx in full to understand what the component tests expect. ",
+        "Step 2: create src/App.tsx — a default-exported React component with: ",
+        "- A title element with data-testid='title' containing the word 'Smooth'. ",
+        "- A counter: a display with data-testid='count' showing the number, ",
+        "  an increment button (data-testid='increment'), and a decrement button (data-testid='decrement'). ",
+        "- A name form: an input (data-testid='name-input'), a submit button (data-testid='submit-name'), ",
+        "  and after submission, a greeting (data-testid='greeting') showing 'Hello, <name>'. ",
+        "- A todo list: an input (data-testid='todo-input'), an add button (data-testid='add-todo'), ",
+        "  and the list of items rendered as text nodes. ",
+        "Step 3: create src/main.tsx that renders <App /> into the #root div. ",
+        "Step 4: install Node.js if needed (apk add nodejs npm, npm install -g pnpm), ",
+        "then run `pnpm install` and `pnpm test`. Read errors, fix your code, ",
+        "and re-run until all tests pass. Do not declare done until you see zero failures."
+    );
+
+    let task_start = serde_json::json!({
+        "type": "TaskStart",
+        "message": task_message,
+        "model": null,
+        "budget": 1.5,
+        "working_dir": workspace.path().to_string_lossy(),
+    });
+    ws.send(Message::Text(task_start.to_string().into())).await.expect("send TaskStart");
+
+    let mut saw_task_complete = false;
+    let mut task_error: Option<String> = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(900);
+    while tokio::time::Instant::now() < deadline {
+        let next = tokio::time::timeout(Duration::from_secs(30), ws.next()).await;
+        let Ok(Some(Ok(msg))) = next else { continue };
+        let text = match msg {
+            Message::Text(t) => t.to_string(),
+            Message::Close(_) => break,
+            _ => continue,
+        };
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        match event.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+            "TaskComplete" => {
+                saw_task_complete = true;
+                break;
+            }
+            "TaskError" => {
+                task_error = event.get("message").and_then(|v| v.as_str()).map(String::from);
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(task_error.is_none(), "sandboxed React spec task failed: {task_error:?}");
+    assert!(saw_task_complete, "agent did not reach TaskComplete within deadline");
+
+    let app_tsx = workspace.path().join("src/App.tsx");
+    assert!(app_tsx.exists(), "agent did not create src/App.tsx");
+    let main_tsx = workspace.path().join("src/main.tsx");
+    assert!(main_tsx.exists(), "agent did not create src/main.tsx");
+    eprintln!(
+        "=== generated src/App.tsx ({} bytes) ===",
+        std::fs::read_to_string(&app_tsx).unwrap_or_default().len()
+    );
+
+    // Run pnpm install + vitest on the HOST.
+    let install = tokio::task::spawn_blocking({
+        let ws = workspace.path().to_path_buf();
+        move || {
+            std::process::Command::new("pnpm")
+                .args(["install", "--silent"])
+                .current_dir(&ws)
+                .output()
+                .expect("pnpm install")
+        }
+    })
+    .await
+    .expect("join pnpm install");
+    assert!(install.status.success(), "pnpm install failed: {}", String::from_utf8_lossy(&install.stderr));
+
+    let vitest = tokio::task::spawn_blocking({
+        let ws = workspace.path().to_path_buf();
+        move || {
+            std::process::Command::new("pnpm")
+                .args(["exec", "vitest", "run", "--reporter=json", "--outputFile=vitest-result.json"])
+                .current_dir(&ws)
+                .output()
+                .expect("vitest")
+        }
+    })
+    .await
+    .expect("join vitest");
+    let vitest_stderr = String::from_utf8_lossy(&vitest.stderr).to_string();
+    let result_json = std::fs::read_to_string(workspace.path().join("vitest-result.json")).unwrap_or_else(|_| "{}".into());
+    let (passed, failed) = parse_vitest_summary(&result_json).unwrap_or_else(|| {
+        panic!("could not parse vitest result — did compilation fail?\nstderr: {vitest_stderr}");
+    });
+    eprintln!("react frontend: {passed} passed, {failed} failed");
+    let total = passed + failed;
+    assert!(total > 0, "vitest reported zero tests — fixture is broken");
+    let pass_rate = f64::from(passed) / f64::from(total);
+    assert!(pass_rate >= 0.5, "expected >=50% pass rate, got {passed}/{total} = {:.1}%", pass_rate * 100.0);
+    eprintln!(
+        "sandboxed_react_frontend_passes_spec_tests: {passed}/{total} tests pass ({:.1}%) ✓",
+        pass_rate * 100.0
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SMOOTH_SANDBOXED flag parsing
+// ---------------------------------------------------------------------------
+
 /// Verify the truthy-value parsing contract for SMOOTH_SANDBOXED.
 ///
 /// We can't call `sandboxed_dispatch_enabled()` directly (private), so we
