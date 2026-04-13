@@ -63,6 +63,7 @@ use smooth_wonk::policy::PolicyHolder;
 use smooth_wonk::server::{build_router as wonk_router, AppState as WonkAppState};
 use tracing_subscriber::EnvFilter;
 
+mod bg_process;
 mod lsp;
 mod tool_support;
 
@@ -605,12 +606,12 @@ impl Tool for BashTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "bash".into(),
-            description: "Run a shell command inside the workspace. Use `timeout` to prevent hung builds.".into(),
+            description: "Run a shell command inside the workspace. Blocks until the command exits — no default timeout. Pass `timeout` (seconds) for commands that might hang. For long-lived processes (dev servers, watchers) use `bg_run` instead so the agent loop isn't blocked.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "command": { "type": "string", "description": "The command to run" },
-                    "timeout": { "type": "integer", "description": "Max seconds before the command is killed (default: 120)" }
+                    "timeout": { "type": "integer", "description": "Optional: max seconds before the command is killed. If omitted, bash waits indefinitely." }
                 },
                 "required": ["command"]
             }),
@@ -622,7 +623,10 @@ impl Tool for BashTool {
             .get("command")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("missing 'command'"))?;
-        let timeout_secs = args.get("timeout").and_then(|v| v.as_u64()).unwrap_or(120);
+        // Timeout is OPT-IN. No default cap — long-running builds and
+        // tests need to be able to finish. For genuinely long-lived
+        // processes (dev servers) the agent should use bg_run instead.
+        let timeout_secs = args.get("timeout").and_then(|v| v.as_u64());
 
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-c").arg(command).current_dir(&self.base);
@@ -637,9 +641,20 @@ impl Tool for BashTool {
                 .env("no_proxy", "127.0.0.1,localhost");
         }
 
-        let result = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output()).await;
-        match result {
-            Ok(Ok(out)) => {
+        let output_result = match timeout_secs {
+            Some(secs) => match tokio::time::timeout(std::time::Duration::from_secs(secs), cmd.output()).await {
+                Ok(r) => r,
+                Err(_) => {
+                    return Err(anyhow::anyhow!(
+                        "command timed out after {secs}s. For long-lived processes (dev servers, watchers), use `bg_run` instead so the agent isn't blocked."
+                    ));
+                }
+            },
+            None => cmd.output().await,
+        };
+
+        match output_result {
+            Ok(out) => {
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 let stderr = String::from_utf8_lossy(&out.stderr);
                 let code = out.status.code().unwrap_or(-1);
@@ -657,15 +672,441 @@ impl Tool for BashTool {
                 };
                 Ok(format!("exit code: {code}\n--- stdout ---\n{stdout_str}\n--- stderr ---\n{stderr_str}"))
             }
-            Ok(Err(e)) => Err(anyhow::anyhow!("command failed to start: {e}")),
-            Err(_) => Err(anyhow::anyhow!(
-                "command timed out after {timeout_secs}s — consider increasing the timeout or breaking the command into smaller steps"
-            )),
+            Err(e) => Err(anyhow::anyhow!("command failed to start: {e}")),
         }
     }
 
     fn is_concurrent_safe(&self) -> bool {
         false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BgRunTool + companions — manage long-lived background processes
+// (dev servers, watchers, databases) that outlive a single tool call.
+// Bash has a 120s timeout; these tools let the agent detach a process
+// and check on it later.
+// ---------------------------------------------------------------------------
+
+struct BgRunTool {
+    base: PathBuf,
+    registry: Arc<bg_process::BgRegistry>,
+    proxy_url: Option<String>,
+}
+
+#[async_trait]
+impl Tool for BgRunTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "bg_run".into(),
+            description: "Run a long-lived process in the background (dev servers, watchers). Returns a handle (e.g. 'bg-1'). Use bg_status/bg_logs/bg_kill to manage it. This is the ONLY way to run commands that don't return — `bash` would time out.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string", "description": "The shell command to run" }
+                },
+                "required": ["command"]
+            }),
+        }
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {
+        let command = args
+            .get("command")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("missing 'command'"))?;
+        let env_vars = if let Some(ref proxy) = self.proxy_url {
+            vec![
+                ("HTTP_PROXY".into(), proxy.clone()),
+                ("http_proxy".into(), proxy.clone()),
+                ("HTTPS_PROXY".into(), proxy.clone()),
+                ("https_proxy".into(), proxy.clone()),
+                ("NO_PROXY".into(), "127.0.0.1,localhost".into()),
+                ("no_proxy".into(), "127.0.0.1,localhost".into()),
+            ]
+        } else {
+            Vec::new()
+        };
+        let handle = self.registry.run(command, &self.base.to_string_lossy(), &env_vars)?;
+        Ok(format!(
+            "started: {handle}\ncommand: {command}\n\nUse bg_status('{handle}'), bg_logs('{handle}'), or bg_kill('{handle}') to manage it."
+        ))
+    }
+
+    fn is_concurrent_safe(&self) -> bool {
+        false
+    }
+}
+
+struct BgStatusTool {
+    registry: Arc<bg_process::BgRegistry>,
+}
+
+#[async_trait]
+impl Tool for BgStatusTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "bg_status".into(),
+            description: "Check status of a background process. If `handle` is omitted, lists all.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "handle": { "type": "string", "description": "Handle returned by bg_run (e.g. 'bg-1'). Omit to list all." }
+                }
+            }),
+        }
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {
+        let handle = args.get("handle").and_then(|v| v.as_str());
+        if let Some(h) = handle {
+            let st = self.registry.status(h)?;
+            Ok(format_bg_status(&st))
+        } else {
+            let list = self.registry.list();
+            if list.is_empty() {
+                return Ok("no background processes".into());
+            }
+            let mut out = String::new();
+            for st in list {
+                out.push_str(&format_bg_status(&st));
+                out.push('\n');
+            }
+            Ok(out)
+        }
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+fn format_bg_status(st: &bg_process::BgStatus) -> String {
+    let state = if st.running {
+        "running".to_string()
+    } else {
+        match st.exit_code {
+            Some(code) => format!("exited (code {code})"),
+            None => "exited".to_string(),
+        }
+    };
+    format!("{}: {} | uptime {}s | `{}`", st.handle, state, st.uptime_secs, st.command)
+}
+
+struct BgLogsTool {
+    registry: Arc<bg_process::BgRegistry>,
+}
+
+#[async_trait]
+impl Tool for BgLogsTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "bg_logs".into(),
+            description: "Tail recent stdout+stderr from a background process. Default: 8KB of each stream.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "handle": { "type": "string", "description": "Handle returned by bg_run" },
+                    "max_bytes": { "type": "integer", "description": "Max bytes to return per stream (default: 8192)" }
+                },
+                "required": ["handle"]
+            }),
+        }
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {
+        let handle = args.get("handle").and_then(|v| v.as_str()).ok_or_else(|| anyhow::anyhow!("missing 'handle'"))?;
+        let max_bytes = args.get("max_bytes").and_then(|v| v.as_u64()).unwrap_or(8192) as usize;
+        let (stdout, stderr) = self.registry.logs(handle, max_bytes)?;
+        Ok(format!("--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"))
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+struct BgKillTool {
+    registry: Arc<bg_process::BgRegistry>,
+}
+
+#[async_trait]
+impl Tool for BgKillTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "bg_kill".into(),
+            description: "Stop a background process (SIGTERM with a short grace period, then SIGKILL if it doesn't exit).".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "handle": { "type": "string", "description": "Handle returned by bg_run" }
+                },
+                "required": ["handle"]
+            }),
+        }
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {
+        let handle = args.get("handle").and_then(|v| v.as_str()).ok_or_else(|| anyhow::anyhow!("missing 'handle'"))?;
+        self.registry.kill(handle, std::time::Duration::from_secs(3)).await?;
+        Ok(format!("killed {handle}"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HttpFetchTool — structured HTTP request for the agent to probe
+// servers it just started in bg_run. First-class alternative to
+// `bash("curl ...")` that returns status + headers + body as a
+// structured summary the LLM can reason about.
+// ---------------------------------------------------------------------------
+
+struct HttpFetchTool {
+    client: reqwest::Client,
+}
+
+#[async_trait]
+impl Tool for HttpFetchTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "http_fetch".into(),
+            description: "Make an HTTP request and return status, headers, and body. Perfect for probing a dev server you started with bg_run.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "URL to fetch (http:// or https://)" },
+                    "method": { "type": "string", "description": "HTTP method (default: GET)" },
+                    "body": { "type": "string", "description": "Request body (optional, use with POST/PUT/PATCH)" },
+                    "headers": { "type": "object", "description": "Extra request headers as an object" },
+                    "timeout": { "type": "integer", "description": "Timeout in seconds (default: 10)" }
+                },
+                "required": ["url"]
+            }),
+        }
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {
+        let url = args.get("url").and_then(|v| v.as_str()).ok_or_else(|| anyhow::anyhow!("missing 'url'"))?;
+        let method = args.get("method").and_then(|v| v.as_str()).unwrap_or("GET").to_uppercase();
+        let body = args.get("body").and_then(|v| v.as_str());
+        let timeout_secs = args.get("timeout").and_then(|v| v.as_u64()).unwrap_or(10);
+
+        let req_method = match method.as_str() {
+            "GET" => reqwest::Method::GET,
+            "POST" => reqwest::Method::POST,
+            "PUT" => reqwest::Method::PUT,
+            "PATCH" => reqwest::Method::PATCH,
+            "DELETE" => reqwest::Method::DELETE,
+            "HEAD" => reqwest::Method::HEAD,
+            other => return Err(anyhow::anyhow!("unsupported HTTP method: {other}")),
+        };
+
+        let mut builder = self.client.request(req_method, url).timeout(std::time::Duration::from_secs(timeout_secs));
+        if let Some(headers_obj) = args.get("headers").and_then(|v| v.as_object()) {
+            for (k, v) in headers_obj {
+                if let Some(val) = v.as_str() {
+                    builder = builder.header(k, val);
+                }
+            }
+        }
+        if let Some(b) = body {
+            builder = builder.body(b.to_string());
+        }
+
+        let start = std::time::Instant::now();
+        let resp = builder.send().await.map_err(|e| anyhow::anyhow!("HTTP {method} {url} failed: {e}"))?;
+        let status = resp.status();
+        let elapsed_ms = start.elapsed().as_millis();
+
+        // Snapshot headers we care about before consuming the body.
+        let mut header_summary = String::new();
+        for (k, v) in resp.headers().iter().take(20) {
+            header_summary.push_str(&format!("  {}: {}\n", k, v.to_str().unwrap_or("<binary>")));
+        }
+
+        let body_text = resp.text().await.unwrap_or_default();
+        let body_tail = if body_text.len() > 8192 {
+            format!("{}...\n[truncated, {} total bytes]", &body_text[..8192], body_text.len())
+        } else {
+            body_text
+        };
+
+        Ok(format!(
+            "{method} {url}\n\
+             status: {status} ({})\n\
+             elapsed: {elapsed_ms}ms\n\
+             headers:\n{header_summary}\n\
+             --- body ---\n{body_tail}",
+            status.canonical_reason().unwrap_or("")
+        ))
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ProjectInspectTool — detect language, framework, package manager,
+// and common scripts from workspace manifests. Fast cold-start for the
+// agent working on an unfamiliar codebase.
+// ---------------------------------------------------------------------------
+
+struct ProjectInspectTool {
+    base: PathBuf,
+}
+
+#[async_trait]
+impl Tool for ProjectInspectTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "project_inspect".into(),
+            description: "Detect project type (language, framework, package manager) and common scripts (dev/test/build) from manifest files. Call this FIRST on an unfamiliar project instead of grep-ing around.".into(),
+            parameters: serde_json::json!({ "type": "object", "properties": {}, "required": [] }),
+        }
+    }
+
+    async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
+        let base = self.base.clone();
+        tokio::task::spawn_blocking(move || inspect_project(&base)).await?
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+fn inspect_project(base: &std::path::Path) -> anyhow::Result<String> {
+    let mut summary = String::new();
+    let mut languages: Vec<&str> = Vec::new();
+
+    // Rust
+    if base.join("Cargo.toml").exists() {
+        languages.push("rust");
+        summary.push_str("## Rust (Cargo.toml detected)\n");
+        summary.push_str("- build: cargo build\n- test: cargo test\n- check: cargo check\n- lint: cargo clippy\n- format: cargo fmt\n");
+        if base.join("Cargo.lock").exists() {
+            summary.push_str("- Cargo.lock present (binary/app project)\n");
+        }
+        summary.push('\n');
+    }
+
+    // Node / TypeScript
+    let pkg_json = base.join("package.json");
+    if pkg_json.exists() {
+        if let Ok(contents) = std::fs::read_to_string(&pkg_json) {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&contents) {
+                languages.push("typescript/javascript");
+                summary.push_str("## Node (package.json detected)\n");
+
+                // Package manager
+                let pm = if base.join("pnpm-lock.yaml").exists() {
+                    "pnpm"
+                } else if base.join("yarn.lock").exists() {
+                    "yarn"
+                } else if base.join("bun.lockb").exists() {
+                    "bun"
+                } else {
+                    "npm"
+                };
+                summary.push_str(&format!("- package manager: {pm}\n"));
+
+                // Scripts
+                if let Some(scripts) = parsed.get("scripts").and_then(|v| v.as_object()) {
+                    summary.push_str("- scripts:\n");
+                    for (name, cmd) in scripts.iter().take(15) {
+                        let cmd_str = cmd.as_str().unwrap_or("");
+                        summary.push_str(&format!("  - {name}: `{cmd_str}`\n"));
+                    }
+                }
+
+                // Framework heuristics
+                let deps = parsed.get("dependencies").and_then(|v| v.as_object());
+                let dev_deps = parsed.get("devDependencies").and_then(|v| v.as_object());
+                let has_dep = |name: &str| -> bool { deps.is_some_and(|d| d.contains_key(name)) || dev_deps.is_some_and(|d| d.contains_key(name)) };
+                let framework = if has_dep("next") {
+                    Some("Next.js")
+                } else if has_dep("vite") {
+                    Some("Vite")
+                } else if has_dep("hono") {
+                    Some("Hono")
+                } else if has_dep("express") {
+                    Some("Express")
+                } else if has_dep("fastify") {
+                    Some("Fastify")
+                } else if has_dep("react") {
+                    Some("React")
+                } else {
+                    None
+                };
+                if let Some(fw) = framework {
+                    summary.push_str(&format!("- framework: {fw}\n"));
+                }
+                summary.push('\n');
+            }
+        }
+    }
+
+    // Python
+    if base.join("pyproject.toml").exists() || base.join("setup.py").exists() || base.join("requirements.txt").exists() {
+        languages.push("python");
+        summary.push_str("## Python\n");
+        if base.join("pyproject.toml").exists() {
+            summary.push_str("- pyproject.toml present\n");
+            if let Ok(contents) = std::fs::read_to_string(base.join("pyproject.toml")) {
+                if contents.contains("[tool.poetry]") {
+                    summary.push_str("- package manager: poetry\n");
+                } else if contents.contains("[tool.uv]") {
+                    summary.push_str("- package manager: uv\n");
+                } else if contents.contains("[tool.hatch") {
+                    summary.push_str("- package manager: hatch\n");
+                } else {
+                    summary.push_str("- package manager: pip (PEP 621)\n");
+                }
+                if contents.contains("fastapi") {
+                    summary.push_str("- framework: FastAPI\n");
+                } else if contents.contains("django") {
+                    summary.push_str("- framework: Django\n");
+                } else if contents.contains("flask") {
+                    summary.push_str("- framework: Flask\n");
+                }
+                if contents.contains("pytest") {
+                    summary.push_str("- test: pytest\n");
+                }
+            }
+        }
+        if base.join("requirements.txt").exists() {
+            summary.push_str("- requirements.txt present (pip install -r)\n");
+        }
+        summary.push('\n');
+    }
+
+    // Go
+    if base.join("go.mod").exists() {
+        languages.push("go");
+        summary.push_str("## Go (go.mod detected)\n");
+        summary.push_str("- build: go build ./...\n- test: go test ./...\n- format: gofmt -w .\n");
+        summary.push('\n');
+    }
+
+    // Git
+    if base.join(".git").exists() {
+        summary.push_str("## Git\n- repository present\n\n");
+    }
+
+    // .env files
+    let env_files: Vec<_> = [".env", ".env.local", ".env.example"].iter().filter(|f| base.join(f).exists()).collect();
+    if !env_files.is_empty() {
+        summary.push_str("## Env\n");
+        for f in env_files {
+            summary.push_str(&format!("- {f} present\n"));
+        }
+        summary.push('\n');
+    }
+
+    if languages.is_empty() {
+        Ok("No known project manifests detected (looked for Cargo.toml, package.json, pyproject.toml, setup.py, requirements.txt, go.mod).".into())
+    } else {
+        Ok(format!("Project languages: {}\n\n{}", languages.join(", "), summary))
     }
 }
 
@@ -1125,8 +1566,34 @@ async fn main() {
     });
     tools.register(BashTool {
         base: config.workspace.clone(),
+        proxy_url: proxy_for_bash.clone(),
+    });
+    tools.register(ProjectInspectTool {
+        base: config.workspace.clone(),
+    });
+
+    // Background process tools — share one registry so bg_status /
+    // bg_logs / bg_kill can see the processes spawned by bg_run.
+    let bg_registry = Arc::new(bg_process::BgRegistry::new());
+    tools.register(BgRunTool {
+        base: config.workspace.clone(),
+        registry: Arc::clone(&bg_registry),
         proxy_url: proxy_for_bash,
     });
+    tools.register(BgStatusTool {
+        registry: Arc::clone(&bg_registry),
+    });
+    tools.register(BgLogsTool {
+        registry: Arc::clone(&bg_registry),
+    });
+    tools.register(BgKillTool {
+        registry: Arc::clone(&bg_registry),
+    });
+
+    // HTTP probe — structured fetch for checking on servers the agent
+    // started via bg_run.
+    let http_client = reqwest::Client::builder().build().unwrap_or_else(|_| reqwest::Client::new());
+    tools.register(HttpFetchTool { client: http_client });
 
     tools.register(port_forward::ForwardPortTool);
 
