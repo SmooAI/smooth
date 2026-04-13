@@ -756,32 +756,6 @@ impl RunnerConfig {
 
 /// Resolve a policy TOML string from env vars, a standard path, or the
 /// permissive default. This runs before Wonk's `PolicyHolder` is built.
-/// Resolve a prompt from multiple sources (in priority order):
-/// 1. Environment variable pointing to a file path
-/// 2. A well-known file in the workspace root
-/// 3. The compile-time embedded default
-///
-/// This lets users customize prompts per-project without recompiling.
-fn resolve_prompt(env_var: &str, workspace_filename: &str, workspace: &std::path::Path, embedded: &str) -> String {
-    // 1. Explicit file path via env var.
-    if let Ok(path) = std::env::var(env_var) {
-        if let Ok(contents) = std::fs::read_to_string(&path) {
-            tracing::info!(source = %path, env = env_var, "loaded prompt from env override");
-            return contents;
-        }
-    }
-    // 2. Well-known file in the workspace.
-    let workspace_file = workspace.join(workspace_filename);
-    if workspace_file.exists() {
-        if let Ok(contents) = std::fs::read_to_string(&workspace_file) {
-            tracing::info!(source = %workspace_file.display(), "loaded prompt from workspace file");
-            return contents;
-        }
-    }
-    // 3. Compile-time embedded default.
-    embedded.to_string()
-}
-
 fn resolve_policy_toml() -> String {
     if let Ok(inline) = std::env::var("SMOOTH_POLICY_TOML") {
         if !inline.trim().is_empty() {
@@ -1170,20 +1144,17 @@ async fn main() {
     // pearl tools so the agent can create/list/close pearls locally.
     pearl_tools::register_pearl_tools(&mut tools, &config.workspace);
 
-    // Build system prompt from file. The prompt is embedded at compile time
-    // via include_str! so the runner binary is self-contained, but can be
-    // overridden at runtime by placing a `smooth-system-prompt.md` in the
-    // workspace root or by setting SMOOTH_SYSTEM_PROMPT to a file path.
+    // System prompt is compiled in from prompts/system.md. This is the
+    // agent harness — tool guidance, workflow constraints, error recovery.
+    // NOT customizable per-project; AGENTS.md / CLAUDE.md handle that
+    // (loaded below via load_project_context and appended as ## Project Context).
     let has_pearl_tools = tools.schemas().iter().any(|s| s.name == "create_pearl");
     let pearl_note = if has_pearl_tools {
         "\nYou also have create_pearl, list_pearls, and close_pearl tools for tracking work items."
     } else {
         ""
     };
-
-    let embedded_prompt = include_str!("../prompts/system.md");
-    let base_prompt = resolve_prompt("SMOOTH_SYSTEM_PROMPT", "smooth-system-prompt.md", &config.workspace, embedded_prompt);
-    let base_prompt = format!("{base_prompt}{pearl_note}");
+    let base_prompt = format!("{}{pearl_note}", include_str!("../prompts/system.md"));
     let workspace_path = std::path::Path::new(&config.workspace);
     let system_prompt = match smooth_operator::context::load_project_context(workspace_path) {
         Some(ctx) => format!("{base_prompt}\n\n## Project Context\n\n{ctx}"),
