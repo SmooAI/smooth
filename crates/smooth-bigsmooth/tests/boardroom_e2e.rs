@@ -144,9 +144,6 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
     // Critical: tells Big Smooth to take dispatch_ws_task_sandboxed, which
     // routes operator spawns through our sandbox client (which, with
     // SMOOTH_BOOTSTRAP_BILL_URL set, is BillSandboxClient). Without this,
-    // Big Smooth dispatches the agent in-process inside the Boardroom VM
-    // and the work never lands on the host.
-    boardroom_env.insert("SMOOTH_SANDBOXED".into(), "1".into());
     // Reaching the host from inside a microVM:
     //
     // microsandbox's TCP proxy intercepts all non-loopback outbound TCP

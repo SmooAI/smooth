@@ -569,20 +569,6 @@ async fn handle_client_event(state: &AppState, event: ClientEvent) {
     }
 }
 
-/// Returns `true` if Big Smooth should route WebSocket task dispatch through
-/// a real sandboxed operator instead of running the agent in its own process.
-///
-/// Controlled by the `SMOOTH_SANDBOXED` environment variable (values `1` or
-/// `true`). Default is `false` — the in-process path is still the path used by
-/// every existing test and by `th code --headless` out of the box.
-///
-/// When sandboxed mode is enabled, Big Smooth:
-///  - Creates an issue (as before)
-///  - Spawns a real microVM via the embedded [`microsandbox`] crate
-///  - Hands the task off to a program running inside the VM
-///  - Streams events back to WebSocket clients
-///  - Destroys the VM on completion
-///
 /// Spawn an agent task from a WebSocket `TaskStart` event, broadcasting
 /// [`ServerEvent`]s as the agent progresses.
 ///

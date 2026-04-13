@@ -1,10 +1,11 @@
 //! Sandboxed dispatch integration test.
 //!
-//! Verifies the end-to-end flow for `SMOOTH_SANDBOXED=1`: Big Smooth accepts a
+//! Verifies the end-to-end sandboxed dispatch flow: Big Smooth accepts a
 //! WebSocket `TaskStart`, routes dispatch through [`dispatch_ws_task_sandboxed`],
 //! spawns a real microVM, runs the task inside it, and streams
 //! `sandbox.create` / `sandbox.exec` / `TokenDelta` / `TaskComplete` events
-//! back to the client.
+//! back to the client. (Sandboxed dispatch is the only path now — the
+//! in-process path was removed in ae6fb7a.)
 //!
 //! Marked `#[ignore]` because it boots a hardware-virtualized microVM (slow
 //! on first run, requires KVM on Linux or HVF on Apple Silicon). Run with:
@@ -57,10 +58,6 @@ async fn open_ws(bigsmooth_url: &str) -> tokio_tungstenite::WebSocketStream<toki
 #[tokio::test]
 #[ignore = "boots a real microVM — requires hardware virtualization"]
 async fn sandboxed_dispatch_boots_vm_and_streams_events_back() {
-    // Enable the sandboxed dispatch path for this process. Tests live in
-    // their own process per binary, so this is safe.
-    std::env::set_var("SMOOTH_SANDBOXED", "1");
-
     let (bigsmooth_url, _tmp) = spawn_bigsmooth().await;
     let mut ws = open_ws(&bigsmooth_url).await;
 
@@ -216,8 +213,6 @@ async fn sandboxed_dispatch_boots_vm_and_streams_events_back() {
 #[tokio::test]
 #[ignore = "boots three real microVMs concurrently — requires hardware virtualization"]
 async fn concurrent_multi_operator_dispatch_runs_in_parallel() {
-    std::env::set_var("SMOOTH_SANDBOXED", "1");
-
     let (bigsmooth_url, _tmp) = spawn_bigsmooth().await;
 
     // Three independent tasks — each gets its own host tempdir, its own
@@ -443,8 +438,6 @@ async fn concurrent_multi_operator_dispatch_runs_in_parallel() {
 #[tokio::test]
 #[ignore = "boots a microVM, drives a real LLM, and asserts network denial — requires hardware virtualization"]
 async fn adversarial_network_exfiltration_attempt_is_blocked_by_in_vm_cast() {
-    std::env::set_var("SMOOTH_SANDBOXED", "1");
-
     let (bigsmooth_url, _tmp) = spawn_bigsmooth().await;
     let mut ws = open_ws(&bigsmooth_url).await;
     let _ = tokio::time::timeout(Duration::from_secs(5), ws.next()).await;
@@ -560,30 +553,4 @@ async fn adversarial_network_exfiltration_attempt_is_blocked_by_in_vm_cast() {
         "adversarial_network_exfiltration_attempt_is_blocked_by_in_vm_cast: \
          {goalie_denied_count} denial(s) recorded, including example.com ✓"
     );
-}
-
-/// Verify the truthy-value parsing contract for SMOOTH_SANDBOXED.
-///
-/// We can't call `sandboxed_dispatch_enabled()` directly (private), so we
-/// replicate its parsing logic here as a regression guard. If the function's
-/// accepted values ever change, this test should be updated intentionally.
-#[tokio::test]
-async fn sandboxed_dispatch_flag_truthy_parsing() {
-    // This mirrors the logic in sandboxed_dispatch_enabled():
-    //   std::env::var("SMOOTH_SANDBOXED")
-    //       .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-    //       .unwrap_or(false)
-    fn is_truthy(val: &str) -> bool {
-        matches!(val.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
-    }
-
-    // Truthy values
-    for val in ["1", "true", "TRUE", "True", "yes", "YES", "on", "ON"] {
-        assert!(is_truthy(val), "{val:?} should be truthy");
-    }
-
-    // Falsy / unrecognized values
-    for val in ["0", "false", "FALSE", "no", "off", "", "maybe"] {
-        assert!(!is_truthy(val), "{val:?} should not be truthy");
-    }
 }
