@@ -499,24 +499,87 @@ fn run_vitest(workspace: &Path) -> (u32, u32) {
 }
 
 fn run_pytest(workspace: &Path) -> (u32, u32) {
-    let output = std::process::Command::new("pytest").args(["--tb=short", "-q"]).current_dir(workspace).output();
+    // Python verification is more involved than Rust/Go/TS because the
+    // host usually won't have FastAPI/pytest installed. Create a venv,
+    // install deps, then run pytest — all in-workspace so the test is
+    // self-contained.
+    let venv_dir = workspace.join(".e2e-venv");
+    if !venv_dir.exists() {
+        // Prefer a modern Python on the host (homebrew 3.13, 3.12, 3.11)
+        // because agents routinely write PEP 604 `str | None` syntax that
+        // only works on 3.10+. Fall back to system python3 last.
+        let python_candidates: &[&str] = &["python3.13", "python3.12", "python3.11", "python3.10", "python3"];
+        let mut made = false;
+        for candidate in python_candidates {
+            if std::process::Command::new(candidate)
+                .args(["-m", "venv", ".e2e-venv"])
+                .current_dir(workspace)
+                .output()
+                .is_ok_and(|o| o.status.success())
+            {
+                eprintln!("[pytest] using {candidate} for venv");
+                made = true;
+                break;
+            }
+        }
+        if !made {
+            eprintln!("[pytest] no usable python3 on host — skipping");
+            return (0, 0);
+        }
+    }
+    let pip_bin = venv_dir.join("bin/pip");
+    let pytest_bin = venv_dir.join("bin/pytest");
+
+    // Install the deps we need for the Hello FastAPI contract. The
+    // agent's taskapi.py is just a module in the workspace; we don't
+    // need editable-install gymnastics — a plain pip install of the
+    // direct deps + pytest is enough. pytest auto-discovers tests/
+    // relative to cwd.
+    let install = std::process::Command::new(&pip_bin)
+        .args(["install", "--quiet", "fastapi", "httpx", "pytest"])
+        .current_dir(workspace)
+        .output();
+    if let Ok(out) = install {
+        if !out.status.success() {
+            eprintln!(
+                "[pytest] pip install failed: {}",
+                String::from_utf8_lossy(&out.stderr).chars().take(500).collect::<String>()
+            );
+            return (0, 0);
+        }
+    } else {
+        eprintln!("[pytest] pip missing from venv");
+        return (0, 0);
+    }
+
+    let output = std::process::Command::new(&pytest_bin)
+        .args(["--tb=short", "-q"])
+        .current_dir(workspace)
+        .output();
     let Ok(output) = output else {
+        eprintln!("[pytest] pytest binary not runnable");
         return (0, 0);
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // pytest summary: "12 passed, 1 failed in 0.42s"
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}\n{stderr}");
+    if !output.status.success() {
+        eprintln!("[pytest] non-zero exit ({}), tail of output:", output.status);
+        for line in combined.lines().take(40) {
+            eprintln!("[pytest]   {line}");
+        }
+    }
+    // pytest summary: "12 passed, 1 failed in 0.42s" or just "12 passed in 0.4s"
     let mut passed = 0u32;
     let mut failed = 0u32;
-    for line in stdout.lines().rev().take(10) {
-        for token in line.split(|c: char| !c.is_ascii_digit() && c != ' ' && c != '.') {
-            let words: Vec<&str> = token.split_whitespace().collect();
-            for pair in words.windows(2) {
-                if let Ok(n) = pair[0].parse::<u32>() {
-                    match pair[1] {
-                        "passed" | "passed," => passed = n,
-                        "failed" | "failed," => failed = n,
-                        _ => {}
-                    }
+    for line in combined.lines().rev().take(20) {
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        for win in tokens.windows(2) {
+            if let Ok(n) = win[0].parse::<u32>() {
+                match win[1].trim_end_matches(',') {
+                    "passed" => passed = passed.max(n),
+                    "failed" => failed = failed.max(n),
+                    _ => {}
                 }
             }
         }
@@ -527,6 +590,62 @@ fn run_pytest(workspace: &Path) -> (u32, u32) {
 // ---------------------------------------------------------------------------
 // The consolidated test
 // ---------------------------------------------------------------------------
+
+// Individual-phase entry points — useful when iterating on a single
+// language without paying for all 5 cold-start VM boots. Each shares
+// the same per-phase runner as the consolidated test below.
+
+#[tokio::test]
+#[ignore = "boots a microVM, drives a real LLM — requires providers.json + hardware virt"]
+async fn phase_python_only() {
+    run_single_phase(PhaseKind::Python).await;
+}
+
+#[tokio::test]
+#[ignore = "boots a microVM, drives a real LLM — requires providers.json + hardware virt"]
+async fn phase_frontend_only() {
+    run_single_phase(PhaseKind::Frontend).await;
+}
+
+enum PhaseKind {
+    Python,
+    Frontend,
+}
+
+async fn run_single_phase(kind: PhaseKind) {
+    let providers_path = dirs_next::home_dir().expect("home dir").join(".smooth/providers.json");
+    if !providers_path.exists() {
+        eprintln!("SKIP: ~/.smooth/providers.json not found");
+        return;
+    }
+    let registry = smooth_operator::providers::ProviderRegistry::load_from_file(&providers_path).expect("load providers.json");
+    let llm = registry.default_llm_config().expect("default provider");
+
+    let Some(bs) = spawn_bigsmooth().await else {
+        eprintln!("SKIP: cannot spawn Big Smooth (smooth-dolt binary missing?)");
+        return;
+    };
+    eprintln!("Big Smooth running at {}", bs.url);
+
+    let result = match kind {
+        PhaseKind::Python => run_python_phase(&bs.url, &llm).await,
+        PhaseKind::Frontend => run_frontend_phase(&bs.url, &llm).await,
+    };
+
+    eprintln!("\n=== {} phase result ===", result.phase);
+    let total = result.passed_tests + result.failed_tests;
+    let pct = if total > 0 {
+        f64::from(result.passed_tests) / f64::from(total) * 100.0
+    } else {
+        0.0
+    };
+    eprintln!(
+        "  {}/{} tests ({:.0}%), judge={} score={}, ${:.3}, {} tool calls",
+        result.passed_tests, total, pct, result.judge_verdict, result.judge_score, result.cost_usd, result.tool_call_count
+    );
+    assert!(total > 0, "{}: expected at least one test to run, got 0", result.phase);
+    assert!(pct >= 50.0, "{}: expected >=50% pass rate, got {pct:.0}%", result.phase);
+}
 
 #[tokio::test]
 #[ignore = "full-stack E2E across Rust/Go/TypeScript/Python + React frontend — boots 5 microVMs, installs toolchains, real LLM, ~30 min cold"]
