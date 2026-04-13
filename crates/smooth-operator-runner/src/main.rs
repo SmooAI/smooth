@@ -63,6 +63,7 @@ use smooth_wonk::policy::PolicyHolder;
 use smooth_wonk::server::{build_router as wonk_router, AppState as WonkAppState};
 use tracing_subscriber::EnvFilter;
 
+mod lsp;
 mod tool_support;
 
 // ---------------------------------------------------------------------------
@@ -377,6 +378,105 @@ impl Tool for ApplyPatchTool {
         let base = self.base.clone();
         let patch_text = patch_text.to_string();
         tokio::task::spawn_blocking(move || tool_support::apply_unified_patch(&base, &patch_text)).await?
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LspTool — language server protocol integration.
+//
+// Spawns rust-analyzer / typescript-language-server / ty / gopls as a
+// sidecar process inside the VM and exposes goToDefinition, findReferences,
+// hover, documentSymbol, workspaceSymbol, and diagnostics to the agent.
+// ---------------------------------------------------------------------------
+
+struct LspTool {
+    base: PathBuf,
+    client: Arc<tokio::sync::Mutex<Option<lsp::LspClient>>>,
+}
+
+#[async_trait]
+impl Tool for LspTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "lsp".into(),
+            description: "Language server integration — semantic code intelligence. Supports goToDefinition, findReferences, hover, documentSymbol, workspaceSymbol, and diagnostics. The language server (rust-analyzer, typescript-language-server, ty, gopls) is auto-detected and lazily spawned.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "operation": {
+                        "type": "string",
+                        "enum": ["goToDefinition", "findReferences", "hover", "documentSymbol", "workspaceSymbol", "diagnostics"],
+                        "description": "The LSP operation to perform"
+                    },
+                    "file": { "type": "string", "description": "Relative file path (required for all except workspaceSymbol)" },
+                    "line": { "type": "integer", "description": "1-based line number (required for goToDefinition, findReferences, hover)" },
+                    "character": { "type": "integer", "description": "1-based column number (required for goToDefinition, findReferences, hover)" },
+                    "query": { "type": "string", "description": "Search query (required for workspaceSymbol)" }
+                },
+                "required": ["operation"]
+            }),
+        }
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {
+        let operation = args
+            .get("operation")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("missing 'operation'"))?;
+        let file = args.get("file").and_then(|v| v.as_str());
+        let line = args.get("line").and_then(|v| v.as_u64()).map(|l| (l.saturating_sub(1)) as u32);
+        let character = args.get("character").and_then(|v| v.as_u64()).map(|c| (c.saturating_sub(1)) as u32);
+        let query = args.get("query").and_then(|v| v.as_str());
+
+        // Lazily start the language server on first use.
+        let mut guard = self.client.lock().await;
+        if guard.is_none() {
+            match lsp::LspClient::start(&self.base).await {
+                Ok(client) => *guard = Some(client),
+                Err(e) => return Err(anyhow::anyhow!("LSP server start failed: {e}")),
+            }
+        }
+        let client = guard.as_mut().ok_or_else(|| anyhow::anyhow!("LSP client not initialized"))?;
+
+        match operation {
+            "goToDefinition" => {
+                let f = file.ok_or_else(|| anyhow::anyhow!("goToDefinition requires 'file'"))?;
+                let l = line.ok_or_else(|| anyhow::anyhow!("goToDefinition requires 'line'"))?;
+                let c = character.ok_or_else(|| anyhow::anyhow!("goToDefinition requires 'character'"))?;
+                client.go_to_definition(&self.base, f, l, c).await
+            }
+            "findReferences" => {
+                let f = file.ok_or_else(|| anyhow::anyhow!("findReferences requires 'file'"))?;
+                let l = line.ok_or_else(|| anyhow::anyhow!("findReferences requires 'line'"))?;
+                let c = character.ok_or_else(|| anyhow::anyhow!("findReferences requires 'character'"))?;
+                client.find_references(&self.base, f, l, c).await
+            }
+            "hover" => {
+                let f = file.ok_or_else(|| anyhow::anyhow!("hover requires 'file'"))?;
+                let l = line.ok_or_else(|| anyhow::anyhow!("hover requires 'line'"))?;
+                let c = character.ok_or_else(|| anyhow::anyhow!("hover requires 'character'"))?;
+                client.hover(&self.base, f, l, c).await
+            }
+            "documentSymbol" => {
+                let f = file.ok_or_else(|| anyhow::anyhow!("documentSymbol requires 'file'"))?;
+                client.document_symbols(&self.base, f).await
+            }
+            "workspaceSymbol" => {
+                let q = query.unwrap_or("");
+                client.workspace_symbols(q).await
+            }
+            "diagnostics" => {
+                let f = file.ok_or_else(|| anyhow::anyhow!("diagnostics requires 'file'"))?;
+                client.diagnostics(&self.base, f).await
+            }
+            other => Err(anyhow::anyhow!(
+                "unknown LSP operation: {other}. Use one of: goToDefinition, findReferences, hover, documentSymbol, workspaceSymbol, diagnostics"
+            )),
+        }
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
     }
 }
 
@@ -1018,6 +1118,10 @@ async fn main() {
     });
     tools.register(GrepTool {
         base: config.workspace.clone(),
+    });
+    tools.register(LspTool {
+        base: config.workspace.clone(),
+        client: Arc::new(tokio::sync::Mutex::new(None)),
     });
     tools.register(BashTool {
         base: config.workspace.clone(),
