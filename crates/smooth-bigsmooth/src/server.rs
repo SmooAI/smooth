@@ -585,232 +585,27 @@ async fn handle_client_event(state: &AppState, event: ClientEvent) {
 ///  - Streams events back to WebSocket clients
 ///  - Destroys the VM on completion
 ///
-/// Crucially, Big Smooth itself performs **no file writes, no tool execution
-/// and no LLM calls** on the sandboxed path — it stays the READ-ONLY
-/// orchestrator the architecture promises.
-fn sandboxed_dispatch_enabled() -> bool {
-    // Sandboxed is the default — the whole point of Smooth is hardware-isolated
-    // operators with Wonk/Goalie/Narc enforcement. Set SMOOTH_SANDBOXED=0 to opt
-    // OUT and use the legacy in-process path (only useful for tests that don't
-    // have microsandbox available).
-    !std::env::var("SMOOTH_SANDBOXED")
-        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"))
-        .unwrap_or(false)
-}
-
 /// Spawn an agent task from a WebSocket `TaskStart` event, broadcasting
 /// [`ServerEvent`]s as the agent progresses.
 ///
-/// Dispatches to either the in-process path or the sandboxed path depending
-/// on [`sandboxed_dispatch_enabled`].
+/// ALL dispatch goes through the sandboxed path — Big Smooth stays
+/// READ-ONLY. The operator runner inside the microVM hosts the real tools
+/// (read_file, write_file, edit_file, grep, bash, etc.) with the full
+/// security cast (Wonk/Goalie/Narc/Scribe) watching every call.
 async fn dispatch_ws_task(state: &AppState, message: String, model: Option<String>, budget: Option<f64>, working_dir: Option<String>) {
-    if sandboxed_dispatch_enabled() {
-        dispatch_ws_task_sandboxed(state, message, model, budget, working_dir).await;
-    } else {
-        dispatch_ws_task_in_process(state, message, model, budget, working_dir).await;
-    }
+    dispatch_ws_task_sandboxed(state, message, model, budget, working_dir).await;
 }
 
-/// Legacy in-process dispatch — runs the agent in Big Smooth's own process.
-/// Kept for backwards compatibility (and because the sandboxed path currently
-/// requires an operator image that does not yet exist in the repo). Do not
-/// add new features here; new functionality should live on the sandboxed
-/// path so that Big Smooth stays READ-ONLY.
-async fn dispatch_ws_task_in_process(state: &AppState, message: String, model: Option<String>, budget: Option<f64>, working_dir: Option<String>) {
-    let working_dir = working_dir
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-    let task_id = uuid::Uuid::new_v4().to_string();
-    let event_tx = state.event_tx.clone();
-
-    // Create an issue for tracking
-    let pearl_store = state.pearl_store.clone();
-    let pearl_id = crate::pearls::create_pearl(&pearl_store, &format!("Task: {}", truncate_str(&message, 60)), &message, "task", 2)
-        .ok()
-        .map(|i| i.id);
-
-    if let Some(ref id) = pearl_id {
-        let update = smooth_pearls::PearlUpdate {
-            status: Some(smooth_pearls::PearlStatus::InProgress),
-            ..Default::default()
-        };
-        let _ = pearl_store.update(id, &update);
-    }
-
-    // Save the task message to Dolt session store
-    {
-        use crate::session::{MessageType, SessionMessage, SessionStore};
-        let msg = SessionMessage {
-            id: format!("msg-{}", &task_id[..8]),
-            session_id: task_id.clone(),
-            from: "user".to_string(),
-            to: "bigsmooth".to_string(),
-            content: message.clone(),
-            timestamp: chrono::Utc::now(),
-            message_type: MessageType::Command,
-        };
-        let _ = state.session_store.save_message(msg);
-    }
-
-    let tid = task_id.clone();
-    let last_activity = state.last_activity.clone();
-    let session_store = state.session_store.clone();
-    tokio::spawn(async move {
-        let (agent_tx, mut agent_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
-
-        // Bridge agent events to broadcast channel
-        let bridge_tx = event_tx.clone();
-        let bridge_tid = tid.clone();
-        let bridge_last_activity = last_activity.clone();
-        let bridge_handle = tokio::spawn(async move {
-            let mut iterations = 0u32;
-            let start = Instant::now();
-            while let Some(agent_event) = agent_rx.recv().await {
-                // Touch last_activity so idle timer doesn't fire mid-task
-                if let Ok(mut last) = bridge_last_activity.lock() {
-                    *last = Instant::now();
-                }
-                let server_event = match agent_event {
-                    AgentEvent::TokenDelta { content } => Some(ServerEvent::TokenDelta {
-                        task_id: bridge_tid.clone(),
-                        content,
-                    }),
-                    AgentEvent::ToolCallStart { tool_name, .. } => Some(ServerEvent::ToolCallStart {
-                        task_id: bridge_tid.clone(),
-                        tool_name,
-                        arguments: String::new(),
-                    }),
-                    AgentEvent::ToolCallComplete { tool_name, is_error, .. } => Some(ServerEvent::ToolCallComplete {
-                        task_id: bridge_tid.clone(),
-                        tool_name,
-                        result: String::new(),
-                        is_error,
-                        duration_ms: start.elapsed().as_millis() as u64,
-                    }),
-                    AgentEvent::Completed { iterations: iters, .. } => {
-                        iterations = iters;
-                        None // We send TaskComplete after the agent loop returns
-                    }
-                    AgentEvent::Error { message } => Some(ServerEvent::TaskError {
-                        task_id: bridge_tid.clone(),
-                        message,
-                    }),
-                    _ => None,
-                };
-
-                if let Some(evt) = server_event {
-                    let _ = bridge_tx.send(evt);
-                }
-            }
-            iterations
-        });
-
-        // Run the actual agent
-        let result = run_agent_task(working_dir, message, model, budget, agent_tx).await;
-
-        // Touch on completion so the idle timer starts fresh from now
-        if let Ok(mut last) = last_activity.lock() {
-            *last = Instant::now();
-        }
-
-        // Wait for bridge to drain
-        let iterations = bridge_handle.await.unwrap_or(0);
-
-        match result {
-            Ok(cost) => {
-                let _ = event_tx.send(ServerEvent::TaskComplete {
-                    task_id: tid.clone(),
-                    iterations,
-                    cost_usd: cost,
-                });
-                if let Some(ref id) = pearl_id {
-                    let _ = pearl_store.close(&[id]);
-                }
-                // Save completion message to Dolt
-                {
-                    use crate::session::{MessageType, SessionMessage, SessionStore};
-                    let msg = SessionMessage {
-                        id: format!("msg-done-{}", &tid[..8]),
-                        session_id: tid.clone(),
-                        from: "bigsmooth".to_string(),
-                        to: "user".to_string(),
-                        content: format!("Task completed. Iterations: {iterations}, cost: ${cost:.4}"),
-                        timestamp: chrono::Utc::now(),
-                        message_type: MessageType::StatusUpdate,
-                    };
-                    let _ = session_store.save_message(msg);
-                }
-                tracing::info!(task_id = tid, cost_usd = cost, "WS task completed");
-            }
-            Err(e) => {
-                let _ = event_tx.send(ServerEvent::TaskError {
-                    task_id: tid.clone(),
-                    message: e.to_string(),
-                });
-                // Save error message to Dolt
-                {
-                    use crate::session::{MessageType, SessionMessage, SessionStore};
-                    let msg = SessionMessage {
-                        id: format!("msg-err-{}", &tid[..8]),
-                        session_id: tid.clone(),
-                        from: "bigsmooth".to_string(),
-                        to: "user".to_string(),
-                        content: format!("Task failed: {e}"),
-                        timestamp: chrono::Utc::now(),
-                        message_type: MessageType::Alert,
-                    };
-                    let _ = session_store.save_message(msg);
-                }
-                tracing::error!(task_id = tid, error = %e, "WS task failed");
-            }
-        }
-    });
-}
-
-// ---------------------------------------------------------------------------
-// Sandboxed dispatch: spawn a real microVM, run the task inside, stream events
-// back. Big Smooth performs NO writes, NO tool execution, and NO LLM calls on
-// this path — it is strictly a READ-ONLY orchestrator.
-//
-// This is the path the architecture actually describes. The full end-to-end
-// "operator binary + Wonk + Goalie + Narc + Scribe all running inside the VM"
-// story is tracked as a follow-up (requires a custom OCI image). What this
-// function delivers today is the plumbing: orchestrator → microVM → exec →
-// result, gated by `SMOOTH_SANDBOXED=1`. Existing in-process clients are
-// unaffected.
-// ---------------------------------------------------------------------------
-
-/// Locate the cross-compiled `smooth-operator-runner` binary that Big Smooth
-/// will mount into each sandbox.
-///
-/// Resolution order:
-///  1. `SMOOTH_OPERATOR_RUNNER_HOST_PATH` env var — an **opaque host path**
-///     used only for bind-mount source. The file does not need to exist
-///     in Big Smooth's own filesystem view. Set when Big Smooth runs
-///     inside the Boardroom VM and passes host paths through to Bill.
-///  2. `SMOOTH_OPERATOR_RUNNER` env var (absolute path, must exist locally)
-///  3. `<CARGO_MANIFEST_DIR>/../../target/aarch64-unknown-linux-musl/release/smooth-operator-runner`
-///  4. `./target/aarch64-unknown-linux-musl/release/smooth-operator-runner` (cwd)
-///
-/// Returns `None` if no binary is found; callers should fall back to the
-/// legacy echo path with a clear error message so developers know they need
-/// to run `scripts/build-operator-runner.sh`.
 fn find_operator_runner_binary() -> Option<std::path::PathBuf> {
     if let Ok(host_path) = std::env::var("SMOOTH_OPERATOR_RUNNER_HOST_PATH") {
-        // Trust the caller (the Boardroom bootstrap). We cannot check the
-        // file because it lives on the host, not inside our VM.
         return Some(std::path::PathBuf::from(host_path));
     }
-
     if let Ok(explicit) = std::env::var("SMOOTH_OPERATOR_RUNNER") {
         let p = std::path::PathBuf::from(explicit);
         if p.is_file() {
             return Some(p);
         }
     }
-
-    // Walk up from CARGO_MANIFEST_DIR looking for target/aarch64-unknown-linux-musl/release.
     let manifest = env!("CARGO_MANIFEST_DIR");
     let mut dir = std::path::PathBuf::from(manifest);
     for _ in 0..5 {
@@ -826,8 +621,6 @@ fn find_operator_runner_binary() -> Option<std::path::PathBuf> {
             break;
         }
     }
-
-    // Last resort: look relative to the current working directory.
     let cwd_candidate = std::env::current_dir()
         .ok()?
         .join("target")
@@ -1688,71 +1481,6 @@ async fn run_task_handler(State(state): State<AppState>, Json(req): Json<TaskReq
     });
 
     Sse::new(sse_stream)
-}
-
-/// Run an agent task and return the total cost.
-async fn run_agent_task(
-    working_dir: PathBuf,
-    message: String,
-    model: Option<String>,
-    budget: Option<f64>,
-    tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
-) -> anyhow::Result<f64> {
-    // 1. Load LLM config from providers.json
-    let providers_path = dirs_next::home_dir()
-        .map(|h| h.join(".smooth/providers.json"))
-        .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
-
-    let mut llm_config = if providers_path.exists() {
-        let registry = ProviderRegistry::load_from_file(&providers_path).map_err(|e| anyhow::anyhow!("Failed to load providers.json: {e}"))?;
-        registry
-            .default_llm_config()
-            .map_err(|e| anyhow::anyhow!("No default provider configured: {e}"))?
-            .with_temperature(0.3)
-    } else {
-        anyhow::bail!("No LLM providers configured. Run: th auth login <provider>");
-    };
-
-    // 2. Override model if specified
-    if let Some(ref m) = model {
-        llm_config = llm_config.with_model(m);
-    }
-
-    // 3. Create AgentConfig — enrich with project context from AGENTS.md
-    let base_prompt = "You are Smooth Coding, an AI coding assistant. \
-        Help the user with their coding task. Use the provided tools to read, write, and execute code. \
-        Be concise and thorough.";
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let system_prompt = match smooth_operator::context::load_project_context(&cwd) {
-        Some(ctx) => format!("{base_prompt}\n\n## Project Context\n\n{ctx}"),
-        None => base_prompt.to_string(),
-    };
-
-    let mut config = AgentConfig::new("smooth-task", &system_prompt, llm_config).with_max_iterations(50);
-
-    // 4. Set budget if specified
-    if let Some(max_usd) = budget {
-        config = config.with_budget(CostBudget {
-            max_cost_usd: Some(max_usd),
-            max_tokens: None,
-        });
-    }
-
-    // 5. Create tools scoped to working directory
-    let mut tools = smooth_code::tools::create_tools(&working_dir);
-
-    // 6. Register NarcHook for security
-    let narc_hook = Arc::new(NarcHook::new(false));
-    tools.add_hook(SharedNarcHook { inner: Arc::clone(&narc_hook) });
-
-    // 7. Run agent with channel for SSE streaming
-    let agent = Agent::new(config, tools);
-    let _conversation = agent.run_with_channel(&message, tx).await?;
-
-    // 8. Return cost
-    #[allow(clippy::expect_used)]
-    let cost = agent.cost_tracker.lock().expect("lock cost_tracker").total_cost_usd;
-    Ok(cost)
 }
 
 /// Truncate a string to at most `max_len` characters, appending "..." if truncated.

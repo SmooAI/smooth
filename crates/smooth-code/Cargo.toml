@@ -25,9 +25,6 @@ uuid.workspace = true
 dirs-next.workspace = true
 futures-util.workspace = true
 ignore.workspace = true
-globset.workspace = true
-grep-regex.workspace = true
-grep-searcher.workspace = true
 reqwest.workspace = true
 tokio-tungstenite.workspace = true
 

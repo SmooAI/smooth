@@ -345,48 +345,63 @@ async fn run_startup_health_checks() -> (HealthStatus, Vec<String>) {
     (status, warnings)
 }
 
-/// Run a query through the agent framework with channel-based streaming.
-///
-/// Sends `AgentEvent`s through the channel as the agent processes.
-/// The caller's event loop picks them up via `try_recv()`.
+/// Send a task to Big Smooth via WebSocket and bridge its `ServerEvent`s
+/// to the `AgentEvent` channel the TUI already consumes. All actual tool
+/// execution happens inside a hardware-isolated sandbox — smooth-code is
+/// just a rendering client.
 async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent>) -> anyhow::Result<()> {
-    use smooth_operator::providers::ProviderRegistry;
-    use smooth_operator::{Agent, AgentConfig, ToolRegistry};
+    use crate::client::{BigSmoothClient, ServerEvent};
 
-    // Load LLM config from providers.json, falling back to env vars
-    let llm_config = {
-        let providers_path = dirs_next::home_dir().map(|h| h.join(".smooth/providers.json"));
-        if let Some(ref path) = providers_path {
-            if path.exists() {
-                if let Ok(registry) = ProviderRegistry::load_from_file(path) {
-                    registry
-                        .default_llm_config()
-                        .map_err(|e| anyhow::anyhow!("Failed to load LLM config from providers.json: {e}"))?
-                        .with_temperature(0.3)
-                } else {
-                    return Err(anyhow::anyhow!("providers.json exists but cannot be parsed. Run: th auth login <provider>"));
-                }
-            } else {
-                return Err(anyhow::anyhow!("No LLM providers configured. Run: th auth login <provider>"));
+    let url = std::env::var("SMOOTH_URL").unwrap_or_else(|_| "http://localhost:4400".into());
+    let mut client = BigSmoothClient::new(&url);
+    client
+        .connect()
+        .await
+        .map_err(|e| anyhow::anyhow!("Cannot connect to Big Smooth at {url}: {e}. Run: th up"))?;
+
+    let _ = tx.send(AgentEvent::Started { agent_id: "task".into() });
+
+    let cwd = std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string());
+    let mut events = client.run_task(message, None, None, cwd.as_deref()).await?;
+
+    while let Some(event) = events.recv().await {
+        let agent_event = match event {
+            ServerEvent::TokenDelta { content, .. } => Some(AgentEvent::TokenDelta { content }),
+            ServerEvent::ToolCallStart { tool_name, .. } => Some(AgentEvent::ToolCallStart { iteration: 0, tool_name }),
+            ServerEvent::ToolCallComplete { tool_name, is_error, .. } => Some(AgentEvent::ToolCallComplete {
+                iteration: 0,
+                tool_name,
+                is_error,
+            }),
+            ServerEvent::TaskComplete { iterations, .. } => {
+                let _ = tx.send(AgentEvent::Completed {
+                    agent_id: "task".into(),
+                    iterations,
+                });
+                break;
             }
-        } else {
-            return Err(anyhow::anyhow!("Cannot determine home directory"));
+            ServerEvent::TaskError { message, .. } => {
+                let _ = tx.send(AgentEvent::Error { message });
+                break;
+            }
+            ServerEvent::NarcAlert { severity, message, .. } => {
+                let _ = tx.send(AgentEvent::Error {
+                    message: format!("[Narc {severity}] {message}"),
+                });
+                None
+            }
+            ServerEvent::Error { message } => {
+                let _ = tx.send(AgentEvent::Error { message });
+                break;
+            }
+            _ => None,
+        };
+        if let Some(e) = agent_event {
+            if tx.send(e).is_err() {
+                break;
+            }
         }
-    };
-
-    let base_prompt = "You are Smooth Coding, an AI coding assistant. Help the user with their coding questions. Be concise and helpful.";
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let system_prompt = match smooth_operator::context::load_project_context(&cwd) {
-        Some(ctx) => format!("{base_prompt}\n\n## Project Context\n\n{ctx}"),
-        None => base_prompt.to_string(),
-    };
-
-    let config = AgentConfig::new("smooth-coding", &system_prompt, llm_config).with_max_iterations(1);
-
-    let tools = ToolRegistry::new();
-    let agent = Agent::new(config, tools);
-
-    let _conversation = agent.run_with_channel(message, tx).await?;
+    }
 
     Ok(())
 }
