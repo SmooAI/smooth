@@ -580,6 +580,45 @@ async fn dispatch_ws_task(state: &AppState, message: String, model: Option<Strin
     dispatch_ws_task_sandboxed(state, message, model, budget, working_dir).await;
 }
 
+/// Build a human-readable resumption context block from prior session
+/// messages. Empty string if `pearl_id` is None or the pearl has no
+/// prior messages — caller treats empty as "no resume".
+///
+/// Capped at `max_messages` so the context doesn't grow unbounded
+/// across many iterations on the same pearl. Messages are tagged with
+/// role + timestamp so the agent can see the sequence.
+fn build_resumption_context(store: &crate::session::DoltSessionStore, pearl_id: Option<&str>, max_messages: usize) -> String {
+    use crate::session::SessionStore;
+    let Some(pearl_id) = pearl_id else {
+        return String::new();
+    };
+    let Ok(messages) = store.get_messages(pearl_id, max_messages) else {
+        return String::new();
+    };
+    if messages.is_empty() {
+        return String::new();
+    }
+    let mut ctx = String::new();
+    ctx.push_str("## Resumption context\n\n");
+    ctx.push_str("You are continuing work on this pearl. The following is a condensed log of what happened in prior sessions on this same pearl. Use it to understand what has already been done and avoid repeating yourself. The workspace files persist between sessions, so anything you see referenced should already exist on disk — verify with read_file before making assumptions.\n\n");
+    for msg in messages.iter().rev().take(max_messages).rev() {
+        let trimmed = if msg.content.chars().count() > 400 {
+            let truncated: String = msg.content.chars().take(400).collect();
+            format!("{truncated}…")
+        } else {
+            msg.content.clone()
+        };
+        ctx.push_str(&format!(
+            "- [{}] {} → {}: {}\n",
+            msg.timestamp.format("%Y-%m-%d %H:%M"),
+            msg.from,
+            msg.to,
+            trimmed
+        ));
+    }
+    ctx
+}
+
 fn find_operator_runner_binary() -> Option<std::path::PathBuf> {
     if let Ok(host_path) = std::env::var("SMOOTH_OPERATOR_RUNNER_HOST_PATH") {
         return Some(std::path::PathBuf::from(host_path));
@@ -738,6 +777,14 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
             return;
         }
     };
+
+    // Build session-resume context BEFORE the tokio::spawn so we don't
+    // have to smuggle a state reference through the 'static boundary.
+    // Reads the pearl's prior SessionMessages (if any) and renders them
+    // as a "## Resumption context" block that gets prepended to the
+    // task message so the agent can pick up where prior invocations
+    // left off.
+    let resumption_context = build_resumption_context(&state.session_store, pearl_id.as_deref(), 20);
 
     tokio::spawn(async move {
         let touch = || {
@@ -911,6 +958,15 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
             }
         }
 
+        // Combine the user's task with any resumption context we loaded
+        // up top. Empty `resumption_context` means no prior session, so
+        // we just use the message as-is.
+        let full_task_message = if resumption_context.is_empty() {
+            message.clone()
+        } else {
+            format!("{message}\n\n{resumption_context}")
+        };
+
         // Write the task message to a file in the control tempdir so the
         // runner can read it via SMOOTH_TASK_FILE. The kernel cmdline that
         // microsandbox builds for the VM has a hard size limit (~2 KB on
@@ -919,7 +975,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
         // path keeps the cmdline tiny regardless of message size.
         let task_file_set = if let Some(ref dir) = policy_dir_guard {
             let task_path = dir.path().join("task.txt");
-            match std::fs::write(&task_path, message.as_bytes()) {
+            match std::fs::write(&task_path, full_task_message.as_bytes()) {
                 Ok(()) => {
                     env.insert("SMOOTH_TASK_FILE".into(), "/opt/smooth/policy/task.txt".into());
                     true
@@ -937,7 +993,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
             // env var. This still works for short messages but will overflow
             // the kernel cmdline for long ones — Boardroom mode needs a
             // brokered task-file path eventually.
-            env.insert("SMOOTH_TASK".into(), message.clone());
+            env.insert("SMOOTH_TASK".into(), full_task_message.clone());
         }
 
         let policy_mount = if !in_boardroom {
@@ -987,30 +1043,42 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
             if let Ok(toml_str) = std::fs::read_to_string(&policy_file) {
                 if let Ok(policy) = smooth_policy::Policy::from_toml(&toml_str) {
                     if policy.ports.enabled {
-                        // Pre-declare common dev server ports. The operator can
-                        // use `forward_port` tool to discover which host port
-                        // maps to their guest port.
+                        // Load any cached mapping for this pearl. If a previous
+                        // task on the same pearl forwarded guest_port=3000 to
+                        // host_port=54321, we'll try to reserve 54321 again so
+                        // "check on the dev server tomorrow" gets the same URL.
+                        let cache_key = pearl_id.clone().unwrap_or_else(|| tid.clone());
+                        let mut cache = crate::port_cache::load(&cache_key);
+
+                        // Pre-declare common dev server ports.
                         let common_ports: Vec<u16> = vec![3000, 3001, 4000, 5000, 5173, 8000, 8080, 8888];
                         for guest_port in common_ports {
-                            if policy.ports.can_forward(guest_port) && extra_ports.len() < policy.ports.max_forwards as usize {
-                                // Pre-bind a host port
-                                if let Ok(listener) = tokio::net::TcpListener::bind("127.0.0.1:0").await {
-                                    if let Ok(addr) = listener.local_addr() {
-                                        let host_port = addr.port();
-                                        extra_ports.push(smooth_bootstrap_bill::protocol::PortMapping {
-                                            host_port,
-                                            guest_port,
-                                            bind_all: false,
-                                        });
-                                        port_map_entries.push(format!("{guest_port}:{host_port}"));
-                                        drop(listener); // release so Bill can rebind
-                                    }
-                                }
+                            if !policy.ports.can_forward(guest_port) || extra_ports.len() >= policy.ports.max_forwards as usize {
+                                continue;
                             }
+                            // Prefer the cached host port if still free. Fall
+                            // back to an ephemeral port otherwise.
+                            let host_port = cache
+                                .get(&guest_port)
+                                .and_then(|p| crate::port_cache::try_reserve(*p))
+                                .or_else(crate::port_cache::reserve_ephemeral);
+                            let Some(host_port) = host_port else {
+                                continue;
+                            };
+                            extra_ports.push(smooth_bootstrap_bill::protocol::PortMapping {
+                                host_port,
+                                guest_port,
+                                bind_all: false,
+                            });
+                            port_map_entries.push(format!("{guest_port}:{host_port}"));
+                            cache.insert(guest_port, host_port);
                         }
+                        // Persist the updated mapping. Subsequent dispatches on
+                        // the same pearl will try these host ports first.
+                        crate::port_cache::save(&cache_key, &cache);
                         if !port_map_entries.is_empty() {
                             env.insert("SMOOTH_PORT_MAP".into(), port_map_entries.join(","));
-                            tracing::info!(task_id = tid, ports = %port_map_entries.join(","), "port forwarding: pre-mapped ports");
+                            tracing::info!(task_id = tid, pearl = %cache_key, ports = %port_map_entries.join(","), "port forwarding: pre-mapped ports (persisted per-pearl)");
                         }
                     }
                 }
