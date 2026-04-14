@@ -171,6 +171,18 @@ impl SessionStore for MemorySessionStore {
 // DoltSessionStore
 // ---------------------------------------------------------------------------
 
+/// A user-facing chat session (distinct from orchestration snapshots).
+/// Rows live in the `sessions` table that `PearlStore` creates.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatSession {
+    pub id: String,
+    pub title: String,
+    pub model: String,
+    pub started_at: DateTime<Utc>,
+    pub message_count: u32,
+    pub token_count: u32,
+}
+
 /// Dolt-backed [`SessionStore`] implementation using the pearl store's Dolt handle.
 pub struct DoltSessionStore {
     dolt: smooth_pearls::SmoothDolt,
@@ -181,6 +193,88 @@ impl DoltSessionStore {
     pub fn new(pearl_store: &smooth_pearls::PearlStore) -> Self {
         Self {
             dolt: pearl_store.dolt().clone(),
+        }
+    }
+
+    /// Create a fresh chat session row. `title` is user-visible so let
+    /// callers default to "New chat" or the first user message.
+    pub fn create_chat_session(&self, title: &str, model: &str) -> anyhow::Result<ChatSession> {
+        let id = Self::generate_id();
+        self.dolt.exec(&format!(
+            "INSERT INTO sessions (id, title, model, started_at, message_count, token_count) \
+             VALUES ('{}', '{}', '{}', NOW(), 0, 0)",
+            Self::esc(&id),
+            Self::esc(title),
+            Self::esc(model),
+        ))?;
+        self.dolt.commit(&format!("create chat session {id}"))?;
+        Ok(ChatSession {
+            id,
+            title: title.to_string(),
+            model: model.to_string(),
+            started_at: Utc::now(),
+            message_count: 0,
+            token_count: 0,
+        })
+    }
+
+    /// List chat sessions (most recently started first).
+    pub fn list_chat_sessions(&self) -> anyhow::Result<Vec<ChatSession>> {
+        let rows = self.dolt.sql(
+            "SELECT id, title, model, started_at, message_count, token_count \
+             FROM sessions ORDER BY started_at DESC",
+        )?;
+        Ok(rows.iter().map(Self::row_to_chat_session).collect())
+    }
+
+    /// Fetch a single chat session by id.
+    pub fn get_chat_session(&self, id: &str) -> anyhow::Result<Option<ChatSession>> {
+        let rows = self.dolt.sql(&format!(
+            "SELECT id, title, model, started_at, message_count, token_count \
+             FROM sessions WHERE id = '{}'",
+            Self::esc(id),
+        ))?;
+        Ok(rows.first().map(Self::row_to_chat_session))
+    }
+
+    /// Bump `message_count` on a session. Call once per exchange
+    /// (user + assistant = 2).
+    pub fn bump_message_count(&self, id: &str, delta: u32) -> anyhow::Result<()> {
+        self.dolt.exec(&format!(
+            "UPDATE sessions SET message_count = message_count + {delta} WHERE id = '{}'",
+            Self::esc(id),
+        ))?;
+        Ok(())
+    }
+
+    /// Replace a session's title (used to swap "New chat" for the first
+    /// user message once it's sent).
+    pub fn rename_chat_session(&self, id: &str, title: &str) -> anyhow::Result<()> {
+        self.dolt
+            .exec(&format!("UPDATE sessions SET title = '{}' WHERE id = '{}'", Self::esc(title), Self::esc(id),))?;
+        self.dolt.commit(&format!("rename chat session {id}"))?;
+        Ok(())
+    }
+
+    /// Delete a chat session and all its messages.
+    pub fn delete_chat_session(&self, id: &str) -> anyhow::Result<()> {
+        self.dolt
+            .exec(&format!("DELETE FROM session_messages WHERE session_id = '{}'", Self::esc(id)))?;
+        self.dolt.exec(&format!("DELETE FROM sessions WHERE id = '{}'", Self::esc(id)))?;
+        self.dolt.commit(&format!("delete chat session {id}"))?;
+        Ok(())
+    }
+
+    fn row_to_chat_session(row: &serde_json::Value) -> ChatSession {
+        ChatSession {
+            id: row["id"].as_str().unwrap_or_default().to_string(),
+            title: row["title"].as_str().unwrap_or_default().to_string(),
+            model: row["model"].as_str().unwrap_or_default().to_string(),
+            started_at: Self::parse_datetime(&row["started_at"]),
+            #[allow(clippy::cast_possible_truncation)]
+            message_count: row["message_count"].as_u64().unwrap_or(0) as u32,
+            #[allow(clippy::cast_possible_truncation)]
+            token_count: row["token_count"].as_u64().unwrap_or(0) as u32,
         }
     }
 

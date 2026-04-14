@@ -283,6 +283,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/reviews/{bead_id}/reject", post(reject_review_handler))
         // Chat
         .route("/api/chat", post(chat_handler))
+        .route("/api/chat/sessions", get(list_chat_sessions_handler).post(create_chat_session_handler))
+        .route("/api/chat/sessions/{id}", get(get_chat_session_handler).delete(delete_chat_session_handler))
+        .route(
+            "/api/chat/sessions/{id}/messages",
+            get(get_chat_messages_handler).post(post_chat_message_handler),
+        )
         // Search
         .route("/api/search", get(search_handler))
         // Steering
@@ -1861,6 +1867,197 @@ async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>)
             ok: true,
         }),
     }
+}
+
+// ── Chat sessions ──────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct CreateChatSessionBody {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct PostChatMessageBody {
+    content: String,
+}
+
+#[derive(Serialize)]
+pub struct ChatMessageView {
+    id: String,
+    role: String, // "user" | "assistant"
+    content: String,
+    created_at: String,
+}
+
+async fn create_chat_session_handler(State(state): State<AppState>, Json(body): Json<CreateChatSessionBody>) -> Json<ApiResponse<crate::session::ChatSession>> {
+    state.touch();
+    let title = body.title.unwrap_or_else(|| "New chat".to_string());
+    let model = body.model.unwrap_or_else(chat_default_model);
+    match state.session_store.create_chat_session(&title, &model) {
+        Ok(session) => Json(ApiResponse { data: session, ok: true }),
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to create chat session");
+            Json(ApiResponse {
+                data: crate::session::ChatSession {
+                    id: String::new(),
+                    title: String::new(),
+                    model: String::new(),
+                    started_at: chrono::Utc::now(),
+                    message_count: 0,
+                    token_count: 0,
+                },
+                ok: false,
+            })
+        }
+    }
+}
+
+async fn list_chat_sessions_handler(State(state): State<AppState>) -> Json<ApiResponse<Vec<crate::session::ChatSession>>> {
+    state.touch();
+    let sessions = state.session_store.list_chat_sessions().unwrap_or_default();
+    Json(ApiResponse { data: sessions, ok: true })
+}
+
+async fn get_chat_session_handler(State(state): State<AppState>, Path(id): Path<String>) -> Json<ApiResponse<Option<crate::session::ChatSession>>> {
+    state.touch();
+    let session = state.session_store.get_chat_session(&id).ok().flatten();
+    Json(ApiResponse { data: session, ok: true })
+}
+
+async fn delete_chat_session_handler(State(state): State<AppState>, Path(id): Path<String>) -> Json<ApiResponse<()>> {
+    state.touch();
+    let ok = state.session_store.delete_chat_session(&id).is_ok();
+    Json(ApiResponse { data: (), ok })
+}
+
+async fn get_chat_messages_handler(State(state): State<AppState>, Path(id): Path<String>) -> Json<ApiResponse<Vec<ChatMessageView>>> {
+    use crate::session::SessionStore;
+    state.touch();
+    let msgs = state.session_store.get_messages(&id, 1000).unwrap_or_default();
+    let views: Vec<ChatMessageView> = msgs
+        .into_iter()
+        .map(|m| ChatMessageView {
+            id: m.id,
+            role: if m.from == "user" { "user".to_string() } else { "assistant".to_string() },
+            content: m.content,
+            created_at: m.timestamp.to_rfc3339(),
+        })
+        .collect();
+    Json(ApiResponse { data: views, ok: true })
+}
+
+async fn post_chat_message_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<PostChatMessageBody>,
+) -> Json<ApiResponse<ChatMessageView>> {
+    use crate::session::SessionStore;
+    state.touch();
+
+    let user_content = body.content;
+    let user_msg_id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
+    let user_msg = crate::session::SessionMessage {
+        id: user_msg_id.clone(),
+        session_id: id.clone(),
+        from: "user".into(),
+        to: "bigsmooth".into(),
+        content: user_content.clone(),
+        timestamp: chrono::Utc::now(),
+        message_type: crate::session::MessageType::Command,
+    };
+    if let Err(e) = state.session_store.save_message(user_msg) {
+        tracing::warn!(error = %e, "failed to save user chat message");
+    }
+
+    // If this is the first message, replace the default title with
+    // a truncated version of the prompt.
+    if let Ok(Some(session)) = state.session_store.get_chat_session(&id) {
+        if session.title == "New chat" {
+            let short: String = user_content.chars().take(60).collect();
+            let trimmed = short.trim().to_string();
+            if !trimmed.is_empty() {
+                let _ = state.session_store.rename_chat_session(&id, &trimmed);
+            }
+        }
+    }
+
+    // Pull recent history to feed the LLM (oldest first).
+    let history = state.session_store.get_messages(&id, 50).unwrap_or_default();
+
+    let system_prompt = chat_system_prompt();
+    let assistant_text = match run_chat_with_history(system_prompt, &history, &user_content).await {
+        Ok(s) => s,
+        Err(e) => format!("Error: {e}"),
+    };
+
+    let assistant_msg_id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
+    let assistant_msg = crate::session::SessionMessage {
+        id: assistant_msg_id.clone(),
+        session_id: id.clone(),
+        from: "bigsmooth".into(),
+        to: "user".into(),
+        content: assistant_text.clone(),
+        timestamp: chrono::Utc::now(),
+        message_type: crate::session::MessageType::Response,
+    };
+    if let Err(e) = state.session_store.save_message(assistant_msg) {
+        tracing::warn!(error = %e, "failed to save assistant chat message");
+    }
+
+    let _ = state.session_store.bump_message_count(&id, 2);
+
+    Json(ApiResponse {
+        data: ChatMessageView {
+            id: assistant_msg_id,
+            role: "assistant".into(),
+            content: assistant_text,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        },
+        ok: true,
+    })
+}
+
+fn chat_system_prompt() -> &'static str {
+    "You are Big Smooth, an AI agent orchestration leader. You help users manage projects, assign work to Smooth Operators (AI agents in sandboxes), review work, and coordinate tasks.\n\nAvailable commands: th run <pearl-id>, th operators, th pause/steer/cancel <pearl-id>, th auth status, th status"
+}
+
+fn chat_default_model() -> String {
+    let providers_path = dirs_next::home_dir().unwrap_or_default().join(".smooth/providers.json");
+    ProviderRegistry::load_from_file(&providers_path)
+        .ok()
+        .and_then(|r| r.default_llm_config().ok())
+        .map(|c| c.model)
+        .unwrap_or_else(|| "default".to_string())
+}
+
+async fn run_chat_with_history(system_prompt: &str, history: &[crate::session::SessionMessage], user_content: &str) -> anyhow::Result<String> {
+    let providers_path = dirs_next::home_dir().unwrap_or_default().join(".smooth/providers.json");
+    let registry = ProviderRegistry::load_from_file(&providers_path).map_err(|e| anyhow::anyhow!("no LLM providers configured: {e}"))?;
+    let config = registry.default_llm_config().map_err(|e| anyhow::anyhow!("no default provider: {e}"))?;
+    let llm = smooth_operator::llm::LlmClient::new(config);
+
+    let sys_msg = smooth_operator::conversation::Message::system(system_prompt);
+    let mut owned: Vec<smooth_operator::conversation::Message> = Vec::with_capacity(history.len() + 1);
+    for m in history {
+        if m.from == "user" {
+            owned.push(smooth_operator::conversation::Message::user(&m.content));
+        } else {
+            owned.push(smooth_operator::conversation::Message::assistant(&m.content));
+        }
+    }
+    owned.push(smooth_operator::conversation::Message::user(user_content));
+
+    let mut refs: Vec<&smooth_operator::conversation::Message> = Vec::with_capacity(owned.len() + 1);
+    refs.push(&sys_msg);
+    for m in &owned {
+        refs.push(m);
+    }
+
+    let response = llm.chat(&refs, &[]).await?;
+    Ok(response.content)
 }
 
 // ── Boardroom Narc — POST /api/narc/judge ─────────────────
