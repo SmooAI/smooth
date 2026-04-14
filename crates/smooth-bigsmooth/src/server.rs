@@ -709,6 +709,20 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
         id
     };
 
+    // Close the task pearl if we early-return before the tokio::spawn
+    // reaches the runner. Otherwise the pearl leaks as permanent
+    // in_progress — that's the E2E-"Task:" leak we cleaned up in th-28edd8.
+    // Clone the store for the closure so the original can move into the
+    // later tokio::spawn; both point at the same Arc<Dolt>.
+    let pearl_store_for_abort = pearl_store.clone();
+    let pearl_id_for_abort = pearl_id.clone();
+    let close_pearl_on_abort = |reason: &str| {
+        if let Some(ref id) = pearl_id_for_abort {
+            tracing::warn!(pearl_id = %id, reason, "closing task pearl due to early-return failure");
+            let _ = pearl_store_for_abort.close(&[id]);
+        }
+    };
+
     // Resolve the runner binary and working directory upfront. Both are
     // needed as host paths to mount into the VM.
     let runner_bin = match find_operator_runner_binary() {
@@ -720,6 +734,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
                 message: err.into(),
             });
             tracing::error!("sandboxed dispatch: {err}");
+            close_pearl_on_abort(err);
             return;
         }
     };
@@ -741,10 +756,12 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
     if !brokered && !host_workspace.exists() {
         if let Err(e) = std::fs::create_dir_all(&host_workspace) {
+            let msg = format!("failed to create host workspace {}: {e}", host_workspace.display());
             let _ = state.event_tx.send(ServerEvent::TaskError {
                 task_id: task_id.clone(),
-                message: format!("failed to create host workspace {}: {e}", host_workspace.display()),
+                message: msg.clone(),
             });
+            close_pearl_on_abort(&msg);
             return;
         }
     }
@@ -757,6 +774,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
             task_id: task_id.clone(),
             message: "smooth-operator-runner binary has no parent directory".into(),
         });
+        close_pearl_on_abort("runner has no parent dir");
         return;
     };
 
@@ -776,10 +794,12 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
     let (api_url, api_key, final_model) = match load_llm_config_for_runner(&model) {
         Ok(x) => x,
         Err(e) => {
+            let msg = format!("no LLM provider configured: {e}");
             let _ = event_tx.send(ServerEvent::TaskError {
                 task_id: tid.clone(),
-                message: format!("no LLM provider configured: {e}"),
+                message: msg.clone(),
             });
+            close_pearl_on_abort(&msg);
             return;
         }
     };
@@ -1342,6 +1362,21 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
                 stderr = %stderr.lines().take(20).collect::<Vec<_>>().join("\n"),
                 "sandboxed WS task failed"
             );
+            // Close the pearl on failure too, otherwise E2E runs leak
+            // "Task: ..." pearls that stay in_progress forever.
+            if let Some(ref id) = pearl_id {
+                if let Some(ref diver_client) = diver {
+                    if let Err(e) = diver_client
+                        .complete(id, Some(&format!("sandboxed runner exited with code {code}")), None)
+                        .await
+                    {
+                        tracing::warn!(error = %e, "diver complete failed on task error, falling back to direct close");
+                        let _ = pearl_store.close(&[id]);
+                    }
+                } else {
+                    let _ = pearl_store.close(&[id]);
+                }
+            }
         }
 
         touch();

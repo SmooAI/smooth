@@ -252,6 +252,20 @@ mod macos {
         let body = render_plist(exe, log, err);
         std::fs::write(&path, body).with_context(|| format!("write {}", path.display()))?;
 
+        // If there's a neighbor smooth-dolt (common for scp'd installs:
+        // `cargo install --path` for th, plus a manual scp of smooth-dolt
+        // from another machine), re-adhoc-sign it. macOS launchd rejects
+        // binaries carrying a signature from a different machine with
+        // "Malformed Mach-o file (os error 88)" even though they run fine
+        // from an interactive shell. A fresh adhoc sign on the target
+        // machine resolves it and is idempotent on already-signed binaries.
+        if let Some(dir) = exe.parent() {
+            let dolt = dir.join("smooth-dolt");
+            if dolt.is_file() {
+                resign_adhoc(&dolt);
+            }
+        }
+
         let uid = current_uid()?;
         let domain = format!("gui/{uid}");
 
@@ -268,6 +282,30 @@ mod macos {
             "th service logs".cyan()
         );
         Ok(())
+    }
+
+    /// Best-effort adhoc re-sign. Swallows failures (missing `codesign`,
+    /// read-only binary) — install should still succeed. If the binary
+    /// was fine before, we just re-sign with the same kind of ad-hoc
+    /// identity; no effective change.
+    fn resign_adhoc(binary: &std::path::Path) {
+        let out = std::process::Command::new("codesign").args(["--force", "--sign", "-"]).arg(binary).output();
+        match out {
+            Ok(o) if o.status.success() => {
+                println!(
+                    "  {} Re-signed {} (adhoc)",
+                    "✓".green().bold(),
+                    binary.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default().dimmed()
+                );
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                tracing::warn!(binary = %binary.display(), stderr = %stderr, "adhoc re-sign failed");
+            }
+            Err(e) => {
+                tracing::warn!(binary = %binary.display(), error = %e, "codesign not available");
+            }
+        }
     }
 
     pub fn uninstall_user() -> Result<()> {
