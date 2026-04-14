@@ -35,6 +35,10 @@ enum Commands {
         /// Run in foreground (default: daemonize)
         #[arg(long)]
         foreground: bool,
+        /// Max concurrent Smooth Operators (each is a microVM). Defaults
+        /// to 3. Can also be set via SMOOTH_SANDBOX_MAX_CONCURRENCY.
+        #[arg(long)]
+        max_operators: Option<usize>,
     },
     /// Stop Smooth platform
     Down,
@@ -570,7 +574,12 @@ async fn main() -> Result<()> {
             json,
         }) => cmd_code(headless, message, file, model, budget, json).await,
         Some(Commands::Doctor) => cmd_doctor().await,
-        Some(Commands::Up { no_leader, port, foreground }) => cmd_up(no_leader, port, foreground).await,
+        Some(Commands::Up {
+            no_leader,
+            port,
+            foreground,
+            max_operators,
+        }) => cmd_up(no_leader, port, foreground, max_operators).await,
         Some(Commands::Down) => cmd_down().await,
         Some(Commands::Status) => cmd_status().await,
         Some(Commands::Db { cmd }) => cmd_db(cmd),
@@ -619,7 +628,13 @@ fn log_file_path() -> std::path::PathBuf {
     dirs_next::home_dir().unwrap_or_default().join(".smooth").join("smooth.log")
 }
 
-async fn cmd_up(no_leader: bool, port: u16, foreground: bool) -> Result<()> {
+async fn cmd_up(no_leader: bool, port: u16, foreground: bool, max_operators: Option<usize>) -> Result<()> {
+    // CLI flag beats env; set env so AppState::new() (which only sees
+    // env) picks the right value in both foreground + daemon paths.
+    if let Some(n) = max_operators {
+        std::env::set_var("SMOOTH_SANDBOX_MAX_CONCURRENCY", n.to_string());
+    }
+
     // Daemon mode: re-exec ourselves with --foreground and redirect output to log file
     if !foreground {
         // Check if already running
@@ -664,6 +679,10 @@ async fn cmd_up(no_leader: bool, port: u16, foreground: bool) -> Result<()> {
         let mut args = vec!["up".to_string(), "--foreground".to_string(), "--port".to_string(), port.to_string()];
         if no_leader {
             args.push("--no-leader".to_string());
+        }
+        if let Some(n) = max_operators {
+            args.push("--max-operators".to_string());
+            args.push(n.to_string());
         }
 
         let child = std::process::Command::new(exe)

@@ -31,6 +31,22 @@ const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 30 * 60;
 /// Default broadcast channel capacity.
 const BROADCAST_CHANNEL_CAPACITY: usize = 256;
 
+/// Default max concurrent Smooth Operators. Each is a real microVM
+/// with its own RAM allocation, so the conservative default keeps a
+/// dev laptop from thrashing. Override via `SMOOTH_SANDBOX_MAX_CONCURRENCY`
+/// env var (or `th up --max-operators N` on the CLI, which sets it).
+const DEFAULT_SANDBOX_MAX_CONCURRENCY: usize = 3;
+
+/// Resolve the sandbox pool cap from `SMOOTH_SANDBOX_MAX_CONCURRENCY`,
+/// falling back to the default. Values <= 0 or unparseable are treated
+/// as unset.
+fn max_sandbox_concurrency() -> usize {
+    match std::env::var("SMOOTH_SANDBOX_MAX_CONCURRENCY").ok().and_then(|v| v.parse::<usize>().ok()) {
+        Some(n) if n > 0 => n,
+        _ => DEFAULT_SANDBOX_MAX_CONCURRENCY,
+    }
+}
+
 /// Shared application state.
 #[derive(Clone)]
 pub struct AppState {
@@ -64,10 +80,15 @@ pub struct AppState {
 
 impl AppState {
     /// Create a new `AppState` with default idle timeout.
+    ///
+    /// Reads `SMOOTH_SANDBOX_MAX_CONCURRENCY` from the environment to
+    /// size the sandbox pool (defaults to 3 — each microVM eats real
+    /// RAM so the conservative default keeps dev laptops happy).
     pub fn new(db: Database, pearl_store: smooth_pearls::PearlStore) -> Self {
+        let max_operators = max_sandbox_concurrency();
         let session_store = Arc::new(crate::session::DoltSessionStore::new(&pearl_store));
         let (event_tx, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
-        let orchestrator = crate::orchestrator::Orchestrator::new(3, pearl_store.clone()).with_event_tx(event_tx.clone());
+        let orchestrator = crate::orchestrator::Orchestrator::new(max_operators, pearl_store.clone()).with_event_tx(event_tx.clone());
 
         // Construct the Boardroom Narc. If the host has an LLM provider
         // configured, Narc uses the default provider for its judge; otherwise
@@ -2322,6 +2343,26 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use tower::ServiceExt;
+
+    #[test]
+    fn max_sandbox_concurrency_env_override() {
+        // Each sub-case uses a unique env var name via std::env isolation.
+        // Set a valid numeric value.
+        std::env::set_var("SMOOTH_SANDBOX_MAX_CONCURRENCY", "7");
+        assert_eq!(max_sandbox_concurrency(), 7);
+
+        // Zero is treated as unset → default.
+        std::env::set_var("SMOOTH_SANDBOX_MAX_CONCURRENCY", "0");
+        assert_eq!(max_sandbox_concurrency(), DEFAULT_SANDBOX_MAX_CONCURRENCY);
+
+        // Garbage falls back to default.
+        std::env::set_var("SMOOTH_SANDBOX_MAX_CONCURRENCY", "not-a-number");
+        assert_eq!(max_sandbox_concurrency(), DEFAULT_SANDBOX_MAX_CONCURRENCY);
+
+        // Unset falls back to default.
+        std::env::remove_var("SMOOTH_SANDBOX_MAX_CONCURRENCY");
+        assert_eq!(max_sandbox_concurrency(), DEFAULT_SANDBOX_MAX_CONCURRENCY);
+    }
 
     #[test]
     fn test_health_response_serializes() {
