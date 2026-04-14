@@ -151,8 +151,34 @@ enum Commands {
         #[command(subcommand)]
         cmd: McpCommands,
     },
+    /// File-based CLI-wrapper plugins (~/.smooth/plugins/*/plugin.toml)
+    Plugin {
+        #[command(subcommand)]
+        cmd: PluginCommands,
+    },
     /// System health check and auto-fix
     Doctor,
+}
+
+#[derive(Subcommand)]
+enum PluginCommands {
+    /// Scaffold a new plugin under ~/.smooth/plugins/<name>/plugin.toml
+    Init {
+        /// Plugin name (becomes the tool name as `plugin.<name>`)
+        name: String,
+        /// Shell command template; use `{{param}}` placeholders for args
+        #[arg(long)]
+        command: Option<String>,
+        /// Short description shown to the LLM
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// List installed plugins
+    List,
+    /// Print the path of a plugin's manifest (or the plugins directory)
+    Path { name: Option<String> },
+    /// Remove a plugin and its directory
+    Remove { name: String },
 }
 
 #[derive(Subcommand)]
@@ -510,6 +536,7 @@ async fn main() -> Result<()> {
         Some(Commands::Jira { cmd }) => cmd_jira(cmd).await,
         Some(Commands::Routing { cmd }) => cmd_routing(cmd).await,
         Some(Commands::Mcp { cmd }) => cmd_mcp(cmd),
+        Some(Commands::Plugin { cmd }) => cmd_plugin(cmd),
         Some(_) => {
             println!("Command not yet implemented. Coming soon!");
             Ok(())
@@ -2776,5 +2803,151 @@ fn cmd_mcp(cmd: McpCommands) -> Result<()> {
                 }
             }
         }
+    }
+}
+
+fn plugins_dir() -> Result<std::path::PathBuf> {
+    if let Ok(home) = std::env::var("SMOOTH_HOME") {
+        return Ok(std::path::PathBuf::from(home).join("plugins"));
+    }
+    let h = dirs_next::home_dir().context("cannot determine home directory")?;
+    Ok(h.join(".smooth").join("plugins"))
+}
+
+fn cmd_plugin(cmd: PluginCommands) -> Result<()> {
+    let dir = plugins_dir()?;
+
+    match cmd {
+        PluginCommands::Path { name } => {
+            match name {
+                Some(n) => println!("{}", dir.join(&n).join("plugin.toml").display()),
+                None => println!("{}", dir.display()),
+            }
+            Ok(())
+        }
+
+        PluginCommands::List => {
+            if !dir.is_dir() {
+                println!("\n  {} No plugins installed.", "ℹ".cyan());
+                println!("  {} {}\n", "Create one:".dimmed(), "th plugin init <name>".cyan());
+                return Ok(());
+            }
+            let mut entries: Vec<_> = std::fs::read_dir(&dir)?
+                .filter_map(std::result::Result::ok)
+                .filter(|e| e.path().is_dir() && e.path().join("plugin.toml").exists())
+                .collect();
+            entries.sort_by_key(std::fs::DirEntry::file_name);
+            if entries.is_empty() {
+                println!("\n  {} No plugins installed.\n", "ℹ".cyan());
+                return Ok(());
+            }
+            println!("\n  {} {}\n", "Plugins".cyan().bold(), format!("({})", dir.display()).dimmed());
+            for entry in entries {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let manifest = entry.path().join("plugin.toml");
+                let summary = std::fs::read_to_string(&manifest)
+                    .ok()
+                    .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
+                    .and_then(|v| v.get("description").and_then(|d| d.as_str()).map(str::to_string))
+                    .unwrap_or_default();
+                println!("  {} plugin.{:<14} {}", "✓".green().bold(), name.bold(), summary.dimmed());
+            }
+            println!();
+            Ok(())
+        }
+
+        PluginCommands::Init { name, command, description } => {
+            let plugin_dir = dir.join(&name);
+            let manifest_path = plugin_dir.join("plugin.toml");
+            if manifest_path.exists() {
+                anyhow::bail!("plugin `{name}` already exists at {}", manifest_path.display());
+            }
+            std::fs::create_dir_all(&plugin_dir)?;
+            let cmd_str = command.unwrap_or_else(|| "echo {{message}}".to_string());
+            let desc = description.unwrap_or_else(|| format!("Custom CLI tool `{name}`."));
+
+            // Extract `{{name}}` placeholders from the command so the
+            // generated schema matches it out of the box.
+            let placeholders = extract_placeholders(&cmd_str);
+            let required = placeholders.iter().map(|n| format!("\"{n}\"")).collect::<Vec<_>>().join(", ");
+            let mut props = String::new();
+            for n in &placeholders {
+                props.push_str(&format!(
+                    "\n[parameters.properties.{n}]\ntype = \"string\"\ndescription = \"TODO: describe `{n}` for the LLM.\"\n"
+                ));
+            }
+            let template = format!(
+                r#"name = "{name}"
+description = "{desc}"
+
+# Hint shown to the LLM about when to pick this tool. Optional.
+prompt_hint = ""
+
+# Shell command run via `bash -lc`. `{{{{param}}}}` placeholders are
+# substituted with values from the agent's tool args.
+command = "{cmd_str}"
+
+# Per-call env vars. `${{env:VAR}}` references resolve from the runner's env.
+[env]
+
+# JSON Schema for the tool's parameters. Shown to the LLM verbatim.
+[parameters]
+type = "object"
+required = [{required}]
+{props}"#
+            );
+            std::fs::write(&manifest_path, template)?;
+            println!(
+                "\n  {} Created plugin {} at {}",
+                "✓".green().bold(),
+                name.bold(),
+                manifest_path.display().to_string().dimmed()
+            );
+            println!("  {} Edit the manifest, then it'll be loaded next `th up`.\n", "→".dimmed());
+            Ok(())
+        }
+
+        PluginCommands::Remove { name } => {
+            let plugin_dir = dir.join(&name);
+            if !plugin_dir.is_dir() {
+                anyhow::bail!("no plugin named `{name}` at {}", plugin_dir.display());
+            }
+            std::fs::remove_dir_all(&plugin_dir)?;
+            println!("\n  {} Removed plugin {}\n", "✓".green().bold(), name.bold());
+            Ok(())
+        }
+    }
+}
+
+/// Extract `{{name}}` placeholders from a command template (deduplicated,
+/// preserving first-seen order).
+fn extract_placeholders(template: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut rest = template;
+    while let Some(idx) = rest.find("{{") {
+        let after = &rest[idx + 2..];
+        if let Some(end) = after.find("}}") {
+            let name = after[..end].trim().to_string();
+            if !name.is_empty() && !out.contains(&name) {
+                out.push(name);
+            }
+            rest = &after[end + 2..];
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod plugin_tests {
+    use super::extract_placeholders;
+
+    #[test]
+    fn extract_placeholders_dedups_and_orders() {
+        assert_eq!(extract_placeholders("echo {{a}} {{b}} {{a}}"), vec!["a", "b"]);
+        assert_eq!(extract_placeholders("plain"), Vec::<String>::new());
+        assert_eq!(extract_placeholders("{{ a }}-{{b}}"), vec!["a", "b"]);
+        assert_eq!(extract_placeholders("dangle {{ unterminated"), Vec::<String>::new());
     }
 }

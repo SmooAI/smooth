@@ -66,6 +66,7 @@ use tracing_subscriber::EnvFilter;
 mod bg_process;
 mod lsp;
 mod mcp;
+mod plugins;
 mod tool_support;
 
 // ---------------------------------------------------------------------------
@@ -1627,6 +1628,18 @@ async fn main() {
         }
         for (server, err) in mcp_failures {
             tracing::warn!(server = %server, error = %err, "MCP server failed to register");
+        }
+    }
+
+    // CLI-wrapper plugins — discover `~/.smooth/plugins/*/plugin.toml`
+    // (or under $SMOOTH_HOME) and register each as `plugin.<name>`.
+    if let Some(plugins_dir) = plugins::default_plugins_dir() {
+        let (plugin_tools, plugin_failures) = plugins::load_plugins(&plugins_dir);
+        for t in plugin_tools {
+            tools.register_arc(t);
+        }
+        for (name, err) in plugin_failures {
+            tracing::warn!(plugin = %name, error = %err, "plugin failed to register");
         }
     }
 
