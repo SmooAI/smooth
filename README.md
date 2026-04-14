@@ -315,6 +315,20 @@ Global config lives at `~/.smooth/`; project config at
 `<repo>/.smooth/`. Project entries shadow global on name collision.
 See [`docs/extending.md`](docs/extending.md) for the full guide.
 
+### Background service
+
+Keep `th up` running across reboots via the native service manager
+(user-level; no sudo, no system daemons).
+
+```bash
+th service install               # LaunchAgent (macOS) / systemd --user (Linux) / logon task (Windows)
+th service start / stop / restart
+th service status
+th service logs -f               # Tail ~/.smooth/service.log
+th service uninstall
+th service install --system      # Print the system-level artifact + install instructions
+```
+
 ### System
 
 ```bash

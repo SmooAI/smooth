@@ -4,6 +4,7 @@
 
 mod hooks;
 mod mcp_config;
+mod service;
 
 use std::net::SocketAddr;
 
@@ -156,8 +157,39 @@ enum Commands {
         #[command(subcommand)]
         cmd: PluginCommands,
     },
+    /// Run Smooth as a background service (launchd / systemd / Task Scheduler)
+    Service {
+        #[command(subcommand)]
+        cmd: ServiceCommands,
+    },
     /// System health check and auto-fix
     Doctor,
+}
+
+#[derive(Subcommand)]
+enum ServiceCommands {
+    /// Install and enable the user-level service (LaunchAgent / systemd --user / logon task)
+    Install {
+        /// Print the system-level artifact instead of installing a user-level one
+        #[arg(long)]
+        system: bool,
+    },
+    /// Disable and remove the user-level service
+    Uninstall,
+    /// Start the installed service
+    Start,
+    /// Stop the installed service
+    Stop,
+    /// Restart the installed service
+    Restart,
+    /// Show the service manager's view of the service
+    Status,
+    /// Tail the service log files
+    Logs {
+        /// Follow new output (like `tail -f`)
+        #[arg(short, long)]
+        follow: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -562,6 +594,7 @@ async fn main() -> Result<()> {
         Some(Commands::Routing { cmd }) => cmd_routing(cmd).await,
         Some(Commands::Mcp { cmd }) => cmd_mcp(cmd),
         Some(Commands::Plugin { cmd }) => cmd_plugin(cmd),
+        Some(Commands::Service { cmd }) => cmd_service(cmd),
         Some(_) => {
             println!("Command not yet implemented. Coming soon!");
             Ok(())
@@ -3148,6 +3181,18 @@ fn extract_placeholders(template: &str) -> Vec<String> {
         }
     }
     out
+}
+
+fn cmd_service(cmd: ServiceCommands) -> Result<()> {
+    match cmd {
+        ServiceCommands::Install { system } => service::install(system),
+        ServiceCommands::Uninstall => service::uninstall(),
+        ServiceCommands::Start => service::start(),
+        ServiceCommands::Stop => service::stop(),
+        ServiceCommands::Restart => service::restart(),
+        ServiceCommands::Status => service::status(),
+        ServiceCommands::Logs { follow } => service::logs(follow),
+    }
 }
 
 #[cfg(test)]
