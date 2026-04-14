@@ -36,7 +36,7 @@ export function ChatPage() {
 
     return (
         <div className="flex flex-col h-[calc(100vh-48px)]">
-            <h1 className="text-2xl font-bold mb-4">Chat with Leader</h1>
+            <h1 className="text-2xl font-bold mb-4">Chat with Big Smooth</h1>
             <div className="flex-1 overflow-auto flex flex-col gap-3 mb-4">
                 {messages.map((msg, i) => (
                     <div key={i} className={`rounded-lg px-3 py-2 max-w-[80%] ${msg.role === 'user' ? 'bg-blue-900/40 self-end' : ''}`}

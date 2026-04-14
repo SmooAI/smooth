@@ -13,10 +13,21 @@ pub struct TailscaleStatus {
 }
 
 /// Find the tailscale CLI binary path.
+///
+/// Resolution order (first match wins):
+/// 1. `/usr/local/bin/tailscale` — the CLI symlink the Mac App Store
+///    version installs when you click "Install CLI…" from the menu bar.
+///    Works from any process context (including launchd children).
+/// 2. `tailscale` on PATH — Homebrew installs here.
+///
+/// We deliberately do **not** fall through to
+/// `/Applications/Tailscale.app/Contents/MacOS/Tailscale` even though
+/// it exists on App Store installs: that binary is the GUI launcher,
+/// and invoking it from a non-GUI process (e.g. our launchd service)
+/// fails with "The Tailscale GUI failed to start: CLIError 3".
 fn tailscale_bin() -> &'static str {
-    // App Store version puts CLI inside the .app bundle
-    if std::path::Path::new("/Applications/Tailscale.app/Contents/MacOS/Tailscale").exists() {
-        return "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
+    if std::path::Path::new("/usr/local/bin/tailscale").exists() {
+        return "/usr/local/bin/tailscale";
     }
     "tailscale"
 }

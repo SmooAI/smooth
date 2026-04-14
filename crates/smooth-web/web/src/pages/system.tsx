@@ -279,7 +279,7 @@ function Tooltip({ node, x, y }: { node: TopoNode; x: number; y: number }) {
 function DetailsTable({ health }: { health: HealthData }) {
     const rows = [
         {
-            label: 'Leader',
+            label: 'Big Smooth',
             status: health.leader?.status,
             detail: health.leader ? `Uptime: ${formatUptime(health.leader.uptime)}` : '--',
         },

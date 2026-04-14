@@ -32,7 +32,7 @@ export function DashboardPage() {
             )}
             {health && (
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-8">
-                    <HealthCard icon={Activity} title="Leader" status={health.leader?.status} detail={`${Math.round(health.leader?.uptime ?? 0)}s`} onClick={() => navigate('/system')} />
+                    <HealthCard icon={Activity} title="Big Smooth" status={health.leader?.status} detail={`${Math.round(health.leader?.uptime ?? 0)}s`} onClick={() => navigate('/system')} />
                     <HealthCard icon={Database} title="Database" status={health.database?.status} detail="SQLite" onClick={() => navigate('/system')} />
                     <HealthCard icon={Shield} title="Sandbox" status={health.sandbox?.status} detail={`${health.sandbox?.active_sandboxes ?? 0}/${health.sandbox?.max_concurrency ?? 0}`} onClick={() => navigate('/system')} />
                     <HealthCard icon={ShieldCheck} title="Tailscale" status={health.tailscale?.status === 'connected' ? 'healthy' : 'down'} detail={health.tailscale?.hostname ?? 'off'} onClick={() => navigate('/system')} />
