@@ -162,6 +162,10 @@ enum Commands {
         #[command(subcommand)]
         cmd: ServiceCommands,
     },
+    /// Print workflow-rules + current-state context block (for Claude
+    /// Code SessionStart / PreCompact hooks; the `th` equivalent of
+    /// `bd prime`)
+    Prime,
     /// System health check and auto-fix
     Doctor,
 }
@@ -595,6 +599,7 @@ async fn main() -> Result<()> {
         Some(Commands::Mcp { cmd }) => cmd_mcp(cmd),
         Some(Commands::Plugin { cmd }) => cmd_plugin(cmd),
         Some(Commands::Service { cmd }) => cmd_service(cmd),
+        Some(Commands::Prime) => cmd_prime(),
         Some(_) => {
             println!("Command not yet implemented. Coming soon!");
             Ok(())
@@ -3181,6 +3186,51 @@ fn extract_placeholders(template: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Print a markdown context block for Claude Code SessionStart /
+/// PreCompact hooks. Mirrors what `bd prime` did for beads.
+///
+/// Output = the embedded workflow primer + a live "Ready to work"
+/// section populated from `th pearls ready`. If pearls isn't available
+/// (first run in a repo, Dolt not initialized, etc.), the live section
+/// is silently omitted — the static primer alone still gives Claude
+/// enough to operate.
+fn cmd_prime() -> Result<()> {
+    // Static rules primer.
+    print!("{}", include_str!("../prompts/prime.md"));
+
+    // Live snapshot — best effort. Use the current `th` executable so
+    // we stay consistent even when multiple `th` copies are on PATH.
+    let exe = std::env::current_exe().ok();
+    if let Some(exe) = exe {
+        let output = std::process::Command::new(&exe)
+            .args(["pearls", "ready"])
+            .env("NO_COLOR", "1")
+            .env("CLICOLOR", "0")
+            .output();
+        if let Ok(out) = output {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout);
+                let trimmed = s.trim();
+                if !trimmed.is_empty() {
+                    println!("\n## Ready to work\n");
+                    println!("```");
+                    // Cap to ~40 lines so we don't bloat the hook output.
+                    for (i, line) in trimmed.lines().enumerate() {
+                        if i >= 40 {
+                            println!("... (truncated; run `th pearls ready` for the full list)");
+                            break;
+                        }
+                        println!("{line}");
+                    }
+                    println!("```");
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn cmd_service(cmd: ServiceCommands) -> Result<()> {
