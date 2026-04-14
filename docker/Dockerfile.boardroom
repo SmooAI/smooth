@@ -1,0 +1,39 @@
+# Boardroom image — the microVM Bootstrap Bill spawns for Big Smooth
+# itself when running in Boardroom mode (`SMOOTH_BOARDROOM_MODE=1`).
+#
+# The `boardroom` binary embeds Archivist, Scribe, Wonk, Goalie, and
+# the Boardroom Narc as library crates (see
+# smooth_bigsmooth::boardroom::spawn_boardroom_cast), all running as
+# tokio tasks inside the same process. That leaves just two binaries
+# to ship:
+#
+#   - boardroom        — Big Smooth + in-process cast
+#   - smooth-dolt      — pearl store backend (Go/Dolt engine)
+#
+# Build with: scripts/build-boardroom-image.sh
+#
+# Expected build context: the repo root. The caller must run
+# scripts/build-boardroom.sh first so both binaries exist at
+# target/aarch64-unknown-linux-musl/release/.
+FROM alpine:3.20
+
+# ca-certificates: outbound HTTPS verification (LLM providers, etc.).
+# ICU libs: smooth-dolt embeds parts of the Dolt engine that want
+# libicuuc/data at runtime in some code paths.
+RUN apk add --no-cache ca-certificates icu-libs
+
+WORKDIR /root
+
+COPY target/aarch64-unknown-linux-musl/release/boardroom /opt/smooth/bin/boardroom
+COPY target/aarch64-unknown-linux-musl/release/smooth-dolt /opt/smooth/bin/smooth-dolt
+
+ARG VERSION=dev
+LABEL org.opencontainers.image.title="smooai-boardroom" \
+      org.opencontainers.image.description="Smooth Boardroom (Big Smooth + in-process cast)" \
+      org.opencontainers.image.source="https://github.com/SmooAI/smooth" \
+      org.opencontainers.image.version="${VERSION}"
+
+ENV PATH="/opt/smooth/bin:${PATH}"
+# SMOOTH_BOARDROOM_MODE is force-set by the boardroom binary itself
+# regardless of env, so callers don't need to know to set it.
+ENTRYPOINT ["/opt/smooth/bin/boardroom"]

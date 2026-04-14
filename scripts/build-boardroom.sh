@@ -45,7 +45,7 @@ echo "==> Cross-compiling boardroom binary for aarch64-unknown-linux-musl"
 # Boardroom VM, Big Smooth talks to Bill over TCP; it never links
 # microsandbox.
 cargo zigbuild --target aarch64-unknown-linux-musl --release \
-    -p smooth-bigsmooth --bin boardroom --no-default-features
+    -p smooai-smooth-bigsmooth --bin boardroom --no-default-features
 
 BIN="target/aarch64-unknown-linux-musl/release/boardroom"
 if [ ! -f "$BIN" ]; then

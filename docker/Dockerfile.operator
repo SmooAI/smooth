@@ -1,0 +1,40 @@
+# Smooth Operator image — the microVM Bootstrap Bill spawns for every
+# Smooth Operator (the sandboxed AI agent that runs a pearl).
+#
+# The only binary the operator actually needs is
+# `smooth-operator-runner`, which statically embeds the whole in-VM
+# cast (Wonk, Goalie, Narc, Scribe) as library crates, running each
+# as a tokio task in the runner's own process. That's why this image
+# is tiny — no sidecar binaries.
+#
+# Build with: scripts/build-operator-image.sh
+#
+# Expected build context: the repo root. The caller must run
+# scripts/build-operator-runner.sh first so the statically-linked
+# aarch64-musl binary exists at
+# target/aarch64-unknown-linux-musl/release/smooth-operator-runner.
+FROM alpine:3.20
+
+# `ca-certificates` so reqwest with rustls-webpki-roots can verify
+# HTTPS endpoints the runner reaches through the Goalie proxy (LLM
+# providers, MCP servers, plugin shell commands). Everything else the
+# runner needs is statically linked into the binary.
+RUN apk add --no-cache ca-certificates
+
+# Workspace is bind-mounted at /workspace by Bill at boot time.
+WORKDIR /workspace
+
+# Runner binary lives at /opt/smooth/bin so PATH can be extended
+# easily when operators need to shell out.
+COPY target/aarch64-unknown-linux-musl/release/smooth-operator-runner /opt/smooth/bin/smooth-operator-runner
+
+# Image label metadata — source of truth is VERSION bake-arg the
+# build script supplies.
+ARG VERSION=dev
+LABEL org.opencontainers.image.title="smooai-operator" \
+      org.opencontainers.image.description="Smooth Operator sandbox runtime" \
+      org.opencontainers.image.source="https://github.com/SmooAI/smooth" \
+      org.opencontainers.image.version="${VERSION}"
+
+ENV PATH="/opt/smooth/bin:${PATH}"
+ENTRYPOINT ["/opt/smooth/bin/smooth-operator-runner"]
