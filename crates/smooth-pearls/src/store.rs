@@ -321,7 +321,14 @@ impl PearlStore {
             sql.push_str(&conditions.join(" AND "));
         }
 
-        sql.push_str(&format!(" ORDER BY p.priority ASC, p.created_at DESC LIMIT {}", query.limit));
+        // `limit == 0` is the "no limit" sentinel — useful for the web UI
+        // which needs every pearl for counts, kanban columns, etc.
+        // Non-zero values cap the result set so LLM tool calls don't
+        // blow their context window.
+        sql.push_str(" ORDER BY p.priority ASC, p.created_at DESC");
+        if query.limit > 0 {
+            sql.push_str(&format!(" LIMIT {}", query.limit));
+        }
 
         let rows = self.dolt.sql(&sql)?;
         let mut result = Vec::with_capacity(rows.len());
@@ -799,6 +806,23 @@ mod tests {
         let closed = store.list(&PearlQuery::new().with_status(PearlStatus::Closed)).unwrap();
         assert_eq!(closed.len(), 1);
         assert_eq!(closed[0].title, "Open one");
+    }
+
+    #[test]
+    fn test_list_limit_zero_is_unbounded() {
+        let Some(store) = test_store() else { return };
+        // Create >100 pearls so the old default would have truncated.
+        for i in 0..150 {
+            store.create(&new_task(&format!("p{i}"))).unwrap();
+        }
+
+        // Default limit (100) caps the result.
+        let capped = store.list(&PearlQuery::new()).unwrap();
+        assert_eq!(capped.len(), 100);
+
+        // limit == 0 returns all rows.
+        let all = store.list(&PearlQuery::new().with_limit(0)).unwrap();
+        assert_eq!(all.len(), 150);
     }
 
     #[test]

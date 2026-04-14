@@ -1605,6 +1605,11 @@ async fn list_projects_handler(State(state): State<AppState>) -> Json<ApiRespons
 pub struct ProjectPearlsParams {
     path: String,
     status: Option<String>,
+    /// Optional cap on returned pearls. Defaults to `0` = "no limit" so
+    /// the dashboard / pearls page get the full set for client-side
+    /// counting and bucketing. Pass an explicit value to paginate.
+    #[serde(default)]
+    limit: usize,
 }
 
 async fn project_pearls_handler(State(state): State<AppState>, Query(params): Query<ProjectPearlsParams>) -> Json<ApiResponse<Vec<smooth_pearls::Pearl>>> {
@@ -1625,10 +1630,10 @@ async fn project_pearls_handler(State(state): State<AppState>, Query(params): Qu
         }
     };
 
-    let query = match params.status.as_deref() {
-        Some(s) => smooth_pearls::PearlQuery::new().with_status(smooth_pearls::PearlStatus::from_str_loose(s).unwrap_or(smooth_pearls::PearlStatus::Open)),
-        None => smooth_pearls::PearlQuery::new(),
-    };
+    let mut query = smooth_pearls::PearlQuery::new().with_limit(params.limit);
+    if let Some(ref s) = params.status {
+        query = query.with_status(smooth_pearls::PearlStatus::from_str_loose(s).unwrap_or(smooth_pearls::PearlStatus::Open));
+    }
 
     let pearls = store.list(&query).unwrap_or_default();
     Json(ApiResponse { data: pearls, ok: true })
@@ -1639,6 +1644,10 @@ async fn project_pearls_handler(State(state): State<AppState>, Query(params): Qu
 #[derive(Deserialize)]
 pub struct ListPearlsParams {
     status: Option<String>,
+    /// Optional cap. Defaults to `0` = "no limit" so the web UI gets
+    /// the full set; pass a value to paginate.
+    #[serde(default)]
+    limit: usize,
 }
 
 #[derive(Deserialize)]
@@ -1672,7 +1681,7 @@ pub struct UpdatePearlBody {
 
 async fn list_pearls_handler(State(state): State<AppState>, Query(params): Query<ListPearlsParams>) -> Json<ApiResponse<Vec<smooth_pearls::Pearl>>> {
     state.touch();
-    let issues = crate::pearls::list_pearls(&state.pearl_store, params.status.as_deref()).unwrap_or_default();
+    let issues = crate::pearls::list_pearls_with_limit(&state.pearl_store, params.status.as_deref(), params.limit).unwrap_or_default();
     Json(ApiResponse { data: issues, ok: true })
 }
 

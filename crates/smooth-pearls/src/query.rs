@@ -66,7 +66,8 @@ impl PearlQuery {
         self
     }
 
-    /// Set the result limit.
+    /// Set the result limit. Pass `0` for "no limit" (useful for the
+    /// web UI where truncation is wrong but LLM tool calls need the cap).
     #[must_use]
     pub fn with_limit(mut self, limit: usize) -> Self {
         self.limit = limit;

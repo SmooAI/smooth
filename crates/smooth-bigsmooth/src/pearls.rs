@@ -5,12 +5,20 @@
 use anyhow::Result;
 use smooth_pearls::{NewPearl, Pearl, PearlComment, PearlQuery, PearlStats, PearlStatus, PearlStore, PearlType, PearlUpdate, Priority};
 
-/// List issues with optional status filter.
+/// List issues with optional status filter. Uses the default limit
+/// (100) — suitable for LLM tool calls.
 pub fn list_pearls(store: &PearlStore, status: Option<&str>) -> Result<Vec<Pearl>> {
-    let query = match status {
-        Some(s) => PearlQuery::new().with_status(PearlStatus::from_str_loose(s).unwrap_or(PearlStatus::Open)),
-        None => PearlQuery::new(),
-    };
+    list_pearls_with_limit(store, status, 100)
+}
+
+/// List issues with optional status filter + explicit limit. Pass `0`
+/// for "no limit" — the web UI uses this so client-side counts and
+/// kanban views aren't cut off at 100.
+pub fn list_pearls_with_limit(store: &PearlStore, status: Option<&str>, limit: usize) -> Result<Vec<Pearl>> {
+    let mut query = PearlQuery::new().with_limit(limit);
+    if let Some(s) = status {
+        query = query.with_status(PearlStatus::from_str_loose(s).unwrap_or(PearlStatus::Open));
+    }
     store.list(&query)
 }
 
