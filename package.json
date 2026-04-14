@@ -20,6 +20,8 @@
         "prepare": "husky",
         "pre-commit-check": "cargo fmt -- --check && cargo clippy --workspace --all-targets",
         "install:th": "cargo install --path crates/smooth-cli --force",
+        "dev:service": "pnpm install:th && th service restart",
+        "dev:service:install": "pnpm install:th && th service install && th service start",
         "version:sync": "node scripts/sync-versions.mjs",
         "ci:publish": "node scripts/ci-publish.mjs",
         "changeset": "changeset",
