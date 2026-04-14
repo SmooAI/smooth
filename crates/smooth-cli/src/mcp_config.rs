@@ -38,6 +38,14 @@ impl McpConfig {
         dirs_next::home_dir().map(|h| h.join(".smooth").join("mcp.toml"))
     }
 
+    /// Project-scoped config: `<repo_root>/.smooth/mcp.toml`. Walks up
+    /// from `cwd` to find the nearest `.smooth/` or `.git/` directory.
+    /// If neither is found, uses `cwd/.smooth/mcp.toml` verbatim.
+    pub fn project_path() -> std::io::Result<PathBuf> {
+        let cwd = std::env::current_dir()?;
+        Ok(find_project_root(&cwd).unwrap_or(cwd).join(".smooth").join("mcp.toml"))
+    }
+
     pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
@@ -64,6 +72,19 @@ impl McpConfig {
         self.servers.retain(|s| s.name != name);
         self.servers.len() < len
     }
+}
+
+/// Walk upwards from `start` until we find a directory containing a
+/// `.smooth/` or `.git/` entry. Returns that directory.
+pub fn find_project_root(start: &std::path::Path) -> Option<PathBuf> {
+    let mut cur = Some(start.to_path_buf());
+    while let Some(dir) = cur {
+        if dir.join(".smooth").is_dir() || dir.join(".git").exists() {
+            return Some(dir);
+        }
+        cur = dir.parent().map(std::path::Path::to_path_buf);
+    }
+    None
 }
 
 /// Expand `${env:VAR}` references using the current process environment.

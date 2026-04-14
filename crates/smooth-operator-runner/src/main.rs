@@ -1617,12 +1617,14 @@ async fn main() {
     // pearl tools so the agent can create/list/close pearls locally.
     pearl_tools::register_pearl_tools(&mut tools, &config.workspace);
 
-    // MCP servers — spawn user-configured MCP servers from
-    // $SMOOTH_HOME/mcp.toml (or ~/.smooth/mcp.toml) and register their
-    // tools with `<server>.<tool>` prefixes. Per-server failures are
-    // logged but never abort startup.
-    if let Some(mcp_path) = mcp::McpConfig::default_path() {
-        let (mcp_tools, mcp_failures) = mcp::load_and_register_mcp_servers(&mcp_path).await;
+    // MCP servers — merge global (~/.smooth/mcp.toml or $SMOOTH_HOME)
+    // with project-scoped (<workspace>/.smooth/mcp.toml). Project wins
+    // on name collisions.
+    {
+        let workspace_path = std::path::PathBuf::from(&config.workspace);
+        let project_mcp = mcp::project_config_path(&workspace_path);
+        let global_mcp = mcp::McpConfig::default_path();
+        let (mcp_tools, mcp_failures) = mcp::load_and_register_mcp_servers_merged(global_mcp.as_deref(), Some(&project_mcp)).await;
         for t in mcp_tools {
             tools.register_arc(t);
         }
@@ -1631,10 +1633,13 @@ async fn main() {
         }
     }
 
-    // CLI-wrapper plugins — discover `~/.smooth/plugins/*/plugin.toml`
-    // (or under $SMOOTH_HOME) and register each as `plugin.<name>`.
-    if let Some(plugins_dir) = plugins::default_plugins_dir() {
-        let (plugin_tools, plugin_failures) = plugins::load_plugins(&plugins_dir);
+    // CLI-wrapper plugins — same merge pattern. Global first, project
+    // overrides on collision.
+    {
+        let workspace_path = std::path::PathBuf::from(&config.workspace);
+        let project_plugins = plugins::project_plugins_dir(&workspace_path);
+        let global_plugins = plugins::default_plugins_dir();
+        let (plugin_tools, plugin_failures) = plugins::load_plugins_merged(global_plugins.as_deref(), Some(&project_plugins));
         for t in plugin_tools {
             tools.register_arc(t);
         }

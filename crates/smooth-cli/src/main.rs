@@ -162,7 +162,7 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum PluginCommands {
-    /// Scaffold a new plugin under ~/.smooth/plugins/<name>/plugin.toml
+    /// Scaffold a new plugin (default: ~/.smooth/plugins/<name>/plugin.toml)
     Init {
         /// Plugin name (becomes the tool name as `plugin.<name>`)
         name: String,
@@ -172,18 +172,31 @@ enum PluginCommands {
         /// Short description shown to the LLM
         #[arg(long)]
         description: Option<String>,
+        /// Scaffold into the current project's `.smooth/plugins/` instead of `~/.smooth/plugins/`
+        #[arg(long)]
+        project: bool,
     },
-    /// List installed plugins
+    /// List installed plugins (global + project-scoped)
     List,
     /// Print the path of a plugin's manifest (or the plugins directory)
-    Path { name: Option<String> },
+    Path {
+        name: Option<String>,
+        /// Print the project-scoped path instead of the global one
+        #[arg(long)]
+        project: bool,
+    },
     /// Remove a plugin and its directory
-    Remove { name: String },
+    Remove {
+        name: String,
+        /// Only remove from the project directory
+        #[arg(long)]
+        project: bool,
+    },
 }
 
 #[derive(Subcommand)]
 enum McpCommands {
-    /// Register an MCP server in ~/.smooth/mcp.toml
+    /// Register an MCP server (default: ~/.smooth/mcp.toml)
     Add {
         /// Name used to prefix this server's tools (e.g. "playwright")
         name: String,
@@ -198,15 +211,27 @@ enum McpCommands {
         /// Register but do not start until enabled
         #[arg(long)]
         disabled: bool,
+        /// Write to the current project's `.smooth/mcp.toml` instead of `~/.smooth/mcp.toml`
+        #[arg(long)]
+        project: bool,
     },
-    /// List configured MCP servers
+    /// List configured MCP servers (global + project-scoped)
     List,
     /// Remove a server by name
-    Remove { name: String },
+    Remove {
+        name: String,
+        /// Only look in the project config
+        #[arg(long)]
+        project: bool,
+    },
     /// Spawn a server's command and report whether it starts cleanly
     Test { name: String },
     /// Print the config file path
-    Path,
+    Path {
+        /// Print the project-scoped path instead of the global one
+        #[arg(long)]
+        project: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2661,24 +2686,36 @@ async fn cmd_routing(cmd: RoutingCommands) -> Result<()> {
 fn cmd_mcp(cmd: McpCommands) -> Result<()> {
     use mcp_config::{expand_env, McpConfig, McpServerConfig};
 
-    let path = McpConfig::default_path().context("cannot determine ~/.smooth/mcp.toml path")?;
+    let global_path = McpConfig::default_path().context("cannot determine ~/.smooth/mcp.toml path")?;
 
     match cmd {
-        McpCommands::Path => {
-            println!("{}", path.display());
+        McpCommands::Path { project } => {
+            let p = if project { McpConfig::project_path()? } else { global_path };
+            println!("{}", p.display());
             Ok(())
         }
 
         McpCommands::List => {
-            let cfg = McpConfig::load(&path)?;
-            if cfg.servers.is_empty() {
+            let project_path = McpConfig::project_path().ok();
+            let global = McpConfig::load(&global_path).unwrap_or_default();
+            let project = project_path.as_ref().and_then(|p| McpConfig::load(p).ok()).unwrap_or_default();
+
+            if global.servers.is_empty() && project.servers.is_empty() {
                 println!("\n  {} No MCP servers configured.", "ℹ".cyan());
                 println!("  {} {}\n", "Add one:".dimmed(), "th mcp add <name> <command> [args...]".cyan());
                 return Ok(());
             }
-            println!("\n  {} {}\n", "MCP Servers".cyan().bold(), format!("({})", path.display()).dimmed());
-            for s in &cfg.servers {
-                let marker = if s.disabled {
+
+            // Project overrides: a name present in project shadows
+            // the global entry.
+            let project_names: std::collections::HashSet<&str> = project.servers.iter().map(|s| s.name.as_str()).collect();
+
+            println!("\n  {} {}\n", "MCP Servers".cyan().bold(), format!("({})", global_path.display()).dimmed());
+            for s in &global.servers {
+                let shadowed = project_names.contains(s.name.as_str());
+                let marker = if shadowed {
+                    "↑".yellow().bold().to_string()
+                } else if s.disabled {
                     "○".dimmed().to_string()
                 } else {
                     "✓".green().bold().to_string()
@@ -2688,14 +2725,32 @@ fn cmd_mcp(cmd: McpCommands) -> Result<()> {
                 } else {
                     format!("{} {}", s.command, s.args.join(" "))
                 };
-                println!("  {} {:<16} {}", marker, s.name.bold(), cmdline.cyan());
-                if !s.env.is_empty() {
-                    let mut keys: Vec<&String> = s.env.keys().collect();
-                    keys.sort();
-                    for k in keys {
-                        let v = &s.env[k];
-                        println!("    {} {}={}", "env".dimmed(), k, v.dimmed());
-                    }
+                let tag = if shadowed {
+                    "[shadowed by project]".yellow().to_string()
+                } else {
+                    "[global]".dimmed().to_string()
+                };
+                println!("  {} {:<16} {}  {}", marker, s.name.bold(), cmdline.cyan(), tag);
+                print_env(&s.env);
+            }
+
+            if !project.servers.is_empty() {
+                if let Some(ref p) = project_path {
+                    println!("\n  {} {}\n", "Project".cyan().bold(), format!("({})", p.display()).dimmed());
+                }
+                for s in &project.servers {
+                    let marker = if s.disabled {
+                        "○".dimmed().to_string()
+                    } else {
+                        "✓".green().bold().to_string()
+                    };
+                    let cmdline = if s.args.is_empty() {
+                        s.command.clone()
+                    } else {
+                        format!("{} {}", s.command, s.args.join(" "))
+                    };
+                    println!("  {} {:<16} {}  {}", marker, s.name.bold(), cmdline.cyan(), "[project]".dimmed());
+                    print_env(&s.env);
                 }
             }
             println!();
@@ -2708,10 +2763,15 @@ fn cmd_mcp(cmd: McpCommands) -> Result<()> {
             args,
             env,
             disabled,
+            project,
         } => {
+            let path = if project { McpConfig::project_path()? } else { global_path };
             let mut cfg = McpConfig::load(&path)?;
             if cfg.find(&name).is_some() {
-                anyhow::bail!("server `{name}` already exists; remove it first with `th mcp remove {name}`");
+                anyhow::bail!(
+                    "server `{name}` already exists in {}; remove it first with `th mcp remove {name}`",
+                    path.display()
+                );
             }
             let mut env_map = std::collections::HashMap::new();
             for entry in env {
@@ -2728,24 +2788,80 @@ fn cmd_mcp(cmd: McpCommands) -> Result<()> {
                 disabled,
             });
             cfg.save(&path)?;
+            let scope_label = if project { "project" } else { "global" };
             let cmdline = if args.is_empty() { command } else { format!("{command} {}", args.join(" ")) };
-            println!("\n  {} Added MCP server {} → {}\n", "✓".green().bold(), name.bold(), cmdline.cyan());
+            println!(
+                "\n  {} Added MCP server {} ({}) → {}\n",
+                "✓".green().bold(),
+                name.bold(),
+                scope_label.dimmed(),
+                cmdline.cyan()
+            );
             Ok(())
         }
 
-        McpCommands::Remove { name } => {
-            let mut cfg = McpConfig::load(&path)?;
-            if !cfg.remove(&name) {
-                anyhow::bail!("no MCP server named `{name}`");
+        McpCommands::Remove { name, project } => {
+            // If --project is passed, only touch the project config.
+            // Otherwise try project first (it's usually what the user
+            // means for an in-repo entry), then global.
+            let project_path = McpConfig::project_path().ok();
+
+            let try_remove = |p: &std::path::Path| -> Result<bool> {
+                let mut cfg = McpConfig::load(p)?;
+                if cfg.remove(&name) {
+                    cfg.save(p)?;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            };
+
+            let removed_from = if project {
+                let Some(pp) = project_path else {
+                    anyhow::bail!("no project config found; run from a repo with `.smooth/` or `.git/`");
+                };
+                if try_remove(&pp)? {
+                    Some(pp)
+                } else {
+                    None
+                }
+            } else {
+                let mut hit: Option<std::path::PathBuf> = None;
+                if let Some(pp) = &project_path {
+                    if try_remove(pp)? {
+                        hit = Some(pp.clone());
+                    }
+                }
+                if hit.is_none() && try_remove(&global_path)? {
+                    hit = Some(global_path.clone());
+                }
+                hit
+            };
+
+            match removed_from {
+                Some(p) => {
+                    println!(
+                        "\n  {} Removed MCP server {} from {}\n",
+                        "✓".green().bold(),
+                        name.bold(),
+                        p.display().to_string().dimmed()
+                    );
+                    Ok(())
+                }
+                None => anyhow::bail!("no MCP server named `{name}` in project or global config"),
             }
-            cfg.save(&path)?;
-            println!("\n  {} Removed MCP server {}\n", "✓".green().bold(), name.bold());
-            Ok(())
         }
 
         McpCommands::Test { name } => {
-            let cfg = McpConfig::load(&path)?;
-            let server = cfg.find(&name).ok_or_else(|| anyhow::anyhow!("no MCP server named `{name}`"))?.clone();
+            // Look in both scopes; project wins.
+            let project_path = McpConfig::project_path().ok();
+            let project_cfg = project_path.as_ref().and_then(|p| McpConfig::load(p).ok()).unwrap_or_default();
+            let global_cfg = McpConfig::load(&global_path).unwrap_or_default();
+            let server = project_cfg
+                .find(&name)
+                .or_else(|| global_cfg.find(&name))
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("no MCP server named `{name}`"))?;
 
             println!("\n  {} Testing MCP server {}", "▶".cyan().bold(), name.bold());
             println!("  {} {} {}", "$".dimmed(), server.command.cyan(), server.args.join(" ").cyan());
@@ -2814,11 +2930,44 @@ fn plugins_dir() -> Result<std::path::PathBuf> {
     Ok(h.join(".smooth").join("plugins"))
 }
 
+fn project_plugins_dir() -> Result<std::path::PathBuf> {
+    let cwd = std::env::current_dir()?;
+    let root = mcp_config::find_project_root(&cwd).unwrap_or(cwd);
+    Ok(root.join(".smooth").join("plugins"))
+}
+
+fn list_plugins_in(dir: &std::path::Path) -> Vec<(String, String)> {
+    if !dir.is_dir() {
+        return Vec::new();
+    }
+    let mut out: Vec<(String, String)> = Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return out,
+    };
+    for entry in entries.flatten() {
+        if !(entry.path().is_dir() && entry.path().join("plugin.toml").exists()) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let summary = std::fs::read_to_string(entry.path().join("plugin.toml"))
+            .ok()
+            .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
+            .and_then(|v| v.get("description").and_then(|d| d.as_str()).map(str::to_string))
+            .unwrap_or_default();
+        out.push((name, summary));
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+#[allow(clippy::too_many_lines)]
 fn cmd_plugin(cmd: PluginCommands) -> Result<()> {
-    let dir = plugins_dir()?;
+    let global_dir = plugins_dir()?;
 
     match cmd {
-        PluginCommands::Path { name } => {
+        PluginCommands::Path { name, project } => {
+            let dir = if project { project_plugins_dir()? } else { global_dir };
             match name {
                 Some(n) => println!("{}", dir.join(&n).join("plugin.toml").display()),
                 None => println!("{}", dir.display()),
@@ -2827,37 +2976,51 @@ fn cmd_plugin(cmd: PluginCommands) -> Result<()> {
         }
 
         PluginCommands::List => {
-            if !dir.is_dir() {
+            let project_dir = project_plugins_dir().ok();
+            let global_plugins = list_plugins_in(&global_dir);
+            let project_plugins = project_dir.as_deref().map(list_plugins_in).unwrap_or_default();
+
+            if global_plugins.is_empty() && project_plugins.is_empty() {
                 println!("\n  {} No plugins installed.", "ℹ".cyan());
                 println!("  {} {}\n", "Create one:".dimmed(), "th plugin init <name>".cyan());
                 return Ok(());
             }
-            let mut entries: Vec<_> = std::fs::read_dir(&dir)?
-                .filter_map(std::result::Result::ok)
-                .filter(|e| e.path().is_dir() && e.path().join("plugin.toml").exists())
-                .collect();
-            entries.sort_by_key(std::fs::DirEntry::file_name);
-            if entries.is_empty() {
-                println!("\n  {} No plugins installed.\n", "ℹ".cyan());
-                return Ok(());
+
+            let project_names: std::collections::HashSet<&str> = project_plugins.iter().map(|(n, _)| n.as_str()).collect();
+
+            if !global_plugins.is_empty() {
+                println!("\n  {} {}\n", "Plugins".cyan().bold(), format!("({})", global_dir.display()).dimmed());
+                for (n, desc) in &global_plugins {
+                    let shadowed = project_names.contains(n.as_str());
+                    let (marker, tag) = if shadowed {
+                        ("↑".yellow().bold().to_string(), "[shadowed by project]".yellow().to_string())
+                    } else {
+                        ("✓".green().bold().to_string(), "[global]".dimmed().to_string())
+                    };
+                    println!("  {} plugin.{:<14} {}  {}", marker, n.bold(), desc.dimmed(), tag);
+                }
             }
-            println!("\n  {} {}\n", "Plugins".cyan().bold(), format!("({})", dir.display()).dimmed());
-            for entry in entries {
-                let name = entry.file_name().to_string_lossy().to_string();
-                let manifest = entry.path().join("plugin.toml");
-                let summary = std::fs::read_to_string(&manifest)
-                    .ok()
-                    .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
-                    .and_then(|v| v.get("description").and_then(|d| d.as_str()).map(str::to_string))
-                    .unwrap_or_default();
-                println!("  {} plugin.{:<14} {}", "✓".green().bold(), name.bold(), summary.dimmed());
+
+            if !project_plugins.is_empty() {
+                if let Some(ref pd) = project_dir {
+                    println!("\n  {} {}\n", "Project".cyan().bold(), format!("({})", pd.display()).dimmed());
+                }
+                for (n, desc) in &project_plugins {
+                    println!("  {} plugin.{:<14} {}  {}", "✓".green().bold(), n.bold(), desc.dimmed(), "[project]".dimmed());
+                }
             }
             println!();
             Ok(())
         }
 
-        PluginCommands::Init { name, command, description } => {
-            let plugin_dir = dir.join(&name);
+        PluginCommands::Init {
+            name,
+            command,
+            description,
+            project,
+        } => {
+            let base = if project { project_plugins_dir()? } else { global_dir };
+            let plugin_dir = base.join(&name);
             let manifest_path = plugin_dir.join("plugin.toml");
             if manifest_path.exists() {
                 anyhow::bail!("plugin `{name}` already exists at {}", manifest_path.display());
@@ -2907,15 +3070,63 @@ required = [{required}]
             Ok(())
         }
 
-        PluginCommands::Remove { name } => {
-            let plugin_dir = dir.join(&name);
-            if !plugin_dir.is_dir() {
-                anyhow::bail!("no plugin named `{name}` at {}", plugin_dir.display());
+        PluginCommands::Remove { name, project } => {
+            // If --project, only look in project dir. Else try project
+            // first, then global (matches cmd_mcp remove semantics).
+            let project_dir = project_plugins_dir().ok();
+
+            let attempt = |dir: &std::path::Path| -> Result<bool> {
+                let plugin_dir = dir.join(&name);
+                if !plugin_dir.is_dir() {
+                    return Ok(false);
+                }
+                std::fs::remove_dir_all(&plugin_dir)?;
+                Ok(true)
+            };
+
+            let removed_from = if project {
+                let Some(pd) = project_dir else {
+                    anyhow::bail!("no project plugins directory found; run from a repo with `.smooth/` or `.git/`");
+                };
+                attempt(&pd)?.then_some(pd)
+            } else {
+                let mut hit: Option<std::path::PathBuf> = None;
+                if let Some(pd) = &project_dir {
+                    if attempt(pd)? {
+                        hit = Some(pd.clone());
+                    }
+                }
+                if hit.is_none() && attempt(&global_dir)? {
+                    hit = Some(global_dir.clone());
+                }
+                hit
+            };
+
+            match removed_from {
+                Some(dir) => {
+                    println!(
+                        "\n  {} Removed plugin {} from {}\n",
+                        "✓".green().bold(),
+                        name.bold(),
+                        dir.display().to_string().dimmed()
+                    );
+                    Ok(())
+                }
+                None => anyhow::bail!("no plugin named `{name}` in project or global directory"),
             }
-            std::fs::remove_dir_all(&plugin_dir)?;
-            println!("\n  {} Removed plugin {}\n", "✓".green().bold(), name.bold());
-            Ok(())
         }
+    }
+}
+
+/// Shared helper: print sorted env map entries under a table row.
+fn print_env(env: &std::collections::HashMap<String, String>) {
+    if env.is_empty() {
+        return;
+    }
+    let mut keys: Vec<&String> = env.keys().collect();
+    keys.sort();
+    for k in keys {
+        println!("    {} {}={}", "env".dimmed(), k, env[k].dimmed());
     }
 }
 

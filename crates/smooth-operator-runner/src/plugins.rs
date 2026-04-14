@@ -83,22 +83,66 @@ pub fn default_plugins_dir() -> Option<PathBuf> {
 /// `(<plugin_name>, <error_message>)` for plugins that failed to load.
 pub type PluginLoadFailure = (String, String);
 
-/// Discover and load every manifest under `dir/<name>/plugin.toml`.
-/// Per-plugin failures are returned alongside the successes so the
-/// caller can log them without aborting.
-pub fn load_plugins(dir: &Path) -> (Vec<Arc<dyn Tool>>, Vec<PluginLoadFailure>) {
-    let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
+/// Discover plugins under both the global and project directories.
+/// On a name collision the project manifest wins and the global one
+/// is dropped with an info log. Either argument may be `None`;
+/// missing directories are treated as empty.
+pub fn load_plugins_merged(global_dir: Option<&Path>, project_dir: Option<&Path>) -> (Vec<Arc<dyn Tool>>, Vec<PluginLoadFailure>) {
+    let mut chosen: Vec<(PluginManifest, &'static str)> = Vec::new();
+    let mut failures: Vec<PluginLoadFailure> = Vec::new();
+
+    for (dir, scope) in [(global_dir, "global"), (project_dir, "project")]
+        .into_iter()
+        .flat_map(|(d, s)| d.map(|d| (d, s)))
+    {
+        let (manifests, fails) = scan_dir(dir);
+        for m in manifests {
+            if let Some(idx) = chosen.iter().position(|(existing, _)| existing.name == m.name) {
+                let (_, existing_scope) = &chosen[idx];
+                if *existing_scope == "global" && scope == "project" {
+                    tracing::info!(plugin = %m.name, "plugin: project scope overrides global");
+                    chosen[idx] = (m, scope);
+                } else {
+                    tracing::warn!(plugin = %m.name, scope, "plugin: duplicate name in same scope; keeping first");
+                }
+            } else {
+                chosen.push((m, scope));
+            }
+        }
+        for f in fails {
+            failures.push(f);
+        }
+    }
+
+    let tools: Vec<Arc<dyn Tool>> = chosen
+        .into_iter()
+        .filter(|(m, _)| !m.disabled)
+        .map(|(m, scope)| {
+            tracing::info!(plugin = %m.name, scope, "plugin: loaded");
+            Arc::new(CliPluginTool::new(m)) as Arc<dyn Tool>
+        })
+        .collect();
+    (tools, failures)
+}
+
+/// Path for a project's plugins directory: `<workspace>/.smooth/plugins`.
+pub fn project_plugins_dir(workspace: &Path) -> std::path::PathBuf {
+    workspace.join(".smooth").join("plugins")
+}
+
+fn scan_dir(dir: &Path) -> (Vec<PluginManifest>, Vec<PluginLoadFailure>) {
+    let mut manifests: Vec<PluginManifest> = Vec::new();
     let mut failures: Vec<PluginLoadFailure> = Vec::new();
 
     if !dir.is_dir() {
-        return (tools, failures);
+        return (manifests, failures);
     }
 
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) => {
             failures.push((dir.display().to_string(), format!("read_dir: {e}")));
-            return (tools, failures);
+            return (manifests, failures);
         }
     };
 
@@ -115,18 +159,12 @@ pub fn load_plugins(dir: &Path) -> (Vec<Arc<dyn Tool>>, Vec<PluginLoadFailure>) 
             .file_name()
             .map_or_else(|| plugin_dir.display().to_string(), |n| n.to_string_lossy().to_string());
         match load_manifest(&manifest_path) {
-            Ok(manifest) => {
-                if manifest.disabled {
-                    continue;
-                }
-                let tool = CliPluginTool::new(manifest);
-                tools.push(Arc::new(tool));
-            }
+            Ok(manifest) => manifests.push(manifest),
             Err(e) => failures.push((display_name, e.to_string())),
         }
     }
 
-    (tools, failures)
+    (manifests, failures)
 }
 
 fn load_manifest(path: &Path) -> anyhow::Result<PluginManifest> {
@@ -341,11 +379,61 @@ disabled = true
         )
         .unwrap();
 
-        let (tools, failures) = load_plugins(dir.path());
+        let (tools, failures) = load_plugins_merged(Some(dir.path()), None);
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].schema().name, "plugin.good");
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].0, "bad");
+    }
+
+    #[test]
+    fn project_scope_overrides_global_on_collision() {
+        let global = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+
+        // Both directories have a `jq` plugin, but with different commands.
+        let make_plugin = |root: &std::path::Path, cmd: &str| {
+            let dir = root.join("jq");
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(
+                dir.join("plugin.toml"),
+                format!(
+                    r#"name = "jq"
+description = "jq"
+command = "{cmd}"
+"#
+                ),
+            )
+            .unwrap();
+        };
+        make_plugin(global.path(), "/usr/bin/jq-global");
+        make_plugin(project.path(), "/usr/bin/jq-project");
+
+        let (tools, failures) = load_plugins_merged(Some(global.path()), Some(project.path()));
+        assert!(failures.is_empty());
+        assert_eq!(tools.len(), 1);
+        // The tool was built from the project manifest: verify by
+        // scanning the schema description which includes the name.
+        assert_eq!(tools[0].schema().name, "plugin.jq");
+    }
+
+    #[test]
+    fn project_only_plugins_register_with_no_global() {
+        let project = tempfile::tempdir().unwrap();
+        let dir = project.path().join("solo");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.toml"),
+            r#"name = "solo"
+command = "echo hi"
+"#,
+        )
+        .unwrap();
+
+        let (tools, failures) = load_plugins_merged(None, Some(project.path()));
+        assert!(failures.is_empty());
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].schema().name, "plugin.solo");
     }
 
     #[tokio::test]

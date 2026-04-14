@@ -262,41 +262,80 @@ fn wrap_mcp_tool(server_name: &str, def: &McpToolDef, service: Arc<RunningServic
     }
 }
 
-/// Load the config from `path` and connect every enabled server.
-/// Returns every wrapped tool across all servers plus a list of
-/// `(server_name, error)` for servers that failed to start — the
-/// caller can log those without aborting the whole runner.
-pub async fn load_and_register_mcp_servers(config_path: &std::path::Path) -> (Vec<Arc<dyn Tool>>, Vec<(String, String)>) {
-    let config = match McpConfig::load(config_path) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, path = %config_path.display(), "MCP: failed to load config; no MCP tools will be registered");
-            return (Vec::new(), vec![("<config>".into(), e.to_string())]);
-        }
-    };
-    if config.servers.is_empty() {
-        return (Vec::new(), Vec::new());
-    }
+/// Load MCP servers from global + project config and connect each.
+/// On a name collision the **project entry wins** and the global one
+/// is dropped with an info log. Either argument may be `None` —
+/// missing files are treated as empty configs. Per-server failures
+/// (spawn, handshake, list_tools) are returned alongside the tools so
+/// the caller can log them without aborting.
+pub async fn load_and_register_mcp_servers_merged(
+    global_path: Option<&std::path::Path>,
+    project_path: Option<&std::path::Path>,
+) -> (Vec<Arc<dyn Tool>>, Vec<(String, String)>) {
+    let mut failures: Vec<(String, String)> = Vec::new();
+
+    let (global, gfails) = load_config_or_empty(global_path, "global");
+    failures.extend(gfails);
+    let (project, pfails) = load_config_or_empty(project_path, "project");
+    failures.extend(pfails);
+
+    let chosen = merge_configs(global, project);
 
     let mut all_tools: Vec<Arc<dyn Tool>> = Vec::new();
-    let mut failures = Vec::new();
-    for server in &config.servers {
+    for (server, scope) in chosen {
         if server.disabled {
             continue;
         }
-        match connect_server(server).await {
+        match connect_server(&server).await {
             Ok(tools) => {
+                tracing::info!(server = %server.name, scope, tool_count = tools.len(), "MCP: loaded");
                 for t in tools {
                     all_tools.push(t);
                 }
             }
             Err(e) => {
-                tracing::warn!(server = %server.name, error = %e, "MCP: server failed to start");
+                tracing::warn!(server = %server.name, scope, error = %e, "MCP: server failed to start");
                 failures.push((server.name.clone(), e.to_string()));
             }
         }
     }
     (all_tools, failures)
+}
+
+fn load_config_or_empty(path: Option<&std::path::Path>, scope: &'static str) -> (McpConfig, Vec<(String, String)>) {
+    let Some(p) = path else {
+        return (McpConfig::default(), Vec::new());
+    };
+    match McpConfig::load(p) {
+        Ok(c) => (c, Vec::new()),
+        Err(e) => {
+            tracing::warn!(error = %e, path = %p.display(), scope, "MCP: failed to load config");
+            (McpConfig::default(), vec![(format!("<{scope} config>"), e.to_string())])
+        }
+    }
+}
+
+/// Merge resolution: project entries override global on name match.
+/// Returns `(server, scope)` pairs preserving the order the servers
+/// will be connected (globals first, then project-only additions).
+fn merge_configs(global: McpConfig, project: McpConfig) -> Vec<(McpServerConfig, &'static str)> {
+    let mut chosen: Vec<(McpServerConfig, &'static str)> = global.servers.into_iter().map(|s| (s, "global")).collect();
+    for server in project.servers {
+        if let Some(idx) = chosen.iter().position(|(s, _)| s.name == server.name) {
+            tracing::info!(server = %server.name, "MCP: project scope overrides global");
+            chosen[idx] = (server, "project");
+        } else {
+            chosen.push((server, "project"));
+        }
+    }
+    chosen
+}
+
+/// Resolve the project-scoped config path for a given workspace:
+/// `<workspace>/.smooth/mcp.toml`. The file may not exist yet —
+/// `McpConfig::load` treats missing as empty.
+pub fn project_config_path(workspace: &std::path::Path) -> std::path::PathBuf {
+    workspace.join(".smooth").join("mcp.toml")
 }
 
 // ---------------------------------------------------------------------------
@@ -355,5 +394,41 @@ mod tests {
         assert_eq!(loaded.servers[0].name, "playwright");
         assert_eq!(loaded.servers[0].command, "npx");
         assert_eq!(loaded.servers[0].env.get("BROWSER"), Some(&"chromium".to_string()));
+    }
+
+    #[test]
+    fn merge_configs_project_overrides_global() {
+        let mk = |name: &str, cmd: &str| McpServerConfig {
+            name: name.into(),
+            command: cmd.into(),
+            args: vec![],
+            env: HashMap::new(),
+            disabled: false,
+        };
+        let global = McpConfig {
+            servers: vec![mk("foo", "global-foo"), mk("bar", "global-bar")],
+        };
+        let project = McpConfig {
+            servers: vec![mk("foo", "project-foo"), mk("baz", "project-baz")],
+        };
+
+        let merged = merge_configs(global, project);
+
+        // foo replaced by project; bar kept from global; baz added from project
+        assert_eq!(merged.len(), 3);
+        let by_name: std::collections::HashMap<_, _> = merged.iter().map(|(s, scope)| (s.name.clone(), (s.command.clone(), *scope))).collect();
+        assert_eq!(by_name.get("foo").unwrap(), &("project-foo".to_string(), "project"));
+        assert_eq!(by_name.get("bar").unwrap(), &("global-bar".to_string(), "global"));
+        assert_eq!(by_name.get("baz").unwrap(), &("project-baz".to_string(), "project"));
+    }
+
+    #[tokio::test]
+    async fn merged_loader_accepts_missing_configs() {
+        // Both paths missing → no failures, no tools.
+        let p = std::path::PathBuf::from("/nonexistent/global.toml");
+        let q = std::path::PathBuf::from("/nonexistent/project.toml");
+        let (tools, failures) = load_and_register_mcp_servers_merged(Some(&p), Some(&q)).await;
+        assert!(tools.is_empty());
+        assert!(failures.is_empty());
     }
 }
