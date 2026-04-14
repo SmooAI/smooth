@@ -171,7 +171,18 @@ enum Commands {
     /// `bd prime`)
     Prime,
     /// System health check and auto-fix
-    Doctor,
+    Doctor {
+        /// Initialize ~/.smooth/ as a git repo (backup/sync config).
+        /// Writes a .gitignore that excludes secrets and high-churn data,
+        /// seeds an initial commit. Skips any config that's already
+        /// tracked. Optionally takes a remote URL to set up push/pull.
+        #[arg(long)]
+        init_home_repo: bool,
+        /// Optional git remote URL to add when --init-home-repo is set
+        /// (e.g. git@github.com:you/smooth-config.git)
+        #[arg(long)]
+        remote: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -571,7 +582,13 @@ async fn main() -> Result<()> {
             budget,
             json,
         }) => cmd_code(headless, message, file, model, budget, json).await,
-        Some(Commands::Doctor) => cmd_doctor().await,
+        Some(Commands::Doctor { init_home_repo, remote }) => {
+            if init_home_repo {
+                cmd_doctor_init_home_repo(remote.as_deref())
+            } else {
+                cmd_doctor().await
+            }
+        }
         Some(Commands::Up {
             no_leader,
             port,
@@ -1741,6 +1758,145 @@ async fn cmd_doctor() -> Result<()> {
         println!("{}", format!("{issues} issue(s) found. Fix them and run: th doctor").yellow().bold());
     }
 
+    Ok(())
+}
+
+/// Git-init ~/.smooth/ as a repo so config can be backed up and synced
+/// across machines. Writes a .gitignore that excludes secrets
+/// (providers.json), service logs, rotating audit logs, the SQLite
+/// leftover, and the Dolt store (which has its own push/pull). Adds
+/// the files that *should* be versioned (mcp.toml, plugins/<name>/,
+/// registry.json) and makes an initial commit.
+///
+/// Idempotent: re-running on an already-initialized repo just prints
+/// status and optionally adds a new remote.
+fn cmd_doctor_init_home_repo(remote: Option<&str>) -> Result<()> {
+    let home = dirs_next::home_dir().context("cannot determine home directory")?;
+    let smooth_home = home.join(".smooth");
+    std::fs::create_dir_all(&smooth_home)?;
+
+    println!("\n  {} {}", "Smooth home repo".bold().cyan(), smooth_home.display().to_string().dimmed());
+
+    let git = |args: &[&str]| -> Result<std::process::Output> {
+        let out = std::process::Command::new("git")
+            .current_dir(&smooth_home)
+            .args(args)
+            .output()
+            .context("spawn git")?;
+        Ok(out)
+    };
+
+    // Seed .gitignore before `git init` runs so the first status is clean.
+    let gitignore_path = smooth_home.join(".gitignore");
+    if !gitignore_path.exists() {
+        std::fs::write(
+            &gitignore_path,
+            r"# Secrets — never commit LLM keys / Jira tokens
+providers.json
+
+# High-churn / ephemeral state
+service.log
+service.err
+smooth.log
+smooth.pid
+smooth.db
+smooth.db-journal
+smooth.db-wal
+smooth.db-shm
+
+# Rotating audit logs
+audit/
+
+# Dolt store has its own push/pull via `th pearls push/pull`
+dolt/
+
+# Pearl environment caches — machine-local
+pearl-env/
+
+# Debug / session captures — ephemeral runtime artifacts
+coding-sessions/
+llm-errors/
+",
+        )?;
+        println!("  {} wrote .gitignore", "✓".green().bold());
+    } else {
+        println!("  {} .gitignore already present — leaving as-is", "○".dimmed());
+    }
+
+    // Is this already a git repo?
+    let is_repo = smooth_home.join(".git").exists();
+    if !is_repo {
+        let out = git(&["init", "-q"])?;
+        if !out.status.success() {
+            anyhow::bail!("git init failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        }
+        println!("  {} git init", "✓".green().bold());
+    } else {
+        println!("  {} already a git repo", "○".dimmed());
+    }
+
+    // Stage everything that survives .gitignore.
+    let add = git(&["add", "-A"])?;
+    if !add.status.success() {
+        anyhow::bail!("git add failed: {}", String::from_utf8_lossy(&add.stderr).trim());
+    }
+
+    // Only commit if there's something to commit.
+    let diff = git(&["diff", "--cached", "--quiet"])?;
+    let anything_staged = !diff.status.success(); // non-zero = changes staged
+    if anything_staged {
+        let msg = if is_repo {
+            "th doctor: sync Smooth home config"
+        } else {
+            "th doctor: initial Smooth home commit"
+        };
+        let commit = git(&["commit", "-q", "-m", msg])?;
+        if !commit.status.success() {
+            let stderr = String::from_utf8_lossy(&commit.stderr);
+            if stderr.contains("user.email") || stderr.contains("user.name") {
+                println!("  {} git has no user.email/user.name configured globally — commit skipped", "!".yellow().bold());
+                println!("  {} set them with: git config --global user.email \"you@example.com\"", "→".dimmed());
+            } else {
+                anyhow::bail!("git commit failed: {}", stderr.trim());
+            }
+        } else {
+            println!("  {} committed: {msg}", "✓".green().bold());
+        }
+    } else {
+        println!("  {} nothing new to commit", "○".dimmed());
+    }
+
+    // Remote handling: add or replace.
+    if let Some(url) = remote {
+        let existing = git(&["remote", "get-url", "origin"])?;
+        if existing.status.success() {
+            let current = String::from_utf8_lossy(&existing.stdout).trim().to_string();
+            if current == url {
+                println!("  {} origin already set to {url}", "○".dimmed());
+            } else {
+                let set = git(&["remote", "set-url", "origin", url])?;
+                if set.status.success() {
+                    println!("  {} updated origin: {url}", "✓".green().bold());
+                }
+            }
+        } else {
+            let add_remote = git(&["remote", "add", "origin", url])?;
+            if add_remote.status.success() {
+                println!("  {} added origin: {url}", "✓".green().bold());
+            } else {
+                anyhow::bail!("git remote add failed: {}", String::from_utf8_lossy(&add_remote.stderr).trim());
+            }
+        }
+        println!(
+            "  {} push with: {}",
+            "→".dimmed(),
+            format!("git -C {} push -u origin main", smooth_home.display()).cyan()
+        );
+    } else if !is_repo {
+        println!("  {} add a remote later: th doctor --init-home-repo --remote <git-url>", "→".dimmed());
+    }
+
+    println!();
     Ok(())
 }
 
