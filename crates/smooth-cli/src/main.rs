@@ -801,22 +801,23 @@ async fn cmd_status() -> Result<()> {
             }
             println!();
 
+            // Align every label to 16 chars so "Smooth Operators" fits cleanly.
             // Big Smooth
             let leader_status = body["leader"].as_str().or_else(|| body["status"].as_str()).unwrap_or("healthy");
             let (icon, label) = status_indicator(leader_status);
-            println!("  {icon} {:<12} {label}", "Big Smooth");
+            println!("  {icon} {:<16} {label}", "Big Smooth");
 
             // Database
             let db_status = body["database"].as_str().unwrap_or("healthy");
             let (icon, label) = status_indicator(db_status);
-            println!("  {icon} {:<12} {} {}", "Database", label, "(SQLite)".dimmed());
+            println!("  {icon} {:<16} {} {}", "Database", label, "(SQLite)".dimmed());
 
-            // Sandbox
+            // Smooth Operators (sandboxed AI agents in microVMs)
             let sandbox_status = body["sandbox"].as_str().or_else(|| body["sandboxes"].as_str()).unwrap_or("healthy");
             let active = body["sandbox_active"].as_u64().or_else(|| body["sandboxes_active"].as_u64()).unwrap_or(0);
             let max = body["sandbox_max"].as_u64().or_else(|| body["sandboxes_max"].as_u64()).unwrap_or(3);
             let (icon, label) = status_indicator(sandbox_status);
-            println!("  {icon} {:<12} {} {}", "Sandbox", label, format!("({active}/{max} active)").dimmed());
+            println!("  {icon} {:<16} {} {}", "Smooth Operators", label, format!("({active}/{max} active)").dimmed());
 
             // Tailscale
             if let Some(ts) = body.get("tailscale") {
@@ -824,14 +825,14 @@ async fn cmd_status() -> Result<()> {
                 let hostname = body["tailscale_hostname"].as_str().unwrap_or("");
                 let (icon, label) = status_indicator(ts_status);
                 let suffix = if hostname.is_empty() { String::new() } else { format!(" ({})", hostname) };
-                println!("  {icon} {:<12} {label}{}", "Tailscale", suffix.dimmed());
+                println!("  {icon} {:<16} {label}{}", "Tailscale", suffix.dimmed());
             }
 
             // Pearls
             if let Ok(store) = open_pearl_store() {
                 if let Ok(stats) = store.stats() {
                     println!(
-                        "  {} {:<12} {} open, {} active, {} closed",
+                        "  {} {:<16} {} open, {} active, {} closed",
                         "\u{2713}".green().bold(),
                         "Pearls",
                         stats.open.to_string().bold(),

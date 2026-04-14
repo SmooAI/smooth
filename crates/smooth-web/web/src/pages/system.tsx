@@ -102,7 +102,7 @@ function buildNodes(health: HealthData | null, workers: Worker[]): TopoNode[] {
         },
         {
             id: 'sandbox',
-            label: 'Sandbox Pool',
+            label: 'Smooth Operators',
             sublabel: `${health?.sandbox?.active_sandboxes ?? 0}/${health?.sandbox?.max_concurrency ?? 3} active`,
             color: statusColor(health?.sandbox?.status),
             pulse: health?.sandbox?.status === 'healthy',
@@ -289,9 +289,9 @@ function DetailsTable({ health }: { health: HealthData }) {
             detail: health.database?.path ?? '--',
         },
         {
-            label: 'Sandbox',
+            label: 'Smooth Operators',
             status: health.sandbox?.status,
-            detail: health.sandbox ? `${health.sandbox.backend} (${health.sandbox.active_sandboxes}/${health.sandbox.max_concurrency})` : '--',
+            detail: health.sandbox ? `${health.sandbox.backend} (${health.sandbox.active_sandboxes}/${health.sandbox.max_concurrency} active)` : '--',
         },
         {
             label: 'Tailscale',
