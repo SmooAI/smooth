@@ -3,6 +3,7 @@
 //! Single binary for agent orchestration, config management, and platform tools.
 
 mod hooks;
+mod mcp_config;
 
 use std::net::SocketAddr;
 
@@ -145,8 +146,41 @@ enum Commands {
         #[command(subcommand)]
         cmd: RoutingCommands,
     },
+    /// MCP server management (Playwright, GitHub, etc.)
+    Mcp {
+        #[command(subcommand)]
+        cmd: McpCommands,
+    },
     /// System health check and auto-fix
     Doctor,
+}
+
+#[derive(Subcommand)]
+enum McpCommands {
+    /// Register an MCP server in ~/.smooth/mcp.toml
+    Add {
+        /// Name used to prefix this server's tools (e.g. "playwright")
+        name: String,
+        /// Command to spawn (e.g. "npx", "docker", or an absolute path)
+        command: String,
+        /// Arguments passed to the command
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+        /// Per-server env var (KEY=VALUE; supports `${env:VAR}` substitution). Repeat for multiple.
+        #[arg(short = 'e', long = "env")]
+        env: Vec<String>,
+        /// Register but do not start until enabled
+        #[arg(long)]
+        disabled: bool,
+    },
+    /// List configured MCP servers
+    List,
+    /// Remove a server by name
+    Remove { name: String },
+    /// Spawn a server's command and report whether it starts cleanly
+    Test { name: String },
+    /// Print the config file path
+    Path,
 }
 
 #[derive(Subcommand)]
@@ -475,6 +509,7 @@ async fn main() -> Result<()> {
         Some(Commands::Access { cmd }) => cmd_access(cmd).await,
         Some(Commands::Jira { cmd }) => cmd_jira(cmd).await,
         Some(Commands::Routing { cmd }) => cmd_routing(cmd).await,
+        Some(Commands::Mcp { cmd }) => cmd_mcp(cmd),
         Some(_) => {
             println!("Command not yet implemented. Coming soon!");
             Ok(())
@@ -2593,4 +2628,153 @@ async fn cmd_routing(cmd: RoutingCommands) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn cmd_mcp(cmd: McpCommands) -> Result<()> {
+    use mcp_config::{expand_env, McpConfig, McpServerConfig};
+
+    let path = McpConfig::default_path().context("cannot determine ~/.smooth/mcp.toml path")?;
+
+    match cmd {
+        McpCommands::Path => {
+            println!("{}", path.display());
+            Ok(())
+        }
+
+        McpCommands::List => {
+            let cfg = McpConfig::load(&path)?;
+            if cfg.servers.is_empty() {
+                println!("\n  {} No MCP servers configured.", "ℹ".cyan());
+                println!("  {} {}\n", "Add one:".dimmed(), "th mcp add <name> <command> [args...]".cyan());
+                return Ok(());
+            }
+            println!("\n  {} {}\n", "MCP Servers".cyan().bold(), format!("({})", path.display()).dimmed());
+            for s in &cfg.servers {
+                let marker = if s.disabled {
+                    "○".dimmed().to_string()
+                } else {
+                    "✓".green().bold().to_string()
+                };
+                let cmdline = if s.args.is_empty() {
+                    s.command.clone()
+                } else {
+                    format!("{} {}", s.command, s.args.join(" "))
+                };
+                println!("  {} {:<16} {}", marker, s.name.bold(), cmdline.cyan());
+                if !s.env.is_empty() {
+                    let mut keys: Vec<&String> = s.env.keys().collect();
+                    keys.sort();
+                    for k in keys {
+                        let v = &s.env[k];
+                        println!("    {} {}={}", "env".dimmed(), k, v.dimmed());
+                    }
+                }
+            }
+            println!();
+            Ok(())
+        }
+
+        McpCommands::Add {
+            name,
+            command,
+            args,
+            env,
+            disabled,
+        } => {
+            let mut cfg = McpConfig::load(&path)?;
+            if cfg.find(&name).is_some() {
+                anyhow::bail!("server `{name}` already exists; remove it first with `th mcp remove {name}`");
+            }
+            let mut env_map = std::collections::HashMap::new();
+            for entry in env {
+                let (k, v) = entry
+                    .split_once('=')
+                    .with_context(|| format!("--env value `{entry}` must be in KEY=VALUE form"))?;
+                env_map.insert(k.to_string(), v.to_string());
+            }
+            cfg.servers.push(McpServerConfig {
+                name: name.clone(),
+                command: command.clone(),
+                args: args.clone(),
+                env: env_map,
+                disabled,
+            });
+            cfg.save(&path)?;
+            let cmdline = if args.is_empty() { command } else { format!("{command} {}", args.join(" ")) };
+            println!("\n  {} Added MCP server {} → {}\n", "✓".green().bold(), name.bold(), cmdline.cyan());
+            Ok(())
+        }
+
+        McpCommands::Remove { name } => {
+            let mut cfg = McpConfig::load(&path)?;
+            if !cfg.remove(&name) {
+                anyhow::bail!("no MCP server named `{name}`");
+            }
+            cfg.save(&path)?;
+            println!("\n  {} Removed MCP server {}\n", "✓".green().bold(), name.bold());
+            Ok(())
+        }
+
+        McpCommands::Test { name } => {
+            let cfg = McpConfig::load(&path)?;
+            let server = cfg.find(&name).ok_or_else(|| anyhow::anyhow!("no MCP server named `{name}`"))?.clone();
+
+            println!("\n  {} Testing MCP server {}", "▶".cyan().bold(), name.bold());
+            println!("  {} {} {}", "$".dimmed(), server.command.cyan(), server.args.join(" ").cyan());
+
+            // Spawn the process. A healthy stdio MCP server stays alive
+            // waiting for JSON-RPC on stdin; if it exits within 1s with
+            // a non-zero status, treat that as a failure.
+            let mut cmd = std::process::Command::new(&server.command);
+            cmd.args(&server.args);
+            for (k, v) in &server.env {
+                cmd.env(k, expand_env(v));
+            }
+            cmd.stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+
+            let mut child = match cmd.spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    println!("  {} spawn failed: {e}", "✗".red().bold());
+                    println!("  {} command not found on PATH? install it or use an absolute path.\n", "hint:".yellow());
+                    return Err(anyhow::anyhow!("spawn failed"));
+                }
+            };
+
+            // Give it a moment to crash if it's going to.
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            match child.try_wait() {
+                Ok(None) => {
+                    // Still running — that's healthy for an MCP stdio server.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    println!(
+                        "  {} Server starts cleanly. Runner will complete the MCP handshake on `th up`.\n",
+                        "✓".green().bold()
+                    );
+                    Ok(())
+                }
+                Ok(Some(status)) => {
+                    let mut stderr_out = String::new();
+                    if let Some(mut stderr) = child.stderr.take() {
+                        use std::io::Read;
+                        let _ = stderr.read_to_string(&mut stderr_out);
+                    }
+                    println!("  {} Process exited early ({status})", "✗".red().bold());
+                    if !stderr_out.trim().is_empty() {
+                        println!("  {} stderr:\n{}", "↳".dimmed(), stderr_out.trim().red());
+                    }
+                    println!();
+                    Err(anyhow::anyhow!("server exited early"))
+                }
+                Err(e) => {
+                    let _ = child.kill();
+                    Err(anyhow::anyhow!("wait failed: {e}"))
+                }
+            }
+        }
+    }
 }

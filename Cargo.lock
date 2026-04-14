@@ -5425,6 +5425,7 @@ dependencies = [
  "smooai-smooth-web",
  "tempfile",
  "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]
