@@ -154,7 +154,8 @@ export function ChatPage() {
     }, [input, streaming, activeId, refreshSessions]);
 
     return (
-        <div className="flex h-[calc(100vh-48px)] gap-4">
+        // Layout chrome = 56px header (h-14) + 48px main padding (p-6 top+bottom)
+        <div className="flex h-[calc(100vh-104px)] gap-4">
             {/* Sessions sidebar */}
             <aside
                 className="w-64 shrink-0 flex flex-col rounded-lg"
