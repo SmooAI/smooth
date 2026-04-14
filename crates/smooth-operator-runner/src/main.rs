@@ -65,6 +65,7 @@ use tracing_subscriber::EnvFilter;
 
 mod bg_process;
 mod lsp;
+mod mcp;
 mod tool_support;
 
 // ---------------------------------------------------------------------------
@@ -1614,6 +1615,20 @@ async fn main() {
     // Pearl tools — if workspace has .smooth/dolt/, register direct Dolt
     // pearl tools so the agent can create/list/close pearls locally.
     pearl_tools::register_pearl_tools(&mut tools, &config.workspace);
+
+    // MCP servers — spawn user-configured MCP servers from
+    // $SMOOTH_HOME/mcp.toml (or ~/.smooth/mcp.toml) and register their
+    // tools with `<server>.<tool>` prefixes. Per-server failures are
+    // logged but never abort startup.
+    if let Some(mcp_path) = mcp::McpConfig::default_path() {
+        let (mcp_tools, mcp_failures) = mcp::load_and_register_mcp_servers(&mcp_path).await;
+        for t in mcp_tools {
+            tools.register_arc(t);
+        }
+        for (server, err) in mcp_failures {
+            tracing::warn!(server = %server, error = %err, "MCP server failed to register");
+        }
+    }
 
     // System prompt is compiled in from prompts/system.md. This is the
     // agent harness — tool guidance, workflow constraints, error recovery.

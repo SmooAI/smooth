@@ -91,6 +91,12 @@ similar = "2"
 # language servers (rust-analyzer, typescript-language-server, pyright).
 lsp-types = "0.97"
 
+# Model Context Protocol SDK — the official Rust MCP client/server
+# library. We use it client-side to spawn user-configured MCP servers
+# (Playwright, GitHub, etc.) as subprocesses and bridge their tools
+# into the runner's ToolRegistry.
+rmcp = { version = "1.4", features = ["client", "transport-child-process"] }
+
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -158,6 +158,14 @@ impl ToolRegistry {
         self.tools.insert(schema.name, Arc::new(tool));
     }
 
+    /// Register a pre-wrapped tool. Useful when the tool already needs to
+    /// be `Arc<T>` for internal reasons (e.g. shared MCP service handles)
+    /// so the caller can hand the same `Arc` to multiple registries.
+    pub fn register_arc(&mut self, tool: Arc<dyn Tool>) {
+        let schema = tool.schema();
+        self.tools.insert(schema.name, tool);
+    }
+
     pub fn add_hook(&mut self, hook: impl ToolHook + 'static) {
         self.hooks.push(Arc::new(hook));
     }
