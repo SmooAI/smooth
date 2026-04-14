@@ -4,7 +4,6 @@ use axum::body::Body;
 use axum::Router;
 use http_body_util::BodyExt;
 use hyper::Request;
-use smooth_bigsmooth::db::Database;
 use smooth_bigsmooth::orchestrator::{Orchestrator, OrchestratorState};
 use smooth_bigsmooth::server::{build_router, AppState};
 use smooth_pearls::PearlStore;
@@ -13,14 +12,12 @@ use tower::ServiceExt;
 /// Build a self-contained test app backed by a temp Dolt database.
 fn test_app() -> Option<(Router, PearlStore)> {
     let dir = tempfile::tempdir().expect("tempdir");
-    let db_path = dir.path().join("test.db");
-    let db = Database::open(&db_path).expect("open db");
     let dolt_dir = dir.path().join("dolt");
     let pearl_store = match PearlStore::init(&dolt_dir) {
         Ok(s) => s,
         Err(_) => return None, // smooth-dolt binary not available
     };
-    let state = AppState::new(db, pearl_store.clone());
+    let state = AppState::new(pearl_store.clone());
     let router = build_router(state);
     // Leak tempdir so it isn't deleted while tests run.
     std::mem::forget(dir);
@@ -575,8 +572,6 @@ async fn list_projects_returns_registered_projects() {
 #[tokio::test]
 async fn project_pearls_returns_pearls_for_path() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let db_path = dir.path().join("test.db");
-    let db = Database::open(&db_path).expect("open db");
     let dolt_dir = dir.path().join(".smooth").join("dolt");
     let pearl_store = match PearlStore::init(&dolt_dir) {
         Ok(s) => s,
@@ -596,7 +591,7 @@ async fn project_pearls_returns_pearls_for_path() {
         })
         .expect("create pearl");
 
-    let state = AppState::new(db, pearl_store);
+    let state = AppState::new(pearl_store);
     let app = build_router(state);
 
     let path_encoded = urlencoding::encode(dir.path().to_str().unwrap());

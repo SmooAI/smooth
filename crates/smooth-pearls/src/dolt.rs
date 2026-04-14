@@ -30,6 +30,12 @@ impl SmoothDolt {
         })
     }
 
+    /// Path to the Dolt data directory backing this handle.
+    #[must_use]
+    pub fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
+    }
+
     /// Create a handle with an explicit binary path (for testing).
     #[must_use]
     pub fn with_bin(bin: PathBuf, data_dir: PathBuf) -> Self {

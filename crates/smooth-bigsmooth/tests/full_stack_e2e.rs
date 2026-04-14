@@ -44,7 +44,6 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use smooth_bigsmooth::db::Database;
 use smooth_bigsmooth::server::{build_router, AppState};
 use smooth_code::headless::{run_headless_capture, HeadlessOutput};
 use smooth_pearls::PearlStore;
@@ -67,14 +66,12 @@ struct BigSmoothHandle {
 
 async fn spawn_bigsmooth() -> Option<BigSmoothHandle> {
     let tmp = tempfile::tempdir().ok()?;
-    let db_path = tmp.path().join("smooth.db");
-    let db = Database::open(&db_path).ok()?;
     let dolt_dir = tmp.path().join("dolt");
     let pearl_store = match PearlStore::init(&dolt_dir) {
         Ok(s) => s,
         Err(_) => return None, // smooth-dolt binary not available in this env
     };
-    let state = AppState::new(db, pearl_store);
+    let state = AppState::new(pearl_store);
     let router = build_router(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.ok()?;

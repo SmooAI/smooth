@@ -22,7 +22,6 @@ use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
-use crate::db::Database;
 use crate::events::{ClientEvent, ServerEvent};
 
 /// Default idle timeout: 30 minutes.
@@ -50,7 +49,6 @@ fn max_sandbox_concurrency() -> usize {
 /// Shared application state.
 #[derive(Clone)]
 pub struct AppState {
-    pub db: Database,
     pub pearl_store: smooth_pearls::PearlStore,
     pub session_store: Arc<crate::session::DoltSessionStore>,
     pub start_time: Instant,
@@ -84,7 +82,7 @@ impl AppState {
     /// Reads `SMOOTH_SANDBOX_MAX_CONCURRENCY` from the environment to
     /// size the sandbox pool (defaults to 3 — each microVM eats real
     /// RAM so the conservative default keeps dev laptops happy).
-    pub fn new(db: Database, pearl_store: smooth_pearls::PearlStore) -> Self {
+    pub fn new(pearl_store: smooth_pearls::PearlStore) -> Self {
         let max_operators = max_sandbox_concurrency();
         let session_store = Arc::new(crate::session::DoltSessionStore::new(&pearl_store));
         let (event_tx, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
@@ -117,7 +115,6 @@ impl AppState {
         let boardroom_narc = crate::boardroom_narc::BoardroomNarc::new(narc_llm_config);
 
         Self {
-            db,
             pearl_store,
             session_store,
             start_time: Instant::now(),
@@ -1433,7 +1430,8 @@ async fn health_handler(State(state): State<AppState>) -> Json<HealthResponse> {
 
 async fn system_health_handler(State(state): State<AppState>) -> Json<ApiResponse<SystemHealth>> {
     state.touch();
-    let db_ok = state.db.get_config("__health_check").is_ok();
+    // Round-trip a query against Dolt to confirm the store is responsive.
+    let db_ok = state.pearl_store.get_config("__health_check").is_ok();
     let ts = crate::tailscale::get_status();
 
     let orch = state.orchestrator.lock().await;
@@ -1454,7 +1452,7 @@ async fn system_health_handler(State(state): State<AppState>) -> Json<ApiRespons
             },
             database: DatabaseHealth {
                 status: if db_ok { "healthy" } else { "down" }.into(),
-                path: state.db.path().display().to_string(),
+                path: state.pearl_store.dolt_path().display().to_string(),
             },
             sandbox: SandboxHealth {
                 status: "healthy".into(),
@@ -1495,8 +1493,16 @@ async fn orchestrator_status_handler(State(state): State<AppState>) -> Json<ApiR
 
 async fn get_config_handler(State(state): State<AppState>) -> Json<ApiResponse<serde_json::Value>> {
     state.touch();
+    let pairs = state.pearl_store.list_config().unwrap_or_default();
+    let mut obj = serde_json::Map::new();
+    for (k, v) in pairs {
+        // Values were set as JSON-stringified; parse back if possible,
+        // otherwise return the raw string.
+        let parsed: serde_json::Value = serde_json::from_str(&v).unwrap_or(serde_json::Value::String(v));
+        obj.insert(k, parsed);
+    }
     Json(ApiResponse {
-        data: serde_json::json!({}),
+        data: serde_json::Value::Object(obj),
         ok: true,
     })
 }
@@ -1504,8 +1510,8 @@ async fn get_config_handler(State(state): State<AppState>) -> Json<ApiResponse<s
 async fn set_config_handler(State(state): State<AppState>, Json(body): Json<ConfigBody>) -> Json<ApiResponse<()>> {
     state.touch();
     let value_str = serde_json::to_string(&body.value).unwrap_or_default();
-    let _ = state.db.set_config(&body.key, &value_str);
-    Json(ApiResponse { data: (), ok: true })
+    let ok = state.pearl_store.set_config(&body.key, &value_str).is_ok();
+    Json(ApiResponse { data: (), ok })
 }
 
 // ── Tasks (headless agent execution via SSE) ──────────────
@@ -2195,7 +2201,7 @@ async fn cancel_handler(State(state): State<AppState>, Path(bead_id): Path<Strin
 
 async fn jira_status_handler(State(state): State<AppState>) -> Json<ApiResponse<crate::jira::SyncStatus>> {
     state.touch();
-    let config = crate::jira::JiraConfig::from_db(&state.db);
+    let config = crate::jira::JiraConfig::from_pearl_store(&state.pearl_store);
     let connected = if let Some(ref c) = config {
         crate::jira::check_connection(c).await
     } else {
@@ -2392,24 +2398,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_router_builds() {
-        let db = Database::open(&PathBuf::from(":memory:")).unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let Ok(pearl_store) = smooth_pearls::PearlStore::init(&tmp.path().join("dolt")) else {
             return;
         };
-        let state = AppState::new(db, pearl_store);
+        let state = AppState::new(pearl_store);
         let _router = build_router(state);
         // If we get here without panic, the router is valid
     }
 
     #[test]
     fn test_app_state_touch_updates_activity() {
-        let db = Database::open(&PathBuf::from(":memory:")).unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let Ok(pearl_store) = smooth_pearls::PearlStore::init(&tmp.path().join("dolt")) else {
             return;
         };
-        let state = AppState::new(db, pearl_store);
+        let state = AppState::new(pearl_store);
 
         let before = *state.last_activity.lock().unwrap();
         std::thread::sleep(Duration::from_millis(10));
@@ -2508,12 +2512,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_delegate_endpoint_creates_pearl() {
-        let db = Database::open(&PathBuf::from(":memory:")).unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let Ok(pearl_store) = smooth_pearls::PearlStore::init(&tmp.path().join("dolt")) else {
             return; // Dolt binary not available, skip
         };
-        let state = AppState::new(db, pearl_store);
+        let state = AppState::new(pearl_store);
         let app = build_router(state.clone());
 
         let body = serde_json::json!({
@@ -2552,7 +2555,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_delegate_status_endpoint_returns_status() {
-        let db = Database::open(&PathBuf::from(":memory:")).unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let Ok(pearl_store) = smooth_pearls::PearlStore::init(&tmp.path().join("dolt")) else {
             return;
@@ -2562,7 +2564,7 @@ mod tests {
         let pearl = crate::pearls::create_pearl(&pearl_store, "test delegation", "test", "subtask", 1).unwrap();
         let pearl_id = pearl.id.clone();
 
-        let state = AppState::new(db, pearl_store);
+        let state = AppState::new(pearl_store);
         let app = build_router(state.clone());
 
         // Check status — should be in_progress (Open maps to in_progress).
@@ -2606,12 +2608,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_delegate_status_not_found() {
-        let db = Database::open(&PathBuf::from(":memory:")).unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let Ok(pearl_store) = smooth_pearls::PearlStore::init(&tmp.path().join("dolt")) else {
             return;
         };
-        let state = AppState::new(db, pearl_store);
+        let state = AppState::new(pearl_store);
         let app = build_router(state);
 
         let response = app

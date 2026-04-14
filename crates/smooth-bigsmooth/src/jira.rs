@@ -1,8 +1,8 @@
-//! Jira REST API client — bidirectional sync with Beads.
+//! Jira REST API client — bidirectional sync with pearls.
 
 use serde::{Deserialize, Serialize};
 
-/// Jira configuration (from SQLite config table).
+/// Jira configuration (from the Dolt `config` table + environment).
 #[derive(Debug, Clone)]
 pub struct JiraConfig {
     pub url: String,
@@ -12,12 +12,15 @@ pub struct JiraConfig {
 }
 
 impl JiraConfig {
-    /// Load Jira config from database + environment.
-    pub fn from_db(db: &crate::db::Database) -> Option<Self> {
-        let url = db.get_config("jira.url").ok()??;
-        let project = db.get_config("jira.project").ok()??;
-        let email = std::env::var("JIRA_EMAIL").ok().or_else(|| db.get_config("jira.email").ok()?)?;
-        let api_token = std::env::var("JIRA_API_TOKEN").ok().or_else(|| db.get_config("jira.api_token").ok()?)?;
+    /// Load Jira config from the pearl store's Dolt config table +
+    /// environment. Env vars beat the DB for the sensitive fields.
+    pub fn from_pearl_store(store: &smooth_pearls::PearlStore) -> Option<Self> {
+        let url = store.get_config("jira.url").ok()??;
+        let project = store.get_config("jira.project").ok()??;
+        let email = std::env::var("JIRA_EMAIL").ok().or_else(|| store.get_config("jira.email").ok().flatten())?;
+        let api_token = std::env::var("JIRA_API_TOKEN")
+            .ok()
+            .or_else(|| store.get_config("jira.api_token").ok().flatten())?;
         Some(Self {
             url,
             project,

@@ -31,17 +31,7 @@ async fn main() -> anyhow::Result<()> {
         .try_init()
         .ok();
 
-    let db_path = std::env::var("SMOOTH_BOARDROOM_DB")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/root/.smooth/smooth.db"));
     let port: u16 = std::env::var("SMOOTH_BOARDROOM_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(4400);
-
-    if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-
-    tracing::info!(db = %db_path.display(), port, "boardroom: opening db");
-    let db = smooth_bigsmooth::db::Database::open(&db_path)?;
 
     // Pearl store: Dolt-backed. Use a per-session temp dir so each
     // Boardroom boot starts with a clean pearl database (no stale data
@@ -95,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
         "boardroom: cast spawned"
     );
 
-    let state = smooth_bigsmooth::server::AppState::new(db, pearl_store).with_boardroom(handles);
+    let state = smooth_bigsmooth::server::AppState::new(pearl_store).with_boardroom(handles);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!(%addr, "boardroom: starting Big Smooth");
     smooth_bigsmooth::server::start(state, addr).await

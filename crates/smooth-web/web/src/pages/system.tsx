@@ -95,8 +95,8 @@ function buildNodes(health: HealthData | null, workers: Worker[]): TopoNode[] {
     const innerNodes = [
         {
             id: 'database',
-            label: 'Database',
-            sublabel: 'SQLite',
+            label: 'Dolt store',
+            sublabel: 'pearls + config',
             color: statusColor(health?.database?.status),
             pulse: health?.database?.status === 'healthy',
         },
@@ -284,7 +284,7 @@ function DetailsTable({ health }: { health: HealthData }) {
             detail: health.leader ? `Uptime: ${formatUptime(health.leader.uptime)}` : '--',
         },
         {
-            label: 'Database',
+            label: 'Dolt store',
             status: health.database?.status,
             detail: health.database?.path ?? '--',
         },

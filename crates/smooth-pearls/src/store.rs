@@ -50,6 +50,12 @@ impl PearlStore {
         Self { dolt }
     }
 
+    /// Path to the Dolt data directory backing this store.
+    #[must_use]
+    pub fn dolt_path(&self) -> &Path {
+        self.dolt.data_dir()
+    }
+
     /// Initialize the Dolt database and create the pearl schema.
     pub fn init(dolt_dir: &Path) -> Result<Self> {
         let dolt = SmoothDolt::new(dolt_dir)?;
@@ -159,6 +165,13 @@ impl PearlStore {
                 content TEXT NOT NULL,
                 source VARCHAR(100),
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+        )?;
+        dolt.exec(
+            "CREATE TABLE IF NOT EXISTS config (
+                k VARCHAR(255) PRIMARY KEY,
+                v TEXT NOT NULL,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )",
         )?;
         Ok(())
@@ -688,6 +701,42 @@ impl PearlStore {
     }
 
     /// Aggregate stats across all pearls.
+    /// Read a key/value from the Dolt `config` table. Returns `None`
+    /// when the key is missing. This replaces the legacy SQLite
+    /// `smooth.db::config` table — all config now lives in the same
+    /// Dolt store as pearls, which means it's version-controlled and
+    /// syncable across machines via `th pearls push/pull`.
+    pub fn get_config(&self, key: &str) -> Result<Option<String>> {
+        let rows = self.dolt.sql(&format!("SELECT v FROM config WHERE k = '{}'", sql_escape(key)))?;
+        Ok(rows.first().and_then(|row| row["v"].as_str().map(String::from)))
+    }
+
+    /// Upsert a key/value into the Dolt `config` table.
+    pub fn set_config(&self, key: &str, value: &str) -> Result<()> {
+        self.dolt.exec(&format!(
+            "INSERT INTO config (k, v, updated_at) VALUES ('{}', '{}', NOW()) \
+             ON DUPLICATE KEY UPDATE v = '{}', updated_at = NOW()",
+            sql_escape(key),
+            sql_escape(value),
+            sql_escape(value),
+        ))?;
+        self.dolt.commit(&format!("config: set {key}"))?;
+        Ok(())
+    }
+
+    /// List all config key/value pairs.
+    pub fn list_config(&self) -> Result<Vec<(String, String)>> {
+        let rows = self.dolt.sql("SELECT k, v FROM config ORDER BY k")?;
+        Ok(rows
+            .iter()
+            .filter_map(|row| {
+                let k = row["k"].as_str()?.to_string();
+                let v = row["v"].as_str()?.to_string();
+                Some((k, v))
+            })
+            .collect())
+    }
+
     pub fn stats(&self) -> Result<PearlStats> {
         let rows = self.dolt.sql("SELECT status, COUNT(*) as cnt FROM pearls GROUP BY status")?;
         let mut stats = PearlStats::default();

@@ -521,8 +521,6 @@ enum PearlCommands {
     Gc,
     /// Migrate from beads
     MigrateFromBeads,
-    /// Migrate pearls from legacy SQLite (smooth.db) into Dolt
-    MigrateFromSqlite,
     /// List all registered pearl projects
     Projects,
 }
@@ -714,12 +712,9 @@ async fn cmd_up(no_leader: bool, port: u16, foreground: bool, max_operators: Opt
     println!("  {} / {}", "Smoo AI".bold(), "Smooth".green().bold());
     println!();
 
-    // Initialize database
-    let db_path = smooth_bigsmooth::db::default_db_path();
-    let db = smooth_bigsmooth::db::Database::open(&db_path)?;
-    println!("  {} Database   {}", "\u{2713}".green().bold(), db_path.display().to_string().dimmed());
-
-    // Initialize pearl store (Dolt-backed)
+    // Initialize pearl store (Dolt-backed). There used to be a SQLite
+    // handle here too, but memories/config/worker_runs all live in
+    // Dolt now — one backend, one sync story.
     let pearl_store = match find_dolt_dir() {
         Ok(dolt_dir) => {
             let store = smooth_pearls::PearlStore::open(&dolt_dir)?;
@@ -748,7 +743,7 @@ async fn cmd_up(no_leader: bool, port: u16, foreground: bool, max_operators: Opt
     }
 
     // Start Big Smooth (API + embedded web UI on same port)
-    let state = smooth_bigsmooth::server::AppState::new(db, pearl_store);
+    let state = smooth_bigsmooth::server::AppState::new(pearl_store);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     println!(
@@ -826,10 +821,10 @@ async fn cmd_status() -> Result<()> {
             let (icon, label) = status_indicator(leader_status);
             println!("  {icon} {:<16} {label}", "Big Smooth");
 
-            // Database
+            // Dolt store (backs pearls, sessions, memories, config)
             let db_status = body["database"].as_str().unwrap_or("healthy");
             let (icon, label) = status_indicator(db_status);
-            println!("  {icon} {:<16} {} {}", "Database", label, "(SQLite)".dimmed());
+            println!("  {icon} {:<16} {} {}", "Dolt store", label, "(pearls + config)".dimmed());
 
             // Smooth Operators (sandboxed AI agents in microVMs)
             let sandbox_status = body["sandbox"].as_str().or_else(|| body["sandboxes"].as_str()).unwrap_or("healthy");
@@ -882,29 +877,22 @@ fn status_indicator(status: &str) -> (String, String) {
 }
 
 fn cmd_db(cmd: DbCommands) -> Result<()> {
-    let db_path = smooth_bigsmooth::db::default_db_path();
+    // Smooth retired SQLite; all durable state (pearls, sessions,
+    // memories, config) now lives in the Dolt store at
+    // ~/.smooth/dolt/ (home) or <repo>/.smooth/dolt/ (per-project).
+    let dolt_dir = dirs_next::home_dir().unwrap_or_default().join(".smooth").join("dolt");
     match cmd {
         DbCommands::Status => {
-            if db_path.exists() {
-                let metadata = std::fs::metadata(&db_path)?;
-                println!("Database: {}", db_path.display());
-                println!("Size: {:.1} KB", metadata.len() as f64 / 1024.0);
+            if dolt_dir.exists() {
+                println!("Dolt store: {}", dolt_dir.display());
+                println!("For per-project pearl counts: cd into a project and run `th pearls stats`.");
             } else {
-                println!("Database not created yet. Run: th up");
+                println!("Dolt store not created yet. Run: th up");
             }
         }
-        DbCommands::Path => println!("{}", db_path.display()),
+        DbCommands::Path => println!("{}", dolt_dir.display()),
         DbCommands::Backup => {
-            if !db_path.exists() {
-                println!("No database to backup.");
-                return Ok(());
-            }
-            let backup_dir = dirs_next::home_dir().unwrap_or_default().join(".smooth").join("backups");
-            std::fs::create_dir_all(&backup_dir)?;
-            let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S");
-            let backup_path = backup_dir.join(format!("smooth-{timestamp}.db"));
-            std::fs::copy(&db_path, &backup_path)?;
-            println!("Backup saved to: {}", backup_path.display());
+            println!("Backups go through Dolt's native push/pull. Run: `th pearls push` to a configured remote.");
         }
     }
     Ok(())
@@ -1559,8 +1547,6 @@ async fn cmd_code(headless: bool, message: Option<String>, file: Option<String>,
         println!("Starting Smooth...");
 
         // Start Big Smooth in background
-        let db_path = smooth_bigsmooth::db::default_db_path();
-        let db = smooth_bigsmooth::db::Database::open(&db_path)?;
         let pearl_store = match find_dolt_dir() {
             Ok(dolt_dir) => smooth_pearls::PearlStore::open(&dolt_dir)?,
             Err(_) => {
@@ -1569,7 +1555,7 @@ async fn cmd_code(headless: bool, message: Option<String>, file: Option<String>,
                 smooth_pearls::PearlStore::init(&dolt_dir)?
             }
         };
-        let state = smooth_bigsmooth::server::AppState::new(db, pearl_store);
+        let state = smooth_bigsmooth::server::AppState::new(pearl_store);
         let addr: SocketAddr = "127.0.0.1:4400".parse()?;
 
         tokio::spawn(async move {
@@ -1632,18 +1618,12 @@ async fn cmd_doctor() -> Result<()> {
         }
     }
 
-    // 2. Check database
-    let db_path = smooth_bigsmooth::db::default_db_path();
-    if db_path.exists() {
-        match smooth_bigsmooth::db::Database::open(&db_path) {
-            Ok(_) => println!("  {} Database: {}", "✓".green().bold(), format!("OK ({})", db_path.display()).green()),
-            Err(e) => {
-                println!("  {} Database: {}", "✗".red().bold(), format!("error ({e})").red());
-                issues += 1;
-            }
-        }
+    // 2. Check Dolt store
+    let dolt_dir = dirs_next::home_dir().unwrap_or_default().join(".smooth").join("dolt");
+    if dolt_dir.exists() {
+        println!("  {} Dolt store: {}", "✓".green().bold(), format!("OK ({})", dolt_dir.display()).green());
     } else {
-        println!("  {} Database: {}", "○".dimmed(), "not created yet (will be created on first run)".dimmed());
+        println!("  {} Dolt store: {}", "○".dimmed(), "not created yet (will be created on first run)".dimmed());
     }
 
     // 3. Check providers
@@ -2216,10 +2196,6 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             cmd_migrate_from_beads(&store)?;
         }
 
-        PearlCommands::MigrateFromSqlite => {
-            cmd_migrate_from_sqlite(&store)?;
-        }
-
         PearlCommands::Projects => {
             let registry = smooth_pearls::Registry::load()?;
             let projects = registry.list();
@@ -2427,152 +2403,6 @@ fn cmd_migrate_from_beads(store: &smooth_pearls::PearlStore) -> Result<()> {
     println!("  Migrated:          {}", format!("{migrated}").green());
     if skipped > 0 {
         println!("  Skipped/errors:    {}", format!("{skipped}").red());
-    }
-
-    Ok(())
-}
-
-fn cmd_migrate_from_sqlite(store: &smooth_pearls::PearlStore) -> Result<()> {
-    println!("{}", "Migrating pearls from SQLite to Dolt...".bold().cyan());
-
-    let db_path = smooth_bigsmooth::db::default_db_path();
-    if !db_path.exists() {
-        println!("  {} No SQLite database found at {}", "○".dimmed(), db_path.display());
-        return Ok(());
-    }
-
-    let conn = rusqlite::Connection::open(&db_path)?;
-
-    // Check if the pearls table exists in SQLite
-    let has_pearls: bool = conn
-        .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='pearls'", [], |row| {
-            row.get::<_, i64>(0)
-        })
-        .unwrap_or(0)
-        > 0;
-    if !has_pearls {
-        println!("  {} No pearls table in SQLite database", "○".dimmed());
-        return Ok(());
-    }
-
-    let mut stmt = conn.prepare("SELECT id, title, description, status, priority, pearl_type, assigned_to, parent_id FROM pearls")?;
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, u8>(4)?,
-            row.get::<_, String>(5)?,
-            row.get::<_, Option<String>>(6)?,
-            row.get::<_, Option<String>>(7)?,
-        ))
-    })?;
-
-    let mut total = 0;
-    let mut migrated = 0;
-    let mut skipped = 0;
-
-    for row in rows {
-        let (old_id, title, description, status_str, priority_val, type_str, assigned_to, parent_id) = row?;
-        total += 1;
-
-        // Check if already exists in Dolt
-        if store.get(&old_id)?.is_some() {
-            skipped += 1;
-            println!("  {} {} already exists in Dolt", "○".dimmed(), old_id.dimmed());
-            continue;
-        }
-
-        let pearl_type = smooth_pearls::PearlType::from_str_loose(&type_str).unwrap_or(smooth_pearls::PearlType::Task);
-        let priority = smooth_pearls::Priority::from_u8(priority_val).unwrap_or(smooth_pearls::Priority::Medium);
-
-        // Load labels from SQLite
-        let labels: Vec<String> = if let Ok(mut label_stmt) = conn.prepare("SELECT label FROM labels WHERE pearl_id = ?1") {
-            label_stmt
-                .query_map(rusqlite::params![&old_id], |r| r.get(0))
-                .ok()
-                .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-
-        let new = smooth_pearls::NewPearl {
-            title,
-            description,
-            pearl_type,
-            priority,
-            assigned_to,
-            parent_id,
-            labels,
-        };
-
-        match store.create(&new) {
-            Ok(pearl) => {
-                // Update status if not open
-                let target_status = smooth_pearls::PearlStatus::from_str_loose(&status_str);
-                if let Some(st) = target_status {
-                    if st != smooth_pearls::PearlStatus::Open {
-                        let _ = store.update(
-                            &pearl.id,
-                            &smooth_pearls::PearlUpdate {
-                                status: Some(st),
-                                ..Default::default()
-                            },
-                        );
-                    }
-                }
-                migrated += 1;
-                println!("  {} {} ← {} ({})", "✓".green(), pearl.id, old_id.dimmed(), new.title.dimmed());
-            }
-            Err(e) => {
-                skipped += 1;
-                println!("  {} {}: {e}", "✗".red(), old_id);
-            }
-        }
-    }
-
-    // Migrate dependencies
-    let mut dep_count = 0;
-    if let Ok(mut stmt) = conn.prepare("SELECT pearl_id, depends_on FROM dependencies") {
-        let deps: Vec<(String, String)> = stmt
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-            .ok()
-            .map(|rows| rows.flatten().collect())
-            .unwrap_or_default();
-        for (pearl_id, depends_on) in &deps {
-            let _ = store.add_dep(pearl_id, depends_on);
-            dep_count += 1;
-        }
-    }
-
-    // Migrate comments
-    let mut comment_count = 0;
-    if let Ok(mut stmt) = conn.prepare("SELECT pearl_id, content FROM comments ORDER BY created_at ASC") {
-        let comments: Vec<(String, String)> = stmt
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-            .ok()
-            .map(|rows| rows.flatten().collect())
-            .unwrap_or_default();
-        for (pearl_id, content) in &comments {
-            let _ = store.add_comment(pearl_id, content);
-            comment_count += 1;
-        }
-    }
-
-    println!();
-    println!("{}", "Migration Summary".bold());
-    println!("  Total SQLite pearls: {total}");
-    println!("  Migrated:            {}", format!("{migrated}").green());
-    if skipped > 0 {
-        println!("  Skipped/existing:    {}", format!("{skipped}").dimmed());
-    }
-    if dep_count > 0 {
-        println!("  Dependencies:        {dep_count}");
-    }
-    if comment_count > 0 {
-        println!("  Comments:            {comment_count}");
     }
 
     Ok(())

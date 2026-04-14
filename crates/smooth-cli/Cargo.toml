@@ -31,7 +31,6 @@ dirs-next.workspace = true
 toml.workspace = true
 owo-colors.workspace = true
 atty.workspace = true
-rusqlite.workspace = true
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 
 [dev-dependencies]

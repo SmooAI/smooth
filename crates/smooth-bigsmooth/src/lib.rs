@@ -4,7 +4,6 @@ pub mod audit;
 pub mod boardroom;
 pub mod boardroom_narc;
 
-pub mod db;
 pub mod diver_client;
 pub mod events;
 pub mod jira;

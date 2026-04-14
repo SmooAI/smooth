@@ -11,7 +11,6 @@ use std::time::Duration;
 use axum::body::Body;
 use http_body_util::BodyExt;
 use hyper::Request;
-use smooth_bigsmooth::db::Database;
 use smooth_bigsmooth::server::{build_router, AppState};
 use smooth_pearls::PearlStore;
 use tower::ServiceExt;
@@ -20,14 +19,12 @@ use tower::ServiceExt;
 /// Returns `None` when the smooth-dolt binary is unavailable.
 fn test_app() -> Option<(axum::Router, AppState)> {
     let dir = tempfile::tempdir().expect("tempdir");
-    let db_path = dir.path().join("test.db");
-    let db = Database::open(&db_path).expect("open db");
     let dolt_dir = dir.path().join("dolt");
     let pearl_store = match PearlStore::init(&dolt_dir) {
         Ok(s) => s,
         Err(_) => return None, // smooth-dolt binary not available
     };
-    let state = AppState::new(db, pearl_store);
+    let state = AppState::new(pearl_store);
     let router = build_router(state.clone());
     // Leak tempdir so it isn't deleted while tests run.
     std::mem::forget(dir);

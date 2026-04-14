@@ -29,12 +29,10 @@ use tokio_tungstenite::tungstenite::Message;
 /// + the tempdir holding its database (kept alive for the test lifetime).
 async fn spawn_bigsmooth() -> (String, TempDir) {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let db_path = tmp.path().join("smooth.db");
-    let db = smooth_bigsmooth::db::Database::open(&db_path).expect("open db");
     let dolt_dir = tmp.path().join("dolt");
     let pearl_store = smooth_pearls::PearlStore::init(&dolt_dir).expect("init pearl store");
 
-    let state = smooth_bigsmooth::server::AppState::new(db, pearl_store);
+    let state = smooth_bigsmooth::server::AppState::new(pearl_store);
     let router = smooth_bigsmooth::server::build_router(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
