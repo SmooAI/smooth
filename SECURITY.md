@@ -229,6 +229,36 @@ that redirect the agent to do legitimate-looking harmful work (e.g.,
 **Mitigation:** don't run Smooth against untrusted codebases. Treat
 "whose code did the agent just read?" as a supply-chain question.
 
+### User-installed MCP servers and plugins
+Smooth lets users extend the tool registry by registering MCP stdio
+servers (`th mcp add`) and CLI-wrapper plugins (`th plugin init`).
+These configs live at `~/.smooth/` (global) and `<repo>/.smooth/`
+(project) and are loaded without a trust prompt — same model as
+`npm install`, `.zshrc`, or cloning a repo and running `pnpm dev`.
+
+A malicious `plugin.toml` or `mcp.toml` in a cloned repo could run
+arbitrary code *within the sandbox* when `th up` brings the operator
+up. We defend this in two ways:
+
+1. **Narc screens tool calls.** CliGuard, injection detectors, and
+   secret detectors apply to every tool invocation — MCP, plugin, or
+   built-in — not just to bash. A plugin that tries to `curl ... | sh`
+   hits the same CliGuard rule as a direct bash call.
+2. **The microVM contains the blast radius.** Plugins and MCP servers
+   run inside the operator's microVM, with network gated by Goalie and
+   filesystem access mediated by Wonk. They cannot touch the host.
+
+What we do **not** promise: that every malicious tool configuration
+is *usefully* prevented from doing its work inside the VM. An
+attacker who installs a deliberately-malicious MCP server onto your
+machine has already compromised your extension surface; Smooth only
+constrains what that server can reach outside the sandbox.
+
+**Mitigation:** review `.smooth/mcp.toml` and `.smooth/plugins/` in
+untrusted repos before the first `th up` there, the same way you'd
+review a `Makefile`, `package.json` `scripts`, or `.envrc` that came
+in with the clone.
+
 ---
 
 ## Assumptions

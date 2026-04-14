@@ -187,6 +187,15 @@ Tables: `pearls`, `pearl_dependencies`, `pearl_labels`, `pearl_comments`,
 - `audit/` — Rotating tool usage logs per actor
 - `providers.json` — LLM credentials
 - `pearl-env/` — Cached operator VM environments (keyed by pearl lineage)
+- `mcp.toml` — MCP server configs (see `docs/extending.md`)
+- `plugins/<name>/plugin.toml` — CLI-wrapper tool manifests
+
+### Project-scoped (`<repo>/.smooth/`)
+- `dolt/` — Pearl database (see above)
+- `mcp.toml` — Project-specific MCP servers; merged with global,
+  project wins on name collision
+- `plugins/<name>/plugin.toml` — Project-specific plugins; same
+  merge rules
 
 ### Building smooth-dolt
 

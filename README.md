@@ -294,6 +294,27 @@ th access deny <bead> <domain>     # Deny domain access
 th access policy <operator-id>     # Show current policy
 ```
 
+### Tools & Plugins
+
+```bash
+# MCP servers (Playwright, GitHub, filesystem, etc.)
+th mcp add playwright npx @playwright/mcp@latest
+th mcp add --project repo-fs npx @modelcontextprotocol/server-filesystem /workspace
+th mcp list                      # Global + project scopes
+th mcp test playwright           # Health check
+th mcp remove playwright
+
+# CLI-wrapper plugins — shell commands exposed as agent tools
+th plugin init jq --command 'jq {{filter}} <<< {{json}}'
+th plugin init --project deploy --command 'scripts/deploy.sh {{env}}'
+th plugin list
+th plugin remove deploy --project
+```
+
+Global config lives at `~/.smooth/`; project config at
+`<repo>/.smooth/`. Project entries shadow global on name collision.
+See [`docs/extending.md`](docs/extending.md) for the full guide.
+
 ### System
 
 ```bash
@@ -303,6 +324,31 @@ th audit tail leader             # View audit logs
 th tailscale status              # Tailscale info
 th worktree create/list/merge    # Git worktrees
 ```
+
+---
+
+## Extending Smooth
+
+Two extension points add tools without rebuilding the binary:
+
+- **MCP servers** — spawn [Model Context
+  Protocol](https://modelcontextprotocol.io) servers like Playwright
+  MCP or GitHub MCP; their tools land in the agent's registry as
+  `<server>.<tool>`.
+- **CLI-wrapper plugins** — drop a TOML manifest at
+  `.smooth/plugins/<name>/plugin.toml` and the runner registers it as
+  `plugin.<name>`, rendering `{{placeholder}}` args into a shell
+  command template.
+
+Both are configurable globally (`~/.smooth/`) and per-project
+(`<repo>/.smooth/`). Project entries shadow global ones. There's
+**no trust gate** on loading these — consistent with `npm install`,
+`.zshrc`, or cloning any repo and running `pnpm dev`. Defense-in-depth
+happens at *call time*: Narc's CliGuard / injection / secret
+detectors gate every tool invocation, Wonk policy gates every
+network + filesystem access, and the whole agent loop runs inside
+a hardware-isolated microVM. See [`docs/extending.md`](docs/extending.md)
+and [`SECURITY.md`](SECURITY.md).
 
 ---
 
