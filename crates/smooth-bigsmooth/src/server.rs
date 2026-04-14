@@ -1442,6 +1442,8 @@ async fn system_health_handler(State(state): State<AppState>) -> Json<ApiRespons
         active_workers: orch.active_workers.len() as u32,
         completed: orch.completed_beads.len() as u32,
     };
+    let sandbox_active = u32::try_from(orch.pool.active_count()).unwrap_or(u32::MAX);
+    let sandbox_max = u32::try_from(orch.pool.max_concurrency()).unwrap_or(u32::MAX);
     drop(orch);
 
     Json(ApiResponse {
@@ -1457,8 +1459,8 @@ async fn system_health_handler(State(state): State<AppState>) -> Json<ApiRespons
             sandbox: SandboxHealth {
                 status: "healthy".into(),
                 backend: "local-microsandbox".into(),
-                active_sandboxes: 0,
-                max_concurrency: 3,
+                active_sandboxes: sandbox_active,
+                max_concurrency: sandbox_max,
             },
             tailscale: TailscaleHealth {
                 status: if ts.connected { "connected" } else { "disconnected" }.into(),
