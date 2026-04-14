@@ -26,10 +26,10 @@ struct Cli {
 enum Commands {
     /// Start Smooth platform
     Up {
-        /// Skip starting the leader service
+        /// Skip starting Big Smooth (API + web UI)
         #[arg(long)]
         no_leader: bool,
-        /// Leader port
+        /// Big Smooth API port
         #[arg(long, default_value = "4400")]
         port: u16,
         /// Run in foreground (default: daemonize)
@@ -724,16 +724,16 @@ async fn cmd_up(no_leader: bool, port: u16, foreground: bool) -> Result<()> {
 
     if no_leader {
         println!();
-        println!("  {}", "Smooth infrastructure ready (leader skipped).".green());
+        println!("  {}", "Smooth infrastructure ready (Big Smooth skipped).".green());
         return Ok(());
     }
 
-    // Start leader (API + embedded web UI on same port)
+    // Start Big Smooth (API + embedded web UI on same port)
     let state = smooth_bigsmooth::server::AppState::new(db, pearl_store);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     println!(
-        "  {} Leader     {}",
+        "  {} Big Smooth {}",
         "\u{2713}".green().bold(),
         format!("http://localhost:{port}").cyan().bold()
     );
@@ -801,10 +801,10 @@ async fn cmd_status() -> Result<()> {
             }
             println!();
 
-            // Leader
+            // Big Smooth
             let leader_status = body["leader"].as_str().or_else(|| body["status"].as_str()).unwrap_or("healthy");
             let (icon, label) = status_indicator(leader_status);
-            println!("  {icon} {:<12} {label}", "Leader");
+            println!("  {icon} {:<12} {label}", "Big Smooth");
 
             // Database
             let db_status = body["database"].as_str().unwrap_or("healthy");
@@ -943,9 +943,9 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
 
             let leader_up = reqwest::get("http://localhost:4400/health").await.is_ok();
             if leader_up {
-                println!("  {} {:<12} {}", "\u{2713}".green().bold(), "Leader", "running".green());
+                println!("  {} {:<12} {}", "\u{2713}".green().bold(), "Big Smooth", "running".green());
             } else {
-                println!("  {} {:<12} {}", "\u{2717}".red().bold(), "Leader", "not running \u{2014} run: th up".red());
+                println!("  {} {:<12} {}", "\u{2717}".red().bold(), "Big Smooth", "not running \u{2014} run: th up".red());
             }
             println!();
         }
@@ -1299,7 +1299,7 @@ async fn cmd_operators() -> Result<()> {
                 }
             }
         }
-        Err(_) => println!("Cannot reach leader. Run: th up"),
+        Err(_) => println!("Cannot reach Big Smooth. Run: th up"),
     }
     Ok(())
 }
@@ -1317,7 +1317,7 @@ async fn cmd_inbox() -> Result<()> {
                 }
             }
         }
-        Err(_) => println!("Cannot reach leader. Run: th up"),
+        Err(_) => println!("Cannot reach Big Smooth. Run: th up"),
     }
     Ok(())
 }

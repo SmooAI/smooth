@@ -1403,7 +1403,7 @@ async fn health_handler(State(state): State<AppState>) -> Json<HealthResponse> {
     state.touch();
     Json(HealthResponse {
         ok: true,
-        service: "smooth-leader".into(),
+        service: "big-smooth".into(),
         version: env!("CARGO_PKG_VERSION").into(),
         uptime: state.start_time.elapsed().as_secs_f64(),
         timestamp: chrono::Utc::now().to_rfc3339(),

@@ -37,7 +37,7 @@ cargo install --path crates/smooth-cli
 # Authenticate with your LLM provider
 th auth login opencode-zen
 
-# Start Smooth (leader API + embedded web dashboard)
+# Start Smooth (Big Smooth API + embedded web dashboard)
 th up
 
 # Open the interactive coding assistant

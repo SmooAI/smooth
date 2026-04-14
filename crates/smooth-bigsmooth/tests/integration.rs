@@ -48,7 +48,7 @@ async fn health_endpoint() {
 
     let body = json_body(resp).await;
     assert_eq!(body["ok"], true);
-    assert_eq!(body["service"], "smooth-leader");
+    assert_eq!(body["service"], "big-smooth");
     assert!(body["uptime"].as_f64().is_some());
     assert!(body["timestamp"].as_str().is_some());
 }
