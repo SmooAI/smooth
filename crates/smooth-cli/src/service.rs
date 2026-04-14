@@ -200,6 +200,7 @@ mod macos {
         // Escape minimal XML-unsafe chars. Paths with & < > in them are
         // vanishingly rare on macOS but may as well be correct.
         let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+        let home = dirs_next::home_dir().map(|h| h.display().to_string()).unwrap_or_else(|| "/tmp".to_string());
         format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -213,10 +214,14 @@ mod macos {
         <string>up</string>
         <string>--foreground</string>
     </array>
+    <key>WorkingDirectory</key>
+    <string>{home}</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
     <key>StandardOutPath</key>
     <string>{log}</string>
     <key>StandardErrorPath</key>
@@ -225,6 +230,8 @@ mod macos {
     <dict>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>{home}</string>
     </dict>
 </dict>
 </plist>
@@ -233,6 +240,7 @@ mod macos {
             exe = esc(&exe.display().to_string()),
             log = esc(&log.display().to_string()),
             err = esc(&err.display().to_string()),
+            home = esc(&home),
         )
     }
 
@@ -348,6 +356,7 @@ After=network.target
 [Service]
 Type=simple
 ExecStart={exe} up --foreground
+WorkingDirectory=%h
 Restart=on-failure
 RestartSec=3s
 StandardOutput=append:{log}
@@ -502,6 +511,8 @@ mod tests {
         assert!(body.contains("<string>--foreground</string>"));
         assert!(body.contains("<key>KeepAlive</key>"));
         assert!(body.contains("<key>RunAtLoad</key>"));
+        assert!(body.contains("<key>WorkingDirectory</key>"));
+        assert!(body.contains("<key>ThrottleInterval</key>"));
         assert!(body.contains("/tmp/smooth.log"));
         assert!(body.contains("/tmp/smooth.err"));
     }
@@ -514,6 +525,7 @@ mod tests {
         let err = std::path::PathBuf::from("/tmp/smooth.err");
         let unit = linux::render_unit(&exe, &log, &err);
         assert!(unit.contains("ExecStart=/opt/th up --foreground"));
+        assert!(unit.contains("WorkingDirectory=%h"));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("WantedBy=default.target"));
         assert!(unit.contains("append:/tmp/smooth.log"));
