@@ -49,8 +49,29 @@ enum Commands {
         #[command(subcommand)]
         cmd: AuthCommands,
     },
-    /// Trigger work on a bead
-    Run { bead_id: String },
+    /// Run a pearl through a Smooth Operator in a microVM — streams
+    /// agent events to stdout. With --keep-alive, the VM stays up
+    /// after the agent completes so you can poke at dev servers,
+    /// REPLs, etc.; stop with `th operators kill <id>`.
+    Run {
+        /// Pearl id, or a task description prefixed with a space
+        /// (e.g. `th run "refactor x to y"`). If empty, picks the
+        /// first ready pearl.
+        pearl_id: Option<String>,
+        /// OCI image for the operator VM. Defaults to server-side
+        /// SMOOTH_WORKER_IMAGE (currently alpine). Use operator-node
+        /// for JS/TS work.
+        #[arg(long)]
+        image: Option<String>,
+        /// Keep the sandbox alive after the agent completes (for
+        /// dev servers, interactive review). Must explicitly stop
+        /// via `th operators kill <id>`.
+        #[arg(long)]
+        keep_alive: bool,
+        /// Override the default model for this run
+        #[arg(long)]
+        model: Option<String>,
+    },
     /// Pause a running Smooth Operator
     Pause { bead_id: String },
     /// Resume a paused Smooth Operator
@@ -64,7 +85,10 @@ enum Commands {
     /// Show messages requiring attention
     Inbox,
     /// Smooth Operator management
-    Operators,
+    Operators {
+        #[command(subcommand)]
+        cmd: Option<OperatorsCommands>,
+    },
     /// Project management
     Project {
         #[command(subcommand)]
@@ -188,6 +212,14 @@ enum Commands {
         #[command(subcommand)]
         cmd: CacheCommands,
     },
+}
+
+#[derive(Subcommand)]
+enum OperatorsCommands {
+    /// List running operator VMs
+    List,
+    /// Tear down a running operator VM
+    Kill { operator_id: String },
 }
 
 #[derive(Subcommand)]
@@ -624,9 +656,14 @@ async fn main() -> Result<()> {
         Some(Commands::Status) => cmd_status().await,
         Some(Commands::Db { cmd }) => cmd_db(cmd),
         Some(Commands::Auth { cmd }) => cmd_auth(cmd).await,
-        Some(Commands::Operators) => cmd_operators().await,
+        Some(Commands::Operators { cmd }) => cmd_operators(cmd).await,
         Some(Commands::Inbox) => cmd_inbox().await,
-        Some(Commands::Run { bead_id }) => cmd_run(&bead_id).await,
+        Some(Commands::Run {
+            pearl_id,
+            image,
+            keep_alive,
+            model,
+        }) => cmd_run(pearl_id.as_deref(), image.as_deref(), keep_alive, model.as_deref()).await,
         Some(Commands::Approve { bead_id }) => cmd_approve(&bead_id).await,
         Some(Commands::Pause { bead_id }) => cmd_steer(&bead_id, "pause", None).await,
         Some(Commands::Resume { bead_id }) => cmd_steer(&bead_id, "resume", None).await,
@@ -1336,22 +1373,63 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_operators() -> Result<()> {
-    match reqwest::get("http://localhost:4400/api/workers").await {
-        Ok(resp) => {
-            let json: serde_json::Value = resp.json().await?;
-            let workers = json["data"].as_array();
-            if workers.is_none_or(Vec::is_empty) {
-                println!("No active Smooth Operators.");
-            } else {
-                for w in workers.unwrap_or(&vec![]) {
-                    println!("{}", serde_json::to_string_pretty(w)?);
+async fn cmd_operators(cmd: Option<OperatorsCommands>) -> Result<()> {
+    let client = reqwest::Client::new();
+    match cmd.unwrap_or(OperatorsCommands::List) {
+        OperatorsCommands::List => {
+            let resp = client.get("http://localhost:4400/api/workers").send().await;
+            let json: serde_json::Value = match resp {
+                Ok(r) => r.json().await.unwrap_or(serde_json::json!({"data": []})),
+                Err(_) => {
+                    println!("Cannot reach Big Smooth. Run: th up");
+                    return Ok(());
+                }
+            };
+            let empty = vec![];
+            let workers = json["data"].as_array().unwrap_or(&empty);
+            if workers.is_empty() {
+                println!("\n  {} No active Smooth Operators.\n", "ℹ".cyan());
+                return Ok(());
+            }
+            println!("\n  {}\n", "Active Smooth Operators".cyan().bold());
+            for w in workers {
+                let id = w.get("operator_id").and_then(|v| v.as_str()).unwrap_or("?");
+                let bead = w.get("bead_id").and_then(|v| v.as_str()).unwrap_or("");
+                let host_port = w.get("host_port").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                let ports = w.get("port_mappings").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                println!("  {} {} {}", "●".green().bold(), id.bold(), format!("(pearl {bead})").dimmed());
+                if host_port > 0 {
+                    println!("    {} {}", "runner ws".dimmed(), format!("ws://localhost:{host_port}").cyan());
+                }
+                for p in ports {
+                    if let (Some(guest), Some(host)) = (p.get(0).and_then(serde_json::Value::as_u64), p.get(1).and_then(serde_json::Value::as_u64)) {
+                        if guest != 4096 {
+                            // Skip the runner's own control port; show user-useful forwards.
+                            println!("    {} guest:{guest} → {}", "port".dimmed(), format!("http://localhost:{host}").cyan());
+                        }
+                    }
                 }
             }
+            println!();
+            Ok(())
         }
-        Err(_) => println!("Cannot reach Big Smooth. Run: th up"),
+        OperatorsCommands::Kill { operator_id } => {
+            let url = format!("http://localhost:4400/api/workers/{operator_id}");
+            let resp = client.delete(&url).send().await;
+            match resp {
+                Ok(r) => {
+                    let body: serde_json::Value = r.json().await.unwrap_or(serde_json::json!({"ok": false}));
+                    if body.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+                        println!("\n  {} Operator {} stopped.\n", "✓".green().bold(), operator_id.bold());
+                    } else {
+                        println!("\n  {} No active operator with id {}\n", "✗".red().bold(), operator_id.bold());
+                    }
+                }
+                Err(_) => println!("Cannot reach Big Smooth. Run: th up"),
+            }
+            Ok(())
+        }
     }
-    Ok(())
 }
 
 async fn cmd_inbox() -> Result<()> {
@@ -1372,9 +1450,159 @@ async fn cmd_inbox() -> Result<()> {
     Ok(())
 }
 
-async fn cmd_run(bead_id: &str) -> Result<()> {
-    println!("Running bead {bead_id}...");
-    println!("Operator creation coming in next phase.");
+async fn cmd_run(pearl_id_arg: Option<&str>, image: Option<&str>, keep_alive: bool, model: Option<&str>) -> Result<()> {
+    // Resolve the task message.
+    // - If pearl_id_arg looks like a pearl id (starts with "th-"), fetch
+    //   the pearl's title+description and use that as the task message.
+    // - Otherwise treat the whole arg as an ad-hoc task message.
+    // - If missing, grab the first ready pearl.
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)).build()?;
+
+    let (pearl_id, message) = match pearl_id_arg {
+        Some(arg) if arg.starts_with("th-") => {
+            let url = format!("http://localhost:4400/api/pearls/{arg}");
+            let resp: serde_json::Value = client.get(&url).send().await?.json().await?;
+            let data = resp.get("data").cloned().unwrap_or(serde_json::Value::Null);
+            if data.is_null() {
+                anyhow::bail!("pearl {arg} not found");
+            }
+            let title = data.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let desc = data.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let body = if desc.is_empty() { title.clone() } else { format!("{title}\n\n{desc}") };
+            (Some(arg.to_string()), body)
+        }
+        Some(adhoc) => (None, adhoc.to_string()),
+        None => {
+            // Take the first ready pearl.
+            let resp: serde_json::Value = client.get("http://localhost:4400/api/pearls/ready").send().await?.json().await?;
+            let first = resp.get("data").and_then(|v| v.as_array()).and_then(|a| a.first()).cloned();
+            let first = first.ok_or_else(|| anyhow::anyhow!("no ready pearls — pass a pearl id or a task description"))?;
+            let id = first.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let title = first.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let desc = first.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let body = if desc.is_empty() { title.clone() } else { format!("{title}\n\n{desc}") };
+            (Some(id), body)
+        }
+    };
+
+    let cwd = std::env::current_dir()?;
+    if let Some(ref id) = pearl_id {
+        println!("\n  {} {} {}", "▶".cyan().bold(), "Running pearl".bold(), id.bold());
+    } else {
+        println!("\n  {} {}", "▶".cyan().bold(), "Running ad-hoc task".bold());
+    }
+    println!("  {} {}", "cwd".dimmed(), cwd.display().to_string().dimmed());
+    if let Some(img) = image {
+        println!("  {} {}", "image".dimmed(), img.dimmed());
+    }
+    if keep_alive {
+        println!("  {} VM will stay alive after completion", "⧗".yellow());
+    }
+    println!();
+
+    let body = serde_json::json!({
+        "message": message,
+        "model": model,
+        "working_dir": cwd.to_string_lossy(),
+        "image": image,
+        "keep_alive": keep_alive,
+    });
+
+    // Stream SSE from /api/tasks.
+    use futures_util::StreamExt;
+
+    let stream_client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30 * 60)).build()?;
+    let resp = stream_client.post("http://localhost:4400/api/tasks").json(&body).send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("dispatch failed: HTTP {}", resp.status());
+    }
+
+    let mut byte_stream = resp.bytes_stream();
+    let mut buffer = String::new();
+    let mut operator_id: Option<String> = None;
+    let mut saw_complete = false;
+
+    while let Some(chunk_res) = byte_stream.next().await {
+        let chunk = chunk_res?;
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        // SSE frames separated by "\n\n". Each starts with "data: ".
+        while let Some(idx) = buffer.find("\n\n") {
+            let frame = buffer[..idx].to_string();
+            buffer.drain(..=idx + 1);
+
+            for line in frame.lines() {
+                let Some(payload) = line.strip_prefix("data: ") else {
+                    continue;
+                };
+                let Ok(evt) = serde_json::from_str::<serde_json::Value>(payload) else {
+                    continue;
+                };
+                let kind = evt.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                match kind {
+                    "TokenDelta" => {
+                        if let Some(content) = evt.get("content").and_then(|v| v.as_str()) {
+                            print!("{content}");
+                            let _ = std::io::Write::flush(&mut std::io::stdout());
+                        }
+                    }
+                    "ToolCallStart" => {
+                        let tool = evt.get("tool_name").and_then(|v| v.as_str()).unwrap_or("?");
+                        println!("\n  {} {}", "⚙".cyan(), tool.dimmed());
+                        // Capture operator id from sandbox.create result
+                        // (server emits it as part of ToolCallComplete,
+                        // but also at create-time in `arguments`).
+                        if tool == "sandbox.create" {
+                            if let Some(args) = evt.get("arguments").and_then(|v| v.as_str()) {
+                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args) {
+                                    if let Some(id) = parsed.get("operator_id").and_then(|v| v.as_str()) {
+                                        operator_id = Some(id.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "ToolCallComplete" => {
+                        let tool = evt.get("tool_name").and_then(|v| v.as_str()).unwrap_or("?");
+                        let is_error = evt.get("is_error").and_then(serde_json::Value::as_bool).unwrap_or(false);
+                        if tool == "sandbox.create" {
+                            if let Some(result) = evt.get("result").and_then(|v| v.as_str()) {
+                                operator_id = Some(result.to_string());
+                                println!("  {} operator {}", "●".green(), result.bold());
+                            }
+                        }
+                        if is_error {
+                            let result = evt.get("result").and_then(|v| v.as_str()).unwrap_or("");
+                            println!("  {} {} {}", "✗".red().bold(), tool.dimmed(), result.red());
+                        }
+                    }
+                    "Complete" | "TaskComplete" => {
+                        saw_complete = true;
+                        println!("\n  {} agent completed", "✓".green().bold());
+                    }
+                    "Error" | "TaskError" => {
+                        let msg = evt.get("message").and_then(|v| v.as_str()).unwrap_or("unknown error");
+                        println!("\n  {} {msg}", "✗".red().bold());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    if keep_alive && saw_complete {
+        let id = operator_id.as_deref().unwrap_or("<unknown>");
+        println!();
+        println!("  {} VM {} still running.", "⧗".yellow(), id.bold());
+        println!("  {} forwarded ports are listed via: {}", "→".dimmed(), "th operators".cyan());
+        println!(
+            "  {} stop with:                      {}",
+            "→".dimmed(),
+            format!("th operators kill {id}").cyan()
+        );
+        println!();
+    }
+
     Ok(())
 }
 

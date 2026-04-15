@@ -246,6 +246,16 @@ pub struct TaskRequest {
     pub model: Option<String>,
     pub budget: Option<f64>,
     pub working_dir: Option<String>,
+    /// OCI image for the operator VM. Overrides `SMOOTH_WORKER_IMAGE`
+    /// env default. Use `smooai/operator-node:latest` for JS/TS work,
+    /// etc. None = server default.
+    #[serde(default)]
+    pub image: Option<String>,
+    /// Keep the operator VM alive after the agent emits Completed so
+    /// the user can poke at a running dev server / REPL. Must be
+    /// explicitly torn down via `th operators stop <id>`.
+    #[serde(default)]
+    pub keep_alive: bool,
 }
 
 // ── NarcHook wrapper for ToolHook ─────────────────────────
@@ -525,7 +535,9 @@ async fn handle_client_event(state: &AppState, event: ClientEvent) {
             budget,
             working_dir,
         } => {
-            dispatch_ws_task(state, message, model, budget, working_dir).await;
+            // WebSocket callers don't currently carry image / keep_alive;
+            // HTTP /api/tasks is the dispatch path for those.
+            dispatch_ws_task(state, message, model, budget, working_dir, None, false).await;
         }
         ClientEvent::TaskCancel { task_id } => {
             tracing::info!(task_id, "Task cancel requested via WebSocket");
@@ -600,8 +612,16 @@ async fn handle_client_event(state: &AppState, event: ClientEvent) {
 /// READ-ONLY. The operator runner inside the microVM hosts the real tools
 /// (read_file, write_file, edit_file, grep, bash, etc.) with the full
 /// security cast (Wonk/Goalie/Narc/Scribe) watching every call.
-async fn dispatch_ws_task(state: &AppState, message: String, model: Option<String>, budget: Option<f64>, working_dir: Option<String>) {
-    dispatch_ws_task_sandboxed(state, message, model, budget, working_dir).await;
+async fn dispatch_ws_task(
+    state: &AppState,
+    message: String,
+    model: Option<String>,
+    budget: Option<f64>,
+    working_dir: Option<String>,
+    image: Option<String>,
+    keep_alive: bool,
+) {
+    dispatch_ws_task_sandboxed(state, message, model, budget, working_dir, image, keep_alive).await;
 }
 
 /// Build a human-readable resumption context block from prior session
@@ -680,7 +700,15 @@ fn find_operator_runner_binary() -> Option<std::path::PathBuf> {
     None
 }
 
-async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Option<String>, budget: Option<f64>, working_dir: Option<String>) {
+async fn dispatch_ws_task_sandboxed(
+    state: &AppState,
+    message: String,
+    model: Option<String>,
+    budget: Option<f64>,
+    working_dir: Option<String>,
+    image: Option<String>,
+    keep_alive: bool,
+) {
     use crate::sandbox::{self, BindMount, SandboxConfig};
 
     let task_id = uuid::Uuid::new_v4().to_string();
@@ -688,6 +716,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
     let pearl_store = state.pearl_store.clone();
     let last_activity = state.last_activity.clone();
     let boardroom_handles = state.boardroom.clone();
+    let orchestrator = state.orchestrator.clone();
 
     // Note: the old printable-ASCII guard was removed — the task message
     // is now delivered via SMOOTH_TASK_FILE (a bind-mounted tempfile), not
@@ -1190,6 +1219,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
                 .filter(|k| !k.is_empty())
                 .or_else(|| project_cache_key(&workspace_canon))
                 .or_else(|| Some(tid.clone())),
+            image: image.clone(),
             ..SandboxConfig::default()
         };
 
@@ -1342,6 +1372,27 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
             is_error: code != 0,
             duration_ms: u64::try_from(exec_started.elapsed().as_millis()).unwrap_or(u64::MAX),
         });
+
+        if keep_alive {
+            // Keep the VM alive so the user can poke at running
+            // dev servers etc. via forwarded ports. Register in the
+            // orchestrator's active_workers so DELETE /api/workers/<id>
+            // can find and tear it down.
+            {
+                let mut orch = orchestrator.lock().await;
+                orch.active_workers.insert(handle.operator_id.clone(), handle.clone());
+            }
+            let _ = event_tx.send(ServerEvent::TokenDelta {
+                task_id: tid.clone(),
+                content: format!(
+                    "[keep-alive] operator VM {} staying up; stop with `th operators kill {}`.\n",
+                    handle.operator_id, handle.operator_id
+                ),
+            });
+            tracing::info!(task_id = tid, operator = %handle.operator_id, "sandboxed dispatch: keep-alive mode, VM left running");
+            touch();
+            return;
+        }
 
         if let Err(e) = sandbox::destroy_sandbox(&handle.msb_name).await {
             tracing::warn!(task_id = tid, error = %e, "sandboxed dispatch: destroy_sandbox failed");
@@ -1536,9 +1587,11 @@ async fn run_task_handler(State(state): State<AppState>, Json(req): Json<TaskReq
     let model = req.model.clone();
     let budget = req.budget;
     let working_dir = req.working_dir.clone();
+    let image = req.image.clone();
+    let keep_alive = req.keep_alive;
 
     tokio::spawn(async move {
-        dispatch_ws_task(&state_clone, message, model, budget, working_dir).await;
+        dispatch_ws_task(&state_clone, message, model, budget, working_dir, image, keep_alive).await;
     });
 
     // Bridge ServerEvent broadcast → AgentEvent SSE stream
@@ -1882,22 +1935,69 @@ async fn stats_handler(State(state): State<AppState>) -> Json<ApiResponse<smooth
 
 async fn list_workers_handler(State(state): State<AppState>) -> Json<ApiResponse<Vec<serde_json::Value>>> {
     state.touch();
-    // TODO: Query worker_runs from SQLite
-    Json(ApiResponse { data: vec![], ok: true })
+    let orch = state.orchestrator.lock().await;
+    let data: Vec<serde_json::Value> = orch
+        .active_workers
+        .iter()
+        .map(|(id, handle)| {
+            serde_json::json!({
+                "operator_id": id,
+                "msb_name": handle.msb_name,
+                "bead_id": handle.bead_id,
+                "host_port": handle.host_port,
+                "port_mappings": handle.port_mappings,
+                "created_at": handle.created_at,
+            })
+        })
+        .collect();
+    Json(ApiResponse { data, ok: true })
 }
 
 async fn get_worker_handler(State(state): State<AppState>, Path(id): Path<String>) -> Json<ApiResponse<serde_json::Value>> {
     state.touch();
-    Json(ApiResponse {
-        data: serde_json::json!({"id": id, "status": "unknown"}),
-        ok: true,
-    })
+    let orch = state.orchestrator.lock().await;
+    let data = orch
+        .active_workers
+        .get(&id)
+        .map(|h| {
+            serde_json::json!({
+                "operator_id": id,
+                "msb_name": h.msb_name,
+                "bead_id": h.bead_id,
+                "host_port": h.host_port,
+                "port_mappings": h.port_mappings,
+                "created_at": h.created_at,
+                "status": "running",
+            })
+        })
+        .unwrap_or_else(|| serde_json::json!({"id": id, "status": "unknown"}));
+    Json(ApiResponse { data, ok: true })
 }
 
 async fn kill_worker_handler(State(state): State<AppState>, Path(id): Path<String>) -> Json<ApiResponse<()>> {
     state.touch();
-    tracing::info!("Kill worker {id}");
-    Json(ApiResponse { data: (), ok: true })
+    // Look up the sandbox handle so we can destroy the VM by its
+    // msb_name (the sandbox registry key), then drop it from the
+    // orchestrator's active_workers map.
+    let msb_name = {
+        let orch = state.orchestrator.lock().await;
+        orch.active_workers.get(&id).map(|h| h.msb_name.clone())
+    };
+    match msb_name {
+        Some(name) => {
+            if let Err(e) = crate::sandbox::destroy_sandbox(&name).await {
+                tracing::warn!(operator = %id, error = %e, "kill_worker: destroy_sandbox failed");
+            }
+            let mut orch = state.orchestrator.lock().await;
+            orch.active_workers.remove(&id);
+            tracing::info!(operator = %id, "kill_worker: VM destroyed and removed from active set");
+            Json(ApiResponse { data: (), ok: true })
+        }
+        None => {
+            tracing::warn!(operator = %id, "kill_worker: no active operator with that id");
+            Json(ApiResponse { data: (), ok: false })
+        }
+    }
 }
 
 // ── Messages ───────────────────────────────────────────────

@@ -87,6 +87,10 @@ pub struct SandboxConfig {
     /// Additional port mappings beyond the default operator WebSocket (guest:4096).
     /// Each entry maps a guest port to a host port (0 = kernel-assigned).
     pub extra_ports: Vec<PortMapping>,
+    /// OCI image to boot the VM from. Overrides the `SMOOTH_WORKER_IMAGE`
+    /// env default when set. Use `smooai/operator-node:latest` for JS/TS
+    /// dev work, etc.
+    pub image: Option<String>,
 }
 
 impl Default for SandboxConfig {
@@ -107,6 +111,7 @@ impl Default for SandboxConfig {
             allow_host_loopback: false,
             env_cache_key: None,
             extra_ports: Vec::new(),
+            image: None,
         }
     }
 }
@@ -182,7 +187,10 @@ impl SandboxClient for DirectSandboxClient {
         let name = format!("smooth-operator-{}", config.operator_id);
         let spec = SandboxSpec {
             name: name.clone(),
-            image: std::env::var("SMOOTH_WORKER_IMAGE").unwrap_or_else(|_| "alpine".into()),
+            image: config
+                .image
+                .clone()
+                .unwrap_or_else(|| std::env::var("SMOOTH_WORKER_IMAGE").unwrap_or_else(|_| "alpine".into())),
             cpus: config.cpus,
             memory_mb: config.memory_mb,
             env: config.env.clone(),
@@ -288,7 +296,10 @@ impl SandboxClient for BillSandboxClient {
         let name = format!("smooth-operator-{}", config.operator_id);
         let spec = SandboxSpec {
             name: name.clone(),
-            image: std::env::var("SMOOTH_WORKER_IMAGE").unwrap_or_else(|_| "alpine".into()),
+            image: config
+                .image
+                .clone()
+                .unwrap_or_else(|| std::env::var("SMOOTH_WORKER_IMAGE").unwrap_or_else(|_| "alpine".into())),
             cpus: config.cpus,
             memory_mb: config.memory_mb,
             env: config.env.clone(),
