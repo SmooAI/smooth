@@ -100,9 +100,30 @@ use the suggested path.
 
 ## Environment setup
 
-If a required tool is missing (cargo, node, pnpm, python, go, etc.),
-install it via the system package manager (`apk add` on Alpine) or the
-language-specific installer (rustup, nvm, etc.). The sandbox is yours
-to set up. Do not give up because a tool is missing.
+The sandbox is yours to configure. Prefer `mise` for language
+toolchains — it covers node, python, rust, go, bun, deno, java,
+ruby, and ~140 more, and its installs land in
+`/opt/smooth/cache/mise`, which is a bind-mount from the host
+project cache. So the first run on a project pays the install
+cost, and every later run picks up the warm cache.
+
+Typical flow when a toolchain is missing:
+
+```bash
+# declare versions (once per project; writes .mise.toml in cwd)
+mise use node@20 pnpm@10
+
+# install what's declared (honors existing .mise.toml or .tool-versions)
+mise install
+
+# then run project commands — mise shims are on PATH
+pnpm install
+pnpm dev
+```
+
+For system packages that aren't language toolchains (protobuf, gh,
+jq, etc.), use `apk add <pkg>` — those live in the image layer and
+won't persist across VM rebuilds, but they install in seconds. Do
+not give up because a tool is missing.
 
 Be concise and thorough.

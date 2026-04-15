@@ -1,0 +1,76 @@
+# Smooth Operator image — the microVM Bootstrap Bill spawns for every
+# Smooth Operator (the sandboxed AI agent that runs a pearl).
+#
+# One image. No polyglot variants. The agent sets up whatever
+# toolchain the task needs at runtime via `mise`
+# (https://mise.jdx.dev) — node + pnpm, python + uv, rust + cargo,
+# go, bun, deno, and ~140 others — and those installs land in
+# /opt/smooth/cache/mise, which Bill bind-mounts from
+# ~/.smooth/project-cache/<project>/mise on the host. Second run on
+# the same project picks up a warm cache in milliseconds.
+#
+# Why this shape:
+#   * Zero "which image is for this stack?" — there's one image.
+#   * The agent controls its own environment. If it needs `protoc`,
+#     it runs `apk add protobuf` (or `mise use` etc.) itself.
+#   * Fast boot. Base image stays <100 MB.
+#   * No Docker on user machines — microsandbox pulls this image
+#     directly from the registry once we ship.
+#
+# Build: scripts/build-smooth-operator-image.sh
+FROM alpine:3.20
+
+# System essentials the agent shouldn't have to install itself:
+#   - ca-certificates: HTTPS verification through the Goalie proxy
+#   - git: universal enough that every project wants it
+#   - bash: `pnpm exec`, `turbo`, lots of tool scripts assume bash
+#   - curl + wget: mise uses them to fetch toolchains
+#   - tini: proper PID 1 so forked dev-server children get reaped
+#   - libc6-compat + gcompat: glibc shim for prebuilt Node / Python
+#     binaries that mise pulls (alpine is musl-native)
+#   - build-base: needed the moment any project's postinstall wants
+#     to compile a native dep. Adds ~180MB but saves a ton of
+#     "cannot find 'make'" runs.
+RUN apk add --no-cache \
+      ca-certificates \
+      git \
+      bash \
+      curl \
+      wget \
+      tini \
+      libc6-compat \
+      gcompat \
+      build-base
+
+# mise — the polyglot toolchain agent install mechanism. Installed
+# globally so it's on PATH for every shell. MISE_DATA_DIR +
+# MISE_CACHE_DIR both point at /opt/smooth/cache/mise so everything
+# mise writes lives in the bind-mounted project cache: toolchain
+# downloads, installed versions, shim dirs, all of it.
+RUN curl -fsSL https://mise.run | sh \
+    && mv /root/.local/bin/mise /usr/local/bin/mise \
+    && mise --version
+
+# Bind-mount targets. Bill sets up these directories from the host
+# at boot; creating them here lets the runner touch them before the
+# mount races it.
+RUN mkdir -p /workspace /opt/smooth/cache/mise /opt/smooth/bin
+WORKDIR /workspace
+
+ENV MISE_DATA_DIR=/opt/smooth/cache/mise \
+    MISE_CACHE_DIR=/opt/smooth/cache/mise/cache \
+    MISE_INSTALL_PATH=/usr/local/bin/mise \
+    PATH=/opt/smooth/cache/mise/shims:/opt/smooth/bin:/usr/local/bin:/usr/bin:/bin
+
+# Operator runner — copied last so base / mise layers stay cached
+# across runner rebuilds.
+COPY target/aarch64-unknown-linux-musl/release/smooth-operator-runner /opt/smooth/bin/smooth-operator-runner
+
+ARG VERSION=dev
+LABEL org.opencontainers.image.title="smooai-smooth-operator" \
+      org.opencontainers.image.description="Smooth Operator sandbox runtime with mise for agent-driven toolchain install" \
+      org.opencontainers.image.source="https://github.com/SmooAI/smooth" \
+      org.opencontainers.image.version="${VERSION}"
+
+# tini reaps children cleanly when the VM shuts down.
+ENTRYPOINT ["/sbin/tini", "--", "/opt/smooth/bin/smooth-operator-runner"]

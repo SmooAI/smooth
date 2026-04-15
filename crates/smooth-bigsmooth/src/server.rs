@@ -246,9 +246,10 @@ pub struct TaskRequest {
     pub model: Option<String>,
     pub budget: Option<f64>,
     pub working_dir: Option<String>,
-    /// OCI image for the operator VM. Overrides `SMOOTH_WORKER_IMAGE`
-    /// env default. Use `smooai/operator-node:latest` for JS/TS work,
-    /// etc. None = server default.
+    /// OCI image for the operator VM. Overrides the server's
+    /// `SMOOTH_WORKER_IMAGE` env default. Usual value is
+    /// `smooai/smooth-operator:latest` (unified image; agent
+    /// installs toolchains at runtime via mise).
     #[serde(default)]
     pub image: Option<String>,
     /// Keep the operator VM alive after the agent emits Completed so

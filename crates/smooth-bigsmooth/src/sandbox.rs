@@ -88,8 +88,10 @@ pub struct SandboxConfig {
     /// Each entry maps a guest port to a host port (0 = kernel-assigned).
     pub extra_ports: Vec<PortMapping>,
     /// OCI image to boot the VM from. Overrides the `SMOOTH_WORKER_IMAGE`
-    /// env default when set. Use `smooai/operator-node:latest` for JS/TS
-    /// dev work, etc.
+    /// env default when set. Usual value is
+    /// `smooai/smooth-operator:latest` — a unified image where the
+    /// agent installs toolchains at runtime via mise, persisted to
+    /// the project cache bind mount.
     pub image: Option<String>,
 }
 

@@ -1,26 +1,31 @@
 #!/usr/bin/env bash
-# Build the smooai-operator OCI image.
+# Build the smooai/smooth-operator OCI image.
+#
+# One unified Smooth Operator image with mise baked in — the agent
+# handles its own toolchain install at runtime (node, python, rust,
+# go, …) and persists installs into /opt/smooth/cache/mise via the
+# project-scoped bind mount.
 #
 # Steps:
 #   1. Cross-compile smooth-operator-runner to aarch64-unknown-linux-musl
 #      (delegates to build-operator-runner.sh — incremental).
-#   2. docker/podman build docker/Dockerfile.operator tagged with the
-#      workspace version and `latest`.
+#   2. docker/podman build docker/Dockerfile.smooth-operator tagged
+#      with the workspace version and `latest`.
 #
 # Usage:
-#   scripts/build-operator-image.sh                 # tags with workspace version
-#   scripts/build-operator-image.sh v1.2.3          # explicit tag
+#   scripts/build-smooth-operator-image.sh                 # tags with workspace version
+#   scripts/build-smooth-operator-image.sh v1.2.3          # explicit tag
 #
 # Environment:
 #   SMOOTH_IMAGE_TOOL   `docker` (default) or `podman`
-#   SMOOTH_IMAGE_REPO   image repository (default: smooai/operator)
+#   SMOOTH_IMAGE_REPO   image repository (default: smooai/smooth-operator)
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 TOOL="${SMOOTH_IMAGE_TOOL:-docker}"
-REPO="${SMOOTH_IMAGE_REPO:-smooai/operator}"
+REPO="${SMOOTH_IMAGE_REPO:-smooai/smooth-operator}"
 
 if ! command -v "$TOOL" >/dev/null 2>&1; then
     echo "error: $TOOL not found on PATH (override with SMOOTH_IMAGE_TOOL)" >&2
@@ -49,7 +54,7 @@ fi
 
 echo "==> Building $REPO:$VERSION"
 $TOOL build \
-    --file docker/Dockerfile.operator \
+    --file docker/Dockerfile.smooth-operator \
     --tag "$REPO:$VERSION" \
     --tag "$REPO:latest" \
     --build-arg "VERSION=$VERSION" \

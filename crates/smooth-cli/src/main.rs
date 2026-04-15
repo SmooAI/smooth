@@ -58,9 +58,10 @@ enum Commands {
         /// (e.g. `th run "refactor x to y"`). If empty, picks the
         /// first ready pearl.
         pearl_id: Option<String>,
-        /// OCI image for the operator VM. If unset, auto-detects:
-        /// package.json in the workspace → smooai/operator-node:latest,
-        /// else falls back to the server-side default (alpine).
+        /// OCI image for the operator VM. Defaults to
+        /// smooai/smooth-operator:latest (single unified image —
+        /// the agent installs toolchains at runtime via mise).
+        /// Override via SMOOTH_OPERATOR_IMAGE env or this flag.
         #[arg(long)]
         image: Option<String>,
         /// Keep the sandbox alive after the agent completes (for
@@ -1456,14 +1457,12 @@ async fn cmd_inbox() -> Result<()> {
     Ok(())
 }
 
-/// Auto-pick a sandbox image from the workspace when the user didn't
-/// pass `--image`. Covers the common JS/TS case out of the box; leaves
-/// other stacks on the server default until we ship more variants.
-fn auto_detect_image(cwd: &std::path::Path) -> Option<&'static str> {
-    if cwd.join("package.json").is_file() || cwd.join("pnpm-workspace.yaml").is_file() {
-        return Some("smooai/operator-node:latest");
-    }
-    None
+/// Default image for a sandboxed `th run`. One image covers every
+/// stack — the agent installs whatever toolchain the task needs at
+/// runtime via mise, and the installs persist in the project cache.
+/// Kept as a helper so it's easy to swap the tag via env if needed.
+fn default_smooth_operator_image() -> String {
+    std::env::var("SMOOTH_OPERATOR_IMAGE").unwrap_or_else(|_| "smooai/smooth-operator:latest".to_string())
 }
 
 async fn cmd_run(pearl_id_arg: Option<&str>, image: Option<&str>, keep_alive: bool, model: Option<&str>, memory_mb: Option<u32>) -> Result<()> {
@@ -1503,9 +1502,9 @@ async fn cmd_run(pearl_id_arg: Option<&str>, image: Option<&str>, keep_alive: bo
 
     let cwd = std::env::current_dir()?;
 
-    // If the user didn't pass --image, pick one from the workspace.
-    // Falls back to the server-side default when nothing matches.
-    let resolved_image: Option<String> = image.map(String::from).or_else(|| auto_detect_image(&cwd).map(String::from));
+    // Default image is always smooai/smooth-operator (agent installs
+    // its own toolchain via mise). --image overrides for special cases.
+    let resolved_image: String = image.map(String::from).unwrap_or_else(default_smooth_operator_image);
 
     if let Some(ref id) = pearl_id {
         println!("\n  {} {} {}", "▶".cyan().bold(), "Running pearl".bold(), id.bold());
@@ -1513,10 +1512,8 @@ async fn cmd_run(pearl_id_arg: Option<&str>, image: Option<&str>, keep_alive: bo
         println!("\n  {} {}", "▶".cyan().bold(), "Running ad-hoc task".bold());
     }
     println!("  {} {}", "cwd".dimmed(), cwd.display().to_string().dimmed());
-    if let Some(ref img) = resolved_image {
-        let suffix = if image.is_none() { " (auto-detected)" } else { "" };
-        println!("  {} {}{}", "image".dimmed(), img.dimmed(), suffix.dimmed());
-    }
+    let image_suffix = if image.is_none() { " (default)" } else { "" };
+    println!("  {} {}{}", "image".dimmed(), resolved_image.dimmed(), image_suffix.dimmed());
     if let Some(mb) = memory_mb {
         println!("  {} {} MB", "memory".dimmed(), mb);
     }

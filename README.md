@@ -323,14 +323,11 @@ project-scoped cache at `/opt/smooth/cache`, and (with `--keep-alive`)
 forwarded ports so you can review dev servers live.
 
 ```bash
-# Pick the first ready pearl; auto-detect image from package.json
+# First ready pearl, default image
 th run --keep-alive
 
-# Explicit pearl, explicit image, explicit memory
-th run th-abcdef \
-    --image smooai/operator-node:latest \
-    --keep-alive \
-    --memory-mb 6144
+# Explicit pearl, explicit memory
+th run th-abcdef --keep-alive --memory-mb 6144
 
 # Ad-hoc prompt against the current directory
 th run "add a /health route that returns {\"ok\":true}" --keep-alive
@@ -340,27 +337,33 @@ th operators list
 th operators kill <operator-id>
 ```
 
-**Image variants** (build locally with `scripts/build-operator-*-image.sh`):
+**One image for every stack.** `smooai/smooth-operator` ships with
+alpine + `mise` baked in. The agent reads the workspace
+(`package.json`, `Cargo.toml`, `pyproject.toml`, `go.mod`) and
+installs whatever toolchain it needs at runtime — node + pnpm,
+python + uv, rust, go, bun, deno, or any of the ~140 tools mise
+supports. Installs land in `/opt/smooth/cache/mise`, bound to the
+host project cache so second-run starts are offline-fast.
 
-| Image | Base | Use for |
-|---|---|---|
-| `smooai/operator` | alpine + runner | editing-only tasks, minimal VMs |
-| `smooai/operator-node` | node:20 + pnpm | JS/TS projects, `pnpm dev`, vite, next |
+Build locally:
 
-`--image` auto-detects `smooai/operator-node:latest` when there's a
-`package.json` or `pnpm-workspace.yaml` in cwd. Otherwise falls back
-to the server-side default (`SMOOTH_WORKER_IMAGE`, which defaults to
-alpine).
+```bash
+scripts/build-smooth-operator-image.sh
+```
 
-**Important**: locally-built images live in your Docker Desktop
-image store. Microsandbox pulls from registries by default — if
-`microsandbox` can't see your local image, push it first
-(`docker push smooai/operator-node:0.2.0`) or set
-`SMOOTH_WORKER_IMAGE` to an image reference microsandbox can reach.
+Override via `--image` or `SMOOTH_OPERATOR_IMAGE` env if you want a
+custom variant (e.g. a version pinned for CI reproducibility).
 
-**Project cache**: each workspace path hashes to its own cache dir
+**Microsandbox image resolution.** Locally-built images live in
+your Docker Desktop image store; `microsandbox` pulls from registries
+by default, so if its pull can't see your local build, push it
+first (`docker push smooai/smooth-operator:0.2.0`) or set
+`SMOOTH_WORKER_IMAGE` to something microsandbox can reach.
+
+**Project cache.** Each workspace path hashes to its own cache dir
 at `~/.smooth/project-cache/<name>-<hash>/`. Subsequent runs on the
-same repo share installed deps. Manage with:
+same repo share mise installs + language stores (pnpm-store, cargo
+registry, uv cache, etc.). Manage with:
 
 ```bash
 th cache list
