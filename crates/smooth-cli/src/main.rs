@@ -183,6 +183,30 @@ enum Commands {
         #[arg(long)]
         remote: Option<String>,
     },
+    /// Manage the project-scoped sandbox cache (~/.smooth/project-cache)
+    Cache {
+        #[command(subcommand)]
+        cmd: CacheCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum CacheCommands {
+    /// List cached projects with size and last-used time
+    List,
+    /// Print the cache directory (optionally for a specific project root)
+    Path { project: Option<String> },
+    /// Remove project caches older than N days (default 30)
+    Prune {
+        /// Evict entries whose mtime is older than this many days
+        #[arg(long, default_value = "30")]
+        older_than: u32,
+        /// Show what would be removed without deleting
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Remove the cache entry for a single project by canonical path
+    Clear { project: String },
 }
 
 #[derive(Subcommand)]
@@ -589,6 +613,7 @@ async fn main() -> Result<()> {
                 cmd_doctor().await
             }
         }
+        Some(Commands::Cache { cmd }) => cmd_cache(cmd),
         Some(Commands::Up {
             no_leader,
             port,
@@ -1770,6 +1795,174 @@ async fn cmd_doctor() -> Result<()> {
 ///
 /// Idempotent: re-running on an already-initialized repo just prints
 /// status and optionally adds a new remote.
+/// Path to the project-scoped sandbox cache root.
+fn project_cache_root() -> Result<std::path::PathBuf> {
+    let home = dirs_next::home_dir().context("cannot determine home directory")?;
+    Ok(home.join(".smooth").join("project-cache"))
+}
+
+/// Compute the cache key for a given workspace path. Mirrors
+/// `smooth_bigsmooth::server::project_cache_key` so CLI-side `th cache`
+/// output matches server-side bind-mount keys.
+fn workspace_cache_key(path: &str) -> Option<String> {
+    smooth_bigsmooth::server::project_cache_key(path)
+}
+
+fn dir_size_bytes(path: &std::path::Path) -> u64 {
+    fn walk(p: &std::path::Path) -> u64 {
+        let mut total = 0u64;
+        let Ok(entries) = std::fs::read_dir(p) else { return 0 };
+        for e in entries.flatten() {
+            let Ok(md) = e.metadata() else { continue };
+            if md.is_dir() {
+                total = total.saturating_add(walk(&e.path()));
+            } else {
+                total = total.saturating_add(md.len());
+            }
+        }
+        total
+    }
+    walk(path)
+}
+
+fn fmt_size(bytes: u64) -> String {
+    const K: u64 = 1024;
+    const M: u64 = K * 1024;
+    const G: u64 = M * 1024;
+    if bytes >= G {
+        format!("{:.1} GB", bytes as f64 / G as f64)
+    } else if bytes >= M {
+        format!("{:.1} MB", bytes as f64 / M as f64)
+    } else if bytes >= K {
+        format!("{:.1} KB", bytes as f64 / K as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn fmt_age(modified: std::time::SystemTime) -> String {
+    let Ok(elapsed) = modified.elapsed() else {
+        return "just now".to_string();
+    };
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        "just now".to_string()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
+}
+
+fn cmd_cache(cmd: CacheCommands) -> Result<()> {
+    let root = project_cache_root()?;
+
+    match cmd {
+        CacheCommands::Path { project } => {
+            let target = if let Some(p) = project {
+                let key = workspace_cache_key(&p).context("cannot derive cache key from empty path")?;
+                root.join(key)
+            } else {
+                root
+            };
+            println!("{}", target.display());
+            Ok(())
+        }
+
+        CacheCommands::List => {
+            if !root.is_dir() {
+                println!(
+                    "\n  {} No project caches yet. They're created lazily on first `th up` / `th dev`.\n",
+                    "ℹ".cyan()
+                );
+                return Ok(());
+            }
+            let mut entries: Vec<_> = std::fs::read_dir(&root)?
+                .filter_map(std::result::Result::ok)
+                .filter(|e| e.path().is_dir())
+                .collect();
+            if entries.is_empty() {
+                println!("\n  {} No project caches yet.\n", "ℹ".cyan());
+                return Ok(());
+            }
+            entries.sort_by_key(|e| e.metadata().and_then(|m| m.modified()).ok());
+            entries.reverse();
+
+            println!("\n  {} {}\n", "Project caches".cyan().bold(), format!("({})", root.display()).dimmed());
+            let mut total = 0u64;
+            for entry in entries {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let size = dir_size_bytes(&entry.path());
+                total = total.saturating_add(size);
+                let modified = entry
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                println!("  {:<28} {:>10} {}", name.bold(), fmt_size(size).dimmed(), fmt_age(modified).dimmed());
+            }
+            println!("\n  {} {}\n", "total".dimmed(), fmt_size(total).bold());
+            Ok(())
+        }
+
+        CacheCommands::Prune { older_than, dry_run } => {
+            if !root.is_dir() {
+                println!("\n  {} No cache to prune.\n", "ℹ".cyan());
+                return Ok(());
+            }
+            let cutoff = std::time::SystemTime::now()
+                .checked_sub(std::time::Duration::from_secs(u64::from(older_than) * 86_400))
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+
+            let mut removed = 0u32;
+            let mut reclaimed = 0u64;
+            for entry in std::fs::read_dir(&root)?.filter_map(std::result::Result::ok) {
+                if !entry.path().is_dir() {
+                    continue;
+                }
+                let modified = entry.metadata().ok().and_then(|m| m.modified().ok()).unwrap_or(std::time::SystemTime::now());
+                if modified > cutoff {
+                    continue;
+                }
+                let size = dir_size_bytes(&entry.path());
+                let name = entry.file_name().to_string_lossy().to_string();
+                let verb = if dry_run { "would remove" } else { "removing" };
+                println!("  {} {:<28} {}", verb.yellow(), name.bold(), fmt_size(size).dimmed());
+                if !dry_run {
+                    if let Err(e) = std::fs::remove_dir_all(entry.path()) {
+                        tracing::warn!(error = %e, path = %entry.path().display(), "failed to remove cache entry");
+                        continue;
+                    }
+                }
+                removed += 1;
+                reclaimed = reclaimed.saturating_add(size);
+            }
+            if removed == 0 {
+                println!("\n  {} Nothing older than {older_than} days.\n", "✓".green().bold());
+            } else {
+                let verb = if dry_run { "would free" } else { "freed" };
+                println!("\n  {} {removed} entries, {verb} {}\n", "✓".green().bold(), fmt_size(reclaimed).bold());
+            }
+            Ok(())
+        }
+
+        CacheCommands::Clear { project } => {
+            let key = workspace_cache_key(&project).context("cannot derive cache key from empty path")?;
+            let dir = root.join(&key);
+            if !dir.is_dir() {
+                println!("\n  {} No cache entry for {} (key: {})\n", "ℹ".cyan(), project.bold(), key.dimmed());
+                return Ok(());
+            }
+            let size = dir_size_bytes(&dir);
+            std::fs::remove_dir_all(&dir).with_context(|| format!("remove {}", dir.display()))?;
+            println!("\n  {} Removed {} — {}\n", "✓".green().bold(), key.bold(), fmt_size(size).dimmed());
+            Ok(())
+        }
+    }
+}
+
 fn cmd_doctor_init_home_repo(remote: Option<&str>) -> Result<()> {
     let home = dirs_next::home_dir().context("cannot determine home directory")?;
     let smooth_home = home.join(".smooth");
@@ -1810,7 +2003,8 @@ audit/
 # Dolt store has its own push/pull via `th pearls push/pull`
 dolt/
 
-# Pearl environment caches — machine-local
+# Project-scoped sandbox caches — machine-local, large
+project-cache/
 pearl-env/
 
 # Debug / session captures — ephemeral runtime artifacts

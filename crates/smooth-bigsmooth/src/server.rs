@@ -1174,18 +1174,21 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, message: String, model: Op
                 m.into_iter().chain(policy_mount).collect()
             },
             allow_host_loopback: true,
-            // Pearl env cache: pass the pearl ID so the sandbox client
-            // (Bill, running on the host) can derive the cache dir.
-            // Big Smooth can't compute host paths from inside the
-            // Boardroom VM — that's Bill's job.
-            // Pearl env cache key. If SMOOTH_ENV_CACHE_KEY is set (typically
-            // by the test harness for repeatable warm cache), use that
-            // stable key so deps persist across test runs. Otherwise use
-            // the pearl ID (each task gets its own cache, warm on retry).
+            // Project-scoped cache key. Resolution order:
+            //   1. SMOOTH_ENV_CACHE_KEY env var (test harness stable key)
+            //   2. project_cache_key(workspace) — hash of the
+            //      canonical workspace path. This means the
+            //      budgeting-app repo always gets the same cache
+            //      directory across pearls, and the smooth-monorepo
+            //      repo gets its own. Much more useful than
+            //      pearl-id-per-cache which lost all prior install
+            //      state between tasks.
+            //   3. Task id fallback (ephemeral, only when workspace is
+            //      absent — e.g. one-off chat dispatch).
             env_cache_key: std::env::var("SMOOTH_ENV_CACHE_KEY")
                 .ok()
                 .filter(|k| !k.is_empty())
-                .or_else(|| pearl_id.clone())
+                .or_else(|| project_cache_key(&workspace_canon))
                 .or_else(|| Some(tid.clone())),
             ..SandboxConfig::default()
         };
@@ -1593,6 +1596,50 @@ fn truncate_str(s: &str, max_len: usize) -> String {
         let truncated: String = s.chars().take(max_len.saturating_sub(3)).collect();
         format!("{truncated}...")
     }
+}
+
+/// Derive a stable cache key from a workspace path. Produces
+/// `<basename>-<6hex>` where the hex is the first 6 nibbles of an FNV-1a
+/// hash of the canonicalized path — stable across runs, distinguishes
+/// siblings sharing a basename. Returns `None` for empty inputs.
+///
+/// Why FNV rather than SHA: we only need bucket-level collision
+/// resistance across the user's own projects, and avoiding the
+/// `sha2` dep keeps this hot path free of cost.
+pub fn project_cache_key(workspace: &str) -> Option<String> {
+    let ws = workspace.trim();
+    if ws.is_empty() {
+        return None;
+    }
+
+    // FNV-1a 64-bit.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in ws.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+
+    let basename = std::path::Path::new(ws)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "workspace".to_string());
+
+    // Keep keys filesystem-safe: alphanum + dashes. Collapse anything
+    // else to dashes so weird paths ("my project (copy)/") don't
+    // produce pathological directory names.
+    let safe: String = basename
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    Some(format!("{safe}-{:06x}", hash & 0x00ff_ffff))
 }
 
 // ── Projects (multi-project pearl support) ─────────────────
@@ -2351,6 +2398,32 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use tower::ServiceExt;
+
+    #[test]
+    fn project_cache_key_is_stable_and_distinguishes_paths() {
+        let a = project_cache_key("/Users/me/dev/budgeting").unwrap();
+        let b = project_cache_key("/Users/me/dev/budgeting").unwrap();
+        assert_eq!(a, b, "same input → same key");
+        assert!(a.starts_with("budgeting-"), "key leads with basename: {a}");
+
+        // Sibling paths with the same basename get different suffixes.
+        let a = project_cache_key("/home/alice/apps/web").unwrap();
+        let b = project_cache_key("/home/bob/apps/web").unwrap();
+        assert_ne!(a, b);
+        assert!(a.starts_with("web-"));
+        assert!(b.starts_with("web-"));
+
+        // Weird chars collapsed so the key is filesystem-safe.
+        let k = project_cache_key("/tmp/my project (copy)").unwrap();
+        assert!(
+            k.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.'),
+            "unsafe char in {k}"
+        );
+
+        // Empty / whitespace → None.
+        assert!(project_cache_key("").is_none());
+        assert!(project_cache_key("   ").is_none());
+    }
 
     #[test]
     fn max_sandbox_concurrency_env_override() {

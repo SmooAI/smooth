@@ -186,7 +186,7 @@ Tables: `pearls`, `pearl_dependencies`, `pearl_labels`, `pearl_comments`,
 - `smooth.db` — Legacy SQLite (migrate with `th pearls migrate-from-sqlite`)
 - `audit/` — Rotating tool usage logs per actor
 - `providers.json` — LLM credentials
-- `pearl-env/` — Cached operator VM environments (keyed by pearl lineage)
+- `project-cache/` — Project-scoped operator VM cache (keyed by workspace path hash). Bound into the sandbox at `/opt/smooth/cache` so repeated runs on the same repo share `pnpm install` / `cargo fetch` state. Manage via `th cache list|prune|clear`.
 - `mcp.toml` — MCP server configs (see `docs/extending.md`)
 - `plugins/<name>/plugin.toml` — CLI-wrapper tool manifests
 

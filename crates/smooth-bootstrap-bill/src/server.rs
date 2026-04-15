@@ -145,22 +145,33 @@ pub async fn spawn_sandbox(spec: SandboxSpec) -> Result<(String, Vec<PortMapping
         });
     }
 
-    // Pearl env cache: Bill resolves the cache key to a host directory
-    // at ~/.smooth/pearl-env/<key>/ and bind-mounts it at /opt/smooth/cache.
-    // The runner sets CARGO_HOME etc. to paths inside this mount.
+    // Project-scoped sandbox cache: Bill resolves the cache key to a
+    // host directory at ~/.smooth/project-cache/<key>/ and bind-mounts
+    // it at /opt/smooth/cache. Deps / stores (PNPM_STORE_PATH, CARGO_HOME,
+    // UV_CACHE_DIR, GOPATH) live inside so repeated runs on the same
+    // project share them. Touches the dir on every mount so `th cache
+    // prune` can LRU-evict cold projects.
     if let Some(ref cache_key) = spec.env_cache_key {
         let cache_dir = dirs_next::home_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
             .join(".smooth")
-            .join("pearl-env")
+            .join("project-cache")
             .join(cache_key);
         if !cache_dir.exists() {
-            std::fs::create_dir_all(&cache_dir).with_context(|| format!("bill: create pearl env cache: {}", cache_dir.display()))?;
-            tracing::info!(path = %cache_dir.display(), key = %cache_key, "bill: created pearl env cache dir");
+            std::fs::create_dir_all(&cache_dir).with_context(|| format!("bill: create project cache: {}", cache_dir.display()))?;
+            tracing::info!(path = %cache_dir.display(), key = %cache_key, "bill: created project cache dir");
+        }
+        // Bump mtime so atime-/mtime-based LRU pruning keeps recently
+        // used projects warm. filetime crate would be nicer but we
+        // avoid adding a dep for a cosmetic refresh — chmod back to
+        // current mode triggers a ctime/mtime bump on most systems
+        // without changing permissions.
+        if let Ok(md) = std::fs::metadata(&cache_dir) {
+            let _ = std::fs::set_permissions(&cache_dir, md.permissions());
         }
         let host = cache_dir.to_string_lossy().to_string();
         builder = builder.volume("/opt/smooth/cache", move |m| m.bind(host));
-        tracing::info!(name = %spec.name, key = %cache_key, path = %cache_dir.display(), "bill: mounting pearl env cache at /opt/smooth/cache");
+        tracing::info!(name = %spec.name, key = %cache_key, path = %cache_dir.display(), "bill: mounting project cache at /opt/smooth/cache");
     }
 
     // Opt-in: let the guest reach host loopback + RFC1918 addresses.
