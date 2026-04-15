@@ -315,6 +315,59 @@ Global config lives at `~/.smooth/`; project config at
 `<repo>/.smooth/`. Project entries shadow global on name collision.
 See [`docs/extending.md`](docs/extending.md) for the full guide.
 
+### Run a pearl in a sandbox (`th run`)
+
+Dispatch a pearl (or ad-hoc prompt) to a Smooth Operator running in a
+microVM. The agent has bind-mount access to your workspace, a
+project-scoped cache at `/opt/smooth/cache`, and (with `--keep-alive`)
+forwarded ports so you can review dev servers live.
+
+```bash
+# Pick the first ready pearl; auto-detect image from package.json
+th run --keep-alive
+
+# Explicit pearl, explicit image, explicit memory
+th run th-abcdef \
+    --image smooai/operator-node:latest \
+    --keep-alive \
+    --memory-mb 6144
+
+# Ad-hoc prompt against the current directory
+th run "add a /health route that returns {\"ok\":true}" --keep-alive
+
+# Inspect + tear down
+th operators list
+th operators kill <operator-id>
+```
+
+**Image variants** (build locally with `scripts/build-operator-*-image.sh`):
+
+| Image | Base | Use for |
+|---|---|---|
+| `smooai/operator` | alpine + runner | editing-only tasks, minimal VMs |
+| `smooai/operator-node` | node:20 + pnpm | JS/TS projects, `pnpm dev`, vite, next |
+
+`--image` auto-detects `smooai/operator-node:latest` when there's a
+`package.json` or `pnpm-workspace.yaml` in cwd. Otherwise falls back
+to the server-side default (`SMOOTH_WORKER_IMAGE`, which defaults to
+alpine).
+
+**Important**: locally-built images live in your Docker Desktop
+image store. Microsandbox pulls from registries by default — if
+`microsandbox` can't see your local image, push it first
+(`docker push smooai/operator-node:0.2.0`) or set
+`SMOOTH_WORKER_IMAGE` to an image reference microsandbox can reach.
+
+**Project cache**: each workspace path hashes to its own cache dir
+at `~/.smooth/project-cache/<name>-<hash>/`. Subsequent runs on the
+same repo share installed deps. Manage with:
+
+```bash
+th cache list
+th cache prune --older-than 30     # evict caches idle > N days
+th cache clear /path/to/project
+```
+
 ### Background service
 
 Keep `th up` running across reboots via the native service manager
