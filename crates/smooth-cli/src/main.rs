@@ -2,6 +2,7 @@
 //!
 //! Single binary for agent orchestration, config management, and platform tools.
 
+mod gradient;
 mod hooks;
 mod mcp_config;
 mod service;
@@ -795,7 +796,7 @@ async fn cmd_up(no_leader: bool, port: u16, foreground: bool, max_operators: Opt
 
     // Foreground mode — actual server startup
     println!();
-    println!("  {} / {}", "Smoo AI".bold(), "Smooth".green().bold());
+    println!("  {} / {}", gradient::smoo_ai(), gradient::smooth());
     println!();
 
     // Initialize pearl store (Dolt-backed). There used to be a SQLite
@@ -882,7 +883,7 @@ async fn cmd_status() -> Result<()> {
             println!();
             println!(
                 "  {} {} {} {}",
-                "Smooth".bold(),
+                gradient::smooth(),
                 format!("v{version}").bold().green(),
                 "\u{2014}".dimmed(),
                 "http://localhost:4400".cyan().bold()
@@ -1920,7 +1921,7 @@ fn cmd_hooks(cmd: HooksCommands) -> Result<()> {
 
 /// System health check and auto-fix.
 async fn cmd_doctor() -> Result<()> {
-    println!("{}", "Smooth Doctor".bold().cyan());
+    println!("{} {}", gradient::smooth(), "Doctor".bold().cyan());
     println!("{}", "checking system health...\n".dimmed());
 
     let mut issues = 0;

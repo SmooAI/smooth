@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="images/logo.png" alt="Smoo AI" width="120" />
+<img src="images/logo.png" alt="Smooth" width="420" />
 
 # Smooth
 
