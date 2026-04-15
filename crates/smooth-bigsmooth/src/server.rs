@@ -256,6 +256,11 @@ pub struct TaskRequest {
     /// explicitly torn down via `th operators stop <id>`.
     #[serde(default)]
     pub keep_alive: bool,
+    /// Per-run memory override in MB. `None` falls back to the
+    /// `SandboxConfig::default()` 4096. Next.js + a couple workers on
+    /// a big monorepo want 6–8 GB; smaller tasks can stay at 4.
+    #[serde(default)]
+    pub memory_mb: Option<u32>,
 }
 
 // ── NarcHook wrapper for ToolHook ─────────────────────────
@@ -535,9 +540,19 @@ async fn handle_client_event(state: &AppState, event: ClientEvent) {
             budget,
             working_dir,
         } => {
-            // WebSocket callers don't currently carry image / keep_alive;
-            // HTTP /api/tasks is the dispatch path for those.
-            dispatch_ws_task(state, message, model, budget, working_dir, None, false).await;
+            // WebSocket callers don't currently carry image / keep_alive /
+            // memory_mb; HTTP /api/tasks is the dispatch path for those.
+            dispatch_ws_task(
+                state,
+                DispatchOptions {
+                    message,
+                    model,
+                    budget,
+                    working_dir,
+                    ..DispatchOptions::default()
+                },
+            )
+            .await;
         }
         ClientEvent::TaskCancel { task_id } => {
             tracing::info!(task_id, "Task cancel requested via WebSocket");
@@ -612,16 +627,23 @@ async fn handle_client_event(state: &AppState, event: ClientEvent) {
 /// READ-ONLY. The operator runner inside the microVM hosts the real tools
 /// (read_file, write_file, edit_file, grep, bash, etc.) with the full
 /// security cast (Wonk/Goalie/Narc/Scribe) watching every call.
-async fn dispatch_ws_task(
-    state: &AppState,
-    message: String,
-    model: Option<String>,
-    budget: Option<f64>,
-    working_dir: Option<String>,
-    image: Option<String>,
-    keep_alive: bool,
-) {
-    dispatch_ws_task_sandboxed(state, message, model, budget, working_dir, image, keep_alive).await;
+/// Options for dispatching an agent task. Bundled so the dispatch
+/// helpers don't balloon past clippy's argument limit and so new
+/// knobs (image, keep-alive, memory, …) can be added without
+/// touching every call site.
+#[derive(Debug, Clone, Default)]
+pub struct DispatchOptions {
+    pub message: String,
+    pub model: Option<String>,
+    pub budget: Option<f64>,
+    pub working_dir: Option<String>,
+    pub image: Option<String>,
+    pub keep_alive: bool,
+    pub memory_mb: Option<u32>,
+}
+
+async fn dispatch_ws_task(state: &AppState, opts: DispatchOptions) {
+    dispatch_ws_task_sandboxed(state, opts).await;
 }
 
 /// Build a human-readable resumption context block from prior session
@@ -700,15 +722,16 @@ fn find_operator_runner_binary() -> Option<std::path::PathBuf> {
     None
 }
 
-async fn dispatch_ws_task_sandboxed(
-    state: &AppState,
-    message: String,
-    model: Option<String>,
-    budget: Option<f64>,
-    working_dir: Option<String>,
-    image: Option<String>,
-    keep_alive: bool,
-) {
+async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
+    let DispatchOptions {
+        message,
+        model,
+        budget,
+        working_dir,
+        image,
+        keep_alive,
+        memory_mb,
+    } = opts;
     use crate::sandbox::{self, BindMount, SandboxConfig};
 
     let task_id = uuid::Uuid::new_v4().to_string();
@@ -1123,8 +1146,15 @@ async fn dispatch_ws_task_sandboxed(
                         let cache_key = pearl_id.clone().unwrap_or_else(|| tid.clone());
                         let mut cache = crate::port_cache::load(&cache_key);
 
-                        // Pre-declare common dev server ports.
-                        let common_ports: Vec<u16> = vec![3000, 3001, 4000, 5000, 5173, 8000, 8080, 8888];
+                        // Pre-declare common dev server ports so `th run --keep-alive`
+                        // exposes them to the host without the agent needing to call
+                        // forward_port. If you start `pnpm dev` inside the VM on
+                        // port 3000, you can hit it on `http://localhost:<host_port>`.
+                        //
+                        // Covers: Next.js/Express (3000/3001), Nuxt/Vite preview (4000),
+                        // Angular (4200), Flask/FastAPI (5000), Vite (5173),
+                        // Django/Python http (8000), generic (8080/8888).
+                        let common_ports: Vec<u16> = vec![3000, 3001, 4000, 4200, 5000, 5173, 8000, 8080, 8888];
                         for guest_port in common_ports {
                             if !policy.ports.can_forward(guest_port) || extra_ports.len() >= policy.ports.max_forwards as usize {
                                 continue;
@@ -1220,6 +1250,7 @@ async fn dispatch_ws_task_sandboxed(
                 .or_else(|| project_cache_key(&workspace_canon))
                 .or_else(|| Some(tid.clone())),
             image: image.clone(),
+            memory_mb: memory_mb.unwrap_or(SandboxConfig::default().memory_mb),
             ..SandboxConfig::default()
         };
 
@@ -1583,15 +1614,18 @@ async fn run_task_handler(State(state): State<AppState>, Json(req): Json<TaskReq
     // set, in-process otherwise. Sandboxed is the security architecture path:
     // operator runs inside a microVM with Wonk/Goalie/Narc enforcement.
     let state_clone = state.clone();
-    let message = req.message.clone();
-    let model = req.model.clone();
-    let budget = req.budget;
-    let working_dir = req.working_dir.clone();
-    let image = req.image.clone();
-    let keep_alive = req.keep_alive;
+    let opts = DispatchOptions {
+        message: req.message.clone(),
+        model: req.model.clone(),
+        budget: req.budget,
+        working_dir: req.working_dir.clone(),
+        image: req.image.clone(),
+        keep_alive: req.keep_alive,
+        memory_mb: req.memory_mb,
+    };
 
     tokio::spawn(async move {
-        dispatch_ws_task(&state_clone, message, model, budget, working_dir, image, keep_alive).await;
+        dispatch_ws_task(&state_clone, opts).await;
     });
 
     // Bridge ServerEvent broadcast → AgentEvent SSE stream

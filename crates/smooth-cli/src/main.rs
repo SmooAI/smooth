@@ -58,9 +58,9 @@ enum Commands {
         /// (e.g. `th run "refactor x to y"`). If empty, picks the
         /// first ready pearl.
         pearl_id: Option<String>,
-        /// OCI image for the operator VM. Defaults to server-side
-        /// SMOOTH_WORKER_IMAGE (currently alpine). Use operator-node
-        /// for JS/TS work.
+        /// OCI image for the operator VM. If unset, auto-detects:
+        /// package.json in the workspace → smooai/operator-node:latest,
+        /// else falls back to the server-side default (alpine).
         #[arg(long)]
         image: Option<String>,
         /// Keep the sandbox alive after the agent completes (for
@@ -71,6 +71,11 @@ enum Commands {
         /// Override the default model for this run
         #[arg(long)]
         model: Option<String>,
+        /// Override the sandbox's memory allocation in MB
+        /// (default 4096 — bump to 6144/8192 for big Next.js / turbo
+        /// monorepos running dev servers).
+        #[arg(long)]
+        memory_mb: Option<u32>,
     },
     /// Pause a running Smooth Operator
     Pause { bead_id: String },
@@ -663,7 +668,8 @@ async fn main() -> Result<()> {
             image,
             keep_alive,
             model,
-        }) => cmd_run(pearl_id.as_deref(), image.as_deref(), keep_alive, model.as_deref()).await,
+            memory_mb,
+        }) => cmd_run(pearl_id.as_deref(), image.as_deref(), keep_alive, model.as_deref(), memory_mb).await,
         Some(Commands::Approve { bead_id }) => cmd_approve(&bead_id).await,
         Some(Commands::Pause { bead_id }) => cmd_steer(&bead_id, "pause", None).await,
         Some(Commands::Resume { bead_id }) => cmd_steer(&bead_id, "resume", None).await,
@@ -1450,7 +1456,17 @@ async fn cmd_inbox() -> Result<()> {
     Ok(())
 }
 
-async fn cmd_run(pearl_id_arg: Option<&str>, image: Option<&str>, keep_alive: bool, model: Option<&str>) -> Result<()> {
+/// Auto-pick a sandbox image from the workspace when the user didn't
+/// pass `--image`. Covers the common JS/TS case out of the box; leaves
+/// other stacks on the server default until we ship more variants.
+fn auto_detect_image(cwd: &std::path::Path) -> Option<&'static str> {
+    if cwd.join("package.json").is_file() || cwd.join("pnpm-workspace.yaml").is_file() {
+        return Some("smooai/operator-node:latest");
+    }
+    None
+}
+
+async fn cmd_run(pearl_id_arg: Option<&str>, image: Option<&str>, keep_alive: bool, model: Option<&str>, memory_mb: Option<u32>) -> Result<()> {
     // Resolve the task message.
     // - If pearl_id_arg looks like a pearl id (starts with "th-"), fetch
     //   the pearl's title+description and use that as the task message.
@@ -1486,14 +1502,23 @@ async fn cmd_run(pearl_id_arg: Option<&str>, image: Option<&str>, keep_alive: bo
     };
 
     let cwd = std::env::current_dir()?;
+
+    // If the user didn't pass --image, pick one from the workspace.
+    // Falls back to the server-side default when nothing matches.
+    let resolved_image: Option<String> = image.map(String::from).or_else(|| auto_detect_image(&cwd).map(String::from));
+
     if let Some(ref id) = pearl_id {
         println!("\n  {} {} {}", "▶".cyan().bold(), "Running pearl".bold(), id.bold());
     } else {
         println!("\n  {} {}", "▶".cyan().bold(), "Running ad-hoc task".bold());
     }
     println!("  {} {}", "cwd".dimmed(), cwd.display().to_string().dimmed());
-    if let Some(img) = image {
-        println!("  {} {}", "image".dimmed(), img.dimmed());
+    if let Some(ref img) = resolved_image {
+        let suffix = if image.is_none() { " (auto-detected)" } else { "" };
+        println!("  {} {}{}", "image".dimmed(), img.dimmed(), suffix.dimmed());
+    }
+    if let Some(mb) = memory_mb {
+        println!("  {} {} MB", "memory".dimmed(), mb);
     }
     if keep_alive {
         println!("  {} VM will stay alive after completion", "⧗".yellow());
@@ -1504,8 +1529,9 @@ async fn cmd_run(pearl_id_arg: Option<&str>, image: Option<&str>, keep_alive: bo
         "message": message,
         "model": model,
         "working_dir": cwd.to_string_lossy(),
-        "image": image,
+        "image": resolved_image,
         "keep_alive": keep_alive,
+        "memory_mb": memory_mb,
     });
 
     // Stream SSE from /api/tasks.
@@ -1593,13 +1619,43 @@ async fn cmd_run(pearl_id_arg: Option<&str>, image: Option<&str>, keep_alive: bo
     if keep_alive && saw_complete {
         let id = operator_id.as_deref().unwrap_or("<unknown>");
         println!();
-        println!("  {} VM {} still running.", "⧗".yellow(), id.bold());
-        println!("  {} forwarded ports are listed via: {}", "→".dimmed(), "th operators".cyan());
-        println!(
-            "  {} stop with:                      {}",
-            "→".dimmed(),
-            format!("th operators kill {id}").cyan()
-        );
+        println!("  {} VM {} is still running.\n", "⧗".yellow(), id.bold());
+
+        // Pull forwarded-port info from the server so the user sees
+        // reachable URLs instead of being told to go run another
+        // command. Best-effort — if the query fails we still print
+        // the stop hint.
+        if let Some(ref opid) = operator_id {
+            let url = format!("http://localhost:4400/api/workers/{opid}");
+            if let Ok(resp) = client.get(&url).send().await {
+                if let Ok(worker) = resp.json::<serde_json::Value>().await {
+                    if let Some(ports) = worker.get("data").and_then(|d| d.get("port_mappings")).and_then(|v| v.as_array()) {
+                        let mut printed_header = false;
+                        for p in ports {
+                            let Some(guest) = p.get(0).and_then(serde_json::Value::as_u64) else {
+                                continue;
+                            };
+                            let Some(host) = p.get(1).and_then(serde_json::Value::as_u64) else {
+                                continue;
+                            };
+                            if guest == 4096 {
+                                continue; // runner control port — not useful to user
+                            }
+                            if !printed_header {
+                                println!("  {}", "Reachable on the host:".bold());
+                                printed_header = true;
+                            }
+                            println!("    guest {guest} → {}", format!("http://localhost:{host}").cyan());
+                        }
+                        if printed_header {
+                            println!();
+                        }
+                    }
+                }
+            }
+        }
+
+        println!("  {} stop with: {}", "→".dimmed(), format!("th operators kill {id}").cyan());
         println!();
     }
 

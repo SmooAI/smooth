@@ -474,8 +474,16 @@ fn task_ports_policy(phase: &str, task_type: TaskType) -> PortPolicy {
         TaskType::Coding => PortPolicy {
             enabled: matches!(phase, "execute" | "finalize"),
             allow_range: (1024, 65535),
-            max_forwards: 5,
-            deny: vec![22],
+            // Bumped from 5 so the common dev-server port set
+            // (3000, 3001, 4000, 4200, 5000, 5173, 8000, 8080, 8888)
+            // fits without silently dropping the tail. 12 gives a bit
+            // of headroom for HMR worker ports and one-off user picks.
+            max_forwards: 12,
+            // 22 (SSH) always denied. Smooth's own control port (4096)
+            // also off-limits — that's where the in-VM runner speaks
+            // to Bill; exposing it to the host would bypass the
+            // orchestrator.
+            deny: vec![22, 4096],
         },
         // Research and review don't need port forwarding
         TaskType::Research | TaskType::Review => PortPolicy::default(),
