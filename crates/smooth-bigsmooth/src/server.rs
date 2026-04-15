@@ -1290,6 +1290,31 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         // agent's responsibility: it should compile, test, and iterate
         // before reporting done.
         let runner_in_vm = format!("/opt/smooth/bin/{runner_name}");
+
+        // Preflight: exec a trivial shell command to verify the
+        // bind-mount landed and the guest can exec anything at all.
+        // When the runner fails with code=-1 and empty stdout/stderr,
+        // this tells us whether it's a runner-binary issue or an
+        // exec-layer issue.
+        let preflight_script = format!(
+            "echo '/opt contents:'; ls -la /opt/ 2>&1 | head -10; \
+             echo 'runner check:'; test -x {runner_in_vm} && echo 'runner is executable' || echo 'runner missing or not executable'"
+        );
+        match sandbox::exec_in_sandbox(&handle.msb_name, &["/bin/sh", "-c", preflight_script.as_str()]).await {
+            Ok((out, err, code)) => {
+                tracing::info!(
+                    task_id = tid,
+                    preflight_code = code,
+                    preflight_stdout = %out.chars().take(500).collect::<String>(),
+                    preflight_stderr = %err.chars().take(500).collect::<String>(),
+                    "sandboxed dispatch: preflight shell check"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(task_id = tid, error = %e, "sandboxed dispatch: preflight failed outright");
+            }
+        }
+
         let _ = event_tx.send(ServerEvent::ToolCallStart {
             task_id: tid.clone(),
             tool_name: "sandbox.exec".into(),

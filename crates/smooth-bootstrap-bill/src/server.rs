@@ -253,13 +253,38 @@ pub async fn exec_sandbox(name: &str, argv: &[String]) -> Result<(String, String
     let sandbox = lookup(name).ok_or_else(|| anyhow::anyhow!("no sandbox registered under '{name}'"))?;
     let cmd_owned: String = cmd.clone();
     let args_owned: Vec<String> = args.to_vec();
+
+    tracing::info!(sandbox = %name, cmd = %cmd_owned, argc = args_owned.len(), "bill: exec starting");
+
     let output = sandbox
-        .exec(cmd_owned, args_owned)
+        .exec(cmd_owned.clone(), args_owned.clone())
         .await
         .with_context(|| format!("bill: exec in sandbox '{name}' failed"))?;
     let stdout = output.stdout().unwrap_or_default();
     let stderr = output.stderr().unwrap_or_default();
     let code = output.status().code;
+
+    // When the exit is non-zero (or -1 = no exit event seen, likely
+    // signal or missing executable), log the captured streams so the
+    // dispatcher and users can tell what happened. Truncate to avoid
+    // blowing out the log with megabytes of stdout.
+    if code != 0 {
+        let stdout_tail: String = stdout.chars().take(2_000).collect();
+        let stderr_tail: String = stderr.chars().take(2_000).collect();
+        tracing::warn!(
+            sandbox = %name,
+            cmd = %cmd,
+            code,
+            stdout_len = stdout.len(),
+            stderr_len = stderr.len(),
+            stdout_tail = %stdout_tail,
+            stderr_tail = %stderr_tail,
+            "bill: exec returned non-zero (code=-1 typically means the process was signaled, killed, or the exec event stream was closed before a proper exit was reported — check that the binary exists at the bind-mount target and is executable inside the guest)"
+        );
+    } else {
+        tracing::debug!(sandbox = %name, stdout_len = stdout.len(), stderr_len = stderr.len(), "bill: exec ok");
+    }
+
     Ok((stdout, stderr, code))
 }
 
