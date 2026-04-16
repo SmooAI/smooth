@@ -192,7 +192,7 @@ impl SandboxClient for DirectSandboxClient {
             image: config
                 .image
                 .clone()
-                .unwrap_or_else(|| std::env::var("SMOOTH_WORKER_IMAGE").unwrap_or_else(|_| "alpine".into())),
+                .unwrap_or_else(|| std::env::var("SMOOTH_WORKER_IMAGE").unwrap_or_else(|_| "ghcr.io/smooai/smooth-operator:latest".into())),
             cpus: config.cpus,
             memory_mb: config.memory_mb,
             env: config.env.clone(),
@@ -301,7 +301,7 @@ impl SandboxClient for BillSandboxClient {
             image: config
                 .image
                 .clone()
-                .unwrap_or_else(|| std::env::var("SMOOTH_WORKER_IMAGE").unwrap_or_else(|_| "alpine".into())),
+                .unwrap_or_else(|| std::env::var("SMOOTH_WORKER_IMAGE").unwrap_or_else(|_| "ghcr.io/smooai/smooth-operator:latest".into())),
             cpus: config.cpus,
             memory_mb: config.memory_mb,
             env: config.env.clone(),

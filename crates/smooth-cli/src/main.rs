@@ -1463,7 +1463,7 @@ async fn cmd_inbox() -> Result<()> {
 /// runtime via mise, and the installs persist in the project cache.
 /// Kept as a helper so it's easy to swap the tag via env if needed.
 fn default_smooth_operator_image() -> String {
-    std::env::var("SMOOTH_OPERATOR_IMAGE").unwrap_or_else(|_| "smooai/smooth-operator:latest".to_string())
+    std::env::var("SMOOTH_OPERATOR_IMAGE").unwrap_or_else(|_| "ghcr.io/smooai/smooth-operator:latest".to_string())
 }
 
 async fn cmd_run(pearl_id_arg: Option<&str>, image: Option<&str>, keep_alive: bool, model: Option<&str>, memory_mb: Option<u32>) -> Result<()> {
