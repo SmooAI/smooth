@@ -121,10 +121,16 @@ jobs:
         if: needs.version.outputs.should_release == 'true'
         runs-on: ${{ matrix.os }}
         strategy:
+            # Don't cancel sibling targets when one fails — a regression on a
+            # single platform shouldn't hold up the whole release.
+            fail-fast: false
             matrix:
                 include:
-                    - target: x86_64-apple-darwin
-                      os: macos-latest
+                    # x86_64-apple-darwin removed: microsandbox's upstream
+                    # `msb_krun_utils` crate (0.1.9) uses `kvm_bindings`
+                    # unconditionally and refuses to compile on Intel macOS.
+                    # Apple Silicon is the only supported macOS target until
+                    # upstream gates kvm_bindings to Linux.
                     - target: aarch64-apple-darwin
                       os: macos-latest
                     - target: x86_64-unknown-linux-gnu
