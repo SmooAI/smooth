@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+publish = false
 description = "Smoo AI CLI — agent orchestration, config management, and platform tools"
 
 [[bin]]

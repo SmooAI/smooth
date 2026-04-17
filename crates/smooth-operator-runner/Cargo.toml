@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+publish = false
 description = "Smooth Operator runner — the binary that runs inside each microVM. Hosts the agent loop, Narc tool surveillance, and (optionally) Wonk policy checks, streaming JSON-lines AgentEvents on stdout."
 
 [[bin]]

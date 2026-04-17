@@ -23,6 +23,7 @@
         "dev:service": "pnpm install:th && th service restart",
         "dev:service:install": "pnpm install:th && th service install && th service start",
         "version:sync": "node scripts/sync-versions.mjs",
+        "ci:version": "node scripts/ci-version.mjs",
         "ci:publish": "node scripts/ci-publish.mjs",
         "changeset": "changeset",
         "aichangeset": "changeset"

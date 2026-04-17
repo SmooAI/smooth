@@ -83,10 +83,15 @@ jobs:
               with:
                   commit: "🦋 New version release"
                   title: "🦋 New version release"
+                  # Override the default `changeset version` so the version
+                  # PR carries Cargo.toml + Cargo.lock bumps too (otherwise
+                  # the Rust side drifts and `cargo publish` fails).
+                  version: pnpm ci:version
                   publish: pnpm ci:publish
                   createGithubReleases: true
               env:
                   GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+                  CARGO_REGISTRY_TOKEN: ${{ secrets.SMOOAI_CARGO_REGISTRY_TOKEN }}
 
             - name: Check if release needed
               id: check_release
@@ -222,29 +227,59 @@ jobs:
                   files: dist/*
                   generate_release_notes: true
 
-            - name: Install Rust (for crates.io publish)
+    images:
+        name: Publish OCI images to GHCR
+        needs: [version, release]
+        if: needs.version.outputs.should_release == 'true'
+        # Native arm64 runner — operator/boardroom images are
+        # `--platform linux/arm64` (guest runs aarch64 microVMs), so we
+        # avoid qemu emulation by building on a matching host.
+        runs-on: ubuntu-24.04-arm
+        permissions:
+            contents: read
+            packages: write
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  ref: main
+
+            - name: Install Rust
               uses: dtolnay/rust-toolchain@stable
+              with:
+                  targets: aarch64-unknown-linux-musl
 
-            - name: Publish smooth-policy to crates.io
-              run: cargo publish --allow-dirty -p smooai-smooth-policy
+            - name: Install Linux build deps
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y pkg-config libdbus-1-dev libcap-ng-dev musl-tools
+
+            - name: Install pnpm
+              uses: pnpm/action-setup@v4
+
+            - name: Install Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+
+            - name: Build web UI (embedded in smooth-bigsmooth via rust-embed)
+              run: |
+                  cd crates/smooth-web/web
+                  pnpm install --no-frozen-lockfile
+                  pnpm build
+
+            - name: Get version
+              id: version
+              run: echo "version=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
+
+            - name: Log in to GHCR
+              run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+            - name: Build + push smooai/smooth-operator
               env:
-                  CARGO_REGISTRY_TOKEN: ${{ secrets.SMOOAI_CARGO_REGISTRY_TOKEN }}
-              continue-on-error: true
+                  SMOOTH_IMAGE_REPO: ghcr.io/smooai/smooth-operator
+              run: scripts/build-smooth-operator-image.sh "${{ steps.version.outputs.version }}" --push
 
-            - name: Wait for crates.io index update
-              run: sleep 30
-
-            - name: Publish smooth-operator to crates.io
-              run: cargo publish --allow-dirty -p smooai-smooth-operator
+            - name: Build + push smooai/boardroom
               env:
-                  CARGO_REGISTRY_TOKEN: ${{ secrets.SMOOAI_CARGO_REGISTRY_TOKEN }}
-              continue-on-error: true
-
-            - name: Wait for crates.io index update
-              run: sleep 30
-
-            - name: Publish smooth-pearls to crates.io
-              run: cargo publish --allow-dirty -p smooai-smooth-pearls
-              env:
-                  CARGO_REGISTRY_TOKEN: ${{ secrets.SMOOAI_CARGO_REGISTRY_TOKEN }}
-              continue-on-error: true
+                  SMOOTH_IMAGE_REPO: ghcr.io/smooai/boardroom
+              run: scripts/build-boardroom-image.sh "${{ steps.version.outputs.version }}" --push
