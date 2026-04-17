@@ -135,8 +135,12 @@ jobs:
                       os: macos-latest
                     - target: x86_64-unknown-linux-gnu
                       os: ubuntu-latest
+                    # Native ARM runner — cross-compiling aarch64 from
+                    # x86_64-ubuntu hit pkg-config's "no cross-compilation
+                    # support" hard wall for libdbus-sys. A native arm64
+                    # runner skips the whole multi-arch dance.
                     - target: aarch64-unknown-linux-gnu
-                      os: ubuntu-latest
+                      os: ubuntu-24.04-arm
 
         steps:
             - uses: actions/checkout@v4
@@ -161,10 +165,6 @@ jobs:
                   # capability management in the VM host shim.
                   sudo apt-get install -y pkg-config libdbus-1-dev libcap-ng-dev
 
-            - name: Install aarch64-linux cross-compile toolchain
-              if: matrix.target == 'aarch64-unknown-linux-gnu'
-              run: |
-                  sudo apt-get install -y gcc-aarch64-linux-gnu
 
             - name: Install pnpm
               uses: pnpm/action-setup@v4
@@ -182,8 +182,6 @@ jobs:
 
             - name: Build binary
               run: cargo build --release --target ${{ matrix.target }} -p smooai-smooth-cli
-              env:
-                  CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
             - name: Package
               run: |
