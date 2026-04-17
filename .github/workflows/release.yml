@@ -156,7 +156,10 @@ jobs:
                   # (pulled in transitively by the keyring/zbus chain that
                   # microsandbox depends on). Missing package fails with
                   # "pkg_config failed" at build time.
-                  sudo apt-get install -y pkg-config libdbus-1-dev
+                  # libcap-ng-dev: linker needs `-lcap-ng` — microsandbox's
+                  # Linux-only msb_krun_devices uses libcap-ng for CAP_*
+                  # capability management in the VM host shim.
+                  sudo apt-get install -y pkg-config libdbus-1-dev libcap-ng-dev
 
             - name: Install aarch64-linux cross-compile toolchain
               if: matrix.target == 'aarch64-unknown-linux-gnu'
