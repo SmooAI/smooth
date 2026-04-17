@@ -77,32 +77,33 @@ function sparsePath(crate) {
     return `${crate.slice(0, 2)}/${crate.slice(2, 4)}/${crate}`;
 }
 
-function isAlreadyPublished(crate, ver) {
+function getSparseIndex(crate) {
     const url = `https://index.crates.io/${sparsePath(crate)}`;
     return new Promise((res) => {
         https
             .get(url, (r) => {
                 if (r.statusCode === 404) {
                     r.resume();
-                    res(false);
+                    res({ exists: false, versions: [] });
                     return;
                 }
                 let body = "";
                 r.setEncoding("utf8");
                 r.on("data", (c) => (body += c));
                 r.on("end", () => {
-                    const match = body
+                    const versions = body
                         .split("\n")
                         .map((l) => l.trim())
                         .filter(Boolean)
-                        .some((line) => {
+                        .map((line) => {
                             try {
-                                return JSON.parse(line).vers === ver;
+                                return JSON.parse(line).vers;
                             } catch {
-                                return false;
+                                return null;
                             }
-                        });
-                    res(match);
+                        })
+                        .filter(Boolean);
+                    res({ exists: versions.length > 0, versions });
                 });
             })
             .on("error", (err) => {
@@ -110,15 +111,38 @@ function isAlreadyPublished(crate, ver) {
                     `sparse-index lookup failed for ${crate}: ${err.message}`,
                 );
                 // Fall through — cargo publish will reject cleanly if already published.
-                res(false);
+                res({ exists: true, versions: [] });
             });
     });
+}
+
+async function isAlreadyPublished(crate, ver) {
+    const { versions } = await getSparseIndex(crate);
+    return versions.includes(ver);
+}
+
+async function isCrateNew(crate) {
+    const { exists } = await getSparseIndex(crate);
+    return !exists;
+}
+
+function sleep(ms) {
+    return new Promise((res) => setTimeout(res, ms));
 }
 
 (async () => {
     console.log(`Publishing Smooth workspace @ ${version} to crates.io`);
     console.log(`Order (${PUBLISH_ORDER.length} crates):`);
     for (const name of PUBLISH_ORDER) console.log(`  - ${name}`);
+
+    // crates.io's "new crate" rate limit is strict: you can only publish a
+    // few brand-new crate names per minute. A fresh workspace introducing
+    // many new crates at once will hit HTTP 429 without throttling. We
+    // only pause when the *previous* publish was a new-crate first-ever
+    // upload; subsequent version bumps of already-published crates don't
+    // hit this limit.
+    let lastPublishWasNew = false;
+    const newCrateDelayMs = 15_000;
 
     for (const crate of PUBLISH_ORDER) {
         const published = await isAlreadyPublished(crate, version);
@@ -127,19 +151,31 @@ function isAlreadyPublished(crate, ver) {
             continue;
         }
 
-        console.log(`\n[publish] ${crate}@${version}`);
+        if (lastPublishWasNew) {
+            console.log(
+                `  throttling ${newCrateDelayMs / 1000}s to stay under crates.io's new-crate rate limit`,
+            );
+            await sleep(newCrateDelayMs);
+        }
+
+        const willBeNewCrate = await isCrateNew(crate);
+        console.log(
+            `\n[publish] ${crate}@${version}${willBeNewCrate ? " (first upload)" : ""}`,
+        );
         try {
             // --no-verify skips the pre-flight `cargo build --release` that
             // cargo publish runs by default. The release job has already
             // built the workspace before we reach this step, so verifying
             // again triples the run time for no safety gain.
             run("cargo", ["publish", "-p", crate, "--no-verify"]);
+            lastPublishWasNew = willBeNewCrate;
         } catch (err) {
             const nowPublished = await isAlreadyPublished(crate, version);
             if (nowPublished) {
                 console.log(
                     `  (recovered) ${crate}@${version} appeared on crates.io during publish — continuing`,
                 );
+                lastPublishWasNew = willBeNewCrate;
                 continue;
             }
             throw err;

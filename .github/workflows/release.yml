@@ -251,7 +251,24 @@ jobs:
             - name: Install Linux build deps
               run: |
                   sudo apt-get update
-                  sudo apt-get install -y pkg-config libdbus-1-dev libcap-ng-dev musl-tools
+                  # libicu-dev is needed by smooth-dolt's CGO build (Dolt's
+                  # gozstd transitively links to libicu).
+                  sudo apt-get install -y pkg-config libdbus-1-dev libcap-ng-dev libicu-dev musl-tools python3-pip
+
+            - name: Install Go (for smooth-dolt)
+              uses: actions/setup-go@v5
+              with:
+                  go-version: "1.24"
+
+            - name: Install cargo-zigbuild
+              # scripts/build-operator-runner.sh + build-boardroom.sh use
+              # `cargo zigbuild` to cross-compile for aarch64-unknown-linux-musl.
+              # Even on a native arm64 runner we keep zigbuild as the single
+              # code path so local + CI builds stay identical.
+              run: |
+                  cargo install --locked cargo-zigbuild
+                  pip3 install --user --break-system-packages ziglang
+                  echo "$HOME/.local/bin" >> $GITHUB_PATH
 
             - name: Install pnpm
               uses: pnpm/action-setup@v4
