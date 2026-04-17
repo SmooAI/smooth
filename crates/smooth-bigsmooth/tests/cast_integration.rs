@@ -102,8 +102,12 @@ async fn spawn_archivist() -> (String, Arc<MemoryArchiveStore>, Arc<MemoryEventA
 }
 
 /// Spawn Goalie with a given Wonk base URL + audit log file path. Returns Goalie base URL.
+///
+/// Goalie is wired with the matching `TEST_AUTH_TOKEN` so its `/check/*` calls
+/// pass Wonk's bearer-token middleware — the same token baked into
+/// `ALLOW_EXAMPLE_POLICY`.
 async fn spawn_goalie(wonk_url: &str, audit_path: &std::path::Path) -> String {
-    let wonk_client = WonkClient::new(wonk_url);
+    let wonk_client = WonkClient::with_auth(wonk_url, TEST_AUTH_TOKEN);
     let audit = AuditLogger::new(audit_path.to_str().unwrap()).expect("open audit log");
 
     // Goalie's run_proxy binds itself; we bind a temp listener first to get a port,
@@ -123,6 +127,14 @@ async fn spawn_goalie(wonk_url: &str, audit_path: &std::path::Path) -> String {
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
+
+/// Bearer token baked into `ALLOW_EXAMPLE_POLICY`'s `[auth]` section.
+///
+/// Wonk's `require_operator_token` middleware (added in the security-hardening
+/// pass) gates every `/check/*`, `/policy`, and `/request` call. Tests that
+/// post to Wonk directly must attach `Authorization: Bearer <TEST_AUTH_TOKEN>`;
+/// `spawn_goalie` wires the same token into its `WonkClient`.
+const TEST_AUTH_TOKEN: &str = "test-token";
 
 /// Minimal policy that allows `example.com` + one tool. Used as a base for
 /// tests that need Wonk up with *something* to gate on.
@@ -184,6 +196,7 @@ async fn wonk_check_tool_allows_and_denies_via_policy() {
     // read_file is explicitly allowed → allowed: true
     let resp: serde_json::Value = client
         .post(format!("{url}/check/tool"))
+        .bearer_auth(TEST_AUTH_TOKEN)
         .json(&serde_json::json!({ "tool_name": "read_file" }))
         .send()
         .await
@@ -196,6 +209,7 @@ async fn wonk_check_tool_allows_and_denies_via_policy() {
     // shell_exec is explicitly denied → allowed: false
     let resp: serde_json::Value = client
         .post(format!("{url}/check/tool"))
+        .bearer_auth(TEST_AUTH_TOKEN)
         .json(&serde_json::json!({ "tool_name": "shell_exec" }))
         .send()
         .await
@@ -214,6 +228,7 @@ async fn wonk_check_network_respects_allowlist() {
     // example.com is on the allowlist
     let resp: serde_json::Value = client
         .post(format!("{url}/check/network"))
+        .bearer_auth(TEST_AUTH_TOKEN)
         .json(&serde_json::json!({ "domain": "example.com", "path": "/api", "method": "GET" }))
         .send()
         .await
@@ -226,6 +241,7 @@ async fn wonk_check_network_respects_allowlist() {
     // evil.com is not
     let resp: serde_json::Value = client
         .post(format!("{url}/check/network"))
+        .bearer_auth(TEST_AUTH_TOKEN)
         .json(&serde_json::json!({ "domain": "evil.com", "path": "/x", "method": "GET" }))
         .send()
         .await
@@ -246,6 +262,7 @@ async fn wonk_policy_holder_hot_update_flows_to_http() {
     // Sanity: currently allowed.
     let resp: serde_json::Value = client
         .post(format!("{url}/check/tool"))
+        .bearer_auth(TEST_AUTH_TOKEN)
         .json(&serde_json::json!({ "tool_name": "read_file" }))
         .send()
         .await
@@ -268,6 +285,7 @@ async fn wonk_policy_holder_hot_update_flows_to_http() {
     // on every request.
     let resp: serde_json::Value = client
         .post(format!("{url}/check/tool"))
+        .bearer_auth(TEST_AUTH_TOKEN)
         .json(&serde_json::json!({ "tool_name": "read_file" }))
         .send()
         .await
@@ -638,6 +656,7 @@ async fn adversarial_secret_exfiltration_attempt_is_caught_across_cast() {
     let client = reqwest::Client::new();
     let resp: serde_json::Value = client
         .post(format!("{wonk_url}/check/network"))
+        .bearer_auth(TEST_AUTH_TOKEN)
         .json(&serde_json::json!({ "domain": "evil.com", "path": "/receive", "method": "POST" }))
         .send()
         .await
