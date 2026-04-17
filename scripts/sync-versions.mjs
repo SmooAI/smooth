@@ -1,8 +1,17 @@
 #!/usr/bin/env node
 /**
- * Sync version from package.json → Cargo.toml workspace.package.version + Cargo.lock.
+ * Sync version from package.json → Cargo.toml + Cargo.lock.
  *
- * Changesets bumps package.json; this script propagates the new version to Rust.
+ * Changesets bumps package.json; this script propagates the new version to:
+ *
+ *   1. `[workspace.package] version`  — root Cargo.toml
+ *   2. `[workspace.dependencies]` entries `smooth-X = { version = "x.y.z", ... }`
+ *      so publishable crates carry matching version requirements on internal deps
+ *   3. Every `smooai-smooth-*` + `smooth-*` entry in Cargo.lock
+ *
+ * All three must move together or `cargo publish` in CI will either fail
+ * validation (version mismatch) or publish a stale lock that subsequent
+ * `cargo install` calls refuse.
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -23,24 +32,52 @@ const updates = [
     {
         path: "Cargo.toml",
         apply(content) {
-            // Update workspace.package.version in root Cargo.toml
-            const pattern = /(\[workspace\.package\]\s*\nversion\s*=\s*")([^"]+)(")/;
-            if (!pattern.test(content)) {
+            let next = content;
+
+            // 1. workspace.package.version
+            const workspacePattern =
+                /(\[workspace\.package\]\s*\nversion\s*=\s*")([^"]+)(")/;
+            if (!workspacePattern.test(next)) {
                 throw new Error(
-                    "workspace.package version line not found in Cargo.toml",
+                    "workspace.package.version line not found in Cargo.toml",
                 );
             }
-            return content.replace(pattern, `$1${version}$3`);
+            next = next.replace(workspacePattern, `$1${version}$3`);
+
+            // 2. workspace.dependencies smooth-X = { ... version = "...", ... }
+            //    Only rewrites the `version = "..."` occurrence on the same
+            //    line as a smooth-X entry. Lines without a version key are
+            //    left alone — we add them in step 3.
+            const depVersionPattern =
+                /^(smooth-[a-z-]+\s*=\s*\{[^}\n]*\bversion\s*=\s*")([^"]+)(")/gm;
+            next = next.replace(depVersionPattern, `$1${version}$3`);
+
+            // 3. Add version to any smooth-X workspace dep that doesn't have
+            //    one yet. Match "smooth-X = { path = "crates/smooth-X", ... }"
+            //    and splice `version = "X.Y.Z",` in right after the opening brace.
+            const addVersionPattern =
+                /^(smooth-[a-z-]+\s*=\s*\{)(?!([^}\n]*\bversion\b))([^}\n]*)(\})/gm;
+            next = next.replace(
+                addVersionPattern,
+                (_, pre, _v, body, close) => {
+                    const trimmed = body.trimStart();
+                    const separator = trimmed.length > 0 ? " " : "";
+                    return `${pre} version = "${version}",${separator}${trimmed}${close}`;
+                },
+            );
+
+            return next;
         },
     },
     {
         path: "Cargo.lock",
         apply(content) {
-            // Update the version for all workspace crate entries.
-            // Workspace crates all share the same version (workspace.package.version).
-            // We match the pattern: name = "smooth-*"\nversion = "X.Y.Z"
+            // Every workspace crate uses the package name `smooai-smooth-*`
+            // (see the `package = "smooai-smooth-<name>"` rename in commit
+            // 933b927). The old regex matched `smooth-*` only and silently
+            // missed every crate.
             const pattern =
-                /(name = "smooth-[^"]+"\nversion = ")([^"]+)(")/g;
+                /(name = "smooai-smooth-[^"]+"\nversion = ")([^"]+)(")/g;
             return content.replace(pattern, `$1${version}$3`);
         },
     },
