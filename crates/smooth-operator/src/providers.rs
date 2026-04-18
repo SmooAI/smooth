@@ -877,9 +877,19 @@ mod tests {
         assert_eq!(default.model, "gpt-4o");
     }
 
+    // Serialize tests that mutate `SMOOAI_GATEWAY_URL` — cargo test runs
+    // tests in parallel, so two tests touching the same process-global env
+    // var race and either order can fail.
+    fn smooai_gateway_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
     // 14b. Smoo AI Gateway preset creates correct routing with semantic aliases
     #[test]
     fn smooai_gateway_preset_creates_correct_routing() {
+        let _guard = smooai_gateway_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+
         // Clear any host override for a deterministic assert on the default
         // production URL. We re-set it at the end so other tests see the
         // same state they started with.
@@ -923,6 +933,8 @@ mod tests {
     // 14c. SMOOAI_GATEWAY_URL env var overrides the default base URL
     #[test]
     fn smooai_gateway_respects_env_url_override() {
+        let _guard = smooai_gateway_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+
         let prior = std::env::var("SMOOAI_GATEWAY_URL").ok();
         std::env::set_var("SMOOAI_GATEWAY_URL", "https://llm.dev.smooai.com/v1");
 

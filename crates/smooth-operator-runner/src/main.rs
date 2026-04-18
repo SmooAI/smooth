@@ -1288,6 +1288,11 @@ struct Cast {
     /// humans reading the [runner stderr] forward) can see every allowed
     /// and denied network request the sandbox actually attempted.
     goalie_audit_path: String,
+    /// Per-VM bearer token from `[auth]` in the policy. Every caller that
+    /// hits Wonk's HTTP surface (Goalie, the runner's own tool hook) has
+    /// to carry this or Wonk's middleware 401s them with an empty body —
+    /// which surfaces as "error decoding response body" at the hook layer.
+    operator_token: String,
 }
 
 /// Spawn Wonk, Scribe, and Goalie in-process on ephemeral localhost ports.
@@ -1337,6 +1342,7 @@ async fn spawn_cast(policy_toml: &str, operator_id: &str) -> anyhow::Result<Cast
     // needs to call Wonk's HTTP surface can authenticate. Wonk's
     // middleware rejects unauthenticated callers with 401.
     let operator_token = policy.auth.token.clone();
+    let operator_token_for_cast = operator_token.clone();
     let holder = PolicyHolder::from_policy(policy);
     // There is no Big Smooth leader to negotiate with from inside this VM
     // (the runner is self-contained), so we point the negotiator at a stub
@@ -1395,6 +1401,7 @@ async fn spawn_cast(policy_toml: &str, operator_id: &str) -> anyhow::Result<Cast
         goalie_url: format!("http://{goalie_addr}"),
         scribe_store,
         goalie_audit_path: audit_path,
+        operator_token: operator_token_for_cast,
     })
 }
 
@@ -1684,7 +1691,7 @@ async fn main() {
     // All three are `ToolHook` impls so they compose cleanly on the registry.
     let narc = Arc::new(NarcHook::new(config.narc_write_guard));
     tools.add_hook(SharedNarc { inner: Arc::clone(&narc) });
-    tools.add_hook(WonkHook::new(&cast.wonk_url));
+    tools.add_hook(WonkHook::with_auth(&cast.wonk_url, &cast.operator_token));
     tools.add_hook(ScribeAuditHook::new(&cast.scribe_url, &config.operator_id));
 
     // Run the agent on a channel and re-emit every AgentEvent as JSON-lines.
