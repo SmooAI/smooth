@@ -70,6 +70,42 @@ pub fn branded_title() -> Vec<Span<'static>> {
     spans
 }
 
+/// The full "Smooth" wordmark as a sequence of ratatui spans with the
+/// same per-character gradient the CLI uses for `th`'s own banner
+/// (see `crates/smooth-cli/src/gradient.rs::smooth()`):
+///
+///   S m o o  →  #f49f0a (orange) → #ff6b6c (pink), linear over 4 chars
+///   t h      →  #00a6a6 (teal)   → #1238dd (blue), linear over 2 chars
+///
+/// Use anywhere the TUI prints "Smooth" so it reads the way the brand
+/// reads elsewhere in the product.
+pub fn smooth_wordmark() -> Vec<Span<'static>> {
+    const SMOO_START: (u8, u8, u8) = (0xf4, 0x9f, 0x0a);
+    const SMOO_END: (u8, u8, u8) = (0xff, 0x6b, 0x6c);
+    const TH_START: (u8, u8, u8) = (0x00, 0xa6, 0xa6);
+    const TH_END: (u8, u8, u8) = (0x12, 0x38, 0xdd);
+
+    fn spans(text: &str, start: (u8, u8, u8), end: (u8, u8, u8)) -> Vec<Span<'static>> {
+        let chars: Vec<char> = text.chars().collect();
+        let n = chars.len();
+        chars
+            .into_iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let t = if n <= 1 { 0.0 } else { i as f64 / (n - 1) as f64 };
+                let r = lerp_u8(start.0, end.0, t);
+                let g = lerp_u8(start.1, end.1, t);
+                let b = lerp_u8(start.2, end.2, t);
+                Span::styled(c.to_string(), Style::default().fg(Color::Rgb(r, g, b)).add_modifier(Modifier::BOLD))
+            })
+            .collect()
+    }
+
+    let mut out = spans("Smoo", SMOO_START, SMOO_END);
+    out.extend(spans("th", TH_START, TH_END));
+    out
+}
+
 /// Style for the main title bar.
 pub fn title() -> Style {
     Style::default().fg(SMOO_GREEN).add_modifier(Modifier::BOLD)

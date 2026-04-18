@@ -56,8 +56,14 @@ fn render_welcome_banner(lines: &mut Vec<Line<'_>>) {
 
 /// Render the chat message area.
 fn render_chat(frame: &mut Frame, state: &AppState, area: Rect) {
+    // Build a " Smooth " title where "Smooth" uses the brand gradient
+    // (matches the CLI wordmark — `smoo` orange→pink, `th` teal→blue).
+    let mut title_spans: Vec<Span<'_>> = vec![Span::raw(" ")];
+    title_spans.extend(theme::smooth_wordmark());
+    title_spans.push(Span::raw(" "));
+
     let block = Block::default()
-        .title(Span::styled(" Smooth Coding ", theme::title()))
+        .title(Line::from(title_spans))
         .borders(Borders::ALL)
         .border_style(theme::panel_border(state.focus == FocusPanel::Chat));
 

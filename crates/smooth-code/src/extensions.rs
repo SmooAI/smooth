@@ -1,4 +1,4 @@
-//! Extension system and skill registry for the Smooth Coding TUI.
+//! Extension system and skill registry for the Smooth TUI.
 //!
 //! Provides [`Extension`], [`Skill`], and [`ExtensionRegistry`] for loading
 //! markdown-based prompt workflows and extension commands.

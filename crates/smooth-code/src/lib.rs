@@ -1,4 +1,4 @@
-//! # Smooth Coding
+//! # Smooth
 //!
 //! AI-assisted coding TUI built with ratatui. Provides an interactive
 //! chat interface for working with the Smooth Operator agent framework.

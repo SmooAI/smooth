@@ -1,4 +1,4 @@
-//! Session persistence for the Smooth Coding TUI.
+//! Session persistence for the Smooth TUI.
 //!
 //! Sessions are stored as JSON files under `~/.smooth/coding-sessions/`.
 //! Each session captures the full conversation history, model configuration,
