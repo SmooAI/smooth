@@ -22,9 +22,74 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         render_sidebar(frame, state, sidebar_rect);
     }
 
+    // Autocomplete popup — rendered last so it floats over the chat
+    // panel. Anchored just above the input box so the user's eye
+    // doesn't jump far from where they're typing.
+    if state.autocomplete.active && !state.autocomplete.results.is_empty() {
+        render_autocomplete_popup(frame, state, regions.input);
+    }
+
     if state.model_picker.active {
         render_model_picker(frame, state, frame.area());
     }
+}
+
+/// Render the autocomplete popup directly above the input box.
+/// Shows up to 8 rows; stays narrow (40 cols) so it doesn't cover
+/// the chat content behind it.
+fn render_autocomplete_popup(frame: &mut Frame, state: &AppState, input_area: Rect) {
+    use crate::autocomplete::CompletionKind;
+
+    let popup_height = (state.autocomplete.results.len() as u16).min(8) + 2; // +2 for borders
+    let popup_width = 48u16.min(input_area.width);
+    if popup_height == 0 || popup_width == 0 || input_area.y < popup_height {
+        return;
+    }
+
+    let popup_rect = Rect {
+        x: input_area.x,
+        y: input_area.y - popup_height,
+        width: popup_width,
+        height: popup_height,
+    };
+
+    let title = match state.autocomplete.kind {
+        CompletionKind::File => " @ File ",
+        CompletionKind::Command => " / Command ",
+    };
+
+    let items: Vec<ListItem<'_>> = state
+        .autocomplete
+        .results
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let is_selected = i == state.autocomplete.selected;
+            let marker = if is_selected { "▶ " } else { "  " };
+            let label_style = if is_selected {
+                theme::user_label() // orange bold
+            } else {
+                Style::default().fg(theme::SMOO_WHITE)
+            };
+            let detail_style = theme::muted();
+            let line = Line::from(vec![
+                Span::raw(marker),
+                Span::styled(r.label.clone(), label_style),
+                Span::raw("  "),
+                Span::styled(r.detail.clone(), detail_style),
+            ]);
+            ListItem::new(line)
+        })
+        .collect();
+
+    let block = Block::default()
+        .title(Span::styled(title, theme::title()))
+        .borders(Borders::ALL)
+        .border_style(theme::panel_border(true));
+
+    let list = List::new(items).block(block);
+    frame.render_widget(Clear, popup_rect);
+    frame.render_widget(list, popup_rect);
 }
 
 /// The ASCII art banner rows for the welcome screen.

@@ -312,6 +312,50 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
     }
 }
 
+/// Refresh the autocomplete query from the current input buffer —
+/// the text between `trigger_pos + 1` and the cursor — and re-run
+/// the filter against the appropriate candidate source.
+fn refresh_autocomplete(state: &mut AppState, command_registry: &CommandRegistry) {
+    if !state.autocomplete.active {
+        return;
+    }
+    let start = state.autocomplete.trigger_pos.saturating_add(1);
+    let end = state.input_cursor.max(start);
+    if end > state.input.len() || start > state.input.len() {
+        state.autocomplete.deactivate();
+        return;
+    }
+    let query = state.input[start..end].to_string();
+    match state.autocomplete.kind {
+        crate::autocomplete::CompletionKind::File => {
+            let files: Vec<_> = state.file_tree.as_ref().map(|t| t.entries.clone()).unwrap_or_default();
+            state.autocomplete.update_query(&query, &files);
+        }
+        crate::autocomplete::CompletionKind::Command => {
+            state.autocomplete.update_command_query(&query, &command_registry.list_commands());
+        }
+    }
+}
+
+/// Accept the currently selected autocomplete result: replace
+/// `input[trigger_pos..cursor]` with the suggestion's insert text
+/// and close the popup.
+fn accept_autocomplete(state: &mut AppState) {
+    let Some(result) = state.autocomplete.selected_result().cloned() else {
+        state.autocomplete.deactivate();
+        return;
+    };
+    let start = state.autocomplete.trigger_pos;
+    let end = state.input_cursor.min(state.input.len());
+    if start > end {
+        state.autocomplete.deactivate();
+        return;
+    }
+    state.input.replace_range(start..end, &result.insert_text);
+    state.input_cursor = start + result.insert_text.len();
+    state.autocomplete.deactivate();
+}
+
 /// Handle key events in input mode.
 #[allow(clippy::needless_pass_by_value)] // Arc is cloned into async tasks
 fn handle_input_mode(
@@ -321,6 +365,52 @@ fn handle_input_mode(
     event_tx: mpsc::UnboundedSender<AgentEvent>,
     command_registry: &CommandRegistry,
 ) {
+    // Autocomplete-first key handling. When the popup is active it
+    // owns the up/down arrows, Tab, and Enter so the user can pick a
+    // suggestion without triggering the usual line semantics.
+    if state.autocomplete.active {
+        match key.code {
+            KeyCode::Up => {
+                state.autocomplete.select_up();
+                return;
+            }
+            KeyCode::Down => {
+                state.autocomplete.select_down();
+                return;
+            }
+            KeyCode::Tab | KeyCode::Enter => {
+                accept_autocomplete(state);
+                return;
+            }
+            KeyCode::Esc => {
+                state.autocomplete.deactivate();
+                return;
+            }
+            KeyCode::Char(c) if c.is_whitespace() => {
+                // Space/tab ends the active query cleanly; fall
+                // through so the whitespace still gets inserted.
+                state.autocomplete.deactivate();
+                state.input_insert(c);
+                return;
+            }
+            KeyCode::Char(c) => {
+                state.input_insert(c);
+                refresh_autocomplete(state, command_registry);
+                return;
+            }
+            KeyCode::Backspace => {
+                state.input_backspace();
+                if state.input_cursor <= state.autocomplete.trigger_pos {
+                    state.autocomplete.deactivate();
+                } else {
+                    refresh_autocomplete(state, command_registry);
+                }
+                return;
+            }
+            _ => {}
+        }
+    }
+
     match key.code {
         KeyCode::Enter => {
             let input = state.take_input();
@@ -415,7 +505,23 @@ fn handle_input_mode(
         KeyCode::Esc => {
             state.mode = Mode::Normal;
         }
-        KeyCode::Char(c) => state.input_insert(c),
+        KeyCode::Char(c) => {
+            // Trigger autocomplete on `@` anywhere and `/` at the
+            // start of the input. The trigger char itself is inserted
+            // normally; refresh_autocomplete then seeds an empty
+            // query against the candidate source.
+            let is_command_trigger = c == '/' && state.input.is_empty();
+            let is_file_trigger = c == '@';
+            let trigger_pos = state.input_cursor;
+            state.input_insert(c);
+            if is_command_trigger {
+                state.autocomplete.activate_commands(trigger_pos);
+                refresh_autocomplete(state, command_registry);
+            } else if is_file_trigger {
+                state.autocomplete.activate_files(trigger_pos);
+                refresh_autocomplete(state, command_registry);
+            }
+        }
         _ => {}
     }
 }
