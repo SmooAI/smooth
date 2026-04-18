@@ -122,7 +122,7 @@ pub async fn run_with_session(working_dir: PathBuf, resume: Option<crate::sessio
     })?;
     tui_debug(format!("Terminal::new OK, size={:?}", terminal.size().ok()));
 
-    let mut initial_state = match resume {
+    let initial_state = match resume {
         Some(ref session) => {
             tui_debug(format!(
                 "resuming session id={} title={:?} messages={}",
@@ -394,6 +394,41 @@ fn handle_input_mode(
     event_tx: mpsc::UnboundedSender<AgentEvent>,
     command_registry: &CommandRegistry,
 ) {
+    // Model picker owns the keyboard while it's visible. Up/Down
+    // navigates, Enter drills in or applies, Esc backs out (Models →
+    // Slots → closed).
+    if state.model_picker.active {
+        match key.code {
+            KeyCode::Up => state.model_picker.select_up(),
+            KeyCode::Down => state.model_picker.select_down(),
+            KeyCode::Enter => match state.model_picker.view {
+                crate::model_picker::PickerView::Slots => state.model_picker.open_models_for_selected(),
+                crate::model_picker::PickerView::Models { .. } => {
+                    // apply_selected_model returns to Slots on success;
+                    // on failure it leaves the error stashed and keeps
+                    // the user in Models view so they can retry.
+                    let _ = state.model_picker.apply_selected_model();
+                    // When the user applied the Default slot, keep the
+                    // displayed model name in the status bar consistent.
+                    if let Some(def_entry) = state
+                        .model_picker
+                        .slots
+                        .iter()
+                        .find(|e| matches!(e.slot, crate::model_picker::PickerSlot::Default))
+                    {
+                        state.model_name = def_entry.current_model.clone();
+                    }
+                }
+            },
+            KeyCode::Esc => match state.model_picker.view {
+                crate::model_picker::PickerView::Slots => state.model_picker.deactivate(),
+                crate::model_picker::PickerView::Models { .. } => state.model_picker.back_to_slots(),
+            },
+            _ => {}
+        }
+        return;
+    }
+
     // Autocomplete-first key handling. When the popup is active it
     // owns the up/down arrows, Tab, and Enter so the user can pick a
     // suggestion without triggering the usual line semantics.

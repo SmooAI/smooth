@@ -375,46 +375,105 @@ fn render_sidebar(frame: &mut Frame, state: &AppState, area: Rect) {
 }
 
 /// Render the model picker as a centered popup overlay.
+///
+/// Two views, rendered off the same popup frame:
+///   * `PickerView::Slots` — list of 8 routing slots with current model
+///   * `PickerView::Models { slot }` — candidate models for that slot
 fn render_model_picker(frame: &mut Frame, state: &AppState, area: Rect) {
+    use crate::model_picker::PickerView;
+
     let picker = &state.model_picker;
 
-    // Size the popup: width ~50 cols, height = options + 2 (border)
-    let popup_width = 50.min(area.width.saturating_sub(4));
+    // Wider popup than the old list-only view so slot label + model +
+    // description fit on one line.
+    let popup_width = 72.min(area.width.saturating_sub(4));
+    let row_count = match picker.view {
+        PickerView::Slots => picker.slots.len(),
+        PickerView::Models { .. } => picker.models.len(),
+    };
     #[allow(clippy::cast_possible_truncation)]
-    let provider_count = picker.providers.len().min(usize::from(u16::MAX) - 2) as u16;
-    let popup_height = (provider_count + 2).min(area.height.saturating_sub(2));
+    let body_rows = row_count.min(usize::from(u16::MAX) - 6) as u16;
+    // +2 for outer border, +1 header, +1 footer
+    let popup_height = (body_rows + 4).min(area.height.saturating_sub(2));
 
     let [popup_y] = Layout::vertical([Constraint::Length(popup_height)]).flex(Flex::Center).areas(area);
     let [popup_area] = Layout::horizontal([Constraint::Length(popup_width)]).flex(Flex::Center).areas(popup_y);
 
-    // Clear the area behind the popup
     frame.render_widget(Clear, popup_area);
 
-    let block = Block::default().title(" Select Model ").borders(Borders::ALL).border_style(theme::title());
+    let title = match picker.view {
+        PickerView::Slots => " Models — routing slots ".to_string(),
+        PickerView::Models { slot } => {
+            let label = picker.slots.iter().find(|e| e.slot == slot).map_or("?", |e| e.label);
+            format!(" Models — {label} ")
+        }
+    };
 
+    let block = Block::default().title(title).borders(Borders::ALL).border_style(theme::title());
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
 
+    // Layout inside the border: [body][footer]
+    let [body_area, footer_area] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+
+    match picker.view {
+        PickerView::Slots => render_slots_view(frame, picker, body_area),
+        PickerView::Models { .. } => render_models_view(frame, picker, body_area),
+    }
+
+    let footer = match picker.view {
+        PickerView::Slots => "↑/↓ navigate  Enter pick slot  Esc close".to_string(),
+        PickerView::Models { .. } => "↑/↓ navigate  Enter apply  Esc back".to_string(),
+    };
+    let footer_line = if let Some(err) = picker.error.as_ref() {
+        format!("⚠ {err}")
+    } else {
+        footer
+    };
+    frame.render_widget(ratatui::widgets::Paragraph::new(footer_line).style(theme::muted()), footer_area);
+}
+
+fn render_slots_view(frame: &mut Frame, picker: &crate::model_picker::ModelPickerState, area: Rect) {
     let items: Vec<ListItem<'_>> = picker
-        .providers
+        .slots
         .iter()
         .enumerate()
-        .map(|(i, opt)| {
-            let prefix = if i == picker.selected { "▸ " } else { "  " };
-            let provider_tag = format!(" ({})", opt.provider);
-            let text = format!("{prefix}{}{provider_tag}", opt.display_name);
-
-            if i == picker.selected {
+        .map(|(i, entry)| {
+            let selected = i == picker.selected;
+            let prefix = if selected { "▸ " } else { "  " };
+            // One-line row: "Label        model-name        description"
+            let text = format!("{prefix}{:<11} {}  —  {}", entry.label, entry.current_model, entry.description);
+            if selected {
                 ListItem::new(Span::styled(
                     text,
-                    ratatui::style::Style::default().bg(theme::SMOO_GREEN).fg(ratatui::style::Color::Black),
+                    ratatui::style::Style::default().bg(theme::SMOO_ORANGE).fg(ratatui::style::Color::Black),
                 ))
             } else {
                 ListItem::new(Span::raw(text))
             }
         })
         .collect();
+    frame.render_widget(List::new(items), area);
+}
 
-    let list = List::new(items);
-    frame.render_widget(list, inner);
+fn render_models_view(frame: &mut Frame, picker: &crate::model_picker::ModelPickerState, area: Rect) {
+    let items: Vec<ListItem<'_>> = picker
+        .models
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let selected = i == picker.selected;
+            let prefix = if selected { "▸ " } else { "  " };
+            let text = format!("{prefix}{}", m.display());
+            if selected {
+                ListItem::new(Span::styled(
+                    text,
+                    ratatui::style::Style::default().bg(theme::SMOO_ORANGE).fg(ratatui::style::Color::Black),
+                ))
+            } else {
+                ListItem::new(Span::raw(text))
+            }
+        })
+        .collect();
+    frame.render_widget(List::new(items), area);
 }
