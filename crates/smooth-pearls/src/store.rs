@@ -37,11 +37,44 @@ fn sql_escape(s: &str) -> String {
 
 impl PearlStore {
     /// Open the pearl store at the given Dolt data directory.
+    ///
+    /// Runs an idempotent schema-migration check: stores created before
+    /// a later table (e.g. `config`, added in the retire-sqlite change)
+    /// get the missing table(s) created and committed. On an up-to-date
+    /// store this costs a single `SHOW TABLES` round-trip.
     pub fn open(dolt_dir: &Path) -> Result<Self> {
         let dolt = SmoothDolt::new(dolt_dir)?;
+        Self::migrate_schema(&dolt)?;
         // Auto-register in global registry (best-effort)
         Self::auto_register_project(dolt_dir);
         Ok(Self { dolt })
+    }
+
+    /// Cheap migration: list tables; if any required table added after
+    /// the initial schema is missing, run the full `CREATE IF NOT EXISTS`
+    /// pass and commit. Idempotent and safe against concurrent opens.
+    fn migrate_schema(dolt: &SmoothDolt) -> Result<()> {
+        // Extend this list whenever a new table is added to ensure_schema
+        // so pre-existing stores get healed on next open.
+        const REQUIRED_TABLES: &[&str] = &["config"];
+
+        let rows = dolt.sql("SHOW TABLES")?;
+        let present: std::collections::HashSet<String> = rows
+            .iter()
+            .filter_map(|row| row.as_object()?.values().next()?.as_str().map(String::from))
+            .collect();
+        if REQUIRED_TABLES.iter().all(|t| present.contains(*t)) {
+            return Ok(());
+        }
+
+        Self::ensure_schema(dolt)?;
+        // Best-effort commit — if there's nothing to commit (concurrent
+        // migrator already landed the DDL), smooth-dolt exits non-zero;
+        // log and continue rather than fail the open.
+        if let Err(e) = dolt.commit("schema migration: add missing tables") {
+            tracing::debug!(error = %e, "migrate_schema: commit returned error (likely no-op)");
+        }
+        Ok(())
     }
 
     /// Create a store with an explicit `SmoothDolt` handle (for testing).
@@ -1077,5 +1110,27 @@ mod tests {
         assert_eq!(stats.closed, 1);
         assert_eq!(stats.deferred, 0);
         assert_eq!(stats.total, 4);
+    }
+
+    /// Regression: stores created before the `config` table was part of
+    /// the schema (before the retire-sqlite commit) were leaving every
+    /// subsequent `get_config` call failing, which surfaced as a red
+    /// "Dolt store" card on the dashboard. `open()` must heal such
+    /// stores by re-running `ensure_schema` idempotently.
+    #[test]
+    fn test_open_migrates_missing_config_table() {
+        let Some(store) = test_store() else { return };
+        let dolt_dir = store.dolt_path().to_path_buf();
+
+        // Drop the config table to simulate a pre-migration store.
+        store.dolt.exec("DROP TABLE config").expect("drop config");
+        store.dolt.commit("simulate legacy store: remove config table").expect("commit drop");
+        drop(store);
+
+        // Re-open. Migration should recreate the table so get_config works.
+        let reopened = PearlStore::open(&dolt_dir).expect("open heals missing table");
+        reopened.set_config("__health_check", "ok").expect("set_config after migration");
+        let got = reopened.get_config("__health_check").expect("get_config succeeds").expect("value present");
+        assert_eq!(got, "ok");
     }
 }
