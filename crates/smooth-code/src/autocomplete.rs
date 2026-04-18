@@ -4,10 +4,20 @@
 //! trigger character and the source of candidates differ. The `kind` field
 //! lets the event loop and renderer distinguish the two.
 
+use std::path::{Path, PathBuf};
+
 use crate::files::FileEntry;
 
 /// Maximum number of autocomplete results to show.
 const MAX_RESULTS: usize = 20;
+
+/// A pearl exposed to the `@` picker — id + title, pre-fetched from
+/// `PearlStore` so autocomplete doesn't hit Dolt on every keystroke.
+#[derive(Debug, Clone)]
+pub struct PearlSuggestion {
+    pub id: String,
+    pub title: String,
+}
 
 /// Which completion surface is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -91,36 +101,72 @@ impl AutocompleteState {
         self.trigger_pos = 0;
     }
 
-    /// Update the query and re-filter results from the file list.
+    /// Update the `@` query with full routing: path prefixes
+    /// (`~/`, `./`, `../`, `/`) expand to filesystem directory
+    /// listings; otherwise pearls matching the query come first
+    /// (they're scarce and high-signal), then workspace file
+    /// matches fill the remainder up to [`MAX_RESULTS`].
+    ///
+    /// `workspace_root` is the directory relative paths resolve
+    /// against — typically the TUI's current working directory.
+    pub fn update_at_query(&mut self, query: &str, files: &[FileEntry], pearls: &[PearlSuggestion], workspace_root: &Path) {
+        self.query = query.to_string();
+        self.selected = 0;
+
+        // Path-prefix queries win unconditionally — the user is
+        // clearly asking for a filesystem listing, not a fuzzy
+        // search over workspace files.
+        if let Some(results) = path_completions(query, workspace_root) {
+            self.results = results;
+            return;
+        }
+
+        let lower_query = query.to_lowercase();
+        let mut out: Vec<AutocompleteResult> = Vec::new();
+
+        // Pearls first — few of them, high signal, named items
+        // trump fuzzy filename hits. Cap at 6 so they don't crowd
+        // out files entirely when the user is actually looking for
+        // a path.
+        for p in pearls {
+            if lower_query.is_empty() || p.id.to_lowercase().contains(&lower_query) || p.title.to_lowercase().contains(&lower_query) {
+                out.push(AutocompleteResult {
+                    label: p.id.clone(),
+                    detail: p.title.clone(),
+                    insert_text: format!("@{}", p.id),
+                });
+                if out.len() >= 6 {
+                    break;
+                }
+            }
+        }
+
+        // Workspace files fill the remainder.
+        for entry in files {
+            if out.len() >= MAX_RESULTS {
+                break;
+            }
+            if !lower_query.is_empty() && !entry.name.to_lowercase().contains(&lower_query) {
+                continue;
+            }
+            out.push(AutocompleteResult {
+                label: entry.name.clone(),
+                detail: entry.path.to_string_lossy().into_owned(),
+                insert_text: format!("@{}", entry.path.display()),
+            });
+        }
+
+        self.results = out;
+    }
+
+    /// Update the query and re-filter results from the file list
+    /// only. Thin backward-compat wrapper around [`update_at_query`]
+    /// for callers that don't have pearls or a workspace root.
     ///
     /// Uses case-insensitive substring matching on file names.
     /// An empty query returns all files up to [`MAX_RESULTS`].
     pub fn update_query(&mut self, query: &str, files: &[FileEntry]) {
-        self.query = query.to_string();
-        self.selected = 0;
-
-        let lower_query = query.to_lowercase();
-
-        self.results = files
-            .iter()
-            .filter(|entry| {
-                if lower_query.is_empty() {
-                    true
-                } else {
-                    entry.name.to_lowercase().contains(&lower_query)
-                }
-            })
-            .take(MAX_RESULTS)
-            .map(|entry| {
-                let display_name = &entry.name;
-                let rel_path = entry.path.to_string_lossy();
-                AutocompleteResult {
-                    label: display_name.clone(),
-                    detail: rel_path.to_string(),
-                    insert_text: format!("@{rel_path}"),
-                }
-            })
-            .collect();
+        self.update_at_query(query, files, &[], Path::new("."));
     }
 
     /// Update the query and re-filter results against a list of
@@ -162,6 +208,96 @@ impl AutocompleteState {
         if !self.results.is_empty() && self.selected < self.results.len() - 1 {
             self.selected += 1;
         }
+    }
+}
+
+/// Attempt to expand `query` as a filesystem path rooted at `~`
+/// (home), `.` / `..` (relative to `workspace_root`), or `/`
+/// (absolute), and return the matching directory entries.
+///
+/// Returns `Some(results)` when `query` is path-like — even if the
+/// resulting directory has no matches — so the caller knows not to
+/// fall through to file-tree fuzzy matching. Returns `None` when
+/// the query doesn't start with a recognised path prefix.
+fn path_completions(query: &str, workspace_root: &Path) -> Option<Vec<AutocompleteResult>> {
+    let (base_dir, file_prefix, query_dir_part): (PathBuf, String, String) = if query == "~" {
+        let base = dirs_next::home_dir()?;
+        (base, String::new(), "~/".to_string())
+    } else if let Some(rest) = query.strip_prefix("~/") {
+        let base = dirs_next::home_dir()?;
+        let (dir_in_query, fp) = split_dir_and_filename(rest);
+        (base.join(dir_in_query), fp.to_string(), format!("~/{dir_in_query}"))
+    } else if let Some(rest) = query.strip_prefix("./") {
+        let (dir_in_query, fp) = split_dir_and_filename(rest);
+        (workspace_root.join(dir_in_query), fp.to_string(), format!("./{dir_in_query}"))
+    } else if query.starts_with("../") || query == ".." {
+        // Walk up one parent per leading "../" segment, then treat
+        // the remainder as a sub-path.
+        let mut path = workspace_root.to_path_buf();
+        let mut remainder = query;
+        let mut leading = String::new();
+        while remainder == ".." || remainder.starts_with("../") {
+            path = path.parent()?.to_path_buf();
+            leading.push_str("../");
+            remainder = remainder.strip_prefix("../").unwrap_or("");
+        }
+        let (dir_in_query, fp) = split_dir_and_filename(remainder);
+        (path.join(dir_in_query), fp.to_string(), format!("{leading}{dir_in_query}"))
+    } else if query.starts_with('/') {
+        let (dir_in_query, fp) = split_dir_and_filename(query);
+        (PathBuf::from(dir_in_query), fp.to_string(), dir_in_query.to_string())
+    } else {
+        return None;
+    };
+
+    let lower_prefix = file_prefix.to_lowercase();
+    let show_hidden = file_prefix.starts_with('.');
+    let mut results: Vec<AutocompleteResult> = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir(&base_dir) {
+        for entry in entries.flatten() {
+            let name_os = entry.file_name();
+            let name = name_os.to_string_lossy().into_owned();
+            if !show_hidden && name.starts_with('.') {
+                continue;
+            }
+            if !lower_prefix.is_empty() && !name.to_lowercase().starts_with(&lower_prefix) {
+                continue;
+            }
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let slash = if is_dir { "/" } else { "" };
+            let insert = format!("@{query_dir_part}{name}{slash}");
+            results.push(AutocompleteResult {
+                label: format!("{name}{slash}"),
+                detail: if is_dir { "directory".into() } else { "file".into() },
+                insert_text: insert,
+            });
+        }
+    }
+
+    // Directories first (users are usually path-hunting), then
+    // alphabetical.
+    results.sort_by(|a, b| {
+        let a_dir = a.detail == "directory";
+        let b_dir = b.detail == "directory";
+        b_dir.cmp(&a_dir).then_with(|| a.label.to_lowercase().cmp(&b.label.to_lowercase()))
+    });
+    results.truncate(MAX_RESULTS);
+    Some(results)
+}
+
+/// Split `s` into `(directory_part_with_trailing_slash, filename_prefix)`.
+///
+/// ```text
+/// "Documents/proj"  → ("Documents/", "proj")
+/// "proj"            → ("",           "proj")
+/// "Documents/"      → ("Documents/", "")
+/// ""                → ("",           "")
+/// ```
+fn split_dir_and_filename(s: &str) -> (&str, &str) {
+    match s.rfind('/') {
+        Some(idx) => (&s[..=idx], &s[idx + 1..]),
+        None => ("", s),
     }
 }
 
@@ -303,6 +439,94 @@ mod tests {
 
         assert_eq!(ac.results.len(), 1);
         assert_eq!(ac.results[0].label, "main.rs");
+    }
+
+    #[test]
+    fn test_path_completions_returns_none_for_non_path_query() {
+        // Plain words don't trigger path listing.
+        assert!(path_completions("main.rs", std::path::Path::new(".")).is_none());
+        assert!(path_completions("foo", std::path::Path::new(".")).is_none());
+    }
+
+    #[test]
+    fn test_path_completions_tilde_lists_home() {
+        let Some(home) = dirs_next::home_dir() else { return };
+        if !home.is_dir() {
+            return;
+        }
+        let results = path_completions("~/", std::path::Path::new(".")).expect("path-like query returns Some");
+        // Home dirs have at least one non-hidden entry on test machines.
+        assert!(
+            results.iter().all(|r| r.insert_text.starts_with("@~/")),
+            "insert texts: {:?}",
+            results.iter().map(|r| &r.insert_text).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_path_completions_relative_resolves_against_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("alpha")).unwrap();
+        std::fs::write(tmp.path().join("beta.txt"), b"hi").unwrap();
+
+        let results = path_completions("./", tmp.path()).expect("path-like");
+        let labels: Vec<String> = results.iter().map(|r| r.label.clone()).collect();
+        assert!(labels.iter().any(|l| l.starts_with("alpha")));
+        assert!(labels.iter().any(|l| l == "beta.txt"));
+        // Directories first
+        assert!(labels[0].ends_with('/'), "first label is dir: {}", labels[0]);
+    }
+
+    #[test]
+    fn test_path_completions_parent_walks_up() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nested = tmp.path().join("deep");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(tmp.path().join("sibling.txt"), b"").unwrap();
+
+        let results = path_completions("../", &nested).expect("path-like");
+        let labels: Vec<String> = results.iter().map(|r| r.label.clone()).collect();
+        assert!(labels.iter().any(|l| l == "sibling.txt"), "labels: {labels:?}");
+        let inserts: Vec<String> = results.iter().map(|r| r.insert_text.clone()).collect();
+        assert!(inserts.iter().any(|i| i == "@../sibling.txt"), "inserts: {inserts:?}");
+    }
+
+    #[test]
+    fn test_update_at_query_mixes_pearls_and_files() {
+        let mut ac = AutocompleteState::default();
+        ac.activate_files(0);
+        let files = sample_files();
+        let pearls = vec![
+            PearlSuggestion {
+                id: "th-aaa111".into(),
+                title: "Refactor Main File".into(),
+            },
+            PearlSuggestion {
+                id: "th-bbb222".into(),
+                title: "Unrelated".into(),
+            },
+        ];
+        // Query "main" matches one pearl title AND main.rs — pearls
+        // come first.
+        ac.update_at_query("main", &files, &pearls, std::path::Path::new("."));
+        assert!(!ac.results.is_empty());
+        assert_eq!(ac.results[0].label, "th-aaa111");
+        assert_eq!(ac.results[0].insert_text, "@th-aaa111");
+        // main.rs should still show up after the pearl
+        assert!(ac.results.iter().any(|r| r.label == "main.rs"));
+    }
+
+    #[test]
+    fn test_update_at_query_path_prefix_uses_filesystem() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("hello.txt"), b"").unwrap();
+        let mut ac = AutocompleteState::default();
+        ac.activate_files(0);
+        // Files list is unused because path prefix wins.
+        let files: Vec<FileEntry> = vec![];
+        ac.update_at_query("./", &files, &[], tmp.path());
+        assert!(ac.results.iter().any(|r| r.label == "hello.txt"));
+        assert!(ac.results.iter().any(|r| r.insert_text == "@./hello.txt"));
     }
 
     #[test]

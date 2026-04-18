@@ -5446,6 +5446,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smooai-smooth-operator",
+ "smooai-smooth-pearls",
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.26.2",
