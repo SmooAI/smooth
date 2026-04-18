@@ -1,4 +1,4 @@
-//! Slash command registry for the Smooth Coding TUI.
+//! Slash command registry for the Smooth TUI.
 //!
 //! Provides a [`CommandRegistry`] that maps `/command` names to handlers.
 //! Built-in commands include `/help`, `/clear`, `/model`, `/save`,

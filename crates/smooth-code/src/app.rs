@@ -1,4 +1,4 @@
-//! Main event loop for the Smooth Coding TUI.
+//! Main event loop for the Smooth TUI.
 
 use std::fmt::Write as _;
 use std::io::{self, IsTerminal as _, Write as _};
@@ -44,7 +44,7 @@ fn tui_debug(msg: impl AsRef<str>) {
     let _ = writeln!(f, "[{ts}] {}", msg.as_ref());
 }
 
-/// Run the Smooth Coding TUI.
+/// Run the Smooth TUI.
 ///
 /// This is the main entry point — it sets up the terminal, runs the event loop,
 /// and restores the terminal on exit.
@@ -116,7 +116,7 @@ pub async fn run(working_dir: PathBuf) -> anyhow::Result<()> {
     // Add welcome message
     {
         let mut s = state.lock().expect("state lock poisoned");
-        s.add_message(ChatMessage::system("Welcome to Smooth Coding. Type a message and press Enter to chat."));
+        s.add_message(ChatMessage::system("Welcome to Smooth. Type a message and press Enter to chat."));
     }
 
     // Run startup health checks asynchronously — TUI renders immediately
