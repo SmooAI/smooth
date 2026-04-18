@@ -16,7 +16,6 @@ use smooth_operator::AgentEvent;
 use tokio::sync::mpsc;
 
 use crate::commands::{parse_input, CommandOutput, CommandRegistry, InputKind};
-use crate::diff_render::RenderCache;
 use crate::render;
 use crate::session::{Session, SessionManager};
 use crate::state::{AppState, ChatMessage, ChatRole, HealthStatus, Mode};
@@ -231,14 +230,18 @@ fn event_loop(
             drop(s);
             last_save = std::time::Instant::now();
         }
-        // Draw with synchronized output to eliminate flicker
+        // Draw. We do NOT wrap this in CSI 2026 synchronized output —
+        // on terminals that half-support it (or where `print!`
+        // doesn't flush between the begin/end), frames get stuck in
+        // the terminal's buffer until process exit, which shows up as
+        // "typing goes into the input but nothing renders until
+        // ^C". ratatui's double-buffered backend already produces
+        // flicker-free output via crossterm's diff rendering.
         {
             let mut s = state.lock().expect("state lock poisoned");
             // Advance spinner each frame for animation
             s.advance_spinner();
-            print!("{}", RenderCache::begin_sync());
             terminal.draw(|f| render::render(f, &s))?;
-            print!("{}", RenderCache::end_sync());
         }
 
         // Drain all pending agent events without blocking
