@@ -33,15 +33,36 @@ struct CliCheckRequest {
 pub struct WonkHook {
     wonk_url: String,
     client: reqwest::Client,
+    /// Operator token from `[auth]` in the per-VM policy. When set, every
+    /// request to Wonk carries `Authorization: Bearer <token>` so Wonk's
+    /// `require_operator_token` middleware accepts it. Empty string means
+    /// no auth (legacy tests or pre-auth stores); the middleware has an
+    /// explicit bypass for that case.
+    auth_token: String,
 }
 
 impl WonkHook {
-    /// Create a new `WonkHook` pointing at the given Wonk HTTP server.
+    /// Create a new `WonkHook` pointing at the given Wonk HTTP server with
+    /// no bearer-auth token. Use [`WonkHook::with_auth`] in production —
+    /// Wonk's middleware will 401 every unauthenticated call, which surfaces
+    /// as `error decoding response body` at the tool-hook layer because the
+    /// empty 401 body is not valid JSON.
+    ///
+    /// Kept as a constructor for tests and legacy callers that run Wonk
+    /// with an empty `[auth] token` (which disables the middleware).
     /// Trailing slashes on `wonk_url` are normalised away.
     pub fn new(wonk_url: &str) -> Self {
+        Self::with_auth(wonk_url, String::new())
+    }
+
+    /// Create a `WonkHook` that carries `Authorization: Bearer <token>` on
+    /// every check. The token must match the one Wonk loaded from its
+    /// policy's `[auth]` section.
+    pub fn with_auth(wonk_url: &str, auth_token: impl Into<String>) -> Self {
         Self {
             wonk_url: wonk_url.trim_end_matches('/').to_string(),
             client: reqwest::Client::new(),
+            auth_token: auth_token.into(),
         }
     }
 
@@ -53,7 +74,20 @@ impl WonkHook {
     /// Post a check request and return an error if the action is denied.
     async fn check(&self, path: &str, body: serde_json::Value) -> anyhow::Result<()> {
         let url = format!("{}{path}", self.wonk_url);
-        let resp = self.client.post(&url).json(&body).send().await?;
+        let mut req = self.client.post(&url).json(&body);
+        if !self.auth_token.is_empty() {
+            req = req.bearer_auth(&self.auth_token);
+        }
+        let resp = req.send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            // Wonk returns 401 with an empty body when the bearer token is
+            // missing/wrong, and 403 + a plain-text reason when the rule
+            // engine rejects the call outright. Neither is JSON, so surface
+            // the HTTP status directly rather than failing the JSON decode.
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("Wonk {path} returned {status}: {body}"));
+        }
         let check: CheckResponse = resp.json().await?;
         if check.allowed {
             Ok(())
@@ -348,5 +382,61 @@ mod tests {
         };
         // post_call should always succeed (no-op)
         assert!(hook.post_call(&call, &result).await.is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression: WonkHook without a bearer token against a real auth-enabled
+    // Wonk used to fail decoding the 401 body as JSON, producing the
+    // confusing "error decoding response body" message at the hook layer.
+    // -----------------------------------------------------------------------
+
+    const AUTH_TEST_TOKEN: &str = "hook-test-token";
+
+    async fn start_mock_auth_wonk() -> String {
+        use axum::body::Body;
+        use axum::http::Request;
+
+        async fn require_auth(req: Request<Body>, next: axum::middleware::Next) -> Result<axum::response::Response, axum::http::StatusCode> {
+            let has_token = req
+                .headers()
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.strip_prefix("Bearer "))
+                .is_some_and(|t| t == AUTH_TEST_TOKEN);
+            if has_token {
+                Ok(next.run(req).await)
+            } else {
+                Err(axum::http::StatusCode::UNAUTHORIZED)
+            }
+        }
+
+        let router = mock_wonk_router().layer(axum::middleware::from_fn(require_auth));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("serve");
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn pre_call_without_token_surfaces_401_not_decode_error() {
+        let url = start_mock_auth_wonk().await;
+        let hook = WonkHook::new(&url); // no auth token
+        let call = make_tool_call("code_search");
+        let err = hook.pre_call(&call).await.unwrap_err();
+        let msg = err.to_string();
+        // Regression: we must NOT see the opaque "error decoding response body"
+        // surface that the raw `resp.json()` call produces on an empty 401 body.
+        assert!(!msg.contains("error decoding response body"), "got opaque decode error: {msg}");
+        assert!(msg.contains("401"), "expected 401 surface, got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn pre_call_with_auth_passes_through() {
+        let url = start_mock_auth_wonk().await;
+        let hook = WonkHook::with_auth(&url, AUTH_TEST_TOKEN);
+        let call = make_tool_call("code_search");
+        assert!(hook.pre_call(&call).await.is_ok());
     }
 }
