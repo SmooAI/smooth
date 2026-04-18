@@ -1,5 +1,91 @@
 # @smooai/smooth
 
+## 0.5.3
+
+### Patch Changes
+
+- a85ea2b: Fix "Dolt store" showing red on the dashboard while green on
+  `th status`. Pre-existing pearl stores were created before the
+  `config` table was part of the schema (added in the retire-sqlite
+  change), and only `PearlStore::init` ran `ensure_schema`. `open()`
+  skipped it entirely, so `get_config("__health_check")` in the health
+  handler ran `SELECT v FROM config WHERE k = ...` against a missing
+  table, failed, and flipped `database.status` to `"down"`.
+
+  `PearlStore::open` now runs an idempotent schema-migration check: a
+  single `SHOW TABLES` query against the open store; if any required
+  later-added table is missing, it re-runs the full `CREATE IF NOT
+EXISTS` pass and commits. On an up-to-date store it's a single
+  round-trip. Concurrent migrators are safe — duplicate commits are
+  logged and swallowed.
+
+  Added a regression test
+  (`test_open_migrates_missing_config_table`) that simulates a legacy
+  store by dropping `config`, reopens via `open()`, and verifies
+  `get_config` / `set_config` work without error.
+
+- 82cca37: Remove the `images` job from the release workflow until we fix
+  smooth-dolt's aarch64-linux-musl cross-compile.
+
+  Current state:
+
+  - `ghcr.io/smooai/smooth-operator:0.2.0` / `:latest` and
+    `ghcr.io/smooai/boardroom:0.2.0` / `:latest` are already public on
+    GHCR (pushed manually the day we went public). Smooth pulls `:latest`
+    by default so end users are unaffected.
+  - The `images` job was green through docker login after the `GH_PAT`
+    scope fix, but then failed on `build-boardroom.sh` — that script
+    expects a cross-compiled `smooth-dolt` at
+    `target/aarch64-unknown-linux-musl/release/smooth-dolt`, which
+    nothing currently produces. `build-smooth-dolt.sh` is a host-arch
+    `go build` that lands at `target/release/` (glibc-linked), so the
+    alpine-based boardroom image can't copy it.
+
+  Options for the follow-up (tracked in a pearl):
+
+  1. Switch the boardroom image base from alpine to
+     `debian:slim-aarch64` so a host-linked smooth-dolt runs natively.
+  2. Cross-compile smooth-dolt to aarch64-musl using `zig cc` as the Go
+     CGO compiler (the same zigbuild workflow Rust uses).
+  3. Build smooth-dolt inside a containerized alpine stage during
+     `docker build` and COPY the result.
+
+  Until then, image pushes are manual via
+  `scripts/build-smooth-operator-image.sh --push` and
+  `scripts/build-boardroom-image.sh --push`.
+
+- 83ba4d1: Fix **th-dfd0d3**: every sandboxed tool call was being rejected with
+  "error decoding response body" because `WonkHook` inside the operator
+  runner never carried the per-VM bearer token. The same security
+  hardening commit (`f7676d8`) that added `Authorization: Bearer` auth
+  to Wonk's `/check/*` endpoints updated `WonkClient` (used by Goalie)
+  but left `WonkHook` (used by the agent's tool registry) untouched.
+  Every `pre_call` → `/check/tool` now gets a 401 with an empty body,
+  and `resp.json::<CheckResponse>()` surfaces as the opaque
+  "error decoding response body" at the hook layer.
+
+  Changes:
+
+  - `WonkHook::with_auth(url, token)` constructor; `new` remains as
+    a zero-token shim for legacy tests.
+  - Per-request `Authorization: Bearer <token>` when the token is
+    non-empty.
+  - `check()` now inspects HTTP status before attempting to decode as
+    JSON — on a non-success response we surface
+    `"Wonk /check/... returned 401: <body>"` instead of the misleading
+    decode error. Future misconfigurations will be obvious.
+  - `smooth-operator-runner` stores the operator token on `Cast` and
+    wires `WonkHook::with_auth(&cast.wonk_url, &cast.operator_token)`
+    into the tool registry.
+  - Regression tests on `WonkHook` pre-call:
+    `pre_call_without_token_surfaces_401_not_decode_error` (negative)
+    and `pre_call_with_auth_passes_through` (positive).
+
+  Also fixed a CI-flaky test on the side: the two
+  `smooai_gateway_*` provider tests both mutate the global
+  `SMOOAI_GATEWAY_URL` env var and ran in parallel, racing each other.
+  Added a module-local `Mutex` so they serialize.
+
 ## 0.5.2
 
 ### Patch Changes
