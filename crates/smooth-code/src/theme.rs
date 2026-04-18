@@ -106,9 +106,11 @@ pub fn smooth_wordmark() -> Vec<Span<'static>> {
     out
 }
 
-/// Style for the main title bar.
+/// Style for the main title bar — orange is the brand's primary
+/// accent; green is secondary and shows up on assistant labels and
+/// the vertical banner gradient.
 pub fn title() -> Style {
-    Style::default().fg(SMOO_GREEN).add_modifier(Modifier::BOLD)
+    Style::default().fg(SMOO_ORANGE).add_modifier(Modifier::BOLD)
 }
 
 /// Style for user message labels ("You").
@@ -187,12 +189,28 @@ pub fn tool_status_border(status: crate::state::ToolStatus) -> Style {
     }
 }
 
-/// Panel border style — bright when active (focused), dim when inactive.
+/// Panel border style — bright orange when focused (the brand's
+/// primary accent), dim gray when inactive. Green is reserved for
+/// assistant labels + the banner gradient so users can visually
+/// separate "where the UI wants attention" (orange) from
+/// "agent speaking" (green).
 pub fn panel_border(active: bool) -> Style {
     if active {
-        Style::default().fg(SMOO_GREEN).add_modifier(Modifier::BOLD)
+        Style::default().fg(SMOO_ORANGE).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(SMOO_GRAY_700)
+    }
+}
+
+/// Border for the message-input panel. Always the primary accent
+/// (orange + bold) so the user can find "where do I type" at a
+/// glance — even when the chat panel is the focused one. Falls back
+/// to muted gray when the user has explicitly escaped into normal
+/// mode.
+pub fn input_border(mode: crate::state::Mode) -> Style {
+    match mode {
+        crate::state::Mode::Input => Style::default().fg(SMOO_ORANGE).add_modifier(Modifier::BOLD),
+        crate::state::Mode::Normal => Style::default().fg(SMOO_GRAY_700),
     }
 }
 
@@ -241,7 +259,7 @@ mod tests {
     fn test_style_functions_return_styles() {
         // Ensure style functions don't panic and return non-default styles
         let t = title();
-        assert_eq!(t.fg, Some(SMOO_GREEN));
+        assert_eq!(t.fg, Some(SMOO_ORANGE));
 
         let ul = user_label();
         assert_eq!(ul.fg, Some(SMOO_ORANGE));
@@ -326,7 +344,14 @@ mod tests {
         let inactive = panel_border(false);
 
         assert_ne!(active.fg, inactive.fg);
-        assert_eq!(active.fg, Some(SMOO_GREEN));
+        assert_eq!(active.fg, Some(SMOO_ORANGE));
         assert_eq!(inactive.fg, Some(SMOO_GRAY_700));
+    }
+
+    #[test]
+    fn test_input_border_is_orange_in_input_mode_gray_in_normal() {
+        use crate::state::Mode;
+        assert_eq!(input_border(Mode::Input).fg, Some(SMOO_ORANGE));
+        assert_eq!(input_border(Mode::Normal).fg, Some(SMOO_GRAY_700));
     }
 }

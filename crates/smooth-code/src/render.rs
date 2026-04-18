@@ -190,10 +190,15 @@ fn render_chat(frame: &mut Frame, state: &AppState, area: Rect) {
 
 /// Render the text input area.
 fn render_input(frame: &mut Frame, state: &AppState, area: Rect) {
+    // Orange-bold "▶ Message" title + orange border so it's the
+    // obvious place to type. Stays orange even when the chat panel
+    // is focused — there's only one thing to do in this surface
+    // (type) and we want it findable at a glance.
+    let title_line = Line::from(vec![Span::styled(" ▶ ", theme::title()), Span::styled("Message ", theme::title())]);
     let block = Block::default()
-        .title(" Message ")
+        .title(title_line)
         .borders(Borders::ALL)
-        .border_style(theme::panel_border(state.focus == FocusPanel::Input));
+        .border_style(theme::input_border(state.mode));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
