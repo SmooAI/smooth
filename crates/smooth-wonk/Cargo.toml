@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Smooth Wonk — in-VM access control authority, policy hot-reload, access negotiation"
+readme = "README.md"
 
 [[bin]]
 name = "smooth-wonk"

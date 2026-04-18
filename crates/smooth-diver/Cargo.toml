@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Smooth Diver — Pearl lifecycle manager and project management service"
+readme = "README.md"
 
 [lib]
 name = "smooth_diver"

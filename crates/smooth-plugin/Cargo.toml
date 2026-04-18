@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Smooth Plugin — trait-based plugin system for extending Smooth with CLI commands, API routes, TUI views, and operator tools"
+readme = "README.md"
 
 [lib]
 name = "smooth_plugin"

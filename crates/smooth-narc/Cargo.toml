@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Smooth Narc — in-VM tool surveillance, secret detection, prompt injection guard"
+readme = "README.md"
 
 [lib]
 name = "smooth_narc"

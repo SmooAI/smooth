@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Smooth Goalie — in-VM HTTP forward proxy, delegates access decisions to Wonk"
+readme = "README.md"
 
 [lib]
 name = "smooth_goalie"

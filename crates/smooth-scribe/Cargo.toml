@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Smooth Scribe — Per-VM structured logging service"
+readme = "README.md"
 
 [lib]
 name = "smooth_scribe"
