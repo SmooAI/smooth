@@ -205,6 +205,13 @@ pub enum Activity {
     Reviewing,
     Judge,
     Summarize,
+    /// Small, latency-sensitive utility calls: session auto-naming,
+    /// short-title generation, one-liner tool-result summaries,
+    /// autocomplete. Sub-second first token, short output (<500 tok),
+    /// no tool use. Target is a Haiku-class model via
+    /// `smooth-fast`. Meaningfully cheaper than `smooth-default` —
+    /// don't pay Sonnet-plus prices to name a session.
+    Fast,
 }
 
 /// A model slot binding a provider ID and model name, with optional fallback.
@@ -241,6 +248,13 @@ pub struct ModelRouting {
     pub judge: ModelSlot,
     pub summarize: ModelSlot,
     pub default: ModelSlot,
+    /// Utility slot — session auto-naming, short titles, autocomplete.
+    /// Optional on disk: existing `providers.json` files (pre-fast) will
+    /// deserialize with `fast = None` and the router falls back to
+    /// `default` until the user updates their config or runs a preset
+    /// that includes a fast slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast: Option<ModelSlot>,
 }
 
 impl Default for ModelRouting {
@@ -253,12 +267,18 @@ impl Default for ModelRouting {
             judge: ModelSlot::new("openrouter", "google/gemini-2.5-flash"),
             summarize: ModelSlot::new("openrouter", "minimax/minimax-m2.5"),
             default: ModelSlot::new("openrouter", "openai/gpt-4o"),
+            fast: Some(ModelSlot::new("openrouter", "google/gemini-2.5-flash-lite")),
         }
     }
 }
 
 impl ModelRouting {
     /// Get the model slot for a given activity.
+    ///
+    /// For `Activity::Fast`, falls back to `default` when the user's
+    /// config doesn't define a `fast` slot — lets the codebase route
+    /// utility calls via `Fast` unconditionally without breaking users
+    /// on old `providers.json` files.
     pub fn slot_for(&self, activity: Activity) -> &ModelSlot {
         match activity {
             Activity::Thinking => &self.thinking,
@@ -267,6 +287,7 @@ impl ModelRouting {
             Activity::Reviewing => &self.reviewing,
             Activity::Judge => &self.judge,
             Activity::Summarize => &self.summarize,
+            Activity::Fast => self.fast.as_ref().unwrap_or(&self.default),
         }
     }
 }
@@ -317,6 +338,7 @@ impl ProviderRegistry {
                     judge: ModelSlot::new("smooai-gateway", "smooth-judge"),
                     summarize: ModelSlot::new("smooai-gateway", "smooth-summarize"),
                     default: ModelSlot::new("smooai-gateway", "smooth-default"),
+                    fast: Some(ModelSlot::new("smooai-gateway", "smooth-fast")),
                 };
             }
             Preset::OpenRouterLowCost => {
@@ -333,6 +355,7 @@ impl ProviderRegistry {
                     judge: ModelSlot::new("openrouter", "google/gemini-2.5-flash"),
                     summarize: ModelSlot::new("openrouter", "deepseek/deepseek-v3.2"),
                     default: ModelSlot::new("openrouter", "deepseek/deepseek-v3.2"),
+                    fast: Some(ModelSlot::new("openrouter", "google/gemini-2.5-flash-lite")),
                 };
             }
             Preset::LlmGatewayLowCost => {
@@ -346,6 +369,7 @@ impl ProviderRegistry {
                     judge: ModelSlot::new("llmgateway", "gemini-2.5-flash"),
                     summarize: ModelSlot::new("llmgateway", "deepseek-v3.2"),
                     default: ModelSlot::new("llmgateway", "deepseek-v3.2"),
+                    fast: Some(ModelSlot::new("llmgateway", "gemini-2.5-flash-lite")),
                 };
             }
             Preset::OpenAI => {
@@ -358,6 +382,7 @@ impl ProviderRegistry {
                     judge: ModelSlot::new("openai", "gpt-4o-mini"),
                     summarize: ModelSlot::new("openai", "gpt-4o-mini"),
                     default: ModelSlot::new("openai", "gpt-4o"),
+                    fast: Some(ModelSlot::new("openai", "gpt-4o-mini")),
                 };
             }
             Preset::Anthropic => {
@@ -370,6 +395,7 @@ impl ProviderRegistry {
                     judge: ModelSlot::new("anthropic", "claude-haiku-4-5-20251001"),
                     summarize: ModelSlot::new("anthropic", "claude-haiku-4-5-20251001"),
                     default: ModelSlot::new("anthropic", "claude-sonnet-4-20250514"),
+                    fast: Some(ModelSlot::new("anthropic", "claude-haiku-4-5-20251001")),
                 };
             }
         }
@@ -406,7 +432,8 @@ impl ProviderRegistry {
             reviewing: slot.clone(),
             judge: slot.clone(),
             summarize: slot.clone(),
-            default: slot,
+            default: slot.clone(),
+            fast: Some(slot),
         };
     }
 
@@ -543,7 +570,8 @@ impl ProviderRegistry {
             reviewing: slot.clone(),
             judge: slot.clone(),
             summarize: slot.clone(),
-            default: slot,
+            default: slot.clone(),
+            fast: Some(slot),
         };
 
         Some(registry)
@@ -776,11 +804,44 @@ mod tests {
             Activity::Reviewing,
             Activity::Judge,
             Activity::Summarize,
+            Activity::Fast,
         ] {
             let json = serde_json::to_string(&activity).unwrap();
             let rt: Activity = serde_json::from_str(&json).unwrap();
             assert_eq!(rt, activity);
         }
+    }
+
+    // 11b. Fast slot absent in pre-fast config deserializes cleanly
+    //      and falls back to the default slot at lookup time.
+    #[test]
+    fn fast_slot_missing_falls_back_to_default() {
+        let json = r#"{
+            "providers": [],
+            "routing": {
+                "thinking": { "provider": "p", "model": "m-thinking" },
+                "coding": { "provider": "p", "model": "m-coding" },
+                "planning": { "provider": "p", "model": "m-planning" },
+                "reviewing": { "provider": "p", "model": "m-reviewing" },
+                "judge": { "provider": "p", "model": "m-judge" },
+                "summarize": { "provider": "p", "model": "m-summarize" },
+                "default": { "provider": "p", "model": "m-default" }
+            }
+        }"#;
+        let file: RegistryFile = serde_json::from_str(json).unwrap();
+        assert!(file.routing.fast.is_none());
+        let fast_slot = file.routing.slot_for(Activity::Fast);
+        assert_eq!(fast_slot.model, "m-default");
+    }
+
+    // 11c. Fast slot present roundtrips and is used in preference.
+    #[test]
+    fn fast_slot_present_wins_over_default() {
+        let mut routing = ModelRouting::default();
+        routing.fast = Some(ModelSlot::new("custom", "haiku"));
+        let fast_slot = routing.slot_for(Activity::Fast);
+        assert_eq!(fast_slot.provider, "custom");
+        assert_eq!(fast_slot.model, "haiku");
     }
 
     // 12. ModelSlot with fallback chain

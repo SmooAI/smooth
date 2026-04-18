@@ -2243,15 +2243,29 @@ async fn post_chat_message_handler(
         tracing::warn!(error = %e, "failed to save user chat message");
     }
 
-    // If this is the first message, replace the default title with
-    // a truncated version of the prompt.
+    // If this is the first message, kick off an async auto-name via
+    // `smooth-fast` — the Haiku-class utility slot. We spawn the LLM
+    // call into a detached tokio task so the chat response isn't gated
+    // on it; the title lands on the session row via `rename_chat_session`
+    // whenever the completion comes back. If the fast slot isn't
+    // configured or the call fails, we fall back to the legacy
+    // truncate-first-60-chars behaviour so a session is never left
+    // literally named "New chat".
     if let Ok(Some(session)) = state.session_store.get_chat_session(&id) {
         if session.title == "New chat" {
-            let short: String = user_content.chars().take(60).collect();
-            let trimmed = short.trim().to_string();
-            if !trimmed.is_empty() {
-                let _ = state.session_store.rename_chat_session(&id, &trimmed);
-            }
+            let session_store = state.session_store.clone();
+            let id_for_spawn = id.clone();
+            let prompt_for_spawn = user_content.clone();
+            tokio::spawn(async move {
+                let title = auto_name_session(&prompt_for_spawn).await.unwrap_or_else(|| {
+                    // Fallback to the legacy behaviour.
+                    let short: String = prompt_for_spawn.chars().take(60).collect();
+                    short.trim().to_string()
+                });
+                if !title.is_empty() {
+                    let _ = session_store.rename_chat_session(&id_for_spawn, &title);
+                }
+            });
         }
     }
 
@@ -2293,6 +2307,45 @@ async fn post_chat_message_handler(
 
 fn chat_system_prompt() -> &'static str {
     "You are Big Smooth, an AI agent orchestration leader. You help users manage projects, assign work to Smooth Operators (AI agents in sandboxes), review work, and coordinate tasks.\n\nAvailable commands: th run <pearl-id>, th operators, th pause/steer/cancel <pearl-id>, th auth status, th status"
+}
+
+/// Generate a short (3–6 word) title summarizing the user's first
+/// message, using the `smooth-fast` routing slot (Haiku-class). Runs
+/// in a detached task so chat latency isn't gated on it. Returns
+/// `None` if the slot isn't configured or the call fails — caller
+/// falls back to a literal truncation of the prompt.
+///
+/// Trims quotes, trailing punctuation, and clamps to 60 chars so a
+/// chatty model can't silently fill the UI with a paragraph.
+async fn auto_name_session(user_prompt: &str) -> Option<String> {
+    let providers_path = dirs_next::home_dir()?.join(".smooth/providers.json");
+    let registry = ProviderRegistry::load_from_file(&providers_path).ok()?;
+    let config = registry.llm_config_for(smooth_operator::providers::Activity::Fast).ok()?;
+    let llm = smooth_operator::llm::LlmClient::new(config);
+
+    let system = smooth_operator::conversation::Message::system(
+        "You name chat sessions. Return ONLY a 3-to-6 word Title Case \
+         summary of the user's first message. No quotes, no trailing \
+         punctuation, no preamble. Example input: \"help me refactor my \
+         auth middleware to use JWT\" → output: Refactor Auth Middleware To JWT.",
+    );
+    let user = smooth_operator::conversation::Message::user(user_prompt);
+    let resp = llm.chat(&[&system, &user], &[]).await.ok()?;
+
+    let cleaned = resp
+        .content
+        .trim()
+        .trim_matches(|c: char| c == '"' || c == '\'' || c == '.' || c == '\n')
+        .chars()
+        .take(60)
+        .collect::<String>()
+        .trim()
+        .to_string();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
 }
 
 fn chat_default_model() -> String {

@@ -3082,6 +3082,7 @@ async fn cmd_routing(cmd: RoutingCommands) -> Result<()> {
                 (Activity::Reviewing, "Reviewing", "code review, adversarial checks"),
                 (Activity::Judge, "Judge", "evaluation, scoring, pass/fail"),
                 (Activity::Summarize, "Summarize", "summaries, compression"),
+                (Activity::Fast, "Fast", "session names, short titles, autocomplete"),
             ];
 
             for (activity, label, desc) in &activities {
