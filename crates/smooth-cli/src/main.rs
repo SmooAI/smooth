@@ -163,6 +163,16 @@ enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+        /// Resume a previous session. Pass a query (matched against
+        /// title or id prefix) to pick a specific one, or leave empty
+        /// to resume the most recently updated session. Pair with
+        /// `--list` to see what's available.
+        #[arg(long, value_name = "QUERY", num_args = 0..=1, default_missing_value = "")]
+        resume: Option<String>,
+        /// List saved sessions (id, title, updated) and exit without
+        /// launching the TUI.
+        #[arg(long)]
+        list: bool,
     },
     /// Git hook management (install, run).
     Hooks {
@@ -636,7 +646,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         // No subcommand = launch smooth-code (THE Smooth experience)
-        None => cmd_code(false, None, None, None, None, false).await,
+        None => cmd_code(false, None, None, None, None, false, None, false).await,
         Some(Commands::Code {
             headless,
             message,
@@ -644,7 +654,9 @@ async fn main() -> Result<()> {
             model,
             budget,
             json,
-        }) => cmd_code(headless, message, file, model, budget, json).await,
+            resume,
+            list,
+        }) => cmd_code(headless, message, file, model, budget, json, resume, list).await,
         Some(Commands::Doctor { init_home_repo, remote }) => {
             if init_home_repo {
                 cmd_doctor_init_home_repo(remote.as_deref())
@@ -1824,7 +1836,74 @@ fn read_stdin() -> Option<String> {
 
 /// Launch smooth-code — THE Smooth experience.
 /// Auto-starts Big Smooth if not running.
-async fn cmd_code(headless: bool, message: Option<String>, file: Option<String>, model: Option<String>, budget: Option<f64>, json: bool) -> Result<()> {
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+async fn cmd_code(
+    headless: bool,
+    message: Option<String>,
+    file: Option<String>,
+    model: Option<String>,
+    budget: Option<f64>,
+    json: bool,
+    resume: Option<String>,
+    list: bool,
+) -> Result<()> {
+    // `--list` short-circuits everything else and prints a simple
+    // table of saved sessions, newest first, then exits without
+    // launching the TUI.
+    if list {
+        let mgr = smooth_code::session::SessionManager::new()?;
+        let sessions = mgr.list()?;
+        if sessions.is_empty() {
+            println!("  {} No saved sessions yet. Start one with `th`.", "ℹ".cyan());
+        } else {
+            println!("\n  {}", "Saved sessions".cyan().bold());
+            for s in &sessions {
+                let label = s.display_label();
+                let short_id: String = s.id.chars().take(8).collect();
+                println!(
+                    "  {} {:<34} {} {}",
+                    "•".dimmed(),
+                    label.bold(),
+                    short_id.dimmed(),
+                    s.updated_at.format("%Y-%m-%d %H:%M").to_string().dimmed()
+                );
+            }
+            println!();
+        }
+        return Ok(());
+    }
+
+    // Resolve `--resume [query]` against the session store. None here
+    // means "no --resume flag"; Some("") means "--resume with no
+    // argument → pick most recently updated"; Some(q) means "match
+    // this query".
+    let resumed_session = if let Some(query) = resume.as_deref() {
+        let mgr = smooth_code::session::SessionManager::new()?;
+        let summary = if query.is_empty() { mgr.most_recent()? } else { mgr.find_by_query(query)? };
+        match summary {
+            Some(s) => {
+                let loaded = mgr.load(&s.id)?;
+                println!(
+                    "  {} {} {}",
+                    "↻".cyan(),
+                    "Resuming".bold(),
+                    loaded.title.as_deref().unwrap_or(&loaded.id).bold()
+                );
+                Some(loaded)
+            }
+            None => {
+                let hint = if query.is_empty() {
+                    "No saved sessions yet".to_string()
+                } else {
+                    format!("No session matched '{query}'. Run `th code --list` to see saved ones.")
+                };
+                anyhow::bail!(hint);
+            }
+        }
+    } else {
+        None
+    };
+
     if headless {
         let working_dir = std::env::current_dir()?;
         let msg = message
@@ -1897,9 +1976,9 @@ async fn cmd_code(headless: bool, message: Option<String>, file: Option<String>,
         }
     }
 
-    // Launch smooth-code TUI
+    // Launch smooth-code TUI — with a resumed session if one was picked.
     let working_dir = std::env::current_dir()?;
-    smooth_code::app::run(working_dir).await
+    smooth_code::app::run_with_session(working_dir, resumed_session).await
 }
 
 fn cmd_hooks(cmd: HooksCommands) -> Result<()> {

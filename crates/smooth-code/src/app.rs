@@ -57,6 +57,19 @@ fn tui_debug(msg: impl AsRef<str>) {
 /// thread holding the lock).
 #[allow(clippy::unused_async)] // async required for caller ergonomics and tokio::spawn inside
 pub async fn run(working_dir: PathBuf) -> anyhow::Result<()> {
+    run_with_session(working_dir, None).await
+}
+
+/// Run the TUI, optionally preloading a persisted session.
+///
+/// When `resume` is `Some`, the app starts with that session's
+/// messages, title, id, and model instead of a fresh one — used by
+/// `th code --resume`.
+///
+/// # Errors
+/// Same as [`run`].
+#[allow(clippy::unused_async)]
+pub async fn run_with_session(working_dir: PathBuf, resume: Option<crate::session::Session>) -> anyhow::Result<()> {
     tui_debug(format!("app::run start, cwd={}", working_dir.display()));
 
     // TTY pre-flight. If stdin or stdout isn't a TTY, the TUI will enter
@@ -110,13 +123,33 @@ pub async fn run(working_dir: PathBuf) -> anyhow::Result<()> {
     })?;
     tui_debug(format!("Terminal::new OK, size={:?}", terminal.size().ok()));
 
-    let state = Arc::new(Mutex::new(AppState::new(working_dir)));
+    let initial_state = match resume {
+        Some(ref session) => {
+            tui_debug(format!(
+                "resuming session id={} title={:?} messages={}",
+                session.id,
+                session.title,
+                session.messages.len()
+            ));
+            AppState::from_resumed_session(working_dir, session)
+        }
+        None => AppState::new(working_dir),
+    };
+    let state = Arc::new(Mutex::new(initial_state));
     let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentEvent>();
 
-    // Add welcome message
-    {
+    // Add welcome message only for fresh sessions — a resumed one
+    // already has a real message history.
+    if resume.is_none() {
         let mut s = state.lock().expect("state lock poisoned");
         s.add_message(ChatMessage::system("Welcome to Smooth. Type a message and press Enter to chat."));
+    } else {
+        let title_display = resume
+            .as_ref()
+            .and_then(|s| s.title.clone())
+            .unwrap_or_else(|| resume.as_ref().map(|s| s.id.clone()).unwrap_or_default());
+        let mut s = state.lock().expect("state lock poisoned");
+        s.add_message(ChatMessage::system(format!("Resumed session: {title_display}")));
     }
 
     // Run startup health checks asynchronously — TUI renders immediately
@@ -341,8 +374,26 @@ fn handle_input_mode(
                     });
                 }
                 InputKind::Normal(_) => {
+                    // If this is the user's first message and the session
+                    // doesn't have a title yet, kick off an async auto-name
+                    // via the smooth-fast slot. Detached task — the chat
+                    // response isn't gated on it; title lands whenever the
+                    // completion comes back and we save-on-next-tick.
+                    let is_first_user_message = state.session_title.is_none() && !state.messages.iter().any(|m| matches!(m.role, ChatRole::User));
+
                     state.add_message(ChatMessage::user(&input));
                     state.thinking = true;
+
+                    if is_first_user_message {
+                        let naming_prompt = input.clone();
+                        let state_for_naming = Arc::clone(&state_arc);
+                        tokio::spawn(async move {
+                            if let Some(title) = auto_name_session(&naming_prompt).await {
+                                let mut s = state_for_naming.lock().expect("state lock poisoned");
+                                s.session_title = Some(title);
+                            }
+                        });
+                    }
 
                     // Spawn agent task with channel-based streaming
                     let message = input;
@@ -429,6 +480,47 @@ async fn run_startup_health_checks() -> (HealthStatus, Vec<String>) {
     };
 
     (status, warnings)
+}
+
+/// Generate a 3–6 word Title Case summary of the user's first
+/// message via the `smooth-fast` routing slot (Haiku-class). Returns
+/// `None` when the slot isn't configured or the LLM call fails.
+///
+/// Mirrors the session-titling pattern in `smooth-bigsmooth`
+/// (`server.rs::auto_name_session`) so the same prompt + trimming
+/// rules produce consistent titles across the web chat and the
+/// `th` TUI.
+async fn auto_name_session(user_prompt: &str) -> Option<String> {
+    use smooth_operator::providers::{Activity, ProviderRegistry};
+
+    let providers_path = dirs_next::home_dir()?.join(".smooth/providers.json");
+    let registry = ProviderRegistry::load_from_file(&providers_path).ok()?;
+    let config = registry.llm_config_for(Activity::Fast).ok()?;
+    let llm = smooth_operator::llm::LlmClient::new(config);
+
+    let system = smooth_operator::conversation::Message::system(
+        "You name chat sessions. Return ONLY a 3-to-6 word Title Case \
+         summary of the user's first message. No quotes, no trailing \
+         punctuation, no preamble. Example: \"help me refactor my auth \
+         middleware to use JWT\" → Refactor Auth Middleware To JWT.",
+    );
+    let user = smooth_operator::conversation::Message::user(user_prompt);
+    let resp = llm.chat(&[&system, &user], &[]).await.ok()?;
+
+    let cleaned = resp
+        .content
+        .trim()
+        .trim_matches(|c: char| c == '"' || c == '\'' || c == '.' || c == '\n')
+        .chars()
+        .take(60)
+        .collect::<String>()
+        .trim()
+        .to_string();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
 }
 
 /// Send a task to Big Smooth via WebSocket and bridge its `ServerEvent`s

@@ -59,6 +59,11 @@ impl SerializableMessage {
 pub struct Session {
     /// Unique session identifier.
     pub id: String,
+    /// Short human-readable title generated via the `smooth-fast` slot
+    /// from the user's first message. `None` on sessions created before
+    /// auto-naming landed; list callers fall back to a message preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// Chat messages in the session.
     pub messages: Vec<SerializableMessage>,
     /// Display name of the LLM model used.
@@ -78,6 +83,7 @@ impl Session {
         let now = Utc::now();
         Self {
             id: state.session_id.clone(),
+            title: state.session_title.clone(),
             messages,
             model_name: state.model_name.clone(),
             total_tokens: state.total_tokens,
@@ -92,12 +98,24 @@ impl Session {
 pub struct SessionSummary {
     /// Session identifier.
     pub id: String,
-    /// First user message, truncated.
+    /// Auto-generated title when the session has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// First user message, truncated. Used as a display fallback when
+    /// `title` is absent.
     pub preview: String,
     /// Number of messages in the session.
     pub message_count: usize,
     /// Last modification time.
     pub updated_at: DateTime<Utc>,
+}
+
+impl SessionSummary {
+    /// What to show the user in a picker list — prefers the
+    /// auto-generated title over the raw message preview.
+    pub fn display_label(&self) -> &str {
+        self.title.as_deref().unwrap_or(&self.preview)
+    }
 }
 
 /// Manages session persistence on disk.
@@ -177,6 +195,7 @@ impl SessionManager {
 
                     summaries.push(SessionSummary {
                         id: session.id,
+                        title: session.title,
                         preview,
                         message_count: session.messages.len(),
                         updated_at: session.updated_at,
@@ -187,6 +206,86 @@ impl SessionManager {
 
         summaries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         Ok(summaries)
+    }
+
+    /// Find the single session that best matches `query`, if any.
+    ///
+    /// Match priority:
+    ///   1. Exact id match
+    ///   2. Id prefix match (unique)
+    ///   3. Case-insensitive substring match on the title (unique)
+    ///   4. Case-insensitive substring match on the preview (unique)
+    ///
+    /// Returns `Ok(Some(summary))` on a unique match, `Ok(None)` when
+    /// no session matches, and `Err(AmbiguousQuery)` when multiple
+    /// sessions match the same tier (caller should print the candidates
+    /// and ask the user to narrow it down).
+    ///
+    /// # Errors
+    /// Propagates `list()` errors. Returns `AmbiguousQuery` when more
+    /// than one session matches at the same tier.
+    pub fn find_by_query(&self, query: &str) -> anyhow::Result<Option<SessionSummary>> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(None);
+        }
+        let sessions = self.list()?;
+        if sessions.is_empty() {
+            return Ok(None);
+        }
+        let lc_query = query.to_lowercase();
+
+        // Tier 1: exact id match.
+        if let Some(s) = sessions.iter().find(|s| s.id == query) {
+            return Ok(Some(s.clone()));
+        }
+
+        // Tier 2: id prefix (only if unique).
+        let id_prefix: Vec<&SessionSummary> = sessions.iter().filter(|s| s.id.starts_with(query)).collect();
+        if id_prefix.len() == 1 {
+            return Ok(Some(id_prefix[0].clone()));
+        }
+        if id_prefix.len() > 1 {
+            anyhow::bail!(
+                "AmbiguousQuery: {} sessions match id prefix '{query}'. Use `th code --list` to see them, then pass the full id.",
+                id_prefix.len()
+            );
+        }
+
+        // Tier 3: case-insensitive title substring (unique).
+        let title_hits: Vec<&SessionSummary> = sessions
+            .iter()
+            .filter(|s| s.title.as_deref().is_some_and(|t| t.to_lowercase().contains(&lc_query)))
+            .collect();
+        if title_hits.len() == 1 {
+            return Ok(Some(title_hits[0].clone()));
+        }
+        if title_hits.len() > 1 {
+            let names: Vec<String> = title_hits.iter().filter_map(|s| s.title.clone()).collect();
+            anyhow::bail!(
+                "AmbiguousQuery: {} sessions match title '{query}': {}. Use `th code --list` or pass the full id.",
+                names.len(),
+                names.join(", ")
+            );
+        }
+
+        // Tier 4: case-insensitive preview substring (unique).
+        let preview_hits: Vec<&SessionSummary> = sessions.iter().filter(|s| s.preview.to_lowercase().contains(&lc_query)).collect();
+        match preview_hits.len() {
+            0 => Ok(None),
+            1 => Ok(Some(preview_hits[0].clone())),
+            n => anyhow::bail!("AmbiguousQuery: {n} sessions match preview '{query}'. Use `th code --list` to narrow it down."),
+        }
+    }
+
+    /// Return the single most-recently-updated session, if any exist.
+    ///
+    /// Used by `th code --resume` with no argument.
+    ///
+    /// # Errors
+    /// Propagates `list()` errors.
+    pub fn most_recent(&self) -> anyhow::Result<Option<SessionSummary>> {
+        Ok(self.list()?.into_iter().next())
     }
 
     /// Delete a session file by ID.
@@ -724,5 +823,79 @@ mod tests {
         assert_eq!(msgs[0].content, "root");
         assert_eq!(msgs[1].content, "a1");
         assert_eq!(msgs[2].content, "c1");
+    }
+
+    // ── find_by_query ───────────────────────────────────────────
+
+    fn make_titled_session(id: &str, title: Option<&str>, first_user_msg: &str) -> Session {
+        let mut state = AppState::new(PathBuf::from("/tmp/p"));
+        state.session_id = id.into();
+        state.session_title = title.map(String::from);
+        state.model_name = "m".into();
+        state.add_message(ChatMessage::user(first_user_msg));
+        Session::from_state(&state)
+    }
+
+    #[test]
+    fn find_by_query_exact_id_wins() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = SessionManager::with_dir(tmp.path().to_path_buf()).unwrap();
+        mgr.save(&make_titled_session("th-deadbeef1234", Some("Refactor Auth Middleware"), "refactor auth"))
+            .unwrap();
+        mgr.save(&make_titled_session("th-cafebabe5678", Some("Debug Failing Tests"), "debug tests"))
+            .unwrap();
+        let hit = mgr.find_by_query("th-deadbeef1234").unwrap().expect("match");
+        assert_eq!(hit.id, "th-deadbeef1234");
+    }
+
+    #[test]
+    fn find_by_query_matches_title_substring_case_insensitive() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = SessionManager::with_dir(tmp.path().to_path_buf()).unwrap();
+        mgr.save(&make_titled_session("a", Some("Refactor Auth Middleware"), "refactor")).unwrap();
+        mgr.save(&make_titled_session("b", Some("Ship Billing Worker"), "ship billing")).unwrap();
+        let hit = mgr.find_by_query("AUTH").unwrap().expect("match");
+        assert_eq!(hit.title.as_deref(), Some("Refactor Auth Middleware"));
+    }
+
+    #[test]
+    fn find_by_query_falls_back_to_preview_substring() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = SessionManager::with_dir(tmp.path().to_path_buf()).unwrap();
+        // No title — preview should match instead.
+        mgr.save(&make_titled_session("a", None, "How do I configure nginx reverse proxy?")).unwrap();
+        let hit = mgr.find_by_query("nginx").unwrap().expect("match via preview");
+        assert_eq!(hit.id, "a");
+    }
+
+    #[test]
+    fn find_by_query_returns_none_on_no_match() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = SessionManager::with_dir(tmp.path().to_path_buf()).unwrap();
+        mgr.save(&make_titled_session("a", Some("Some Title"), "hello")).unwrap();
+        assert!(mgr.find_by_query("nothing-matches-this").unwrap().is_none());
+    }
+
+    #[test]
+    fn find_by_query_errors_on_ambiguous_title_match() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = SessionManager::with_dir(tmp.path().to_path_buf()).unwrap();
+        mgr.save(&make_titled_session("a", Some("Fix Auth Bug"), "fix auth 1")).unwrap();
+        mgr.save(&make_titled_session("b", Some("Fix Auth Perf"), "fix auth 2")).unwrap();
+        let err = mgr.find_by_query("Auth").unwrap_err();
+        assert!(err.to_string().contains("AmbiguousQuery"), "{err}");
+    }
+
+    #[test]
+    fn most_recent_returns_newest() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = SessionManager::with_dir(tmp.path().to_path_buf()).unwrap();
+        let mut s1 = make_titled_session("older", Some("Older"), "x");
+        s1.updated_at = chrono::Utc::now() - chrono::Duration::hours(2);
+        mgr.save(&s1).unwrap();
+        let s2 = make_titled_session("newer", Some("Newer"), "y");
+        mgr.save(&s2).unwrap();
+        let hit = mgr.most_recent().unwrap().expect("one session");
+        assert_eq!(hit.id, "newer");
     }
 }

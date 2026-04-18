@@ -181,6 +181,11 @@ pub struct AppState {
     pub working_dir: PathBuf,
     /// Unique session identifier.
     pub session_id: String,
+    /// Short human-readable title for this session (3–6 words, Title
+    /// Case) generated via the `smooth-fast` slot from the user's
+    /// first message. `None` until the first real user message is
+    /// sent, and remains `None` when the LLM auto-name call fails.
+    pub session_title: Option<String>,
     /// Chat message history.
     pub messages: Vec<ChatMessage>,
     /// Current text in the input box.
@@ -224,6 +229,7 @@ impl AppState {
             focus: FocusPanel::default(),
             working_dir,
             session_id: Uuid::new_v4().to_string(),
+            session_title: None,
             messages: Vec::new(),
             input: String::new(),
             input_cursor: 0,
@@ -241,6 +247,19 @@ impl AppState {
             model_picker: ModelPickerState::new(),
             health_status: HealthStatus::default(),
         }
+    }
+
+    /// Restore an `AppState` from a persisted session. Keeps the
+    /// session's id, title, messages, model, and token count; resets
+    /// everything else (cursor, focus, spinner) to fresh defaults.
+    pub fn from_resumed_session(working_dir: PathBuf, session: &crate::session::Session) -> Self {
+        let mut state = Self::new(working_dir);
+        state.session_id = session.id.clone();
+        state.session_title = session.title.clone();
+        state.messages = session.messages.iter().map(|m| m.to_chat_message()).collect();
+        state.model_name = session.model_name.clone();
+        state.total_tokens = session.total_tokens;
+        state
     }
 
     /// Add a message to the conversation history.
