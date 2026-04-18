@@ -12,6 +12,7 @@ name = "smooth_code"
 
 [dependencies]
 smooth-operator.workspace = true
+smooth-pearls.workspace = true
 async-trait.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true

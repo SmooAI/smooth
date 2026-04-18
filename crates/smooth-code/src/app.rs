@@ -122,7 +122,7 @@ pub async fn run_with_session(working_dir: PathBuf, resume: Option<crate::sessio
     })?;
     tui_debug(format!("Terminal::new OK, size={:?}", terminal.size().ok()));
 
-    let initial_state = match resume {
+    let mut initial_state = match resume {
         Some(ref session) => {
             tui_debug(format!(
                 "resuming session id={} title={:?} messages={}",
@@ -134,6 +134,13 @@ pub async fn run_with_session(working_dir: PathBuf, resume: Option<crate::sessio
         }
         None => AppState::new(working_dir),
     };
+
+    // Pre-fetch pearls for the `@` picker. Best-effort — a missing
+    // or empty pearl store just means no pearls show up in the
+    // popup, and the workspace-file path keeps working.
+    initial_state.pearls = load_pearls_for_autocomplete();
+    tui_debug(format!("pearls loaded for @ picker: {}", initial_state.pearls.len()));
+
     let state = Arc::new(Mutex::new(initial_state));
     let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentEvent>();
 
@@ -326,14 +333,24 @@ fn refresh_autocomplete(state: &mut AppState, command_registry: &CommandRegistry
         return;
     }
     let query = state.input[start..end].to_string();
+    let workspace_root = state.working_dir.clone();
     match state.autocomplete.kind {
         crate::autocomplete::CompletionKind::File => {
             let files: Vec<_> = state.file_tree.as_ref().map(|t| t.entries.clone()).unwrap_or_default();
-            state.autocomplete.update_query(&query, &files);
+            let pearls = state.pearls.clone();
+            state.autocomplete.update_at_query(&query, &files, &pearls, &workspace_root);
         }
         crate::autocomplete::CompletionKind::Command => {
             state.autocomplete.update_command_query(&query, &command_registry.list_commands());
         }
+    }
+    // Empty results → silently close the popup. Matters for the
+    // "slash can be typed mid-message" behaviour: typing "/" pops
+    // the command picker for discoverability; once the user types
+    // something the registry can't match (e.g. "/tmp/foo"), the
+    // popup vanishes without stealing their keystrokes.
+    if state.autocomplete.results.is_empty() {
+        state.autocomplete.deactivate();
     }
 }
 
@@ -506,20 +523,25 @@ fn handle_input_mode(
             state.mode = Mode::Normal;
         }
         KeyCode::Char(c) => {
-            // Trigger autocomplete on `@` anywhere and `/` at the
-            // start of the input. The trigger char itself is inserted
-            // normally; refresh_autocomplete then seeds an empty
-            // query against the candidate source.
-            let is_command_trigger = c == '/' && state.input.is_empty();
-            let is_file_trigger = c == '@';
+            // Trigger autocomplete on `@` or `/` anywhere in the
+            // input. Pre-cursor trigger (Claude-Code-style) so users
+            // can reference commands mid-message for discoverability
+            // ("use /help to see options"). refresh_autocomplete
+            // silently closes the popup if the subsequent text
+            // doesn't match any candidate, so a literal `/path/to`
+            // or a stray slash doesn't hijack the keystrokes.
             let trigger_pos = state.input_cursor;
             state.input_insert(c);
-            if is_command_trigger {
-                state.autocomplete.activate_commands(trigger_pos);
-                refresh_autocomplete(state, command_registry);
-            } else if is_file_trigger {
-                state.autocomplete.activate_files(trigger_pos);
-                refresh_autocomplete(state, command_registry);
+            match c {
+                '@' => {
+                    state.autocomplete.activate_files(trigger_pos);
+                    refresh_autocomplete(state, command_registry);
+                }
+                '/' => {
+                    state.autocomplete.activate_commands(trigger_pos);
+                    refresh_autocomplete(state, command_registry);
+                }
+                _ => {}
             }
         }
         _ => {}
@@ -589,6 +611,34 @@ async fn run_startup_health_checks() -> (HealthStatus, Vec<String>) {
     };
 
     (status, warnings)
+}
+
+/// Best-effort load of open + in-progress pearls for the `@`
+/// picker. Tries `<cwd>/.smooth/dolt/` first (project-scoped) and
+/// falls back to `~/.smooth/dolt/` (global). Returns an empty vec
+/// on any failure — the picker treats "no pearls" as "just show
+/// files and paths."
+fn load_pearls_for_autocomplete() -> Vec<crate::autocomplete::PearlSuggestion> {
+    use smooth_pearls::{PearlQuery, PearlStore};
+
+    let candidates = [
+        std::env::current_dir().ok().map(|d| d.join(".smooth/dolt")),
+        dirs_next::home_dir().map(|h| h.join(".smooth/dolt")),
+    ];
+    for dir in candidates.into_iter().flatten() {
+        if !dir.exists() {
+            continue;
+        }
+        let Ok(store) = PearlStore::open(&dir) else { continue };
+        let Ok(pearls) = store.list(&PearlQuery::new()) else { continue };
+        return pearls
+            .into_iter()
+            .filter(|p| !matches!(p.status, smooth_pearls::PearlStatus::Closed))
+            .take(100)
+            .map(|p| crate::autocomplete::PearlSuggestion { id: p.id, title: p.title })
+            .collect();
+    }
+    Vec::new()
 }
 
 /// Generate a 3–6 word Title Case summary of the user's first

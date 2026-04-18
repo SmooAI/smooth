@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::autocomplete::AutocompleteState;
+use crate::autocomplete::{AutocompleteState, PearlSuggestion};
 use crate::files::FileTree;
 use crate::git::GitState;
 use crate::model_picker::ModelPickerState;
@@ -212,6 +212,12 @@ pub struct AppState {
     pub file_tree: Option<FileTree>,
     /// Autocomplete state for @ references.
     pub autocomplete: AutocompleteState,
+    /// Pearls exposed to the `@` picker. Pre-fetched once at app
+    /// startup from `~/.smooth/dolt/` so the autocomplete refresh
+    /// doesn't pay a Dolt query per keystroke. `None` when the
+    /// store isn't reachable (no pearls created yet, smooth-dolt
+    /// missing, etc.) — picker silently omits pearls in that case.
+    pub pearls: Vec<PearlSuggestion>,
     /// Current git repository state (populated by `GitState::refresh`).
     pub git_state: Option<GitState>,
     /// Model picker popup state.
@@ -243,6 +249,7 @@ impl AppState {
             spinner_frame: 0,
             file_tree,
             autocomplete: AutocompleteState::default(),
+            pearls: Vec::new(),
             git_state: None,
             model_picker: ModelPickerState::new(),
             health_status: HealthStatus::default(),
