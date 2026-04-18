@@ -138,6 +138,9 @@ impl CommandRegistry {
 
         // /skill
         self.register("skill", "Invoke a skill: /skill (list) or /skill:<name> [args]", Box::new(cmd_skill));
+
+        // /rename
+        self.register("rename", "Rename the current session: /rename <title>", Box::new(cmd_rename));
     }
 
     /// Execute a slash command, handling `/skill:name` syntax by splitting the colon-separated
@@ -348,6 +351,29 @@ fn cmd_goto(args: &str, _state: &mut AppState) -> anyhow::Result<CommandOutput> 
     )))
 }
 
+fn cmd_rename(args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput> {
+    use crate::session::{Session, SessionManager};
+
+    let new_title = args.trim();
+    if new_title.is_empty() {
+        let current = state.session_title.as_deref().unwrap_or("(untitled)");
+        return Ok(CommandOutput::Message(format!("Usage: /rename <title>\nCurrent title: {current}")));
+    }
+
+    let old = state.session_title.clone().unwrap_or_else(|| "(untitled)".to_string());
+    state.session_title = Some(new_title.to_string());
+
+    // Persist immediately so the rename survives a quit before the next auto-save.
+    let mgr = SessionManager::new()?;
+    let mut session = Session::from_state(state);
+    if let Ok(existing) = mgr.load(&state.session_id) {
+        session.created_at = existing.created_at;
+    }
+    mgr.save(&session)?;
+
+    Ok(CommandOutput::Message(format!("Session renamed: {old} -> {new_title}")))
+}
+
 #[allow(clippy::unnecessary_wraps)]
 fn cmd_skill(args: &str, _state: &mut AppState) -> anyhow::Result<CommandOutput> {
     let args = args.trim();
@@ -447,6 +473,44 @@ mod tests {
         assert!(names.contains(&"quit"));
         assert!(names.contains(&"status"));
         assert!(names.contains(&"compact"));
+        assert!(names.contains(&"rename"));
+    }
+
+    #[test]
+    fn test_rename_without_args_reports_current_title() {
+        let mut state = AppState::new(PathBuf::from("/tmp"));
+        state.session_title = Some("old-title".to_string());
+        let reg = CommandRegistry::new();
+        let output = reg.execute("rename", "", &mut state).expect("rename exists").expect("handler ok");
+        match output {
+            CommandOutput::Message(msg) => {
+                assert!(msg.contains("Usage:"));
+                assert!(msg.contains("old-title"));
+            }
+            other => panic!("Expected Message, got {other:?}"),
+        }
+        // Title unchanged
+        assert_eq!(state.session_title.as_deref(), Some("old-title"));
+    }
+
+    #[test]
+    fn test_rename_persists_via_with_dir() {
+        use crate::session::{Session, SessionManager};
+
+        // Use a tempdir-backed SessionManager directly to prove the round-trip:
+        // set title on state, Session::from_state captures it, save + load returns it.
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let mgr = SessionManager::with_dir(tmp.path().to_path_buf()).expect("manager");
+
+        let mut state = AppState::new(PathBuf::from("/tmp"));
+        state.session_id = "sess-persist".to_string();
+        state.session_title = Some("Renamed".to_string());
+
+        let session = Session::from_state(&state);
+        mgr.save(&session).expect("save");
+
+        let loaded = mgr.load("sess-persist").expect("load");
+        assert_eq!(loaded.title.as_deref(), Some("Renamed"));
     }
 
     #[test]

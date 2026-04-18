@@ -135,13 +135,25 @@ pub async fn run_with_session(working_dir: PathBuf, resume: Option<crate::sessio
         None => AppState::new(working_dir),
     };
 
-    // Pre-fetch pearls for the `@` picker. Best-effort — a missing
-    // or empty pearl store just means no pearls show up in the
-    // popup, and the workspace-file path keeps working.
-    initial_state.pearls = load_pearls_for_autocomplete();
-    tui_debug(format!("pearls loaded for @ picker: {}", initial_state.pearls.len()));
-
     let state = Arc::new(Mutex::new(initial_state));
+
+    // Load pearls for the `@` picker in a background thread so the
+    // TUI can paint immediately. Pearls only matter when the user
+    // types `@`; a slight delay before they show up is fine.
+    // Best-effort — a missing or empty pearl store just means no
+    // pearls show up in the popup, and the workspace-file path keeps
+    // working.
+    {
+        let state_bg = Arc::clone(&state);
+        std::thread::spawn(move || {
+            let pearls = load_pearls_for_autocomplete();
+            if let Ok(mut s) = state_bg.lock() {
+                let n = pearls.len();
+                s.pearls = pearls;
+                tui_debug(format!("pearls loaded for @ picker: {n}"));
+            }
+        });
+    }
     let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentEvent>();
 
     // Add welcome message only for fresh sessions — a resumed one
