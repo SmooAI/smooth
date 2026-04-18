@@ -1,5 +1,49 @@
 # @smooai/smooth
 
+## 0.7.1
+
+### Patch Changes
+
+- a4a5063: TUI colors: orange is the primary frame accent, green is a
+  secondary accent on assistant labels and the banner gradient.
+  Previously panel borders + the chat title used green, which made
+  the input-box border blend with assistant labels — users reported
+  they couldn't see where to type.
+
+  - `panel_border(true)` → Smoo AI orange (`#f49f0a`), was green.
+  - `title()` → orange, was green.
+  - New `input_border(mode)` helper: the message-input panel gets an
+    orange bold border in input mode and a gray border only when the
+    user explicitly escapes into normal mode. The chat panel follows
+    focus; the input panel stays obvious as "the place to type."
+  - New "▶ Message" title on the input panel, orange + bold.
+  - Assistant labels stay green (secondary accent), user labels stay
+    orange (primary accent), banner keeps the orange→green vertical
+    gradient — green lives on as the destination color.
+
+  All colors verified against
+  `smooai/packages/ui/globals.css` (the canonical palette): orange
+  `#f49f0a`, green `#00a6a6`, red `#ff6b6c`, blue `#bbdef0`,
+  gray-700 `#4e4e4e` all match.
+
+  Regression test: `test_input_border_is_orange_in_input_mode_gray_in_normal`.
+
+- f8f3ed3: TUI: remove CSI 2026 synchronized-output wrapper around each
+  render. Fixes the "I can type but the screen doesn't update until I
+  ^C" class of bug reported on at least one macOS terminal.
+
+  Root cause: the event loop wrapped each `terminal.draw` with
+  `print!("{}", begin_sync())` / `print!("{}", end_sync())`. On
+  terminals that half-support CSI 2026 (or where `print!` doesn't
+  flush between the begin and the end), frames get stuck in the
+  terminal's buffer until the process exits and stdout flushes on
+  teardown — so typed input appears to be ignored until you kill
+  `th`.
+
+  ratatui's backend already produces flicker-free output via
+  crossterm's diff-based rendering, so the sync wrapper was a
+  micro-optimization not worth the fragility it introduced. Dropped.
+
 ## 0.7.0
 
 ### Minor Changes
