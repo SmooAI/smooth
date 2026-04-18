@@ -1,7 +1,7 @@
 //! Main event loop for the Smooth Coding TUI.
 
 use std::fmt::Write as _;
-use std::io;
+use std::io::{self, IsTerminal as _, Write as _};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -21,6 +21,29 @@ use crate::render;
 use crate::session::{Session, SessionManager};
 use crate::state::{AppState, ChatMessage, ChatRole, HealthStatus, Mode};
 
+/// Log a diagnostic line to `~/.smooth/logs/smooth-code.log` when
+/// `SMOOTH_TUI_DEBUG=1` is set. Used to diagnose the
+/// "nothing renders in my terminal" class of bug — the user can flip
+/// the env var, re-run `th`, and then tail the log to see exactly
+/// where `run()` gave up.
+///
+/// Always a no-op when the env var isn't set, so the hot path is
+/// untouched.
+fn tui_debug(msg: impl AsRef<str>) {
+    if std::env::var("SMOOTH_TUI_DEBUG").ok().as_deref() != Some("1") {
+        return;
+    }
+    let Some(home) = dirs_next::home_dir() else { return };
+    let log_dir = home.join(".smooth").join("logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let log_path = log_dir.join("smooth-code.log");
+    let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) else {
+        return;
+    };
+    let ts = chrono::Utc::now().to_rfc3339();
+    let _ = writeln!(f, "[{ts}] {}", msg.as_ref());
+}
+
 /// Run the Smooth Coding TUI.
 ///
 /// This is the main entry point — it sets up the terminal, runs the event loop,
@@ -34,12 +57,58 @@ use crate::state::{AppState, ChatMessage, ChatRole, HealthStatus, Mode};
 /// thread holding the lock).
 #[allow(clippy::unused_async)] // async required for caller ergonomics and tokio::spawn inside
 pub async fn run(working_dir: PathBuf) -> anyhow::Result<()> {
+    tui_debug(format!("app::run start, cwd={}", working_dir.display()));
+
+    // TTY pre-flight. If stdin or stdout isn't a TTY, the TUI will enter
+    // alt-screen but render to /dev/null — the user sees nothing and the
+    // only clue is the terminal returning to the shell a moment later.
+    // Print a clear error up front so pipe/redirect mistakes don't look
+    // like a UI bug.
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        anyhow::bail!(
+            "smooth-code requires an interactive terminal (stdin + stdout must be a TTY). \
+             If you piped or redirected, run `th` with a direct terminal instead, \
+             or use `th code --headless \"your message\"` for scripted runs."
+        );
+    }
+    tui_debug(format!(
+        "TTY check passed (TERM={}, TERM_PROGRAM={})",
+        std::env::var("TERM").unwrap_or_default(),
+        std::env::var("TERM_PROGRAM").unwrap_or_default()
+    ));
+
+    // Escape hatch for terminals that don't cleanly handle
+    // alternate-screen + synchronized-output + mouse-capture together
+    // (some tmux configs, some Windows terminals, certain ssh multiplexes).
+    // `SMOOTH_TUI_NO_ALT_SCREEN=1` drops the alt-screen switch and the
+    // mouse-capture mode so the UI renders inline in the primary buffer.
+    // Scrollback gets mixed in with the TUI output but at least the
+    // user can *see* the UI.
+    let no_alt_screen = matches!(std::env::var("SMOOTH_TUI_NO_ALT_SCREEN").ok().as_deref(), Some("1"));
+    tui_debug(format!("no_alt_screen={no_alt_screen}"));
+
     // Setup terminal
-    enable_raw_mode()?;
+    enable_raw_mode().map_err(|e| anyhow::anyhow!("enable_raw_mode failed ({e}); terminal may not support raw mode"))?;
+    tui_debug("enable_raw_mode OK");
+
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, crossterm::event::EnableMouseCapture)?;
+    if !no_alt_screen {
+        execute!(stdout, EnterAlternateScreen, crossterm::event::EnableMouseCapture)
+            .map_err(|e| anyhow::anyhow!("EnterAlternateScreen failed ({e}); try SMOOTH_TUI_NO_ALT_SCREEN=1"))?;
+        tui_debug("EnterAlternateScreen + EnableMouseCapture OK");
+    } else {
+        tui_debug("skipped alt-screen + mouse capture (SMOOTH_TUI_NO_ALT_SCREEN=1)");
+    }
+
     let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = Terminal::new(backend).map_err(|e| {
+        // Best-effort restore if Terminal::new fails after alt-screen entered.
+        let _ = disable_raw_mode();
+        let mut stdout = io::stdout();
+        let _ = execute!(stdout, LeaveAlternateScreen, crossterm::event::DisableMouseCapture);
+        anyhow::anyhow!("Terminal::new failed: {e}")
+    })?;
+    tui_debug(format!("Terminal::new OK, size={:?}", terminal.size().ok()));
 
     let state = Arc::new(Mutex::new(AppState::new(working_dir)));
     let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentEvent>();
@@ -67,7 +136,21 @@ pub async fn run(working_dir: PathBuf) -> anyhow::Result<()> {
         });
     }
 
+    // Initial forced draw before the event loop starts. If the loop later
+    // blocks or errors, we've at least rendered the welcome message once
+    // so the user sees the UI is alive.
+    {
+        let s = state.lock().expect("state lock poisoned");
+        if let Err(e) = terminal.draw(|f| render::render(f, &s)) {
+            tui_debug(format!("initial terminal.draw failed: {e}"));
+        } else {
+            tui_debug("initial terminal.draw OK");
+        }
+    }
+
+    tui_debug("entering event_loop");
     let result = event_loop(&mut terminal, &state, &event_tx, event_rx);
+    tui_debug(format!("event_loop returned: {result:?}"));
 
     // Auto-save on quit
     {
@@ -80,8 +163,11 @@ pub async fn run(working_dir: PathBuf) -> anyhow::Result<()> {
 
     // Restore terminal
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, crossterm::event::DisableMouseCapture)?;
+    if !no_alt_screen {
+        execute!(terminal.backend_mut(), LeaveAlternateScreen, crossterm::event::DisableMouseCapture)?;
+    }
     terminal.show_cursor()?;
+    tui_debug("terminal restored, app::run exit");
 
     result
 }
