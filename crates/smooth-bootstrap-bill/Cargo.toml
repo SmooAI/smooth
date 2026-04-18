@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Bootstrap Bill — The Board's host-side broker. Owns microsandbox, spawns pods on behalf of Big Smooth and the rest of the Boardroom cast."
+readme = "README.md"
 
 [lib]
 name = "smooth_bootstrap_bill"
