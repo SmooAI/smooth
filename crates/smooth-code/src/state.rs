@@ -208,6 +208,19 @@ pub struct AppState {
     /// header when the gateway sets it, ModelPricing fallback
     /// otherwise), so the client just sums them.
     pub total_cost_usd: f64,
+    /// Current workflow phase from the latest `PhaseStart` event
+    /// (ASSESS / PLAN / EXECUTE / VERIFY / REVIEW / FINALIZE). `None`
+    /// outside a workflow-managed run. Shown in the status bar next
+    /// to the rotating thesaurus phrase.
+    pub current_phase: Option<String>,
+    /// Routing alias for the current phase, e.g. `smooth-thinking`.
+    pub current_phase_alias: Option<String>,
+    /// Concrete upstream model for the current phase when known.
+    /// `None` until the gateway tells us.
+    pub current_phase_upstream: Option<String>,
+    /// Index into the thesaurus for the current phase. Advances on
+    /// every spinner tick so long phases feel alive.
+    pub phrase_idx: usize,
     /// Flag to exit the main loop.
     pub should_quit: bool,
     /// Whether the agent is currently processing a request.
@@ -251,6 +264,10 @@ impl AppState {
             model_name: "claude-sonnet-4".to_string(),
             total_tokens: 0,
             total_cost_usd: 0.0,
+            current_phase: None,
+            current_phase_alias: None,
+            current_phase_upstream: None,
+            phrase_idx: 0,
             should_quit: false,
             thinking: false,
             spinner_frame: 0,
@@ -373,8 +390,12 @@ impl AppState {
     const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
     /// Advance the spinner to the next frame, cycling through all 10 braille frames.
+    /// Also advances the phase thesaurus index — spinner ticks every ~100 ms
+    /// so the phrase rotates every ~3 seconds (every 30 ticks). The TUI reads
+    /// `phrase_idx / 30 % phrases_len` at render time.
     pub fn advance_spinner(&mut self) {
         self.spinner_frame = (self.spinner_frame + 1) % Self::SPINNER_FRAMES.len();
+        self.phrase_idx = self.phrase_idx.wrapping_add(1);
     }
 
     /// Get the current spinner character.

@@ -133,6 +133,12 @@ impl Default for ParallelExecutionConfig {
 }
 
 /// Registry of available tools with pre/post hooks.
+///
+/// `Clone` is cheap — every inner value is `Arc`'d, so cloning the
+/// registry gives a new handle that shares the same tool instances
+/// and hook chain. The coding workflow relies on this to pass the
+/// same tools into each phase's fresh `Agent`.
+#[derive(Clone)]
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
     hooks: Vec<Arc<dyn ToolHook>>,

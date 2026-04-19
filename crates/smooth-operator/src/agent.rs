@@ -142,6 +142,35 @@ pub enum AgentEvent {
         #[serde(default)]
         cost_usd: f64,
     },
+    /// Emitted by `coding_workflow` each time the orchestrator enters
+    /// a new phase (ASSESS / PLAN / EXECUTE / VERIFY / REVIEW / FINALIZE).
+    ///
+    /// TUIs listen for this to update the status bar (phase name +
+    /// routing alias + resolved upstream model + rotating thesaurus
+    /// phrase). Serialization-compatible with older runners that
+    /// don't emit it: clients just skip unknown AgentEvent variants.
+    PhaseStart {
+        /// Canonical phase name: `"ASSESS"`, `"PLAN"`, `"EXECUTE"`,
+        /// `"VERIFY"`, `"REVIEW"`, `"FINALIZE"`. Uppercase so it
+        /// doubles as a display label.
+        phase: String,
+        /// Routing alias the phase dispatches through
+        /// (`smooth-thinking`, `smooth-planning`, …). Already
+        /// resolved from the `Activity` slot so callers don't need
+        /// access to the `ProviderRegistry`.
+        alias: String,
+        /// The concrete upstream model the gateway is serving this
+        /// phase through, if known. `None` when we haven't seen a
+        /// response yet (this phase's first turn) — clients display
+        /// just the alias until a response arrives.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        upstream: Option<String>,
+        /// 1-indexed iteration of the OUTER workflow loop. Execute/
+        /// Verify/Review/Execute counts as iterations 1, 1, 1, 2,
+        /// 2, 2, … — lets the TUI show "iteration 3 of 5" style
+        /// progress.
+        iteration: u32,
+    },
     MaxIterationsReached {
         agent_id: String,
         max: u32,

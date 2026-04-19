@@ -293,8 +293,24 @@ fn render_status(frame: &mut Frame, state: &AppState, area: Rect) {
         HealthStatus::Unknown => ("\u{25cf}", Style::default().fg(theme::SMOO_GRAY_700)),
     };
 
+    // When a workflow phase is active, prefix the status bar with
+    // `<PHASE> · <alias> → <upstream>  |  <cycling phrase>`. The
+    // thesaurus rotates every ~30 spinner ticks (~3 sec) so long
+    // phases feel alive without spamming events.
+    let phase_prefix = state
+        .current_phase
+        .as_deref()
+        .map(|phase| {
+            let alias = state.current_phase_alias.as_deref().unwrap_or("?");
+            let upstream_suffix = state.current_phase_upstream.as_deref().map_or(String::new(), |u| format!(" → {u}"));
+            let phrases = crate::thesaurus::phrases_for(phase);
+            let phrase = phrases[(state.phrase_idx / 30) % phrases.len()];
+            format!(" {phase} · {alias}{upstream_suffix} | {phrase} |")
+        })
+        .unwrap_or_default();
+
     let status_left = format!(
-        " {branch_indicator}{} | tokens: {} | spend: {} | ",
+        "{phase_prefix} {branch_indicator}{} | tokens: {} | spend: {} | ",
         state.model_name,
         state.total_tokens,
         format_spend(state.total_cost_usd),

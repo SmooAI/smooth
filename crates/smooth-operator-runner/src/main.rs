@@ -1695,7 +1695,6 @@ async fn main() {
     tools.add_hook(ScribeAuditHook::new(&cast.scribe_url, &config.operator_id));
 
     // Run the agent on a channel and re-emit every AgentEvent as JSON-lines.
-    let agent = Agent::new(agent_config, tools);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
     let emit_task = tokio::spawn(async move {
@@ -1704,7 +1703,62 @@ async fn main() {
         }
     });
 
-    let result = agent.run_with_channel(&config.task, tx).await;
+    // Dispatch: workflow path (per-phase slot routing) when the
+    // caller opts in via SMOOTH_WORKFLOW=1 + SMOOTH_ROUTING_JSON
+    // (serialized ProviderRegistry), else the classic single-Agent
+    // loop. Gated so existing sandboxed tests keep behaving the
+    // same until benchmark runs opt in.
+    let workflow_opt_in = std::env::var("SMOOTH_WORKFLOW")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    // Prefer the file path (bind-mounted into the sandbox, no
+    // kernel-cmdline size limit). Fall back to inline env var for
+    // tests and non-sandboxed dev runs.
+    let routing_json = if let Ok(path) = std::env::var("SMOOTH_ROUTING_JSON_FILE") {
+        std::fs::read_to_string(&path).ok()
+    } else {
+        std::env::var("SMOOTH_ROUTING_JSON").ok()
+    };
+
+    let result = if workflow_opt_in && routing_json.is_some() {
+        use smooth_operator::coding_workflow::{run_coding_workflow, CodingWorkflowConfig};
+        use smooth_operator::providers::ProviderRegistry;
+        use std::sync::Arc;
+
+        let raw = routing_json.expect("checked above");
+        match ProviderRegistry::from_json(&raw) {
+            Ok(registry) => {
+                let cfg = CodingWorkflowConfig {
+                    operator_id: config.operator_id.clone(),
+                    task_prompt: config.task.clone(),
+                    registry: Arc::new(registry),
+                    tools,
+                    budget_usd: config.budget_usd,
+                    max_outer_iterations: std::env::var("SMOOTH_WORKFLOW_MAX_ITERATIONS").ok().and_then(|v| v.parse().ok()).unwrap_or(3),
+                    tx: tx.clone(),
+                };
+                match run_coding_workflow(cfg).await {
+                    // Workflow emits its own Completed event — return
+                    // a placeholder Conversation so the cast-summary
+                    // tail code below still has a shape to consume.
+                    // The actual conversation lived inside the per-phase
+                    // Agents and is already flushed to the event stream.
+                    Ok(_cost) => Ok(smooth_operator::conversation::Conversation::new(8192)),
+                    Err(e) => Err(e),
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "SMOOTH_ROUTING_JSON set but not deserializable; falling back to single-agent path");
+                let agent = Agent::new(agent_config, tools);
+                agent.run_with_channel(&config.task, tx.clone()).await
+            }
+        }
+    } else {
+        let agent = Agent::new(agent_config, tools);
+        agent.run_with_channel(&config.task, tx.clone()).await
+    };
+
+    drop(tx); // close the channel so the emitter task exits
 
     // Drain the emitter before we exit.
     let _ = emit_task.await;
