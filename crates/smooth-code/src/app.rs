@@ -318,7 +318,11 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
         AgentEvent::TokenDelta { content } => {
             state.append_stream_content(&content);
         }
-        AgentEvent::Completed { .. } | AgentEvent::StreamingComplete | AgentEvent::MaxIterationsReached { .. } => {
+        AgentEvent::Completed { cost_usd, .. } => {
+            state.total_cost_usd += cost_usd;
+            state.finish_streaming();
+        }
+        AgentEvent::StreamingComplete | AgentEvent::MaxIterationsReached { .. } => {
             state.finish_streaming();
         }
         AgentEvent::Error { message } => {
@@ -757,10 +761,11 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
                 tool_name,
                 is_error,
             }),
-            ServerEvent::TaskComplete { iterations, .. } => {
+            ServerEvent::TaskComplete { iterations, cost_usd, .. } => {
                 let _ = tx.send(AgentEvent::Completed {
                     agent_id: "task".into(),
                     iterations,
+                    cost_usd,
                 });
                 break;
             }

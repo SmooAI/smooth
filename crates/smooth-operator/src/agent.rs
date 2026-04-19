@@ -136,6 +136,11 @@ pub enum AgentEvent {
     Completed {
         agent_id: String,
         iterations: u32,
+        /// Accumulated cost in USD across every LLM call in this agent
+        /// run. Defaults to 0 when deserializing older runner output
+        /// that didn't carry the field.
+        #[serde(default)]
+        cost_usd: f64,
     },
     MaxIterationsReached {
         agent_id: String,
@@ -493,11 +498,12 @@ impl Agent {
             // Act: execute tool calls
             if response.tool_calls.is_empty() {
                 // No tool calls = agent is done thinking
+                let cost = self.cost_tracker.lock().expect("lock cost_tracker").total_cost_usd;
                 self.emit(AgentEvent::Completed {
                     agent_id: self.id.clone(),
                     iterations: iteration,
+                    cost_usd: cost,
                 });
-                let cost = self.cost_tracker.lock().expect("lock cost_tracker").total_cost_usd;
                 self.report_to_bigsmooth(ReporterEvent::TaskComplete {
                     iterations: iteration,
                     cost_usd: cost,
@@ -754,9 +760,11 @@ impl Agent {
             self.maybe_checkpoint(&conversation, iteration, CheckpointEvent::LlmResponse);
 
             if response.tool_calls.is_empty() {
+                let cost = self.cost_tracker.lock().expect("lock cost_tracker").total_cost_usd;
                 let _ = tx.send(AgentEvent::Completed {
                     agent_id: self.id.clone(),
                     iterations: iteration,
+                    cost_usd: cost,
                 });
                 return Ok(conversation);
             }
@@ -869,13 +877,23 @@ impl Agent {
     }
 
     /// Record cost for an LLM response and check budget. Returns `true` if budget was exceeded.
+    ///
+    /// Prefers the gateway's authoritative cost when present
+    /// (LiteLLM's `x-litellm-response-cost` header). Falls back to
+    /// the local `ModelPricing` table otherwise — which is only
+    /// accurate for direct provider access; aliased routes through
+    /// `smooth-coding` et al. won't price correctly locally.
     fn record_cost_and_check_budget(&self, response: &crate::llm::LlmResponse) -> bool {
         let model = &self.config.llm.model;
-        let pricing = ModelPricing::for_model(model);
 
         {
             let mut tracker = self.cost_tracker.lock().expect("lock cost_tracker");
-            tracker.record(model, &response.usage, &pricing);
+            if let Some(cost) = response.gateway_cost_usd {
+                tracker.record_with_cost(model, &response.usage, cost);
+            } else {
+                let pricing = ModelPricing::for_model(model);
+                tracker.record(model, &response.usage, &pricing);
+            }
 
             if let Some(budget) = &self.config.budget {
                 if let Err(exceeded) = tracker.check_budget(budget) {
@@ -1028,6 +1046,7 @@ mod tests {
             AgentEvent::Completed {
                 agent_id: "a".into(),
                 iterations: 5,
+                cost_usd: 0.042,
             },
             AgentEvent::MaxIterationsReached { agent_id: "a".into(), max: 50 },
             AgentEvent::BudgetExceeded {

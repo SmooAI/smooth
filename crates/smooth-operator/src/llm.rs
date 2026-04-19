@@ -120,6 +120,50 @@ pub struct LlmResponse {
     pub finish_reason: String,
     pub usage: Usage,
     pub rate_limit: Option<RateLimitInfo>,
+    /// Authoritative cost in USD as reported by the gateway
+    /// (LiteLLM's `x-litellm-response-cost` response header).
+    /// `None` when the gateway didn't report a cost — the caller
+    /// falls back to local `ModelPricing` in that case.
+    pub gateway_cost_usd: Option<f64>,
+}
+
+/// Parse the gateway's authoritative cost from an HTTP response's
+/// headers. Checks a few header name variants so the same parser
+/// works across LiteLLM versions and other OpenAI-compat gateways
+/// that echo a cost header.
+pub fn parse_gateway_cost(headers: &reqwest::header::HeaderMap) -> Option<f64> {
+    // LiteLLM splits cost into a few headers. `-margin-amount` is
+    // what the caller actually pays (includes the gateway's
+    // configured markup); `-original` is the raw upstream cost.
+    // Prefer margin when present, fall back to original, then the
+    // legacy `x-litellm-response-cost` shape older LiteLLM versions
+    // emit. Takes the first non-zero match so a config that happens
+    // to report 0 in `-margin-amount` (no markup) still surfaces
+    // the underlying cost.
+    const CANDIDATES: &[&str] = &[
+        "x-litellm-response-cost-margin-amount",
+        "x-litellm-response-cost-original",
+        "x-litellm-response-cost",
+        "x-response-cost",
+        "x-cost-usd",
+    ];
+    let mut zero_fallback: Option<f64> = None;
+    for name in CANDIDATES {
+        if let Some(v) = headers.get(*name).and_then(|h| h.to_str().ok()) {
+            if let Ok(cost) = v.trim().parse::<f64>() {
+                if cost > 0.0 {
+                    return Some(cost);
+                }
+                zero_fallback = Some(cost);
+            }
+        }
+    }
+    // All candidates reported zero (tiny request, free model, etc.).
+    // Surface 0 rather than None so the caller knows the gateway *did*
+    // report a cost — the agent's budget check can still meaningfully
+    // rely on the gateway number, and the spend meter stays at zero
+    // instead of silently falling back to ModelPricing's guess.
+    zero_fallback
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -457,6 +501,7 @@ impl LlmClient {
             let rate_limit_info = parse_rate_limit_headers(resp.headers());
 
             if status.is_success() {
+                let gateway_cost_usd = parse_gateway_cost(resp.headers());
                 let chat_resp: ChatResponse = resp.json().await?;
                 let choice = chat_resp.choices.into_iter().next().ok_or_else(|| anyhow::anyhow!("no choices in response"))?;
 
@@ -487,6 +532,7 @@ impl LlmClient {
                     finish_reason: choice.finish_reason.unwrap_or_else(|| "stop".into()),
                     usage,
                     rate_limit: Some(rate_limit_info),
+                    gateway_cost_usd,
                 });
             }
 
@@ -705,6 +751,7 @@ impl LlmClient {
             let rate_limit_info = parse_rate_limit_headers(resp.headers());
 
             if status.is_success() {
+                let gateway_cost_usd = parse_gateway_cost(resp.headers());
                 let anthropic_resp: AnthropicResponse = resp.json().await?;
 
                 let mut content = String::new();
@@ -738,6 +785,7 @@ impl LlmClient {
                         total_tokens: total,
                     },
                     rate_limit: Some(rate_limit_info),
+                    gateway_cost_usd,
                 });
             }
 
@@ -1062,6 +1110,7 @@ pub async fn accumulate_stream_events(mut stream: Pin<Box<dyn Stream<Item = anyh
         finish_reason,
         usage,
         rate_limit: None,
+        gateway_cost_usd: None,
     })
 }
 

@@ -1340,6 +1340,11 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         // as a raw TokenDelta (helps with debugging).
         let mut agent_iterations: u32 = 0;
         let mut saw_completed = false;
+        // Accumulates the final cost reported by the runner's
+        // `AgentEvent::Completed`. Runner emits the real cost; a
+        // fallback emit (exit-path race) reports 0.0 so we don't
+        // over-count — we take the max across all Completed events.
+        let mut final_cost_usd: f64 = 0.0;
         for line in stdout.lines() {
             let line = line.trim();
             if line.is_empty() {
@@ -1382,6 +1387,11 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
                             saw_completed = true;
                             if let Some(iters) = event.get("iterations").and_then(serde_json::Value::as_u64) {
                                 agent_iterations = u32::try_from(iters).unwrap_or(u32::MAX);
+                            }
+                            if let Some(c) = event.get("cost_usd").and_then(serde_json::Value::as_f64) {
+                                if c > final_cost_usd {
+                                    final_cost_usd = c;
+                                }
                             }
                         }
                         "Error" => {
@@ -1466,7 +1476,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
             let _ = event_tx.send(ServerEvent::TaskComplete {
                 task_id: tid.clone(),
                 iterations: agent_iterations,
-                cost_usd: 0.0,
+                cost_usd: final_cost_usd,
             });
             // Close pearl via Diver or directly
             if let Some(ref id) = pearl_id {
@@ -1667,10 +1677,11 @@ async fn run_task_handler(State(state): State<AppState>, Json(req): Json<TaskReq
                             tool_name,
                             is_error,
                         }),
-                        ServerEvent::TaskComplete { iterations, .. } => {
+                        ServerEvent::TaskComplete { iterations, cost_usd, .. } => {
                             let _ = sse_tx.send(AgentEvent::Completed {
                                 agent_id: "task".into(),
                                 iterations,
+                                cost_usd,
                             });
                             break;
                         }

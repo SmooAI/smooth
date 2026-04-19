@@ -75,17 +75,25 @@ impl CostTracker {
     /// Record a single LLM call's usage and cost.
     pub fn record(&mut self, model: &str, usage: &Usage, pricing: &ModelPricing) {
         let cost = pricing.calculate(usage.prompt_tokens, usage.completion_tokens);
+        self.record_with_cost(model, usage, cost);
+    }
 
+    /// Record a single LLM call with an explicit cost (e.g. the
+    /// gateway's authoritative number from the `x-litellm-response-cost`
+    /// response header). Prefer this over [`record`] whenever the
+    /// gateway reports a cost — local `ModelPricing` can't price
+    /// aliased routes (`smooth-coding` → unknown upstream) accurately.
+    pub fn record_with_cost(&mut self, model: &str, usage: &Usage, cost_usd: f64) {
         self.total_prompt_tokens += u64::from(usage.prompt_tokens);
         self.total_completion_tokens += u64::from(usage.completion_tokens);
-        self.total_cost_usd += cost;
+        self.total_cost_usd += cost_usd;
         self.calls += 1;
 
         self.entries.push(CostEntry {
             model: model.to_string(),
             prompt_tokens: usage.prompt_tokens,
             completion_tokens: usage.completion_tokens,
-            cost_usd: cost,
+            cost_usd,
             timestamp: Utc::now(),
         });
     }
