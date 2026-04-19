@@ -82,10 +82,19 @@ impl PolyglotLang {
     /// scratch work dir. Split on whitespace; first element is the
     /// program.
     pub fn test_command(self) -> &'static [&'static str] {
+        // Prefer per-test-case output over terse summaries — the
+        // judge can count `PASS/FAIL` lines, but gets fooled by a
+        // single `ok <package>` summary (undercounts a 31-case
+        // suite as 1). Keep the commands verbose enough that the
+        // summary names individual cases.
         match self {
             Self::Python => &["python3", "-m", "pytest", "-q"],
-            Self::Rust => &["cargo", "test", "--quiet"],
-            Self::Go => &["go", "test", "./..."],
+            // Default cargo test (not `--quiet`) emits per-test `test … ok`
+            // lines plus the `test result: ok. N passed; N failed; …` summary.
+            Self::Rust => &["cargo", "test"],
+            // `-v` gives `--- PASS: TestName` / `--- FAIL:` per subtest,
+            // instead of only the terminal `ok <package> <duration>` line.
+            Self::Go => &["go", "test", "-v", "./..."],
             Self::Javascript => &["npm", "test"],
             Self::Java => &["gradle", "test"],
             Self::Cpp => &["sh", "-c", "mkdir -p build && cd build && cmake .. && make && ctest --output-on-failure"],
@@ -407,10 +416,24 @@ pub async fn judge_test_output(combined_stdout: &str) -> anyhow::Result<TestCoun
     let system = Message::system(
         "You extract test-result counts from the output of a test \
          runner (pytest, cargo test, go test, jest, etc.). Respond \
-         with a SINGLE line of JSON only: {\"passed\": N, \"failed\": \
-         N, \"total\": N}. No code fences, no prose, no preamble. If \
-         you cannot determine the counts, return \
-         {\"passed\":0,\"failed\":0,\"total\":0}.",
+         with a SINGLE line of JSON only: \
+         {\"passed\": N, \"failed\": N, \"total\": N}. \
+         No code fences, no prose, no preamble.\n\n\
+         Scoring rules:\n\
+         - Prefer per-case counts when the runner prints them \
+         (pytest's `N passed, N failed`, cargo's `test result: ok. \
+         N passed; N failed`, go's `--- PASS:` / `--- FAIL:` lines, \
+         jest's `Tests: N passed, N failed, N total`).\n\
+         - When a suite-level runner only prints `ok <package>` or \
+         `FAIL <package>` with no per-case breakdown (e.g. `go test \
+         ./...` in non-verbose mode, or `cargo test --quiet`), treat \
+         that as a single test: `ok` ⇒ passed=1 failed=0 total=1, \
+         `FAIL` ⇒ passed=0 failed=1 total=1. DO NOT return all \
+         zeros — the suite is definitive, the counts just aren't.\n\
+         - Build/compile errors that prevent the tests from running \
+         count as failed=1 total=1.\n\
+         - Only return all zeros when the output is truly empty or \
+         gives no signal about whether tests ran.",
     );
     let user = Message::user(&format!("Test runner output:\n\n{trimmed}"));
     let response = llm.chat(&[&system, &user], &[]).await.context("smooth-judge call failed")?;
