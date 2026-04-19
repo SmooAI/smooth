@@ -202,6 +202,12 @@ pub struct AppState {
     pub model_name: String,
     /// Running total of tokens used this session.
     pub total_tokens: u32,
+    /// Running total of spend in USD this session. Accumulated on
+    /// every `ServerEvent::TaskComplete` — the value the server
+    /// reports is already authoritative (LiteLLM response-cost
+    /// header when the gateway sets it, ModelPricing fallback
+    /// otherwise), so the client just sums them.
+    pub total_cost_usd: f64,
     /// Flag to exit the main loop.
     pub should_quit: bool,
     /// Whether the agent is currently processing a request.
@@ -244,6 +250,7 @@ impl AppState {
             user_scrolled: false,
             model_name: "claude-sonnet-4".to_string(),
             total_tokens: 0,
+            total_cost_usd: 0.0,
             should_quit: false,
             thinking: false,
             spinner_frame: 0,

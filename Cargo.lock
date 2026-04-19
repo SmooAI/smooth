@@ -5455,6 +5455,7 @@ dependencies = [
  "crossterm",
  "dirs-next",
  "futures-util",
+ "globset",
  "ignore",
  "pulldown-cmark",
  "ratatui",

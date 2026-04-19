@@ -293,7 +293,12 @@ fn render_status(frame: &mut Frame, state: &AppState, area: Rect) {
         HealthStatus::Unknown => ("\u{25cf}", Style::default().fg(theme::SMOO_GRAY_700)),
     };
 
-    let status_left = format!(" {branch_indicator}{} | tokens: {} | ", state.model_name, state.total_tokens);
+    let status_left = format!(
+        " {branch_indicator}{} | tokens: {} | spend: {} | ",
+        state.model_name,
+        state.total_tokens,
+        format_spend(state.total_cost_usd),
+    );
     let status_right = " | Ctrl+C quit | Ctrl+B sidebar ";
 
     let line = Line::from(vec![
@@ -476,4 +481,38 @@ fn render_models_view(frame: &mut Frame, picker: &crate::model_picker::ModelPick
         })
         .collect();
     frame.render_widget(List::new(items), area);
+}
+
+/// Format a spend total for the status bar.
+pub fn format_spend(usd: f64) -> String {
+    if usd <= 0.0 {
+        "$0".to_string()
+    } else if usd < 1.0 {
+        format!("${usd:.3}")
+    } else {
+        format!("${usd:.2}")
+    }
+}
+
+#[cfg(test)]
+mod spend_fmt_tests {
+    use super::format_spend;
+
+    #[test]
+    fn zero_is_short() {
+        assert_eq!(format_spend(0.0), "$0");
+        assert_eq!(format_spend(-0.001), "$0");
+    }
+
+    #[test]
+    fn sub_dollar_has_three_decimals() {
+        assert_eq!(format_spend(0.042), "$0.042");
+        assert_eq!(format_spend(0.1), "$0.100");
+    }
+
+    #[test]
+    fn dollar_plus_has_two_decimals() {
+        assert_eq!(format_spend(1.0), "$1.00");
+        assert_eq!(format_spend(12.345), "$12.35");
+    }
 }

@@ -113,6 +113,19 @@ impl AutocompleteState {
         self.query = query.to_string();
         self.selected = 0;
 
+        // Glob queries (any `*`, `?`, or `{` outside a leading
+        // path prefix) recursively walk the filesystem from the
+        // deepest literal base directory and match by the glob.
+        // Handled before the simple path-prefix path because
+        // `../**/(dashboard)` starts with `../` but means "recurse
+        // under parent", not "list parent directory".
+        if has_glob_meta(query) {
+            if let Some(results) = glob_completions(query, workspace_root) {
+                self.results = results;
+                return;
+            }
+        }
+
         // Path-prefix queries win unconditionally — the user is
         // clearly asking for a filesystem listing, not a fuzzy
         // search over workspace files.
@@ -284,6 +297,153 @@ fn path_completions(query: &str, workspace_root: &Path) -> Option<Vec<Autocomple
     });
     results.truncate(MAX_RESULTS);
     Some(results)
+}
+
+/// Does the query contain glob metacharacters (`*`, `?`, `{`)
+/// anywhere? Used to route `@foo/**/*.rs`-style queries to the
+/// recursive walker instead of the simple directory listing path.
+fn has_glob_meta(query: &str) -> bool {
+    query.chars().any(|c| matches!(c, '*' | '?' | '{'))
+}
+
+/// Recursively walk from the deepest literal prefix of `query` and
+/// return entries matching the remainder as a glob. Respects
+/// `.gitignore` via `ignore::WalkBuilder`.
+///
+/// Supported query shapes:
+///
+/// * `**/*.rs` — recurse from the workspace root
+/// * `src/**/mod.rs` — recurse from `workspace_root/src`
+/// * `../**/(dashboard)` — climb to the parent, then recurse
+/// * `~/dev/**/README.md` — expand home, then recurse
+/// * `/etc/**/*.conf` — recurse from an absolute path
+///
+/// Returns `None` when the query isn't a valid glob (e.g. `globset`
+/// rejects the pattern) so callers can fall through to simpler
+/// matching modes. Returns `Some(vec![])` when the walker ran but
+/// matched nothing — the picker treats an empty result set as "close
+/// silently" so a stray `*` doesn't trap the user inside a popup.
+fn glob_completions(query: &str, workspace_root: &Path) -> Option<Vec<AutocompleteResult>> {
+    let (base_dir, base_display, pattern) = split_base_and_glob(query, workspace_root)?;
+    if !base_dir.is_dir() {
+        return Some(Vec::new());
+    }
+
+    let matcher = globset::Glob::new(&pattern).ok()?.compile_matcher();
+
+    let mut results: Vec<AutocompleteResult> = Vec::new();
+    let walker = ignore::WalkBuilder::new(&base_dir)
+        .hidden(false) // show hidden entries — users globbing for `.env*` expect them
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .max_depth(Some(12)) // enough for real repos; bounded so a bad glob can't hang
+        .build();
+
+    for entry in walker.flatten() {
+        let Ok(rel) = entry.path().strip_prefix(&base_dir) else { continue };
+        if rel.as_os_str().is_empty() {
+            continue; // skip the base dir itself
+        }
+        let rel_str = rel.to_string_lossy();
+        if !matcher.is_match(&*rel_str) {
+            continue;
+        }
+
+        let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
+        let slash = if is_dir { "/" } else { "" };
+        // Preserve the leading "~/" / "../" / absolute prefix so the
+        // inserted @-reference round-trips back to the same path.
+        let insert_prefix = if base_display.is_empty() {
+            String::new()
+        } else if base_display.ends_with('/') {
+            base_display.clone()
+        } else {
+            format!("{base_display}/")
+        };
+        results.push(AutocompleteResult {
+            label: format!("{rel_str}{slash}"),
+            detail: if is_dir { "directory".into() } else { "file".into() },
+            insert_text: format!("@{insert_prefix}{rel_str}{slash}"),
+        });
+        if results.len() >= MAX_RESULTS {
+            break;
+        }
+    }
+
+    // Directories before files, alphabetical within.
+    results.sort_by(|a, b| {
+        let a_dir = a.detail == "directory";
+        let b_dir = b.detail == "directory";
+        b_dir.cmp(&a_dir).then_with(|| a.label.to_lowercase().cmp(&b.label.to_lowercase()))
+    });
+    Some(results)
+}
+
+/// Split a glob query into `(base_dir, base_display, glob_pattern)`.
+///
+/// `base_dir` is an absolute path to start the walker from.
+/// `base_display` is how the prefix should appear back in the inserted
+/// `@`-reference (e.g. `~/dev`, `../src`, `/etc`, or ``).
+/// `glob_pattern` is what remains after stripping the literal prefix,
+/// to be compiled with `globset`.
+fn split_base_and_glob(query: &str, workspace_root: &Path) -> Option<(PathBuf, String, String)> {
+    // Resolve any leading path prefix first. The remainder may still
+    // contain literal path components before the first glob metachar.
+    let (mut base_dir, mut base_display, rest) = if query == "~" {
+        (dirs_next::home_dir()?, "~".to_string(), String::new())
+    } else if let Some(r) = query.strip_prefix("~/") {
+        (dirs_next::home_dir()?, "~".to_string(), r.to_string())
+    } else if let Some(r) = query.strip_prefix("./") {
+        (workspace_root.to_path_buf(), ".".to_string(), r.to_string())
+    } else if query.starts_with("../") || query == ".." {
+        let mut path = workspace_root.to_path_buf();
+        let mut remainder = query;
+        let mut display = String::new();
+        while remainder == ".." || remainder.starts_with("../") {
+            path = path.parent()?.to_path_buf();
+            if !display.is_empty() {
+                display.push('/');
+            }
+            display.push_str("..");
+            remainder = remainder.strip_prefix("../").unwrap_or("");
+        }
+        (path, display, remainder.to_string())
+    } else if query.starts_with('/') {
+        let r = query.strip_prefix('/').unwrap_or(query).to_string();
+        (PathBuf::from("/"), String::new(), r)
+    } else {
+        (workspace_root.to_path_buf(), String::new(), query.to_string())
+    };
+
+    // Walk literal path components until we hit the first one with a
+    // glob metachar. Everything before it goes into base_dir; the
+    // rest stays as the glob pattern.
+    let mut pattern_parts: Vec<&str> = Vec::new();
+    let mut consumed = true;
+    for part in rest.split('/') {
+        if !consumed || has_glob_meta(part) {
+            consumed = false;
+            pattern_parts.push(part);
+            continue;
+        }
+        if part.is_empty() {
+            continue;
+        }
+        base_dir.push(part);
+        if base_display.is_empty() {
+            base_display = part.to_string();
+        } else {
+            base_display.push('/');
+            base_display.push_str(part);
+        }
+    }
+
+    let pattern = pattern_parts.join("/");
+    if pattern.is_empty() {
+        return None; // no glob — caller should route to path_completions
+    }
+    Some((base_dir, base_display, pattern))
 }
 
 /// Split `s` into `(directory_part_with_trailing_slash, filename_prefix)`.
