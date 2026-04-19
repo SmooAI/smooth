@@ -95,8 +95,15 @@ impl PolyglotLang {
             // `-v` gives `--- PASS: TestName` / `--- FAIL:` per subtest,
             // instead of only the terminal `ok <package> <duration>` line.
             Self::Go => &["go", "test", "-v", "./..."],
-            Self::Javascript => &["npm", "test"],
-            Self::Java => &["gradle", "test"],
+            // `npm install` first — devDependencies (jest, babel, etc.) aren't
+            // in the task's scratch dir by default; only the package.json is.
+            // `--silent --no-audit --no-fund` keep install output terse so the
+            // judge still has a short tail with jest's actual summary.
+            Self::Javascript => &["sh", "-c", "npm install --silent --no-audit --no-fund && npm test"],
+            // Use the task's bundled Gradle wrapper (`gradlew`) so we don't
+            // depend on a system-wide gradle of a specific version.
+            // `--no-daemon` avoids leaking a background daemon per task.
+            Self::Java => &["sh", "-c", "./gradlew test --no-daemon"],
             Self::Cpp => &["sh", "-c", "mkdir -p build && cd build && cmake .. && make && ctest --output-on-failure"],
         }
     }
