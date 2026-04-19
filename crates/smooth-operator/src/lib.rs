@@ -17,6 +17,7 @@ pub mod knowledge;
 pub mod llm;
 pub mod memory;
 pub mod providers;
+pub mod resolution;
 pub mod tool;
 pub mod workflow;
 pub mod ws_resilience;
