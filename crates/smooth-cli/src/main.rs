@@ -362,6 +362,13 @@ enum McpCommands {
 enum RoutingCommands {
     /// Show current routing configuration
     Show,
+    /// Ask the gateway what concrete upstream backs each alias.
+    ///
+    /// Hits `GET /model/info` on each configured provider that supports
+    /// it (LiteLLM-backed gateways like llm.smoo.ai). Useful when your
+    /// slots point at semantic aliases (`smooth-coding`, …) and you
+    /// want to know what's actually running behind them today.
+    Resolved,
     /// Apply a preset routing configuration
     Preset {
         /// Preset name: low-cost, codex, anthropic
@@ -3171,6 +3178,89 @@ async fn cmd_routing(cmd: RoutingCommands) -> Result<()> {
                     }
                     Err(_) => {
                         println!("  {} {:<12} {}", "✗".red().bold(), label, "not configured".red());
+                    }
+                }
+            }
+            println!();
+        }
+
+        RoutingCommands::Resolved => {
+            if !providers_path.exists() {
+                println!("  {} No providers configured. Run: th auth login", "✗".red().bold());
+                return Ok(());
+            }
+            let registry = smooth_operator::providers::ProviderRegistry::load_from_file(&providers_path)?;
+
+            println!("\n  {}\n", "Resolved Model Routing".cyan().bold());
+
+            // Build the set of (provider, slot-alias) pairs we care about,
+            // then fetch /model/info once per unique provider.
+            use smooth_operator::providers::Activity;
+            let activities = [
+                (Activity::Thinking, "Thinking"),
+                (Activity::Coding, "Coding"),
+                (Activity::Planning, "Planning"),
+                (Activity::Reviewing, "Reviewing"),
+                (Activity::Judge, "Judge"),
+                (Activity::Summarize, "Summarize"),
+                (Activity::Fast, "Fast"),
+            ];
+
+            // slot_for + default slot
+            let mut slot_rows: Vec<(String, String, String)> = Vec::new(); // (label, provider, alias)
+            for (activity, label) in &activities {
+                let slot = registry.routing.slot_for(*activity);
+                slot_rows.push(((*label).to_string(), slot.provider.clone(), slot.model.clone()));
+            }
+            slot_rows.push((
+                "Default".to_string(),
+                registry.routing.default.provider.clone(),
+                registry.routing.default.model.clone(),
+            ));
+
+            // Unique providers we need to query.
+            let mut providers_needed: Vec<String> = slot_rows.iter().map(|(_, p, _)| p.clone()).collect();
+            providers_needed.sort();
+            providers_needed.dedup();
+
+            // Fetch per provider.
+            let mut resolved: std::collections::HashMap<String, std::collections::BTreeMap<String, smooth_operator::resolution::ResolvedModel>> =
+                std::collections::HashMap::new();
+            let mut errors: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+            for provider_id in &providers_needed {
+                let Some(cfg) = registry.get_provider(provider_id) else {
+                    errors.insert(provider_id.clone(), "provider not registered".into());
+                    continue;
+                };
+                match smooth_operator::resolution::fetch_model_info(&cfg.api_url, &cfg.api_key).await {
+                    Ok(map) => {
+                        resolved.insert(provider_id.clone(), map);
+                    }
+                    Err(e) => {
+                        errors.insert(provider_id.clone(), format!("{e}"));
+                    }
+                }
+            }
+
+            for (label, provider, alias) in &slot_rows {
+                let upstream = resolved.get(provider).and_then(|m| m.get(alias)).and_then(|r| r.upstream.as_deref());
+                match upstream {
+                    Some(u) => {
+                        println!("  {} {:<11} {} {} {}", "✓".green().bold(), label.bold(), alias.cyan(), "→".dimmed(), u.yellow());
+                    }
+                    None => {
+                        let hint = errors
+                            .get(provider)
+                            .map(std::string::String::as_str)
+                            .unwrap_or("gateway did not report an upstream for this alias");
+                        println!(
+                            "  {} {:<11} {} {} {}",
+                            "?".yellow().bold(),
+                            label.bold(),
+                            alias.cyan(),
+                            "→".dimmed(),
+                            hint.dimmed()
+                        );
                     }
                 }
             }
