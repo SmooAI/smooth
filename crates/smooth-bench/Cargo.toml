@@ -17,6 +17,7 @@ path = "src/lib.rs"
 
 [dependencies]
 smooth-code.workspace = true
+smooth-operator.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true

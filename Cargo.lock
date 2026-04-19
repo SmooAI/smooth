@@ -5348,6 +5348,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smooai-smooth-code",
+ "smooai-smooth-operator",
  "tempfile",
  "tokio",
  "uuid",
