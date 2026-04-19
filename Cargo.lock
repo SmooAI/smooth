@@ -5338,6 +5338,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "smooai-smooth-bench"
+version = "0.8.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "dirs-next",
+ "serde",
+ "serde_json",
+ "smooai-smooth-code",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "smooai-smooth-bigsmooth"
 version = "0.8.0"
 dependencies = [
