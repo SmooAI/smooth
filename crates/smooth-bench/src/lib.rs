@@ -189,7 +189,7 @@ pub async fn run_aider_polyglot(lang: PolyglotLang, task: &str, opts: &BenchOpts
 
     let duration_s = t0.elapsed().as_secs_f64();
 
-    let (test_stdout, counts) = score_work_dir(lang, &work_dir)?;
+    let (test_stdout, counts) = score_work_dir(lang, &work_dir).await?;
 
     let result = BenchResult {
         run_id: run.file_name().and_then(|s| s.to_str()).unwrap_or("unknown").to_string(),
@@ -358,8 +358,11 @@ fn list_non_hidden_files(dir: &Path) -> anyhow::Result<Vec<String>> {
     Ok(out)
 }
 
-/// Run the language's test command and parse counts out of stdout.
-fn score_work_dir(lang: PolyglotLang, work_dir: &Path) -> anyhow::Result<(String, TestCounts)> {
+/// Run the language's test command, then ask `smooth-judge` to
+/// extract counts from its stdout. Agentic scoring — no per-language
+/// regex parsers, so new languages and test runner format drift
+/// don't require harness changes.
+async fn score_work_dir(lang: PolyglotLang, work_dir: &Path) -> anyhow::Result<(String, TestCounts)> {
     let argv = lang.test_command();
     let program = argv[0];
     let args = &argv[1..];
@@ -371,75 +374,115 @@ fn score_work_dir(lang: PolyglotLang, work_dir: &Path) -> anyhow::Result<(String
     let mut combined = String::new();
     combined.push_str(&String::from_utf8_lossy(&output.stdout));
     combined.push_str(&String::from_utf8_lossy(&output.stderr));
-    let counts = parse_test_output(lang, &combined);
+    let counts = judge_test_output(&combined).await.unwrap_or_default();
     Ok((combined, counts))
 }
 
-/// Parse passed/failed/total out of a test runner's combined
-/// stdout+stderr. Language-specific because each runner has its
-/// own summary line.
-pub fn parse_test_output(lang: PolyglotLang, s: &str) -> TestCounts {
-    match lang {
-        PolyglotLang::Python => parse_pytest(s),
-        PolyglotLang::Rust => parse_cargo_test(s),
-        _ => TestCounts::default(), // not yet wired for MVP
+/// Ask the `smooth-judge` slot to extract pass/fail/total counts
+/// from a test runner's combined stdout+stderr. Returns the default
+/// `TestCounts` on any failure — we'd rather under-report (marks the
+/// run as unsolved) than fabricate success.
+///
+/// # Errors
+/// Returns an error only when the registry can't be loaded at all.
+/// LLM failures are converted into zero counts, not propagated.
+pub async fn judge_test_output(combined_stdout: &str) -> anyhow::Result<TestCounts> {
+    use smooth_operator::conversation::Message;
+    use smooth_operator::llm::LlmClient;
+    use smooth_operator::providers::{Activity, ProviderRegistry};
+
+    let providers_path = dirs_next::home_dir()
+        .map(|h| h.join(".smooth/providers.json"))
+        .ok_or_else(|| anyhow!("no home dir"))?;
+    let registry = ProviderRegistry::load_from_file(&providers_path).context("loading providers.json")?;
+    let config = registry.llm_config_for(Activity::Judge).context("no `judge` routing slot configured")?;
+    let llm = LlmClient::new(config);
+
+    // Keep the input modest — judge doesn't need 2MB of verbose
+    // cargo test output, just enough to see the summary lines. Keep
+    // both ends since some runners print the tally at the top
+    // (e.g. `go test -v`) and some at the bottom (pytest, cargo).
+    let trimmed = trim_for_judge(combined_stdout, 4000);
+
+    let system = Message::system(
+        "You extract test-result counts from the output of a test \
+         runner (pytest, cargo test, go test, jest, etc.). Respond \
+         with a SINGLE line of JSON only: {\"passed\": N, \"failed\": \
+         N, \"total\": N}. No code fences, no prose, no preamble. If \
+         you cannot determine the counts, return \
+         {\"passed\":0,\"failed\":0,\"total\":0}.",
+    );
+    let user = Message::user(&format!("Test runner output:\n\n{trimmed}"));
+    let response = llm.chat(&[&system, &user], &[]).await.context("smooth-judge call failed")?;
+
+    Ok(parse_judge_response(&response.content))
+}
+
+/// Parse the judge's JSON response into `TestCounts`. Lenient:
+/// strips code fences, finds the first `{...}` block, accepts
+/// partial totals (infers total when the model only gives passed +
+/// failed). Unit-tested without a live LLM.
+pub fn parse_judge_response(raw: &str) -> TestCounts {
+    let body = strip_code_fence(raw.trim());
+    let Some(json_slice) = extract_first_object(body) else {
+        return TestCounts::default();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json_slice) else {
+        return TestCounts::default();
+    };
+
+    let passed = value.get("passed").and_then(serde_json::Value::as_u64).unwrap_or(0) as u32;
+    let failed = value.get("failed").and_then(serde_json::Value::as_u64).unwrap_or(0) as u32;
+    let total = value
+        .get("total")
+        .and_then(serde_json::Value::as_u64)
+        .map_or(passed.saturating_add(failed), |n| n as u32);
+
+    TestCounts { passed, failed, total }
+}
+
+fn strip_code_fence(s: &str) -> &str {
+    let s = s.trim();
+    if let Some(rest) = s.strip_prefix("```json") {
+        rest.trim_end_matches("```").trim()
+    } else if let Some(rest) = s.strip_prefix("```") {
+        rest.trim_end_matches("```").trim()
+    } else {
+        s
     }
 }
 
-/// Parse pytest summary. Handles:
-///   "20 passed in 0.01s"
-///   "5 failed, 15 passed in 0.05s"
-///   "18 passed, 2 skipped in 0.02s"
-fn parse_pytest(s: &str) -> TestCounts {
-    let mut counts = TestCounts::default();
-    for line in s.lines().rev() {
-        let line_lc = line.to_lowercase();
-        if !(line_lc.contains("passed") || line_lc.contains("failed") || line_lc.contains("error")) {
-            continue;
-        }
-        // Scan for "N passed" / "N failed" patterns. Ignore skipped / xfailed.
-        let mut tokens = line.split_whitespace().peekable();
-        while let Some(tok) = tokens.next() {
-            let Ok(n) = tok.parse::<u32>() else { continue };
-            match tokens.peek().copied() {
-                Some("passed") | Some("passed,") => counts.passed = counts.passed.saturating_add(n),
-                Some("failed") | Some("failed,") | Some("errors") | Some("error") => {
-                    counts.failed = counts.failed.saturating_add(n);
-                }
-                _ => {}
-            }
-        }
-        if counts.passed + counts.failed > 0 {
-            break;
-        }
+fn extract_first_object(s: &str) -> Option<&str> {
+    let start = s.find('{')?;
+    let end = s.rfind('}')?;
+    if end <= start {
+        return None;
     }
-    counts.total = counts.passed + counts.failed;
-    counts
+    Some(&s[start..=end])
 }
 
-/// Parse `cargo test` summary. Each `test result:` block has the form
-///   "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
-/// A workspace can have multiple blocks — sum them.
-fn parse_cargo_test(s: &str) -> TestCounts {
-    let mut counts = TestCounts::default();
-    for line in s.lines() {
-        let l = line.trim();
-        if !l.starts_with("test result:") {
-            continue;
-        }
-        let mut tokens = l.split_whitespace().peekable();
-        while let Some(tok) = tokens.next() {
-            let clean = tok.trim_end_matches([';', ',']);
-            let Ok(n) = clean.parse::<u32>() else { continue };
-            match tokens.peek().copied() {
-                Some("passed") | Some("passed;") | Some("passed,") => counts.passed += n,
-                Some("failed") | Some("failed;") | Some("failed,") => counts.failed += n,
-                _ => {}
-            }
-        }
+fn trim_for_judge(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
     }
-    counts.total = counts.passed + counts.failed;
-    counts
+    // Keep the head (setup errors) and the tail (summary). Those are
+    // the two spots test runners print their counts.
+    let head_bytes = max_bytes / 3;
+    let tail_bytes = max_bytes - head_bytes - 64;
+
+    // Careful with UTF-8 — step back to a char boundary.
+    let head_end = head_bytes.min(s.len());
+    let head_end = (0..=head_end).rev().find(|&i| s.is_char_boundary(i)).unwrap_or(0);
+
+    let tail_start_raw = s.len().saturating_sub(tail_bytes);
+    let tail_start = (tail_start_raw..s.len()).find(|&i| s.is_char_boundary(i)).unwrap_or(tail_start_raw);
+
+    format!(
+        "{}\n\n[... {} bytes elided ...]\n\n{}",
+        &s[..head_end],
+        s.len() - head_end - (s.len() - tail_start),
+        &s[tail_start..]
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -509,9 +552,8 @@ mod tests {
     }
 
     #[test]
-    fn pytest_parse_all_passed() {
-        let s = "....................                                                     [100%]\n20 passed in 0.01s\n";
-        let c = parse_pytest(s);
+    fn judge_response_plain_json() {
+        let c = parse_judge_response(r#"{"passed": 20, "failed": 0, "total": 20}"#);
         assert_eq!(
             c,
             TestCounts {
@@ -523,80 +565,78 @@ mod tests {
     }
 
     #[test]
-    fn pytest_parse_mixed_fail_and_pass() {
-        let s = "F.F..F\n3 failed, 3 passed in 0.05s\n";
-        let c = parse_pytest(s);
+    fn judge_response_strips_json_code_fence() {
+        let c = parse_judge_response("```json\n{\"passed\": 5, \"failed\": 2, \"total\": 7}\n```");
+        assert_eq!(
+            c,
+            TestCounts {
+                passed: 5,
+                failed: 2,
+                total: 7
+            }
+        );
+    }
+
+    #[test]
+    fn judge_response_strips_bare_code_fence() {
+        let c = parse_judge_response("```\n{\"passed\": 1, \"failed\": 0, \"total\": 1}\n```");
+        assert_eq!(
+            c,
+            TestCounts {
+                passed: 1,
+                failed: 0,
+                total: 1
+            }
+        );
+    }
+
+    #[test]
+    fn judge_response_infers_total_from_passed_plus_failed() {
+        let c = parse_judge_response(r#"{"passed": 3, "failed": 2}"#);
         assert_eq!(
             c,
             TestCounts {
                 passed: 3,
-                failed: 3,
-                total: 6
-            }
-        );
-    }
-
-    #[test]
-    fn pytest_parse_ignores_skipped_count() {
-        let s = "18 passed, 2 skipped in 0.02s";
-        let c = parse_pytest(s);
-        assert_eq!(
-            c,
-            TestCounts {
-                passed: 18,
-                failed: 0,
-                total: 18
-            }
-        );
-    }
-
-    #[test]
-    fn pytest_parse_with_errors() {
-        let s = "1 failed, 2 passed, 1 error in 0.10s";
-        let c = parse_pytest(s);
-        assert_eq!(
-            c,
-            TestCounts {
-                passed: 2,
                 failed: 2,
-                total: 4
+                total: 5
             }
         );
     }
 
     #[test]
-    fn cargo_test_parse_single_block() {
-        let s = "\ntest foo ... ok\ntest bar ... ok\n\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n";
-        let c = parse_cargo_test(s);
+    fn judge_response_tolerates_prose_around_object() {
+        let c = parse_judge_response("Sure! Here you go: {\"passed\": 10, \"failed\": 0, \"total\": 10} — hope that helps.");
         assert_eq!(
             c,
             TestCounts {
-                passed: 2,
+                passed: 10,
                 failed: 0,
-                total: 2
+                total: 10
             }
         );
     }
 
     #[test]
-    fn cargo_test_parse_multiple_blocks_sum() {
-        let s = "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\
-                 test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n";
-        let c = parse_cargo_test(s);
-        assert_eq!(
-            c,
-            TestCounts {
-                passed: 4,
-                failed: 2,
-                total: 6
-            }
-        );
+    fn judge_response_malformed_returns_zero() {
+        assert_eq!(parse_judge_response("I don't know."), TestCounts::default());
+        assert_eq!(parse_judge_response("{not json}"), TestCounts::default());
+        assert_eq!(parse_judge_response(""), TestCounts::default());
     }
 
     #[test]
-    fn cargo_test_parse_empty_returns_zero() {
-        let c = parse_cargo_test("no matches here");
-        assert_eq!(c, TestCounts::default());
+    fn trim_for_judge_keeps_head_and_tail_under_budget() {
+        let big = "head-line\n".repeat(500) + &"tail-line\n".repeat(500);
+        let out = trim_for_judge(&big, 500);
+        assert!(out.len() <= 800, "trimmed output should be ≲ budget + elision note: got {}", out.len());
+        assert!(out.starts_with("head-line"));
+        assert!(out.contains("[... "));
+        assert!(out.trim_end().ends_with("tail-line"));
+    }
+
+    #[test]
+    fn trim_for_judge_below_budget_is_unchanged() {
+        let s = "short output";
+        assert_eq!(trim_for_judge(s, 1000), s);
     }
 
     #[test]
