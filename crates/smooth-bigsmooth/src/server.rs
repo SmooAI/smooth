@@ -99,10 +99,18 @@ impl AppState {
                 return None;
             }
             match smooth_operator::providers::ProviderRegistry::load_from_file(&providers_path) {
-                Ok(registry) => match registry.default_llm_config() {
+                // Route the Narc arbiter through the `Judge` slot (smooth-judge).
+                // This is what the slot was named for — a cheap, fast
+                // judge-class model. Falls back to the Default slot when the
+                // Judge slot isn't configured (older providers.json files
+                // without routing).
+                Ok(registry) => match registry
+                    .llm_config_for(smooth_operator::providers::Activity::Judge)
+                    .or_else(|_| registry.default_llm_config())
+                {
                     Ok(cfg) => Some(cfg),
                     Err(e) => {
-                        tracing::warn!(error = %e, "boardroom narc: no default LLM provider; Narc will escalate unknown requests to humans");
+                        tracing::warn!(error = %e, "boardroom narc: no judge/default LLM provider; Narc will escalate unknown requests to humans");
                         None
                     }
                 },
@@ -918,6 +926,16 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         env.insert("SMOOTH_MODEL".into(), final_model);
         env.insert("SMOOTH_WORKSPACE".into(), "/workspace".into());
         env.insert("SMOOTH_OPERATOR_ID".into(), tid.clone());
+
+        // When the host has SMOOTH_WORKFLOW=1 set, flag it for the
+        // runner. The routing config itself is serialized as a file
+        // further down (after policy_dir_guard is set up) because the
+        // JSON is several kilobytes and would overflow the kernel
+        // cmdline if passed as an env var.
+        let workflow_enabled = std::env::var("SMOOTH_WORKFLOW").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+        if workflow_enabled {
+            env.insert("SMOOTH_WORKFLOW".into(), "1".into());
+        }
         // Tell the operator where ~/.smooth is mounted inside the VM.
         env.insert("SMOOTH_HOME".into(), "/root/.smooth".into());
         if let Some(b) = budget {
@@ -1091,6 +1109,40 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
             // the kernel cmdline for long ones — Boardroom mode needs a
             // brokered task-file path eventually.
             env.insert("SMOOTH_TASK".into(), full_task_message.clone());
+        }
+
+        // When the workflow is enabled, write the full ProviderRegistry
+        // JSON to the policy bind-mount so the runner can load it at
+        // `/opt/smooth/policy/routing.json`. Too big (~3 KB) to fit
+        // in the kernel cmdline via an env var; same reason task.txt
+        // is mounted rather than inlined.
+        if workflow_enabled {
+            if let Some(ref dir) = policy_dir_guard {
+                if let Some(home) = dirs_next::home_dir() {
+                    let providers_path = home.join(".smooth/providers.json");
+                    match smooth_operator::providers::ProviderRegistry::load_from_file(&providers_path) {
+                        Ok(registry) => match registry.to_json() {
+                            Ok(json) => {
+                                let routing_path = dir.path().join("routing.json");
+                                if let Err(e) = std::fs::write(&routing_path, json) {
+                                    tracing::warn!(task_id = tid, error = %e, "could not write routing.json; workflow will fall back to single-Agent");
+                                } else {
+                                    env.insert("SMOOTH_ROUTING_JSON_FILE".into(), "/opt/smooth/policy/routing.json".into());
+                                    tracing::info!(task_id = tid, "coding workflow enabled: routing.json mounted for runner");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(task_id = tid, error = %e, "could not serialize routing config; workflow disabled");
+                            }
+                        },
+                        Err(e) => {
+                            tracing::warn!(task_id = tid, error = %e, "could not load providers.json; workflow disabled");
+                        }
+                    }
+                }
+            } else {
+                tracing::warn!(task_id = tid, "SMOOTH_WORKFLOW=1 but no policy dir (Boardroom mode); routing config path not plumbed yet");
+            }
         }
 
         let policy_mount = if !in_boardroom {

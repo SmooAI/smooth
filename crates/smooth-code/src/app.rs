@@ -320,7 +320,21 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
         }
         AgentEvent::Completed { cost_usd, .. } => {
             state.total_cost_usd += cost_usd;
+            // Workflow has wrapped up — clear the phase indicator so
+            // the status bar doesn't keep showing "FINALIZE" while
+            // the agent is idle.
+            state.current_phase = None;
+            state.current_phase_alias = None;
+            state.current_phase_upstream = None;
             state.finish_streaming();
+        }
+        AgentEvent::PhaseStart { phase, alias, upstream, .. } => {
+            state.current_phase = Some(phase);
+            state.current_phase_alias = Some(alias);
+            state.current_phase_upstream = upstream;
+            // Reset phrase so the new phase shows its first word, not
+            // whatever index we were on for the prior phase.
+            state.phrase_idx = 0;
         }
         AgentEvent::StreamingComplete | AgentEvent::MaxIterationsReached { .. } => {
             state.finish_streaming();

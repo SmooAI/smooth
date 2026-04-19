@@ -21,3 +21,4 @@ pub mod render;
 pub mod session;
 pub mod state;
 pub mod theme;
+pub mod thesaurus;

@@ -514,6 +514,38 @@ impl ProviderRegistry {
         Ok(registry)
     }
 
+    /// Deserialize a registry from the same JSON shape `save_to_file`
+    /// produces. Used when a parent process (Big Smooth) passes the
+    /// full routing config to a child (the sandboxed runner) via an
+    /// env var instead of writing it to disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `json` isn't a valid `RegistryFile`.
+    pub fn from_json(json: &str) -> anyhow::Result<Self> {
+        let file: RegistryFile = serde_json::from_str(json).context("parsing provider registry JSON")?;
+        let mut registry = Self::new().with_routing(file.routing);
+        for provider in file.providers {
+            registry.register_provider(provider);
+        }
+        Ok(registry)
+    }
+
+    /// Serialize the registry to the same JSON shape
+    /// `save_to_file` writes. Useful for passing routing config
+    /// to a child process via env var.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if JSON encoding fails.
+    pub fn to_json(&self) -> anyhow::Result<String> {
+        let file = RegistryFile {
+            providers: self.providers.values().cloned().collect(),
+            routing: self.routing.clone(),
+        };
+        Ok(serde_json::to_string(&file)?)
+    }
+
     /// Save registry to a JSON file.
     ///
     /// # Errors
