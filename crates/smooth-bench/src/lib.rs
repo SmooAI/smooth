@@ -89,9 +89,12 @@ impl PolyglotLang {
         // summary names individual cases.
         match self {
             Self::Python => &["python3", "-m", "pytest", "-q"],
-            // Default cargo test (not `--quiet`) emits per-test `test … ok`
-            // lines plus the `test result: ok. N passed; N failed; …` summary.
-            Self::Rust => &["cargo", "test"],
+            // `--include-ignored` runs tests marked `#[ignore]` — the
+            // polyglot Rust tasks ship with most tests `#[ignore]`d
+            // (bowling: 30 of 31). Without this, we'd score "solved"
+            // off a single trivial case and miss the real evaluation.
+            // `--` separates cargo flags from test-runner flags.
+            Self::Rust => &["cargo", "test", "--", "--include-ignored"],
             // `-v` gives `--- PASS: TestName` / `--- FAIL:` per subtest,
             // instead of only the terminal `ok <package> <duration>` line.
             Self::Go => &["go", "test", "-v", "./..."],
@@ -182,6 +185,7 @@ pub async fn run_aider_polyglot(lang: PolyglotLang, task: &str, opts: &BenchOpts
     std::fs::create_dir_all(&work_dir).with_context(|| format!("mkdir {}", work_dir.display()))?;
 
     copy_task_files(&task_src, &work_dir)?;
+    enable_skipped_tests(lang, &work_dir)?;
     let prompt = build_prompt(task, lang, &work_dir)?;
     std::fs::write(run.join("PROMPT.txt"), &prompt)?;
 
@@ -330,6 +334,67 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
             copy_dir_recursive(&entry.path(), &dst.join(&name))?;
         } else {
             std::fs::copy(entry.path(), dst.join(&name))?;
+        }
+    }
+    Ok(())
+}
+
+/// Strip per-language "skip this test" markers so every case in the
+/// upstream dataset actually runs. Aider Polyglot intentionally ships
+/// most of its tests disabled (so the stub compiles); unless we flip
+/// them on the bench scores only the one trivial remaining case.
+///
+/// Handled here rather than as a blanket command-line flag because
+/// some languages (JS) don't have a "run-skipped" flag — the markers
+/// are literal in the test file and have to be rewritten.
+///
+/// Safe to call on any lang: it's a no-op when the language has no
+/// skip markers or the target files aren't present.
+fn enable_skipped_tests(lang: PolyglotLang, work_dir: &Path) -> anyhow::Result<()> {
+    match lang {
+        PolyglotLang::Rust => {
+            // Nothing to do on disk — Rust runs all tests via the
+            // `cargo test -- --include-ignored` command-line flag.
+            Ok(())
+        }
+        PolyglotLang::Javascript => {
+            // jest skip shapes:
+            //   xtest( / xit(        — the whole case is skipped
+            //   test.skip( / it.skip( — same thing, alternate syntax
+            // Rewrite all four variants in every *.spec.js (or similar)
+            // file under the work dir.
+            rewrite_jest_skips(work_dir)
+        }
+        PolyglotLang::Python | PolyglotLang::Go | PolyglotLang::Java | PolyglotLang::Cpp => {
+            // No-op: polyglot Python/Go tasks don't ship skipped
+            // tests; Java/C++ are future work once they're exercised.
+            Ok(())
+        }
+    }
+}
+
+fn rewrite_jest_skips(dir: &Path) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if entry.file_type()?.is_dir() && !name.starts_with('.') && name != "node_modules" {
+            rewrite_jest_skips(&path)?;
+            continue;
+        }
+        if !(name.ends_with(".spec.js") || name.ends_with(".test.js") || name.ends_with(".spec.ts") || name.ends_with(".test.ts")) {
+            continue;
+        }
+        let Ok(body) = std::fs::read_to_string(&path) else { continue };
+        let rewritten = body
+            .replace("xtest(", "test(")
+            .replace("xit(", "it(")
+            .replace("test.skip(", "test(")
+            .replace("it.skip(", "it(")
+            .replace("describe.skip(", "describe(")
+            .replace("xdescribe(", "describe(");
+        if rewritten != body {
+            std::fs::write(&path, rewritten)?;
         }
     }
     Ok(())
@@ -703,5 +768,76 @@ mod tests {
         assert!(prompt.contains("grade_school_test.py"));
         assert!(prompt.contains("INSTRUCTIONS.md"));
         assert!(prompt.contains("python3 -m pytest"));
+    }
+
+    #[test]
+    fn rewrite_jest_skips_flips_every_variant() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let spec = tmp.path().join("foo.spec.js");
+        std::fs::write(
+            &spec,
+            r#"
+describe("bowling", () => {
+  test("one", () => { expect(1).toBe(1); });
+  xtest("two", () => {});
+  test.skip("three", () => {});
+  it.skip("four", () => {});
+  xit("five", () => {});
+  xdescribe("nested", () => {
+    test("six", () => {});
+  });
+  describe.skip("also nested", () => {
+    test("seven", () => {});
+  });
+});
+"#,
+        )
+        .unwrap();
+
+        rewrite_jest_skips(tmp.path()).expect("rewrite");
+
+        let body = std::fs::read_to_string(&spec).unwrap();
+        assert!(!body.contains("xtest("), "xtest not rewritten: {body}");
+        assert!(!body.contains("xit("), "xit not rewritten: {body}");
+        assert!(!body.contains("test.skip("), "test.skip not rewritten: {body}");
+        assert!(!body.contains("it.skip("), "it.skip not rewritten: {body}");
+        assert!(!body.contains("xdescribe("), "xdescribe not rewritten: {body}");
+        assert!(!body.contains("describe.skip("), "describe.skip not rewritten: {body}");
+        // Every case becomes an active test/it/describe call.
+        assert_eq!(body.matches("test(").count(), 5);
+    }
+
+    #[test]
+    fn rewrite_jest_skips_recurses_into_subdirs() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let nested = tmp.path().join("a/b");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("deep.spec.js"), "xtest(\"x\", () => {});").unwrap();
+
+        rewrite_jest_skips(tmp.path()).expect("rewrite");
+
+        let body = std::fs::read_to_string(nested.join("deep.spec.js")).unwrap();
+        assert_eq!(body, "test(\"x\", () => {});");
+    }
+
+    #[test]
+    fn rewrite_jest_skips_skips_node_modules() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        std::fs::create_dir_all(tmp.path().join("node_modules")).unwrap();
+        std::fs::write(tmp.path().join("node_modules/foo.spec.js"), "xtest(\"x\", () => {});").unwrap();
+
+        rewrite_jest_skips(tmp.path()).expect("rewrite");
+
+        // node_modules content untouched — we don't rewrite third-party code.
+        let body = std::fs::read_to_string(tmp.path().join("node_modules/foo.spec.js")).unwrap();
+        assert!(body.contains("xtest("));
+    }
+
+    #[test]
+    fn enable_skipped_tests_is_noop_for_python_rust_go() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        for lang in [PolyglotLang::Python, PolyglotLang::Rust, PolyglotLang::Go] {
+            enable_skipped_tests(lang, tmp.path()).expect("no-op");
+        }
     }
 }
