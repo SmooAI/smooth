@@ -1099,7 +1099,12 @@ pub async fn accumulate_stream_events(mut stream: Pin<Box<dyn Stream<Item = anyh
             if name.is_empty() {
                 return None;
             }
-            let arguments: serde_json::Value = serde_json::from_str(&args_str).unwrap_or(serde_json::Value::Null);
+            // Fall back to an EMPTY OBJECT, not Null. When we echo the
+            // assistant turn back on the next LLM call, the arguments
+            // field must serialize to valid JSON object content —
+            // strict providers (qwen3-coder-plus via DashScope) reject
+            // `arguments: "null"` with "must be in JSON format".
+            let arguments: serde_json::Value = serde_json::from_str(&args_str).unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
             Some(ToolCall { id, name, arguments })
         })
         .collect();
@@ -1112,6 +1117,29 @@ pub async fn accumulate_stream_events(mut stream: Pin<Box<dyn Stream<Item = anyh
         rate_limit: None,
         gateway_cost_usd: None,
     })
+}
+
+/// Serialize tool-call arguments to the canonical OpenAI wire
+/// format: a JSON-string whose content is a JSON object (never
+/// `"null"`, never an empty string, never a non-object primitive).
+///
+/// Strict providers — qwen3-coder-plus on DashScope for one — reject
+/// `function.arguments` unless it parses as a JSON object. Our
+/// streaming path used to fall back to `Value::Null` when argument
+/// deltas arrived malformed; echoing that back produced
+/// `arguments: "null"` and qwen3 would trip with
+/// `InternalError.Algo.InvalidParameter: The "function.arguments"
+/// parameter of the code model must be in JSON format.`
+///
+/// This function is the single gate for the wire format: it coerces
+/// anything non-object to `"{}"`, which every OpenAI-compat provider
+/// accepts. Keep it strict — the cost of being lenient here is
+/// per-provider wire errors at runtime.
+pub fn canonical_tool_arguments_json(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Object(_) => serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string()),
+        _ => "{}".to_string(),
+    }
 }
 
 fn to_chat_message(msg: &Message) -> ChatMessage {
@@ -1130,7 +1158,7 @@ fn to_chat_message(msg: &Message) -> ChatMessage {
             r#type: "function".into(),
             function: ChatToolCallFunction {
                 name: tc.name.clone(),
-                arguments: serde_json::to_string(&tc.arguments).unwrap_or_default(),
+                arguments: canonical_tool_arguments_json(&tc.arguments),
             },
         })
         .collect();
@@ -1789,5 +1817,32 @@ mod tests {
     fn llm_config_anthropic_defaults_to_anthropic_format() {
         let config = LlmConfig::anthropic("sk-ant-test");
         assert_eq!(config.api_format, ApiFormat::Anthropic);
+    }
+
+    #[test]
+    fn canonical_args_json_passes_object_through() {
+        let v = serde_json::json!({"city": "Tokyo", "unit": "c"});
+        let s = canonical_tool_arguments_json(&v);
+        let reparsed: serde_json::Value = serde_json::from_str(&s).expect("valid JSON");
+        assert_eq!(reparsed, v);
+        assert!(s.starts_with('{') && s.ends_with('}'));
+    }
+
+    #[test]
+    fn canonical_args_json_coerces_null_to_empty_object() {
+        assert_eq!(canonical_tool_arguments_json(&serde_json::Value::Null), "{}");
+    }
+
+    #[test]
+    fn canonical_args_json_coerces_primitives_to_empty_object() {
+        assert_eq!(canonical_tool_arguments_json(&serde_json::json!(42)), "{}");
+        assert_eq!(canonical_tool_arguments_json(&serde_json::json!(true)), "{}");
+        assert_eq!(canonical_tool_arguments_json(&serde_json::json!("already-a-string")), "{}");
+        assert_eq!(canonical_tool_arguments_json(&serde_json::json!([1, 2, 3])), "{}");
+    }
+
+    #[test]
+    fn canonical_args_json_empty_object_stays_empty_object() {
+        assert_eq!(canonical_tool_arguments_json(&serde_json::json!({})), "{}");
     }
 }
