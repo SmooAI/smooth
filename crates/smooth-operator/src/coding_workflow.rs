@@ -181,6 +181,16 @@ struct WorkflowState {
     /// and force a retry with an override review-finding instead
     /// of wasting a VERIFY cycle on unchanged code.
     last_execute_write_count: usize,
+    /// How many `bash` tool calls the most recent EXECUTE phase
+    /// made. Zero is the "shipped without self-validation" failure
+    /// mode — the agent edited a file but never ran the test suite
+    /// or a compile check, and the code turns out to have an
+    /// unclosed delimiter (Rust 0/1 bench run: 6 edit_file, 1 bash
+    /// total including VERIFY's run = zero bash in EXECUTE). A
+    /// single `cargo check` / `node --check` would have caught it.
+    /// We treat zero-bash on a non-trivial EXECUTE the same way we
+    /// treat zero-writes: force a retry with an override finding.
+    last_execute_bash_count: usize,
     /// Override string prepended to the next EXECUTE's "Review
     /// findings" context when the previous turn was a no-op. Empty
     /// when the normal REVIEW phase output is authoritative. Lets
@@ -232,37 +242,81 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
 
         run_phase(&cfg, CodingPhase::Execute, &mut state, execute_prompt).await?;
 
-        // No-op EXECUTE recovery. If the agent spent the turn
-        // exploring (zero edit_file / write_file calls) the code
-        // didn't change; running VERIFY on it would just recycle
-        // the prior failure, and REVIEW would point at code the
-        // agent already saw. Retry EXECUTE immediately with a blunt
-        // "you wrote nothing — write code now" note so it doesn't
-        // re-enter exploration mode. Cap retries tightly so a
-        // genuinely stuck model can't burn the whole budget here.
-        let mut noop_retries = 0u32;
-        while state.last_execute_write_count == 0 && noop_retries < 2 {
-            noop_retries += 1;
+        // EXECUTE degenerate-case recovery. Two distinct failure
+        // modes we've observed and auto-fix before wasting a VERIFY
+        // cycle on code that can't possibly be right:
+        //
+        //   A. Zero writes (Java bowling 0/31). Agent explored —
+        //      29 list_files, 0 edit_file — and the stub sits
+        //      intact. VERIFY would fail on unchanged code.
+        //   B. Writes but zero bash (Rust bowling 0/1). Agent
+        //      edited 6 times but never ran `cargo check`; shipped
+        //      code with an unclosed delimiter. A single
+        //      syntax-check would have caught it. Self-validation
+        //      is the one thing the EXECUTE prompt calls non-
+        //      optional, and skipping it is a 0/N bench result.
+        //
+        // Both cases fix the same way: inject an override finding
+        // into the next EXECUTE's review-block and retry. Cap at
+        // 2 retries so a genuinely stuck model can't burn the
+        // whole budget here.
+        let mut exec_retries = 0u32;
+        loop {
+            let no_writes = state.last_execute_write_count == 0;
+            let no_bash = state.last_execute_bash_count == 0 && state.last_execute_write_count > 0;
+            if !no_writes && !no_bash {
+                break;
+            }
+            if exec_retries >= 2 {
+                break;
+            }
+            exec_retries += 1;
+            let (reason, note) = if no_writes {
+                (
+                    "no writes",
+                    format!(
+                        "YOUR PRIOR TURN WROTE NOTHING. You called zero edit_file / \
+                         write_file tools in your last EXECUTE turn — the implementation \
+                         file is still the starter stub. That is a broken outcome: the \
+                         workflow cannot make progress without a write. This turn you \
+                         MUST call edit_file or write_file at least once with real \
+                         implementation code. Do not burn this turn on list_files / \
+                         read_file exploration; you have already surveyed the repo. \
+                         Open the implementation file and write code.\n\
+                         (Retry {exec_retries} of 2 after a no-op EXECUTE.)"
+                    ),
+                )
+            } else {
+                (
+                    "no bash",
+                    format!(
+                        "YOU EDITED FILES BUT NEVER RAN THE TESTS. Self-validation is \
+                         the single non-optional rule of this phase and you skipped it. \
+                         Your last turn made {writes} write call(s) but ZERO bash calls, \
+                         which means you cannot know whether the code compiles — let \
+                         alone whether it passes the suite. Most 0/N bench failures \
+                         look exactly like this: the agent edits, declares victory, \
+                         ships code with an unclosed delimiter. This turn you MUST run \
+                         the test command via `bash` BEFORE your summary. Fix anything \
+                         that fails. Then report the literal pass/fail count.\n\
+                         (Retry {exec_retries} of 2 after an EXECUTE with no \
+                         self-validation.)",
+                        writes = state.last_execute_write_count
+                    ),
+                )
+            };
             tracing::warn!(
                 outer_iter = state.outer_iteration,
-                noop_retries,
-                "EXECUTE made zero write calls; forcing retry with write-required override"
+                exec_retries,
+                reason,
+                "EXECUTE degenerate-case retry"
             );
-            state.execute_force_write_note = Some(format!(
-                "YOUR PRIOR TURN WROTE NOTHING. You called zero edit_file / write_file \
-                 tools in your last EXECUTE turn — the implementation file is still the \
-                 starter stub. That is a broken outcome: the workflow cannot make \
-                 progress without a write. This turn you MUST call edit_file or \
-                 write_file at least once with real implementation code. Do not burn \
-                 this turn on list_files / read_file exploration; you have already \
-                 surveyed the repo. Open the implementation file and write code.\n\
-                 (Retry {noop_retries} of 2 after a no-op EXECUTE.)"
-            ));
+            state.execute_force_write_note = Some(note);
             append_progress(
                 &mut state.progress_summary,
                 "EXECUTE",
                 state.outer_iteration,
-                &format!("no writes — retry #{noop_retries}"),
+                &format!("{reason} — retry #{exec_retries}"),
             );
             run_phase(&cfg, CodingPhase::Execute, &mut state, execute_prompt).await?;
         }
@@ -428,6 +482,7 @@ async fn run_phase(cfg: &CodingWorkflowConfig, phase: CodingPhase, state: &mut W
         }
         CodingPhase::Execute => {
             state.last_execute_write_count = count_write_tool_calls(&conversation);
+            state.last_execute_bash_count = count_tool_calls_named(&conversation, "bash");
             let update = extract_section(&transcript, "Progress Update").unwrap_or_else(|| first_line(&transcript, 160));
             append_progress(&mut state.progress_summary, "EXECUTE", state.outer_iteration, &update);
             state.last_exec_summary = Some(transcript);
@@ -689,6 +744,18 @@ fn count_write_tool_calls(conv: &crate::conversation::Conversation) -> usize {
         .iter()
         .flat_map(|m| m.tool_calls.iter())
         .filter(|tc| matches!(tc.name.as_str(), "edit_file" | "write_file"))
+        .count()
+}
+
+/// Count tool calls by exact name. Used alongside
+/// `count_write_tool_calls` for the "did EXECUTE bother to run
+/// tests?" check — zero `bash` calls after a write means the
+/// agent shipped without self-validation.
+fn count_tool_calls_named(conv: &crate::conversation::Conversation, name: &str) -> usize {
+    conv.messages
+        .iter()
+        .flat_map(|m| m.tool_calls.iter())
+        .filter(|tc| tc.name == name)
         .count()
 }
 
@@ -1299,6 +1366,26 @@ mod tests {
         conv.messages.push(m2);
         // 3 writes total: edit_file, write_file, edit_file.
         assert_eq!(count_write_tool_calls(&conv), 3);
+    }
+
+    #[test]
+    fn count_tool_calls_named_counts_exact_name_only() {
+        use crate::conversation::{Conversation, Message};
+        use crate::tool::ToolCall;
+        fn tc(name: &str) -> ToolCall {
+            ToolCall {
+                id: "id".into(),
+                name: name.into(),
+                arguments: serde_json::json!({}),
+            }
+        }
+        let mut conv = Conversation::new(8192);
+        let mut m = Message::assistant("");
+        m.tool_calls = vec![tc("bash"), tc("bash"), tc("bash"), tc("edit_file"), tc("read_file")];
+        conv.messages.push(m);
+        assert_eq!(count_tool_calls_named(&conv, "bash"), 3);
+        assert_eq!(count_tool_calls_named(&conv, "edit_file"), 1);
+        assert_eq!(count_tool_calls_named(&conv, "nonexistent"), 0);
     }
 
     #[test]

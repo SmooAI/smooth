@@ -687,7 +687,7 @@ pub async fn judge_test_output(combined_stdout: &str) -> anyhow::Result<TestCoun
          - Only return all zeros when the output is truly empty or \
          gives no signal about whether tests ran.",
     );
-    let user = Message::user(&format!("Test runner output:\n\n{trimmed}"));
+    let user = Message::user(format!("Test runner output:\n\n{trimmed}"));
     let response = llm.chat(&[&system, &user], &[]).await.context("smooth-judge call failed")?;
 
     Ok(parse_judge_response(&response.content))
