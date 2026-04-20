@@ -12,6 +12,7 @@
 //! | EXECUTE  | Coding          | Write code via edit_file/write_file tools           |
 //! | VERIFY   | Coding          | Invoke bash tool to run tests, report pass/fail     |
 //! | REVIEW   | Reviewing       | Adversarial critique of diff + test failures        |
+//! | TEST     | Reviewing       | Add real test coverage (MSW, Playwright, property…) |
 //! | FINALIZE | Thinking        | Holistic last-look before emitting Completed        |
 //!
 //! The loop routes REVIEW → EXECUTE when VERIFY reports failures,
@@ -45,6 +46,15 @@ pub enum CodingPhase {
     Execute,
     Verify,
     Review,
+    /// Adversarial test augmentation. Runs AFTER the provided tests
+    /// pass. Classifies the code, picks the right testing stack for
+    /// its shape (MSW, Playwright, testcontainers, property-based,
+    /// …), installs missing deps, and writes boundary-pushing tests.
+    /// Fails back into EXECUTE if the new tests expose real bugs.
+    ///
+    /// Skippable via `SMOOTH_WORKFLOW_SKIP_TEST=1` for benchmark
+    /// runs where adding extra tests would change the score.
+    Test,
     Finalize,
 }
 
@@ -57,6 +67,7 @@ impl CodingPhase {
             Self::Execute => "EXECUTE",
             Self::Verify => "VERIFY",
             Self::Review => "REVIEW",
+            Self::Test => "TEST",
             Self::Finalize => "FINALIZE",
         }
     }
@@ -66,23 +77,27 @@ impl CodingPhase {
     /// `VERIFY` and `EXECUTE` share the Coding slot — verify is just
     /// the agent running bash tests, same surface as writing code.
     /// `FINALIZE` uses Thinking so the last-look review has room to
-    /// reason about the whole diff holistically.
+    /// reason about the whole diff holistically. `TEST` uses
+    /// Reviewing — adversarial test writing is closer to code
+    /// review than to fresh implementation.
     pub fn activity(self) -> Activity {
         match self {
             Self::Assess | Self::Finalize => Activity::Thinking,
             Self::Plan => Activity::Planning,
             Self::Execute | Self::Verify => Activity::Coding,
-            Self::Review => Activity::Reviewing,
+            Self::Review | Self::Test => Activity::Reviewing,
         }
     }
 
     /// Max iterations for the Agent instance inside this phase.
     /// Non-iterative phases (assess/plan/review/finalize) cap short;
-    /// execute + verify get the full budget.
+    /// execute + verify + test get the full budget because they all
+    /// touch the filesystem and need room to iterate.
     fn max_iterations(self) -> u32 {
         match self {
             Self::Assess | Self::Plan | Self::Review | Self::Finalize => 8,
             Self::Execute => 40,
+            Self::Test => 20,
             Self::Verify => 6,
         }
     }
@@ -105,9 +120,13 @@ pub struct CodingWorkflowConfig {
     /// (each phase gets the full remaining amount when it runs).
     pub budget_usd: Option<f64>,
     /// Max outer-loop iterations (EXECUTE → VERIFY → REVIEW cycle
-    /// count). 3 is enough for most tasks; bumps to 5 for harder
-    /// benchmarks.
+    /// count). 10 is a ceiling — budget + plateau detection do the
+    /// real governing.
     pub max_outer_iterations: u32,
+    /// Skip the adversarial TEST phase (useful for benchmark runs
+    /// where adding deps or extra tests would change the score).
+    /// Defaults to false — real coding tasks want the TEST phase.
+    pub skip_test_phase: bool,
     /// Event sink — every AgentEvent from every phase flows here,
     /// plus `PhaseStart` markers between phases.
     pub tx: UnboundedSender<AgentEvent>,
@@ -139,6 +158,14 @@ struct WorkflowState {
     last_verify_output: Option<String>,
     verify_passed: bool,
     last_review: Option<String>,
+    /// Adversarial-test findings from the TEST phase — new tests
+    /// written + whether they all passed. When red, these feed back
+    /// into EXECUTE's review-findings slot on the next loop.
+    last_test_report: Option<String>,
+    /// TEST phase's verdict: did its added tests all pass?
+    /// `true` lets the workflow move to FINALIZE; `false` loops
+    /// back to EXECUTE with the new failures as review findings.
+    test_phase_passed: bool,
     outer_iteration: u32,
     total_cost_usd: f64,
 }
@@ -160,6 +187,17 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
     run_phase(&cfg, CodingPhase::Plan, &mut state, plan_prompt).await?;
 
     // EXECUTE → VERIFY → (REVIEW → EXECUTE) loop ------------------------
+    //
+    // Stop conditions, in order of priority:
+    //   1. verify_passed → done, break to FINALIZE
+    //   2. budget would be exhausted before next cycle → break
+    //   3. plateau: same verify signature twice in a row → break
+    //   4. hard cap max_outer_iterations → break
+    //
+    // The cap is a safety net, not the primary governor. Budget +
+    // plateau detection do most of the work.
+    let mut last_verify_signature: Option<String> = None;
+    let mut plateau_strikes = 0u32;
     for _ in 0..cfg.max_outer_iterations {
         state.outer_iteration += 1;
 
@@ -170,7 +208,83 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
             break;
         }
 
+        // Plateau detection: if REVIEW→EXECUTE produced the same
+        // verify output signature two cycles in a row, the model's
+        // going in circles. Stop and save the remaining budget for
+        // FINALIZE + the user's next task.
+        let sig = verify_signature(state.last_verify_output.as_deref().unwrap_or(""));
+        if Some(&sig) == last_verify_signature.as_ref() {
+            plateau_strikes += 1;
+            if plateau_strikes >= 1 {
+                tracing::info!("coding workflow: plateau detected (identical verify output twice), stopping early");
+                break;
+            }
+        } else {
+            plateau_strikes = 0;
+        }
+        last_verify_signature = Some(sig);
+
+        // Budget: break if the next iteration would likely blow the
+        // cap. Rough heuristic — next iter costs roughly as much as
+        // this iter did. Avoid the pathological case where the loop
+        // drains the whole cap on retry spam.
+        if let Some(cap) = cfg.budget_usd {
+            if cap > 0.0 && state.outer_iteration > 0 {
+                let per_iter = state.total_cost_usd / f64::from(state.outer_iteration);
+                let projected = state.total_cost_usd + per_iter;
+                if projected >= cap {
+                    tracing::info!(
+                        spent = state.total_cost_usd,
+                        cap = cap,
+                        projected = projected,
+                        "coding workflow: budget would be exhausted next cycle, stopping early"
+                    );
+                    break;
+                }
+            }
+        }
+
         run_phase(&cfg, CodingPhase::Review, &mut state, review_prompt).await?;
+    }
+
+    // TEST --------------------------------------------------------------
+    // Only run when the core verify passed AND the caller didn't
+    // opt out. If TEST adds tests that reveal real bugs, loop back
+    // to EXECUTE with those as the next REVIEW findings — bounded
+    // separately so a TEST-induced problem can't eat the whole
+    // iteration cap on its own.
+    if state.verify_passed && !cfg.skip_test_phase {
+        let mut test_retry_strikes = 0u32;
+        let test_retry_max = 3u32;
+        loop {
+            run_phase(&cfg, CodingPhase::Test, &mut state, test_prompt).await?;
+            if state.test_phase_passed {
+                break;
+            }
+            test_retry_strikes += 1;
+            if test_retry_strikes >= test_retry_max {
+                tracing::info!("coding workflow: TEST phase red after {test_retry_max} tries, finalizing with the gap noted");
+                break;
+            }
+            // Budget check for the retry too.
+            if let Some(cap) = cfg.budget_usd {
+                if cap > 0.0 && state.total_cost_usd >= cap {
+                    break;
+                }
+            }
+            // Feed the TEST report into review findings so EXECUTE
+            // sees what broke, then run one more EXECUTE → VERIFY
+            // cycle to try to fix it.
+            state.last_review = state.last_test_report.clone();
+            state.outer_iteration += 1;
+            run_phase(&cfg, CodingPhase::Execute, &mut state, execute_prompt).await?;
+            run_phase(&cfg, CodingPhase::Verify, &mut state, verify_prompt).await?;
+            if !state.verify_passed {
+                // EXECUTE broke the original tests — bail, don't
+                // keep drilling. FINALIZE will report the regression.
+                break;
+            }
+        }
     }
 
     // FINALIZE ----------------------------------------------------------
@@ -258,6 +372,20 @@ async fn run_phase(cfg: &CodingWorkflowConfig, phase: CodingPhase, state: &mut W
             }
             state.last_review = Some(transcript);
         }
+        CodingPhase::Test => {
+            // The TEST-phase prompt asks for a final `## Verdict`
+            // line: `PASS` when every new test the agent added is
+            // green, `FAIL` otherwise. Fall back to looking for the
+            // verify-style marker if the agent ignored the format.
+            let upper = transcript.to_uppercase();
+            state.test_phase_passed = upper.contains("## VERDICT")
+                && upper
+                    .split("## VERDICT")
+                    .nth(1)
+                    .map_or(false, |tail| tail.lines().take(3).any(|l| l.trim_start().starts_with("PASS")))
+                || (detect_verify_pass(&transcript) && !upper.contains("FAIL"));
+            state.last_test_report = Some(transcript);
+        }
         CodingPhase::Finalize => {}
     }
 
@@ -287,6 +415,60 @@ fn extract_section(markdown: &str, heading: &str) -> Option<String> {
     } else {
         Some(body.to_string())
     }
+}
+
+/// Distill a verifier transcript down to "how many passed vs
+/// failed" so we can detect a plateau: if the numbers are the
+/// same two cycles in a row, REVIEW isn't giving the agent new
+/// information and we're wasting budget. Case-insensitive.
+///
+/// Returns a compact string like `"27p/4f"` built from the first
+/// `N passed … N failed` pattern it finds. Falls back to the whole
+/// trimmed message when no counts are visible — better to be
+/// conservative (treat as plateau after one stable pass) than risk
+/// false-positive.
+pub fn verify_signature(transcript: &str) -> String {
+    let lower = transcript.to_lowercase();
+    // Pull the first passed/failed pair we find.
+    let passed = scan_count(&lower, "passed");
+    let failed = scan_count(&lower, "failed");
+    if passed.is_some() || failed.is_some() {
+        return format!("{}p/{}f", passed.unwrap_or(0), failed.unwrap_or(0));
+    }
+    // Build error vs test failure: track the first line mentioning
+    // "error" so two identical compile errors count as a plateau.
+    for line in lower.lines() {
+        if line.contains("error") {
+            return line.trim().to_string();
+        }
+    }
+    lower.trim().chars().take(80).collect()
+}
+
+fn scan_count(haystack: &str, needle: &str) -> Option<u32> {
+    // Walk through the string looking for "<number> <needle>".
+    let mut chars = haystack.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if !c.is_ascii_digit() {
+            continue;
+        }
+        let start = i;
+        let mut end = i + c.len_utf8();
+        while let Some(&(j, ch)) = chars.peek() {
+            if ch.is_ascii_digit() {
+                end = j + ch.len_utf8();
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        let num = &haystack[start..end];
+        let rest = &haystack[end..].trim_start();
+        if rest.starts_with(needle) {
+            return num.parse().ok();
+        }
+    }
+    None
 }
 
 /// Heuristic: does the verifier's last message claim tests passed?
@@ -410,12 +592,26 @@ Rules:
 - Follow the implementation plan from the PLAN phase (included below).
 - If a prior REVIEW phase left critique (included below), address \
   EVERY point it raised before declaring done.
-- Do NOT modify test files. The tests are the spec.
-- You do NOT need to run the tests here — the VERIFY phase will. \
-  But you may run a quick syntax check (e.g. `cargo check`, \
-  `python -m py_compile`) if it helps you catch errors early.
-- When your implementation is in place, stop and respond with a \
-  one-paragraph summary of what you changed.";
+- Do NOT modify the provided test files — they are the spec.
+- **Before you stop, run a validation pass yourself.** Pick the \
+  check that fits the language and the project:
+    * Rust:   `cargo check` (fast type-check, no test run)
+    * Python: `python -m py_compile <file>` or `ruff check`
+    * Go:     `go vet ./...` or `go build ./...`
+    * JS/TS:  `node --check <file>` or `tsc --noEmit`
+    * Other:  use judgement — the smallest reproducible validation \
+      for the toolchain. Use `bash` to run it. If it fails, fix and \
+      re-run before stopping. The goal is: don't hand off to VERIFY \
+      with code that won't compile / parse / import.
+- **Extra tests are welcome, but only with the implementation that \
+  makes them pass** — if you add a test for a method, add the \
+  method in the same change. Never leave orphan failing tests that \
+  reference unimplemented code. If you spot an edge case the \
+  provided tests miss and you've already handled it in the \
+  implementation, a matching test is a good addition.
+- When your implementation is in place and your validation pass is \
+  clean, stop and respond with a one-paragraph summary of what \
+  you changed (including the validation you ran and its result).";
 
     let goal = state.goal_summary.as_deref().unwrap_or("(no goal summary)");
     let plan = state.plan.as_deref().unwrap_or("(no plan available)");
@@ -490,6 +686,95 @@ code or the tests.";
     (sys.to_string(), user)
 }
 
+fn test_prompt(state: &WorkflowState, task: &str) -> (String, String) {
+    let sys = "\
+You are in the TEST phase of a structured coding workflow.
+
+The provided tests are green. Your job now is the thing that sets \
+this agent apart from every run-tests-until-green coder: establish \
+REAL test coverage appropriate to the shape of the code.
+
+Your process:
+
+1. **Classify the code.** What is it?
+   - React / Vue / Solid / Svelte component?
+   - HTTP / RPC client?
+   - Browser-based user flow?
+   - WebSocket / streaming client?
+   - Database-backed service?
+   - CLI tool?
+   - Pure library / algorithm?
+   - Async code with timers / retries?
+
+2. **Pick the canonical test stack for that shape.** For example:
+   - React component → Testing Library + `@testing-library/user-event`.
+   - API client → **MSW** (`msw`) to intercept real `fetch`/axios \
+     calls. Exercise retry, error, timeout, non-2xx, malformed-JSON \
+     paths.
+   - Web user flow → **Playwright** (`@playwright/test`) with a \
+     headless browser. Script the real click path.
+   - WebSocket → stand up a fake WS server in-process; test connect, \
+     message parsing, reconnect after disconnect, backpressure.
+   - DB layer → `testcontainers` / `sqlite::memory:` / `pg-mem`. \
+     Round-trip + constraint-violation + transaction tests.
+   - CLI → shell out to the binary with fixtures, snapshot stdout.
+   - Pure library → property-based (`hypothesis` / `proptest` / \
+     `fast-check`) when the domain has laws (idempotent, \
+     commutative, inverse-of, ordered).
+   - Async / timer-driven → use the test framework's fake clock; \
+     race-condition stress where meaningful.
+
+3. **Install the tooling** if it's not already in the project. Use \
+   the right package manager for the ecosystem (pnpm / npm / cargo \
+   add --dev / uv add --dev / go get). Respect existing `package.json` / \
+   `Cargo.toml` / `pyproject.toml` conventions.
+
+4. **Write the tests.** NOT \"one more unit test\" — use the tooling \
+   you installed to exercise real boundaries: intercept the \
+   network, boot the browser, fake the clock, stand up the fake WS \
+   server. Each test should expose behaviour the provided suite \
+   does not cover.
+
+5. **Run them.** Every new test must pass. If one fails, that's a \
+   real bug — the workflow will cycle you back into EXECUTE with \
+   the failure as the next review finding. Do not ship red tests.
+
+6. **Respond.** Produce your final message in this shape:
+   ```
+   ## Code Classification
+   (one sentence — \"this is a React component with server-driven data\")
+
+   ## Tooling Chosen
+   (list the test deps you installed, or \"none needed — existing stack is right\")
+
+   ## Tests Added
+   (short bullets: what each new test exercises)
+
+   ## Verdict
+   PASS    (iff every new test is green)
+   FAIL: <summary>    (otherwise — this loops back to EXECUTE)
+   ```
+
+Rules of the road:
+- Do NOT modify the ORIGINAL provided tests. Only ADD new ones.
+- Do NOT ship tests for unimplemented methods. If a test requires \
+  a new surface, add the implementation in the same change.
+- Do NOT add tests that pass trivially or duplicate the provided \
+  suite — this phase is adversarial on purpose.
+- Benchmark-style tasks often have the stub's shape locked; if the \
+  only reasonable tests are the ones already given, say so \
+  explicitly in Tests Added (\"none — suite already covers the \
+  surface\") and emit `PASS` in Verdict.";
+
+    let goal = state.goal_summary.as_deref().unwrap_or("(no goal summary)");
+    let exec = state.last_exec_summary.as_deref().unwrap_or("");
+    let verify = state.last_verify_output.as_deref().unwrap_or("");
+    let user = format!(
+        "Task:\n\n{task}\n\n## Goal Summary\n\n{goal}\n\n## Final implementation summary\n\n{exec}\n\n## Provided-test verify output\n\n{verify}\n\nThe provided tests are green. Now classify the code and raise the bar with real test coverage using the right stack."
+    );
+    (sys.to_string(), user)
+}
+
 fn finalize_prompt(state: &WorkflowState, task: &str) -> (String, String) {
     let sys = "\
 You are in the FINALIZE phase of a structured coding workflow.
@@ -560,6 +845,7 @@ mod tests {
             CodingPhase::Execute,
             CodingPhase::Verify,
             CodingPhase::Review,
+            CodingPhase::Test,
             CodingPhase::Finalize,
         ] {
             by_activity.entry(p.activity()).or_default().push(p);
@@ -569,9 +855,10 @@ mod tests {
         assert_eq!(by_activity.get(&Activity::Thinking).map(Vec::len), Some(2));
         // Coding handles Execute + Verify (both edit/run tool users).
         assert_eq!(by_activity.get(&Activity::Coding).map(Vec::len), Some(2));
-        // Planning & Reviewing each own a single phase.
+        // Planning owns its own phase.
         assert_eq!(by_activity.get(&Activity::Planning).map(Vec::len), Some(1));
-        assert_eq!(by_activity.get(&Activity::Reviewing).map(Vec::len), Some(1));
+        // Reviewing handles Review + Test (both adversarial).
+        assert_eq!(by_activity.get(&Activity::Reviewing).map(Vec::len), Some(2));
         // Judge / Summarize / Fast are NOT used by the workflow —
         // they belong to the bench harness, compaction path, and
         // session-naming callers respectively.
@@ -625,6 +912,54 @@ mod tests {
         assert!(sys.contains("## Test Cases"));
         assert!(sys.contains("Do NOT start writing code"));
         assert!(user.contains("solve bowling"));
+    }
+
+    #[test]
+    fn test_phase_routes_through_reviewing_slot() {
+        assert_eq!(CodingPhase::Test.activity(), Activity::Reviewing);
+        assert_eq!(CodingPhase::Test.label(), "TEST");
+    }
+
+    #[test]
+    fn test_phase_prompt_guides_classification_and_tooling() {
+        let state = WorkflowState::default();
+        let (sys, _user) = test_prompt(&state, "build an api client");
+        // Classification guidance
+        assert!(sys.contains("Classify the code"));
+        // Right-tool-for-the-job callouts — the specific stacks the
+        // user flagged: MSW + Playwright + property-based.
+        assert!(sys.contains("MSW"));
+        assert!(sys.contains("Playwright"));
+        assert!(sys.to_lowercase().contains("property-based"));
+        assert!(sys.contains("testcontainers"));
+        // Orphan-test rule
+        assert!(sys.contains("unimplemented methods") || sys.contains("unimplemented"));
+        // Verdict format for machine parsing
+        assert!(sys.contains("## Verdict"));
+        assert!(sys.contains("PASS"));
+    }
+
+    #[test]
+    fn test_phase_prompt_refuses_to_modify_provided_tests() {
+        let (sys, _) = test_prompt(&WorkflowState::default(), "task");
+        assert!(sys.to_lowercase().contains("do not modify"));
+        assert!(sys.contains("ORIGINAL"));
+    }
+
+    #[test]
+    fn execute_prompt_demands_self_validation() {
+        let state = WorkflowState::default();
+        let (sys, _) = execute_prompt(&state, "task");
+        // The prompt must explicitly ask the agent to run a
+        // validation pass before stopping — don't ship code that
+        // won't compile to VERIFY.
+        assert!(sys.contains("run a validation pass yourself"));
+        // Language hints the model can pick from.
+        assert!(sys.contains("cargo check"));
+        assert!(sys.contains("py_compile"));
+        assert!(sys.contains("go vet"));
+        // Don't leave unimplemented methods behind failing tests.
+        assert!(sys.contains("orphan failing tests"));
     }
 
     #[test]
@@ -682,6 +1017,39 @@ mod tests {
         let review = "## Root cause\n\nOff by one.\n\n## Updated Goal Summary\n\nImplement bowling score; rolls can exceed 10 on bonus rolls.\n";
         let refined = extract_section(review, "Updated Goal Summary");
         assert_eq!(refined.as_deref(), Some("Implement bowling score; rolls can exceed 10 on bonus rolls."));
+    }
+
+    #[test]
+    fn verify_signature_captures_passed_failed_pair() {
+        let s = "Test runner output:\n15 passed, 4 failed in 0.03s\n";
+        assert_eq!(verify_signature(s), "15p/4f");
+    }
+
+    #[test]
+    fn verify_signature_case_insensitive() {
+        let s = "Tests: 27 PASSED, 4 FAILED, 31 total";
+        assert_eq!(verify_signature(s), "27p/4f");
+    }
+
+    #[test]
+    fn verify_signature_uses_first_error_when_no_counts() {
+        let s = "compile error: unexpected token at line 42\n... other lines ...";
+        let sig = verify_signature(s);
+        assert!(sig.contains("compile error"));
+    }
+
+    #[test]
+    fn verify_signature_is_stable_across_identical_failures() {
+        let a = "ran 31 tests\n3 failed, 28 passed\nassertionerror: expected 81 got 48";
+        let b = "ran 31 tests\n3 failed, 28 passed\nassertionerror: expected 81 got 48";
+        assert_eq!(verify_signature(a), verify_signature(b));
+    }
+
+    #[test]
+    fn verify_signature_detects_progress() {
+        let old = "15 passed, 16 failed";
+        let new_ = "27 passed, 4 failed";
+        assert_ne!(verify_signature(old), verify_signature(new_));
     }
 
     #[test]

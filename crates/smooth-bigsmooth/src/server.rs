@@ -932,9 +932,16 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         // further down (after policy_dir_guard is set up) because the
         // JSON is several kilobytes and would overflow the kernel
         // cmdline if passed as an env var.
-        let workflow_enabled = std::env::var("SMOOTH_WORKFLOW").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+        let workflow_enabled = std::env::var("SMOOTH_WORKFLOW")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
         if workflow_enabled {
             env.insert("SMOOTH_WORKFLOW".into(), "1".into());
+            // Pass through the TEST-phase skip flag for benchmark
+            // runs where adding extra tests would change the score.
+            if let Ok(skip) = std::env::var("SMOOTH_WORKFLOW_SKIP_TEST") {
+                env.insert("SMOOTH_WORKFLOW_SKIP_TEST".into(), skip);
+            }
         }
         // Tell the operator where ~/.smooth is mounted inside the VM.
         env.insert("SMOOTH_HOME".into(), "/root/.smooth".into());
@@ -1141,7 +1148,10 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
                     }
                 }
             } else {
-                tracing::warn!(task_id = tid, "SMOOTH_WORKFLOW=1 but no policy dir (Boardroom mode); routing config path not plumbed yet");
+                tracing::warn!(
+                    task_id = tid,
+                    "SMOOTH_WORKFLOW=1 but no policy dir (Boardroom mode); routing config path not plumbed yet"
+                );
             }
         }
 

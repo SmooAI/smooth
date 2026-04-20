@@ -15,7 +15,7 @@
 
 /// Canonical phase names emitted by the coding workflow.
 /// Match exactly the `phase:` field of `AgentEvent::PhaseStart`.
-pub const PHASES: &[&str] = &["ASSESS", "PLAN", "EXECUTE", "VERIFY", "REVIEW", "FINALIZE"];
+pub const PHASES: &[&str] = &["ASSESS", "PLAN", "EXECUTE", "VERIFY", "REVIEW", "TEST", "FINALIZE"];
 
 /// Return the rotating phrase list for a phase. Always returns at
 /// least one entry — callers can do `phrases[idx % len]` without
@@ -67,6 +67,16 @@ pub fn phrases_for(phase: &str) -> &'static [&'static str] {
             "Roasting…",
             "Cross-examining…",
             "Sharpening the critique…",
+        ],
+        "TEST" => &[
+            "Writing tests…",
+            "Raising the bar…",
+            "Setting traps…",
+            "Mocking the network…",
+            "Booting the browser…",
+            "Faking the clock…",
+            "Red-teaming the code…",
+            "Stress-testing…",
         ],
         "FINALIZE" => &[
             "Closing the loop…",
