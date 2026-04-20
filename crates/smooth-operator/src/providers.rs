@@ -869,8 +869,10 @@ mod tests {
     // 11c. Fast slot present roundtrips and is used in preference.
     #[test]
     fn fast_slot_present_wins_over_default() {
-        let mut routing = ModelRouting::default();
-        routing.fast = Some(ModelSlot::new("custom", "haiku"));
+        let routing = ModelRouting {
+            fast: Some(ModelSlot::new("custom", "haiku")),
+            ..Default::default()
+        };
         let fast_slot = routing.slot_for(Activity::Fast);
         assert_eq!(fast_slot.provider, "custom");
         assert_eq!(fast_slot.model, "haiku");

@@ -32,7 +32,6 @@ use anyhow::{anyhow, Context};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::agent::{Agent, AgentConfig, AgentEvent};
-use crate::conversation::Message;
 use crate::cost::CostBudget;
 use crate::llm::LlmClient;
 use crate::providers::{Activity, ProviderRegistry};
@@ -148,6 +147,14 @@ struct WorkflowState {
     /// phase sees this at the top of its user prompt so the model
     /// doesn't lose sight of the objective after N review loops.
     goal_summary: Option<String>,
+    /// Rolling progress log — what's actually been accomplished so
+    /// far. Updated after EXECUTE / VERIFY / REVIEW / TEST each
+    /// emit a `## Progress Update` one-liner. Threaded into every
+    /// subsequent phase's user prompt alongside `goal_summary` so
+    /// the agent always knows both where it's going (goal) AND
+    /// how far it's got (progress). FINALIZE uses it as the
+    /// authoritative record for its verdict.
+    progress_summary: String,
     /// Full assessment from ASSESS (goal + enumeration of test
     /// cases + constraints). Longer than `goal_summary`; fed to
     /// PLAN and REVIEW but not to EXECUTE/VERIFY (they only need
@@ -354,11 +361,22 @@ async fn run_phase(cfg: &CodingWorkflowConfig, phase: CodingPhase, state: &mut W
             // word assessment along.
             state.goal_summary = extract_section(&transcript, "Goal Summary");
             state.assessment = Some(transcript);
+            append_progress(&mut state.progress_summary, "ASSESS", 0, "Read tests + stub + instructions; crystallized goal.");
         }
-        CodingPhase::Plan => state.plan = Some(transcript),
-        CodingPhase::Execute => state.last_exec_summary = Some(transcript),
+        CodingPhase::Plan => {
+            state.plan = Some(transcript);
+            append_progress(&mut state.progress_summary, "PLAN", 0, "Produced an implementation plan.");
+        }
+        CodingPhase::Execute => {
+            let update = extract_section(&transcript, "Progress Update").unwrap_or_else(|| first_line(&transcript, 160));
+            append_progress(&mut state.progress_summary, "EXECUTE", state.outer_iteration, &update);
+            state.last_exec_summary = Some(transcript);
+        }
         CodingPhase::Verify => {
             state.verify_passed = detect_verify_pass(&transcript);
+            let counts = verify_signature(&transcript);
+            let status = if state.verify_passed { "tests PASS" } else { "tests fail" };
+            append_progress(&mut state.progress_summary, "VERIFY", state.outer_iteration, &format!("{status} ({counts})"));
             state.last_verify_output = Some(transcript);
         }
         CodingPhase::Review => {
@@ -369,6 +387,14 @@ async fn run_phase(cfg: &CodingWorkflowConfig, phase: CodingPhase, state: &mut W
             // we keep ASSESS's version.
             if let Some(refined) = extract_section(&transcript, "Updated Goal Summary") {
                 state.goal_summary = Some(refined);
+                append_progress(&mut state.progress_summary, "REVIEW", state.outer_iteration, "Refined goal summary.");
+            } else {
+                append_progress(
+                    &mut state.progress_summary,
+                    "REVIEW",
+                    state.outer_iteration,
+                    "Critiqued failures; queued fixes.",
+                );
             }
             state.last_review = Some(transcript);
         }
@@ -382,11 +408,15 @@ async fn run_phase(cfg: &CodingWorkflowConfig, phase: CodingPhase, state: &mut W
                 && upper
                     .split("## VERDICT")
                     .nth(1)
-                    .map_or(false, |tail| tail.lines().take(3).any(|l| l.trim_start().starts_with("PASS")))
+                    .is_some_and(|tail| tail.lines().take(3).any(|l| l.trim_start().starts_with("PASS")))
                 || (detect_verify_pass(&transcript) && !upper.contains("FAIL"));
+            let status = if state.test_phase_passed { "new tests PASS" } else { "new tests fail" };
+            append_progress(&mut state.progress_summary, "TEST", state.outer_iteration, status);
             state.last_test_report = Some(transcript);
         }
-        CodingPhase::Finalize => {}
+        CodingPhase::Finalize => {
+            append_progress(&mut state.progress_summary, "FINALIZE", state.outer_iteration, "Session complete.");
+        }
     }
 
     Ok(())
@@ -399,6 +429,44 @@ async fn run_phase(cfg: &CodingWorkflowConfig, phase: CodingPhase, state: &mut W
 ///
 /// Matches headings case-insensitively so minor capitalization drift
 /// in the LLM output doesn't drop the section on the floor.
+/// Append one line to the rolling progress log with a
+/// phase/iteration tag. Iteration 0 means "not inside the outer
+/// execute-verify-review loop" (ASSESS / PLAN / FINALIZE).
+fn append_progress(buf: &mut String, phase: &str, iteration: u32, update: &str) {
+    let update = update.trim();
+    if update.is_empty() {
+        return;
+    }
+    if iteration > 0 {
+        buf.push_str(&format!("- [{phase} #{iteration}] {update}\n"));
+    } else {
+        buf.push_str(&format!("- [{phase}] {update}\n"));
+    }
+}
+
+/// Trim a phase transcript to the first useful line — used as a
+/// fallback progress update when the phase didn't emit a
+/// `## Progress Update` section.
+/// Format the rolling progress log for inclusion in a prompt.
+/// Returns `"(starting fresh — no prior phases)"` when the log is
+/// empty so the section never shows up blank.
+fn progress_block(buf: &str) -> String {
+    if buf.trim().is_empty() {
+        "(starting fresh — no prior phases)".to_string()
+    } else {
+        buf.trim_end().to_string()
+    }
+}
+
+fn first_line(s: &str, max: usize) -> String {
+    let line = s.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    if line.chars().count() > max {
+        line.chars().take(max).collect::<String>() + "…"
+    } else {
+        line.to_string()
+    }
+}
+
 fn extract_section(markdown: &str, heading: &str) -> Option<String> {
     let needle = format!("## {heading}").to_lowercase();
     let lower = markdown.to_lowercase();
@@ -577,7 +645,10 @@ files.";
 
     let goal = state.goal_summary.as_deref().unwrap_or("(no goal summary)");
     let assessment = state.assessment.as_deref().unwrap_or("(no assessment available)");
-    let user = format!("Task:\n\n{task}\n\n## Goal Summary\n\n{goal}\n\n## Full Assessment\n\n{assessment}\n\nProduce the implementation plan.");
+    let progress = progress_block(&state.progress_summary);
+    let user = format!(
+        "Task:\n\n{task}\n\n## Goal Summary\n\n{goal}\n\n## Work So Far\n\n{progress}\n\n## Full Assessment\n\n{assessment}\n\nProduce the implementation plan."
+    );
     (sys.to_string(), user)
 }
 
@@ -628,8 +699,9 @@ Rules:
     let goal = state.goal_summary.as_deref().unwrap_or("(no goal summary)");
     let plan = state.plan.as_deref().unwrap_or("(no plan available)");
     let review = state.last_review.as_deref().unwrap_or("(first iteration — no prior review)");
+    let progress = progress_block(&state.progress_summary);
     let user = format!(
-        "Task:\n\n{task}\n\n## Goal Summary (keep this in mind while coding)\n\n{goal}\n\n## Implementation plan\n\n{plan}\n\n## Review findings to address\n\n{review}\n\nImplement the solution. When done, summarize what you changed in one paragraph."
+        "Task:\n\n{task}\n\n## Goal Summary (keep this in mind while coding)\n\n{goal}\n\n## Work So Far\n\n{progress}\n\n## Implementation plan\n\n{plan}\n\n## Review findings to address\n\n{review}\n\nImplement the solution. When done, include a one-paragraph summary of what you changed PLUS a `## Progress Update` section with a single-line description of this iteration's contribution."
     );
     (sys.to_string(), user)
 }
@@ -654,8 +726,9 @@ run tests and report.";
 
     let goal = state.goal_summary.as_deref().unwrap_or("(no goal summary)");
     let exec = state.last_exec_summary.as_deref().unwrap_or("(no execute summary)");
+    let progress = progress_block(&state.progress_summary);
     let user = format!(
-        "## Goal (what the tests are supposed to confirm)\n\n{goal}\n\n## EXECUTE just made these changes\n\n{exec}\n\nRun the tests now. Use the language's standard test runner (pytest, cargo test, go test, jest, etc.) — find the right command by inspecting the task's configuration (package.json scripts, Cargo.toml, etc.). Then respond with the prefix-formatted result."
+        "## Goal (what the tests are supposed to confirm)\n\n{goal}\n\n## Work So Far\n\n{progress}\n\n## EXECUTE just made these changes\n\n{exec}\n\nRun the tests now. Use the language's standard test runner (pytest, cargo test, go test, jest, etc.) — find the right command by inspecting the task's configuration (package.json scripts, Cargo.toml, etc.). Then respond with the prefix-formatted result."
     );
     (sys.to_string(), user)
 }
@@ -694,7 +767,10 @@ code or the tests.";
 
     let goal = state.goal_summary.as_deref().unwrap_or("(no goal summary)");
     let verify = state.last_verify_output.as_deref().unwrap_or("(no verify output)");
-    let user = format!("Task:\n\n{task}\n\n## Current Goal Summary\n\n{goal}\n\n## Test failure output from VERIFY\n\n{verify}\n\nProduce the critique.");
+    let progress = progress_block(&state.progress_summary);
+    let user = format!(
+        "Task:\n\n{task}\n\n## Current Goal Summary\n\n{goal}\n\n## Work So Far\n\n{progress}\n\n## Test failure output from VERIFY\n\n{verify}\n\nProduce the critique."
+    );
     (sys.to_string(), user)
 }
 
@@ -725,7 +801,31 @@ Your process:
    - Look at a sibling test file in the repo — what conventions \
      does it follow (file naming, imports, fixtures, setup)?
 
-2. **Classify the code** in the ambient context of the repo:
+2. **Assess coverage of THIS SESSION'S work.** Scope matters — \
+   you are responsible for coverage of what the agent added or \
+   changed in this session, not for retroactively covering legacy \
+   code the agent didn't touch. Identify the gaps that belong to \
+   the current change:
+   - What code did EXECUTE add or modify? (check the diff — the \
+     workspace has the before-state in git when available, or \
+     infer from the ASSESS summary + PLAN + EXECUTE summary.)
+   - Of that code, which branches / error paths / edge cases are \
+     NOT exercised by the tests that just passed?
+   - Which inputs / states / external conditions could trigger \
+     the new code but are absent from the existing suite (empty \
+     collections, zero, negative, unicode, concurrent access, \
+     malformed input, timeout, retry, network failure, clock \
+     skew)?
+   - Which external boundaries the new code touches are only \
+     covered by happy-path tests (the server always returns 200; \
+     the DB always has rows; the clock never moves)?
+   - For each gap: note the specific behaviour a new test should \
+     prove correct AND confirm the behaviour belongs to THIS \
+     session's work (not pre-existing untested code).
+   Don't add tests for code the agent didn't touch. Don't \
+   duplicate coverage that already exists.
+
+3. **Classify the code** in the ambient context of the repo:
    - React / Vue / Solid / Svelte component?
    - HTTP / RPC client?
    - Browser-based user flow?
@@ -735,7 +835,7 @@ Your process:
    - Pure library / algorithm?
    - Async code with timers / retries?
 
-3. **Pick the test stack that the repo already endorses.** Only \
+4. **Pick the test stack that the repo already endorses.** Only \
    introduce new tooling when the repo genuinely lacks something \
    and adding it is idiomatic. Starting points (pick WHAT IS OR \
    WOULD BE NATIVE to this repo):
@@ -761,35 +861,38 @@ Your process:
    a backend Node service with no browser component, don't \
    install Playwright. Honor the context.
 
-4. **Install tooling the repo-native way.** Use the package \
+5. **Install tooling the repo-native way.** Use the package \
    manager the repo uses (`pnpm add -D`, `cargo add --dev`, `uv \
    add --dev`, `go get -t`). Follow the repo's existing devDep \
    conventions — if the repo pins versions with `~`, match; if \
    it groups dev deps under a workspace root, add there.
 
-5. **Write the tests in the repo's convention.** Match file \
-   naming (`*_test.go` vs `*.test.ts` vs `tests/foo.rs`), \
-   fixture layout, assertion style (existing sibling tests are \
-   the style guide). NOT \"one more unit test\" — use the \
-   tooling you picked to exercise real boundaries: intercept the \
-   network, boot the browser, fake the clock, stand up the fake \
-   WS server. Each test should expose behaviour the provided \
-   suite does not cover.
+6. **Write the tests in the repo's convention**, one test per \
+   gap from step 2. Match file naming (`*_test.go` vs \
+   `*.test.ts` vs `tests/foo.rs`), fixture layout, assertion \
+   style (existing sibling tests are the style guide). NOT \
+   \"one more unit test\" — use the tooling you picked to \
+   exercise real boundaries: intercept the network, boot the \
+   browser, fake the clock, stand up the fake WS server. Each \
+   test closes one specific gap from step 2.
 
-5. **Run them.** Every new test must pass. If one fails, that's a \
+7. **Run them.** Every new test must pass. If one fails, that's a \
    real bug — the workflow will cycle you back into EXECUTE with \
    the failure as the next review finding. Do not ship red tests.
 
-6. **Respond.** Produce your final message in this shape:
+8. **Respond.** Produce your final message in this shape:
    ```
    ## Code Classification
    (one sentence — \"this is a React component with server-driven data\")
+
+   ## Coverage Gaps (in this session's work)
+   (bullet list from step 2 — what's uncovered, and why it matters)
 
    ## Tooling Chosen
    (list the test deps you installed, or \"none needed — existing stack is right\")
 
    ## Tests Added
-   (short bullets: what each new test exercises)
+   (short bullets — one per gap you closed, naming the gap)
 
    ## Verdict
    PASS    (iff every new test is green)
@@ -810,40 +913,67 @@ Rules of the road:
     let goal = state.goal_summary.as_deref().unwrap_or("(no goal summary)");
     let exec = state.last_exec_summary.as_deref().unwrap_or("");
     let verify = state.last_verify_output.as_deref().unwrap_or("");
+    let progress = progress_block(&state.progress_summary);
     let user = format!(
-        "Task:\n\n{task}\n\n## Goal Summary\n\n{goal}\n\n## Final implementation summary\n\n{exec}\n\n## Provided-test verify output\n\n{verify}\n\nThe provided tests are green. Now classify the code and raise the bar with real test coverage using the right stack."
+        "Task:\n\n{task}\n\n## Goal Summary\n\n{goal}\n\n## Work So Far\n\n{progress}\n\n## Final implementation summary\n\n{exec}\n\n## Provided-test verify output\n\n{verify}\n\nThe provided tests are green. Now classify the code and raise the bar with real test coverage using the right stack."
     );
     (sys.to_string(), user)
 }
 
 fn finalize_prompt(state: &WorkflowState, task: &str) -> (String, String) {
     let sys = "\
-You are in the FINALIZE phase of a structured coding workflow.
+You are in the FINALIZE phase of a structured coding workflow. \
+This is the last message the END USER sees when the loop stops \
+working. Write it FOR them — plain language, easy to scan, no \
+internal phase jargon.
 
-The tests have passed (or iterations are exhausted). Go back to \
-first principles: does the final state of the code actually \
-achieve the Goal Summary from ASSESS? Check against the goal, not \
-just the tests — tests can pass on code that misses the user's \
-real intent.
+Go back to first principles: does the final state of the code \
+actually achieve the Goal Summary from ASSESS? Check against \
+the goal, not just the tests — tests can pass on code that \
+misses the user's real intent.
 
-Produce a short holistic review:
+Produce your final message in EXACTLY this shape:
 
-1. **Goal Check** — one sentence: did we achieve the Goal Summary?
-2. **Verdict** — SOLVED / PARTIAL / FAILED + why.
-3. **Gaps** — edge cases worth adding tests for (even though \
-   current tests pass), or aspects of the goal the tests don't \
-   actually verify.
-4. **Handoff notes** — anything the next developer picking this up \
-   should know.
+    ## Summary
 
-Keep it under 200 words. No tool calls needed — this is a pure \
-summary.";
+    (ONE paragraph, 3–6 sentences, that marries the goal and \
+    the work into a single readable story for the user. Open \
+    with what we were trying to do, weave in what actually got \
+    done, and close with where we ended up. Plain English — no \
+    phase labels, no markdown quoting, no enumerating every \
+    iteration. Example tone: \"The task was to implement a \
+    bowling-scorer module. We drafted a plan around frame \
+    iteration, built the scoring function, caught and fixed an \
+    off-by-one in the strike bonus, and finished with \
+    property-based tests covering frame boundaries. All 31 \
+    tests pass.\")
+
+    ## Verdict
+
+    **SOLVED** / **PARTIAL** / **FAILED** — one sentence why.
+
+    ## What's left for you
+
+    (bullet list — edge cases worth more tests, aspects of the \
+    goal the tests don't verify, follow-ups. If nothing, say so \
+    in one line: \"Nothing — ready to ship.\")
+
+    <details>
+    <summary>Detailed phase log</summary>
+
+    (Copy the Work So Far log verbatim here — the bullet list — \
+    for users who want the full trail.)
+    </details>
+
+Keep the whole thing tight. No tool calls — this is a pure \
+summary for a human reader.";
 
     let goal = state.goal_summary.as_deref().unwrap_or("(no goal summary)");
     let exec = state.last_exec_summary.as_deref().unwrap_or("");
     let verify = state.last_verify_output.as_deref().unwrap_or("");
+    let progress = progress_block(&state.progress_summary);
     let user = format!(
-        "Task:\n\n{task}\n\n## Goal Summary (the anchor)\n\n{goal}\n\n## Final execute summary\n\n{exec}\n\n## Final verify output\n\n{verify}\n\nProduce the finalization note."
+        "Task:\n\n{task}\n\n## Goal Summary (weave into the plain-English Summary paragraph)\n\n{goal}\n\n## Work So Far (weave into the Summary paragraph AND copy verbatim into the collapsed detail block)\n\n{progress}\n\n## Final execute summary\n\n{exec}\n\n## Final verify output\n\n{verify}\n\nWrite the finalization message for the end user in the required shape."
     );
     (sys.to_string(), user)
 }
@@ -1022,9 +1152,11 @@ mod tests {
 
     #[test]
     fn execute_prompt_includes_plan_and_review_findings() {
-        let mut state = WorkflowState::default();
-        state.plan = Some("step 1: write score()".into());
-        state.last_review = Some("off-by-one in strike bonus".into());
+        let state = WorkflowState {
+            plan: Some("step 1: write score()".into()),
+            last_review: Some("off-by-one in strike bonus".into()),
+            ..Default::default()
+        };
         let (sys, user) = execute_prompt(&state, "solve bowling");
         assert!(sys.contains("EXECUTE"));
         assert!(sys.contains("edit_file"));
@@ -1117,5 +1249,116 @@ mod tests {
         assert!(sys.contains("ALL TESTS PASS"));
         assert!(sys.contains("TESTS FAILED"));
         assert!(sys.contains("EXACTLY ONE"));
+    }
+
+    #[test]
+    fn append_progress_writes_iteration_tagged_bullet() {
+        let mut buf = String::new();
+        append_progress(&mut buf, "EXECUTE", 2, "wired the scorer");
+        assert_eq!(buf, "- [EXECUTE #2] wired the scorer\n");
+    }
+
+    #[test]
+    fn append_progress_skips_empty_updates() {
+        let mut buf = String::new();
+        append_progress(&mut buf, "EXECUTE", 1, "   ");
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn append_progress_omits_iteration_when_zero() {
+        let mut buf = String::new();
+        append_progress(&mut buf, "ASSESS", 0, "crystallized the goal");
+        assert_eq!(buf, "- [ASSESS] crystallized the goal\n");
+    }
+
+    #[test]
+    fn progress_block_placeholder_for_empty_log() {
+        assert_eq!(progress_block(""), "(starting fresh — no prior phases)");
+        assert_eq!(progress_block("   \n  "), "(starting fresh — no prior phases)");
+    }
+
+    #[test]
+    fn progress_block_trims_trailing_blank_lines() {
+        let log = "- [ASSESS] crystallized goal\n- [PLAN] drafted plan\n\n";
+        assert_eq!(progress_block(log), "- [ASSESS] crystallized goal\n- [PLAN] drafted plan");
+    }
+
+    #[test]
+    fn plan_prompt_threads_work_so_far() {
+        let mut state = WorkflowState::default();
+        state.progress_summary.push_str("- [ASSESS] crystallized goal\n");
+        let (_sys, user) = plan_prompt(&state, "task");
+        assert!(user.contains("## Work So Far"), "plan user prompt must carry Work So Far");
+        assert!(user.contains("crystallized goal"));
+    }
+
+    #[test]
+    fn execute_prompt_threads_work_so_far_and_demands_progress_update() {
+        let mut state = WorkflowState::default();
+        state.progress_summary.push_str("- [PLAN] drafted plan\n");
+        let (_sys, user) = execute_prompt(&state, "task");
+        assert!(user.contains("## Work So Far"), "execute user prompt must carry Work So Far");
+        assert!(user.contains("drafted plan"));
+        assert!(user.contains("## Progress Update"), "execute must demand a Progress Update section");
+    }
+
+    #[test]
+    fn verify_prompt_threads_work_so_far() {
+        let mut state = WorkflowState::default();
+        state.progress_summary.push_str("- [EXECUTE #1] wired scorer\n");
+        let (_sys, user) = verify_prompt(&state, "task");
+        assert!(user.contains("## Work So Far"));
+        assert!(user.contains("wired scorer"));
+    }
+
+    #[test]
+    fn review_prompt_threads_work_so_far() {
+        let mut state = WorkflowState::default();
+        state.progress_summary.push_str("- [VERIFY #1] tests fail (15p/4f)\n");
+        let (_sys, user) = review_prompt(&state, "task");
+        assert!(user.contains("## Work So Far"), "review user prompt must carry Work So Far");
+        assert!(user.contains("tests fail"));
+    }
+
+    #[test]
+    fn test_prompt_threads_work_so_far() {
+        let mut state = WorkflowState::default();
+        state.progress_summary.push_str("- [VERIFY #1] tests PASS\n");
+        let (_sys, user) = test_prompt(&state, "task");
+        assert!(user.contains("## Work So Far"));
+    }
+
+    #[test]
+    fn test_prompt_scopes_coverage_to_this_session() {
+        let (sys, _user) = test_prompt(&WorkflowState::default(), "task");
+        // The TEST phase must focus on gaps in the agent's session
+        // work, not retroactive coverage of legacy code.
+        assert!(
+            sys.to_lowercase().contains("this session"),
+            "test phase must scope coverage to this session's work"
+        );
+        assert!(sys.contains("EXECUTE add or modify") || sys.contains("agent added or changed"));
+    }
+
+    #[test]
+    fn finalize_prompt_is_shaped_for_the_end_user() {
+        let state = WorkflowState {
+            goal_summary: Some("Implement bowling scorer".into()),
+            progress_summary: "- [EXECUTE #1] wired scorer\n- [VERIFY #1] tests PASS\n".into(),
+            ..Default::default()
+        };
+        let (sys, user) = finalize_prompt(&state, "solve bowling");
+        // User-facing framing — not another intra-workflow handoff.
+        assert!(sys.to_uppercase().contains("END USER"));
+        // Required output sections: combined summary, verdict, what's left, detail log.
+        assert!(sys.contains("## Summary"));
+        assert!(sys.contains("## Verdict"));
+        assert!(sys.contains("## What's left for you"));
+        assert!(sys.contains("<details>") && sys.contains("Detailed phase log"));
+        // User prompt carries both anchors.
+        assert!(user.contains("Implement bowling scorer"));
+        assert!(user.contains("## Work So Far"));
+        assert!(user.contains("wired scorer"));
     }
 }
