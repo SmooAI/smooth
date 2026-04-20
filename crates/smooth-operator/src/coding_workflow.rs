@@ -198,11 +198,19 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
     // Stop conditions, in order of priority:
     //   1. verify_passed → done, break to FINALIZE
     //   2. budget would be exhausted before next cycle → break
-    //   3. plateau: same verify signature twice in a row → break
+    //   3. plateau: three consecutive identical verify signatures → break
     //   4. hard cap max_outer_iterations → break
     //
     // The cap is a safety net, not the primary governor. Budget +
-    // plateau detection do most of the work.
+    // plateau detection do most of the work. Plateau is the
+    // trickiest knob: too eager and we give up on tasks where the
+    // next REVIEW→EXECUTE would have closed the gap (bench runs
+    // routinely stop at 28/31 when 31/31 was one more cycle away);
+    // too lax and the loop burns budget on a stuck model. Three
+    // identical signatures in a row is the sweet spot — one repeat
+    // can be an unlucky re-fix that happened to yield the same
+    // failure count with different specifics; three says the model
+    // really is going in circles.
     let mut last_verify_signature: Option<String> = None;
     let mut plateau_strikes = 0u32;
     for _ in 0..cfg.max_outer_iterations {
@@ -215,15 +223,15 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
             break;
         }
 
-        // Plateau detection: if REVIEW→EXECUTE produced the same
-        // verify output signature two cycles in a row, the model's
-        // going in circles. Stop and save the remaining budget for
-        // FINALIZE + the user's next task.
         let sig = verify_signature(state.last_verify_output.as_deref().unwrap_or(""));
         if Some(&sig) == last_verify_signature.as_ref() {
             plateau_strikes += 1;
-            if plateau_strikes >= 1 {
-                tracing::info!("coding workflow: plateau detected (identical verify output twice), stopping early");
+            if plateau_strikes >= 2 {
+                tracing::info!(
+                    strikes = plateau_strikes,
+                    signature = %sig,
+                    "coding workflow: plateau detected (three identical verify signatures in a row), stopping early"
+                );
                 break;
             }
         } else {
@@ -664,44 +672,75 @@ Rules:
 - If a prior REVIEW phase left critique (included below), address \
   EVERY point it raised before declaring done.
 - Do NOT modify the provided test files — they are the spec.
-- **Match the repo's existing tools, don't invent new ones.** \
-  Before picking a validation or editing any config, inspect what's \
-  already there:
-    * `package.json` — use the `scripts` block (`pnpm lint`, \
-      `pnpm typecheck`, `pnpm check-all`). Prefer pnpm / npm / \
-      yarn based on the lockfile present.
-    * `Cargo.toml` + `rustfmt.toml` — use the workspace's test / \
-      check / clippy invocations.
-    * `pyproject.toml` / `requirements.txt` — check for ruff, \
-      mypy, pytest already configured before reaching for defaults.
-    * `go.mod` — `go vet`, `go build`, `go test` against the \
-      existing module layout.
-    * `Makefile` / `justfile` / `mise.toml` — if the repo has a \
-      task runner, USE IT. `make check`, `just lint`, etc.
-    * `.github/workflows/` — mirrors CI; if CI runs a specific \
-      command, prefer that verbatim.
-- **Fallback defaults** (only when the repo has no ambient \
-  convention): `cargo check`, `python -m py_compile`, `go vet`, \
-  `node --check`, `tsc --noEmit`.
-- Run your chosen validation via `bash`. If it fails, fix and \
-  re-run before stopping. Don't hand off to VERIFY with code that \
-  won't compile / parse / import.
-- **Extra tests are welcome, but only with the implementation that \
-  makes them pass** — if you add a test for a method, add the \
-  method in the same change. Never leave orphan failing tests that \
-  reference unimplemented code. If you spot an edge case the \
-  provided tests miss and you've already handled it in the \
-  implementation, a matching test is a good addition.
-- When your implementation is in place and your validation pass is \
-  clean, stop and respond with a one-paragraph summary of what \
-  you changed (including the validation you ran and its result).";
+
+**Self-validation is NOT optional.** Before you respond with a \
+summary, you MUST run the provided test suite via `bash` and see \
+how many pass. This is the single most important rule in this \
+phase. Do not hand off to VERIFY on \"it should work\" — run the \
+tests yourself and iterate until you either pass them or \
+genuinely cannot make further progress.
+
+Process:
+
+1. **Pick the test command the repo actually uses.** Inspect the \
+   repo first:
+    * `package.json` scripts — `pnpm test` / `npm test` / \
+      `yarn test` (mirror the lockfile). Often wraps jest / \
+      vitest / mocha.
+    * `Cargo.toml` — `cargo test` (or `cargo nextest run` when \
+      `.config/nextest.toml` is present).
+    * `pyproject.toml` / `pytest.ini` / `tox.ini` — `pytest` \
+      (with whatever args the config file specifies).
+    * `go.mod` — `go test ./...` at the module root.
+    * `Makefile` / `justfile` — if there's a `test` target, \
+      USE it (`make test`, `just test`).
+    * `.github/workflows/` — mirrors CI. If CI runs a specific \
+      test command, use that exact one.
+   The test files in the workspace are the spec — find what \
+   runs them, don't invent a new harness.
+
+2. **Write your implementation.** Follow the plan. Don't add \
+   orphan tests that reference unimplemented methods. Extra \
+   tests are fine only if the matching implementation ships in \
+   the same change.
+
+3. **Run the test command.** Read the output. Count \
+   passed / failed.
+
+4. **If any test fails, iterate.** The output tells you exactly \
+   which assertion blew up — fix the code and re-run. Keep \
+   iterating until either (a) the suite is fully green, or (b) \
+   you've hit a failure you cannot diagnose and have exhausted \
+   your attempts. Do not stop at 'most tests pass' — run them \
+   again after every fix.
+
+5. **When you're done iterating,** your final response MUST \
+   include a `## Progress Update` section AND a `## Test \
+   Results` line showing the exact pass/fail count you observed \
+   on your last run, verbatim from the test runner \
+   (\"31 passed, 0 failed\" or \"28 passed, 3 failed — \
+   tenth-frame strike bonus index off by 9\"). This is non-\
+   negotiable — lying about the count (saying \"all pass\" when \
+   they don't) breaks the downstream phases.
+
+**Fallback when no test command can be determined** (rare — the \
+repo almost always has one): `cargo check` / `python -m \
+py_compile` / `go vet` / `node --check <file>` / `tsc \
+--noEmit`. This only validates that the code parses, NOT that \
+it's correct. Treat this as a last resort and say so in your \
+summary.
+
+**Do NOT modify the provided test files** even if a test looks \
+wrong. The tests are the spec. If one seems impossible, note \
+it in Progress Update — REVIEW will decide whether the spec \
+itself is off.";
 
     let goal = state.goal_summary.as_deref().unwrap_or("(no goal summary)");
     let plan = state.plan.as_deref().unwrap_or("(no plan available)");
     let review = state.last_review.as_deref().unwrap_or("(first iteration — no prior review)");
     let progress = progress_block(&state.progress_summary);
     let user = format!(
-        "Task:\n\n{task}\n\n## Goal Summary (keep this in mind while coding)\n\n{goal}\n\n## Work So Far\n\n{progress}\n\n## Implementation plan\n\n{plan}\n\n## Review findings to address\n\n{review}\n\nImplement the solution. When done, include a one-paragraph summary of what you changed PLUS a `## Progress Update` section with a single-line description of this iteration's contribution."
+        "Task:\n\n{task}\n\n## Goal Summary (keep this in mind while coding)\n\n{goal}\n\n## Work So Far\n\n{progress}\n\n## Implementation plan\n\n{plan}\n\n## Review findings to address\n\n{review}\n\nImplement the solution, RUN THE TEST SUITE, and iterate until green (or you've exhausted your attempts). When you stop, include: (1) a one-paragraph summary of what you changed, (2) a `## Progress Update` section with a single-line description of this iteration's contribution, and (3) a `## Test Results` line with the literal pass/fail count from your final test run (e.g., \"31 passed, 0 failed\" or \"28 passed, 3 failed — unresolved: tenth-frame strike bonus\")."
     );
     (sys.to_string(), user)
 }
@@ -1132,22 +1171,35 @@ mod tests {
     }
 
     #[test]
-    fn execute_prompt_demands_self_validation() {
+    fn execute_prompt_demands_running_the_test_suite() {
         let state = WorkflowState::default();
-        let (sys, _) = execute_prompt(&state, "task");
-        // Repo-first discipline — check ambient tools before
-        // picking a generic default.
-        assert!(sys.contains("Match the repo"));
+        let (sys, user) = execute_prompt(&state, "task");
+        // Self-validation must run REAL tests, not just compile-check.
+        assert!(
+            sys.contains("Self-validation is NOT optional"),
+            "execute must force the model to actually run the tests"
+        );
+        // Repo-first discipline — find the test command the repo
+        // actually uses before inventing one.
         assert!(sys.contains("package.json"));
         assert!(sys.contains("Cargo.toml"));
-        assert!(sys.contains("Makefile"));
-        // Fallback defaults still present for repos with no
-        // ambient convention.
-        assert!(sys.contains("cargo check"));
-        assert!(sys.contains("py_compile"));
-        assert!(sys.contains("go vet"));
-        // Don't leave unimplemented methods behind failing tests.
-        assert!(sys.contains("orphan failing tests"));
+        assert!(sys.contains("pyproject.toml"));
+        assert!(sys.contains("go.mod"));
+        // Canonical test invocations — the model should know these
+        // by name, not reach for compile-only checks.
+        assert!(sys.contains("cargo test"));
+        assert!(sys.contains("pnpm test") || sys.contains("npm test"));
+        assert!(sys.contains("pytest"));
+        assert!(sys.contains("go test"));
+        // Compile-only checks are the LAST RESORT fallback.
+        assert!(sys.contains("last resort") || sys.contains("Fallback when no test command"));
+        // Pass/fail count must appear in the output so REVIEW can
+        // see truth vs. the model's summary.
+        assert!(sys.contains("## Test Results"), "execute must demand a Test Results section in the response");
+        assert!(
+            user.contains("## Test Results"),
+            "execute user prompt must reiterate the Test Results requirement"
+        );
     }
 
     #[test]
