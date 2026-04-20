@@ -1734,7 +1734,18 @@ async fn main() {
                     registry: Arc::new(registry),
                     tools,
                     budget_usd: config.budget_usd,
-                    max_outer_iterations: std::env::var("SMOOTH_WORKFLOW_MAX_ITERATIONS").ok().and_then(|v| v.parse().ok()).unwrap_or(3),
+                    // 10 is a safety net, not the primary governor — the
+                    // workflow breaks out on budget exhaustion and on
+                    // plateau (identical verify signature twice in a row).
+                    // Override via env only when debugging stuck loops.
+                    max_outer_iterations: std::env::var("SMOOTH_WORKFLOW_MAX_ITERATIONS").ok().and_then(|v| v.parse().ok()).unwrap_or(10),
+                    // Skip the adversarial TEST phase for benchmark
+                    // runs where adding new tests / deps would
+                    // change the score. Default off — real coding
+                    // tasks want it.
+                    skip_test_phase: std::env::var("SMOOTH_WORKFLOW_SKIP_TEST")
+                        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                        .unwrap_or(false),
                     tx: tx.clone(),
                 };
                 match run_coding_workflow(cfg).await {
