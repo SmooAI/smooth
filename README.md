@@ -17,6 +17,18 @@ One binary for everything Smoo AI.
 
 ---
 
+## About Smoo AI
+
+**[Smoo AI](https://smoo.ai)** is an AI platform that helps businesses multiply their customer, employee, and developer experience — conversational AI for support and sales, paired with the production-grade developer tooling we use to build it.
+
+Smooth is part of a small family of open-source packages we maintain to keep our own stack honest: contextual logging, typed HTTP, file storage, and agent orchestration. Use them in your stack, or take them as a reference for how we build.
+
+- 🌐 [smoo.ai](https://smoo.ai) — the product
+- 📦 [smoo.ai/open-source](https://smoo.ai/open-source) — every open-source package we ship
+- 🐙 [github.com/SmooAI](https://github.com/SmooAI) — the source
+
+---
+
 ## Install
 
 ```bash
