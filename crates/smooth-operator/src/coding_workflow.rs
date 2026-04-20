@@ -554,14 +554,73 @@ fn scan_count(haystack: &str, needle: &str) -> Option<u32> {
 /// summaries if the agent ignored the format request.
 fn detect_verify_pass(transcript: &str) -> bool {
     let upper = transcript.to_uppercase();
+    // Explicit prefix from the VERIFY phase prompt contract.
     if upper.contains("ALL TESTS PASS") {
         return true;
     }
     if upper.contains("TESTS FAILED") || upper.contains("TESTS FAIL") {
         return false;
     }
-    // Fallback: common runner summary shapes that indicate success.
-    upper.contains("TEST RESULT: OK") || upper.contains("OK (") || upper.contains("PASSING") && !upper.contains("FAILING")
+    // Narrow runner-summary fallbacks. Used only when the VERIFY
+    // model forgot the explicit prefix. Each positive pattern must
+    // uniquely identify a *successful* final summary from a real
+    // test runner — fuzzy phrases like "OK (" would false-positive
+    // on Rust `Ok(..)` values that appear verbatim in failure diffs
+    // ("left: Ok(()), right: Err(NotEnoughPinsLeft)"), and lone
+    // "PASSING" would false-positive on prose like "most suites
+    // are passing". A false positive here silently short-circuits
+    // the EXECUTE → VERIFY → REVIEW loop on the very first cycle,
+    // which is exactly the bug we're avoiding.
+    //
+    // "FAILED" in the transcript does NOT automatically mean
+    // failure — "0 failed" appears inside real green summaries like
+    // "31 passed; 0 failed". We only short-circuit on failure when
+    // we see a *positive* failure count or a cargo-style
+    // "test result: FAILED" line.
+    if nonzero_failure_count(&upper) || upper.contains("TEST RESULT: FAILED") {
+        return false;
+    }
+    upper.contains("TEST RESULT: OK")                     // cargo test green
+        || upper.contains(" PASSED, 0 FAILED")             // pytest / go / jest summary
+        || upper.contains("0 FAILED, 0 ERRORS")            // go test verbose
+        || (upper.contains("TESTS:") && upper.contains(" PASSED") && upper.contains("0 FAILED"))
+    // jest / vitest
+}
+
+/// True when the transcript contains a summary line reporting a
+/// POSITIVE number of failures (e.g. "3 failed", "Tests: 2 failed,
+/// 28 passed"). Zero-failure counts ("0 failed") don't count — they
+/// appear in green summaries. We only need to be approximately
+/// right: false negatives here fall through to the positive-shape
+/// check, and false positives on a green run are what we just fixed.
+fn nonzero_failure_count(upper: &str) -> bool {
+    // Walk every occurrence of "FAILED" / "FAILURE" / "FAILING" and
+    // look backwards for the nearest digit-run. If that digit-run is
+    // nonzero, we've got a real failure count. Cheap and reliable.
+    let needles = ["FAILED", "FAILURE", "FAILING"];
+    for needle in needles {
+        let mut search = upper;
+        while let Some(idx) = search.find(needle) {
+            let before = &search[..idx];
+            // Pull the last digit-run from `before`.
+            let digits: String = before
+                .chars()
+                .rev()
+                .skip_while(|c| c.is_whitespace() || matches!(*c, ',' | ';' | '(' | '—' | '-'))
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            if let Ok(n) = digits.parse::<u32>() {
+                if n > 0 {
+                    return true;
+                }
+            }
+            search = &search[idx + needle.len()..];
+        }
+    }
+    false
 }
 
 fn summarize_conversation(conv: &crate::conversation::Conversation) -> String {
@@ -1109,6 +1168,45 @@ mod tests {
     fn detect_verify_pass_falls_back_to_runner_summary() {
         assert!(detect_verify_pass("test result: ok. 31 passed; 0 failed;"));
         assert!(!detect_verify_pass("no signal at all"));
+    }
+
+    #[test]
+    fn detect_verify_pass_rejects_rust_ok_value_false_positive() {
+        // Regression: old fallback matched `OK (` which appeared in
+        // Rust failure diffs like `left: Ok(()), right: Err(...)`.
+        // A false positive here silently short-circuited the whole
+        // EXECUTE → VERIFY → REVIEW loop on the first cycle.
+        let diff = "assertion left == right failed\n  left: Ok(())\n  right: Err(NotEnoughPinsLeft)";
+        assert!(!detect_verify_pass(diff));
+    }
+
+    #[test]
+    fn detect_verify_pass_rejects_prose_passing_without_failing_word() {
+        // Another regression target: old fallback matched "PASSING"
+        // with absent "FAILING". Phrases like "most suites are
+        // passing" or "28 passing (out of 30)" would false-positive.
+        let prose = "Summary: 28 passing out of 30. Needs more work.";
+        assert!(!detect_verify_pass(prose));
+    }
+
+    #[test]
+    fn detect_verify_pass_rejects_jest_partial_failure() {
+        // Real jest output shape for a partial failure. None of the
+        // narrow success markers match; any failure marker wins.
+        let jest = "Tests:       2 failed, 28 passed, 30 total\nTest Suites: 1 failed, 1 total";
+        assert!(!detect_verify_pass(jest));
+    }
+
+    #[test]
+    fn detect_verify_pass_accepts_jest_full_green() {
+        let jest = "Tests:       30 passed, 0 failed, 30 total\nTest Suites: 1 passed, 1 total";
+        assert!(detect_verify_pass(jest));
+    }
+
+    #[test]
+    fn detect_verify_pass_accepts_go_full_green() {
+        let go = "ok  bowling 0.123s — 22 passed, 0 failed, 0 errors";
+        assert!(detect_verify_pass(go));
     }
 
     #[test]
