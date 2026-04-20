@@ -173,6 +173,20 @@ struct WorkflowState {
     /// `true` lets the workflow move to FINALIZE; `false` loops
     /// back to EXECUTE with the new failures as review findings.
     test_phase_passed: bool,
+    /// How many write-shape (`edit_file` / `write_file`) tool calls
+    /// the most recent EXECUTE phase made. Zero means the agent
+    /// spent the whole turn exploring — real failure mode in our
+    /// Java bench run (29 `list_files`, 0 writes, stub code left
+    /// intact → 0/31). We detect this between EXECUTE and VERIFY
+    /// and force a retry with an override review-finding instead
+    /// of wasting a VERIFY cycle on unchanged code.
+    last_execute_write_count: usize,
+    /// Override string prepended to the next EXECUTE's "Review
+    /// findings" context when the previous turn was a no-op. Empty
+    /// when the normal REVIEW phase output is authoritative. Lets
+    /// us keep the REVIEW prompt untouched while still threading a
+    /// blunt "you wrote no code last turn" warning when needed.
+    execute_force_write_note: Option<String>,
     outer_iteration: u32,
     total_cost_usd: f64,
 }
@@ -217,6 +231,43 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
         state.outer_iteration += 1;
 
         run_phase(&cfg, CodingPhase::Execute, &mut state, execute_prompt).await?;
+
+        // No-op EXECUTE recovery. If the agent spent the turn
+        // exploring (zero edit_file / write_file calls) the code
+        // didn't change; running VERIFY on it would just recycle
+        // the prior failure, and REVIEW would point at code the
+        // agent already saw. Retry EXECUTE immediately with a blunt
+        // "you wrote nothing — write code now" note so it doesn't
+        // re-enter exploration mode. Cap retries tightly so a
+        // genuinely stuck model can't burn the whole budget here.
+        let mut noop_retries = 0u32;
+        while state.last_execute_write_count == 0 && noop_retries < 2 {
+            noop_retries += 1;
+            tracing::warn!(
+                outer_iter = state.outer_iteration,
+                noop_retries,
+                "EXECUTE made zero write calls; forcing retry with write-required override"
+            );
+            state.execute_force_write_note = Some(format!(
+                "YOUR PRIOR TURN WROTE NOTHING. You called zero edit_file / write_file \
+                 tools in your last EXECUTE turn — the implementation file is still the \
+                 starter stub. That is a broken outcome: the workflow cannot make \
+                 progress without a write. This turn you MUST call edit_file or \
+                 write_file at least once with real implementation code. Do not burn \
+                 this turn on list_files / read_file exploration; you have already \
+                 surveyed the repo. Open the implementation file and write code.\n\
+                 (Retry {noop_retries} of 2 after a no-op EXECUTE.)"
+            ));
+            append_progress(
+                &mut state.progress_summary,
+                "EXECUTE",
+                state.outer_iteration,
+                &format!("no writes — retry #{noop_retries}"),
+            );
+            run_phase(&cfg, CodingPhase::Execute, &mut state, execute_prompt).await?;
+        }
+        state.execute_force_write_note = None;
+
         run_phase(&cfg, CodingPhase::Verify, &mut state, verify_prompt).await?;
 
         if state.verify_passed {
@@ -376,6 +427,7 @@ async fn run_phase(cfg: &CodingWorkflowConfig, phase: CodingPhase, state: &mut W
             append_progress(&mut state.progress_summary, "PLAN", 0, "Produced an implementation plan.");
         }
         CodingPhase::Execute => {
+            state.last_execute_write_count = count_write_tool_calls(&conversation);
             let update = extract_section(&transcript, "Progress Update").unwrap_or_else(|| first_line(&transcript, 160));
             append_progress(&mut state.progress_summary, "EXECUTE", state.outer_iteration, &update);
             state.last_exec_summary = Some(transcript);
@@ -623,6 +675,23 @@ fn nonzero_failure_count(upper: &str) -> bool {
     false
 }
 
+/// Count the number of `edit_file` / `write_file` tool calls across
+/// a completed phase's conversation. Zero after an EXECUTE phase
+/// means the agent spent the turn on `read_file` / `list_files` /
+/// `bash` exploration and never actually touched the code — a
+/// failure mode we've observed in the Java bench task (the agent
+/// got lost in the Gradle `src/main/java/…` tree and ran the test
+/// clock out without writing). Detecting this lets us force a
+/// retry with an override finding instead of wasting the VERIFY
+/// slot on unchanged code.
+fn count_write_tool_calls(conv: &crate::conversation::Conversation) -> usize {
+    conv.messages
+        .iter()
+        .flat_map(|m| m.tool_calls.iter())
+        .filter(|tc| matches!(tc.name.as_str(), "edit_file" | "write_file"))
+        .count()
+}
+
 fn summarize_conversation(conv: &crate::conversation::Conversation) -> String {
     // The assistant's LAST message is what this phase produced. For
     // execute/verify that message summarises what was done; for
@@ -798,8 +867,15 @@ itself is off.";
     let plan = state.plan.as_deref().unwrap_or("(no plan available)");
     let review = state.last_review.as_deref().unwrap_or("(first iteration — no prior review)");
     let progress = progress_block(&state.progress_summary);
+    // If the prior EXECUTE turn was a no-op (zero writes), prepend
+    // a blunt force-write note so this turn starts with the
+    // correction instead of more context the agent will paraphrase.
+    let review_block = match state.execute_force_write_note.as_deref() {
+        Some(note) => format!("{note}\n\n---\n\n{review}"),
+        None => review.to_string(),
+    };
     let user = format!(
-        "Task:\n\n{task}\n\n## Goal Summary (keep this in mind while coding)\n\n{goal}\n\n## Work So Far\n\n{progress}\n\n## Implementation plan\n\n{plan}\n\n## Review findings to address\n\n{review}\n\nImplement the solution, RUN THE TEST SUITE, and iterate until green (or you've exhausted your attempts). When you stop, include: (1) a one-paragraph summary of what you changed, (2) a `## Progress Update` section with a single-line description of this iteration's contribution, and (3) a `## Test Results` line with the literal pass/fail count from your final test run (e.g., \"31 passed, 0 failed\" or \"28 passed, 3 failed — unresolved: tenth-frame strike bonus\")."
+        "Task:\n\n{task}\n\n## Goal Summary (keep this in mind while coding)\n\n{goal}\n\n## Work So Far\n\n{progress}\n\n## Implementation plan\n\n{plan}\n\n## Review findings to address\n\n{review_block}\n\nImplement the solution, RUN THE TEST SUITE, and iterate until green (or you've exhausted your attempts). When you stop, include: (1) a one-paragraph summary of what you changed, (2) a `## Progress Update` section with a single-line description of this iteration's contribution, and (3) a `## Test Results` line with the literal pass/fail count from your final test run (e.g., \"31 passed, 0 failed\" or \"28 passed, 3 failed — unresolved: tenth-frame strike bonus\")."
     );
     (sys.to_string(), user)
 }
@@ -1201,6 +1277,78 @@ mod tests {
     fn detect_verify_pass_accepts_jest_full_green() {
         let jest = "Tests:       30 passed, 0 failed, 30 total\nTest Suites: 1 passed, 1 total";
         assert!(detect_verify_pass(jest));
+    }
+
+    #[test]
+    fn count_write_tool_calls_counts_edit_and_write_only() {
+        use crate::conversation::{Conversation, Message};
+        use crate::tool::ToolCall;
+        fn tc(name: &str) -> ToolCall {
+            ToolCall {
+                id: "id".into(),
+                name: name.into(),
+                arguments: serde_json::json!({}),
+            }
+        }
+        let mut conv = Conversation::new(8192);
+        let mut m1 = Message::assistant("");
+        m1.tool_calls = vec![tc("read_file"), tc("list_files"), tc("edit_file")];
+        conv.messages.push(m1);
+        let mut m2 = Message::assistant("");
+        m2.tool_calls = vec![tc("write_file"), tc("bash"), tc("edit_file")];
+        conv.messages.push(m2);
+        // 3 writes total: edit_file, write_file, edit_file.
+        assert_eq!(count_write_tool_calls(&conv), 3);
+    }
+
+    #[test]
+    fn count_write_tool_calls_zero_when_only_exploration() {
+        use crate::conversation::{Conversation, Message};
+        use crate::tool::ToolCall;
+        fn tc(name: &str) -> ToolCall {
+            ToolCall {
+                id: "id".into(),
+                name: name.into(),
+                arguments: serde_json::json!({}),
+            }
+        }
+        // Java-bench-failure shape: lots of list_files, zero writes.
+        let mut conv = Conversation::new(8192);
+        let mut m = Message::assistant("");
+        m.tool_calls = vec![tc("list_files"); 29];
+        m.tool_calls.push(tc("read_file"));
+        m.tool_calls.push(tc("bash"));
+        conv.messages.push(m);
+        assert_eq!(count_write_tool_calls(&conv), 0);
+    }
+
+    #[test]
+    fn execute_prompt_prepends_force_write_note_when_present() {
+        let state = WorkflowState {
+            execute_force_write_note: Some("YOUR PRIOR TURN WROTE NOTHING.".into()),
+            last_review: Some("off-by-one in strike bonus".into()),
+            ..Default::default()
+        };
+        let (_sys, user) = execute_prompt(&state, "task");
+        // The note lands in the Review-findings block so EXECUTE
+        // sees the correction without losing prior critique.
+        assert!(user.contains("YOUR PRIOR TURN WROTE NOTHING"));
+        assert!(user.contains("off-by-one in strike bonus"));
+        // And the note comes first — it's the blunt correction.
+        let note_idx = user.find("YOUR PRIOR TURN").unwrap();
+        let review_idx = user.find("off-by-one").unwrap();
+        assert!(note_idx < review_idx, "force-write note must come before prior review");
+    }
+
+    #[test]
+    fn execute_prompt_omits_force_write_note_when_absent() {
+        let state = WorkflowState {
+            last_review: Some("regular review critique".into()),
+            ..Default::default()
+        };
+        let (_sys, user) = execute_prompt(&state, "task");
+        assert!(!user.contains("YOUR PRIOR TURN WROTE NOTHING"));
+        assert!(user.contains("regular review critique"));
     }
 
     #[test]
