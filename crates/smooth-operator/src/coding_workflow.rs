@@ -593,16 +593,28 @@ Rules:
 - If a prior REVIEW phase left critique (included below), address \
   EVERY point it raised before declaring done.
 - Do NOT modify the provided test files — they are the spec.
-- **Before you stop, run a validation pass yourself.** Pick the \
-  check that fits the language and the project:
-    * Rust:   `cargo check` (fast type-check, no test run)
-    * Python: `python -m py_compile <file>` or `ruff check`
-    * Go:     `go vet ./...` or `go build ./...`
-    * JS/TS:  `node --check <file>` or `tsc --noEmit`
-    * Other:  use judgement — the smallest reproducible validation \
-      for the toolchain. Use `bash` to run it. If it fails, fix and \
-      re-run before stopping. The goal is: don't hand off to VERIFY \
-      with code that won't compile / parse / import.
+- **Match the repo's existing tools, don't invent new ones.** \
+  Before picking a validation or editing any config, inspect what's \
+  already there:
+    * `package.json` — use the `scripts` block (`pnpm lint`, \
+      `pnpm typecheck`, `pnpm check-all`). Prefer pnpm / npm / \
+      yarn based on the lockfile present.
+    * `Cargo.toml` + `rustfmt.toml` — use the workspace's test / \
+      check / clippy invocations.
+    * `pyproject.toml` / `requirements.txt` — check for ruff, \
+      mypy, pytest already configured before reaching for defaults.
+    * `go.mod` — `go vet`, `go build`, `go test` against the \
+      existing module layout.
+    * `Makefile` / `justfile` / `mise.toml` — if the repo has a \
+      task runner, USE IT. `make check`, `just lint`, etc.
+    * `.github/workflows/` — mirrors CI; if CI runs a specific \
+      command, prefer that verbatim.
+- **Fallback defaults** (only when the repo has no ambient \
+  convention): `cargo check`, `python -m py_compile`, `go vet`, \
+  `node --check`, `tsc --noEmit`.
+- Run your chosen validation via `bash`. If it fails, fix and \
+  re-run before stopping. Don't hand off to VERIFY with code that \
+  won't compile / parse / import.
 - **Extra tests are welcome, but only with the implementation that \
   makes them pass** — if you add a test for a method, add the \
   method in the same change. Never leave orphan failing tests that \
@@ -696,7 +708,24 @@ REAL test coverage appropriate to the shape of the code.
 
 Your process:
 
-1. **Classify the code.** What is it?
+1. **Survey the repo first.** Before you pick any tooling, read \
+   what's already there:
+   - `package.json` — scripts, devDependencies (jest? vitest? \
+     playwright? msw? @testing-library/*? already installed?). \
+     Which package manager (pnpm-lock.yaml / yarn.lock / \
+     package-lock.json)?
+   - `Cargo.toml` — which test runner (cargo test vs nextest), \
+     which property-test crate already used (proptest, \
+     quickcheck)?
+   - `pyproject.toml` / `requirements*.txt` — pytest vs unittest, \
+     is hypothesis already a dep?
+   - `go.mod` — stdlib testing vs testify vs ginkgo?
+   - `Makefile` / `justfile` / `.github/workflows/` — what does CI \
+     actually run? Mirror it.
+   - Look at a sibling test file in the repo — what conventions \
+     does it follow (file naming, imports, fixtures, setup)?
+
+2. **Classify the code** in the ambient context of the repo:
    - React / Vue / Solid / Svelte component?
    - HTTP / RPC client?
    - Browser-based user flow?
@@ -706,34 +735,46 @@ Your process:
    - Pure library / algorithm?
    - Async code with timers / retries?
 
-2. **Pick the canonical test stack for that shape.** For example:
-   - React component → Testing Library + `@testing-library/user-event`.
-   - API client → **MSW** (`msw`) to intercept real `fetch`/axios \
-     calls. Exercise retry, error, timeout, non-2xx, malformed-JSON \
-     paths.
+3. **Pick the test stack that the repo already endorses.** Only \
+   introduce new tooling when the repo genuinely lacks something \
+   and adding it is idiomatic. Starting points (pick WHAT IS OR \
+   WOULD BE NATIVE to this repo):
+   - React component → Testing Library + \
+     `@testing-library/user-event`.
+   - API client → **MSW** (`msw`) to intercept real \
+     `fetch`/axios calls; exercise retry, error, timeout, \
+     non-2xx, malformed-JSON paths.
    - Web user flow → **Playwright** (`@playwright/test`) with a \
-     headless browser. Script the real click path.
-   - WebSocket → stand up a fake WS server in-process; test connect, \
-     message parsing, reconnect after disconnect, backpressure.
-   - DB layer → `testcontainers` / `sqlite::memory:` / `pg-mem`. \
-     Round-trip + constraint-violation + transaction tests.
+     headless browser; script the real click path.
+   - WebSocket → stand up a fake WS server in-process; test \
+     connect, message parsing, reconnect after disconnect, \
+     backpressure.
+   - DB layer → `testcontainers` / `sqlite::memory:` / `pg-mem`; \
+     round-trip + constraint-violation + transaction tests.
    - CLI → shell out to the binary with fixtures, snapshot stdout.
    - Pure library → property-based (`hypothesis` / `proptest` / \
      `fast-check`) when the domain has laws (idempotent, \
      commutative, inverse-of, ordered).
    - Async / timer-driven → use the test framework's fake clock; \
      race-condition stress where meaningful.
+   If the repo is a Rust crate, don't suggest MSW. If the repo is \
+   a backend Node service with no browser component, don't \
+   install Playwright. Honor the context.
 
-3. **Install the tooling** if it's not already in the project. Use \
-   the right package manager for the ecosystem (pnpm / npm / cargo \
-   add --dev / uv add --dev / go get). Respect existing `package.json` / \
-   `Cargo.toml` / `pyproject.toml` conventions.
+4. **Install tooling the repo-native way.** Use the package \
+   manager the repo uses (`pnpm add -D`, `cargo add --dev`, `uv \
+   add --dev`, `go get -t`). Follow the repo's existing devDep \
+   conventions — if the repo pins versions with `~`, match; if \
+   it groups dev deps under a workspace root, add there.
 
-4. **Write the tests.** NOT \"one more unit test\" — use the tooling \
-   you installed to exercise real boundaries: intercept the \
-   network, boot the browser, fake the clock, stand up the fake WS \
-   server. Each test should expose behaviour the provided suite \
-   does not cover.
+5. **Write the tests in the repo's convention.** Match file \
+   naming (`*_test.go` vs `*.test.ts` vs `tests/foo.rs`), \
+   fixture layout, assertion style (existing sibling tests are \
+   the style guide). NOT \"one more unit test\" — use the \
+   tooling you picked to exercise real boundaries: intercept the \
+   network, boot the browser, fake the clock, stand up the fake \
+   WS server. Each test should expose behaviour the provided \
+   suite does not cover.
 
 5. **Run them.** Every new test must pass. If one fails, that's a \
    real bug — the workflow will cycle you back into EXECUTE with \
@@ -940,6 +981,20 @@ mod tests {
     }
 
     #[test]
+    fn test_phase_prompt_is_repo_aware() {
+        let (sys, _) = test_prompt(&WorkflowState::default(), "task");
+        // Survey-first discipline
+        assert!(sys.contains("Survey the repo first"));
+        // Repo signals the prompt explicitly checks
+        assert!(sys.contains("package.json"));
+        assert!(sys.contains("Cargo.toml"));
+        assert!(sys.contains("go.mod"));
+        assert!(sys.contains("pyproject.toml"));
+        // Don't force mismatched tooling
+        assert!(sys.contains("Rust crate, don't suggest MSW"));
+    }
+
+    #[test]
     fn test_phase_prompt_refuses_to_modify_provided_tests() {
         let (sys, _) = test_prompt(&WorkflowState::default(), "task");
         assert!(sys.to_lowercase().contains("do not modify"));
@@ -950,11 +1005,14 @@ mod tests {
     fn execute_prompt_demands_self_validation() {
         let state = WorkflowState::default();
         let (sys, _) = execute_prompt(&state, "task");
-        // The prompt must explicitly ask the agent to run a
-        // validation pass before stopping — don't ship code that
-        // won't compile to VERIFY.
-        assert!(sys.contains("run a validation pass yourself"));
-        // Language hints the model can pick from.
+        // Repo-first discipline — check ambient tools before
+        // picking a generic default.
+        assert!(sys.contains("Match the repo"));
+        assert!(sys.contains("package.json"));
+        assert!(sys.contains("Cargo.toml"));
+        assert!(sys.contains("Makefile"));
+        // Fallback defaults still present for repos with no
+        // ambient convention.
         assert!(sys.contains("cargo check"));
         assert!(sys.contains("py_compile"));
         assert!(sys.contains("go vet"));
