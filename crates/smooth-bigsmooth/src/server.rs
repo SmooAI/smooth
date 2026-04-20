@@ -1384,6 +1384,11 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         // exec-layer issue.
         let preflight_script = format!(
             "echo '/opt contents:'; ls -la /opt/ 2>&1 | head -10; \
+             echo '/opt/smooth contents:'; ls -la /opt/smooth/ 2>&1 | head -10; \
+             echo '/opt/smooth/policy contents:'; ls -la /opt/smooth/policy/ 2>&1 | head -20; \
+             echo '/opt/smooth/bin contents:'; ls -la /opt/smooth/bin/ 2>&1 | head -5; \
+             echo '/workspace contents:'; ls /workspace/ 2>&1 | head -8; \
+             echo 'mounts:'; mount 2>&1 | grep -E 'opt/smooth|workspace' | head -10; \
              echo 'runner check:'; test -x {runner_in_vm} && echo 'runner is executable' || echo 'runner missing or not executable'"
         );
         match sandbox::exec_in_sandbox(&handle.msb_name, &["/bin/sh", "-c", preflight_script.as_str()]).await {
@@ -1391,8 +1396,8 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
                 tracing::info!(
                     task_id = tid,
                     preflight_code = code,
-                    preflight_stdout = %out.chars().take(500).collect::<String>(),
-                    preflight_stderr = %err.chars().take(500).collect::<String>(),
+                    preflight_stdout = %out.chars().take(2000).collect::<String>(),
+                    preflight_stderr = %err.chars().take(2000).collect::<String>(),
                     "sandboxed dispatch: preflight shell check"
                 );
             }
