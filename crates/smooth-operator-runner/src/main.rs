@@ -1720,12 +1720,11 @@ async fn main() {
         std::env::var("SMOOTH_ROUTING_JSON").ok()
     };
 
-    let result = if workflow_opt_in && routing_json.is_some() {
+    let result = if let (true, Some(raw)) = (workflow_opt_in, routing_json) {
         use smooth_operator::coding_workflow::{run_coding_workflow, CodingWorkflowConfig};
         use smooth_operator::providers::ProviderRegistry;
         use std::sync::Arc;
 
-        let raw = routing_json.expect("checked above");
         match ProviderRegistry::from_json(&raw) {
             Ok(registry) => {
                 let cfg = CodingWorkflowConfig {
