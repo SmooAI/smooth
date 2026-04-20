@@ -186,6 +186,14 @@ pub async fn run_aider_polyglot(lang: PolyglotLang, task: &str, opts: &BenchOpts
 
     copy_task_files(&task_src, &work_dir)?;
     enable_skipped_tests(lang, &work_dir)?;
+    // Snapshot the original file set BEFORE the agent touches
+    // anything. Used after the agent finishes to delete any
+    // test-file-pattern files it added — the polyglot scorer runs
+    // the test command over the whole work dir, so agent-written
+    // `test_*.py` / `*_test.go` / `*.spec.ts` / `*Test.java` / etc.
+    // would get counted and tilt the score. Benchmark invariant:
+    // only the provided tests count.
+    let original_files = snapshot_files(&work_dir)?;
     let prompt = build_prompt(task, lang, &work_dir)?;
     std::fs::write(run.join("PROMPT.txt"), &prompt)?;
 
@@ -208,6 +216,20 @@ pub async fn run_aider_polyglot(lang: PolyglotLang, task: &str, opts: &BenchOpts
         };
 
     let duration_s = t0.elapsed().as_secs_f64();
+
+    // Delete any test-file-pattern files the agent added that
+    // weren't in the original task. Leaves production-code files
+    // alone regardless of name, and leaves original test files
+    // intact — only new files matching per-language test patterns
+    // get cleaned. See `strip_agent_added_tests` for the patterns.
+    let stripped_files = strip_agent_added_tests(lang, &work_dir, &original_files)?;
+    if !stripped_files.is_empty() {
+        eprintln!(
+            "bench: stripped {} agent-added test file(s) before scoring: {:?}",
+            stripped_files.len(),
+            stripped_files
+        );
+    }
 
     let (test_stdout, counts) = score_work_dir(lang, &work_dir).await?;
 
@@ -467,6 +489,95 @@ fn rewrite_jest_skips(dir: &Path) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Recursively collect the set of relative paths under `root`.
+/// Directories aren't included — just files — because the strip
+/// step only cares about file-level additions. Skips `.git` +
+/// `.smooth` (transient/metadata dirs that never appear in the
+/// dataset).
+fn snapshot_files(root: &Path) -> anyhow::Result<std::collections::HashSet<PathBuf>> {
+    let mut out = std::collections::HashSet::new();
+    walk(root, root, &mut out)?;
+    return Ok(out);
+
+    fn walk(base: &Path, dir: &Path, out: &mut std::collections::HashSet<PathBuf>) -> anyhow::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str == ".git" || name_str == ".smooth" || name_str == "node_modules" || name_str == "target" || name_str == "build" || name_str == ".gradle"
+            {
+                continue;
+            }
+            let path = entry.path();
+            if entry.file_type()?.is_dir() {
+                walk(base, &path, out)?;
+            } else if let Ok(rel) = path.strip_prefix(base) {
+                out.insert(rel.to_path_buf());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Delete any test-file-pattern files the agent added that weren't
+/// in the original task snapshot. Non-test files the agent created
+/// (helpers, new modules) are left alone — the polyglot scorer
+/// only looks at test output, so a new module only matters if a
+/// test imports it, and imports from the agent's own code are
+/// fine.
+///
+/// Returns the list of relative paths that got deleted so callers
+/// can log them.
+fn strip_agent_added_tests(lang: PolyglotLang, work_dir: &Path, original: &std::collections::HashSet<PathBuf>) -> anyhow::Result<Vec<PathBuf>> {
+    let current = snapshot_files(work_dir)?;
+    let mut stripped = Vec::new();
+    for rel in current.difference(original) {
+        if is_test_file(lang, rel) {
+            let full = work_dir.join(rel);
+            if std::fs::remove_file(&full).is_ok() {
+                stripped.push(rel.clone());
+            }
+        }
+    }
+    Ok(stripped)
+}
+
+/// Per-language test-file naming conventions. Only matches files
+/// the agent ADDED; originals stay in place (they're excluded at a
+/// higher level via the snapshot diff).
+fn is_test_file(lang: PolyglotLang, rel: &Path) -> bool {
+    let name = match rel.file_name().and_then(|n| n.to_str()) {
+        Some(n) => n,
+        None => return false,
+    };
+    let rel_str = rel.to_string_lossy();
+    match lang {
+        PolyglotLang::Python => {
+            // pytest discovery patterns: `test_*.py`, `*_test.py`, and
+            // anything under a top-level `tests/` dir.
+            name.starts_with("test_") && name.ends_with(".py") || name.ends_with("_test.py") || rel_str.starts_with("tests/") && name.ends_with(".py")
+        }
+        PolyglotLang::Rust => {
+            // Rust integration tests live under `tests/`. Unit tests
+            // are inline `#[cfg(test)]` blocks — we can't strip those
+            // without parsing, so leave them. They're inside source
+            // files anyway; agent additions to lib.rs don't count as
+            // new files.
+            rel_str.starts_with("tests/") && name.ends_with(".rs")
+        }
+        PolyglotLang::Go => name.ends_with("_test.go"),
+        PolyglotLang::Javascript => name.ends_with(".spec.js") || name.ends_with(".test.js") || name.ends_with(".spec.ts") || name.ends_with(".test.ts"),
+        PolyglotLang::Java => {
+            // JUnit discovery: classes whose name ends in Test /
+            // Tests, or files under `src/test/…`.
+            rel_str.contains("/test/") && name.ends_with(".java") || name.ends_with("Test.java") || name.ends_with("Tests.java")
+        }
+        PolyglotLang::Cpp => {
+            name.ends_with("_test.cpp") || name.starts_with("test_") && name.ends_with(".cpp") || rel_str.contains("/tests/") && name.ends_with(".cpp")
+        }
+    }
 }
 
 fn build_prompt(task: &str, lang: PolyglotLang, work_dir: &Path) -> anyhow::Result<String> {
@@ -966,6 +1077,82 @@ class BowlingTest {
 
         let body = std::fs::read_to_string(&file).unwrap();
         assert!(!body.contains("@Disabled"));
+    }
+
+    #[test]
+    fn is_test_file_matches_per_language_conventions() {
+        // Python — pytest discovery
+        assert!(is_test_file(PolyglotLang::Python, Path::new("test_bowling.py")));
+        assert!(is_test_file(PolyglotLang::Python, Path::new("bowling_test.py")));
+        assert!(is_test_file(PolyglotLang::Python, Path::new("tests/extra.py")));
+        assert!(!is_test_file(PolyglotLang::Python, Path::new("bowling.py")));
+        assert!(!is_test_file(PolyglotLang::Python, Path::new("helper.py")));
+
+        // Rust — integration-test files under tests/ only
+        assert!(is_test_file(PolyglotLang::Rust, Path::new("tests/edge_cases.rs")));
+        assert!(!is_test_file(PolyglotLang::Rust, Path::new("src/lib.rs")));
+        assert!(!is_test_file(PolyglotLang::Rust, Path::new("src/tests.rs")));
+
+        // Go
+        assert!(is_test_file(PolyglotLang::Go, Path::new("bowling_test.go")));
+        assert!(is_test_file(PolyglotLang::Go, Path::new("extra_test.go")));
+        assert!(!is_test_file(PolyglotLang::Go, Path::new("bowling.go")));
+
+        // JavaScript
+        assert!(is_test_file(PolyglotLang::Javascript, Path::new("bowling.spec.js")));
+        assert!(is_test_file(PolyglotLang::Javascript, Path::new("extra.test.ts")));
+        assert!(!is_test_file(PolyglotLang::Javascript, Path::new("bowling.js")));
+
+        // Java
+        assert!(is_test_file(PolyglotLang::Java, Path::new("src/test/java/BowlingTest.java")));
+        assert!(is_test_file(PolyglotLang::Java, Path::new("ExtraTests.java")));
+        assert!(!is_test_file(PolyglotLang::Java, Path::new("src/main/java/BowlingGame.java")));
+    }
+
+    #[test]
+    fn strip_agent_added_tests_removes_only_new_test_files() {
+        use std::fs;
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path();
+
+        // Original task files
+        fs::write(root.join("bowling.py"), "class BowlingGame: pass").unwrap();
+        fs::write(root.join("bowling_test.py"), "def test_x(): pass").unwrap();
+
+        let original = snapshot_files(root).unwrap();
+        assert_eq!(original.len(), 2);
+
+        // Agent adds: one new test file (should be stripped), one
+        // new helper module (should be kept).
+        fs::write(root.join("test_extra.py"), "def test_edge(): pass").unwrap();
+        fs::write(root.join("helper.py"), "def helper(): pass").unwrap();
+        // Agent modifies an existing file — should stay put.
+        fs::write(root.join("bowling.py"), "class BowlingGame:\n    def score(self): return 0").unwrap();
+
+        let stripped = strip_agent_added_tests(PolyglotLang::Python, root, &original).unwrap();
+
+        // test_extra.py is gone
+        assert_eq!(stripped.len(), 1);
+        assert_eq!(stripped[0], Path::new("test_extra.py"));
+        assert!(!root.join("test_extra.py").exists());
+        // helper.py and bowling.py (modified) survive
+        assert!(root.join("helper.py").exists());
+        assert!(root.join("bowling.py").exists());
+        // Original bowling_test.py untouched
+        assert!(root.join("bowling_test.py").exists());
+    }
+
+    #[test]
+    fn strip_agent_added_tests_ignores_untouched_originals() {
+        use std::fs;
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path();
+        fs::write(root.join("bowling_test.py"), "def test_x(): pass").unwrap();
+        let original = snapshot_files(root).unwrap();
+        // Agent didn't add any new test files.
+        let stripped = strip_agent_added_tests(PolyglotLang::Python, root, &original).unwrap();
+        assert!(stripped.is_empty());
+        assert!(root.join("bowling_test.py").exists());
     }
 
     #[test]
