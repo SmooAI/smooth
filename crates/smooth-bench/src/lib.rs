@@ -365,12 +365,81 @@ fn enable_skipped_tests(lang: PolyglotLang, work_dir: &Path) -> anyhow::Result<(
             // file under the work dir.
             rewrite_jest_skips(work_dir)
         }
-        PolyglotLang::Python | PolyglotLang::Go | PolyglotLang::Java | PolyglotLang::Cpp => {
+        PolyglotLang::Java => {
+            // JUnit 5 / JUnit 4 skip shapes:
+            //   @Disabled           — JUnit 5
+            //   @Disabled("reason") — JUnit 5 with reason
+            //   @Ignore             — JUnit 4
+            //   @Ignore("reason")   — JUnit 4 with reason
+            // Strip the annotations from every *.java under the test
+            // tree so the underlying `@Test` runs.
+            rewrite_junit_skips(work_dir)
+        }
+        PolyglotLang::Python | PolyglotLang::Go | PolyglotLang::Cpp => {
             // No-op: polyglot Python/Go tasks don't ship skipped
-            // tests; Java/C++ are future work once they're exercised.
+            // tests; C++ is future work once it's exercised.
             Ok(())
         }
     }
+}
+
+/// Walk the work dir and remove every JUnit `@Disabled`/`@Ignore`
+/// annotation — whether bare (`@Disabled`) or with a reason string
+/// (`@Disabled("not yet implemented")`). Leaves the underlying
+/// `@Test` intact so the case actually runs.
+///
+/// Only touches `.java` files under `src/test/…`; leaves production
+/// code alone even if it happens to include a doc-comment mentioning
+/// the annotation.
+fn rewrite_junit_skips(dir: &Path) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if entry.file_type()?.is_dir() && !name.starts_with('.') && name != "build" && name != ".gradle" {
+            rewrite_junit_skips(&path)?;
+            continue;
+        }
+        if !name.ends_with(".java") {
+            continue;
+        }
+        // Only touch test files — avoid stripping a @Disabled the
+        // project uses legitimately in prod code.
+        let s = path.to_string_lossy();
+        if !s.contains("/test/") && !s.ends_with("Test.java") {
+            continue;
+        }
+        let Ok(body) = std::fs::read_to_string(&path) else { continue };
+        let rewritten = strip_junit_skip_annotations(&body);
+        if rewritten != body {
+            std::fs::write(&path, rewritten)?;
+        }
+    }
+    Ok(())
+}
+
+/// Remove JUnit skip annotation lines from a Java source. A line is
+/// dropped when its only non-whitespace content is `@Disabled` or
+/// `@Ignore`, optionally followed by a parenthesized argument. Keeps
+/// surrounding whitespace layout tidy.
+fn strip_junit_skip_annotations(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    for line in body.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        let is_skip = trimmed.starts_with("@Disabled") || trimmed.starts_with("@Ignore");
+        if is_skip {
+            // Verify the NEXT non-blank thing is the annotation (not
+            // a word like `@DisabledByDefault`) — require it to end
+            // the identifier cleanly before `(` / whitespace / EOL.
+            let rest = &trimmed[1..]; // past the @
+            let (name, _) = rest.split_once(|c: char| !c.is_ascii_alphanumeric()).unwrap_or((rest, ""));
+            if name == "Disabled" || name == "Ignore" {
+                continue; // skip the whole line
+            }
+        }
+        out.push_str(line);
+    }
+    out
 }
 
 fn rewrite_jest_skips(dir: &Path) -> anyhow::Result<()> {
@@ -839,5 +908,80 @@ describe("bowling", () => {
         for lang in [PolyglotLang::Python, PolyglotLang::Rust, PolyglotLang::Go] {
             enable_skipped_tests(lang, tmp.path()).expect("no-op");
         }
+    }
+
+    #[test]
+    fn strip_junit_skip_annotations_removes_bare_disabled() {
+        let src = r#"import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Disabled;
+
+class BowlingTest {
+    @Test
+    void passing() {}
+
+    @Disabled
+    @Test
+    void skipped() {}
+
+    @Disabled("not yet implemented")
+    @Test
+    void skippedWithReason() {}
+}
+"#;
+        let out = strip_junit_skip_annotations(src);
+        assert!(!out.contains("@Disabled"), "all @Disabled lines should be gone: {out}");
+        // @Test for each method must remain (3 of them).
+        assert_eq!(out.matches("@Test").count(), 3);
+        // The method bodies remain.
+        assert!(out.contains("void skipped()"));
+        assert!(out.contains("void skippedWithReason()"));
+    }
+
+    #[test]
+    fn strip_junit_skip_annotations_handles_junit4_ignore() {
+        let src = "@Ignore\n@Test public void x() {}\n@Ignore(\"meh\")\n@Test public void y() {}\n";
+        let out = strip_junit_skip_annotations(src);
+        assert!(!out.contains("@Ignore"));
+        assert!(out.contains("@Test public void x()"));
+        assert!(out.contains("@Test public void y()"));
+    }
+
+    #[test]
+    fn strip_junit_skip_annotations_preserves_unrelated_annotations() {
+        let src = "@DisabledInNativeImage\n@Test void z() {}\n";
+        let out = strip_junit_skip_annotations(src);
+        // `@DisabledInNativeImage` is NOT `@Disabled` — must survive.
+        assert!(out.contains("@DisabledInNativeImage"));
+    }
+
+    #[test]
+    fn rewrite_junit_skips_recurses_into_test_dir() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let test_dir = tmp.path().join("src/test/java");
+        std::fs::create_dir_all(&test_dir).unwrap();
+        let file = test_dir.join("BowlingTest.java");
+        std::fs::write(&file, "@Disabled\n@Test void a() {}\n").unwrap();
+
+        rewrite_junit_skips(tmp.path()).expect("rewrite");
+
+        let body = std::fs::read_to_string(&file).unwrap();
+        assert!(!body.contains("@Disabled"));
+    }
+
+    #[test]
+    fn rewrite_junit_skips_leaves_production_code_alone() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let main_dir = tmp.path().join("src/main/java");
+        std::fs::create_dir_all(&main_dir).unwrap();
+        // A production-code file that happens to reference
+        // `@Disabled` via a doc comment or something — don't
+        // rewrite it just because the annotation name appears.
+        let prod = main_dir.join("BowlingGame.java");
+        std::fs::write(&prod, "class BowlingGame {\n    // See @Disabled tests in BowlingTest\n}\n").unwrap();
+
+        rewrite_junit_skips(tmp.path()).expect("rewrite");
+
+        let body = std::fs::read_to_string(&prod).unwrap();
+        assert!(body.contains("@Disabled"));
     }
 }
