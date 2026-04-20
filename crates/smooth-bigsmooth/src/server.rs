@@ -428,7 +428,26 @@ pub async fn start(mut state: AppState, addr: SocketAddr) -> anyhow::Result<()> 
 
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!("Smooth leader running at http://{addr}");
+    // Print runtime-identifying facts on startup so anyone staring
+    // at a long-running Big Smooth can confirm which binary + modes
+    // are in effect without having to inspect the process env.
+    let workflow_mode = if std::env::var("SMOOTH_WORKFLOW")
+        .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false)
+    {
+        "disabled (SMOOTH_WORKFLOW=0)"
+    } else {
+        "enabled (default)"
+    };
+    let skip_test = std::env::var("SMOOTH_WORKFLOW_SKIP_TEST")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    tracing::info!(
+        version = env!("TH_VERSION"),
+        workflow = workflow_mode,
+        skip_test_phase = skip_test,
+        "Smooth leader running at http://{addr}"
+    );
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -927,15 +946,20 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         env.insert("SMOOTH_WORKSPACE".into(), "/workspace".into());
         env.insert("SMOOTH_OPERATOR_ID".into(), tid.clone());
 
-        // When the host has SMOOTH_WORKFLOW=1 set, flag it for the
-        // runner. The routing config itself is serialized as a file
-        // further down (after policy_dir_guard is set up) because the
-        // JSON is several kilobytes and would overflow the kernel
-        // cmdline if passed as an env var.
-        let workflow_enabled = std::env::var("SMOOTH_WORKFLOW")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        // The multi-phase workflow is the product — always on. The
+        // routing config itself is serialized as a file further down
+        // (after policy_dir_guard is set up) because the JSON is
+        // several kilobytes and would overflow the kernel cmdline if
+        // passed as an env var.
+        //
+        // `SMOOTH_WORKFLOW=0` is kept as an opt-OUT for debugging
+        // and regression bisects — it falls back to the classic
+        // single-Agent loop in `smooth-operator-runner`. Anything
+        // else (unset, "1", "true") turns it on.
+        let workflow_disabled = std::env::var("SMOOTH_WORKFLOW")
+            .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
             .unwrap_or(false);
-        if workflow_enabled {
+        if !workflow_disabled {
             env.insert("SMOOTH_WORKFLOW".into(), "1".into());
             // Pass through the TEST-phase skip flag for benchmark
             // runs where adding extra tests would change the score.
@@ -1123,7 +1147,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         // `/opt/smooth/policy/routing.json`. Too big (~3 KB) to fit
         // in the kernel cmdline via an env var; same reason task.txt
         // is mounted rather than inlined.
-        if workflow_enabled {
+        if !workflow_disabled {
             if let Some(ref dir) = policy_dir_guard {
                 if let Some(home) = dirs_next::home_dir() {
                     let providers_path = home.join(".smooth/providers.json");
