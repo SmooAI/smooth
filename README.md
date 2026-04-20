@@ -58,17 +58,67 @@ Smooth is the central CLI and orchestration platform for [Smoo AI](https://smoo.
 
 ### How it works
 
-```
-ASSESS → PLAN → ORCHESTRATE → EXECUTE → FINALIZE → REVIEW (adversarial)
+Smooth spawns teams of AI agents called **Smooth Operators** that work inside isolated microVMs. Each operator runs a structured, multi-phase coding workflow — and every phase routes through a different model tuned for the shape of that phase's work.
+
+```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk"}, "themeVariables": {"lineColor": "#f49f0a"}}}%%
+flowchart LR
+    ASSESS["ASSESS<br/><small>smooth-thinking</small>"]
+    PLAN["PLAN<br/><small>smooth-planning</small>"]
+    EXECUTE["EXECUTE<br/><small>smooth-coding</small>"]
+    VERIFY["VERIFY<br/><small>smooth-coding</small>"]
+    REVIEW["REVIEW<br/><small>smooth-reviewing</small>"]
+    TEST["TEST<br/><small>smooth-reviewing</small>"]
+    FINALIZE["FINALIZE<br/><small>smooth-thinking</small>"]
+
+    ASSESS --> PLAN
+    PLAN --> EXECUTE
+    EXECUTE --> VERIFY
+    VERIFY -- fail --> REVIEW
+    REVIEW --> EXECUTE
+    VERIFY -- pass --> TEST
+    TEST -- red --> EXECUTE
+    TEST -- green --> FINALIZE
+
+    style ASSESS fill:#0a1f7a,stroke:#18387a,color:#f8fafc
+    style PLAN fill:#0a1f7a,stroke:#18387a,color:#f8fafc
+    style EXECUTE fill:#040d30,stroke:#22c55e,color:#f8fafc
+    style VERIFY fill:#040d30,stroke:#22c55e,color:#f8fafc
+    style REVIEW fill:#040d30,stroke:#f49f0a,color:#f8fafc
+    style TEST fill:#040d30,stroke:#f49f0a,color:#f8fafc
+    style FINALIZE fill:#0a1f7a,stroke:#18387a,color:#f8fafc
 ```
 
-Every piece of work gets adversarial review from a separate operator that challenges assumptions, checks for security issues, and either approves, requests rework, or rejects. All state is durable through [Beads](https://github.com/SmooAI/beads).
+**Per-phase routing** — each phase dispatches through a semantic routing slot, so the gateway can pick the right concrete model for the shape of work:
+
+| Phase | Slot | What it does |
+|---|---|---|
+| **ASSESS** | `smooth-thinking` | Deep read of tests + stub + docs; crystallize a 2–4 sentence Goal Summary every later phase sees |
+| **PLAN** | `smooth-planning` | Decompose into implementation steps |
+| **EXECUTE** | `smooth-coding` | Write code using the repo's existing tools (pnpm scripts, Cargo targets, Makefile, CI commands — not generic defaults). Self-validate before stopping. |
+| **VERIFY** | `smooth-coding` | Run the test command, report pass/fail verbatim |
+| **REVIEW** | `smooth-reviewing` | Adversarial critique; may refine the Goal Summary if understanding drifted |
+| **TEST** | `smooth-reviewing` | **The differentiator.** After provided tests pass, classify the code and raise the bar with real coverage — MSW for HTTP mocking, Playwright for real browser flows, testcontainers for DBs, property-based (hypothesis/proptest/fast-check) for pure libraries. Uses the repo's existing framework; doesn't force new deps on a Rust crate or suggest Playwright for a pure CLI. |
+| **FINALIZE** | `smooth-thinking` | Holistic check against the Goal Summary, not just the test results |
+
+**What makes this different.** Most agentic coders bang on the given tests until green. Smooth's TEST phase is adversarial: it classifies what the code actually is (API client? React component? WebSocket? CLI?), inspects what the repo already uses, and then exercises real boundaries — intercepting `fetch` with MSW to test the retry loop, booting a Playwright browser to click the real flow, faking the clock for timer-driven code. If those new tests expose real bugs, the workflow loops back to EXECUTE. If they're clean, it moves on.
+
+**Loop governor.** Stop conditions are budget + plateau, not a fixed iteration cap. `verify_signature` extracts pass/fail counts from each VERIFY and breaks early when the signature repeats (model going in circles). A budget short-circuit breaks when the next iteration would blow the cap. The iteration cap is a safety ceiling, not the primary brake.
+
+**Live status.** The TUI streams an `AgentEvent::PhaseStart` on each phase entry and shows the phase + routing alias + resolved upstream model + a rotating thesaurus phrase in the status bar:
+
+```
+ASSESS · smooth-thinking → kimi-k2-thinking | Pondering… | tokens: 1.2k | spend: $0.003
+```
+
+All state is durable through Smooth's built-in pearl tracker (Dolt-backed per-project, git-syncable).
 
 ---
 
 ## Architecture
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk"}, "themeVariables": {"lineColor": "#f49f0a"}}}%%
 graph TB
     subgraph Host["Host Machine"]
         MSB["msb server<br/><small>Microsandbox daemon</small>"]
@@ -131,6 +181,7 @@ Everything runs inside [Microsandbox](https://github.com/nicholasgasior/microsan
 ### Inside each MicroVM
 
 ```mermaid
+%%{init: {"flowchart": {"defaultRenderer": "elk"}, "themeVariables": {"lineColor": "#f49f0a"}}}%%
 graph LR
     subgraph VM["MicroVM (--scope none)"]
         Operator["Operator / Big Smooth"]
