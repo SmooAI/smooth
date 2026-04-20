@@ -17,7 +17,7 @@ use owo_colors::OwoColorize;
 /// Smooth — AI agent orchestration platform.
 /// Run with no arguments to launch the interactive coding assistant.
 #[derive(Parser)]
-#[command(name = "th", version, about, long_about = None)]
+#[command(name = "th", version = env!("TH_VERSION"), about, long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
