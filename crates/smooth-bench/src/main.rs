@@ -27,8 +27,11 @@ enum Commands {
         /// Language subset. Default: python.
         #[arg(long, default_value = "python")]
         lang: String,
-        /// Budget limit in USD for the LLM calls. Default: $0.50.
-        #[arg(long, default_value_t = 0.50)]
+        /// Budget limit in USD for the LLM calls. Default: $5.00.
+        /// Bench tasks are meant to be exercised end-to-end; we
+        /// push through plateaus (up to 20 outer iterations) and
+        /// need enough headroom that the cap isn't the limiter.
+        #[arg(long, default_value_t = 5.00)]
         budget: f64,
         /// Override the routing (passed through to Big Smooth).
         #[arg(long)]

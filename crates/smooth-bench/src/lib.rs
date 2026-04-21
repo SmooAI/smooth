@@ -138,7 +138,10 @@ impl Default for BenchOpts {
     fn default() -> Self {
         Self {
             big_smooth_url: "http://localhost:4400".into(),
-            budget_usd: Some(0.50),
+            // Bench tasks need enough headroom for the workflow to
+            // push through plateaus — budget is the real limiter
+            // and should not fire on a run that was going to converge.
+            budget_usd: Some(5.00),
             model: None,
         }
     }
