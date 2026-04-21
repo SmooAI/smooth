@@ -305,12 +305,7 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
                     ),
                 )
             };
-            tracing::warn!(
-                outer_iter = state.outer_iteration,
-                exec_retries,
-                reason,
-                "EXECUTE degenerate-case retry"
-            );
+            tracing::warn!(outer_iter = state.outer_iteration, exec_retries, reason, "EXECUTE degenerate-case retry");
             state.execute_force_write_note = Some(note);
             append_progress(
                 &mut state.progress_summary,
@@ -362,6 +357,61 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
                     break;
                 }
             }
+        }
+
+        // Compile-error short-circuit. When VERIFY's output is a
+        // syntax / parse / compile error, REVIEW doesn't add much —
+        // the fix is mechanical (close the delimiter, fix the
+        // import, etc.) and a full REVIEW round spends an LLM call
+        // on prose the model already knows how to produce.
+        // Instead, inject a targeted review-finding directly and
+        // loop straight back to EXECUTE. Saves one LLM call per
+        // cycle and gives EXECUTE a blunt "fix the syntax first"
+        // instruction it can act on.
+        //
+        // The JS bowling bench pattern we keep hitting: agent
+        // appends a second class body after the class closure, jest
+        // parse-errors, VERIFY reports "SyntaxError: Missing
+        // semicolon", the loop was doing REVIEW → EXECUTE but
+        // EXECUTE wasn't pinning on the syntax fix. A direct
+        // override is blunter and cheaper.
+        if let Some(compile_err) = detect_compile_error(state.last_verify_output.as_deref().unwrap_or("")) {
+            tracing::info!(
+                outer_iter = state.outer_iteration,
+                "coding workflow: VERIFY reported a compile/parse error — skipping REVIEW, forcing EXECUTE to fix syntax first"
+            );
+            state.last_review = Some(format!(
+                "## Root cause\n\n\
+                 Your last EXECUTE turn shipped code that does not compile / parse. \
+                 This is the single most common failure mode at this stage of the \
+                 workflow: writing plausible-looking code and declaring done without \
+                 running the test suite to confirm it parses. Fix the syntax before \
+                 anything else — no logic work, no refactors, no new features.\n\n\
+                 ## Compile error from VERIFY\n\n\
+                 {compile_err}\n\n\
+                 ## Specific fixes\n\n\
+                 1. Open the file the error points at. Read it end-to-end.\n\
+                 2. Find the exact line / column the error names. If it's a \"missing \
+                    semicolon\", \"unclosed delimiter\", \"unexpected token\", or \
+                    \"unexpected EOF\", you almost certainly have a class or function \
+                    body that was duplicated, truncated, or had content pasted after \
+                    its closing brace.\n\
+                 3. Delete anything that appears after a module-level export / \
+                    public-API closing brace (e.g. anything after `module.exports = \
+                    Bowling;` in JS, anything after the final `}}` that closes an \
+                    `impl` block in Rust).\n\
+                 4. Run the test command via `bash` to confirm the syntax is valid \
+                    before declaring done.\n\n\
+                 Do NOT produce a new implementation this turn. Just repair the \
+                 syntax of the file you already have."
+            ));
+            append_progress(
+                &mut state.progress_summary,
+                "REVIEW",
+                state.outer_iteration,
+                "compile error — auto-override to fix syntax",
+            );
+            continue;
         }
 
         run_phase(&cfg, CodingPhase::Review, &mut state, review_prompt).await?;
@@ -694,6 +744,58 @@ fn detect_verify_pass(transcript: &str) -> bool {
     // jest / vitest
 }
 
+/// Extract a compile / parse / syntax error from a VERIFY
+/// transcript, or `None` when the failure is a normal test
+/// assertion. Looking for the patterns each language's toolchain
+/// emits when the input doesn't even parse — at that point running
+/// REVIEW → EXECUTE with freeform critique wastes an LLM call on
+/// advice the model already has. A blunt "fix the syntax first"
+/// override closes the loop faster.
+///
+/// Returns a short extracted snippet (the error line + 1–2 lines
+/// of surrounding context) when a pattern matches, suitable for
+/// dropping into the EXECUTE-override note verbatim.
+fn detect_compile_error(transcript: &str) -> Option<String> {
+    // Language-agnostic signatures. Each is unambiguous — a real
+    // test assertion won't print these phrases. We match the raw
+    // case to preserve line numbers / column numbers in the
+    // snippet, but detect case-insensitively.
+    let upper = transcript.to_uppercase();
+    let patterns = [
+        // JavaScript / TypeScript — jest / vitest / babel / swc / node
+        "SYNTAXERROR",
+        "UNEXPECTED TOKEN",
+        "MISSING SEMICOLON",
+        "UNCLOSED DELIMITER",
+        "UNEXPECTED EOF",
+        // Rust — cargo / rustc
+        "COULD NOT COMPILE",
+        "THIS FILE CONTAINS AN UNCLOSED DELIMITER",
+        "EXPECTED ONE OF",
+        // Go — gc / go build
+        "SYNTAX ERROR:",
+        "EXPECTED '{'",
+        "EXPECTED ';'",
+        // Python — py_compile / pytest collect-time failure
+        "INDENTATIONERROR",
+        "TABERROR",
+        // Java — javac / gradle compile
+        "REACHED END OF FILE",
+        "';' EXPECTED",
+        "CLASS, INTERFACE, OR ENUM EXPECTED",
+        "ERROR: COMPILATION FAILED",
+    ];
+    let hit_idx = patterns.iter().find_map(|p| upper.find(p))?;
+    // Grab the error line + a small surrounding window from the
+    // ORIGINAL (case-preserving) transcript, not the uppercased copy.
+    // Clamp so we don't drag a megabyte of trailing noise.
+    let bytes_per_char = transcript.len().checked_div(upper.len()).unwrap_or(1).max(1);
+    let start = hit_idx.saturating_mul(bytes_per_char).saturating_sub(120);
+    let end = (hit_idx.saturating_mul(bytes_per_char).saturating_add(600)).min(transcript.len());
+    let snippet = transcript.get(start..end).unwrap_or(transcript);
+    Some(snippet.trim().to_string())
+}
+
 /// True when the transcript contains a summary line reporting a
 /// POSITIVE number of failures (e.g. "3 failed", "Tests: 2 failed,
 /// 28 passed"). Zero-failure counts ("0 failed") don't count — they
@@ -752,11 +854,7 @@ fn count_write_tool_calls(conv: &crate::conversation::Conversation) -> usize {
 /// tests?" check — zero `bash` calls after a write means the
 /// agent shipped without self-validation.
 fn count_tool_calls_named(conv: &crate::conversation::Conversation, name: &str) -> usize {
-    conv.messages
-        .iter()
-        .flat_map(|m| m.tool_calls.iter())
-        .filter(|tc| tc.name == name)
-        .count()
+    conv.messages.iter().flat_map(|m| m.tool_calls.iter()).filter(|tc| tc.name == name).count()
 }
 
 fn summarize_conversation(conv: &crate::conversation::Conversation) -> String {
@@ -1436,6 +1534,74 @@ mod tests {
         let (_sys, user) = execute_prompt(&state, "task");
         assert!(!user.contains("YOUR PRIOR TURN WROTE NOTHING"));
         assert!(user.contains("regular review critique"));
+    }
+
+    #[test]
+    fn detect_compile_error_catches_js_parse_error() {
+        // The exact shape we've been hitting on JS bowling — agent
+        // appended content after the class closure, jest babel parse
+        // errored out on the unexpected constructor.
+        let jest_out = "TESTS FAILED:\n\n\
+            FAIL ./bowling.spec.js\n  \
+            Test suite failed to run\n\n    \
+            SyntaxError: /workspace/bowling.js: Missing semicolon. (151:15)\n\n      \
+            149 | module.exports = Bowling;\n      \
+            150 |\n    > \
+            151 |   constructor() {\n          \
+                |               ^\n      \
+            152 |     this.rolls = [];";
+        let err = detect_compile_error(jest_out).expect("should detect parse error");
+        assert!(err.to_lowercase().contains("syntaxerror") || err.contains("Missing semicolon"));
+    }
+
+    #[test]
+    fn detect_compile_error_catches_rust_unclosed_delimiter() {
+        let cargo_out = "TESTS FAILED:\n\n\
+            error: this file contains an unclosed delimiter\n   \
+            --> src/lib.rs:193:3\n";
+        assert!(detect_compile_error(cargo_out).is_some());
+    }
+
+    #[test]
+    fn detect_compile_error_catches_go_syntax_error() {
+        let go_out = "TESTS FAILED:\n./bowling.go:45:2: syntax error: unexpected }";
+        assert!(detect_compile_error(go_out).is_some());
+    }
+
+    #[test]
+    fn detect_compile_error_ignores_real_assertion_failure() {
+        // This is a LOGIC failure, not a compile failure — the code
+        // parses fine, it just produced the wrong number. REVIEW
+        // should handle it normally, not the compile-error override.
+        let rust_out = "TESTS FAILED:\n\
+            test all_strikes_is_a_perfect_score_of_300 ... FAILED\n  \
+            left: None\n  right: Some(300)\n\
+            assertion `left == right` failed";
+        assert!(detect_compile_error(rust_out).is_none());
+    }
+
+    #[test]
+    fn detect_compile_error_ignores_jest_assertion_diff() {
+        let jest_out = "TESTS FAILED:\n\
+            Bowling › consecutive strikes each get the two roll bonus\n\
+            expect(received).toEqual(expected)\n\
+            Expected: 81\nReceived: 66";
+        assert!(detect_compile_error(jest_out).is_none());
+    }
+
+    #[test]
+    fn detect_compile_error_catches_python_indentation() {
+        let py_out = "TESTS FAILED:\n\
+            IndentationError: expected an indented block";
+        assert!(detect_compile_error(py_out).is_some());
+    }
+
+    #[test]
+    fn detect_compile_error_catches_java_compilation_failed() {
+        let java_out = "FAILURE: Build failed with an exception.\n\n\
+            * What went wrong:\n\
+            Execution failed for task ':compileJava'.\n> Error: Compilation failed; see the compiler error output for details.";
+        assert!(detect_compile_error(java_out).is_some());
     }
 
     #[test]
