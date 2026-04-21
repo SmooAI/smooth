@@ -1733,11 +1733,15 @@ async fn main() {
                     registry: Arc::new(registry),
                     tools,
                     budget_usd: config.budget_usd,
-                    // 10 is a safety net, not the primary governor — the
-                    // workflow breaks out on budget exhaustion and on
-                    // plateau (identical verify signature twice in a row).
-                    // Override via env only when debugging stuck loops.
-                    max_outer_iterations: std::env::var("SMOOTH_WORKFLOW_MAX_ITERATIONS").ok().and_then(|v| v.parse().ok()).unwrap_or(10),
+                    // 20 is a safety net, not the primary governor — the
+                    // workflow now pushes through plateaus by escalating
+                    // (scrap approach, re-examine mental model, one
+                    // test at a time) instead of bailing, so the cap
+                    // needs to be generous enough that a stubborn task
+                    // can burn enough iterations to actually converge.
+                    // Budget is the real limiter.
+                    // Override via env when debugging stuck loops.
+                    max_outer_iterations: std::env::var("SMOOTH_WORKFLOW_MAX_ITERATIONS").ok().and_then(|v| v.parse().ok()).unwrap_or(20),
                     // Skip the adversarial TEST phase for benchmark
                     // runs where adding new tests / deps would
                     // change the score. Default off — real coding

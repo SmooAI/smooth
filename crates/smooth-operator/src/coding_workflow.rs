@@ -197,6 +197,13 @@ struct WorkflowState {
     /// us keep the REVIEW prompt untouched while still threading a
     /// blunt "you wrote no code last turn" warning when needed.
     execute_force_write_note: Option<String>,
+    /// Override string for the next EXECUTE when the outer loop
+    /// detects we're plateauing (same failure signature repeating
+    /// without progress). Tells the model: scrap the current
+    /// implementation, try a different approach — the one you're
+    /// iterating on isn't converging. Cleared once EXECUTE runs
+    /// with it applied.
+    force_new_approach_note: Option<String>,
     outer_iteration: u32,
     total_cost_usd: f64,
 }
@@ -222,21 +229,26 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
     // Stop conditions, in order of priority:
     //   1. verify_passed → done, break to FINALIZE
     //   2. budget would be exhausted before next cycle → break
-    //   3. plateau: three consecutive identical verify signatures → break
-    //   4. hard cap max_outer_iterations → break
+    //   3. hard cap max_outer_iterations → break (safety net only)
     //
-    // The cap is a safety net, not the primary governor. Budget +
-    // plateau detection do most of the work. Plateau is the
-    // trickiest knob: too eager and we give up on tasks where the
-    // next REVIEW→EXECUTE would have closed the gap (bench runs
-    // routinely stop at 28/31 when 31/31 was one more cycle away);
-    // too lax and the loop burns budget on a stuck model. Three
-    // identical signatures in a row is the sweet spot — one repeat
-    // can be an unlucky re-fix that happened to yield the same
-    // failure count with different specifics; three says the model
-    // really is going in circles.
+    // Note: we no longer bail on "plateau" (identical failure
+    // signatures). A human debugging wouldn't stop just because
+    // the same 3 tests failed twice in a row — they'd change
+    // approach. So do we: when we detect a genuine plateau, we
+    // inject a `force_new_approach_note` into the next EXECUTE
+    // telling it to scrap its current implementation and try a
+    // different one, and we keep looping. Only budget / cap stop
+    // us. This matches the user's intuition: "we know the model
+    // CAN solve this; why give up?".
+    //
+    // Progress detection: if `failed_count` is strictly dropping
+    // across iterations, we're making progress and reset the
+    // plateau strike counter. Only when failed_count stops
+    // decreasing AND the signature repeats do we escalate.
     let mut last_verify_signature: Option<String> = None;
+    let mut min_failed_seen: Option<u32> = None;
     let mut plateau_strikes = 0u32;
+    let mut approach_escalation: u32 = 0;
     for _ in 0..cfg.max_outer_iterations {
         state.outer_iteration += 1;
 
@@ -316,6 +328,10 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
             run_phase(&cfg, CodingPhase::Execute, &mut state, execute_prompt).await?;
         }
         state.execute_force_write_note = None;
+        // force_new_approach_note is consumed by this EXECUTE call;
+        // clear it so future iterations don't re-apply the same
+        // override unless a fresh plateau is detected.
+        state.force_new_approach_note = None;
 
         run_phase(&cfg, CodingPhase::Verify, &mut state, verify_prompt).await?;
 
@@ -324,20 +340,54 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
         }
 
         let sig = verify_signature(state.last_verify_output.as_deref().unwrap_or(""));
-        if Some(&sig) == last_verify_signature.as_ref() {
+        let current_failed = extract_failed_count(state.last_verify_output.as_deref().unwrap_or(""));
+
+        // Progress-aware plateau. Reset strikes whenever we're
+        // improving (strictly fewer failing tests than the best
+        // we've seen). "Same signature twice" isn't plateau if
+        // we're also going from 10 failed to 4 failed — the
+        // specifics changed even though the count summary string
+        // happened to land on the same format.
+        let improving = match (current_failed, min_failed_seen) {
+            (Some(now), Some(best)) => now < best,
+            (Some(_now), None) => true,
+            _ => false,
+        };
+        if let Some(now) = current_failed {
+            min_failed_seen = Some(min_failed_seen.map_or(now, |best| best.min(now)));
+        }
+
+        if improving {
+            plateau_strikes = 0;
+        } else if Some(&sig) == last_verify_signature.as_ref() {
             plateau_strikes += 1;
-            if plateau_strikes >= 2 {
-                tracing::info!(
-                    strikes = plateau_strikes,
-                    signature = %sig,
-                    "coding workflow: plateau detected (three identical verify signatures in a row), stopping early"
-                );
-                break;
-            }
         } else {
             plateau_strikes = 0;
         }
-        last_verify_signature = Some(sig);
+        last_verify_signature = Some(sig.clone());
+
+        // Plateau escalation. Instead of breaking out, inject a
+        // "scrap your approach, try something different" override
+        // and continue the loop. If we hit the same wall N escalations
+        // in a row with no movement, we STILL continue to the hard cap
+        // — the user's explicit directive is "push through until
+        // solved". Budget is the real limiter.
+        if plateau_strikes >= 2 {
+            approach_escalation += 1;
+            plateau_strikes = 0; // reset after escalating
+            tracing::info!(
+                escalation = approach_escalation,
+                signature = %sig,
+                "coding workflow: plateau — escalating with 'try a different approach' override"
+            );
+            state.force_new_approach_note = Some(new_approach_note(approach_escalation, &sig));
+            append_progress(
+                &mut state.progress_summary,
+                "REVIEW",
+                state.outer_iteration,
+                &format!("plateau — escalation #{approach_escalation} (try different approach)"),
+            );
+        }
 
         // Budget: break if the next iteration would likely blow the
         // cap. Rough heuristic — next iter costs roughly as much as
@@ -744,6 +794,80 @@ fn detect_verify_pass(transcript: &str) -> bool {
     // jest / vitest
 }
 
+/// Extract the "N failed" count from a VERIFY transcript. Returns
+/// `None` when no digit-before-"failed" shape matches (e.g. compile
+/// errors, runner summaries we can't parse). A missing count just
+/// falls through to the plateau-signature check — we prefer a false
+/// negative (keep going) to a false positive (give up early).
+fn extract_failed_count(transcript: &str) -> Option<u32> {
+    scan_count(&transcript.to_lowercase(), "failed")
+}
+
+/// Build the EXECUTE override for a detected plateau. Levels:
+/// 1 → "scrap and rewrite from scratch, simpler approach".
+/// 2 → "the problem is likely your mental model; re-read the tests".
+/// 3+ → "you are stuck in a loop. Pick ONE failing test, isolate it,
+///       make only that test pass, then move to the next".
+fn new_approach_note(escalation: u32, signature: &str) -> String {
+    match escalation {
+        1 => format!(
+            "PLATEAU — START OVER.\n\n\
+             You've run the same test suite with the same failure shape \
+             twice in a row ({signature}). That means your current \
+             approach isn't converging: the patches you're making aren't \
+             closing the actual gap, and more of the same won't help.\n\n\
+             This turn, SCRAP your current implementation and rewrite it \
+             from scratch with a DIFFERENT approach:\n\
+             - If you've been using a complex state machine, try the \
+               simplest possible version — just walk through the rolls \
+               and sum scores.\n\
+             - If you've been tracking cached bonus state, drop it and \
+               recompute from `rolls` every time `score()` is called.\n\
+             - If your frame-boundary logic is tangled, use explicit \
+               per-frame loops with clear start/end indices instead of \
+               running counters.\n\n\
+             Start from the test file. Read it end-to-end. Pick the \
+             smallest possible implementation that could satisfy it. \
+             Then run the tests."
+        ),
+        2 => format!(
+            "PLATEAU — MENTAL MODEL CHECK.\n\n\
+             You're on your second escalation. Signature: {signature}. \
+             The first 'try a different approach' didn't close the gap. \
+             That suggests the issue isn't the approach but the \
+             understanding: you're solving a subtly different problem \
+             than the tests expect.\n\n\
+             Re-read the ACTUAL failing test assertions, one at a time. \
+             Don't read your code first. For each failure: what exact \
+             behaviour does the test expect, and what did the code \
+             actually produce? The gap between those two is the bug.\n\n\
+             Common mental-model errors:\n\
+             - Off-by-one on frame boundaries (strikes vs non-strikes).\n\
+             - Treating the 10th frame like frames 1–9 (it has different \
+               rules).\n\
+             - Misunderstanding when `score()` is defined vs undefined.\n\
+             - Mis-ordering validation (pin count, frame completion, \
+               game-over).\n\n\
+             Write down your mental model in 3 sentences before editing. \
+             Then verify the model against the failing tests."
+        ),
+        _ => format!(
+            "PLATEAU — ISOLATE ONE FAILURE.\n\n\
+             Escalation #{escalation}, signature {signature}. You've \
+             tried restarting from scratch AND re-examining your mental \
+             model. Neither closed the gap.\n\n\
+             Stop trying to pass the whole suite. Pick the FIRST failing \
+             test in the list. Read it in detail. Make ONLY that test \
+             pass — don't care what breaks elsewhere. Write the implementation \
+             in the narrowest possible form that handles exactly that one \
+             case. Run the tests. If that test now passes, pick the next \
+             failing test and widen the implementation to handle it too. \
+             Repeat until the suite converges.\n\n\
+             The goal is progress, not elegance. One green test at a time."
+        ),
+    }
+}
+
 /// Extract a compile / parse / syntax error from a VERIFY
 /// transcript, or `None` when the failure is a normal test
 /// assertion. Looking for the patterns each language's toolchain
@@ -1032,13 +1156,21 @@ itself is off.";
     let plan = state.plan.as_deref().unwrap_or("(no plan available)");
     let review = state.last_review.as_deref().unwrap_or("(first iteration — no prior review)");
     let progress = progress_block(&state.progress_summary);
-    // If the prior EXECUTE turn was a no-op (zero writes), prepend
-    // a blunt force-write note so this turn starts with the
-    // correction instead of more context the agent will paraphrase.
-    let review_block = match state.execute_force_write_note.as_deref() {
-        Some(note) => format!("{note}\n\n---\n\n{review}"),
-        None => review.to_string(),
-    };
+    // Overrides stack (force_new_approach takes priority, then
+    // force_write, then the normal REVIEW critique). Each override
+    // is for a different degenerate case; only one applies per
+    // turn in practice but handle both for safety. The new-approach
+    // note outranks write/bash retries because it's specifically
+    // saying "your current code is the problem" — and if you're
+    // about to rewrite from scratch, the old write-count warnings
+    // don't apply.
+    let mut review_block = review.to_string();
+    if let Some(note) = state.execute_force_write_note.as_deref() {
+        review_block = format!("{note}\n\n---\n\n{review_block}");
+    }
+    if let Some(note) = state.force_new_approach_note.as_deref() {
+        review_block = format!("{note}\n\n---\n\n{review_block}");
+    }
     let user = format!(
         "Task:\n\n{task}\n\n## Goal Summary (keep this in mind while coding)\n\n{goal}\n\n## Work So Far\n\n{progress}\n\n## Implementation plan\n\n{plan}\n\n## Review findings to address\n\n{review_block}\n\nImplement the solution, RUN THE TEST SUITE, and iterate until green (or you've exhausted your attempts). When you stop, include: (1) a one-paragraph summary of what you changed, (2) a `## Progress Update` section with a single-line description of this iteration's contribution, and (3) a `## Test Results` line with the literal pass/fail count from your final test run (e.g., \"31 passed, 0 failed\" or \"28 passed, 3 failed — unresolved: tenth-frame strike bonus\")."
     );
@@ -1608,6 +1740,48 @@ mod tests {
     fn detect_verify_pass_accepts_go_full_green() {
         let go = "ok  bowling 0.123s — 22 passed, 0 failed, 0 errors";
         assert!(detect_verify_pass(go));
+    }
+
+    #[test]
+    fn extract_failed_count_catches_standard_shapes() {
+        assert_eq!(extract_failed_count("3 failed, 28 passed"), Some(3));
+        assert_eq!(extract_failed_count("Tests: 15 failed, 16 passed"), Some(15));
+        assert_eq!(extract_failed_count("test result: FAILED. 28 passed; 3 failed"), Some(3));
+        assert_eq!(extract_failed_count("all tests pass"), None);
+    }
+
+    #[test]
+    fn new_approach_note_escalates_with_level() {
+        let lvl1 = new_approach_note(1, "26p/5f");
+        let lvl2 = new_approach_note(2, "26p/5f");
+        let lvl3 = new_approach_note(5, "26p/5f");
+        // Level 1: restart with different approach
+        assert!(lvl1.contains("SCRAP") || lvl1.contains("scrap"));
+        assert!(lvl1.contains("26p/5f"));
+        // Level 2: re-examine mental model
+        assert!(lvl2.to_lowercase().contains("mental model"));
+        // Level 3+: isolate one failing test
+        assert!(lvl3.to_lowercase().contains("one") && lvl3.to_lowercase().contains("test"));
+    }
+
+    #[test]
+    fn execute_prompt_prepends_new_approach_note_above_write_note() {
+        let state = WorkflowState {
+            force_new_approach_note: Some("PLATEAU — START OVER.".into()),
+            execute_force_write_note: Some("YOUR PRIOR TURN WROTE NOTHING.".into()),
+            last_review: Some("prior critique".into()),
+            ..Default::default()
+        };
+        let (_sys, user) = execute_prompt(&state, "task");
+        // All three appear.
+        assert!(user.contains("PLATEAU — START OVER"));
+        assert!(user.contains("YOUR PRIOR TURN WROTE NOTHING"));
+        assert!(user.contains("prior critique"));
+        // Order: new-approach > write-note > review.
+        let p1 = user.find("PLATEAU — START OVER").unwrap();
+        let p2 = user.find("YOUR PRIOR TURN").unwrap();
+        let p3 = user.find("prior critique").unwrap();
+        assert!(p1 < p2 && p2 < p3, "note order: plateau → write → review");
     }
 
     #[test]
