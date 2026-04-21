@@ -803,67 +803,71 @@ fn extract_failed_count(transcript: &str) -> Option<u32> {
     scan_count(&transcript.to_lowercase(), "failed")
 }
 
-/// Build the EXECUTE override for a detected plateau. Levels:
-/// 1 → "scrap and rewrite from scratch, simpler approach".
-/// 2 → "the problem is likely your mental model; re-read the tests".
-/// 3+ → "you are stuck in a loop. Pick ONE failing test, isolate it,
-///       make only that test pass, then move to the next".
+/// Build the EXECUTE override for a detected plateau. Phrased the
+/// way a senior engineer would nudge a teammate who's stuck —
+/// "take another pass", "try a different angle" — NOT "throw your
+/// work away". Most of the current code is probably right; the gap
+/// is usually in a handful of edge cases, and rewriting from
+/// scratch regresses the majority that already works. Levels:
+///
+/// 1 → "Take another shot at just the failing tests. Keep what's
+///      passing. Look at the failures fresh."
+/// 2 → "Try a different angle on the same failures — you've been
+///      making the same fix twice."
+/// 3+ → "Isolate one failing test. Fix only that. Then the next.
+///       Don't touch tests that are already green."
 fn new_approach_note(escalation: u32, signature: &str) -> String {
     match escalation {
         1 => format!(
-            "PLATEAU — START OVER.\n\n\
-             You've run the same test suite with the same failure shape \
-             twice in a row ({signature}). That means your current \
-             approach isn't converging: the patches you're making aren't \
-             closing the actual gap, and more of the same won't help.\n\n\
-             This turn, SCRAP your current implementation and rewrite it \
-             from scratch with a DIFFERENT approach:\n\
-             - If you've been using a complex state machine, try the \
-               simplest possible version — just walk through the rolls \
-               and sum scores.\n\
-             - If you've been tracking cached bonus state, drop it and \
-               recompute from `rolls` every time `score()` is called.\n\
-             - If your frame-boundary logic is tangled, use explicit \
-               per-frame loops with clear start/end indices instead of \
-               running counters.\n\n\
-             Start from the test file. Read it end-to-end. Pick the \
-             smallest possible implementation that could satisfy it. \
-             Then run the tests."
+            "PLATEAU — TAKE ANOTHER SHOT.\n\n\
+             The test suite ran twice in a row with the same failure \
+             shape ({signature}). Your last fix didn't move the \
+             needle.\n\n\
+             That doesn't mean your code is wrong overall — most of \
+             the passing tests are probably passing for good reasons, \
+             and you should keep that code as-is. The gap is in a \
+             handful of specific edge cases.\n\n\
+             For THIS turn:\n\
+             - DO NOT rewrite from scratch. Keep every test that's \
+               currently green actually green.\n\
+             - Look at the failing tests with fresh eyes. Pretend you \
+               just saw them for the first time.\n\
+             - Run the suite again after your change and confirm the \
+               failure count dropped (or at least the specific \
+               failures changed)."
         ),
         2 => format!(
-            "PLATEAU — MENTAL MODEL CHECK.\n\n\
-             You're on your second escalation. Signature: {signature}. \
-             The first 'try a different approach' didn't close the gap. \
-             That suggests the issue isn't the approach but the \
-             understanding: you're solving a subtly different problem \
-             than the tests expect.\n\n\
-             Re-read the ACTUAL failing test assertions, one at a time. \
-             Don't read your code first. For each failure: what exact \
-             behaviour does the test expect, and what did the code \
-             actually produce? The gap between those two is the bug.\n\n\
-             Common mental-model errors:\n\
-             - Off-by-one on frame boundaries (strikes vs non-strikes).\n\
-             - Treating the 10th frame like frames 1–9 (it has different \
-               rules).\n\
-             - Misunderstanding when `score()` is defined vs undefined.\n\
-             - Mis-ordering validation (pin count, frame completion, \
-               game-over).\n\n\
-             Write down your mental model in 3 sentences before editing. \
-             Then verify the model against the failing tests."
+            "PLATEAU — TRY A DIFFERENT ANGLE.\n\n\
+             Second escalation, signature {signature}. Your last two \
+             attempts both got the same result, which means you're \
+             re-making the same fix. Time to look at it from a \
+             different angle, not re-apply the one that didn't work.\n\n\
+             What's NOT working is the fix you've been trying. Instead:\n\
+             - Read the EXACT assertion in the first failing test. \
+               Don't paraphrase. What literal values does it expect?\n\
+             - Trace your code by hand with the test's inputs. At \
+               what line does your output diverge from what the \
+               test expects?\n\
+             - Once you've found the divergence point, THAT's the \
+               bug. The fix is usually a two-line change, not a \
+               refactor.\n\n\
+             Keep every passing test passing. Narrow your edit to \
+             the smallest change that closes the specific gap."
         ),
         _ => format!(
-            "PLATEAU — ISOLATE ONE FAILURE.\n\n\
+            "PLATEAU — ISOLATE ONE TEST.\n\n\
              Escalation #{escalation}, signature {signature}. You've \
-             tried restarting from scratch AND re-examining your mental \
-             model. Neither closed the gap.\n\n\
-             Stop trying to pass the whole suite. Pick the FIRST failing \
-             test in the list. Read it in detail. Make ONLY that test \
-             pass — don't care what breaks elsewhere. Write the implementation \
-             in the narrowest possible form that handles exactly that one \
-             case. Run the tests. If that test now passes, pick the next \
-             failing test and widen the implementation to handle it too. \
-             Repeat until the suite converges.\n\n\
-             The goal is progress, not elegance. One green test at a time."
+             taken two fresh passes and it's still not moving.\n\n\
+             Zoom all the way in: pick the FIRST failing test. Read \
+             its assertions. Make ONLY that test pass — a targeted \
+             patch on the narrowest code path that handles exactly \
+             its inputs. Do not rewrite anything. Do not regress \
+             tests that are green. Run the suite; confirm that test \
+             moved from failing to passing without any green test \
+             flipping to red. Then pick the next failing test and \
+             repeat.\n\n\
+             One test at a time. Patch-sized changes. Keep the \
+             working parts working."
         ),
     }
 }
@@ -1755,13 +1759,31 @@ mod tests {
         let lvl1 = new_approach_note(1, "26p/5f");
         let lvl2 = new_approach_note(2, "26p/5f");
         let lvl3 = new_approach_note(5, "26p/5f");
-        // Level 1: restart with different approach
-        assert!(lvl1.contains("SCRAP") || lvl1.contains("scrap"));
-        assert!(lvl1.contains("26p/5f"));
-        // Level 2: re-examine mental model
-        assert!(lvl2.to_lowercase().contains("mental model"));
-        // Level 3+: isolate one failing test
-        assert!(lvl3.to_lowercase().contains("one") && lvl3.to_lowercase().contains("test"));
+        // Every level must keep signature visible so the model
+        // knows what failure shape is plateauing.
+        for note in [&lvl1, &lvl2, &lvl3] {
+            assert!(note.contains("26p/5f"));
+        }
+        // Every level must explicitly preserve passing tests —
+        // the whole point of this softer escalation is to avoid
+        // the "scrap and rewrite" regression pattern.
+        assert!(
+            lvl1.to_lowercase().contains("passing") || lvl1.to_lowercase().contains("keep"),
+            "level 1 must preserve passing tests"
+        );
+        assert!(
+            lvl1.to_lowercase().contains("do not rewrite") || lvl1.to_lowercase().contains("not rewrite"),
+            "level 1 must forbid from-scratch rewrite"
+        );
+        // Level 2: look at it from a different angle (not rewrite).
+        assert!(lvl2.to_lowercase().contains("different angle") || lvl2.to_lowercase().contains("fresh"));
+        // Level 3+: isolate one failing test, narrow patch, keep greens green.
+        let lvl3_low = lvl3.to_lowercase();
+        assert!(lvl3_low.contains("one") && lvl3_low.contains("test"));
+        assert!(
+            lvl3_low.contains("green") || lvl3_low.contains("passing"),
+            "level 3 must also forbid regressing passing tests"
+        );
     }
 
     #[test]
