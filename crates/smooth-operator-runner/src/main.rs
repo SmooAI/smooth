@@ -1750,6 +1750,13 @@ async fn main() {
                         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                         .unwrap_or(false),
                     tx: tx.clone(),
+                    // Pass the workspace root so the workflow can
+                    // snapshot it at the best-seen iteration and
+                    // restore on regression. Defaults to the same
+                    // path the tool registry scopes to.
+                    workspace_root: Some(std::path::PathBuf::from(
+                        std::env::var("SMOOTH_WORKSPACE").unwrap_or_else(|_| "/workspace".into()),
+                    )),
                 };
                 match run_coding_workflow(cfg).await {
                     // Workflow emits its own Completed event — return
