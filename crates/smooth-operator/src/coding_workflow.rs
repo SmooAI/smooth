@@ -26,6 +26,7 @@
 //! All workflow does is sequence Agent invocations with the right
 //! prompts, slots, and context.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context};
@@ -129,6 +130,13 @@ pub struct CodingWorkflowConfig {
     /// Event sink — every AgentEvent from every phase flows here,
     /// plus `PhaseStart` markers between phases.
     pub tx: UnboundedSender<AgentEvent>,
+    /// Workspace root — the directory the agent is editing. Used
+    /// by the best-state snapshotter so the outer loop can save a
+    /// copy of the workspace at the lowest-failure-count iteration
+    /// and restore it at exit if a later cycle regressed. Set to
+    /// `/workspace` in the sandboxed path; `None` otherwise
+    /// (snapshotting silently skipped).
+    pub workspace_root: Option<PathBuf>,
 }
 
 /// Summary of what each phase produced. Carried across phases so
@@ -204,6 +212,13 @@ struct WorkflowState {
     /// iterating on isn't converging. Cleared once EXECUTE runs
     /// with it applied.
     force_new_approach_note: Option<String>,
+    /// Path to the workspace root — bind-mounted at /workspace
+    /// inside the sandbox. Used by the best-state snapshotter so
+    /// the loop can preserve the lowest-failure-count iteration
+    /// and restore it at exit if a later escalation regressed.
+    /// `None` when running outside a sandbox (classic dev path);
+    /// snapshotting is skipped silently in that case.
+    workspace_root: Option<PathBuf>,
     outer_iteration: u32,
     total_cost_usd: f64,
 }
@@ -216,7 +231,10 @@ struct WorkflowState {
 /// and get logged as `AgentEvent::Error`, not propagated (same
 /// contract as `Agent::run_with_channel`).
 pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f64> {
-    let mut state = WorkflowState::default();
+    let mut state = WorkflowState {
+        workspace_root: cfg.workspace_root.clone(),
+        ..WorkflowState::default()
+    };
 
     // ASSESS ------------------------------------------------------------
     run_phase(&cfg, CodingPhase::Assess, &mut state, assess_prompt).await?;
@@ -342,17 +360,31 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
         let sig = verify_signature(state.last_verify_output.as_deref().unwrap_or(""));
         let current_failed = extract_failed_count(state.last_verify_output.as_deref().unwrap_or(""));
 
-        // Progress-aware plateau. Reset strikes whenever we're
-        // improving (strictly fewer failing tests than the best
-        // we've seen). "Same signature twice" isn't plateau if
-        // we're also going from 10 failed to 4 failed — the
-        // specifics changed even though the count summary string
-        // happened to land on the same format.
+        // Best-state tracking. When the current iteration has
+        // fewer failing tests than the best we've seen, snapshot
+        // the workspace so FINALIZE can restore to it if later
+        // cycles regress. "A human wouldn't lose their 30/31
+        // solution by experimenting" — this implements that rule.
+        // Snapshot is best-effort; failures log but don't abort.
         let improving = match (current_failed, min_failed_seen) {
             (Some(now), Some(best)) => now < best,
             (Some(_now), None) => true,
             _ => false,
         };
+        if improving {
+            if let Some(ref ws) = state.workspace_root {
+                let snapshot_dir = best_snapshot_dir(ws);
+                if let Err(e) = snapshot_workspace(ws, &snapshot_dir) {
+                    tracing::warn!(error = %e, "best-state snapshot failed; continuing without");
+                } else {
+                    tracing::info!(
+                        failed = current_failed,
+                        snapshot = %snapshot_dir.display(),
+                        "best-state snapshot saved"
+                    );
+                }
+            }
+        }
         if let Some(now) = current_failed {
             min_failed_seen = Some(min_failed_seen.map_or(now, |best| best.min(now)));
         }
@@ -366,19 +398,32 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
         }
         last_verify_signature = Some(sig.clone());
 
-        // Plateau escalation. Instead of breaking out, inject a
-        // "scrap your approach, try something different" override
-        // and continue the loop. If we hit the same wall N escalations
-        // in a row with no movement, we STILL continue to the hard cap
-        // — the user's explicit directive is "push through until
-        // solved". Budget is the real limiter.
+        // Close-to-green stop. When we've plateaued AND we're
+        // already within a handful of failures of green, further
+        // iteration has a high chance of regressing the suite.
+        // Each LLM call is a dice roll; the model that hit 3/31
+        // probably can't close the last 3 without some variance
+        // shaking loose something that was passing. Stop here and
+        // keep the best-seen state.
+        const CLOSE_TO_GREEN_THRESHOLD: u32 = 3;
         if plateau_strikes >= 2 {
+            let close_to_green = min_failed_seen.is_some_and(|n| n <= CLOSE_TO_GREEN_THRESHOLD);
+            if close_to_green {
+                tracing::info!(
+                    best_failed = min_failed_seen,
+                    signature = %sig,
+                    "coding workflow: plateaued within {CLOSE_TO_GREEN_THRESHOLD} failures of green — stopping to avoid regression"
+                );
+                break;
+            }
+            // Not close to green — escalate and keep going.
             approach_escalation += 1;
-            plateau_strikes = 0; // reset after escalating
+            plateau_strikes = 0;
             tracing::info!(
                 escalation = approach_escalation,
                 signature = %sig,
-                "coding workflow: plateau — escalating with 'try a different approach' override"
+                best_failed = min_failed_seen,
+                "coding workflow: plateau (not close to green) — escalating with 'try a different angle' override"
             );
             state.force_new_approach_note = Some(new_approach_note(approach_escalation, &sig));
             append_progress(
@@ -467,6 +512,48 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
         run_phase(&cfg, CodingPhase::Review, &mut state, review_prompt).await?;
     }
 
+    // Best-state restore. If we exited the loop without going
+    // green AND a later iteration regressed past the best we saw,
+    // roll the workspace back to the snapshot we took at the
+    // best iteration. FINALIZE (and the bench scorer) will see
+    // the best-seen state rather than whatever the last botched
+    // iteration left behind. A human wouldn't turn in the regressed
+    // version; neither should we.
+    if !state.verify_passed {
+        let current_failed = extract_failed_count(state.last_verify_output.as_deref().unwrap_or(""));
+        if let (Some(ref ws), Some(best), Some(now)) = (&state.workspace_root, min_failed_seen, current_failed) {
+            if now > best {
+                let snapshot_dir = best_snapshot_dir(ws);
+                if snapshot_dir.is_dir() {
+                    match restore_workspace(&snapshot_dir, ws) {
+                        Ok(()) => {
+                            tracing::info!(
+                                best_failed = best,
+                                current_failed = now,
+                                "coding workflow: restored workspace to best-seen state (reverted regression)"
+                            );
+                            append_progress(
+                                &mut state.progress_summary,
+                                "RESTORE",
+                                state.outer_iteration,
+                                &format!("reverted regression — workspace back at best ({best} failed)"),
+                            );
+                        }
+                        Err(e) => tracing::warn!(error = %e, "best-state restore failed"),
+                    }
+                }
+            }
+        }
+        // Clean up the snapshot dir so it doesn't leak into the
+        // bench scorer's view of the workspace or a follow-up run.
+        if let Some(ref ws) = state.workspace_root {
+            let snapshot_dir = best_snapshot_dir(ws);
+            if snapshot_dir.is_dir() {
+                let _ = std::fs::remove_dir_all(&snapshot_dir);
+            }
+        }
+    }
+
     // TEST --------------------------------------------------------------
     // Only run when the core verify passed AND the caller didn't
     // opt out. If TEST adds tests that reveal real bugs, loop back
@@ -504,6 +591,16 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
                 // keep drilling. FINALIZE will report the regression.
                 break;
             }
+        }
+    }
+
+    // Clean up the best-state snapshot on the green path too so
+    // it doesn't leak into the scorer's view of the workspace or
+    // confuse follow-up runs on the same workspace.
+    if let Some(ref ws) = state.workspace_root {
+        let snapshot_dir = best_snapshot_dir(ws);
+        if snapshot_dir.is_dir() {
+            let _ = std::fs::remove_dir_all(&snapshot_dir);
         }
     }
 
@@ -801,6 +898,106 @@ fn detect_verify_pass(transcript: &str) -> bool {
 /// negative (keep going) to a false positive (give up early).
 fn extract_failed_count(transcript: &str) -> Option<u32> {
     scan_count(&transcript.to_lowercase(), "failed")
+}
+
+/// Location of the best-state snapshot inside a workspace.
+/// Hidden dir (leading `.`) so language test runners skip it —
+/// cargo, pytest, jest, go test, gradle all ignore dotfile dirs
+/// by default. Living under the workspace itself rather than a
+/// sibling dir keeps the snapshot reachable without additional
+/// mount plumbing.
+fn best_snapshot_dir(workspace: &Path) -> PathBuf {
+    workspace.join(".smooth-best-snapshot")
+}
+
+/// True when a path should be skipped when snapshotting or
+/// restoring the workspace. Everything in here is either huge
+/// (node_modules, target), noisy (.git), or our own bookkeeping
+/// (.smooth-*). Hidden dotfiles outside this list DO snapshot
+/// because some tasks ship config in them (e.g. `.babelrc`).
+fn is_snapshot_excluded(name: &std::ffi::OsStr) -> bool {
+    matches!(
+        name.to_str(),
+        Some(".git")
+            | Some(".smooth-best-snapshot")
+            | Some("node_modules")
+            | Some("target")
+            | Some("build")
+            | Some("dist")
+            | Some("__pycache__")
+            | Some(".pytest_cache")
+            | Some(".venv")
+            | Some("venv")
+            | Some(".gradle")
+            | Some(".cargo")
+    )
+}
+
+/// Recursive copy of `src` into `dst`, skipping excluded names
+/// at any depth. Creates `dst` if missing; removes it first if
+/// present so the snapshot mirrors the source exactly (no stale
+/// files left from an earlier, larger snapshot). Errors propagate
+/// so the caller can log and continue — snapshotting is a
+/// resilience bonus, not a correctness requirement.
+fn snapshot_workspace(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if dst.exists() {
+        std::fs::remove_dir_all(dst)?;
+    }
+    std::fs::create_dir_all(dst)?;
+    copy_recursive(src, dst)
+}
+
+/// Restore `dst` from `src` by clearing the workspace's
+/// non-excluded entries and copying the snapshot over. Keeps
+/// node_modules/.git intact so we don't re-do `pnpm install`
+/// after a restore — just the code changes go back.
+fn restore_workspace(src: &Path, dst: &Path) -> std::io::Result<()> {
+    // Delete non-excluded entries in dst, then copy from src.
+    for entry in std::fs::read_dir(dst)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if is_snapshot_excluded(&name) {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path)?;
+        } else {
+            std::fs::remove_file(&path)?;
+        }
+    }
+    copy_recursive(src, dst)
+}
+
+fn copy_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if is_snapshot_excluded(&name) {
+            continue;
+        }
+        let from = entry.path();
+        let to = dst.join(&name);
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            copy_recursive(&from, &to)?;
+        } else if file_type.is_symlink() {
+            // Resolve and copy content; sandbox workspaces rarely
+            // have symlinks, and preserving them correctly across
+            // bind mounts is fiddly.
+            if let Ok(target) = std::fs::read_link(&from) {
+                let _ = std::fs::remove_file(&to);
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&target, &to)?;
+                #[cfg(not(unix))]
+                std::fs::copy(&from, &to)?;
+            }
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
 }
 
 /// Build the EXECUTE override for a detected plateau. Phrased the
@@ -1480,6 +1677,68 @@ fn llm_client_for(registry: &ProviderRegistry, activity: Activity) -> anyhow::Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_workspace_copies_source_files_and_excludes_bloat() {
+        let src = tempfile::tempdir().expect("mktemp src");
+        let dst = tempfile::tempdir().expect("mktemp dst");
+
+        // Source files: one real, one inside an excluded dir.
+        std::fs::write(src.path().join("bowling.py"), b"class Bowling: pass\n").unwrap();
+        std::fs::create_dir_all(src.path().join("__pycache__")).unwrap();
+        std::fs::write(src.path().join("__pycache__").join("garbage.pyc"), b"pyc").unwrap();
+        std::fs::create_dir_all(src.path().join("node_modules")).unwrap();
+        std::fs::write(src.path().join("node_modules").join("pkg.json"), b"{}").unwrap();
+        std::fs::create_dir_all(src.path().join("sub")).unwrap();
+        std::fs::write(src.path().join("sub").join("nested.txt"), b"keep me").unwrap();
+
+        snapshot_workspace(src.path(), dst.path()).expect("snapshot");
+
+        assert!(dst.path().join("bowling.py").is_file());
+        assert!(dst.path().join("sub").join("nested.txt").is_file());
+        assert!(!dst.path().join("__pycache__").exists(), "excluded dir must not be copied");
+        assert!(!dst.path().join("node_modules").exists(), "excluded dir must not be copied");
+    }
+
+    #[test]
+    fn restore_workspace_clears_non_excluded_entries_then_copies() {
+        let src = tempfile::tempdir().expect("mktemp src");
+        let dst = tempfile::tempdir().expect("mktemp dst");
+
+        // Pre-existing stale content in dst that must be wiped.
+        std::fs::write(dst.path().join("stale_code.py"), b"regressed").unwrap();
+        std::fs::create_dir_all(dst.path().join("subdir")).unwrap();
+        std::fs::write(dst.path().join("subdir").join("old.txt"), b"old").unwrap();
+        // Pre-existing excluded content in dst that must SURVIVE.
+        std::fs::create_dir_all(dst.path().join("node_modules")).unwrap();
+        std::fs::write(dst.path().join("node_modules").join("cached.json"), b"cached").unwrap();
+
+        // Snapshot content.
+        std::fs::write(src.path().join("bowling.py"), b"BEST VERSION").unwrap();
+
+        restore_workspace(src.path(), dst.path()).expect("restore");
+
+        // Stale non-excluded entries removed.
+        assert!(!dst.path().join("stale_code.py").exists());
+        assert!(!dst.path().join("subdir").exists());
+        // Excluded entries preserved (don't re-run pnpm install).
+        assert!(dst.path().join("node_modules").join("cached.json").is_file());
+        // Snapshot content applied.
+        assert_eq!(std::fs::read(dst.path().join("bowling.py")).unwrap(), b"BEST VERSION");
+    }
+
+    #[test]
+    fn best_snapshot_dir_lives_inside_workspace_under_dot_prefix() {
+        let ws = Path::new("/workspace");
+        let snap = best_snapshot_dir(ws);
+        assert_eq!(snap, Path::new("/workspace/.smooth-best-snapshot"));
+        // Test runners skip dotfiles by default, so this location
+        // won't accidentally be included in pytest/jest/cargo test.
+        assert!(
+            snap.file_name().and_then(|s| s.to_str()).unwrap().starts_with('.'),
+            "snapshot dir must be a dotfile so test runners skip it"
+        );
+    }
 
     #[test]
     fn every_phase_has_a_distinct_activity_mapping() {
