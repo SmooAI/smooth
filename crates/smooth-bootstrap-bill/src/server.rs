@@ -18,6 +18,32 @@ use tokio::net::{TcpListener, TcpStream};
 
 use crate::protocol::{BillRequest, BillResponse, PortMapping, SandboxSpec};
 
+/// Convert an arbitrary cache key into a microsandbox-safe Volume name.
+///
+/// microsandbox requires names to start with an alphanumeric char and
+/// contain only `[A-Za-z0-9._-]`. Our cache keys are already hex-ish
+/// workspace-path hashes in practice, but be defensive: replace anything
+/// unsupported with `_`, prefix `smooth-cache-` so multiple smooth
+/// installs coexist with other users of the microsandbox volumes store,
+/// and cap length at 120 chars (microsandbox has no documented cap, but
+/// a lot of filesystems stop liking names past ~255 bytes).
+pub(crate) fn sanitize_volume_name(cache_key: &str) -> String {
+    let mut sanitized = String::with_capacity(cache_key.len());
+    for ch in cache_key.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_' {
+            sanitized.push(ch);
+        } else {
+            sanitized.push('_');
+        }
+    }
+    // Strip leading dots/hyphens/underscores — microsandbox requires
+    // the first char to be alphanumeric.
+    let trimmed = sanitized.trim_start_matches(|c: char| !c.is_ascii_alphanumeric());
+    let body: String = trimmed.chars().take(100).collect();
+    let name = if body.is_empty() { "nokey".to_string() } else { body };
+    format!("smooth-cache-{name}")
+}
+
 // ---------------------------------------------------------------------------
 // Registry — lifted wholesale from `smooth-bigsmooth/src/sandbox.rs`.
 //
@@ -145,33 +171,80 @@ pub async fn spawn_sandbox(spec: SandboxSpec) -> Result<(String, Vec<PortMapping
         });
     }
 
-    // Project-scoped sandbox cache: Bill resolves the cache key to a
-    // host directory at ~/.smooth/project-cache/<key>/ and bind-mounts
-    // it at /opt/smooth/cache. Deps / stores (PNPM_STORE_PATH, CARGO_HOME,
-    // UV_CACHE_DIR, GOPATH) live inside so repeated runs on the same
-    // project share them. Touches the dir on every mount so `th cache
-    // prune` can LRU-evict cold projects.
+    // Project-scoped sandbox cache: two backends.
+    //
+    // A) Named-volume backend (opt-in via spec.use_named_volume_for_cache):
+    //    ask microsandbox for a first-class Volume keyed off a sanitized
+    //    cache_key. Quota-able, listable via `Volume::list`, removable via
+    //    `Volume::remove`. Lives under ~/.microsandbox/volumes/<name>/.
+    //
+    // B) Bind-mount backend (default, backward-compatible): resolve the
+    //    cache key to ~/.smooth/project-cache/<key>/ and bind-mount it at
+    //    /opt/smooth/cache. Remains the default until the `th cache
+    //    list|prune|clear` CLI commands are migrated to the Volume API —
+    //    those commands read the bind-mount host path directly, so
+    //    flipping the default prematurely breaks the user-facing tools.
+    //
+    // Either way, deps / stores (PNPM_STORE_PATH, CARGO_HOME, UV_CACHE_DIR,
+    // GOPATH) live inside so repeated runs on the same pearl lineage share
+    // them.
     if let Some(ref cache_key) = spec.env_cache_key {
-        let cache_dir = dirs_next::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-            .join(".smooth")
-            .join("project-cache")
-            .join(cache_key);
-        if !cache_dir.exists() {
-            std::fs::create_dir_all(&cache_dir).with_context(|| format!("bill: create project cache: {}", cache_dir.display()))?;
-            tracing::info!(path = %cache_dir.display(), key = %cache_key, "bill: created project cache dir");
+        if spec.use_named_volume_for_cache {
+            let volume_name = sanitize_volume_name(cache_key);
+            match microsandbox::volume::Volume::get(&volume_name).await {
+                Ok(_) => {
+                    tracing::info!(name = %spec.name, key = %cache_key, volume = %volume_name, "bill: reusing existing named Volume for project cache");
+                }
+                Err(_) => {
+                    // Volume doesn't exist (or DB unreachable) — try to
+                    // create. `VolumeAlreadyExists` is benign if another
+                    // Bill raced us, so we only bail on other errors.
+                    match microsandbox::volume::Volume::create(microsandbox::volume::VolumeConfig {
+                        name: volume_name.clone(),
+                        quota_mib: None,
+                        labels: vec![("smooth-kind".into(), "project-cache".into()), ("smooth-cache-key".into(), cache_key.clone())],
+                    })
+                    .await
+                    {
+                        Ok(_) => {
+                            tracing::info!(name = %spec.name, key = %cache_key, volume = %volume_name, "bill: created named Volume for project cache");
+                        }
+                        Err(e) => {
+                            let msg = format!("{e}");
+                            if msg.contains("already exists") || msg.to_ascii_lowercase().contains("already exists") {
+                                tracing::debug!(name = %spec.name, volume = %volume_name, "bill: named volume already existed (benign race)");
+                            } else {
+                                return Err(anyhow::anyhow!(e).context(format!("bill: create named volume '{volume_name}' for cache key '{cache_key}'")));
+                            }
+                        }
+                    }
+                }
+            }
+            let vol_name_for_mount = volume_name.clone();
+            builder = builder.volume("/opt/smooth/cache", move |m| m.named(vol_name_for_mount));
+            tracing::info!(name = %spec.name, key = %cache_key, volume = %volume_name, "bill: mounting named Volume at /opt/smooth/cache");
+        } else {
+            let cache_dir = dirs_next::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+                .join(".smooth")
+                .join("project-cache")
+                .join(cache_key);
+            if !cache_dir.exists() {
+                std::fs::create_dir_all(&cache_dir).with_context(|| format!("bill: create project cache: {}", cache_dir.display()))?;
+                tracing::info!(path = %cache_dir.display(), key = %cache_key, "bill: created project cache dir");
+            }
+            // Bump mtime so atime-/mtime-based LRU pruning keeps recently
+            // used projects warm. filetime crate would be nicer but we
+            // avoid adding a dep for a cosmetic refresh — chmod back to
+            // current mode triggers a ctime/mtime bump on most systems
+            // without changing permissions.
+            if let Ok(md) = std::fs::metadata(&cache_dir) {
+                let _ = std::fs::set_permissions(&cache_dir, md.permissions());
+            }
+            let host = cache_dir.to_string_lossy().to_string();
+            builder = builder.volume("/opt/smooth/cache", move |m| m.bind(host));
+            tracing::info!(name = %spec.name, key = %cache_key, path = %cache_dir.display(), "bill: mounting project cache at /opt/smooth/cache (bind-mount)");
         }
-        // Bump mtime so atime-/mtime-based LRU pruning keeps recently
-        // used projects warm. filetime crate would be nicer but we
-        // avoid adding a dep for a cosmetic refresh — chmod back to
-        // current mode triggers a ctime/mtime bump on most systems
-        // without changing permissions.
-        if let Ok(md) = std::fs::metadata(&cache_dir) {
-            let _ = std::fs::set_permissions(&cache_dir, md.permissions());
-        }
-        let host = cache_dir.to_string_lossy().to_string();
-        builder = builder.volume("/opt/smooth/cache", move |m| m.bind(host));
-        tracing::info!(name = %spec.name, key = %cache_key, path = %cache_dir.display(), "bill: mounting project cache at /opt/smooth/cache");
     }
 
     // Opt-in: let the guest reach host loopback + RFC1918 addresses.
@@ -445,6 +518,42 @@ async fn dispatch(request: BillRequest) -> BillResponse {
 mod tests {
     use super::*;
 
+    #[test]
+    fn sanitize_volume_name_preserves_safe_chars() {
+        let name = sanitize_volume_name("abc123.-_");
+        assert_eq!(name, "smooth-cache-abc123.-_");
+    }
+
+    #[test]
+    fn sanitize_volume_name_replaces_unsafe_chars() {
+        let name = sanitize_volume_name("proj/with space+slash");
+        assert_eq!(name, "smooth-cache-proj_with_space_slash");
+    }
+
+    #[test]
+    fn sanitize_volume_name_strips_leading_non_alnum() {
+        // Leading symbols get trimmed so the resulting body starts
+        // alphanumeric (microsandbox's `validate_volume_name` requires it);
+        // the `smooth-cache-` prefix is still added by us.
+        let name = sanitize_volume_name("---proj");
+        assert_eq!(name, "smooth-cache-proj");
+    }
+
+    #[test]
+    fn sanitize_volume_name_handles_empty_key() {
+        let name = sanitize_volume_name("");
+        assert_eq!(name, "smooth-cache-nokey");
+    }
+
+    #[test]
+    fn sanitize_volume_name_caps_body_length() {
+        let body = "a".repeat(500);
+        let name = sanitize_volume_name(&body);
+        // Body is capped at 100 chars + fixed prefix.
+        assert_eq!(name.len(), "smooth-cache-".len() + 100);
+        assert!(name.starts_with("smooth-cache-aaaa"));
+    }
+
     #[tokio::test]
     async fn ping_roundtrip_over_tcp() {
         let (addr, _handle) = listen("127.0.0.1:0".parse().unwrap()).await.expect("bind");
@@ -491,6 +600,8 @@ mod tests {
             timeout_seconds: 60,
             allow_host_loopback: false,
             env_cache_key: None,
+            use_named_volume_for_cache: false,
+            secrets: vec![],
         };
         let err = spawn_sandbox(spec).await.unwrap_err();
         let msg = err.to_string();

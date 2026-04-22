@@ -91,6 +91,16 @@ pub struct SandboxSpec {
     /// skip caching (bare Alpine every time).
     #[serde(default)]
     pub env_cache_key: Option<String>,
+    /// When true, back `env_cache_key` with a microsandbox named
+    /// Volume (first-class primitive: quota-able, listable via
+    /// `Volume::list`, removable via `Volume::remove`) instead of
+    /// the ad-hoc bind-mount of `~/.smooth/project-cache/<key>`.
+    /// Opt-in because `th cache list|prune|clear` reads the
+    /// bind-mount host path directly; flipping the default would
+    /// break those CLI commands until they're migrated (tracked
+    /// separately). Defaults to false.
+    #[serde(default)]
+    pub use_named_volume_for_cache: bool,
     /// Secrets wired through microsandbox's SecretBuilder API. For each
     /// entry, the runner inside the VM sees an env var containing the
     /// PLACEHOLDER (not the real value). When the runner's HTTP client
@@ -214,6 +224,8 @@ mod tests {
             timeout_seconds: 1800,
             allow_host_loopback: false,
             env_cache_key: None,
+            use_named_volume_for_cache: false,
+            secrets: vec![],
         };
         let req = BillRequest::Spawn { spec };
         let json = serde_json::to_string(&req).expect("serialize");

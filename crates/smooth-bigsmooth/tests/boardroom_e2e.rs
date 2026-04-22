@@ -244,6 +244,8 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
         // Boardroom itself doesn't need env caching (it's Big Smooth, not
         // an operator). Operator VMs get caching via the dispatch path.
         env_cache_key: None,
+        use_named_volume_for_cache: false,
+        secrets: vec![],
     };
 
     let (resolved_name, host_ports, _created_at) = bill_client.spawn(spec).await.expect("spawn boardroom");

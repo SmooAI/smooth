@@ -84,6 +84,15 @@ pub struct SandboxConfig {
     /// Host-side directory for pearl env caching. Bill bind-mounts it at
     /// `/opt/smooth/cache` so compiled deps persist across VM runs.
     pub env_cache_key: Option<String>,
+    /// When true, back `env_cache_key` with a microsandbox named Volume
+    /// (first-class primitive: quota-able, listable via `Volume::list`,
+    /// removable via `Volume::remove`) instead of the ad-hoc bind-mount
+    /// of `~/.smooth/project-cache/<key>`. Opt-in because the existing
+    /// `th cache list|prune|clear` commands read the bind-mount host
+    /// path directly — they must be migrated to the `Volume::*` API
+    /// before this can flip to the default. Typically set from the
+    /// `SMOOTH_USE_VOLUMES=1` env var in `dispatch_ws_task_sandboxed`.
+    pub use_named_volume_for_cache: bool,
     /// Additional port mappings beyond the default operator WebSocket (guest:4096).
     /// Each entry maps a guest port to a host port (0 = kernel-assigned).
     pub extra_ports: Vec<PortMapping>,
@@ -143,6 +152,7 @@ impl Default for SandboxConfig {
             mounts: Vec::new(),
             allow_host_loopback: false,
             env_cache_key: None,
+            use_named_volume_for_cache: false,
             extra_ports: Vec::new(),
             image: None,
             secrets: Vec::new(),
@@ -241,6 +251,7 @@ impl SandboxClient for DirectSandboxClient {
             timeout_seconds: config.timeout_seconds,
             allow_host_loopback: config.allow_host_loopback,
             env_cache_key: config.env_cache_key.clone(),
+            use_named_volume_for_cache: config.use_named_volume_for_cache,
             secrets: config.secrets.iter().map(smooth_bootstrap_bill::protocol::SecretSpec::from).collect(),
         };
         let (resolved_name, resolved_ports, created_at) = bill_server::spawn_sandbox(spec).await?;
@@ -351,6 +362,7 @@ impl SandboxClient for BillSandboxClient {
             timeout_seconds: config.timeout_seconds,
             allow_host_loopback: config.allow_host_loopback,
             env_cache_key: config.env_cache_key.clone(),
+            use_named_volume_for_cache: config.use_named_volume_for_cache,
             secrets: config.secrets.iter().map(smooth_bootstrap_bill::protocol::SecretSpec::from).collect(),
         };
         let (resolved_name, resolved_ports, created_at) = self.client.spawn(spec).await?;
@@ -829,6 +841,17 @@ mod tests {
         // from any code path that uses `..SandboxConfig::default()`.
         let cfg = SandboxConfig::default();
         assert!(cfg.secrets.is_empty());
+    }
+
+    #[test]
+    fn sandbox_config_default_does_not_opt_into_named_volume() {
+        // Opt-in only: the bind-mount backend stays the default
+        // until `th cache list|prune|clear` are migrated to the
+        // microsandbox Volume API. Flipping this default would
+        // silently strand existing caches under
+        // ~/.smooth/project-cache/ and break those commands.
+        let cfg = SandboxConfig::default();
+        assert!(!cfg.use_named_volume_for_cache);
     }
 
     #[test]
