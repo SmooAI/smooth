@@ -40,6 +40,25 @@ enum Commands {
         /// to 3. Can also be set via SMOOTH_SANDBOX_MAX_CONCURRENCY.
         #[arg(long)]
         max_operators: Option<usize>,
+        /// Run the agent as a host subprocess instead of inside a
+        /// microVM. Skips Narc / Wonk / Goalie enforcement — use
+        /// only for bench runs, fast dev loops on trusted code, or
+        /// nested-virt environments where microsandbox can't boot.
+        /// Equivalent to `SMOOTH_WORKFLOW_DIRECT=1`. CLI beats env.
+        #[arg(long)]
+        direct: bool,
+        /// Skip the workflow's post-implementation TEST phase
+        /// (adversarial test augmentation). Benchmark runs want
+        /// this so added tests don't change the score. Equivalent
+        /// to `SMOOTH_WORKFLOW_SKIP_TEST=1`.
+        #[arg(long)]
+        skip_test: bool,
+        /// Sandbox backend when NOT in direct mode: `microsandbox`
+        /// (default — embedded libkrun microVMs) or `docker`
+        /// (containers, for CI / nested-virt environments).
+        /// Equivalent to `SMOOTH_SANDBOX_BACKEND=<value>`.
+        #[arg(long, value_parser = ["microsandbox", "docker"])]
+        sandbox_backend: Option<String>,
     },
     /// Stop Smooth platform
     Down,
@@ -677,7 +696,10 @@ async fn main() -> Result<()> {
             port,
             foreground,
             max_operators,
-        }) => cmd_up(no_leader, port, foreground, max_operators).await,
+            direct,
+            skip_test,
+            sandbox_backend,
+        }) => cmd_up(no_leader, port, foreground, max_operators, direct, skip_test, sandbox_backend).await,
         Some(Commands::Down) => cmd_down().await,
         Some(Commands::Status) => cmd_status().await,
         Some(Commands::Db { cmd }) => cmd_db(cmd),
@@ -732,11 +754,35 @@ fn log_file_path() -> std::path::PathBuf {
     dirs_next::home_dir().unwrap_or_default().join(".smooth").join("smooth.log")
 }
 
-async fn cmd_up(no_leader: bool, port: u16, foreground: bool, max_operators: Option<usize>) -> Result<()> {
+async fn cmd_up(
+    no_leader: bool,
+    port: u16,
+    foreground: bool,
+    max_operators: Option<usize>,
+    direct: bool,
+    skip_test: bool,
+    sandbox_backend: Option<String>,
+) -> Result<()> {
     // CLI flag beats env; set env so AppState::new() (which only sees
     // env) picks the right value in both foreground + daemon paths.
     if let Some(n) = max_operators {
         std::env::set_var("SMOOTH_SANDBOX_MAX_CONCURRENCY", n.to_string());
+    }
+    // Direct-dispatch mode: host subprocess instead of microVM.
+    // Skips Narc/Wonk/Goalie — for bench + trusted code only.
+    if direct {
+        std::env::set_var("SMOOTH_WORKFLOW_DIRECT", "1");
+    }
+    // Benchmark knob — skip the TEST phase so the agent doesn't
+    // add tests that change the score.
+    if skip_test {
+        std::env::set_var("SMOOTH_WORKFLOW_SKIP_TEST", "1");
+    }
+    // Sandbox backend selection (only matters when NOT in direct
+    // mode). `microsandbox` = embedded libkrun; `docker` = shell
+    // out to the docker CLI, for nested-virt-safe isolation.
+    if let Some(backend) = sandbox_backend.as_deref() {
+        std::env::set_var("SMOOTH_SANDBOX_BACKEND", backend);
     }
 
     // Daemon mode: re-exec ourselves with --foreground and redirect output to log file
@@ -787,6 +833,20 @@ async fn cmd_up(no_leader: bool, port: u16, foreground: bool, max_operators: Opt
         if let Some(n) = max_operators {
             args.push("--max-operators".to_string());
             args.push(n.to_string());
+        }
+        // Propagate the dispatch-mode flags through the daemon
+        // re-exec. The env vars are already set on THIS process,
+        // but spawning a child that parses its own args also works
+        // — and it keeps the flags visible in `ps` / `launchctl`.
+        if direct {
+            args.push("--direct".to_string());
+        }
+        if skip_test {
+            args.push("--skip-test".to_string());
+        }
+        if let Some(ref backend) = sandbox_backend {
+            args.push("--sandbox-backend".to_string());
+            args.push(backend.clone());
         }
 
         let child = std::process::Command::new(exe)
