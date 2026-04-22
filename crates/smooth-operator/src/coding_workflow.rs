@@ -1,832 +1,355 @@
-//! Multi-phase coding workflow.
+//! Coding workflow — single-agent outer loop.
 //!
-//! A structured alternative to `Agent::run_with_channel`'s single
-//! unstructured loop. Each phase runs an `Agent` dispatched through
-//! a different `Activity` slot so the routing can pick the right
-//! model for the shape of the subtask:
+//! The agent handles its own iteration (LLM → tool → LLM → …)
+//! via `Agent::run_with_channel`. We sit around that and do three
+//! things:
 //!
-//! | Phase    | Activity slot   | What it does                                        |
-//! |----------|-----------------|-----------------------------------------------------|
-//! | ASSESS   | Thinking        | Read tests + stub + INSTRUCTIONS; infer spec        |
-//! | PLAN     | Planning        | Decompose into an implementation plan               |
-//! | EXECUTE  | Coding          | Write code via edit_file/write_file tools           |
-//! | VERIFY   | Coding          | Invoke bash tool to run tests, report pass/fail     |
-//! | REVIEW   | Reviewing       | Adversarial critique of diff + test failures        |
-//! | TEST     | Reviewing       | Add real test coverage (MSW, Playwright, property…) |
-//! | FINALIZE | Thinking        | Holistic last-look before emitting Completed        |
+//!   1. Snapshot the workspace when the failing-test count drops
+//!      — so a later turn can't regress past the best-seen state.
+//!   2. On not-green, feed the test output back into the next
+//!      turn's prompt so the agent has surgical failure context.
+//!   3. Stop when we're green, within a few failures of green
+//!      (more iteration is more likely to regress than improve),
+//!      over budget, or past the outer-iteration cap.
 //!
-//! The loop routes REVIEW → EXECUTE when VERIFY reports failures,
-//! and EXECUTE → FINALIZE when tests pass or the iteration cap is
-//! hit. Each phase emits an `AgentEvent::PhaseStart` on entry so
-//! TUIs can update their status bar with the phase, routing alias,
-//! and upstream model.
+//! We used to decompose into 7 phases (ASSESS / PLAN / EXECUTE /
+//! VERIFY / REVIEW / TEST / FINALIZE). That added a lot of prompt
+//! surface area and failure modes — the phase decomposition kept
+//! silent-short-circuiting at one detector or another and eating
+//! runs that should have kept going. A single-agent loop is
+//! smaller, easier to reason about, and matches the shape of
+//! tools like OpenCode that are maintained against coding
+//! benchmarks. We kept the parts that demonstrably help — the
+//! self-validation requirement in the system prompt, the
+//! best-state snapshot, the compile-error short-circuit — and
+//! dropped the per-phase dispatch.
 //!
 //! This module does NOT own the sandbox, the security hooks, or
-//! the tool registry — the caller assembles those and hands them in.
-//! All workflow does is sequence Agent invocations with the right
-//! prompts, slots, and context.
+//! the tool registry — the caller assembles those and hands them
+//! in.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context};
+use anyhow::Context;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::agent::{Agent, AgentConfig, AgentEvent};
 use crate::cost::CostBudget;
-use crate::llm::LlmClient;
 use crate::providers::{Activity, ProviderRegistry};
 use crate::tool::ToolRegistry;
-
-/// Fixed phase order for the coding workflow.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CodingPhase {
-    Assess,
-    Plan,
-    Execute,
-    Verify,
-    Review,
-    /// Adversarial test augmentation. Runs AFTER the provided tests
-    /// pass. Classifies the code, picks the right testing stack for
-    /// its shape (MSW, Playwright, testcontainers, property-based,
-    /// …), installs missing deps, and writes boundary-pushing tests.
-    /// Fails back into EXECUTE if the new tests expose real bugs.
-    ///
-    /// Skippable via `SMOOTH_WORKFLOW_SKIP_TEST=1` for benchmark
-    /// runs where adding extra tests would change the score.
-    Test,
-    Finalize,
-}
-
-impl CodingPhase {
-    /// Canonical uppercase display label emitted in `PhaseStart`.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Assess => "ASSESS",
-            Self::Plan => "PLAN",
-            Self::Execute => "EXECUTE",
-            Self::Verify => "VERIFY",
-            Self::Review => "REVIEW",
-            Self::Test => "TEST",
-            Self::Finalize => "FINALIZE",
-        }
-    }
-
-    /// Which routing slot this phase dispatches through.
-    ///
-    /// `VERIFY` and `EXECUTE` share the Coding slot — verify is just
-    /// the agent running bash tests, same surface as writing code.
-    /// `FINALIZE` uses Thinking so the last-look review has room to
-    /// reason about the whole diff holistically. `TEST` uses
-    /// Reviewing — adversarial test writing is closer to code
-    /// review than to fresh implementation.
-    pub fn activity(self) -> Activity {
-        match self {
-            Self::Assess | Self::Finalize => Activity::Thinking,
-            Self::Plan => Activity::Planning,
-            Self::Execute | Self::Verify => Activity::Coding,
-            Self::Review | Self::Test => Activity::Reviewing,
-        }
-    }
-
-    /// Max iterations for the Agent instance inside this phase.
-    /// Non-iterative phases (assess/plan/review/finalize) cap short;
-    /// execute + verify + test get the full budget because they all
-    /// touch the filesystem and need room to iterate.
-    fn max_iterations(self) -> u32 {
-        match self {
-            Self::Assess | Self::Plan | Self::Review | Self::Finalize => 8,
-            Self::Execute => 40,
-            Self::Test => 20,
-            Self::Verify => 6,
-        }
-    }
-}
 
 /// Input to `run_coding_workflow`.
 pub struct CodingWorkflowConfig {
     /// Stable id for the operator running this workflow — echoed
     /// into every AgentEvent.
     pub operator_id: String,
-    /// The task prompt the user gave (same shape as the existing
-    /// single-agent path).
+    /// The task prompt the user gave.
     pub task_prompt: String,
-    /// Provider registry for resolving Activity slots to concrete
-    /// LlmConfigs.
+    /// Provider registry — used to resolve the Coding slot.
     pub registry: Arc<ProviderRegistry>,
-    /// Tool registry the phases will share.
+    /// Tool registry the agent will use.
     pub tools: ToolRegistry,
-    /// Optional global budget cap — prorated loosely across phases
-    /// (each phase gets the full remaining amount when it runs).
+    /// Optional global budget cap across the whole workflow.
     pub budget_usd: Option<f64>,
-    /// Max outer-loop iterations (EXECUTE → VERIFY → REVIEW cycle
-    /// count). 10 is a ceiling — budget + plateau detection do the
-    /// real governing.
+    /// Max outer-loop iterations. Each iteration is one full
+    /// `Agent::run_with_channel` call; the agent itself iterates
+    /// internally via tool calls. 5 is usually plenty — if the
+    /// agent can't converge in 5 full turns with failure context,
+    /// another turn is unlikely to help.
     pub max_outer_iterations: u32,
-    /// Skip the adversarial TEST phase (useful for benchmark runs
-    /// where adding deps or extra tests would change the score).
-    /// Defaults to false — real coding tasks want the TEST phase.
+    /// Skip any post-implementation test-augmentation phase.
+    /// Kept in the config for API stability, currently ignored —
+    /// the single-agent loop doesn't have a separate TEST phase.
     pub skip_test_phase: bool,
-    /// Event sink — every AgentEvent from every phase flows here,
-    /// plus `PhaseStart` markers between phases.
+    /// Event sink — every AgentEvent from the agent flows here.
     pub tx: UnboundedSender<AgentEvent>,
-    /// Workspace root — the directory the agent is editing. Used
-    /// by the best-state snapshotter so the outer loop can save a
-    /// copy of the workspace at the lowest-failure-count iteration
-    /// and restore it at exit if a later cycle regressed. Set to
-    /// `/workspace` in the sandboxed path; `None` otherwise
-    /// (snapshotting silently skipped).
+    /// Workspace root (bind-mounted at /workspace inside the
+    /// sandbox). Used to snapshot the best-seen state and restore
+    /// it on regression. `None` skips snapshotting.
     pub workspace_root: Option<PathBuf>,
 }
 
-/// Summary of what each phase produced. Carried across phases so
-/// the next one can see the prior outputs as user-message context
-/// instead of restarting cold.
-///
-/// The important field here is `goal_summary` — a short
-/// crystallization of what the task is actually trying to achieve,
-/// produced by the ASSESS phase and threaded through every later
-/// phase. Keeps the agent anchored to the objective across many
-/// iterations instead of drifting into whatever subproblem it's
-/// currently solving.
-#[derive(Debug, Default, Clone)]
-struct WorkflowState {
-    /// 2–4 sentence goal crystallization from ASSESS. Every later
-    /// phase sees this at the top of its user prompt so the model
-    /// doesn't lose sight of the objective after N review loops.
-    goal_summary: Option<String>,
-    /// Rolling progress log — what's actually been accomplished so
-    /// far. Updated after EXECUTE / VERIFY / REVIEW / TEST each
-    /// emit a `## Progress Update` one-liner. Threaded into every
-    /// subsequent phase's user prompt alongside `goal_summary` so
-    /// the agent always knows both where it's going (goal) AND
-    /// how far it's got (progress). FINALIZE uses it as the
-    /// authoritative record for its verdict.
-    progress_summary: String,
-    /// Full assessment from ASSESS (goal + enumeration of test
-    /// cases + constraints). Longer than `goal_summary`; fed to
-    /// PLAN and REVIEW but not to EXECUTE/VERIFY (they only need
-    /// the goal).
-    assessment: Option<String>,
-    plan: Option<String>,
-    last_exec_summary: Option<String>,
-    last_verify_output: Option<String>,
-    verify_passed: bool,
-    last_review: Option<String>,
-    /// Adversarial-test findings from the TEST phase — new tests
-    /// written + whether they all passed. When red, these feed back
-    /// into EXECUTE's review-findings slot on the next loop.
-    last_test_report: Option<String>,
-    /// TEST phase's verdict: did its added tests all pass?
-    /// `true` lets the workflow move to FINALIZE; `false` loops
-    /// back to EXECUTE with the new failures as review findings.
-    test_phase_passed: bool,
-    /// How many write-shape (`edit_file` / `write_file`) tool calls
-    /// the most recent EXECUTE phase made. Zero means the agent
-    /// spent the whole turn exploring — real failure mode in our
-    /// Java bench run (29 `list_files`, 0 writes, stub code left
-    /// intact → 0/31). We detect this between EXECUTE and VERIFY
-    /// and force a retry with an override review-finding instead
-    /// of wasting a VERIFY cycle on unchanged code.
-    last_execute_write_count: usize,
-    /// How many `bash` tool calls the most recent EXECUTE phase
-    /// made. Zero is the "shipped without self-validation" failure
-    /// mode — the agent edited a file but never ran the test suite
-    /// or a compile check, and the code turns out to have an
-    /// unclosed delimiter (Rust 0/1 bench run: 6 edit_file, 1 bash
-    /// total including VERIFY's run = zero bash in EXECUTE). A
-    /// single `cargo check` / `node --check` would have caught it.
-    /// We treat zero-bash on a non-trivial EXECUTE the same way we
-    /// treat zero-writes: force a retry with an override finding.
-    last_execute_bash_count: usize,
-    /// Override string prepended to the next EXECUTE's "Review
-    /// findings" context when the previous turn was a no-op. Empty
-    /// when the normal REVIEW phase output is authoritative. Lets
-    /// us keep the REVIEW prompt untouched while still threading a
-    /// blunt "you wrote no code last turn" warning when needed.
-    execute_force_write_note: Option<String>,
-    /// Override string for the next EXECUTE when the outer loop
-    /// detects we're plateauing (same failure signature repeating
-    /// without progress). Tells the model: scrap the current
-    /// implementation, try a different approach — the one you're
-    /// iterating on isn't converging. Cleared once EXECUTE runs
-    /// with it applied.
-    force_new_approach_note: Option<String>,
-    /// Path to the workspace root — bind-mounted at /workspace
-    /// inside the sandbox. Used by the best-state snapshotter so
-    /// the loop can preserve the lowest-failure-count iteration
-    /// and restore it at exit if a later escalation regressed.
-    /// `None` when running outside a sandbox (classic dev path);
-    /// snapshotting is skipped silently in that case.
-    workspace_root: Option<PathBuf>,
-    outer_iteration: u32,
-    total_cost_usd: f64,
-}
-
-/// Run the full workflow end-to-end.
-///
-/// Returns the final cost on success. Errors bubble up when
-/// provider resolution fails or the channel closes early; per-phase
-/// LLM failures are handled internally by the inner `Agent` loop
-/// and get logged as `AgentEvent::Error`, not propagated (same
-/// contract as `Agent::run_with_channel`).
+/// Run the workflow end-to-end. Returns the accumulated cost.
 pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f64> {
-    let mut state = WorkflowState {
-        workspace_root: cfg.workspace_root.clone(),
-        ..WorkflowState::default()
-    };
+    let llm_config = cfg.registry.llm_config_for(Activity::Coding).context("resolving coding slot → LLM config")?;
+    let coding_slot = cfg.registry.routing.slot_for(Activity::Coding);
+    let alias = coding_slot.model.clone();
 
-    // ASSESS ------------------------------------------------------------
-    run_phase(&cfg, CodingPhase::Assess, &mut state, assess_prompt).await?;
+    let mut total_cost_usd = 0.0_f64;
+    let mut last_verify_output: Option<String> = None;
+    let mut best_failed_count: Option<u32> = None;
+    let mut snapshot_taken = false;
 
-    // PLAN --------------------------------------------------------------
-    run_phase(&cfg, CodingPhase::Plan, &mut state, plan_prompt).await?;
+    let iter_cap = cfg.max_outer_iterations.max(1);
+    let mut iteration = 0u32;
+    let mut succeeded = false;
 
-    // EXECUTE → VERIFY → (REVIEW → EXECUTE) loop ------------------------
-    //
-    // Stop conditions, in order of priority:
-    //   1. verify_passed → done, break to FINALIZE
-    //   2. budget would be exhausted before next cycle → break
-    //   3. hard cap max_outer_iterations → break (safety net only)
-    //
-    // Note: we no longer bail on "plateau" (identical failure
-    // signatures). A human debugging wouldn't stop just because
-    // the same 3 tests failed twice in a row — they'd change
-    // approach. So do we: when we detect a genuine plateau, we
-    // inject a `force_new_approach_note` into the next EXECUTE
-    // telling it to scrap its current implementation and try a
-    // different one, and we keep looping. Only budget / cap stop
-    // us. This matches the user's intuition: "we know the model
-    // CAN solve this; why give up?".
-    //
-    // Progress detection: if `failed_count` is strictly dropping
-    // across iterations, we're making progress and reset the
-    // plateau strike counter. Only when failed_count stops
-    // decreasing AND the signature repeats do we escalate.
-    let mut last_verify_signature: Option<String> = None;
-    let mut min_failed_seen: Option<u32> = None;
-    let mut plateau_strikes = 0u32;
-    let mut approach_escalation: u32 = 0;
-    for _ in 0..cfg.max_outer_iterations {
-        state.outer_iteration += 1;
+    for _ in 0..iter_cap {
+        iteration += 1;
 
-        run_phase(&cfg, CodingPhase::Execute, &mut state, execute_prompt).await?;
+        let _ = cfg.tx.send(AgentEvent::PhaseStart {
+            phase: "CODING".into(),
+            alias: alias.clone(),
+            upstream: None,
+            iteration,
+        });
 
-        // EXECUTE degenerate-case recovery. Two distinct failure
-        // modes we've observed and auto-fix before wasting a VERIFY
-        // cycle on code that can't possibly be right:
-        //
-        //   A. Zero writes (Java bowling 0/31). Agent explored —
-        //      29 list_files, 0 edit_file — and the stub sits
-        //      intact. VERIFY would fail on unchanged code.
-        //   B. Writes but zero bash (Rust bowling 0/1). Agent
-        //      edited 6 times but never ran `cargo check`; shipped
-        //      code with an unclosed delimiter. A single
-        //      syntax-check would have caught it. Self-validation
-        //      is the one thing the EXECUTE prompt calls non-
-        //      optional, and skipping it is a 0/N bench result.
-        //
-        // Both cases fix the same way: inject an override finding
-        // into the next EXECUTE's review-block and retry. Cap at
-        // 2 retries so a genuinely stuck model can't burn the
-        // whole budget here.
-        let mut exec_retries = 0u32;
-        loop {
-            let no_writes = state.last_execute_write_count == 0;
-            let no_bash = state.last_execute_bash_count == 0 && state.last_execute_write_count > 0;
-            if !no_writes && !no_bash {
-                break;
-            }
-            if exec_retries >= 2 {
-                break;
-            }
-            exec_retries += 1;
-            let (reason, note) = if no_writes {
-                (
-                    "no writes",
-                    format!(
-                        "YOUR PRIOR TURN WROTE NOTHING. You called zero edit_file / \
-                         write_file tools in your last EXECUTE turn — the implementation \
-                         file is still the starter stub. That is a broken outcome: the \
-                         workflow cannot make progress without a write. This turn you \
-                         MUST call edit_file or write_file at least once with real \
-                         implementation code. Do not burn this turn on list_files / \
-                         read_file exploration; you have already surveyed the repo. \
-                         Open the implementation file and write code.\n\
-                         (Retry {exec_retries} of 2 after a no-op EXECUTE.)"
-                    ),
-                )
-            } else {
-                (
-                    "no bash",
-                    format!(
-                        "YOU EDITED FILES BUT NEVER RAN THE TESTS. Self-validation is \
-                         the single non-optional rule of this phase and you skipped it. \
-                         Your last turn made {writes} write call(s) but ZERO bash calls, \
-                         which means you cannot know whether the code compiles — let \
-                         alone whether it passes the suite. Most 0/N bench failures \
-                         look exactly like this: the agent edits, declares victory, \
-                         ships code with an unclosed delimiter. This turn you MUST run \
-                         the test command via `bash` BEFORE your summary. Fix anything \
-                         that fails. Then report the literal pass/fail count.\n\
-                         (Retry {exec_retries} of 2 after an EXECUTE with no \
-                         self-validation.)",
-                        writes = state.last_execute_write_count
-                    ),
-                )
-            };
-            tracing::warn!(outer_iter = state.outer_iteration, exec_retries, reason, "EXECUTE degenerate-case retry");
-            state.execute_force_write_note = Some(note);
-            append_progress(
-                &mut state.progress_summary,
-                "EXECUTE",
-                state.outer_iteration,
-                &format!("{reason} — retry #{exec_retries}"),
-            );
-            run_phase(&cfg, CodingPhase::Execute, &mut state, execute_prompt).await?;
+        let user_prompt = build_user_prompt(&cfg.task_prompt, iteration, last_verify_output.as_deref());
+
+        let mut agent_config = AgentConfig::new(
+            format!("{}/coding-{}", cfg.operator_id, iteration),
+            CODING_SYSTEM_PROMPT.to_string(),
+            llm_config.clone(),
+        )
+        .with_max_iterations(80); // agent can take a lot of tool-call turns internally
+        if let Some(cap) = cfg.budget_usd {
+            let remaining = (cap - total_cost_usd).max(0.0);
+            agent_config = agent_config.with_budget(CostBudget {
+                max_cost_usd: Some(remaining),
+                max_tokens: None,
+            });
         }
-        state.execute_force_write_note = None;
-        // force_new_approach_note is consumed by this EXECUTE call;
-        // clear it so future iterations don't re-apply the same
-        // override unless a fresh plateau is detected.
-        state.force_new_approach_note = None;
 
-        run_phase(&cfg, CodingPhase::Verify, &mut state, verify_prompt).await?;
+        let agent = Agent::new(agent_config, cfg.tools.clone());
+        let conversation = agent.run_with_channel(user_prompt, cfg.tx.clone()).await?;
 
-        if state.verify_passed {
+        let turn_cost = {
+            let tracker = agent.cost_tracker.lock().expect("cost_tracker lock");
+            tracker.total_cost_usd
+        };
+        total_cost_usd += turn_cost;
+
+        // Pull the agent's final assistant message — it usually
+        // contains a summary of what it did plus the last test
+        // result. We parse THIS for pass/fail and failure detail.
+        let transcript = summarize_conversation(&conversation);
+        last_verify_output = Some(transcript.clone());
+
+        // Green? We're done.
+        if detect_verify_pass(&transcript) {
+            succeeded = true;
+            tracing::info!(iteration, "coding workflow: agent reports green, stopping");
             break;
         }
 
-        let sig = verify_signature(state.last_verify_output.as_deref().unwrap_or(""));
-        let current_failed = extract_failed_count(state.last_verify_output.as_deref().unwrap_or(""));
-
-        // Best-state tracking. When the current iteration has
-        // fewer failing tests than the best we've seen, snapshot
-        // the workspace so FINALIZE can restore to it if later
-        // cycles regress. "A human wouldn't lose their 30/31
-        // solution by experimenting" — this implements that rule.
-        // Snapshot is best-effort; failures log but don't abort.
-        let improving = match (current_failed, min_failed_seen) {
+        // Snapshot the workspace when this turn was the best so
+        // far. If the agent never reports a count, we still snap
+        // the first turn so a later regression has something to
+        // restore to.
+        let current_failed = extract_failed_count(&transcript);
+        let improved = match (current_failed, best_failed_count) {
             (Some(now), Some(best)) => now < best,
-            (Some(_now), None) => true,
+            (Some(_), None) => true,
+            (None, _) if !snapshot_taken => true, // first turn, unknown count
             _ => false,
         };
-        if improving {
-            if let Some(ref ws) = state.workspace_root {
-                let snapshot_dir = best_snapshot_dir(ws);
-                if let Err(e) = snapshot_workspace(ws, &snapshot_dir) {
-                    tracing::warn!(error = %e, "best-state snapshot failed; continuing without");
-                } else {
-                    tracing::info!(
-                        failed = current_failed,
-                        snapshot = %snapshot_dir.display(),
-                        "best-state snapshot saved"
-                    );
-                }
-            }
-        }
-        if let Some(now) = current_failed {
-            min_failed_seen = Some(min_failed_seen.map_or(now, |best| best.min(now)));
-        }
-
-        if improving {
-            plateau_strikes = 0;
-        } else if Some(&sig) == last_verify_signature.as_ref() {
-            plateau_strikes += 1;
-        } else {
-            plateau_strikes = 0;
-        }
-        last_verify_signature = Some(sig.clone());
-
-        // Close-to-green stop. When we've plateaued AND we're
-        // already within a handful of failures of green, further
-        // iteration has a high chance of regressing the suite.
-        // Each LLM call is a dice roll; the model that hit 3/31
-        // probably can't close the last 3 without some variance
-        // shaking loose something that was passing. Stop here and
-        // keep the best-seen state.
-        const CLOSE_TO_GREEN_THRESHOLD: u32 = 3;
-        if plateau_strikes >= 2 {
-            let close_to_green = min_failed_seen.is_some_and(|n| n <= CLOSE_TO_GREEN_THRESHOLD);
-            if close_to_green {
-                tracing::info!(
-                    best_failed = min_failed_seen,
-                    signature = %sig,
-                    "coding workflow: plateaued within {CLOSE_TO_GREEN_THRESHOLD} failures of green — stopping to avoid regression"
-                );
-                break;
-            }
-            // Not close to green — escalate and keep going.
-            approach_escalation += 1;
-            plateau_strikes = 0;
-            tracing::info!(
-                escalation = approach_escalation,
-                signature = %sig,
-                best_failed = min_failed_seen,
-                "coding workflow: plateau (not close to green) — escalating with 'try a different angle' override"
-            );
-            state.force_new_approach_note = Some(new_approach_note(approach_escalation, &sig));
-            append_progress(
-                &mut state.progress_summary,
-                "REVIEW",
-                state.outer_iteration,
-                &format!("plateau — escalation #{approach_escalation} (try different approach)"),
-            );
-        }
-
-        // Budget: break if the next iteration would likely blow the
-        // cap. Rough heuristic — next iter costs roughly as much as
-        // this iter did. Avoid the pathological case where the loop
-        // drains the whole cap on retry spam.
-        if let Some(cap) = cfg.budget_usd {
-            if cap > 0.0 && state.outer_iteration > 0 {
-                let per_iter = state.total_cost_usd / f64::from(state.outer_iteration);
-                let projected = state.total_cost_usd + per_iter;
-                if projected >= cap {
-                    tracing::info!(
-                        spent = state.total_cost_usd,
-                        cap = cap,
-                        projected = projected,
-                        "coding workflow: budget would be exhausted next cycle, stopping early"
-                    );
-                    break;
-                }
-            }
-        }
-
-        // Compile-error short-circuit. When VERIFY's output is a
-        // syntax / parse / compile error, REVIEW doesn't add much —
-        // the fix is mechanical (close the delimiter, fix the
-        // import, etc.) and a full REVIEW round spends an LLM call
-        // on prose the model already knows how to produce.
-        // Instead, inject a targeted review-finding directly and
-        // loop straight back to EXECUTE. Saves one LLM call per
-        // cycle and gives EXECUTE a blunt "fix the syntax first"
-        // instruction it can act on.
-        //
-        // The JS bowling bench pattern we keep hitting: agent
-        // appends a second class body after the class closure, jest
-        // parse-errors, VERIFY reports "SyntaxError: Missing
-        // semicolon", the loop was doing REVIEW → EXECUTE but
-        // EXECUTE wasn't pinning on the syntax fix. A direct
-        // override is blunter and cheaper.
-        if let Some(compile_err) = detect_compile_error(state.last_verify_output.as_deref().unwrap_or("")) {
-            tracing::info!(
-                outer_iter = state.outer_iteration,
-                "coding workflow: VERIFY reported a compile/parse error — skipping REVIEW, forcing EXECUTE to fix syntax first"
-            );
-            state.last_review = Some(format!(
-                "## Root cause\n\n\
-                 Your last EXECUTE turn shipped code that does not compile / parse. \
-                 This is the single most common failure mode at this stage of the \
-                 workflow: writing plausible-looking code and declaring done without \
-                 running the test suite to confirm it parses. Fix the syntax before \
-                 anything else — no logic work, no refactors, no new features.\n\n\
-                 ## Compile error from VERIFY\n\n\
-                 {compile_err}\n\n\
-                 ## Specific fixes\n\n\
-                 1. Open the file the error points at. Read it end-to-end.\n\
-                 2. Find the exact line / column the error names. If it's a \"missing \
-                    semicolon\", \"unclosed delimiter\", \"unexpected token\", or \
-                    \"unexpected EOF\", you almost certainly have a class or function \
-                    body that was duplicated, truncated, or had content pasted after \
-                    its closing brace.\n\
-                 3. Delete anything that appears after a module-level export / \
-                    public-API closing brace (e.g. anything after `module.exports = \
-                    Bowling;` in JS, anything after the final `}}` that closes an \
-                    `impl` block in Rust).\n\
-                 4. Run the test command via `bash` to confirm the syntax is valid \
-                    before declaring done.\n\n\
-                 Do NOT produce a new implementation this turn. Just repair the \
-                 syntax of the file you already have."
-            ));
-            append_progress(
-                &mut state.progress_summary,
-                "REVIEW",
-                state.outer_iteration,
-                "compile error — auto-override to fix syntax",
-            );
-            continue;
-        }
-
-        run_phase(&cfg, CodingPhase::Review, &mut state, review_prompt).await?;
-    }
-
-    // Best-state restore. If we exited the loop without going
-    // green AND a later iteration regressed past the best we saw,
-    // roll the workspace back to the snapshot we took at the
-    // best iteration. FINALIZE (and the bench scorer) will see
-    // the best-seen state rather than whatever the last botched
-    // iteration left behind. A human wouldn't turn in the regressed
-    // version; neither should we.
-    if !state.verify_passed {
-        let current_failed = extract_failed_count(state.last_verify_output.as_deref().unwrap_or(""));
-        if let (Some(ref ws), Some(best), Some(now)) = (&state.workspace_root, min_failed_seen, current_failed) {
-            if now > best {
-                let snapshot_dir = best_snapshot_dir(ws);
-                if snapshot_dir.is_dir() {
-                    match restore_workspace(&snapshot_dir, ws) {
-                        Ok(()) => {
-                            tracing::info!(
-                                best_failed = best,
-                                current_failed = now,
-                                "coding workflow: restored workspace to best-seen state (reverted regression)"
-                            );
-                            append_progress(
-                                &mut state.progress_summary,
-                                "RESTORE",
-                                state.outer_iteration,
-                                &format!("reverted regression — workspace back at best ({best} failed)"),
-                            );
+        if improved {
+            if let Some(ref ws) = cfg.workspace_root {
+                match snapshot_workspace(ws, &best_snapshot_dir(ws)) {
+                    Ok(()) => {
+                        snapshot_taken = true;
+                        if let Some(now) = current_failed {
+                            best_failed_count = Some(now);
                         }
-                        Err(e) => tracing::warn!(error = %e, "best-state restore failed"),
+                        tracing::info!(iteration, failed = current_failed, "coding workflow: snapshotted best-seen workspace");
                     }
+                    Err(e) => tracing::warn!(error = %e, "coding workflow: snapshot failed"),
                 }
             }
         }
-        // Clean up the snapshot dir so it doesn't leak into the
-        // bench scorer's view of the workspace or a follow-up run.
-        if let Some(ref ws) = state.workspace_root {
-            let snapshot_dir = best_snapshot_dir(ws);
-            if snapshot_dir.is_dir() {
-                let _ = std::fs::remove_dir_all(&snapshot_dir);
+
+        // Close-to-green stop. When we've seen a turn at ≤3 failures
+        // and this turn didn't improve on it, another cycle is more
+        // likely to regress than close the gap.
+        if let Some(best) = best_failed_count {
+            if best <= CLOSE_TO_GREEN_THRESHOLD && !improved {
+                tracing::info!(iteration, best_failed = best, "coding workflow: close to green, stopping before regression");
+                break;
             }
         }
-    }
 
-    // TEST --------------------------------------------------------------
-    // Only run when the core verify passed AND the caller didn't
-    // opt out. If TEST adds tests that reveal real bugs, loop back
-    // to EXECUTE with those as the next REVIEW findings — bounded
-    // separately so a TEST-induced problem can't eat the whole
-    // iteration cap on its own.
-    if state.verify_passed && !cfg.skip_test_phase {
-        let mut test_retry_strikes = 0u32;
-        let test_retry_max = 3u32;
-        loop {
-            run_phase(&cfg, CodingPhase::Test, &mut state, test_prompt).await?;
-            if state.test_phase_passed {
-                break;
-            }
-            test_retry_strikes += 1;
-            if test_retry_strikes >= test_retry_max {
-                tracing::info!("coding workflow: TEST phase red after {test_retry_max} tries, finalizing with the gap noted");
-                break;
-            }
-            // Budget check for the retry too.
-            if let Some(cap) = cfg.budget_usd {
-                if cap > 0.0 && state.total_cost_usd >= cap {
+        // Budget check: next turn would blow the cap.
+        if let Some(cap) = cfg.budget_usd {
+            if cap > 0.0 && total_cost_usd > 0.0 {
+                let per_iter = total_cost_usd / f64::from(iteration);
+                if total_cost_usd + per_iter >= cap {
+                    tracing::info!(spent = total_cost_usd, cap, "coding workflow: budget exhausted");
                     break;
                 }
             }
-            // Feed the TEST report into review findings so EXECUTE
-            // sees what broke, then run one more EXECUTE → VERIFY
-            // cycle to try to fix it.
-            state.last_review = state.last_test_report.clone();
-            state.outer_iteration += 1;
-            run_phase(&cfg, CodingPhase::Execute, &mut state, execute_prompt).await?;
-            run_phase(&cfg, CodingPhase::Verify, &mut state, verify_prompt).await?;
-            if !state.verify_passed {
-                // EXECUTE broke the original tests — bail, don't
-                // keep drilling. FINALIZE will report the regression.
-                break;
+        }
+    }
+
+    // Restore the best-seen workspace if a later turn regressed.
+    if !succeeded {
+        if let (Some(ref ws), Some(best), true) = (&cfg.workspace_root, best_failed_count, snapshot_taken) {
+            let final_failed = extract_failed_count(last_verify_output.as_deref().unwrap_or(""));
+            let regressed = final_failed.is_some_and(|n| n > best);
+            let snap = best_snapshot_dir(ws);
+            if regressed && snap.is_dir() {
+                match restore_workspace(&snap, ws) {
+                    Ok(()) => tracing::info!(best_failed = best, "coding workflow: restored workspace to best-seen state"),
+                    Err(e) => tracing::warn!(error = %e, "coding workflow: restore failed"),
+                }
             }
         }
     }
 
-    // Clean up the best-state snapshot on the green path too so
-    // it doesn't leak into the scorer's view of the workspace or
-    // confuse follow-up runs on the same workspace.
-    if let Some(ref ws) = state.workspace_root {
-        let snapshot_dir = best_snapshot_dir(ws);
-        if snapshot_dir.is_dir() {
-            let _ = std::fs::remove_dir_all(&snapshot_dir);
+    // Remove the snapshot so it doesn't leak into the scorer's
+    // view of the workspace or a follow-up run on the same dir.
+    if let Some(ref ws) = cfg.workspace_root {
+        let snap = best_snapshot_dir(ws);
+        if snap.is_dir() {
+            let _ = std::fs::remove_dir_all(&snap);
         }
     }
 
-    // FINALIZE ----------------------------------------------------------
-    run_phase(&cfg, CodingPhase::Finalize, &mut state, finalize_prompt).await?;
-
-    // Single authoritative Completed event — mirrors what
-    // Agent::run_with_channel emits at the end of its loop so bench
-    // harness / TUI stream consumers don't need a new code path to
-    // detect "workflow is done."
     let _ = cfg.tx.send(AgentEvent::Completed {
         agent_id: cfg.operator_id.clone(),
-        iterations: state.outer_iteration,
-        cost_usd: state.total_cost_usd,
+        iterations: iteration,
+        cost_usd: total_cost_usd,
     });
 
-    Ok(state.total_cost_usd)
+    Ok(total_cost_usd)
 }
 
-type PromptBuilder = fn(&WorkflowState, &str) -> (String, String);
+/// Stop escalating when we're this close to green — more
+/// iteration is more likely to regress than close the gap.
+const CLOSE_TO_GREEN_THRESHOLD: u32 = 3;
 
-async fn run_phase(cfg: &CodingWorkflowConfig, phase: CodingPhase, state: &mut WorkflowState, prompt_builder: PromptBuilder) -> anyhow::Result<()> {
-    let slot = cfg.registry.routing.slot_for(phase.activity()).clone();
-    let alias = slot.model.clone();
-    let llm_config = cfg
-        .registry
-        .llm_config_for(phase.activity())
-        .with_context(|| format!("resolving {} slot → LLM config", phase.activity_name()))?;
+/// System prompt the coding agent runs under. One prompt that
+/// captures the agent's whole job: read the problem, write the
+/// code, run the tests, iterate until green (or report why not).
+/// This replaces the seven per-phase system prompts the old
+/// workflow shipped with.
+const CODING_SYSTEM_PROMPT: &str = "\
+You are a coding agent working inside a sandboxed workspace.
 
-    let _ = cfg.tx.send(AgentEvent::PhaseStart {
-        phase: phase.label().to_string(),
-        alias: alias.clone(),
-        upstream: None,
-        iteration: state.outer_iteration.max(1),
-    });
+Your job: implement the task, run the test suite, fix what \
+fails, and keep iterating until every provided test passes (or \
+until you genuinely cannot make more progress).
 
-    let (system_prompt, user_prompt) = prompt_builder(state, &cfg.task_prompt);
+## Process
 
-    let mut agent_config = AgentConfig::new(format!("{}/{}", cfg.operator_id, phase.label().to_lowercase()), system_prompt, llm_config)
-        .with_max_iterations(phase.max_iterations());
-    if let Some(cap) = cfg.budget_usd {
-        let remaining = (cap - state.total_cost_usd).max(0.0);
-        agent_config = agent_config.with_budget(CostBudget {
-            max_cost_usd: Some(remaining),
-            max_tokens: None,
-        });
+1. **Read before writing.** Use `read_file` / `list_files` to \
+   inspect the existing code, the tests (the spec), and any \
+   `INSTRUCTIONS.md` / `README.md`. Figure out the test command \
+   the repo already uses: `cargo test`, `pnpm test` / `npm test`, \
+   `pytest`, `go test ./...`, `./gradlew test`, `make test`. If \
+   the repo has a `Makefile` / `justfile` / CI workflow with a \
+   test target, mirror that exactly. Don't invent a new harness.
+
+2. **Implement.** Write code with `edit_file` or `write_file`. \
+   Keep changes minimal — don't rewrite the whole file when a \
+   small patch will do. Do NOT modify the provided test files; \
+   they are the spec. If an extra test of your own makes sense, \
+   add it alongside the implementation that satisfies it.
+
+3. **Self-validate.** Run the test command via `bash`. THIS IS \
+   NON-NEGOTIABLE. Declaring done without running the tests is a \
+   recurring failure mode in this workflow — don't do it. If the \
+   tests fail, fix and re-run. Iterate inside this turn until \
+   they pass, or until you've made the most surgical fix you can \
+   and remaining failures are edge cases you can't close without \
+   risking regressing the passing ones.
+
+4. **Preserve passing tests.** When fixing a failure, do not \
+   rewrite code that's already making other tests pass. Most \
+   test regressions come from changing logic that worked. If a \
+   compile error stops the tests from running, that IS the first \
+   thing to fix — unclosed delimiters and duplicate class bodies \
+   are the usual culprits.
+
+5. **Report.** When you stop, include:
+   - A one-paragraph summary of what you changed.
+   - A `## Test Results` line with the literal pass/fail count \
+     from your final test run, e.g. `31 passed, 0 failed` or \
+     `28 passed, 3 failed — last-frame strike bonus unresolved`. \
+     The orchestrator parses this to decide whether to loop back \
+     with more context or stop.
+
+## Hard rules
+
+- Always run the test suite via `bash` before your final summary. \
+  Compile-only checks (`cargo check`, `node --check`) are not a \
+  substitute when a real test runner is available.
+- Never leave orphan failing tests that reference unimplemented \
+  methods you added. If you add a test, add the implementation \
+  that satisfies it in the same change.
+- When in doubt, prefer a small correct patch to a clever rewrite.
+";
+
+/// Build the user-message prompt for a given outer iteration.
+/// The first turn just shows the task. Subsequent turns include
+/// the prior turn's test output so the agent has concrete failure
+/// context to act on — this is what turns the outer loop from
+/// "try the same thing again" into "try again with specific
+/// failure feedback."
+fn build_user_prompt(task: &str, iteration: u32, prior_output: Option<&str>) -> String {
+    if iteration == 1 {
+        return format!("{task}\n\nImplement the solution, run the test suite, and iterate until green. Finish with a `## Test Results` line.");
     }
-
-    // Each phase gets its own Agent with a FRESH conversation —
-    // prior phase output is carried explicitly via `user_prompt` so
-    // the model sees only what it needs, not a growing history.
-    // Share the same ToolRegistry handle (Arc-backed internally).
-    let agent = Agent::new(agent_config, cfg.tools.clone());
-    let conversation = agent.run_with_channel(user_prompt, cfg.tx.clone()).await?;
-
-    let transcript = summarize_conversation(&conversation);
-
-    let phase_cost = {
-        let tracker = agent.cost_tracker.lock().expect("cost_tracker lock");
-        tracker.total_cost_usd
+    let prior = prior_output.unwrap_or("(no prior output)");
+    let compile_err = detect_compile_error(prior);
+    let preamble = if let Some(err) = compile_err {
+        format!(
+            "Your previous attempt shipped code that does not compile / parse. Before doing anything else, fix the syntax. The usual cause is a duplicated class body or extra content appended after the module's export. \n\n## Compile error\n\n{err}\n\n"
+        )
+    } else {
+        format!(
+            "Your previous attempt left some tests failing. The output from your last test run is below. Keep every test that's currently passing passing — most test regressions come from rewriting code that was working. Make a targeted patch that closes the specific failures.\n\n## Previous test output (truncated)\n\n{}\n\n",
+            prior.chars().take(3000).collect::<String>()
+        )
     };
-    state.total_cost_usd += phase_cost;
-
-    match phase {
-        CodingPhase::Assess => {
-            // Pull out the `## Goal Summary` section so later phases
-            // can quote it verbatim without lugging the whole ~500
-            // word assessment along.
-            state.goal_summary = extract_section(&transcript, "Goal Summary");
-            state.assessment = Some(transcript);
-            append_progress(&mut state.progress_summary, "ASSESS", 0, "Read tests + stub + instructions; crystallized goal.");
-        }
-        CodingPhase::Plan => {
-            state.plan = Some(transcript);
-            append_progress(&mut state.progress_summary, "PLAN", 0, "Produced an implementation plan.");
-        }
-        CodingPhase::Execute => {
-            state.last_execute_write_count = count_write_tool_calls(&conversation);
-            state.last_execute_bash_count = count_tool_calls_named(&conversation, "bash");
-            let update = extract_section(&transcript, "Progress Update").unwrap_or_else(|| first_line(&transcript, 160));
-            append_progress(&mut state.progress_summary, "EXECUTE", state.outer_iteration, &update);
-            state.last_exec_summary = Some(transcript);
-        }
-        CodingPhase::Verify => {
-            state.verify_passed = detect_verify_pass(&transcript);
-            let counts = verify_signature(&transcript);
-            let status = if state.verify_passed { "tests PASS" } else { "tests fail" };
-            append_progress(&mut state.progress_summary, "VERIFY", state.outer_iteration, &format!("{status} ({counts})"));
-            state.last_verify_output = Some(transcript);
-        }
-        CodingPhase::Review => {
-            // REVIEW may update the goal summary if it noticed
-            // we've been solving the wrong problem. The review
-            // prompt asks for a `## Updated Goal Summary` block
-            // only when the original needs refinement; when absent
-            // we keep ASSESS's version.
-            if let Some(refined) = extract_section(&transcript, "Updated Goal Summary") {
-                state.goal_summary = Some(refined);
-                append_progress(&mut state.progress_summary, "REVIEW", state.outer_iteration, "Refined goal summary.");
-            } else {
-                append_progress(
-                    &mut state.progress_summary,
-                    "REVIEW",
-                    state.outer_iteration,
-                    "Critiqued failures; queued fixes.",
-                );
-            }
-            state.last_review = Some(transcript);
-        }
-        CodingPhase::Test => {
-            // The TEST-phase prompt asks for a final `## Verdict`
-            // line: `PASS` when every new test the agent added is
-            // green, `FAIL` otherwise. Fall back to looking for the
-            // verify-style marker if the agent ignored the format.
-            let upper = transcript.to_uppercase();
-            state.test_phase_passed = upper.contains("## VERDICT")
-                && upper
-                    .split("## VERDICT")
-                    .nth(1)
-                    .is_some_and(|tail| tail.lines().take(3).any(|l| l.trim_start().starts_with("PASS")))
-                || (detect_verify_pass(&transcript) && !upper.contains("FAIL"));
-            let status = if state.test_phase_passed { "new tests PASS" } else { "new tests fail" };
-            append_progress(&mut state.progress_summary, "TEST", state.outer_iteration, status);
-            state.last_test_report = Some(transcript);
-        }
-        CodingPhase::Finalize => {
-            append_progress(&mut state.progress_summary, "FINALIZE", state.outer_iteration, "Session complete.");
-        }
-    }
-
-    Ok(())
+    format!("{preamble}## Task (reminder)\n\n{task}\n\nFix the remaining failures and re-run the tests. Finish with a `## Test Results` line.")
 }
 
-/// Pull out the contents of a `## <heading>` section from a markdown
-/// blob produced by one of the workflow phases. Returns `None` when
-/// the heading isn't present, so callers can distinguish "didn't
-/// emit" from "emitted empty".
-///
-/// Matches headings case-insensitively so minor capitalization drift
-/// in the LLM output doesn't drop the section on the floor.
-/// Append one line to the rolling progress log with a
-/// phase/iteration tag. Iteration 0 means "not inside the outer
-/// execute-verify-review loop" (ASSESS / PLAN / FINALIZE).
-fn append_progress(buf: &mut String, phase: &str, iteration: u32, update: &str) {
-    let update = update.trim();
-    if update.is_empty() {
-        return;
-    }
-    if iteration > 0 {
-        buf.push_str(&format!("- [{phase} #{iteration}] {update}\n"));
-    } else {
-        buf.push_str(&format!("- [{phase}] {update}\n"));
-    }
+// ---------------------------------------------------------------------------
+// Helpers: test-result parsing, compile-error detection, snapshots.
+// These are the same helpers the old multi-phase workflow used;
+// they carry their own unit tests below and don't care whether
+// the surrounding loop is one phase or seven.
+// ---------------------------------------------------------------------------
+
+fn summarize_conversation(conv: &crate::conversation::Conversation) -> String {
+    conv.messages
+        .iter()
+        .rev()
+        .find(|m| matches!(m.role, crate::conversation::Role::Assistant))
+        .map(|m| m.content.clone())
+        .unwrap_or_default()
 }
 
-/// Trim a phase transcript to the first useful line — used as a
-/// fallback progress update when the phase didn't emit a
-/// `## Progress Update` section.
-/// Format the rolling progress log for inclusion in a prompt.
-/// Returns `"(starting fresh — no prior phases)"` when the log is
-/// empty so the section never shows up blank.
-fn progress_block(buf: &str) -> String {
-    if buf.trim().is_empty() {
-        "(starting fresh — no prior phases)".to_string()
-    } else {
-        buf.trim_end().to_string()
+/// True when the transcript reports the test suite is green.
+/// Explicit prefix (`ALL TESTS PASS`) wins; runner-summary
+/// fallbacks are narrow to avoid false positives on prose or
+/// on Rust `Ok(..)` values that appear in failure diffs.
+pub fn detect_verify_pass(transcript: &str) -> bool {
+    let upper = transcript.to_uppercase();
+    if upper.contains("ALL TESTS PASS") {
+        return true;
     }
+    if upper.contains("TESTS FAILED") || upper.contains("TESTS FAIL") {
+        return false;
+    }
+    if nonzero_failure_count(&upper) || upper.contains("TEST RESULT: FAILED") {
+        return false;
+    }
+    upper.contains("TEST RESULT: OK")                       // cargo test
+        || upper.contains(" PASSED, 0 FAILED")              // pytest / go / jest
+        || upper.contains("0 FAILED, 0 ERRORS")             // go test verbose
+        || (upper.contains("TESTS:") && upper.contains(" PASSED") && upper.contains("0 FAILED"))
 }
 
-fn first_line(s: &str, max: usize) -> String {
-    let line = s.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
-    if line.chars().count() > max {
-        line.chars().take(max).collect::<String>() + "…"
-    } else {
-        line.to_string()
-    }
-}
-
-fn extract_section(markdown: &str, heading: &str) -> Option<String> {
-    let needle = format!("## {heading}").to_lowercase();
-    let lower = markdown.to_lowercase();
-    let start_line = lower.find(&needle)?;
-    // Advance to the line after the heading.
-    let after_heading = markdown[start_line..].find('\n').map_or(markdown.len(), |i| start_line + i + 1);
-    // Find the next `## ` heading (any level-2), which terminates
-    // the section. If there isn't one, take everything to EOF.
-    let rest = &markdown[after_heading..];
-    let end_relative = rest.find("\n## ").or_else(|| rest.find("\n##")).unwrap_or(rest.len());
-    let body = rest[..end_relative].trim();
-    if body.is_empty() {
-        None
-    } else {
-        Some(body.to_string())
-    }
-}
-
-/// Distill a verifier transcript down to "how many passed vs
-/// failed" so we can detect a plateau: if the numbers are the
-/// same two cycles in a row, REVIEW isn't giving the agent new
-/// information and we're wasting budget. Case-insensitive.
-///
-/// Returns a compact string like `"27p/4f"` built from the first
-/// `N passed … N failed` pattern it finds. Falls back to the whole
-/// trimmed message when no counts are visible — better to be
-/// conservative (treat as plateau after one stable pass) than risk
-/// false-positive.
-pub fn verify_signature(transcript: &str) -> String {
-    let lower = transcript.to_lowercase();
-    // Pull the first passed/failed pair we find.
-    let passed = scan_count(&lower, "passed");
-    let failed = scan_count(&lower, "failed");
-    if passed.is_some() || failed.is_some() {
-        return format!("{}p/{}f", passed.unwrap_or(0), failed.unwrap_or(0));
-    }
-    // Build error vs test failure: track the first line mentioning
-    // "error" so two identical compile errors count as a plateau.
-    for line in lower.lines() {
-        if line.contains("error") {
-            return line.trim().to_string();
-        }
-    }
-    lower.trim().chars().take(80).collect()
+/// Extract the "N failed" count from a transcript. `None` when
+/// we can't parse a shape — callers treat that as "unknown" and
+/// fall through to iteration without progress tracking.
+pub fn extract_failed_count(transcript: &str) -> Option<u32> {
+    scan_count(&transcript.to_lowercase(), "failed")
 }
 
 fn scan_count(haystack: &str, needle: &str) -> Option<u32> {
-    // Walk through the string looking for "<number> <needle>".
     let mut chars = haystack.char_indices().peekable();
     while let Some((i, c)) = chars.next() {
         if !c.is_ascii_digit() {
@@ -851,70 +374,83 @@ fn scan_count(haystack: &str, needle: &str) -> Option<u32> {
     None
 }
 
-/// Heuristic: does the verifier's last message claim tests passed?
-/// The verify phase's system prompt asks the agent to say either
-/// `ALL TESTS PASS` or `TESTS FAILED:` with the output — so we look
-/// for the pass marker. Falls back to looking for standard runner
-/// summaries if the agent ignored the format request.
-fn detect_verify_pass(transcript: &str) -> bool {
+/// True when the transcript contains a POSITIVE failure count.
+/// Zero-failure counts ("0 failed") don't count — they appear
+/// in green summaries. We only bail out on failure when a real
+/// non-zero count shows up.
+fn nonzero_failure_count(upper: &str) -> bool {
+    let needles = ["FAILED", "FAILURE", "FAILING"];
+    for needle in needles {
+        let mut search = upper;
+        while let Some(idx) = search.find(needle) {
+            let before = &search[..idx];
+            let digits: String = before
+                .chars()
+                .rev()
+                .skip_while(|c| c.is_whitespace() || matches!(*c, ',' | ';' | '(' | '—' | '-'))
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            if let Ok(n) = digits.parse::<u32>() {
+                if n > 0 {
+                    return true;
+                }
+            }
+            search = &search[idx + needle.len()..];
+        }
+    }
+    false
+}
+
+/// Pull a compile / parse / syntax error snippet out of a
+/// transcript when the failure isn't a normal test assertion.
+/// Returns `None` when we should treat the failure as a regular
+/// red-test run. Used by `build_user_prompt` to switch retry
+/// tone from "fix the failures" to "fix the syntax".
+fn detect_compile_error(transcript: &str) -> Option<String> {
     let upper = transcript.to_uppercase();
-    // Explicit prefix from the VERIFY phase prompt contract.
-    if upper.contains("ALL TESTS PASS") {
-        return true;
-    }
-    if upper.contains("TESTS FAILED") || upper.contains("TESTS FAIL") {
-        return false;
-    }
-    // Narrow runner-summary fallbacks. Used only when the VERIFY
-    // model forgot the explicit prefix. Each positive pattern must
-    // uniquely identify a *successful* final summary from a real
-    // test runner — fuzzy phrases like "OK (" would false-positive
-    // on Rust `Ok(..)` values that appear verbatim in failure diffs
-    // ("left: Ok(()), right: Err(NotEnoughPinsLeft)"), and lone
-    // "PASSING" would false-positive on prose like "most suites
-    // are passing". A false positive here silently short-circuits
-    // the EXECUTE → VERIFY → REVIEW loop on the very first cycle,
-    // which is exactly the bug we're avoiding.
-    //
-    // "FAILED" in the transcript does NOT automatically mean
-    // failure — "0 failed" appears inside real green summaries like
-    // "31 passed; 0 failed". We only short-circuit on failure when
-    // we see a *positive* failure count or a cargo-style
-    // "test result: FAILED" line.
-    if nonzero_failure_count(&upper) || upper.contains("TEST RESULT: FAILED") {
-        return false;
-    }
-    upper.contains("TEST RESULT: OK")                     // cargo test green
-        || upper.contains(" PASSED, 0 FAILED")             // pytest / go / jest summary
-        || upper.contains("0 FAILED, 0 ERRORS")            // go test verbose
-        || (upper.contains("TESTS:") && upper.contains(" PASSED") && upper.contains("0 FAILED"))
-    // jest / vitest
+    let patterns = [
+        // JS / TS
+        "SYNTAXERROR",
+        "UNEXPECTED TOKEN",
+        "MISSING SEMICOLON",
+        "UNCLOSED DELIMITER",
+        "UNEXPECTED EOF",
+        // Rust
+        "COULD NOT COMPILE",
+        "THIS FILE CONTAINS AN UNCLOSED DELIMITER",
+        "EXPECTED ONE OF",
+        // Go
+        "SYNTAX ERROR:",
+        "EXPECTED '{'",
+        "EXPECTED ';'",
+        // Python
+        "INDENTATIONERROR",
+        "TABERROR",
+        // Java
+        "REACHED END OF FILE",
+        "';' EXPECTED",
+        "CLASS, INTERFACE, OR ENUM EXPECTED",
+        "ERROR: COMPILATION FAILED",
+    ];
+    let hit_idx = patterns.iter().find_map(|p| upper.find(p))?;
+    let bytes_per_char = transcript.len().checked_div(upper.len()).unwrap_or(1).max(1);
+    let start = hit_idx.saturating_mul(bytes_per_char).saturating_sub(120);
+    let end = (hit_idx.saturating_mul(bytes_per_char).saturating_add(600)).min(transcript.len());
+    let snippet = transcript.get(start..end).unwrap_or(transcript);
+    Some(snippet.trim().to_string())
 }
 
-/// Extract the "N failed" count from a VERIFY transcript. Returns
-/// `None` when no digit-before-"failed" shape matches (e.g. compile
-/// errors, runner summaries we can't parse). A missing count just
-/// falls through to the plateau-signature check — we prefer a false
-/// negative (keep going) to a false positive (give up early).
-fn extract_failed_count(transcript: &str) -> Option<u32> {
-    scan_count(&transcript.to_lowercase(), "failed")
-}
+// Best-state snapshot + restore. Lives under a hidden dir inside
+// the workspace so `pytest` / `jest` / `cargo test` / gradle
+// all skip it naturally.
 
-/// Location of the best-state snapshot inside a workspace.
-/// Hidden dir (leading `.`) so language test runners skip it —
-/// cargo, pytest, jest, go test, gradle all ignore dotfile dirs
-/// by default. Living under the workspace itself rather than a
-/// sibling dir keeps the snapshot reachable without additional
-/// mount plumbing.
 fn best_snapshot_dir(workspace: &Path) -> PathBuf {
     workspace.join(".smooth-best-snapshot")
 }
 
-/// True when a path should be skipped when snapshotting or
-/// restoring the workspace. Everything in here is either huge
-/// (node_modules, target), noisy (.git), or our own bookkeeping
-/// (.smooth-*). Hidden dotfiles outside this list DO snapshot
-/// because some tasks ship config in them (e.g. `.babelrc`).
 fn is_snapshot_excluded(name: &std::ffi::OsStr) -> bool {
     matches!(
         name.to_str(),
@@ -933,12 +469,6 @@ fn is_snapshot_excluded(name: &std::ffi::OsStr) -> bool {
     )
 }
 
-/// Recursive copy of `src` into `dst`, skipping excluded names
-/// at any depth. Creates `dst` if missing; removes it first if
-/// present so the snapshot mirrors the source exactly (no stale
-/// files left from an earlier, larger snapshot). Errors propagate
-/// so the caller can log and continue — snapshotting is a
-/// resilience bonus, not a correctness requirement.
 fn snapshot_workspace(src: &Path, dst: &Path) -> std::io::Result<()> {
     if dst.exists() {
         std::fs::remove_dir_all(dst)?;
@@ -947,12 +477,7 @@ fn snapshot_workspace(src: &Path, dst: &Path) -> std::io::Result<()> {
     copy_recursive(src, dst)
 }
 
-/// Restore `dst` from `src` by clearing the workspace's
-/// non-excluded entries and copying the snapshot over. Keeps
-/// node_modules/.git intact so we don't re-do `pnpm install`
-/// after a restore — just the code changes go back.
 fn restore_workspace(src: &Path, dst: &Path) -> std::io::Result<()> {
-    // Delete non-excluded entries in dst, then copy from src.
     for entry in std::fs::read_dir(dst)? {
         let entry = entry?;
         let name = entry.file_name();
@@ -983,9 +508,6 @@ fn copy_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
         if file_type.is_dir() {
             copy_recursive(&from, &to)?;
         } else if file_type.is_symlink() {
-            // Resolve and copy content; sandbox workspaces rarely
-            // have symlinks, and preserving them correctly across
-            // bind mounts is fiddly.
             if let Ok(target) = std::fs::read_link(&from) {
                 let _ = std::fs::remove_file(&to);
                 #[cfg(unix)]
@@ -1000,1371 +522,120 @@ fn copy_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Build the EXECUTE override for a detected plateau. Phrased the
-/// way a senior engineer would nudge a teammate who's stuck —
-/// "take another pass", "try a different angle" — NOT "throw your
-/// work away". Most of the current code is probably right; the gap
-/// is usually in a handful of edge cases, and rewriting from
-/// scratch regresses the majority that already works. Levels:
-///
-/// 1 → "Take another shot at just the failing tests. Keep what's
-///      passing. Look at the failures fresh."
-/// 2 → "Try a different angle on the same failures — you've been
-///      making the same fix twice."
-/// 3+ → "Isolate one failing test. Fix only that. Then the next.
-///       Don't touch tests that are already green."
-fn new_approach_note(escalation: u32, signature: &str) -> String {
-    match escalation {
-        1 => format!(
-            "PLATEAU — TAKE ANOTHER SHOT.\n\n\
-             The test suite ran twice in a row with the same failure \
-             shape ({signature}). Your last fix didn't move the \
-             needle.\n\n\
-             That doesn't mean your code is wrong overall — most of \
-             the passing tests are probably passing for good reasons, \
-             and you should keep that code as-is. The gap is in a \
-             handful of specific edge cases.\n\n\
-             For THIS turn:\n\
-             - DO NOT rewrite from scratch. Keep every test that's \
-               currently green actually green.\n\
-             - Look at the failing tests with fresh eyes. Pretend you \
-               just saw them for the first time.\n\
-             - Run the suite again after your change and confirm the \
-               failure count dropped (or at least the specific \
-               failures changed)."
-        ),
-        2 => format!(
-            "PLATEAU — TRY A DIFFERENT ANGLE.\n\n\
-             Second escalation, signature {signature}. Your last two \
-             attempts both got the same result, which means you're \
-             re-making the same fix. Time to look at it from a \
-             different angle, not re-apply the one that didn't work.\n\n\
-             What's NOT working is the fix you've been trying. Instead:\n\
-             - Read the EXACT assertion in the first failing test. \
-               Don't paraphrase. What literal values does it expect?\n\
-             - Trace your code by hand with the test's inputs. At \
-               what line does your output diverge from what the \
-               test expects?\n\
-             - Once you've found the divergence point, THAT's the \
-               bug. The fix is usually a two-line change, not a \
-               refactor.\n\n\
-             Keep every passing test passing. Narrow your edit to \
-             the smallest change that closes the specific gap."
-        ),
-        _ => format!(
-            "PLATEAU — ISOLATE ONE TEST.\n\n\
-             Escalation #{escalation}, signature {signature}. You've \
-             taken two fresh passes and it's still not moving.\n\n\
-             Zoom all the way in: pick the FIRST failing test. Read \
-             its assertions. Make ONLY that test pass — a targeted \
-             patch on the narrowest code path that handles exactly \
-             its inputs. Do not rewrite anything. Do not regress \
-             tests that are green. Run the suite; confirm that test \
-             moved from failing to passing without any green test \
-             flipping to red. Then pick the next failing test and \
-             repeat.\n\n\
-             One test at a time. Patch-sized changes. Keep the \
-             working parts working."
-        ),
-    }
-}
-
-/// Extract a compile / parse / syntax error from a VERIFY
-/// transcript, or `None` when the failure is a normal test
-/// assertion. Looking for the patterns each language's toolchain
-/// emits when the input doesn't even parse — at that point running
-/// REVIEW → EXECUTE with freeform critique wastes an LLM call on
-/// advice the model already has. A blunt "fix the syntax first"
-/// override closes the loop faster.
-///
-/// Returns a short extracted snippet (the error line + 1–2 lines
-/// of surrounding context) when a pattern matches, suitable for
-/// dropping into the EXECUTE-override note verbatim.
-fn detect_compile_error(transcript: &str) -> Option<String> {
-    // Language-agnostic signatures. Each is unambiguous — a real
-    // test assertion won't print these phrases. We match the raw
-    // case to preserve line numbers / column numbers in the
-    // snippet, but detect case-insensitively.
-    let upper = transcript.to_uppercase();
-    let patterns = [
-        // JavaScript / TypeScript — jest / vitest / babel / swc / node
-        "SYNTAXERROR",
-        "UNEXPECTED TOKEN",
-        "MISSING SEMICOLON",
-        "UNCLOSED DELIMITER",
-        "UNEXPECTED EOF",
-        // Rust — cargo / rustc
-        "COULD NOT COMPILE",
-        "THIS FILE CONTAINS AN UNCLOSED DELIMITER",
-        "EXPECTED ONE OF",
-        // Go — gc / go build
-        "SYNTAX ERROR:",
-        "EXPECTED '{'",
-        "EXPECTED ';'",
-        // Python — py_compile / pytest collect-time failure
-        "INDENTATIONERROR",
-        "TABERROR",
-        // Java — javac / gradle compile
-        "REACHED END OF FILE",
-        "';' EXPECTED",
-        "CLASS, INTERFACE, OR ENUM EXPECTED",
-        "ERROR: COMPILATION FAILED",
-    ];
-    let hit_idx = patterns.iter().find_map(|p| upper.find(p))?;
-    // Grab the error line + a small surrounding window from the
-    // ORIGINAL (case-preserving) transcript, not the uppercased copy.
-    // Clamp so we don't drag a megabyte of trailing noise.
-    let bytes_per_char = transcript.len().checked_div(upper.len()).unwrap_or(1).max(1);
-    let start = hit_idx.saturating_mul(bytes_per_char).saturating_sub(120);
-    let end = (hit_idx.saturating_mul(bytes_per_char).saturating_add(600)).min(transcript.len());
-    let snippet = transcript.get(start..end).unwrap_or(transcript);
-    Some(snippet.trim().to_string())
-}
-
-/// True when the transcript contains a summary line reporting a
-/// POSITIVE number of failures (e.g. "3 failed", "Tests: 2 failed,
-/// 28 passed"). Zero-failure counts ("0 failed") don't count — they
-/// appear in green summaries. We only need to be approximately
-/// right: false negatives here fall through to the positive-shape
-/// check, and false positives on a green run are what we just fixed.
-fn nonzero_failure_count(upper: &str) -> bool {
-    // Walk every occurrence of "FAILED" / "FAILURE" / "FAILING" and
-    // look backwards for the nearest digit-run. If that digit-run is
-    // nonzero, we've got a real failure count. Cheap and reliable.
-    let needles = ["FAILED", "FAILURE", "FAILING"];
-    for needle in needles {
-        let mut search = upper;
-        while let Some(idx) = search.find(needle) {
-            let before = &search[..idx];
-            // Pull the last digit-run from `before`.
-            let digits: String = before
-                .chars()
-                .rev()
-                .skip_while(|c| c.is_whitespace() || matches!(*c, ',' | ';' | '(' | '—' | '-'))
-                .take_while(|c| c.is_ascii_digit())
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
-            if let Ok(n) = digits.parse::<u32>() {
-                if n > 0 {
-                    return true;
-                }
-            }
-            search = &search[idx + needle.len()..];
-        }
-    }
-    false
-}
-
-/// Count the number of `edit_file` / `write_file` tool calls across
-/// a completed phase's conversation. Zero after an EXECUTE phase
-/// means the agent spent the turn on `read_file` / `list_files` /
-/// `bash` exploration and never actually touched the code — a
-/// failure mode we've observed in the Java bench task (the agent
-/// got lost in the Gradle `src/main/java/…` tree and ran the test
-/// clock out without writing). Detecting this lets us force a
-/// retry with an override finding instead of wasting the VERIFY
-/// slot on unchanged code.
-fn count_write_tool_calls(conv: &crate::conversation::Conversation) -> usize {
-    conv.messages
-        .iter()
-        .flat_map(|m| m.tool_calls.iter())
-        .filter(|tc| matches!(tc.name.as_str(), "edit_file" | "write_file"))
-        .count()
-}
-
-/// Count tool calls by exact name. Used alongside
-/// `count_write_tool_calls` for the "did EXECUTE bother to run
-/// tests?" check — zero `bash` calls after a write means the
-/// agent shipped without self-validation.
-fn count_tool_calls_named(conv: &crate::conversation::Conversation, name: &str) -> usize {
-    conv.messages.iter().flat_map(|m| m.tool_calls.iter()).filter(|tc| tc.name == name).count()
-}
-
-fn summarize_conversation(conv: &crate::conversation::Conversation) -> String {
-    // The assistant's LAST message is what this phase produced. For
-    // execute/verify that message summarises what was done; for
-    // assess/plan/review it IS the output (reasoning text).
-    conv.messages
-        .iter()
-        .rev()
-        .find(|m| matches!(m.role, crate::conversation::Role::Assistant))
-        .map(|m| m.content.clone())
-        .unwrap_or_default()
-}
-
-// ---------------------------------------------------------------------------
-// System + user prompts per phase. Kept as free functions so tests
-// can snapshot them; no LLM calls happen here.
-// ---------------------------------------------------------------------------
-
-fn assess_prompt(_state: &WorkflowState, task: &str) -> (String, String) {
-    let sys = "\
-You are in the ASSESS phase of a structured coding workflow.
-
-You are the voice of the user's intent across every later phase. \
-After you, the code gets written, tests get run, bugs get \
-critiqued. Every one of those phases will see your output at the \
-top of their prompt. Get it right; everything downstream depends \
-on it.
-
-Read the task, the test file, the stub code, and any \
-INSTRUCTIONS.md (use read_file liberally — do not guess).
-
-Then produce your response in EXACTLY this format:
-
-    ## Goal Summary
-
-    (2–4 short sentences. What is the user trying to achieve. What \
-    does success look like. The fewest words that still preserve \
-    the real objective. This is what every later phase will see.)
-
-    ## Context
-
-    (Anything relevant about the problem shape that the Goal \
-    Summary omits — test framework, language, conventions the \
-    surrounding code uses.)
-
-    ## Test Cases
-
-    (Enumerate the concrete cases the test file exercises, one per \
-    line. If there are ignored/skipped markers, note they've been \
-    stripped already.)
-
-    ## Constraints & Gotchas
-
-    (Hidden behaviors the tests reveal — specific error types \
-    expected, ordering, edge-case values. One bullet each.)
-
-    ## Open Judgement Calls
-
-    (Anything truly ambiguous where you're making a choice. Skip \
-    if nothing is ambiguous.)
-
-Keep the whole thing under ~500 words. Do NOT start writing code. \
-Do NOT edit any files. That's EXECUTE's job.";
-
-    let user = format!(
-        "Task:\n\n{task}\n\nProduce the assessment in the required format. Every later phase will quote your Goal Summary verbatim, so make it precise."
-    );
-    (sys.to_string(), user)
-}
-
-fn plan_prompt(state: &WorkflowState, task: &str) -> (String, String) {
-    let sys = "\
-You are in the PLAN phase of a structured coding workflow.
-
-ASSESS produced a Goal Summary and a detailed assessment (both \
-included below). Your job: turn them into a concrete \
-implementation plan.
-
-Output:
-1. An ordered list of steps the EXECUTE phase should take.
-2. The key data structures / types / functions that need to exist.
-3. Any edge cases that will need special handling.
-4. A short strategy for verifying incrementally (which cases to \
-   get green first).
-
-Keep it tight (~300 words). No code — just the plan. Do not edit \
-files.";
-
-    let goal = state.goal_summary.as_deref().unwrap_or("(no goal summary)");
-    let assessment = state.assessment.as_deref().unwrap_or("(no assessment available)");
-    let progress = progress_block(&state.progress_summary);
-    let user = format!(
-        "Task:\n\n{task}\n\n## Goal Summary\n\n{goal}\n\n## Work So Far\n\n{progress}\n\n## Full Assessment\n\n{assessment}\n\nProduce the implementation plan."
-    );
-    (sys.to_string(), user)
-}
-
-fn execute_prompt(state: &WorkflowState, task: &str) -> (String, String) {
-    let sys = "\
-You are in the EXECUTE phase of a structured coding workflow.
-
-Your job: implement the solution. You have read_file, write_file, \
-edit_file, and bash tools available.
-
-Rules:
-- Follow the implementation plan from the PLAN phase (included below).
-- If a prior REVIEW phase left critique (included below), address \
-  EVERY point it raised before declaring done.
-- Do NOT modify the provided test files — they are the spec.
-
-**Self-validation is NOT optional.** Before you respond with a \
-summary, you MUST run the provided test suite via `bash` and see \
-how many pass. This is the single most important rule in this \
-phase. Do not hand off to VERIFY on \"it should work\" — run the \
-tests yourself and iterate until you either pass them or \
-genuinely cannot make further progress.
-
-Process:
-
-1. **Pick the test command the repo actually uses.** Inspect the \
-   repo first:
-    * `package.json` scripts — `pnpm test` / `npm test` / \
-      `yarn test` (mirror the lockfile). Often wraps jest / \
-      vitest / mocha.
-    * `Cargo.toml` — `cargo test` (or `cargo nextest run` when \
-      `.config/nextest.toml` is present).
-    * `pyproject.toml` / `pytest.ini` / `tox.ini` — `pytest` \
-      (with whatever args the config file specifies).
-    * `go.mod` — `go test ./...` at the module root.
-    * `Makefile` / `justfile` — if there's a `test` target, \
-      USE it (`make test`, `just test`).
-    * `.github/workflows/` — mirrors CI. If CI runs a specific \
-      test command, use that exact one.
-   The test files in the workspace are the spec — find what \
-   runs them, don't invent a new harness.
-
-2. **Write your implementation.** Follow the plan. Don't add \
-   orphan tests that reference unimplemented methods. Extra \
-   tests are fine only if the matching implementation ships in \
-   the same change.
-
-3. **Run the test command.** Read the output. Count \
-   passed / failed.
-
-4. **If any test fails, iterate.** The output tells you exactly \
-   which assertion blew up — fix the code and re-run. Keep \
-   iterating until either (a) the suite is fully green, or (b) \
-   you've hit a failure you cannot diagnose and have exhausted \
-   your attempts. Do not stop at 'most tests pass' — run them \
-   again after every fix.
-
-5. **When you're done iterating,** your final response MUST \
-   include a `## Progress Update` section AND a `## Test \
-   Results` line showing the exact pass/fail count you observed \
-   on your last run, verbatim from the test runner \
-   (\"31 passed, 0 failed\" or \"28 passed, 3 failed — \
-   tenth-frame strike bonus index off by 9\"). This is non-\
-   negotiable — lying about the count (saying \"all pass\" when \
-   they don't) breaks the downstream phases.
-
-**Fallback when no test command can be determined** (rare — the \
-repo almost always has one): `cargo check` / `python -m \
-py_compile` / `go vet` / `node --check <file>` / `tsc \
---noEmit`. This only validates that the code parses, NOT that \
-it's correct. Treat this as a last resort and say so in your \
-summary.
-
-**Do NOT modify the provided test files** even if a test looks \
-wrong. The tests are the spec. If one seems impossible, note \
-it in Progress Update — REVIEW will decide whether the spec \
-itself is off.";
-
-    let goal = state.goal_summary.as_deref().unwrap_or("(no goal summary)");
-    let plan = state.plan.as_deref().unwrap_or("(no plan available)");
-    let review = state.last_review.as_deref().unwrap_or("(first iteration — no prior review)");
-    let progress = progress_block(&state.progress_summary);
-    // Overrides stack (force_new_approach takes priority, then
-    // force_write, then the normal REVIEW critique). Each override
-    // is for a different degenerate case; only one applies per
-    // turn in practice but handle both for safety. The new-approach
-    // note outranks write/bash retries because it's specifically
-    // saying "your current code is the problem" — and if you're
-    // about to rewrite from scratch, the old write-count warnings
-    // don't apply.
-    let mut review_block = review.to_string();
-    if let Some(note) = state.execute_force_write_note.as_deref() {
-        review_block = format!("{note}\n\n---\n\n{review_block}");
-    }
-    if let Some(note) = state.force_new_approach_note.as_deref() {
-        review_block = format!("{note}\n\n---\n\n{review_block}");
-    }
-    let user = format!(
-        "Task:\n\n{task}\n\n## Goal Summary (keep this in mind while coding)\n\n{goal}\n\n## Work So Far\n\n{progress}\n\n## Implementation plan\n\n{plan}\n\n## Review findings to address\n\n{review_block}\n\nImplement the solution, RUN THE TEST SUITE, and iterate until green (or you've exhausted your attempts). When you stop, include: (1) a one-paragraph summary of what you changed, (2) a `## Progress Update` section with a single-line description of this iteration's contribution, and (3) a `## Test Results` line with the literal pass/fail count from your final test run (e.g., \"31 passed, 0 failed\" or \"28 passed, 3 failed — unresolved: tenth-frame strike bonus\")."
-    );
-    (sys.to_string(), user)
-}
-
-fn verify_prompt(state: &WorkflowState, _task: &str) -> (String, String) {
-    let sys = "\
-You are in the VERIFY phase of a structured coding workflow.
-
-Your ONLY job: run the test command in the working directory and \
-report the results.
-
-1. Use the bash tool to run the task's test command.
-2. Observe the output.
-3. Respond with EXACTLY ONE of these two prefixes as your final message:
-   - `ALL TESTS PASS` followed by a one-line summary (N passed).
-   - `TESTS FAILED:` followed by the test runner's failure output \
-     (trim to the most actionable ~30 lines — the REVIEW phase will \
-     use this to figure out what to fix).
-
-Do NOT edit files. Do NOT try to fix anything in this phase. Just \
-run tests and report.";
-
-    let goal = state.goal_summary.as_deref().unwrap_or("(no goal summary)");
-    let exec = state.last_exec_summary.as_deref().unwrap_or("(no execute summary)");
-    let progress = progress_block(&state.progress_summary);
-    let user = format!(
-        "## Goal (what the tests are supposed to confirm)\n\n{goal}\n\n## Work So Far\n\n{progress}\n\n## EXECUTE just made these changes\n\n{exec}\n\nRun the tests now. Use the language's standard test runner (pytest, cargo test, go test, jest, etc.) — find the right command by inspecting the task's configuration (package.json scripts, Cargo.toml, etc.). Then respond with the prefix-formatted result."
-    );
-    (sys.to_string(), user)
-}
-
-fn review_prompt(state: &WorkflowState, task: &str) -> (String, String) {
-    let sys = "\
-You are in the REVIEW phase of a structured coding workflow.
-
-Tests just failed. Your job is adversarial critique: figure out \
-WHY they failed and tell the EXECUTE phase exactly what to change \
-on its next turn.
-
-Format your output:
-1. Root-cause analysis: 2–4 bullet points identifying what's wrong.
-2. Specific fixes: numbered list of concrete changes to make (file \
-   names + what to change).
-3. Edge cases the current code is missing (if the failures suggest \
-   one).
-
-If — and ONLY if — the failures suggest we've misunderstood the \
-task (not a bug but a wrong model of the problem), add a section:
-
-    ## Updated Goal Summary
-
-    (2–4 sentences restating the goal with the corrected \
-    understanding. This REPLACES the ASSESS version for subsequent \
-    phases. Omit this section entirely when the original goal is \
-    still right and we just need to fix code bugs.)
-
-Keep it direct and specific. Don't re-state what the task is — \
-EXECUTE already knows. Don't write the code yourself; just tell \
-EXECUTE what to do.
-
-You have read-only file tools if you need to inspect the current \
-code or the tests.";
-
-    let goal = state.goal_summary.as_deref().unwrap_or("(no goal summary)");
-    let verify = state.last_verify_output.as_deref().unwrap_or("(no verify output)");
-    let progress = progress_block(&state.progress_summary);
-    let user = format!(
-        "Task:\n\n{task}\n\n## Current Goal Summary\n\n{goal}\n\n## Work So Far\n\n{progress}\n\n## Test failure output from VERIFY\n\n{verify}\n\nProduce the critique."
-    );
-    (sys.to_string(), user)
-}
-
-fn test_prompt(state: &WorkflowState, task: &str) -> (String, String) {
-    let sys = "\
-You are in the TEST phase of a structured coding workflow.
-
-The provided tests are green. Your job now is the thing that sets \
-this agent apart from every run-tests-until-green coder: establish \
-REAL test coverage appropriate to the shape of the code.
-
-Your process:
-
-1. **Survey the repo first.** Before you pick any tooling, read \
-   what's already there:
-   - `package.json` — scripts, devDependencies (jest? vitest? \
-     playwright? msw? @testing-library/*? already installed?). \
-     Which package manager (pnpm-lock.yaml / yarn.lock / \
-     package-lock.json)?
-   - `Cargo.toml` — which test runner (cargo test vs nextest), \
-     which property-test crate already used (proptest, \
-     quickcheck)?
-   - `pyproject.toml` / `requirements*.txt` — pytest vs unittest, \
-     is hypothesis already a dep?
-   - `go.mod` — stdlib testing vs testify vs ginkgo?
-   - `Makefile` / `justfile` / `.github/workflows/` — what does CI \
-     actually run? Mirror it.
-   - Look at a sibling test file in the repo — what conventions \
-     does it follow (file naming, imports, fixtures, setup)?
-
-2. **Assess coverage of THIS SESSION'S work.** Scope matters — \
-   you are responsible for coverage of what the agent added or \
-   changed in this session, not for retroactively covering legacy \
-   code the agent didn't touch. Identify the gaps that belong to \
-   the current change:
-   - What code did EXECUTE add or modify? (check the diff — the \
-     workspace has the before-state in git when available, or \
-     infer from the ASSESS summary + PLAN + EXECUTE summary.)
-   - Of that code, which branches / error paths / edge cases are \
-     NOT exercised by the tests that just passed?
-   - Which inputs / states / external conditions could trigger \
-     the new code but are absent from the existing suite (empty \
-     collections, zero, negative, unicode, concurrent access, \
-     malformed input, timeout, retry, network failure, clock \
-     skew)?
-   - Which external boundaries the new code touches are only \
-     covered by happy-path tests (the server always returns 200; \
-     the DB always has rows; the clock never moves)?
-   - For each gap: note the specific behaviour a new test should \
-     prove correct AND confirm the behaviour belongs to THIS \
-     session's work (not pre-existing untested code).
-   Don't add tests for code the agent didn't touch. Don't \
-   duplicate coverage that already exists.
-
-3. **Classify the code** in the ambient context of the repo:
-   - React / Vue / Solid / Svelte component?
-   - HTTP / RPC client?
-   - Browser-based user flow?
-   - WebSocket / streaming client?
-   - Database-backed service?
-   - CLI tool?
-   - Pure library / algorithm?
-   - Async code with timers / retries?
-
-4. **Pick the test stack that the repo already endorses.** Only \
-   introduce new tooling when the repo genuinely lacks something \
-   and adding it is idiomatic. Starting points (pick WHAT IS OR \
-   WOULD BE NATIVE to this repo):
-   - React component → Testing Library + \
-     `@testing-library/user-event`.
-   - API client → **MSW** (`msw`) to intercept real \
-     `fetch`/axios calls; exercise retry, error, timeout, \
-     non-2xx, malformed-JSON paths.
-   - Web user flow → **Playwright** (`@playwright/test`) with a \
-     headless browser; script the real click path.
-   - WebSocket → stand up a fake WS server in-process; test \
-     connect, message parsing, reconnect after disconnect, \
-     backpressure.
-   - DB layer → `testcontainers` / `sqlite::memory:` / `pg-mem`; \
-     round-trip + constraint-violation + transaction tests.
-   - CLI → shell out to the binary with fixtures, snapshot stdout.
-   - Pure library → property-based (`hypothesis` / `proptest` / \
-     `fast-check`) when the domain has laws (idempotent, \
-     commutative, inverse-of, ordered).
-   - Async / timer-driven → use the test framework's fake clock; \
-     race-condition stress where meaningful.
-   If the repo is a Rust crate, don't suggest MSW. If the repo is \
-   a backend Node service with no browser component, don't \
-   install Playwright. Honor the context.
-
-5. **Install tooling the repo-native way.** Use the package \
-   manager the repo uses (`pnpm add -D`, `cargo add --dev`, `uv \
-   add --dev`, `go get -t`). Follow the repo's existing devDep \
-   conventions — if the repo pins versions with `~`, match; if \
-   it groups dev deps under a workspace root, add there.
-
-6. **Write the tests in the repo's convention**, one test per \
-   gap from step 2. Match file naming (`*_test.go` vs \
-   `*.test.ts` vs `tests/foo.rs`), fixture layout, assertion \
-   style (existing sibling tests are the style guide). NOT \
-   \"one more unit test\" — use the tooling you picked to \
-   exercise real boundaries: intercept the network, boot the \
-   browser, fake the clock, stand up the fake WS server. Each \
-   test closes one specific gap from step 2.
-
-7. **Run them.** Every new test must pass. If one fails, that's a \
-   real bug — the workflow will cycle you back into EXECUTE with \
-   the failure as the next review finding. Do not ship red tests.
-
-8. **Respond.** Produce your final message in this shape:
-   ```
-   ## Code Classification
-   (one sentence — \"this is a React component with server-driven data\")
-
-   ## Coverage Gaps (in this session's work)
-   (bullet list from step 2 — what's uncovered, and why it matters)
-
-   ## Tooling Chosen
-   (list the test deps you installed, or \"none needed — existing stack is right\")
-
-   ## Tests Added
-   (short bullets — one per gap you closed, naming the gap)
-
-   ## Verdict
-   PASS    (iff every new test is green)
-   FAIL: <summary>    (otherwise — this loops back to EXECUTE)
-   ```
-
-Rules of the road:
-- Do NOT modify the ORIGINAL provided tests. Only ADD new ones.
-- Do NOT ship tests for unimplemented methods. If a test requires \
-  a new surface, add the implementation in the same change.
-- Do NOT add tests that pass trivially or duplicate the provided \
-  suite — this phase is adversarial on purpose.
-- Benchmark-style tasks often have the stub's shape locked; if the \
-  only reasonable tests are the ones already given, say so \
-  explicitly in Tests Added (\"none — suite already covers the \
-  surface\") and emit `PASS` in Verdict.";
-
-    let goal = state.goal_summary.as_deref().unwrap_or("(no goal summary)");
-    let exec = state.last_exec_summary.as_deref().unwrap_or("");
-    let verify = state.last_verify_output.as_deref().unwrap_or("");
-    let progress = progress_block(&state.progress_summary);
-    let user = format!(
-        "Task:\n\n{task}\n\n## Goal Summary\n\n{goal}\n\n## Work So Far\n\n{progress}\n\n## Final implementation summary\n\n{exec}\n\n## Provided-test verify output\n\n{verify}\n\nThe provided tests are green. Now classify the code and raise the bar with real test coverage using the right stack."
-    );
-    (sys.to_string(), user)
-}
-
-fn finalize_prompt(state: &WorkflowState, task: &str) -> (String, String) {
-    let sys = "\
-You are in the FINALIZE phase of a structured coding workflow. \
-This is the last message the END USER sees when the loop stops \
-working. Write it FOR them — plain language, easy to scan, no \
-internal phase jargon.
-
-Go back to first principles: does the final state of the code \
-actually achieve the Goal Summary from ASSESS? Check against \
-the goal, not just the tests — tests can pass on code that \
-misses the user's real intent.
-
-Produce your final message in EXACTLY this shape:
-
-    ## Summary
-
-    (ONE paragraph, 3–6 sentences, that marries the goal and \
-    the work into a single readable story for the user. Open \
-    with what we were trying to do, weave in what actually got \
-    done, and close with where we ended up. Plain English — no \
-    phase labels, no markdown quoting, no enumerating every \
-    iteration. Example tone: \"The task was to implement a \
-    bowling-scorer module. We drafted a plan around frame \
-    iteration, built the scoring function, caught and fixed an \
-    off-by-one in the strike bonus, and finished with \
-    property-based tests covering frame boundaries. All 31 \
-    tests pass.\")
-
-    ## Verdict
-
-    **SOLVED** / **PARTIAL** / **FAILED** — one sentence why.
-
-    ## What's left for you
-
-    (bullet list — edge cases worth more tests, aspects of the \
-    goal the tests don't verify, follow-ups. If nothing, say so \
-    in one line: \"Nothing — ready to ship.\")
-
-    <details>
-    <summary>Detailed phase log</summary>
-
-    (Copy the Work So Far log verbatim here — the bullet list — \
-    for users who want the full trail.)
-    </details>
-
-Keep the whole thing tight. No tool calls — this is a pure \
-summary for a human reader.";
-
-    let goal = state.goal_summary.as_deref().unwrap_or("(no goal summary)");
-    let exec = state.last_exec_summary.as_deref().unwrap_or("");
-    let verify = state.last_verify_output.as_deref().unwrap_or("");
-    let progress = progress_block(&state.progress_summary);
-    let user = format!(
-        "Task:\n\n{task}\n\n## Goal Summary (weave into the plain-English Summary paragraph)\n\n{goal}\n\n## Work So Far (weave into the Summary paragraph AND copy verbatim into the collapsed detail block)\n\n{progress}\n\n## Final execute summary\n\n{exec}\n\n## Final verify output\n\n{verify}\n\nWrite the finalization message for the end user in the required shape."
-    );
-    (sys.to_string(), user)
-}
-
-// Ergonomic `activity_name` shim for error messages — the enum's
-// Debug impl uses struct-variant formatting which reads ugly in
-// `with_context`.
-impl CodingPhase {
-    fn activity_name(self) -> &'static str {
-        match self.activity() {
-            Activity::Thinking => "smooth-thinking",
-            Activity::Planning => "smooth-planning",
-            Activity::Coding => "smooth-coding",
-            Activity::Reviewing => "smooth-reviewing",
-            Activity::Judge => "smooth-judge",
-            Activity::Summarize => "smooth-summarize",
-            Activity::Fast => "smooth-fast",
-        }
-    }
-}
-
-// Kept here so the caller doesn't need to reach into `crate::llm`.
-#[allow(dead_code)]
-fn llm_client_for(registry: &ProviderRegistry, activity: Activity) -> anyhow::Result<LlmClient> {
-    let config = registry.llm_config_for(activity).map_err(|e| anyhow!("resolve {activity:?} slot: {e}"))?;
-    Ok(LlmClient::new(config))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn snapshot_workspace_copies_source_files_and_excludes_bloat() {
-        let src = tempfile::tempdir().expect("mktemp src");
-        let dst = tempfile::tempdir().expect("mktemp dst");
-
-        // Source files: one real, one inside an excluded dir.
-        std::fs::write(src.path().join("bowling.py"), b"class Bowling: pass\n").unwrap();
-        std::fs::create_dir_all(src.path().join("__pycache__")).unwrap();
-        std::fs::write(src.path().join("__pycache__").join("garbage.pyc"), b"pyc").unwrap();
-        std::fs::create_dir_all(src.path().join("node_modules")).unwrap();
-        std::fs::write(src.path().join("node_modules").join("pkg.json"), b"{}").unwrap();
-        std::fs::create_dir_all(src.path().join("sub")).unwrap();
-        std::fs::write(src.path().join("sub").join("nested.txt"), b"keep me").unwrap();
-
-        snapshot_workspace(src.path(), dst.path()).expect("snapshot");
-
-        assert!(dst.path().join("bowling.py").is_file());
-        assert!(dst.path().join("sub").join("nested.txt").is_file());
-        assert!(!dst.path().join("__pycache__").exists(), "excluded dir must not be copied");
-        assert!(!dst.path().join("node_modules").exists(), "excluded dir must not be copied");
-    }
-
-    #[test]
-    fn restore_workspace_clears_non_excluded_entries_then_copies() {
-        let src = tempfile::tempdir().expect("mktemp src");
-        let dst = tempfile::tempdir().expect("mktemp dst");
-
-        // Pre-existing stale content in dst that must be wiped.
-        std::fs::write(dst.path().join("stale_code.py"), b"regressed").unwrap();
-        std::fs::create_dir_all(dst.path().join("subdir")).unwrap();
-        std::fs::write(dst.path().join("subdir").join("old.txt"), b"old").unwrap();
-        // Pre-existing excluded content in dst that must SURVIVE.
-        std::fs::create_dir_all(dst.path().join("node_modules")).unwrap();
-        std::fs::write(dst.path().join("node_modules").join("cached.json"), b"cached").unwrap();
-
-        // Snapshot content.
-        std::fs::write(src.path().join("bowling.py"), b"BEST VERSION").unwrap();
-
-        restore_workspace(src.path(), dst.path()).expect("restore");
-
-        // Stale non-excluded entries removed.
-        assert!(!dst.path().join("stale_code.py").exists());
-        assert!(!dst.path().join("subdir").exists());
-        // Excluded entries preserved (don't re-run pnpm install).
-        assert!(dst.path().join("node_modules").join("cached.json").is_file());
-        // Snapshot content applied.
-        assert_eq!(std::fs::read(dst.path().join("bowling.py")).unwrap(), b"BEST VERSION");
-    }
-
-    #[test]
-    fn best_snapshot_dir_lives_inside_workspace_under_dot_prefix() {
-        let ws = Path::new("/workspace");
-        let snap = best_snapshot_dir(ws);
-        assert_eq!(snap, Path::new("/workspace/.smooth-best-snapshot"));
-        // Test runners skip dotfiles by default, so this location
-        // won't accidentally be included in pytest/jest/cargo test.
-        assert!(
-            snap.file_name().and_then(|s| s.to_str()).unwrap().starts_with('.'),
-            "snapshot dir must be a dotfile so test runners skip it"
-        );
-    }
-
-    #[test]
-    fn every_phase_has_a_distinct_activity_mapping() {
-        use std::collections::HashMap;
-        let mut by_activity: HashMap<Activity, Vec<CodingPhase>> = HashMap::new();
-        for p in [
-            CodingPhase::Assess,
-            CodingPhase::Plan,
-            CodingPhase::Execute,
-            CodingPhase::Verify,
-            CodingPhase::Review,
-            CodingPhase::Test,
-            CodingPhase::Finalize,
-        ] {
-            by_activity.entry(p.activity()).or_default().push(p);
-        }
-
-        // Thinking handles Assess + Finalize (deep reading + last-look).
-        assert_eq!(by_activity.get(&Activity::Thinking).map(Vec::len), Some(2));
-        // Coding handles Execute + Verify (both edit/run tool users).
-        assert_eq!(by_activity.get(&Activity::Coding).map(Vec::len), Some(2));
-        // Planning owns its own phase.
-        assert_eq!(by_activity.get(&Activity::Planning).map(Vec::len), Some(1));
-        // Reviewing handles Review + Test (both adversarial).
-        assert_eq!(by_activity.get(&Activity::Reviewing).map(Vec::len), Some(2));
-        // Judge / Summarize / Fast are NOT used by the workflow —
-        // they belong to the bench harness, compaction path, and
-        // session-naming callers respectively.
-        assert!(!by_activity.contains_key(&Activity::Judge));
-        assert!(!by_activity.contains_key(&Activity::Summarize));
-        assert!(!by_activity.contains_key(&Activity::Fast));
-    }
-
-    #[test]
-    fn phase_labels_are_stable_uppercase() {
-        assert_eq!(CodingPhase::Assess.label(), "ASSESS");
-        assert_eq!(CodingPhase::Plan.label(), "PLAN");
-        assert_eq!(CodingPhase::Execute.label(), "EXECUTE");
-        assert_eq!(CodingPhase::Verify.label(), "VERIFY");
-        assert_eq!(CodingPhase::Review.label(), "REVIEW");
-        assert_eq!(CodingPhase::Finalize.label(), "FINALIZE");
-    }
-
-    #[test]
-    fn activity_name_is_the_smooth_alias() {
-        assert_eq!(CodingPhase::Assess.activity_name(), "smooth-thinking");
-        assert_eq!(CodingPhase::Plan.activity_name(), "smooth-planning");
-        assert_eq!(CodingPhase::Execute.activity_name(), "smooth-coding");
-        assert_eq!(CodingPhase::Verify.activity_name(), "smooth-coding");
-        assert_eq!(CodingPhase::Review.activity_name(), "smooth-reviewing");
-        assert_eq!(CodingPhase::Finalize.activity_name(), "smooth-thinking");
-    }
-
-    #[test]
-    fn detect_verify_pass_matches_explicit_marker() {
+    fn detect_verify_pass_explicit_marker() {
         assert!(detect_verify_pass("ALL TESTS PASS — 31 of 31."));
-        assert!(detect_verify_pass("all tests pass. great."));
-        assert!(!detect_verify_pass("TESTS FAILED:\n  case one: expected 3 got 2"));
-        assert!(!detect_verify_pass("tests fail in two cases"));
+        assert!(!detect_verify_pass("TESTS FAILED:\nsome failure"));
     }
 
     #[test]
-    fn detect_verify_pass_falls_back_to_runner_summary() {
+    fn detect_verify_pass_runner_summaries() {
         assert!(detect_verify_pass("test result: ok. 31 passed; 0 failed;"));
-        assert!(!detect_verify_pass("no signal at all"));
+        assert!(detect_verify_pass("Tests:       30 passed, 0 failed, 30 total"));
+        assert!(!detect_verify_pass("Tests: 2 failed, 28 passed"));
     }
 
     #[test]
-    fn detect_verify_pass_rejects_rust_ok_value_false_positive() {
-        // Regression: old fallback matched `OK (` which appeared in
-        // Rust failure diffs like `left: Ok(()), right: Err(...)`.
-        // A false positive here silently short-circuited the whole
-        // EXECUTE → VERIFY → REVIEW loop on the first cycle.
-        let diff = "assertion left == right failed\n  left: Ok(())\n  right: Err(NotEnoughPinsLeft)";
+    fn detect_verify_pass_rejects_rust_ok_false_positive() {
+        // Regression: old fallback matched `OK (` on Rust failure
+        // diffs with `Ok(())` values. Must return false here.
+        let diff = "assertion `left == right` failed\n  left: Ok(())\n  right: Err(NotEnoughPinsLeft)";
         assert!(!detect_verify_pass(diff));
     }
 
     #[test]
-    fn detect_verify_pass_rejects_prose_passing_without_failing_word() {
-        // Another regression target: old fallback matched "PASSING"
-        // with absent "FAILING". Phrases like "most suites are
-        // passing" or "28 passing (out of 30)" would false-positive.
-        let prose = "Summary: 28 passing out of 30. Needs more work.";
-        assert!(!detect_verify_pass(prose));
+    fn detect_compile_error_catches_js_syntax() {
+        let jest = "TESTS FAILED:\n\nSyntaxError: /workspace/bowling.js: Missing semicolon. (151:15)";
+        assert!(detect_compile_error(jest).is_some());
     }
 
     #[test]
-    fn detect_verify_pass_rejects_jest_partial_failure() {
-        // Real jest output shape for a partial failure. None of the
-        // narrow success markers match; any failure marker wins.
-        let jest = "Tests:       2 failed, 28 passed, 30 total\nTest Suites: 1 failed, 1 total";
-        assert!(!detect_verify_pass(jest));
+    fn detect_compile_error_catches_rust_unclosed() {
+        let cargo = "TESTS FAILED:\nerror: this file contains an unclosed delimiter\n   --> src/lib.rs:193:3";
+        assert!(detect_compile_error(cargo).is_some());
     }
 
     #[test]
-    fn detect_verify_pass_accepts_jest_full_green() {
-        let jest = "Tests:       30 passed, 0 failed, 30 total\nTest Suites: 1 passed, 1 total";
-        assert!(detect_verify_pass(jest));
+    fn detect_compile_error_ignores_real_assertion() {
+        let rust = "TESTS FAILED:\ntest all_strikes_is_300 ... FAILED\n  left: None\n  right: Some(300)";
+        assert!(detect_compile_error(rust).is_none());
     }
 
     #[test]
-    fn count_write_tool_calls_counts_edit_and_write_only() {
-        use crate::conversation::{Conversation, Message};
-        use crate::tool::ToolCall;
-        fn tc(name: &str) -> ToolCall {
-            ToolCall {
-                id: "id".into(),
-                name: name.into(),
-                arguments: serde_json::json!({}),
-            }
-        }
-        let mut conv = Conversation::new(8192);
-        let mut m1 = Message::assistant("");
-        m1.tool_calls = vec![tc("read_file"), tc("list_files"), tc("edit_file")];
-        conv.messages.push(m1);
-        let mut m2 = Message::assistant("");
-        m2.tool_calls = vec![tc("write_file"), tc("bash"), tc("edit_file")];
-        conv.messages.push(m2);
-        // 3 writes total: edit_file, write_file, edit_file.
-        assert_eq!(count_write_tool_calls(&conv), 3);
-    }
-
-    #[test]
-    fn count_tool_calls_named_counts_exact_name_only() {
-        use crate::conversation::{Conversation, Message};
-        use crate::tool::ToolCall;
-        fn tc(name: &str) -> ToolCall {
-            ToolCall {
-                id: "id".into(),
-                name: name.into(),
-                arguments: serde_json::json!({}),
-            }
-        }
-        let mut conv = Conversation::new(8192);
-        let mut m = Message::assistant("");
-        m.tool_calls = vec![tc("bash"), tc("bash"), tc("bash"), tc("edit_file"), tc("read_file")];
-        conv.messages.push(m);
-        assert_eq!(count_tool_calls_named(&conv, "bash"), 3);
-        assert_eq!(count_tool_calls_named(&conv, "edit_file"), 1);
-        assert_eq!(count_tool_calls_named(&conv, "nonexistent"), 0);
-    }
-
-    #[test]
-    fn count_write_tool_calls_zero_when_only_exploration() {
-        use crate::conversation::{Conversation, Message};
-        use crate::tool::ToolCall;
-        fn tc(name: &str) -> ToolCall {
-            ToolCall {
-                id: "id".into(),
-                name: name.into(),
-                arguments: serde_json::json!({}),
-            }
-        }
-        // Java-bench-failure shape: lots of list_files, zero writes.
-        let mut conv = Conversation::new(8192);
-        let mut m = Message::assistant("");
-        m.tool_calls = vec![tc("list_files"); 29];
-        m.tool_calls.push(tc("read_file"));
-        m.tool_calls.push(tc("bash"));
-        conv.messages.push(m);
-        assert_eq!(count_write_tool_calls(&conv), 0);
-    }
-
-    #[test]
-    fn execute_prompt_prepends_force_write_note_when_present() {
-        let state = WorkflowState {
-            execute_force_write_note: Some("YOUR PRIOR TURN WROTE NOTHING.".into()),
-            last_review: Some("off-by-one in strike bonus".into()),
-            ..Default::default()
-        };
-        let (_sys, user) = execute_prompt(&state, "task");
-        // The note lands in the Review-findings block so EXECUTE
-        // sees the correction without losing prior critique.
-        assert!(user.contains("YOUR PRIOR TURN WROTE NOTHING"));
-        assert!(user.contains("off-by-one in strike bonus"));
-        // And the note comes first — it's the blunt correction.
-        let note_idx = user.find("YOUR PRIOR TURN").unwrap();
-        let review_idx = user.find("off-by-one").unwrap();
-        assert!(note_idx < review_idx, "force-write note must come before prior review");
-    }
-
-    #[test]
-    fn execute_prompt_omits_force_write_note_when_absent() {
-        let state = WorkflowState {
-            last_review: Some("regular review critique".into()),
-            ..Default::default()
-        };
-        let (_sys, user) = execute_prompt(&state, "task");
-        assert!(!user.contains("YOUR PRIOR TURN WROTE NOTHING"));
-        assert!(user.contains("regular review critique"));
-    }
-
-    #[test]
-    fn detect_compile_error_catches_js_parse_error() {
-        // The exact shape we've been hitting on JS bowling — agent
-        // appended content after the class closure, jest babel parse
-        // errored out on the unexpected constructor.
-        let jest_out = "TESTS FAILED:\n\n\
-            FAIL ./bowling.spec.js\n  \
-            Test suite failed to run\n\n    \
-            SyntaxError: /workspace/bowling.js: Missing semicolon. (151:15)\n\n      \
-            149 | module.exports = Bowling;\n      \
-            150 |\n    > \
-            151 |   constructor() {\n          \
-                |               ^\n      \
-            152 |     this.rolls = [];";
-        let err = detect_compile_error(jest_out).expect("should detect parse error");
-        assert!(err.to_lowercase().contains("syntaxerror") || err.contains("Missing semicolon"));
-    }
-
-    #[test]
-    fn detect_compile_error_catches_rust_unclosed_delimiter() {
-        let cargo_out = "TESTS FAILED:\n\n\
-            error: this file contains an unclosed delimiter\n   \
-            --> src/lib.rs:193:3\n";
-        assert!(detect_compile_error(cargo_out).is_some());
-    }
-
-    #[test]
-    fn detect_compile_error_catches_go_syntax_error() {
-        let go_out = "TESTS FAILED:\n./bowling.go:45:2: syntax error: unexpected }";
-        assert!(detect_compile_error(go_out).is_some());
-    }
-
-    #[test]
-    fn detect_compile_error_ignores_real_assertion_failure() {
-        // This is a LOGIC failure, not a compile failure — the code
-        // parses fine, it just produced the wrong number. REVIEW
-        // should handle it normally, not the compile-error override.
-        let rust_out = "TESTS FAILED:\n\
-            test all_strikes_is_a_perfect_score_of_300 ... FAILED\n  \
-            left: None\n  right: Some(300)\n\
-            assertion `left == right` failed";
-        assert!(detect_compile_error(rust_out).is_none());
-    }
-
-    #[test]
-    fn detect_compile_error_ignores_jest_assertion_diff() {
-        let jest_out = "TESTS FAILED:\n\
-            Bowling › consecutive strikes each get the two roll bonus\n\
-            expect(received).toEqual(expected)\n\
-            Expected: 81\nReceived: 66";
-        assert!(detect_compile_error(jest_out).is_none());
-    }
-
-    #[test]
-    fn detect_compile_error_catches_python_indentation() {
-        let py_out = "TESTS FAILED:\n\
-            IndentationError: expected an indented block";
-        assert!(detect_compile_error(py_out).is_some());
-    }
-
-    #[test]
-    fn detect_compile_error_catches_java_compilation_failed() {
-        let java_out = "FAILURE: Build failed with an exception.\n\n\
-            * What went wrong:\n\
-            Execution failed for task ':compileJava'.\n> Error: Compilation failed; see the compiler error output for details.";
-        assert!(detect_compile_error(java_out).is_some());
-    }
-
-    #[test]
-    fn detect_verify_pass_accepts_go_full_green() {
-        let go = "ok  bowling 0.123s — 22 passed, 0 failed, 0 errors";
-        assert!(detect_verify_pass(go));
-    }
-
-    #[test]
-    fn extract_failed_count_catches_standard_shapes() {
+    fn extract_failed_count_standard_shapes() {
         assert_eq!(extract_failed_count("3 failed, 28 passed"), Some(3));
-        assert_eq!(extract_failed_count("Tests: 15 failed, 16 passed"), Some(15));
-        assert_eq!(extract_failed_count("test result: FAILED. 28 passed; 3 failed"), Some(3));
+        assert_eq!(extract_failed_count("Tests: 2 failed, 28 passed"), Some(2));
         assert_eq!(extract_failed_count("all tests pass"), None);
     }
 
     #[test]
-    fn new_approach_note_escalates_with_level() {
-        let lvl1 = new_approach_note(1, "26p/5f");
-        let lvl2 = new_approach_note(2, "26p/5f");
-        let lvl3 = new_approach_note(5, "26p/5f");
-        // Every level must keep signature visible so the model
-        // knows what failure shape is plateauing.
-        for note in [&lvl1, &lvl2, &lvl3] {
-            assert!(note.contains("26p/5f"));
-        }
-        // Every level must explicitly preserve passing tests —
-        // the whole point of this softer escalation is to avoid
-        // the "scrap and rewrite" regression pattern.
+    fn build_user_prompt_first_iter_is_plain_task() {
+        let p = build_user_prompt("solve bowling", 1, None);
+        assert!(p.starts_with("solve bowling"));
+        assert!(p.contains("## Test Results"));
+        assert!(!p.contains("previous attempt"), "iter 1 has no prior context");
+    }
+
+    #[test]
+    fn build_user_prompt_subsequent_iter_includes_prior_output_and_preserve_passing_warning() {
+        let prior = "2 failed, 28 passed\nconsecutive strikes got 66, expected 81";
+        let p = build_user_prompt("solve bowling", 2, Some(prior));
+        assert!(p.contains("previous attempt"));
+        assert!(p.contains("28 passed") || p.contains("2 failed"));
+        assert!(p.to_lowercase().contains("keep every test that's currently passing"));
+    }
+
+    #[test]
+    fn build_user_prompt_switches_to_syntax_mode_on_compile_error() {
+        let prior = "SyntaxError: Missing semicolon (151:15)";
+        let p = build_user_prompt("task", 2, Some(prior));
+        assert!(p.contains("does not compile"));
+        assert!(p.contains("Missing semicolon"));
+    }
+
+    #[test]
+    fn snapshot_and_restore_roundtrip_preserves_non_excluded_entries() {
+        let src = tempfile::tempdir().unwrap();
+        let snap = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+
+        std::fs::write(src.path().join("bowling.py"), b"BEST").unwrap();
+        std::fs::create_dir_all(src.path().join("sub")).unwrap();
+        std::fs::write(src.path().join("sub").join("nested.txt"), b"keep").unwrap();
+        // Excluded: must NOT be copied.
+        std::fs::create_dir_all(src.path().join("node_modules")).unwrap();
+        std::fs::write(src.path().join("node_modules").join("pkg.json"), b"{}").unwrap();
+
+        snapshot_workspace(src.path(), snap.path()).unwrap();
+        assert!(snap.path().join("bowling.py").is_file());
+        assert!(snap.path().join("sub").join("nested.txt").is_file());
+        assert!(!snap.path().join("node_modules").exists());
+
+        // Pollute dst with stale non-excluded content + excluded
+        // content that must SURVIVE (node_modules caches).
+        std::fs::write(dst.path().join("stale.py"), b"regressed").unwrap();
+        std::fs::create_dir_all(dst.path().join("node_modules")).unwrap();
+        std::fs::write(dst.path().join("node_modules").join("cache.json"), b"cached").unwrap();
+
+        restore_workspace(snap.path(), dst.path()).unwrap();
+        assert!(!dst.path().join("stale.py").exists());
+        assert!(dst.path().join("bowling.py").is_file());
+        assert_eq!(std::fs::read(dst.path().join("bowling.py")).unwrap(), b"BEST");
         assert!(
-            lvl1.to_lowercase().contains("passing") || lvl1.to_lowercase().contains("keep"),
-            "level 1 must preserve passing tests"
-        );
-        assert!(
-            lvl1.to_lowercase().contains("do not rewrite") || lvl1.to_lowercase().contains("not rewrite"),
-            "level 1 must forbid from-scratch rewrite"
-        );
-        // Level 2: look at it from a different angle (not rewrite).
-        assert!(lvl2.to_lowercase().contains("different angle") || lvl2.to_lowercase().contains("fresh"));
-        // Level 3+: isolate one failing test, narrow patch, keep greens green.
-        let lvl3_low = lvl3.to_lowercase();
-        assert!(lvl3_low.contains("one") && lvl3_low.contains("test"));
-        assert!(
-            lvl3_low.contains("green") || lvl3_low.contains("passing"),
-            "level 3 must also forbid regressing passing tests"
+            dst.path().join("node_modules").join("cache.json").is_file(),
+            "excluded cache must survive restore"
         );
     }
 
     #[test]
-    fn execute_prompt_prepends_new_approach_note_above_write_note() {
-        let state = WorkflowState {
-            force_new_approach_note: Some("PLATEAU — START OVER.".into()),
-            execute_force_write_note: Some("YOUR PRIOR TURN WROTE NOTHING.".into()),
-            last_review: Some("prior critique".into()),
-            ..Default::default()
-        };
-        let (_sys, user) = execute_prompt(&state, "task");
-        // All three appear.
-        assert!(user.contains("PLATEAU — START OVER"));
-        assert!(user.contains("YOUR PRIOR TURN WROTE NOTHING"));
-        assert!(user.contains("prior critique"));
-        // Order: new-approach > write-note > review.
-        let p1 = user.find("PLATEAU — START OVER").unwrap();
-        let p2 = user.find("YOUR PRIOR TURN").unwrap();
-        let p3 = user.find("prior critique").unwrap();
-        assert!(p1 < p2 && p2 < p3, "note order: plateau → write → review");
-    }
-
-    #[test]
-    fn assess_prompt_mentions_all_key_sections() {
-        let state = WorkflowState::default();
-        let (sys, user) = assess_prompt(&state, "solve bowling");
-        assert!(sys.contains("ASSESS"));
-        // Structured output sections the prompt demands
-        assert!(sys.contains("## Goal Summary"));
-        assert!(sys.contains("## Context"));
-        assert!(sys.contains("## Test Cases"));
-        assert!(sys.contains("Do NOT start writing code"));
-        assert!(user.contains("solve bowling"));
-    }
-
-    #[test]
-    fn test_phase_routes_through_reviewing_slot() {
-        assert_eq!(CodingPhase::Test.activity(), Activity::Reviewing);
-        assert_eq!(CodingPhase::Test.label(), "TEST");
-    }
-
-    #[test]
-    fn test_phase_prompt_guides_classification_and_tooling() {
-        let state = WorkflowState::default();
-        let (sys, _user) = test_prompt(&state, "build an api client");
-        // Classification guidance
-        assert!(sys.contains("Classify the code"));
-        // Right-tool-for-the-job callouts — the specific stacks the
-        // user flagged: MSW + Playwright + property-based.
-        assert!(sys.contains("MSW"));
-        assert!(sys.contains("Playwright"));
-        assert!(sys.to_lowercase().contains("property-based"));
-        assert!(sys.contains("testcontainers"));
-        // Orphan-test rule
-        assert!(sys.contains("unimplemented methods") || sys.contains("unimplemented"));
-        // Verdict format for machine parsing
-        assert!(sys.contains("## Verdict"));
-        assert!(sys.contains("PASS"));
-    }
-
-    #[test]
-    fn test_phase_prompt_is_repo_aware() {
-        let (sys, _) = test_prompt(&WorkflowState::default(), "task");
-        // Survey-first discipline
-        assert!(sys.contains("Survey the repo first"));
-        // Repo signals the prompt explicitly checks
-        assert!(sys.contains("package.json"));
-        assert!(sys.contains("Cargo.toml"));
-        assert!(sys.contains("go.mod"));
-        assert!(sys.contains("pyproject.toml"));
-        // Don't force mismatched tooling
-        assert!(sys.contains("Rust crate, don't suggest MSW"));
-    }
-
-    #[test]
-    fn test_phase_prompt_refuses_to_modify_provided_tests() {
-        let (sys, _) = test_prompt(&WorkflowState::default(), "task");
-        assert!(sys.to_lowercase().contains("do not modify"));
-        assert!(sys.contains("ORIGINAL"));
-    }
-
-    #[test]
-    fn execute_prompt_demands_running_the_test_suite() {
-        let state = WorkflowState::default();
-        let (sys, user) = execute_prompt(&state, "task");
-        // Self-validation must run REAL tests, not just compile-check.
-        assert!(
-            sys.contains("Self-validation is NOT optional"),
-            "execute must force the model to actually run the tests"
-        );
-        // Repo-first discipline — find the test command the repo
-        // actually uses before inventing one.
-        assert!(sys.contains("package.json"));
-        assert!(sys.contains("Cargo.toml"));
-        assert!(sys.contains("pyproject.toml"));
-        assert!(sys.contains("go.mod"));
-        // Canonical test invocations — the model should know these
-        // by name, not reach for compile-only checks.
-        assert!(sys.contains("cargo test"));
-        assert!(sys.contains("pnpm test") || sys.contains("npm test"));
-        assert!(sys.contains("pytest"));
-        assert!(sys.contains("go test"));
-        // Compile-only checks are the LAST RESORT fallback.
-        assert!(sys.contains("last resort") || sys.contains("Fallback when no test command"));
-        // Pass/fail count must appear in the output so REVIEW can
-        // see truth vs. the model's summary.
-        assert!(sys.contains("## Test Results"), "execute must demand a Test Results section in the response");
-        assert!(
-            user.contains("## Test Results"),
-            "execute user prompt must reiterate the Test Results requirement"
-        );
-    }
-
-    #[test]
-    fn execute_prompt_includes_plan_and_review_findings() {
-        let state = WorkflowState {
-            plan: Some("step 1: write score()".into()),
-            last_review: Some("off-by-one in strike bonus".into()),
-            ..Default::default()
-        };
-        let (sys, user) = execute_prompt(&state, "solve bowling");
-        assert!(sys.contains("EXECUTE"));
-        assert!(sys.contains("edit_file"));
-        assert!(user.contains("step 1: write score()"));
-        assert!(user.contains("off-by-one in strike bonus"));
-    }
-
-    #[test]
-    fn extract_section_pulls_out_goal_summary() {
-        let doc = "## Goal Summary\n\nImplement bowling score with strikes/spares.\n\n## Context\n\nRust stub.\n";
-        assert_eq!(
-            extract_section(doc, "Goal Summary").as_deref(),
-            Some("Implement bowling score with strikes/spares.")
-        );
-    }
-
-    #[test]
-    fn extract_section_is_case_insensitive() {
-        let doc = "## GOAL SUMMARY\n\nBody text.\n";
-        assert_eq!(extract_section(doc, "Goal Summary").as_deref(), Some("Body text."));
-    }
-
-    #[test]
-    fn extract_section_returns_none_when_missing() {
-        let doc = "## Context\n\nNo goal here.\n";
-        assert_eq!(extract_section(doc, "Goal Summary"), None);
-    }
-
-    #[test]
-    fn extract_section_terminates_at_next_heading() {
-        let doc = "## Goal Summary\n\nGoal body.\n\n## Context\n\nContext body.\n\n## Test Cases\n\nOne per line.\n";
-        assert_eq!(extract_section(doc, "Goal Summary").as_deref(), Some("Goal body."));
-        assert_eq!(extract_section(doc, "Context").as_deref(), Some("Context body."));
-    }
-
-    #[test]
-    fn extract_section_with_empty_body_returns_none() {
-        let doc = "## Goal Summary\n\n## Next Section\n";
-        assert_eq!(extract_section(doc, "Goal Summary"), None);
-    }
-
-    #[test]
-    fn review_can_refine_goal_summary() {
-        // If the review includes an "Updated Goal Summary" block,
-        // state update should swap it in. Tested via the extractor
-        // because the state mutation in run_phase is only reachable
-        // with a live LLM.
-        let review = "## Root cause\n\nOff by one.\n\n## Updated Goal Summary\n\nImplement bowling score; rolls can exceed 10 on bonus rolls.\n";
-        let refined = extract_section(review, "Updated Goal Summary");
-        assert_eq!(refined.as_deref(), Some("Implement bowling score; rolls can exceed 10 on bonus rolls."));
-    }
-
-    #[test]
-    fn verify_signature_captures_passed_failed_pair() {
-        let s = "Test runner output:\n15 passed, 4 failed in 0.03s\n";
-        assert_eq!(verify_signature(s), "15p/4f");
-    }
-
-    #[test]
-    fn verify_signature_case_insensitive() {
-        let s = "Tests: 27 PASSED, 4 FAILED, 31 total";
-        assert_eq!(verify_signature(s), "27p/4f");
-    }
-
-    #[test]
-    fn verify_signature_uses_first_error_when_no_counts() {
-        let s = "compile error: unexpected token at line 42\n... other lines ...";
-        let sig = verify_signature(s);
-        assert!(sig.contains("compile error"));
-    }
-
-    #[test]
-    fn verify_signature_is_stable_across_identical_failures() {
-        let a = "ran 31 tests\n3 failed, 28 passed\nassertionerror: expected 81 got 48";
-        let b = "ran 31 tests\n3 failed, 28 passed\nassertionerror: expected 81 got 48";
-        assert_eq!(verify_signature(a), verify_signature(b));
-    }
-
-    #[test]
-    fn verify_signature_detects_progress() {
-        let old = "15 passed, 16 failed";
-        let new_ = "27 passed, 4 failed";
-        assert_ne!(verify_signature(old), verify_signature(new_));
-    }
-
-    #[test]
-    fn verify_prompt_demands_prefix_format() {
-        let state = WorkflowState::default();
-        let (sys, _user) = verify_prompt(&state, "solve bowling");
-        assert!(sys.contains("ALL TESTS PASS"));
-        assert!(sys.contains("TESTS FAILED"));
-        assert!(sys.contains("EXACTLY ONE"));
-    }
-
-    #[test]
-    fn append_progress_writes_iteration_tagged_bullet() {
-        let mut buf = String::new();
-        append_progress(&mut buf, "EXECUTE", 2, "wired the scorer");
-        assert_eq!(buf, "- [EXECUTE #2] wired the scorer\n");
-    }
-
-    #[test]
-    fn append_progress_skips_empty_updates() {
-        let mut buf = String::new();
-        append_progress(&mut buf, "EXECUTE", 1, "   ");
-        assert!(buf.is_empty());
-    }
-
-    #[test]
-    fn append_progress_omits_iteration_when_zero() {
-        let mut buf = String::new();
-        append_progress(&mut buf, "ASSESS", 0, "crystallized the goal");
-        assert_eq!(buf, "- [ASSESS] crystallized the goal\n");
-    }
-
-    #[test]
-    fn progress_block_placeholder_for_empty_log() {
-        assert_eq!(progress_block(""), "(starting fresh — no prior phases)");
-        assert_eq!(progress_block("   \n  "), "(starting fresh — no prior phases)");
-    }
-
-    #[test]
-    fn progress_block_trims_trailing_blank_lines() {
-        let log = "- [ASSESS] crystallized goal\n- [PLAN] drafted plan\n\n";
-        assert_eq!(progress_block(log), "- [ASSESS] crystallized goal\n- [PLAN] drafted plan");
-    }
-
-    #[test]
-    fn plan_prompt_threads_work_so_far() {
-        let mut state = WorkflowState::default();
-        state.progress_summary.push_str("- [ASSESS] crystallized goal\n");
-        let (_sys, user) = plan_prompt(&state, "task");
-        assert!(user.contains("## Work So Far"), "plan user prompt must carry Work So Far");
-        assert!(user.contains("crystallized goal"));
-    }
-
-    #[test]
-    fn execute_prompt_threads_work_so_far_and_demands_progress_update() {
-        let mut state = WorkflowState::default();
-        state.progress_summary.push_str("- [PLAN] drafted plan\n");
-        let (_sys, user) = execute_prompt(&state, "task");
-        assert!(user.contains("## Work So Far"), "execute user prompt must carry Work So Far");
-        assert!(user.contains("drafted plan"));
-        assert!(user.contains("## Progress Update"), "execute must demand a Progress Update section");
-    }
-
-    #[test]
-    fn verify_prompt_threads_work_so_far() {
-        let mut state = WorkflowState::default();
-        state.progress_summary.push_str("- [EXECUTE #1] wired scorer\n");
-        let (_sys, user) = verify_prompt(&state, "task");
-        assert!(user.contains("## Work So Far"));
-        assert!(user.contains("wired scorer"));
-    }
-
-    #[test]
-    fn review_prompt_threads_work_so_far() {
-        let mut state = WorkflowState::default();
-        state.progress_summary.push_str("- [VERIFY #1] tests fail (15p/4f)\n");
-        let (_sys, user) = review_prompt(&state, "task");
-        assert!(user.contains("## Work So Far"), "review user prompt must carry Work So Far");
-        assert!(user.contains("tests fail"));
-    }
-
-    #[test]
-    fn test_prompt_threads_work_so_far() {
-        let mut state = WorkflowState::default();
-        state.progress_summary.push_str("- [VERIFY #1] tests PASS\n");
-        let (_sys, user) = test_prompt(&state, "task");
-        assert!(user.contains("## Work So Far"));
-    }
-
-    #[test]
-    fn test_prompt_scopes_coverage_to_this_session() {
-        let (sys, _user) = test_prompt(&WorkflowState::default(), "task");
-        // The TEST phase must focus on gaps in the agent's session
-        // work, not retroactive coverage of legacy code.
-        assert!(
-            sys.to_lowercase().contains("this session"),
-            "test phase must scope coverage to this session's work"
-        );
-        assert!(sys.contains("EXECUTE add or modify") || sys.contains("agent added or changed"));
-    }
-
-    #[test]
-    fn finalize_prompt_is_shaped_for_the_end_user() {
-        let state = WorkflowState {
-            goal_summary: Some("Implement bowling scorer".into()),
-            progress_summary: "- [EXECUTE #1] wired scorer\n- [VERIFY #1] tests PASS\n".into(),
-            ..Default::default()
-        };
-        let (sys, user) = finalize_prompt(&state, "solve bowling");
-        // User-facing framing — not another intra-workflow handoff.
-        assert!(sys.to_uppercase().contains("END USER"));
-        // Required output sections: combined summary, verdict, what's left, detail log.
-        assert!(sys.contains("## Summary"));
-        assert!(sys.contains("## Verdict"));
-        assert!(sys.contains("## What's left for you"));
-        assert!(sys.contains("<details>") && sys.contains("Detailed phase log"));
-        // User prompt carries both anchors.
-        assert!(user.contains("Implement bowling scorer"));
-        assert!(user.contains("## Work So Far"));
-        assert!(user.contains("wired scorer"));
+    fn best_snapshot_dir_uses_dotfile_name_so_test_runners_skip_it() {
+        let snap = best_snapshot_dir(Path::new("/workspace"));
+        assert_eq!(snap, Path::new("/workspace/.smooth-best-snapshot"));
+        let name = snap.file_name().and_then(|s| s.to_str()).unwrap();
+        assert!(name.starts_with('.'), "must be a dotfile for pytest/jest/cargo/gradle to skip");
     }
 }
