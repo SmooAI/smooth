@@ -1008,9 +1008,29 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         // aarch64), and a long task message (e.g. 1.5 KB of agent
         // instructions) will overflow it and panic msb_krun_vmm with
         // `TooLarge` before the VM ever boots.
-        env.insert("SMOOTH_API_URL".into(), api_url);
-        env.insert("SMOOTH_API_KEY".into(), api_key);
+        // SMOOTH_API_URL stays in plain env — it's a URL, not a secret.
+        // SMOOTH_API_KEY is wired as a microsandbox Secret below so the
+        // guest only ever sees a placeholder; the real value is
+        // substituted by the network layer on outbound requests to the
+        // LLM gateway host. That defuses the "agent reads its own env
+        // and exfils the credential" attack.
+        env.insert("SMOOTH_API_URL".into(), api_url.clone());
         env.insert("SMOOTH_MODEL".into(), final_model);
+
+        // Derive the LLM gateway host from the API URL so we only
+        // substitute the secret for that destination. Minimal
+        // string parse — avoids pulling in a full URL crate just
+        // for host extraction.
+        let llm_host = extract_host_from_url(&api_url);
+        let api_key_secret = crate::sandbox::SecretConfig {
+            env_var: "SMOOTH_API_KEY".into(),
+            value: api_key,
+            // A deterministic sentinel — if this ever shows up on a
+            // server log, something routed past the microsandbox
+            // substitution and we want it obvious.
+            placeholder: "SMOOTH_PLACEHOLDER_API_KEY_NOT_SUBSTITUTED".into(),
+            allowed_hosts: if llm_host.is_empty() { Vec::new() } else { vec![llm_host] },
+        };
         env.insert("SMOOTH_WORKSPACE".into(), "/workspace".into());
         env.insert("SMOOTH_OPERATOR_ID".into(), tid.clone());
 
@@ -1406,6 +1426,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
                 .or_else(|| Some(tid.clone())),
             image: image.clone(),
             memory_mb: memory_mb.unwrap_or(SandboxConfig::default().memory_mb),
+            secrets: vec![api_key_secret],
             ..SandboxConfig::default()
         };
 
@@ -2040,6 +2061,25 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
 /// Load LLM config for the in-VM runner. Big Smooth reads its own
 /// providers.json (which it already does for the in-process path) and
 /// projects the relevant fields into env vars the runner can consume.
+/// Pull the bare hostname out of an HTTP(S) URL for the secrets
+/// allowed-hosts list. Intentionally minimal — we don't need a
+/// full URL crate for the shape providers.json produces
+/// (`https://llm.smoo.ai/v1`, `http://127.0.0.1:11434/v1`, etc.).
+/// Strips scheme, port, userinfo, and path. Returns an empty
+/// string on any parse failure; callers treat empty as "no
+/// substitution" (the placeholder never gets expanded on the wire,
+/// which is safer than expanding on the wrong host).
+fn extract_host_from_url(url: &str) -> String {
+    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    // Strip userinfo ("user:pass@").
+    let after_userinfo = after_scheme.rsplit_once('@').map_or(after_scheme, |(_, host)| host);
+    // Cut at first '/', '?', or '#' → authority.
+    let authority = after_userinfo.split(['/', '?', '#']).next().unwrap_or("");
+    // Strip port.
+    let host = authority.rsplit_once(':').map_or(authority, |(h, _)| h);
+    host.to_string()
+}
+
 fn load_llm_config_for_runner(model_override: &Option<String>) -> anyhow::Result<(String, String, String)> {
     let providers_path = dirs_next::home_dir()
         .ok_or_else(|| anyhow::anyhow!("no home directory"))?
@@ -3137,6 +3177,19 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use tower::ServiceExt;
+
+    #[test]
+    fn extract_host_handles_common_shapes() {
+        assert_eq!(extract_host_from_url("https://llm.smoo.ai/v1"), "llm.smoo.ai");
+        assert_eq!(extract_host_from_url("http://127.0.0.1:11434/v1"), "127.0.0.1");
+        assert_eq!(extract_host_from_url("https://api.openai.com"), "api.openai.com");
+        assert_eq!(extract_host_from_url("https://user:pass@example.com/path"), "example.com");
+        assert_eq!(extract_host_from_url("https://example.com:443/v1?q=1"), "example.com");
+        assert_eq!(extract_host_from_url("example.com"), "example.com", "no scheme still works");
+        // Malformed → empty; callers MUST treat empty as "don't substitute"
+        // because substituting on the wrong host would leak the secret.
+        assert_eq!(extract_host_from_url(""), "");
+    }
 
     #[test]
     fn find_native_operator_runner_finds_debug_or_release_build() {

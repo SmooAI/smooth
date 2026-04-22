@@ -93,6 +93,37 @@ pub struct SandboxConfig {
     /// agent installs toolchains at runtime via mise, persisted to
     /// the project cache bind mount.
     pub image: Option<String>,
+    /// Secrets to inject via microsandbox's SecretBuilder. See
+    /// [`SecretConfig`] for semantics — short version: the guest
+    /// sees `env_var = placeholder` and the real value is only
+    /// substituted on outbound requests to `allowed_hosts`.
+    pub secrets: Vec<SecretConfig>,
+}
+
+/// One secret to plumb through microsandbox. The guest-visible
+/// env var will hold `placeholder` until microsandbox rewrites an
+/// outbound request to one of `allowed_hosts` at which point the
+/// real `value` is substituted on the wire.
+///
+/// This is the in-process mirror of the on-wire [`SecretSpec`];
+/// the two carry the same fields and convert cleanly.
+#[derive(Debug, Clone)]
+pub struct SecretConfig {
+    pub env_var: String,
+    pub value: String,
+    pub placeholder: String,
+    pub allowed_hosts: Vec<String>,
+}
+
+impl From<&SecretConfig> for smooth_bootstrap_bill::protocol::SecretSpec {
+    fn from(s: &SecretConfig) -> Self {
+        Self {
+            env_var: s.env_var.clone(),
+            value: s.value.clone(),
+            placeholder: s.placeholder.clone(),
+            allowed_hosts: s.allowed_hosts.clone(),
+        }
+    }
 }
 
 impl Default for SandboxConfig {
@@ -114,6 +145,7 @@ impl Default for SandboxConfig {
             env_cache_key: None,
             extra_ports: Vec::new(),
             image: None,
+            secrets: Vec::new(),
         }
     }
 }
@@ -209,6 +241,7 @@ impl SandboxClient for DirectSandboxClient {
             timeout_seconds: config.timeout_seconds,
             allow_host_loopback: config.allow_host_loopback,
             env_cache_key: config.env_cache_key.clone(),
+            secrets: config.secrets.iter().map(smooth_bootstrap_bill::protocol::SecretSpec::from).collect(),
         };
         let (resolved_name, resolved_ports, created_at) = bill_server::spawn_sandbox(spec).await?;
         let resolved_host_port = resolved_ports.first().map_or(host_port, |p| p.host_port);
@@ -318,6 +351,7 @@ impl SandboxClient for BillSandboxClient {
             timeout_seconds: config.timeout_seconds,
             allow_host_loopback: config.allow_host_loopback,
             env_cache_key: config.env_cache_key.clone(),
+            secrets: config.secrets.iter().map(smooth_bootstrap_bill::protocol::SecretSpec::from).collect(),
         };
         let (resolved_name, resolved_ports, created_at) = self.client.spawn(spec).await?;
         let resolved_host_port = resolved_ports.first().map_or(host_port, |p| p.host_port);
@@ -771,6 +805,30 @@ mod tests {
     async fn exec_with_empty_command_errors() {
         let result = exec_in_sandbox("any", &[]).await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn secret_config_converts_to_wire_secret_spec_field_for_field() {
+        let cfg = SecretConfig {
+            env_var: "SMOOTH_API_KEY".into(),
+            value: "sk-real-key".into(),
+            placeholder: "SMOOTH_PLACEHOLDER_API_KEY_NOT_SUBSTITUTED".into(),
+            allowed_hosts: vec!["llm.smoo.ai".into(), "api.backup.com".into()],
+        };
+        let wire: smooth_bootstrap_bill::protocol::SecretSpec = (&cfg).into();
+        assert_eq!(wire.env_var, "SMOOTH_API_KEY");
+        assert_eq!(wire.value, "sk-real-key");
+        assert_eq!(wire.placeholder, "SMOOTH_PLACEHOLDER_API_KEY_NOT_SUBSTITUTED");
+        assert_eq!(wire.allowed_hosts, vec!["llm.smoo.ai", "api.backup.com"]);
+    }
+
+    #[test]
+    fn sandbox_config_default_has_empty_secrets() {
+        // Defensible default: no secrets unless the caller adds
+        // them explicitly. Prevents an accidental plaintext key
+        // from any code path that uses `..SandboxConfig::default()`.
+        let cfg = SandboxConfig::default();
+        assert!(cfg.secrets.is_empty());
     }
 
     #[test]

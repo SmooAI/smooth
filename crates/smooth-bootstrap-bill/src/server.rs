@@ -181,9 +181,46 @@ pub async fn spawn_sandbox(spec: SandboxSpec) -> Result<(String, Vec<PortMapping
     // Big Smooth) must be able to talk back to Bill on 127.0.0.1 and to
     // the Boardroom's Archivist. When this flag is set we apply
     // `allow_all()` which removes those denies.
-    if spec.allow_host_loopback {
-        tracing::info!(name = %spec.name, "bill: applying NetworkPolicy::allow_all() (host loopback enabled)");
-        builder = builder.network(|n| n.policy(NetworkPolicy::allow_all()));
+    //
+    // The secrets layer rides on the same `.network(|n| ...)` closure,
+    // so we stage a single builder mutation that owns both the policy
+    // override and the secret entries.
+    let allow_loopback = spec.allow_host_loopback;
+    let secrets = spec.secrets.clone();
+    if allow_loopback || !secrets.is_empty() {
+        if allow_loopback {
+            tracing::info!(name = %spec.name, "bill: applying NetworkPolicy::allow_all() (host loopback enabled)");
+        }
+        if !secrets.is_empty() {
+            tracing::info!(
+                name = %spec.name,
+                count = secrets.len(),
+                "bill: wiring SecretBuilder entries (values substituted on allowed hosts only)"
+            );
+        }
+        builder = builder.network(move |mut n| {
+            if allow_loopback {
+                n = n.policy(NetworkPolicy::allow_all());
+            }
+            for secret in &secrets {
+                // Clone into the closure because the SecretBuilder is
+                // moved on each call. The outer `secrets` vec is owned
+                // by this closure (already cloned from spec above) so
+                // we can drain through a reference without moves.
+                let env_var = secret.env_var.clone();
+                let value = secret.value.clone();
+                let placeholder = secret.placeholder.clone();
+                let allowed = secret.allowed_hosts.clone();
+                n = n.secret(move |mut s| {
+                    s = s.env(env_var).value(value).placeholder(placeholder);
+                    for host in allowed {
+                        s = s.allow_host(host);
+                    }
+                    s
+                });
+            }
+            n
+        });
     }
 
     let sandbox = builder
