@@ -1427,6 +1427,14 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
             image: image.clone(),
             memory_mb: memory_mb.unwrap_or(SandboxConfig::default().memory_mb),
             secrets: vec![api_key_secret],
+            // Opt-in: back the project cache with a microsandbox named
+            // Volume when `SMOOTH_USE_VOLUMES=1`. Default (false) keeps
+            // the bind-mount backend so `th cache list|prune|clear`
+            // keeps working until they're migrated to `Volume::*`.
+            use_named_volume_for_cache: std::env::var("SMOOTH_USE_VOLUMES")
+                .ok()
+                .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
+                .unwrap_or(false),
             ..SandboxConfig::default()
         };
 
