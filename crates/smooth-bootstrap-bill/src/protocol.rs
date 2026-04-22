@@ -91,6 +91,43 @@ pub struct SandboxSpec {
     /// skip caching (bare Alpine every time).
     #[serde(default)]
     pub env_cache_key: Option<String>,
+    /// Secrets wired through microsandbox's SecretBuilder API. For each
+    /// entry, the runner inside the VM sees an env var containing the
+    /// PLACEHOLDER (not the real value). When the runner's HTTP client
+    /// makes an outbound request to one of `allowed_hosts`, microsandbox
+    /// substitutes the placeholder with the real value on the wire. The
+    /// real value is never readable from inside the VM.
+    ///
+    /// Used today for `SMOOTH_API_KEY` so that a compromised agent
+    /// can't exfiltrate the LLM gateway credential by reading its
+    /// own env. Also gives us automatic DNS-rebinding protection +
+    /// cloud-metadata blocking on any request the placeholder might
+    /// otherwise leak through.
+    #[serde(default)]
+    pub secrets: Vec<SecretSpec>,
+}
+
+/// One secret to inject into the sandbox via microsandbox's
+/// SecretBuilder API. The guest sees `env_var = placeholder`; the
+/// real `value` is only swapped in for requests to `allowed_hosts`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretSpec {
+    /// Env var name the guest reads (e.g. `SMOOTH_API_KEY`).
+    pub env_var: String,
+    /// Real credential value. Never reaches the guest filesystem —
+    /// lives in the secrets store and gets substituted on outbound
+    /// requests to allowed hosts only.
+    pub value: String,
+    /// Sentinel the guest sees in `$env_var` until microsandbox
+    /// swaps it on the wire. A deterministic placeholder lets the
+    /// guest detect when a substitution failed (e.g. talking to a
+    /// non-allowlisted host) — if the literal placeholder ever
+    /// reaches a server, something's misconfigured.
+    pub placeholder: String,
+    /// Exact hostnames (not patterns) where the real value is
+    /// substituted. All other destinations see the placeholder
+    /// verbatim.
+    pub allowed_hosts: Vec<String>,
 }
 
 /// A request Bill accepts.
