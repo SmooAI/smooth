@@ -442,10 +442,19 @@ pub async fn start(mut state: AppState, addr: SocketAddr) -> anyhow::Result<()> 
     let skip_test = std::env::var("SMOOTH_WORKFLOW_SKIP_TEST")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
+    let dispatch_mode = if std::env::var("SMOOTH_WORKFLOW_DIRECT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        "direct (no sandbox; agent runs as host subprocess)"
+    } else {
+        "sandboxed (microVM per task)"
+    };
     tracing::info!(
         version = env!("TH_VERSION"),
         workflow = workflow_mode,
         skip_test_phase = skip_test,
+        dispatch = dispatch_mode,
         "Smooth leader running at http://{addr}"
     );
     axum::serve(listener, app).await?;
@@ -671,7 +680,66 @@ pub struct DispatchOptions {
 }
 
 async fn dispatch_ws_task(state: &AppState, opts: DispatchOptions) {
-    dispatch_ws_task_sandboxed(state, opts).await;
+    // Direct mode: spawn the operator runner as a host subprocess
+    // instead of a microVM. No Narc/Wonk/Goalie enforcement — the
+    // agent has raw host access. Gated behind `SMOOTH_WORKFLOW_DIRECT=1`
+    // so the default behaviour is the sandboxed path. Intended for
+    // bench runs, fast dev loops, and environments that can't do
+    // nested virtualisation (GitHub Actions, most cloud VMs, k8s
+    // pods) — NOT for untrusted code.
+    let direct_mode = std::env::var("SMOOTH_WORKFLOW_DIRECT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if direct_mode {
+        dispatch_ws_task_direct(state, opts).await;
+    } else {
+        dispatch_ws_task_sandboxed(state, opts).await;
+    }
+}
+
+/// Find the NATIVE operator-runner binary (built for the host
+/// triple, not cross-compiled to `aarch64-unknown-linux-musl`).
+/// Used by the direct-dispatch path where we exec the runner as
+/// a regular subprocess rather than inside a microVM.
+///
+/// Resolution order:
+/// 1. `SMOOTH_OPERATOR_RUNNER_NATIVE` env var (explicit override).
+/// 2. Walk up from `CARGO_MANIFEST_DIR` looking for
+///    `target/release/smooth-operator-runner`, then
+///    `target/debug/smooth-operator-runner`.
+/// 3. Same walk from `std::env::current_dir`.
+fn find_native_operator_runner_binary() -> Option<std::path::PathBuf> {
+    if let Ok(explicit) = std::env::var("SMOOTH_OPERATOR_RUNNER_NATIVE") {
+        let p = std::path::PathBuf::from(explicit);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    let check = |base: &std::path::Path| -> Option<std::path::PathBuf> {
+        for profile in ["release", "debug"] {
+            let candidate = base.join("target").join(profile).join("smooth-operator-runner");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        None
+    };
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let mut dir = std::path::PathBuf::from(manifest);
+    for _ in 0..5 {
+        if let Some(p) = check(&dir) {
+            return Some(p);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(p) = check(&cwd) {
+            return Some(p);
+        }
+    }
+    None
 }
 
 /// Build a human-readable resumption context block from prior session
@@ -1610,6 +1678,362 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         }
 
         touch();
+    });
+}
+
+/// Spawn the operator runner as a direct subprocess against the
+/// host workspace. No microVM, no bind mounts, no Narc/Wonk/Goalie
+/// enforcement — the agent has host-level tool access. Intended
+/// for bench runs and fast dev loops. Opt-in via
+/// `SMOOTH_WORKFLOW_DIRECT=1` (checked by `dispatch_ws_task`).
+///
+/// Trade-off vs. `dispatch_ws_task_sandboxed`:
+///   + No VM boot (~10-30s faster per task)
+///   + Runs in nested-virt environments where microsandbox can't
+///     (GitHub Actions Linux runners, k8s pods, most cloud VMs)
+///   + No bind-mount overhead
+///   - No hardware isolation — agent can reach the whole host
+///   - No Goalie/Wonk/Narc enforcement of tool policy
+///
+/// Wiring: we stream stdout line-by-line via tokio's async pipe
+/// reader and translate each `AgentEvent` JSON line to the same
+/// `ServerEvent` shape the sandboxed path emits. The output-parsing
+/// logic is intentionally identical to the sandboxed branch — the
+/// runner is the same binary emitting the same event stream; we
+/// just don't wrap the exec in a VM.
+#[allow(clippy::too_many_lines)]
+async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
+    use std::process::Stdio;
+    use tokio::io::AsyncBufReadExt;
+
+    let DispatchOptions {
+        message,
+        model,
+        budget,
+        working_dir,
+        image: _,
+        keep_alive: _,
+        memory_mb: _,
+    } = opts;
+
+    let task_id = uuid::Uuid::new_v4().to_string();
+    let event_tx = state.event_tx.clone();
+    let pearl_store = state.pearl_store.clone();
+    let last_activity = state.last_activity.clone();
+
+    // Pearl bookkeeping — mirrors the sandboxed path so runs show
+    // up in `th pearls` the same way. Diver first if configured,
+    // direct PearlStore otherwise.
+    let diver = state.diver.clone();
+    let pearl_id: Option<String> = if let Some(ref diver_client) = diver {
+        match diver_client.dispatch(&format!("Task: {}", truncate_str(&message, 60)), &message, None).await {
+            Ok(id) => Some(id),
+            Err(e) => {
+                tracing::warn!(error = %e, "direct dispatch: Diver dispatch failed, falling back to direct PearlStore");
+                crate::pearls::create_pearl(&pearl_store, &format!("Task: {}", truncate_str(&message, 60)), &message, "task", 2)
+                    .ok()
+                    .map(|i| i.id)
+            }
+        }
+    } else {
+        let id = crate::pearls::create_pearl(&pearl_store, &format!("Task: {}", truncate_str(&message, 60)), &message, "task", 2)
+            .ok()
+            .map(|i| i.id);
+        if let Some(ref id) = id {
+            let _ = pearl_store.update(
+                id,
+                &smooth_pearls::PearlUpdate {
+                    status: Some(smooth_pearls::PearlStatus::InProgress),
+                    ..Default::default()
+                },
+            );
+        }
+        id
+    };
+
+    let pearl_store_for_abort = pearl_store.clone();
+    let pearl_id_for_abort = pearl_id.clone();
+    let close_pearl_on_abort = |reason: &str| {
+        if let Some(ref id) = pearl_id_for_abort {
+            tracing::warn!(pearl_id = %id, reason, "closing task pearl (direct dispatch early return)");
+            let _ = pearl_store_for_abort.close(&[id]);
+        }
+    };
+
+    // Resolve runner binary + workspace as host paths.
+    let runner_bin = match find_native_operator_runner_binary() {
+        Some(p) => p,
+        None => {
+            let err = "native smooth-operator-runner not found. Run `cargo build -p smooai-smooth-operator-runner` (debug) or `--release`, or set SMOOTH_OPERATOR_RUNNER_NATIVE=/absolute/path.";
+            let _ = event_tx.send(ServerEvent::TaskError {
+                task_id: task_id.clone(),
+                message: err.into(),
+            });
+            tracing::error!("direct dispatch: {err}");
+            close_pearl_on_abort(err);
+            return;
+        }
+    };
+
+    let host_workspace: std::path::PathBuf = working_dir
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+    if !host_workspace.exists() {
+        if let Err(e) = std::fs::create_dir_all(&host_workspace) {
+            let msg = format!("failed to create workspace {}: {e}", host_workspace.display());
+            let _ = event_tx.send(ServerEvent::TaskError {
+                task_id: task_id.clone(),
+                message: msg.clone(),
+            });
+            close_pearl_on_abort(&msg);
+            return;
+        }
+    }
+    let workspace_canon = host_workspace.canonicalize().unwrap_or_else(|_| host_workspace.clone());
+
+    let (api_url, api_key, final_model) = match load_llm_config_for_runner(&model) {
+        Ok(x) => x,
+        Err(e) => {
+            let msg = format!("no LLM provider configured: {e}");
+            let _ = event_tx.send(ServerEvent::TaskError {
+                task_id: task_id.clone(),
+                message: msg.clone(),
+            });
+            close_pearl_on_abort(&msg);
+            return;
+        }
+    };
+
+    // Build a host tempdir that carries the task message + routing
+    // config. Tempdir's Drop removes it when this function returns,
+    // which is AFTER we've waited for the subprocess, so the files
+    // are safe for the runner's lifetime.
+    let control_dir = match tempfile::Builder::new().prefix("smooth-direct-").tempdir() {
+        Ok(d) => d,
+        Err(e) => {
+            let msg = format!("failed to create control tempdir: {e}");
+            let _ = event_tx.send(ServerEvent::TaskError {
+                task_id: task_id.clone(),
+                message: msg.clone(),
+            });
+            close_pearl_on_abort(&msg);
+            return;
+        }
+    };
+
+    let resumption_context = build_resumption_context(&state.session_store, pearl_id.as_deref(), 20);
+    let full_task_message = if resumption_context.is_empty() {
+        message.clone()
+    } else {
+        format!("{message}\n\n{resumption_context}")
+    };
+
+    let task_path = control_dir.path().join("task.txt");
+    if let Err(e) = std::fs::write(&task_path, full_task_message.as_bytes()) {
+        let msg = format!("failed to write task file: {e}");
+        let _ = event_tx.send(ServerEvent::TaskError {
+            task_id: task_id.clone(),
+            message: msg.clone(),
+        });
+        close_pearl_on_abort(&msg);
+        return;
+    }
+
+    // Write routing.json so the runner's workflow path picks up
+    // the provider registry (needed for the coding slot).
+    let routing_path = control_dir.path().join("routing.json");
+    if let Some(home) = dirs_next::home_dir() {
+        let providers_path = home.join(".smooth/providers.json");
+        match smooth_operator::providers::ProviderRegistry::load_from_file(&providers_path) {
+            Ok(registry) => match registry.to_json() {
+                Ok(json) => {
+                    if let Err(e) = std::fs::write(&routing_path, json) {
+                        tracing::warn!(error = %e, "direct dispatch: failed to write routing.json; workflow will fall back to classic agent");
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "direct dispatch: failed to serialize routing config"),
+            },
+            Err(e) => tracing::warn!(error = %e, "direct dispatch: failed to load providers.json"),
+        }
+    }
+
+    let tid = task_id.clone();
+
+    tokio::spawn(async move {
+        let _control_dir = control_dir; // keep alive
+
+        // Build the runner's environment. Deliberately minimal —
+        // the direct path doesn't need Narc/Wonk/Goalie URLs.
+        let mut cmd = tokio::process::Command::new(&runner_bin);
+        cmd.env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".into()))
+            .env("HOME", std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
+            .env("SMOOTH_API_URL", &api_url)
+            .env("SMOOTH_API_KEY", &api_key)
+            .env("SMOOTH_MODEL", &final_model)
+            .env("SMOOTH_OPERATOR_ID", &tid)
+            .env("SMOOTH_WORKSPACE", workspace_canon.to_string_lossy().as_ref())
+            .env("SMOOTH_TASK_FILE", task_path.to_string_lossy().as_ref())
+            .env("SMOOTH_WORKFLOW", "1")
+            .env("SMOOTH_ROUTING_JSON_FILE", routing_path.to_string_lossy().as_ref());
+        if let Some(b) = budget {
+            cmd.env("SMOOTH_BUDGET_USD", b.to_string());
+        }
+        if let Ok(skip) = std::env::var("SMOOTH_WORKFLOW_SKIP_TEST") {
+            cmd.env("SMOOTH_WORKFLOW_SKIP_TEST", skip);
+        }
+        if let Some(home) = dirs_next::home_dir() {
+            let smooth_home = home.join(".smooth");
+            if smooth_home.exists() {
+                cmd.env("SMOOTH_HOME", smooth_home.to_string_lossy().as_ref());
+            }
+        }
+        cmd.current_dir(&workspace_canon)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = event_tx.send(ServerEvent::TaskError {
+                    task_id: tid.clone(),
+                    message: format!("failed to spawn runner: {e}"),
+                });
+                return;
+            }
+        };
+
+        let stdout = child.stdout.take().expect("stdout piped");
+        let stderr = child.stderr.take().expect("stderr piped");
+        let mut out_reader = tokio::io::BufReader::new(stdout).lines();
+        let mut err_reader = tokio::io::BufReader::new(stderr).lines();
+
+        let event_tx_out = event_tx.clone();
+        let tid_out = tid.clone();
+        let last_activity_for_stdout = last_activity.clone();
+        let stdout_task = tokio::spawn(async move {
+            let mut agent_iterations: u32 = 0;
+            let mut final_cost_usd: f64 = 0.0;
+            while let Ok(Some(line)) = out_reader.next_line().await {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if let Ok(mut la) = last_activity_for_stdout.lock() {
+                    *la = std::time::Instant::now();
+                }
+                match serde_json::from_str::<serde_json::Value>(trimmed) {
+                    Ok(event) => {
+                        let Some(ty) = event.get("type").and_then(|v| v.as_str()) else {
+                            continue;
+                        };
+                        match ty {
+                            "TokenDelta" => {
+                                if let Some(content) = event.get("content").and_then(|v| v.as_str()) {
+                                    let _ = event_tx_out.send(ServerEvent::TokenDelta {
+                                        task_id: tid_out.clone(),
+                                        content: content.to_string(),
+                                    });
+                                }
+                            }
+                            "ToolCallStart" => {
+                                let tool_name = event.get("tool_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                let _ = event_tx_out.send(ServerEvent::ToolCallStart {
+                                    task_id: tid_out.clone(),
+                                    tool_name,
+                                    arguments: String::new(),
+                                });
+                            }
+                            "ToolCallComplete" => {
+                                let tool_name = event.get("tool_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                let is_error = event.get("is_error").and_then(serde_json::Value::as_bool).unwrap_or(false);
+                                let _ = event_tx_out.send(ServerEvent::ToolCallComplete {
+                                    task_id: tid_out.clone(),
+                                    tool_name,
+                                    result: String::new(),
+                                    is_error,
+                                    duration_ms: 0,
+                                });
+                            }
+                            "Completed" => {
+                                if let Some(iters) = event.get("iterations").and_then(serde_json::Value::as_u64) {
+                                    agent_iterations = u32::try_from(iters).unwrap_or(u32::MAX);
+                                }
+                                if let Some(c) = event.get("cost_usd").and_then(serde_json::Value::as_f64) {
+                                    if c > final_cost_usd {
+                                        final_cost_usd = c;
+                                    }
+                                }
+                            }
+                            "Error" => {
+                                if let Some(msg) = event.get("message").and_then(|v| v.as_str()) {
+                                    let _ = event_tx_out.send(ServerEvent::TaskError {
+                                        task_id: tid_out.clone(),
+                                        message: msg.to_string(),
+                                    });
+                                }
+                            }
+                            _ => {} // informational; not forwarded
+                        }
+                    }
+                    Err(_) => {
+                        // Non-JSON — forward as TokenDelta for visibility.
+                        let _ = event_tx_out.send(ServerEvent::TokenDelta {
+                            task_id: tid_out.clone(),
+                            content: format!("{trimmed}\n"),
+                        });
+                    }
+                }
+            }
+            (agent_iterations, final_cost_usd)
+        });
+
+        let event_tx_err = event_tx.clone();
+        let tid_err = tid.clone();
+        let stderr_task = tokio::spawn(async move {
+            while let Ok(Some(line)) = err_reader.next_line().await {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let _ = event_tx_err.send(ServerEvent::TokenDelta {
+                    task_id: tid_err.clone(),
+                    content: format!("[runner] {line}\n"),
+                });
+            }
+        });
+
+        let exit = child.wait().await;
+        let (iters, cost) = stdout_task.await.unwrap_or((0, 0.0));
+        let _ = stderr_task.await;
+
+        match exit {
+            Ok(status) if status.success() => {
+                let _ = event_tx.send(ServerEvent::TaskComplete {
+                    task_id: tid.clone(),
+                    iterations: iters,
+                    cost_usd: cost,
+                });
+            }
+            Ok(status) => {
+                let _ = event_tx.send(ServerEvent::TaskError {
+                    task_id: tid.clone(),
+                    message: format!("runner exited non-zero: {status}"),
+                });
+            }
+            Err(e) => {
+                let _ = event_tx.send(ServerEvent::TaskError {
+                    task_id: tid.clone(),
+                    message: format!("runner wait failed: {e}"),
+                });
+            }
+        }
+
+        // Pearl bookkeeping on exit — mark the task pearl done.
+        if let Some(ref id) = pearl_id {
+            let _ = pearl_store.close(&[id.as_str()]);
+        }
     });
 }
 
@@ -2713,6 +3137,35 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use tower::ServiceExt;
+
+    #[test]
+    fn find_native_operator_runner_finds_debug_or_release_build() {
+        // The direct-dispatch path needs a runner binary built for
+        // the host triple. We don't assert which profile — CI or
+        // dev boxes could have either — but at least one must
+        // exist after a normal `cargo build -p smooai-smooth-operator-runner`.
+        //
+        // This test runs inside cargo, which means the workspace
+        // has been built; skip gracefully if the binary happens to
+        // be missing (e.g. running on an alternate target dir).
+        if let Some(p) = find_native_operator_runner_binary() {
+            assert!(p.is_file(), "returned path must point at a real file: {}", p.display());
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            assert_eq!(name, "smooth-operator-runner", "must be the runner binary, got: {name}");
+            // Must be under target/<profile>/, not the
+            // aarch64-unknown-linux-musl cross-compile output
+            // (that one is for sandboxed dispatch).
+            let path_str = p.to_string_lossy();
+            assert!(
+                path_str.contains("/target/release/") || path_str.contains("/target/debug/"),
+                "native path should be target/release or target/debug, got: {path_str}"
+            );
+            assert!(
+                !path_str.contains("aarch64-unknown-linux-musl"),
+                "native path must NOT be the cross-compiled runner, got: {path_str}"
+            );
+        }
+    }
 
     #[test]
     fn project_cache_key_is_stable_and_distinguishes_paths() {
