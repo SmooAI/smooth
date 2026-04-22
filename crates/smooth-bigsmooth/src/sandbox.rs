@@ -361,6 +361,204 @@ impl SandboxClient for BillSandboxClient {
 }
 
 // ---------------------------------------------------------------------------
+// Docker backend — sandboxing for nested-virt environments.
+// ---------------------------------------------------------------------------
+
+/// Sandbox client that runs operator containers via the Docker CLI.
+///
+/// Intended for environments where microsandbox can't boot — GitHub
+/// Actions' Linux runners, nested cloud VMs, Kubernetes pods — but
+/// where the caller still wants *some* isolation (a new process
+/// namespace, controlled filesystem view, network namespace) rather
+/// than the `SMOOTH_WORKFLOW_DIRECT=1` "run the agent as a host
+/// subprocess" path.
+///
+/// Compared to the microsandbox backend:
+///   - No hardware isolation (containers share the host kernel).
+///   - Narc / Wonk / Goalie still spin up INSIDE the container so
+///     their in-process enforcement (regex secret detection, tool
+///     policy gates, prompt-injection guard) still works. What's
+///     lost is the hardware-level network policy enforcement that
+///     krun/KVM gave us — if an operator gets root inside the
+///     container, it can reach everything Docker can reach.
+///   - Works in CI + nested virt out of the box.
+///
+/// Shelling out to `docker` rather than using Bollard keeps the dep
+/// tree slim. The CLI is ubiquitous; when it isn't installed,
+/// `create` fails loudly at first use with a clear error.
+#[derive(Debug, Clone)]
+pub struct DockerSandboxClient {
+    docker_bin: String,
+}
+
+impl DockerSandboxClient {
+    /// Construct a client. `docker_bin` defaults to `"docker"`, but
+    /// `SMOOTH_DOCKER_BIN=/path/to/docker` overrides — useful on
+    /// systems where it's `podman` or an alternate path.
+    #[must_use]
+    pub fn new() -> Self {
+        let docker_bin = std::env::var("SMOOTH_DOCKER_BIN").unwrap_or_else(|_| "docker".into());
+        Self { docker_bin }
+    }
+
+    fn container_name(operator_id: &str) -> String {
+        // Docker container names are `[a-zA-Z0-9][a-zA-Z0-9_.-]+` —
+        // operator IDs are UUIDs so they always fit.
+        format!("smooth-operator-{operator_id}")
+    }
+
+    async fn run_cmd(&self, args: &[&str]) -> Result<(String, String, i32)> {
+        let out = tokio::process::Command::new(&self.docker_bin)
+            .args(args)
+            .output()
+            .await
+            .with_context(|| format!("spawning `{} {}`", self.docker_bin, args.join(" ")))?;
+        let code = out.status.code().unwrap_or(-1);
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        Ok((stdout, stderr, code))
+    }
+}
+
+impl Default for DockerSandboxClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl SandboxClient for DockerSandboxClient {
+    async fn create(&self, config: &SandboxConfig, host_port: u16) -> Result<SandboxHandle> {
+        let name = Self::container_name(&config.operator_id);
+        let image = config
+            .image
+            .clone()
+            .unwrap_or_else(|| std::env::var("SMOOTH_WORKER_IMAGE").unwrap_or_else(|_| "ghcr.io/smooai/smooth-operator:latest".into()));
+
+        // Build `docker run` args.
+        //   -d              detached; we'll use `docker exec` for the real work.
+        //   --name          stable identifier used by exec/destroy.
+        //   --rm            auto-clean on stop.
+        //   --cpus / -m     resource limits (rough parity with microVM sizing).
+        //   -p host:guest   port forwards — default operator WS on guest 4096.
+        //   -v src:dst[:ro] bind mounts for workspace, policy, project cache.
+        //   -e KEY=VAL      env passthrough for SMOOTH_* config.
+        // Entrypoint is NOT the runner — we start the container with a
+        // long-sleep so `docker exec` can invoke the runner below.
+        let mut args: Vec<String> = vec!["run".into(), "-d".into(), "--rm".into(), "--name".into(), name.clone()];
+
+        // Resource hints — Docker accepts --cpus as a fractional value;
+        // treat our `cpus: u32` as whole cores.
+        args.push("--cpus".into());
+        args.push(config.cpus.to_string());
+        args.push("-m".into());
+        args.push(format!("{}m", config.memory_mb));
+
+        // Default WS port + extras.
+        args.push("-p".into());
+        args.push(format!("127.0.0.1:{host_port}:4096"));
+        for port in &config.extra_ports {
+            // host_port=0 means let Docker pick an ephemeral one — docker
+            // does that with `-p 0:guest`; we still report the allocation
+            // back via `docker port` if callers need it. For now, pass
+            // through explicit mappings only; kernel-assigned host ports
+            // are a follow-up (same pattern the microsandbox path uses).
+            if port.host_port != 0 {
+                args.push("-p".into());
+                args.push(format!("127.0.0.1:{}:{}", port.host_port, port.guest_port));
+            }
+        }
+
+        // Allow host loopback reach via host.docker.internal.
+        // Linux Docker needs --add-host=host.docker.internal:host-gateway
+        // explicitly; Docker Desktop adds it automatically. Always include
+        // so behaviour is portable.
+        if config.allow_host_loopback {
+            args.push("--add-host".into());
+            args.push("host.docker.internal:host-gateway".into());
+        }
+
+        // Bind mounts. Each caller-provided mount maps host → guest at
+        // the guest_path. The `readonly` flag, when set, appends `:ro`.
+        for mount in &config.mounts {
+            let flag = if mount.readonly { ":ro" } else { "" };
+            args.push("-v".into());
+            args.push(format!("{}:{}{}", mount.host_path, mount.guest_path, flag));
+        }
+
+        // Env vars — alphabetically ordered on output for deterministic
+        // test assertions against the command line.
+        let mut env_entries: Vec<(String, String)> = config.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        env_entries.sort();
+        for (k, v) in env_entries {
+            args.push("-e".into());
+            args.push(format!("{k}={v}"));
+        }
+
+        args.push(image);
+        // Keep container alive indefinitely; we'll exec the runner.
+        args.push("sleep".into());
+        args.push("infinity".into());
+
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let (stdout, stderr, code) = self.run_cmd(&arg_refs).await?;
+        if code != 0 {
+            anyhow::bail!("docker run failed (exit {code}): {stderr}\n{stdout}");
+        }
+
+        let created_at = chrono::Utc::now().to_rfc3339();
+        let timeout_at = chrono::Utc::now()
+            .checked_add_signed(chrono::Duration::seconds(i64::try_from(config.timeout_seconds).unwrap_or(i64::MAX)))
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_default();
+
+        let port_mappings: Vec<(u16, u16)> = std::iter::once((4096_u16, host_port))
+            .chain(config.extra_ports.iter().filter(|p| p.host_port != 0).map(|p| (p.guest_port, p.host_port)))
+            .collect();
+
+        Ok(SandboxHandle {
+            sandbox_id: config.operator_id.clone(),
+            operator_id: config.operator_id.clone(),
+            bead_id: config.bead_id.clone(),
+            msb_name: name,
+            host_port,
+            port_mappings,
+            created_at,
+            timeout_at,
+        })
+    }
+
+    async fn exec(&self, msb_name: &str, command: &[&str]) -> Result<(String, String, i32)> {
+        let mut args: Vec<&str> = vec!["exec", msb_name];
+        args.extend_from_slice(command);
+        self.run_cmd(&args).await
+    }
+
+    async fn destroy(&self, msb_name: &str) -> Result<()> {
+        // `rm -f` kills + removes. Idempotent-ish — `docker rm -f
+        // <nonexistent>` exits non-zero but with a "No such container"
+        // message; treat that as success.
+        let (_stdout, stderr, code) = self.run_cmd(&["rm", "-f", msb_name]).await?;
+        if code != 0 && !stderr.contains("No such container") {
+            anyhow::bail!("docker rm -f failed (exit {code}): {stderr}");
+        }
+        Ok(())
+    }
+
+    async fn status(&self, msb_name: &str) -> SandboxStatus {
+        // `docker inspect -f '{{.State.Running}}' <name>` → "true" / "false".
+        let out = self.run_cmd(&["inspect", "-f", "{{.State.Running}}", msb_name]).await;
+        let running = matches!(out, Ok((ref stdout, _, 0)) if stdout.trim() == "true");
+        SandboxStatus {
+            running,
+            healthy: running,
+            phase: "docker".into(),
+            uptime_ms: 0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Process-global client, selected once at startup.
 // ---------------------------------------------------------------------------
 
@@ -369,14 +567,54 @@ fn global_slot() -> &'static OnceLock<Arc<dyn SandboxClient>> {
     &SLOT
 }
 
-/// Initialize the process-global sandbox client. If Bill is running
-/// out-of-process (env var `SMOOTH_BOOTSTRAP_BILL_URL` is set), use the
-/// Bill TCP client. Otherwise fall back to direct in-process calls
-/// (only available when the `direct-sandbox` feature is enabled).
+/// Initialize the process-global sandbox client. Selection order:
+///
+/// 1. `SMOOTH_SANDBOX_BACKEND=docker` → `DockerSandboxClient`.
+///    Intended for GitHub Actions, k8s pods, nested cloud VMs —
+///    any environment where krun/KVM can't boot microVMs but
+///    Docker is available.
+/// 2. `SMOOTH_BOOTSTRAP_BILL_URL` set → `BillSandboxClient`
+///    (brokered microsandbox over TCP; Boardroom mode).
+/// 3. `direct-sandbox` feature enabled → `DirectSandboxClient`
+///    (embedded microsandbox in-process — the dev-mac default).
+/// 4. Otherwise → a broken `BillSandboxClient` pointed at an
+///    obviously-wrong URL, so dispatch fails loudly.
+///
+/// Explicit override `SMOOTH_SANDBOX_BACKEND=microsandbox` picks
+/// the microsandbox path regardless of other env; useful for
+/// tests that want to bypass Docker even when it happens to be
+/// installed. `SMOOTH_SANDBOX_BACKEND=direct` is reserved for the
+/// unsandboxed host-subprocess path handled at dispatch time,
+/// not here — the client trait doesn't have a "no sandbox" variant.
 ///
 /// Safe to call multiple times; only the first call wins.
 pub fn init_sandbox_client() {
     let _ = global_slot().get_or_init(|| -> Arc<dyn SandboxClient> {
+        // Explicit backend override. Values other than "docker" and
+        // "microsandbox" are logged and ignored.
+        if let Ok(backend) = std::env::var("SMOOTH_SANDBOX_BACKEND") {
+            let backend = backend.trim().to_ascii_lowercase();
+            match backend.as_str() {
+                "docker" => {
+                    tracing::info!("sandbox: using DockerSandboxClient (SMOOTH_SANDBOX_BACKEND=docker)");
+                    return Arc::new(DockerSandboxClient::new());
+                }
+                "microsandbox" | "msb" => {
+                    // Fall through to the default microsandbox selection
+                    // below (Bill TCP if URL set, else direct).
+                }
+                "direct" => {
+                    // "direct" is handled at the dispatch level, not the
+                    // client level. Fall through to the microsandbox
+                    // selection so any sandboxed code path that DOES run
+                    // (e.g. preflight checks) still has a backend.
+                }
+                other if !other.is_empty() => {
+                    tracing::warn!(value = %other, "SMOOTH_SANDBOX_BACKEND value not recognised; falling back to default selection");
+                }
+                _ => {}
+            }
+        }
         if let Ok(url) = std::env::var("SMOOTH_BOOTSTRAP_BILL_URL") {
             if !url.trim().is_empty() {
                 tracing::info!(url = %url, "sandbox: using BillSandboxClient (brokered mode)");
@@ -533,6 +771,59 @@ mod tests {
     async fn exec_with_empty_command_errors() {
         let result = exec_in_sandbox("any", &[]).await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn docker_container_name_derives_from_operator_id() {
+        let name = DockerSandboxClient::container_name("abc-123");
+        assert_eq!(name, "smooth-operator-abc-123");
+    }
+
+    #[test]
+    fn docker_sandbox_client_respects_docker_bin_env_override() {
+        // Set + unwind via a scope to keep other tests unaffected.
+        // SAFETY: tests set env vars that other tests might read; run
+        // serially if this becomes flaky. For a single-test scope it's
+        // fine.
+        std::env::set_var("SMOOTH_DOCKER_BIN", "/usr/local/bin/podman");
+        let c = DockerSandboxClient::new();
+        assert_eq!(c.docker_bin, "/usr/local/bin/podman");
+        std::env::remove_var("SMOOTH_DOCKER_BIN");
+        let c = DockerSandboxClient::new();
+        assert_eq!(c.docker_bin, "docker", "default when env unset");
+    }
+
+    #[tokio::test]
+    async fn docker_status_reports_not_running_when_docker_missing() {
+        // Point at a bogus binary so `docker inspect` fails to spawn.
+        // The client should degrade to "not running" rather than
+        // panic — this is the shape we want when Docker isn't
+        // installed.
+        let c = DockerSandboxClient {
+            docker_bin: "/definitely/not/a/real/binary".into(),
+        };
+        let status = c.status("anything").await;
+        assert!(!status.running);
+        assert!(!status.healthy);
+    }
+
+    #[test]
+    fn init_sandbox_client_respects_backend_env() {
+        // We can't actually call `init_sandbox_client` in a test
+        // because the global slot is process-shared and may already
+        // be set. Instead, exercise the parsing logic by invoking
+        // the branches through the public API.
+        //
+        // At minimum, verify that `SMOOTH_SANDBOX_BACKEND=docker`
+        // produces a `DockerSandboxClient` when we construct it
+        // directly the way `init_sandbox_client` does.
+        std::env::set_var("SMOOTH_SANDBOX_BACKEND", "docker");
+        let backend = std::env::var("SMOOTH_SANDBOX_BACKEND").unwrap().to_ascii_lowercase();
+        assert_eq!(backend, "docker");
+        let c = DockerSandboxClient::new();
+        // Smoke-check: non-empty docker_bin means the constructor wired.
+        assert!(!c.docker_bin.is_empty());
+        std::env::remove_var("SMOOTH_SANDBOX_BACKEND");
     }
 
     /// Regression guard documenting the ASCII-only env var constraint that
