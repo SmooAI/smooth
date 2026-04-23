@@ -2895,15 +2895,12 @@ fn chat_system_prompt() -> &'static str {
 async fn auto_name_session(user_prompt: &str) -> Option<String> {
     let providers_path = dirs_next::home_dir()?.join(".smooth/providers.json");
     let registry = ProviderRegistry::load_from_file(&providers_path).ok()?;
-    let config = registry.llm_config_for(smooth_operator::providers::Activity::Fast).ok()?;
+    let agents = smooth_operator::agents::AgentRegistry::builtin();
+    let agent = agents.get("title")?;
+    let config = registry.llm_config_for(agent.slot).ok()?;
     let llm = smooth_operator::llm::LlmClient::new(config);
 
-    let system = smooth_operator::conversation::Message::system(
-        "You name chat sessions. Return ONLY a 3-to-6 word Title Case \
-         summary of the user's first message. No quotes, no trailing \
-         punctuation, no preamble. Example input: \"help me refactor my \
-         auth middleware to use JWT\" → output: Refactor Auth Middleware To JWT.",
-    );
+    let system = smooth_operator::conversation::Message::system(&agent.prompt);
     let user = smooth_operator::conversation::Message::user(user_prompt);
     let resp = llm.chat(&[&system, &user], &[]).await.ok()?;
 
