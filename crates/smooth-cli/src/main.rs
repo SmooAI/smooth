@@ -253,6 +253,16 @@ enum Commands {
         #[command(subcommand)]
         cmd: CacheCommands,
     },
+    /// Hosted remote-control sessions via th.smoo.ai (reverse-tunnel).
+    ///
+    /// Opens an outbound connection to th.smoo.ai which gives back a
+    /// publicly reachable URL proxying HTTP + WebSocket requests to
+    /// your local Big Smooth (127.0.0.1:4400). Share a pearl, join a
+    /// teammate's session, or drive Smooth from a phone without VPN.
+    Tunnel {
+        #[command(subcommand)]
+        cmd: TunnelCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -261,6 +271,37 @@ enum OperatorsCommands {
     List,
     /// Tear down a running operator VM
     Kill { operator_id: String },
+}
+
+#[derive(Subcommand)]
+enum TunnelCommands {
+    /// Start a tunnel session. Opens a persistent connection to
+    /// th.smoo.ai and prints the public URL once the handshake
+    /// completes.
+    Start {
+        /// Preferred slug (`scratch-abcd` → `scratch-abcd.th.smoo.ai`).
+        /// Default: a fresh ephemeral slug chosen by the server.
+        #[arg(long)]
+        slug: Option<String>,
+
+        /// Override the rendezvous endpoint. Default: `wss://th.smoo.ai/tunnel`.
+        /// Useful for dev/staging.
+        #[arg(long)]
+        service_url: Option<String>,
+
+        /// Override the local target. Default: `http://127.0.0.1:4400`.
+        #[arg(long)]
+        local_target: Option<String>,
+
+        /// Auth token. If omitted, read from `SMOOTH_TUNNEL_TOKEN`.
+        /// (`th auth login` will mint this in a future change — for
+        /// now, paste one explicitly.)
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// Show the configured endpoints and a previewed ephemeral slug.
+    /// Runs entirely client-side; does not hit the network.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -696,6 +737,7 @@ async fn main() -> Result<()> {
             }
         }
         Some(Commands::Cache { cmd }) => cmd_cache(cmd).await,
+        Some(Commands::Tunnel { cmd }) => cmd_tunnel(cmd).await,
         Some(Commands::Up {
             no_leader,
             port,
@@ -2508,6 +2550,69 @@ async fn cmd_cache(cmd: CacheCommands) -> Result<()> {
             } else {
                 println!();
             }
+            Ok(())
+        }
+    }
+}
+
+async fn cmd_tunnel(cmd: TunnelCommands) -> Result<()> {
+    use smooth_tunnel::{SlugPreference, TunnelClient, TunnelConfig};
+
+    match cmd {
+        TunnelCommands::Start {
+            slug,
+            service_url,
+            local_target,
+            token,
+        } => {
+            let mut builder = TunnelConfig::production();
+            if let Some(url) = service_url {
+                let parsed = ::url::Url::parse(&url).with_context(|| format!("parse --service-url {url}"))?;
+                builder = builder.service_url(parsed);
+            }
+            if let Some(target) = local_target {
+                let parsed = ::url::Url::parse(&target).with_context(|| format!("parse --local-target {target}"))?;
+                builder = builder.local_target(parsed);
+            }
+            let token = token
+                .or_else(|| std::env::var("SMOOTH_TUNNEL_TOKEN").ok())
+                .context("no tunnel token — pass --token or set SMOOTH_TUNNEL_TOKEN")?;
+            builder = builder.auth_token(token);
+            if let Some(s) = slug {
+                builder = builder.slug(SlugPreference::Requested(s));
+            }
+            let cfg = builder.build().context("build tunnel config")?;
+
+            println!("\n  {} {}", "th tunnel".cyan().bold(), "— reverse-tunnel rendezvous".dimmed());
+            println!("  {} {}", "service   ".dimmed(), cfg.service_url.as_str().bold());
+            println!("  {} {}", "local     ".dimmed(), cfg.local_target.as_str().bold());
+            println!("  {} {}\n", "slug      ".dimmed(), format!("{}", cfg.slug).bold());
+
+            let client = TunnelClient::new(cfg);
+            match client.run().await {
+                Ok(()) => Ok(()),
+                // Scaffold-phase: the rendezvous service isn't live
+                // yet. Surface the structured error with a friendly
+                // hint instead of crashing.
+                Err(smooth_tunnel::TunnelError::NotImplementedYet) => {
+                    println!("  {} Scaffold only — the th.smoo.ai rendezvous service is not deployed yet.", "ℹ".cyan());
+                    println!("  {} Track {} (smooai pearl th-8898f2) for the ECS side.\n", "ℹ".cyan(), "SMOODEV-637".bold());
+                    Ok(())
+                }
+                Err(e) => Err(anyhow::anyhow!("tunnel: {e}")),
+            }
+        }
+        TunnelCommands::Status => {
+            let hint = smooth_tunnel::slug::generate_ephemeral_hint();
+            println!("\n  {}", "th tunnel status".cyan().bold());
+            println!("  {} {}", "service    ".dimmed(), "wss://th.smoo.ai/tunnel".bold());
+            println!("  {} {}", "local      ".dimmed(), "http://127.0.0.1:4400".bold());
+            println!("  {} {}", "slug hint  ".dimmed(), hint.bold());
+            println!(
+                "  {} {}\n",
+                "state      ".dimmed(),
+                "scaffold (rendezvous service pending — SMOODEV-637)".yellow()
+            );
             Ok(())
         }
     }
