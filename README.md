@@ -46,8 +46,8 @@ cargo install --path crates/smooth-cli
 ## Quick Start
 
 ```bash
-# Authenticate with your LLM provider
-th auth login opencode-zen
+# Authenticate with Smoo AI's gateway (resolves every smooth-* slot)
+th auth login smooai-gateway
 
 # Start Smooth (Big Smooth API + embedded web dashboard)
 th up
@@ -55,6 +55,9 @@ th up
 # Open the interactive coding assistant
 th code
 ```
+
+Or bring your own provider — see [Authentication](#authentication)
+below for the full list.
 
 No Docker. No Node.js. No runtime dependencies. One 10MB binary.
 
@@ -64,66 +67,96 @@ No Docker. No Node.js. No runtime dependencies. One 10MB binary.
 
 Smooth is the central CLI and orchestration platform for [Smoo AI](https://smoo.ai). It does two things:
 
-1. **Agent Orchestration** — Spin up teams of AI agents (Smooth Operators) that work on real projects inside hardware-isolated Microsandbox microVMs. They assess, plan, execute, and review work autonomously with adversarial security review.
+1. **Agent Orchestration** — Dispatch Smooth Operators (AI agents) to work on real projects inside hardware-isolated Microsandbox microVMs, with adversarial surveillance and policy-gated access control.
 
-2. **Smoo AI Platform CLI** — Manage config schemas, interact with the SmooAI API, sync with Jira, and control your infrastructure from one command.
+2. **Smoo AI Platform CLI** — Manage config schemas, interact with the Smoo AI API, sync with Jira, and control your infrastructure from one command.
 
-### How it works
+### How the agent loop works
 
-Smooth spawns teams of AI agents called **Smooth Operators** that work inside isolated microVMs. Each operator runs a structured, multi-phase coding workflow — and every phase routes through a different model tuned for the shape of that phase's work.
+Inside each operator VM, a **single agent** handles its own inner iteration
+(LLM → tool → LLM → …) via `smooth-operator`'s agent loop. A thin outer
+governor wraps it with three jobs: feed last run's test output back in,
+snapshot the workspace when failing tests drop, and stop on the first
+convincing signal.
 
 ```mermaid
 %%{init: {"flowchart": {"defaultRenderer": "elk"}, "themeVariables": {"lineColor": "#f49f0a"}}}%%
 flowchart LR
-    ASSESS["ASSESS<br/><small>smooth-thinking</small>"]
-    PLAN["PLAN<br/><small>smooth-planning</small>"]
-    EXECUTE["EXECUTE<br/><small>smooth-coding</small>"]
-    VERIFY["VERIFY<br/><small>smooth-coding</small>"]
-    REVIEW["REVIEW<br/><small>smooth-reviewing</small>"]
-    TEST["TEST<br/><small>smooth-reviewing</small>"]
-    FINALIZE["FINALIZE<br/><small>smooth-thinking</small>"]
+    START["Task prompt"]
+    TURN["Coding turn<br/><small>smooth-coding · agent runs tools internally</small>"]
+    GREEN{"Tests green?"}
+    SNAP["Snapshot workspace<br/><small>if failing count dropped</small>"]
+    STOP{"Stop signal?<br/><small>close-to-green · budget · iter cap</small>"}
+    DONE["Done"]
+    RESTORE["Restore best-seen state"]
 
-    ASSESS --> PLAN
-    PLAN --> EXECUTE
-    EXECUTE --> VERIFY
-    VERIFY -- fail --> REVIEW
-    REVIEW --> EXECUTE
-    VERIFY -- pass --> TEST
-    TEST -- red --> EXECUTE
-    TEST -- green --> FINALIZE
+    START --> TURN
+    TURN --> GREEN
+    GREEN -- yes --> DONE
+    GREEN -- no --> SNAP
+    SNAP --> STOP
+    STOP -- no --> TURN
+    STOP -- yes --> RESTORE
+    RESTORE --> DONE
 
-    style ASSESS fill:#0a1f7a,stroke:#18387a,color:#f8fafc
-    style PLAN fill:#0a1f7a,stroke:#18387a,color:#f8fafc
-    style EXECUTE fill:#040d30,stroke:#22c55e,color:#f8fafc
-    style VERIFY fill:#040d30,stroke:#22c55e,color:#f8fafc
-    style REVIEW fill:#040d30,stroke:#f49f0a,color:#f8fafc
-    style TEST fill:#040d30,stroke:#f49f0a,color:#f8fafc
-    style FINALIZE fill:#0a1f7a,stroke:#18387a,color:#f8fafc
+    style START fill:#0a1f7a,stroke:#18387a,color:#f8fafc
+    style TURN fill:#040d30,stroke:#22c55e,color:#f8fafc
+    style SNAP fill:#040d30,stroke:#f49f0a,color:#f8fafc
+    style GREEN fill:#0a1f7a,stroke:#18387a,color:#f8fafc
+    style STOP fill:#0a1f7a,stroke:#18387a,color:#f8fafc
+    style RESTORE fill:#040d30,stroke:#f49f0a,color:#f8fafc
+    style DONE fill:#14532d,stroke:#22c55e,color:#f8fafc
 ```
 
-**Per-phase routing** — each phase dispatches through a semantic routing slot, so the gateway can pick the right concrete model for the shape of work:
+Implemented in [`smooth-operator::coding_workflow`](crates/smooth-operator/src/coding_workflow.rs).
+An earlier version decomposed the run into seven phases (ASSESS / PLAN /
+EXECUTE / VERIFY / REVIEW / TEST / FINALIZE). The phase pipeline kept
+silently short-circuiting at one detector or another; the single-agent
+loop is smaller, easier to reason about, and matches the shape of
+benchmark-tuned coding agents. We kept the self-validation requirement
+in the system prompt, the best-state snapshot, and the compile-error
+short-circuit — and dropped per-phase dispatch.
 
-| Phase | Slot | What it does |
+**Stop conditions** are budget + plateau, not a fixed iteration cap:
+
+- **Green** — agent reports all tests passing.
+- **Close-to-green** — a previous turn reached ≤3 failing tests; this
+  turn didn't improve on it. More iteration is more likely to regress.
+- **Budget** — next turn would blow the `--budget-usd` cap.
+- **Iteration cap** — safety ceiling (default 5), not the primary brake.
+
+### Model routing
+
+Every LLM call dispatches through a **semantic routing slot**. The gateway
+(typically `llm.smoo.ai`) resolves each slot to a concrete model, so
+upgrading backends doesn't churn the code.
+
+| Slot | Used by | Shape |
 |---|---|---|
-| **ASSESS** | `smooth-thinking` | Deep read of tests + stub + docs; crystallize a 2–4 sentence Goal Summary every later phase sees |
-| **PLAN** | `smooth-planning` | Decompose into implementation steps |
-| **EXECUTE** | `smooth-coding` | Write code using the repo's existing tools (pnpm scripts, Cargo targets, Makefile, CI commands — not generic defaults). Self-validate before stopping. |
-| **VERIFY** | `smooth-coding` | Run the test command, report pass/fail verbatim |
-| **REVIEW** | `smooth-reviewing` | Adversarial critique; may refine the Goal Summary if understanding drifted |
-| **TEST** | `smooth-reviewing` | **The differentiator.** After provided tests pass, classify the code and raise the bar with real coverage — MSW for HTTP mocking, Playwright for real browser flows, testcontainers for DBs, property-based (hypothesis/proptest/fast-check) for pure libraries. Uses the repo's existing framework; doesn't force new deps on a Rust crate or suggest Playwright for a pure CLI. |
-| **FINALIZE** | `smooth-thinking` | Holistic check against the Goal Summary, not just the test results |
+| `smooth-coding` | The coding loop (workhorse) | Strong tool use + multi-turn |
+| `smooth-thinking` | `th code` Thinking preset, deep reasoning | Extended chain-of-thought |
+| `smooth-planning` | `th code` Planning preset | Task decomposition |
+| `smooth-reviewing` | `th code` Reviewing preset, code-review flows | Adversarial critique |
+| `smooth-judge` | Narc's LLM-as-a-judge, bench scoring | Yes/no verdicts, low latency |
+| `smooth-summarize` | Context compression during long runs | Summarization |
+| `smooth-fast` | Session auto-naming, short titles, autocomplete | Haiku/Flash-class, sub-second TTFT |
+| `smooth-default` | Fallback when a specific slot isn't configured | Generalist |
 
-**What makes this different.** Most agentic coders bang on the given tests until green. Smooth's TEST phase is adversarial: it classifies what the code actually is (API client? React component? WebSocket? CLI?), inspects what the repo already uses, and then exercises real boundaries — intercepting `fetch` with MSW to test the retry loop, booting a Playwright browser to click the real flow, faking the clock for timer-driven code. If those new tests expose real bugs, the workflow loops back to EXECUTE. If they're clean, it moves on.
+Routing is in [`smooth-operator::providers`](crates/smooth-operator/src/providers.rs).
+The CLI's `th code` presets remap slots to arbitrary models via the
+model picker — e.g. point Coding at Kimi Code for a run, Thinking at
+GLM, whatever.
 
-**Loop governor.** Stop conditions are budget + plateau, not a fixed iteration cap. `verify_signature` extracts pass/fail counts from each VERIFY and breaks early when the signature repeats (model going in circles). A budget short-circuit breaks when the next iteration would blow the cap. The iteration cap is a safety ceiling, not the primary brake.
-
-**Live status.** The TUI streams an `AgentEvent::PhaseStart` on each phase entry and shows the phase + routing alias + resolved upstream model + a rotating thesaurus phrase in the status bar:
+**Live status.** The TUI streams an `AgentEvent::PhaseStart` on each
+coding turn and shows iteration + routing alias + resolved upstream +
+spend in the status bar:
 
 ```
-ASSESS · smooth-thinking → kimi-k2-thinking | Pondering… | tokens: 1.2k | spend: $0.003
+CODING · smooth-coding → minimax-m2.7 | iter 3/5 | failed: 4 → 1 | spend: $0.012
 ```
 
-All state is durable through Smooth's built-in pearl tracker (Dolt-backed per-project, git-syncable).
+All state is durable through Smooth's built-in pearl tracker (Dolt-backed
+per-project, git-syncable).
 
 ---
 
@@ -146,7 +179,7 @@ graph TB
     end
 
     subgraph Op1["Operator VM 1 (microsandbox)"]
-        OC1["OpenCode<br/><small>AI agent</small>"]
+        OC1["smooth-operator-runner<br/><small>agent + tools</small>"]
         W1["Wonk<br/><small>access control</small>"]
         G1["Goalie<br/><small>network + fs proxy</small>"]
         N1["Narc<br/><small>tool surveillance</small>"]
@@ -154,7 +187,7 @@ graph TB
     end
 
     subgraph Op2["Operator VM 2 (microsandbox)"]
-        OC2["OpenCode<br/><small>AI agent</small>"]
+        OC2["smooth-operator-runner<br/><small>agent + tools</small>"]
         W2["Wonk"] & G2["Goalie"] & N2["Narc"] & S2["Scribe"]
     end
 
@@ -180,11 +213,11 @@ Everything runs inside [Microsandbox](https://github.com/nicholasgasior/microsan
 |---|---|---|
 | **Big Smooth** | Orchestrator. Schedules work, generates policies, handles access requests. **READ-ONLY** — cannot write to the filesystem. | The Boardroom |
 | **Archivist** | Central log + trace aggregator. Receives events and OTLP traces from all Scribes. Stores traces in SQLite, optionally forwards to external OTel backends (Jaeger, Tempo, Honeycomb). Can write, but only to log paths. | The Boardroom |
-| **Wonk** | Access control authority. Reads policy TOML, answers "is this allowed?" for every network request, tool call, bead access, and CLI command. No LLM. | Every VM |
+| **Wonk** | Access control authority. Reads policy TOML, answers "is this allowed?" for every network request, tool call, pearl access, and CLI command. No LLM. | Every VM |
 | **Goalie** | Network + filesystem proxy. Dumb pipe — forwards or blocks based on Wonk's answer. iptables + FUSE enforced at kernel level. | Every VM |
 | **Narc** | Tool surveillance + prompt injection guard. Two-tier detection: fast regex pre-filters + LLM-as-a-judge for ambiguous cases. | Every VM |
 | **Scribe** | Structured logging service. All services log through Scribe, which writes to on-pod SQLite and feeds Archivist. | Every VM |
-| **Groove** | LLM checkpointing + session resume. Captures conversation state after tool calls and phase transitions. Enables interrupted operators to resume from last checkpoint. | Every VM |
+| **Groove** | LLM checkpointing + session resume. Captures conversation state after tool calls. Enables interrupted operators to resume from last checkpoint. | Every VM |
 
 **The Board** = Big Smooth + Archivist (leadership). **The Boardroom** = the VM where The Board operates, with its own Wonk, Goalie, Narc, Scribe, and Groove.
 
@@ -234,8 +267,8 @@ graph TD
         TOML["policy.toml<br/><small>generated by Big Smooth per operator</small>"]
         NET["Network allowlist<br/><small>domain + path matching</small>"]
         FS["Filesystem deny patterns<br/><small>*.env, *.pem, .ssh/*</small>"]
-        TOOL["Tool allowlist<br/><small>per-phase tool access</small>"]
-        BEAD["Bead scoping<br/><small>operator sees only assigned beads + deps</small>"]
+        TOOL["Tool allowlist<br/><small>per-operator tool access</small>"]
+        BEAD["Pearl scoping<br/><small>operator sees only assigned pearls + deps</small>"]
         MCP["MCP server allowlist<br/><small>deny unknown servers by default</small>"]
     end
 
@@ -256,7 +289,7 @@ graph TD
 **Key invariants:**
 - Big Smooth **never writes**. Narc in the Boardroom enforces this — any write attempt is instantly blocked.
 - Archivist **can write**, but only to log paths. Writes to any other path are blocked.
-- Operators can only see their assigned beads and dependencies (scoped by auth token).
+- Operators can only see their assigned pearls and dependencies (scoped by auth token).
 - All outbound traffic goes through Goalie. No process can bypass the proxy — enforced at the kernel level.
 
 ### Continuous Access Negotiation
@@ -276,45 +309,33 @@ sequenceDiagram
     G-->>Op: 403 Blocked
     G->>W: request access
     W->>BS: POST /api/access/request
-    BS->>BS: auto-approve? check bead labels?
+    BS->>BS: auto-approve? check pearl labels?
     alt auto-approved
         BS-->>W: approved + updated policy
         W-->>W: hot-reload policy
         Note over Op,G: retry succeeds
     else needs human
         BS->>BS: send to inbox
-        Note over BS: th access approve <bead> <domain>
+        Note over BS: th access approve <pearl> <domain>
     end
 ```
 
-### Operator Lifecycle
+### Default access envelope
 
-```mermaid
-graph LR
-    A["ASSESS"] --> P["PLAN"] --> O["ORCHESTRATE"] --> E["EXECUTE"] --> F["FINALIZE"] --> R["REVIEW"]
-    R -->|approved| Done["Done"]
-    R -->|rework| E
-    R -->|"security\nfailed"| E
+Each operator VM boots with a minimal envelope:
 
-    style A fill:#040d30,stroke:#0a1f7a,color:#f8fafc
-    style P fill:#040d30,stroke:#0a1f7a,color:#f8fafc
-    style O fill:#040d30,stroke:#0a1f7a,color:#f8fafc
-    style E fill:#14532d,stroke:#22c55e,color:#f8fafc
-    style F fill:#040d30,stroke:#0a1f7a,color:#f8fafc
-    style R fill:#422006,stroke:#f49f0a,color:#f8fafc
-    style Done fill:#14532d,stroke:#22c55e,color:#f8fafc
-```
-
-### Phase-Based Access Defaults
-
-| Phase | Network | Filesystem | Beads |
-|---|---|---|---|
-| Assess | LLM + registries | Read-only | Own bead + deps (depth 1) |
-| Plan | LLM + registries | Read-only | Own bead + deps (depth 2) |
-| Orchestrate | LLM + registries + leader | Read-only | Own bead + deps (depth 2) |
-| Execute | LLM + registries + GitHub | Read-write | Own bead + deps (depth 2) |
-| Finalize | LLM + registries + GitHub | Read-write | Own bead + deps (depth 2) |
-| Review | LLM + registries | Read-only | Target bead + own bead |
+- **Network**: the configured LLM gateway (`llm.smoo.ai` by default),
+  relevant package registries (crates.io, npm, PyPI), and GitHub. Any
+  other domain needs explicit approval — see continuous access negotiation
+  above.
+- **Filesystem**: read-write on `/workspace` (bind-mount of the user's
+  repo). Everything else is read-only or denied. `.env`, `*.pem`,
+  `.ssh/*`, and other secret-shaped paths are always denied.
+- **Pearls**: the assigned pearl + its dependency closure (depth 2).
+  Tasks cannot reach pearls outside that closure.
+- **Tools**: the registered tool allowlist (file read/write, bash via
+  Goalie, MCP tools that were approved, CLI-wrapper plugins). Every
+  invocation passes Narc's regex prefilter + ambiguous-case LLM judge.
 
 ---
 
@@ -331,30 +352,52 @@ th code                          # Interactive coding assistant (ratatui)
 
 ### Authentication
 
+Smooth talks to any OpenAI-compatible endpoint. The recommended default
+is **[llm.smoo.ai](https://llm.smoo.ai)** — our LiteLLM-backed gateway
+that maps every `smooth-*` routing slot to a production-tuned upstream
+(Claude, GPT, Gemini, Kimi, MiniMax, GLM, Qwen, etc.) with Stripe-
+metered billing, org/team keys, and an admin dashboard. One key, every
+model, no per-provider plumbing.
+
 ```bash
-th auth login opencode-zen       # OpenCode Zen (Claude, GPT, Gemini, etc.)
-th auth login anthropic          # Direct Anthropic API
+# Smoo AI's gateway (recommended — every slot resolves via one key)
+th auth login smooai-gateway
+
+# Or bring your own upstream — any OpenAI-compatible provider:
+th auth login kimi-code          # Moonshot Kimi Code (coding workhorse)
+th auth login kimi               # Moonshot Kimi chat endpoint
+th auth login openrouter         # OpenRouter (aggregator over many providers)
+th auth login openai             # OpenAI direct
+th auth login anthropic          # Anthropic direct
+th auth login google             # Google (Gemini)
+th auth login ollama             # Local Ollama models
+
 th auth status                   # Show all auth status
 th auth providers                # List configured providers
+th auth default <provider>       # Which provider backs smooth-default
 ```
+
+Providers and slots are independent: you can pin each routing slot
+(`smooth-coding`, `smooth-thinking`, …) to a different provider/model
+via `th code`'s model picker or by editing `~/.smooth/providers.json`.
 
 ### Work
 
 ```bash
-th run <bead-id>                 # Trigger work on a bead
+th run <pearl-id>                # Trigger work on a pearl
 th operators                     # List active Smooth Operators
 th pause/resume/steer/cancel     # Control operators mid-task
-th approve <bead-id>             # Approve a review
+th approve <pearl-id>            # Approve a review
 th inbox                         # Messages needing attention
 ```
 
 ### Access Control
 
 ```bash
-th access pending                # List pending access requests
-th access approve <bead> <domain>  # Approve domain access
-th access deny <bead> <domain>     # Deny domain access
-th access policy <operator-id>     # Show current policy
+th access pending                   # List pending access requests
+th access approve <pearl> <domain>  # Approve domain access
+th access deny <pearl> <domain>     # Deny domain access
+th access policy <operator-id>      # Show current policy
 ```
 
 ### Tools & Plugins
@@ -423,15 +466,18 @@ by default, so if its pull can't see your local build, push it
 first (`docker push smooai/smooth-operator:0.2.0`) or set
 `SMOOTH_WORKER_IMAGE` to something microsandbox can reach.
 
-**Project cache.** Each workspace path hashes to its own cache dir
-at `~/.smooth/project-cache/<name>-<hash>/`. Subsequent runs on the
+**Project cache.** Each workspace path hashes to its own cache,
+mounted at `/opt/smooth/cache` inside the VM. Subsequent runs on the
 same repo share mise installs + language stores (pnpm-store, cargo
-registry, uv cache, etc.). Manage with:
+registry, uv cache, etc.). Backed by a first-class microsandbox
+Volume by default (`~/.microsandbox/volumes/smooth-cache-<key>/`);
+set `SMOOTH_USE_VOLUMES=0` to fall back to the legacy bind-mount
+(`~/.smooth/project-cache/<key>/`). Manage with:
 
 ```bash
-th cache list
-th cache prune --older-than 30     # evict caches idle > N days
-th cache clear /path/to/project
+th cache list                     # shows entries from both backends, tagged
+th cache prune --older-than 30    # evict caches idle > N days
+th cache clear /path/to/project   # remove entry for a specific workspace
 ```
 
 ### Background service
@@ -497,8 +543,8 @@ and [`SECURITY.md`](SECURITY.md).
 | **Markdown** | pulldown-cmark (TUI), react-markdown (web) |
 | **Sandboxes** | Microsandbox (hardware-isolated microVMs) |
 | **Agent framework** | smooth-operator (Rust-native, built-in checkpointing) |
-| **LLM** | OpenAI-compatible (OpenCode Zen, Anthropic, OpenAI) |
-| **Work tracking** | Beads (durable SoR) |
+| **LLM** | OpenAI-compatible via `llm.smoo.ai` gateway by default (Kimi, MiniMax, GLM, Qwen, Anthropic, OpenAI, Google) |
+| **Work tracking** | Pearls (Dolt-backed, git-syncable) |
 | **Policy** | TOML-based, hot-reloadable via notify + ArcSwap |
 | **Logging** | smooai-logger (structured, context-aware) |
 | **Tracing** | OpenTelemetry (tracing-opentelemetry bridge, OTLP export) |
@@ -510,21 +556,28 @@ and [`SECURITY.md`](SECURITY.md).
 ```
 smooth/
 ├── crates/
-│   ├── smooth-cli/          # Binary — clap CLI (27 commands)
-│   ├── smooth-bigsmooth/    # Library — orchestrator, policy gen, session mgmt
-│   ├── smooth-operator/     # Library — Rust-native AI agent framework
-│   ├── smooth-policy/       # Library — shared policy types, TOML parsing
-│   ├── smooth-wonk/         # Binary — in-VM access control authority
-│   ├── smooth-goalie/       # Binary — in-VM network + filesystem proxy
-│   ├── smooth-narc/         # Library — tool surveillance + secret detection
-│   ├── smooth-scribe/       # Library — per-VM structured logging
-│   ├── smooth-archivist/    # Library — central log aggregator
-│   ├── smooth-code/         # Library — ratatui terminal dashboard
-│   └── smooth-web/          # Library — embedded Vite SPA
-│       └── web/             # React + Vite source
-├── Cargo.toml               # Workspace root
-├── rustfmt.toml             # Format config
-└── install.sh               # Curl installer
+│   ├── smooth-cli/               # Binary — clap CLI, the `th` entry point
+│   ├── smooth-bigsmooth/         # Library — orchestrator, policy gen, session mgmt
+│   ├── smooth-bootstrap-bill/    # Library + binary — host-side microsandbox broker ("Bill")
+│   ├── smooth-operator/          # Library — Rust-native AI agent framework
+│   ├── smooth-operator-runner/   # Binary — agent loop inside each operator VM
+│   ├── smooth-policy/            # Library — shared policy types, TOML parsing
+│   ├── smooth-wonk/              # Binary — in-VM access control authority
+│   ├── smooth-goalie/            # Binary — in-VM network + filesystem proxy
+│   ├── smooth-narc/              # Library — tool surveillance + secret detection
+│   ├── smooth-scribe/            # Library — per-VM structured logging
+│   ├── smooth-archivist/         # Library — central log aggregator
+│   ├── smooth-pearls/            # Library — Dolt-backed pearl tracker
+│   ├── smooth-plugin/            # Library — CLI-wrapper plugin manifests
+│   ├── smooth-diver/             # Library — deep research / exploratory agent
+│   ├── smooth-tunnel/            # Library — th.smoo.ai reverse-tunnel client
+│   ├── smooth-bench/             # Binary — coding-benchmark harness (aider-polyglot, SWE-bench, …)
+│   ├── smooth-code/              # Library — ratatui terminal dashboard
+│   └── smooth-web/               # Library — embedded Vite SPA
+│       └── web/                  # React + Vite source
+├── Cargo.toml                    # Workspace root
+├── rustfmt.toml                  # Format config
+└── install.sh                    # Curl installer
 ```
 
 ## Development
@@ -533,7 +586,7 @@ smooth/
 # Build
 cargo build
 
-# Test (200+ tests across 10 crates)
+# Test (full suite across all crates)
 cargo test
 
 # Format
