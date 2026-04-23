@@ -14,8 +14,8 @@ pub enum ClientEvent {
         model: Option<String>,
         budget: Option<f64>,
         working_dir: Option<String>,
-        /// Primary agent to dispatch under (`code` / `plan` / `think`
-        /// / `review`). `None` → server default (`code`). Unknown
+        /// Lead role to dispatch under (`fixer` / `mapper` / `oracle`
+        /// / `heckler`). `None` → server default (`fixer`). Unknown
         /// names surface as `TaskError`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<String>,
@@ -128,14 +128,14 @@ mod tests {
             model: Some("gpt-4".into()),
             budget: Some(1.5),
             working_dir: Some("/tmp".into()),
-            agent: Some("plan".into()),
+            agent: Some("mapper".into()),
         };
         let json = serde_json::to_string(&event).expect("serialize");
         assert!(json.contains(r#""type":"TaskStart"#));
         assert!(json.contains(r#""message":"build the thing"#));
         assert!(json.contains(r#""model":"gpt-4"#));
         assert!(json.contains(r#""budget":1.5"#));
-        assert!(json.contains(r#""agent":"plan"#));
+        assert!(json.contains(r#""agent":"mapper"#));
 
         // Roundtrip
         let parsed: ClientEvent = serde_json::from_str(&json).expect("deserialize");
@@ -151,7 +151,7 @@ mod tests {
             assert_eq!(model.as_deref(), Some("gpt-4"));
             assert_eq!(budget, Some(1.5));
             assert_eq!(working_dir.as_deref(), Some("/tmp"));
-            assert_eq!(agent.as_deref(), Some("plan"));
+            assert_eq!(agent.as_deref(), Some("mapper"));
         } else {
             panic!("unexpected variant");
         }

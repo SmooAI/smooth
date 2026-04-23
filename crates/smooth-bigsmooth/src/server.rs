@@ -270,9 +270,9 @@ pub struct TaskRequest {
     /// a big monorepo want 6–8 GB; smaller tasks can stay at 4.
     #[serde(default)]
     pub memory_mb: Option<u32>,
-    /// Primary agent to run under. Mapped directly to
+    /// Lead role to run under. Mapped directly to
     /// [`DispatchOptions::agent`]; the runner applies the
-    /// corresponding [`smooth_operator::PermissionSet`].
+    /// corresponding [`smooth_operator::Clearance`].
     #[serde(default)]
     pub agent: Option<String>,
 }
@@ -684,9 +684,9 @@ pub struct DispatchOptions {
     pub image: Option<String>,
     pub keep_alive: bool,
     pub memory_mb: Option<u32>,
-    /// Primary agent to run under. Propagated to the microVM runner
+    /// Lead role to run under. Propagated to the microVM runner
     /// as `SMOOTH_AGENT`; the runner resolves it against
-    /// `AgentRegistry::builtin()` and installs a `PermissionHook`
+    /// `Cast::builtin()` and installs a `PermissionHook`
     /// that blocks denied tool calls before they execute.
     pub agent: Option<String>,
 }
@@ -1029,7 +1029,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         // and exfils the credential" attack.
         env.insert("SMOOTH_API_URL".into(), api_url.clone());
         env.insert("SMOOTH_MODEL".into(), final_model);
-        // Agent selection — the runner falls back to `code` on unset
+        // Role selection — the runner falls back to `fixer` on unset
         // or empty, so we only plumb this when the caller explicitly
         // picked one.
         if let Some(ref agent_name) = agent {
@@ -2923,8 +2923,8 @@ fn chat_system_prompt() -> &'static str {
 async fn auto_name_session(user_prompt: &str) -> Option<String> {
     let providers_path = dirs_next::home_dir()?.join(".smooth/providers.json");
     let registry = ProviderRegistry::load_from_file(&providers_path).ok()?;
-    let agents = smooth_operator::agents::AgentRegistry::builtin();
-    let agent = agents.get("title")?;
+    let cast = smooth_operator::cast::Cast::builtin();
+    let agent = cast.get("tagger")?;
     let config = registry.llm_config_for(agent.slot).ok()?;
     let llm = smooth_operator::llm::LlmClient::new(config);
 

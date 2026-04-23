@@ -97,9 +97,9 @@ enum Commands {
         /// monorepos running dev servers).
         #[arg(long)]
         memory_mb: Option<u32>,
-        /// Primary agent to run under: `code` (default, full tools),
-        /// `plan` (read-only, decomposes), `think` (read-only, reasons),
-        /// or `review` (read-only, critiques). Unknown names error
+        /// Lead role to run under: `fixer` (default, full tools),
+        /// `mapper` (read-only, decomposes), `oracle` (read-only, reasons),
+        /// or `heckler` (read-only, critiques). Unknown names error
         /// out with the list above.
         #[arg(long)]
         agent: Option<String>,
@@ -198,9 +198,9 @@ enum Commands {
         /// launching the TUI.
         #[arg(long)]
         list: bool,
-        /// Primary agent to run under: `code` (default, full tools),
-        /// `plan` (read-only, decomposes), `think` (read-only, reasons),
-        /// or `review` (read-only, critiques). Unknown names error
+        /// Lead role to run under: `fixer` (default, full tools),
+        /// `mapper` (read-only, decomposes), `oracle` (read-only, reasons),
+        /// or `heckler` (read-only, critiques). Unknown names error
         /// out with the list above.
         #[arg(long)]
         agent: Option<String>,
@@ -721,26 +721,26 @@ enum RemoteCommands {
 }
 
 /// Validate and canonicalize a `--agent` CLI argument against the
-/// built-in agent registry. Returns the agent name the rest of the
-/// CLI should use.
+/// built-in cast. Returns the role name the rest of the CLI should
+/// use.
 ///
-/// - `None` → defaults to `"code"` (the full-tool primary agent).
-/// - `Some(name)` where `name` is a registered, non-hidden agent →
+/// - `None` → defaults to `"fixer"` (the full-tool lead role).
+/// - `Some(name)` where `name` is a registered, non-hidden role →
 ///   returns `name.to_string()`.
 /// - Any other input produces an error listing the available
-///   primary agents, so a typo at the CLI fails loudly before a
-///   runner spins up with the wrong permission set.
+///   visible roles, so a typo at the CLI fails loudly before a
+///   runner spins up with the wrong clearance set.
 fn resolve_primary_agent(name: Option<&str>) -> Result<String> {
-    let registry = smooth_operator::AgentRegistry::builtin();
+    let cast = smooth_operator::Cast::builtin();
     let available: Vec<String> = {
-        let mut v: Vec<String> = registry.list_visible().map(|a| a.name.clone()).collect();
+        let mut v: Vec<String> = cast.list_visible().map(|a| a.name.clone()).collect();
         v.sort();
         v
     };
     match name.map(str::trim).filter(|s| !s.is_empty()) {
-        None => Ok("code".into()),
-        Some(raw) => match registry.get(raw) {
-            Some(agent) if !agent.hidden => Ok(agent.name.clone()),
+        None => Ok("fixer".into()),
+        Some(raw) => match cast.get(raw) {
+            Some(role) if !role.hidden => Ok(role.name.clone()),
             _ => anyhow::bail!("unknown --agent '{raw}' — available: {}", available.join(" | ")),
         },
     }

@@ -65,8 +65,8 @@ pub async fn run(working_dir: PathBuf) -> anyhow::Result<()> {
 /// messages, title, id, and model instead of a fresh one — used by
 /// `th code --resume`.
 ///
-/// `agent` is the primary agent the TUI should dispatch under —
-/// `None` means "use the default" (`code`). Flowed through to
+/// `agent` is the lead role the TUI should dispatch under —
+/// `None` means "use the default" (`fixer`). Flowed through to
 /// Big Smooth on every `TaskStart` and surfaced on the status bar.
 ///
 /// # Errors
@@ -730,13 +730,13 @@ fn load_pearls_for_autocomplete() -> Vec<crate::autocomplete::PearlSuggestion> {
 /// rules produce consistent titles across the web chat and the
 /// `th` TUI.
 async fn auto_name_session(user_prompt: &str) -> Option<String> {
-    use smooth_operator::agents::AgentRegistry;
+    use smooth_operator::cast::Cast;
     use smooth_operator::providers::ProviderRegistry;
 
     let providers_path = dirs_next::home_dir()?.join(".smooth/providers.json");
     let registry = ProviderRegistry::load_from_file(&providers_path).ok()?;
-    let agents = AgentRegistry::builtin();
-    let agent = agents.get("title")?;
+    let cast = Cast::builtin();
+    let agent = cast.get("tagger")?;
     let config = registry.llm_config_for(agent.slot).ok()?;
     let llm = smooth_operator::llm::LlmClient::new(config);
 

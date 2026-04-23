@@ -200,9 +200,9 @@ pub struct AppState {
     pub user_scrolled: bool,
     /// Display name of the current LLM model.
     pub model_name: String,
-    /// Active primary agent name (`code` / `plan` / `think` / `review`).
+    /// Active lead role name (`fixer` / `mapper` / `oracle` / `heckler`).
     /// Flows into every `TaskStart` so the runner applies the right
-    /// permission set; rendered on the status bar so the user can see
+    /// clearance set; rendered on the status bar so the user can see
     /// which role is active without re-running `th --agent`.
     pub agent_name: String,
     /// Running total of tokens used this session.
@@ -267,7 +267,7 @@ impl AppState {
             scroll_offset: 0,
             user_scrolled: false,
             model_name: "claude-sonnet-4".to_string(),
-            agent_name: "code".to_string(),
+            agent_name: "fixer".to_string(),
             total_tokens: 0,
             total_cost_usd: 0.0,
             current_phase: None,

@@ -68,7 +68,7 @@ pub struct Session {
     pub messages: Vec<SerializableMessage>,
     /// Display name of the LLM model used.
     pub model_name: String,
-    /// Active primary agent name (`code` / `plan` / `think` / `review`).
+    /// Active lead role name (`fixer` / `mapper` / `oracle` / `heckler`).
     /// Optional for back-compat: sessions created before the agent
     /// system deserialize with `None` and fall back to the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]

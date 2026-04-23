@@ -28,9 +28,9 @@ pub enum ClientEvent {
         model: Option<String>,
         budget: Option<f64>,
         working_dir: Option<String>,
-        /// Primary agent to run under (`code` / `plan` / `think` /
-        /// `review`). `None` means "use the server default"
-        /// (`code`). Unknown names surface as a TaskError.
+        /// Lead role to run under (`fixer` / `mapper` / `oracle` /
+        /// `heckler`). `None` means "use the server default"
+        /// (`fixer`). Unknown names surface as a TaskError.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<String>,
     },
@@ -408,14 +408,14 @@ mod tests {
             model: Some("gpt-4".into()),
             budget: Some(1.5),
             working_dir: Some("/tmp".into()),
-            agent: Some("plan".into()),
+            agent: Some("mapper".into()),
         };
         let json = serde_json::to_string(&event).expect("serialize");
         assert!(json.contains(r#""type":"TaskStart"#));
         assert!(json.contains(r#""message":"build the thing"#));
         assert!(json.contains(r#""model":"gpt-4"#));
         assert!(json.contains(r#""budget":1.5"#));
-        assert!(json.contains(r#""agent":"plan"#));
+        assert!(json.contains(r#""agent":"mapper"#));
 
         // Roundtrip
         let parsed: ClientEvent = serde_json::from_str(&json).expect("deserialize");
@@ -431,7 +431,7 @@ mod tests {
             assert_eq!(model.as_deref(), Some("gpt-4"));
             assert_eq!(budget, Some(1.5));
             assert_eq!(working_dir.as_deref(), Some("/tmp"));
-            assert_eq!(agent.as_deref(), Some("plan"));
+            assert_eq!(agent.as_deref(), Some("mapper"));
         } else {
             panic!("unexpected variant");
         }
@@ -440,7 +440,7 @@ mod tests {
     #[test]
     fn client_event_task_start_accepts_missing_agent() {
         // Back-compat: clients that don't send `agent` should still
-        // deserialize (the server defaults to `code`).
+        // deserialize (the server defaults to `fixer`).
         let json = r#"{"type":"TaskStart","message":"hi","model":null,"budget":null,"working_dir":null}"#;
         let parsed: ClientEvent = serde_json::from_str(json).expect("deserialize without agent field");
         if let ClientEvent::TaskStart { agent, .. } = parsed {
