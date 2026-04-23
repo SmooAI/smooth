@@ -200,6 +200,11 @@ pub struct AppState {
     pub user_scrolled: bool,
     /// Display name of the current LLM model.
     pub model_name: String,
+    /// Active primary agent name (`code` / `plan` / `think` / `review`).
+    /// Flows into every `TaskStart` so the runner applies the right
+    /// permission set; rendered on the status bar so the user can see
+    /// which role is active without re-running `th --agent`.
+    pub agent_name: String,
     /// Running total of tokens used this session.
     pub total_tokens: u32,
     /// Running total of spend in USD this session. Accumulated on
@@ -262,6 +267,7 @@ impl AppState {
             scroll_offset: 0,
             user_scrolled: false,
             model_name: "claude-sonnet-4".to_string(),
+            agent_name: "code".to_string(),
             total_tokens: 0,
             total_cost_usd: 0.0,
             current_phase: None,
@@ -281,8 +287,8 @@ impl AppState {
     }
 
     /// Restore an `AppState` from a persisted session. Keeps the
-    /// session's id, title, messages, model, and token count; resets
-    /// everything else (cursor, focus, spinner) to fresh defaults.
+    /// session's id, title, messages, model, agent, and token count;
+    /// resets everything else (cursor, focus, spinner) to fresh defaults.
     pub fn from_resumed_session(working_dir: PathBuf, session: &crate::session::Session) -> Self {
         let mut state = Self::new(working_dir);
         state.session_id = session.id.clone();
@@ -290,6 +296,9 @@ impl AppState {
         state.messages = session.messages.iter().map(|m| m.to_chat_message()).collect();
         state.model_name = session.model_name.clone();
         state.total_tokens = session.total_tokens;
+        if let Some(ref a) = session.agent_name {
+            state.agent_name = a.clone();
+        }
         state
     }
 

@@ -1146,6 +1146,12 @@ struct RunnerConfig {
     workspace: PathBuf,
     operator_id: String,
     narc_write_guard: bool,
+    /// Name of the primary agent to run under. Resolved against
+    /// [`smooth_operator::AgentRegistry::builtin`]. Defaults to
+    /// `"code"` when `SMOOTH_AGENT` is unset or empty. Controls the
+    /// system prompt AND the tool-permission set via a
+    /// [`smooth_operator::PermissionHook`] installed on the registry.
+    agent_name: String,
     /// Policy TOML to feed into Wonk. Resolution order:
     /// 1. `SMOOTH_POLICY_TOML` env var (the full TOML string inline)
     /// 2. `SMOOTH_POLICY_FILE` env var (path to a TOML file)
@@ -1192,6 +1198,16 @@ impl RunnerConfig {
             narc_write_guard: std::env::var("SMOOTH_NARC_WRITE_GUARD")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
+            // Agent selection defaults to `code` (the full-tool coding
+            // agent). An explicit empty string is treated the same as
+            // unset so dispatchers that forward the env var
+            // unconditionally don't end up with an invalid
+            // zero-length name.
+            agent_name: std::env::var("SMOOTH_AGENT")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| "code".into()),
             policy_toml,
         })
     }
@@ -1655,17 +1671,44 @@ async fn main() {
         }
     }
 
-    // System prompt is compiled in from prompts/system.md. This is the
-    // agent harness — tool guidance, workflow constraints, error recovery.
-    // NOT customizable per-project; AGENTS.md / CLAUDE.md handle that
-    // (loaded below via load_project_context and appended as ## Project Context).
+    // Resolve the active agent from `AgentRegistry::builtin`. Invalid
+    // names fall back to `code` with a loud warning — we don't want a
+    // typo in the dispatcher to silently run under an unexpected
+    // permission set, but we also don't want to hard-crash the sandbox
+    // since `code` is always a safe default. The runner emits the
+    // resolution onto its TokenDelta stream so tests + human operators
+    // can see exactly which agent the sandbox is running under.
+    let agents = smooth_operator::AgentRegistry::builtin();
+    let active_agent = match agents.get(&config.agent_name) {
+        Some(a) => a.clone(),
+        None => {
+            tracing::warn!(
+                requested = %config.agent_name,
+                "unknown SMOOTH_AGENT — falling back to 'code'"
+            );
+            agents.get("code").expect("'code' must always exist in AgentRegistry::builtin").clone()
+        }
+    };
+
+    // System prompt is compiled in from prompts/system.md (the tool
+    // harness — tool guidance, workflow constraints, error recovery).
+    // On top of that we append the agent's role prompt and, when
+    // present, the project's AGENTS.md / CLAUDE.md context. Order
+    // matters: the tool harness sets ground rules the agent prompt
+    // must obey, the role prompt tailors behavior to the selected
+    // agent, and project context lands last so it can reference
+    // either.
     let has_pearl_tools = tools.schemas().iter().any(|s| s.name == "create_pearl");
     let pearl_note = if has_pearl_tools {
         "\nYou also have create_pearl, list_pearls, and close_pearl tools for tracking work items."
     } else {
         ""
     };
-    let base_prompt = format!("{}{pearl_note}", include_str!("../prompts/system.md"));
+    let base_prompt = format!(
+        "{}{pearl_note}\n\n## Agent Role\n\n{}",
+        include_str!("../prompts/system.md"),
+        active_agent.prompt
+    );
     let workspace_path = std::path::Path::new(&config.workspace);
     let system_prompt = match smooth_operator::context::load_project_context(workspace_path) {
         Some(ctx) => format!("{base_prompt}\n\n## Project Context\n\n{ctx}"),
@@ -1681,6 +1724,13 @@ async fn main() {
     }
 
     // Hook order is intentional:
+    //   0. PermissionHook — FIRST: an agent that's not allowed to call
+    //      a tool (plan mode trying to edit_file) is blocked here
+    //      before any downstream hook runs. Returning an error from
+    //      pre_call surfaces as a tool-result error to the LLM with
+    //      the message "agent '<name>' is not permitted to call
+    //      '<tool>'". This is cheaper than asking Wonk + Narc about
+    //      a call the local agent can't make anyway.
     //   1. Narc — fastest, catches secrets/injection/dangerous writes purely
     //      in-process (no HTTP). Blocks the call outright on Block severity.
     //   2. Wonk — HTTP check against the policy for tool name, network
@@ -1688,11 +1738,33 @@ async fn main() {
     //   3. Scribe audit — best-effort POST of pre_call/post_call log entries
     //      to the in-VM Scribe for later aggregation.
     //
-    // All three are `ToolHook` impls so they compose cleanly on the registry.
+    // All four are `ToolHook` impls so they compose cleanly on the registry.
+    tools.add_hook(smooth_operator::PermissionHook::new(&active_agent));
     let narc = Arc::new(NarcHook::new(config.narc_write_guard));
     tools.add_hook(SharedNarc { inner: Arc::clone(&narc) });
     tools.add_hook(WonkHook::with_auth(&cast.wonk_url, &cast.operator_token));
     tools.add_hook(ScribeAuditHook::new(&cast.scribe_url, &config.operator_id));
+
+    // Announce the active agent + its permission shape on the stream so
+    // callers (CLI, tests, dashboards) can see what the sandbox is
+    // actually enforcing without reading env vars.
+    emit_event(&AgentEvent::TokenDelta {
+        content: format!(
+            "[runner] active agent: {} (slot={:?}, allow={}, deny={})\n",
+            active_agent.name,
+            active_agent.slot,
+            if active_agent.permissions.allow_tools.is_empty() {
+                "*".to_string()
+            } else {
+                active_agent.permissions.allow_tools.join(",")
+            },
+            if active_agent.permissions.deny_tools.is_empty() {
+                "-".to_string()
+            } else {
+                active_agent.permissions.deny_tools.join(",")
+            },
+        ),
+    });
 
     // Run the agent on a channel and re-emit every AgentEvent as JSON-lines.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();

@@ -310,7 +310,8 @@ fn render_status(frame: &mut Frame, state: &AppState, area: Rect) {
         .unwrap_or_default();
 
     let status_left = format!(
-        "{phase_prefix} {branch_indicator}{} | tokens: {} | spend: {} | ",
+        "{phase_prefix} {branch_indicator}agent: {} | {} | tokens: {} | spend: {} | ",
+        state.agent_name,
         state.model_name,
         state.total_tokens,
         format_spend(state.total_cost_usd),

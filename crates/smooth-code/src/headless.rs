@@ -46,7 +46,14 @@ pub struct HeadlessToolCall {
 /// # Errors
 /// Returns an error if the message is empty, Big Smooth cannot be reached,
 /// or the task fails.
-pub async fn run_headless(working_dir: PathBuf, message: String, model: Option<String>, budget: Option<f64>, json_output: bool) -> anyhow::Result<()> {
+pub async fn run_headless(
+    working_dir: PathBuf,
+    message: String,
+    model: Option<String>,
+    budget: Option<f64>,
+    json_output: bool,
+    agent: Option<String>,
+) -> anyhow::Result<()> {
     if message.trim().is_empty() {
         anyhow::bail!("message must not be empty");
     }
@@ -54,10 +61,10 @@ pub async fn run_headless(working_dir: PathBuf, message: String, model: Option<S
     let mut client = BigSmoothClient::new("http://localhost:4400");
 
     match client.connect().await {
-        Ok(()) => run_headless_client(client, working_dir, message, model, budget, json_output).await,
+        Ok(()) => run_headless_client(client, working_dir, message, model, budget, json_output, agent).await,
         Err(e) => {
             tracing::debug!(error = %e, "BigSmoothClient connection failed, falling back to SSE");
-            run_headless_sse(working_dir, message, model, budget, json_output).await
+            run_headless_sse(working_dir, message, model, budget, json_output, agent).await
         }
     }
 }
@@ -88,7 +95,7 @@ pub async fn run_headless_capture(
     client.connect().await.map_err(|e| anyhow::anyhow!("connect to Big Smooth at {url}: {e}"))?;
 
     let mut events = client
-        .run_task(&message, model.as_deref(), budget, Some(&working_dir.to_string_lossy()))
+        .run_task(&message, model.as_deref(), budget, Some(&working_dir.to_string_lossy()), None)
         .await?;
 
     let mut content_buf = String::new();
@@ -132,9 +139,10 @@ async fn run_headless_client(
     model: Option<String>,
     budget: Option<f64>,
     json_output: bool,
+    agent: Option<String>,
 ) -> anyhow::Result<()> {
     let mut events = client
-        .run_task(&message, model.as_deref(), budget, Some(&working_dir.to_string_lossy()))
+        .run_task(&message, model.as_deref(), budget, Some(&working_dir.to_string_lossy()), agent.as_deref())
         .await?;
 
     let mut content_buf = String::new();
@@ -196,7 +204,14 @@ async fn run_headless_client(
 }
 
 /// Fallback: run headless via SSE (legacy `/api/tasks` endpoint).
-async fn run_headless_sse(working_dir: PathBuf, message: String, model: Option<String>, budget: Option<f64>, json_output: bool) -> anyhow::Result<()> {
+async fn run_headless_sse(
+    working_dir: PathBuf,
+    message: String,
+    model: Option<String>,
+    budget: Option<f64>,
+    json_output: bool,
+    agent: Option<String>,
+) -> anyhow::Result<()> {
     let client = reqwest::Client::builder().timeout(Duration::from_secs(300)).build()?;
 
     let task_req = serde_json::json!({
@@ -204,6 +219,7 @@ async fn run_headless_sse(working_dir: PathBuf, message: String, model: Option<S
         "model": model,
         "budget": budget,
         "working_dir": working_dir.to_string_lossy(),
+        "agent": agent,
     });
 
     let resp = client
@@ -344,7 +360,7 @@ mod tests {
     #[tokio::test]
     async fn headless_empty_message_returns_error() {
         let dir = tempfile::tempdir().expect("create tempdir");
-        let result = run_headless(dir.path().to_path_buf(), String::new(), None, None, false).await;
+        let result = run_headless(dir.path().to_path_buf(), String::new(), None, None, false, None).await;
         assert!(result.is_err());
         let err_msg = result.expect_err("should error").to_string();
         assert!(err_msg.contains("empty"), "error should mention empty message, got: {err_msg}");

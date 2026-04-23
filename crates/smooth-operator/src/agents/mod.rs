@@ -6,14 +6,17 @@
 //! call sites can look up by name instead of hard-coding a prompt and a
 //! routing call side by side.
 //!
-//! This module intentionally ships only the three *hidden* utility agents
-//! (`title`, `compaction`, `summary`). Primary agents (`code`, `plan`,
-//! `think`, `review`) and subagents (`explore`, `general`) are added by
-//! later pearls in the agents-primitive epic.
+//! This module ships the three *hidden* utility agents (`title`,
+//! `compaction`, `summary`) and the four *primary* agents (`code`,
+//! `plan`, `think`, `review`). Subagents (`explore`, `general`) land in
+//! a follow-up pearl.
 
 use std::collections::HashMap;
 
+use async_trait::async_trait;
+
 use crate::providers::{Activity, ModelSlot};
+use crate::tool::{ToolCall, ToolHook, ToolResult};
 
 /// How an agent is surfaced to users.
 ///
@@ -158,6 +161,36 @@ impl AgentRegistry {
 const TITLE_PROMPT: &str = include_str!("prompts/title.txt");
 const COMPACTION_PROMPT: &str = include_str!("prompts/compaction.txt");
 const SUMMARY_PROMPT: &str = include_str!("prompts/summary.txt");
+pub const CODE_PROMPT: &str = include_str!("prompts/code.txt");
+const PLAN_PROMPT: &str = include_str!("prompts/plan.txt");
+const THINK_PROMPT: &str = include_str!("prompts/think.txt");
+const REVIEW_PROMPT: &str = include_str!("prompts/review.txt");
+
+/// Read-only tool set used by `plan`, `think`, and `review`. Anything
+/// not in this list is denied. The allowlist is more defensible than
+/// a deny-list: when a new mutating tool gets registered (edit_file,
+/// write_file, apply_patch, bash, bg_run, http_fetch …) the reasoning
+/// agents stay read-only by default instead of inheriting power they
+/// weren't designed for.
+fn read_only_tools() -> Vec<String> {
+    vec![
+        "read_file".into(),
+        "list_files".into(),
+        "grep".into(),
+        "glob".into(),
+        "lsp".into(),
+        "project_inspect".into(),
+    ]
+}
+
+/// Tools that the `plan` agent is allowed to call on top of
+/// [`read_only_tools`]. Plan is still read-only w.r.t. the workspace
+/// but may inspect structure more broadly — same set as think/review
+/// today, kept as its own helper so future tweaks don't accidentally
+/// leak edit capability.
+fn plan_tools() -> Vec<String> {
+    read_only_tools()
+}
 
 fn builtin_agents() -> Vec<AgentInfo> {
     vec![
@@ -191,7 +224,155 @@ fn builtin_agents() -> Vec<AgentInfo> {
             steps: None,
             hidden: true,
         },
+        // ─── Primary agents ────────────────────────────────────
+        //
+        // `code` is the default `th` experience: full tool access,
+        // Coding-slot routing. Its prompt is the same text that used
+        // to live inline in `coding_workflow.rs` as
+        // `CODING_SYSTEM_PROMPT` — factoring it here means the
+        // coding workflow now looks up the prompt + slot by name
+        // instead of hard-coding both, and users can override it
+        // from a single place in a future pearl.
+        AgentInfo {
+            name: "code".into(),
+            kind: AgentKind::Primary,
+            slot: Activity::Coding,
+            model_override: None,
+            prompt: CODE_PROMPT.trim().to_string(),
+            permissions: PermissionSet::default(),
+            steps: None,
+            hidden: false,
+        },
+        // `plan` decomposes without modifying. Allow-list of
+        // read-only inspection tools; edit/write/patch/bash are
+        // denied so even a confused model can't ship code under the
+        // plan agent.
+        AgentInfo {
+            name: "plan".into(),
+            kind: AgentKind::Primary,
+            slot: Activity::Planning,
+            model_override: None,
+            prompt: PLAN_PROMPT.trim().to_string(),
+            permissions: PermissionSet {
+                allow_tools: plan_tools(),
+                deny_tools: vec!["edit_file".into(), "write_file".into(), "apply_patch".into()],
+            },
+            steps: None,
+            hidden: false,
+        },
+        // `think` is pure reasoning — no bash, no mutation.
+        AgentInfo {
+            name: "think".into(),
+            kind: AgentKind::Primary,
+            slot: Activity::Thinking,
+            model_override: None,
+            prompt: THINK_PROMPT.trim().to_string(),
+            permissions: PermissionSet {
+                allow_tools: read_only_tools(),
+                deny_tools: vec![
+                    "edit_file".into(),
+                    "write_file".into(),
+                    "apply_patch".into(),
+                    "bash".into(),
+                    "bg_run".into(),
+                    "http_fetch".into(),
+                ],
+            },
+            steps: None,
+            hidden: false,
+        },
+        // `review` is adversarial critique — read-only, same shape
+        // as think but routed through the Reviewing slot.
+        AgentInfo {
+            name: "review".into(),
+            kind: AgentKind::Primary,
+            slot: Activity::Reviewing,
+            model_override: None,
+            prompt: REVIEW_PROMPT.trim().to_string(),
+            permissions: PermissionSet {
+                allow_tools: read_only_tools(),
+                deny_tools: vec![
+                    "edit_file".into(),
+                    "write_file".into(),
+                    "apply_patch".into(),
+                    "bash".into(),
+                    "bg_run".into(),
+                    "http_fetch".into(),
+                ],
+            },
+            steps: None,
+            hidden: false,
+        },
     ]
+}
+
+// ─── Permission enforcement hook ──────────────────────────────
+//
+// `PermissionHook` sits on the [`ToolRegistry`] hook chain and
+// blocks any tool call that the active agent's [`PermissionSet`]
+// disallows. Permission enforcement happens BEFORE the tool runs,
+// so a `plan`-mode agent that tries to call `edit_file` never
+// touches disk — the registry returns an error result with an
+// explicit "agent '{name}' is not permitted to call '{tool}'"
+// message that the LLM sees and can reason about.
+
+/// Tool-dispatch hook that enforces an [`AgentInfo`]'s
+/// [`PermissionSet`]. Install this on a [`ToolRegistry`] BEFORE any
+/// tool call happens — the hook chain runs in registration order,
+/// so an agent permission check should be first to fail fast on
+/// denied calls and avoid wasting downstream hooks.
+///
+/// The hook only reads the agent at construction time; the agent
+/// itself is immutable for the lifetime of a run. If a caller wants
+/// to swap agents mid-session they should rebuild the registry.
+#[derive(Debug, Clone)]
+pub struct PermissionHook {
+    agent_name: String,
+    permissions: PermissionSet,
+}
+
+impl PermissionHook {
+    /// Build a hook that enforces `agent`'s [`PermissionSet`].
+    pub fn new(agent: &AgentInfo) -> Self {
+        Self {
+            agent_name: agent.name.clone(),
+            permissions: agent.permissions.clone(),
+        }
+    }
+
+    /// Build a hook directly from a name + [`PermissionSet`]. Useful
+    /// in tests and when the caller doesn't have an [`AgentInfo`]
+    /// handy.
+    pub fn from_parts(agent_name: impl Into<String>, permissions: PermissionSet) -> Self {
+        Self {
+            agent_name: agent_name.into(),
+            permissions,
+        }
+    }
+
+    /// Render the block message for a denied tool call. Kept as its
+    /// own function so the wording is the same in `pre_call` and in
+    /// tests — the wording is part of the tool's contract with the
+    /// LLM (the model reads it as a tool result) and with the human
+    /// reader of logs.
+    pub fn block_message(agent_name: &str, tool: &str) -> String {
+        format!("agent '{agent_name}' is not permitted to call '{tool}'")
+    }
+}
+
+#[async_trait]
+impl ToolHook for PermissionHook {
+    async fn pre_call(&self, call: &ToolCall) -> anyhow::Result<()> {
+        if self.permissions.allows(&call.name) {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(Self::block_message(&self.agent_name, &call.name)))
+        }
+    }
+
+    async fn post_call(&self, _call: &ToolCall, _result: &ToolResult) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -201,12 +382,97 @@ mod tests {
     #[test]
     fn builtin_registers_three_hidden_agents() {
         let registry = AgentRegistry::builtin();
-        assert_eq!(registry.len(), 3);
         for name in ["title", "compaction", "summary"] {
             let agent = registry.get(name).unwrap_or_else(|| panic!("{name} not registered"));
             assert!(agent.hidden, "{name} should be hidden");
             assert_eq!(agent.kind, AgentKind::Hidden);
         }
+    }
+
+    #[test]
+    fn builtin_registers_four_primary_agents() {
+        let registry = AgentRegistry::builtin();
+        for name in ["code", "plan", "think", "review"] {
+            let agent = registry.get(name).unwrap_or_else(|| panic!("{name} not registered"));
+            assert!(!agent.hidden, "{name} should not be hidden");
+            assert_eq!(agent.kind, AgentKind::Primary);
+        }
+    }
+
+    #[test]
+    fn primary_agents_route_to_expected_slots() {
+        let registry = AgentRegistry::builtin();
+        assert_eq!(registry.get("code").unwrap().slot, Activity::Coding);
+        assert_eq!(registry.get("plan").unwrap().slot, Activity::Planning);
+        assert_eq!(registry.get("think").unwrap().slot, Activity::Thinking);
+        assert_eq!(registry.get("review").unwrap().slot, Activity::Reviewing);
+    }
+
+    #[test]
+    fn code_agent_has_full_tool_access() {
+        let registry = AgentRegistry::builtin();
+        let code = registry.get("code").unwrap();
+        // Default PermissionSet is empty allow + empty deny = anything goes.
+        assert!(code.permissions.allows("read_file"));
+        assert!(code.permissions.allows("write_file"));
+        assert!(code.permissions.allows("edit_file"));
+        assert!(code.permissions.allows("apply_patch"));
+        assert!(code.permissions.allows("bash"));
+        assert!(!code.permissions.is_deny_all());
+    }
+
+    #[test]
+    fn plan_agent_allows_read_and_blocks_writes() {
+        let registry = AgentRegistry::builtin();
+        let plan = registry.get("plan").unwrap();
+        assert!(plan.permissions.allows("read_file"));
+        assert!(plan.permissions.allows("list_files"));
+        assert!(plan.permissions.allows("grep"));
+        assert!(!plan.permissions.allows("edit_file"), "plan must not edit");
+        assert!(!plan.permissions.allows("write_file"), "plan must not write");
+        assert!(!plan.permissions.allows("apply_patch"), "plan must not patch");
+    }
+
+    #[test]
+    fn think_agent_is_fully_read_only() {
+        let registry = AgentRegistry::builtin();
+        let think = registry.get("think").unwrap();
+        assert!(think.permissions.allows("read_file"));
+        assert!(!think.permissions.allows("bash"), "think must not shell");
+        assert!(!think.permissions.allows("edit_file"));
+        assert!(!think.permissions.allows("write_file"));
+        assert!(!think.permissions.allows("http_fetch"));
+    }
+
+    #[test]
+    fn review_agent_is_fully_read_only() {
+        let registry = AgentRegistry::builtin();
+        let review = registry.get("review").unwrap();
+        assert!(review.permissions.allows("read_file"));
+        assert!(review.permissions.allows("grep"));
+        assert!(!review.permissions.allows("edit_file"));
+        assert!(!review.permissions.allows("bash"));
+    }
+
+    #[test]
+    fn primary_agent_prompts_are_loaded_from_files() {
+        let registry = AgentRegistry::builtin();
+
+        let code = registry.get("code").unwrap();
+        assert!(code.prompt.contains("coding agent"), "code prompt: {}", code.prompt);
+        assert!(code.prompt.contains("## Test Results"));
+
+        let plan = registry.get("plan").unwrap();
+        assert!(plan.prompt.contains("planning agent"));
+        assert!(plan.prompt.contains("do not modify"));
+
+        let think = registry.get("think").unwrap();
+        assert!(think.prompt.contains("reasoning"));
+        assert!(think.prompt.contains("do not modify code"));
+
+        let review = registry.get("review").unwrap();
+        assert!(review.prompt.to_lowercase().contains("review"));
+        assert!(review.prompt.contains("Blockers"));
     }
 
     #[test]
@@ -256,13 +522,18 @@ mod tests {
     #[test]
     fn list_visible_excludes_hidden_utility_agents() {
         let registry = AgentRegistry::builtin();
-        assert_eq!(registry.list_visible().count(), 0, "all built-ins are hidden today");
-        assert_eq!(registry.list().count(), 3);
+        let visible: Vec<_> = registry.list_visible().map(|a| a.name.clone()).collect();
+        // Four primary agents are visible; title/compaction/summary are hidden.
+        assert_eq!(visible.len(), 4, "expected 4 visible agents, got {visible:?}");
+        for name in ["code", "plan", "think", "review"] {
+            assert!(visible.iter().any(|v| v == name), "{name} missing from visible list");
+        }
     }
 
     #[test]
     fn register_overwrites_existing_agent() {
         let mut registry = AgentRegistry::builtin();
+        let before = registry.len();
         registry.register(AgentInfo {
             name: "title".into(),
             kind: AgentKind::Primary,
@@ -278,7 +549,63 @@ mod tests {
         assert_eq!(title.kind, AgentKind::Primary);
         assert!(!title.hidden);
         assert_eq!(title.steps, Some(5));
-        assert_eq!(registry.len(), 3, "overwrite should not add a new entry");
+        assert_eq!(registry.len(), before, "overwrite should not add a new entry");
+    }
+
+    #[test]
+    fn permission_hook_blocks_denied_tool() {
+        use crate::tool::ToolCall;
+        let registry = AgentRegistry::builtin();
+        let plan = registry.get("plan").unwrap();
+        let hook = PermissionHook::new(plan);
+
+        let call = ToolCall {
+            id: "call-1".into(),
+            name: "edit_file".into(),
+            arguments: serde_json::json!({}),
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let result = runtime.block_on(hook.pre_call(&call));
+        let err = result.expect_err("plan must not be permitted to edit_file");
+        let msg = err.to_string();
+        assert!(msg.contains("plan"), "error should name the agent: {msg}");
+        assert!(msg.contains("edit_file"), "error should name the tool: {msg}");
+        assert!(msg.contains("not permitted"), "error should say 'not permitted': {msg}");
+    }
+
+    #[test]
+    fn permission_hook_allows_permitted_tool() {
+        use crate::tool::ToolCall;
+        let registry = AgentRegistry::builtin();
+        let plan = registry.get("plan").unwrap();
+        let hook = PermissionHook::new(plan);
+
+        let call = ToolCall {
+            id: "call-2".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({}),
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(hook.pre_call(&call)).expect("plan may read_file");
+    }
+
+    #[test]
+    fn permission_hook_allows_everything_for_code_agent() {
+        use crate::tool::ToolCall;
+        let registry = AgentRegistry::builtin();
+        let code = registry.get("code").unwrap();
+        let hook = PermissionHook::new(code);
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        for tool in ["read_file", "write_file", "edit_file", "apply_patch", "bash", "grep"] {
+            let call = ToolCall {
+                id: format!("call-{tool}"),
+                name: tool.into(),
+                arguments: serde_json::json!({}),
+            };
+            runtime
+                .block_on(hook.pre_call(&call))
+                .unwrap_or_else(|e| panic!("code should allow {tool}: {e}"));
+        }
     }
 
     #[test]

@@ -97,6 +97,12 @@ enum Commands {
         /// monorepos running dev servers).
         #[arg(long)]
         memory_mb: Option<u32>,
+        /// Primary agent to run under: `code` (default, full tools),
+        /// `plan` (read-only, decomposes), `think` (read-only, reasons),
+        /// or `review` (read-only, critiques). Unknown names error
+        /// out with the list above.
+        #[arg(long)]
+        agent: Option<String>,
     },
     /// Pause a running Smooth Operator
     Pause { bead_id: String },
@@ -192,6 +198,12 @@ enum Commands {
         /// launching the TUI.
         #[arg(long)]
         list: bool,
+        /// Primary agent to run under: `code` (default, full tools),
+        /// `plan` (read-only, decomposes), `think` (read-only, reasons),
+        /// or `review` (read-only, critiques). Unknown names error
+        /// out with the list above.
+        #[arg(long)]
+        agent: Option<String>,
     },
     /// Git hook management (install, run).
     Hooks {
@@ -708,6 +720,32 @@ enum RemoteCommands {
     Remove { name: String },
 }
 
+/// Validate and canonicalize a `--agent` CLI argument against the
+/// built-in agent registry. Returns the agent name the rest of the
+/// CLI should use.
+///
+/// - `None` → defaults to `"code"` (the full-tool primary agent).
+/// - `Some(name)` where `name` is a registered, non-hidden agent →
+///   returns `name.to_string()`.
+/// - Any other input produces an error listing the available
+///   primary agents, so a typo at the CLI fails loudly before a
+///   runner spins up with the wrong permission set.
+fn resolve_primary_agent(name: Option<&str>) -> Result<String> {
+    let registry = smooth_operator::AgentRegistry::builtin();
+    let available: Vec<String> = {
+        let mut v: Vec<String> = registry.list_visible().map(|a| a.name.clone()).collect();
+        v.sort();
+        v
+    };
+    match name.map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok("code".into()),
+        Some(raw) => match registry.get(raw) {
+            Some(agent) if !agent.hidden => Ok(agent.name.clone()),
+            _ => anyhow::bail!("unknown --agent '{raw}' — available: {}", available.join(" | ")),
+        },
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize tracing
@@ -719,7 +757,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         // No subcommand = launch smooth-code (THE Smooth experience)
-        None => cmd_code(false, None, None, None, None, false, None, false).await,
+        None => cmd_code(false, None, None, None, None, false, None, false, None).await,
         Some(Commands::Code {
             headless,
             message,
@@ -729,7 +767,8 @@ async fn main() -> Result<()> {
             json,
             resume,
             list,
-        }) => cmd_code(headless, message, file, model, budget, json, resume, list).await,
+            agent,
+        }) => cmd_code(headless, message, file, model, budget, json, resume, list, agent).await,
         Some(Commands::Doctor { init_home_repo, remote }) => {
             if init_home_repo {
                 cmd_doctor_init_home_repo(remote.as_deref())
@@ -760,7 +799,8 @@ async fn main() -> Result<()> {
             keep_alive,
             model,
             memory_mb,
-        }) => cmd_run(pearl_id.as_deref(), image.as_deref(), keep_alive, model.as_deref(), memory_mb).await,
+            agent,
+        }) => cmd_run(pearl_id.as_deref(), image.as_deref(), keep_alive, model.as_deref(), memory_mb, agent.as_deref()).await,
         Some(Commands::Approve { bead_id }) => cmd_approve(&bead_id).await,
         Some(Commands::Pause { bead_id }) => cmd_steer(&bead_id, "pause", None).await,
         Some(Commands::Resume { bead_id }) => cmd_steer(&bead_id, "resume", None).await,
@@ -1593,7 +1633,18 @@ fn default_smooth_operator_image() -> String {
     std::env::var("SMOOTH_OPERATOR_IMAGE").unwrap_or_else(|_| "ghcr.io/smooai/smooth-operator:latest".to_string())
 }
 
-async fn cmd_run(pearl_id_arg: Option<&str>, image: Option<&str>, keep_alive: bool, model: Option<&str>, memory_mb: Option<u32>) -> Result<()> {
+async fn cmd_run(
+    pearl_id_arg: Option<&str>,
+    image: Option<&str>,
+    keep_alive: bool,
+    model: Option<&str>,
+    memory_mb: Option<u32>,
+    agent: Option<&str>,
+) -> Result<()> {
+    // Validate the agent name up front so a typo fails at the CLI
+    // instead of falling through to the runner's "unknown agent,
+    // falling back to code" warning.
+    let agent_name = resolve_primary_agent(agent)?;
     // Resolve the task message.
     // - If pearl_id_arg looks like a pearl id (starts with "th-"), fetch
     //   the pearl's title+description and use that as the task message.
@@ -1648,6 +1699,7 @@ async fn cmd_run(pearl_id_arg: Option<&str>, image: Option<&str>, keep_alive: bo
     if keep_alive {
         println!("  {} VM will stay alive after completion", "⧗".yellow());
     }
+    println!("  {} {}", "agent".dimmed(), agent_name.dimmed());
     println!();
 
     let body = serde_json::json!({
@@ -1657,6 +1709,7 @@ async fn cmd_run(pearl_id_arg: Option<&str>, image: Option<&str>, keep_alive: bo
         "image": resolved_image,
         "keep_alive": keep_alive,
         "memory_mb": memory_mb,
+        "agent": agent_name,
     });
 
     // Stream SSE from /api/tasks.
@@ -1961,7 +2014,12 @@ async fn cmd_code(
     json: bool,
     resume: Option<String>,
     list: bool,
+    agent: Option<String>,
 ) -> Result<()> {
+    // Validate the agent name at CLI time so a typo doesn't waste a
+    // runner spin-up. The value flows into the TUI's status bar and
+    // into dispatch's `agent` field when the user sends a message.
+    let agent_name = resolve_primary_agent(agent.as_deref())?;
     // `--list` short-circuits everything else and prints a simple
     // table of saved sessions, newest first, then exits without
     // launching the TUI.
@@ -2025,7 +2083,7 @@ async fn cmd_code(
             .or_else(|| file.and_then(|f| std::fs::read_to_string(f).ok()))
             .or_else(read_stdin)
             .ok_or_else(|| anyhow::anyhow!("--message, --file, or stdin required for headless mode"))?;
-        return smooth_code::headless::run_headless(working_dir, msg, model, budget, json).await;
+        return smooth_code::headless::run_headless(working_dir, msg, model, budget, json, Some(agent_name)).await;
     }
 
     // Quick startup checks (non-blocking warnings)
@@ -2093,7 +2151,7 @@ async fn cmd_code(
 
     // Launch smooth-code TUI — with a resumed session if one was picked.
     let working_dir = std::env::current_dir()?;
-    smooth_code::app::run_with_session(working_dir, resumed_session).await
+    smooth_code::app::run_with_session(working_dir, resumed_session, Some(agent_name)).await
 }
 
 fn cmd_hooks(cmd: HooksCommands) -> Result<()> {

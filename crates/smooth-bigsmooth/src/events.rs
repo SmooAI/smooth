@@ -14,6 +14,11 @@ pub enum ClientEvent {
         model: Option<String>,
         budget: Option<f64>,
         working_dir: Option<String>,
+        /// Primary agent to dispatch under (`code` / `plan` / `think`
+        /// / `review`). `None` → server default (`code`). Unknown
+        /// names surface as `TaskError`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
     },
     TaskCancel {
         task_id: String,
@@ -123,12 +128,14 @@ mod tests {
             model: Some("gpt-4".into()),
             budget: Some(1.5),
             working_dir: Some("/tmp".into()),
+            agent: Some("plan".into()),
         };
         let json = serde_json::to_string(&event).expect("serialize");
         assert!(json.contains(r#""type":"TaskStart"#));
         assert!(json.contains(r#""message":"build the thing"#));
         assert!(json.contains(r#""model":"gpt-4"#));
         assert!(json.contains(r#""budget":1.5"#));
+        assert!(json.contains(r#""agent":"plan"#));
 
         // Roundtrip
         let parsed: ClientEvent = serde_json::from_str(&json).expect("deserialize");
@@ -137,12 +144,25 @@ mod tests {
             model,
             budget,
             working_dir,
+            agent,
         } = parsed
         {
             assert_eq!(message, "build the thing");
             assert_eq!(model.as_deref(), Some("gpt-4"));
             assert_eq!(budget, Some(1.5));
             assert_eq!(working_dir.as_deref(), Some("/tmp"));
+            assert_eq!(agent.as_deref(), Some("plan"));
+        } else {
+            panic!("unexpected variant");
+        }
+    }
+
+    #[test]
+    fn client_event_task_start_without_agent_deserializes() {
+        let json = r#"{"type":"TaskStart","message":"do it","model":null,"budget":null,"working_dir":null}"#;
+        let parsed: ClientEvent = serde_json::from_str(json).expect("must deserialize back-compat TaskStart");
+        if let ClientEvent::TaskStart { agent, .. } = parsed {
+            assert!(agent.is_none());
         } else {
             panic!("unexpected variant");
         }
