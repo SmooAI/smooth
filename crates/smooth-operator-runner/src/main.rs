@@ -1146,10 +1146,10 @@ struct RunnerConfig {
     workspace: PathBuf,
     operator_id: String,
     narc_write_guard: bool,
-    /// Name of the primary agent to run under. Resolved against
-    /// [`smooth_operator::AgentRegistry::builtin`]. Defaults to
-    /// `"code"` when `SMOOTH_AGENT` is unset or empty. Controls the
-    /// system prompt AND the tool-permission set via a
+    /// Name of the lead role to run under. Resolved against
+    /// [`smooth_operator::Cast::builtin`]. Defaults to
+    /// `"fixer"` when `SMOOTH_AGENT` is unset or empty. Controls the
+    /// system prompt AND the tool-clearance set via a
     /// [`smooth_operator::PermissionHook`] installed on the registry.
     agent_name: String,
     /// Policy TOML to feed into Wonk. Resolution order:
@@ -1198,8 +1198,8 @@ impl RunnerConfig {
             narc_write_guard: std::env::var("SMOOTH_NARC_WRITE_GUARD")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
-            // Agent selection defaults to `code` (the full-tool coding
-            // agent). An explicit empty string is treated the same as
+            // Role selection defaults to `fixer` (the full-tool coding
+            // role). An explicit empty string is treated the same as
             // unset so dispatchers that forward the env var
             // unconditionally don't end up with an invalid
             // zero-length name.
@@ -1207,7 +1207,7 @@ impl RunnerConfig {
                 .ok()
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty())
-                .unwrap_or_else(|| "code".into()),
+                .unwrap_or_else(|| "fixer".into()),
             policy_toml,
         })
     }
@@ -1671,51 +1671,51 @@ async fn main() {
         }
     }
 
-    // Resolve the active agent from `AgentRegistry::builtin`. Invalid
-    // names fall back to `code` with a loud warning — we don't want a
+    // Resolve the active role from `Cast::builtin`. Invalid
+    // names fall back to `fixer` with a loud warning — we don't want a
     // typo in the dispatcher to silently run under an unexpected
-    // permission set, but we also don't want to hard-crash the sandbox
-    // since `code` is always a safe default. The runner emits the
+    // clearance set, but we also don't want to hard-crash the sandbox
+    // since `fixer` is always a safe default. The runner emits the
     // resolution onto its TokenDelta stream so tests + human operators
-    // can see exactly which agent the sandbox is running under.
-    let agents = std::sync::Arc::new(smooth_operator::AgentRegistry::builtin());
-    let active_agent = match agents.get(&config.agent_name) {
+    // can see exactly which role the sandbox is running under.
+    let role_cast = std::sync::Arc::new(smooth_operator::Cast::builtin());
+    let active_role = match role_cast.get(&config.agent_name) {
         Some(a) => a.clone(),
         None => {
             tracing::warn!(
                 requested = %config.agent_name,
-                "unknown SMOOTH_AGENT — falling back to 'code'"
+                "unknown SMOOTH_AGENT — falling back to 'fixer'"
             );
-            agents.get("code").expect("'code' must always exist in AgentRegistry::builtin").clone()
+            role_cast.get("fixer").expect("'fixer' must always exist in Cast::builtin").clone()
         }
     };
 
-    // Register the `dispatch_subagent` tool ONLY for agents that
-    // are allowed to spawn subagents: `code` (the default primary)
-    // and `general` (the general-purpose subagent, which may be
-    // chosen as the active agent in nested runs). Reasoning-only
-    // agents (plan/think/review) must not see the dispatch surface
+    // Register the `send_sidekick` tool ONLY for roles that
+    // are allowed to spawn sidekicks: `fixer` (the default lead)
+    // and `runner` (the general-purpose sidekick, which may be
+    // chosen as the active role in nested runs). Reasoning-only
+    // roles (mapper/oracle/heckler) must not see the dispatch surface
     // at all — leaving it off the schema is stronger than blocking
     // it at the hook, since the LLM never learns the tool exists.
     //
-    // The subagent's LLM config is derived from the runner's
+    // The sidekick's LLM config is derived from the runner's
     // single `LlmConfig` (Coding slot by default). When workflow
-    // routing is active, the subagent still uses the base Coding
-    // config — subagents are short-lived explorers, not
+    // routing is active, the sidekick still uses the base Coding
+    // config — sidekicks are short-lived explorers, not
     // multi-phase workflows, so they don't need per-activity
     // routing today. This is easy to expand later by passing a
     // ProviderRegistry-backed factory when workflow mode is on.
-    if active_agent.name == "code" || active_agent.name == "general" {
-        let llm_for_subagents = llm.clone();
+    if active_role.name == "fixer" || active_role.name == "runner" {
+        let llm_for_sidekicks = llm.clone();
         let factory: smooth_operator::LlmConfigFactory =
-            std::sync::Arc::new(move |_activity: smooth_operator::Activity| -> anyhow::Result<smooth_operator::LlmConfig> { Ok(llm_for_subagents.clone()) });
+            std::sync::Arc::new(move |_activity: smooth_operator::Activity| -> anyhow::Result<smooth_operator::LlmConfig> { Ok(llm_for_sidekicks.clone()) });
         // The dispatch tool filters the parent's tools by the
-        // subagent's permission set; pass a clone of the current
+        // sidekick's clearance set; pass a clone of the current
         // registry so it can see every tool registered so far.
         let dispatch =
-            smooth_operator::DispatchSubagentTool::new(std::sync::Arc::clone(&agents), tools.clone(), factory).with_max_iterations(config.max_iterations);
+            smooth_operator::DispatchSubagentTool::new(std::sync::Arc::clone(&role_cast), tools.clone(), factory).with_max_iterations(config.max_iterations);
         tools.register(dispatch);
-        tracing::info!(active_agent = %active_agent.name, "dispatch_subagent tool registered");
+        tracing::info!(active_role = %active_role.name, "send_sidekick tool registered");
     }
 
     // System prompt is compiled in from prompts/system.md (the tool
@@ -1735,7 +1735,7 @@ async fn main() {
     let base_prompt = format!(
         "{}{pearl_note}\n\n## Agent Role\n\n{}",
         include_str!("../prompts/system.md"),
-        active_agent.prompt
+        active_role.prompt
     );
     let workspace_path = std::path::Path::new(&config.workspace);
     let system_prompt = match smooth_operator::context::load_project_context(workspace_path) {
@@ -1767,7 +1767,7 @@ async fn main() {
     //      to the in-VM Scribe for later aggregation.
     //
     // All four are `ToolHook` impls so they compose cleanly on the registry.
-    tools.add_hook(smooth_operator::PermissionHook::new(&active_agent));
+    tools.add_hook(smooth_operator::PermissionHook::new(&active_role));
     let narc = Arc::new(NarcHook::new(config.narc_write_guard));
     tools.add_hook(SharedNarc { inner: Arc::clone(&narc) });
     tools.add_hook(WonkHook::with_auth(&cast.wonk_url, &cast.operator_token));
@@ -1778,18 +1778,18 @@ async fn main() {
     // actually enforcing without reading env vars.
     emit_event(&AgentEvent::TokenDelta {
         content: format!(
-            "[runner] active agent: {} (slot={:?}, allow={}, deny={})\n",
-            active_agent.name,
-            active_agent.slot,
-            if active_agent.permissions.allow_tools.is_empty() {
+            "[runner] active role: {} (slot={:?}, allow={}, deny={})\n",
+            active_role.name,
+            active_role.slot,
+            if active_role.permissions.allow_tools.is_empty() {
                 "*".to_string()
             } else {
-                active_agent.permissions.allow_tools.join(",")
+                active_role.permissions.allow_tools.join(",")
             },
-            if active_agent.permissions.deny_tools.is_empty() {
+            if active_role.permissions.deny_tools.is_empty() {
                 "-".to_string()
             } else {
-                active_agent.permissions.deny_tools.join(",")
+                active_role.permissions.deny_tools.join(",")
             },
         ),
     });

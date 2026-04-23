@@ -1,21 +1,21 @@
-//! Integration test: `dispatch_subagent` runs a subagent in isolation
+//! Integration test: `send_sidekick` runs a sidekick in isolation
 //! and only its final summary crosses back into the parent's
 //! conversation.
 //!
 //! The test stands up a tiny OpenAI-compat mock server on a random
 //! port and serves canned SSE streams keyed off the system prompt:
 //!
-//! - Parent (`code` primary agent): first response calls
-//!   `dispatch_subagent({agent: "explore", prompt: "..."})`, second
+//! - Parent (`fixer` lead role): first response calls
+//!   `send_sidekick({agent: "scout", prompt: "..."})`, second
 //!   response is a plain final message — i.e. the classic two-turn
 //!   parent pattern.
-//! - Subagent (`explore`): one response, plain final message, no
+//! - Sidekick (`scout`): one response, plain final message, no
 //!   tool calls.
 //!
 //! We then assert that the parent's conversation contains exactly
 //! ONE tool-result message from the dispatch, and that the tool
 //! result is the compact `{agent, turns, final_message}` JSON —
-//! never the subagent's own transcript.
+//! never the sidekick's own transcript.
 
 #![allow(clippy::uninlined_format_args)]
 
@@ -26,7 +26,7 @@ use std::sync::{
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::post, Json, Router};
 use serde_json::{json, Value};
-use smooth_operator::agents::{AgentRegistry, DispatchSubagentTool};
+use smooth_operator::cast::{Cast, DispatchSubagentTool};
 use smooth_operator::conversation::Role;
 use smooth_operator::llm::{ApiFormat, LlmConfig, RetryPolicy};
 use smooth_operator::providers::Activity;
@@ -98,7 +98,7 @@ fn final_message_stream(text: &str) -> String {
     sse_body(&chunks)
 }
 
-/// Serve a stream that issues a `dispatch_subagent` tool call. Used
+/// Serve a stream that issues a `send_sidekick` tool call. Used
 /// for the parent's first turn.
 fn tool_call_stream(call_id: &str, agent: &str, prompt: &str) -> String {
     let args = json!({"agent": agent, "prompt": prompt}).to_string();
@@ -117,7 +117,7 @@ fn tool_call_stream(call_id: &str, agent: &str, prompt: &str) -> String {
                         "id": call_id,
                         "type": "function",
                         "function": {
-                            "name": "dispatch_subagent",
+                            "name": "send_sidekick",
                             "arguments": ""
                         }
                     }]
@@ -159,8 +159,8 @@ fn tool_call_stream(call_id: &str, agent: &str, prompt: &str) -> String {
 /// Sentinel strings we embed in the mock responses so the test can
 /// cleanly assert which transcript content did or did not bleed
 /// into the parent's conversation.
-const EXPLORE_FINAL: &str = "EXPLORE_SUMMARY: found 3 uses of X in src/";
-const EXPLORE_INTERNAL: &str = "INTERNAL_EXPLORE_STEP_DO_NOT_LEAK";
+const SCOUT_FINAL: &str = "SCOUT_SUMMARY: found 3 uses of X in src/";
+const SCOUT_INTERNAL: &str = "INTERNAL_SCOUT_STEP_DO_NOT_LEAK";
 const PARENT_FINAL: &str = "PARENT_FINAL_MESSAGE_AFTER_DISPATCH";
 
 async fn chat_handler(State(state): State<MockState>, Json(body): Json<ChatReqLite>) -> impl IntoResponse {
@@ -179,26 +179,26 @@ async fn chat_handler(State(state): State<MockState>, Json(body): Json<ChatReqLi
         })
         .unwrap_or_default();
 
-    let is_explore = system_text.to_lowercase().contains("scout");
+    let is_scout = system_text.to_lowercase().contains("you are a scout");
 
-    let body = if is_explore {
-        // Subagent turn. We embed both a "final" sentinel (what the
+    let body = if is_scout {
+        // Sidekick turn. We embed both a "final" sentinel (what the
         // parent should see) and an "internal" sentinel (what must
         // NOT leak). Only the final goes through because the
-        // subagent emits the whole string as its single assistant
+        // sidekick emits the whole string as its single assistant
         // message — the internal sentinel is just a string inside
         // that message which we'll check is not replicated into
         // the PARENT's conversation (the parent sees only the
-        // dispatch tool's JSON result, not the subagent's raw
+        // dispatch tool's JSON result, not the sidekick's raw
         // message).
         state.explore_turn.fetch_add(1, Ordering::SeqCst);
-        let text = format!("{EXPLORE_INTERNAL}\n\n{EXPLORE_FINAL}");
+        let text = format!("{SCOUT_INTERNAL}\n\n{SCOUT_FINAL}");
         final_message_stream(&text)
     } else {
         // Parent turn. First time → tool call. Second time → final.
         let turn = state.parent_turn.fetch_add(1, Ordering::SeqCst);
         if turn == 0 {
-            tool_call_stream("call-dispatch-1", "explore", "find uses of X")
+            tool_call_stream("call-dispatch-1", "scout", "find uses of X")
         } else {
             final_message_stream(PARENT_FINAL)
         }
@@ -231,25 +231,25 @@ fn mock_llm_config(api_url: &str) -> LlmConfig {
 }
 
 #[tokio::test]
-async fn code_agent_dispatches_explore_and_only_final_summary_leaks() {
+async fn fixer_role_dispatches_scout_and_only_final_summary_leaks() {
     let (api_url, state) = spawn_mock().await;
-    let agents = Arc::new(AgentRegistry::builtin());
-    let code = agents.get("code").expect("'code' agent registered").clone();
+    let cast = Arc::new(Cast::builtin());
+    let fixer = cast.get("fixer").expect("'fixer' role registered").clone();
 
     let api_for_factory = api_url.clone();
     let llm_factory: smooth_operator::LlmConfigFactory =
         Arc::new(move |_activity: Activity| -> anyhow::Result<LlmConfig> { Ok(mock_llm_config(&api_for_factory)) });
 
     // Parent's tool registry: just the dispatch tool. The parent's
-    // `code` agent has full permissions so the PermissionHook won't
+    // `fixer` role has full permissions so the PermissionHook won't
     // block the dispatch call. No other tools are registered because
     // the canned parent response only ever calls dispatch.
     let mut parent_tools = ToolRegistry::new();
-    let dispatch = DispatchSubagentTool::new(Arc::clone(&agents), ToolRegistry::new(), Arc::clone(&llm_factory)).with_max_iterations(3);
+    let dispatch = DispatchSubagentTool::new(Arc::clone(&cast), ToolRegistry::new(), Arc::clone(&llm_factory)).with_max_iterations(3);
     parent_tools.register(dispatch);
-    parent_tools.add_hook(smooth_operator::PermissionHook::new(&code));
+    parent_tools.add_hook(smooth_operator::PermissionHook::new(&fixer));
 
-    let parent_cfg = AgentConfig::new("parent-code", &code.prompt, mock_llm_config(&api_url)).with_max_iterations(4);
+    let parent_cfg = AgentConfig::new("parent-fixer", &fixer.prompt, mock_llm_config(&api_url)).with_max_iterations(4);
     let parent = Agent::new(parent_cfg, parent_tools);
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -259,13 +259,13 @@ async fn code_agent_dispatches_explore_and_only_final_summary_leaks() {
     let _ = drain.await;
 
     // The parent's LLM was called exactly twice (turn 1 = tool call,
-    // turn 2 = final). The subagent's LLM was called exactly once.
+    // turn 2 = final). The sidekick's LLM was called exactly once.
     assert_eq!(state.parent_turn.load(Ordering::SeqCst), 2, "parent LLM turn count");
-    assert_eq!(state.explore_turn.load(Ordering::SeqCst), 1, "subagent LLM turn count");
+    assert_eq!(state.explore_turn.load(Ordering::SeqCst), 1, "sidekick LLM turn count");
 
     // Tool-result messages in the parent's conversation. There
-    // should be EXACTLY ONE — the dispatch_subagent result. No
-    // other tool_result messages from the subagent should leak.
+    // should be EXACTLY ONE — the send_sidekick result. No
+    // other tool_result messages from the sidekick should leak.
     let tool_results: Vec<_> = conversation.messages.iter().filter(|m| m.role == Role::Tool).collect();
     assert_eq!(
         tool_results.len(),
@@ -276,15 +276,15 @@ async fn code_agent_dispatches_explore_and_only_final_summary_leaks() {
     );
 
     // The tool result content is the DispatchResult JSON — the
-    // compact summary, NOT the subagent's transcript.
+    // compact summary, NOT the sidekick's transcript.
     let tool_result_body = &tool_results[0].content;
     let parsed: Value = serde_json::from_str(tool_result_body).unwrap_or_else(|e| panic!("tool result must be JSON, was: {tool_result_body:?} ({e})"));
-    assert_eq!(parsed["agent"], "explore");
+    assert_eq!(parsed["agent"], "scout");
     assert!(parsed["turns"].as_u64().unwrap_or(0) >= 1, "turns should be >= 1, got {:?}", parsed["turns"]);
     let final_message = parsed["final_message"].as_str().expect("final_message string");
     assert!(
-        final_message.contains("EXPLORE_SUMMARY"),
-        "final_message must include subagent summary: {final_message}"
+        final_message.contains("SCOUT_SUMMARY"),
+        "final_message must include sidekick summary: {final_message}"
     );
 
     // Exactly three fields — no extra leakage vector.
@@ -292,39 +292,39 @@ async fn code_agent_dispatches_explore_and_only_final_summary_leaks() {
     assert_eq!(obj.len(), 3, "DispatchResult must have exactly 3 fields: {obj:?}");
 
     // SANITY: none of the parent's messages OUTSIDE the tool result
-    // body contain the subagent's raw message. (The tool result
+    // body contain the sidekick's raw message. (The tool result
     // body does contain the final_message string, which is fine —
-    // that's the summary. But the raw subagent assistant message
+    // that's the summary. But the raw sidekick assistant message
     // itself, or any intermediate turn, must not be replicated as
     // a message in the parent's conversation.)
     for msg in &conversation.messages {
         if msg.role == Role::Tool {
             // Allowed — that's the dispatch result. The
-            // EXPLORE_INTERNAL sentinel IS embedded in the
-            // subagent's final assistant message (which was the
-            // sole message the subagent produced), so it will
+            // SCOUT_INTERNAL sentinel IS embedded in the
+            // sidekick's final assistant message (which was the
+            // sole message the sidekick produced), so it will
             // appear inside final_message. That's acceptable
-            // because the SUBAGENT chose to include it. What we
+            // because the SIDEKICK chose to include it. What we
             // care about is that no separate Tool / Assistant
             // message in the PARENT was synthesized from
-            // subagent transcript content.
+            // sidekick transcript content.
             continue;
         }
         // Assistant messages in the parent are either the
         // tool-call turn (no text content that could leak) or the
-        // final PARENT_FINAL message. Never the subagent's
+        // final PARENT_FINAL message. Never the sidekick's
         // transcript.
         if msg.role == Role::Assistant {
             let c = &msg.content;
             assert!(
-                !c.contains("EXPLORE_SUMMARY") && !c.contains("INTERNAL_EXPLORE_STEP"),
-                "parent assistant message leaked subagent transcript: {c}"
+                !c.contains("SCOUT_SUMMARY") && !c.contains("INTERNAL_SCOUT_STEP"),
+                "parent assistant message leaked sidekick transcript: {c}"
             );
         }
     }
 
     // The parent's FINAL assistant message is the canned parent
-    // response, not anything derived from the subagent transcript.
+    // response, not anything derived from the sidekick transcript.
     let final_parent = conversation.last_assistant_content().expect("parent produced a final message");
     assert!(
         final_parent.contains(PARENT_FINAL),
@@ -335,9 +335,9 @@ async fn code_agent_dispatches_explore_and_only_final_summary_leaks() {
 #[tokio::test]
 async fn dispatch_unknown_agent_returns_clean_tool_error() {
     // No LLM calls in this test — we invoke the tool directly.
-    let agents = Arc::new(AgentRegistry::builtin());
+    let cast = Arc::new(Cast::builtin());
     let llm_factory: smooth_operator::LlmConfigFactory = Arc::new(|_a: Activity| -> anyhow::Result<LlmConfig> { Ok(mock_llm_config("http://127.0.0.1:1")) });
-    let dispatch = DispatchSubagentTool::new(Arc::clone(&agents), ToolRegistry::new(), llm_factory);
+    let dispatch = DispatchSubagentTool::new(Arc::clone(&cast), ToolRegistry::new(), llm_factory);
 
     // Register it in a parent registry and invoke through the
     // registry to prove the error propagates as a normal tool
@@ -348,14 +348,14 @@ async fn dispatch_unknown_agent_returns_clean_tool_error() {
     let result = tools
         .execute(&smooth_operator::tool::ToolCall {
             id: "call-1".into(),
-            name: "dispatch_subagent".into(),
+            name: "send_sidekick".into(),
             arguments: json!({"agent": "nonexistent", "prompt": "do stuff"}),
         })
         .await;
 
     assert!(result.is_error, "unknown agent should produce is_error tool result");
     assert!(
-        result.content.contains("not a dispatchable subagent") && result.content.contains("nonexistent"),
+        result.content.contains("not a dispatchable sidekick") && result.content.contains("nonexistent"),
         "unexpected error content: {}",
         result.content
     );
@@ -363,13 +363,13 @@ async fn dispatch_unknown_agent_returns_clean_tool_error() {
 }
 
 #[tokio::test]
-async fn dispatch_primary_agent_name_returns_clean_tool_error() {
-    // Dispatching to 'code' (a primary, not a subagent) must fail
+async fn dispatch_lead_role_name_returns_clean_tool_error() {
+    // Dispatching to 'fixer' (a lead, not a sidekick) must fail
     // with the same clean error — not fall through to spawning a
-    // code agent loop.
-    let agents = Arc::new(AgentRegistry::builtin());
+    // fixer role loop.
+    let cast = Arc::new(Cast::builtin());
     let llm_factory: smooth_operator::LlmConfigFactory = Arc::new(|_a: Activity| -> anyhow::Result<LlmConfig> { Ok(mock_llm_config("http://127.0.0.1:1")) });
-    let dispatch = DispatchSubagentTool::new(Arc::clone(&agents), ToolRegistry::new(), llm_factory);
+    let dispatch = DispatchSubagentTool::new(Arc::clone(&cast), ToolRegistry::new(), llm_factory);
 
     let mut tools = ToolRegistry::new();
     tools.register(dispatch);
@@ -377,12 +377,12 @@ async fn dispatch_primary_agent_name_returns_clean_tool_error() {
     let result = tools
         .execute(&smooth_operator::tool::ToolCall {
             id: "call-2".into(),
-            name: "dispatch_subagent".into(),
-            arguments: json!({"agent": "code", "prompt": "recurse"}),
+            name: "send_sidekick".into(),
+            arguments: json!({"agent": "fixer", "prompt": "recurse"}),
         })
         .await;
 
     assert!(result.is_error);
-    assert!(result.content.contains("not a dispatchable subagent"), "error content: {}", result.content);
-    assert!(result.content.contains("code"), "error should name 'code': {}", result.content);
+    assert!(result.content.contains("not a dispatchable sidekick"), "error content: {}", result.content);
+    assert!(result.content.contains("fixer"), "error should name 'fixer': {}", result.content);
 }

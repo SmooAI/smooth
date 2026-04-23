@@ -35,7 +35,7 @@ use anyhow::Context;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::agent::{Agent, AgentConfig, AgentEvent};
-use crate::agents::AgentRegistry;
+use crate::cast::Cast;
 use crate::cost::CostBudget;
 use crate::providers::ProviderRegistry;
 use crate::tool::ToolRegistry;
@@ -73,18 +73,16 @@ pub struct CodingWorkflowConfig {
 
 /// Run the workflow end-to-end. Returns the accumulated cost.
 pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f64> {
-    // Pull the coding agent definition from the registry so the
-    // prompt lives in one place (`agents/prompts/code.txt`) and the
-    // slot comes from the agent's `slot` field instead of being
-    // hard-coded here. The `code` agent is always present in
-    // `AgentRegistry::builtin()` — if it ever isn't, something is
-    // badly wrong and we want a loud failure, not a silent fallback.
-    let agents = AgentRegistry::builtin();
-    let code_agent = agents
-        .get("code")
-        .context("missing 'code' agent in registry — did AgentRegistry::builtin change?")?;
-    let code_prompt = code_agent.prompt.clone();
-    let code_slot = code_agent.slot;
+    // Pull the fixer role definition from the cast so the prompt
+    // lives in one place (`cast/prompts/fixer.txt`) and the slot
+    // comes from the role's `slot` field instead of being hard-coded
+    // here. The `fixer` role is always present in `Cast::builtin()`
+    // — if it ever isn't, something is badly wrong and we want a
+    // loud failure, not a silent fallback.
+    let cast = Cast::builtin();
+    let fixer_role = cast.get("fixer").context("missing 'fixer' role in cast — did Cast::builtin change?")?;
+    let code_prompt = fixer_role.prompt.clone();
+    let code_slot = fixer_role.slot;
 
     let llm_config = cfg.registry.llm_config_for(code_slot).context("resolving coding slot → LLM config")?;
     let coding_slot = cfg.registry.routing.slot_for(code_slot);
@@ -228,10 +226,10 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
 /// iteration is more likely to regress than close the gap.
 const CLOSE_TO_GREEN_THRESHOLD: u32 = 3;
 
-// The coding system prompt lives in `crates/smooth-operator/src/agents/prompts/code.txt`
-// and is loaded by `AgentRegistry::builtin()` via `include_str!`. The
+// The coding system prompt lives in `crates/smooth-operator/src/cast/prompts/fixer.txt`
+// and is loaded by `Cast::builtin()` via `include_str!`. The
 // workflow resolves it at the top of `run_coding_workflow` so adding a
-// new prompt-aware agent there gives all call sites the same text.
+// new prompt-aware role there gives all call sites the same text.
 
 /// Build the user-message prompt for a given outer iteration.
 /// The first turn just shows the task. Subsequent turns include
