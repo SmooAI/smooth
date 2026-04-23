@@ -87,11 +87,15 @@ pub struct SandboxConfig {
     /// When true, back `env_cache_key` with a microsandbox named Volume
     /// (first-class primitive: quota-able, listable via `Volume::list`,
     /// removable via `Volume::remove`) instead of the ad-hoc bind-mount
-    /// of `~/.smooth/project-cache/<key>`. Opt-in because the existing
-    /// `th cache list|prune|clear` commands read the bind-mount host
-    /// path directly — they must be migrated to the `Volume::*` API
-    /// before this can flip to the default. Typically set from the
-    /// `SMOOTH_USE_VOLUMES=1` env var in `dispatch_ws_task_sandboxed`.
+    /// of `~/.smooth/project-cache/<key>`.
+    ///
+    /// **Default: `true`** — the CLI (`th cache …`) understands both
+    /// backends, so new caches go to the Volume store. To opt back into
+    /// the legacy bind-mount backend for a specific run, set
+    /// `SMOOTH_USE_VOLUMES=0` (or `false`/`no`/`off`). Existing
+    /// bind-mount entries under `~/.smooth/project-cache/<key>` are
+    /// still honored by Bill when this is false, and `th cache list`
+    /// shows both populations until the old entries are pruned.
     pub use_named_volume_for_cache: bool,
     /// Additional port mappings beyond the default operator WebSocket (guest:4096).
     /// Each entry maps a guest port to a host port (0 = kernel-assigned).
@@ -152,7 +156,11 @@ impl Default for SandboxConfig {
             mounts: Vec::new(),
             allow_host_loopback: false,
             env_cache_key: None,
-            use_named_volume_for_cache: false,
+            // Default to the microsandbox named-Volume backend.
+            // th-266809 flipped this after `th cache` learned both
+            // backends (th-fb7bec). Opt out per-run with
+            // SMOOTH_USE_VOLUMES=0.
+            use_named_volume_for_cache: true,
             extra_ports: Vec::new(),
             image: None,
             secrets: Vec::new(),
@@ -844,14 +852,14 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_config_default_does_not_opt_into_named_volume() {
-        // Opt-in only: the bind-mount backend stays the default
-        // until `th cache list|prune|clear` are migrated to the
-        // microsandbox Volume API. Flipping this default would
-        // silently strand existing caches under
-        // ~/.smooth/project-cache/ and break those commands.
+    fn sandbox_config_default_uses_named_volume_backend() {
+        // After th-fb7bec (dual-backend CLI) + th-266809 (this flip),
+        // the named-Volume backend is the default. Older bind-mount
+        // entries under ~/.smooth/project-cache/ are still managed by
+        // `th cache list|prune|clear`, so no caches are stranded.
+        // Opt out per-run with SMOOTH_USE_VOLUMES=0.
         let cfg = SandboxConfig::default();
-        assert!(!cfg.use_named_volume_for_cache);
+        assert!(cfg.use_named_volume_for_cache);
     }
 
     #[test]
