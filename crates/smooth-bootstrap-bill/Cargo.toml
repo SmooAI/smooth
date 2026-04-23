@@ -38,5 +38,8 @@ name = "bootstrap-bill"
 path = "src/bin/bootstrap-bill.rs"
 required-features = ["server"]
 
+[dev-dependencies]
+tempfile = "3"
+
 [lints]
 workspace = true
