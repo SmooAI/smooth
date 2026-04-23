@@ -1,0 +1,1 @@
+Summarize this conversation for a later session. Include: the goal, what was tried, what worked, what's next. Be concrete — name files, commands, tests, and error messages verbatim when they matter. Omit chit-chat and dead-end explorations unless they're load-bearing for the next session. Keep it under 300 words.
