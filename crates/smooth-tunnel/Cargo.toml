@@ -1,0 +1,29 @@
+[package]
+name = "smooai-smooth-tunnel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Client-side reverse-tunnel daemon for th.smoo.ai. Dials the rendezvous service, advertises a slug, and multiplexes inbound HTTP + WebSocket requests back to the local Big Smooth."
+readme = "README.md"
+
+[lib]
+name = "smooth_tunnel"
+
+[dependencies]
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+url = "2"
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

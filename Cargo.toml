@@ -163,3 +163,4 @@ smooth-code = { version = "0.8.0", path = "crates/smooth-code", package = "smooa
 smooth-pearls = { path = "crates/smooth-pearls", version = "0.8.0", package = "smooai-smooth-pearls" }
 smooth-diver = { version = "0.8.0", path = "crates/smooth-diver", package = "smooai-smooth-diver" }
 smooth-bootstrap-bill = { version = "0.8.0", path = "crates/smooth-bootstrap-bill", default-features = false, package = "smooai-smooth-bootstrap-bill" }
+smooth-tunnel = { version = "0.8.0", path = "crates/smooth-tunnel", package = "smooai-smooth-tunnel" }

@@ -5440,12 +5440,14 @@ dependencies = [
  "smooai-smooth-diver",
  "smooai-smooth-operator",
  "smooai-smooth-pearls",
+ "smooai-smooth-tunnel",
  "smooai-smooth-web",
  "tempfile",
  "tokio",
  "toml",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
@@ -5653,6 +5655,22 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "smooai-smooth-tunnel"
+version = "0.8.0"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.26.2",
+ "tracing",
+ "url",
  "uuid",
 ]
 
