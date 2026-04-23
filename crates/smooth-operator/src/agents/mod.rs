@@ -7,9 +7,10 @@
 //! routing call side by side.
 //!
 //! This module ships the three *hidden* utility agents (`title`,
-//! `compaction`, `summary`) and the four *primary* agents (`code`,
-//! `plan`, `think`, `review`). Subagents (`explore`, `general`) land in
-//! a follow-up pearl.
+//! `compaction`, `summary`), the four *primary* agents (`code`,
+//! `plan`, `think`, `review`), and the two *subagents* (`explore`,
+//! `general`) that primary agents can dispatch work to via the
+//! `dispatch_subagent` tool (see [`dispatch`]).
 
 use std::collections::HashMap;
 
@@ -17,6 +18,9 @@ use async_trait::async_trait;
 
 use crate::providers::{Activity, ModelSlot};
 use crate::tool::{ToolCall, ToolHook, ToolResult};
+
+pub mod dispatch;
+pub use dispatch::{DispatchResult, DispatchSubagentTool, LlmConfigFactory};
 
 /// How an agent is surfaced to users.
 ///
@@ -147,6 +151,15 @@ impl AgentRegistry {
         self.agents.values().filter(|a| !a.hidden)
     }
 
+    /// Iterate only the subagents — agents with
+    /// [`AgentKind::Subagent`]. The `dispatch_subagent` tool uses
+    /// this to enumerate which agent names it is willing to spawn;
+    /// anything else (primary, hidden) is not dispatchable from a
+    /// parent agent's tool surface.
+    pub fn subagents(&self) -> impl Iterator<Item = &AgentInfo> {
+        self.agents.values().filter(|a| a.kind == AgentKind::Subagent)
+    }
+
     /// Number of registered agents.
     pub fn len(&self) -> usize {
         self.agents.len()
@@ -165,6 +178,8 @@ pub const CODE_PROMPT: &str = include_str!("prompts/code.txt");
 const PLAN_PROMPT: &str = include_str!("prompts/plan.txt");
 const THINK_PROMPT: &str = include_str!("prompts/think.txt");
 const REVIEW_PROMPT: &str = include_str!("prompts/review.txt");
+const EXPLORE_PROMPT: &str = include_str!("prompts/explore.txt");
+const GENERAL_PROMPT: &str = include_str!("prompts/general.txt");
 
 /// Read-only tool set used by `plan`, `think`, and `review`. Anything
 /// not in this list is denied. The allowlist is more defensible than
@@ -190,6 +205,23 @@ fn read_only_tools() -> Vec<String> {
 /// leak edit capability.
 fn plan_tools() -> Vec<String> {
     read_only_tools()
+}
+
+/// Tools the `explore` subagent is allowed to call. Read-only
+/// investigation set: grep/glob/ls/read/find. Strictly no edit, no
+/// bash, no write — `explore` is a scout that returns a summary, not
+/// an agent that fixes anything. Kept as its own allowlist (rather
+/// than re-using [`read_only_tools`]) so the subagent's surface can
+/// evolve separately from the reasoning agents' surface.
+fn explore_tools() -> Vec<String> {
+    vec![
+        "grep".into(),
+        "glob".into(),
+        "ls".into(),
+        "list_files".into(),
+        "read_file".into(),
+        "find".into(),
+    ]
 }
 
 fn builtin_agents() -> Vec<AgentInfo> {
@@ -300,6 +332,53 @@ fn builtin_agents() -> Vec<AgentInfo> {
                     "http_fetch".into(),
                 ],
             },
+            steps: None,
+            hidden: false,
+        },
+        // ─── Subagents ─────────────────────────────────────────
+        //
+        // Subagents are dispatched by primary agents through the
+        // `dispatch_subagent` tool (see [`dispatch`]). Each call
+        // spawns a fresh `Agent` with its own context, its own
+        // filtered [`ToolRegistry`], and its own [`PermissionHook`]
+        // — the parent only ever sees the final summary string the
+        // subagent returns, never the subagent's transcript. This
+        // is the context-window win: expensive investigation stays
+        // out of the parent's conversation.
+        AgentInfo {
+            name: "explore".into(),
+            kind: AgentKind::Subagent,
+            slot: Activity::Coding,
+            model_override: None,
+            prompt: EXPLORE_PROMPT.trim().to_string(),
+            permissions: PermissionSet {
+                allow_tools: explore_tools(),
+                // Belt-and-suspenders: even if someone adds a write
+                // tool to the explore allowlist by mistake, these
+                // stay denied outright.
+                deny_tools: vec![
+                    "edit_file".into(),
+                    "write_file".into(),
+                    "apply_patch".into(),
+                    "bash".into(),
+                    "bg_run".into(),
+                    "http_fetch".into(),
+                ],
+            },
+            steps: None,
+            hidden: false,
+        },
+        // `general` is the fallback subagent: full tool access,
+        // self-contained multi-step tasks. Use this when a primary
+        // agent wants to hand off an entire sub-problem (not just a
+        // lookup) without polluting its own context.
+        AgentInfo {
+            name: "general".into(),
+            kind: AgentKind::Subagent,
+            slot: Activity::Coding,
+            model_override: None,
+            prompt: GENERAL_PROMPT.trim().to_string(),
+            permissions: PermissionSet::default(),
             steps: None,
             hidden: false,
         },
@@ -523,9 +602,10 @@ mod tests {
     fn list_visible_excludes_hidden_utility_agents() {
         let registry = AgentRegistry::builtin();
         let visible: Vec<_> = registry.list_visible().map(|a| a.name.clone()).collect();
-        // Four primary agents are visible; title/compaction/summary are hidden.
-        assert_eq!(visible.len(), 4, "expected 4 visible agents, got {visible:?}");
-        for name in ["code", "plan", "think", "review"] {
+        // Four primary agents + two subagents are visible; title/
+        // compaction/summary are hidden.
+        assert_eq!(visible.len(), 6, "expected 6 visible agents, got {visible:?}");
+        for name in ["code", "plan", "think", "review", "explore", "general"] {
             assert!(visible.iter().any(|v| v == name), "{name} missing from visible list");
         }
     }
@@ -634,5 +714,93 @@ mod tests {
         assert!(perms.allows("read"));
         assert!(perms.allows("bash"));
         assert!(!perms.is_deny_all());
+    }
+
+    // ─── Subagent registration tests ─────────────────────────
+
+    #[test]
+    fn builtin_registers_two_subagents() {
+        let registry = AgentRegistry::builtin();
+        for name in ["explore", "general"] {
+            let agent = registry.get(name).unwrap_or_else(|| panic!("{name} not registered"));
+            assert_eq!(agent.kind, AgentKind::Subagent, "{name} must be a Subagent");
+            assert!(!agent.hidden, "{name} should not be hidden");
+        }
+    }
+
+    #[test]
+    fn subagents_helper_returns_only_subagents() {
+        let registry = AgentRegistry::builtin();
+        let names: Vec<String> = registry.subagents().map(|a| a.name.clone()).collect();
+        assert_eq!(names.len(), 2, "expected 2 subagents, got {names:?}");
+        for expected in ["explore", "general"] {
+            assert!(names.iter().any(|n| n == expected), "{expected} missing from subagents()");
+        }
+        // Verify no primaries / hidden agents slip through.
+        for agent in registry.subagents() {
+            assert_eq!(agent.kind, AgentKind::Subagent, "{} leaked into subagents()", agent.name);
+        }
+    }
+
+    #[test]
+    fn explore_subagent_is_read_only() {
+        let registry = AgentRegistry::builtin();
+        let explore = registry.get("explore").unwrap();
+        // Explicitly allowed read-only tools pass.
+        assert!(explore.permissions.allows("read_file"));
+        assert!(explore.permissions.allows("grep"));
+        assert!(explore.permissions.allows("glob"));
+        assert!(explore.permissions.allows("ls"));
+        assert!(explore.permissions.allows("list_files"));
+        assert!(explore.permissions.allows("find"));
+        // Mutating / shell tools are denied.
+        assert!(!explore.permissions.allows("edit_file"), "explore must not edit");
+        assert!(!explore.permissions.allows("write_file"), "explore must not write");
+        assert!(!explore.permissions.allows("apply_patch"), "explore must not patch");
+        assert!(!explore.permissions.allows("bash"), "explore must not shell");
+        assert!(!explore.permissions.allows("bg_run"), "explore must not background-run");
+        assert!(!explore.permissions.allows("http_fetch"), "explore must not hit the network");
+        // Tools outside the allowlist are denied too (allowlist is
+        // the defense, not the deny list).
+        assert!(!explore.permissions.allows("some_future_write_tool"));
+    }
+
+    #[test]
+    fn general_subagent_has_full_tool_access() {
+        let registry = AgentRegistry::builtin();
+        let general = registry.get("general").unwrap();
+        // Empty allow + empty deny = anything is permitted.
+        assert!(general.permissions.allows("read_file"));
+        assert!(general.permissions.allows("write_file"));
+        assert!(general.permissions.allows("edit_file"));
+        assert!(general.permissions.allows("apply_patch"));
+        assert!(general.permissions.allows("bash"));
+        assert!(general.permissions.allows("http_fetch"));
+        assert!(!general.permissions.is_deny_all());
+    }
+
+    #[test]
+    fn subagents_route_to_coding_slot() {
+        let registry = AgentRegistry::builtin();
+        assert_eq!(registry.get("explore").unwrap().slot, Activity::Coding);
+        assert_eq!(registry.get("general").unwrap().slot, Activity::Coding);
+    }
+
+    #[test]
+    fn subagent_prompts_loaded_from_files() {
+        let registry = AgentRegistry::builtin();
+
+        let explore = registry.get("explore").unwrap();
+        assert!(explore.prompt.to_lowercase().contains("scout"), "explore prompt: {}", explore.prompt);
+        assert!(explore.prompt.contains("DO NOT modify"), "explore prompt must forbid modification");
+        assert!(!explore.prompt.ends_with('\n'), "prompt should be trimmed");
+
+        let general = registry.get("general").unwrap();
+        assert!(
+            general.prompt.to_lowercase().contains("subagent"),
+            "general prompt should mention subagent: {}",
+            general.prompt
+        );
+        assert!(general.prompt.contains("isolated"), "general prompt must note isolation");
     }
 }

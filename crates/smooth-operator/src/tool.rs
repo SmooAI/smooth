@@ -184,6 +184,18 @@ impl ToolRegistry {
         self.tools.contains_key(name)
     }
 
+    /// Look up a registered tool by name and clone the underlying
+    /// `Arc<dyn Tool>`. Returns `None` if the tool isn't registered.
+    ///
+    /// Used by callers that need to forward a specific tool handle
+    /// to another registry (e.g. the subagent dispatcher filtering
+    /// the parent's tool set into a smaller per-subagent registry)
+    /// without re-registering the underlying implementation.
+    #[must_use]
+    pub fn tool_by_name(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools.get(name).cloned()
+    }
+
     /// Check all hooks for a pending network request. Any `Err` blocks the operation.
     ///
     /// # Errors

@@ -1678,7 +1678,7 @@ async fn main() {
     // since `code` is always a safe default. The runner emits the
     // resolution onto its TokenDelta stream so tests + human operators
     // can see exactly which agent the sandbox is running under.
-    let agents = smooth_operator::AgentRegistry::builtin();
+    let agents = std::sync::Arc::new(smooth_operator::AgentRegistry::builtin());
     let active_agent = match agents.get(&config.agent_name) {
         Some(a) => a.clone(),
         None => {
@@ -1689,6 +1689,34 @@ async fn main() {
             agents.get("code").expect("'code' must always exist in AgentRegistry::builtin").clone()
         }
     };
+
+    // Register the `dispatch_subagent` tool ONLY for agents that
+    // are allowed to spawn subagents: `code` (the default primary)
+    // and `general` (the general-purpose subagent, which may be
+    // chosen as the active agent in nested runs). Reasoning-only
+    // agents (plan/think/review) must not see the dispatch surface
+    // at all — leaving it off the schema is stronger than blocking
+    // it at the hook, since the LLM never learns the tool exists.
+    //
+    // The subagent's LLM config is derived from the runner's
+    // single `LlmConfig` (Coding slot by default). When workflow
+    // routing is active, the subagent still uses the base Coding
+    // config — subagents are short-lived explorers, not
+    // multi-phase workflows, so they don't need per-activity
+    // routing today. This is easy to expand later by passing a
+    // ProviderRegistry-backed factory when workflow mode is on.
+    if active_agent.name == "code" || active_agent.name == "general" {
+        let llm_for_subagents = llm.clone();
+        let factory: smooth_operator::LlmConfigFactory =
+            std::sync::Arc::new(move |_activity: smooth_operator::Activity| -> anyhow::Result<smooth_operator::LlmConfig> { Ok(llm_for_subagents.clone()) });
+        // The dispatch tool filters the parent's tools by the
+        // subagent's permission set; pass a clone of the current
+        // registry so it can see every tool registered so far.
+        let dispatch =
+            smooth_operator::DispatchSubagentTool::new(std::sync::Arc::clone(&agents), tools.clone(), factory).with_max_iterations(config.max_iterations);
+        tools.register(dispatch);
+        tracing::info!(active_agent = %active_agent.name, "dispatch_subagent tool registered");
+    }
 
     // System prompt is compiled in from prompts/system.md (the tool
     // harness — tool guidance, workflow constraints, error recovery).
