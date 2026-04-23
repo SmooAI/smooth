@@ -68,6 +68,11 @@ pub struct Session {
     pub messages: Vec<SerializableMessage>,
     /// Display name of the LLM model used.
     pub model_name: String,
+    /// Active primary agent name (`code` / `plan` / `think` / `review`).
+    /// Optional for back-compat: sessions created before the agent
+    /// system deserialize with `None` and fall back to the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
     /// Running total of tokens used.
     pub total_tokens: u32,
     /// When the session was first created.
@@ -86,6 +91,7 @@ impl Session {
             title: state.session_title.clone(),
             messages,
             model_name: state.model_name.clone(),
+            agent_name: Some(state.agent_name.clone()),
             total_tokens: state.total_tokens,
             created_at: now,
             updated_at: now,

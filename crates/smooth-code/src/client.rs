@@ -28,6 +28,11 @@ pub enum ClientEvent {
         model: Option<String>,
         budget: Option<f64>,
         working_dir: Option<String>,
+        /// Primary agent to run under (`code` / `plan` / `think` /
+        /// `review`). `None` means "use the server default"
+        /// (`code`). Unknown names surface as a TaskError.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
     },
     TaskCancel {
         task_id: String,
@@ -262,12 +267,14 @@ impl BigSmoothClient {
         model: Option<&str>,
         budget: Option<f64>,
         working_dir: Option<&str>,
+        agent: Option<&str>,
     ) -> anyhow::Result<mpsc::UnboundedReceiver<ServerEvent>> {
         let event = ClientEvent::TaskStart {
             message: message.to_string(),
             model: model.map(ToString::to_string),
             budget,
             working_dir: working_dir.map(ToString::to_string),
+            agent: agent.map(ToString::to_string),
         };
         self.send(&event).await?;
 
@@ -401,12 +408,14 @@ mod tests {
             model: Some("gpt-4".into()),
             budget: Some(1.5),
             working_dir: Some("/tmp".into()),
+            agent: Some("plan".into()),
         };
         let json = serde_json::to_string(&event).expect("serialize");
         assert!(json.contains(r#""type":"TaskStart"#));
         assert!(json.contains(r#""message":"build the thing"#));
         assert!(json.contains(r#""model":"gpt-4"#));
         assert!(json.contains(r#""budget":1.5"#));
+        assert!(json.contains(r#""agent":"plan"#));
 
         // Roundtrip
         let parsed: ClientEvent = serde_json::from_str(&json).expect("deserialize");
@@ -415,12 +424,27 @@ mod tests {
             model,
             budget,
             working_dir,
+            agent,
         } = parsed
         {
             assert_eq!(message, "build the thing");
             assert_eq!(model.as_deref(), Some("gpt-4"));
             assert_eq!(budget, Some(1.5));
             assert_eq!(working_dir.as_deref(), Some("/tmp"));
+            assert_eq!(agent.as_deref(), Some("plan"));
+        } else {
+            panic!("unexpected variant");
+        }
+    }
+
+    #[test]
+    fn client_event_task_start_accepts_missing_agent() {
+        // Back-compat: clients that don't send `agent` should still
+        // deserialize (the server defaults to `code`).
+        let json = r#"{"type":"TaskStart","message":"hi","model":null,"budget":null,"working_dir":null}"#;
+        let parsed: ClientEvent = serde_json::from_str(json).expect("deserialize without agent field");
+        if let ClientEvent::TaskStart { agent, .. } = parsed {
+            assert!(agent.is_none(), "missing agent should deserialize as None");
         } else {
             panic!("unexpected variant");
         }

@@ -270,6 +270,11 @@ pub struct TaskRequest {
     /// a big monorepo want 6–8 GB; smaller tasks can stay at 4.
     #[serde(default)]
     pub memory_mb: Option<u32>,
+    /// Primary agent to run under. Mapped directly to
+    /// [`DispatchOptions::agent`]; the runner applies the
+    /// corresponding [`smooth_operator::PermissionSet`].
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 // ── NarcHook wrapper for ToolHook ─────────────────────────
@@ -576,6 +581,7 @@ async fn handle_client_event(state: &AppState, event: ClientEvent) {
             model,
             budget,
             working_dir,
+            agent,
         } => {
             // WebSocket callers don't currently carry image / keep_alive /
             // memory_mb; HTTP /api/tasks is the dispatch path for those.
@@ -586,6 +592,7 @@ async fn handle_client_event(state: &AppState, event: ClientEvent) {
                     model,
                     budget,
                     working_dir,
+                    agent,
                     ..DispatchOptions::default()
                 },
             )
@@ -677,6 +684,11 @@ pub struct DispatchOptions {
     pub image: Option<String>,
     pub keep_alive: bool,
     pub memory_mb: Option<u32>,
+    /// Primary agent to run under. Propagated to the microVM runner
+    /// as `SMOOTH_AGENT`; the runner resolves it against
+    /// `AgentRegistry::builtin()` and installs a `PermissionHook`
+    /// that blocks denied tool calls before they execute.
+    pub agent: Option<String>,
 }
 
 async fn dispatch_ws_task(state: &AppState, opts: DispatchOptions) {
@@ -827,6 +839,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         image,
         keep_alive,
         memory_mb,
+        agent,
     } = opts;
     use crate::sandbox::{self, BindMount, SandboxConfig};
 
@@ -1016,6 +1029,14 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         // and exfils the credential" attack.
         env.insert("SMOOTH_API_URL".into(), api_url.clone());
         env.insert("SMOOTH_MODEL".into(), final_model);
+        // Agent selection — the runner falls back to `code` on unset
+        // or empty, so we only plumb this when the caller explicitly
+        // picked one.
+        if let Some(ref agent_name) = agent {
+            if !agent_name.trim().is_empty() {
+                env.insert("SMOOTH_AGENT".into(), agent_name.clone());
+            }
+        }
 
         // Derive the LLM gateway host from the API URL so we only
         // substitute the secret for that destination. Minimal
@@ -1744,6 +1765,7 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
         image: _,
         keep_alive: _,
         memory_mb: _,
+        agent,
     } = opts;
 
     let task_id = uuid::Uuid::new_v4().to_string();
@@ -1909,6 +1931,11 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
             .env("SMOOTH_ROUTING_JSON_FILE", routing_path.to_string_lossy().as_ref());
         if let Some(b) = budget {
             cmd.env("SMOOTH_BUDGET_USD", b.to_string());
+        }
+        if let Some(ref agent_name) = agent {
+            if !agent_name.trim().is_empty() {
+                cmd.env("SMOOTH_AGENT", agent_name);
+            }
         }
         if let Ok(skip) = std::env::var("SMOOTH_WORKFLOW_SKIP_TEST") {
             cmd.env("SMOOTH_WORKFLOW_SKIP_TEST", skip);
@@ -2222,6 +2249,7 @@ async fn run_task_handler(State(state): State<AppState>, Json(req): Json<TaskReq
         image: req.image.clone(),
         keep_alive: req.keep_alive,
         memory_mb: req.memory_mb,
+        agent: req.agent.clone(),
     };
 
     tokio::spawn(async move {

@@ -35,8 +35,9 @@ use anyhow::Context;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::agent::{Agent, AgentConfig, AgentEvent};
+use crate::agents::AgentRegistry;
 use crate::cost::CostBudget;
-use crate::providers::{Activity, ProviderRegistry};
+use crate::providers::ProviderRegistry;
 use crate::tool::ToolRegistry;
 
 /// Input to `run_coding_workflow`.
@@ -72,8 +73,21 @@ pub struct CodingWorkflowConfig {
 
 /// Run the workflow end-to-end. Returns the accumulated cost.
 pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f64> {
-    let llm_config = cfg.registry.llm_config_for(Activity::Coding).context("resolving coding slot → LLM config")?;
-    let coding_slot = cfg.registry.routing.slot_for(Activity::Coding);
+    // Pull the coding agent definition from the registry so the
+    // prompt lives in one place (`agents/prompts/code.txt`) and the
+    // slot comes from the agent's `slot` field instead of being
+    // hard-coded here. The `code` agent is always present in
+    // `AgentRegistry::builtin()` — if it ever isn't, something is
+    // badly wrong and we want a loud failure, not a silent fallback.
+    let agents = AgentRegistry::builtin();
+    let code_agent = agents
+        .get("code")
+        .context("missing 'code' agent in registry — did AgentRegistry::builtin change?")?;
+    let code_prompt = code_agent.prompt.clone();
+    let code_slot = code_agent.slot;
+
+    let llm_config = cfg.registry.llm_config_for(code_slot).context("resolving coding slot → LLM config")?;
+    let coding_slot = cfg.registry.routing.slot_for(code_slot);
     let alias = coding_slot.model.clone();
 
     let mut total_cost_usd = 0.0_f64;
@@ -97,12 +111,8 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
 
         let user_prompt = build_user_prompt(&cfg.task_prompt, iteration, last_verify_output.as_deref());
 
-        let mut agent_config = AgentConfig::new(
-            format!("{}/coding-{}", cfg.operator_id, iteration),
-            CODING_SYSTEM_PROMPT.to_string(),
-            llm_config.clone(),
-        )
-        .with_max_iterations(80); // agent can take a lot of tool-call turns internally
+        let mut agent_config =
+            AgentConfig::new(format!("{}/coding-{}", cfg.operator_id, iteration), code_prompt.clone(), llm_config.clone()).with_max_iterations(80); // agent can take a lot of tool-call turns internally
         if let Some(cap) = cfg.budget_usd {
             let remaining = (cap - total_cost_usd).max(0.0);
             agent_config = agent_config.with_budget(CostBudget {
@@ -218,67 +228,10 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
 /// iteration is more likely to regress than close the gap.
 const CLOSE_TO_GREEN_THRESHOLD: u32 = 3;
 
-/// System prompt the coding agent runs under. One prompt that
-/// captures the agent's whole job: read the problem, write the
-/// code, run the tests, iterate until green (or report why not).
-/// This replaces the seven per-phase system prompts the old
-/// workflow shipped with.
-const CODING_SYSTEM_PROMPT: &str = "\
-You are a coding agent working inside a sandboxed workspace.
-
-Your job: implement the task, run the test suite, fix what \
-fails, and keep iterating until every provided test passes (or \
-until you genuinely cannot make more progress).
-
-## Process
-
-1. **Read before writing.** Use `read_file` / `list_files` to \
-   inspect the existing code, the tests (the spec), and any \
-   `INSTRUCTIONS.md` / `README.md`. Figure out the test command \
-   the repo already uses: `cargo test`, `pnpm test` / `npm test`, \
-   `pytest`, `go test ./...`, `./gradlew test`, `make test`. If \
-   the repo has a `Makefile` / `justfile` / CI workflow with a \
-   test target, mirror that exactly. Don't invent a new harness.
-
-2. **Implement.** Write code with `edit_file` or `write_file`. \
-   Keep changes minimal — don't rewrite the whole file when a \
-   small patch will do. Do NOT modify the provided test files; \
-   they are the spec. If an extra test of your own makes sense, \
-   add it alongside the implementation that satisfies it.
-
-3. **Self-validate.** Run the test command via `bash`. THIS IS \
-   NON-NEGOTIABLE. Declaring done without running the tests is a \
-   recurring failure mode in this workflow — don't do it. If the \
-   tests fail, fix and re-run. Iterate inside this turn until \
-   they pass, or until you've made the most surgical fix you can \
-   and remaining failures are edge cases you can't close without \
-   risking regressing the passing ones.
-
-4. **Preserve passing tests.** When fixing a failure, do not \
-   rewrite code that's already making other tests pass. Most \
-   test regressions come from changing logic that worked. If a \
-   compile error stops the tests from running, that IS the first \
-   thing to fix — unclosed delimiters and duplicate class bodies \
-   are the usual culprits.
-
-5. **Report.** When you stop, include:
-   - A one-paragraph summary of what you changed.
-   - A `## Test Results` line with the literal pass/fail count \
-     from your final test run, e.g. `31 passed, 0 failed` or \
-     `28 passed, 3 failed — last-frame strike bonus unresolved`. \
-     The orchestrator parses this to decide whether to loop back \
-     with more context or stop.
-
-## Hard rules
-
-- Always run the test suite via `bash` before your final summary. \
-  Compile-only checks (`cargo check`, `node --check`) are not a \
-  substitute when a real test runner is available.
-- Never leave orphan failing tests that reference unimplemented \
-  methods you added. If you add a test, add the implementation \
-  that satisfies it in the same change.
-- When in doubt, prefer a small correct patch to a clever rewrite.
-";
+// The coding system prompt lives in `crates/smooth-operator/src/agents/prompts/code.txt`
+// and is loaded by `AgentRegistry::builtin()` via `include_str!`. The
+// workflow resolves it at the top of `run_coding_workflow` so adding a
+// new prompt-aware agent there gives all call sites the same text.
 
 /// Build the user-message prompt for a given outer iteration.
 /// The first turn just shows the task. Subsequent turns include

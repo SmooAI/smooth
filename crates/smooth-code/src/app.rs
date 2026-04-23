@@ -56,7 +56,7 @@ fn tui_debug(msg: impl AsRef<str>) {
 /// thread holding the lock).
 #[allow(clippy::unused_async)] // async required for caller ergonomics and tokio::spawn inside
 pub async fn run(working_dir: PathBuf) -> anyhow::Result<()> {
-    run_with_session(working_dir, None).await
+    run_with_session(working_dir, None, None).await
 }
 
 /// Run the TUI, optionally preloading a persisted session.
@@ -65,10 +65,14 @@ pub async fn run(working_dir: PathBuf) -> anyhow::Result<()> {
 /// messages, title, id, and model instead of a fresh one — used by
 /// `th code --resume`.
 ///
+/// `agent` is the primary agent the TUI should dispatch under —
+/// `None` means "use the default" (`code`). Flowed through to
+/// Big Smooth on every `TaskStart` and surfaced on the status bar.
+///
 /// # Errors
 /// Same as [`run`].
 #[allow(clippy::unused_async)]
-pub async fn run_with_session(working_dir: PathBuf, resume: Option<crate::session::Session>) -> anyhow::Result<()> {
+pub async fn run_with_session(working_dir: PathBuf, resume: Option<crate::session::Session>, agent: Option<String>) -> anyhow::Result<()> {
     tui_debug(format!("app::run start, cwd={}", working_dir.display()));
 
     // TTY pre-flight. If stdin or stdout isn't a TTY, the TUI will enter
@@ -134,6 +138,14 @@ pub async fn run_with_session(working_dir: PathBuf, resume: Option<crate::sessio
         }
         None => AppState::new(working_dir),
     };
+
+    // Agent selection: explicit `--agent` flag from the CLI beats the
+    // session's stored agent (user may want to switch roles on resume).
+    // Otherwise keep whatever the session already had.
+    let mut initial_state = initial_state;
+    if let Some(name) = agent {
+        initial_state.agent_name = name;
+    }
 
     let state = Arc::new(Mutex::new(initial_state));
 
@@ -570,11 +582,14 @@ fn handle_input_mode(
                         });
                     }
 
-                    // Spawn agent task with channel-based streaming
+                    // Spawn agent task with channel-based streaming.
+                    // Capture the active agent so the runner applies the
+                    // right permission set on this dispatch.
                     let message = input;
                     let tx = event_tx;
+                    let agent = state.agent_name.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = run_agent_streaming(&message, tx.clone()).await {
+                        if let Err(e) = run_agent_streaming(&message, tx.clone(), Some(agent)).await {
                             let _ = tx.send(AgentEvent::Error { message: e.to_string() });
                         }
                     });
@@ -749,7 +764,7 @@ async fn auto_name_session(user_prompt: &str) -> Option<String> {
 /// to the `AgentEvent` channel the TUI already consumes. All actual tool
 /// execution happens inside a hardware-isolated sandbox — smooth-code is
 /// just a rendering client.
-async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent>) -> anyhow::Result<()> {
+async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent>, agent: Option<String>) -> anyhow::Result<()> {
     use crate::client::{BigSmoothClient, ServerEvent};
 
     let url = std::env::var("SMOOTH_URL").unwrap_or_else(|_| "http://localhost:4400".into());
@@ -762,7 +777,7 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
     let _ = tx.send(AgentEvent::Started { agent_id: "task".into() });
 
     let cwd = std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string());
-    let mut events = client.run_task(message, None, None, cwd.as_deref()).await?;
+    let mut events = client.run_task(message, None, None, cwd.as_deref(), agent.as_deref()).await?;
 
     while let Some(event) = events.recv().await {
         let agent_event = match event {
