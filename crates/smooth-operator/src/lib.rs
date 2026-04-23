@@ -26,7 +26,7 @@ pub mod workflow;
 pub mod ws_resilience;
 
 pub use agent::{Agent, AgentConfig, AgentEvent, DelegationHandle, DelegationTool, SubAgentConfig};
-pub use agents::{AgentInfo, AgentKind, AgentRegistry, PermissionHook, PermissionSet};
+pub use agents::{AgentInfo, AgentKind, AgentRegistry, DispatchResult, DispatchSubagentTool, LlmConfigFactory, PermissionHook, PermissionSet};
 pub use bigsmooth_client::{BigSmoothReporter, ControlEvent, ReporterEvent};
 pub use checkpoint::{Checkpoint, CheckpointStore, MemoryCheckpointStore};
 pub use conversation::{CompactionResult, CompactionStrategy, Conversation, Message, Role};

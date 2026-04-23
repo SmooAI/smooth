@@ -326,6 +326,16 @@ impl Conversation {
         self.messages.iter().rev().find(|m| m.role == Role::Assistant).map(|m| m.content.as_str())
     }
 
+    /// Count how many assistant messages the conversation contains.
+    /// Each assistant message corresponds to one outer agent-loop
+    /// turn (either emitting tool calls or a final reply), so this
+    /// doubles as an iteration counter for budget / reporting when
+    /// the caller doesn't have access to the loop's own iteration
+    /// variable (e.g. after `run_with_channel` returns).
+    pub fn assistant_turn_count(&self) -> u32 {
+        u32::try_from(self.messages.iter().filter(|m| m.role == Role::Assistant).count()).unwrap_or(u32::MAX)
+    }
+
     /// Replace any existing system messages with the cached prompt from a [`PromptCache`].
     pub fn with_cached_system_prompt(mut self, cache: &PromptCache) -> Self {
         self.messages.retain(|m| m.role != Role::System);
