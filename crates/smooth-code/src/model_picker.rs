@@ -3,9 +3,8 @@
 //! Two-level picker opened by `/model`:
 //!
 //! 1. **Slots view** — one entry per routing slot
-//!    (Thinking / Coding / Planning / Reviewing / Judge / Summarize /
-//!    Default / Fast), showing the model each slot currently routes
-//!    to.
+//!    (Coding / Reasoning / Reviewing / Judge / Summarize / Fast /
+//!    Default), showing the model each slot currently routes to.
 //! 2. **Models view** — entered from the Slots view by pressing
 //!    Enter. Lists candidate models for that slot. Selecting one
 //!    applies the routing change and persists it back to
@@ -22,26 +21,24 @@ use smooth_operator::providers::{Activity, ModelSlot, ProviderRegistry};
 
 /// Which routing slot a picker entry maps to. Distinct from
 /// [`Activity`] because `ModelRouting` has a `default` slot that
-/// isn't an `Activity` variant — a request with no specified
-/// activity routes through `default_llm_config()` directly.
+/// isn't an `Activity` variant — it's a wire-compat fallback used
+/// by `default_llm_config()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickerSlot {
-    Thinking,
     Coding,
-    Planning,
+    Reasoning,
     Reviewing,
     Judge,
     Summarize,
-    Default,
     Fast,
+    Default,
 }
 
 impl PickerSlot {
     fn from_activity(a: Activity) -> Self {
         match a {
-            Activity::Thinking => Self::Thinking,
             Activity::Coding => Self::Coding,
-            Activity::Planning => Self::Planning,
+            Activity::Reasoning => Self::Reasoning,
             Activity::Reviewing => Self::Reviewing,
             Activity::Judge => Self::Judge,
             Activity::Summarize => Self::Summarize,
@@ -266,15 +263,18 @@ fn default_providers_path() -> Option<PathBuf> {
 }
 
 /// Fixed display order for the slot list.
+///
+/// Six canonical activity slots plus the wire-compat `Default` slot
+/// (served by the coding route at runtime but still editable on disk
+/// so older configs continue to load).
 pub const ALL_SLOTS: &[(PickerSlot, &str, &str)] = &[
-    (PickerSlot::Thinking, "Thinking", "deep reasoning, architecture, hard problems"),
     (PickerSlot::Coding, "Coding", "code edits, refactors, tool-using loops"),
-    (PickerSlot::Planning, "Planning", "task decomposition, pearl creation"),
+    (PickerSlot::Reasoning, "Reasoning", "deep reasoning, planning, hard problems"),
     (PickerSlot::Reviewing, "Reviewing", "critique, PR review, style checks"),
     (PickerSlot::Judge, "Judge", "Narc rulings, guardrail checks"),
     (PickerSlot::Summarize, "Summarize", "context compaction, long-doc summary"),
-    (PickerSlot::Default, "Default", "anything unrouted"),
     (PickerSlot::Fast, "Fast", "utility calls (session titles, quick summaries)"),
+    (PickerSlot::Default, "Default", "wire-compat fallback (served by Coding)"),
 ];
 
 fn slot_entries(registry: &ProviderRegistry) -> Vec<SlotEntry> {
@@ -295,9 +295,8 @@ fn slot_entries(registry: &ProviderRegistry) -> Vec<SlotEntry> {
 
 fn read_slot(registry: &ProviderRegistry, slot: PickerSlot) -> ModelSlot {
     match slot {
-        PickerSlot::Thinking => registry.routing.thinking.clone(),
         PickerSlot::Coding => registry.routing.coding.clone(),
-        PickerSlot::Planning => registry.routing.planning.clone(),
+        PickerSlot::Reasoning => registry.routing.reasoning.clone().unwrap_or_else(|| registry.routing.default.clone()),
         PickerSlot::Reviewing => registry.routing.reviewing.clone(),
         PickerSlot::Judge => registry.routing.judge.clone(),
         PickerSlot::Summarize => registry.routing.summarize.clone(),
@@ -340,21 +339,19 @@ fn candidate_models(slots: &[SlotEntry], focused: &SlotEntry) -> Vec<ModelEntry>
 }
 
 const SMOOTH_ALIASES: &[&str] = &[
-    "smooth-thinking",
     "smooth-coding",
-    "smooth-planning",
+    "smooth-reasoning",
     "smooth-reviewing",
     "smooth-judge",
     "smooth-summarize",
-    "smooth-default",
     "smooth-fast",
+    "smooth-default",
 ];
 
 fn assign_slot(registry: &mut ProviderRegistry, slot: PickerSlot, new_slot: ModelSlot) {
     match slot {
-        PickerSlot::Thinking => registry.routing.thinking = new_slot,
         PickerSlot::Coding => registry.routing.coding = new_slot,
-        PickerSlot::Planning => registry.routing.planning = new_slot,
+        PickerSlot::Reasoning => registry.routing.reasoning = Some(new_slot),
         PickerSlot::Reviewing => registry.routing.reviewing = new_slot,
         PickerSlot::Judge => registry.routing.judge = new_slot,
         PickerSlot::Summarize => registry.routing.summarize = new_slot,
@@ -389,14 +386,14 @@ mod tests {
             default_model: "smooth-default".into(),
         });
         r = r.with_routing(ModelRouting {
-            thinking: ModelSlot::new("smooth", "smooth-thinking"),
             coding: ModelSlot::new("smooth", "smooth-coding"),
-            planning: ModelSlot::new("smooth", "smooth-planning"),
+            reasoning: Some(ModelSlot::new("smooth", "smooth-reasoning")),
             reviewing: ModelSlot::new("smooth", "smooth-reviewing"),
             judge: ModelSlot::new("smooth", "smooth-judge"),
             summarize: ModelSlot::new("smooth", "smooth-summarize"),
             default: ModelSlot::new("smooth", "smooth-default"),
             fast: Some(ModelSlot::new("smooth", "smooth-fast")),
+            planning: None,
         });
         r
     }
@@ -409,14 +406,16 @@ mod tests {
     }
 
     #[test]
-    fn load_from_registry_populates_all_eight_slots() {
+    fn load_from_registry_populates_all_slots() {
         let mut p = ModelPickerState::new();
         p.load_from_registry(&test_registry());
         assert_eq!(p.slots.len(), ALL_SLOTS.len());
-        assert_eq!(p.slots[0].slot, PickerSlot::Thinking);
-        assert_eq!(p.slots[0].current_model, "smooth-thinking");
+        assert_eq!(p.slots[0].slot, PickerSlot::Coding);
+        assert_eq!(p.slots[0].current_model, "smooth-coding");
         let fast = p.slots.iter().find(|s| s.slot == PickerSlot::Fast).expect("fast slot");
         assert_eq!(fast.current_model, "smooth-fast");
+        let reasoning = p.slots.iter().find(|s| s.slot == PickerSlot::Reasoning).expect("reasoning slot");
+        assert_eq!(reasoning.current_model, "smooth-reasoning");
     }
 
     #[test]
@@ -437,25 +436,28 @@ mod tests {
         let mut p = ModelPickerState::new();
         p.load_from_registry(&test_registry());
 
-        // Drill into slot #3 (Reviewing in fixed order).
-        p.selected = 3;
+        // Drill into the Reviewing slot regardless of index.
+        let idx = ALL_SLOTS.iter().position(|(s, _, _)| *s == PickerSlot::Reviewing).expect("reviewing slot");
+        p.selected = idx;
         p.open_models_for_selected();
         assert_eq!(p.view, PickerView::Models { slot: PickerSlot::Reviewing });
         assert!(!p.models.is_empty());
 
         p.back_to_slots();
         assert_eq!(p.view, PickerView::Slots);
-        assert_eq!(p.selected, 3);
+        assert_eq!(p.selected, idx);
     }
 
     #[test]
     fn open_models_preselects_current_model() {
         let mut p = ModelPickerState::new();
         p.load_from_registry(&test_registry());
-        p.selected = 1; // Coding
+        // Drill into Reasoning — its current model is "smooth-reasoning".
+        let idx = ALL_SLOTS.iter().position(|(s, _, _)| *s == PickerSlot::Reasoning).expect("reasoning slot");
+        p.selected = idx;
         p.open_models_for_selected();
         let chosen = &p.models[p.selected];
-        assert_eq!(chosen.model, "smooth-coding");
+        assert_eq!(chosen.model, "smooth-reasoning");
     }
 
     #[test]
@@ -468,25 +470,26 @@ mod tests {
         p.providers_path = Some(path.clone());
         p.reload_slots();
 
-        // Drill into Coding; pick a different model than smooth-coding.
-        p.selected = 1;
+        // Drill into Coding; pick smooth-reasoning instead of smooth-coding.
+        let coding_idx = ALL_SLOTS.iter().position(|(s, _, _)| *s == PickerSlot::Coding).expect("coding slot");
+        p.selected = coding_idx;
         p.open_models_for_selected();
         let idx = p
             .models
             .iter()
-            .position(|m| m.model == "smooth-thinking")
-            .expect("smooth-thinking is always a candidate");
+            .position(|m| m.model == "smooth-reasoning")
+            .expect("smooth-reasoning is always a candidate");
         p.selected = idx;
         assert!(p.apply_selected_model());
 
-        // Back on Slots view, Coding now points at smooth-thinking.
+        // Back on Slots view, Coding now points at smooth-reasoning.
         assert_eq!(p.view, PickerView::Slots);
         let coding = p.slots.iter().find(|s| s.slot == PickerSlot::Coding).expect("coding");
-        assert_eq!(coding.current_model, "smooth-thinking");
+        assert_eq!(coding.current_model, "smooth-reasoning");
 
         // And the on-disk file actually changed.
         let reloaded = ProviderRegistry::load_from_file(&path).expect("reload");
-        assert_eq!(reloaded.routing.coding.model, "smooth-thinking");
+        assert_eq!(reloaded.routing.coding.model, "smooth-reasoning");
     }
 
     #[test]
@@ -523,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn preset_registry_populates_all_eight_slots() {
+    fn preset_registry_populates_all_slots() {
         let presets = [
             Preset::SmoaiGateway,
             Preset::OpenRouterLowCost,
@@ -535,7 +538,12 @@ mod tests {
             let reg = ProviderRegistry::from_preset(preset, "test");
             let mut p = ModelPickerState::new();
             p.load_from_registry(&reg);
-            assert_eq!(p.slots.len(), ALL_SLOTS.len(), "{preset:?} has all 8 slots");
+            assert_eq!(p.slots.len(), ALL_SLOTS.len(), "{preset:?} populates every slot");
+            // Every slot has a resolvable provider/model pair — no empty strings.
+            for s in &p.slots {
+                assert!(!s.current_model.is_empty(), "{preset:?}::{:?} model blank", s.slot);
+                assert!(!s.current_provider.is_empty(), "{preset:?}::{:?} provider blank", s.slot);
+            }
         }
     }
 }

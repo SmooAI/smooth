@@ -441,7 +441,8 @@ enum RoutingCommands {
     },
     /// Set routing for a specific activity
     Set {
-        /// Activity: thinking, coding, planning, reviewing, judge, summarize
+        /// Activity: coding, reasoning, reviewing, judge, summarize, fast, default
+        /// (legacy aliases `thinking` and `planning` route into `reasoning`)
         activity: String,
         /// Model in provider/model format (e.g. openrouter/deepseek/deepseek-v3.2)
         model: String,
@@ -1183,13 +1184,13 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
                     "smooai-gateway",
                     "Smoo AI Gateway (recommended)",
                     vec![
-                        "smooth-default",
                         "smooth-coding",
-                        "smooth-thinking",
-                        "smooth-planning",
+                        "smooth-reasoning",
                         "smooth-reviewing",
                         "smooth-judge",
                         "smooth-summarize",
+                        "smooth-fast",
+                        "smooth-default",
                     ],
                     true,
                 ),
@@ -3449,9 +3450,8 @@ async fn cmd_routing(cmd: RoutingCommands) -> Result<()> {
 
             use smooth_operator::providers::Activity;
             let activities = [
-                (Activity::Thinking, "Thinking", "deep reasoning, chain-of-thought"),
                 (Activity::Coding, "Coding", "code generation, edits, refactoring"),
-                (Activity::Planning, "Planning", "task decomposition, architecture"),
+                (Activity::Reasoning, "Reasoning", "deep reasoning, planning, chain-of-thought"),
                 (Activity::Reviewing, "Reviewing", "code review, adversarial checks"),
                 (Activity::Judge, "Judge", "evaluation, scoring, pass/fail"),
                 (Activity::Summarize, "Summarize", "summaries, compression"),
@@ -3484,9 +3484,8 @@ async fn cmd_routing(cmd: RoutingCommands) -> Result<()> {
             // then fetch /model/info once per unique provider.
             use smooth_operator::providers::Activity;
             let activities = [
-                (Activity::Thinking, "Thinking"),
                 (Activity::Coding, "Coding"),
-                (Activity::Planning, "Planning"),
+                (Activity::Reasoning, "Reasoning"),
                 (Activity::Reviewing, "Reviewing"),
                 (Activity::Judge, "Judge"),
                 (Activity::Summarize, "Summarize"),
@@ -3637,16 +3636,20 @@ async fn cmd_routing(cmd: RoutingCommands) -> Result<()> {
 
             let slot = smooth_operator::providers::ModelSlot::new(&provider_id, &model_name);
 
+            // `thinking` and `planning` are deprecated aliases that
+            // map onto the merged `reasoning` slot — accepted for one
+            // release for back-compat with old scripts and docs.
             match activity.as_str() {
-                "thinking" => registry.routing.thinking = slot,
                 "coding" => registry.routing.coding = slot,
-                "planning" => registry.routing.planning = slot,
+                "reasoning" | "thinking" | "planning" => registry.routing.reasoning = Some(slot),
                 "reviewing" => registry.routing.reviewing = slot,
                 "judge" => registry.routing.judge = slot,
                 "summarize" => registry.routing.summarize = slot,
+                "fast" => registry.routing.fast = Some(slot),
+                "default" => registry.routing.default = slot,
                 other => {
                     println!("Unknown activity: {other}");
-                    println!("Available: thinking, coding, planning, reviewing, judge, summarize");
+                    println!("Available: coding, reasoning, reviewing, judge, summarize, fast, default");
                     return Ok(());
                 }
             }

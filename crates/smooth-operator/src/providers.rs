@@ -197,21 +197,51 @@ impl ProviderConfig {
 }
 
 /// Activity type that determines which model slot to use.
+///
+/// Six semantic slots. The legacy `Thinking` + `Planning` split
+/// collapsed into `Reasoning`, and the legacy `Default` alias is
+/// served by the `Coding` slot (deprecated associated constants
+/// below preserve the old call sites for one release).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Activity {
-    Thinking,
+    /// The outer coding loop — workhorse slot, also serves the
+    /// legacy "default" call path.
     Coding,
-    Planning,
+    /// Deep reasoning / planning / chain-of-thought. Replaces the
+    /// legacy `Thinking` + `Planning` variants.
+    Reasoning,
+    /// Code review, critique, adversarial checks.
     Reviewing,
+    /// LLM-as-a-judge: yes/no verdicts, low latency, used by Narc
+    /// guardrails and bench scoring.
     Judge,
+    /// Context compression during long agent runs.
     Summarize,
     /// Small, latency-sensitive utility calls: session auto-naming,
     /// short-title generation, one-liner tool-result summaries,
     /// autocomplete. Sub-second first token, short output (<500 tok),
     /// no tool use. Target is a Haiku-class model via
-    /// `smooth-fast`. Meaningfully cheaper than `smooth-default` —
+    /// `smooth-fast`. Meaningfully cheaper than the coding slot —
     /// don't pay Sonnet-plus prices to name a session.
     Fast,
+}
+
+impl Activity {
+    /// Legacy alias — use [`Activity::Reasoning`] instead.
+    #[deprecated(note = "use Activity::Reasoning — Thinking and Planning merged into Reasoning")]
+    #[allow(non_upper_case_globals)]
+    pub const Thinking: Self = Self::Reasoning;
+
+    /// Legacy alias — use [`Activity::Reasoning`] instead.
+    #[deprecated(note = "use Activity::Reasoning — Thinking and Planning merged into Reasoning")]
+    #[allow(non_upper_case_globals)]
+    pub const Planning: Self = Self::Reasoning;
+
+    /// Legacy alias — use [`Activity::Coding`] instead. The
+    /// "default" slot is served by the coding route.
+    #[deprecated(note = "use Activity::Coding — the default slot is served by the coding route")]
+    #[allow(non_upper_case_globals)]
+    pub const Default: Self = Self::Coding;
 }
 
 /// A model slot binding a provider ID and model name, with optional fallback.
@@ -239,14 +269,28 @@ impl ModelSlot {
 }
 
 /// Per-activity model routing configuration.
+///
+/// Six semantic slots plus a `default` slot for wire compatibility.
+/// `default` is not an `Activity` variant — `Activity::Coding` serves
+/// the default route. Old `providers.json` files that still carry a
+/// `thinking` field are mapped into `reasoning` via `#[serde(alias)]`;
+/// a missing `reasoning` falls back to `default` at lookup time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelRouting {
-    pub thinking: ModelSlot,
     pub coding: ModelSlot,
-    pub planning: ModelSlot,
+    /// Deep reasoning / planning slot — merged from the legacy
+    /// `thinking` + `planning` fields. `#[serde(alias = "thinking")]`
+    /// lets old `providers.json` files keep deserializing; we write
+    /// back as `reasoning`.
+    #[serde(alias = "thinking", default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ModelSlot>,
     pub reviewing: ModelSlot,
     pub judge: ModelSlot,
     pub summarize: ModelSlot,
+    /// Wire-compat fallback slot. No `Activity` variant routes through
+    /// this directly — `Activity::Coding` serves the default path —
+    /// but the field stays so pre-collapse configs load cleanly and
+    /// `default_llm_config()` still resolves.
     pub default: ModelSlot,
     /// Utility slot — session auto-naming, short titles, autocomplete.
     /// Optional on disk: existing `providers.json` files (pre-fast) will
@@ -255,19 +299,25 @@ pub struct ModelRouting {
     /// that includes a fast slot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fast: Option<ModelSlot>,
+    /// Legacy `planning` field held for one-release wire-compat.
+    /// Deserialized but ignored at lookup time — `Reasoning` absorbs
+    /// the planning slot. `skip_serializing_if = "Option::is_none"`
+    /// keeps fresh configs clean.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planning: Option<ModelSlot>,
 }
 
 impl Default for ModelRouting {
     fn default() -> Self {
         Self {
-            thinking: ModelSlot::new("openrouter", "deepseek/deepseek-r1"),
             coding: ModelSlot::new("openrouter", "openai/gpt-4o"),
-            planning: ModelSlot::new("openrouter", "moonshot/kimi-k2.5"),
+            reasoning: Some(ModelSlot::new("openrouter", "deepseek/deepseek-r1")),
             reviewing: ModelSlot::new("openrouter", "z-ai/glm-5.1"),
             judge: ModelSlot::new("openrouter", "google/gemini-2.5-flash"),
             summarize: ModelSlot::new("openrouter", "minimax/minimax-m2.5"),
             default: ModelSlot::new("openrouter", "openai/gpt-4o"),
             fast: Some(ModelSlot::new("openrouter", "google/gemini-2.5-flash-lite")),
+            planning: None,
         }
     }
 }
@@ -275,15 +325,18 @@ impl Default for ModelRouting {
 impl ModelRouting {
     /// Get the model slot for a given activity.
     ///
-    /// For `Activity::Fast`, falls back to `default` when the user's
-    /// config doesn't define a `fast` slot — lets the codebase route
-    /// utility calls via `Fast` unconditionally without breaking users
-    /// on old `providers.json` files.
+    /// `Activity::Coding` serves the "default" route — the separate
+    /// `default` field on disk exists for wire-compat only.
+    ///
+    /// `Activity::Reasoning` falls back to `default` when absent so
+    /// partial configs don't panic.
+    ///
+    /// `Activity::Fast` falls back to `default` when absent so older
+    /// `providers.json` files keep working.
     pub fn slot_for(&self, activity: Activity) -> &ModelSlot {
         match activity {
-            Activity::Thinking => &self.thinking,
             Activity::Coding => &self.coding,
-            Activity::Planning => &self.planning,
+            Activity::Reasoning => self.reasoning.as_ref().unwrap_or(&self.default),
             Activity::Reviewing => &self.reviewing,
             Activity::Judge => &self.judge,
             Activity::Summarize => &self.summarize,
@@ -321,81 +374,81 @@ impl ProviderRegistry {
                 // underlying model is a server-side deploy — no client
                 // release needed.
                 //
-                // Aliases:
-                //   smooth-thinking  → frontier reasoning model
-                //   smooth-coding    → coding workhorse
-                //   smooth-planning  → planning / architecture model
-                //   smooth-reviewing → code review / critique model
-                //   smooth-judge     → cheap fast judge for Narc + guardrails
-                //   smooth-summarize → cheap summarizer
-                //   smooth-default   → balanced default
+                // Six canonical slots + a `default` compatibility slot:
+                //   smooth-coding    → coding workhorse (also serves default)
+                //   smooth-reasoning → deep reasoning + planning
+                //   smooth-reviewing → adversarial code review
+                //   smooth-judge     → Narc + guardrail verdicts
+                //   smooth-summarize → context compaction
+                //   smooth-fast      → session titles, autocomplete
+                //   smooth-default   → on-disk alias for smooth-coding
                 registry.register_provider(ProviderConfig::smooai_gateway(api_key));
                 registry.routing = ModelRouting {
-                    thinking: ModelSlot::new("smooai-gateway", "smooth-thinking"),
                     coding: ModelSlot::new("smooai-gateway", "smooth-coding"),
-                    planning: ModelSlot::new("smooai-gateway", "smooth-planning"),
+                    reasoning: Some(ModelSlot::new("smooai-gateway", "smooth-reasoning")),
                     reviewing: ModelSlot::new("smooai-gateway", "smooth-reviewing"),
                     judge: ModelSlot::new("smooai-gateway", "smooth-judge"),
                     summarize: ModelSlot::new("smooai-gateway", "smooth-summarize"),
                     default: ModelSlot::new("smooai-gateway", "smooth-default"),
                     fast: Some(ModelSlot::new("smooai-gateway", "smooth-fast")),
+                    planning: None,
                 };
             }
             Preset::OpenRouterLowCost => {
                 // OpenRouter: provider-prefixed model IDs
-                // GLM-5.1 for thinking (#1 SWE-Bench Pro 58.4%)
                 // MiniMax-M2.7 for coding (56.2% SWE-Pro, 10B active params, cheapest tier-1)
+                // GLM-5.1 for reasoning (#1 SWE-Bench Pro 58.4%)
                 // DeepSeek-V3.2 as default ($0.28/M, great all-rounder)
                 registry.register_provider(ProviderConfig::openrouter(api_key));
                 registry.routing = ModelRouting {
-                    thinking: ModelSlot::new("openrouter", "z-ai/glm-5.1"),
                     coding: ModelSlot::new("openrouter", "minimax/minimax-m2.7").with_fallback(ModelSlot::new("openrouter", "minimax/minimax-m2.5")),
-                    planning: ModelSlot::new("openrouter", "z-ai/glm-5.1"),
+                    reasoning: Some(ModelSlot::new("openrouter", "z-ai/glm-5.1")),
                     reviewing: ModelSlot::new("openrouter", "deepseek/deepseek-v3.2"),
                     judge: ModelSlot::new("openrouter", "google/gemini-2.5-flash"),
                     summarize: ModelSlot::new("openrouter", "deepseek/deepseek-v3.2"),
                     default: ModelSlot::new("openrouter", "deepseek/deepseek-v3.2"),
                     fast: Some(ModelSlot::new("openrouter", "google/gemini-2.5-flash-lite")),
+                    planning: None,
                 };
             }
             Preset::LlmGatewayLowCost => {
                 // LLM Gateway: bare model names
                 registry.register_provider(ProviderConfig::llmgateway(api_key));
                 registry.routing = ModelRouting {
-                    thinking: ModelSlot::new("llmgateway", "glm-5"),
                     coding: ModelSlot::new("llmgateway", "minimax-m2.7").with_fallback(ModelSlot::new("llmgateway", "minimax-m2.5")),
-                    planning: ModelSlot::new("llmgateway", "glm-5"),
+                    reasoning: Some(ModelSlot::new("llmgateway", "glm-5")),
                     reviewing: ModelSlot::new("llmgateway", "deepseek-v3.2"),
                     judge: ModelSlot::new("llmgateway", "gemini-2.5-flash"),
                     summarize: ModelSlot::new("llmgateway", "deepseek-v3.2"),
                     default: ModelSlot::new("llmgateway", "deepseek-v3.2"),
                     fast: Some(ModelSlot::new("llmgateway", "gemini-2.5-flash-lite")),
+                    planning: None,
                 };
             }
             Preset::OpenAI => {
                 registry.register_provider(ProviderConfig::openai(api_key));
                 registry.routing = ModelRouting {
-                    thinking: ModelSlot::new("openai", "o3-mini"),
                     coding: ModelSlot::new("openai", "gpt-4o"),
-                    planning: ModelSlot::new("openai", "gpt-4o"),
+                    reasoning: Some(ModelSlot::new("openai", "o3-mini")),
                     reviewing: ModelSlot::new("openai", "gpt-4o"),
                     judge: ModelSlot::new("openai", "gpt-4o-mini"),
                     summarize: ModelSlot::new("openai", "gpt-4o-mini"),
                     default: ModelSlot::new("openai", "gpt-4o"),
                     fast: Some(ModelSlot::new("openai", "gpt-4o-mini")),
+                    planning: None,
                 };
             }
             Preset::Anthropic => {
                 registry.register_provider(ProviderConfig::anthropic(api_key));
                 registry.routing = ModelRouting {
-                    thinking: ModelSlot::new("anthropic", "claude-opus-4-20250514"),
                     coding: ModelSlot::new("anthropic", "claude-sonnet-4-20250514"),
-                    planning: ModelSlot::new("anthropic", "claude-sonnet-4-20250514"),
+                    reasoning: Some(ModelSlot::new("anthropic", "claude-opus-4-20250514")),
                     reviewing: ModelSlot::new("anthropic", "claude-sonnet-4-20250514"),
                     judge: ModelSlot::new("anthropic", "claude-haiku-4-5-20251001"),
                     summarize: ModelSlot::new("anthropic", "claude-haiku-4-5-20251001"),
                     default: ModelSlot::new("anthropic", "claude-sonnet-4-20250514"),
                     fast: Some(ModelSlot::new("anthropic", "claude-haiku-4-5-20251001")),
+                    planning: None,
                 };
             }
         }
@@ -426,14 +479,14 @@ impl ProviderRegistry {
         let model = self.providers.get(provider_id).map(|p| p.default_model.clone()).unwrap_or_default();
         let slot = ModelSlot::new(provider_id, &model);
         self.routing = ModelRouting {
-            thinking: slot.clone(),
             coding: slot.clone(),
-            planning: slot.clone(),
+            reasoning: Some(slot.clone()),
             reviewing: slot.clone(),
             judge: slot.clone(),
             summarize: slot.clone(),
             default: slot.clone(),
             fast: Some(slot),
+            planning: None,
         };
     }
 
@@ -596,14 +649,14 @@ impl ProviderRegistry {
         // Update default routing to use this provider
         let slot = ModelSlot::new(&provider_id, &default_model);
         registry.routing = ModelRouting {
-            thinking: slot.clone(),
             coding: slot.clone(),
-            planning: slot.clone(),
+            reasoning: Some(slot.clone()),
             reviewing: slot.clone(),
             judge: slot.clone(),
             summarize: slot.clone(),
             default: slot.clone(),
             fast: Some(slot),
+            planning: None,
         };
 
         Some(registry)
@@ -676,9 +729,8 @@ mod tests {
     #[test]
     fn model_routing_default_has_all_activities() {
         let routing = ModelRouting::default();
-        assert_eq!(routing.thinking.model, "deepseek/deepseek-r1");
         assert_eq!(routing.coding.model, "openai/gpt-4o");
-        assert_eq!(routing.planning.model, "moonshot/kimi-k2.5");
+        assert_eq!(routing.reasoning.as_ref().expect("reasoning slot").model, "deepseek/deepseek-r1");
         assert_eq!(routing.reviewing.model, "z-ai/glm-5.1");
         assert_eq!(routing.judge.model, "google/gemini-2.5-flash");
         assert_eq!(routing.summarize.model, "minimax/minimax-m2.5");
@@ -718,7 +770,7 @@ mod tests {
         let mut registry = ProviderRegistry::new();
         registry.register_provider(ProviderConfig::openrouter("test-key"));
 
-        let config = registry.llm_config_for(Activity::Thinking).unwrap();
+        let config = registry.llm_config_for(Activity::Reasoning).unwrap();
         assert_eq!(config.model, "deepseek/deepseek-r1");
         assert_eq!(config.api_url, "https://openrouter.ai/api/v1");
 
@@ -780,7 +832,7 @@ mod tests {
         assert_eq!(oai.api_key, "oai-key");
 
         // Routing survives roundtrip
-        let config = loaded.llm_config_for(Activity::Thinking).unwrap();
+        let config = loaded.llm_config_for(Activity::Reasoning).unwrap();
         assert_eq!(config.model, "deepseek/deepseek-r1");
     }
 
@@ -821,18 +873,17 @@ mod tests {
     // 11. Activity serialization
     #[test]
     fn activity_serialization() {
-        let activity = Activity::Thinking;
+        let activity = Activity::Reasoning;
         let json = serde_json::to_string(&activity).unwrap();
-        assert_eq!(json, "\"Thinking\"");
+        assert_eq!(json, "\"Reasoning\"");
 
         let deserialized: Activity = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized, Activity::Thinking);
+        assert_eq!(deserialized, Activity::Reasoning);
 
-        // All variants roundtrip
+        // All six variants roundtrip
         for activity in [
-            Activity::Thinking,
             Activity::Coding,
-            Activity::Planning,
+            Activity::Reasoning,
             Activity::Reviewing,
             Activity::Judge,
             Activity::Summarize,
@@ -844,8 +895,20 @@ mod tests {
         }
     }
 
+    // 11a. Deprecated aliases resolve to their merged variants.
+    #[test]
+    #[allow(deprecated)]
+    fn deprecated_activity_aliases_point_to_merged_variants() {
+        assert_eq!(Activity::Thinking, Activity::Reasoning);
+        assert_eq!(Activity::Planning, Activity::Reasoning);
+        assert_eq!(Activity::Default, Activity::Coding);
+    }
+
     // 11b. Fast slot absent in pre-fast config deserializes cleanly
     //      and falls back to the default slot at lookup time.
+    //      Also exercises the legacy `thinking` / `planning` field
+    //      names — they deserialize via serde aliases onto the new
+    //      `reasoning` slot.
     #[test]
     fn fast_slot_missing_falls_back_to_default() {
         let json = r#"{
@@ -864,6 +927,29 @@ mod tests {
         assert!(file.routing.fast.is_none());
         let fast_slot = file.routing.slot_for(Activity::Fast);
         assert_eq!(fast_slot.model, "m-default");
+        // Legacy "thinking" field migrates onto the new `reasoning` slot.
+        let reasoning_slot = file.routing.slot_for(Activity::Reasoning);
+        assert_eq!(reasoning_slot.model, "m-thinking");
+    }
+
+    // 11b-bis. Missing `reasoning` slot entirely still resolves via
+    //          the `default` slot — partial configs stay functional.
+    #[test]
+    fn reasoning_slot_missing_falls_back_to_default() {
+        let json = r#"{
+            "providers": [],
+            "routing": {
+                "coding": { "provider": "p", "model": "m-coding" },
+                "reviewing": { "provider": "p", "model": "m-reviewing" },
+                "judge": { "provider": "p", "model": "m-judge" },
+                "summarize": { "provider": "p", "model": "m-summarize" },
+                "default": { "provider": "p", "model": "m-default" }
+            }
+        }"#;
+        let file: RegistryFile = serde_json::from_str(json).unwrap();
+        assert!(file.routing.reasoning.is_none());
+        let slot = file.routing.slot_for(Activity::Reasoning);
+        assert_eq!(slot.model, "m-default");
     }
 
     // 11c. Fast slot present roundtrips and is used in preference.
@@ -921,15 +1007,12 @@ mod tests {
     fn low_cost_preset_creates_correct_routing() {
         let registry = ProviderRegistry::from_preset(Preset::OpenRouterLowCost, "or-key");
 
-        let thinking = registry.llm_config_for(Activity::Thinking).unwrap();
-        assert_eq!(thinking.model, "z-ai/glm-5.1");
-        assert_eq!(thinking.api_url, "https://openrouter.ai/api/v1");
+        let reasoning = registry.llm_config_for(Activity::Reasoning).unwrap();
+        assert_eq!(reasoning.model, "z-ai/glm-5.1");
+        assert_eq!(reasoning.api_url, "https://openrouter.ai/api/v1");
 
         let coding = registry.llm_config_for(Activity::Coding).unwrap();
         assert_eq!(coding.model, "minimax/minimax-m2.7");
-
-        let planning = registry.llm_config_for(Activity::Planning).unwrap();
-        assert_eq!(planning.model, "z-ai/glm-5.1");
 
         let reviewing = registry.llm_config_for(Activity::Reviewing).unwrap();
         assert_eq!(reviewing.model, "deepseek/deepseek-v3.2");
@@ -949,15 +1032,12 @@ mod tests {
     fn codex_preset_creates_correct_routing() {
         let registry = ProviderRegistry::from_preset(Preset::OpenAI, "oai-key");
 
-        let thinking = registry.llm_config_for(Activity::Thinking).unwrap();
-        assert_eq!(thinking.model, "o3-mini");
-        assert_eq!(thinking.api_url, "https://api.openai.com/v1");
+        let reasoning = registry.llm_config_for(Activity::Reasoning).unwrap();
+        assert_eq!(reasoning.model, "o3-mini");
+        assert_eq!(reasoning.api_url, "https://api.openai.com/v1");
 
         let coding = registry.llm_config_for(Activity::Coding).unwrap();
         assert_eq!(coding.model, "gpt-4o");
-
-        let planning = registry.llm_config_for(Activity::Planning).unwrap();
-        assert_eq!(planning.model, "gpt-4o");
 
         let reviewing = registry.llm_config_for(Activity::Reviewing).unwrap();
         assert_eq!(reviewing.model, "gpt-4o");
@@ -996,16 +1076,13 @@ mod tests {
         // Every slot routes to the `smooai-gateway` provider with a
         // semantic `smooth-*` alias. The alias → upstream model mapping
         // lives in the gateway's LiteLLM config, not here.
-        let thinking = registry.llm_config_for(Activity::Thinking).unwrap();
-        assert_eq!(thinking.model, "smooth-thinking");
-        assert_eq!(thinking.api_url, "https://llm.smooai.com/v1");
-        assert_eq!(thinking.api_key, "smooai-key");
+        let reasoning = registry.llm_config_for(Activity::Reasoning).unwrap();
+        assert_eq!(reasoning.model, "smooth-reasoning");
+        assert_eq!(reasoning.api_url, "https://llm.smooai.com/v1");
+        assert_eq!(reasoning.api_key, "smooai-key");
 
         let coding = registry.llm_config_for(Activity::Coding).unwrap();
         assert_eq!(coding.model, "smooth-coding");
-
-        let planning = registry.llm_config_for(Activity::Planning).unwrap();
-        assert_eq!(planning.model, "smooth-planning");
 
         let reviewing = registry.llm_config_for(Activity::Reviewing).unwrap();
         assert_eq!(reviewing.model, "smooth-reviewing");
@@ -1050,10 +1127,10 @@ mod tests {
     fn anthropic_preset_creates_correct_routing() {
         let registry = ProviderRegistry::from_preset(Preset::Anthropic, "ant-key");
 
-        let thinking = registry.llm_config_for(Activity::Thinking).unwrap();
-        assert_eq!(thinking.model, "claude-opus-4-20250514");
-        assert_eq!(thinking.api_url, "https://api.anthropic.com/v1");
-        assert_eq!(thinking.api_format, ApiFormat::Anthropic);
+        let reasoning = registry.llm_config_for(Activity::Reasoning).unwrap();
+        assert_eq!(reasoning.model, "claude-opus-4-20250514");
+        assert_eq!(reasoning.api_url, "https://api.anthropic.com/v1");
+        assert_eq!(reasoning.api_format, ApiFormat::Anthropic);
 
         let coding = registry.llm_config_for(Activity::Coding).unwrap();
         assert_eq!(coding.model, "claude-sonnet-4-20250514");
@@ -1112,12 +1189,12 @@ mod tests {
 
         // Every activity should resolve without error
         for activity in [
-            Activity::Thinking,
             Activity::Coding,
-            Activity::Planning,
+            Activity::Reasoning,
             Activity::Reviewing,
             Activity::Judge,
             Activity::Summarize,
+            Activity::Fast,
         ] {
             let config = registry.llm_config_for(activity);
             assert!(config.is_ok(), "Activity {activity:?} should resolve for Codex preset");

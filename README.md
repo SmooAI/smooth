@@ -131,20 +131,21 @@ Every LLM call dispatches through a **semantic routing slot**. The gateway
 (typically `llm.smoo.ai`) resolves each slot to a concrete model, so
 upgrading backends doesn't churn the code.
 
+Six semantic slots (plus a `smooth-default` wire-compat alias that
+the gateway routes onto `smooth-coding`):
+
 | Slot | Used by | Shape |
 |---|---|---|
-| `smooth-coding` | The coding loop (workhorse) | Strong tool use + multi-turn |
-| `smooth-thinking` | `th code` Thinking preset, deep reasoning | Extended chain-of-thought |
-| `smooth-planning` | `th code` Planning preset | Task decomposition |
-| `smooth-reviewing` | `th code` Reviewing preset, code-review flows | Adversarial critique |
+| `smooth-coding` | The coding loop (workhorse) — also serves the legacy `smooth-default` alias | Strong tool use + multi-turn |
+| `smooth-reasoning` | `th code` Plan/Think modes — merged from the old `thinking` + `planning` slots | Extended chain-of-thought, task decomposition |
+| `smooth-reviewing` | `th code` Review mode, code-review flows | Adversarial critique |
 | `smooth-judge` | Narc's LLM-as-a-judge, bench scoring | Yes/no verdicts, low latency |
 | `smooth-summarize` | Context compression during long runs | Summarization |
 | `smooth-fast` | Session auto-naming, short titles, autocomplete | Haiku/Flash-class, sub-second TTFT |
-| `smooth-default` | Fallback when a specific slot isn't configured | Generalist |
 
 Routing is in [`smooth-operator::providers`](crates/smooth-operator/src/providers.rs).
 The CLI's `th code` presets remap slots to arbitrary models via the
-model picker — e.g. point Coding at Kimi Code for a run, Thinking at
+model picker — e.g. point Coding at Kimi Code for a run, Reasoning at
 GLM, whatever.
 
 **Live status.** The TUI streams an `AgentEvent::PhaseStart` on each

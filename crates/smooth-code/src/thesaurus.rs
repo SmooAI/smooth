@@ -2,9 +2,8 @@
 //! strings the TUI cycles while the agent is working.
 //!
 //! Shown in the status bar alongside the phase name and current
-//! upstream model, e.g.
-//!
-//!     ASSESS · smooth-thinking → kimi-k2-thinking  |  Pondering…
+//! upstream model, e.g. `ASSESS · smooth-reasoning → deepseek-v3.2
+//! | Pondering…`.
 //!
 //! Each phase has a small thesaurus; the TUI picks an index
 //! (`phrase_idx % phrases.len()`) and cycles on the spinner tick
