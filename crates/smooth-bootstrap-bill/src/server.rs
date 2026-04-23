@@ -27,7 +27,7 @@ use crate::protocol::{BillRequest, BillResponse, PortMapping, SandboxSpec};
 /// installs coexist with other users of the microsandbox volumes store,
 /// and cap length at 120 chars (microsandbox has no documented cap, but
 /// a lot of filesystems stop liking names past ~255 bytes).
-pub(crate) fn sanitize_volume_name(cache_key: &str) -> String {
+pub fn sanitize_volume_name(cache_key: &str) -> String {
     let mut sanitized = String::with_capacity(cache_key.len());
     for ch in cache_key.chars() {
         if ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_' {

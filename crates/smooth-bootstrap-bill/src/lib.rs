@@ -30,6 +30,8 @@
 //!   Boardroom cast member) to talk to Bill.
 
 pub mod client;
+#[cfg(feature = "server")]
+pub mod project_cache;
 pub mod protocol;
 #[cfg(feature = "server")]
 pub mod server;

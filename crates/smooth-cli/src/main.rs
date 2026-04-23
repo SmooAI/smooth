@@ -243,7 +243,12 @@ enum Commands {
         #[arg(long)]
         remote: Option<String>,
     },
-    /// Manage the project-scoped sandbox cache (~/.smooth/project-cache)
+    /// Manage the project-scoped sandbox cache.
+    ///
+    /// Two backends: legacy bind-mount under `~/.smooth/project-cache/`
+    /// and microsandbox named volumes under `~/.microsandbox/volumes/`
+    /// (opt-in via `SMOOTH_USE_VOLUMES=1`). List shows both; prune and
+    /// clear operate on both.
     Cache {
         #[command(subcommand)]
         cmd: CacheCommands,
@@ -690,7 +695,7 @@ async fn main() -> Result<()> {
                 cmd_doctor().await
             }
         }
-        Some(Commands::Cache { cmd }) => cmd_cache(cmd),
+        Some(Commands::Cache { cmd }) => cmd_cache(cmd).await,
         Some(Commands::Up {
             no_leader,
             port,
@@ -2284,7 +2289,96 @@ fn fmt_age(modified: std::time::SystemTime) -> String {
     }
 }
 
-fn cmd_cache(cmd: CacheCommands) -> Result<()> {
+/// Unified row across both cache backends. Populated from either a
+/// bind-mount directory entry or a `ProjectCacheVolumeInfo`; the
+/// display path and pruning logic then treat them uniformly.
+struct CacheEntry {
+    backend: CacheBackend,
+    /// Display name. For bind-mount entries: the directory name (which
+    /// equals the cache_key). For volumes: the volume name (with
+    /// `smooth-cache-` prefix).
+    display: String,
+    /// Workspace cache_key. For volumes this is taken from the
+    /// `smooth-cache-key` label (falls back to name-with-prefix-
+    /// stripped); for bind-mount entries it's just the dir name.
+    cache_key: String,
+    /// Host path to the entry's data directory.
+    path: std::path::PathBuf,
+    size_bytes: u64,
+    /// "Last touched" signal — dir mtime. For volumes this is computed
+    /// from on-disk mtime; for bind-mounts it's the entry's own
+    /// metadata.
+    last_modified: std::time::SystemTime,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum CacheBackend {
+    BindMount,
+    NamedVolume,
+}
+
+impl CacheBackend {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::BindMount => "bind",
+            Self::NamedVolume => "volume",
+        }
+    }
+}
+
+fn collect_bind_mount_entries(root: &std::path::Path) -> Vec<CacheEntry> {
+    if !root.is_dir() {
+        return Vec::new();
+    }
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in rd.filter_map(std::result::Result::ok) {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let size_bytes = dir_size_bytes(&path);
+        let last_modified = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        out.push(CacheEntry {
+            backend: CacheBackend::BindMount,
+            display: name.clone(),
+            cache_key: name,
+            path,
+            size_bytes,
+            last_modified,
+        });
+    }
+    out
+}
+
+async fn collect_volume_entries() -> Vec<CacheEntry> {
+    match smooth_bootstrap_bill::project_cache::list_project_cache_volumes().await {
+        Ok(vols) => vols
+            .into_iter()
+            .map(|v| CacheEntry {
+                backend: CacheBackend::NamedVolume,
+                display: v.volume_name.clone(),
+                cache_key: v.cache_key,
+                path: v.path,
+                size_bytes: v.size_bytes,
+                last_modified: v.last_modified.unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+            })
+            .collect(),
+        Err(e) => {
+            tracing::debug!(error = %e, "th cache: named-volume enumeration failed (treating as empty)");
+            Vec::new()
+        }
+    }
+}
+
+async fn cmd_cache(cmd: CacheCommands) -> Result<()> {
     let root = project_cache_root()?;
 
     match cmd {
@@ -2300,72 +2394,76 @@ fn cmd_cache(cmd: CacheCommands) -> Result<()> {
         }
 
         CacheCommands::List => {
-            if !root.is_dir() {
+            let mut entries = collect_bind_mount_entries(&root);
+            let volume_entries = collect_volume_entries().await;
+            entries.extend(volume_entries);
+
+            if entries.is_empty() {
                 println!(
                     "\n  {} No project caches yet. They're created lazily on first `th up` / `th dev`.\n",
                     "ℹ".cyan()
                 );
                 return Ok(());
             }
-            let mut entries: Vec<_> = std::fs::read_dir(&root)?
-                .filter_map(std::result::Result::ok)
-                .filter(|e| e.path().is_dir())
-                .collect();
-            if entries.is_empty() {
-                println!("\n  {} No project caches yet.\n", "ℹ".cyan());
-                return Ok(());
-            }
-            entries.sort_by_key(|e| e.metadata().and_then(|m| m.modified()).ok());
-            entries.reverse();
+            // Newest first across both backends.
+            entries.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
 
-            println!("\n  {} {}\n", "Project caches".cyan().bold(), format!("({})", root.display()).dimmed());
+            println!("\n  {}\n", "Project caches".cyan().bold());
             let mut total = 0u64;
-            for entry in entries {
-                let name = entry.file_name().to_string_lossy().to_string();
-                let size = dir_size_bytes(&entry.path());
-                total = total.saturating_add(size);
-                let modified = entry
-                    .metadata()
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                println!("  {:<28} {:>10} {}", name.bold(), fmt_size(size).dimmed(), fmt_age(modified).dimmed());
+            for e in &entries {
+                total = total.saturating_add(e.size_bytes);
+                println!(
+                    "  [{:<6}] {:<40} {:>10} {}",
+                    e.backend.label().dimmed(),
+                    e.display.as_str().bold(),
+                    fmt_size(e.size_bytes).dimmed(),
+                    fmt_age(e.last_modified).dimmed()
+                );
             }
             println!("\n  {} {}\n", "total".dimmed(), fmt_size(total).bold());
             Ok(())
         }
 
         CacheCommands::Prune { older_than, dry_run } => {
-            if !root.is_dir() {
+            let mut entries = collect_bind_mount_entries(&root);
+            let volume_entries = collect_volume_entries().await;
+            entries.extend(volume_entries);
+
+            if entries.is_empty() {
                 println!("\n  {} No cache to prune.\n", "ℹ".cyan());
                 return Ok(());
             }
+
             let cutoff = std::time::SystemTime::now()
                 .checked_sub(std::time::Duration::from_secs(u64::from(older_than) * 86_400))
                 .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
 
             let mut removed = 0u32;
             let mut reclaimed = 0u64;
-            for entry in std::fs::read_dir(&root)?.filter_map(std::result::Result::ok) {
-                if !entry.path().is_dir() {
+            for e in entries {
+                if e.last_modified > cutoff {
                     continue;
                 }
-                let modified = entry.metadata().ok().and_then(|m| m.modified().ok()).unwrap_or(std::time::SystemTime::now());
-                if modified > cutoff {
-                    continue;
-                }
-                let size = dir_size_bytes(&entry.path());
-                let name = entry.file_name().to_string_lossy().to_string();
                 let verb = if dry_run { "would remove" } else { "removing" };
-                println!("  {} {:<28} {}", verb.yellow(), name.bold(), fmt_size(size).dimmed());
+                println!(
+                    "  {} [{:<6}] {:<40} {}",
+                    verb.yellow(),
+                    e.backend.label().dimmed(),
+                    e.display.as_str().bold(),
+                    fmt_size(e.size_bytes).dimmed()
+                );
                 if !dry_run {
-                    if let Err(e) = std::fs::remove_dir_all(entry.path()) {
-                        tracing::warn!(error = %e, path = %entry.path().display(), "failed to remove cache entry");
+                    let remove_result = match e.backend {
+                        CacheBackend::BindMount => std::fs::remove_dir_all(&e.path).map_err(anyhow::Error::from),
+                        CacheBackend::NamedVolume => smooth_bootstrap_bill::project_cache::remove_project_cache_volume(&e.cache_key).await.map(drop),
+                    };
+                    if let Err(err) = remove_result {
+                        tracing::warn!(error = %err, path = %e.path.display(), backend = e.backend.label(), "failed to remove cache entry");
                         continue;
                     }
                 }
                 removed += 1;
-                reclaimed = reclaimed.saturating_add(size);
+                reclaimed = reclaimed.saturating_add(e.size_bytes);
             }
             if removed == 0 {
                 println!("\n  {} Nothing older than {older_than} days.\n", "✓".green().bold());
@@ -2378,14 +2476,38 @@ fn cmd_cache(cmd: CacheCommands) -> Result<()> {
 
         CacheCommands::Clear { project } => {
             let key = workspace_cache_key(&project).context("cannot derive cache key from empty path")?;
-            let dir = root.join(&key);
-            if !dir.is_dir() {
-                println!("\n  {} No cache entry for {} (key: {})\n", "ℹ".cyan(), project.bold(), key.dimmed());
-                return Ok(());
+            let bind_dir = root.join(&key);
+
+            let mut removed_any = false;
+            let mut total_size = 0u64;
+
+            if bind_dir.is_dir() {
+                let size = dir_size_bytes(&bind_dir);
+                std::fs::remove_dir_all(&bind_dir).with_context(|| format!("remove {}", bind_dir.display()))?;
+                println!("  {} [{:<6}] {} — {}", "✓".green().bold(), "bind".dimmed(), key.bold(), fmt_size(size).dimmed());
+                total_size = total_size.saturating_add(size);
+                removed_any = true;
             }
-            let size = dir_size_bytes(&dir);
-            std::fs::remove_dir_all(&dir).with_context(|| format!("remove {}", dir.display()))?;
-            println!("\n  {} Removed {} — {}\n", "✓".green().bold(), key.bold(), fmt_size(size).dimmed());
+
+            match smooth_bootstrap_bill::project_cache::remove_project_cache_volume(&key).await {
+                Ok(true) => {
+                    let vol_name = smooth_bootstrap_bill::project_cache::volume_name_for_cache_key(&key);
+                    println!("  {} [{:<6}] {}", "✓".green().bold(), "volume".dimmed(), vol_name.bold());
+                    removed_any = true;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, key = %key, "failed to remove named-volume cache entry");
+                }
+            }
+
+            if !removed_any {
+                println!("\n  {} No cache entry for {} (key: {})\n", "ℹ".cyan(), project.bold(), key.dimmed());
+            } else if total_size > 0 {
+                println!("\n  {} freed {}\n", "total".dimmed(), fmt_size(total_size).bold());
+            } else {
+                println!();
+            }
             Ok(())
         }
     }
