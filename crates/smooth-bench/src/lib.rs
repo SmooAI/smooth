@@ -27,6 +27,10 @@ use std::time::Instant;
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
 
+pub mod curated;
+pub mod score;
+pub mod sweep;
+
 /// Where we cache the cloned polyglot-benchmark repo.
 pub fn cache_root() -> anyhow::Result<PathBuf> {
     let home = dirs_next::home_dir().ok_or_else(|| anyhow!("no home dir"))?;
@@ -44,7 +48,7 @@ const POLYGLOT_DIR: &str = "polyglot-benchmark";
 
 /// Supported Aider Polyglot languages. MVP handles Python + Rust;
 /// the rest have known test-command shapes but aren't exercised yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PolyglotLang {
     Python,
     Rust,
