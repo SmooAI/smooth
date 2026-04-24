@@ -13,7 +13,7 @@
 //!   "data": [
 //!     {
 //!       "model_name": "smooth-coding",
-//!       "litellm_params": { "model": "anthropic/claude-opus-4-7", ... },
+//!       "litellm_params": { "model": "moonshot/kimi-k2-thinking", ... },
 //!       "model_info": { "id": "...", "max_tokens": 200000 }
 //!     }
 //!   ]
@@ -30,7 +30,7 @@ use serde::Deserialize;
 pub struct ResolvedModel {
     /// The alias callers use (e.g. `smooth-coding`).
     pub alias: String,
-    /// The concrete upstream (e.g. `anthropic/claude-opus-4-7`), when
+    /// The concrete upstream (e.g. `moonshot/kimi-k2-thinking`), when
     /// the gateway chose to surface it.
     pub upstream: Option<String>,
     /// Stable id from `model_info.id`, when present. Useful for
@@ -138,7 +138,7 @@ mod tests {
             "data": [
                 {
                     "model_name": "smooth-coding",
-                    "litellm_params": { "model": "anthropic/claude-opus-4-7" },
+                    "litellm_params": { "model": "moonshot/kimi-k2-thinking" },
                     "model_info": { "id": "abc-123", "max_tokens": 200000 }
                 }
             ]
@@ -146,7 +146,7 @@ mod tests {
         let map = parse_model_info(body).expect("parse");
         let entry = map.get("smooth-coding").expect("smooth-coding present");
         assert_eq!(entry.alias, "smooth-coding");
-        assert_eq!(entry.upstream.as_deref(), Some("anthropic/claude-opus-4-7"));
+        assert_eq!(entry.upstream.as_deref(), Some("moonshot/kimi-k2-thinking"));
         assert_eq!(entry.id.as_deref(), Some("abc-123"));
     }
 
