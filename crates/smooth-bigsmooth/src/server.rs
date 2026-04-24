@@ -830,6 +830,21 @@ fn find_operator_runner_binary() -> Option<std::path::PathBuf> {
     None
 }
 
+/// Create a tempdir whose host path microsandbox can bind-mount into a
+/// microVM. On macOS, `$TMPDIR` resolves to a SIP-protected location
+/// (`/var/folders/.../T`) that microsandbox silently fails to mount;
+/// `control_root` (typically `~/.smooth/control/`) avoids that trap. If
+/// no root is provided we fall back to the system default — the caller
+/// has already logged a warning in that case.
+fn make_control_tempdir(prefix: &str, control_root: Option<&std::path::Path>) -> std::io::Result<tempfile::TempDir> {
+    let mut b = tempfile::Builder::new();
+    b.prefix(prefix);
+    match control_root {
+        Some(root) => b.tempdir_in(root),
+        None => b.tempdir(),
+    }
+}
+
 async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
     let DispatchOptions {
         message,
@@ -1139,10 +1154,28 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         // (newlines included). So instead of shipping it via env var, we
         // write it to a per-task host tempdir, bind-mount that dir RO into
         // the VM, and point the runner at the file via SMOOTH_POLICY_FILE.
-        // The tempdir is intentionally leaked: /tmp is tmpfs on macOS HVF
-        // hosts and gets reclaimed on reboot; the cleanup cost of tracking
-        // every per-task dir isn't worth the complexity.
+        //
+        // CRITICAL: the tempdir lives under `~/.smooth/control/`, NOT
+        // the system `$TMPDIR`. On macOS `$TMPDIR` resolves to
+        // `/var/folders/…/T` which is SIP-protected — microsandbox silently
+        // drops bind-mounts rooted there, and the operator-runner boots to
+        // find `/opt/smooth/policy` empty. The project-cache bind-mount
+        // uses user-home paths for the same reason. See th-b1f040 for the
+        // full debugging trail.
         let mut policy_dir_guard: Option<tempfile::TempDir> = None;
+        // Best-effort — if we can't find a home dir or mkdir fails, we
+        // fall back to the system tempdir (older broken behavior, still
+        // better than panicking).
+        let control_root: Option<std::path::PathBuf> = dirs_next::home_dir().and_then(|h| {
+            let p = h.join(".smooth").join("control");
+            match std::fs::create_dir_all(&p) {
+                Ok(()) => Some(p),
+                Err(e) => {
+                    tracing::warn!(error = %e, path = %p.display(), "could not mkdir control root; falling back to $TMPDIR (microsandbox bind-mounts will likely fail on macOS)");
+                    None
+                }
+            }
+        });
         let operator_token = crate::policy::generate_operator_token(&tid);
         // Build mount mappings so Wonk can translate guest paths to host
         // paths when checking filesystem deny patterns.
@@ -1177,7 +1210,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
             crate::policy::TaskType::Coding,
             policy_mounts,
         ) {
-            Ok(policy_toml) => match tempfile::Builder::new().prefix("smooth-policy-").tempdir() {
+            Ok(policy_toml) => match make_control_tempdir("smooth-policy-", control_root.as_deref()) {
                 Ok(dir) => {
                     let policy_file = dir.path().join("policy.toml");
                     if let Err(e) = std::fs::write(&policy_file, &policy_toml) {
@@ -1208,7 +1241,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         // kernel-cmdline size limit on long messages). If policy generation
         // failed earlier, fall back to a bare tempdir here.
         if !in_boardroom && policy_dir_guard.is_none() {
-            if let Ok(dir) = tempfile::Builder::new().prefix("smooth-control-").tempdir() {
+            if let Ok(dir) = make_control_tempdir("smooth-control-", control_root.as_deref()) {
                 policy_dir_guard = Some(dir);
             }
         }
