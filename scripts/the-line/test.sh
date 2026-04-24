@@ -165,6 +165,12 @@ assert_not_contains "$WORK/notes-merged.md" "<!-- THE-LINE -->"
 
 echo "== test: render-badge emits Shields endpoint JSON with correct color =="
 "$SCRIPT_DIR/render-badge.sh" "$SAMPLE" "$WORK/badge.json"
+# Structural check — every required Shields-endpoint field present.
+# Catches typos (e.g. "colour" for "color") that a substring assert
+# would let through and silently break the rendered badge.
+if ! jq -e 'has("schemaVersion") and has("label") and has("message") and has("color")' "$WORK/badge.json" >/dev/null; then
+    fail "badge.json missing one of the required Shields fields: $(cat "$WORK/badge.json")"
+fi
 assert_contains "$WORK/badge.json" '"schemaVersion": 1'
 assert_contains "$WORK/badge.json" '"label": "the line"'
 # Sample fixture's overall_pass_rate is 0.825 → message "82.5%", >= 0.80 → brightgreen.

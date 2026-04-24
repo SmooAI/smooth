@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 # Render a Score JSON into a Shields.io "endpoint" badge JSON at $2.
 #
+# Why a separate file from docs/bench-latest.json: The Line's release
+# artefact needs to serve two readers with incompatible shapes —
+#   - docs/bench-latest.json  : raw Score JSON, consumed by the `th`
+#                                 binary's build.rs (baked into the
+#                                 binary as BENCH_SCORE_JSON so
+#                                 `th bench score` can reprint it).
+#   - docs/bench-badge.json   : Shields.io endpoint JSON (this file's
+#                                 output), consumed by img.shields.io
+#                                 to render the README badge.
+# Same source (score.json), two artefacts. The workflow writes both on
+# every tag.
+#
 # Consumed by the README badge:
 #   https://img.shields.io/endpoint?url=.../docs/bench-badge.json
 #
