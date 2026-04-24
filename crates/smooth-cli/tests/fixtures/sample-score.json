@@ -1,0 +1,24 @@
+{
+  "smooth_version": "0.8.0",
+  "commit_sha": "abc123def456",
+  "ran_at": "2026-04-23T12:34:56Z",
+  "overall_pass_rate": 0.8,
+  "by_language": {
+    "python": {
+      "pass_rate": 0.85,
+      "tasks_attempted": 20,
+      "tasks_green": 17
+    },
+    "rust": {
+      "pass_rate": 0.75,
+      "tasks_attempted": 20,
+      "tasks_green": 15
+    }
+  },
+  "tasks_attempted": 40,
+  "tasks_green": 32,
+  "cost_usd": 4.23,
+  "median_task_ms": 15000,
+  "budget_usd_cap": 10.0,
+  "budget_usd_hit": false
+}

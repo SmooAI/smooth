@@ -12,6 +12,7 @@ name = "th"
 path = "src/main.rs"
 
 [dependencies]
+smooth-bench.workspace = true
 smooth-bigsmooth.workspace = true
 smooth-bootstrap-bill = { workspace = true, default-features = false, features = ["server"] }
 smooth-code.workspace = true

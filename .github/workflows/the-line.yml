@@ -132,6 +132,9 @@ jobs:
             - name: Copy score to docs/bench-latest.json
               run: cp score.json docs/bench-latest.json
 
+            - name: Render docs/bench-badge.json (Shields.io endpoint)
+              run: bash scripts/the-line/render-badge.sh score.json docs/bench-badge.json
+
             - name: Commit history + latest score to main
               if: env.DRY_RUN != '1'
               env:
@@ -149,7 +152,8 @@ jobs:
                       bash scripts/the-line/render-markdown.sh score.json "$TAG"
                   bash scripts/the-line/append-history.sh docs/bench-history.md artifacts/row.md
                   cp score.json docs/bench-latest.json
-                  git add docs/bench-history.md docs/bench-latest.json
+                  bash scripts/the-line/render-badge.sh score.json docs/bench-badge.json
+                  git add docs/bench-history.md docs/bench-latest.json docs/bench-badge.json
                   if git diff --cached --quiet; then
                       echo "no changes to commit (history already updated for this tag?)"
                   else

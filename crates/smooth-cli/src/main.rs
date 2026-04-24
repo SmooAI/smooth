@@ -275,6 +275,22 @@ enum Commands {
         #[command(subcommand)]
         cmd: TunnelCommands,
     },
+    /// The Line — the aider-polyglot benchmark score baked into this
+    /// binary at build time (from `docs/bench-latest.json`, which the
+    /// release workflow commits on every tag).
+    Bench {
+        #[command(subcommand)]
+        cmd: BenchCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum BenchCommands {
+    /// Print The Line — the aider-polyglot pass rate baked into this
+    /// binary. Reads the `docs/bench-latest.json` that was present at
+    /// build time; if no release has been cut, prints a note
+    /// explaining how to produce one locally.
+    Score,
 }
 
 #[derive(Subcommand)]
@@ -822,6 +838,7 @@ async fn main() -> Result<()> {
         Some(Commands::Mcp { cmd }) => cmd_mcp(cmd),
         Some(Commands::Plugin { cmd }) => cmd_plugin(cmd),
         Some(Commands::Service { cmd }) => cmd_service(cmd),
+        Some(Commands::Bench { cmd }) => cmd_bench(cmd),
         Some(Commands::Prime) => cmd_prime(),
         Some(_) => {
             println!("Command not yet implemented. Coming soon!");
@@ -4233,6 +4250,51 @@ fn cmd_prime() -> Result<()> {
     Ok(())
 }
 
+fn cmd_bench(cmd: BenchCommands) -> Result<()> {
+    match cmd {
+        BenchCommands::Score => print_baked_score(env!("BENCH_SCORE_JSON"), &mut std::io::stdout()),
+    }
+}
+
+/// Shared `th bench score` implementation, parameterised over the
+/// input JSON blob and the output sink so unit tests can feed
+/// fixtures through the same code path the real subcommand uses.
+///
+/// Three cases:
+///   - empty input → print the "not baked in yet" hint.
+///   - valid `Score` JSON → delegate to `Score::render_table` (the
+///     same formatter `smooth-bench score` prints without `--output`),
+///     so the two surfaces stay in sync.
+///   - malformed JSON → print a clear error with the first ~400
+///     chars of the raw payload; never panic. This is an escape
+///     hatch for a broken release; most users will never hit it.
+fn print_baked_score<W: std::io::Write>(score_json: &str, out: &mut W) -> Result<()> {
+    if score_json.is_empty() {
+        writeln!(
+            out,
+            "No Line baked in yet. Run `smooth-bench score --release` locally to see where this binary would score, or wait for the next tagged release."
+        )?;
+        return Ok(());
+    }
+
+    match serde_json::from_str::<smooth_bench::score::Score>(score_json) {
+        Ok(score) => {
+            write!(out, "{}", score.render_table())?;
+            Ok(())
+        }
+        Err(err) => {
+            // Never panic on a malformed embed — surface the parse error
+            // plus a truncated copy of the raw payload so whoever cut
+            // the bad release can diagnose it.
+            let preview: String = score_json.chars().take(400).collect();
+            let suffix = if score_json.len() > preview.len() { " …(truncated)" } else { "" };
+            writeln!(out, "error: BENCH_SCORE_JSON baked into this binary failed to parse as Score: {err}")?;
+            writeln!(out, "raw payload: {preview}{suffix}")?;
+            Ok(())
+        }
+    }
+}
+
 fn cmd_service(cmd: ServiceCommands) -> Result<()> {
     match cmd {
         ServiceCommands::Install { system } => service::install(system),
@@ -4255,5 +4317,85 @@ mod plugin_tests {
         assert_eq!(extract_placeholders("plain"), Vec::<String>::new());
         assert_eq!(extract_placeholders("{{ a }}-{{b}}"), vec!["a", "b"]);
         assert_eq!(extract_placeholders("dangle {{ unterminated"), Vec::<String>::new());
+    }
+}
+
+#[cfg(test)]
+mod bench_tests {
+    use super::print_baked_score;
+
+    const SAMPLE_SCORE: &str = include_str!("../tests/fixtures/sample-score.json");
+
+    #[test]
+    fn prints_hint_when_score_json_is_empty() {
+        let mut out = Vec::new();
+        print_baked_score("", &mut out).expect("ok");
+        let s = String::from_utf8(out).expect("utf8");
+        assert!(s.contains("No Line baked in yet"), "missing empty-case hint: {s}");
+        assert!(s.contains("smooth-bench score --release"), "hint should mention smooth-bench command: {s}");
+    }
+
+    #[test]
+    fn renders_table_from_valid_fixture() {
+        let mut out = Vec::new();
+        print_baked_score(SAMPLE_SCORE, &mut out).expect("ok");
+        let s = String::from_utf8(out).expect("utf8");
+
+        // Sanity-check every field in the fixture lands somewhere in
+        // the rendered table — we don't assert exact formatting
+        // (that's Score::render_table's responsibility and is tested
+        // inside smooth-bench's own suite).
+        assert!(s.contains("The Line"), "missing banner: {s}");
+        assert!(s.contains("0.8.0"), "missing smooth version: {s}");
+        assert!(s.contains("abc123def456"), "missing commit sha: {s}");
+        assert!(s.contains("80.0%"), "missing overall pass rate: {s}");
+        assert!(s.contains("python"), "missing python lang line: {s}");
+        assert!(s.contains("rust"), "missing rust lang line: {s}");
+        assert!(s.contains("$4.2300"), "missing cost: {s}");
+    }
+
+    #[test]
+    fn malformed_json_prints_error_without_panic() {
+        let mut out = Vec::new();
+        // Valid JSON shape, wrong fields — serde rejects it. Must
+        // not panic, must surface a clear error + the raw payload.
+        print_baked_score(r#"{"not":"a score"}"#, &mut out).expect("ok");
+        let s = String::from_utf8(out).expect("utf8");
+        assert!(s.contains("error:"), "missing error label: {s}");
+        assert!(s.contains("BENCH_SCORE_JSON"), "should mention env var: {s}");
+        assert!(s.contains(r#"{"not":"a score"}"#), "should echo raw payload: {s}");
+    }
+
+    #[test]
+    fn totally_invalid_json_prints_error_without_panic() {
+        let mut out = Vec::new();
+        print_baked_score("<<this is not JSON at all>>", &mut out).expect("ok");
+        let s = String::from_utf8(out).expect("utf8");
+        assert!(s.contains("error:"), "missing error label: {s}");
+    }
+
+    #[test]
+    fn malformed_json_truncates_oversize_payload_preview() {
+        // Large malformed payload — the preview should be clipped so
+        // `th bench score` doesn't spew megabytes on a broken release.
+        let huge = "x".repeat(10_000);
+        let mut out = Vec::new();
+        print_baked_score(&huge, &mut out).expect("ok");
+        let s = String::from_utf8(out).expect("utf8");
+        assert!(
+            s.contains("truncated"),
+            "preview should note truncation: first 200 chars = {}",
+            &s[..s.len().min(200)]
+        );
+        assert!(s.len() < 2_000, "output should be bounded even on huge bad input: {} bytes", s.len());
+    }
+
+    #[test]
+    fn build_script_bench_score_env_is_defined() {
+        // build.rs MUST emit BENCH_SCORE_JSON (empty or populated).
+        // env!() would fail to compile if not — this test exists to
+        // document the contract and catch a regression where someone
+        // removes the println! from build.rs.
+        let _ = env!("BENCH_SCORE_JSON");
     }
 }
