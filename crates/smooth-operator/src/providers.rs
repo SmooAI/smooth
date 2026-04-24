@@ -174,7 +174,7 @@ impl ProviderConfig {
     /// environment variable for self-hosted installs or dev overrides.
     /// Defaults to the production endpoint.
     pub fn smooai_gateway(api_key: impl Into<String>) -> Self {
-        let api_url = std::env::var("SMOOAI_GATEWAY_URL").unwrap_or_else(|_| "https://llm.smooai.com/v1".into());
+        let api_url = std::env::var("SMOOAI_GATEWAY_URL").unwrap_or_else(|_| "https://llm.smoo.ai/v1".into());
         Self {
             id: "smooai-gateway".into(),
             api_url,
@@ -309,14 +309,22 @@ pub struct ModelRouting {
 
 impl Default for ModelRouting {
     fn default() -> Self {
+        // Match the Smoo AI Gateway preset exactly — every slot points at a
+        // `smooth-*` semantic alias on llm.smoo.ai so the server-side
+        // LiteLLM config decides the concrete upstream (Kimi K2-Thinking for
+        // coding, DeepSeek V3.2-Speciale for reasoning, GLM 5.1 for review,
+        // Haiku 4.5 for judge, Gemini 3 Flash for summarize, GPT-5.4-nano
+        // for fast). Swapping the underlying model is a gateway redeploy —
+        // no client release. The old OpenRouter/cloud-model defaults were
+        // arbitrary and not aligned with the Smooth product shape.
         Self {
-            coding: ModelSlot::new("openrouter", "openai/gpt-4o"),
-            reasoning: Some(ModelSlot::new("openrouter", "deepseek/deepseek-r1")),
-            reviewing: ModelSlot::new("openrouter", "z-ai/glm-5.1"),
-            judge: ModelSlot::new("openrouter", "google/gemini-2.5-flash"),
-            summarize: ModelSlot::new("openrouter", "minimax/minimax-m2.5"),
-            default: ModelSlot::new("openrouter", "openai/gpt-4o"),
-            fast: Some(ModelSlot::new("openrouter", "google/gemini-2.5-flash-lite")),
+            coding: ModelSlot::new("smooai-gateway", "smooth-coding"),
+            reasoning: Some(ModelSlot::new("smooai-gateway", "smooth-reasoning")),
+            reviewing: ModelSlot::new("smooai-gateway", "smooth-reviewing"),
+            judge: ModelSlot::new("smooai-gateway", "smooth-judge"),
+            summarize: ModelSlot::new("smooai-gateway", "smooth-summarize"),
+            default: ModelSlot::new("smooai-gateway", "smooth-default"),
+            fast: Some(ModelSlot::new("smooai-gateway", "smooth-fast")),
             planning: None,
         }
     }
@@ -725,16 +733,21 @@ mod tests {
         assert!(!json.contains("fallback"));
     }
 
-    // 3. ModelRouting default has all activities set
+    // 3. ModelRouting default points every slot at llm.smoo.ai aliases
     #[test]
     fn model_routing_default_has_all_activities() {
         let routing = ModelRouting::default();
-        assert_eq!(routing.coding.model, "openai/gpt-4o");
-        assert_eq!(routing.reasoning.as_ref().expect("reasoning slot").model, "deepseek/deepseek-r1");
-        assert_eq!(routing.reviewing.model, "z-ai/glm-5.1");
-        assert_eq!(routing.judge.model, "google/gemini-2.5-flash");
-        assert_eq!(routing.summarize.model, "minimax/minimax-m2.5");
-        assert_eq!(routing.default.model, "openai/gpt-4o");
+        // Every slot routes through the `smooai-gateway` provider with
+        // a `smooth-*` semantic alias. The alias → concrete-model mapping
+        // lives server-side in the gateway's LiteLLM config.
+        assert_eq!(routing.coding.provider, "smooai-gateway");
+        assert_eq!(routing.coding.model, "smooth-coding");
+        assert_eq!(routing.reasoning.as_ref().expect("reasoning slot").model, "smooth-reasoning");
+        assert_eq!(routing.reviewing.model, "smooth-reviewing");
+        assert_eq!(routing.judge.model, "smooth-judge");
+        assert_eq!(routing.summarize.model, "smooth-summarize");
+        assert_eq!(routing.default.model, "smooth-default");
+        assert_eq!(routing.fast.as_ref().expect("fast slot").model, "smooth-fast");
     }
 
     // 4. ProviderRegistry register + get
@@ -767,18 +780,20 @@ mod tests {
     // 6. llm_config_for returns correct model for each activity
     #[test]
     fn llm_config_for_returns_correct_model() {
+        // Default routing now targets the Smoo AI Gateway, so this test
+        // exercises that path — one provider, semantic `smooth-*` aliases.
         let mut registry = ProviderRegistry::new();
-        registry.register_provider(ProviderConfig::openrouter("test-key"));
+        registry.register_provider(ProviderConfig::smooai_gateway("test-key"));
 
         let config = registry.llm_config_for(Activity::Reasoning).unwrap();
-        assert_eq!(config.model, "deepseek/deepseek-r1");
-        assert_eq!(config.api_url, "https://openrouter.ai/api/v1");
+        assert_eq!(config.model, "smooth-reasoning");
+        assert_eq!(config.api_url, "https://llm.smoo.ai/v1");
 
         let config = registry.llm_config_for(Activity::Coding).unwrap();
-        assert_eq!(config.model, "openai/gpt-4o");
+        assert_eq!(config.model, "smooth-coding");
 
         let config = registry.llm_config_for(Activity::Judge).unwrap();
-        assert_eq!(config.model, "google/gemini-2.5-flash");
+        assert_eq!(config.model, "smooth-judge");
     }
 
     // 7. llm_config_for falls back when provider missing
@@ -803,10 +818,10 @@ mod tests {
     #[test]
     fn default_llm_config_works() {
         let mut registry = ProviderRegistry::new();
-        registry.register_provider(ProviderConfig::openrouter("default-key"));
+        registry.register_provider(ProviderConfig::smooai_gateway("default-key"));
 
         let config = registry.default_llm_config().unwrap();
-        assert_eq!(config.model, "openai/gpt-4o");
+        assert_eq!(config.model, "smooth-default");
         assert_eq!(config.api_key, "default-key");
     }
 
@@ -817,7 +832,7 @@ mod tests {
         let path = dir.path().join("providers.json");
 
         let mut registry = ProviderRegistry::new();
-        registry.register_provider(ProviderConfig::openrouter("rt-key"));
+        registry.register_provider(ProviderConfig::smooai_gateway("sg-key"));
         registry.register_provider(ProviderConfig::openai("oai-key"));
 
         registry.save_to_file(&path).unwrap();
@@ -825,15 +840,15 @@ mod tests {
         let loaded = ProviderRegistry::load_from_file(&path).unwrap();
         assert_eq!(loaded.list_providers().len(), 2);
 
-        let or = loaded.get_provider("openrouter").unwrap();
-        assert_eq!(or.api_key, "rt-key");
+        let sg = loaded.get_provider("smooai-gateway").unwrap();
+        assert_eq!(sg.api_key, "sg-key");
 
         let oai = loaded.get_provider("openai").unwrap();
         assert_eq!(oai.api_key, "oai-key");
 
-        // Routing survives roundtrip
+        // Routing survives roundtrip — default points at smooth-reasoning
         let config = loaded.llm_config_for(Activity::Reasoning).unwrap();
-        assert_eq!(config.model, "deepseek/deepseek-r1");
+        assert_eq!(config.model, "smooth-reasoning");
     }
 
     // 10. from_env reads SMOOTH_PROVIDER and SMOOTH_API_KEY
@@ -1078,7 +1093,7 @@ mod tests {
         // lives in the gateway's LiteLLM config, not here.
         let reasoning = registry.llm_config_for(Activity::Reasoning).unwrap();
         assert_eq!(reasoning.model, "smooth-reasoning");
-        assert_eq!(reasoning.api_url, "https://llm.smooai.com/v1");
+        assert_eq!(reasoning.api_url, "https://llm.smoo.ai/v1");
         assert_eq!(reasoning.api_key, "smooai-key");
 
         let coding = registry.llm_config_for(Activity::Coding).unwrap();
