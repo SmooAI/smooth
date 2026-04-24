@@ -634,6 +634,11 @@ impl Policy {
 pub fn phase_network_defaults(phase: &str) -> Vec<NetworkRule> {
     let mut rules = vec![
         NetworkRule {
+            domain: "llm.smoo.ai".into(),
+            path: None,
+            methods: None,
+        },
+        NetworkRule {
             domain: "openrouter.ai".into(),
             path: None,
             methods: None,

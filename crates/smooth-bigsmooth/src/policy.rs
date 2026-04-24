@@ -219,6 +219,11 @@ fn task_network_policy(phase: &str, task_type: TaskType) -> NetworkPolicy {
         TaskType::Coding => {
             let mut rules = vec![
                 NetworkRule {
+                    domain: "llm.smoo.ai".into(),
+                    path: None,
+                    methods: None,
+                },
+                NetworkRule {
                     domain: "openrouter.ai".into(),
                     path: None,
                     methods: None,
@@ -317,6 +322,11 @@ fn task_network_policy(phase: &str, task_type: TaskType) -> NetworkPolicy {
         TaskType::Research => {
             vec![
                 NetworkRule {
+                    domain: "llm.smoo.ai".into(),
+                    path: None,
+                    methods: None,
+                },
+                NetworkRule {
                     domain: "openrouter.ai".into(),
                     path: None,
                     methods: None,
@@ -385,6 +395,11 @@ fn task_network_policy(phase: &str, task_type: TaskType) -> NetworkPolicy {
         }
         TaskType::Review => {
             vec![
+                NetworkRule {
+                    domain: "llm.smoo.ai".into(),
+                    path: None,
+                    methods: None,
+                },
                 NetworkRule {
                     domain: "openrouter.ai".into(),
                     path: None,
