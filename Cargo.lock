@@ -5342,6 +5342,7 @@ name = "smooai-smooth-bench"
 version = "0.8.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "clap",
  "dirs-next",
@@ -5351,6 +5352,7 @@ dependencies = [
  "smooai-smooth-operator",
  "tempfile",
  "tokio",
+ "toml",
  "uuid",
 ]
 

@@ -1,0 +1,164 @@
+# Curated Aider Polyglot task list — "The Line"
+#
+# This is the authoritative set of tasks for the `smooth-bench score`
+# subcommand. The aggregate pass-rate across these tasks is the
+# single number Smoo AI publishes with every release.
+#
+# Selection criteria (applied when the list was first curated):
+#   1. Spread across difficulty — easy (e.g. `leap`, `hamming`),
+#      medium (e.g. `bowling`, `grade-school`), hard (e.g. `forth`,
+#      `poker`, `zebra-puzzle`).
+#   2. Stable, deterministic tests — no network I/O, no time-based
+#      assertions, no randomness that isn't seeded.
+#   3. Standard-library only — avoid tasks that require specific
+#      third-party packages (flaky npm/pip installs, version drift).
+#   4. Small, self-contained corpora — the scratch work dir has to
+#      fit in a microVM's default disk budget (~1 GB).
+#   5. Present in the upstream aider-polyglot corpus at the time of
+#      curation (2026-04-23). Tasks removed upstream will cause a
+#      `task not found` error at run time; re-curate when that
+#      happens.
+#
+# All six languages must have EXACTLY 20 tasks. The unit test
+# `curated_list_has_exactly_20_per_language` enforces this.
+#
+# Upstream repo: https://github.com/Aider-AI/polyglot-benchmark
+# Curated: 2026-04-23
+
+python = [
+    "affine-cipher",
+    "beer-song",
+    "book-store",
+    "bottle-song",
+    "bowling",
+    "connect",
+    "dominoes",
+    "food-chain",
+    "grade-school",
+    "grep",
+    "hangman",
+    "list-ops",
+    "phone-number",
+    "pig-latin",
+    "poker",
+    "proverb",
+    "rest-api",
+    "robot-name",
+    "scale-generator",
+    "wordy",
+]
+
+rust = [
+    "accumulate",
+    "acronym",
+    "alphametics",
+    "book-store",
+    "bowling",
+    "decimal",
+    "dot-dsl",
+    "forth",
+    "gigasecond",
+    "grade-school",
+    "grep",
+    "luhn-from",
+    "macros",
+    "pig-latin",
+    "poker",
+    "robot-name",
+    "say",
+    "scale-generator",
+    "simple-cipher",
+    "word-count",
+]
+
+go = [
+    "alphametics",
+    "beer-song",
+    "book-store",
+    "bottle-song",
+    "bowling",
+    "connect",
+    "counter",
+    "dominoes",
+    "food-chain",
+    "forth",
+    "hexadecimal",
+    "markdown",
+    "matrix",
+    "octal",
+    "pig-latin",
+    "poker",
+    "protein-translation",
+    "robot-simulator",
+    "scale-generator",
+    "trinary",
+]
+
+javascript = [
+    "affine-cipher",
+    "alphametics",
+    "beer-song",
+    "binary",
+    "book-store",
+    "bottle-song",
+    "bowling",
+    "complex-numbers",
+    "connect",
+    "food-chain",
+    "forth",
+    "grade-school",
+    "grep",
+    "list-ops",
+    "phone-number",
+    "pig-latin",
+    "poker",
+    "rest-api",
+    "robot-name",
+    "scale-generator",
+]
+
+java = [
+    "affine-cipher",
+    "all-your-base",
+    "alphametics",
+    "bank-account",
+    "book-store",
+    "bottle-song",
+    "bowling",
+    "change",
+    "circular-buffer",
+    "connect",
+    "food-chain",
+    "forth",
+    "hangman",
+    "kindergarten-garden",
+    "phone-number",
+    "pig-latin",
+    "poker",
+    "rest-api",
+    "simple-linked-list",
+    "transpose",
+]
+
+cpp = [
+    "all-your-base",
+    "allergies",
+    "bank-account",
+    "binary-search-tree",
+    "circular-buffer",
+    "clock",
+    "complex-numbers",
+    "crypto-square",
+    "diamond",
+    "dnd-character",
+    "gigasecond",
+    "grade-school",
+    "kindergarten-garden",
+    "linked-list",
+    "phone-number",
+    "queen-attack",
+    "robot-name",
+    "space-age",
+    "sublist",
+    "zebra-puzzle",
+]
