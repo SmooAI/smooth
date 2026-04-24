@@ -1,0 +1,180 @@
+name: The Line
+
+# Runs `smooth-bench score --release` on every release tag (`v*`), publishes
+# the result to:
+#   - $GITHUB_STEP_SUMMARY (Actions UI)
+#   - docs/bench-history.md (append one row, commit to main with [skip ci])
+#   - docs/bench-latest.json (raw score, consumed by README badge)
+#   - The GitHub Release body (replace <!-- THE-LINE --> or append)
+#
+# Fails with exit 1 if this release's overall_pass_rate drops by more than
+# 2 percentage points vs the previous row in docs/bench-history.md. That is
+# the regression alarm — a human must investigate before the release goes
+# public.
+#
+# The `workflow_dispatch` `dry_run` input is the primary test surface: it
+# skips the (expensive, network-bound) smooth-bench step and feeds a checked
+# in fixture through every downstream step. The regression-fixture variant
+# lets you verify the alarm trips as expected.
+
+on:
+    push:
+        tags:
+            - 'v*'
+    workflow_dispatch:
+        inputs:
+            dry_run:
+                description: 'Dry-run: use fixture JSON instead of running smooth-bench'
+                type: boolean
+                default: true
+            fixture:
+                description: 'Fixture to use when dry_run=true'
+                type: choice
+                options:
+                    - sample
+                    - regression
+                default: sample
+            tag_override:
+                description: 'Tag name to use when dry_run=true (default: v0.0.0-dry-run)'
+                type: string
+                default: v0.0.0-dry-run
+
+concurrency:
+    group: the-line
+    cancel-in-progress: false
+
+permissions:
+    contents: write
+
+jobs:
+    the-line:
+        name: Publish The Line
+        runs-on: ubuntu-latest
+        timeout-minutes: 90
+        env:
+            DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true && '1' || '0' }}
+            TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag_override }}
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+                  token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+            - name: Install jq
+              run: |
+                  if ! command -v jq >/dev/null 2>&1; then
+                      sudo apt-get update
+                      sudo apt-get install -y jq
+                  fi
+
+            - name: Run helper-script test harness
+              if: env.DRY_RUN == '1'
+              run: bash scripts/the-line/test.sh
+
+            - name: Setup Rust toolchain
+              if: env.DRY_RUN != '1'
+              uses: dtolnay/rust-toolchain@stable
+
+            - name: Cache Rust build artifacts
+              if: env.DRY_RUN != '1'
+              uses: Swatinem/rust-cache@v2
+              with:
+                  cache-on-failure: true
+
+            - name: Install Linux build deps
+              if: env.DRY_RUN != '1'
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y pkg-config libdbus-1-dev libcap-ng-dev
+
+            - name: Build smooth-bench
+              if: env.DRY_RUN != '1'
+              run: cargo build --release -p smooai-smooth-bench
+
+            - name: Run smooth-bench score --release
+              if: env.DRY_RUN != '1'
+              env:
+                  SMOOAI_GATEWAY_API_KEY: ${{ secrets.SMOOAI_GATEWAY_API_KEY }}
+              run: |
+                  set -o pipefail
+                  ./target/release/smooth-bench score \
+                      --release \
+                      --budget-usd 10 \
+                      --output score.json
+                  echo "smooth-bench exit=$?"
+
+            - name: Seed score.json from fixture (dry-run only)
+              if: env.DRY_RUN == '1'
+              run: |
+                  fixture="${{ inputs.fixture }}"
+                  case "$fixture" in
+                      regression) src=tests/fixtures/the-line-regression.json ;;
+                      sample|*)   src=tests/fixtures/the-line-sample.json ;;
+                  esac
+                  cp "$src" score.json
+                  echo "seeded score.json from $src"
+
+            - name: Render markdown summary + history row
+              run: |
+                  mkdir -p artifacts
+                  SUMMARY_OUT=artifacts/summary.md \
+                  HISTORY_ROW_OUT=artifacts/row.md \
+                      bash scripts/the-line/render-markdown.sh score.json "$TAG"
+                  cat artifacts/summary.md >>"$GITHUB_STEP_SUMMARY"
+
+            - name: Check regression vs previous release
+              run: bash scripts/the-line/check-regression.sh score.json docs/bench-history.md
+
+            - name: Append to docs/bench-history.md
+              run: bash scripts/the-line/append-history.sh docs/bench-history.md artifacts/row.md
+
+            - name: Copy score to docs/bench-latest.json
+              run: cp score.json docs/bench-latest.json
+
+            - name: Commit history + latest score to main
+              if: env.DRY_RUN != '1'
+              env:
+                  GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+              run: |
+                  git config user.name "smoo-ai-bot"
+                  git config user.email "bot@smoo.ai"
+                  git fetch origin main
+                  git checkout main
+                  # Re-apply the two artifact changes on top of main (the tag
+                  # checkout above may be at a detached HEAD on a historical
+                  # commit). We only commit the two files we own.
+                  SUMMARY_OUT=artifacts/summary.md \
+                  HISTORY_ROW_OUT=artifacts/row.md \
+                      bash scripts/the-line/render-markdown.sh score.json "$TAG"
+                  bash scripts/the-line/append-history.sh docs/bench-history.md artifacts/row.md
+                  cp score.json docs/bench-latest.json
+                  git add docs/bench-history.md docs/bench-latest.json
+                  if git diff --cached --quiet; then
+                      echo "no changes to commit (history already updated for this tag?)"
+                  else
+                      git commit -m "chore(the-line): publish $TAG bench score [skip ci]"
+                      git push origin main
+                  fi
+
+            - name: Build release-notes.md with embedded summary
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: bash scripts/the-line/update-release-notes.sh artifacts/summary.md "$TAG" artifacts/release-notes.md
+
+            - name: Update GitHub Release body
+              if: env.DRY_RUN != '1'
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: gh release edit "$TAG" --notes-file artifacts/release-notes.md
+
+            - name: Upload artifacts
+              uses: actions/upload-artifact@v4
+              with:
+                  name: the-line-${{ env.TAG }}
+                  path: |
+                      score.json
+                      artifacts/summary.md
+                      artifacts/row.md
+                      artifacts/release-notes.md
+                  if-no-files-found: warn
