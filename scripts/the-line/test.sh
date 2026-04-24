@@ -163,5 +163,41 @@ assert_contains "$WORK/notes-merged.md" "THE-LINE:START"
 assert_contains "$WORK/notes-merged.md" "### rendered"
 assert_not_contains "$WORK/notes-merged.md" "<!-- THE-LINE -->"
 
+echo "== test: render-badge emits Shields endpoint JSON with correct color =="
+"$SCRIPT_DIR/render-badge.sh" "$SAMPLE" "$WORK/badge.json"
+assert_contains "$WORK/badge.json" '"schemaVersion": 1'
+assert_contains "$WORK/badge.json" '"label": "the line"'
+# Sample fixture's overall_pass_rate is 0.825 → message "82.5%", >= 0.80 → brightgreen.
+assert_contains "$WORK/badge.json" '"message": "82.5%"'
+assert_contains "$WORK/badge.json" '"color": "brightgreen"'
+
+echo "== test: render-badge picks yellow color for mid-band score =="
+"$SCRIPT_DIR/render-badge.sh" "$REGRESSION" "$WORK/badge-mid.json"
+# Regression fixture's overall_pass_rate is 0.775 → below 0.80, >= 0.60 → yellow.
+assert_contains "$WORK/badge-mid.json" '"color": "yellow"'
+
+echo "== test: render-badge annotates budget-cap hit =="
+python3 - <<'PY' "$SAMPLE" "$WORK/sample-budget-hit.json"
+import json, sys
+data = json.load(open(sys.argv[1]))
+data["budget_usd_hit"] = True
+json.dump(data, open(sys.argv[2], "w"))
+PY
+"$SCRIPT_DIR/render-badge.sh" "$WORK/sample-budget-hit.json" "$WORK/badge-partial.json"
+assert_contains "$WORK/badge-partial.json" "⚠"
+
+echo "== test: render-badge picks orange for below-target score =="
+python3 - <<'PY' "$SAMPLE" "$WORK/sample-low.json"
+import json, sys
+data = json.load(open(sys.argv[1]))
+data["overall_pass_rate"] = 0.40
+data["budget_usd_hit"] = False
+json.dump(data, open(sys.argv[2], "w"))
+PY
+"$SCRIPT_DIR/render-badge.sh" "$WORK/sample-low.json" "$WORK/badge-low.json"
+assert_contains "$WORK/badge-low.json" '"color": "orange"'
+# Never red — red implies brokenness, not "below target".
+assert_not_contains "$WORK/badge-low.json" '"color": "red"'
+
 echo
 echo "ALL TESTS PASSED"

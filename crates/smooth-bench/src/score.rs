@@ -46,6 +46,40 @@ impl LanguageScore {
     }
 }
 
+impl Score {
+    /// Render a human-readable summary of the Score. Shared between
+    /// `smooth-bench score` (no `--output` → stdout) and `th bench
+    /// score` (the baked-in Line the shipped binary carries) so both
+    /// surfaces print identically.
+    #[must_use]
+    pub fn render_table(&self) -> String {
+        use std::fmt::Write;
+        let mut out = String::new();
+        let _ = writeln!(out, "The Line — smooth-bench score");
+        let _ = writeln!(out, "  smooth version:    {}", self.smooth_version);
+        let _ = writeln!(out, "  commit:            {}", self.commit_sha);
+        let _ = writeln!(out, "  ran at:            {}", self.ran_at.to_rfc3339());
+        let _ = writeln!(
+            out,
+            "  overall pass rate: {:.1}%  ({}/{} tasks green)",
+            self.overall_pass_rate * 100.0,
+            self.tasks_green,
+            self.tasks_attempted
+        );
+        let _ = writeln!(out, "  cost:              ${:.4} (cap ${:.2})", self.cost_usd, self.budget_usd_cap);
+        if self.budget_usd_hit {
+            let _ = writeln!(out, "  BUDGET CAP HIT — score is partial");
+        }
+        let _ = writeln!(out, "  median task time:  {} ms", self.median_task_ms);
+        let _ = writeln!(out);
+        let _ = writeln!(out, "  by language:");
+        for (lang, ls) in &self.by_language {
+            let _ = writeln!(out, "    {lang:<12} {:.1}%  ({}/{})", ls.pass_rate * 100.0, ls.tasks_green, ls.tasks_attempted);
+        }
+        out
+    }
+}
+
 /// Aggregate score emitted by `smooth-bench score`.
 ///
 /// Written to stdout (or `--output <path>`) as pretty-printed JSON

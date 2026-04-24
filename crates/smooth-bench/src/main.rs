@@ -190,42 +190,14 @@ fn emit_score(score: &smooth_bench::score::Score, output: Option<&std::path::Pat
             eprintln!("wrote {}", path.display());
         }
         Some(path) => {
-            let table = render_table(score);
-            std::fs::write(path, table).with_context(|| format!("writing score table to {}", path.display()))?;
+            std::fs::write(path, score.render_table()).with_context(|| format!("writing score table to {}", path.display()))?;
             eprintln!("wrote {}", path.display());
         }
         None => {
             // stdout = human table; JSON is always recoverable by
             // re-running with `--output score.json`.
-            println!("{}", render_table(score));
+            println!("{}", score.render_table());
         }
     }
     Ok(())
-}
-
-fn render_table(score: &smooth_bench::score::Score) -> String {
-    use std::fmt::Write;
-    let mut out = String::new();
-    let _ = writeln!(out, "The Line — smooth-bench score");
-    let _ = writeln!(out, "  smooth version:    {}", score.smooth_version);
-    let _ = writeln!(out, "  commit:            {}", score.commit_sha);
-    let _ = writeln!(out, "  ran at:            {}", score.ran_at.to_rfc3339());
-    let _ = writeln!(
-        out,
-        "  overall pass rate: {:.1}%  ({}/{} tasks green)",
-        score.overall_pass_rate * 100.0,
-        score.tasks_green,
-        score.tasks_attempted
-    );
-    let _ = writeln!(out, "  cost:              ${:.4} (cap ${:.2})", score.cost_usd, score.budget_usd_cap);
-    if score.budget_usd_hit {
-        let _ = writeln!(out, "  BUDGET CAP HIT — score is partial");
-    }
-    let _ = writeln!(out, "  median task time:  {} ms", score.median_task_ms);
-    let _ = writeln!(out);
-    let _ = writeln!(out, "  by language:");
-    for (lang, ls) in &score.by_language {
-        let _ = writeln!(out, "    {lang:<12} {:.1}%  ({}/{})", ls.pass_rate * 100.0, ls.tasks_green, ls.tasks_attempted);
-    }
-    out
 }

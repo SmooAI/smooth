@@ -5436,6 +5436,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "smooai-smooth-bench",
  "smooai-smooth-bigsmooth",
  "smooai-smooth-bootstrap-bill",
  "smooai-smooth-code",
