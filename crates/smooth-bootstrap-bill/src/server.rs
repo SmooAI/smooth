@@ -123,11 +123,39 @@ pub async fn spawn_sandbox(spec: SandboxSpec) -> Result<(String, Vec<PortMapping
         "bill: spawning sandbox"
     );
 
+    // pearl th-461ab9 (diag): elapsed-since-spawn breadcrumbs.
+    // The hang is observed at "wiring SecretBuilder" → silence; we don't
+    // know whether we're stuck in OCI pull, db init, builder.create()
+    // closures, or wait_for_relay. Tag every step so the gap pinpoints
+    // the call.
+    let diag_t0 = std::time::Instant::now();
+    let diag_name = spec.name.clone();
+    macro_rules! diag {
+        ($msg:expr) => {
+            tracing::info!(
+                name = %diag_name,
+                t_ms = diag_t0.elapsed().as_millis() as u64,
+                "bill diag: {}", $msg
+            );
+        };
+        ($msg:expr, $($field:tt)*) => {
+            tracing::info!(
+                name = %diag_name,
+                t_ms = diag_t0.elapsed().as_millis() as u64,
+                $($field)*,
+                "bill diag: {}", $msg
+            );
+        };
+    }
+    diag!("entering spawn_sandbox after preflight checks");
+
     let cpus_u8 = u8::try_from(spec.cpus).unwrap_or(u8::MAX);
+    diag!("calling Sandbox::builder()");
     let mut builder = Sandbox::builder(spec.name.clone())
         .image(spec.image.as_str())
         .cpus(cpus_u8)
         .memory(spec.memory_mb);
+    diag!("builder constructed");
 
     // Resolve any host_port == 0 requests by asking the kernel for a free
     // port now, then handing that number to microsandbox. This keeps the
@@ -189,8 +217,10 @@ pub async fn spawn_sandbox(spec: SandboxSpec) -> Result<(String, Vec<PortMapping
     // GOPATH) live inside so repeated runs on the same pearl lineage share
     // them.
     if let Some(ref cache_key) = spec.env_cache_key {
+        diag!("processing env_cache_key", cache_key = %cache_key, use_named_volume = spec.use_named_volume_for_cache);
         if spec.use_named_volume_for_cache {
             let volume_name = sanitize_volume_name(cache_key);
+            diag!("calling Volume::get", volume = %volume_name);
             match microsandbox::volume::Volume::get(&volume_name).await {
                 Ok(_) => {
                     tracing::info!(name = %spec.name, key = %cache_key, volume = %volume_name, "bill: reusing existing named Volume for project cache");
@@ -258,6 +288,11 @@ pub async fn spawn_sandbox(spec: SandboxSpec) -> Result<(String, Vec<PortMapping
     // The secrets layer rides on the same `.network(|n| ...)` closure,
     // so we stage a single builder mutation that owns both the policy
     // override and the secret entries.
+    diag!(
+        "preparing network/secrets builder closure",
+        allow_loopback = spec.allow_host_loopback,
+        n_secrets = spec.secrets.len()
+    );
     let allow_loopback = spec.allow_host_loopback;
     let secrets = spec.secrets.clone();
     if allow_loopback || !secrets.is_empty() {
@@ -296,10 +331,73 @@ pub async fn spawn_sandbox(spec: SandboxSpec) -> Result<(String, Vec<PortMapping
         });
     }
 
-    let sandbox = builder
-        .create()
-        .await
-        .with_context(|| format!("bill: failed to create microVM '{}' from image '{}'", spec.name, spec.image))?;
+    diag!("about to call builder.create().await — this is the historical hang point");
+
+    // pearl th-461ab9 (diag): parallel filesystem watcher. The microsandbox
+    // SDK's spawn_sandbox creates ~/.microsandbox/sandboxes/<name>/{logs,
+    // runtime,...} as part of `.create()`. If we never see those dirs
+    // appear, the SDK is hung BEFORE forking the child msb process —
+    // i.e. in OCI pull / db init / volume validate. If we see the dirs
+    // but host.log stays empty (or has no `sandbox starting` line), the
+    // child msb forked but never reached `microsandbox_runtime::vm::run`.
+    let watch_name = spec.name.clone();
+    let watch_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watch_stop_inner = watch_stop.clone();
+    let watch_handle = tokio::spawn(async move {
+        let home = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+        let sandbox_dir = home.join(".microsandbox").join("sandboxes").join(&watch_name);
+        let host_log = sandbox_dir.join("logs").join("host.log");
+        let runtime_dir = sandbox_dir.join("runtime");
+        let agent_sock = runtime_dir.join("agent.sock");
+        let mut tick = 0u64;
+        let mut head_logged = false;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            if watch_stop_inner.load(std::sync::atomic::Ordering::SeqCst) {
+                tracing::info!(name = %watch_name, "bill diag-watch: stopped (create() returned)");
+                return;
+            }
+            tick += 1;
+            let dir_exists = sandbox_dir.exists();
+            let host_log_size = std::fs::metadata(&host_log).map(|m| m.len()).unwrap_or(0);
+            let agent_sock_exists = agent_sock.exists();
+            tracing::info!(
+                name = %watch_name,
+                tick,
+                dir_exists,
+                host_log_size,
+                agent_sock_exists,
+                "bill diag-watch: polling"
+            );
+            // First few hundred bytes of host.log when it lands — gives us
+            // immediate visibility into whether the child msb is alive.
+            if dir_exists && host_log_size > 0 && !head_logged {
+                if let Ok(content) = std::fs::read_to_string(&host_log) {
+                    let head: String = content.chars().take(800).collect();
+                    tracing::info!(name = %watch_name, head = %head, "bill diag-watch: host.log head");
+                    head_logged = true;
+                }
+            }
+        }
+    });
+
+    let create_started = std::time::Instant::now();
+    let sandbox = match builder.create().await {
+        Ok(sb) => {
+            diag!("builder.create().await RETURNED OK", create_ms = create_started.elapsed().as_millis() as u64);
+            watch_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = watch_handle.await;
+            sb
+        }
+        Err(e) => {
+            diag!("builder.create().await RETURNED ERR", create_ms = create_started.elapsed().as_millis() as u64, error = %e);
+            watch_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = watch_handle.await;
+            return Err(anyhow::anyhow!(e).context(format!("bill: failed to create microVM '{}' from image '{}'", spec.name, spec.image)));
+        }
+    };
 
     register(&spec.name, sandbox);
 

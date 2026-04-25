@@ -845,6 +845,55 @@ fn make_control_tempdir(prefix: &str, control_root: Option<&std::path::Path>) ->
     }
 }
 
+/// pearl th-461ab9 (diag): Decide whether an env-var value enables a flag.
+/// Truthy: `1`, `true`, `TRUE`, `yes`, `on`. Anything else (incl. unset) → false.
+fn diag_flag_is_truthy(value: &str) -> bool {
+    matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "on")
+}
+
+/// pearl th-461ab9 (diag): Build the `/bin/sh -c` argv that wraps the runner
+/// invocation with diagnostic capture. Writes 8 files into
+/// `/var/log/smooth-runner/` (must be a RW bind-mount or guest-writable
+/// tmpfs):
+///
+///   00-started.txt     UTC start timestamp
+///   01-mounts.txt      `mount` output (proves bind mounts landed)
+///   02-listing.txt     ls -la /opt/smooth/{,bin,policy} /workspace
+///   03-env.txt         env var snapshot
+///   04-runner-check.txt   runner binary `-x` test
+///   05-stdout.log      runner stdout transcript
+///   06-stderr.log      runner stderr transcript
+///   07-exit-code.txt   runner exit code
+///
+/// Streaming back to bigsmooth's AgentEvent parser is preserved: tee
+/// runs in the background reading FIFOs, with its OWN stdout/stderr
+/// passed through the parent shell — sandbox.exec captures both as
+/// they're emitted, just like the un-wrapped path.
+fn build_runner_diag_wrapper_argv(runner_in_vm: &str) -> Vec<String> {
+    let script = format!(
+        "set +e; \
+         mkdir -p /var/log/smooth-runner 2>/dev/null; \
+         date -u +%Y-%m-%dT%H:%M:%SZ > /var/log/smooth-runner/00-started.txt 2>/dev/null; \
+         mount > /var/log/smooth-runner/01-mounts.txt 2>&1; \
+         ls -la /opt/smooth/ /opt/smooth/bin/ /opt/smooth/policy/ /workspace/ /var/log/smooth-runner/ \
+             > /var/log/smooth-runner/02-listing.txt 2>&1; \
+         env > /var/log/smooth-runner/03-env.txt 2>&1; \
+         if [ -x {runner} ]; then echo runner-exists-and-executable; else echo MISSING-RUNNER; ls -la {runner} 2>&1; fi \
+             > /var/log/smooth-runner/04-runner-check.txt 2>&1; \
+         outfifo=$(mktemp -u /tmp/smooth-out.XXXXXX); errfifo=$(mktemp -u /tmp/smooth-err.XXXXXX); \
+         mkfifo \"$outfifo\" \"$errfifo\" 2>/dev/null; \
+         tee /var/log/smooth-runner/05-stdout.log < \"$outfifo\" & tee_out=$!; \
+         tee /var/log/smooth-runner/06-stderr.log < \"$errfifo\" >&2 & tee_err=$!; \
+         {runner} > \"$outfifo\" 2> \"$errfifo\"; rc=$?; \
+         wait $tee_out 2>/dev/null; wait $tee_err 2>/dev/null; \
+         rm -f \"$outfifo\" \"$errfifo\" 2>/dev/null; \
+         echo $rc > /var/log/smooth-runner/07-exit-code.txt 2>/dev/null; \
+         exit $rc",
+        runner = runner_in_vm
+    );
+    vec!["/bin/sh".into(), "-c".into(), script]
+}
+
 async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
     let DispatchOptions {
         message,
@@ -1417,6 +1466,33 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
             }
         }
 
+        // pearl th-461ab9 (diag): when SMOOTH_DIAG_RUNNER_LOGS=1, allocate a
+        // host-side dir at ~/.smooth/runner-logs/<task_id>/ that the wrapper
+        // script will tee runner stdout/stderr into. Bind-mounted into the
+        // VM at /var/log/smooth-runner. Lets us recover guest output even
+        // when sandbox.exec returns no data (Mode B's "VM booted but
+        // nothing happened" pattern), AND tells us whether bind-mounts
+        // landed at all (presence-of-file in the host path proves the
+        // wrapper ran inside the guest).
+        let diag_runner_logs_enabled = std::env::var("SMOOTH_DIAG_RUNNER_LOGS").map(|v| diag_flag_is_truthy(&v)).unwrap_or(false);
+        let diag_runner_logs_host: Option<String> = if diag_runner_logs_enabled {
+            dirs_next::home_dir().and_then(|h| {
+                let p = h.join(".smooth").join("runner-logs").join(&tid);
+                match std::fs::create_dir_all(&p) {
+                    Ok(()) => {
+                        tracing::info!(task_id = tid, path = %p.display(), "diag runner-logs: host dir ready");
+                        Some(p.to_string_lossy().to_string())
+                    }
+                    Err(e) => {
+                        tracing::warn!(task_id = tid, error = %e, "diag runner-logs: could not create host dir; logs disabled");
+                        None
+                    }
+                }
+            })
+        } else {
+            None
+        };
+
         let config = SandboxConfig {
             bead_id: pearl_id.clone().unwrap_or_default(),
             workspace_path: "/workspace".into(),
@@ -1435,6 +1511,15 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
                         readonly: false,
                     },
                 ];
+                // pearl th-461ab9 (diag): runner-logs bind mount. RW because
+                // we need the wrapper to tee into it.
+                if let Some(ref host_path) = diag_runner_logs_host {
+                    m.push(BindMount {
+                        host_path: host_path.clone(),
+                        guest_path: "/var/log/smooth-runner".into(),
+                        readonly: false,
+                    });
+                }
                 // Mount ~/.smooth for global config, registry, and pearl access.
                 // RW so operators can update pearls, write audit logs, etc.
                 //
@@ -1565,7 +1650,22 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         });
 
         let exec_started = std::time::Instant::now();
-        let (stdout, stderr, code) = match sandbox::exec_in_sandbox(&handle.msb_name, &[runner_in_vm.as_str()]).await {
+        // pearl th-461ab9 (diag): when runner-logs is enabled, wrap the
+        // runner exec in a sh script that snapshots /opt mounts + env,
+        // then runs the runner with stdout/stderr tee'd into the
+        // bind-mounted /var/log/smooth-runner/. The runner's stdout
+        // (JSON AgentEvents) still flows back through agent.sock so the
+        // existing parser keeps working — we only ADD a copy on disk.
+        // If the bind-mount silently fails to land, the host dir stays
+        // empty and that itself is a diagnostic signal.
+        let exec_argv: Vec<String> = if diag_runner_logs_host.is_some() {
+            tracing::info!(task_id = tid, "diag runner-logs: dispatching runner via tee wrapper script");
+            build_runner_diag_wrapper_argv(&runner_in_vm)
+        } else {
+            vec![runner_in_vm.clone()]
+        };
+        let exec_argv_refs: Vec<&str> = exec_argv.iter().map(String::as_str).collect();
+        let (stdout, stderr, code) = match sandbox::exec_in_sandbox(&handle.msb_name, &exec_argv_refs).await {
             Ok(r) => r,
             Err(e) => {
                 let _ = event_tx.send(ServerEvent::TaskError {
@@ -3386,6 +3486,153 @@ mod tests {
     #[test]
     fn test_truncate_str_short() {
         assert_eq!(truncate_str("hello", 10), "hello");
+    }
+
+    // pearl th-461ab9 (diag): tests for the runner-logs diagnostic helpers.
+    #[test]
+    fn diag_flag_is_truthy_accepts_documented_truthy_values() {
+        for v in ["1", "true", "TRUE", "yes", "on", " 1 ", "  on  "] {
+            assert!(diag_flag_is_truthy(v), "expected truthy for {v:?}");
+        }
+    }
+
+    #[test]
+    fn diag_flag_is_truthy_rejects_falsy_and_unknown_values() {
+        for v in ["", "0", "false", "FALSE", "no", "off", "True", "False", "anything-else", "  "] {
+            assert!(!diag_flag_is_truthy(v), "expected falsy for {v:?}");
+        }
+    }
+
+    #[test]
+    fn build_runner_diag_wrapper_argv_returns_three_elem_sh_invocation() {
+        let argv = build_runner_diag_wrapper_argv("/opt/smooth/bin/smooth-operator-runner");
+        assert_eq!(argv.len(), 3, "expected /bin/sh -c <script>, got: {argv:?}");
+        assert_eq!(argv[0], "/bin/sh");
+        assert_eq!(argv[1], "-c");
+        let script = &argv[2];
+        // The script must include the runner path verbatim (not template
+        // syntax) and reference the host-readable log dir.
+        assert!(
+            script.contains("/opt/smooth/bin/smooth-operator-runner"),
+            "runner path not interpolated: {script}"
+        );
+        assert!(script.contains("/var/log/smooth-runner"), "log dir missing: {script}");
+        // The 8 expected diagnostic files must each be addressed.
+        for name in [
+            "00-started.txt",
+            "01-mounts.txt",
+            "02-listing.txt",
+            "03-env.txt",
+            "04-runner-check.txt",
+            "05-stdout.log",
+            "06-stderr.log",
+            "07-exit-code.txt",
+        ] {
+            assert!(script.contains(name), "expected {name} in script: {script}");
+        }
+        // FIFO + background tee pattern is what preserves streaming back to
+        // sandbox.exec — if it ever gets refactored away, this test fires.
+        assert!(script.contains("mkfifo "), "FIFO pattern missing");
+        assert!(script.contains("tee "), "tee invocation missing");
+        // exit $rc preserves the runner's actual exit code.
+        assert!(script.contains("exit $rc"), "exit code not preserved: {script}");
+    }
+
+    #[test]
+    fn build_runner_diag_wrapper_argv_handles_runner_with_special_chars() {
+        // Path may contain hyphens/underscores; just make sure the
+        // template doesn't do anything unsafe with them.
+        let argv = build_runner_diag_wrapper_argv("/opt/smooth/bin/smooth-operator-runner_v2");
+        assert!(argv[2].contains("smooth-operator-runner_v2"));
+        // Note: we deliberately do NOT shell-quote runner_in_vm because
+        // it's controlled by Big Smooth (always a fixed
+        // /opt/smooth/bin/<binary> path resolved from a host-side build
+        // artifact). This test pins that assumption — if the call site
+        // ever passes user-controlled input here, this test should be
+        // updated alongside a shell-escape change.
+    }
+
+    #[test]
+    fn build_runner_diag_wrapper_executes_locally_and_captures_streams() {
+        // Run the actual generated script against a tiny shell-script
+        // stand-in for the runner. Proves the FIFO + background tee
+        // pattern doesn't deadlock and does land all 8 files.
+        let tmp = tempfile::tempdir().unwrap();
+        let log_dir = tmp.path().join("var-log-smooth-runner");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let fake_runner = tmp.path().join("fake-runner.sh");
+        std::fs::write(
+            &fake_runner,
+            "#!/bin/sh\n\
+             echo '{\"type\":\"TokenDelta\",\"content\":\"hello\"}'\n\
+             echo final-stderr-line >&2\n\
+             exit 7\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // Patch the script to use our tmp log dir instead of /var/log/smooth-runner.
+        let argv = build_runner_diag_wrapper_argv(fake_runner.to_str().unwrap());
+        let patched = argv[2].replace("/var/log/smooth-runner", log_dir.to_str().unwrap());
+        let output = std::process::Command::new("/bin/sh").arg("-c").arg(&patched).output().expect("spawn sh");
+        assert_eq!(output.status.code(), Some(7), "runner exit code must be preserved through wrapper");
+        // Streaming preservation: the runner's stdout line must appear on
+        // the wrapper's stdout (this is what sandbox.exec captures).
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("\"TokenDelta\""),
+            "wrapper stdout must echo runner stdout (sandbox.exec captures this); got: {stdout}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("final-stderr-line"), "wrapper stderr must echo runner stderr; got: {stderr}");
+        // All 8 diagnostic files must exist with non-zero size for the ones we expect populated.
+        for name in [
+            "00-started.txt",
+            "01-mounts.txt",
+            "03-env.txt",
+            "04-runner-check.txt",
+            "05-stdout.log",
+            "06-stderr.log",
+            "07-exit-code.txt",
+        ] {
+            let p = log_dir.join(name);
+            assert!(p.exists(), "{name} should exist after wrapper run");
+            let size = std::fs::metadata(&p).unwrap().len();
+            assert!(size > 0, "{name} is empty");
+        }
+        // Exit code file must contain "7\n" (the runner's exit code).
+        let exit_str = std::fs::read_to_string(log_dir.join("07-exit-code.txt")).unwrap();
+        assert_eq!(exit_str.trim(), "7", "07-exit-code.txt should hold runner's exit code");
+        // 04-runner-check.txt must report runner-exists-and-executable.
+        let check = std::fs::read_to_string(log_dir.join("04-runner-check.txt")).unwrap();
+        assert!(check.contains("runner-exists-and-executable"), "got: {check}");
+    }
+
+    #[test]
+    fn build_runner_diag_wrapper_handles_missing_runner() {
+        // Same as above but with a runner path that doesn't exist —
+        // wrapper should still produce all the diagnostic files and
+        // surface a non-zero exit code, NOT hang.
+        let tmp = tempfile::tempdir().unwrap();
+        let log_dir = tmp.path().join("var-log-smooth-runner");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let argv = build_runner_diag_wrapper_argv("/this/path/does/not/exist/fake-runner");
+        let patched = argv[2].replace("/var/log/smooth-runner", log_dir.to_str().unwrap());
+        let output = std::process::Command::new("/bin/sh").arg("-c").arg(&patched).output().expect("spawn sh");
+        // Non-zero exit (likely 127) indicating runner-not-found.
+        assert_ne!(output.status.code(), Some(0), "missing runner must not produce success exit");
+        // 04-runner-check.txt must report MISSING-RUNNER.
+        let check = std::fs::read_to_string(log_dir.join("04-runner-check.txt")).unwrap();
+        assert!(check.contains("MISSING-RUNNER"), "got: {check}");
+        // Stderr file should capture the shell's "not found" diagnostic.
+        let stderr_log = std::fs::read_to_string(log_dir.join("06-stderr.log")).unwrap_or_default();
+        assert!(
+            stderr_log.contains("not found") || stderr_log.contains("No such file"),
+            "stderr should capture missing-runner error; got: {stderr_log}"
+        );
     }
 
     #[test]

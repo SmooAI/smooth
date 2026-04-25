@@ -200,6 +200,51 @@ impl OperatorClient {
         Ok(())
     }
 
+    /// pearl th-461ab9 (Mode B fix): Try to connect with bounded
+    /// exponential backoff for the INITIAL connection.
+    ///
+    /// `connect()` is one-shot: a freshly-spawned operator VM may not yet
+    /// have its WebSocket server bound when Big Smooth races out of
+    /// `pool.create_operator()` and calls connect, so the first attempt
+    /// reliably hits "Handshake not finished". This wrapper retries with
+    /// the same exponential-backoff machinery `reconnect()` uses, but
+    /// driven by an attempt-count cap so a permanently-unreachable
+    /// operator (e.g. wrong runner, bind-mount silently dropped) still
+    /// fails fast instead of spinning forever.
+    ///
+    /// `max_attempts` of 0 falls back to the single-shot `connect()` for
+    /// backwards compatibility. Recommended value is 5: with the default
+    /// `ResiliencyConfig` (base 1s, max 30s, jitter 20%) total wait
+    /// before final failure is ~31s of mostly-sleeping (1+2+4+8+16s),
+    /// covering virtually all observed runner-startup windows.
+    pub async fn connect_with_retry(&mut self, max_attempts: u32) -> anyhow::Result<()> {
+        if max_attempts <= 1 {
+            return self.connect().await;
+        }
+        let mut last_err: Option<anyhow::Error> = None;
+        for attempt in 0..max_attempts {
+            match self.connect().await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    let backoff = self.conn_mgr.backoff_duration(attempt);
+                    tracing::debug!(
+                        operator = %self.operator_id,
+                        attempt = attempt + 1,
+                        max_attempts,
+                        backoff_ms = backoff.as_millis() as u64,
+                        error = %e,
+                        "operator connect attempt failed; sleeping before retry"
+                    );
+                    last_err = Some(e);
+                    if attempt + 1 < max_attempts {
+                        tokio::time::sleep(backoff).await;
+                    }
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("connect_with_retry exhausted {max_attempts} attempts")))
+    }
+
     /// Attempt to reconnect using exponential backoff.
     ///
     /// Returns `Ok(())` once reconnected or `Err` if max attempts exhausted.
@@ -376,6 +421,45 @@ mod tests {
     fn is_connected_returns_false_before_connect() {
         let client = OperatorClient::new("op-1", "ws://localhost:9090/ws");
         assert!(!client.is_connected());
+    }
+
+    #[tokio::test]
+    async fn connect_with_retry_max_attempts_zero_falls_back_to_single_shot() {
+        // Tight ResiliencyConfig so the test runs in well under the
+        // default heartbeat budget. The exact backoff values don't
+        // matter — we just need connect to fail on an unreachable URL.
+        let cfg = ResiliencyConfig {
+            base_backoff: std::time::Duration::from_millis(1),
+            max_backoff: std::time::Duration::from_millis(2),
+            ..ResiliencyConfig::default()
+        };
+        // Picks a port nothing is listening on. tungstenite returns
+        // ConnectionRefused which connect() wraps as anyhow.
+        let mut client = OperatorClient::with_config("op-x", "ws://127.0.0.1:1/ws", cfg);
+        let result = client.connect_with_retry(0).await;
+        assert!(result.is_err(), "max_attempts=0 must surface the same error as single-shot connect()");
+    }
+
+    #[tokio::test]
+    async fn connect_with_retry_returns_last_error_after_exhausting_attempts() {
+        let cfg = ResiliencyConfig {
+            base_backoff: std::time::Duration::from_millis(1),
+            max_backoff: std::time::Duration::from_millis(2),
+            ..ResiliencyConfig::default()
+        };
+        let mut client = OperatorClient::with_config("op-y", "ws://127.0.0.1:1/ws", cfg);
+        let started = std::time::Instant::now();
+        let result = client.connect_with_retry(3).await;
+        let elapsed = started.elapsed();
+        assert!(result.is_err(), "all attempts must fail against an unreachable URL");
+        // 3 attempts with 1ms+2ms+(no-final-sleep) backoff plus connect
+        // attempts → tens of ms. Mostly we just want the function to
+        // return promptly rather than hang.
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "connect_with_retry should not hang; took {:?}",
+            elapsed
+        );
     }
 
     #[test]
