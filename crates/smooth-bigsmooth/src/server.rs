@@ -1417,6 +1417,35 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
             }
         }
 
+        // pearl th-461ab9 (diag): when SMOOTH_DIAG_RUNNER_LOGS=1, allocate a
+        // host-side dir at ~/.smooth/runner-logs/<task_id>/ that the wrapper
+        // script will tee runner stdout/stderr into. Bind-mounted into the
+        // VM at /var/log/smooth-runner. Lets us recover guest output even
+        // when sandbox.exec returns no data (Mode B's "VM booted but
+        // nothing happened" pattern), AND tells us whether bind-mounts
+        // landed at all (presence-of-file in the host path proves the
+        // wrapper ran inside the guest).
+        let diag_runner_logs_enabled = std::env::var("SMOOTH_DIAG_RUNNER_LOGS")
+            .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
+            .unwrap_or(false);
+        let diag_runner_logs_host: Option<String> = if diag_runner_logs_enabled {
+            dirs_next::home_dir().and_then(|h| {
+                let p = h.join(".smooth").join("runner-logs").join(&tid);
+                match std::fs::create_dir_all(&p) {
+                    Ok(()) => {
+                        tracing::info!(task_id = tid, path = %p.display(), "diag runner-logs: host dir ready");
+                        Some(p.to_string_lossy().to_string())
+                    }
+                    Err(e) => {
+                        tracing::warn!(task_id = tid, error = %e, "diag runner-logs: could not create host dir; logs disabled");
+                        None
+                    }
+                }
+            })
+        } else {
+            None
+        };
+
         let config = SandboxConfig {
             bead_id: pearl_id.clone().unwrap_or_default(),
             workspace_path: "/workspace".into(),
@@ -1435,6 +1464,15 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
                         readonly: false,
                     },
                 ];
+                // pearl th-461ab9 (diag): runner-logs bind mount. RW because
+                // we need the wrapper to tee into it.
+                if let Some(ref host_path) = diag_runner_logs_host {
+                    m.push(BindMount {
+                        host_path: host_path.clone(),
+                        guest_path: "/var/log/smooth-runner".into(),
+                        readonly: false,
+                    });
+                }
                 // Mount ~/.smooth for global config, registry, and pearl access.
                 // RW so operators can update pearls, write audit logs, etc.
                 //
@@ -1565,7 +1603,58 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         });
 
         let exec_started = std::time::Instant::now();
-        let (stdout, stderr, code) = match sandbox::exec_in_sandbox(&handle.msb_name, &[runner_in_vm.as_str()]).await {
+        // pearl th-461ab9 (diag): when runner-logs is enabled, wrap the
+        // runner exec in a sh script that snapshots /opt mounts + env,
+        // then runs the runner with stdout/stderr tee'd into the
+        // bind-mounted /var/log/smooth-runner/. The runner's stdout
+        // (JSON AgentEvents) still flows back through agent.sock so the
+        // existing parser keeps working — we only ADD a copy on disk.
+        // If the bind-mount silently fails to land, the host dir stays
+        // empty and that itself is a diagnostic signal.
+        let exec_argv: Vec<String> = if diag_runner_logs_host.is_some() {
+            // Files written into /var/log/smooth-runner (host-readable):
+            //   00-started.txt        — UTC start timestamp
+            //   01-mounts.txt         — `mount` output (proves bind mounts landed)
+            //   02-listing.txt        — `ls -la` of /opt/smooth/{,bin,policy}, /workspace
+            //   03-env.txt            — env var snapshot
+            //   04-runner-check.txt   — runner binary check (-x test + stat)
+            //   05-stdout.log         — runner stdout (full transcript)
+            //   06-stderr.log         — runner stderr (full transcript)
+            //   07-exit-code.txt      — runner exit code
+            //
+            // Streaming-preservation: tee runs in the background, reading
+            // FIFOs and writing to disk; tee's OWN stdout passes through to
+            // the parent shell, which sandbox.exec captures and bigsmooth's
+            // AgentEvent parser consumes. So lines stream as the runner
+            // emits them — the on-disk files are a side-channel copy.
+            let script = format!(
+                "set +e; \
+                 mkdir -p /var/log/smooth-runner 2>/dev/null; \
+                 date -u +%Y-%m-%dT%H:%M:%SZ > /var/log/smooth-runner/00-started.txt 2>/dev/null; \
+                 mount > /var/log/smooth-runner/01-mounts.txt 2>&1; \
+                 ls -la /opt/smooth/ /opt/smooth/bin/ /opt/smooth/policy/ /workspace/ /var/log/smooth-runner/ \
+                     > /var/log/smooth-runner/02-listing.txt 2>&1; \
+                 env > /var/log/smooth-runner/03-env.txt 2>&1; \
+                 if [ -x {runner} ]; then echo runner-exists-and-executable; else echo MISSING-RUNNER; ls -la {runner} 2>&1; fi \
+                     > /var/log/smooth-runner/04-runner-check.txt 2>&1; \
+                 outfifo=$(mktemp -u /tmp/smooth-out.XXXXXX); errfifo=$(mktemp -u /tmp/smooth-err.XXXXXX); \
+                 mkfifo \"$outfifo\" \"$errfifo\" 2>/dev/null; \
+                 tee /var/log/smooth-runner/05-stdout.log < \"$outfifo\" & tee_out=$!; \
+                 tee /var/log/smooth-runner/06-stderr.log < \"$errfifo\" >&2 & tee_err=$!; \
+                 {runner} > \"$outfifo\" 2> \"$errfifo\"; rc=$?; \
+                 wait $tee_out 2>/dev/null; wait $tee_err 2>/dev/null; \
+                 rm -f \"$outfifo\" \"$errfifo\" 2>/dev/null; \
+                 echo $rc > /var/log/smooth-runner/07-exit-code.txt 2>/dev/null; \
+                 exit $rc",
+                runner = runner_in_vm
+            );
+            tracing::info!(task_id = tid, "diag runner-logs: dispatching runner via tee wrapper script");
+            vec!["/bin/sh".into(), "-c".into(), script]
+        } else {
+            vec![runner_in_vm.clone()]
+        };
+        let exec_argv_refs: Vec<&str> = exec_argv.iter().map(String::as_str).collect();
+        let (stdout, stderr, code) = match sandbox::exec_in_sandbox(&handle.msb_name, &exec_argv_refs).await {
             Ok(r) => r,
             Err(e) => {
                 let _ = event_tx.send(ServerEvent::TaskError {
