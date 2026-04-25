@@ -870,6 +870,42 @@ fn diag_flag_is_truthy(value: &str) -> bool {
 /// passed through the parent shell — sandbox.exec captures both as
 /// they're emitted, just like the un-wrapped path.
 fn build_runner_diag_wrapper_argv(runner_in_vm: &str) -> Vec<String> {
+    // The wrapper:
+    //   1. Snapshots pre-flight diagnostics (mounts, listings, env, runner-check)
+    //   2. Pipes runner stdout through `tee` to 05-stdout.log AND parent stdout
+    //      (so sandbox.exec → bigsmooth's AgentEvent parser keeps streaming)
+    //   3. Pipes runner stderr through `tee` to 06-stderr.log AND parent stderr
+    //   4. Captures the runner's exit code via `${PIPESTATUS[0]}` (bash) or by
+    //      using a temp-file dance for plain POSIX `sh`
+    //   5. Writes 07-exit-code.txt and exits with the runner's code
+    //
+    // POSIX sh doesn't have PIPESTATUS, so we round-trip the runner's exit
+    // code through a per-run file inside the diag dir. The runner is wrapped
+    // in a subshell that writes its $? to that file; the parent reads the
+    // file at the end. This avoids FIFOs entirely (no tee-deadlock-on-SIGKILL
+    // risk that bench harness flagged on run #2 of th-461ab9 reproduction).
+    // NOTE: This script is concatenated onto a single logical line by the
+    // surrounding `\\\n         ` continuation; do NOT add `# comments` —
+    // they swallow the following `;`-separated commands. Keep all design
+    // notes in this Rust comment block, not in the shell.
+    //
+    // Pipeline shape:
+    //   { ( runner; echo $? > rcfile ) 2>&1 1>&3 | tee -a stderr.log >&2 ; } 3>&1 \
+    //       | tee -a stdout.log
+    //   rc=$(cat rcfile); exit $rc
+    // - Inner subshell runs the runner, captures its exit status into rcfile
+    //   (POSIX pipelines lose the leftmost stage's exit code, so we round-trip
+    //   through a file).
+    // - 2>&1 1>&3 swaps stdout/stderr so the LEFT branch of the inner pipe
+    //   carries stderr, which is `tee -a stderr.log >&2` — appears on the
+    //   parent's stderr. The 3>&1 redirect on the outer group brings the
+    //   original stdout out as the group's stdout, which the OUTER pipe's
+    //   tee then duplicates to stdout.log AND the parent's stdout.
+    // - sandbox.exec captures both streams as they're emitted (streaming
+    //   preserved). Crucially, NO FIFOs / no background tee — earlier FIFO
+    //   approach could deadlock if the runner was SIGKILL'd before tee
+    //   read EOF, hanging sandbox.exec and breaking subsequent grading
+    //   exec calls (caught by bench harness, run #2 of th-461ab9 repro).
     let script = format!(
         "set +e; \
          mkdir -p /var/log/smooth-runner 2>/dev/null; \
@@ -880,14 +916,12 @@ fn build_runner_diag_wrapper_argv(runner_in_vm: &str) -> Vec<String> {
          env > /var/log/smooth-runner/03-env.txt 2>&1; \
          if [ -x {runner} ]; then echo runner-exists-and-executable; else echo MISSING-RUNNER; ls -la {runner} 2>&1; fi \
              > /var/log/smooth-runner/04-runner-check.txt 2>&1; \
-         outfifo=$(mktemp -u /tmp/smooth-out.XXXXXX); errfifo=$(mktemp -u /tmp/smooth-err.XXXXXX); \
-         mkfifo \"$outfifo\" \"$errfifo\" 2>/dev/null; \
-         tee /var/log/smooth-runner/05-stdout.log < \"$outfifo\" & tee_out=$!; \
-         tee /var/log/smooth-runner/06-stderr.log < \"$errfifo\" >&2 & tee_err=$!; \
-         {runner} > \"$outfifo\" 2> \"$errfifo\"; rc=$?; \
-         wait $tee_out 2>/dev/null; wait $tee_err 2>/dev/null; \
-         rm -f \"$outfifo\" \"$errfifo\" 2>/dev/null; \
-         echo $rc > /var/log/smooth-runner/07-exit-code.txt 2>/dev/null; \
+         rcfile=/var/log/smooth-runner/07-exit-code.txt; \
+         rm -f \"$rcfile\" 2>/dev/null; \
+         {{ ( {runner}; echo $? > \"$rcfile\" ) 2>&1 1>&3 | tee -a /var/log/smooth-runner/06-stderr.log >&2; }} 3>&1 \
+             | tee -a /var/log/smooth-runner/05-stdout.log; \
+         rc=$(cat \"$rcfile\" 2>/dev/null); \
+         [ -z \"$rc\" ] && rc=1; \
          exit $rc",
         runner = runner_in_vm
     );
@@ -3532,10 +3566,17 @@ mod tests {
         }
         // FIFO + background tee pattern is what preserves streaming back to
         // sandbox.exec — if it ever gets refactored away, this test fires.
-        assert!(script.contains("mkfifo "), "FIFO pattern missing");
-        assert!(script.contains("tee "), "tee invocation missing");
-        // exit $rc preserves the runner's actual exit code.
+        // The streaming-preserving pipeline: tee duplicates runner output to
+        // both the parent's stdout/stderr (so sandbox.exec keeps seeing it
+        // live) and to disk. fd 3 is used to swap streams so a single
+        // pipeline can split into two tee branches without FIFOs.
+        assert!(script.contains("tee -a "), "tee invocation missing: {script}");
+        assert!(script.contains("3>&1"), "fd-3 stream-swap missing (needed for stderr branch)");
+        // exit $rc preserves the runner's actual exit code (round-tripped
+        // through 07-exit-code.txt because POSIX pipelines drop leftmost
+        // stage's exit status).
         assert!(script.contains("exit $rc"), "exit code not preserved: {script}");
+        assert!(script.contains("07-exit-code.txt"), "rcfile-via-disk pattern missing: {script}");
     }
 
     #[test]
