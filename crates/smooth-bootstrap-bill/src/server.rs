@@ -288,7 +288,11 @@ pub async fn spawn_sandbox(spec: SandboxSpec) -> Result<(String, Vec<PortMapping
     // The secrets layer rides on the same `.network(|n| ...)` closure,
     // so we stage a single builder mutation that owns both the policy
     // override and the secret entries.
-    diag!("preparing network/secrets builder closure", allow_loopback = spec.allow_host_loopback, n_secrets = spec.secrets.len());
+    diag!(
+        "preparing network/secrets builder closure",
+        allow_loopback = spec.allow_host_loopback,
+        n_secrets = spec.secrets.len()
+    );
     let allow_loopback = spec.allow_host_loopback;
     let secrets = spec.secrets.clone();
     if allow_loopback || !secrets.is_empty() {
