@@ -3297,8 +3297,11 @@ async fn post_chat_message_handler(
     // Pull recent history to feed the LLM (oldest first).
     let history = state.session_store.get_messages(&id, 50).unwrap_or_default();
 
-    let system_prompt = chat_system_prompt();
-    let assistant_text = match run_chat_with_history(system_prompt, &history, &user_content).await {
+    // Goal-first system prompt shared with /api/chat — the session-bound
+    // path is the one the web UI hits, so this is what the user actually
+    // sees as Big Smooth's persona.
+    let system_prompt = include_str!("chat_tools_system_prompt.txt");
+    let assistant_text = match run_chat_with_history(&state, system_prompt, &history, &user_content).await {
         Ok(s) => s,
         Err(e) => format!("Error: {e}"),
     };
@@ -3379,31 +3382,67 @@ fn chat_default_model() -> String {
         .unwrap_or_else(|| "default".to_string())
 }
 
-async fn run_chat_with_history(system_prompt: &str, history: &[crate::session::SessionMessage], user_content: &str) -> anyhow::Result<String> {
+/// Run an agentic chat turn for the session-bound endpoint
+/// (`POST /api/chat/sessions/{id}/messages`).
+///
+/// Same Agent + tools as the bare `/api/chat` handler — the session
+/// endpoint just adds prior-conversation context. The web UI uses this
+/// endpoint, so making this agentic is what makes the chat actually
+/// orchestrate (search/create pearls, spawn teammates, message them)
+/// instead of returning Haiku-class one-shots.
+async fn run_chat_with_history(
+    state: &AppState,
+    system_prompt: &str,
+    history: &[crate::session::SessionMessage],
+    user_content: &str,
+) -> anyhow::Result<String> {
+    use smooth_operator::agent::{Agent, AgentConfig, AgentEvent};
+
     let providers_path = dirs_next::home_dir().unwrap_or_default().join(".smooth/providers.json");
     let registry = ProviderRegistry::load_from_file(&providers_path).map_err(|e| anyhow::anyhow!("no LLM providers configured: {e}"))?;
-    let config = registry.default_llm_config().map_err(|e| anyhow::anyhow!("no default provider: {e}"))?;
-    let llm = smooth_operator::llm::LlmClient::new(config);
 
-    let sys_msg = smooth_operator::conversation::Message::system(system_prompt);
-    let mut owned: Vec<smooth_operator::conversation::Message> = Vec::with_capacity(history.len() + 1);
+    // Reasoning slot — same default as `/api/chat`. Capability over speed
+    // for orchestration; users can flip the slot via providers.json.
+    let llm_config = registry
+        .llm_config_for(smooth_operator::providers::Activity::Reasoning)
+        .map_err(|e| anyhow::anyhow!("resolving reasoning slot for chat: {e}"))?;
+
+    let registry_arc = std::sync::Arc::new(registry);
+    let tools = crate::chat_tools::build_chat_tools(state.clone(), registry_arc);
+
+    // Fold prior history into a single read-only context block prepended to
+    // the new user-turn. Avoids the user/assistant alternation requirement
+    // some OpenAI-compat providers enforce on the live message array, and
+    // keeps the agent's compaction strategy from churning on old turns.
+    let mut history_block = String::new();
     for m in history {
-        if m.from == "user" {
-            owned.push(smooth_operator::conversation::Message::user(&m.content));
-        } else {
-            owned.push(smooth_operator::conversation::Message::assistant(&m.content));
+        let speaker = if m.from == "user" { "User" } else { "Big Smooth" };
+        history_block.push_str(&format!("{speaker}: {}\n\n", m.content));
+    }
+    let user_payload = if history_block.is_empty() {
+        user_content.to_string()
+    } else {
+        format!("Recent conversation history (read-only context):\n\n{history_block}---\n\nNew user message:\n\n{user_content}")
+    };
+
+    let agent_cfg = AgentConfig::new("big-smooth-chat-session", system_prompt, llm_config).with_max_iterations(5);
+    let agent = Agent::new(agent_cfg, tools);
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+    let event_tx = state.event_tx.clone();
+    let drain = tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            let _ = event_tx.send(crate::events::ServerEvent::TokenDelta {
+                task_id: "chat-session".to_string(),
+                content: format!("[chat] {ev:?}"),
+            });
         }
-    }
-    owned.push(smooth_operator::conversation::Message::user(user_content));
+    });
 
-    let mut refs: Vec<&smooth_operator::conversation::Message> = Vec::with_capacity(owned.len() + 1);
-    refs.push(&sys_msg);
-    for m in &owned {
-        refs.push(m);
-    }
+    let conversation = agent.run_with_channel(user_payload, tx).await.map_err(|e| anyhow::anyhow!("chat agent: {e}"))?;
+    drain.abort();
 
-    let response = llm.chat(&refs, &[]).await?;
-    Ok(response.content)
+    Ok(conversation.last_assistant_content().unwrap_or("(no response)").to_string())
 }
 
 // ── Boardroom Narc — POST /api/narc/judge ─────────────────
