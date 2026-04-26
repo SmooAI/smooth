@@ -2527,7 +2527,7 @@ pub fn project_cache_key(workspace: &str) -> Option<String> {
 
 // ── Projects (multi-project pearl support) ─────────────────
 
-#[derive(Serialize)]
+#[derive(Serialize, Default)]
 struct ProjectPearlCounts {
     open: usize,
     in_progress: usize,
@@ -2555,48 +2555,49 @@ fn is_invalid_project(path: &str) -> bool {
 async fn list_projects_handler(State(state): State<AppState>) -> Json<ApiResponse<Vec<ProjectInfo>>> {
     state.touch();
 
-    let registry = match smooth_pearls::Registry::load() {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to load project registry");
-            return Json(ApiResponse { data: vec![], ok: true });
-        }
-    };
+    // `PearlStore::open` and `store.stats()` both spawn the `smooth-dolt` Go
+    // binary via blocking `std::process::Command::output`. Calling them on a
+    // tokio worker (`async fn` body) pins the worker for the full
+    // subprocess+IPC roundtrip; with N projects in the registry we do
+    // N×subprocess sequentially, easily blowing past the request timeout when
+    // the binary is on slower storage. Move the loop onto the blocking pool
+    // so the runtime stays responsive.
+    let projects = tokio::task::spawn_blocking(|| -> Vec<ProjectInfo> {
+        let registry = match smooth_pearls::Registry::load() {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to load project registry");
+                return Vec::new();
+            }
+        };
 
-    let mut projects = Vec::new();
-    for entry in registry.list() {
-        let path_str = entry.path.to_string_lossy().to_string();
-        if is_invalid_project(&path_str) {
-            continue;
-        }
+        let mut projects = Vec::new();
+        for entry in registry.list() {
+            let path_str = entry.path.to_string_lossy().to_string();
+            if is_invalid_project(&path_str) {
+                continue;
+            }
 
-        let dolt_dir = entry.path.join(".smooth").join("dolt");
-        let counts = match smooth_pearls::PearlStore::open(&dolt_dir) {
-            Ok(store) => match store.stats() {
-                Ok(stats) => ProjectPearlCounts {
+            let dolt_dir = entry.path.join(".smooth").join("dolt");
+            let counts = smooth_pearls::PearlStore::open(&dolt_dir)
+                .and_then(|store| store.stats())
+                .map(|stats| ProjectPearlCounts {
                     open: stats.open,
                     in_progress: stats.in_progress,
                     closed: stats.closed,
-                },
-                Err(_) => ProjectPearlCounts {
-                    open: 0,
-                    in_progress: 0,
-                    closed: 0,
-                },
-            },
-            Err(_) => ProjectPearlCounts {
-                open: 0,
-                in_progress: 0,
-                closed: 0,
-            },
-        };
+                })
+                .unwrap_or_default();
 
-        projects.push(ProjectInfo {
-            path: path_str,
-            name: entry.name.clone(),
-            pearl_counts: counts,
-        });
-    }
+            projects.push(ProjectInfo {
+                path: path_str,
+                name: entry.name.clone(),
+                pearl_counts: counts,
+            });
+        }
+        projects
+    })
+    .await
+    .unwrap_or_default();
 
     Json(ApiResponse { data: projects, ok: true })
 }
@@ -2622,21 +2623,29 @@ async fn project_pearls_handler(State(state): State<AppState>, Query(params): Qu
         return Json(ApiResponse { data: vec![], ok: false });
     }
 
-    let store = match smooth_pearls::PearlStore::open(&dolt_dir) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(error = %e, path = %params.path, "failed to open pearl store for project");
-            return Json(ApiResponse { data: vec![], ok: false });
+    // Same blocking-subprocess pattern as `list_projects_handler` —
+    // `PearlStore::open` + `store.list()` both shell out to `smooth-dolt`.
+    let limit = params.limit;
+    let status = params.status.clone();
+    let path_for_log = params.path.clone();
+    let result: Result<Vec<smooth_pearls::Pearl>, anyhow::Error> = tokio::task::spawn_blocking(move || {
+        let store = smooth_pearls::PearlStore::open(&dolt_dir)?;
+        let mut query = smooth_pearls::PearlQuery::new().with_limit(limit);
+        if let Some(ref s) = status {
+            query = query.with_status(smooth_pearls::PearlStatus::from_str_loose(s).unwrap_or(smooth_pearls::PearlStatus::Open));
         }
-    };
+        Ok(store.list(&query).unwrap_or_default())
+    })
+    .await
+    .unwrap_or_else(|join_err| Err(anyhow::anyhow!("blocking task join failed: {join_err}")));
 
-    let mut query = smooth_pearls::PearlQuery::new().with_limit(params.limit);
-    if let Some(ref s) = params.status {
-        query = query.with_status(smooth_pearls::PearlStatus::from_str_loose(s).unwrap_or(smooth_pearls::PearlStatus::Open));
+    match result {
+        Ok(pearls) => Json(ApiResponse { data: pearls, ok: true }),
+        Err(e) => {
+            tracing::warn!(error = %e, path = %path_for_log, "failed to load pearls for project");
+            Json(ApiResponse { data: vec![], ok: false })
+        }
     }
-
-    let pearls = store.list(&query).unwrap_or_default();
-    Json(ApiResponse { data: pearls, ok: true })
 }
 
 // ── Issues ─────────────────────────────────────────────────
