@@ -210,7 +210,8 @@ impl Tool for TeammateSpawnTool {
                     "pearl_id": { "type": "string", "description": "The pearl to dispatch on. Must already exist (call pearls_create first)." },
                     "extra_prompt": { "type": "string", "description": "Optional extra instruction appended to the pearl description when handing off to the teammate." },
                     "budget_usd": { "type": "number", "description": "Optional cost cap in USD for this dispatch." },
-                    "working_dir": { "type": "string", "description": "Optional working directory for the teammate's sandbox. Pass an absolute path; defaults to the project root." }
+                    "working_dir": { "type": "string", "description": "Optional working directory for the teammate's sandbox. Pass an absolute path; defaults to the project root." },
+                    "role": { "type": "string", "description": "Optional cast role to spawn under (e.g. `fixer`, `mapper`, `oracle`, `heckler` — see smooth-operator/src/cast). Affects permissions, prompt, and routing slot." }
                 }
             }),
         }
@@ -221,6 +222,7 @@ impl Tool for TeammateSpawnTool {
         let extra = arguments.get("extra_prompt").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
         let budget = arguments.get("budget_usd").and_then(|v| v.as_f64());
         let working_dir = arguments.get("working_dir").and_then(|v| v.as_str()).map(String::from);
+        let role = arguments.get("role").and_then(|v| v.as_str()).map(String::from);
 
         let pearl = self
             .state
@@ -241,7 +243,7 @@ impl Tool for TeammateSpawnTool {
             image: None,
             keep_alive: false,
             memory_mb: None,
-            agent: None,
+            agent: role,
         };
 
         // Fire-and-forget: dispatch_ws_task is `async` and runs the whole
