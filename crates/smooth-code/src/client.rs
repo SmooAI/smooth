@@ -523,6 +523,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn connect_with_retry_max_attempts_zero_falls_back_to_single_shot() {
+        // pearl th-461ab9: bench-side mirror of OperatorClient's
+        // connect_with_retry tests. Use a tight ResiliencyConfig so the test
+        // doesn't pause the full default backoff (base 1s, max 30s).
+        let cfg = ResiliencyConfig {
+            base_backoff: std::time::Duration::from_millis(1),
+            max_backoff: std::time::Duration::from_millis(2),
+            ..ResiliencyConfig::default()
+        };
+        // Port 1 has nothing listening — `ensure_server` fails first because
+        // the bench harness will try to spawn a `<smooth-bench> up` shim
+        // which errors out, then health probe times out.
+        let mut client = BigSmoothClient::with_config("http://127.0.0.1:1", cfg);
+        let result = client.connect_with_retry(0).await;
+        assert!(result.is_err(), "max_attempts=0 must surface the same error as single-shot connect()");
+    }
+
+    #[tokio::test]
+    async fn connect_with_retry_returns_last_error_after_exhausting_attempts() {
+        // pearl th-461ab9: confirm we don't hang when every attempt fails.
+        let cfg = ResiliencyConfig {
+            base_backoff: std::time::Duration::from_millis(1),
+            max_backoff: std::time::Duration::from_millis(2),
+            ..ResiliencyConfig::default()
+        };
+        let mut client = BigSmoothClient::with_config("http://127.0.0.1:1", cfg);
+        let started = std::time::Instant::now();
+        let result = client.connect_with_retry(3).await;
+        let elapsed = started.elapsed();
+        assert!(result.is_err(), "all attempts must fail against an unreachable URL");
+        // The bench harness's `ensure_server` itself sleeps up to 10s per
+        // attempt waiting for /health to come up. With 3 attempts, total
+        // wall-clock should be bounded by ~30s + tiny backoff. The test
+        // mostly proves the function returns rather than hangs forever.
+        assert!(
+            elapsed < std::time::Duration::from_secs(60),
+            "connect_with_retry should not hang; took {:?}",
+            elapsed
+        );
+    }
+
+    #[tokio::test]
     async fn send_serializes_and_sends_via_channel() {
         // Create a client with a manually wired-up channel
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
