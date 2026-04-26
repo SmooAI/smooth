@@ -257,6 +257,50 @@ impl BigSmoothClient {
         anyhow::bail!("Max reconnect attempts ({}) exhausted", self.conn_mgr.reconnect_attempts())
     }
 
+    /// pearl th-461ab9 (Mode B fix): Try to connect with bounded
+    /// exponential backoff for the INITIAL connection.
+    ///
+    /// Mirrors `OperatorClient::connect_with_retry` for the bench / headless
+    /// path. `connect()` is one-shot and does a 5s wait for the
+    /// `ServerEvent::Connected` handshake. When Big Smooth was just (re)started
+    /// — e.g. by the LaunchAgent KeepAlive cycle, or because the bench
+    /// harness's `ensure_server` raced the leader's bind — the first attempt
+    /// can fail before the server's WS handler is ready. This wrapper retries
+    /// with the same exponential-backoff machinery `reconnect()` uses but
+    /// driven by an attempt-count cap so a permanently-unreachable Big Smooth
+    /// (e.g. wrong port, crashed) still fails fast.
+    ///
+    /// `max_attempts` of 0 or 1 falls back to single-shot `connect()` for
+    /// backwards compatibility. Recommended value is 5: with the default
+    /// `ResiliencyConfig` (base 1s, max 30s) total wait before final failure
+    /// is ~31s of mostly-sleeping (1+2+4+8+16s).
+    pub async fn connect_with_retry(&mut self, max_attempts: u32) -> anyhow::Result<()> {
+        if max_attempts <= 1 {
+            return self.connect().await;
+        }
+        let mut last_err: Option<anyhow::Error> = None;
+        for attempt in 0..max_attempts {
+            match self.connect().await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    let backoff = self.conn_mgr.backoff_duration(attempt);
+                    tracing::debug!(
+                        attempt = attempt + 1,
+                        max_attempts,
+                        backoff_ms = backoff.as_millis() as u64,
+                        error = %e,
+                        "BigSmoothClient connect attempt failed; sleeping before retry"
+                    );
+                    last_err = Some(e);
+                    if attempt + 1 < max_attempts {
+                        tokio::time::sleep(backoff).await;
+                    }
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("connect_with_retry exhausted {max_attempts} attempts")))
+    }
+
     /// Send a task start and return a receiver for streaming server events.
     ///
     /// The returned receiver will yield events until the task completes or

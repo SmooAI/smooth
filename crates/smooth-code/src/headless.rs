@@ -92,7 +92,14 @@ pub async fn run_headless_capture(
     }
 
     let mut client = BigSmoothClient::new(url);
-    client.connect().await.map_err(|e| anyhow::anyhow!("connect to Big Smooth at {url}: {e}"))?;
+    // pearl th-461ab9 (Mode B fix): bounded retry for initial WebSocket connect.
+    // The bench harness was racing the launchctl-managed Big Smooth's restart
+    // window and its 5s Connected-event handshake; 5 attempts × exp-backoff
+    // covers the ~31s window between LaunchAgent restarts.
+    client
+        .connect_with_retry(5)
+        .await
+        .map_err(|e| anyhow::anyhow!("connect to Big Smooth at {url}: {e}"))?;
 
     let mut events = client
         .run_task(&message, model.as_deref(), budget, Some(&working_dir.to_string_lossy()), None)
