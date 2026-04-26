@@ -764,6 +764,16 @@ pub struct DispatchOptions {
     /// `Cast::builtin()` and installs a `PermissionHook`
     /// that blocks denied tool calls before they execute.
     pub agent: Option<String>,
+    /// Reuse an existing pearl instead of creating a fresh one.
+    /// The chat-agent's `teammate_spawn` tool sets this to the pearl
+    /// id that `pearls_create` just returned, so dispatch doesn't
+    /// duplicate it. When set:
+    ///   - Diver (when present) reconciles status to `in_progress`
+    ///     instead of dispatching a new entry.
+    ///   - PearlStore-only path updates status to `in_progress` so
+    ///     the orchestrator's "ready pearls" sweep doesn't double-
+    ///     dispatch the same pearl.
+    pub pearl_id: Option<String>,
 }
 
 pub async fn dispatch_ws_task(state: &AppState, opts: DispatchOptions) {
@@ -1013,6 +1023,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         keep_alive,
         memory_mb,
         agent,
+        pearl_id: pearl_id_in,
     } = opts;
     use crate::sandbox::{self, BindMount, SandboxConfig};
 
@@ -1029,10 +1040,34 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
     // quotes, Unicode, etc.) are safe. The kernel cmdline size limit
     // concern was also resolved by the task file approach.
 
-    // Pearl lifecycle: dispatch through Diver when available (Boardroom mode),
-    // fall back to direct PearlStore when Diver is not running.
+    // Pearl lifecycle:
+    //   1. If the caller (typically the chat-agent's `teammate_spawn` tool)
+    //      already created a pearl and passed `pearl_id`, REUSE it. We just
+    //      flip its status to in_progress (via Diver if available) so the
+    //      orchestrator's ready-pearls sweep doesn't dispatch a duplicate.
+    //   2. Otherwise dispatch through Diver when available (Boardroom mode).
+    //   3. Fall back to direct PearlStore when neither applies.
     let diver = state.diver.clone();
-    let pearl_id: Option<String> = if let Some(ref diver_client) = diver {
+    let pearl_id: Option<String> = if let Some(supplied) = pearl_id_in {
+        // Pearl already exists — reconcile status so the orchestrator
+        // doesn't pick it up as "ready" and dispatch a second teammate.
+        if let Some(ref diver_client) = diver {
+            // Diver knows about the pearl already; ask it to mark in_progress.
+            // If Diver doesn't expose a status update (current state), the
+            // direct PearlStore fallback below covers us.
+            tracing::info!(pearl_id = %supplied, "dispatch: reusing caller-supplied pearl (Diver mode)");
+        } else {
+            tracing::info!(pearl_id = %supplied, "dispatch: reusing caller-supplied pearl");
+        }
+        let _ = pearl_store.update(
+            &supplied,
+            &smooth_pearls::PearlUpdate {
+                status: Some(smooth_pearls::PearlStatus::InProgress),
+                ..Default::default()
+            },
+        );
+        Some(supplied)
+    } else if let Some(ref diver_client) = diver {
         match diver_client.dispatch(&format!("Task: {}", truncate_str(&message, 60)), &message, None).await {
             Ok(id) => {
                 tracing::info!(pearl_id = %id, "dispatch: pearl created via Diver");
@@ -2054,6 +2089,7 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
         keep_alive: _,
         memory_mb: _,
         agent,
+        pearl_id: pearl_id_in,
     } = opts;
 
     let task_id = uuid::Uuid::new_v4().to_string();
@@ -2062,10 +2098,21 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
     let last_activity = state.last_activity.clone();
 
     // Pearl bookkeeping — mirrors the sandboxed path so runs show
-    // up in `th pearls` the same way. Diver first if configured,
-    // direct PearlStore otherwise.
+    // up in `th pearls` the same way. Caller-supplied pearl wins
+    // (the chat-agent's teammate_spawn passes the pearls_create id);
+    // otherwise Diver, then direct PearlStore.
     let diver = state.diver.clone();
-    let pearl_id: Option<String> = if let Some(ref diver_client) = diver {
+    let pearl_id: Option<String> = if let Some(supplied) = pearl_id_in {
+        tracing::info!(pearl_id = %supplied, "direct dispatch: reusing caller-supplied pearl");
+        let _ = pearl_store.update(
+            &supplied,
+            &smooth_pearls::PearlUpdate {
+                status: Some(smooth_pearls::PearlStatus::InProgress),
+                ..Default::default()
+            },
+        );
+        Some(supplied)
+    } else if let Some(ref diver_client) = diver {
         match diver_client.dispatch(&format!("Task: {}", truncate_str(&message, 60)), &message, None).await {
             Ok(id) => Some(id),
             Err(e) => {
@@ -2547,6 +2594,7 @@ async fn run_task_handler(State(state): State<AppState>, Json(req): Json<TaskReq
         keep_alive: req.keep_alive,
         memory_mb: req.memory_mb,
         agent: req.agent.clone(),
+        pearl_id: None,
     };
 
     tokio::spawn(async move {
