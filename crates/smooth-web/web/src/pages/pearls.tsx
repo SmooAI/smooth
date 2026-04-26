@@ -310,6 +310,59 @@ function StatsView({ pearls }: { pearls: Pearl[] }) {
     );
 }
 
+// --- Project Picker ---
+
+function ProjectPicker() {
+    const { projects, setSelectedProject } = useProject();
+
+    if (projects.length === 0) {
+        return (
+            <div className="rounded-lg border border-border p-6">
+                <h2 className="text-base font-semibold mb-2">No projects registered</h2>
+                <p className="text-sm text-muted-foreground mb-3">
+                    Initialize pearls in a repository to see it here:
+                </p>
+                <pre className="rounded bg-muted px-3 py-2 text-xs overflow-x-auto">
+                    cd ~/your/repo && th pearls init
+                </pre>
+            </div>
+        );
+    }
+
+    return (
+        <div>
+            <h2 className="text-base font-semibold mb-3">Choose a project</h2>
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {projects.map((p) => {
+                    const total =
+                        (p.pearl_counts?.open ?? 0) +
+                        (p.pearl_counts?.in_progress ?? 0) +
+                        (p.pearl_counts?.closed ?? 0);
+                    return (
+                        <button
+                            key={p.path}
+                            onClick={() => setSelectedProject(p.path)}
+                            type="button"
+                            className="text-left rounded-lg border border-border bg-card p-4 hover:bg-muted/40 hover:border-primary/40 transition-colors cursor-pointer min-h-[88px]"
+                        >
+                            <div className="font-medium mb-1">{p.name}</div>
+                            <div className="text-xs text-muted-foreground font-mono truncate mb-2">
+                                {p.path}
+                            </div>
+                            <div className="flex flex-wrap gap-1.5 text-xs">
+                                <Badge variant="muted">{p.pearl_counts?.open ?? 0} open</Badge>
+                                <Badge variant="warning">{p.pearl_counts?.in_progress ?? 0} active</Badge>
+                                <Badge variant="success">{p.pearl_counts?.closed ?? 0} closed</Badge>
+                                <span className="text-muted-foreground self-center">· {total} total</span>
+                            </div>
+                        </button>
+                    );
+                })}
+            </div>
+        </div>
+    );
+}
+
 // --- Main Page ---
 
 export function PearlsPage() {
@@ -358,6 +411,7 @@ export function PearlsPage() {
                             value={search}
                             onChange={(e) => setSearch(e.target.value)}
                             className="w-full rounded-lg border border-border bg-background px-9 py-2 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                            style={{ fontSize: '16px' }}
                         />
                         {search && (
                             <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">
@@ -368,9 +422,7 @@ export function PearlsPage() {
                 )}
             </div>
 
-            {!selectedProject && (
-                <p className="text-muted-foreground">Select a project to view pearls.</p>
-            )}
+            {!selectedProject && <ProjectPicker />}
             {selectedProject && loading && (
                 <p className="text-muted-foreground">Loading pearls...</p>
             )}
