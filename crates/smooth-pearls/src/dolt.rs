@@ -6,28 +6,69 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
 
+use crate::dolt_server::SmoothDoltServer;
+
 /// Handle to the smooth-dolt binary. All Dolt operations go through this.
+///
+/// Two transports are supported:
+///
+/// 1. **CLI mode** (default — [`SmoothDolt::new`]): each method spawns a
+///    fresh `smooth-dolt sql ...` subprocess via `Command::output`.
+///    Works fine for short-lived commands like `th pearls list`.
+///
+/// 2. **Server mode** ([`SmoothDolt::from_server`]): each method round-
+///    trips through a long-running `smooth-dolt serve` subprocess over a
+///    Unix socket. The Big Smooth long-running daemon uses this to avoid
+///    a known hang where the second `PearlStore::open` inside the same
+///    process wedges the spawned smooth-dolt subprocess in
+///    `pthread_cond_wait` (see pearl `th-1a61a7`). The server itself is
+///    spawned at startup (synchronous code, before tokio handlers run)
+///    where the underlying issue doesn't fire.
 #[derive(Debug, Clone)]
 pub struct SmoothDolt {
-    /// Path to the smooth-dolt binary.
+    /// Path to the smooth-dolt binary. Used in CLI mode.
     bin: PathBuf,
     /// Path to the Dolt data directory (e.g., `.smooth/dolt/`).
     data_dir: PathBuf,
+    /// When set, route operations through this long-running server's
+    /// socket instead of spawning per-call. The `Arc` lets multiple
+    /// `SmoothDolt` clones (and their `PearlStore` parents) share the
+    /// same server without each owning a copy of the spawned child.
+    server: Option<Arc<SmoothDoltServer>>,
 }
 
 impl SmoothDolt {
-    /// Create a new handle pointing at the given data directory.
+    /// Create a CLI-mode handle pointing at the given data directory.
     /// Locates the `smooth-dolt` binary automatically.
     pub fn new(data_dir: impl Into<PathBuf>) -> Result<Self> {
         let bin = find_smooth_dolt_binary().context("smooth-dolt binary not found. Run: scripts/build-smooth-dolt.sh")?;
         Ok(Self {
             bin,
             data_dir: data_dir.into(),
+            server: None,
         })
+    }
+
+    /// Create a server-mode handle that routes all operations through a
+    /// long-running [`SmoothDoltServer`] instead of spawning per-call.
+    /// `data_dir` is informational here (returned by [`Self::data_dir`]);
+    /// the actual storage path is whatever was passed to
+    /// [`SmoothDoltServer::spawn`].
+    #[must_use]
+    pub fn from_server(server: Arc<SmoothDoltServer>, data_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            // The `bin` field is unused in server mode but kept for the
+            // accessor; pick something reasonable rather than holding an
+            // Option just for this case.
+            bin: server.socket_path().to_path_buf(),
+            data_dir: data_dir.into(),
+            server: Some(server),
+        }
     }
 
     /// Path to the Dolt data directory backing this handle.
@@ -39,17 +80,28 @@ impl SmoothDolt {
     /// Create a handle with an explicit binary path (for testing).
     #[must_use]
     pub fn with_bin(bin: PathBuf, data_dir: PathBuf) -> Self {
-        Self { bin, data_dir }
+        Self {
+            bin,
+            data_dir,
+            server: None,
+        }
     }
 
-    /// Initialize a new Dolt database at the data directory.
+    /// Initialize a new Dolt database at the data directory. Server mode
+    /// is rejected — init must run before a server can serve the dir.
     pub fn init(&self) -> Result<String> {
-        self.run(&["init", &self.data_dir_str()])
+        if self.server.is_some() {
+            anyhow::bail!("init is not supported in server mode; init the dolt dir first, then spawn the server");
+        }
+        self.run_cli(&["init", &self.data_dir_str()])
     }
 
     /// Execute a SQL query and return parsed JSON results.
     pub fn sql(&self, query: &str) -> Result<Vec<Value>> {
-        let output = self.run(&["sql", &self.data_dir_str(), "-q", query])?;
+        if let Some(server) = &self.server {
+            return server.client()?.sql(query);
+        }
+        let output = self.run_cli(&["sql", &self.data_dir_str(), "-q", query])?;
         if output.is_empty() || output == "null" {
             return Ok(Vec::new());
         }
@@ -59,25 +111,37 @@ impl SmoothDolt {
 
     /// Execute a SQL statement (INSERT/UPDATE/DELETE/CREATE). Returns raw output.
     pub fn exec(&self, statement: &str) -> Result<String> {
-        self.run(&["sql", &self.data_dir_str(), "-q", statement])
+        if let Some(server) = &self.server {
+            let rows = server.client()?.exec(statement)?;
+            return Ok(format!("{rows} rows affected"));
+        }
+        self.run_cli(&["sql", &self.data_dir_str(), "-q", statement])
     }
 
     /// Stage all changes and commit with a message.
     pub fn commit(&self, message: &str) -> Result<String> {
-        self.run(&["commit", &self.data_dir_str(), "-m", message])
+        if let Some(server) = &self.server {
+            return server.client()?.commit(message);
+        }
+        self.run_cli(&["commit", &self.data_dir_str(), "-m", message])
     }
 
     /// Query the Dolt commit log. Returns vec of (hash, author, date, message).
     pub fn log(&self, limit: usize) -> Result<Vec<(String, String, String, String)>> {
-        let output = self.run(&["log", &self.data_dir_str(), "-n", &limit.to_string()])?;
+        let output = if let Some(server) = &self.server {
+            server.client()?.log(limit)?
+        } else {
+            self.run_cli(&["log", &self.data_dir_str(), "-n", &limit.to_string()])?
+        };
         let mut entries = Vec::new();
         for line in output.lines() {
             let line = line.trim();
             if line.is_empty() {
                 continue;
             }
-            // Format: "hash message (author) date"
-            // Just pass through as a single string for now.
+            // Format: "hash message (author) date" — passthrough as a
+            // single string for now; callers that need structured fields
+            // can split.
             entries.push((line.to_string(), String::new(), String::new(), String::new()));
         }
         Ok(entries)
@@ -85,32 +149,51 @@ impl SmoothDolt {
 
     /// Push to the configured Dolt remote (refs/dolt/data on git origin).
     pub fn push(&self) -> Result<String> {
-        self.run(&["push", &self.data_dir_str()])
+        if let Some(server) = &self.server {
+            return server.client()?.dolt("push");
+        }
+        self.run_cli(&["push", &self.data_dir_str()])
     }
 
     /// Pull from the configured Dolt remote.
     pub fn pull(&self) -> Result<String> {
-        self.run(&["pull", &self.data_dir_str()])
+        if let Some(server) = &self.server {
+            return server.client()?.dolt("pull");
+        }
+        self.run_cli(&["pull", &self.data_dir_str()])
     }
 
-    /// Add a Dolt remote.
+    /// Add a Dolt remote. CLI-only; the server protocol doesn't expose
+    /// remote management because it's an administrative one-shot.
     pub fn remote_add(&self, name: &str, url: &str) -> Result<String> {
-        self.run(&["remote", &self.data_dir_str(), "add", name, url])
+        if self.server.is_some() {
+            anyhow::bail!("remote_add is not supported in server mode; use the CLI directly");
+        }
+        self.run_cli(&["remote", &self.data_dir_str(), "add", name, url])
     }
 
-    /// List configured Dolt remotes.
+    /// List configured Dolt remotes. CLI-only (see `remote_add`).
     pub fn remote_list(&self) -> Result<String> {
-        self.run(&["remote", &self.data_dir_str(), "list"])
+        if self.server.is_some() {
+            anyhow::bail!("remote_list is not supported in server mode; use the CLI directly");
+        }
+        self.run_cli(&["remote", &self.data_dir_str(), "list"])
     }
 
     /// Garbage collect — compact the database to minimize storage.
     pub fn gc(&self) -> Result<String> {
-        self.run(&["gc", &self.data_dir_str()])
+        if let Some(server) = &self.server {
+            return server.client()?.dolt("gc");
+        }
+        self.run_cli(&["gc", &self.data_dir_str()])
     }
 
     /// Check the Dolt status (working set changes).
     pub fn status(&self) -> Result<String> {
-        self.run(&["status", &self.data_dir_str()])
+        if let Some(server) = &self.server {
+            return server.client()?.dolt("status");
+        }
+        self.run_cli(&["status", &self.data_dir_str()])
     }
 
     /// Get the version of the smooth-dolt binary.
@@ -127,7 +210,7 @@ impl SmoothDolt {
         self.data_dir.to_string_lossy().to_string()
     }
 
-    /// Run a smooth-dolt command and return stdout.
+    /// Run a smooth-dolt command and return stdout (CLI mode).
     ///
     /// Uses `Stdio::null()` for stdin and stderr. The Go runtime inside
     /// smooth-dolt forks a long-lived dolt sql-server child that inherits
@@ -140,7 +223,7 @@ impl SmoothDolt {
     /// need the SQL result; on failure we surface a generic message
     /// instead of stderr — operators can re-run the underlying CLI for
     /// detail.
-    fn run(&self, args: &[&str]) -> Result<String> {
+    fn run_cli(&self, args: &[&str]) -> Result<String> {
         let output = Command::new(&self.bin)
             .args(args)
             .stdin(Stdio::null())
@@ -167,7 +250,7 @@ impl SmoothDolt {
 ///  2. `target/release/smooth-dolt` relative to CARGO_MANIFEST_DIR (dev builds)
 ///  3. Same directory as the current executable (installed alongside `th`)
 ///  4. `PATH` lookup
-fn find_smooth_dolt_binary() -> Option<PathBuf> {
+pub fn find_smooth_dolt_binary() -> Option<PathBuf> {
     // 1. Explicit env var.
     if let Ok(p) = std::env::var("SMOOTH_DOLT") {
         let path = PathBuf::from(p);

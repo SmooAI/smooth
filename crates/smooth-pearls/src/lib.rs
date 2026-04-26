@@ -7,6 +7,7 @@
 //! or git refs). Global registry at `~/.smooth/` tracks all projects.
 
 pub mod dolt;
+pub mod dolt_server;
 pub mod query;
 pub mod registry;
 #[allow(clippy::missing_errors_doc)]
@@ -15,6 +16,7 @@ pub mod tools;
 pub mod types;
 
 pub use dolt::SmoothDolt;
+pub use dolt_server::{SmoothDoltClient, SmoothDoltServer};
 pub use query::PearlQuery;
 pub use registry::Registry;
 pub use store::PearlStore;

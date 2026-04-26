@@ -1,5 +1,6 @@
 //! Axum HTTP server — all REST routes, middleware, CORS.
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -50,6 +51,16 @@ fn max_sandbox_concurrency() -> usize {
 #[derive(Clone)]
 pub struct AppState {
     pub pearl_store: smooth_pearls::PearlStore,
+    /// Per-project [`PearlStore`]s, each backed by a long-running
+    /// `smooth-dolt serve` subprocess spawned in [`AppState::new`]. See
+    /// `smooth_pearls::SmoothDoltServer` for why we don't open fresh
+    /// stores from inside tokio handlers (pearl `th-1a61a7`).
+    pub project_pearl_stores: Arc<HashMap<std::path::PathBuf, smooth_pearls::PearlStore>>,
+    /// `SmoothDoltServer` handles for each cached project. Held to keep
+    /// the spawned children alive — `Drop` SIGTERMs them and removes
+    /// their socket files. The `PearlStore`s above route their queries
+    /// through these via `SmoothDolt::from_server`.
+    pub project_dolt_servers: Arc<HashMap<std::path::PathBuf, Arc<smooth_pearls::SmoothDoltServer>>>,
     pub session_store: Arc<crate::session::DoltSessionStore>,
     pub start_time: Instant,
     pub last_activity: Arc<Mutex<Instant>>,
@@ -88,6 +99,44 @@ impl AppState {
         let (event_tx, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         let orchestrator = crate::orchestrator::Orchestrator::new(max_operators, pearl_store.clone()).with_event_tx(event_tx.clone());
 
+        // Pre-spawn a `smooth-dolt serve` per registered project, wrap each
+        // in a server-mode `PearlStore`, cache. Synchronous code; runs
+        // BEFORE axum starts so the smooth-dolt subprocess hang documented
+        // in pearl `th-1a61a7` doesn't fire here. Failures are logged
+        // and skipped — a single broken project shouldn't take the
+        // service down.
+        let (project_pearl_stores, project_dolt_servers) = match smooth_pearls::Registry::load() {
+            Ok(registry) => {
+                let mut stores: HashMap<std::path::PathBuf, smooth_pearls::PearlStore> = HashMap::new();
+                let mut servers: HashMap<std::path::PathBuf, Arc<smooth_pearls::SmoothDoltServer>> = HashMap::new();
+                for entry in registry.list() {
+                    let path_str = entry.path.to_string_lossy().to_string();
+                    if is_invalid_project(&path_str) {
+                        continue;
+                    }
+                    let dolt_dir = entry.path.join(".smooth").join("dolt");
+                    match smooth_pearls::SmoothDoltServer::spawn(&dolt_dir) {
+                        Ok(server) => {
+                            let server = Arc::new(server);
+                            let dolt = smooth_pearls::SmoothDolt::from_server(server.clone(), &dolt_dir);
+                            let store = smooth_pearls::PearlStore::from_dolt(dolt);
+                            tracing::info!(path = %path_str, "spawned smooth-dolt serve for project");
+                            stores.insert(entry.path.clone(), store);
+                            servers.insert(entry.path.clone(), server);
+                        }
+                        Err(e) => {
+                            tracing::warn!(path = %path_str, error = %e, "failed to spawn smooth-dolt serve; project unavailable until restart");
+                        }
+                    }
+                }
+                (Arc::new(stores), Arc::new(servers))
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to load project registry");
+                (Arc::new(HashMap::new()), Arc::new(HashMap::new()))
+            }
+        };
+
         // Construct the Boardroom Narc. If the host has an LLM provider
         // configured, Narc uses the default provider for its judge; otherwise
         // it runs rule-engine-only and escalates any unhandled request to a
@@ -124,6 +173,8 @@ impl AppState {
 
         Self {
             pearl_store,
+            project_pearl_stores,
+            project_dolt_servers,
             session_store,
             start_time: Instant::now(),
             last_activity: Arc::new(Mutex::new(Instant::now())),
@@ -2555,14 +2606,12 @@ fn is_invalid_project(path: &str) -> bool {
 async fn list_projects_handler(State(state): State<AppState>) -> Json<ApiResponse<Vec<ProjectInfo>>> {
     state.touch();
 
-    // `PearlStore::open` and `store.stats()` both spawn the `smooth-dolt` Go
-    // binary via blocking `std::process::Command::output`. Calling them on a
-    // tokio worker (`async fn` body) pins the worker for the full
-    // subprocess+IPC roundtrip; with N projects in the registry we do
-    // N×subprocess sequentially, easily blowing past the request timeout when
-    // the binary is on slower storage. Move the loop onto the blocking pool
-    // so the runtime stays responsive.
-    let projects = tokio::task::spawn_blocking(|| -> Vec<ProjectInfo> {
+    // Use the per-project `PearlStore`s pre-spawned at startup, each
+    // routed through its own long-running `smooth-dolt serve`. See
+    // `AppState::project_pearl_stores` for why we don't open fresh.
+    let stores = state.project_pearl_stores.clone();
+
+    let projects = tokio::task::spawn_blocking(move || -> Vec<ProjectInfo> {
         let registry = match smooth_pearls::Registry::load() {
             Ok(r) => r,
             Err(e) => {
@@ -2578,15 +2627,23 @@ async fn list_projects_handler(State(state): State<AppState>) -> Json<ApiRespons
                 continue;
             }
 
-            let dolt_dir = entry.path.join(".smooth").join("dolt");
-            let counts = smooth_pearls::PearlStore::open(&dolt_dir)
-                .and_then(|store| store.stats())
-                .map(|stats| ProjectPearlCounts {
-                    open: stats.open,
-                    in_progress: stats.in_progress,
-                    closed: stats.closed,
-                })
-                .unwrap_or_default();
+            let counts = match stores.get(&entry.path) {
+                Some(store) => store
+                    .stats()
+                    .map(|stats| ProjectPearlCounts {
+                        open: stats.open,
+                        in_progress: stats.in_progress,
+                        closed: stats.closed,
+                    })
+                    .unwrap_or_default(),
+                None => {
+                    // Project registered after startup, or its serve
+                    // child failed to spawn. Surface the entry with
+                    // zero counts so it still appears in the picker.
+                    tracing::debug!(path = %path_str, "project not in pre-spawned cache; restart service to populate");
+                    ProjectPearlCounts::default()
+                }
+            };
 
             projects.push(ProjectInfo {
                 path: path_str,
@@ -2616,20 +2673,17 @@ pub struct ProjectPearlsParams {
 async fn project_pearls_handler(State(state): State<AppState>, Query(params): Query<ProjectPearlsParams>) -> Json<ApiResponse<Vec<smooth_pearls::Pearl>>> {
     state.touch();
 
-    let project_path = std::path::Path::new(&params.path);
-    let dolt_dir = project_path.join(".smooth").join("dolt");
-
-    if !dolt_dir.exists() {
-        return Json(ApiResponse { data: vec![], ok: false });
-    }
-
-    // Same blocking-subprocess pattern as `list_projects_handler` —
-    // `PearlStore::open` + `store.list()` both shell out to `smooth-dolt`.
+    // Use the pre-spawned (server-mode) store for this project. See
+    // `AppState::project_pearl_stores` for why we don't open fresh.
+    let project_path = std::path::PathBuf::from(&params.path);
+    let stores = state.project_pearl_stores.clone();
     let limit = params.limit;
     let status = params.status.clone();
     let path_for_log = params.path.clone();
     let result: Result<Vec<smooth_pearls::Pearl>, anyhow::Error> = tokio::task::spawn_blocking(move || {
-        let store = smooth_pearls::PearlStore::open(&dolt_dir)?;
+        let store = stores
+            .get(&project_path)
+            .ok_or_else(|| anyhow::anyhow!("project not in pre-spawned cache (restart service to populate): {}", project_path.display()))?;
         let mut query = smooth_pearls::PearlQuery::new().with_limit(limit);
         if let Some(ref s) = status {
             query = query.with_status(smooth_pearls::PearlStatus::from_str_loose(s).unwrap_or(smooth_pearls::PearlStatus::Open));
