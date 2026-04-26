@@ -38,6 +38,7 @@ lsp-types.workspace = true
 rmcp.workspace = true
 toml.workspace = true
 dirs-next.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

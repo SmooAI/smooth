@@ -39,10 +39,12 @@
 
 #![allow(clippy::expect_used)]
 
+mod ask_smooth_tool;
 mod delegate;
 mod mailbox;
 mod pearl_tools;
 mod port_forward;
+mod reply_to_chat_tool;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1650,13 +1652,31 @@ async fn main() {
     // conversation as user-turns. See `mailbox::parse_comment` for the
     // prefix table. We hold onto the JoinHandle for the lifetime of the
     // run so the poller is dropped exactly when the agent exits.
+    //
+    // Also registers `ask_smooth` and `reply_to_chat` tools so the
+    // teammate can talk back to Big Smooth / the user. These tools share
+    // the mailbox's `QuestionRegistry` so blocking `ask_smooth` calls
+    // resolve cleanly when an `[ANSWER:*]` comment lands.
     let mailbox_chat_rx = match (pearl_store_handle.clone(), std::env::var("SMOOTH_PEARL_ID").ok()) {
         (Some(h), Some(pid)) if !pid.trim().is_empty() => {
-            let (rx, _join) = mailbox::spawn_poller(h, pid.clone());
+            let questions = std::sync::Arc::new(mailbox::QuestionRegistry::new());
+            let (rx, join) = mailbox::spawn_poller(h.clone(), pid.clone(), Some(questions.clone()));
             tracing::info!(pearl_id = %pid, "mailbox: poller spawned");
             // Leak the join handle: the task observes tx-drop and exits
             // naturally when the agent finishes; we don't need to await it.
-            std::mem::forget(_join);
+            std::mem::forget(join);
+
+            tools.register(crate::ask_smooth_tool::AskSmoothTool {
+                pearl_handle: h.clone(),
+                questions,
+                pearl_id: pid.clone(),
+            });
+            tools.register(crate::reply_to_chat_tool::ReplyToChatTool {
+                pearl_handle: h,
+                pearl_id: pid.clone(),
+            });
+            tracing::info!(pearl_id = %pid, "mailbox: registered ask_smooth + reply_to_chat tools");
+
             Some(rx)
         }
         _ => None,
