@@ -160,6 +160,27 @@ impl Orchestrator {
         Ok(())
     }
 
+    /// pearl th-461ab9 (Mode B fix): Revert a bead's pearl status back to
+    /// Open so it shows up in the next ready-bead scan. Called when dispatch
+    /// fails to reach the operator (connect_with_retry exhausted, or
+    /// assign_task failed) — without this, beads would leak status=in_progress
+    /// with no live worker.
+    ///
+    /// Best-effort: errors are logged at warn level, not propagated, because
+    /// the alternative (returning an error from dispatch) would abort the
+    /// whole scheduling pass and starve every other bead.
+    fn revert_pearl_to_open(&self, bead_id: &str) {
+        if let Err(e) = self.pearl_store.update(
+            bead_id,
+            &PearlUpdate {
+                status: Some(PearlStatus::Open),
+                ..Default::default()
+            },
+        ) {
+            tracing::warn!(bead_id, error = %e, "could not revert pearl status to Open after dispatch failure");
+        }
+    }
+
     /// Dispatch: assign beads to operators.
     async fn dispatch(&mut self) -> Result<()> {
         let ready_beads = match &self.state {
@@ -189,31 +210,54 @@ impl Orchestrator {
                         },
                     );
 
-                    // Create OperatorClient and connect to the operator's WS server
+                    // pearl th-461ab9 (Mode B fix): Create OperatorClient and connect
+                    // with bounded retry. The freshly-spawned operator VM may not yet
+                    // have its WS server bound when we race out of pool.create_operator,
+                    // so a single-shot connect() reliably hits "Handshake not finished"
+                    // on first try. connect_with_retry(5) uses ConnectionManager
+                    // exp-backoff (1+2+4+8+16s ≈ 31s ceiling) so a permanently-
+                    // unreachable runner still fails fast — but a runner that's just
+                    // slow to start gets the seconds it needs.
+                    //
+                    // On hard failure (connect retries exhausted OR assign_task fails)
+                    // we DON'T insert into active_workers / assignments; we release
+                    // the sandbox immediately and revert the pearl back to Open so the
+                    // next ready-bead scan picks it up. Without this, the orchestrator
+                    // used to leak the bead in InProgress with no live worker for
+                    // 30 min until the VM idle-timed-out.
                     let mut client = OperatorClient::new(&operator_id, &ws_url);
-                    match client.connect().await {
-                        Ok(()) => {
-                            // Look up the issue title/description for the task message
-                            let message = self
-                                .pearl_store
-                                .get(bead_id)
-                                .ok()
-                                .flatten()
-                                .map(|issue| format!("{}: {}", issue.title, issue.description))
-                                .unwrap_or_else(|| format!("Work on bead {bead_id}"));
+                    let mut succeeded = false;
+                    if client.connect_with_retry(5).await.is_ok() {
+                        let message = self
+                            .pearl_store
+                            .get(bead_id)
+                            .ok()
+                            .flatten()
+                            .map(|issue| format!("{}: {}", issue.title, issue.description))
+                            .unwrap_or_else(|| format!("Work on bead {bead_id}"));
 
-                            if let Err(e) = client.assign_task(bead_id, &message, None, "").await {
-                                tracing::error!("Failed to assign task for {bead_id}: {e}");
+                        match client.assign_task(bead_id, &message, None, "").await {
+                            Ok(()) => {
+                                self.operator_clients.insert(bead_id.clone(), client);
+                                self.active_workers.insert(bead_id.clone(), handle.clone());
+                                assignments.insert(bead_id.clone(), operator_id.clone());
+                                succeeded = true;
                             }
-                            self.operator_clients.insert(bead_id.clone(), client);
+                            Err(e) => {
+                                tracing::error!(bead_id, operator = %operator_id, error = %e, "Failed to assign task; will release sandbox and re-open bead");
+                            }
                         }
-                        Err(e) => {
-                            tracing::error!("Failed to connect to operator {operator_id}: {e}");
-                        }
+                    } else {
+                        tracing::error!(
+                            operator = %operator_id,
+                            bead_id,
+                            "operator unreachable after connect_with_retry; releasing sandbox and re-opening bead"
+                        );
                     }
-
-                    self.active_workers.insert(bead_id.clone(), handle);
-                    assignments.insert(bead_id.clone(), operator_id);
+                    if !succeeded {
+                        self.revert_pearl_to_open(bead_id);
+                        self.pool.release(&handle.operator_id).await;
+                    }
                 }
                 Err(e) => {
                     tracing::error!("Failed to create operator for {bead_id}: {e}");
@@ -463,6 +507,68 @@ mod tests {
         assert!(orch.operator_clients.is_empty());
         assert_eq!(orch.pool.active_count(), 0);
         assert!(orch.pool.has_capacity());
+    }
+
+    // pearl th-461ab9 (Mode B fix): regression tests for the dispatch-
+    // failure cleanup path.
+    #[test]
+    fn revert_pearl_to_open_flips_inprogress_back_to_open() {
+        let store = {
+            let tmp = tempfile::tempdir().unwrap();
+            let dolt_dir = tmp.path().join("dolt");
+            match PearlStore::init(&dolt_dir) {
+                Ok(store) => {
+                    std::mem::forget(tmp);
+                    store
+                }
+                Err(_) => return, // Dolt binary not available — skip
+            }
+        };
+        // Seed a pearl in InProgress (the state dispatch leaves it in just
+        // before the connect_with_retry attempt).
+        let pearl = match crate::pearls::create_pearl(&store, "test pearl", "", "task", 2) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let _ = store.update(
+            &pearl.id,
+            &PearlUpdate {
+                status: Some(PearlStatus::InProgress),
+                ..Default::default()
+            },
+        );
+        let pre = store.get(&pearl.id).unwrap().unwrap();
+        assert_eq!(pre.status, PearlStatus::InProgress, "test setup failed");
+
+        let orch = Orchestrator::new(3, store);
+        orch.revert_pearl_to_open(&pearl.id);
+
+        let post = orch.pearl_store.get(&pearl.id).unwrap().unwrap();
+        assert_eq!(
+            post.status,
+            PearlStatus::Open,
+            "revert_pearl_to_open should flip status back to Open so the bead is re-schedulable"
+        );
+    }
+
+    #[test]
+    fn revert_pearl_to_open_does_not_panic_for_unknown_bead() {
+        let store = {
+            let tmp = tempfile::tempdir().unwrap();
+            let dolt_dir = tmp.path().join("dolt");
+            match PearlStore::init(&dolt_dir) {
+                Ok(store) => {
+                    std::mem::forget(tmp);
+                    store
+                }
+                Err(_) => return,
+            }
+        };
+        let orch = Orchestrator::new(3, store);
+        // Best-effort revert: must NOT propagate / panic when the bead
+        // doesn't exist. The dispatch loop relies on this so a stale
+        // bead_id from a since-deleted pearl doesn't blow up scheduling.
+        orch.revert_pearl_to_open("th-doesnotexist");
     }
 
     #[tokio::test]
