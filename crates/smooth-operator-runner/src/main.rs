@@ -1554,7 +1554,7 @@ async fn main() {
         api_url: config.api_url.clone(),
         api_key: config.api_key.clone(),
         model: config.model.clone(),
-        max_tokens: 8192,
+        max_tokens: 32768,
         temperature: 0.3,
         retry_policy: smooth_operator::llm::RetryPolicy::default(),
         api_format: smooth_operator::llm::ApiFormat::OpenAiCompat,

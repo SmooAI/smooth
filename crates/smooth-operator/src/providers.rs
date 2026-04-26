@@ -524,7 +524,7 @@ impl ProviderRegistry {
                 api_url: provider.api_url.clone(),
                 api_key: provider.api_key.clone(),
                 model: slot.model.clone(),
-                max_tokens: 8192,
+                max_tokens: 32768,
                 temperature: 0.0,
                 retry_policy: crate::llm::RetryPolicy::default(),
                 api_format: provider.api_format.clone(),
