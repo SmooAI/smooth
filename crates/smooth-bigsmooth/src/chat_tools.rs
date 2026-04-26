@@ -235,6 +235,10 @@ impl Tool for TeammateSpawnTool {
             message.push_str("\n\n");
             message.push_str(&extra);
         }
+        // Pass the caller's pearl id through so dispatch reuses it instead
+        // of creating a duplicate. The chat-agent's `pearls_create` already
+        // produced this pearl; dispatch will flip its status to in_progress
+        // (which also keeps the orchestrator from auto-dispatching it).
         let opts = DispatchOptions {
             message,
             model: None,
@@ -244,6 +248,7 @@ impl Tool for TeammateSpawnTool {
             keep_alive: false,
             memory_mb: None,
             agent: role,
+            pearl_id: Some(pearl_id.clone()),
         };
 
         // Fire-and-forget: dispatch_ws_task is `async` and runs the whole
