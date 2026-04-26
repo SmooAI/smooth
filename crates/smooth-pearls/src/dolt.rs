@@ -5,7 +5,7 @@
 //! The binary is located once at startup and reused for all calls.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -128,15 +128,33 @@ impl SmoothDolt {
     }
 
     /// Run a smooth-dolt command and return stdout.
+    ///
+    /// Uses `Stdio::null()` for stdin and stderr. The Go runtime inside
+    /// smooth-dolt forks a long-lived dolt sql-server child that inherits
+    /// the parent's stderr fd; if we connected stderr to a pipe, that
+    /// inherited fd stayed open after the smooth-dolt parent exited and
+    /// `Command::output()` waited for EOF on the pipe forever (observed on
+    /// smoo-hub: 60s+ HTTP timeouts on `/api/projects` while the same
+    /// command run from a TTY returned in 50ms). Discarding stderr breaks
+    /// that inheritance chain. We still capture stdout because callers
+    /// need the SQL result; on failure we surface a generic message
+    /// instead of stderr — operators can re-run the underlying CLI for
+    /// detail.
     fn run(&self, args: &[&str]) -> Result<String> {
         let output = Command::new(&self.bin)
             .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
             .output()
             .with_context(|| format!("exec smooth-dolt {}: {}", args.join(" "), self.bin.display()))?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("smooth-dolt {} failed: {}", args.first().unwrap_or(&""), stderr.trim());
+            anyhow::bail!(
+                "smooth-dolt {} failed (exit {}); rerun the CLI for stderr",
+                args.first().unwrap_or(&""),
+                output.status.code().unwrap_or(-1)
+            );
         }
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
