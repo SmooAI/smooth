@@ -284,6 +284,11 @@ pub struct SearchParams {
 #[derive(Deserialize)]
 pub struct ChatBody {
     content: String,
+    /// Optional override for the chat agent's LLM. When unset the agent
+    /// runs on the reasoning slot (smooth-reasoning-kimi by default).
+    /// Set to e.g. "smooth-fast-gemini" for one-liner queries.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -742,7 +747,7 @@ pub struct DispatchOptions {
     pub agent: Option<String>,
 }
 
-async fn dispatch_ws_task(state: &AppState, opts: DispatchOptions) {
+pub async fn dispatch_ws_task(state: &AppState, opts: DispatchOptions) {
     // Direct mode: spawn the operator runner as a host subprocess
     // instead of a microVM. No Narc/Wonk/Goalie enforcement — the
     // agent has raw host access. Gated behind `SMOOTH_WORKFLOW_DIRECT=1`
@@ -2973,20 +2978,72 @@ async fn reject_review_handler(State(state): State<AppState>, Path(bead_id): Pat
 async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>) -> Json<ApiResponse<String>> {
     state.touch();
 
-    let system_prompt = "You are Smooth, an AI agent orchestration leader. You help users manage projects, assign work to Smooth Operators (AI agents in sandboxes), review work, and coordinate tasks.\n\nAvailable commands: th run <pearl-id>, th operators, th pause/steer/cancel <pearl-id>, th auth status, th status";
+    // The chat agent IS the team lead. It searches pearls, creates them
+    // with smooth-summarize-generated titles, dispatches teammates
+    // (operators), nudges them with steering messages, and reads back
+    // their progress. Default model is `smooth-reasoning-kimi` —
+    // capability for orchestration beats raw speed; per-request model
+    // override is a Phase 6 polish (see plan).
+    let system_prompt = include_str!("chat_tools_system_prompt.txt");
 
-    async fn chat_inner(system_prompt: &str, user_content: &str) -> anyhow::Result<String> {
+    async fn chat_inner(state: AppState, system_prompt: &str, user_content: &str, model_override: Option<&str>) -> anyhow::Result<String> {
+        use smooth_operator::agent::{Agent, AgentConfig, AgentEvent};
+
         let providers_path = dirs_next::home_dir().unwrap_or_default().join(".smooth/providers.json");
         let registry = ProviderRegistry::load_from_file(&providers_path).map_err(|e| anyhow::anyhow!("no LLM providers configured: {e}"))?;
-        let config = registry.default_llm_config().map_err(|e| anyhow::anyhow!("no default provider: {e}"))?;
-        let llm = smooth_operator::llm::LlmClient::new(config);
 
-        let sys_msg = smooth_operator::conversation::Message::system(system_prompt);
-        let user_msg = smooth_operator::conversation::Message::user(user_content);
-        let response = llm.chat(&[&sys_msg, &user_msg], &[]).await?;
-        Ok(response.content)
+        // Resolve the chat agent's LLM. Default is the reasoning slot
+        // (smooth-reasoning-kimi via providers.json routing). A
+        // per-request `model` field on the chat body lets callers flip
+        // to smooth-fast-gemini for one-liner queries.
+        let llm_config = if let Some(m) = model_override.filter(|s| !s.trim().is_empty()) {
+            // Use the default provider's key/url with the requested model alias.
+            let mut cfg = registry.default_llm_config().map_err(|e| anyhow::anyhow!("no default provider: {e}"))?;
+            cfg.model = m.to_string();
+            cfg
+        } else {
+            // Reasoning slot — see plan + providers.json `routing.thinking`.
+            registry
+                .llm_config_for(smooth_operator::providers::Activity::Reasoning)
+                .map_err(|e| anyhow::anyhow!("resolving reasoning slot for chat: {e}"))?
+        };
+
+        let registry_arc = std::sync::Arc::new(registry);
+        let tools = crate::chat_tools::build_chat_tools(state.clone(), registry_arc);
+
+        // Cap iterations low — the chat must stay responsive, and 5
+        // tool-using turns are plenty for "search → create pearl →
+        // spawn teammate → confirm" workflows. Hard tasks should be
+        // delegated to the teammate, not run by the chat agent itself.
+        let agent_cfg = AgentConfig::new("big-smooth-chat", system_prompt, llm_config).with_max_iterations(5);
+        let agent = Agent::new(agent_cfg, tools);
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+        // Drain events into the broadcast channel so chat-session
+        // subscribers see tool-call activity. Unfiltered for now;
+        // Phase 4 narrows this with operator-id subscription.
+        let event_tx = state.event_tx.clone();
+        let drain = tokio::spawn(async move {
+            while let Some(ev) = rx.recv().await {
+                let _ = event_tx.send(crate::events::ServerEvent::TokenDelta {
+                    task_id: "chat".to_string(),
+                    content: format!("[chat] {ev:?}"),
+                });
+            }
+        });
+
+        let conversation = agent
+            .run_with_channel(user_content.to_string(), tx)
+            .await
+            .map_err(|e| anyhow::anyhow!("chat agent: {e}"))?;
+        drain.abort();
+
+        // Final assistant message is the user-facing reply.
+        let last_assistant = conversation.last_assistant_content().unwrap_or("(no response)").to_string();
+        Ok(last_assistant)
     }
-    let result: anyhow::Result<String> = chat_inner(system_prompt, &body.content).await;
+
+    let result: anyhow::Result<String> = chat_inner(state, system_prompt, &body.content, body.model.as_deref()).await;
 
     match result {
         Ok(response) => Json(ApiResponse { data: response, ok: true }),
