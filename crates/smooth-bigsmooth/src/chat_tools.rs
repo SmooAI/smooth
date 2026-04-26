@@ -209,7 +209,8 @@ impl Tool for TeammateSpawnTool {
                 "properties": {
                     "pearl_id": { "type": "string", "description": "The pearl to dispatch on. Must already exist (call pearls_create first)." },
                     "extra_prompt": { "type": "string", "description": "Optional extra instruction appended to the pearl description when handing off to the teammate." },
-                    "budget_usd": { "type": "number", "description": "Optional cost cap in USD for this dispatch." }
+                    "budget_usd": { "type": "number", "description": "Optional cost cap in USD for this dispatch." },
+                    "working_dir": { "type": "string", "description": "Optional working directory for the teammate's sandbox. Pass an absolute path; defaults to the project root." }
                 }
             }),
         }
@@ -219,6 +220,7 @@ impl Tool for TeammateSpawnTool {
         let pearl_id = arguments["pearl_id"].as_str().ok_or_else(|| anyhow::anyhow!("missing 'pearl_id'"))?.to_string();
         let extra = arguments.get("extra_prompt").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
         let budget = arguments.get("budget_usd").and_then(|v| v.as_f64());
+        let working_dir = arguments.get("working_dir").and_then(|v| v.as_str()).map(String::from);
 
         let pearl = self
             .state
@@ -235,7 +237,7 @@ impl Tool for TeammateSpawnTool {
             message,
             model: None,
             budget,
-            working_dir: None,
+            working_dir,
             image: None,
             keep_alive: false,
             memory_mb: None,

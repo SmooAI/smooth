@@ -12,7 +12,9 @@
 //!   2. Copy the task's source + test + instruction files into a fresh
 //!      scratch run dir at `~/.smooth/bench-runs/<run-id>/work/`.
 //!   3. Invoke `th code --headless` against Big Smooth over WebSocket,
-//!      capturing tool calls + cost via [`smooth_code::headless::run_headless_capture`].
+//!      capturing tool calls + cost via Big Smooth's chat-agent (default)
+//!      or [`smooth_code::headless::run_headless_capture`] (legacy, gated
+//!      by `SMOOTH_BENCH_LEGACY_DIRECT=1`).
 //!   4. Run the language's test command in the scratch dir, count
 //!      pass/fail.
 //!   5. Write `result.json` and print a one-line summary.
@@ -27,6 +29,7 @@ use std::time::Instant;
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
 
+pub mod chat_driver;
 pub mod curated;
 pub mod score;
 pub mod sweep;
@@ -206,7 +209,17 @@ pub async fn run_aider_polyglot(lang: PolyglotLang, task: &str, opts: &BenchOpts
 
     let t0 = Instant::now();
 
-    let (cost_usd, tool_calls, llm_error) =
+    // Routing: by default the bench runs through Big Smooth's chat-agent
+    // (see Phase 7 in `~/.claude/plans/sorted-orbiting-hummingbird.md`).
+    // The chat-agent creates a pearl and dispatches a teammate on it; we
+    // poll for completion. `SMOOTH_BENCH_LEGACY_DIRECT=1` falls back to
+    // the old `run_headless_capture` direct WS dispatch for diagnostics.
+    let legacy_direct = std::env::var("SMOOTH_BENCH_LEGACY_DIRECT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let deadline = std::time::Duration::from_secs(std::env::var("SMOOTH_BENCH_DEADLINE_S").ok().and_then(|v| v.parse().ok()).unwrap_or(1800));
+
+    let (cost_usd, tool_calls, llm_error) = if legacy_direct {
         match smooth_code::headless::run_headless_capture(&opts.big_smooth_url, work_dir.clone(), prompt.clone(), opts.model.clone(), opts.budget_usd).await {
             Ok(out) => (
                 out.cost,
@@ -220,7 +233,23 @@ pub async fn run_aider_polyglot(lang: PolyglotLang, task: &str, opts: &BenchOpts
                 None,
             ),
             Err(e) => (0.0, Vec::new(), Some(e.to_string())),
-        };
+        }
+    } else {
+        match crate::chat_driver::run_via_chat_agent(&opts.big_smooth_url, &work_dir, &prompt, opts.budget_usd, deadline).await {
+            Ok(out) => (
+                out.cost,
+                out.tool_calls
+                    .into_iter()
+                    .map(|t| ToolCallRecord {
+                        name: t.name,
+                        success: t.success,
+                    })
+                    .collect(),
+                None,
+            ),
+            Err(e) => (0.0, Vec::new(), Some(e.to_string())),
+        }
+    };
 
     let duration_s = t0.elapsed().as_secs_f64();
 
