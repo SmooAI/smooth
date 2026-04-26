@@ -30,6 +30,8 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"sync"
@@ -417,6 +419,11 @@ func cmdServe(dataDir, socketPath string) {
 	// Best-effort cleanup of any stale socket from a previous run.
 	_ = os.Remove(socketPath)
 
+	// Goroutine-dump path: SIGUSR1 → write all goroutine stacks
+	// (with file:line for each frame) here. Lets us debug a hung
+	// serve from outside the process even when stderr is /dev/null.
+	dumpPath := filepath.Join(filepath.Dir(socketPath), "goroutines.txt")
+
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		fatal("listen unix: " + err.Error())
@@ -438,12 +445,27 @@ func cmdServe(dataDir, socketPath string) {
 	// work — they just queue at the DB layer.
 	var dbMu sync.Mutex
 
-	// Trap signals so we can clean up the socket file.
+	// Trap shutdown signals so we can clean up the socket file.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
 		_ = listener.Close()
+	}()
+
+	// SIGUSR1 → dump all goroutine stacks to <socket-dir>/goroutines.txt.
+	// Diagnostic hook for hangs where stderr was redirected to /dev/null.
+	dumpCh := make(chan os.Signal, 1)
+	signal.Notify(dumpCh, syscall.SIGUSR1)
+	go func() {
+		for range dumpCh {
+			f, err := os.Create(dumpPath)
+			if err != nil {
+				continue
+			}
+			_ = pprof.Lookup("goroutine").WriteTo(f, 2) // 2 = full frames
+			_ = f.Close()
+		}
 	}()
 
 	fmt.Fprintf(os.Stderr, "smooth-dolt: serve %s on %s\n", dataDir, socketPath)
