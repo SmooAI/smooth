@@ -115,6 +115,34 @@ pub enum ServerEvent {
     Connected {
         session_id: String,
     },
+
+    // ── Teammates (Phase 4) ──────────────────────────────────
+    /// A teammate posted a chat-relevant comment on its pearl. Used by the
+    /// web UI to stream live operator → user replies (`[CHAT:TEAMMATE]`),
+    /// progress milestones (`[PROGRESS]`), questions, and idle markers
+    /// without round-tripping to GET /api/teammates/{name}/messages.
+    /// Filtered per-client via `ClientEvent::Subscribe { topics: ["teammate:<name>", …] }`.
+    TeammateChat {
+        teammate_name: String,
+        pearl_id: String,
+        /// Comment kind, derived from prefix: `chat`, `progress`, `question`, `idle`.
+        kind: String,
+        message: String,
+        comment_id: String,
+    },
+    /// A teammate was just spawned (or transitioned active again). The
+    /// sidebar uses this to surface them in the Teammates list without
+    /// polling /api/teammates.
+    TeammateSpawned {
+        teammate_name: String,
+        pearl_id: String,
+        title: String,
+    },
+    /// A teammate finished and posted [IDLE].
+    TeammateIdle {
+        teammate_name: String,
+        pearl_id: String,
+    },
 }
 
 #[cfg(test)]

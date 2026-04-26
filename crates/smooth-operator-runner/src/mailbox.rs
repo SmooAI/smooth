@@ -1,0 +1,305 @@
+//! Pearl-comment mailbox poller for the operator runner.
+//!
+//! Operators inside a sandbox don't have a direct WebSocket to Big Smooth — by
+//! design, the only authoritative durable channel between the lead and a
+//! running teammate is the pearl's comment list (audit-friendly, replayable,
+//! visible in the pearls UI). This module wraps that store as a *mailbox*: a
+//! background tokio task polls `PearlStore::get_comments(pearl_id)` every
+//! ~1.5 s, parses each new comment by prefix, and emits typed messages onto a
+//! channel that the agent loop drains at the top of each iteration.
+//!
+//! Prefix conventions (see plan `sorted-orbiting-hummingbird.md`):
+//!
+//! | Prefix                       | Meaning                                      |
+//! |------------------------------|----------------------------------------------|
+//! | `[CHAT:USER]`                | direct-chat user-turn                        |
+//! | `[STEERING:GUIDANCE]`        | mid-flight nudge from the lead               |
+//! | `[ANSWER:USER:q-{id}]`       | reply to an `ask_smooth` blocking question   |
+//! | `[ANSWER:SMOOTH:q-{id}]`     | reply auto-answered by Big Smooth's chat     |
+//!
+//! Comments without a recognised prefix are ignored (they're often the
+//! teammate's own `[CHAT:TEAMMATE]`, `[PROGRESS]`, `[QUESTION:TEAMMATE]`,
+//! `[IDLE]` posts, which a teammate must not consume).
+//!
+//! The poller never blocks the agent: the channel is unbounded and the
+//! agent uses `try_recv` on each iteration. If the poll fails (Dolt
+//! transient error, store unavailable), it logs and tries again next tick.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use smooth_operator::agent::{InjectedMessage, InjectedMessageKind};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::{oneshot, Mutex};
+
+use crate::pearl_tools::PearlStoreHandle;
+
+const POLL_INTERVAL: Duration = Duration::from_millis(1500);
+
+/// Pending-question registry shared between `ask_smooth` (writer) and the
+/// mailbox poller (reader). When `ask_smooth(urgency=blocking)` is called it
+/// registers a oneshot under the question id and posts a
+/// `[QUESTION:TEAMMATE:q-id]` comment; when the mailbox observes a matching
+/// `[ANSWER:USER:q-id]` or `[ANSWER:SMOOTH:q-id]` it removes the entry and
+/// delivers the body over the oneshot. Late or unregistered answers fall
+/// through to `chat_rx` as `InjectedMessageKind::AnswerToQuestion` so the
+/// agent still sees them as conversation context.
+#[derive(Default)]
+pub struct QuestionRegistry {
+    pending: Mutex<HashMap<String, oneshot::Sender<String>>>,
+}
+
+impl QuestionRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Insert a new pending question. Returns the receiver the caller should
+    /// `.await` on (with timeout). The id must be unique — collisions will
+    /// silently overwrite the prior waiter.
+    pub async fn register(&self, question_id: String) -> oneshot::Receiver<String> {
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(question_id, tx);
+        rx
+    }
+
+    /// Try to deliver an answer to a pending question. Returns `true` if
+    /// the question was registered (answer delivered) and `false` if not
+    /// (caller should fall through to general injection).
+    pub async fn try_resolve(&self, question_id: &str, body: String) -> bool {
+        let Some(tx) = self.pending.lock().await.remove(question_id) else {
+            return false;
+        };
+        let _ = tx.send(body); // ignore receiver-dropped (caller already moved on)
+        true
+    }
+}
+
+/// Parsed `[ANSWER:USER:q-{id}]` / `[ANSWER:SMOOTH:q-{id}]` payload.
+struct ParsedAnswer {
+    question_id: Option<String>,
+    body: String,
+}
+
+fn parse_answer(trimmed: &str) -> Option<ParsedAnswer> {
+    let close = trimmed.find(']')?;
+    let header = &trimmed[1..close]; // strip leading `[`
+    if !header.starts_with("ANSWER:") {
+        return None;
+    }
+    // header is `ANSWER:USER` or `ANSWER:SMOOTH` or `ANSWER:USER:q-id` or `ANSWER:SMOOTH:q-id`
+    let parts: Vec<&str> = header.split(':').collect();
+    let question_id = parts.get(2).map(|&s| s.to_string());
+    Some(ParsedAnswer {
+        question_id,
+        body: trimmed[close + 1..].trim().to_string(),
+    })
+}
+
+/// Spawn the mailbox poller. Returns the receiver half wrapped for
+/// `AgentConfig::with_chat_rx`. Caller is expected to keep the join handle
+/// alive for the agent's lifetime; the poller exits when the sender is
+/// dropped or the pearl store reports a fatal error.
+///
+/// The optional `questions` registry lets `ask_smooth(blocking)` consume
+/// targeted answers (`[ANSWER:USER:q-id]`) without surfacing them as
+/// generic conversation injections.
+#[must_use]
+pub fn spawn_poller(
+    handle: Arc<PearlStoreHandle>,
+    pearl_id: String,
+    questions: Option<Arc<QuestionRegistry>>,
+) -> (Arc<Mutex<UnboundedReceiver<InjectedMessage>>>, tokio::task::JoinHandle<()>) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<InjectedMessage>();
+    let join = tokio::spawn(poll_loop(handle, pearl_id, tx, questions));
+    (Arc::new(Mutex::new(rx)), join)
+}
+
+async fn poll_loop(handle: Arc<PearlStoreHandle>, pearl_id: String, tx: UnboundedSender<InjectedMessage>, questions: Option<Arc<QuestionRegistry>>) {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut first = true;
+    let mut ticker = tokio::time::interval(POLL_INTERVAL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        ticker.tick().await;
+        if tx.is_closed() {
+            tracing::debug!(pearl_id = %pearl_id, "mailbox: receiver dropped, exiting poll loop");
+            return;
+        }
+
+        let comments = match handle.store.get_comments(&pearl_id) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, pearl_id = %pearl_id, "mailbox: get_comments failed");
+                continue;
+            }
+        };
+
+        for comment in comments {
+            // First pass primes `seen` without emitting anything: messages
+            // posted before the operator started are not user-turns it should
+            // act on. (They're already part of the pearl's history; the lead's
+            // dispatch prompt subsumes them.)
+            if !seen.insert(comment.id.clone()) {
+                continue;
+            }
+            if first {
+                continue;
+            }
+
+            // First check whether this is a targeted answer to a pending
+            // ask_smooth question. If yes and the registry has the question
+            // id, deliver via oneshot and skip chat injection so the agent
+            // doesn't see the answer as a duplicate user-turn.
+            let trimmed = comment.content.trim_start();
+            if (trimmed.starts_with("[ANSWER:USER") || trimmed.starts_with("[ANSWER:SMOOTH")) && questions.is_some() {
+                if let Some(parsed) = parse_answer(trimmed) {
+                    if let Some(qid) = &parsed.question_id {
+                        if let Some(reg) = &questions {
+                            if reg.try_resolve(qid, parsed.body.clone()).await {
+                                tracing::info!(pearl_id = %pearl_id, comment_id = %comment.id, qid = %qid, "mailbox: resolved pending question");
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(msg) = parse_comment(&comment.content) {
+                tracing::info!(pearl_id = %pearl_id, comment_id = %comment.id, kind = ?msg.kind, "mailbox: injecting");
+                if tx.send(msg).is_err() {
+                    return;
+                }
+            }
+        }
+
+        first = false;
+    }
+}
+
+/// Parse a comment body and return an `InjectedMessage` if the prefix matches
+/// one of the lead-to-teammate kinds. Returns `None` for prefixes the teammate
+/// originated itself (`[CHAT:TEAMMATE]`, `[PROGRESS]`, `[QUESTION:TEAMMATE]`,
+/// `[IDLE]`) or for arbitrary unprefixed comments.
+pub fn parse_comment(body: &str) -> Option<InjectedMessage> {
+    let trimmed = body.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("[CHAT:USER]") {
+        return Some(InjectedMessage {
+            kind: InjectedMessageKind::UserChat,
+            body: rest.trim().to_string(),
+        });
+    }
+    if let Some(rest) = trimmed.strip_prefix("[STEERING:GUIDANCE]") {
+        return Some(InjectedMessage {
+            kind: InjectedMessageKind::LeadGuidance,
+            body: rest.trim().to_string(),
+        });
+    }
+    if trimmed.starts_with("[ANSWER:USER") || trimmed.starts_with("[ANSWER:SMOOTH") {
+        // strip past the first `]`
+        if let Some(idx) = trimmed.find(']') {
+            return Some(InjectedMessage {
+                kind: InjectedMessageKind::AnswerToQuestion,
+                body: trimmed[idx + 1..].trim().to_string(),
+            });
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_chat_user() {
+        let m = parse_comment("[CHAT:USER] please switch to staging").unwrap();
+        assert_eq!(m.kind, InjectedMessageKind::UserChat);
+        assert_eq!(m.body, "please switch to staging");
+    }
+
+    #[test]
+    fn parses_lead_guidance() {
+        let m = parse_comment("[STEERING:GUIDANCE] focus on the auth module").unwrap();
+        assert_eq!(m.kind, InjectedMessageKind::LeadGuidance);
+        assert_eq!(m.body, "focus on the auth module");
+    }
+
+    #[test]
+    fn parses_answer_user_with_id() {
+        let m = parse_comment("[ANSWER:USER:q-abc123] use port 4400").unwrap();
+        assert_eq!(m.kind, InjectedMessageKind::AnswerToQuestion);
+        assert_eq!(m.body, "use port 4400");
+    }
+
+    #[test]
+    fn parses_answer_smooth_with_id() {
+        let m = parse_comment("[ANSWER:SMOOTH:q-xyz] the lint command is `pnpm lint`").unwrap();
+        assert_eq!(m.kind, InjectedMessageKind::AnswerToQuestion);
+        assert_eq!(m.body, "the lint command is `pnpm lint`");
+    }
+
+    #[test]
+    fn ignores_teammate_originated_prefixes() {
+        assert!(parse_comment("[CHAT:TEAMMATE] working on it").is_none());
+        assert!(parse_comment("[PROGRESS] step 2 of 5").is_none());
+        assert!(parse_comment("[QUESTION:TEAMMATE:q-1] should I bump deps?").is_none());
+        assert!(parse_comment("[IDLE]").is_none());
+    }
+
+    #[test]
+    fn ignores_unprefixed_comments() {
+        assert!(parse_comment("just a regular comment").is_none());
+        assert!(parse_comment("").is_none());
+    }
+
+    #[test]
+    fn tolerates_leading_whitespace() {
+        let m = parse_comment("   [CHAT:USER] hi").unwrap();
+        assert_eq!(m.body, "hi");
+    }
+
+    #[test]
+    fn parse_answer_extracts_question_id() {
+        let p = parse_answer("[ANSWER:USER:q-abc123] use port 4400").expect("parsed");
+        assert_eq!(p.question_id.as_deref(), Some("q-abc123"));
+        assert_eq!(p.body, "use port 4400");
+    }
+
+    #[test]
+    fn parse_answer_handles_smooth_prefix() {
+        let p = parse_answer("[ANSWER:SMOOTH:q-xyz] pnpm lint").expect("parsed");
+        assert_eq!(p.question_id.as_deref(), Some("q-xyz"));
+    }
+
+    #[test]
+    fn parse_answer_returns_none_when_no_id() {
+        let p = parse_answer("[ANSWER:USER] no id here").expect("parsed");
+        assert!(p.question_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn question_registry_resolves_pending() {
+        let reg = QuestionRegistry::new();
+        let rx = reg.register("q-1".to_string()).await;
+        assert!(reg.try_resolve("q-1", "answer body".to_string()).await);
+        let got = rx.await.expect("oneshot");
+        assert_eq!(got, "answer body");
+    }
+
+    #[tokio::test]
+    async fn question_registry_returns_false_for_unknown() {
+        let reg = QuestionRegistry::new();
+        assert!(!reg.try_resolve("q-unknown", "body".to_string()).await);
+    }
+
+    #[tokio::test]
+    async fn question_registry_only_one_resolution_per_id() {
+        let reg = QuestionRegistry::new();
+        let _rx = reg.register("q-2".to_string()).await;
+        assert!(reg.try_resolve("q-2", "first".to_string()).await);
+        assert!(!reg.try_resolve("q-2", "second".to_string()).await);
+    }
+}

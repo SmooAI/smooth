@@ -34,7 +34,9 @@ use std::sync::Arc;
 use anyhow::Context;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::agent::{Agent, AgentConfig, AgentEvent};
+use tokio::sync::mpsc::UnboundedReceiver;
+
+use crate::agent::{Agent, AgentConfig, AgentEvent, InjectedMessage};
 use crate::cast::Cast;
 use crate::cost::CostBudget;
 use crate::providers::ProviderRegistry;
@@ -69,6 +71,11 @@ pub struct CodingWorkflowConfig {
     /// sandbox). Used to snapshot the best-seen state and restore
     /// it on regression. `None` skips snapshotting.
     pub workspace_root: Option<PathBuf>,
+    /// Optional injection channel for mailbox messages — passed to every
+    /// inner Agent so steering/chat/answers from the lead reach a running
+    /// teammate without needing to restart the workflow. `None` keeps
+    /// the agent isolated (current behaviour for non-pearl-attached runs).
+    pub chat_rx: Option<Arc<tokio::sync::Mutex<UnboundedReceiver<InjectedMessage>>>>,
 }
 
 /// Run the workflow end-to-end. Returns the accumulated cost.
@@ -109,8 +116,18 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
 
         let user_prompt = build_user_prompt(&cfg.task_prompt, iteration, last_verify_output.as_deref());
 
+        // Inner iteration cap. Agent can take a lot of tool-call turns
+        // internally; default is 80 but `SMOOTH_WORKFLOW_AGENT_MAX_ITERATIONS`
+        // lets benchmark/diagnostic runs shorten the feedback loop.
+        let agent_max_iter: u32 = std::env::var("SMOOTH_WORKFLOW_AGENT_MAX_ITERATIONS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(80);
         let mut agent_config =
-            AgentConfig::new(format!("{}/coding-{}", cfg.operator_id, iteration), code_prompt.clone(), llm_config.clone()).with_max_iterations(80); // agent can take a lot of tool-call turns internally
+            AgentConfig::new(format!("{}/coding-{}", cfg.operator_id, iteration), code_prompt.clone(), llm_config.clone()).with_max_iterations(agent_max_iter);
+        if let Some(rx) = cfg.chat_rx.clone() {
+            agent_config = agent_config.with_chat_rx(rx);
+        }
         if let Some(cap) = cfg.budget_usd {
             let remaining = (cap - total_cost_usd).max(0.0);
             agent_config = agent_config.with_budget(CostBudget {

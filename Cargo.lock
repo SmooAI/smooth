@@ -5387,10 +5387,12 @@ dependencies = [
  "chrono",
  "clap",
  "dirs-next",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "smooai-smooth-code",
  "smooai-smooth-operator",
+ "smooai-smooth-pearls",
  "tempfile",
  "tokio",
  "toml",
@@ -5635,6 +5637,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

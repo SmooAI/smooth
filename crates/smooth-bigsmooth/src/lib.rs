@@ -3,6 +3,8 @@
 pub mod audit;
 pub mod boardroom;
 pub mod boardroom_narc;
+pub mod chat_tools;
+pub mod teammates;
 
 pub mod diver_client;
 pub mod events;

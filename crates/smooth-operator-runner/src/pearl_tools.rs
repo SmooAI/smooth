@@ -13,7 +13,7 @@ use smooth_operator::tool::{Tool, ToolSchema};
 
 /// Shared pearl store handle for all pearl tools.
 pub struct PearlStoreHandle {
-    store: smooth_pearls::PearlStore,
+    pub(crate) store: smooth_pearls::PearlStore,
 }
 
 // ── CreatePearlTool ─────────────────────────────────────────────────
@@ -152,27 +152,29 @@ impl Tool for ClosePearlTool {
 
 /// Register pearl tools if a `.smooth/dolt/` directory exists in the
 /// workspace ancestry. Uses the `smooth-dolt` binary directly — no HTTP.
-pub fn register_pearl_tools(tools: &mut smooth_operator::ToolRegistry, workspace: &std::path::Path) {
+///
+/// Returns the shared `PearlStoreHandle` so other in-runner consumers (the
+/// mailbox poller) can read pearl comments without opening a second store.
+/// Returns `None` when no Dolt dir is found or the store fails to open.
+pub fn register_pearl_tools(tools: &mut smooth_operator::ToolRegistry, workspace: &std::path::Path) -> Option<Arc<PearlStoreHandle>> {
     // Walk up from workspace looking for .smooth/dolt/
-    let dolt_dir = match smooth_pearls::dolt::find_repo_dolt_dir(workspace) {
-        Some(d) => d,
-        None => {
-            tracing::debug!("no .smooth/dolt/ found in workspace ancestry — pearl tools not registered");
-            return;
-        }
-    };
+    let dolt_dir = smooth_pearls::dolt::find_repo_dolt_dir(workspace).or_else(|| {
+        tracing::debug!("no .smooth/dolt/ found in workspace ancestry — pearl tools not registered");
+        None
+    })?;
 
     let store = match smooth_pearls::PearlStore::open(&dolt_dir) {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "failed to open pearl store at {} — pearl tools not registered", dolt_dir.display());
-            return;
+            return None;
         }
     };
 
     let handle = Arc::new(PearlStoreHandle { store });
     tools.register(CreatePearlTool { handle: handle.clone() });
     tools.register(ListPearlsTool { handle: handle.clone() });
-    tools.register(ClosePearlTool { handle });
+    tools.register(ClosePearlTool { handle: handle.clone() });
     tracing::info!(dolt = %dolt_dir.display(), "registered pearl tools (create_pearl, list_pearls, close_pearl)");
+    Some(handle)
 }

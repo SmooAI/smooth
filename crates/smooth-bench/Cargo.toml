@@ -18,11 +18,13 @@ path = "src/lib.rs"
 [dependencies]
 smooth-code.workspace = true
 smooth-operator.workspace = true
+smooth-pearls = { path = "../smooth-pearls", package = "smooai-smooth-pearls" }
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 clap.workspace = true
 dirs-next.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

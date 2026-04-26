@@ -85,6 +85,10 @@ pub struct AppState {
     /// or without an LLM backend) so the `/api/narc/*` routes can unwrap
     /// unconditionally.
     pub boardroom_narc: crate::boardroom_narc::BoardroomNarc,
+    /// Registry of live teammates (operators) — populated on dispatch,
+    /// idled when the comment-tap sees `[IDLE]`. Powers `/api/teammates`
+    /// and the chat-agent's `teammate_list` tool. See `crate::teammates`.
+    pub teammates: Arc<crate::teammates::OperatorRegistry>,
 }
 
 impl AppState {
@@ -184,6 +188,7 @@ impl AppState {
             diver: None,
             orchestrator: Arc::new(tokio::sync::Mutex::new(orchestrator)),
             boardroom_narc,
+            teammates: Arc::new(crate::teammates::OperatorRegistry::new()),
         }
     }
 
@@ -284,6 +289,18 @@ pub struct SearchParams {
 #[derive(Deserialize)]
 pub struct ChatBody {
     content: String,
+    /// Optional override for the chat agent's LLM. When unset the agent
+    /// runs on the reasoning slot (smooth-reasoning-kimi by default).
+    /// Set to e.g. "smooth-fast-gemini" for one-liner queries.
+    #[serde(default)]
+    model: Option<String>,
+    /// Optional per-request USD cap on the chat agent. Stops the
+    /// inner Agent loop when total cost exceeds this. Useful for
+    /// keeping a bounded ceiling on tool-call recursion (chat-agent
+    /// dispatches teammate → teammate ask_smooths → chat-agent
+    /// answers → recurse). Defaults to no cap.
+    #[serde(default)]
+    budget_usd: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -394,6 +411,13 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/steering/{bead_id}/resume", post(resume_handler))
         .route("/api/steering/{bead_id}/steer", post(steer_handler))
         .route("/api/steering/{bead_id}/cancel", post(cancel_handler))
+        // Phase 4: live-teammate registry + direct chat with a selected teammate.
+        .route("/api/teammates", get(list_teammates_handler))
+        .route(
+            "/api/teammates/{name}/messages",
+            get(get_teammate_messages_handler).post(post_teammate_message_handler),
+        )
+        .route("/api/teammates/{name}/shutdown", post(shutdown_teammate_handler))
         // Delegation — operator-to-operator delegation via sub-pearls
         .route("/api/delegate", post(delegate_handler))
         .route("/api/delegate/{id}/status", get(delegate_status_handler))
@@ -742,7 +766,7 @@ pub struct DispatchOptions {
     pub agent: Option<String>,
 }
 
-async fn dispatch_ws_task(state: &AppState, opts: DispatchOptions) {
+pub async fn dispatch_ws_task(state: &AppState, opts: DispatchOptions) {
     // Direct mode: spawn the operator runner as a host subprocess
     // instead of a microVM. No Narc/Wonk/Goalie enforcement — the
     // agent has raw host access. Gated behind `SMOOTH_WORKFLOW_DIRECT=1`
@@ -1037,6 +1061,37 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         id
     };
 
+    // Register the teammate + spawn the per-pearl comment tap so the web
+    // UI's sidebar / sidebar's chat scope sees live operator output.
+    if let Some(ref pid) = pearl_id {
+        let title = pearl_store
+            .get(pid)
+            .ok()
+            .flatten()
+            .map(|p| p.title)
+            .unwrap_or_else(|| truncate_str(&message, 60));
+        let teammate_name = crate::teammates::slug_from_pearl(pid);
+        let now = chrono::Utc::now();
+        state
+            .teammates
+            .insert(crate::teammates::TeammateView {
+                name: teammate_name.clone(),
+                pearl_id: pid.clone(),
+                title: title.clone(),
+                status: "running".into(),
+                started_at: now,
+                last_event_at: now,
+            })
+            .await;
+        let _ = state.event_tx.send(crate::events::ServerEvent::TeammateSpawned {
+            teammate_name: teammate_name.clone(),
+            pearl_id: pid.clone(),
+            title,
+        });
+        let _tap = crate::teammates::spawn_comment_tap(pearl_store.clone(), pid.clone(), teammate_name, state.event_tx.clone(), state.teammates.clone()).await;
+        // Tap exits naturally on `[IDLE]`; we don't await it here.
+    }
+
     // Close the task pearl if we early-return before the tokio::spawn
     // reaches the runner. Otherwise the pearl leaks as permanent
     // in_progress — that's the E2E-"Task:" leak we cleaned up in th-28edd8.
@@ -1224,6 +1279,12 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
             if let Ok(skip) = std::env::var("SMOOTH_WORKFLOW_SKIP_TEST") {
                 env.insert("SMOOTH_WORKFLOW_SKIP_TEST".into(), skip);
             }
+            if let Ok(iters) = std::env::var("SMOOTH_WORKFLOW_MAX_ITERATIONS") {
+                env.insert("SMOOTH_WORKFLOW_MAX_ITERATIONS".into(), iters);
+            }
+            if let Ok(iters) = std::env::var("SMOOTH_WORKFLOW_AGENT_MAX_ITERATIONS") {
+                env.insert("SMOOTH_WORKFLOW_AGENT_MAX_ITERATIONS".into(), iters);
+            }
         }
         // Tell the operator where ~/.smooth is mounted inside the VM.
         env.insert("SMOOTH_HOME".into(), "/root/.smooth".into());
@@ -1275,6 +1336,15 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         if let Some(ref url) = narc_url {
             tracing::info!(task_id = tid, url = %url, "operator env: SMOOTH_NARC_URL set");
             env.insert("SMOOTH_NARC_URL".into(), url.clone());
+        }
+
+        // Hand the operator its pearl id so the in-VM mailbox poller knows
+        // which pearl to read steering/chat comments from. When this is unset
+        // (e.g. dispatch ran without Diver and PearlStore creation failed),
+        // the runner falls through to legacy behaviour with no mailbox.
+        if let Some(ref pid) = pearl_id {
+            tracing::info!(task_id = tid, pearl_id = %pid, "operator env: SMOOTH_PEARL_ID set");
+            env.insert("SMOOTH_PEARL_ID".into(), pid.clone());
         }
 
         // Generate a task-type-specific policy TOML for Wonk inside the VM.
@@ -2158,6 +2228,15 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
         if let Ok(skip) = std::env::var("SMOOTH_WORKFLOW_SKIP_TEST") {
             cmd.env("SMOOTH_WORKFLOW_SKIP_TEST", skip);
         }
+        if let Ok(iters) = std::env::var("SMOOTH_WORKFLOW_MAX_ITERATIONS") {
+            cmd.env("SMOOTH_WORKFLOW_MAX_ITERATIONS", iters);
+        }
+        if let Ok(iters) = std::env::var("SMOOTH_WORKFLOW_AGENT_MAX_ITERATIONS") {
+            cmd.env("SMOOTH_WORKFLOW_AGENT_MAX_ITERATIONS", iters);
+        }
+        if let Some(ref pid) = pearl_id {
+            cmd.env("SMOOTH_PEARL_ID", pid);
+        }
         if let Some(home) = dirs_next::home_dir() {
             let smooth_home = home.join(".smooth");
             if smooth_home.exists() {
@@ -2949,20 +3028,85 @@ async fn reject_review_handler(State(state): State<AppState>, Path(bead_id): Pat
 async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>) -> Json<ApiResponse<String>> {
     state.touch();
 
-    let system_prompt = "You are Smooth, an AI agent orchestration leader. You help users manage projects, assign work to Smooth Operators (AI agents in sandboxes), review work, and coordinate tasks.\n\nAvailable commands: th run <pearl-id>, th operators, th pause/steer/cancel <pearl-id>, th auth status, th status";
+    // The chat agent IS the team lead. It searches pearls, creates them
+    // with smooth-summarize-generated titles, dispatches teammates
+    // (operators), nudges them with steering messages, and reads back
+    // their progress. Default model is `smooth-reasoning-kimi` —
+    // capability for orchestration beats raw speed; per-request model
+    // override is a Phase 6 polish (see plan).
+    let system_prompt = include_str!("chat_tools_system_prompt.txt");
 
-    async fn chat_inner(system_prompt: &str, user_content: &str) -> anyhow::Result<String> {
+    async fn chat_inner(
+        state: AppState,
+        system_prompt: &str,
+        user_content: &str,
+        model_override: Option<&str>,
+        budget_usd: Option<f64>,
+    ) -> anyhow::Result<String> {
+        use smooth_operator::agent::{Agent, AgentConfig, AgentEvent};
+        use smooth_operator::cost::CostBudget;
+
         let providers_path = dirs_next::home_dir().unwrap_or_default().join(".smooth/providers.json");
         let registry = ProviderRegistry::load_from_file(&providers_path).map_err(|e| anyhow::anyhow!("no LLM providers configured: {e}"))?;
-        let config = registry.default_llm_config().map_err(|e| anyhow::anyhow!("no default provider: {e}"))?;
-        let llm = smooth_operator::llm::LlmClient::new(config);
 
-        let sys_msg = smooth_operator::conversation::Message::system(system_prompt);
-        let user_msg = smooth_operator::conversation::Message::user(user_content);
-        let response = llm.chat(&[&sys_msg, &user_msg], &[]).await?;
-        Ok(response.content)
+        // Resolve the chat agent's LLM. Default is the reasoning slot
+        // (smooth-reasoning-kimi via providers.json routing). A
+        // per-request `model` field on the chat body lets callers flip
+        // to smooth-fast-gemini for one-liner queries.
+        let llm_config = if let Some(m) = model_override.filter(|s| !s.trim().is_empty()) {
+            // Use the default provider's key/url with the requested model alias.
+            let mut cfg = registry.default_llm_config().map_err(|e| anyhow::anyhow!("no default provider: {e}"))?;
+            cfg.model = m.to_string();
+            cfg
+        } else {
+            // Reasoning slot — see plan + providers.json `routing.thinking`.
+            registry
+                .llm_config_for(smooth_operator::providers::Activity::Reasoning)
+                .map_err(|e| anyhow::anyhow!("resolving reasoning slot for chat: {e}"))?
+        };
+
+        let registry_arc = std::sync::Arc::new(registry);
+        let tools = crate::chat_tools::build_chat_tools(state.clone(), registry_arc);
+
+        // Cap iterations low — the chat must stay responsive, and 5
+        // tool-using turns are plenty for "search → create pearl →
+        // spawn teammate → confirm" workflows. Hard tasks should be
+        // delegated to the teammate, not run by the chat agent itself.
+        let mut agent_cfg = AgentConfig::new("big-smooth-chat", system_prompt, llm_config).with_max_iterations(5);
+        if let Some(cap) = budget_usd {
+            agent_cfg = agent_cfg.with_budget(CostBudget {
+                max_cost_usd: Some(cap),
+                max_tokens: None,
+            });
+        }
+        let agent = Agent::new(agent_cfg, tools);
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+        // Drain events into the broadcast channel so chat-session
+        // subscribers see tool-call activity. Unfiltered for now;
+        // Phase 4 narrows this with operator-id subscription.
+        let event_tx = state.event_tx.clone();
+        let drain = tokio::spawn(async move {
+            while let Some(ev) = rx.recv().await {
+                let _ = event_tx.send(crate::events::ServerEvent::TokenDelta {
+                    task_id: "chat".to_string(),
+                    content: format!("[chat] {ev:?}"),
+                });
+            }
+        });
+
+        let conversation = agent
+            .run_with_channel(user_content.to_string(), tx)
+            .await
+            .map_err(|e| anyhow::anyhow!("chat agent: {e}"))?;
+        drain.abort();
+
+        // Final assistant message is the user-facing reply.
+        let last_assistant = conversation.last_assistant_content().unwrap_or("(no response)").to_string();
+        Ok(last_assistant)
     }
-    let result: anyhow::Result<String> = chat_inner(system_prompt, &body.content).await;
+
+    let result: anyhow::Result<String> = chat_inner(state, system_prompt, &body.content, body.model.as_deref(), body.budget_usd).await;
 
     match result {
         Ok(response) => Json(ApiResponse { data: response, ok: true }),
@@ -3285,6 +3429,99 @@ async fn cancel_handler(State(state): State<AppState>, Path(bead_id): Path<Strin
         data: "cancelled".into(),
         ok: true,
     })
+}
+
+// ── Teammates (Phase 4) ────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct PostTeammateMessageBody {
+    content: String,
+}
+
+async fn list_teammates_handler(State(state): State<AppState>) -> Json<ApiResponse<Vec<crate::teammates::TeammateView>>> {
+    state.touch();
+    let mut list = state.teammates.list().await;
+    list.sort_by_key(|t| std::cmp::Reverse(t.last_event_at));
+    Json(ApiResponse { data: list, ok: true })
+}
+
+async fn get_teammate_messages_handler(State(state): State<AppState>, Path(name): Path<String>) -> Json<ApiResponse<Vec<crate::session::SessionMessage>>> {
+    state.touch();
+    let Some(view) = state.teammates.get(&name).await else {
+        return Json(ApiResponse { data: Vec::new(), ok: false });
+    };
+    // Return the pearl's recent comments cast as session-message-shaped
+    // records so the chat panel can render them uniformly.
+    let comments = state.pearl_store.get_comments(&view.pearl_id).unwrap_or_default();
+    let msgs: Vec<crate::session::SessionMessage> = comments
+        .into_iter()
+        .map(|c| crate::session::SessionMessage {
+            id: c.id,
+            session_id: view.pearl_id.clone(),
+            from: actor_for_comment(&c.content).to_string(),
+            to: "user".to_string(),
+            content: c.content,
+            message_type: crate::session::MessageType::Response,
+            timestamp: c.created_at,
+        })
+        .collect();
+    Json(ApiResponse { data: msgs, ok: true })
+}
+
+async fn post_teammate_message_handler(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(body): Json<PostTeammateMessageBody>,
+) -> Json<ApiResponse<String>> {
+    state.touch();
+    let Some(view) = state.teammates.get(&name).await else {
+        return Json(ApiResponse {
+            data: format!("teammate {name} not found"),
+            ok: false,
+        });
+    };
+    let comment = format!("[CHAT:USER] {}", body.content);
+    if let Err(e) = state.pearl_store.add_comment(&view.pearl_id, &comment) {
+        return Json(ApiResponse {
+            data: format!("posting message failed: {e}"),
+            ok: false,
+        });
+    }
+    Json(ApiResponse {
+        data: "Message queued for the teammate.".into(),
+        ok: true,
+    })
+}
+
+async fn shutdown_teammate_handler(State(state): State<AppState>, Path(name): Path<String>) -> Json<ApiResponse<String>> {
+    state.touch();
+    let Some(view) = state.teammates.get(&name).await else {
+        return Json(ApiResponse {
+            data: format!("teammate {name} not found"),
+            ok: false,
+        });
+    };
+    let _ = state
+        .pearl_store
+        .add_comment(&view.pearl_id, "[STEERING:SHUTDOWN] graceful shutdown requested by user");
+    state.teammates.mark_status(&name, "ended").await;
+    Json(ApiResponse {
+        data: "shutdown requested".into(),
+        ok: true,
+    })
+}
+
+fn actor_for_comment(body: &str) -> &'static str {
+    let t = body.trim_start();
+    if t.starts_with("[CHAT:USER]") {
+        "user"
+    } else if t.starts_with("[CHAT:TEAMMATE]") || t.starts_with("[PROGRESS]") || t.starts_with("[QUESTION:TEAMMATE") || t.starts_with("[IDLE]") {
+        "teammate"
+    } else if t.starts_with("[STEERING:") || t.starts_with("[ANSWER:") {
+        "lead"
+    } else {
+        "system"
+    }
 }
 
 // ── Jira ───────────────────────────────────────────────────
