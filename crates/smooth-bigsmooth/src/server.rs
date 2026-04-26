@@ -85,6 +85,10 @@ pub struct AppState {
     /// or without an LLM backend) so the `/api/narc/*` routes can unwrap
     /// unconditionally.
     pub boardroom_narc: crate::boardroom_narc::BoardroomNarc,
+    /// Registry of live teammates (operators) — populated on dispatch,
+    /// idled when the comment-tap sees `[IDLE]`. Powers `/api/teammates`
+    /// and the chat-agent's `teammate_list` tool. See `crate::teammates`.
+    pub teammates: Arc<crate::teammates::OperatorRegistry>,
 }
 
 impl AppState {
@@ -184,6 +188,7 @@ impl AppState {
             diver: None,
             orchestrator: Arc::new(tokio::sync::Mutex::new(orchestrator)),
             boardroom_narc,
+            teammates: Arc::new(crate::teammates::OperatorRegistry::new()),
         }
     }
 
@@ -399,6 +404,13 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/steering/{bead_id}/resume", post(resume_handler))
         .route("/api/steering/{bead_id}/steer", post(steer_handler))
         .route("/api/steering/{bead_id}/cancel", post(cancel_handler))
+        // Phase 4: live-teammate registry + direct chat with a selected teammate.
+        .route("/api/teammates", get(list_teammates_handler))
+        .route(
+            "/api/teammates/{name}/messages",
+            get(get_teammate_messages_handler).post(post_teammate_message_handler),
+        )
+        .route("/api/teammates/{name}/shutdown", post(shutdown_teammate_handler))
         // Delegation — operator-to-operator delegation via sub-pearls
         .route("/api/delegate", post(delegate_handler))
         .route("/api/delegate/{id}/status", get(delegate_status_handler))
@@ -1041,6 +1053,37 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         }
         id
     };
+
+    // Register the teammate + spawn the per-pearl comment tap so the web
+    // UI's sidebar / sidebar's chat scope sees live operator output.
+    if let Some(ref pid) = pearl_id {
+        let title = pearl_store
+            .get(pid)
+            .ok()
+            .flatten()
+            .map(|p| p.title)
+            .unwrap_or_else(|| truncate_str(&message, 60));
+        let teammate_name = crate::teammates::slug_from_pearl(pid);
+        let now = chrono::Utc::now();
+        state
+            .teammates
+            .insert(crate::teammates::TeammateView {
+                name: teammate_name.clone(),
+                pearl_id: pid.clone(),
+                title: title.clone(),
+                status: "running".into(),
+                started_at: now,
+                last_event_at: now,
+            })
+            .await;
+        let _ = state.event_tx.send(crate::events::ServerEvent::TeammateSpawned {
+            teammate_name: teammate_name.clone(),
+            pearl_id: pid.clone(),
+            title,
+        });
+        let _tap = crate::teammates::spawn_comment_tap(pearl_store.clone(), pid.clone(), teammate_name, state.event_tx.clone(), state.teammates.clone()).await;
+        // Tap exits naturally on `[IDLE]`; we don't await it here.
+    }
 
     // Close the task pearl if we early-return before the tokio::spawn
     // reaches the runner. Otherwise the pearl leaks as permanent
@@ -3366,6 +3409,99 @@ async fn cancel_handler(State(state): State<AppState>, Path(bead_id): Path<Strin
         data: "cancelled".into(),
         ok: true,
     })
+}
+
+// ── Teammates (Phase 4) ────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct PostTeammateMessageBody {
+    content: String,
+}
+
+async fn list_teammates_handler(State(state): State<AppState>) -> Json<ApiResponse<Vec<crate::teammates::TeammateView>>> {
+    state.touch();
+    let mut list = state.teammates.list().await;
+    list.sort_by_key(|t| std::cmp::Reverse(t.last_event_at));
+    Json(ApiResponse { data: list, ok: true })
+}
+
+async fn get_teammate_messages_handler(State(state): State<AppState>, Path(name): Path<String>) -> Json<ApiResponse<Vec<crate::session::SessionMessage>>> {
+    state.touch();
+    let Some(view) = state.teammates.get(&name).await else {
+        return Json(ApiResponse { data: Vec::new(), ok: false });
+    };
+    // Return the pearl's recent comments cast as session-message-shaped
+    // records so the chat panel can render them uniformly.
+    let comments = state.pearl_store.get_comments(&view.pearl_id).unwrap_or_default();
+    let msgs: Vec<crate::session::SessionMessage> = comments
+        .into_iter()
+        .map(|c| crate::session::SessionMessage {
+            id: c.id,
+            session_id: view.pearl_id.clone(),
+            from: actor_for_comment(&c.content).to_string(),
+            to: "user".to_string(),
+            content: c.content,
+            message_type: crate::session::MessageType::Response,
+            timestamp: c.created_at,
+        })
+        .collect();
+    Json(ApiResponse { data: msgs, ok: true })
+}
+
+async fn post_teammate_message_handler(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(body): Json<PostTeammateMessageBody>,
+) -> Json<ApiResponse<String>> {
+    state.touch();
+    let Some(view) = state.teammates.get(&name).await else {
+        return Json(ApiResponse {
+            data: format!("teammate {name} not found"),
+            ok: false,
+        });
+    };
+    let comment = format!("[CHAT:USER] {}", body.content);
+    if let Err(e) = state.pearl_store.add_comment(&view.pearl_id, &comment) {
+        return Json(ApiResponse {
+            data: format!("posting message failed: {e}"),
+            ok: false,
+        });
+    }
+    Json(ApiResponse {
+        data: "Message queued for the teammate.".into(),
+        ok: true,
+    })
+}
+
+async fn shutdown_teammate_handler(State(state): State<AppState>, Path(name): Path<String>) -> Json<ApiResponse<String>> {
+    state.touch();
+    let Some(view) = state.teammates.get(&name).await else {
+        return Json(ApiResponse {
+            data: format!("teammate {name} not found"),
+            ok: false,
+        });
+    };
+    let _ = state
+        .pearl_store
+        .add_comment(&view.pearl_id, "[STEERING:SHUTDOWN] graceful shutdown requested by user");
+    state.teammates.mark_status(&name, "ended").await;
+    Json(ApiResponse {
+        data: "shutdown requested".into(),
+        ok: true,
+    })
+}
+
+fn actor_for_comment(body: &str) -> &'static str {
+    let t = body.trim_start();
+    if t.starts_with("[CHAT:USER]") {
+        "user"
+    } else if t.starts_with("[CHAT:TEAMMATE]") || t.starts_with("[PROGRESS]") || t.starts_with("[QUESTION:TEAMMATE") || t.starts_with("[IDLE]") {
+        "teammate"
+    } else if t.starts_with("[STEERING:") || t.starts_with("[ANSWER:") {
+        "lead"
+    } else {
+        "system"
+    }
 }
 
 // ── Jira ───────────────────────────────────────────────────
