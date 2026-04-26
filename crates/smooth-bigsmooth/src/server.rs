@@ -294,6 +294,13 @@ pub struct ChatBody {
     /// Set to e.g. "smooth-fast-gemini" for one-liner queries.
     #[serde(default)]
     model: Option<String>,
+    /// Optional per-request USD cap on the chat agent. Stops the
+    /// inner Agent loop when total cost exceeds this. Useful for
+    /// keeping a bounded ceiling on tool-call recursion (chat-agent
+    /// dispatches teammate → teammate ask_smooths → chat-agent
+    /// answers → recurse). Defaults to no cap.
+    #[serde(default)]
+    budget_usd: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -3029,8 +3036,15 @@ async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>)
     // override is a Phase 6 polish (see plan).
     let system_prompt = include_str!("chat_tools_system_prompt.txt");
 
-    async fn chat_inner(state: AppState, system_prompt: &str, user_content: &str, model_override: Option<&str>) -> anyhow::Result<String> {
+    async fn chat_inner(
+        state: AppState,
+        system_prompt: &str,
+        user_content: &str,
+        model_override: Option<&str>,
+        budget_usd: Option<f64>,
+    ) -> anyhow::Result<String> {
         use smooth_operator::agent::{Agent, AgentConfig, AgentEvent};
+        use smooth_operator::cost::CostBudget;
 
         let providers_path = dirs_next::home_dir().unwrap_or_default().join(".smooth/providers.json");
         let registry = ProviderRegistry::load_from_file(&providers_path).map_err(|e| anyhow::anyhow!("no LLM providers configured: {e}"))?;
@@ -3058,7 +3072,13 @@ async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>)
         // tool-using turns are plenty for "search → create pearl →
         // spawn teammate → confirm" workflows. Hard tasks should be
         // delegated to the teammate, not run by the chat agent itself.
-        let agent_cfg = AgentConfig::new("big-smooth-chat", system_prompt, llm_config).with_max_iterations(5);
+        let mut agent_cfg = AgentConfig::new("big-smooth-chat", system_prompt, llm_config).with_max_iterations(5);
+        if let Some(cap) = budget_usd {
+            agent_cfg = agent_cfg.with_budget(CostBudget {
+                max_cost_usd: Some(cap),
+                max_tokens: None,
+            });
+        }
         let agent = Agent::new(agent_cfg, tools);
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
@@ -3086,7 +3106,7 @@ async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>)
         Ok(last_assistant)
     }
 
-    let result: anyhow::Result<String> = chat_inner(state, system_prompt, &body.content, body.model.as_deref()).await;
+    let result: anyhow::Result<String> = chat_inner(state, system_prompt, &body.content, body.model.as_deref(), body.budget_usd).await;
 
     match result {
         Ok(response) => Json(ApiResponse { data: response, ok: true }),
