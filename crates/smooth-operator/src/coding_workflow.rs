@@ -109,8 +109,15 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
 
         let user_prompt = build_user_prompt(&cfg.task_prompt, iteration, last_verify_output.as_deref());
 
+        // Inner iteration cap. Agent can take a lot of tool-call turns
+        // internally; default is 80 but `SMOOTH_WORKFLOW_AGENT_MAX_ITERATIONS`
+        // lets benchmark/diagnostic runs shorten the feedback loop.
+        let agent_max_iter: u32 = std::env::var("SMOOTH_WORKFLOW_AGENT_MAX_ITERATIONS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(80);
         let mut agent_config =
-            AgentConfig::new(format!("{}/coding-{}", cfg.operator_id, iteration), code_prompt.clone(), llm_config.clone()).with_max_iterations(80); // agent can take a lot of tool-call turns internally
+            AgentConfig::new(format!("{}/coding-{}", cfg.operator_id, iteration), code_prompt.clone(), llm_config.clone()).with_max_iterations(agent_max_iter);
         if let Some(cap) = cfg.budget_usd {
             let remaining = (cap - total_cost_usd).max(0.0);
             agent_config = agent_config.with_budget(CostBudget {

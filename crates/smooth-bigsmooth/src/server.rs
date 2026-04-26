@@ -1224,6 +1224,12 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
             if let Ok(skip) = std::env::var("SMOOTH_WORKFLOW_SKIP_TEST") {
                 env.insert("SMOOTH_WORKFLOW_SKIP_TEST".into(), skip);
             }
+            if let Ok(iters) = std::env::var("SMOOTH_WORKFLOW_MAX_ITERATIONS") {
+                env.insert("SMOOTH_WORKFLOW_MAX_ITERATIONS".into(), iters);
+            }
+            if let Ok(iters) = std::env::var("SMOOTH_WORKFLOW_AGENT_MAX_ITERATIONS") {
+                env.insert("SMOOTH_WORKFLOW_AGENT_MAX_ITERATIONS".into(), iters);
+            }
         }
         // Tell the operator where ~/.smooth is mounted inside the VM.
         env.insert("SMOOTH_HOME".into(), "/root/.smooth".into());
@@ -2157,6 +2163,12 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
         }
         if let Ok(skip) = std::env::var("SMOOTH_WORKFLOW_SKIP_TEST") {
             cmd.env("SMOOTH_WORKFLOW_SKIP_TEST", skip);
+        }
+        if let Ok(iters) = std::env::var("SMOOTH_WORKFLOW_MAX_ITERATIONS") {
+            cmd.env("SMOOTH_WORKFLOW_MAX_ITERATIONS", iters);
+        }
+        if let Ok(iters) = std::env::var("SMOOTH_WORKFLOW_AGENT_MAX_ITERATIONS") {
+            cmd.env("SMOOTH_WORKFLOW_AGENT_MAX_ITERATIONS", iters);
         }
         if let Some(home) = dirs_next::home_dir() {
             let smooth_home = home.join(".smooth");
