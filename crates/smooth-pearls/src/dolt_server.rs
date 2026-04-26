@@ -59,17 +59,24 @@ impl SmoothDoltServer {
         let socket_dir = tempfile::Builder::new().prefix("smooth-dolt-").tempdir().context("create socket tempdir")?;
         let socket = socket_dir.path().join("dolt.sock");
 
-        // Stderr stays connected to inherited stderr so server errors are
-        // visible in the parent's log; this is fine for a long-running
-        // server (no pipe-fill risk like the per-call path) and useful
-        // when debugging.
+        // ALL of stdin/stdout/stderr go to /dev/null. Inheriting any of
+        // them from the parent process (especially launchd's
+        // service.err redirection, which delivers a regular file as fd 2)
+        // wedges the embedded Dolt engine — the Go runtime parks SQL
+        // queries in `pthread_cond_wait` and never returns. Verified on
+        // smoo-hub: same binary, shell-spawned with stderr → /dev/null
+        // returns SQL in 67ms; Big-Smooth-spawned with stderr → service.err
+        // hangs forever. We lose server-side log visibility — operators
+        // who need it can run `smooth-dolt serve <dir> --socket <path>`
+        // by hand.
         let mut cmd = Command::new(&bin);
         cmd.arg("serve")
             .arg(data_dir)
             .arg("--socket")
             .arg(&socket)
             .stdin(Stdio::null())
-            .stdout(Stdio::null());
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
 
         let child = cmd.spawn().with_context(|| format!("spawn {} serve {}", bin.display(), data_dir.display()))?;
 
