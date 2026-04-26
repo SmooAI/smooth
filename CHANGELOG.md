@@ -1,5 +1,17 @@
 # @smooai/smooth
 
+## 0.10.0
+
+### Minor Changes
+
+- 8e3e7d6: `smooth-dolt`: add a long-running `serve` subcommand. Opens the embedded Dolt database once and accepts JSON-line requests over a Unix domain socket — eliminates the per-call subprocess spawn that was hanging Big Smooth's `/api/projects` handler on smoo-hub (see pearl th-1a61a7). Existing one-shot subcommands (`init`, `sql`, `commit`, `log`, `push`, `pull`, etc.) are unchanged so the CLI keeps working. Phase A of pearl th-1ff010 — a Rust client and Big Smooth integration land in subsequent commits.
+
+### Patch Changes
+
+- bbf42fc: `SmoothDoltServer::spawn` now launders the spawn through `/bin/sh -c 'exec setsid smooth-dolt serve ...'` with a cleared env, instead of `Command::new(smooth-dolt)` directly. The embedded Dolt engine inside `smooth-dolt serve` cannot run when its parent process is the long-running Big Smooth daemon (under launchd) — even with stdin/stdout/stderr all set to `/dev/null` it parks all goroutines in `pthread_cond_wait`. The intermediate shell + `setsid` detaches the new server into a fresh session, drops anything weird Big Smooth's tokio runtime had attached to the spawn, and the embedded Dolt comes up clean. Verified on smoo-hub: `/api/projects` now responds in <1s where it previously hung at 60s+.
+- 1465c51: `SmoothDoltServer::spawn` now also sets stderr to `/dev/null`. Inheriting the parent's stderr (which under launchd points at `~/.smooth/service.err`, a regular file) wedges the embedded Dolt engine inside `smooth-dolt serve` — SQL queries park forever in `pthread_cond_wait`. The shell-spawned binary works fine because the shell connects stderr to a TTY or `/dev/null`. Verified on smoo-hub: same binary, same dolt dir, only difference is the inherited stderr fd.
+- 7acd383: Bump default `max_tokens` from 8192 → 32768 across the operator stack. Reasoning-model coding slots (smooth-coding via MiniMax M2.7) burn 1k–4k tokens on chain-of-thought before any visible content; with 8192 there's not enough budget left for the actual response + tool-call JSON, so multi-arg edits truncate and the agent burns iterations recovering. Affected configs: `LlmConfig::openrouter`/`anthropic` defaults, `ProviderRegistry::resolve_slot`, and the in-VM `smooth-operator-runner` startup config.
+
 ## 0.9.4
 
 ### Patch Changes
