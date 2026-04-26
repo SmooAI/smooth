@@ -99,9 +99,7 @@ impl SmoothDoltServer {
             .env("PATH", "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin")
             .env("HOME", std::env::var("HOME").unwrap_or_default());
 
-        let child = cmd
-            .spawn()
-            .with_context(|| format!("spawn /bin/sh -c '{serve_cmdline}'"))?;
+        let child = cmd.spawn().with_context(|| format!("spawn /bin/sh -c '{serve_cmdline}'"))?;
 
         // Wait for the server to create its socket file.
         let deadline = Instant::now() + SERVER_START_TIMEOUT;

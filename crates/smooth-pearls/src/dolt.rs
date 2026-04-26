@@ -80,11 +80,7 @@ impl SmoothDolt {
     /// Create a handle with an explicit binary path (for testing).
     #[must_use]
     pub fn with_bin(bin: PathBuf, data_dir: PathBuf) -> Self {
-        Self {
-            bin,
-            data_dir,
-            server: None,
-        }
+        Self { bin, data_dir, server: None }
     }
 
     /// Initialize a new Dolt database at the data directory. Server mode
