@@ -34,6 +34,33 @@ pub struct AgentConfig {
     pub human_rx: Option<Arc<tokio::sync::Mutex<UnboundedReceiver<HumanResponse>>>>,
     /// Optional reporter for communicating back to Big Smooth from inside a sandbox.
     pub reporter: Option<Arc<tokio::sync::Mutex<BigSmoothReporter>>>,
+    /// Optional injection channel — out-of-band messages (mailbox: `[CHAT:USER]`,
+    /// `[STEERING:GUIDANCE]`, `[ANSWER:*]`) drained at the top of each iteration
+    /// and pushed into the conversation as user-turns. Wired by
+    /// `smooth-operator-runner` when `SMOOTH_PEARL_ID` is set so the lead
+    /// (Big Smooth) can talk to a running teammate without restarting the agent.
+    pub chat_rx: Option<Arc<tokio::sync::Mutex<UnboundedReceiver<InjectedMessage>>>>,
+}
+
+/// A message injected into a running agent's conversation from outside the loop.
+/// Carried over `AgentConfig::chat_rx`. The `kind` controls how the message
+/// is framed when pushed onto the conversation; `body` is the verbatim text.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InjectedMessage {
+    pub kind: InjectedMessageKind,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InjectedMessageKind {
+    /// Direct chat from the user — pushed verbatim as a `Message::user`.
+    UserChat,
+    /// `[STEERING:GUIDANCE]` from the lead — pushed as a user-turn prefixed
+    /// with "Lead guidance:" so the agent treats it as authoritative redirection.
+    LeadGuidance,
+    /// `[ANSWER:USER]` or `[ANSWER:SMOOTH]` reply to a prior `ask_smooth` —
+    /// pushed as a user-turn prefixed with "Answer to your question:".
+    AnswerToQuestion,
 }
 
 impl AgentConfig {
@@ -53,7 +80,16 @@ impl AgentConfig {
             human_tx: None,
             human_rx: None,
             reporter: None,
+            chat_rx: None,
         }
+    }
+
+    /// Wire an injection channel for the agent's mailbox. Messages drained from
+    /// this channel are pushed onto the conversation as user-turns at the top
+    /// of each iteration, so the lead can steer/chat with a running teammate.
+    pub fn with_chat_rx(mut self, rx: Arc<tokio::sync::Mutex<UnboundedReceiver<InjectedMessage>>>) -> Self {
+        self.chat_rx = Some(rx);
+        self
     }
 
     pub fn with_max_iterations(mut self, max: u32) -> Self {
@@ -417,6 +453,9 @@ impl Agent {
         let tool_schemas = self.tools.schemas();
 
         for iteration in 1..=self.config.max_iterations {
+            // Drain mailbox injections (see `drain_injected_messages` doc).
+            self.drain_injected_messages(&mut conversation);
+
             // Check for steering commands from Big Smooth
             if let Some(control) = self.check_steering() {
                 match control {
@@ -639,6 +678,12 @@ impl Agent {
         let tool_schemas = self.tools.schemas();
 
         for iteration in 1..=self.config.max_iterations {
+            // Drain any out-of-band injected messages (mailbox) and push them as
+            // user-turns. This is what makes the agent conversational mid-flight:
+            // the lead, a direct-chat user, or an answer to an `ask_smooth` call
+            // all arrive here.
+            self.drain_injected_messages(&mut conversation);
+
             // Compact if approaching context limit
             if conversation.needs_compaction() {
                 let result = conversation.compact(&self.config.compaction_strategy, None);
@@ -967,6 +1012,40 @@ impl Agent {
         }
         None
     }
+
+    /// Drain any pending injected messages from the mailbox channel and push
+    /// them onto the conversation as user-turns. Non-blocking: returns
+    /// immediately if no channel is wired or nothing is queued. Called at the
+    /// top of each iteration of `run` and `run_with_channel`, so messages
+    /// arriving mid-LLM-call land before the next request goes out.
+    fn drain_injected_messages(&self, conversation: &mut Conversation) {
+        let Some(rx) = &self.config.chat_rx else {
+            return;
+        };
+        let Ok(mut guard) = rx.try_lock() else {
+            // Another caller is draining (shouldn't happen — single agent loop)
+            // — just skip this turn rather than block.
+            return;
+        };
+        loop {
+            match guard.try_recv() {
+                Ok(InjectedMessage { kind, body }) => {
+                    let framed = match kind {
+                        InjectedMessageKind::UserChat => body,
+                        InjectedMessageKind::LeadGuidance => format!("Lead guidance: {body}"),
+                        InjectedMessageKind::AnswerToQuestion => format!("Answer to your question: {body}"),
+                    };
+                    tracing::info!(kind = ?kind, len = framed.len(), "agent: injected message into conversation");
+                    conversation.push(Message::user(framed));
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    tracing::debug!("agent: chat_rx disconnected");
+                    break;
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1248,5 +1327,56 @@ mod tests {
         assert_eq!(params["properties"]["task"]["type"], "string");
         let required = params["required"].as_array().expect("required array");
         assert!(required.iter().any(|v| v.as_str() == Some("task")));
+    }
+
+    #[test]
+    fn drain_pushes_user_chat_verbatim() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<InjectedMessage>();
+        let rx = Arc::new(tokio::sync::Mutex::new(rx));
+        let cfg = test_config().with_chat_rx(rx);
+        let agent = Agent::new(cfg, ToolRegistry::new());
+        let mut conv = Conversation::new(8192).with_system_prompt("sys");
+
+        tx.send(InjectedMessage {
+            kind: InjectedMessageKind::UserChat,
+            body: "hi from the user".into(),
+        })
+        .expect("send");
+
+        agent.drain_injected_messages(&mut conv);
+        // system + new user-turn
+        assert_eq!(conv.len(), 2);
+    }
+
+    #[test]
+    fn drain_frames_lead_guidance_and_answer() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<InjectedMessage>();
+        let rx = Arc::new(tokio::sync::Mutex::new(rx));
+        let cfg = test_config().with_chat_rx(rx);
+        let agent = Agent::new(cfg, ToolRegistry::new());
+        let mut conv = Conversation::new(8192).with_system_prompt("sys");
+
+        tx.send(InjectedMessage {
+            kind: InjectedMessageKind::LeadGuidance,
+            body: "focus on auth".into(),
+        })
+        .expect("send guidance");
+        tx.send(InjectedMessage {
+            kind: InjectedMessageKind::AnswerToQuestion,
+            body: "use port 4400".into(),
+        })
+        .expect("send answer");
+
+        agent.drain_injected_messages(&mut conv);
+        // system + 2 injected
+        assert_eq!(conv.len(), 3);
+    }
+
+    #[test]
+    fn drain_is_noop_when_channel_unset() {
+        let agent = Agent::new(test_config(), ToolRegistry::new());
+        let mut conv = Conversation::new(8192).with_system_prompt("sys");
+        agent.drain_injected_messages(&mut conv);
+        assert_eq!(conv.len(), 1); // just system prompt
     }
 }

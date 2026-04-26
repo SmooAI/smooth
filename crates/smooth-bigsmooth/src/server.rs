@@ -1283,6 +1283,15 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
             env.insert("SMOOTH_NARC_URL".into(), url.clone());
         }
 
+        // Hand the operator its pearl id so the in-VM mailbox poller knows
+        // which pearl to read steering/chat comments from. When this is unset
+        // (e.g. dispatch ran without Diver and PearlStore creation failed),
+        // the runner falls through to legacy behaviour with no mailbox.
+        if let Some(ref pid) = pearl_id {
+            tracing::info!(task_id = tid, pearl_id = %pid, "operator env: SMOOTH_PEARL_ID set");
+            env.insert("SMOOTH_PEARL_ID".into(), pid.clone());
+        }
+
         // Generate a task-type-specific policy TOML for Wonk inside the VM.
         // We default to TaskType::Coding in the `execute` phase, which gives
         // the in-VM agent full file/bash/search access. Follow-up: thread
@@ -2169,6 +2178,9 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
         }
         if let Ok(iters) = std::env::var("SMOOTH_WORKFLOW_AGENT_MAX_ITERATIONS") {
             cmd.env("SMOOTH_WORKFLOW_AGENT_MAX_ITERATIONS", iters);
+        }
+        if let Some(ref pid) = pearl_id {
+            cmd.env("SMOOTH_PEARL_ID", pid);
         }
         if let Some(home) = dirs_next::home_dir() {
             let smooth_home = home.join(".smooth");

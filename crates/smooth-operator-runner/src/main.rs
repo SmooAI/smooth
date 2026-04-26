@@ -40,6 +40,7 @@
 #![allow(clippy::expect_used)]
 
 mod delegate;
+mod mailbox;
 mod pearl_tools;
 mod port_forward;
 
@@ -1637,8 +1638,29 @@ async fn main() {
     }
 
     // Pearl tools — if workspace has .smooth/dolt/, register direct Dolt
-    // pearl tools so the agent can create/list/close pearls locally.
-    pearl_tools::register_pearl_tools(&mut tools, &config.workspace);
+    // pearl tools so the agent can create/list/close pearls locally. The
+    // returned handle is also reused below to power the pearl-comment
+    // mailbox poller (steering / direct-chat / answer injection).
+    let pearl_store_handle = pearl_tools::register_pearl_tools(&mut tools, &config.workspace);
+
+    // Mailbox: when this teammate has a pearl id (Big Smooth's dispatch
+    // sets `SMOOTH_PEARL_ID`), spawn a background task that polls the
+    // pearl's comments and forwards lead-to-teammate messages
+    // (`[CHAT:USER]`, `[STEERING:GUIDANCE]`, `[ANSWER:*]`) into the agent's
+    // conversation as user-turns. See `mailbox::parse_comment` for the
+    // prefix table. We hold onto the JoinHandle for the lifetime of the
+    // run so the poller is dropped exactly when the agent exits.
+    let mailbox_chat_rx = match (pearl_store_handle.clone(), std::env::var("SMOOTH_PEARL_ID").ok()) {
+        (Some(h), Some(pid)) if !pid.trim().is_empty() => {
+            let (rx, _join) = mailbox::spawn_poller(h, pid.clone());
+            tracing::info!(pearl_id = %pid, "mailbox: poller spawned");
+            // Leak the join handle: the task observes tx-drop and exits
+            // naturally when the agent finishes; we don't need to await it.
+            std::mem::forget(_join);
+            Some(rx)
+        }
+        _ => None,
+    };
 
     // MCP servers — merge global (~/.smooth/mcp.toml or $SMOOTH_HOME)
     // with project-scoped (<workspace>/.smooth/mcp.toml). Project wins
@@ -1750,6 +1772,9 @@ async fn main() {
             max_tokens: None,
         });
     }
+    if let Some(rx) = mailbox_chat_rx.clone() {
+        agent_config = agent_config.with_chat_rx(rx);
+    }
 
     // Hook order is intentional:
     //   0. PermissionHook — FIRST: an agent that's not allowed to call
@@ -1857,6 +1882,7 @@ async fn main() {
                     workspace_root: Some(std::path::PathBuf::from(
                         std::env::var("SMOOTH_WORKSPACE").unwrap_or_else(|_| "/workspace".into()),
                     )),
+                    chat_rx: mailbox_chat_rx.clone(),
                 };
                 match run_coding_workflow(cfg).await {
                     // Workflow emits its own Completed event — return

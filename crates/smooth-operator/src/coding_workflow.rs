@@ -34,7 +34,9 @@ use std::sync::Arc;
 use anyhow::Context;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::agent::{Agent, AgentConfig, AgentEvent};
+use tokio::sync::mpsc::UnboundedReceiver;
+
+use crate::agent::{Agent, AgentConfig, AgentEvent, InjectedMessage};
 use crate::cast::Cast;
 use crate::cost::CostBudget;
 use crate::providers::ProviderRegistry;
@@ -69,6 +71,11 @@ pub struct CodingWorkflowConfig {
     /// sandbox). Used to snapshot the best-seen state and restore
     /// it on regression. `None` skips snapshotting.
     pub workspace_root: Option<PathBuf>,
+    /// Optional injection channel for mailbox messages — passed to every
+    /// inner Agent so steering/chat/answers from the lead reach a running
+    /// teammate without needing to restart the workflow. `None` keeps
+    /// the agent isolated (current behaviour for non-pearl-attached runs).
+    pub chat_rx: Option<Arc<tokio::sync::Mutex<UnboundedReceiver<InjectedMessage>>>>,
 }
 
 /// Run the workflow end-to-end. Returns the accumulated cost.
@@ -118,6 +125,9 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
             .unwrap_or(80);
         let mut agent_config =
             AgentConfig::new(format!("{}/coding-{}", cfg.operator_id, iteration), code_prompt.clone(), llm_config.clone()).with_max_iterations(agent_max_iter);
+        if let Some(rx) = cfg.chat_rx.clone() {
+            agent_config = agent_config.with_chat_rx(rx);
+        }
         if let Some(cap) = cfg.budget_usd {
             let remaining = (cap - total_cost_usd).max(0.0);
             agent_config = agent_config.with_budget(CostBudget {
