@@ -1,8 +1,5 @@
 ---
-"smooai-smooth-operator": minor
-"smooai-smooth-operator-runner": minor
-"smooai-smooth-bigsmooth": minor
-"smooai-smooth-code": minor
+"@smooai/smooth": minor
 ---
 
 **CodingWorkflow** — first real per-phase dispatcher. ASSESS / PLAN / EXECUTE / VERIFY / REVIEW / FINALIZE each run their own `Agent` invocation through a different `Activity` slot: Thinking for ASSESS + FINALIZE, Planning for PLAN, Coding for EXECUTE + VERIFY, Reviewing for REVIEW. Previously Thinking / Planning / Coding / Reviewing were declared-only — no code path routed through them.

@@ -1,6 +1,5 @@
 ---
-"smooai-smooth-cli": minor
-"smooai-smooth-bench": patch
+"@smooai/smooth": minor
 ---
 
 The Line is now visible in two new places:

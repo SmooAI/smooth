@@ -1,8 +1,5 @@
 ---
-"smooai-smooth-operator": minor
-"smooai-smooth-operator-runner": minor
-"smooai-smooth-bigsmooth": patch
-"smooai-smooth-code": minor
+"@smooai/smooth": minor
 ---
 
 - **Cost threading**: `AgentEvent::Completed` now carries `cost_usd`, and Big Smooth's sandboxed dispatch path forwards that into `ServerEvent::TaskComplete` instead of the hardcoded `0.0` it sent before. `LlmResponse.gateway_cost_usd` captures the authoritative gateway-reported cost (LiteLLM's `x-litellm-response-cost-*` headers, with `-margin-amount` / `-original` / the legacy `-response-cost` all checked); `CostTracker::record_with_cost` replaces local `ModelPricing` guesswork when the gateway reports a real number.

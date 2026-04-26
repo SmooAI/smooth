@@ -1,8 +1,5 @@
 ---
-"smooai-smooth-operator": minor
-"smooai-smooth-operator-runner": patch
-"smooai-smooth-bigsmooth": patch
-"smooai-smooth-code": patch
+"@smooai/smooth": minor
 ---
 
 **TEST phase + self-validating EXECUTE + loop v2.**
