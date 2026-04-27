@@ -165,7 +165,18 @@ impl Tool for PearlsCreateTool {
             labels: Vec::new(),
         };
         let pearl = self.state.pearl_store.create(&new).context("creating pearl")?;
-        Ok(format!("Created pearl {} — {}", pearl.id, pearl.title))
+        // Claim the pearl immediately so the orchestrator's 5-second
+        // ready-pearls poll doesn't race the chat-agent's follow-up
+        // teammate_spawn call. Without this, both the chat-agent AND
+        // the orchestrator can dispatch operators on the same pearl.
+        let _ = self.state.pearl_store.update(
+            &pearl.id,
+            &smooth_pearls::PearlUpdate {
+                status: Some(smooth_pearls::PearlStatus::InProgress),
+                ..Default::default()
+            },
+        );
+        Ok(format!("Created pearl {} — {} (claimed; ready for teammate_spawn)", pearl.id, pearl.title))
     }
 
     fn is_read_only(&self) -> bool {

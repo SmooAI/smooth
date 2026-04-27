@@ -41,6 +41,7 @@
 
 mod ask_smooth_tool;
 mod delegate;
+mod host_tool;
 mod mailbox;
 mod pearl_tools;
 mod port_forward;
@@ -1681,6 +1682,17 @@ async fn main() {
         }
         _ => None,
     };
+
+    // Host-tool proxy — when SMOOTH_HOST_TOKEN is set (Big Smooth's
+    // dispatch threads it through), register the `host_tool` tool that
+    // calls Big Smooth's /api/host/exec for whitelisted CLIs (gh, git,
+    // kubectl, …). Useful in sandbox mode where the teammate has no
+    // direct host auth; harmless in direct mode where the teammate's
+    // own BashTool already works directly against the host.
+    if std::env::var("SMOOTH_HOST_TOKEN").is_ok() {
+        tools.register(crate::host_tool::HostToolTool);
+        tracing::info!("registered host_tool — teammate can call whitelisted host CLIs via /api/host/exec");
+    }
 
     // MCP servers — merge global (~/.smooth/mcp.toml or $SMOOTH_HOME)
     // with project-scoped (<workspace>/.smooth/mcp.toml). Project wins

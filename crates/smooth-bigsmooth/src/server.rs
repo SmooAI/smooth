@@ -98,6 +98,15 @@ impl AppState {
     /// size the sandbox pool (defaults to 3 — each microVM eats real
     /// RAM so the conservative default keeps dev laptops happy).
     pub fn new(pearl_store: smooth_pearls::PearlStore) -> Self {
+        // Bootstrap the per-process host-tool bearer token. Sandbox
+        // teammates use this when calling /api/host/exec so we know the
+        // call is from a legit dispatch and not a stray network reach.
+        // Set in the env so BOTH the host-exec handler (reads
+        // `SMOOTH_HOST_TOKEN`) and the dispatch path (passes the same
+        // env into the sandbox) see the same value.
+        if std::env::var_os("SMOOTH_HOST_TOKEN").is_none() {
+            std::env::set_var("SMOOTH_HOST_TOKEN", crate::host_tools::generate_host_token());
+        }
         let max_operators = max_sandbox_concurrency();
         let session_store = Arc::new(crate::session::DoltSessionStore::new(&pearl_store));
         let (event_tx, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
@@ -431,6 +440,7 @@ pub fn build_router(state: AppState) -> Router {
         // rule engine, its decision cache, and (when unresolved) the LLM
         // judge, then returns an approve/deny/escalate verdict.
         .route("/api/narc/judge", post(narc_judge_handler))
+        .route("/api/host/exec", post(crate::host_tools::host_exec_handler))
         // WebSocket — primary real-time channel
         .route("/ws", get(ws_handler))
         // Embedded web UI (SPA fallback — must be last)
@@ -1382,6 +1392,14 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
             env.insert("SMOOTH_PEARL_ID".into(), pid.clone());
         }
 
+        // Pass through the host-tool bearer so the teammate's `host_tool`
+        // can hit Big Smooth's `/api/host/exec` for whitelisted CLIs (gh,
+        // git, kubectl, …). See `crate::host_tools` for the security
+        // model — secrets stay on the host, sandbox sees only output.
+        if let Ok(host_token) = std::env::var("SMOOTH_HOST_TOKEN") {
+            env.insert("SMOOTH_HOST_TOKEN".into(), host_token);
+        }
+
         // Generate a task-type-specific policy TOML for Wonk inside the VM.
         // We default to TaskType::Coding in the `execute` phase, which gives
         // the in-VM agent full file/bash/search access. Follow-up: thread
@@ -2283,6 +2301,9 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
         }
         if let Some(ref pid) = pearl_id {
             cmd.env("SMOOTH_PEARL_ID", pid);
+        }
+        if let Ok(host_token) = std::env::var("SMOOTH_HOST_TOKEN") {
+            cmd.env("SMOOTH_HOST_TOKEN", host_token);
         }
         if let Some(home) = dirs_next::home_dir() {
             let smooth_home = home.join(".smooth");
