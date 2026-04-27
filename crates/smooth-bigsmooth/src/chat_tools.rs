@@ -538,7 +538,13 @@ impl Tool for TeammateWaitTool {
 pub struct BashTool;
 
 const BASH_ALLOWLIST: &[&str] = &[
+    // Read-only lookups
     "gh", "git", "kubectl", "jq", "curl", "ls", "cat", "head", "tail", "wc", "grep", "rg", "fd", "find", "echo",
+    // One-shot writes that don't need teammate isolation. `mkdir`
+    // pairs with `git clone <url> <dest>` for "set up this repo for
+    // me" requests so the chat agent can do them itself instead of
+    // spending 30-90s booting a runner.
+    "mkdir",
 ];
 /// Explicit refuse-list, even for commands that LOOK harmless. `th`
 /// re-enters Big Smooth's own dolt store via CLI subprocess and
@@ -546,11 +552,10 @@ const BASH_ALLOWLIST: &[&str] = &[
 /// hang waiting on stdin. The agent should reach for the native pearl
 /// tools (`pearls_list`, `pearls_search`, `pearls_show`) instead.
 const BASH_FORBIDDEN_FIRST_TOKEN: &[&str] = &["th", "smooth-dolt", "vim", "nvim", "emacs", "less", "more", "fzf"];
-/// Wallclock cap for any single bash invocation. Tightened from 25→10
-/// after observing a `gh` call sit idle for minutes; the chat agent
-/// should not be the place where slow commands wait — those go to a
-/// teammate with their own timeout.
-const BASH_TIMEOUT_SECS: u64 = 10;
+/// Wallclock cap for any single bash invocation. 30 s covers a small
+/// `git clone` over a typical connection while still keeping the chat
+/// agent honest — anything past this should be a teammate.
+const BASH_TIMEOUT_SECS: u64 = 30;
 
 #[async_trait]
 impl Tool for BashTool {
