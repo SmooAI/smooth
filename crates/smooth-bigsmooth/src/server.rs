@@ -1551,20 +1551,29 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
                 if let Some(home) = dirs_next::home_dir() {
                     let providers_path = home.join(".smooth/providers.json");
                     match smooth_operator::providers::ProviderRegistry::load_from_file(&providers_path) {
-                        Ok(registry) => match registry.to_json() {
-                            Ok(json) => {
-                                let routing_path = dir.path().join("routing.json");
-                                if let Err(e) = std::fs::write(&routing_path, json) {
-                                    tracing::warn!(task_id = tid, error = %e, "could not write routing.json; workflow will fall back to single-Agent");
-                                } else {
-                                    env.insert("SMOOTH_ROUTING_JSON_FILE".into(), "/opt/smooth/policy/routing.json".into());
-                                    tracing::info!(task_id = tid, "coding workflow enabled: routing.json mounted for runner");
+                        Ok(mut registry) => {
+                            // See dispatch_ws_task_direct for why: the workflow uses
+                            // routing.coding to resolve the LLM, so opts.model only
+                            // takes effect when we patch the slot here.
+                            if let Some(ref m) = model {
+                                registry.routing.coding.model = m.clone();
+                                tracing::info!(task_id = tid, model = %m, "sandboxed dispatch: overrode routing.coding.model from opts.model");
+                            }
+                            match registry.to_json() {
+                                Ok(json) => {
+                                    let routing_path = dir.path().join("routing.json");
+                                    if let Err(e) = std::fs::write(&routing_path, json) {
+                                        tracing::warn!(task_id = tid, error = %e, "could not write routing.json; workflow will fall back to single-Agent");
+                                    } else {
+                                        env.insert("SMOOTH_ROUTING_JSON_FILE".into(), "/opt/smooth/policy/routing.json".into());
+                                        tracing::info!(task_id = tid, "coding workflow enabled: routing.json mounted for runner");
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(task_id = tid, error = %e, "could not serialize routing config; workflow disabled");
                                 }
                             }
-                            Err(e) => {
-                                tracing::warn!(task_id = tid, error = %e, "could not serialize routing config; workflow disabled");
-                            }
-                        },
+                        }
                         Err(e) => {
                             tracing::warn!(task_id = tid, error = %e, "could not load providers.json; workflow disabled");
                         }
@@ -2247,18 +2256,32 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
 
     // Write routing.json so the runner's workflow path picks up
     // the provider registry (needed for the coding slot).
+    //
+    // When the caller passes `opts.model`, override the `coding` slot's
+    // model before serializing. The runner's `coding_workflow` resolves
+    // the LLM via `routing.coding`, so without this override the model
+    // override is ignored and the runner uses the default coding model
+    // (smooth-coding) regardless of what `teammate_spawn(model=...)`
+    // requested. That made simple lookups dispatch on a slow reasoning
+    // model and look like a hang.
     let routing_path = control_dir.path().join("routing.json");
     if let Some(home) = dirs_next::home_dir() {
         let providers_path = home.join(".smooth/providers.json");
         match smooth_operator::providers::ProviderRegistry::load_from_file(&providers_path) {
-            Ok(registry) => match registry.to_json() {
-                Ok(json) => {
-                    if let Err(e) = std::fs::write(&routing_path, json) {
-                        tracing::warn!(error = %e, "direct dispatch: failed to write routing.json; workflow will fall back to classic agent");
-                    }
+            Ok(mut registry) => {
+                if let Some(ref m) = model {
+                    registry.routing.coding.model = m.clone();
+                    tracing::info!(model = %m, "direct dispatch: overrode routing.coding.model from opts.model");
                 }
-                Err(e) => tracing::warn!(error = %e, "direct dispatch: failed to serialize routing config"),
-            },
+                match registry.to_json() {
+                    Ok(json) => {
+                        if let Err(e) = std::fs::write(&routing_path, json) {
+                            tracing::warn!(error = %e, "direct dispatch: failed to write routing.json; workflow will fall back to classic agent");
+                        }
+                    }
+                    Err(e) => tracing::warn!(error = %e, "direct dispatch: failed to serialize routing config"),
+                }
+            }
             Err(e) => tracing::warn!(error = %e, "direct dispatch: failed to load providers.json"),
         }
     }
