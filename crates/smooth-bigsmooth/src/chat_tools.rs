@@ -65,6 +65,66 @@ impl Tool for PearlsSearchTool {
     }
 }
 
+// ── pearls.list ────────────────────────────────────────────────────────
+
+pub struct PearlsListTool {
+    pub state: AppState,
+}
+
+#[async_trait]
+impl Tool for PearlsListTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "pearls_list".to_string(),
+            description: "List pearls by status. Use this to answer 'how many open pearls', 'what's in progress', 'what's ready', etc. Goes through the in-process pearl store — much faster and more reliable than shelling out to `th pearls list`. Returns up to `limit` pearls (default 50, hard cap 200) sorted newest first.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": ["open", "in_progress", "closed", "deferred"],
+                        "description": "Optional status filter. Omit for all statuses."
+                    },
+                    "limit": {
+                        "type": "number",
+                        "default": 50,
+                        "description": "Max pearls to return (capped at 200)."
+                    }
+                }
+            }),
+        }
+    }
+
+    async fn execute(&self, arguments: serde_json::Value) -> anyhow::Result<String> {
+        let limit = arguments.get("limit").and_then(|v| v.as_u64()).unwrap_or(50).clamp(1, 200) as usize;
+        let mut q = smooth_pearls::PearlQuery::new();
+        q.limit = limit;
+        if let Some(status_str) = arguments.get("status").and_then(|v| v.as_str()) {
+            q = match status_str {
+                "open" => q.with_status(smooth_pearls::PearlStatus::Open),
+                "in_progress" => q.with_status(smooth_pearls::PearlStatus::InProgress),
+                "closed" => q.with_status(smooth_pearls::PearlStatus::Closed),
+                "deferred" => q.with_status(smooth_pearls::PearlStatus::Deferred),
+                other => anyhow::bail!("unknown status `{other}` — use one of: open, in_progress, closed, deferred"),
+            };
+        }
+        let pearls = self.state.pearl_store.list(&q).context("listing pearls")?;
+        if pearls.is_empty() {
+            return Ok("(no pearls match)".to_string());
+        }
+        let total = pearls.len();
+        let mut out = format!("{total} pearl(s):\n");
+        for p in pearls.iter().take(limit) {
+            out.push_str(&format!("[{}] {} P{} {}\n", p.status.as_str(), p.id, p.priority.as_u8(), p.title));
+        }
+        Ok(out.trim_end().to_string())
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
 // ── pearls.show ────────────────────────────────────────────────────────
 
 pub struct PearlsShowTool {
@@ -480,10 +540,17 @@ pub struct BashTool;
 const BASH_ALLOWLIST: &[&str] = &[
     "gh", "git", "kubectl", "jq", "curl", "ls", "cat", "head", "tail", "wc", "grep", "rg", "fd", "find", "echo",
 ];
-/// Wallclock cap for any single bash invocation. Most allowlisted
-/// lookups finish in well under a second; this catches a hung curl or
-/// a runaway grep.
-const BASH_TIMEOUT_SECS: u64 = 25;
+/// Explicit refuse-list, even for commands that LOOK harmless. `th`
+/// re-enters Big Smooth's own dolt store via CLI subprocess and
+/// deadlocks against the long-running serve. The interactive editors
+/// hang waiting on stdin. The agent should reach for the native pearl
+/// tools (`pearls_list`, `pearls_search`, `pearls_show`) instead.
+const BASH_FORBIDDEN_FIRST_TOKEN: &[&str] = &["th", "smooth-dolt", "vim", "nvim", "emacs", "less", "more", "fzf"];
+/// Wallclock cap for any single bash invocation. Tightened from 25→10
+/// after observing a `gh` call sit idle for minutes; the chat agent
+/// should not be the place where slow commands wait — those go to a
+/// teammate with their own timeout.
+const BASH_TIMEOUT_SECS: u64 = 10;
 
 #[async_trait]
 impl Tool for BashTool {
@@ -517,6 +584,11 @@ impl Tool for BashTool {
         // and only check the FIRST token. Multi-stage pipelines tend
         // to be teammate territory anyway.
         let first = cmd.split_whitespace().next().unwrap_or("");
+        if BASH_FORBIDDEN_FIRST_TOKEN.contains(&first) {
+            anyhow::bail!(
+                "bash: '{first}' is explicitly forbidden — for pearl questions use `pearls_list`, `pearls_search`, or `pearls_show`; for editor-style tools spawn a teammate."
+            );
+        }
         if !BASH_ALLOWLIST.contains(&first) {
             anyhow::bail!(
                 "bash: '{first}' is not in the allowlist. Allowed: {}. For anything else, spawn a teammate.",
@@ -578,6 +650,7 @@ impl Tool for BashTool {
 pub fn build_chat_tools(state: AppState, registry: Arc<ProviderRegistry>) -> smooth_operator::tool::ToolRegistry {
     let mut tools = smooth_operator::tool::ToolRegistry::new();
     tools.register(PearlsSearchTool { state: state.clone() });
+    tools.register(PearlsListTool { state: state.clone() });
     tools.register(PearlsShowTool { state: state.clone() });
     tools.register(PearlsCreateTool {
         state: state.clone(),
