@@ -213,7 +213,7 @@ impl Tool for TeammateSpawnTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "teammate_spawn".to_string(),
-            description: "Spawn a teammate (operator) on a pearl. The teammate runs in its own sandbox with its own context, picks up the pearl's description as its task, and reports progress as pearl comments. Returns immediately — use teammate_read or pearls_show to follow progress.".to_string(),
+            description: "Spawn a teammate (operator) on a pearl. The teammate runs in its own sandbox with its own context, picks up the pearl's description as its task, and reports progress as pearl comments. Returns immediately — use teammate_read or pearls_show to follow progress.\n\nFor SIMPLE read-only lookups (`list github repos`, `query a database`, `show kube pods`), pass `model=\"smooth-fast-gemini\"` — the default `smooth-coding` model is a slow reasoning model tuned for code edits and will make you wait for needless deliberation. Reserve the default for actual coding tasks.".to_string(),
             parameters: json!({
                 "type": "object",
                 "required": ["pearl_id"],
@@ -222,7 +222,8 @@ impl Tool for TeammateSpawnTool {
                     "extra_prompt": { "type": "string", "description": "Optional extra instruction appended to the pearl description when handing off to the teammate." },
                     "budget_usd": { "type": "number", "description": "Optional cost cap in USD for this dispatch." },
                     "working_dir": { "type": "string", "description": "Optional working directory for the teammate's sandbox. Pass an absolute path; defaults to the project root." },
-                    "role": { "type": "string", "description": "Optional cast role to spawn under (e.g. `fixer`, `mapper`, `oracle`, `heckler` — see smooth-operator/src/cast). Affects permissions, prompt, and routing slot." }
+                    "role": { "type": "string", "description": "Optional cast role to spawn under (e.g. `fixer`, `mapper`, `oracle`, `heckler` — see smooth-operator/src/cast). Affects permissions, prompt, and routing slot." },
+                    "model": { "type": "string", "description": "Override the LLM the teammate uses. Defaults to the role's slot (smooth-coding for `fixer`). Use `smooth-fast-gemini` for simple read-only lookups, `smooth-reasoning` for hard problems, `smooth-coding` for code edits." }
                 }
             }),
         }
@@ -234,6 +235,7 @@ impl Tool for TeammateSpawnTool {
         let budget = arguments.get("budget_usd").and_then(|v| v.as_f64());
         let working_dir = arguments.get("working_dir").and_then(|v| v.as_str()).map(String::from);
         let role = arguments.get("role").and_then(|v| v.as_str()).map(String::from);
+        let model = arguments.get("model").and_then(|v| v.as_str()).map(String::from);
 
         let pearl = self
             .state
@@ -252,7 +254,7 @@ impl Tool for TeammateSpawnTool {
         // (which also keeps the orchestrator from auto-dispatching it).
         let opts = DispatchOptions {
             message,
-            model: None,
+            model,
             budget,
             working_dir,
             image: None,
