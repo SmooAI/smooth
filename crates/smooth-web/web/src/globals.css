@@ -77,3 +77,23 @@ body {
         transform: translateY(-2px);
     }
 }
+
+/* Big Smooth flies down from his header perch to a spot under the
+   user's most recent question while he's thinking. The header avatar
+   fades + drops at the same time (inline transition above) so the
+   pair reads as a single continuous motion. Slight overshoot at 65%
+   gives him a bit of personality on the landing. */
+@keyframes bs-face-fly-in {
+    0% {
+        opacity: 0;
+        transform: translateY(-48px) scale(0.7);
+    }
+    65% {
+        opacity: 1;
+        transform: translateY(6px) scale(1.04);
+    }
+    100% {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
