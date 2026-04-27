@@ -672,29 +672,53 @@ export function ChatPage() {
                     </button>
                 )}
                 {scope.kind === 'lead' && (
-                    <div className="relative shrink-0" style={{ width: isMobile ? 64 : 96, height: isMobile ? 64 : 96 }}>
+                    <div
+                        className="relative shrink-0"
+                        style={{
+                            width: isMobile ? 64 : 96,
+                            height: isMobile ? 64 : 96,
+                            opacity: streaming ? 0 : 1,
+                            transform: streaming ? 'translateY(28px) scale(0.85)' : 'translateY(0) scale(1)',
+                            pointerEvents: streaming ? 'none' : 'auto',
+                            transition: 'opacity 320ms ease, transform 360ms cubic-bezier(0.34, 1.56, 0.64, 1)',
+                        }}
+                    >
                         <BigSmoothFace state={streaming ? 'thinking' : 'idle'} size={isMobile ? 64 : 96} />
                     </div>
                 )}
                 <h1 className={`font-bold ${isMobile ? 'text-lg' : 'text-2xl'}`}>{conversationTitle}</h1>
             </div>
-            {scope.kind === 'lead' && (streaming || thoughts.length > 0) && (
-                <div
-                    className="flex flex-wrap gap-2 mb-3 px-3 py-2 rounded-lg"
-                    style={{
-                        background: 'color-mix(in oklch, var(--smoo-green) 6%, transparent)',
-                        border: '1px solid color-mix(in oklch, var(--smoo-green) 30%, transparent)',
-                    }}
-                    aria-live="polite"
-                >
-                    {thoughts.length === 0 && streaming && <PendingThoughtBubble />}
-                    {thoughts.map((t, i) => (
-                        <ThoughtBubble key={t.id} text={t.text} freshness={(i + 1) / thoughts.length} />
-                    ))}
-                </div>
-            )}
             <div className="flex-1 overflow-auto flex flex-col gap-3 mb-3 min-h-0">
                 {scope.kind === 'lead' ? renderLeadMessages() : renderTeammateMessages()}
+                {scope.kind === 'lead' && streaming && (
+                    <div
+                        className="flex flex-col items-start gap-2 self-start"
+                        style={{
+                            animation: 'bs-face-fly-in 420ms cubic-bezier(0.34, 1.56, 0.64, 1) both',
+                        }}
+                    >
+                        <div
+                            className="relative shrink-0"
+                            style={{ width: isMobile ? 64 : 96, height: isMobile ? 64 : 96 }}
+                        >
+                            <BigSmoothFace state="thinking" size={isMobile ? 64 : 96} />
+                        </div>
+                        <div
+                            className="flex flex-wrap gap-2 px-3 py-2 rounded-lg"
+                            style={{
+                                background: 'color-mix(in oklch, var(--smoo-green) 6%, transparent)',
+                                border: '1px solid color-mix(in oklch, var(--smoo-green) 30%, transparent)',
+                                maxWidth: '90%',
+                            }}
+                            aria-live="polite"
+                        >
+                            {thoughts.length === 0 && <PendingThoughtBubble />}
+                            {thoughts.map((t, i) => (
+                                <ThoughtBubble key={t.id} text={t.text} freshness={(i + 1) / thoughts.length} />
+                            ))}
+                        </div>
+                    </div>
+                )}
                 {streaming && scope.kind !== 'lead' && (
                     <div className="italic text-sm" style={{ color: 'var(--muted)' }}>
                         Sending…
