@@ -36,3 +36,16 @@ body {
     color: var(--color-foreground);
     font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
 }
+
+/* Aliases used by chat.tsx and operators.tsx — these were referenced
+ * everywhere but never defined, so any element styled with
+ * `var(--border)` etc. was rendering with no border / no background.
+ * Mapping them onto the `--color-*` tokens defined in @theme above. */
+:root {
+    --border: var(--color-border);
+    --muted: var(--color-muted-foreground);
+    --smoo-green: var(--color-smoo-green);
+    --smoo-green-alpha: color-mix(in oklch, var(--color-smoo-green) 22%, transparent);
+    --smoo-orange: oklch(0.78 0.18 65);
+    --smoo-dark-blue-850: oklch(0.18 0.02 260);
+}

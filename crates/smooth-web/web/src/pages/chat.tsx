@@ -5,6 +5,25 @@ import remarkGfm from 'remark-gfm';
 import { api } from '../api';
 import { useIsMobile } from '../hooks/use-mobile';
 
+// Slash commands surfaced when the user types `/` at the start of the input.
+// Each `expand` runs when the command is accepted; the returned string
+// replaces the input contents (or null to leave the input alone, e.g. /clear).
+const SLASH_COMMANDS: { name: string; description: string; expand: () => string | null }[] = [
+    { name: '/help', description: 'List available commands', expand: () => 'Show me what slash commands and mentions are supported in this chat.' },
+    { name: '/pearls', description: 'List open pearls', expand: () => 'List my open pearls.' },
+    { name: '/teammates', description: 'List active teammates', expand: () => 'Which teammates are running right now?' },
+    { name: '/spawn', description: 'Spawn a teammate on a new task', expand: () => 'Create a pearl for ' },
+    { name: '/status', description: 'Show overall status', expand: () => 'Give me a quick status — pearls open vs in progress, active teammates, anything stuck.' },
+    { name: '/clear', description: 'Clear the input', expand: () => '' },
+];
+
+interface SearchResult {
+    kind: string; // "pearl" | "file" | "path"
+    label: string;
+    detail?: string;
+    insert: string;
+}
+
 interface Session {
     id: string;
     title: string;
@@ -63,7 +82,78 @@ export function ChatPage() {
     const [scope, setScope] = useState<Scope>({ kind: 'lead' });
     const [teammateMessages, setTeammateMessages] = useState<TeammateMessage[]>([]);
     const bottomRef = useRef<HTMLDivElement>(null);
+    const inputRef = useRef<HTMLInputElement>(null);
     const isMobile = useIsMobile();
+
+    // Autocomplete: slash commands on '/<...>', mentions on '@<...>'.
+    // When `mode` is null the popover is hidden.
+    const [acMode, setAcMode] = useState<'slash' | 'mention' | null>(null);
+    const [acQuery, setAcQuery] = useState('');
+    const [acResults, setAcResults] = useState<SearchResult[]>([]);
+    const [acIndex, setAcIndex] = useState(0);
+
+    const slashSuggestions = useMemo(() => {
+        if (acMode !== 'slash') return [];
+        const q = acQuery.toLowerCase();
+        return SLASH_COMMANDS.filter((c) => c.name.toLowerCase().includes(q));
+    }, [acMode, acQuery]);
+
+    // Drive autocomplete from the current input value + caret position.
+    const refreshAutocomplete = useCallback(
+        async (value: string) => {
+            // Slash commands: the input must START with `/` (and not contain
+            // a space yet). Anything else closes the menu.
+            if (value.startsWith('/') && !value.includes(' ')) {
+                setAcMode('slash');
+                setAcQuery(value);
+                setAcIndex(0);
+                return;
+            }
+            // Mentions: look back from the end of the buffer for an `@`,
+            // bounded by whitespace, ≤ 30 chars.
+            const m = value.match(/(?:^|\s)@([^\s]{0,30})$/);
+            if (m) {
+                setAcMode('mention');
+                const q = m[1] ?? '';
+                setAcQuery(q);
+                setAcIndex(0);
+                if (q.length === 0) {
+                    setAcResults([]);
+                    return;
+                }
+                try {
+                    const r = await api<{ data: SearchResult[] }>(`/api/search?q=${encodeURIComponent(q)}`);
+                    setAcResults((r.data || []).slice(0, 8));
+                } catch {
+                    setAcResults([]);
+                }
+                return;
+            }
+            setAcMode(null);
+            setAcResults([]);
+        },
+        [],
+    );
+
+    const acceptAutocomplete = useCallback(() => {
+        if (acMode === 'slash') {
+            const cmd = slashSuggestions[acIndex];
+            if (!cmd) return;
+            const replacement = cmd.expand();
+            if (replacement === null) return;
+            setInput(replacement);
+            setAcMode(null);
+            inputRef.current?.focus();
+            return;
+        }
+        if (acMode === 'mention') {
+            const r = acResults[acIndex];
+            if (!r) return;
+            setInput((cur) => cur.replace(/@([^\s]{0,30})$/, `${r.insert} `));
+            setAcMode(null);
+            inputRef.current?.focus();
+        }
+    }, [acMode, acIndex, slashSuggestions, acResults]);
 
     const refreshSessions = useCallback(async () => {
         try {
@@ -502,46 +592,150 @@ export function ChatPage() {
                 )}
                 <div ref={bottomRef} />
             </div>
-            <form
-                onSubmit={(e) => {
-                    e.preventDefault();
-                    send();
-                }}
-                className="flex gap-2 shrink-0"
-            >
-                <input
-                    value={input}
-                    onChange={(e) => setInput(e.target.value)}
-                    onKeyDown={(e) => {
-                        if (e.key === 'Enter' && !e.shiftKey) {
-                            e.preventDefault();
-                            send();
+            <div className="relative shrink-0">
+                {acMode === 'slash' && slashSuggestions.length > 0 && (
+                    <div
+                        className="absolute bottom-full left-0 right-0 mb-2 rounded-lg overflow-hidden z-10"
+                        style={{ background: 'var(--smoo-dark-blue-850)', border: '2px solid var(--border)', maxHeight: '240px', overflowY: 'auto' }}
+                    >
+                        <div className="px-3 py-1.5 text-[11px] uppercase tracking-wide" style={{ color: 'var(--muted)', borderBottom: '1px solid var(--border)' }}>
+                            Slash commands
+                        </div>
+                        {slashSuggestions.map((cmd, i) => (
+                            <button
+                                key={cmd.name}
+                                type="button"
+                                onClick={() => {
+                                    setAcIndex(i);
+                                    acceptAutocomplete();
+                                }}
+                                onMouseEnter={() => setAcIndex(i)}
+                                className="w-full text-left px-3 py-2 cursor-pointer flex justify-between gap-3"
+                                style={{ background: i === acIndex ? 'var(--smoo-green-alpha)' : 'transparent' }}
+                            >
+                                <span className="font-mono text-sm" style={{ color: 'var(--smoo-green)' }}>
+                                    {cmd.name}
+                                </span>
+                                <span className="text-[12px] truncate" style={{ color: 'var(--muted)' }}>
+                                    {cmd.description}
+                                </span>
+                            </button>
+                        ))}
+                    </div>
+                )}
+                {acMode === 'mention' && acResults.length > 0 && (
+                    <div
+                        className="absolute bottom-full left-0 right-0 mb-2 rounded-lg overflow-hidden z-10"
+                        style={{ background: 'var(--smoo-dark-blue-850)', border: '2px solid var(--border)', maxHeight: '320px', overflowY: 'auto' }}
+                    >
+                        <div className="px-3 py-1.5 text-[11px] uppercase tracking-wide" style={{ color: 'var(--muted)', borderBottom: '1px solid var(--border)' }}>
+                            @{acQuery}
+                        </div>
+                        {acResults.map((r, i) => (
+                            <button
+                                key={`${r.kind}-${r.insert}-${i}`}
+                                type="button"
+                                onClick={() => {
+                                    setAcIndex(i);
+                                    acceptAutocomplete();
+                                }}
+                                onMouseEnter={() => setAcIndex(i)}
+                                className="w-full text-left px-3 py-2 cursor-pointer flex flex-col gap-0.5"
+                                style={{ background: i === acIndex ? 'var(--smoo-green-alpha)' : 'transparent' }}
+                            >
+                                <div className="flex items-center gap-2">
+                                    <span className="text-[10px] uppercase tracking-wide rounded px-1.5 py-0.5" style={{ background: 'var(--smoo-green-alpha)', color: 'var(--smoo-green)' }}>
+                                        {r.kind}
+                                    </span>
+                                    <span className="text-sm font-medium truncate">{r.label}</span>
+                                </div>
+                                {r.detail && (
+                                    <div className="text-[12px] truncate" style={{ color: 'var(--muted)' }}>
+                                        {r.detail}
+                                    </div>
+                                )}
+                            </button>
+                        ))}
+                    </div>
+                )}
+                <form
+                    onSubmit={(e) => {
+                        e.preventDefault();
+                        if (acMode) {
+                            acceptAutocomplete();
+                            return;
                         }
+                        send();
                     }}
-                    placeholder={
-                        scope.kind === 'lead'
-                            ? activeId
-                                ? 'Message Big Smooth...'
-                                : 'Start a new chat...'
-                            : `Message ${scope.name}...`
-                    }
-                    className="flex-1 min-w-0 rounded-lg px-3 py-3 outline-none"
-                    style={{ background: 'var(--smoo-dark-blue-850)', border: '1px solid var(--border)', color: '#f8fafc', fontSize: '16px' }}
-                    enterKeyHint="send"
-                    autoComplete="off"
-                    aria-label="Message"
-                />
-                <button
-                    type="submit"
-                    disabled={!input.trim() || streaming}
-                    className="rounded-lg px-4 sm:px-6 py-3 font-semibold flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shrink-0 min-h-[48px] min-w-[48px]"
-                    style={{ background: 'var(--smoo-green)', color: '#020618' }}
-                    aria-label="Send"
+                    className="flex gap-2"
                 >
-                    <Send size={18} />
-                    <span className="hidden sm:inline">Send</span>
-                </button>
-            </form>
+                    <input
+                        ref={inputRef}
+                        value={input}
+                        onChange={(e) => {
+                            setInput(e.target.value);
+                            refreshAutocomplete(e.target.value);
+                        }}
+                        onKeyDown={(e) => {
+                            if (acMode) {
+                                if (e.key === 'ArrowDown') {
+                                    e.preventDefault();
+                                    const total = acMode === 'slash' ? slashSuggestions.length : acResults.length;
+                                    setAcIndex((i) => (i + 1) % Math.max(1, total));
+                                    return;
+                                }
+                                if (e.key === 'ArrowUp') {
+                                    e.preventDefault();
+                                    const total = acMode === 'slash' ? slashSuggestions.length : acResults.length;
+                                    setAcIndex((i) => (i - 1 + Math.max(1, total)) % Math.max(1, total));
+                                    return;
+                                }
+                                if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+                                    e.preventDefault();
+                                    acceptAutocomplete();
+                                    return;
+                                }
+                                if (e.key === 'Escape') {
+                                    e.preventDefault();
+                                    setAcMode(null);
+                                    return;
+                                }
+                            }
+                            if (e.key === 'Enter' && !e.shiftKey) {
+                                e.preventDefault();
+                                send();
+                            }
+                        }}
+                        placeholder={
+                            scope.kind === 'lead'
+                                ? activeId
+                                    ? 'Message Big Smooth — try /pearls or @ to search'
+                                    : 'Start a new chat — try /help, /pearls, /teammates, or @ to mention'
+                                : `Message ${scope.name} — / for commands, @ to search`
+                        }
+                        className="flex-1 min-w-0 rounded-lg px-4 py-4 outline-none focus:ring-2 transition-shadow"
+                        style={{
+                            background: 'var(--color-card)',
+                            border: '2px solid var(--color-border)',
+                            color: 'var(--color-foreground)',
+                            fontSize: '16px',
+                        }}
+                        enterKeyHint="send"
+                        autoComplete="off"
+                        aria-label="Message"
+                    />
+                    <button
+                        type="submit"
+                        disabled={!input.trim() || streaming}
+                        className="rounded-lg px-5 sm:px-6 py-4 font-semibold flex items-center justify-center gap-2 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed shrink-0 min-h-[56px] min-w-[56px] shadow-lg"
+                        style={{ background: 'var(--smoo-green)', color: '#020618' }}
+                        aria-label="Send"
+                    >
+                        <Send size={20} strokeWidth={2.5} />
+                        <span className="hidden sm:inline">Send</span>
+                    </button>
+                </form>
+            </div>
         </div>
     );
 
