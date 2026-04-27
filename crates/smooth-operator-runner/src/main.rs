@@ -46,6 +46,7 @@ mod mailbox;
 mod pearl_tools;
 mod port_forward;
 mod reply_to_chat_tool;
+mod tool_hints;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1694,6 +1695,15 @@ async fn main() {
         tracing::info!("registered host_tool — teammate can call whitelisted host CLIs via /api/host/exec");
     }
 
+    // Tool hints registry — recommended approaches for common operator
+    // intents. Layered: built-ins → ~/.smooth/tool_hints/*.toml →
+    // <workspace>/.smooth/tool_hints/*.toml. Always available; the agent
+    // is encouraged (in its system prompt) to consult this BEFORE
+    // reaching for bash on a new intent.
+    let workspace_path = std::path::PathBuf::from(&config.workspace);
+    tools.register(crate::tool_hints::ToolHintsTool::new(Some(workspace_path)));
+    tracing::info!("registered tool_hints — agent can look up preferred approaches by intent");
+
     // MCP servers — merge global (~/.smooth/mcp.toml or $SMOOTH_HOME)
     // with project-scoped (<workspace>/.smooth/mcp.toml). Project wins
     // on name collisions.
@@ -1786,8 +1796,14 @@ async fn main() {
     } else {
         ""
     };
+    // Tool-discovery doctrine — model the agent thinking through "how
+    // would a competent human do this", then verifying tools exist,
+    // coordinating install/auth via ask_smooth when they don't, before
+    // running the real command. The static `tool_hints` registry is a
+    // shortcut for the common cases; discovery is the headline pattern.
+    let hints_note = "\n\n## Tool discovery & coordination\n\nBefore running anything for a generic intent (\"list github repos\", \"deploy to staging\", \"query our database\", …):\n\n1. **Think out loud.** What tool would a competent human reach for here? Name it. CLI tools usually win for read-only lookups (`gh`, `kubectl`, `aws`, `psql`, `jq`, `rg`, `fd`).\n2. **Check if it's installed and authed.** A quick `command -v <tool>` answers installation; tool-specific subcommands (`gh auth status`, `kubectl config current-context`, `aws sts get-caller-identity`) answer auth. Don't assume — verify.\n3. **If missing or unauthed, coordinate with the user.** Use `ask_smooth(question=\"I'd like to use `gh` for this — looks like it's not installed/authed. Want me to walk you through `brew install gh && gh auth login`?\", urgency=\"blocking\")`. Don't try to install/auth silently in the user's environment; that's their decision and their credentials. The user will run the commands, then signal back.\n4. **Once the tool is ready, run it.** Use the bash tool with the actual command. Capture the output; if it errors, diagnose and report or ask the user.\n5. **Shortcut: `tool_hints(intent=\"...\")`.** When you've identified an intent the team has done before, this returns the preferred command + fallback. It's a hint, not a rule — your judgment still wins. No hint matches? Step 1.\n\nThe goal is the user gets their answer with the right tool, the right auth, and the right amount of friction. Don't reinvent; don't bypass; don't silently fail.";
     let base_prompt = format!(
-        "{}{pearl_note}\n\n## Agent Role\n\n{}",
+        "{}{pearl_note}{hints_note}\n\n## Agent Role\n\n{}",
         include_str!("../prompts/system.md"),
         active_role.prompt
     );

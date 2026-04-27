@@ -1,0 +1,123 @@
+# Built-in tool hints. Loaded by `tool_hints::builtin_hints()` and merged
+# with `~/.smooth/tool_hints/*.toml` and `<workspace>/.smooth/tool_hints/*.toml`.
+# Project hints win over user hints win over these on intent collision.
+
+[[hint]]
+intent = "list github repos"
+keywords = ["github", "repos", "repositories", "gh", "git remote"]
+preferred = "gh CLI"
+command = "gh repo list --limit 50 --json name,description,visibility,updatedAt,isArchived"
+notes = "Requires `gh` installed and authed (`gh auth status`). Use `--visibility public|private` to filter, `--owner <org>` for an org's repos. JSON is easy to parse with jq."
+fallback = "curl -s -H \"Authorization: Bearer $GITHUB_TOKEN\" 'https://api.github.com/user/repos?per_page=100'"
+
+[[hint]]
+intent = "show github repo info"
+keywords = ["github", "repo", "describe", "view"]
+preferred = "gh CLI"
+command = "gh repo view <owner>/<name> --json name,description,defaultBranchRef,latestRelease,stargazerCount"
+notes = "Returns structured JSON. For unauthenticated public-repo lookups use the API fallback."
+fallback = "curl -s 'https://api.github.com/repos/<owner>/<name>'"
+
+[[hint]]
+intent = "search github code"
+keywords = ["github", "search", "code"]
+preferred = "gh CLI"
+command = "gh search code 'query' --limit 30 --json repository,path,url"
+notes = "Use --owner to scope to a user or org. `gh search repos` for repo search; `gh search issues` for issues."
+fallback = ""
+
+[[hint]]
+intent = "list github prs"
+keywords = ["github", "pr", "pull request", "prs"]
+preferred = "gh CLI"
+command = "gh pr list --limit 30 --json number,title,state,author,headRefName,createdAt,url"
+notes = "Add `--state all` to include closed/merged. Use `--repo <owner>/<name>` to scope outside the cwd."
+fallback = ""
+
+[[hint]]
+intent = "list github issues"
+keywords = ["github", "issue", "issues"]
+preferred = "gh CLI"
+command = "gh issue list --limit 30 --json number,title,state,author,labels,createdAt,url"
+notes = "`--state all` to include closed. `--label X` to filter."
+fallback = ""
+
+[[hint]]
+intent = "format json"
+keywords = ["json", "pretty", "format", "parse"]
+preferred = "jq"
+command = "jq '.' <file>     # or:    cat file | jq '.'"
+notes = "`jq -r '.field'` for raw values. `jq -c` for compact (one line per record). For large files use `jq --stream`."
+fallback = "python3 -m json.tool <file>"
+
+[[hint]]
+intent = "search the web"
+keywords = ["web", "search", "google", "duckduckgo"]
+preferred = "duckduckgo HTML scrape"
+command = "curl -s -A 'Mozilla/5.0' \"https://duckduckgo.com/html/?q=<query>\" | grep -oE 'href=\"[^\"]+\"' | head -20"
+notes = "DDG's HTML endpoint doesn't require API auth and tolerates light scraping. For higher-volume use, prefer firecrawl/serper if MCP is configured."
+fallback = "curl -s 'https://api.duckduckgo.com/?q=<query>&format=json'"
+
+[[hint]]
+intent = "fetch url"
+keywords = ["fetch", "url", "http", "download", "curl"]
+preferred = "curl"
+command = "curl -fsSL <url>"
+notes = "`-f` fails on HTTP error, `-s` silent, `-S` show errors when -s, `-L` follows redirects. Add `-H 'Authorization: Bearer ...'` for authed calls."
+fallback = "wget -qO- <url>"
+
+[[hint]]
+intent = "find files"
+keywords = ["find", "search", "files", "fs"]
+preferred = "fd or rg --files"
+command = "fd <pattern>     # or:    rg --files | rg <pattern>"
+notes = "`fd` (or `fdfind`) is fast and gitignore-aware. Use `find . -name <pattern>` if neither is installed."
+fallback = "find . -name '<pattern>' -type f"
+
+[[hint]]
+intent = "search file contents"
+keywords = ["grep", "search", "ripgrep", "rg", "contents"]
+preferred = "ripgrep (rg)"
+command = "rg <pattern>     # or:   rg -t rust <pattern>     to scope by language"
+notes = "`-i` case-insensitive, `-n` line numbers, `-A 3 -B 3` for context, `--json` for machine-readable output."
+fallback = "grep -rn <pattern> ."
+
+[[hint]]
+intent = "git log"
+keywords = ["git", "log", "history", "commits"]
+preferred = "git log"
+command = "git log --oneline -20     # or:    git log --since='7 days ago' --pretty=format:'%h %ae %s'"
+notes = "Use `git log -p` for diffs, `git log --stat` for file change summaries, `git log <file>` to scope to a file."
+fallback = ""
+
+[[hint]]
+intent = "git diff"
+keywords = ["git", "diff", "changes", "review"]
+preferred = "git diff"
+command = "git diff main...HEAD     # for branch changes vs main"
+notes = "`git diff` for unstaged, `git diff --cached` for staged, `git diff main...HEAD` for branch diff (3 dots = merge-base based)."
+fallback = ""
+
+[[hint]]
+intent = "list npm packages"
+keywords = ["npm", "pnpm", "yarn", "packages", "node"]
+preferred = "pnpm list"
+command = "pnpm list --depth=0     # or:    cat package.json | jq '.dependencies + .devDependencies'"
+notes = "This project uses pnpm — never substitute npm or yarn (per project policy). For cross-workspace listings: `pnpm list -r`."
+fallback = "cat package.json | jq '.dependencies + .devDependencies'"
+
+[[hint]]
+intent = "run tests"
+keywords = ["test", "pytest", "jest", "vitest", "cargo test"]
+preferred = "project-defined test command"
+command = "look in package.json scripts, Cargo.toml, Makefile, or README; common: `pnpm test`, `cargo test`, `pytest`"
+notes = "ALWAYS check the project's actual test command before guessing. Smoo AI projects use pnpm + vitest; smooth/ uses cargo test."
+fallback = ""
+
+[[hint]]
+intent = "list pearls"
+keywords = ["pearls", "tasks", "issues", "smooth"]
+preferred = "th pearls"
+command = "th pearls list --status=open"
+notes = "Or `th pearls ready` for unblocked work, `th pearls show <id>` for details. Pearl ids are `th-<6 hex chars>`."
+fallback = ""
