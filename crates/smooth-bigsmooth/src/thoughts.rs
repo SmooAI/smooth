@@ -17,10 +17,12 @@ use tokio::sync::Semaphore;
 
 use crate::events::ServerEvent;
 
-/// Cap concurrent Gemini Flash Lite calls in flight at once. Two is
-/// enough for natural pacing (a burst of 4 tool calls overlaps two pairs
-/// rather than four-wide) without saturating the gateway.
-const MAX_INFLIGHT: usize = 2;
+/// Cap concurrent Gemini Flash Lite calls in flight at once. Four lets
+/// a burst of tool-call events surface as bubbles in tight succession
+/// without the chat-agent's own iterations overrunning the summarizer.
+/// Two was too tight — bursts of 4-5 tool calls produced bubbles
+/// staggered over several seconds.
+const MAX_INFLIGHT: usize = 4;
 
 /// One in-flight summarizer with shared rate-limit state.
 #[derive(Clone)]
@@ -80,8 +82,19 @@ impl ThoughtStreamer {
 /// prompt per kind. (A tool call needs a different framing than a
 /// streamed assistant text snippet.)
 pub enum ThoughtContext {
-    ToolCall { tool_name: String },
-    AssistantPreview { snippet: String },
+    ToolCall {
+        tool_name: String,
+    },
+    AssistantPreview {
+        snippet: String,
+    },
+    /// Heartbeat thought — emitted on a periodic timer while a long
+    /// tool call (teammate_wait, big search) is in flight, so the UI
+    /// bubbles keep flowing and the user can see BS is still alive.
+    Heartbeat {
+        last_action: String,
+        seconds: u32,
+    },
 }
 
 impl ThoughtContext {
@@ -96,6 +109,11 @@ impl ThoughtContext {
                 let clipped: String = snippet.chars().take(280).collect();
                 format!(
                     "I just thought to myself: \"{clipped}\". Compress that into one short first-person sentence (≤ 8 words, present tense). No quotes, no list, no emoji. Respond with ONLY the one-line thought."
+                )
+            }
+            Self::Heartbeat { last_action, seconds } => {
+                format!(
+                    "I'm still working on my last action: `{last_action}`. It's been {seconds} seconds. In one short, varied sentence (≤ 8 words, present tense, first person), describe what I'm doing right now to keep the user informed. No quotes, no list, no emoji. Examples: \"Still waiting on the teammate to chime in…\", \"Holding tight while the search finishes…\", \"Letting the operator cook for a moment…\". Respond with ONLY the one-line thought."
                 )
             }
         }

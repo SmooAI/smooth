@@ -60,3 +60,20 @@ body {
         opacity: var(--bs-thought-opacity, 1);
     }
 }
+
+.bs-dot {
+    display: inline-block;
+    animation: bs-dot-pulse 1.05s ease-in-out infinite;
+    font-weight: 700;
+}
+
+@keyframes bs-dot-pulse {
+    0%, 80%, 100% {
+        opacity: 0.25;
+        transform: translateY(0);
+    }
+    40% {
+        opacity: 1;
+        transform: translateY(-2px);
+    }
+}

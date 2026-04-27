@@ -986,24 +986,50 @@ async fn cmd_up(
     // Initialize pearl store (Dolt-backed). There used to be a SQLite
     // handle here too, but memories/config/worker_runs all live in
     // Dolt now — one backend, one sync story.
-    let pearl_store = match find_dolt_dir() {
-        Ok(dolt_dir) => {
-            let store = smooth_pearls::PearlStore::open(&dolt_dir)?;
-            println!("  {} Pearls     {}", "\u{2713}".green().bold(), dolt_dir.display().to_string().dimmed());
-            store
-        }
+    //
+    // Use the long-running `smooth-dolt serve` companion (same self-heal
+    // path as project stores) so the global store doesn't fall back to
+    // per-call CLI subprocesses — that path keeps hitting "database is
+    // read only" on smoo-hub when concurrent CLI opens race the Dolt
+    // manifest lock. Server-mode opens the database once and serializes
+    // writes through a single goroutine, dodging the issue entirely.
+    let dolt_dir = match find_dolt_dir() {
+        Ok(d) => d,
         Err(_) => {
             // Auto-init Dolt in cwd if no .smooth/dolt/ found
             let cwd = std::env::current_dir()?;
-            let dolt_dir = cwd.join(".smooth").join("dolt");
-            let store = smooth_pearls::PearlStore::init(&dolt_dir)?;
+            let dir = cwd.join(".smooth").join("dolt");
+            smooth_pearls::PearlStore::init(&dir)?;
+            println!(
+                "  {} Pearls     {} {}",
+                "\u{2713}".green().bold(),
+                dir.display().to_string().dimmed(),
+                "(auto-initialized)".dimmed()
+            );
+            dir
+        }
+    };
+    let pearl_store = match smooth_pearls::SmoothDoltServer::spawn(&dolt_dir) {
+        Ok(server) => {
+            let server = std::sync::Arc::new(server);
+            let dolt = smooth_pearls::SmoothDolt::from_server(server, &dolt_dir);
+            let store = smooth_pearls::PearlStore::from_dolt(dolt);
             println!(
                 "  {} Pearls     {} {}",
                 "\u{2713}".green().bold(),
                 dolt_dir.display().to_string().dimmed(),
-                "(auto-initialized)".dimmed()
+                "(serve)".dimmed()
             );
             store
+        }
+        Err(e) => {
+            // Fall back to CLI mode so we don't hard-fail on machines
+            // where serve refuses to come up — but warn loudly.
+            eprintln!(
+                "  {} Pearls     serve unavailable ({e}); falling back to CLI mode (will be slow + may hit lock errors)",
+                "\u{26A0}".yellow().bold()
+            );
+            smooth_pearls::PearlStore::open(&dolt_dir)?
         }
     };
 

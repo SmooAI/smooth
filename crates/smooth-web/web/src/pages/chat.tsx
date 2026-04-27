@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, Plus, Send, Trash2, Users } from 'lucide-react';
+import { ArrowLeft, Plus, Send, Square, Trash2, Users } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { api } from '../api';
@@ -92,6 +92,7 @@ export function ChatPage() {
     const bottomRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLInputElement>(null);
     const thoughtIdRef = useRef(0);
+    const sendAbortRef = useRef<AbortController | null>(null);
     const isMobile = useIsMobile();
 
     // Autocomplete: slash commands on '/<...>', mentions on '@<...>'.
@@ -257,10 +258,11 @@ export function ChatPage() {
                         const id = thoughtIdRef.current;
                         const bornAt = Date.now();
                         setThoughts((prev) => [...prev, { id, text: ev.text, bornAt }].slice(-3));
-                        // Auto-expire after 7s.
+                        // Auto-expire after 14s — long enough that a slow
+                        // tool call doesn't leave the bubble row empty.
                         setTimeout(() => {
                             setThoughts((prev) => prev.filter((t) => t.id !== id));
-                        }, 7000);
+                        }, 14000);
                     }
                 } catch {
                     // ignore non-JSON / unknown frames
@@ -283,15 +285,17 @@ export function ChatPage() {
         };
     }, []);
 
-    // Clear thoughts when the user leaves the lead chat or starts a new
-    // turn — they reflect "right now" Big Smooth state, not history.
+    // Clear thoughts when the user leaves the lead chat. We DON'T
+    // clear on `streaming` flipping false anymore — the user wants to
+    // be able to read what Big Smooth was thinking even after the
+    // reply lands. The 14s auto-expire on each bubble already drains
+    // the row organically.
     useEffect(() => {
-        if (!streaming || scope.kind !== 'lead') {
-            // Drain after a short tail so the last thought has time to read.
+        if (scope.kind !== 'lead') {
             const t = setTimeout(() => setThoughts([]), 1500);
             return () => clearTimeout(t);
         }
-    }, [streaming, scope]);
+    }, [scope]);
 
     // Hotkeys: Shift+ArrowDown cycles lead → t1 → t2 → … → lead. Escape returns to lead.
     useEffect(() => {
@@ -368,11 +372,17 @@ export function ChatPage() {
         setInput('');
         setMessages((prev) => [...prev, { id: `tmp-${Date.now()}`, role: 'user', content }]);
         setStreaming(true);
+        // AbortController so the user can hit Stop and reclaim the input.
+        // Server-side the chat-agent task may keep running for a beat
+        // (it's already mid-tool-call), but the UI is unblocked.
+        const ctrl = new AbortController();
+        sendAbortRef.current = ctrl;
         try {
             const resp = await fetch(`/api/chat/sessions/${sessionId}/messages`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ content }),
+                signal: ctrl.signal,
             });
             const json = await resp.json();
             const assistantMsg: Msg = {
@@ -383,11 +393,21 @@ export function ChatPage() {
             setMessages((prev) => [...prev, assistantMsg]);
             refreshSessions();
         } catch (e) {
-            setMessages((prev) => [...prev, { id: `err-${Date.now()}`, role: 'assistant', content: `Error: ${(e as Error).message}` }]);
+            const aborted = (e as Error).name === 'AbortError';
+            if (!aborted) {
+                setMessages((prev) => [...prev, { id: `err-${Date.now()}`, role: 'assistant', content: `Error: ${(e as Error).message}` }]);
+            } else {
+                setMessages((prev) => [...prev, { id: `cancel-${Date.now()}`, role: 'assistant', content: '_(stopped — Big Smooth was still working when you cancelled)_' }]);
+            }
         } finally {
+            sendAbortRef.current = null;
             setStreaming(false);
         }
     }, [input, streaming, activeId, refreshSessions]);
+
+    const stopSend = useCallback(() => {
+        sendAbortRef.current?.abort();
+    }, []);
 
     const sendToTeammate = useCallback(async () => {
         if (scope.kind !== 'teammate') return;
@@ -652,23 +672,24 @@ export function ChatPage() {
                     </button>
                 )}
                 {scope.kind === 'lead' && (
-                    <div className="relative" style={{ width: isMobile ? 56 : 72, height: isMobile ? 56 : 72 }}>
-                        <BigSmoothFace state={streaming ? 'thinking' : 'idle'} size={isMobile ? 56 : 72} />
+                    <div className="relative shrink-0" style={{ width: isMobile ? 64 : 96, height: isMobile ? 64 : 96 }}>
+                        <BigSmoothFace state={streaming ? 'thinking' : 'idle'} size={isMobile ? 64 : 96} />
                     </div>
                 )}
                 <h1 className={`font-bold ${isMobile ? 'text-lg' : 'text-2xl'}`}>{conversationTitle}</h1>
-                {scope.kind === 'lead' && thoughts.length > 0 && (
-                    <div className="hidden sm:flex flex-1 flex-wrap gap-2 items-center justify-end pr-1 min-w-0">
-                        {thoughts.map((t, i) => (
-                            <ThoughtBubble key={t.id} text={t.text} freshness={i / Math.max(1, thoughts.length - 1)} />
-                        ))}
-                    </div>
-                )}
             </div>
-            {scope.kind === 'lead' && thoughts.length > 0 && (
-                <div className="flex sm:hidden flex-wrap gap-1.5 mb-2">
+            {scope.kind === 'lead' && (streaming || thoughts.length > 0) && (
+                <div
+                    className="flex flex-wrap gap-2 mb-3 px-3 py-2 rounded-lg"
+                    style={{
+                        background: 'color-mix(in oklch, var(--smoo-green) 6%, transparent)',
+                        border: '1px solid color-mix(in oklch, var(--smoo-green) 30%, transparent)',
+                    }}
+                    aria-live="polite"
+                >
+                    {thoughts.length === 0 && streaming && <PendingThoughtBubble />}
                     {thoughts.map((t, i) => (
-                        <ThoughtBubble key={t.id} text={t.text} freshness={i / Math.max(1, thoughts.length - 1)} compact />
+                        <ThoughtBubble key={t.id} text={t.text} freshness={(i + 1) / thoughts.length} />
                     ))}
                 </div>
             )}
@@ -813,16 +834,30 @@ export function ChatPage() {
                         autoComplete="off"
                         aria-label="Message"
                     />
-                    <button
-                        type="submit"
-                        disabled={!input.trim() || streaming}
-                        className="rounded-lg px-5 sm:px-6 py-4 font-semibold flex items-center justify-center gap-2 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed shrink-0 min-h-[56px] min-w-[56px] shadow-lg"
-                        style={{ background: 'var(--smoo-green)', color: '#020618' }}
-                        aria-label="Send"
-                    >
-                        <Send size={20} strokeWidth={2.5} />
-                        <span className="hidden sm:inline">Send</span>
-                    </button>
+                    {streaming ? (
+                        <button
+                            type="button"
+                            onClick={stopSend}
+                            className="rounded-lg px-5 sm:px-6 py-4 font-semibold flex items-center justify-center gap-2 cursor-pointer shrink-0 min-h-[56px] min-w-[56px] shadow-lg"
+                            style={{ background: 'oklch(0.65 0.20 25)', color: '#020618' }}
+                            aria-label="Stop"
+                            title="Cancel — your input field will unlock"
+                        >
+                            <Square size={18} strokeWidth={3} fill="#020618" />
+                            <span className="hidden sm:inline">Stop</span>
+                        </button>
+                    ) : (
+                        <button
+                            type="submit"
+                            disabled={!input.trim()}
+                            className="rounded-lg px-5 sm:px-6 py-4 font-semibold flex items-center justify-center gap-2 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed shrink-0 min-h-[56px] min-w-[56px] shadow-lg"
+                            style={{ background: 'var(--smoo-green)', color: '#020618' }}
+                            aria-label="Send"
+                        >
+                            <Send size={20} strokeWidth={2.5} />
+                            <span className="hidden sm:inline">Send</span>
+                        </button>
+                    )}
                 </form>
             </div>
         </div>
@@ -838,24 +873,50 @@ export function ChatPage() {
 
 /// One floating one-liner from Big Smooth's inner monologue. `freshness`
 /// runs 0 (oldest) → 1 (newest) so we can fade older bubbles back.
-function ThoughtBubble({ text, freshness, compact = false }: { text: string; freshness: number; compact?: boolean }) {
-    // Clamp opacity so the oldest bubble is still readable.
-    const opacity = 0.55 + 0.45 * freshness;
+function ThoughtBubble({ text, freshness }: { text: string; freshness: number }) {
+    // Newest bubble is fully opaque; oldest still very legible.
+    const opacity = 0.7 + 0.3 * freshness;
     return (
         <div
-            className={`rounded-full whitespace-nowrap overflow-hidden text-ellipsis ${compact ? 'px-2 py-1 text-[11px]' : 'px-3 py-1.5 text-[12px]'}`}
+            className="rounded-full whitespace-nowrap overflow-hidden text-ellipsis px-3 py-1.5 text-[13px]"
             style={{
-                background: 'color-mix(in oklch, var(--smoo-green) 18%, transparent)',
-                border: '1px solid color-mix(in oklch, var(--smoo-green) 55%, transparent)',
+                background: 'color-mix(in oklch, var(--smoo-green) 28%, transparent)',
+                border: '1px solid color-mix(in oklch, var(--smoo-green) 70%, transparent)',
                 color: 'var(--color-foreground)',
                 opacity,
-                maxWidth: compact ? '60vw' : '320px',
+                maxWidth: '380px',
                 animation: 'bs-thought-in 280ms ease-out both',
                 fontStyle: 'italic',
+                fontWeight: 500,
             }}
             title={text}
         >
             {text}
+        </div>
+    );
+}
+
+/// Placeholder bubble shown when streaming has started but the first
+/// summarized thought hasn't landed yet. Animated dots so the user
+/// sees something alive immediately.
+function PendingThoughtBubble() {
+    return (
+        <div
+            className="rounded-full px-3 py-1.5 text-[13px] flex items-center gap-1.5"
+            style={{
+                background: 'color-mix(in oklch, var(--smoo-green) 18%, transparent)',
+                border: '1px solid color-mix(in oklch, var(--smoo-green) 55%, transparent)',
+                color: 'var(--color-foreground)',
+                fontStyle: 'italic',
+                opacity: 0.85,
+            }}
+        >
+            <span>Big Smooth is thinking</span>
+            <span className="inline-flex gap-0.5">
+                <span className="bs-dot" style={{ animationDelay: '0ms' }}>·</span>
+                <span className="bs-dot" style={{ animationDelay: '150ms' }}>·</span>
+                <span className="bs-dot" style={{ animationDelay: '300ms' }}>·</span>
+            </span>
         </div>
     );
 }
