@@ -1,6 +1,6 @@
 {
     "name": "@smooai/smooth",
-    "version": "0.12.4",
+    "version": "0.12.5",
     "description": "Security-first AI agent orchestration platform",
     "homepage": "https://github.com/SmooAI/smooth#readme",
     "bugs": {
