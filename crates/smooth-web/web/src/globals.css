@@ -49,3 +49,14 @@ body {
     --smoo-orange: oklch(0.78 0.18 65);
     --smoo-dark-blue-850: oklch(0.18 0.02 260);
 }
+
+@keyframes bs-thought-in {
+    0% {
+        transform: translateY(6px) scale(0.92);
+        opacity: 0;
+    }
+    100% {
+        transform: translateY(0) scale(1);
+        opacity: var(--bs-thought-opacity, 1);
+    }
+}

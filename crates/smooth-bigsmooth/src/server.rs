@@ -3158,7 +3158,7 @@ async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>)
         };
 
         let registry_arc = std::sync::Arc::new(registry);
-        let tools = crate::chat_tools::build_chat_tools(state.clone(), registry_arc);
+        let tools = crate::chat_tools::build_chat_tools(state.clone(), registry_arc.clone());
 
         // 20-iteration cap: enough for the chat-agent to drive a task
         // to completion via teammate_wait (poll + retry + format). Each
@@ -3174,17 +3174,19 @@ async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>)
         }
         let agent = Agent::new(agent_cfg, tools);
 
+        let thoughts = crate::thoughts::ThoughtStreamer::new(&registry_arc, state.event_tx.clone());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
-        // Drain events into the broadcast channel so chat-session
-        // subscribers see tool-call activity. Unfiltered for now;
-        // Phase 4 narrows this with operator-id subscription.
-        let event_tx = state.event_tx.clone();
         let drain = tokio::spawn(async move {
             while let Some(ev) = rx.recv().await {
-                let _ = event_tx.send(crate::events::ServerEvent::TokenDelta {
-                    task_id: "chat".to_string(),
-                    content: format!("[chat] {ev:?}"),
-                });
+                match ev {
+                    AgentEvent::ToolCallStart { tool_name, .. } => {
+                        thoughts.emit(crate::thoughts::ThoughtContext::ToolCall { tool_name });
+                    }
+                    AgentEvent::LlmResponse { content_preview, .. } if !content_preview.trim().is_empty() => {
+                        thoughts.emit(crate::thoughts::ThoughtContext::AssistantPreview { snippet: content_preview });
+                    }
+                    _ => {}
+                }
             }
         });
 
@@ -3453,7 +3455,7 @@ async fn run_chat_with_history(
         .map_err(|e| anyhow::anyhow!("resolving reasoning slot for chat: {e}"))?;
 
     let registry_arc = std::sync::Arc::new(registry);
-    let tools = crate::chat_tools::build_chat_tools(state.clone(), registry_arc);
+    let tools = crate::chat_tools::build_chat_tools(state.clone(), registry_arc.clone());
 
     // Fold prior history into a single read-only context block prepended to
     // the new user-turn. Avoids the user/assistant alternation requirement
@@ -3476,14 +3478,25 @@ async fn run_chat_with_history(
     let agent_cfg = AgentConfig::new("big-smooth-chat-session", system_prompt, llm_config).with_max_iterations(20);
     let agent = Agent::new(agent_cfg, tools);
 
+    // Thought stream — Gemini Flash Lite summarizes each tool call /
+    // assistant snippet into a one-line first-person thought and
+    // broadcasts it to the chat WS so the UI can float it next to the
+    // BS face. Non-blocking (Semaphore-capped) so the agent never
+    // waits on the summarizer.
+    let thoughts = crate::thoughts::ThoughtStreamer::new(&registry_arc, state.event_tx.clone());
+
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
-    let event_tx = state.event_tx.clone();
     let drain = tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
-            let _ = event_tx.send(crate::events::ServerEvent::TokenDelta {
-                task_id: "chat-session".to_string(),
-                content: format!("[chat] {ev:?}"),
-            });
+            match ev {
+                AgentEvent::ToolCallStart { tool_name, .. } => {
+                    thoughts.emit(crate::thoughts::ThoughtContext::ToolCall { tool_name });
+                }
+                AgentEvent::LlmResponse { content_preview, .. } if !content_preview.trim().is_empty() => {
+                    thoughts.emit(crate::thoughts::ThoughtContext::AssistantPreview { snippet: content_preview });
+                }
+                _ => {}
+            }
         }
     });
 
