@@ -3366,16 +3366,33 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
 
         PearlCommands::Push => {
             let dolt_dir = find_dolt_dir()?;
+            // Global store at `~/.smooth/dolt` is intentionally
+            // single-machine — sessions, memories, and personal-scope
+            // pearls don't need cross-machine sync. Treat "no remote
+            // configured" there as a no-op rather than an error so
+            // `th pearls push` is safe to script unconditionally.
+            // Project stores still surface the error so the user
+            // notices a missing remote on a shared board.
             let dolt = smooth_pearls::SmoothDolt::new(&dolt_dir)?;
-            let output = dolt.push()?;
-            println!("{output}");
+            match dolt.push() {
+                Ok(output) => println!("{output}"),
+                Err(e) if is_global_pearl_store(&dolt_dir) && is_no_remote_error(&e) => {
+                    println!("(global pearl store at {} has no remote — push skipped, this is expected)", dolt_dir.display());
+                }
+                Err(e) => return Err(e),
+            }
         }
 
         PearlCommands::Pull => {
             let dolt_dir = find_dolt_dir()?;
             let dolt = smooth_pearls::SmoothDolt::new(&dolt_dir)?;
-            let output = dolt.pull()?;
-            println!("{output}");
+            match dolt.pull() {
+                Ok(output) => println!("{output}"),
+                Err(e) if is_global_pearl_store(&dolt_dir) && is_no_remote_error(&e) => {
+                    println!("(global pearl store at {} has no remote — pull skipped, this is expected)", dolt_dir.display());
+                }
+                Err(e) => return Err(e),
+            }
         }
 
         PearlCommands::Remote { cmd } => {
@@ -3418,6 +3435,28 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
 fn find_dolt_dir() -> Result<std::path::PathBuf> {
     let cwd = std::env::current_dir()?;
     smooth_pearls::dolt::find_repo_dolt_dir(&cwd).ok_or_else(|| anyhow::anyhow!("no .smooth/dolt/ found. Run: th pearls init"))
+}
+
+/// True if `dolt_dir` resolves to the global `~/.smooth/dolt` store.
+/// We treat the global store as single-machine: sessions, memories,
+/// and personal pearls don't need cross-machine sync, so push/pull
+/// without a configured remote is a no-op there rather than an error.
+fn is_global_pearl_store(dolt_dir: &std::path::Path) -> bool {
+    let Some(home) = dirs_next::home_dir() else { return false };
+    let global = home.join(".smooth").join("dolt");
+    let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    canon(dolt_dir) == canon(&global)
+}
+
+/// Heuristic: dolt push/pull surfacing "no configured push destination"
+/// (or the equivalent for pull) is what we want to swallow on the
+/// global store. SQL/lock errors etc. should still propagate.
+fn is_no_remote_error(e: &anyhow::Error) -> bool {
+    let s = format!("{e:#}").to_lowercase();
+    s.contains("no configured push destination")
+        || s.contains("no configured pull destination")
+        || s.contains("no upstream")
+        || s.contains("remote not found")
 }
 
 fn cmd_migrate_from_beads(store: &smooth_pearls::PearlStore) -> Result<()> {
