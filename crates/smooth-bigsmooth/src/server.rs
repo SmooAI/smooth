@@ -499,22 +499,37 @@ pub async fn start(mut state: AppState, addr: SocketAddr) -> anyhow::Result<()> 
         }
     });
 
-    // Spawn orchestrator loop — continuously picks up ready pearls and dispatches operators
-    let orch = state.orchestrator.clone();
-    tokio::spawn(async move {
-        loop {
-            {
-                let mut o = orch.lock().await;
-                if let Err(e) = o.step().await {
-                    tracing::debug!(error = %e, state = ?o.state, "orchestrator step error");
+    // Spawn orchestrator loop — continuously picks up ready pearls and
+    // dispatches operators. Skipped in direct mode: the orchestrator
+    // only knows how to spawn microVMs through Bootstrap Bill, so when
+    // SMOOTH_WORKFLOW_DIRECT=1 it would silently fall back to sandboxed
+    // dispatch even though every other path is direct. In dev / bench
+    // / smoo-hub setups that's exactly the wrong thing — the only
+    // dispatch we want is the explicit one driven by the chat-agent's
+    // teammate_spawn (which honours direct mode). Re-enable when
+    // sandbox dispatch is reliable again.
+    let direct_only = std::env::var("SMOOTH_WORKFLOW_DIRECT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if direct_only {
+        tracing::info!("Orchestrator background loop skipped (SMOOTH_WORKFLOW_DIRECT=1)");
+    } else {
+        let orch = state.orchestrator.clone();
+        tokio::spawn(async move {
+            loop {
+                {
+                    let mut o = orch.lock().await;
+                    if let Err(e) = o.step().await {
+                        tracing::debug!(error = %e, state = ?o.state, "orchestrator step error");
+                    }
                 }
+                // Poll interval — 5s default. The lock is released between polls
+                // so API handlers can inspect orchestrator state without blocking.
+                tokio::time::sleep(Duration::from_millis(5000)).await;
             }
-            // Poll interval — 5s default. The lock is released between polls
-            // so API handlers can inspect orchestrator state without blocking.
-            tokio::time::sleep(Duration::from_millis(5000)).await;
-        }
-    });
-    tracing::info!("Orchestrator loop started (poll every 5s)");
+        });
+        tracing::info!("Orchestrator loop started (poll every 5s)");
+    }
 
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -3141,20 +3156,25 @@ async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>)
         let providers_path = dirs_next::home_dir().unwrap_or_default().join(".smooth/providers.json");
         let registry = ProviderRegistry::load_from_file(&providers_path).map_err(|e| anyhow::anyhow!("no LLM providers configured: {e}"))?;
 
-        // Resolve the chat agent's LLM. Default is the reasoning slot
-        // (smooth-reasoning-kimi via providers.json routing). A
-        // per-request `model` field on the chat body lets callers flip
-        // to smooth-fast-gemini for one-liner queries.
+        // Resolve the chat agent's LLM. Default is the CODING slot
+        // (MiniMax via smooth-coding) — fast AND tool-call-capable.
+        // The previous defaults all had problems: smooth-reasoning-kimi
+        // was too slow, smooth-fast-gemini hallucinated Python-style
+        // `tool_code` blocks instead of using native function calling.
+        // smooth-coding is explicitly trained on tool use and runs at
+        // ~1-2s per turn on the gateway, which is the right balance for
+        // an orchestration chat. Per-request `model` still flips up
+        // (e.g. smooth-reasoning) for hard requests, or down (e.g.
+        // smooth-fast-gemini) when the user is willing to risk less
+        // capability for more speed.
         let llm_config = if let Some(m) = model_override.filter(|s| !s.trim().is_empty()) {
-            // Use the default provider's key/url with the requested model alias.
             let mut cfg = registry.default_llm_config().map_err(|e| anyhow::anyhow!("no default provider: {e}"))?;
             cfg.model = m.to_string();
             cfg
         } else {
-            // Reasoning slot — see plan + providers.json `routing.thinking`.
             registry
-                .llm_config_for(smooth_operator::providers::Activity::Reasoning)
-                .map_err(|e| anyhow::anyhow!("resolving reasoning slot for chat: {e}"))?
+                .llm_config_for(smooth_operator::providers::Activity::Coding)
+                .map_err(|e| anyhow::anyhow!("resolving coding slot for chat: {e}"))?
         };
 
         let registry_arc = std::sync::Arc::new(registry);
@@ -3176,17 +3196,56 @@ async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>)
 
         let thoughts = crate::thoughts::ThoughtStreamer::new(&registry_arc, state.event_tx.clone());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+        // Heartbeat: if a single tool sits running for > 8s without
+        // emitting any new ToolCallStart (e.g. teammate_wait polling),
+        // fire a synthesized "still working" thought so the UI bubbles
+        // don't go quiet. Tracks the last tool name + the start instant
+        // so the heartbeat thought references it.
+        let last_action: std::sync::Arc<tokio::sync::Mutex<(String, std::time::Instant)>> =
+            std::sync::Arc::new(tokio::sync::Mutex::new((String::from("thinking"), std::time::Instant::now())));
+        let last_action_drain = last_action.clone();
+        let thoughts_drain = thoughts.clone();
         let drain = tokio::spawn(async move {
             while let Some(ev) = rx.recv().await {
                 match ev {
                     AgentEvent::ToolCallStart { tool_name, .. } => {
-                        thoughts.emit(crate::thoughts::ThoughtContext::ToolCall { tool_name });
+                        {
+                            let mut la = last_action_drain.lock().await;
+                            *la = (tool_name.clone(), std::time::Instant::now());
+                        }
+                        thoughts_drain.emit(crate::thoughts::ThoughtContext::ToolCall { tool_name });
+                    }
+                    AgentEvent::ToolCallComplete { .. } => {
+                        let mut la = last_action_drain.lock().await;
+                        la.1 = std::time::Instant::now(); // reset so heartbeat doesn't fire on the next iteration's gap
                     }
                     AgentEvent::LlmResponse { content_preview, .. } if !content_preview.trim().is_empty() => {
-                        thoughts.emit(crate::thoughts::ThoughtContext::AssistantPreview { snippet: content_preview });
+                        thoughts_drain.emit(crate::thoughts::ThoughtContext::AssistantPreview { snippet: content_preview });
                     }
                     _ => {}
                 }
+            }
+        });
+        let last_action_hb = last_action.clone();
+        let thoughts_hb = thoughts.clone();
+        let heartbeat = tokio::spawn(async move {
+            // First beat at 8s so quick chats don't get a heartbeat at
+            // all. After that, every 9-13s while the same action is
+            // still in flight.
+            tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+            loop {
+                let (action, since) = {
+                    let la = last_action_hb.lock().await;
+                    (la.0.clone(), la.1)
+                };
+                let elapsed = since.elapsed().as_secs();
+                if elapsed >= 8 {
+                    thoughts_hb.emit(crate::thoughts::ThoughtContext::Heartbeat {
+                        last_action: action,
+                        seconds: u32::try_from(elapsed).unwrap_or(u32::MAX),
+                    });
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(11)).await;
             }
         });
 
@@ -3194,6 +3253,7 @@ async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>)
             .run_with_channel(user_content.to_string(), tx)
             .await
             .map_err(|e| anyhow::anyhow!("chat agent: {e}"))?;
+        heartbeat.abort();
         drain.abort();
 
         // Final assistant message is the user-facing reply.
@@ -3448,11 +3508,11 @@ async fn run_chat_with_history(
     let providers_path = dirs_next::home_dir().unwrap_or_default().join(".smooth/providers.json");
     let registry = ProviderRegistry::load_from_file(&providers_path).map_err(|e| anyhow::anyhow!("no LLM providers configured: {e}"))?;
 
-    // Reasoning slot — same default as `/api/chat`. Capability over speed
-    // for orchestration; users can flip the slot via providers.json.
+    // Coding slot (MiniMax) — fast AND tool-call-capable. See the
+    // chat_handler comment for why we pick coding over fast/reasoning.
     let llm_config = registry
-        .llm_config_for(smooth_operator::providers::Activity::Reasoning)
-        .map_err(|e| anyhow::anyhow!("resolving reasoning slot for chat: {e}"))?;
+        .llm_config_for(smooth_operator::providers::Activity::Coding)
+        .map_err(|e| anyhow::anyhow!("resolving coding slot for chat: {e}"))?;
 
     let registry_arc = std::sync::Arc::new(registry);
     let tools = crate::chat_tools::build_chat_tools(state.clone(), registry_arc.clone());
@@ -3484,23 +3544,55 @@ async fn run_chat_with_history(
     // BS face. Non-blocking (Semaphore-capped) so the agent never
     // waits on the summarizer.
     let thoughts = crate::thoughts::ThoughtStreamer::new(&registry_arc, state.event_tx.clone());
+    let last_action: std::sync::Arc<tokio::sync::Mutex<(String, std::time::Instant)>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new((String::from("thinking"), std::time::Instant::now())));
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+    let last_action_drain = last_action.clone();
+    let thoughts_drain = thoughts.clone();
     let drain = tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
             match ev {
                 AgentEvent::ToolCallStart { tool_name, .. } => {
-                    thoughts.emit(crate::thoughts::ThoughtContext::ToolCall { tool_name });
+                    {
+                        let mut la = last_action_drain.lock().await;
+                        *la = (tool_name.clone(), std::time::Instant::now());
+                    }
+                    thoughts_drain.emit(crate::thoughts::ThoughtContext::ToolCall { tool_name });
+                }
+                AgentEvent::ToolCallComplete { .. } => {
+                    let mut la = last_action_drain.lock().await;
+                    la.1 = std::time::Instant::now();
                 }
                 AgentEvent::LlmResponse { content_preview, .. } if !content_preview.trim().is_empty() => {
-                    thoughts.emit(crate::thoughts::ThoughtContext::AssistantPreview { snippet: content_preview });
+                    thoughts_drain.emit(crate::thoughts::ThoughtContext::AssistantPreview { snippet: content_preview });
                 }
                 _ => {}
             }
         }
     });
+    let last_action_hb = last_action.clone();
+    let thoughts_hb = thoughts.clone();
+    let heartbeat = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+        loop {
+            let (action, since) = {
+                let la = last_action_hb.lock().await;
+                (la.0.clone(), la.1)
+            };
+            let elapsed = since.elapsed().as_secs();
+            if elapsed >= 8 {
+                thoughts_hb.emit(crate::thoughts::ThoughtContext::Heartbeat {
+                    last_action: action,
+                    seconds: u32::try_from(elapsed).unwrap_or(u32::MAX),
+                });
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(11)).await;
+        }
+    });
 
     let conversation = agent.run_with_channel(user_payload, tx).await.map_err(|e| anyhow::anyhow!("chat agent: {e}"))?;
+    heartbeat.abort();
     drain.abort();
 
     Ok(conversation.last_assistant_content().unwrap_or("(no response)").to_string())

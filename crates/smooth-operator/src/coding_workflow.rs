@@ -437,7 +437,53 @@ fn is_snapshot_excluded(name: &std::ffi::OsStr) -> bool {
     )
 }
 
+/// Refuse to snapshot a workspace that's clearly NOT a project — most
+/// commonly $HOME (or a parent of it) when the chat agent dispatched a
+/// teammate without passing a working_dir, which makes the runner
+/// inherit Big Smooth's cwd. Recursing through tens of GB of user data
+/// hangs the workflow; better to skip the snapshot than freeze.
+///
+/// Heuristic:
+///   * if the dir IS or is a parent of $HOME → unsafe
+///   * if the dir contains classic $HOME children (`Library`, `Desktop`,
+///     `Documents`) → unsafe
+///   * if it has more than 200 top-level entries → unsafe
+fn is_unsafe_to_snapshot(src: &Path) -> bool {
+    if let Ok(home) = std::env::var("HOME") {
+        let home_path = std::path::PathBuf::from(home);
+        if let (Ok(c_src), Ok(c_home)) = (src.canonicalize(), home_path.canonicalize()) {
+            if c_src == c_home || c_home.starts_with(&c_src) {
+                return true;
+            }
+        }
+    }
+    if let Ok(rd) = std::fs::read_dir(src) {
+        let mut count = 0usize;
+        for entry in rd.flatten() {
+            count += 1;
+            if count > 200 {
+                return true;
+            }
+            let name = entry.file_name();
+            if matches!(
+                name.to_str(),
+                Some("Library") | Some("Desktop") | Some("Documents") | Some("Movies") | Some("Pictures")
+            ) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn snapshot_workspace(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if is_unsafe_to_snapshot(src) {
+        tracing::warn!(
+            src = %src.display(),
+            "coding workflow: refusing to snapshot — workspace looks like $HOME or a non-project dir"
+        );
+        return Ok(());
+    }
     if dst.exists() {
         std::fs::remove_dir_all(dst)?;
     }
@@ -493,6 +539,22 @@ fn copy_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsafe_to_snapshot_flags_home_lookalikes() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        // A project-like dir is fine.
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+        assert!(!is_unsafe_to_snapshot(tmp.path()));
+
+        // A dir with macOS HOME-style children is rejected.
+        let homey = tempfile::tempdir().expect("home");
+        for child in ["Library", "Desktop", "Documents"] {
+            std::fs::create_dir_all(homey.path().join(child)).unwrap();
+        }
+        assert!(is_unsafe_to_snapshot(homey.path()));
+    }
 
     #[test]
     fn detect_verify_pass_explicit_marker() {

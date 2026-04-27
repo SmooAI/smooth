@@ -41,7 +41,35 @@ fn shell_escape(s: &str) -> String {
 /// How long to wait for the spawned server to create its socket file
 /// before giving up. Cold-start of the embedded Dolt engine on a
 /// reasonably fast machine is sub-second; we give it a generous cap.
-const SERVER_START_TIMEOUT: Duration = Duration::from_secs(15);
+/// Bumped to 30s after observing smoo-hub repeatedly hit the old 15s
+/// ceiling under load.
+const SERVER_START_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// On retry after a failed spawn, scrub any zombie `smooth-dolt serve`
+/// processes for this data dir before trying again — sometimes the
+/// previous run left a half-stuck child holding the database lock.
+fn kill_stale_serve_for(data_dir: &Path) {
+    let needle = match data_dir.canonicalize() {
+        Ok(p) => p.to_string_lossy().to_string(),
+        Err(_) => data_dir.to_string_lossy().to_string(),
+    };
+    // Best-effort. We use pgrep+kill rather than parsing /proc — this
+    // path runs on macOS too, and the failure modes (no pgrep, no
+    // matches) are all silent.
+    let out = Command::new("pgrep")
+        .arg("-f")
+        .arg(format!("smooth-dolt serve {needle}"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output();
+    if let Ok(out) = out {
+        let pids = String::from_utf8_lossy(&out.stdout);
+        for pid in pids.split_whitespace() {
+            tracing::warn!(data_dir = %needle, pid = %pid, "killing stale smooth-dolt serve");
+            let _ = Command::new("kill").arg("-9").arg(pid).status();
+        }
+    }
+}
 
 /// Long-running `smooth-dolt serve` subprocess + the Unix socket it's
 /// listening on. Created once per dolt data directory; clients open
@@ -56,13 +84,32 @@ pub struct SmoothDoltServer {
 }
 
 impl SmoothDoltServer {
-    /// Spawn `smooth-dolt serve` for the given data dir. Blocks until the
-    /// socket is ready (or `SERVER_START_TIMEOUT` elapses).
+    /// Spawn `smooth-dolt serve` for the given data dir, retrying once
+    /// (after killing any stale `smooth-dolt serve` for the same dir)
+    /// if the first attempt times out. The retry is the self-heal path
+    /// for the recurring "did not create socket within …" failure
+    /// where a half-dead previous server is squatting on the database.
     ///
     /// # Errors
-    /// Fails when the `smooth-dolt` binary can't be located, the spawn
-    /// fails, or the server doesn't create its socket within the timeout.
+    /// Fails when the `smooth-dolt` binary can't be located or both
+    /// spawn attempts time out / the server fails to respond.
     pub fn spawn(data_dir: &Path) -> Result<Self> {
+        match Self::spawn_once(data_dir) {
+            Ok(s) => Ok(s),
+            Err(first) => {
+                tracing::warn!(data_dir = %data_dir.display(), error = %first, "smooth-dolt spawn failed; killing zombies and retrying once");
+                kill_stale_serve_for(data_dir);
+                std::thread::sleep(Duration::from_millis(500));
+                Self::spawn_once(data_dir).with_context(|| format!("smooth-dolt spawn retry also failed (first attempt: {first:#})"))
+            }
+        }
+    }
+
+    /// One spawn attempt — blocks until the socket is ready (or
+    /// `SERVER_START_TIMEOUT` elapses). Internal helper for
+    /// [`SmoothDoltServer::spawn`], which wraps it with a self-heal
+    /// retry path.
+    fn spawn_once(data_dir: &Path) -> Result<Self> {
         let bin = find_smooth_dolt_binary().context("smooth-dolt binary not found. Run: scripts/build-smooth-dolt.sh")?;
 
         let socket_dir = tempfile::Builder::new().prefix("smooth-dolt-").tempdir().context("create socket tempdir")?;

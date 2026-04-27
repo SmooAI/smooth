@@ -224,15 +224,22 @@ impl SmoothDolt {
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .output()
             .with_context(|| format!("exec smooth-dolt {}: {}", args.join(" "), self.bin.display()))?;
 
         if !output.status.success() {
+            // Capture stderr inline so callers (and the operator log) get
+            // a useful failure mode instead of the old "rerun the CLI for
+            // stderr" cul-de-sac. Trim + clip to keep one-line callsites
+            // readable.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr_clip: String = stderr.trim().chars().take(300).collect();
             anyhow::bail!(
-                "smooth-dolt {} failed (exit {}); rerun the CLI for stderr",
+                "smooth-dolt {} failed (exit {}): {}",
                 args.first().unwrap_or(&""),
-                output.status.code().unwrap_or(-1)
+                output.status.code().unwrap_or(-1),
+                if stderr_clip.is_empty() { "(no stderr)" } else { stderr_clip.as_str() }
             );
         }
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())

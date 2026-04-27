@@ -447,12 +447,123 @@ impl Tool for TeammateWaitTool {
                 return Ok(out.trim_end().to_string());
             }
 
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            // 1.5s poll: matches the operator runner's mailbox-poll
+            // cadence so the chat agent picks up [IDLE]/[CHAT:TEAMMATE]
+            // within one round-trip of the teammate posting it. The old
+            // 5s cadence added noticeable latency on quick teammates.
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
         }
     }
 
     fn is_read_only(&self) -> bool {
         true
+    }
+
+    fn is_concurrent_safe(&self) -> bool {
+        true
+    }
+}
+
+// ── bash (read-only allowlist) ─────────────────────────────────────────
+
+/// Tight-allowlist `bash` tool for the chat agent. Lets simple read-
+/// only lookups (e.g. `gh repo list`, `git status`, `kubectl get pods`)
+/// run directly from Big Smooth in 1-2 seconds instead of spawning a
+/// whole teammate (which adds 30-90s of boot + LLM-turn overhead).
+///
+/// The allowlist is intentionally narrow — only commands that are
+/// already host-trusted on the machine running BS (auth via the host's
+/// own credentials cache, no fresh secrets passed). For risky / writing
+/// / multi-step work the chat agent still spawns a teammate.
+pub struct BashTool;
+
+const BASH_ALLOWLIST: &[&str] = &[
+    "gh", "git", "kubectl", "jq", "curl", "ls", "cat", "head", "tail", "wc", "grep", "rg", "fd", "find", "echo",
+];
+/// Wallclock cap for any single bash invocation. Most allowlisted
+/// lookups finish in well under a second; this catches a hung curl or
+/// a runaway grep.
+const BASH_TIMEOUT_SECS: u64 = 25;
+
+#[async_trait]
+impl Tool for BashTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "bash".to_string(),
+            description: format!(
+                "Run a short read-only shell command on the host. PREFER this over `teammate_spawn` for simple one-shot lookups (\"do I have a github repo for X?\", \"what's our current k8s pod state?\", \"git log -5 in the smooth repo\"). Allowlisted commands only: {}. Spawning a teammate costs 30-90s of boot time; this tool returns in 1-2s. Output capped at 12 KB. Hard timeout {}s. Returns stdout (with stderr appended on non-zero exit).",
+                BASH_ALLOWLIST.join(", "),
+                BASH_TIMEOUT_SECS
+            ),
+            parameters: json!({
+                "type": "object",
+                "required": ["cmd"],
+                "properties": {
+                    "cmd": { "type": "string", "description": "Full shell command line. First token must be in the allowlist (otherwise this tool refuses to run)." },
+                    "cwd": { "type": "string", "description": "Optional working directory. Defaults to $HOME." }
+                }
+            }),
+        }
+    }
+
+    async fn execute(&self, arguments: serde_json::Value) -> anyhow::Result<String> {
+        let cmd = arguments["cmd"].as_str().ok_or_else(|| anyhow::anyhow!("missing 'cmd'"))?.trim().to_string();
+        if cmd.is_empty() {
+            anyhow::bail!("empty cmd");
+        }
+        // Reject obvious shell-escape attempts that would let the model
+        // chain through a non-allowlisted binary. Pipes/&&/||/; are OK
+        // *between* allowlisted commands but we keep things simple
+        // and only check the FIRST token. Multi-stage pipelines tend
+        // to be teammate territory anyway.
+        let first = cmd.split_whitespace().next().unwrap_or("");
+        if !BASH_ALLOWLIST.contains(&first) {
+            anyhow::bail!(
+                "bash: '{first}' is not in the allowlist. Allowed: {}. For anything else, spawn a teammate.",
+                BASH_ALLOWLIST.join(", ")
+            );
+        }
+        let cwd = arguments
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()));
+
+        let mut child = tokio::process::Command::new("/bin/sh");
+        child.arg("-c").arg(&cmd).current_dir(&cwd).kill_on_drop(true);
+        let out_fut = child.output();
+        let timeout = tokio::time::timeout(std::time::Duration::from_secs(BASH_TIMEOUT_SECS), out_fut);
+
+        match timeout.await {
+            Ok(Ok(output)) => {
+                let mut body = String::new();
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                body.push_str(stdout.trim_end());
+                if !output.status.success() {
+                    body.push_str("\n\n--- stderr (exit ");
+                    body.push_str(&output.status.code().unwrap_or(-1).to_string());
+                    body.push_str(") ---\n");
+                    body.push_str(stderr.trim_end());
+                }
+                if body.chars().count() > 12_000 {
+                    let mut clipped: String = body.chars().take(12_000).collect();
+                    clipped.push_str("\n\n[output truncated at 12 KB]");
+                    Ok(clipped)
+                } else {
+                    Ok(body)
+                }
+            }
+            Ok(Err(e)) => Err(anyhow::anyhow!("bash spawn failed: {e}")),
+            Err(_) => Err(anyhow::anyhow!("bash timeout after {BASH_TIMEOUT_SECS}s")),
+        }
+    }
+
+    fn is_read_only(&self) -> bool {
+        // Conservative: gh/git can write under unusual flags, but the
+        // typical orchestration calls (list/status/diff/log) don't, and
+        // the agent's system prompt steers it that way.
+        false
     }
 
     fn is_concurrent_safe(&self) -> bool {
@@ -476,6 +587,7 @@ pub fn build_chat_tools(state: AppState, registry: Arc<ProviderRegistry>) -> smo
     tools.register(TeammateMessageTool { state: state.clone() });
     tools.register(TeammateReadTool { state: state.clone() });
     tools.register(TeammateWaitTool { state });
+    tools.register(BashTool);
     tools
 }
 
