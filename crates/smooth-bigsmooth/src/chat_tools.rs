@@ -273,7 +273,7 @@ impl Tool for TeammateSpawnTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "teammate_spawn".to_string(),
-            description: "Spawn a teammate (operator) on a pearl. The teammate runs in its own sandbox with its own context, picks up the pearl's description as its task, and reports progress as pearl comments. Returns immediately — use teammate_read or pearls_show to follow progress.\n\nFor SIMPLE read-only lookups (`list github repos`, `query a database`, `show kube pods`), pass `model=\"smooth-fast-gemini\"` — the default `smooth-coding` model is a slow reasoning model tuned for code edits and will make you wait for needless deliberation. Reserve the default for actual coding tasks.".to_string(),
+            description: "Spawn a teammate (operator) on a pearl for REAL CODING WORK (multi-file edits, builds, test runs, debugging). Do NOT use this for one-shot bash-allowlist commands — git clone, gh repo clone, mkdir, curl etc. should run via the `bash` tool directly. The teammate runs in its own sandbox, picks up the pearl's description as its task, and reports progress as pearl comments. Returns immediately — use teammate_read or pearls_show to follow progress.".to_string(),
             parameters: json!({
                 "type": "object",
                 "required": ["pearl_id"],
@@ -281,9 +281,9 @@ impl Tool for TeammateSpawnTool {
                     "pearl_id": { "type": "string", "description": "The pearl to dispatch on. Must already exist (call pearls_create first)." },
                     "extra_prompt": { "type": "string", "description": "Optional extra instruction appended to the pearl description when handing off to the teammate." },
                     "budget_usd": { "type": "number", "description": "Optional cost cap in USD for this dispatch." },
-                    "working_dir": { "type": "string", "description": "Optional working directory for the teammate's sandbox. Pass an absolute path; defaults to the project root." },
+                    "working_dir": { "type": "string", "description": "Working directory for the teammate's sandbox. Pass the most specific absolute path that scopes the work — e.g. for 'clone repo X to ~/dev/foo/X' pass `~/dev/foo`. Never pass a directory as broad as `~` or `/`; the runner can stall enumerating that much filesystem." },
                     "role": { "type": "string", "description": "Optional cast role to spawn under (e.g. `fixer`, `mapper`, `oracle`, `heckler` — see smooth-operator/src/cast). Affects permissions, prompt, and routing slot." },
-                    "model": { "type": "string", "description": "Override the LLM the teammate uses. Defaults to the role's slot (smooth-coding for `fixer`). Use `smooth-fast-gemini` for simple read-only lookups, `smooth-reasoning` for hard problems, `smooth-coding` for code edits." }
+                    "model": { "type": "string", "description": "DO NOT SET unless you have a specific reason. Default = role's slot (smooth-coding for `fixer`) which is the best balance of speed and tool-call reliability. Avoid `smooth-fast-gemini` — it can't reliably emit native tool calls and will wedge the runner. `smooth-reasoning` is for genuinely hard problems only." }
                 }
             }),
         }
