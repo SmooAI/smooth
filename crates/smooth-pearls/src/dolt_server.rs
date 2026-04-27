@@ -100,13 +100,16 @@ struct ServerHandle {
 /// listening on. Created once per dolt data directory; clients open
 /// fresh connections per call via [`SmoothDoltServer::client`].
 ///
-/// Self-healing: after `client()` is called, if the connection or
-/// initial ping fails, the server will respawn its child and try
-/// once more before returning the error. A separate background task
-/// (see [`SmoothDoltServer::spawn_healthcheck_task`]) periodically
-/// pings every server and respawns any that have gone silent — this
-/// is what catches the macOS-overnight-sleep failure mode where the
-/// child stays alive but its socket no longer responds.
+/// **Single-writer queue.** Every higher-level op (`sql`, `exec`,
+/// `commit`) goes through [`SmoothDoltServer::with_client`], which
+/// acquires `serial_lock` for the duration of the call. Two callers
+/// to the same data dir are serialized — they cannot race each other
+/// into the Dolt manifest lock. Combined with (a) the 15 s socket
+/// read/write timeout, (b) the connect-time self-heal in `client()`,
+/// and (c) the 30 s background healthcheck respawn loop, this is the
+/// full set of safeguards against the failure modes Dolt-as-a-daemon
+/// exhibits: cold-start delays, manifest contention, and macOS-sleep
+/// goroutine wedges.
 #[derive(Debug)]
 pub struct SmoothDoltServer {
     /// Source-of-truth dir for the dolt database. Kept so the server
@@ -116,6 +119,12 @@ pub struct SmoothDoltServer {
     /// because callers (including blocking SmoothDolt::commit paths)
     /// don't always have an async runtime in scope.
     inner: Mutex<ServerHandle>,
+    /// Single-writer serializer. Every public op acquires this for
+    /// its full duration so two callers can't race each other into
+    /// the Dolt manifest lock. Separate from `inner` because we want
+    /// `respawn` (which writes to `inner`) to be able to grab the
+    /// lock briefly without contending with itself.
+    serial_lock: Mutex<()>,
 }
 
 impl SmoothDoltServer {
@@ -141,7 +150,27 @@ impl SmoothDoltServer {
         Ok(Self {
             data_dir: data_dir.to_path_buf(),
             inner: Mutex::new(handle),
+            serial_lock: Mutex::new(()),
         })
+    }
+
+    /// Run `f` against a fresh client connection while holding the
+    /// single-writer serializer. Use this for every dolt op — it's
+    /// the supported entry point for callers that want serialization.
+    /// `client()` exposed below is the lower-level path that doesn't
+    /// serialize (used internally by `is_healthy`, where we WANT
+    /// concurrency with in-flight work so we can detect a wedge).
+    ///
+    /// # Errors
+    /// Surfaces both the `client()` connect/respawn errors and any
+    /// errors `f` returns from its op.
+    pub fn with_client<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&mut SmoothDoltClient) -> Result<T>,
+    {
+        let _guard = self.serial_lock.lock().expect("dolt serial_lock poisoned");
+        let mut client = self.client()?;
+        f(&mut client)
     }
 
     /// One spawn attempt — blocks until the socket is ready (or
@@ -492,6 +521,61 @@ impl SmoothDoltClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
+    use std::thread;
+
+    /// `with_client` must serialize concurrent callers — at most one
+    /// can be inside the closure at a time, even if many threads
+    /// race in. This is the property that prevents Dolt manifest-
+    /// lock contention between, e.g., the chat agent and a
+    /// background commit.
+    #[test]
+    fn with_client_serializes_concurrent_callers() {
+        let tmp = match tempfile::tempdir() {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+        let dolt_dir = tmp.path().join("dolt");
+        if crate::dolt::SmoothDolt::new(&dolt_dir).and_then(|d| d.init()).is_err() {
+            return;
+        }
+        let server = match SmoothDoltServer::spawn(&dolt_dir) {
+            Ok(s) => Arc::new(s),
+            Err(_) => return,
+        };
+
+        // Counter rises while a caller is "inside" the closure and
+        // falls when they leave. If serialization works, the high-
+        // water mark stays at exactly 1 even with 8 racing threads.
+        let inside = Arc::new(AtomicUsize::new(0));
+        let high_water = Arc::new(AtomicUsize::new(0));
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let server = server.clone();
+                let inside = inside.clone();
+                let high_water = high_water.clone();
+                thread::spawn(move || {
+                    server
+                        .with_client(|client: &mut SmoothDoltClient| -> Result<()> {
+                            let now = inside.fetch_add(1, Ordering::SeqCst) + 1;
+                            high_water.fetch_max(now, Ordering::SeqCst);
+                            // Hold the lock for a moment so contention is real.
+                            std::thread::sleep(Duration::from_millis(20));
+                            client.ping()?;
+                            inside.fetch_sub(1, Ordering::SeqCst);
+                            Ok(())
+                        })
+                        .expect("with_client succeeds");
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("thread");
+        }
+        assert_eq!(high_water.load(Ordering::SeqCst), 1, "with_client must serialize");
+    }
 
     /// Spin up a server against a freshly-init'd dolt store and exercise
     /// the basic ops. Skips silently if `smooth-dolt` isn't built locally.
