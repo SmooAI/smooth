@@ -21,6 +21,7 @@ pub mod search;
 pub mod server;
 pub mod session;
 pub mod tailscale;
+pub mod thoughts;
 pub mod tool_api;
 pub mod tools;
 pub mod ws;

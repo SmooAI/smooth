@@ -3,6 +3,7 @@ import { ArrowLeft, Plus, Send, Trash2, Users } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { api } from '../api';
+import { BigSmoothFace } from '../components/BigSmoothFace';
 import { useIsMobile } from '../hooks/use-mobile';
 
 // Slash commands surfaced when the user types `/` at the start of the input.
@@ -56,6 +57,12 @@ interface TeammateMessage {
     timestamp: string;
 }
 
+interface Thought {
+    id: number;
+    text: string;
+    bornAt: number;
+}
+
 // `null` selection means the user is chatting with Big Smooth (the lead).
 type Scope = { kind: 'lead' } | { kind: 'teammate'; name: string };
 
@@ -81,8 +88,10 @@ export function ChatPage() {
     const [teammates, setTeammates] = useState<Teammate[]>([]);
     const [scope, setScope] = useState<Scope>({ kind: 'lead' });
     const [teammateMessages, setTeammateMessages] = useState<TeammateMessage[]>([]);
+    const [thoughts, setThoughts] = useState<Thought[]>([]);
     const bottomRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLInputElement>(null);
+    const thoughtIdRef = useRef(0);
     const isMobile = useIsMobile();
 
     // Autocomplete: slash commands on '/<...>', mentions on '@<...>'.
@@ -222,6 +231,67 @@ export function ChatPage() {
     useEffect(() => {
         bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages.length, teammateMessages.length, streaming]);
+
+    // Big Smooth's "thought stream": subscribe to /ws and surface
+    // BigSmoothThought events as floating bubbles next to the face.
+    // Older bubbles auto-expire so the row stays at most 3 deep.
+    useEffect(() => {
+        let ws: WebSocket | null = null;
+        let alive = true;
+        let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+        const open = () => {
+            if (!alive) return;
+            try {
+                const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+                ws = new WebSocket(`${proto}://${window.location.host}/ws`);
+            } catch {
+                reconnectTimer = setTimeout(open, 2000);
+                return;
+            }
+            ws.onmessage = (e) => {
+                try {
+                    const ev = JSON.parse(typeof e.data === 'string' ? e.data : '');
+                    if (ev?.type === 'BigSmoothThought' && typeof ev.text === 'string') {
+                        thoughtIdRef.current += 1;
+                        const id = thoughtIdRef.current;
+                        const bornAt = Date.now();
+                        setThoughts((prev) => [...prev, { id, text: ev.text, bornAt }].slice(-3));
+                        // Auto-expire after 7s.
+                        setTimeout(() => {
+                            setThoughts((prev) => prev.filter((t) => t.id !== id));
+                        }, 7000);
+                    }
+                } catch {
+                    // ignore non-JSON / unknown frames
+                }
+            };
+            ws.onclose = () => {
+                if (!alive) return;
+                reconnectTimer = setTimeout(open, 2000);
+            };
+            ws.onerror = () => {
+                ws?.close();
+            };
+        };
+        open();
+
+        return () => {
+            alive = false;
+            if (reconnectTimer) clearTimeout(reconnectTimer);
+            ws?.close();
+        };
+    }, []);
+
+    // Clear thoughts when the user leaves the lead chat or starts a new
+    // turn — they reflect "right now" Big Smooth state, not history.
+    useEffect(() => {
+        if (!streaming || scope.kind !== 'lead') {
+            // Drain after a short tail so the last thought has time to read.
+            const t = setTimeout(() => setThoughts([]), 1500);
+            return () => clearTimeout(t);
+        }
+    }, [streaming, scope]);
 
     // Hotkeys: Shift+ArrowDown cycles lead → t1 → t2 → … → lead. Escape returns to lead.
     useEffect(() => {
@@ -567,7 +637,7 @@ export function ChatPage() {
 
     const Conversation = (
         <div className={`flex flex-col min-w-0 min-h-0 ${isMobile ? 'w-full flex-1' : 'flex-1'}`}>
-            <div className="flex items-center gap-2 mb-3">
+            <div className="flex items-center gap-3 mb-3">
                 {isMobile && (
                     <button
                         onClick={() => {
@@ -581,13 +651,32 @@ export function ChatPage() {
                         <ArrowLeft size={18} />
                     </button>
                 )}
+                {scope.kind === 'lead' && (
+                    <div className="relative" style={{ width: isMobile ? 56 : 72, height: isMobile ? 56 : 72 }}>
+                        <BigSmoothFace state={streaming ? 'thinking' : 'idle'} size={isMobile ? 56 : 72} />
+                    </div>
+                )}
                 <h1 className={`font-bold ${isMobile ? 'text-lg' : 'text-2xl'}`}>{conversationTitle}</h1>
+                {scope.kind === 'lead' && thoughts.length > 0 && (
+                    <div className="hidden sm:flex flex-1 flex-wrap gap-2 items-center justify-end pr-1 min-w-0">
+                        {thoughts.map((t, i) => (
+                            <ThoughtBubble key={t.id} text={t.text} freshness={i / Math.max(1, thoughts.length - 1)} />
+                        ))}
+                    </div>
+                )}
             </div>
+            {scope.kind === 'lead' && thoughts.length > 0 && (
+                <div className="flex sm:hidden flex-wrap gap-1.5 mb-2">
+                    {thoughts.map((t, i) => (
+                        <ThoughtBubble key={t.id} text={t.text} freshness={i / Math.max(1, thoughts.length - 1)} compact />
+                    ))}
+                </div>
+            )}
             <div className="flex-1 overflow-auto flex flex-col gap-3 mb-3 min-h-0">
                 {scope.kind === 'lead' ? renderLeadMessages() : renderTeammateMessages()}
-                {streaming && (
+                {streaming && scope.kind !== 'lead' && (
                     <div className="italic text-sm" style={{ color: 'var(--muted)' }}>
-                        {scope.kind === 'lead' ? 'Big Smooth is thinking…' : 'Sending…'}
+                        Sending…
                     </div>
                 )}
                 <div ref={bottomRef} />
@@ -743,6 +832,30 @@ export function ChatPage() {
         <div className={`flex gap-4 ${isMobile ? 'flex-col h-[calc(100dvh-88px)]' : 'flex-row h-[calc(100vh-104px)]'}`}>
             {!showConvoOnMobile && Sidebar}
             {!showListOnMobile && Conversation}
+        </div>
+    );
+}
+
+/// One floating one-liner from Big Smooth's inner monologue. `freshness`
+/// runs 0 (oldest) → 1 (newest) so we can fade older bubbles back.
+function ThoughtBubble({ text, freshness, compact = false }: { text: string; freshness: number; compact?: boolean }) {
+    // Clamp opacity so the oldest bubble is still readable.
+    const opacity = 0.55 + 0.45 * freshness;
+    return (
+        <div
+            className={`rounded-full whitespace-nowrap overflow-hidden text-ellipsis ${compact ? 'px-2 py-1 text-[11px]' : 'px-3 py-1.5 text-[12px]'}`}
+            style={{
+                background: 'color-mix(in oklch, var(--smoo-green) 18%, transparent)',
+                border: '1px solid color-mix(in oklch, var(--smoo-green) 55%, transparent)',
+                color: 'var(--color-foreground)',
+                opacity,
+                maxWidth: compact ? '60vw' : '320px',
+                animation: 'bs-thought-in 280ms ease-out both',
+                fontStyle: 'italic',
+            }}
+            title={text}
+        >
+            {text}
         </div>
     );
 }
