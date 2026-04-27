@@ -365,6 +365,99 @@ impl Tool for TeammateReadTool {
     }
 }
 
+// ── teammate.wait ──────────────────────────────────────────────────────
+//
+// The cheap way for the chat-agent to "drive a task to completion" without
+// burning every iteration on `teammate_read`. Internally polls pearl
+// comments every 5 s up to `max_wait_seconds` (capped at 120 s), returns
+// when the teammate posts `[IDLE]`, posts a `[CHAT:TEAMMATE]` reply, hits
+// the cap, or asks a question. The chat-agent calls this AFTER
+// `teammate_spawn` and treats the returned snapshot as ground truth for
+// the next decision.
+
+pub struct TeammateWaitTool {
+    pub state: AppState,
+}
+
+#[async_trait]
+impl Tool for TeammateWaitTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "teammate_wait".to_string(),
+            description: "Block for up to `max_wait_seconds` (cap 120) waiting for the teammate on this pearl to make progress. Returns when the teammate posts [IDLE], a [CHAT:TEAMMATE] reply, a [QUESTION:TEAMMATE], or the cap fires. Polls every 5 s. Cheaper than calling teammate_read in a loop — this burns ONE chat-agent iteration even if the teammate takes minutes. Use after `teammate_spawn` to drive the task to completion.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "required": ["pearl_id"],
+                "properties": {
+                    "pearl_id": { "type": "string", "description": "Pearl id of the teammate." },
+                    "max_wait_seconds": { "type": "number", "default": 60, "description": "Wait cap in seconds, max 120." }
+                }
+            }),
+        }
+    }
+
+    async fn execute(&self, arguments: serde_json::Value) -> anyhow::Result<String> {
+        let pearl_id = arguments["pearl_id"].as_str().ok_or_else(|| anyhow::anyhow!("missing 'pearl_id'"))?.to_string();
+        let max_wait = arguments.get("max_wait_seconds").and_then(|v| v.as_u64()).unwrap_or(60).clamp(5, 120);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(max_wait);
+
+        let baseline = self.state.pearl_store.get_comments(&pearl_id).context("reading pearl comments")?;
+        let baseline_ids: std::collections::HashSet<String> = baseline.iter().map(|c| c.id.clone()).collect();
+
+        loop {
+            let comments = self.state.pearl_store.get_comments(&pearl_id).context("reading pearl comments")?;
+            // Look for any new teammate-originated comment since baseline.
+            let new_comments: Vec<&smooth_pearls::PearlComment> = comments
+                .iter()
+                .filter(|c| !baseline_ids.contains(&c.id))
+                .filter(|c| {
+                    let t = c.content.trim_start();
+                    t.starts_with("[CHAT:TEAMMATE]") || t.starts_with("[PROGRESS]") || t.starts_with("[QUESTION:TEAMMATE") || t.starts_with("[IDLE]")
+                })
+                .collect();
+
+            // Stop conditions: idle / question / a chat reply with content / deadline.
+            let saw_idle = new_comments.iter().any(|c| c.content.trim_start().starts_with("[IDLE]"));
+            let saw_question = new_comments.iter().any(|c| c.content.trim_start().starts_with("[QUESTION:TEAMMATE"));
+            let saw_chat = new_comments.iter().any(|c| c.content.trim_start().starts_with("[CHAT:TEAMMATE]"));
+
+            if saw_idle || saw_question || saw_chat || std::time::Instant::now() >= deadline {
+                let mut out = String::new();
+                if saw_idle {
+                    out.push_str("Teammate posted [IDLE] — task is complete.\n\n");
+                } else if saw_question {
+                    out.push_str("Teammate has a question for you to answer (see below).\n\n");
+                } else if saw_chat {
+                    out.push_str("Teammate posted a chat reply — see below.\n\n");
+                } else {
+                    out.push_str(&format!(
+                        "Wait cap of {max_wait}s reached — teammate is still working. You can call teammate_wait again, or teammate_read for a snapshot.\n\n"
+                    ));
+                }
+                if new_comments.is_empty() {
+                    out.push_str("(no new teammate output yet)");
+                } else {
+                    out.push_str("--- new teammate output ---\n");
+                    for c in new_comments {
+                        out.push_str(&format!("- {} {}\n", c.created_at.format("%H:%M:%S"), c.content));
+                    }
+                }
+                return Ok(out.trim_end().to_string());
+            }
+
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn is_concurrent_safe(&self) -> bool {
+        true
+    }
+}
+
 // ── Registration ───────────────────────────────────────────────────────
 
 /// Build the `ToolRegistry` for the chat agent. Returns an owned registry
@@ -379,7 +472,8 @@ pub fn build_chat_tools(state: AppState, registry: Arc<ProviderRegistry>) -> smo
     });
     tools.register(TeammateSpawnTool { state: state.clone() });
     tools.register(TeammateMessageTool { state: state.clone() });
-    tools.register(TeammateReadTool { state });
+    tools.register(TeammateReadTool { state: state.clone() });
+    tools.register(TeammateWaitTool { state });
     tools
 }
 
