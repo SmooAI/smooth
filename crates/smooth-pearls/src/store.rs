@@ -89,6 +89,15 @@ impl PearlStore {
         self.dolt.data_dir()
     }
 
+    /// Underlying long-running smooth-dolt server, if this store was
+    /// constructed with one. Returns `None` for CLI-mode stores.
+    /// Used by Big Smooth to register the global store in the
+    /// periodic health-check loop.
+    #[must_use]
+    pub fn dolt_server(&self) -> Option<&std::sync::Arc<crate::dolt_server::SmoothDoltServer>> {
+        self.dolt.server()
+    }
+
     /// Initialize the Dolt database and create the pearl schema.
     pub fn init(dolt_dir: &Path) -> Result<Self> {
         let dolt = SmoothDolt::new(dolt_dir)?;

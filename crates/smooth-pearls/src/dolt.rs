@@ -65,9 +65,26 @@ impl SmoothDolt {
             // The `bin` field is unused in server mode but kept for the
             // accessor; pick something reasonable rather than holding an
             // Option just for this case.
-            bin: server.socket_path().to_path_buf(),
+            bin: server.socket_path(),
             data_dir: data_dir.into(),
             server: Some(server),
+        }
+    }
+
+    /// Wrap a server-mode op with one round of self-healing on
+    /// transport-looking errors (broken pipe, timeout, EOF). The
+    /// `client()` path already retries connect failures; this catches
+    /// the case where connect succeeds but the request itself wedges
+    /// (e.g. dolt mid-deadlock from a paused volume after sleep).
+    fn run_with_self_heal<T>(server: &Arc<SmoothDoltServer>, op: impl Fn(&Arc<SmoothDoltServer>) -> Result<T>) -> Result<T> {
+        match op(server) {
+            Ok(v) => Ok(v),
+            Err(e) if is_transport_err(&e) => {
+                tracing::warn!(error = %e, "smooth-dolt op looked like a transport failure; respawning + retrying once");
+                server.ensure_healthy().context("self-heal: ensure_healthy")?;
+                op(server)
+            }
+            Err(e) => Err(e),
         }
     }
 
@@ -75,6 +92,14 @@ impl SmoothDolt {
     #[must_use]
     pub fn data_dir(&self) -> &std::path::Path {
         &self.data_dir
+    }
+
+    /// Underlying long-running server, if this handle is in server
+    /// mode. Used by the host process to drive a background health-
+    /// check loop that respawns the child on macOS-sleep wedges.
+    #[must_use]
+    pub fn server(&self) -> Option<&Arc<SmoothDoltServer>> {
+        self.server.as_ref()
     }
 
     /// Create a handle with an explicit binary path (for testing).
@@ -95,7 +120,7 @@ impl SmoothDolt {
     /// Execute a SQL query and return parsed JSON results.
     pub fn sql(&self, query: &str) -> Result<Vec<Value>> {
         if let Some(server) = &self.server {
-            return server.client()?.sql(query);
+            return Self::run_with_self_heal(server, |s| s.client()?.sql(query));
         }
         let output = self.run_cli(&["sql", &self.data_dir_str(), "-q", query])?;
         if output.is_empty() || output == "null" {
@@ -108,7 +133,7 @@ impl SmoothDolt {
     /// Execute a SQL statement (INSERT/UPDATE/DELETE/CREATE). Returns raw output.
     pub fn exec(&self, statement: &str) -> Result<String> {
         if let Some(server) = &self.server {
-            let rows = server.client()?.exec(statement)?;
+            let rows = Self::run_with_self_heal(server, |s| s.client()?.exec(statement))?;
             return Ok(format!("{rows} rows affected"));
         }
         self.run_cli(&["sql", &self.data_dir_str(), "-q", statement])
@@ -117,7 +142,7 @@ impl SmoothDolt {
     /// Stage all changes and commit with a message.
     pub fn commit(&self, message: &str) -> Result<String> {
         if let Some(server) = &self.server {
-            return server.client()?.commit(message);
+            return Self::run_with_self_heal(server, |s| s.client()?.commit(message));
         }
         self.run_cli(&["commit", &self.data_dir_str(), "-m", message])
     }
@@ -288,6 +313,49 @@ pub fn find_smooth_dolt_binary() -> Option<PathBuf> {
 
     // 4. PATH lookup.
     which_smooth_dolt()
+}
+
+/// Heuristic: treat broken-pipe / EOF / timeout / closed-connection
+/// errors as transport-layer failures eligible for one round of
+/// self-heal retry. Errors from the SQL engine itself (syntax, lock,
+/// not-found) are NOT transport — those should propagate so callers
+/// can react meaningfully instead of looping into an infinite respawn.
+fn is_transport_err(e: &anyhow::Error) -> bool {
+    let s = format!("{e:#}").to_lowercase();
+    [
+        "broken pipe",
+        "connection refused",
+        "connection reset",
+        "connection closed",
+        "server closed connection",
+        "timed out",
+        "timeout",
+        "early eof",
+        "unexpected end of file",
+        "no such file or directory",
+        "transport endpoint",
+    ]
+    .iter()
+    .any(|needle| s.contains(needle))
+}
+
+#[cfg(test)]
+mod is_transport_err_tests {
+    use super::is_transport_err;
+
+    #[test]
+    fn flags_pipe_and_timeout() {
+        assert!(is_transport_err(&anyhow::anyhow!("write request: broken pipe")));
+        assert!(is_transport_err(&anyhow::anyhow!("read response: timed out")));
+        assert!(is_transport_err(&anyhow::anyhow!("smooth-dolt server closed connection")));
+        assert!(is_transport_err(&anyhow::anyhow!("connect /tmp/foo: No such file or directory")));
+    }
+
+    #[test]
+    fn does_not_flag_sql_errors() {
+        assert!(!is_transport_err(&anyhow::anyhow!("smooth-dolt: dolt_add: Error 1105: cannot update manifest")));
+        assert!(!is_transport_err(&anyhow::anyhow!("syntax error near 'SELET'")));
+    }
 }
 
 fn which_smooth_dolt() -> Option<PathBuf> {

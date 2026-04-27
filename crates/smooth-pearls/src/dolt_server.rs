@@ -21,6 +21,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
@@ -28,6 +29,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::dolt::find_smooth_dolt_binary;
+
+/// Wallclock timeout applied to every request/response on a client
+/// connection. Without this, a wedged `smooth-dolt serve` (e.g. after
+/// macOS overnight sleep) can leave the calling thread blocked
+/// indefinitely on `read_line`. With it, callers see a timeout error
+/// quickly and the self-heal path on the server side can respawn.
+const CLIENT_OP_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Background health-check probe timeout. Keep this aggressive — a
+/// healthy server pings in <5ms; we want to give up fast and respawn.
+const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Shell-escape a single argument by wrapping it in single quotes and
 /// escaping any embedded single quotes. Sufficient for our use (paths
@@ -71,16 +83,39 @@ fn kill_stale_serve_for(data_dir: &Path) {
     }
 }
 
+/// Held inside a `Mutex` on `SmoothDoltServer` so we can swap the
+/// child + socket atomically when the server gets respawned. (The
+/// `tempfile::TempDir` lives here too so the socket directory is
+/// cleaned up at drop time.)
+#[derive(Debug)]
+struct ServerHandle {
+    socket: PathBuf,
+    child: Option<Child>,
+    /// Held to clean up the socket directory on drop. Replaced wholesale
+    /// when the server is respawned so the old socket gets unlinked.
+    _socket_dir: tempfile::TempDir,
+}
+
 /// Long-running `smooth-dolt serve` subprocess + the Unix socket it's
 /// listening on. Created once per dolt data directory; clients open
 /// fresh connections per call via [`SmoothDoltServer::client`].
+///
+/// Self-healing: after `client()` is called, if the connection or
+/// initial ping fails, the server will respawn its child and try
+/// once more before returning the error. A separate background task
+/// (see [`SmoothDoltServer::spawn_healthcheck_task`]) periodically
+/// pings every server and respawns any that have gone silent — this
+/// is what catches the macOS-overnight-sleep failure mode where the
+/// child stays alive but its socket no longer responds.
 #[derive(Debug)]
 pub struct SmoothDoltServer {
-    socket: PathBuf,
-    /// Held to keep the child alive; killed in `Drop`.
-    child: Option<Child>,
-    /// Held to clean up the socket directory on drop.
-    _socket_dir: tempfile::TempDir,
+    /// Source-of-truth dir for the dolt database. Kept so the server
+    /// can self-respawn without external coordination.
+    data_dir: PathBuf,
+    /// Latest server child + socket. Locked under a sync `Mutex`
+    /// because callers (including blocking SmoothDolt::commit paths)
+    /// don't always have an async runtime in scope.
+    inner: Mutex<ServerHandle>,
 }
 
 impl SmoothDoltServer {
@@ -94,22 +129,26 @@ impl SmoothDoltServer {
     /// Fails when the `smooth-dolt` binary can't be located or both
     /// spawn attempts time out / the server fails to respond.
     pub fn spawn(data_dir: &Path) -> Result<Self> {
-        match Self::spawn_once(data_dir) {
-            Ok(s) => Ok(s),
+        let handle = match Self::spawn_handle_once(data_dir) {
+            Ok(h) => h,
             Err(first) => {
                 tracing::warn!(data_dir = %data_dir.display(), error = %first, "smooth-dolt spawn failed; killing zombies and retrying once");
                 kill_stale_serve_for(data_dir);
                 std::thread::sleep(Duration::from_millis(500));
-                Self::spawn_once(data_dir).with_context(|| format!("smooth-dolt spawn retry also failed (first attempt: {first:#})"))
+                Self::spawn_handle_once(data_dir).with_context(|| format!("smooth-dolt spawn retry also failed (first attempt: {first:#})"))?
             }
-        }
+        };
+        Ok(Self {
+            data_dir: data_dir.to_path_buf(),
+            inner: Mutex::new(handle),
+        })
     }
 
     /// One spawn attempt — blocks until the socket is ready (or
     /// `SERVER_START_TIMEOUT` elapses). Internal helper for
     /// [`SmoothDoltServer::spawn`], which wraps it with a self-heal
     /// retry path.
-    fn spawn_once(data_dir: &Path) -> Result<Self> {
+    fn spawn_handle_once(data_dir: &Path) -> Result<ServerHandle> {
         let bin = find_smooth_dolt_binary().context("smooth-dolt binary not found. Run: scripts/build-smooth-dolt.sh")?;
 
         let socket_dir = tempfile::Builder::new().prefix("smooth-dolt-").tempdir().context("create socket tempdir")?;
@@ -161,37 +200,96 @@ impl SmoothDoltServer {
             std::thread::sleep(Duration::from_millis(50));
         }
 
-        let server = Self {
-            socket,
+        let handle = ServerHandle {
+            socket: socket.clone(),
             child: Some(child),
             _socket_dir: socket_dir,
         };
 
         // Verify the server is actually responding before returning.
-        let mut probe = server.client().context("connect to freshly-spawned smooth-dolt serve")?;
+        let mut probe = SmoothDoltClient::connect(&socket).context("connect to freshly-spawned smooth-dolt serve")?;
         probe.ping().context("ping freshly-spawned smooth-dolt serve")?;
         drop(probe);
 
-        Ok(server)
+        Ok(handle)
     }
 
-    /// Path to the Unix socket the server is listening on.
-    #[must_use]
-    pub fn socket_path(&self) -> &Path {
-        &self.socket
+    /// Path to the Unix socket the server is currently listening on.
+    /// May change over the server's lifetime if it self-heals — call
+    /// each time rather than caching.
+    pub fn socket_path(&self) -> PathBuf {
+        let inner = self.inner.lock().expect("dolt server mutex poisoned");
+        inner.socket.clone()
     }
 
     /// Open a fresh client connection. Many can coexist; the server
     /// handles each connection on its own goroutine.
     ///
+    /// On connection failure (typically a stale socket from a child
+    /// that died or was paused-then-killed during macOS sleep) we
+    /// respawn the child and retry once. Callers see a single retry
+    /// of latency; subsequent calls hit the fresh server normally.
+    ///
     /// # Errors
-    /// Fails when the socket can't be reached (server died, etc.).
+    /// Fails only if both the initial connection AND the post-respawn
+    /// connection fail.
     pub fn client(&self) -> Result<SmoothDoltClient> {
-        SmoothDoltClient::connect(&self.socket)
+        let socket = self.socket_path();
+        match SmoothDoltClient::connect(&socket) {
+            Ok(c) => Ok(c),
+            Err(e) => {
+                tracing::warn!(socket = %socket.display(), error = %e, "smooth-dolt client connect failed; attempting self-heal respawn");
+                self.respawn().context("respawn smooth-dolt during client() self-heal")?;
+                let socket = self.socket_path();
+                SmoothDoltClient::connect(&socket).with_context(|| format!("connect to respawned smooth-dolt at {}", socket.display()))
+            }
+        }
+    }
+
+    /// Run a quick ping with `HEALTH_PROBE_TIMEOUT`. Returns `Ok(())`
+    /// when the server answers, `Err` when it's gone or wedged.
+    pub fn is_healthy(&self) -> Result<()> {
+        let socket = self.socket_path();
+        let mut client = SmoothDoltClient::connect_with_timeout(&socket, HEALTH_PROBE_TIMEOUT).context("health: connect")?;
+        client.ping().context("health: ping")
+    }
+
+    /// Probe the server; if it's not healthy, respawn it. Idempotent
+    /// — safe to call from a periodic background task.
+    pub fn ensure_healthy(&self) -> Result<()> {
+        if self.is_healthy().is_ok() {
+            return Ok(());
+        }
+        tracing::warn!(data_dir = %self.data_dir.display(), "smooth-dolt server unhealthy — respawning");
+        self.respawn().context("ensure_healthy: respawn")?;
+        self.is_healthy().context("ensure_healthy: post-respawn ping")
+    }
+
+    /// Kill the current child (if any) and start a fresh one. The
+    /// inner handle is replaced atomically.
+    fn respawn(&self) -> Result<()> {
+        // Try to spawn a NEW handle first; only swap in once it's
+        // verified healthy. This way a transient spawn failure
+        // doesn't take the server permanently offline.
+        let new_handle = match Self::spawn_handle_once(&self.data_dir) {
+            Ok(h) => h,
+            Err(first) => {
+                kill_stale_serve_for(&self.data_dir);
+                std::thread::sleep(Duration::from_millis(500));
+                Self::spawn_handle_once(&self.data_dir)
+                    .with_context(|| format!("respawn smooth-dolt for {}: retry also failed (first: {first:#})", self.data_dir.display()))?
+            }
+        };
+        let mut inner = self.inner.lock().expect("dolt server mutex poisoned");
+        // Drop-replace the old handle: takes the old child + tempdir,
+        // SIGTERMs the child via ServerHandle's drop semantics below.
+        let old = std::mem::replace(&mut *inner, new_handle);
+        drop(old); // explicit so the SIGTERM happens before we return
+        Ok(())
     }
 }
 
-impl Drop for SmoothDoltServer {
+impl Drop for ServerHandle {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
             // SIGTERM equivalent — the Go server handles it cleanly,
@@ -250,13 +348,27 @@ struct ServerResponse {
 }
 
 impl SmoothDoltClient {
-    /// Connect to a `smooth-dolt serve` Unix socket.
+    /// Connect to a `smooth-dolt serve` Unix socket. Applies the
+    /// default `CLIENT_OP_TIMEOUT` to read/write so a wedged server
+    /// can't block the caller indefinitely.
     ///
     /// # Errors
     /// Returns the underlying I/O error if the socket can't be opened.
     pub fn connect(socket: &Path) -> Result<Self> {
+        Self::connect_with_timeout(socket, CLIENT_OP_TIMEOUT)
+    }
+
+    /// Like [`connect`] but with a caller-chosen timeout — used by the
+    /// server's own health-check path which wants to give up faster.
+    pub fn connect_with_timeout(socket: &Path, timeout: Duration) -> Result<Self> {
         let stream = UnixStream::connect(socket).with_context(|| format!("connect {}", socket.display()))?;
-        let reader = BufReader::new(stream.try_clone().context("clone unix stream for reader")?);
+        // Apply read/write timeouts so a wedged peer surfaces as an
+        // io::Error rather than blocking the calling thread forever.
+        let _ = stream.set_read_timeout(Some(timeout));
+        let _ = stream.set_write_timeout(Some(timeout));
+        let reader_stream = stream.try_clone().context("clone unix stream for reader")?;
+        let _ = reader_stream.set_read_timeout(Some(timeout));
+        let reader = BufReader::new(reader_stream);
         Ok(Self {
             stream,
             reader,

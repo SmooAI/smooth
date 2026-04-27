@@ -508,6 +508,38 @@ pub async fn start(mut state: AppState, addr: SocketAddr) -> anyhow::Result<()> 
     // dispatch we want is the explicit one driven by the chat-agent's
     // teammate_spawn (which honours direct mode). Re-enable when
     // sandbox dispatch is reliable again.
+    // Periodic dolt-serve health check. Pings every smooth-dolt
+    // companion (project servers + global) every 30 s; respawns any
+    // that don't answer within 3 s. Closes the macOS-overnight-sleep
+    // wedge where the child stays alive but the socket goes silent
+    // and any subsequent dolt op blocks forever.
+    {
+        let project_servers = state.project_dolt_servers.clone();
+        let global_server = state.pearl_store.dolt_server().cloned();
+        tokio::spawn(async move {
+            // Initial 60s grace so freshly-spawned children settle.
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            loop {
+                let mut all: Vec<(std::path::PathBuf, std::sync::Arc<smooth_pearls::SmoothDoltServer>)> =
+                    project_servers.iter().map(|(p, s)| (p.clone(), s.clone())).collect();
+                if let Some(ref g) = global_server {
+                    all.push((std::path::PathBuf::from("global"), g.clone()));
+                }
+                for (path, server) in all {
+                    let server2 = server.clone();
+                    let res = tokio::task::spawn_blocking(move || server2.ensure_healthy()).await;
+                    match res {
+                        Ok(Ok(())) => tracing::trace!(path = %path.display(), "dolt healthcheck ok"),
+                        Ok(Err(e)) => tracing::error!(path = %path.display(), error = %e, "dolt healthcheck: respawn failed"),
+                        Err(join_err) => tracing::warn!(path = %path.display(), error = %join_err, "dolt healthcheck task join failed"),
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+        });
+        tracing::info!("dolt healthcheck loop started (30s interval)");
+    }
+
     let direct_only = std::env::var("SMOOTH_WORKFLOW_DIRECT")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
@@ -3261,7 +3293,19 @@ async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>)
         Ok(last_assistant)
     }
 
-    let result: anyhow::Result<String> = chat_inner(state, system_prompt, &body.content, body.model.as_deref(), body.budget_usd).await;
+    // Same 5-minute ceiling as the session-bound chat path. Anything
+    // past this is a wedge — return an actionable error so the user
+    // can retry instead of watching a spinner indefinitely.
+    const CHAT_TURN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+    let result: anyhow::Result<String> = match tokio::time::timeout(
+        CHAT_TURN_TIMEOUT,
+        chat_inner(state, system_prompt, &body.content, body.model.as_deref(), body.budget_usd),
+    )
+    .await
+    {
+        Ok(inner) => inner,
+        Err(_) => Err(anyhow::anyhow!("chat turn exceeded {CHAT_TURN_TIMEOUT:?} ceiling")),
+    };
 
     match result {
         Ok(response) => Json(ApiResponse { data: response, ok: true }),
@@ -3408,9 +3452,21 @@ async fn post_chat_message_handler(
     // path is the one the web UI hits, so this is what the user actually
     // sees as Big Smooth's persona.
     let system_prompt = include_str!("chat_tools_system_prompt.txt");
-    let assistant_text = match run_chat_with_history(&state, system_prompt, &history, &user_content).await {
-        Ok(s) => s,
-        Err(e) => format!("Error: {e}"),
+    // Hard ceiling on a single chat turn. The chat agent itself caps
+    // iterations at 20 with per-tool timeouts (bash 10s, teammate_wait
+    // 60s ×3), so even a worst-case run completes inside 4 minutes.
+    // 5 minutes is a generous buffer; anything past it is a wedge
+    // (dolt deadlock, gateway hang, etc.) and we're better off
+    // returning an error to the user than leaving them watching the
+    // thinking spinner forever.
+    const CHAT_TURN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+    let assistant_text = match tokio::time::timeout(CHAT_TURN_TIMEOUT, run_chat_with_history(&state, system_prompt, &history, &user_content)).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => format!("Error: {e}"),
+        Err(_) => {
+            tracing::warn!(session = %id, "chat turn exceeded {CHAT_TURN_TIMEOUT:?} ceiling — aborting");
+            "_(Big Smooth ran into a wall — the chat turn went past 5 minutes without a real answer. Try sending the message again; the next turn starts fresh.)_".to_string()
+        }
     };
 
     let assistant_msg_id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
