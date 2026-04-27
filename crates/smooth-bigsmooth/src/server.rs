@@ -2396,6 +2396,19 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
                 return;
             }
         };
+        // Make runner spawns visible in service.log so a silent wedge
+        // can be diagnosed after the fact. Without this the only
+        // server-log entry for a dispatched runner was the "reusing
+        // pearl" line and we couldn't tell whether the runner ever
+        // launched / what bin / what cwd.
+        tracing::info!(
+            task_id = %tid,
+            runner_pid = child.id().unwrap_or(0),
+            runner_bin = %runner_bin.display(),
+            workspace = %workspace_canon.display(),
+            model = %final_model,
+            "direct dispatch: spawned runner"
+        );
 
         let stdout = child.stdout.take().expect("stdout piped");
         let stderr = child.stderr.take().expect("stderr piped");
@@ -2408,10 +2421,16 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
         let stdout_task = tokio::spawn(async move {
             let mut agent_iterations: u32 = 0;
             let mut final_cost_usd: f64 = 0.0;
+            let mut first_line_logged = false;
             while let Ok(Some(line)) = out_reader.next_line().await {
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     continue;
+                }
+                if !first_line_logged {
+                    first_line_logged = true;
+                    let preview: String = trimmed.chars().take(160).collect();
+                    tracing::info!(task_id = %tid_out, preview = %preview, "direct dispatch: runner produced first stdout line");
                 }
                 if let Ok(mut la) = last_activity_for_stdout.lock() {
                     *la = std::time::Instant::now();
@@ -2489,6 +2508,13 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
                 if line.trim().is_empty() {
                     continue;
                 }
+                // Mirror to tracing so the host's service.log captures
+                // runner stderr — without this the only consumer was
+                // the WebSocket TokenDelta below, which is great for
+                // live UI but useless for post-mortem on a hang. Now
+                // a wedged runner that did manage to print "panic:"
+                // or a tracing init message will show up in the log.
+                tracing::warn!(task_id = %tid_err, line = %line, "runner stderr");
                 let _ = event_tx_err.send(ServerEvent::TokenDelta {
                     task_id: tid_err.clone(),
                     content: format!("[runner] {line}\n"),
