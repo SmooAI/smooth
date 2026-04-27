@@ -117,10 +117,13 @@ impl SmoothDolt {
         self.run_cli(&["init", &self.data_dir_str()])
     }
 
-    /// Execute a SQL query and return parsed JSON results.
+    /// Execute a SQL query and return parsed JSON results. In server
+    /// mode the call is serialized through the single-writer queue
+    /// (see [`SmoothDoltServer::with_client`]) so concurrent callers
+    /// can't race the Dolt manifest lock.
     pub fn sql(&self, query: &str) -> Result<Vec<Value>> {
         if let Some(server) = &self.server {
-            return Self::run_with_self_heal(server, |s| s.client()?.sql(query));
+            return Self::run_with_self_heal(server, |s| s.with_client(|c| c.sql(query)));
         }
         let output = self.run_cli(&["sql", &self.data_dir_str(), "-q", query])?;
         if output.is_empty() || output == "null" {
@@ -133,7 +136,7 @@ impl SmoothDolt {
     /// Execute a SQL statement (INSERT/UPDATE/DELETE/CREATE). Returns raw output.
     pub fn exec(&self, statement: &str) -> Result<String> {
         if let Some(server) = &self.server {
-            let rows = Self::run_with_self_heal(server, |s| s.client()?.exec(statement))?;
+            let rows = Self::run_with_self_heal(server, |s| s.with_client(|c| c.exec(statement)))?;
             return Ok(format!("{rows} rows affected"));
         }
         self.run_cli(&["sql", &self.data_dir_str(), "-q", statement])
@@ -142,7 +145,7 @@ impl SmoothDolt {
     /// Stage all changes and commit with a message.
     pub fn commit(&self, message: &str) -> Result<String> {
         if let Some(server) = &self.server {
-            return Self::run_with_self_heal(server, |s| s.client()?.commit(message));
+            return Self::run_with_self_heal(server, |s| s.with_client(|c| c.commit(message)));
         }
         self.run_cli(&["commit", &self.data_dir_str(), "-m", message])
     }
@@ -150,7 +153,7 @@ impl SmoothDolt {
     /// Query the Dolt commit log. Returns vec of (hash, author, date, message).
     pub fn log(&self, limit: usize) -> Result<Vec<(String, String, String, String)>> {
         let output = if let Some(server) = &self.server {
-            server.client()?.log(limit)?
+            Self::run_with_self_heal(server, |s| s.with_client(|c| c.log(limit)))?
         } else {
             self.run_cli(&["log", &self.data_dir_str(), "-n", &limit.to_string()])?
         };
@@ -171,7 +174,7 @@ impl SmoothDolt {
     /// Push to the configured Dolt remote (refs/dolt/data on git origin).
     pub fn push(&self) -> Result<String> {
         if let Some(server) = &self.server {
-            return server.client()?.dolt("push");
+            return Self::run_with_self_heal(server, |s| s.with_client(|c| c.dolt("push")));
         }
         self.run_cli(&["push", &self.data_dir_str()])
     }
@@ -179,7 +182,7 @@ impl SmoothDolt {
     /// Pull from the configured Dolt remote.
     pub fn pull(&self) -> Result<String> {
         if let Some(server) = &self.server {
-            return server.client()?.dolt("pull");
+            return Self::run_with_self_heal(server, |s| s.with_client(|c| c.dolt("pull")));
         }
         self.run_cli(&["pull", &self.data_dir_str()])
     }
@@ -204,7 +207,7 @@ impl SmoothDolt {
     /// Garbage collect — compact the database to minimize storage.
     pub fn gc(&self) -> Result<String> {
         if let Some(server) = &self.server {
-            return server.client()?.dolt("gc");
+            return Self::run_with_self_heal(server, |s| s.with_client(|c| c.dolt("gc")));
         }
         self.run_cli(&["gc", &self.data_dir_str()])
     }
@@ -212,7 +215,7 @@ impl SmoothDolt {
     /// Check the Dolt status (working set changes).
     pub fn status(&self) -> Result<String> {
         if let Some(server) = &self.server {
-            return server.client()?.dolt("status");
+            return Self::run_with_self_heal(server, |s| s.with_client(|c| c.dolt("status")));
         }
         self.run_cli(&["status", &self.data_dir_str()])
     }
