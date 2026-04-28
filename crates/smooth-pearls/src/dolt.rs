@@ -280,6 +280,54 @@ impl SmoothDolt {
     }
 }
 
+/// Locate the smooth-dolt-launcher binary — a tiny C wrapper that
+/// resets the signal mask, closes inherited fds, and `setsid`s
+/// before exec'ing the real program. Used to spawn `smooth-dolt
+/// serve` from inside long-running Tokio processes (Big Smooth)
+/// without contaminating Go's runtime with parent state. See
+/// `c/smooth-dolt-launcher/launcher.c` for the rationale.
+///
+/// Resolution mirrors `find_smooth_dolt_binary` but looks for
+/// `smooth-dolt-launcher` instead. Returns `None` when not found
+/// (callers should fall back to a direct spawn — works fine for
+/// short-lived parents like `th` CLI).
+pub fn find_smooth_dolt_launcher_binary() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("SMOOTH_DOLT_LAUNCHER") {
+        let path = PathBuf::from(p);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
+        let mut dir = PathBuf::from(manifest);
+        for _ in 0..5 {
+            let candidate = dir.join("target").join("release").join("smooth-dolt-launcher");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("smooth-dolt-launcher");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    let output = Command::new("which").arg("smooth-dolt-launcher").output().ok()?;
+    if output.status.success() {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path.is_empty() {
+            return Some(PathBuf::from(path));
+        }
+    }
+    None
+}
+
 /// Locate the smooth-dolt binary.
 ///
 /// Resolution order:
