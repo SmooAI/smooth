@@ -1,0 +1,13 @@
+# Pearl store runtime files — keep the dolt manifest + content-
+# addressed blobs in git (so pearls sync between machines via git
+# push/pull), but exclude anything ephemeral.
+
+# Per-process lock files
+*/.dolt/noms/LOCK
+
+# Temp / scratch dirs
+*/.dolt/temptf/
+*/.dolt/noms/.temptf/
+
+# Stats engine sidecar (rebuilt on demand)
+*/.dolt/stats/
