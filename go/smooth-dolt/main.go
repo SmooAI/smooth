@@ -67,6 +67,23 @@ func main() {
 			fatal("missing -q flag")
 		}
 		cmdSQL(dataDir, query)
+	case "exec":
+		// Like `sql` but for write statements (INSERT/UPDATE/DELETE/
+		// CREATE/etc). Uses db.Exec, which commits the implicit
+		// transaction when the connection is released — without this
+		// path, writes via cmdSQL go through db.Query and are silently
+		// lost when the subprocess exits because the working-set
+		// transaction never commits. Returns "<n> rows affected" so
+		// callers can verify the write landed.
+		if len(os.Args) < 4 {
+			fatal("usage: smooth-dolt exec <data-dir> -q \"SQL\"")
+		}
+		dataDir := os.Args[2]
+		stmt := findFlag(os.Args[3:], "-q")
+		if stmt == "" {
+			fatal("missing -q flag")
+		}
+		cmdExec(dataDir, stmt)
 	case "commit":
 		if len(os.Args) < 4 {
 			fatal("usage: smooth-dolt commit <data-dir> -m \"message\"")
@@ -251,6 +268,24 @@ func cmdSQL(dataDir string, query string) {
 	if err := enc.Encode(results); err != nil {
 		fatal("json: " + err.Error())
 	}
+}
+
+// cmdExec runs a write statement (INSERT/UPDATE/DELETE/CREATE) and
+// prints "<n> rows affected". Uses db.Exec rather than db.Query so
+// the implicit transaction commits to the working set before the
+// connection releases — without this, writes through cmdSQL get
+// silently dropped because the subprocess exits with the transaction
+// still open and Dolt rolls it back.
+func cmdExec(dataDir, stmt string) {
+	db := openDB(dataDir)
+	defer db.Close()
+
+	res, err := db.Exec(stmt)
+	if err != nil {
+		fatal("exec: " + err.Error())
+	}
+	rows, _ := res.RowsAffected()
+	fmt.Printf("%d rows affected\n", rows)
 }
 
 func cmdCommit(dataDir string, message string) {

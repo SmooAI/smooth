@@ -134,12 +134,18 @@ impl SmoothDolt {
     }
 
     /// Execute a SQL statement (INSERT/UPDATE/DELETE/CREATE). Returns raw output.
+    /// In CLI mode, dispatches to `smooth-dolt exec` (uses db.Exec,
+    /// commits writes) rather than `smooth-dolt sql` (db.Query, drops
+    /// uncommitted writes when the subprocess exits — this was
+    /// silently swallowing every `th pearls create` write before
+    /// store.create's verify-after-create caught it as
+    /// "pearl not found after create").
     pub fn exec(&self, statement: &str) -> Result<String> {
         if let Some(server) = &self.server {
             let rows = Self::run_with_self_heal(server, |s| s.with_client(|c| c.exec(statement)))?;
             return Ok(format!("{rows} rows affected"));
         }
-        self.run_cli(&["sql", &self.data_dir_str(), "-q", statement])
+        self.run_cli(&["exec", &self.data_dir_str(), "-q", statement])
     }
 
     /// Stage all changes and commit with a message.
