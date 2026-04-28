@@ -3453,10 +3453,7 @@ fn is_global_pearl_store(dolt_dir: &std::path::Path) -> bool {
 /// global store. SQL/lock errors etc. should still propagate.
 fn is_no_remote_error(e: &anyhow::Error) -> bool {
     let s = format!("{e:#}").to_lowercase();
-    s.contains("no configured push destination")
-        || s.contains("no configured pull destination")
-        || s.contains("no upstream")
-        || s.contains("remote not found")
+    s.contains("no configured push destination") || s.contains("no configured pull destination") || s.contains("no upstream") || s.contains("remote not found")
 }
 
 fn cmd_migrate_from_beads(store: &smooth_pearls::PearlStore) -> Result<()> {

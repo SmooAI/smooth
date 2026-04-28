@@ -28,7 +28,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::dolt::find_smooth_dolt_binary;
+use crate::dolt::{find_smooth_dolt_binary, find_smooth_dolt_launcher_binary};
 
 /// Wallclock timeout applied to every request/response on a client
 /// connection. Without this, a wedged `smooth-dolt serve` (e.g. after
@@ -183,38 +183,48 @@ impl SmoothDoltServer {
         let socket_dir = tempfile::Builder::new().prefix("smooth-dolt-").tempdir().context("create socket tempdir")?;
         let socket = socket_dir.path().join("dolt.sock");
 
-        // Launder the spawn through `/bin/sh -c 'exec smooth-dolt serve ...'`
-        // and detach into a new session via `setsid` so the spawned
-        // server inherits as little of Big Smooth's process state as
-        // possible. ALL stdio goes to /dev/null, the new session means
-        // no controlling terminal, and the intermediate shell flushes
-        // any inherited file-descriptor weirdness. Without this dance the
-        // embedded Dolt engine inside `smooth-dolt serve` parks all SQL
-        // queries in `pthread_cond_wait` indefinitely on smoo-hub —
-        // the same binary launched directly from a TTY answers in 67ms.
-        // (Multiple narrower attempts — Stdio::null on stdin/stdout/stderr,
-        // spawn_blocking, pre-cache at startup — all failed; only a clean
-        // session-detach via /bin/sh actually works.)
-        // `setsid` isn't always present on macOS; the intermediate /bin/sh
-        // alone provides enough laundering for the embedded Dolt to come
-        // up clean.
-        let serve_cmdline = format!(
-            "exec {} serve {} --socket {}",
-            shell_escape(&bin.to_string_lossy()),
-            shell_escape(&data_dir.to_string_lossy()),
-            shell_escape(&socket.to_string_lossy()),
-        );
-        let mut cmd = Command::new("/bin/sh");
-        cmd.arg("-c")
-            .arg(&serve_cmdline)
-            .stdin(Stdio::null())
+        // Spawn through `smooth-dolt-launcher` if available — a tiny
+        // C wrapper that resets the inherited signal mask, closes
+        // every fd > 2, and `setsid`s before exec'ing smooth-dolt.
+        // This matters when the parent is a long-running Tokio
+        // process (Big Smooth): without the launcher, Go's runtime
+        // in the child wedges on first SQL query because Tokio has
+        // installed signal masks (Go needs SIGURG for goroutine
+        // preemption) and Go grabs leftover Tokio epoll fds at
+        // startup. The launcher is roughly 30 lines of C; see
+        // `c/smooth-dolt-launcher/launcher.c` for the full
+        // rationale.
+        //
+        // When the launcher binary isn't available (e.g. a stripped
+        // dev install), we fall back to the shell-laundered spawn
+        // which is enough for short-lived parents like `th` CLI but
+        // doesn't reliably work from inside BS.
+        let launcher = find_smooth_dolt_launcher_binary();
+        let mut cmd = if let Some(ref launcher_bin) = launcher {
+            let mut c = Command::new(launcher_bin);
+            c.arg(&bin).arg("serve").arg(data_dir).arg("--socket").arg(&socket);
+            c
+        } else {
+            let serve_cmdline = format!(
+                "exec {} serve {} --socket {}",
+                shell_escape(&bin.to_string_lossy()),
+                shell_escape(&data_dir.to_string_lossy()),
+                shell_escape(&socket.to_string_lossy()),
+            );
+            let mut c = Command::new("/bin/sh");
+            c.arg("-c").arg(&serve_cmdline);
+            c
+        };
+        cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .env_clear()
             .env("PATH", "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin")
             .env("HOME", std::env::var("HOME").unwrap_or_default());
 
-        let child = cmd.spawn().with_context(|| format!("spawn /bin/sh -c '{serve_cmdline}'"))?;
+        let child = cmd
+            .spawn()
+            .with_context(|| format!("spawn smooth-dolt serve via {}", launcher.as_ref().map_or("shell", |_| "smooth-dolt-launcher")))?;
 
         // Wait for the server to create its socket file.
         let deadline = Instant::now() + SERVER_START_TIMEOUT;
