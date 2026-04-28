@@ -1,5 +1,101 @@
 # @smooai/smooth
 
+## 0.12.6
+
+### Patch Changes
+
+- ba63393: Stronger chat-agent prompt — clone goes through bash, not a teammate
+
+  Even after adding the bash carve-out for one-shot writes, the chat
+  agent kept reaching for `teammate_spawn` on `git clone` requests
+  because the rule was buried mid-prompt. Reorganized the prompt around
+  a numbered "decision rules" block at the top with rule 1 being
+  "clone/fetch/mkdir → bash, NOT teammate_spawn" — explicit, ordered,
+  non-negotiable.
+
+  Also tightened `teammate_spawn`'s tool description:
+
+  - Lead sentence is now "for REAL CODING WORK ... do NOT use this for
+    one-shot bash-allowlist commands". Models are likelier to skip a
+    tool whose schema says "don't use for X" than to read past five
+    paragraphs to find the same caveat.
+  - The `model` parameter description explicitly warns against
+    `smooth-fast-gemini` (it can't reliably emit native tool calls and
+    wedges the runner) and removes the prior advice to use it for
+    read-only lookups, which was the trigger for the 5-min wedge this
+    morning.
+  - The `working_dir` field's description explicitly says "never pass a
+    directory as broad as ~ or /". The wedge happened with
+    `working_dir=/Users/brentrager`.
+
+  Verified end-to-end: `clone brentrager/budgeting to
+~/dev/brentrager/budgeting` now answers in ~47 s with the repo
+  actually cloned (verified via `ls .git` on the destination).
+
+- 70244a9: Fix `th pearls create` silently dropping writes from CLI mode
+
+  `smooth-dolt sql -q ...` ran every statement through Go's
+  `db.Query`, including writes (INSERT/UPDATE/DELETE). Dolt returns
+  `__ok_result__` for those, but the implicit transaction never
+  commits to the working set before the subprocess exits — Dolt
+  rolls it back. Result: `th pearls create`'s INSERT was silently
+  dropped, then `store.create`'s verify-after-create failed with
+  `pearl not found after create: th-XXXXXX` and the row was gone
+  from disk.
+
+  Server mode (`smooth-dolt serve`) had a separate `doExec`
+  (uses `db.Exec`, commits on close); CLI mode had no equivalent.
+
+  Fix:
+
+  - New `smooth-dolt exec <data-dir> -q "SQL"` subcommand that uses
+    `db.Exec` and prints `<n> rows affected`.
+  - `SmoothDolt::exec` (Rust, CLI path) routes writes to the new
+    subcommand instead of `sql`.
+
+  Verified: create-then-read across `th pearls create` → row appears
+  in subsequent `SELECT` from a fresh subprocess.
+
+- 94987f4: `th pearls push/pull` is a no-op on the global store
+
+  Project pearl stores are designed to sync via Dolt remotes
+  (per-project board for the team). The global store at
+  `~/.smooth/dolt` holds personal-scope state (sessions, memories,
+  private pearls) and isn't meant to sync — making `th pearls push`
+  fail there with "no configured push destination" was just noise.
+
+  Now `th pearls push/pull` from the global store prints a one-line
+  informational message and exits 0 instead of erroring. Project
+  stores still surface the error so a missing remote on a shared
+  board is obvious.
+
+  Detection: canonical-path comparison against `~/.smooth/dolt`.
+  Error matching is heuristic (looks for "no configured push
+  destination", "no upstream", "remote not found", etc.) so
+  unrelated SQL/lock errors still propagate.
+
+- c237f11: Add `smooth-dolt-launcher` — clean-slate exec wrapper for spawn isolation
+
+  Tiny C binary (~5 KB, ~30 lines) that runs BEFORE Go starts:
+  resets the inherited signal mask, closes every fd > 2, `setsid`s,
+  then `execv`s the requested program. Used transparently when
+  `SmoothDoltServer::spawn_handle_once` launches `smooth-dolt serve`
+  from inside Big Smooth's Tokio runtime.
+
+  Without the launcher the child Go runtime can wedge on first SQL
+  query in pearl `th-1a61a7`-style failures: Tokio installs blocking
+  signal masks (Go needs SIGURG for goroutine preemption) and
+  contaminates fd inheritance (Go grabs leftover Tokio epoll fds at
+  startup). Restored daemons via this path get clean process state.
+
+  The launcher is opt-in via path discovery — falls back to the
+  shell-laundered spawn if the binary isn't installed alongside
+  `th` and `smooth-dolt`. CLI invocations of `th pearls *` and
+  short-lived parents work without it; long-running daemons
+  (BS) benefit from it.
+
+  Build: `bash scripts/build-smooth-dolt-launcher.sh`
+
 ## 0.12.5
 
 ### Patch Changes
