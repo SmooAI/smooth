@@ -1844,6 +1844,14 @@ async fn main() {
     //   3. Scribe audit — best-effort POST of pre_call/post_call log entries
     //      to the in-VM Scribe for later aggregation.
     //
+    // C1: filter the registry by the active role's clearance BEFORE the
+    // schemas are handed to the LLM. PermissionHook still runs on every
+    // call, but if the model never sees a denied tool's schema in the
+    // first place, we skip the wasted "model calls denied tool, gets
+    // permission error, retries" round-trip. Two layers of defense.
+    let clearance = active_role.permissions.clone();
+    tools.retain(|name| clearance.allows(name));
+
     // All four are `ToolHook` impls so they compose cleanly on the registry.
     tools.add_hook(smooth_operator::PermissionHook::new(&active_role));
     let narc = Arc::new(NarcHook::new(config.narc_write_guard));
