@@ -148,7 +148,7 @@ footer {
     <h1>Smooth bench — tuning batch progress report</h1>
     <p class="meta">
         Smooth version <code>0.12.11 (77e49e3)</code> &middot;
-        Generated <code>2026-05-02 17:26 EDT</code> &middot;
+        Generated <code>2026-05-02 17:58 EDT</code> &middot;
         Mode <code>sandboxed (microVM per task)</code> &middot;
         Sample <code>--pr</code> (3 tasks &times; 6 languages = 18 runs)
     </p>
@@ -163,13 +163,13 @@ footer {
     </div>
     <div class="card stat pass">
         <div class="label">Take 7 (in flight)</div>
-        <div class="value">67 %</div>
-        <div class="delta">4 / 6 &mdash; real solves with [IDLE] / Closed detection</div>
+        <div class="value">50 %</div>
+        <div class="delta">5 / 10 &mdash; real solves with [IDLE] / Closed detection</div>
     </div>
     <div class="card stat neutral">
         <div class="label">Improvement</div>
-        <div class="value">+44 pp</div>
-        <div class="delta">on the 6 tasks completed so far</div>
+        <div class="value">+28 pp</div>
+        <div class="delta">on the 10 tasks completed so far</div>
     </div>
     <div class="card stat neutral">
         <div class="label">Median solve time</div>
@@ -240,7 +240,31 @@ footer {
             <td>Real solve. Pearl status flipped to <code>Closed</code> after 1468.4 s &mdash; the runner posted <code>TaskComplete</code> and the dispatch flow closed the pearl directly (no <code>[IDLE]</code> needed).</td>
         </tr>
         <tr>
-            <td>7&ndash;18</td><td colspan="5"><span class="tag live">Pending</span> Currently dispatched on go/alphametics; javascript / go / java / cpp tasks queued.</td>
+            <td>7</td><td>go</td><td>alphametics</td>
+            <td><span class="tag pass">Pass</span></td>
+            <td>1840.8 s (30.7 min)</td>
+            <td>Real solve. Stripped 2 agent-added test files before scoring &mdash; the model wrote tests, runner stripped them so they don't pollute the polyglot grader.</td>
+        </tr>
+        <tr>
+            <td>8</td><td>go</td><td>beer-song</td>
+            <td><span class="tag fail">Fail</span></td>
+            <td>305.4 s (5.1 min)</td>
+            <td>Operator posted <code>[IDLE]</code> after 277.5 s &mdash; gave up early.</td>
+        </tr>
+        <tr>
+            <td>9</td><td>go</td><td>book-store</td>
+            <td><span class="tag fail">Fail</span></td>
+            <td>300.0 s (5.0 min)</td>
+            <td>HTTP timeout (chat-agent didn't return pearl id in 300 s). Workspace unchanged, test fails.</td>
+        </tr>
+        <tr>
+            <td>10</td><td>javascript</td><td>affine-cipher</td>
+            <td><span class="tag fail">Fail</span></td>
+            <td>239.6 s (4.0 min)</td>
+            <td>Operator gave up early.</td>
+        </tr>
+        <tr>
+            <td>11&ndash;18</td><td colspan="5"><span class="tag live">Pending</span> Currently dispatched on javascript/alphametics; remaining javascript / java / cpp tasks queued.</td>
         </tr>
     </tbody>
 </table>
