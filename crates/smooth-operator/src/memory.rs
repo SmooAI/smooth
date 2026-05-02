@@ -62,6 +62,28 @@ impl MemoryEntry {
 }
 
 /// Classification of memory entries.
+///
+/// The first three variants (`ShortTerm`, `LongTerm`, `Entity`) are
+/// scope-based — they describe *when* a memory is valid and don't
+/// carry intent.
+///
+/// The lower four variants (`User`, `Feedback`, `Project`, `Reference`)
+/// are intent-based and adapted from the Claude Code v2.1.120 memory
+/// subsystem. They tell future calls *how* to use the memory:
+///
+/// - `User` — durable facts about the user (role, expertise,
+///   preferences). Shapes how to address and explain things.
+/// - `Feedback` — corrections or confirmations on approach. Highest
+///   leverage type — re-reading prevents re-litigating decisions.
+/// - `Project` — current state of in-flight work — initiatives,
+///   deadlines, who's doing what. Decays fast; verify against current
+///   state before acting.
+/// - `Reference` — pointers to where information lives outside this
+///   project (Linear, Slack channel, dashboard URL, etc.).
+///
+/// Intent typing matters for *recall*: `Feedback` and `User` entries
+/// stay applicable across sessions, while `Project` and `Reference`
+/// need a freshness check before being acted on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MemoryType {
     /// Transient, session-scoped memory.
@@ -70,6 +92,31 @@ pub enum MemoryType {
     LongTerm,
     /// Named entity or concept.
     Entity,
+    /// Durable facts about the user — role, expertise, preferences.
+    User,
+    /// Corrections or validations on approach. Read these especially
+    /// carefully; they're meant to prevent repeated drift.
+    Feedback,
+    /// Current state of in-flight work. Decays quickly; verify against
+    /// current state before acting on it.
+    Project,
+    /// Pointer to where information lives outside this project
+    /// (Linear, Slack, Grafana, GitHub, etc.).
+    Reference,
+}
+
+impl MemoryType {
+    /// True if recall sites should append a freshness-check nudge to
+    /// any reminder rendered from a memory of this type.
+    ///
+    /// `Project` and `Reference` memories are time-sensitive — a
+    /// claimed function path may have been renamed, an external
+    /// dashboard URL may have moved. The other types ride on durable
+    /// truths and don't need the same caveat.
+    #[must_use]
+    pub fn needs_freshness_check(self) -> bool {
+        matches!(self, Self::Project | Self::Reference)
+    }
 }
 
 /// In-memory implementation of the `Memory` trait.
@@ -213,7 +260,15 @@ mod tests {
 
     #[test]
     fn memory_type_variants_serialize_correctly() {
-        let types = [MemoryType::ShortTerm, MemoryType::LongTerm, MemoryType::Entity];
+        let types = [
+            MemoryType::ShortTerm,
+            MemoryType::LongTerm,
+            MemoryType::Entity,
+            MemoryType::User,
+            MemoryType::Feedback,
+            MemoryType::Project,
+            MemoryType::Reference,
+        ];
         for mt in &types {
             let json = serde_json::to_string(mt).expect("serialize");
             let parsed: MemoryType = serde_json::from_str(&json).expect("deserialize");
@@ -222,9 +277,27 @@ mod tests {
 
         let json = serde_json::to_string(&MemoryType::ShortTerm).expect("serialize");
         assert!(json.contains("ShortTerm"));
-        let json = serde_json::to_string(&MemoryType::LongTerm).expect("serialize");
-        assert!(json.contains("LongTerm"));
-        let json = serde_json::to_string(&MemoryType::Entity).expect("serialize");
-        assert!(json.contains("Entity"));
+        let json = serde_json::to_string(&MemoryType::Feedback).expect("serialize");
+        assert!(json.contains("Feedback"));
+        let json = serde_json::to_string(&MemoryType::Reference).expect("serialize");
+        assert!(json.contains("Reference"));
+    }
+
+    #[test]
+    fn freshness_check_only_for_time_sensitive_types() {
+        // D6: Project and Reference name external state that decays —
+        // the agent must verify before recommending. User and Feedback
+        // ride on durable truths and don't need the same caveat. Guards
+        // against a refactor that flips a non-decaying type into the
+        // freshness-check path (and bloats every recall block) or
+        // drops Project/Reference out of it (and loses the recommend-
+        // before-verify discipline).
+        assert!(MemoryType::Project.needs_freshness_check());
+        assert!(MemoryType::Reference.needs_freshness_check());
+        assert!(!MemoryType::User.needs_freshness_check());
+        assert!(!MemoryType::Feedback.needs_freshness_check());
+        assert!(!MemoryType::ShortTerm.needs_freshness_check());
+        assert!(!MemoryType::LongTerm.needs_freshness_check());
+        assert!(!MemoryType::Entity.needs_freshness_check());
     }
 }
