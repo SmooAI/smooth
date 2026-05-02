@@ -1,0 +1,44 @@
+{
+  "smooth_version": "0.12.8",
+  "commit_sha": "0f17d8da88ec9e9550f80c9108cfb8b36e33a5c2",
+  "ran_at": "2026-05-02T17:18:11.267008Z",
+  "overall_pass_rate": 0.2222222222222222,
+  "by_language": {
+    "cpp": {
+      "pass_rate": 0.0,
+      "tasks_attempted": 3,
+      "tasks_green": 0
+    },
+    "go": {
+      "pass_rate": 0.0,
+      "tasks_attempted": 3,
+      "tasks_green": 0
+    },
+    "java": {
+      "pass_rate": 0.0,
+      "tasks_attempted": 3,
+      "tasks_green": 0
+    },
+    "javascript": {
+      "pass_rate": 0.3333333333333333,
+      "tasks_attempted": 3,
+      "tasks_green": 1
+    },
+    "python": {
+      "pass_rate": 0.6666666666666666,
+      "tasks_attempted": 3,
+      "tasks_green": 2
+    },
+    "rust": {
+      "pass_rate": 0.3333333333333333,
+      "tasks_attempted": 3,
+      "tasks_green": 1
+    }
+  },
+  "tasks_attempted": 18,
+  "tasks_green": 4,
+  "cost_usd": 0.0,
+  "median_task_ms": 120003,
+  "budget_usd_cap": 10.0,
+  "budget_usd_hit": false
+}
