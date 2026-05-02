@@ -924,7 +924,22 @@ impl Agent {
         if let Some(memory) = &self.config.memory {
             match memory.recall(last_user_message, 5) {
                 Ok(entries) if !entries.is_empty() => {
+                    let needs_freshness = entries.iter().any(|e| e.memory_type.needs_freshness_check());
                     let mut buf = String::from("[Recalled memories]\n");
+                    if needs_freshness {
+                        // D6: verify-before-recommend rule — a memory that names
+                        // a function/file/flag is a claim about the past, not a
+                        // fact about now. The agent should grep/read before
+                        // surfacing it, especially for Project and Reference
+                        // entries which are time-sensitive.
+                        buf.push_str(
+                            "Note: 'the memory says X exists' is not the same as 'X exists now'. \
+                            Before recommending or acting on any function path, file, flag, or external \
+                            pointer named below, verify it's current by reading the file or grepping the \
+                            codebase. Project and Reference memories are time-sensitive; User and Feedback \
+                            are durable.\n",
+                        );
+                    }
                     for entry in &entries {
                         let _ = writeln!(buf, "- ({:?}, relevance={:.2}): {}", entry.memory_type, entry.relevance, entry.content);
                     }
