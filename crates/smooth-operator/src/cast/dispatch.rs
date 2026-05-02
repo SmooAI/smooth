@@ -79,6 +79,81 @@ pub struct DispatchResult {
     /// calls, intermediate reasoning, retried turns) stays
     /// isolated in the sidekick's own conversation.
     pub final_message: String,
+    /// C4: trust-but-verify. File paths the sidekick named in its
+    /// summary that the parent confirmed exist at dispatch return
+    /// time (either as absolute paths or relative to the parent's
+    /// CWD). Empty when no path-shaped tokens appeared in the
+    /// summary.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verified_paths: Vec<String>,
+    /// File paths the sidekick named that the parent couldn't verify
+    /// — may have been renamed, moved, never existed, or be relative
+    /// to a different workspace. The parent should re-read or grep
+    /// for these before surfacing them as factual claims.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unverified_paths: Vec<String>,
+}
+
+/// Extract file-path-shaped tokens from a sidekick's summary text.
+///
+/// Heuristic, not exhaustive: matches tokens that contain `/` or that
+/// end with a known code/config extension. Strips trailing punctuation
+/// (`.,;:!?`). Deduplicates while preserving first-seen order.
+///
+/// Pulled out as a free function so it's easy to unit-test without
+/// constructing a full `DispatchSubagentTool`.
+#[must_use]
+pub fn extract_claimed_paths(text: &str) -> Vec<String> {
+    const EXTS: &[&str] = &[
+        "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "md", "toml", "yaml", "yml", "json", "txt", "sh", "bash", "zsh", "go", "rb", "java", "kt", "swift",
+        "c", "h", "cpp", "hpp", "cc", "hh", "sql", "html", "htm", "css", "scss", "lock", "log", "csv", "tsv", "xml", "ini", "cfg", "conf",
+    ];
+    let separators = |c: char| c.is_whitespace() || ",;()[]{}\"'`<>".contains(c);
+    let mut seen: Vec<String> = Vec::new();
+    for raw in text.split(separators) {
+        let trimmed = raw.trim_end_matches(|c: char| ".,;:!?".contains(c));
+        if trimmed.is_empty() {
+            continue;
+        }
+        let looks_like_path = trimmed.contains('/')
+            || EXTS.iter().any(|ext| {
+                let suffix = format!(".{ext}");
+                trimmed.ends_with(suffix.as_str()) && trimmed.len() > suffix.len()
+            });
+        if looks_like_path && !seen.iter().any(|s| s == trimmed) {
+            seen.push(trimmed.to_string());
+        }
+    }
+    seen
+}
+
+/// Verify a list of claimed paths against the host filesystem.
+///
+/// A path is verified when [`Path::exists`] returns true for either
+/// the path as-given (absolute or already-relative-to-cwd) or for
+/// `cwd.join(p)`. Paths relative to a sidekick's own workspace can't
+/// be checked from here and fall through into the unverified list.
+///
+/// Returns `(verified, unverified)` preserving input order in each list.
+#[must_use]
+pub fn verify_paths(claimed: Vec<String>) -> (Vec<String>, Vec<String>) {
+    let cwd = std::env::current_dir().ok();
+    let mut verified = Vec::new();
+    let mut unverified = Vec::new();
+    for p in claimed {
+        let path = std::path::Path::new(&p);
+        let exists_as_given = path.exists();
+        let exists_under_cwd = match cwd.as_ref() {
+            Some(base) if !path.is_absolute() => base.join(&p).exists(),
+            _ => false,
+        };
+        if exists_as_given || exists_under_cwd {
+            verified.push(p);
+        } else {
+            unverified.push(p);
+        }
+    }
+    (verified, unverified)
 }
 
 /// Built-in tool that hands a task to a sidekick and returns only its
@@ -278,10 +353,20 @@ impl Tool for DispatchSubagentTool {
         // iteration count out of run_with_channel.
         let turns = conversation.assistant_turn_count();
 
+        // C4: trust-but-verify. Pull file-path-shaped tokens out of the
+        // summary and check them against the host filesystem. Verified
+        // paths are returned as a green-checkmarked list; unverified
+        // ones are surfaced too so the parent can investigate before
+        // reporting them as factual.
+        let claimed_paths = extract_claimed_paths(final_message);
+        let (verified_paths, unverified_paths) = verify_paths(claimed_paths);
+
         let result = DispatchResult {
             agent: sub.name.clone(),
             turns,
             final_message: final_message.to_string(),
+            verified_paths,
+            unverified_paths,
         };
 
         serde_json::to_string(&result).map_err(|e| anyhow::anyhow!("failed to serialize dispatch result: {e}"))
@@ -404,20 +489,76 @@ mod tests {
     async fn dispatch_result_serializes_to_expected_shape() {
         // Direct check of the result type's JSON shape — the
         // parent's tool call sees exactly this shape and nothing
-        // else from the sidekick transcript.
+        // else from the sidekick transcript. verified_paths and
+        // unverified_paths are skipped when empty so the JSON stays
+        // small for the common case (no path claims in summary).
         let result = DispatchResult {
             agent: "scout".into(),
             turns: 3,
             final_message: "found 4 usages of X in src/".into(),
+            verified_paths: vec![],
+            unverified_paths: vec![],
         };
         let json = serde_json::to_string(&result).expect("serialize");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
         assert_eq!(parsed["agent"], "scout");
         assert_eq!(parsed["turns"], 3);
         assert_eq!(parsed["final_message"], "found 4 usages of X in src/");
-        // No stray fields that could leak transcript content.
         let obj = parsed.as_object().expect("object");
-        assert_eq!(obj.len(), 3, "DispatchResult must have exactly 3 fields, got {obj:?}");
+        // 3 fields when verified/unverified are empty — unchanged from
+        // the pre-C4 shape so existing parent-side parsers don't break.
+        assert_eq!(obj.len(), 3, "DispatchResult must have 3 visible fields when paths are empty, got {obj:?}");
+        assert!(!obj.contains_key("verified_paths"));
+        assert!(!obj.contains_key("unverified_paths"));
+
+        // With paths populated, both lists surface.
+        let result = DispatchResult {
+            agent: "scout".into(),
+            turns: 1,
+            final_message: "edited src/lib.rs and crates/foo/src/main.rs".into(),
+            verified_paths: vec!["src/lib.rs".into()],
+            unverified_paths: vec!["crates/foo/src/main.rs".into()],
+        };
+        let json = serde_json::to_string(&result).expect("serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        assert_eq!(parsed["verified_paths"], serde_json::json!(["src/lib.rs"]));
+        assert_eq!(parsed["unverified_paths"], serde_json::json!(["crates/foo/src/main.rs"]));
+    }
+
+    #[test]
+    fn extract_claimed_paths_finds_path_shaped_tokens() {
+        // Standard cases the parent should be able to verify.
+        let summary = "Edited `src/lib.rs:42` and tests/integration.rs to fix the bug. \
+                       See docs/CHANGELOG.md and Cargo.toml for context. Logs at /var/log/foo.log.";
+        let paths = extract_claimed_paths(summary);
+        assert!(paths.iter().any(|p| p == "src/lib.rs:42" || p.starts_with("src/lib.rs")));
+        assert!(paths.iter().any(|p| p == "tests/integration.rs"));
+        assert!(paths.iter().any(|p| p == "docs/CHANGELOG.md"));
+        assert!(paths.iter().any(|p| p == "Cargo.toml"));
+        assert!(paths.iter().any(|p| p == "/var/log/foo.log"));
+    }
+
+    #[test]
+    fn extract_claimed_paths_dedups_and_skips_prose() {
+        let summary = "Found foo.rs. Fixed foo.rs again. The word done is not a path. \
+                       Neither is mid-sentence punctuation, like, this.";
+        let paths = extract_claimed_paths(summary);
+        assert_eq!(paths.iter().filter(|p| p.starts_with("foo.rs")).count(), 1, "expected dedup, got {paths:?}");
+        assert!(!paths.iter().any(|p| p == "done" || p == "this"), "false positive in {paths:?}");
+    }
+
+    #[test]
+    fn verify_paths_classifies_real_and_fake() {
+        // Cargo.toml lives at the workspace root, which is also
+        // where `cargo test` runs from — should always verify.
+        // A made-up path should never verify.
+        let claimed = vec!["Cargo.toml".to_string(), "definitely-not-a-real/path-xyz123.rs".to_string()];
+        let (verified, unverified) = verify_paths(claimed);
+        assert!(verified.iter().any(|p| p == "Cargo.toml"), "verified={verified:?}");
+        assert!(
+            unverified.iter().any(|p| p == "definitely-not-a-real/path-xyz123.rs"),
+            "unverified={unverified:?}"
+        );
     }
 
     #[test]
