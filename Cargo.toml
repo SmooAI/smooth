@@ -4,7 +4,7 @@ members = ["crates/*"]
 exclude = ["crates/smooth-bigsmooth/tests/fixtures"]
 
 [workspace.package]
-version = "0.12.7"
+version = "0.12.8"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/SmooAI/smooth"
@@ -149,19 +149,19 @@ tokio-tungstenite = "0.26"
 microsandbox = "0.3"
 
 # Workspace crates
-smooth-operator = { path = "crates/smooth-operator", version = "0.12.7", package = "smooai-smooth-operator" }
-smooth-bigsmooth = { version = "0.12.7", path = "crates/smooth-bigsmooth", package = "smooai-smooth-bigsmooth" }
-smooth-policy = { path = "crates/smooth-policy", version = "0.12.7", package = "smooai-smooth-policy" }
-smooth-web = { version = "0.12.7", path = "crates/smooth-web", package = "smooai-smooth-web" }
-smooth-scribe = { version = "0.12.7", path = "crates/smooth-scribe", package = "smooai-smooth-scribe" }
-smooth-wonk = { version = "0.12.7", path = "crates/smooth-wonk", package = "smooai-smooth-wonk" }
-smooth-goalie = { version = "0.12.7", path = "crates/smooth-goalie", package = "smooai-smooth-goalie" }
-smooth-narc = { version = "0.12.7", path = "crates/smooth-narc", package = "smooai-smooth-narc" }
-smooth-archivist = { version = "0.12.7", path = "crates/smooth-archivist", package = "smooai-smooth-archivist" }
-smooth-plugin = { version = "0.12.7", path = "crates/smooth-plugin", package = "smooai-smooth-plugin" }
-smooth-code = { version = "0.12.7", path = "crates/smooth-code", package = "smooai-smooth-code" }
-smooth-pearls = { path = "crates/smooth-pearls", version = "0.12.7", package = "smooai-smooth-pearls" }
-smooth-diver = { version = "0.12.7", path = "crates/smooth-diver", package = "smooai-smooth-diver" }
-smooth-bootstrap-bill = { version = "0.12.7", path = "crates/smooth-bootstrap-bill", default-features = false, package = "smooai-smooth-bootstrap-bill" }
-smooth-tunnel = { version = "0.12.7", path = "crates/smooth-tunnel", package = "smooai-smooth-tunnel" }
-smooth-bench = { version = "0.12.7", path = "crates/smooth-bench", package = "smooai-smooth-bench" }
+smooth-operator = { path = "crates/smooth-operator", version = "0.12.8", package = "smooai-smooth-operator" }
+smooth-bigsmooth = { version = "0.12.8", path = "crates/smooth-bigsmooth", package = "smooai-smooth-bigsmooth" }
+smooth-policy = { path = "crates/smooth-policy", version = "0.12.8", package = "smooai-smooth-policy" }
+smooth-web = { version = "0.12.8", path = "crates/smooth-web", package = "smooai-smooth-web" }
+smooth-scribe = { version = "0.12.8", path = "crates/smooth-scribe", package = "smooai-smooth-scribe" }
+smooth-wonk = { version = "0.12.8", path = "crates/smooth-wonk", package = "smooai-smooth-wonk" }
+smooth-goalie = { version = "0.12.8", path = "crates/smooth-goalie", package = "smooai-smooth-goalie" }
+smooth-narc = { version = "0.12.8", path = "crates/smooth-narc", package = "smooai-smooth-narc" }
+smooth-archivist = { version = "0.12.8", path = "crates/smooth-archivist", package = "smooai-smooth-archivist" }
+smooth-plugin = { version = "0.12.8", path = "crates/smooth-plugin", package = "smooai-smooth-plugin" }
+smooth-code = { version = "0.12.8", path = "crates/smooth-code", package = "smooai-smooth-code" }
+smooth-pearls = { path = "crates/smooth-pearls", version = "0.12.8", package = "smooai-smooth-pearls" }
+smooth-diver = { version = "0.12.8", path = "crates/smooth-diver", package = "smooai-smooth-diver" }
+smooth-bootstrap-bill = { version = "0.12.8", path = "crates/smooth-bootstrap-bill", default-features = false, package = "smooai-smooth-bootstrap-bill" }
+smooth-tunnel = { version = "0.12.8", path = "crates/smooth-tunnel", package = "smooai-smooth-tunnel" }
+smooth-bench = { version = "0.12.8", path = "crates/smooth-bench", package = "smooai-smooth-bench" }
