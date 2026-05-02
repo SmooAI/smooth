@@ -187,19 +187,39 @@ fn extract_pearl_id(text: &str) -> Option<String> {
     last
 }
 
-/// Find the Dolt store the bench should poll. Walks up from `cwd` looking
-/// for `.smooth/dolt/`, falls back to `~/.smooth/dolt/` (the global store).
+/// Find the Dolt store the bench should poll.
+///
+/// **Priority** (this order matters — the daemon writes pearls to its own
+/// active store, which is the global one when launchd boots from `$HOME`,
+/// not the bench's repo-local store):
+///
+/// 1. `SMOOTH_BENCH_PEARL_STORE` — explicit override.
+/// 2. `~/.smooth/dolt/` — the global store the daemon defaults to. This
+///    is the right answer for almost every dev setup; the daemon's
+///    chat-agent creates pearls here and the heartbeat task writes
+///    `[PROGRESS]` comments here.
+/// 3. Walk up from `cwd` looking for `.smooth/dolt/` — covers running
+///    the bench against a project that explicitly initialised its own
+///    pearl store. Used to be priority #1, which silently bound the
+///    bench to its build directory's store and missed every comment
+///    the daemon wrote to the global store.
 fn locate_pearl_store_dir() -> anyhow::Result<std::path::PathBuf> {
-    if let Ok(cwd) = std::env::current_dir() {
-        if let Some(d) = smooth_pearls::dolt::find_repo_dolt_dir(&cwd) {
-            return Ok(d);
+    if let Ok(p) = std::env::var("SMOOTH_BENCH_PEARL_STORE") {
+        let path = std::path::PathBuf::from(p);
+        if path.exists() {
+            return Ok(path);
         }
     }
     let global = dirs_next::home_dir().context("$HOME unset")?.join(".smooth").join("dolt");
     if global.exists() {
         return Ok(global);
     }
-    anyhow::bail!("no .smooth/dolt found in repo ancestry or ~/.smooth/dolt")
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(d) = smooth_pearls::dolt::find_repo_dolt_dir(&cwd) {
+            return Ok(d);
+        }
+    }
+    anyhow::bail!("no .smooth/dolt found at SMOOTH_BENCH_PEARL_STORE, ~/.smooth/dolt, or repo ancestry")
 }
 
 #[cfg(test)]
