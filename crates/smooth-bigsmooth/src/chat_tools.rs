@@ -712,15 +712,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn min_context_brief_threshold_is_meaningful() {
-        // Threshold has to be loose enough that real briefings pass and
-        // tight enough that one-line tasks fail. 80 chars is roughly two
-        // short sentences — enough room for "what you've learned, what
-        // you've ruled out, where to start."
-        assert!(MIN_CONTEXT_BRIEF_CHARS >= 60);
-        assert!(MIN_CONTEXT_BRIEF_CHARS <= 200);
-    }
+    // Threshold has to be loose enough that real briefings pass and tight
+    // enough that one-line tasks fail. 80 chars is roughly two short
+    // sentences — enough room for "what you've learned, what you've
+    // ruled out, where to start." Const-asserts compile-fail if someone
+    // moves the value outside this range without re-thinking rejection UX.
+    const _: () = assert!(MIN_CONTEXT_BRIEF_CHARS >= 60);
+    const _: () = assert!(MIN_CONTEXT_BRIEF_CHARS <= 200);
 
     #[test]
     fn short_brief_rejection_message_lists_what_to_include() {
