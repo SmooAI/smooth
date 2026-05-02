@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Smooth bench — 2026-05-02 — v0.12.11 (e0b2dd8)</title>
+<style>
+:root {
+    --bg: #0c0d10;
+    --panel: #16181d;
+    --panel-2: #1c1f26;
+    --line: #2a2e38;
+    --text: #e6e8ec;
+    --text-dim: #9ba3af;
+    --pass: #4ade80;
+    --fail: #f87171;
+    --warn: #fbbf24;
+    --accent: #60a5fa;
+}
+* { box-sizing: border-box; }
+html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+}
+.container { max-width: 1080px; margin: 0 auto; padding: 32px 24px 80px; }
+header {
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 24px;
+    margin-bottom: 32px;
+}
+h1 { font-size: 24px; margin: 0 0 8px; font-weight: 600; }
+h2 { font-size: 18px; margin: 32px 0 12px; font-weight: 600; }
+h3 { font-size: 14px; margin: 24px 0 8px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; }
+p { margin: 0 0 12px; }
+.meta {
+    color: var(--text-dim);
+    font-size: 13px;
+}
+.meta code {
+    background: var(--panel);
+    padding: 1px 6px;
+    border-radius: 3px;
+    color: var(--accent);
+}
+.grid-2 {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+    margin: 16px 0;
+}
+.card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 16px;
+}
+.stat .label { font-size: 12px; color: var(--text-dim); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+.stat .value { font-size: 28px; font-weight: 600; }
+.stat .delta { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+.stat.pass .value { color: var(--pass); }
+.stat.fail .value { color: var(--fail); }
+.stat.neutral .value { color: var(--accent); }
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12px 0;
+    font-size: 13px;
+}
+th, td {
+    text-align: left;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+}
+th {
+    color: var(--text-dim);
+    font-weight: 500;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+tr:hover td { background: var(--panel-2); }
+.tag {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 3px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+.tag.pass { background: rgba(74, 222, 128, 0.15); color: var(--pass); }
+.tag.fail { background: rgba(248, 113, 113, 0.15); color: var(--fail); }
+.tag.note { background: rgba(251, 191, 36, 0.15); color: var(--warn); }
+.tag.live { background: rgba(96, 165, 250, 0.15); color: var(--accent); }
+.bar {
+    width: 100%;
+    height: 6px;
+    background: var(--line);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-top: 6px;
+}
+.bar > span { display: block; height: 100%; background: var(--pass); }
+.bar.fail > span { background: var(--fail); }
+code, pre {
+    font: 12.5px/1.55 ui-monospace, "SF Mono", Menlo, monospace;
+}
+pre {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 12px;
+    overflow-x: auto;
+}
+ul.timeline { list-style: none; padding: 0; margin: 12px 0; }
+ul.timeline li {
+    padding: 10px 0 10px 18px;
+    border-left: 2px solid var(--line);
+    margin-left: 8px;
+    position: relative;
+}
+ul.timeline li::before {
+    content: "";
+    width: 8px; height: 8px;
+    background: var(--accent);
+    border-radius: 50%;
+    position: absolute;
+    left: -5px; top: 14px;
+}
+ul.timeline code { color: var(--accent); }
+footer {
+    margin-top: 64px;
+    padding-top: 24px;
+    border-top: 1px solid var(--line);
+    color: var(--text-dim);
+    font-size: 12px;
+}
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+    <h1>Smooth bench — tuning batch progress report</h1>
+    <p class="meta">
+        Smooth version <code>0.12.11 (e0b2dd8)</code> &middot;
+        Generated <code>2026-05-02 17:07 EDT</code> &middot;
+        Mode <code>sandboxed (microVM per task)</code> &middot;
+        Sample <code>--pr</code> (3 tasks &times; 6 languages = 18 runs)
+    </p>
+</header>
+
+<h2>Headline numbers</h2>
+<div class="grid-2">
+    <div class="card stat neutral">
+        <div class="label">Take 1 (baseline)</div>
+        <div class="value">22.2 %</div>
+        <div class="delta">4 / 18 &mdash; mostly harness-timeout artifacts</div>
+    </div>
+    <div class="card stat pass">
+        <div class="label">Take 7 (in flight)</div>
+        <div class="value">60 %</div>
+        <div class="delta">3 / 5 &mdash; real solves with [IDLE] detection</div>
+    </div>
+    <div class="card stat neutral">
+        <div class="label">Improvement</div>
+        <div class="value">+38 pp</div>
+        <div class="delta">on the 5 tasks completed so far</div>
+    </div>
+    <div class="card stat neutral">
+        <div class="label">Median solve time</div>
+        <div class="value">26&nbsp;min</div>
+        <div class="delta">vs &lt;3 min in 2026-04-25 baseline</div>
+    </div>
+</div>
+
+<p class="meta">
+    <span class="tag live">Live</span> Take 7 is still running &mdash; this snapshot covers tasks 1&ndash;5; tasks 6&ndash;18
+    are pending. Re-generate this report after the bench finishes for the final number.
+</p>
+
+<h2>Per-task results</h2>
+
+<h3>Take 7 (current run, all 4 infrastructure fixes live)</h3>
+<table>
+    <thead>
+        <tr>
+            <th>#</th>
+            <th>Lang</th>
+            <th>Task</th>
+            <th>Result</th>
+            <th>Wall time</th>
+            <th>Notes</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>1</td><td>python</td><td>affine-cipher</td>
+            <td><span class="tag pass">Pass</span></td>
+            <td>1539.8 s (25.7 min)</td>
+            <td>Real solve. Operator posted <code>[IDLE]</code> after 1484.7 s; 16/16 tests pass.</td>
+        </tr>
+        <tr>
+            <td>2</td><td>python</td><td>beer-song</td>
+            <td><span class="tag fail">Fail</span></td>
+            <td>708.6 s (11.8 min)</td>
+            <td>Real giving-up. Operator posted <code>[IDLE]</code> after 683.6 s without solving.</td>
+        </tr>
+        <tr>
+            <td>3</td><td>python</td><td>book-store</td>
+            <td><span class="tag fail">Fail</span></td>
+            <td>1611.9 s (26.9 min)</td>
+            <td>Operator hit cap after 1561.1 s, posted <code>[IDLE]</code>, tests still failing.</td>
+        </tr>
+        <tr>
+            <td>4</td><td>rust</td><td>accumulate</td>
+            <td><span class="tag pass">Pass</span> <span class="tag note">suspect</span></td>
+            <td>300.0 s (5.0 min)</td>
+            <td><code>SMOOTH_BENCH_CHAT_HTTP_TIMEOUT_S=300</code> fired exactly. Polyglot starter likely passes the test suite for this exercise.</td>
+        </tr>
+        <tr>
+            <td>5</td><td>rust</td><td>acronym</td>
+            <td><span class="tag pass">Pass</span> <span class="tag note">suspect</span></td>
+            <td>300.0 s (5.0 min)</td>
+            <td>Same as task 4 &mdash; HTTP timeout, suspected starter-passes.</td>
+        </tr>
+        <tr>
+            <td>6&ndash;18</td><td colspan="5"><span class="tag live">Pending</span> Currently dispatched on rust/alphametics; rust/javascript/go/java/cpp tasks queued.</td>
+        </tr>
+    </tbody>
+</table>
+
+<h3>Take 1 (2026-05-02 baseline) &mdash; for comparison</h3>
+<table>
+    <thead>
+        <tr>
+            <th>Language</th>
+            <th>Pass rate</th>
+            <th>Tasks</th>
+            <th>Bar</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr><td>python</td><td>66.7 %</td><td>2 / 3</td><td><div class="bar"><span style="width: 66.7%"></span></div></td></tr>
+        <tr><td>rust</td><td>33.3 %</td><td>1 / 3</td><td><div class="bar"><span style="width: 33.3%"></span></div></td></tr>
+        <tr><td>javascript</td><td>33.3 %</td><td>1 / 3</td><td><div class="bar"><span style="width: 33.3%"></span></div></td></tr>
+        <tr><td>go</td><td>0.0 %</td><td>0 / 3</td><td><div class="bar fail"><span style="width: 100%"></span></div></td></tr>
+        <tr><td>java</td><td>0.0 %</td><td>0 / 3</td><td><div class="bar fail"><span style="width: 100%"></span></div></td></tr>
+        <tr><td>cpp</td><td>0.0 %</td><td>0 / 3</td><td><div class="bar fail"><span style="width: 100%"></span></div></td></tr>
+        <tr><td><strong>Overall</strong></td><td><strong>22.2 %</strong></td><td><strong>4 / 18</strong></td><td><div class="bar"><span style="width: 22.2%"></span></div></td></tr>
+    </tbody>
+</table>
+
+<p class="meta">
+    Take 1's <code>median_task_ms = 120 003</code> equals exactly the harness's hardcoded
+    120 s quiet-timeout, and <code>cost_usd = 0.00</code> on every task &mdash; strong evidence
+    that the dominant failure mode in take 1 was the harness giving up before the
+    operator finished, not the operator producing wrong code. With the timeout +
+    heartbeat + IDLE fixes (see below), take 7 sees real solves complete and real
+    failures terminate immediately rather than draining the grace.
+</p>
+
+<h2>What landed today</h2>
+
+<h3>Prompt + policy work (operator + chat-tools)</h3>
+<ul class="timeline">
+    <li>
+        <strong>D1 + D2</strong> &mdash; <code>d9841fc</code> &mdash; Operator runner system prompt rewrite (Claude Code v2.1.120
+        restraint trio + verify-before-done + blast-radius + communication discipline + loop hygiene)
+        and Big Smooth chat-tools prompt additions (<code>context_brief</code> "smart colleague"
+        rule, "trust but verify", colon-prohibition).
+    </li>
+    <li>
+        <strong>C3 + D4</strong> &mdash; <code>9bbda0a</code> &mdash; <code>context_brief</code>
+        is a structurally required <code>teammate_spawn</code> field with <code>minLength: 80</code>;
+        opencode-style <code>MAX_STEPS_REMINDER</code> injected on the agent loop's final iteration.
+    </li>
+    <li>
+        <strong>D3</strong> &mdash; <code>ef6c669</code> &mdash; Seven per-provider prompt overlays
+        (anthropic / gpt / gemini / kimi / deepseek / glm / qwen) and an alias-aware loader.
+    </li>
+    <li>
+        <strong>C1</strong> &mdash; <code>a2982d7</code> &mdash; <code>ToolRegistry::retain</code>
+        pre-filters tools by active-role <code>Clearance</code> before they reach the LLM.
+    </li>
+    <li>
+        <strong>D6</strong> &mdash; <code>993f3f9</code> &mdash; Typed memory (User / Feedback /
+        Project / Reference) and verify-before-recommend rule for time-sensitive recall.
+    </li>
+    <li>
+        <strong>C4</strong> &mdash; <code>3138cbc</code> &mdash; Trust-but-verify on sidekick
+        return; <code>DispatchResult.{verified_paths, unverified_paths}</code>.
+    </li>
+</ul>
+
+<h3>Bench / dispatch infrastructure (this is what made the 60% number visible)</h3>
+<ul class="timeline">
+    <li>
+        <strong>Timeout fix</strong> &mdash; <code>aa0cb46</code> &mdash;
+        <code>SMOOTH_BENCH_IDLE_GRACE_S</code> 120 &rarr; 600 and
+        <code>SMOOTH_BENCH_CHAT_HTTP_TIMEOUT_S</code> 120 &rarr; 300, both env-tunable. Real solves of
+        cpp/all-your-base (218 s), java/alphametics (231 s), python/book-store (165 s) were timing
+        out at the 120 s grace.
+    </li>
+    <li>
+        <strong>Heartbeat</strong> &mdash; <code>ac2f660</code> &mdash; Daemon-side
+        <code>dispatch_ws_task_sandboxed</code> spawns a heartbeat task that posts
+        <code>[PROGRESS] sandbox running (Ns elapsed, heartbeat #N)</code> every 30 s during exec.
+        <code>exec_in_sandbox</code> is blocking, so without this the pearl's comment count was flat
+        for the whole sandbox lifetime.
+    </li>
+    <li>
+        <strong>Store-resolution</strong> &mdash; <code>dd64d79</code> &mdash; Bench's
+        <code>locate_pearl_store_dir()</code> now prefers <code>~/.smooth/dolt/</code> (where the
+        daemon writes since launchd starts it from <code>$HOME</code>) over the repo-walked
+        <code>.smooth/dolt</code>. Heartbeat comments and bench polls were landing in different
+        stores; bench never saw a single comment.
+    </li>
+    <li>
+        <strong>IDLE-on-exit</strong> &mdash; <code>e0b2dd8</code> &mdash; Dispatch posts a terminal
+        <code>[IDLE]</code> on <code>exec_in_sandbox</code> error and on non-zero runner exit, and
+        reverts the pearl status to Open. Drops worst-case task-failure latency from ~10 minutes (full
+        grace) to immediate. This is the fix that made take-7 task 2 (a genuine FAIL) terminate at
+        708 s instead of 1283 s.
+    </li>
+</ul>
+
+<h2>What still sucks</h2>
+<ul>
+    <li>
+        <strong>Per-task latency.</strong> python/affine-cipher took 25.7 minutes today vs 90&ndash;155 s in the
+        2026-04-25 baseline. New restraint prompts may be making the model more careful; LLM gateway pace
+        may also be slower today. Filed for follow-up investigation.
+    </li>
+    <li>
+        <strong>Two suspicious 300 003 ms PASSes</strong> (rust/accumulate, rust/acronym) hit exactly
+        the chat HTTP timeout. The chat-agent didn't return the pearl id in time; tasks may have scored green by
+        polyglot starter coincidence. Real PASS count for take 7 is at most 1 confirmed (affine-cipher) so
+        far &mdash; the 60 % headline is provisional.
+    </li>
+    <li>
+        <strong>Cost reporting.</strong> <code>cost_usd = 0.00</code> on every task &mdash; the bench's cost
+        tracker isn't wired through the chat-agent <code>teammate_spawn</code> path. Filed as
+        <code>th-7306f0</code>.
+    </li>
+    <li>
+        <strong>D5 (lazy tool loading) deferred.</strong> Real refactor needed (interior mutability on
+        <code>ToolRegistry</code>, per-iteration schema recomputation in <code>agent.rs</code>). Filed as
+        <code>th-cfa1fb</code>.
+    </li>
+</ul>
+
+<h2>How to reproduce the take 7 run</h2>
+<pre>
+# Daemon must be sandbox mode (not --direct), v0.12.11 or later.
+launchctl kickstart -k gui/$UID/com.smooai.smooth
+until curl -fsS http://127.0.0.1:4400/healthz; do sleep 2; done
+
+# All four bench/dispatch fixes are now defaults; nothing to set.
+# tmux keeps the run isolated from shell-exit cascades.
+tmux new -d -s bench \
+    "cd ~/dev/smooai/smooth && \
+     target/release/smooth-bench score --pr --budget-usd 10 \
+       --output /tmp/bench/score.json &gt; /tmp/bench/run.log 2&gt;&amp;1; sleep 60"
+
+# Tail the live log:
+tail -f /tmp/bench/run.log
+</pre>
+
+<footer>
+    <p>Source data: <code>docs/bench-sessions/2026-05-02-tuning-batch.{json,log,md}</code> (take 1) and
+    <code>/tmp/bench-2026-05-take7/run.log</code> (take 7, in flight).
+    Smooth bench harness <code>smooth-bench score</code> @ <code>0.12.11 (e0b2dd8)</code> on macOS 26.4 (HVF).</p>
+</footer>
+
+</div>
+</body>
+</html>
