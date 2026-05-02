@@ -45,6 +45,7 @@ mod host_tool;
 mod mailbox;
 mod pearl_tools;
 mod port_forward;
+mod provider_overlay;
 mod reply_to_chat_tool;
 mod tool_hints;
 
@@ -1802,8 +1803,12 @@ async fn main() {
     // running the real command. The static `tool_hints` registry is a
     // shortcut for the common cases; discovery is the headline pattern.
     let hints_note = "\n\n## Tool discovery & coordination\n\nBefore running anything for a generic intent (\"list github repos\", \"deploy to staging\", \"query our database\", …):\n\n1. **Think out loud.** What tool would a competent human reach for here? Name it. CLI tools usually win for read-only lookups (`gh`, `kubectl`, `aws`, `psql`, `jq`, `rg`, `fd`).\n2. **Check if it's installed and authed.** A quick `command -v <tool>` answers installation; tool-specific subcommands (`gh auth status`, `kubectl config current-context`, `aws sts get-caller-identity`) answer auth. Don't assume — verify.\n3. **If missing or unauthed, coordinate with the user.** Use `ask_smooth(question=\"I'd like to use `gh` for this — looks like it's not installed/authed. Want me to walk you through `brew install gh && gh auth login`?\", urgency=\"blocking\")`. Don't try to install/auth silently in the user's environment; that's their decision and their credentials. The user will run the commands, then signal back.\n4. **Once the tool is ready, run it.** Use the bash tool with the actual command. Capture the output; if it errors, diagnose and report or ask the user.\n5. **Shortcut: `tool_hints(intent=\"...\")`.** When you've identified an intent the team has done before, this returns the preferred command + fallback. It's a hint, not a rule — your judgment still wins. No hint matches? Step 1.\n\nThe goal is the user gets their answer with the right tool, the right auth, and the right amount of friction. Don't reinvent; don't bypass; don't silently fail.";
+    // Per-provider overlay (D3): for known model families and Smoo
+    // semantic aliases, prepend a short tuning block before the base
+    // system prompt. Returns empty when the model is unknown.
+    let provider_overlay = provider_overlay::for_model(&config.model).map(|s| format!("{s}\n\n")).unwrap_or_default();
     let base_prompt = format!(
-        "{}{pearl_note}{hints_note}\n\n## Agent Role\n\n{}",
+        "{provider_overlay}{}{pearl_note}{hints_note}\n\n## Agent Role\n\n{}",
         include_str!("../prompts/system.md"),
         active_role.prompt
     );
