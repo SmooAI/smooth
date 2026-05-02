@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Smooth bench — 2026-05-02 — v0.12.11 (e0b2dd8)</title>
+<title>Smooth bench — 2026-05-02 — v0.12.11 (77e49e3)</title>
 <style>
 :root {
     --bg: #0c0d10;
@@ -147,8 +147,8 @@ footer {
 <header>
     <h1>Smooth bench — tuning batch progress report</h1>
     <p class="meta">
-        Smooth version <code>0.12.11 (e0b2dd8)</code> &middot;
-        Generated <code>2026-05-02 17:07 EDT</code> &middot;
+        Smooth version <code>0.12.11 (77e49e3)</code> &middot;
+        Generated <code>2026-05-02 17:18 EDT</code> &middot;
         Mode <code>sandboxed (microVM per task)</code> &middot;
         Sample <code>--pr</code> (3 tasks &times; 6 languages = 18 runs)
     </p>
@@ -175,6 +175,11 @@ footer {
         <div class="label">Median solve time</div>
         <div class="value">26&nbsp;min</div>
         <div class="delta">vs &lt;3 min in 2026-04-25 baseline</div>
+    </div>
+    <div class="card stat neutral">
+        <div class="label">Cost (this run)</div>
+        <div class="value">$0.00<span style="font-size: 16px;">&nbsp;<span class="tag note">stale</span></span></div>
+        <div class="delta">Pre-fix run; cost tracker now wired via <code>[METRICS]</code> &mdash; next run carries real spend</div>
     </div>
 </div>
 
@@ -327,7 +332,44 @@ footer {
         grace) to immediate. This is the fix that made take-7 task 2 (a genuine FAIL) terminate at
         708 s instead of 1283 s.
     </li>
+    <li>
+        <strong>Cost reporting</strong> &mdash; <code>77e49e3</code> &mdash; <code>dispatch_ws_task_sandboxed</code>
+        posts <code>[METRICS] cost_usd=X iterations=Y</code> to the pearl right before closing on the
+        success path. <code>chat_driver::extract_cost()</code> scans pearl comments for the latest
+        <code>[METRICS]</code> line and returns the parsed value. Both bench early-return paths now
+        report real cost instead of hardcoded <code>0.0</code>. Take 7 (in flight before this fix
+        landed) still reports <code>$0.00</code>; the <em>next</em> bench run carries actual spend.
+    </li>
 </ul>
+
+<h2>Cost reporting (new)</h2>
+<p>
+    Up through this report's "stale" cost column, every bench score JSON has carried
+    <code>cost_usd: 0.00</code> on every task because the chat-agent dispatch path returned
+    <code>HeadlessOutput.cost = 0.0</code> hardcoded &mdash; the dispatched teammate's actual LLM
+    spend was tracked inside the daemon's <code>final_cost_usd</code> aggregator but never
+    crossed back to the bench harness.
+</p>
+<p>
+    The fix uses pearl comments as the bridge. When the operator-runner finishes successfully,
+    Big Smooth's <code>dispatch_ws_task_sandboxed</code> writes a single
+    <code>[METRICS] cost_usd=&lt;f64&gt; iterations=&lt;u32&gt;</code> comment to the pearl
+    immediately before closing it. The comment is part of the pearl's history, so any poller
+    can read the dispatch's actual spend without subscribing to the WebSocket event stream.
+</p>
+<p>
+    Bench-side, <code>chat_driver::extract_cost(&amp;[PearlComment])</code> scans for the latest
+    <code>[METRICS]</code> line, parses <code>cost_usd=X</code>, returns it. Falls back to
+    <code>0.0</code> for any pearl that didn't get a Completed event (errored runs, deadline
+    timeouts, pre-fix runs).
+</p>
+<p>
+    <strong>What this means for take 7:</strong> the run is still going under v0.12.11
+    <code>e0b2dd8</code> (one commit before the cost-wiring fix), so the score JSON it produces
+    will still say <code>cost_usd: 0.00</code>. The next bench run, after restarting the daemon
+    on <code>77e49e3</code> or later, will carry real numbers. Worth a fresh run for the take-8
+    baseline.
+</p>
 
 <h2>What still sucks</h2>
 <ul>
@@ -343,9 +385,9 @@ footer {
         far &mdash; the 60 % headline is provisional.
     </li>
     <li>
-        <strong>Cost reporting.</strong> <code>cost_usd = 0.00</code> on every task &mdash; the bench's cost
-        tracker isn't wired through the chat-agent <code>teammate_spawn</code> path. Filed as
-        <code>th-7306f0</code>.
+        <strong>Cost reporting</strong> &mdash; <span class="tag pass">Fixed</span> in <code>77e49e3</code>
+        (closed pearl <code>th-7306f0</code>). Take 7 was running before the fix landed, so its score
+        JSON still shows <code>$0.00</code>; the next bench run will carry real spend.
     </li>
     <li>
         <strong>D5 (lazy tool loading) deferred.</strong> Real refactor needed (interior mutability on
