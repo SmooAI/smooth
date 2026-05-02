@@ -108,10 +108,11 @@ pub async fn run_via_chat_agent(
 
     loop {
         if t0.elapsed() > deadline {
+            let comments = store.get_comments(&pearl_id).unwrap_or_default();
             return Ok(HeadlessOutput {
                 content: chat_text,
                 tool_calls,
-                cost: 0.0,
+                cost: extract_cost(&comments),
             });
         }
 
@@ -133,7 +134,7 @@ pub async fn run_via_chat_agent(
             return Ok(HeadlessOutput {
                 content: chat_text,
                 tool_calls,
-                cost: 0.0,
+                cost: extract_cost(&comments),
             });
         }
 
@@ -144,7 +145,7 @@ pub async fn run_via_chat_agent(
                 return Ok(HeadlessOutput {
                     content: chat_text,
                     tool_calls,
-                    cost: 0.0,
+                    cost: extract_cost(&comments),
                 });
             }
         }
@@ -157,7 +158,7 @@ pub async fn run_via_chat_agent(
                 return Ok(HeadlessOutput {
                     content: chat_text,
                     tool_calls,
-                    cost: 0.0,
+                    cost: extract_cost(&comments),
                 });
             }
         } else {
@@ -167,6 +168,28 @@ pub async fn run_via_chat_agent(
 
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
+}
+
+/// Pull `cost_usd=X` out of a `[METRICS] cost_usd=X iterations=Y` comment.
+///
+/// `dispatch_ws_task_sandboxed` posts that comment when an operator-runner
+/// finishes successfully, so any pearl with a Completed run carries the
+/// dispatch's actual LLM spend in its history. Returns `0.0` when no
+/// `[METRICS]` line is present (pre-fix runs, errored runs, etc.).
+fn extract_cost(comments: &[smooth_pearls::PearlComment]) -> f64 {
+    for c in comments.iter().rev() {
+        let t = c.content.trim_start();
+        if let Some(rest) = t.strip_prefix("[METRICS]") {
+            for token in rest.split_whitespace() {
+                if let Some(value) = token.strip_prefix("cost_usd=") {
+                    if let Ok(v) = value.parse::<f64>() {
+                        return v;
+                    }
+                }
+            }
+        }
+    }
+    0.0
 }
 
 /// Extract a pearl id (`th-[0-9a-f]{6}`) from arbitrary text. Looks for
