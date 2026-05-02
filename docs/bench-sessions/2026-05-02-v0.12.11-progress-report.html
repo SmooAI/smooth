@@ -148,7 +148,7 @@ footer {
     <h1>Smooth bench — tuning batch progress report</h1>
     <p class="meta">
         Smooth version <code>0.12.11 (77e49e3)</code> &middot;
-        Generated <code>2026-05-02 17:58 EDT</code> &middot;
+        Generated <code>2026-05-02 18:30 EDT</code> &middot;
         Mode <code>sandboxed (microVM per task)</code> &middot;
         Sample <code>--pr</code> (3 tasks &times; 6 languages = 18 runs)
     </p>
@@ -163,13 +163,13 @@ footer {
     </div>
     <div class="card stat pass">
         <div class="label">Take 7 (in flight)</div>
-        <div class="value">50 %</div>
-        <div class="delta">5 / 10 &mdash; real solves with [IDLE] / Closed detection</div>
+        <div class="value">61.5 %</div>
+        <div class="delta">8 / 13 &mdash; real solves with [IDLE] / Closed detection</div>
     </div>
     <div class="card stat neutral">
         <div class="label">Improvement</div>
-        <div class="value">+28 pp</div>
-        <div class="delta">on the 10 tasks completed so far</div>
+        <div class="value">+39 pp</div>
+        <div class="delta">on the 13 tasks completed so far</div>
     </div>
     <div class="card stat neutral">
         <div class="label">Median solve time</div>
@@ -264,7 +264,25 @@ footer {
             <td>Operator gave up early.</td>
         </tr>
         <tr>
-            <td>11&ndash;18</td><td colspan="5"><span class="tag live">Pending</span> Currently dispatched on javascript/alphametics; remaining javascript / java / cpp tasks queued.</td>
+            <td>11</td><td>javascript</td><td>alphametics</td>
+            <td><span class="tag pass">Pass</span></td>
+            <td>509.0 s (8.5 min)</td>
+            <td>Real solve. Operator posted <code>[IDLE]</code> after 438.4 s.</td>
+        </tr>
+        <tr>
+            <td>12</td><td>javascript</td><td>beer-song</td>
+            <td><span class="tag pass">Pass</span> <span class="tag note">suspect</span></td>
+            <td>300.0 s (5.0 min)</td>
+            <td>Hit chat HTTP timeout exactly &mdash; likely starter-passes.</td>
+        </tr>
+        <tr>
+            <td>13</td><td>java</td><td>affine-cipher</td>
+            <td><span class="tag pass">Pass</span></td>
+            <td>1192.3 s (19.9 min)</td>
+            <td>Real solve. Stripped 1 agent-added test file before grading.</td>
+        </tr>
+        <tr>
+            <td>14&ndash;18</td><td colspan="5"><span class="tag live">Pending</span> Java + cpp tasks queued.</td>
         </tr>
     </tbody>
 </table>
