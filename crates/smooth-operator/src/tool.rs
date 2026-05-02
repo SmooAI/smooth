@@ -196,6 +196,19 @@ impl ToolRegistry {
         self.tools.get(name).cloned()
     }
 
+    /// Drop every registered tool whose name fails the supplied
+    /// predicate. Hooks are preserved.
+    ///
+    /// Used to filter the runner's tool set by the active role's
+    /// clearance before handing schemas to the LLM, so the model
+    /// never sees a tool it isn't permitted to call. The
+    /// [`PermissionHook`](crate::cast::PermissionHook) remains as
+    /// second-line defense in case a tool is registered later in
+    /// the lifecycle.
+    pub fn retain<F: Fn(&str) -> bool>(&mut self, keep: F) {
+        self.tools.retain(|name, _| keep(name));
+    }
+
     /// Check all hooks for a pending network request. Any `Err` blocks the operation.
     ///
     /// # Errors
@@ -519,6 +532,28 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    #[test]
+    fn retain_drops_unallowed_tools_only() {
+        // C1: the runner pre-filters its registry by the active role's
+        // clearance so the LLM never sees schemas for forbidden tools.
+        // Hooks must survive the filter; they're a separate concern
+        // from which tools are advertised.
+        let mut registry = ToolRegistry::new();
+        registry.register(EchoTool);
+        registry.register(FailTool);
+        registry.add_hook(BlockHook);
+        assert_eq!(registry.schemas().len(), 2);
+
+        // Drop "fail", keep "echo".
+        registry.retain(|n| n == "echo");
+
+        assert_eq!(registry.schemas().len(), 1);
+        assert!(registry.has_tool("echo"));
+        assert!(!registry.has_tool("fail"));
+        // Hooks are preserved across the retain pass.
+        assert_eq!(registry.hooks.len(), 1);
     }
 
     #[tokio::test]
