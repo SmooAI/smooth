@@ -148,7 +148,7 @@ footer {
     <h1>Smooth bench — tuning batch progress report</h1>
     <p class="meta">
         Smooth version <code>0.12.11 (77e49e3)</code> &middot;
-        Generated <code>2026-05-02 17:18 EDT</code> &middot;
+        Generated <code>2026-05-02 17:26 EDT</code> &middot;
         Mode <code>sandboxed (microVM per task)</code> &middot;
         Sample <code>--pr</code> (3 tasks &times; 6 languages = 18 runs)
     </p>
@@ -163,13 +163,13 @@ footer {
     </div>
     <div class="card stat pass">
         <div class="label">Take 7 (in flight)</div>
-        <div class="value">60 %</div>
-        <div class="delta">3 / 5 &mdash; real solves with [IDLE] detection</div>
+        <div class="value">67 %</div>
+        <div class="delta">4 / 6 &mdash; real solves with [IDLE] / Closed detection</div>
     </div>
     <div class="card stat neutral">
         <div class="label">Improvement</div>
-        <div class="value">+38 pp</div>
-        <div class="delta">on the 5 tasks completed so far</div>
+        <div class="value">+44 pp</div>
+        <div class="delta">on the 6 tasks completed so far</div>
     </div>
     <div class="card stat neutral">
         <div class="label">Median solve time</div>
@@ -234,7 +234,13 @@ footer {
             <td>Same as task 4 &mdash; HTTP timeout, suspected starter-passes.</td>
         </tr>
         <tr>
-            <td>6&ndash;18</td><td colspan="5"><span class="tag live">Pending</span> Currently dispatched on rust/alphametics; rust/javascript/go/java/cpp tasks queued.</td>
+            <td>6</td><td>rust</td><td>alphametics</td>
+            <td><span class="tag pass">Pass</span></td>
+            <td>1511.8 s (25.2 min)</td>
+            <td>Real solve. Pearl status flipped to <code>Closed</code> after 1468.4 s &mdash; the runner posted <code>TaskComplete</code> and the dispatch flow closed the pearl directly (no <code>[IDLE]</code> needed).</td>
+        </tr>
+        <tr>
+            <td>7&ndash;18</td><td colspan="5"><span class="tag live">Pending</span> Currently dispatched on go/alphametics; javascript / go / java / cpp tasks queued.</td>
         </tr>
     </tbody>
 </table>
