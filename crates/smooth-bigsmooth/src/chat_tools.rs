@@ -264,6 +264,8 @@ async fn generate_title(registry: &ProviderRegistry, description: &str) -> anyho
 
 // ── teammate.spawn ─────────────────────────────────────────────────────
 
+const MIN_CONTEXT_BRIEF_CHARS: usize = 80;
+
 pub struct TeammateSpawnTool {
     pub state: AppState,
 }
@@ -276,10 +278,15 @@ impl Tool for TeammateSpawnTool {
             description: "Spawn a teammate (operator) on a pearl for REAL CODING WORK (multi-file edits, builds, test runs, debugging). Do NOT use this for one-shot bash-allowlist commands — git clone, gh repo clone, mkdir, curl etc. should run via the `bash` tool directly. The teammate runs in its own sandbox, picks up the pearl's description as its task, and reports progress as pearl comments. Returns immediately — use teammate_read or pearls_show to follow progress.".to_string(),
             parameters: json!({
                 "type": "object",
-                "required": ["pearl_id"],
+                "required": ["pearl_id", "context_brief"],
                 "properties": {
                     "pearl_id": { "type": "string", "description": "The pearl to dispatch on. Must already exist (call pearls_create first)." },
-                    "extra_prompt": { "type": "string", "description": "Optional extra instruction appended to the pearl description when handing off to the teammate." },
+                    "context_brief": {
+                        "type": "string",
+                        "minLength": 80,
+                        "description": "REQUIRED. Brief the teammate like a smart colleague who just walked into the room — they haven't seen this conversation. Cover: (1) what you've already learned or ruled out, (2) the specific files/paths/commands they should look at first, (3) any judgment-call dimensions you want them flagged back to you rather than decided. For lookups, hand over the exact command. For investigations, hand over the question — prescribed steps become dead weight when the premise is wrong. Terse one-liners produce shallow generic work; never delegate understanding. Minimum 80 chars; the runner will reject shorter briefings."
+                    },
+                    "extra_prompt": { "type": "string", "description": "Optional extra instruction appended after the context_brief. Use this for fine-grained constraints (e.g. 'use the Rust 2021 edition', 'don't touch the migrations directory')." },
                     "budget_usd": { "type": "number", "description": "Optional cost cap in USD for this dispatch." },
                     "working_dir": { "type": "string", "description": "Working directory for the teammate's sandbox. Pass the most specific absolute path that scopes the work — e.g. for 'clone repo X to ~/dev/foo/X' pass `~/dev/foo`. Never pass a directory as broad as `~` or `/`; the runner can stall enumerating that much filesystem." },
                     "role": { "type": "string", "description": "Optional cast role to spawn under (e.g. `fixer`, `mapper`, `oracle`, `heckler` — see smooth-operator/src/cast). Affects permissions, prompt, and routing slot." },
@@ -291,6 +298,16 @@ impl Tool for TeammateSpawnTool {
 
     async fn execute(&self, arguments: serde_json::Value) -> anyhow::Result<String> {
         let pearl_id = arguments["pearl_id"].as_str().ok_or_else(|| anyhow::anyhow!("missing 'pearl_id'"))?.to_string();
+        let context_brief = arguments.get("context_brief").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        if context_brief.chars().count() < MIN_CONTEXT_BRIEF_CHARS {
+            anyhow::bail!(
+                "teammate_spawn rejected: `context_brief` must be at least {MIN_CONTEXT_BRIEF_CHARS} chars (got {}). \
+                Brief the teammate like a smart colleague who just walked in: what you've learned, what you've \
+                ruled out, the files/paths/commands to start with, and the judgment dimensions to flag back. \
+                Re-issue the call with a real briefing — never delegate understanding.",
+                context_brief.chars().count()
+            );
+        }
         let extra = arguments.get("extra_prompt").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
         let budget = arguments.get("budget_usd").and_then(|v| v.as_f64());
         let working_dir = arguments.get("working_dir").and_then(|v| v.as_str()).map(String::from);
@@ -304,8 +321,10 @@ impl Tool for TeammateSpawnTool {
             .ok_or_else(|| anyhow::anyhow!("pearl {pearl_id} not found"))?;
 
         let mut message = pearl.description.clone();
+        message.push_str("\n\n## Context from team lead\n\n");
+        message.push_str(&context_brief);
         if !extra.is_empty() {
-            message.push_str("\n\n");
+            message.push_str("\n\n## Extra constraints\n\n");
             message.push_str(&extra);
         }
         // Pass the caller's pearl id through so dispatch reuses it instead
@@ -691,5 +710,36 @@ mod tests {
         for n in &names {
             assert!(n.chars().all(|c| c.is_ascii_lowercase() || c == '_'), "{n}");
         }
+    }
+
+    #[test]
+    fn min_context_brief_threshold_is_meaningful() {
+        // Threshold has to be loose enough that real briefings pass and
+        // tight enough that one-line tasks fail. 80 chars is roughly two
+        // short sentences — enough room for "what you've learned, what
+        // you've ruled out, where to start."
+        assert!(MIN_CONTEXT_BRIEF_CHARS >= 60);
+        assert!(MIN_CONTEXT_BRIEF_CHARS <= 200);
+    }
+
+    #[test]
+    fn short_brief_rejection_message_lists_what_to_include() {
+        // The error returned to the model has to teach it how to recover.
+        // Rather than just "too short", it must list the things a proper
+        // briefing covers (learned/ruled-out/files/judgment-dimensions),
+        // so the model's next call is structured rather than just longer.
+        // This guards against well-meaning rewording of the bail message
+        // that drops the recovery scaffold.
+        let msg = format!(
+            "teammate_spawn rejected: `context_brief` must be at least {MIN_CONTEXT_BRIEF_CHARS} chars (got 12). \
+            Brief the teammate like a smart colleague who just walked in: what you've learned, what you've \
+            ruled out, the files/paths/commands to start with, and the judgment dimensions to flag back. \
+            Re-issue the call with a real briefing — never delegate understanding."
+        );
+        assert!(msg.contains("learned"));
+        assert!(msg.contains("ruled out"));
+        assert!(msg.contains("files"));
+        assert!(msg.contains("judgment"));
+        assert!(msg.contains("Re-issue"));
     }
 }

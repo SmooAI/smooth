@@ -16,6 +16,17 @@ use crate::conversation::{CompactionStrategy, Conversation, Message, ReactiveCom
 use crate::llm::{accumulate_stream_events, LlmClient, LlmConfig, StreamEvent};
 use crate::tool::{Tool, ToolRegistry, ToolSchema};
 
+/// Reminder injected as a system message on the final iteration of the agent
+/// loop. Adapted from opencode's `max-steps.txt` system reminder. Lets the
+/// model wrap up cleanly — what's done, what's left, what to do next — instead
+/// of being cut off mid-tool-call when the iteration cap fires.
+const MAX_STEPS_REMINDER: &str = "MAXIMUM ITERATIONS REACHED. This is your final iteration before the loop ends. \
+Do not start new tool chains. Respond with text only:\n\
+1. State that the maximum iterations for this agent have been reached.\n\
+2. Summarize what has been accomplished so far.\n\
+3. List any remaining tasks that were not completed.\n\
+4. Recommend what should be done next (a follow-up dispatch, a manual step, a question for the user).";
+
 /// Configuration for an agent.
 #[allow(missing_debug_implementations)]
 pub struct AgentConfig {
@@ -456,6 +467,14 @@ impl Agent {
             // Drain mailbox injections (see `drain_injected_messages` doc).
             self.drain_injected_messages(&mut conversation);
 
+            // On the final iteration, surface the max-steps reminder so the
+            // model can write a clean wrap-up turn instead of being cut off
+            // mid-tool-chain. Only inject once — if max_iterations == 1
+            // the reminder still lands before the single LLM call.
+            if iteration == self.config.max_iterations {
+                conversation.push(Message::system(MAX_STEPS_REMINDER));
+            }
+
             // Check for steering commands from Big Smooth
             if let Some(control) = self.check_steering() {
                 match control {
@@ -683,6 +702,12 @@ impl Agent {
             // the lead, a direct-chat user, or an answer to an `ask_smooth` call
             // all arrive here.
             self.drain_injected_messages(&mut conversation);
+
+            // Final iteration: surface the max-steps reminder so the model
+            // can wrap up cleanly instead of being cut off mid-tool-chain.
+            if iteration == self.config.max_iterations {
+                conversation.push(Message::system(MAX_STEPS_REMINDER));
+            }
 
             // Compact if approaching context limit
             if conversation.needs_compaction() {
@@ -1062,6 +1087,22 @@ mod tests {
     fn agent_config_builder() {
         let config = test_config().with_max_iterations(10).with_checkpoint_strategy(CheckpointStrategy::Never);
         assert_eq!(config.max_iterations, 10);
+    }
+
+    #[test]
+    fn max_steps_reminder_includes_recovery_scaffold() {
+        // The reminder is the model's last guidance before the loop exits.
+        // It must instruct a clean wrap-up rather than read like an error
+        // — accomplished/remaining/next-steps. Guards against truncating
+        // the reminder to "stop, you ran out of steps" which leaves the
+        // user with no actionable summary.
+        assert!(MAX_STEPS_REMINDER.contains("MAXIMUM"));
+        assert!(MAX_STEPS_REMINDER.contains("accomplished"));
+        assert!(MAX_STEPS_REMINDER.contains("remaining"));
+        assert!(MAX_STEPS_REMINDER.contains("next") || MAX_STEPS_REMINDER.contains("Recommend"));
+        // Tools-disabled framing keeps the model from starting a fresh
+        // chain that will be cut off mid-flight.
+        assert!(MAX_STEPS_REMINDER.contains("text only") || MAX_STEPS_REMINDER.contains("Do not start"));
     }
 
     #[test]
