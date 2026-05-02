@@ -2140,6 +2140,18 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
                 iterations: agent_iterations,
                 cost_usd: final_cost_usd,
             });
+            // Pearl-side cost / iterations breadcrumb. Anyone polling
+            // the pearl (the bench harness, the TUI, future tooling)
+            // can grep for `[METRICS] cost_usd=X iterations=Y` and read
+            // the dispatch's actual spend without reading the WS event
+            // stream. Posted before the pearl is closed so the comment
+            // is part of the pearl's history.
+            if let Some(ref id) = pearl_id {
+                let body = format!("[METRICS] cost_usd={final_cost_usd:.6} iterations={agent_iterations}");
+                if let Err(e) = pearl_store.add_comment(id, &body) {
+                    tracing::warn!(pearl_id = %id, error = %e, "[METRICS] write failed");
+                }
+            }
             // Close pearl via Diver or directly
             if let Some(ref id) = pearl_id {
                 if let Some(ref diver_client) = diver {
