@@ -1973,6 +1973,17 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
                 if let Some(h) = heartbeat_handle.as_ref() {
                     h.abort();
                 }
+                // Post a terminal `[IDLE]` comment so any external poller
+                // (the bench harness, see SMOOTH_BENCH_IDLE_GRACE_S) sees
+                // the dispatch is truly over and doesn't have to wait the
+                // full grace timeout to find out. Best-effort: a write
+                // failure here is non-fatal.
+                if let Some(ref pid) = pearl_id {
+                    let body = format!("[IDLE] sandbox exec failed: {e}");
+                    if let Err(write_err) = pearl_store.add_comment(pid, &body) {
+                        tracing::warn!(pearl_id = %pid, error = %write_err, "[IDLE] write failed on exec error path");
+                    }
+                }
                 let _ = event_tx.send(ServerEvent::TaskError {
                     task_id: tid.clone(),
                     message: format!("sandbox exec failed: {e}"),
@@ -2146,6 +2157,27 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
                 task_id: tid.clone(),
                 message: format!("sandboxed runner exited with code {code}"),
             });
+            // Post a terminal `[IDLE]` comment + flip the pearl back to
+            // open so the bench harness (and any other comment-poller)
+            // doesn't have to wait the full grace timeout to find out
+            // the dispatch is over. This is the runner-non-zero-exit
+            // path — the workspace may be partially mutated; we
+            // surface that as failure rather than success.
+            if let Some(ref id) = pearl_id {
+                let body = format!("[IDLE] sandboxed runner exited with code {code}");
+                if let Err(write_err) = pearl_store.add_comment(id, &body) {
+                    tracing::warn!(pearl_id = %id, error = %write_err, "[IDLE] write failed on non-zero exit path");
+                }
+                if let Err(close_err) = pearl_store.update(
+                    id,
+                    &smooth_pearls::PearlUpdate {
+                        status: Some(smooth_pearls::PearlStatus::Open),
+                        ..Default::default()
+                    },
+                ) {
+                    tracing::warn!(pearl_id = %id, error = %close_err, "pearl status revert failed");
+                }
+            }
             tracing::error!(
                 task_id = tid,
                 exit = code,
