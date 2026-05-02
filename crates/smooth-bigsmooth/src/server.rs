@@ -1929,9 +1929,50 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
             vec![runner_in_vm.clone()]
         };
         let exec_argv_refs: Vec<&str> = exec_argv.iter().map(String::as_str).collect();
+
+        // Pearl-comment heartbeat: `exec_in_sandbox` is blocking and
+        // doesn't stream stdout, so the runner's `[ToolCallStart]`-shaped
+        // events arrive in one batch when the exec finishes. Without a
+        // heartbeat the pearl's comment count stays flat for the whole
+        // run, and any external poller (the bench harness in particular,
+        // see SMOOTH_BENCH_IDLE_GRACE_S in smooth-bench/chat_driver.rs)
+        // gives up well before the operator is genuinely done. Post a
+        // [PROGRESS] comment every `heartbeat_secs` so the pearl shows
+        // continued life. Abort the loop after exec returns.
+        //
+        // `SMOOTH_DISPATCH_HEARTBEAT_S=0` disables the heartbeat for
+        // tests / benchmark harnesses that want to observe genuine
+        // quiescence; default 30s.
+        let heartbeat_secs: u64 = std::env::var("SMOOTH_DISPATCH_HEARTBEAT_S").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
+        let heartbeat_handle = if heartbeat_secs > 0 {
+            if let Some(pid) = pearl_id.clone() {
+                let pearl_store_hb = pearl_store.clone();
+                let started = exec_started;
+                Some(tokio::spawn(async move {
+                    let mut tick: u32 = 0;
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(heartbeat_secs)).await;
+                        tick = tick.saturating_add(1);
+                        let elapsed = started.elapsed().as_secs();
+                        let body = format!("[PROGRESS] sandbox running ({elapsed}s elapsed, heartbeat #{tick})");
+                        if let Err(e) = pearl_store_hb.add_comment(&pid, &body) {
+                            tracing::warn!(pearl_id = %pid, error = %e, "heartbeat comment write failed");
+                        }
+                    }
+                }))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let (stdout, stderr, code) = match sandbox::exec_in_sandbox(&handle.msb_name, &exec_argv_refs).await {
             Ok(r) => r,
             Err(e) => {
+                if let Some(h) = heartbeat_handle.as_ref() {
+                    h.abort();
+                }
                 let _ = event_tx.send(ServerEvent::TaskError {
                     task_id: tid.clone(),
                     message: format!("sandbox exec failed: {e}"),
@@ -1940,6 +1981,9 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
                 return;
             }
         };
+        if let Some(h) = heartbeat_handle.as_ref() {
+            h.abort();
+        }
         touch();
 
         // The runner emits one JSON AgentEvent per line on stdout. Parse each
