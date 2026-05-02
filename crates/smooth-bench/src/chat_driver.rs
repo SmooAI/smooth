@@ -26,6 +26,15 @@ use anyhow::Context;
 
 use smooth_code::headless::{HeadlessOutput, HeadlessToolCall};
 
+/// Read a duration in seconds from an env var, falling back to a default.
+///
+/// Pulled out so the bench's tunable timeouts read consistently and so
+/// unit tests can verify default-vs-override behaviour without poking
+/// around in `std::env`.
+fn env_secs(var: &str, default_secs: u64) -> u64 {
+    std::env::var(var).ok().and_then(|v| v.parse().ok()).unwrap_or(default_secs)
+}
+
 /// Drive a task through Big Smooth's chat-agent and return the same shape
 /// as the legacy `run_headless_capture` so the caller can keep its scoring
 /// logic unchanged.
@@ -36,7 +45,14 @@ pub async fn run_via_chat_agent(
     budget_usd: Option<f64>,
     deadline: Duration,
 ) -> anyhow::Result<HeadlessOutput> {
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(120)).build()?;
+    // The HTTP timeout covers the initial POST /api/chat call that
+    // dispatches the chat-agent. The chat-agent returns once it's
+    // spawned a teammate (typically <60s on a warm daemon, longer on
+    // first dispatch when smooth-dolt + sandbox cold-start). 120s has
+    // historically been tight enough to time out real dispatches; default
+    // to 300s, override with `SMOOTH_BENCH_CHAT_HTTP_TIMEOUT_S`.
+    let chat_http_timeout = Duration::from_secs(env_secs("SMOOTH_BENCH_CHAT_HTTP_TIMEOUT_S", 300));
+    let client = reqwest::Client::builder().timeout(chat_http_timeout).build()?;
 
     // Compose the chat prompt: the chat-agent's system prompt knows the
     // workflow (search → create → spawn). We just need to give it enough
@@ -78,7 +94,16 @@ pub async fn run_via_chat_agent(
     let t0 = Instant::now();
     let mut last_seen_count = 0usize;
     let mut quiet_since = Instant::now();
-    let idle_grace = Duration::from_secs(120);
+    // The "no new comment for `idle_grace`" heuristic stands in for the
+    // [IDLE] post that the runner doesn't emit yet (Phase 2/4 work).
+    // Real solves have been observed taking 90-300s on harder polyglot
+    // tasks (e.g. cpp/all-your-base 218s, java/alphametics 231s) — at
+    // 120s the harness was scoring half the tasks as FAIL purely because
+    // the operator hadn't yet posted a [PROGRESS] comment when the
+    // grace expired. Default to 600s; override with
+    // `SMOOTH_BENCH_IDLE_GRACE_S` to tune for fast-feedback runs.
+    let idle_grace = Duration::from_secs(env_secs("SMOOTH_BENCH_IDLE_GRACE_S", 600));
+    eprintln!("bench: pearl {pearl_id} polling with idle_grace={}s", idle_grace.as_secs());
     let mut tool_calls: Vec<HeadlessToolCall> = Vec::new();
 
     loop {
@@ -197,5 +222,22 @@ mod tests {
     fn extract_pearl_id_returns_none_when_absent() {
         assert!(extract_pearl_id("hello world no pearls here").is_none());
         assert!(extract_pearl_id("th-xx").is_none()); // too short
+    }
+
+    #[test]
+    fn env_secs_falls_back_when_unset_or_invalid() {
+        // Use a unique var name so the test doesn't collide with an
+        // operator's actual env. The fallback path is what runs in CI.
+        let var = "SMOOTH_BENCH_TEST_SECS_FALLBACK_XYZ";
+        // Unset → default.
+        std::env::remove_var(var);
+        assert_eq!(env_secs(var, 42), 42);
+        // Garbage → default.
+        std::env::set_var(var, "not-a-number");
+        assert_eq!(env_secs(var, 7), 7);
+        // Valid integer → parsed value.
+        std::env::set_var(var, "999");
+        assert_eq!(env_secs(var, 7), 999);
+        std::env::remove_var(var);
     }
 }
