@@ -148,7 +148,7 @@ footer {
     <h1>Smooth bench — tuning batch progress report</h1>
     <p class="meta">
         Smooth version <code>0.12.11 (77e49e3)</code> &middot;
-        Generated <code>2026-05-02 19:02 EDT</code> &middot;
+        Generated <code>2026-05-02 19:34 EDT</code> &middot;
         Mode <code>sandboxed (microVM per task)</code> &middot;
         Sample <code>--pr</code> (3 tasks &times; 6 languages = 18 runs)
     </p>
@@ -162,14 +162,14 @@ footer {
         <div class="delta">4 / 18 &mdash; mostly harness-timeout artifacts</div>
     </div>
     <div class="card stat pass">
-        <div class="label">Take 7 (in flight)</div>
-        <div class="value">60 %</div>
-        <div class="delta">9 / 15 &mdash; real solves with [IDLE] / Closed detection</div>
+        <div class="label">Take 7 (final)</div>
+        <div class="value">50.0 %</div>
+        <div class="delta">9 / 18 &mdash; real solves with [IDLE] / Closed detection</div>
     </div>
     <div class="card stat neutral">
         <div class="label">Improvement</div>
-        <div class="value">+38 pp</div>
-        <div class="delta">on the 15 tasks completed so far</div>
+        <div class="value">+27.8 pp</div>
+        <div class="delta">vs 22.2% baseline on the same task set</div>
     </div>
     <div class="card stat neutral">
         <div class="label">Median solve time</div>
@@ -184,8 +184,9 @@ footer {
 </div>
 
 <p class="meta">
-    <span class="tag live">Live</span> Take 7 is still running &mdash; this snapshot covers tasks 1&ndash;5; tasks 6&ndash;18
-    are pending. Re-generate this report after the bench finishes for the final number.
+    <span class="tag pass">Final</span> Take 7 finished. 18/18 tasks completed in 4 hours 7 minutes;
+    score JSON archived at
+    <code>docs/bench-sessions/2026-05-02-v0.12.11-take7-final.json</code>.
 </p>
 
 <h2>Per-task results</h2>
@@ -294,10 +295,56 @@ footer {
             <td>Real solve. Operator posted <code>[IDLE]</code> after 1637.6 s; stripped 1 agent-added test file.</td>
         </tr>
         <tr>
-            <td>16&ndash;18</td><td colspan="5"><span class="tag live">Pending</span> 3 cpp tasks remain.</td>
+            <td>16</td><td>cpp</td><td>all-your-base</td>
+            <td><span class="tag fail">Fail</span></td>
+            <td>300.0 s (5.0 min)</td>
+            <td>HTTP timeout exactly &mdash; chat-agent didn't return pearl id in 300 s.</td>
+        </tr>
+        <tr>
+            <td>17</td><td>cpp</td><td>allergies</td>
+            <td><span class="tag fail">Fail</span></td>
+            <td>300.0 s (5.0 min)</td>
+            <td>HTTP timeout. Cpp toolchain bootstrap probably eats most of the dispatch window.</td>
+        </tr>
+        <tr>
+            <td>18</td><td>cpp</td><td>bank-account</td>
+            <td><span class="tag fail">Fail</span></td>
+            <td>957.4 s (16.0 min)</td>
+            <td>Real run, real fail. Operator hit cap or gave up; tests still failing.</td>
         </tr>
     </tbody>
 </table>
+
+<h3>Take 7 (final) &mdash; pass rate by language</h3>
+<table>
+    <thead>
+        <tr>
+            <th>Language</th>
+            <th>Pass rate</th>
+            <th>Tasks</th>
+            <th>Bar</th>
+            <th>Take 1 baseline</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr><td>rust</td><td><strong style="color:#4ade80">100.0 %</strong></td><td>3 / 3</td><td><div class="bar"><span style="width: 100%"></span></div></td><td>33.3 %</td></tr>
+        <tr><td>java</td><td>66.7 %</td><td>2 / 3</td><td><div class="bar"><span style="width: 66.7%"></span></div></td><td>0.0 %</td></tr>
+        <tr><td>javascript</td><td>66.7 %</td><td>2 / 3</td><td><div class="bar"><span style="width: 66.7%"></span></div></td><td>33.3 %</td></tr>
+        <tr><td>python</td><td>33.3 %</td><td>1 / 3</td><td><div class="bar"><span style="width: 33.3%"></span></div></td><td>66.7 %</td></tr>
+        <tr><td>go</td><td>33.3 %</td><td>1 / 3</td><td><div class="bar"><span style="width: 33.3%"></span></div></td><td>0.0 %</td></tr>
+        <tr><td>cpp</td><td>0.0 %</td><td>0 / 3</td><td><div class="bar fail"><span style="width: 100%"></span></div></td><td>0.0 %</td></tr>
+        <tr><td><strong>Overall</strong></td><td><strong>50.0 %</strong></td><td><strong>9 / 18</strong></td><td><div class="bar"><span style="width: 50%"></span></div></td><td><strong>22.2 %</strong></td></tr>
+    </tbody>
+</table>
+
+<p class="meta">
+    Big movers: <strong>rust 33% &rarr; 100%</strong>, <strong>java 0% &rarr; 67%</strong>,
+    <strong>go 0% &rarr; 33%</strong>. python regressed 67% &rarr; 33% (one extra FAIL on
+    book-store; the same 2/3 PASSes from take 1 still hold), and cpp stayed at 0/3 &mdash; cpp
+    toolchain bootstrap cost in the sandbox eats the dispatch window before the model can
+    make progress. Median wall time 407 s &mdash; 3.4&times; take 1's 120 s, but take 1's was
+    just the harness's quiet-timeout firing.
+</p>
 
 <h3>Take 1 (2026-05-02 baseline) &mdash; for comparison</h3>
 <table>
