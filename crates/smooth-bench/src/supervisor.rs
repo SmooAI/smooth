@@ -21,11 +21,25 @@
 //! comes from `[IDLE]` / pearl status. It only injects coaching when the
 //! operator is mid-flight.
 
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use smooth_operator::conversation::Message;
 use smooth_operator::llm::{ApiFormat, LlmClient, LlmConfig};
 use smooth_pearls::{PearlComment, PearlStatus, PearlStore};
+use tokio::sync::Mutex as AsyncMutex;
+
+/// Global lock serialising all supervisor [STEERING] writes across
+/// parallel pearls. The dolt server is single-writer; under
+/// SMOOTH_BENCH_PARALLELISM=3 the 3 concurrent supervisors used to
+/// race the manifest lock and 5/10 of them would fail to write.
+/// Holding this around `add_comment` lets at most one supervisor
+/// touch dolt at a time — a few hundred ms of serialisation per tick,
+/// well within the 30s interval.
+static STEER_WRITE_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+fn steer_write_lock() -> &'static AsyncMutex<()> {
+    STEER_WRITE_LOCK.get_or_init(|| AsyncMutex::new(()))
+}
 
 /// Tick cadence. 30s strikes a balance: short enough that a stuck
 /// operator gets unstuck inside a single iteration window (operator
@@ -277,9 +291,13 @@ impl Supervisor {
             }
             SupervisorDecision::Steer(msg) => {
                 let body = format!("[STEERING:GUIDANCE] {msg}");
-                // Dolt manifest contention is common under parallel sweep
-                // load (multiple pearls writing heartbeats + steers
-                // concurrently). Retry with exponential backoff before
+                // Hold the global steer-write lock across the whole
+                // retry loop so two parallel supervisors can't fight
+                // for the dolt manifest at the same moment.
+                let _write_guard = steer_write_lock().lock().await;
+                // Dolt manifest contention can still leak through
+                // (daemon-side heartbeat writes don't go through this
+                // lock). Retry with jittered exponential backoff before
                 // giving up — contention windows are typically sub-second.
                 let mut attempt = 0_u32;
                 let result = loop {
@@ -291,11 +309,19 @@ impl Supervisor {
                             // of error. Real problems (missing pearl,
                             // perm error, disk full) shouldn't burn retries.
                             let retryable = m.contains("read only") || m.contains("manifest") || m.contains("Error 1105");
-                            if !retryable || attempt >= 5 {
+                            if !retryable || attempt >= 10 {
                                 break Err(e);
                             }
-                            // 50ms, 100, 200, 400, 800 → ~1.5s total ceiling.
-                            tokio::time::sleep(Duration::from_millis(50_u64 << attempt)).await;
+                            // Backoff with jitter so the 3 concurrent
+                            // supervisors don't lock-step their retries.
+                            // Base: 50, 100, 200, 400, 800, 1600, 3200,
+                            // 6400, 12800, 25600 ms (capped). Jitter:
+                            // ±50% via the LSB of an Instant nanosecond.
+                            let base = (50_u64).checked_shl(attempt).unwrap_or(25_600).min(25_600);
+                            let nanos = Instant::now().elapsed().subsec_nanos() as u64;
+                            let jitter = nanos % (base / 2 + 1);
+                            let backoff = base / 2 + jitter; // 50%..150% of base
+                            tokio::time::sleep(Duration::from_millis(backoff)).await;
                             attempt += 1;
                         }
                     }
