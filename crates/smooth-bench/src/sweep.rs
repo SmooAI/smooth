@@ -65,13 +65,13 @@ impl TaskRunner for PolyglotTaskRunner {
         let duration_ms: u64 = (res.duration_s * 1000.0).max(0.0) as u64;
 
         // Detect HTTP-timeout starter passes. The chat-driver sets
-        // SMOOTH_BENCH_CHAT_HTTP_TIMEOUT_S (default 300 s) on the
-        // reqwest client; when that timeout fires before the chat-agent
-        // returns a pearl id, the bench bails and runs the test against
-        // the unmodified workspace. Some polyglot exercises happen to
-        // pass without modification (rust/accumulate stub returns the
-        // input list, etc.); these PASSes shouldn't pollute the
-        // headline.
+        // SMOOTH_BENCH_CHAT_HTTP_TIMEOUT_S (default 600 s after take 9)
+        // on the reqwest client; when that timeout fires before the
+        // chat-agent returns a pearl id, the bench bails and runs the
+        // test against the unmodified workspace. Some polyglot exercises
+        // happen to pass without modification (rust/accumulate stub
+        // returns the input list, etc.); these PASSes shouldn't pollute
+        // the headline.
         //
         // Heuristic: duration ≈ HTTP timeout (within 100 ms),
         // cost_usd is 0 (no LLM rounds completed), and the test runner
@@ -82,7 +82,7 @@ impl TaskRunner for PolyglotTaskRunner {
         let http_timeout_secs: u64 = std::env::var("SMOOTH_BENCH_CHAT_HTTP_TIMEOUT_S")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(300);
+            .unwrap_or(600);
         let http_timeout_ms = http_timeout_secs * 1000;
         let near_timeout = duration_ms.saturating_sub(http_timeout_ms) < 100 && http_timeout_ms.saturating_sub(duration_ms) < 100;
         let inconclusive = res.solved && near_timeout && res.cost_usd <= 0.0;

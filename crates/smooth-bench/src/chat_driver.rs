@@ -59,10 +59,14 @@ pub async fn run_via_chat_agent(
     // The HTTP timeout covers the initial POST /api/chat call that
     // dispatches the chat-agent. The chat-agent returns once it's
     // spawned a teammate (typically <60s on a warm daemon, longer on
-    // first dispatch when smooth-dolt + sandbox cold-start). 120s has
-    // historically been tight enough to time out real dispatches; default
-    // to 300s, override with `SMOOTH_BENCH_CHAT_HTTP_TIMEOUT_S`.
-    let chat_http_timeout = Duration::from_secs(env_secs("SMOOTH_BENCH_CHAT_HTTP_TIMEOUT_S", 300));
+    // first dispatch when smooth-dolt + sandbox cold-start). 120s and
+    // 300s both produced INCONCLUSIVE artifacts (workspace untouched,
+    // test runner happens to pass on the polyglot starter). Default to
+    // 600s after take 9 — the cost of a slow dispatch is just one extra
+    // supervisor tick window, the cost of poisoning the verdict with
+    // "did not run" is a useless data point. Override with
+    // `SMOOTH_BENCH_CHAT_HTTP_TIMEOUT_S`.
+    let chat_http_timeout = Duration::from_secs(env_secs("SMOOTH_BENCH_CHAT_HTTP_TIMEOUT_S", 600));
     let client = reqwest::Client::builder().timeout(chat_http_timeout).build()?;
 
     // Compose the chat prompt: the chat-agent's system prompt knows the

@@ -68,7 +68,7 @@ pub fn classify(result: &BenchResult) -> Verdict {
     let timeout_ms = std::env::var("SMOOTH_BENCH_CHAT_HTTP_TIMEOUT_S")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(300);
+        .unwrap_or(600);
     let wall_ms = (result.duration_s * 1000.0) as u64;
     // 5 ms wiggle room on either side of the exact harness timeout.
     let near_timeout = wall_ms.abs_diff(timeout_ms * 1000) <= 5;
@@ -519,7 +519,7 @@ mod tests {
     fn classify_pass_at_timeout_with_no_steers_is_inconclusive() {
         // PASS at 300003 ms wall AND no supervisor activity → INCONCLUSIVE
         // (likely a polyglot-starter coincidence, not a real solve).
-        let r = make_result(true, 300.003, Some(0));
+        let r = make_result(true, 600.003, Some(0));
         assert_eq!(classify(&r), Verdict::Inconclusive);
     }
 
@@ -529,7 +529,7 @@ mod tests {
         // returned a pearl id, the unmodified workspace failed the suite,
         // that's a real failure (not "we don't know"). Mirrors the sweep's
         // TaskOutcome.inconclusive rule which only flips PASSes.
-        let r = make_result(false, 300.003, Some(0));
+        let r = make_result(false, 600.003, Some(0));
         assert_eq!(classify(&r), Verdict::Fail);
     }
 
@@ -537,7 +537,7 @@ mod tests {
     fn classify_pass_at_timeout_when_supervisor_steered() {
         // Supervisor activity proves a real run, so a coincidental
         // 300003 ms wall is no longer INCONCLUSIVE.
-        let r = make_result(true, 300.003, Some(1));
+        let r = make_result(true, 600.003, Some(1));
         assert_eq!(classify(&r), Verdict::Pass);
     }
 
@@ -588,7 +588,7 @@ mod tests {
 
     #[test]
     fn render_html_shows_inconclusive_with_warn_class() {
-        let r = make_result(true, 300.003, Some(0));
+        let r = make_result(true, 600.003, Some(0));
         let html = render_html(&r, "", &[], Verdict::Inconclusive);
         assert!(html.contains("INCONCLUSIVE"));
         assert!(html.contains("class=\"card stat note\""));
@@ -600,7 +600,7 @@ mod tests {
         a.task = "a".into();
         let mut b = make_result(false, 600.0, Some(1));
         b.task = "b".into();
-        let mut c = make_result(true, 300.003, Some(0));
+        let mut c = make_result(true, 600.003, Some(0));
         c.task = "c".into();
         let html = render_sweep_html(&[a, b, c], "take 9");
 

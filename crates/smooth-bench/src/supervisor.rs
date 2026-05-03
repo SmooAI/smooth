@@ -27,13 +27,21 @@ use smooth_operator::conversation::Message;
 use smooth_operator::llm::{ApiFormat, LlmClient, LlmConfig};
 use smooth_pearls::{PearlComment, PearlStatus, PearlStore};
 
-const DEFAULT_INTERVAL_S: u64 = 90;
+/// Tick cadence. 30s strikes a balance: short enough that a stuck
+/// operator gets unstuck inside a single iteration window (operator
+/// iterations are ~30-60s on warm models), long enough that we don't
+/// burn LLM cost spamming CONTINUEs. Was 90s in the first version,
+/// dropped after take 9 showed zero steers across 10 tasks — supervisor
+/// was waking up after the operator had already moved on.
+const DEFAULT_INTERVAL_S: u64 = 30;
 const DEFAULT_SUPERVISOR_MAX_TOKENS: u32 = 1024;
 const DEFAULT_SUPERVISOR_TEMPERATURE: f32 = 0.0;
-/// Lower bound on time between successive steering posts. Even if the
-/// supervisor decides to steer twice in a row, we cool off to avoid
-/// flooding the runner's mailbox.
-const STEERING_COOLDOWN_S: u64 = 60;
+/// Lower bound on time between successive steering posts. Was 60s; cut
+/// to 20s after take 9. Operator iterations cycle every 30-60s, so a
+/// 60s cooldown often means a steer can't land until 2 iterations
+/// later — too late on dispatches that wedge fast. 20s lets a follow-
+/// up steer chase the first one if the LLM keeps deciding STEER.
+const STEERING_COOLDOWN_S: u64 = 20;
 
 /// Decision returned by the supervisor LLM for a given pearl state.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -368,43 +376,63 @@ pub fn parse_supervisor_response(text: &str) -> SupervisorDecision {
     SupervisorDecision::Continue
 }
 
-const SUPERVISOR_SYSTEM_PROMPT: &str = r#"You are a supervisor agent watching a coding operator solve a benchmark task.
+const SUPERVISOR_SYSTEM_PROMPT: &str = r#"You are a supervisor coaching a coding operator solve a benchmark task. The
+operator wastes time when left alone — your job is to STEER it toward
+convergence as often as you can justify. Bias toward steering.
 
 The operator runs autonomously inside a microVM. You see the pearl's recent
 comments (PROGRESS heartbeats, CHAT, STEERING you've already posted, METRICS,
-IDLE). You can post one short steering message per tick. Do not micromanage
-— the operator is competent and your nudges interrupt its flow.
+IDLE). Each STEER you post is injected as a system message in the operator's
+next iteration — operators tend to act on them. Use that.
+
+Tasks are scored on whether the FULL test suite passes. The operator has
+~10-15 minutes wall-clock to converge before the run is considered failed.
+Treat that as a hard ceiling: if the operator is at 8+ minutes elapsed and
+not yet showing green tests, it's behind schedule and you should push.
 
 Decide one of three actions per tick:
 
-1. CONTINUE — operator is making progress, no nudge needed. This is the
-   default. Use it when:
-   - PROGRESS heartbeats are landing and tool calls are advancing
-   - Test output shows shrinking failure count or new green tests
-   - Operator is mid-edit on a file related to the task
+1. STEER: <one or two sharp sentences> — DEFAULT WHEN IN DOUBT. Triggers
+   you should act on (not exhaustive — if you spot something not on this
+   list, steer anyway):
+   - Same tool / file edited 2+ times in the last few comments → quote
+     the failing test back and tell the operator to read it carefully
+   - Bash returned "command not found", non-zero exit, or compile error →
+     name the fix ("apk add jq", "use go.mod 1.21", "import is misspelled
+     on line N")
+   - Test output shows a specific failure that hints at the fix → quote
+     the failure verbatim and point at the file/line
+   - 60+ seconds since the last PROGRESS comment → ask "what are you
+     working on right now?" — this nudges a stalled operator to emit
+     more state
+   - Operator wrote test files instead of fixing source → reminder: bench
+     scores green only when the original tests pass; delete the new
+     tests and fix the source
+   - 8+ minutes elapsed with no green tests → pressure: "you're at 8
+     min, focus on making the existing tests pass; don't refactor"
+   - Operator says "I'll continue" or "let me think" without a tool call
+     → push: "stop deliberating; run the tests and fix the first failure"
+   Keep the message concrete, imperative, and short. Quote real test
+   output when you have it. No prose. No "great job".
 
-2. STEER: <one-or-two-sentence message> — operator is stuck or off-track.
-   Reasonable triggers:
-   - Same tool call repeated 3+ times with same args (suggest an alternative)
-   - Bash returned "command not found" (suggest install / apk add / mise)
-   - 90+ s elapsed with no PROGRESS after a heartbeat-emitting period
-   - Test output shows a specific failure that hints at a fix
-     ("import error in line N — read the file, the symbol is misspelled")
-   - Operator wrote tests instead of fixing source (gentle reminder: bench
-     scores green only when the original tests pass against the operator's
-     source changes)
-   Keep the message concrete and actionable. No prose. No "great job".
+2. CONTINUE — only when the operator is BOTH executing tool calls each
+   iteration AND has visibly advanced toward green tests since the last
+   tick (e.g. failure count is dropping, new test files are passing).
+   Plain heartbeats without progress = STEER, not CONTINUE.
 
 3. STOP — operator clearly finished (test output 100% green, IDLE posted,
    METRICS reported). Bench will detect this on its own; only emit STOP
    when you're 100% sure to save the bench a poll cycle.
 
 Respond on a single line:
+    STEER: <your message here>
     CONTINUE
     STOP
-    STEER: <your message here>
 
-Anything else parses as CONTINUE."#;
+Bias toward STEER. The bench's failure mode is operators drifting alone
+for 30 minutes and timing out without solving — your job is to break that
+pattern. Anything ambiguous parses as CONTINUE, so be explicit when you
+mean to steer."#;
 
 #[cfg(test)]
 mod tests {
