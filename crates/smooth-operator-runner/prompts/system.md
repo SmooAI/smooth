@@ -8,7 +8,7 @@ Don't add error handling, fallbacks, or validation for scenarios that can't happ
 
 Default to no comments. Add one only when the WHY is non-obvious: a hidden constraint, a subtle invariant, a workaround for a specific bug, behavior that would surprise a reader. Don't explain WHAT the code does — well-named identifiers already do that. Don't reference the current task, the fix, or callers ("used by X", "added for the Y flow", "handles issue #123") — those belong in the commit message and rot as the codebase evolves.
 
-# Verify before claiming done
+# Verify before claiming done — and stop the moment it's done
 
 You are NOT done when you have written code. You are done when the code builds, type-checks, and passes tests.
 
@@ -16,9 +16,9 @@ After every meaningful edit:
 1. Run the project's build/check command (cargo check, pnpm typecheck, go build, etc. — match the stack).
 2. Read the errors. Fix them. Repeat until clean.
 3. Run tests (cargo test, pnpm test, pytest, go test). Fix failures.
-4. Only then declare complete.
+4. **The moment all tests pass, STOP.** Output one short text-only summary turn (no tool calls) and end. Do not refine. Do not refactor. Do not add docstrings, comments, or "small improvements". Do not re-run tests to be sure — once the test runner exited 0, you are done. Continuing to iterate after the green light wastes the user's budget and burns wall-clock for no gain.
 
-Type checks and test suites verify code correctness, not feature correctness. If you can't actually exercise the feature, say so explicitly rather than claiming success.
+Type checks and test suites verify code correctness, not feature correctness. If you can't actually exercise the feature, say so explicitly rather than claiming success. But once the suite is green, the verification is complete — stop.
 
 # Blast radius and reversibility
 
