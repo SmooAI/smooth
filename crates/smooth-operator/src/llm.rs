@@ -46,6 +46,13 @@ pub enum ApiFormat {
     #[default]
     OpenAiCompat,
     Anthropic,
+    /// Google Gemini native API. Endpoint shape:
+    /// `<api_url>/models/<model>:generateContent?key=<api_key>` where
+    /// `api_url` ends in `/gemini/v1beta` (LiteLLM's native pass-through
+    /// route or Google direct). Request uses `contents`/`parts` blocks
+    /// with `functionCall`/`functionResponse` for tool use; response
+    /// places `functionCall` parts inside `candidates[0].content.parts`.
+    Gemini,
 }
 
 /// Configuration for the LLM client.
@@ -395,6 +402,119 @@ struct AnthropicUsage {
     output_tokens: u32,
 }
 
+// --- Gemini native API types ---
+//
+// Endpoint: POST {api_url}/models/{model}:generateContent?key={api_key}
+// where api_url ends in `/gemini/v1beta` (LiteLLM native pass-through)
+// or `https://generativelanguage.googleapis.com/v1beta` (Google direct).
+//
+// Request shape (simplified):
+//   { systemInstruction?, contents: [{ role, parts: [...] }], tools?: [{ functionDeclarations: [...] }] }
+// where role is "user" or "model" (NOT "assistant"), and parts can be
+// `{ text }`, `{ functionCall: { name, args } }`, or
+// `{ functionResponse: { name, response } }`.
+//
+// Response shape:
+//   { candidates: [{ content: { parts: [...], role }, finishReason }], usageMetadata }
+// where parts may include functionCall blocks for tool use.
+
+#[derive(Debug, Serialize)]
+struct GeminiRequest {
+    contents: Vec<GeminiContent>,
+    #[serde(rename = "systemInstruction", skip_serializing_if = "Option::is_none")]
+    system_instruction: Option<GeminiSystemInstruction>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<GeminiTool>,
+    #[serde(rename = "generationConfig")]
+    generation_config: GeminiGenerationConfig,
+}
+
+#[derive(Debug, Serialize)]
+struct GeminiSystemInstruction {
+    parts: Vec<GeminiPart>,
+}
+
+#[derive(Debug, Serialize)]
+struct GeminiGenerationConfig {
+    #[serde(rename = "maxOutputTokens")]
+    max_output_tokens: u32,
+    temperature: f32,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct GeminiContent {
+    role: String,
+    parts: Vec<GeminiPart>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct GeminiPart {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    function_call: Option<GeminiFunctionCall>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    function_response: Option<GeminiFunctionResponse>,
+    /// Thought signature on assistant parts from thinking-enabled models
+    /// (Gemini 2.5+, 3.x). Round-tripped on subsequent turns so the model
+    /// can verify its prior reasoning. Opaque base64 blob — never inspected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thought_signature: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct GeminiFunctionCall {
+    name: String,
+    #[serde(default)]
+    args: serde_json::Value,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct GeminiFunctionResponse {
+    name: String,
+    response: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+struct GeminiTool {
+    #[serde(rename = "functionDeclarations")]
+    function_declarations: Vec<GeminiFunctionDeclaration>,
+}
+
+#[derive(Debug, Serialize)]
+struct GeminiFunctionDeclaration {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiResponse {
+    #[serde(default)]
+    candidates: Vec<GeminiCandidate>,
+    #[serde(rename = "usageMetadata", default)]
+    usage_metadata: Option<GeminiUsageMetadata>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiCandidate {
+    #[serde(default)]
+    content: Option<GeminiContent>,
+    #[serde(rename = "finishReason", default)]
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiUsageMetadata {
+    #[serde(rename = "promptTokenCount", default)]
+    prompt_token_count: u32,
+    #[serde(rename = "candidatesTokenCount", default)]
+    candidates_token_count: u32,
+    #[serde(rename = "totalTokenCount", default)]
+    total_token_count: u32,
+}
+
 /// Calculate exponential backoff duration for a given retry attempt.
 fn calculate_backoff(attempt: u32, policy: &RetryPolicy) -> Duration {
     let exp_ms = policy.base_delay_ms.saturating_mul(1u64 << attempt);
@@ -471,6 +591,7 @@ impl LlmClient {
     pub async fn chat(&self, messages: &[&Message], tools: &[ToolSchema]) -> anyhow::Result<LlmResponse> {
         match self.config.api_format {
             ApiFormat::Anthropic => return self.chat_anthropic(messages, tools).await,
+            ApiFormat::Gemini => return self.chat_gemini(messages, tools).await,
             ApiFormat::OpenAiCompat => {}
         }
 
@@ -823,6 +944,132 @@ impl LlmClient {
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Anthropic API request failed after retries")))
     }
 
+    /// Send a chat completion request using the Gemini native API.
+    ///
+    /// Endpoint: `POST {api_url}/models/{model}:generateContent?key={api_key}`.
+    /// Targets either LiteLLM's native pass-through (`https://llm.smoo.ai/gemini/v1beta`)
+    /// or Google direct (`https://generativelanguage.googleapis.com/v1beta`).
+    /// Bypasses the OpenAI-compat translation layer that drops tool calls
+    /// silently on the second turn for Gemini models.
+    async fn chat_gemini(&self, messages: &[&Message], tools: &[ToolSchema]) -> anyhow::Result<LlmResponse> {
+        let (system_instruction, contents) = convert_messages_to_gemini(messages);
+
+        let function_declarations: Vec<GeminiFunctionDeclaration> = tools
+            .iter()
+            .map(|t| GeminiFunctionDeclaration {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                parameters: gemini_sanitize_schema(&t.parameters),
+            })
+            .collect();
+
+        let gemini_tools = if function_declarations.is_empty() {
+            Vec::new()
+        } else {
+            vec![GeminiTool { function_declarations }]
+        };
+
+        let request = GeminiRequest {
+            contents,
+            system_instruction,
+            tools: gemini_tools,
+            generation_config: GeminiGenerationConfig {
+                max_output_tokens: self.config.max_tokens,
+                temperature: self.config.temperature,
+            },
+        };
+
+        // Gemini's URL embeds the model name and the API key as a query param.
+        // We support both shapes: LiteLLM pass-through and Google direct.
+        let base = self.config.api_url.trim_end_matches('/');
+        let url = format!("{base}/models/{}:generateContent?key={}", self.config.model, self.config.api_key);
+        let policy = &self.config.retry_policy;
+
+        let mut last_error: Option<anyhow::Error> = None;
+
+        for attempt in 0..=policy.max_retries {
+            let resp = self.client.post(&url).header("content-type", "application/json").json(&request).send().await?;
+
+            let status = resp.status();
+            let rate_limit_info = parse_rate_limit_headers(resp.headers());
+
+            if status.is_success() {
+                let gateway_cost_usd = parse_gateway_cost(resp.headers());
+                let gemini_resp: GeminiResponse = resp.json().await?;
+
+                let mut content = String::new();
+                let mut tool_calls = Vec::new();
+
+                let candidate = gemini_resp.candidates.into_iter().next();
+                let finish_reason = candidate.as_ref().and_then(|c| c.finish_reason.clone()).unwrap_or_else(|| "stop".into());
+
+                if let Some(cand) = candidate {
+                    if let Some(content_block) = cand.content {
+                        for (idx, part) in content_block.parts.into_iter().enumerate() {
+                            if let Some(text) = part.text {
+                                if !content.is_empty() {
+                                    content.push('\n');
+                                }
+                                content.push_str(&text);
+                            }
+                            if let Some(fc) = part.function_call {
+                                // Gemini doesn't return a tool_call_id; synthesize a stable
+                                // one from index + name so subsequent functionResponse parts
+                                // can be paired (we don't actually use it on the wire — the
+                                // Gemini conversion looks up tool name, not id).
+                                tool_calls.push(ToolCall {
+                                    id: format!("call_{idx}_{}", fc.name),
+                                    name: fc.name,
+                                    arguments: fc.args,
+                                });
+                            }
+                        }
+                    }
+                }
+
+                let usage = gemini_resp.usage_metadata.map_or_else(Usage::default, |u| Usage {
+                    prompt_tokens: u.prompt_token_count,
+                    completion_tokens: u.candidates_token_count,
+                    total_tokens: u.total_token_count,
+                });
+
+                return Ok(LlmResponse {
+                    content,
+                    tool_calls,
+                    finish_reason,
+                    usage,
+                    rate_limit: Some(rate_limit_info),
+                    gateway_cost_usd,
+                });
+            }
+
+            let status_code = status.as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            let is_retryable = policy.retry_on_status.contains(&status_code);
+
+            if !is_retryable || attempt == policy.max_retries {
+                last_error = Some(anyhow::anyhow!("Gemini API error {status}: {body}"));
+                break;
+            }
+
+            let delay = rate_limit_info
+                .retry_after_ms
+                .map_or_else(|| calculate_backoff(attempt, policy), Duration::from_millis);
+
+            tracing::warn!(
+                attempt = attempt + 1,
+                max_retries = policy.max_retries,
+                status = status_code,
+                delay_ms = delay.as_millis(),
+                "Gemini API request failed, retrying"
+            );
+
+            tokio::time::sleep(delay).await;
+        }
+
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Gemini API request failed after retries")))
+    }
+
     pub fn config(&self) -> &LlmConfig {
         &self.config
     }
@@ -846,9 +1093,11 @@ impl LlmClient {
         // doesn't offer a moderation endpoint of its own; callers should
         // route moderation through a gateway (LiteLLM / Smoo AI Gateway /
         // OpenAI) even when the primary chat provider is Anthropic.
-        if matches!(self.config.api_format, ApiFormat::Anthropic) {
+        // Gemini also lacks a /moderations endpoint of its own — same rule.
+        if !matches!(self.config.api_format, ApiFormat::OpenAiCompat) {
             return Err(anyhow::anyhow!(
-                "moderate() requires an OpenAI-compatible provider (current: Anthropic). Route moderation through a gateway."
+                "moderate() requires an OpenAI-compatible provider (current: {:?}). Route moderation through a gateway.",
+                self.config.api_format
             ));
         }
 
@@ -1259,6 +1508,156 @@ fn convert_messages_to_anthropic(messages: &[&Message]) -> (Option<String>, Vec<
     let system = if system_parts.is_empty() { None } else { Some(system_parts.join("\n\n")) };
 
     (system, anthropic_messages)
+}
+
+/// Convert conversation messages to Gemini format, extracting system messages.
+///
+/// Returns `(system_instruction, contents)`. Gemini uses role `"user"` and
+/// `"model"` (not `"assistant"`); function responses go in a user-role
+/// content with a `functionResponse` part. Consecutive same-role messages
+/// are merged so the API doesn't reject the request — Gemini requires
+/// alternating user/model turns.
+fn convert_messages_to_gemini(messages: &[&Message]) -> (Option<GeminiSystemInstruction>, Vec<GeminiContent>) {
+    let mut system_parts: Vec<&str> = Vec::new();
+    let mut contents: Vec<GeminiContent> = Vec::new();
+
+    for msg in messages {
+        match msg.role {
+            Role::System => {
+                system_parts.push(&msg.content);
+            }
+            Role::User => {
+                push_or_merge_content(
+                    &mut contents,
+                    "user",
+                    vec![GeminiPart {
+                        text: Some(msg.content.clone()),
+                        function_call: None,
+                        function_response: None,
+                        thought_signature: None,
+                    }],
+                );
+            }
+            Role::Assistant => {
+                let mut parts: Vec<GeminiPart> = Vec::new();
+                if !msg.content.is_empty() {
+                    parts.push(GeminiPart {
+                        text: Some(msg.content.clone()),
+                        function_call: None,
+                        function_response: None,
+                        thought_signature: None,
+                    });
+                }
+                for tc in &msg.tool_calls {
+                    parts.push(GeminiPart {
+                        text: None,
+                        function_call: Some(GeminiFunctionCall {
+                            name: tc.name.clone(),
+                            args: if tc.arguments.is_object() {
+                                tc.arguments.clone()
+                            } else {
+                                serde_json::json!({})
+                            },
+                        }),
+                        function_response: None,
+                        thought_signature: None,
+                    });
+                }
+                if !parts.is_empty() {
+                    push_or_merge_content(&mut contents, "model", parts);
+                }
+            }
+            Role::Tool => {
+                // Gemini wraps tool results inside a user-role content with a
+                // functionResponse part. The `name` must match the prior
+                // functionCall — we recover it from `Message::tool_name`
+                // (set by `tool_result_named`); legacy callers without a name
+                // fall back to the empty string and the gateway will reject
+                // (which is the right failure mode — surfaces a real bug).
+                let name = msg.tool_name.clone().unwrap_or_default();
+                // Gemini expects `response` to be a JSON object. Wrap raw
+                // string output (which is what tools typically return) in
+                // `{ "result": "<output>" }`.
+                let response = serde_json::json!({ "result": msg.content });
+                push_or_merge_content(
+                    &mut contents,
+                    "user",
+                    vec![GeminiPart {
+                        text: None,
+                        function_call: None,
+                        function_response: Some(GeminiFunctionResponse { name, response }),
+                        thought_signature: None,
+                    }],
+                );
+            }
+        }
+    }
+
+    let system_instruction = if system_parts.is_empty() {
+        None
+    } else {
+        Some(GeminiSystemInstruction {
+            parts: vec![GeminiPart {
+                text: Some(system_parts.join("\n\n")),
+                function_call: None,
+                function_response: None,
+                thought_signature: None,
+            }],
+        })
+    };
+
+    (system_instruction, contents)
+}
+
+fn push_or_merge_content(contents: &mut Vec<GeminiContent>, role: &str, mut parts: Vec<GeminiPart>) {
+    if let Some(last) = contents.last_mut() {
+        if last.role == role {
+            last.parts.append(&mut parts);
+            return;
+        }
+    }
+    contents.push(GeminiContent { role: role.to_string(), parts });
+}
+
+/// Gemini's function-declaration schema is a strict subset of JSON Schema —
+/// it rejects keywords like `additionalProperties`, `$schema`, `definitions`,
+/// `oneOf`, `anyOf`, `allOf`, `not`, etc. Strip them recursively so tool
+/// schemas authored for OpenAI/Anthropic don't 400 the request.
+fn gemini_sanitize_schema(value: &serde_json::Value) -> serde_json::Value {
+    const STRIP_KEYS: &[&str] = &[
+        "$schema",
+        "$id",
+        "$ref",
+        "$comment",
+        "definitions",
+        "additionalProperties",
+        "patternProperties",
+        "unevaluatedProperties",
+        "oneOf",
+        "anyOf",
+        "allOf",
+        "not",
+        "if",
+        "then",
+        "else",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "const",
+    ];
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, v) in map {
+                if STRIP_KEYS.contains(&k.as_str()) {
+                    continue;
+                }
+                out.insert(k.clone(), gemini_sanitize_schema(v));
+            }
+            serde_json::Value::Object(out)
+        }
+        serde_json::Value::Array(arr) => serde_json::Value::Array(arr.iter().map(gemini_sanitize_schema).collect()),
+        _ => value.clone(),
+    }
 }
 
 #[cfg(test)]
@@ -1892,5 +2291,179 @@ mod tests {
     #[test]
     fn canonical_args_json_empty_object_stays_empty_object() {
         assert_eq!(canonical_tool_arguments_json(&serde_json::json!({})), "{}");
+    }
+
+    // --- Gemini conversion tests ---
+
+    #[test]
+    fn gemini_convert_user_only() {
+        let msg = Message::user("Hello");
+        let msgs = vec![&msg];
+        let (system, contents) = convert_messages_to_gemini(&msgs);
+        assert!(system.is_none());
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0].role, "user");
+        assert_eq!(contents[0].parts[0].text.as_deref(), Some("Hello"));
+    }
+
+    #[test]
+    fn gemini_convert_extracts_system() {
+        let s = Message::system("You are a helpful assistant.");
+        let u = Message::user("Hi");
+        let msgs = vec![&s, &u];
+        let (system, contents) = convert_messages_to_gemini(&msgs);
+        let sys = system.expect("system instruction set");
+        assert_eq!(sys.parts[0].text.as_deref(), Some("You are a helpful assistant."));
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0].role, "user");
+    }
+
+    #[test]
+    fn gemini_convert_assistant_uses_model_role() {
+        let u = Message::user("Hi");
+        let a = Message::assistant("Hello back!");
+        let msgs = vec![&u, &a];
+        let (_, contents) = convert_messages_to_gemini(&msgs);
+        assert_eq!(contents[1].role, "model", "Gemini uses 'model' not 'assistant'");
+    }
+
+    #[test]
+    fn gemini_convert_tool_call_round_trip() {
+        let u = Message::user("What's the weather?");
+        let mut a = Message::assistant("");
+        a.tool_calls.push(ToolCall {
+            id: "call-1".into(),
+            name: "get_weather".into(),
+            arguments: serde_json::json!({ "city": "Seattle" }),
+        });
+        let t = Message::tool_result_named("call-1", "get_weather", "sunny, 22C");
+        let msgs = vec![&u, &a, &t];
+        let (_, contents) = convert_messages_to_gemini(&msgs);
+
+        assert_eq!(contents.len(), 3);
+        // assistant tool_call → model role with functionCall part
+        assert_eq!(contents[1].role, "model");
+        let fc = contents[1].parts[0].function_call.as_ref().expect("functionCall");
+        assert_eq!(fc.name, "get_weather");
+        assert_eq!(fc.args, serde_json::json!({ "city": "Seattle" }));
+        // tool result → user role with functionResponse part, name preserved
+        assert_eq!(contents[2].role, "user");
+        let fr = contents[2].parts[0].function_response.as_ref().expect("functionResponse");
+        assert_eq!(fr.name, "get_weather");
+        assert_eq!(fr.response, serde_json::json!({ "result": "sunny, 22C" }));
+    }
+
+    #[test]
+    fn gemini_convert_merges_consecutive_user_messages() {
+        // Function-response (tool result) is also user-role; if user sends a
+        // followup right after a tool result we must merge them so Gemini's
+        // "alternating roles" requirement is satisfied.
+        let u1 = Message::user("Hi");
+        let u2 = Message::user("Are you there?");
+        let msgs = vec![&u1, &u2];
+        let (_, contents) = convert_messages_to_gemini(&msgs);
+        assert_eq!(contents.len(), 1, "consecutive same-role messages must merge");
+        assert_eq!(contents[0].parts.len(), 2);
+    }
+
+    #[test]
+    fn gemini_convert_assistant_with_text_and_tool_call() {
+        let u = Message::user("Use a tool");
+        let mut a = Message::assistant("Sure, let me check.");
+        a.tool_calls.push(ToolCall {
+            id: "c1".into(),
+            name: "ping".into(),
+            arguments: serde_json::json!({}),
+        });
+        let msgs = vec![&u, &a];
+        let (_, contents) = convert_messages_to_gemini(&msgs);
+        assert_eq!(contents[1].parts.len(), 2);
+        assert_eq!(contents[1].parts[0].text.as_deref(), Some("Sure, let me check."));
+        assert!(contents[1].parts[1].function_call.is_some());
+    }
+
+    #[test]
+    fn gemini_sanitize_strips_unsupported_keywords() {
+        let schema = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "city": { "type": "string" },
+                "mode": { "oneOf": [{ "type": "string" }, { "type": "null" }] }
+            },
+            "required": ["city"]
+        });
+        let cleaned = gemini_sanitize_schema(&schema);
+        let s = cleaned.to_string();
+        assert!(!s.contains("$schema"));
+        assert!(!s.contains("additionalProperties"));
+        assert!(!s.contains("oneOf"));
+        // Allowed keywords retained
+        assert!(s.contains("\"type\""));
+        assert!(s.contains("\"properties\""));
+        assert!(s.contains("\"required\""));
+    }
+
+    #[test]
+    fn gemini_request_serialization() {
+        let req = GeminiRequest {
+            contents: vec![GeminiContent {
+                role: "user".into(),
+                parts: vec![GeminiPart {
+                    text: Some("hi".into()),
+                    function_call: None,
+                    function_response: None,
+                    thought_signature: None,
+                }],
+            }],
+            system_instruction: None,
+            tools: vec![],
+            generation_config: GeminiGenerationConfig {
+                max_output_tokens: 1024,
+                temperature: 0.0,
+            },
+        };
+        let json = serde_json::to_string(&req).expect("serialize");
+        assert!(json.contains("\"contents\""));
+        assert!(json.contains("\"generationConfig\""));
+        assert!(json.contains("\"maxOutputTokens\":1024"));
+        assert!(!json.contains("\"systemInstruction\""), "absent system should be omitted");
+        assert!(!json.contains("\"tools\""), "empty tools should be omitted");
+        // skipped optional part fields
+        assert!(!json.contains("\"functionCall\""));
+        assert!(!json.contains("\"functionResponse\""));
+        assert!(!json.contains("\"thoughtSignature\""));
+    }
+
+    #[test]
+    fn gemini_response_deserialization_with_function_call() {
+        let json = r#"{
+            "candidates": [{
+                "content": {
+                    "role": "model",
+                    "parts": [
+                        { "text": "I'll check the weather." },
+                        { "functionCall": { "name": "get_weather", "args": { "city": "Seattle" } } }
+                    ]
+                },
+                "finishReason": "STOP"
+            }],
+            "usageMetadata": { "promptTokenCount": 10, "candidatesTokenCount": 5, "totalTokenCount": 15 }
+        }"#;
+        let resp: GeminiResponse = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(resp.candidates.len(), 1);
+        let cand = &resp.candidates[0];
+        let content = cand.content.as_ref().expect("content");
+        assert_eq!(content.parts.len(), 2);
+        let fc = content.parts[1].function_call.as_ref().expect("functionCall");
+        assert_eq!(fc.name, "get_weather");
+        assert_eq!(fc.args, serde_json::json!({ "city": "Seattle" }));
+        assert_eq!(resp.usage_metadata.unwrap().total_token_count, 15);
+    }
+
+    #[test]
+    fn api_format_default_is_openai_compat() {
+        assert_eq!(ApiFormat::default(), ApiFormat::OpenAiCompat);
     }
 }

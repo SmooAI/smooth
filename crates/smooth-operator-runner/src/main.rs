@@ -1569,14 +1569,49 @@ async fn main() {
     // (case-insensitive) plus the smooth-* aliases that pin to Claude
     // backings (smooth-judge, smooth-fast-haiku, smooth-reviewing-haiku
     // if it lands).
-    let api_format = if provider_overlay::is_anthropic_family(&config.model) {
+    // Family-aware api_url + api_format selection.
+    //
+    // Anthropic family → native Anthropic shape at `<api_url>/messages`
+    // (LiteLLM's /v1/messages route resolves smooth-* aliases AND
+    // preserves multi-turn tool_use / tool_result pairing).
+    //
+    // Gemini family → native Gemini shape at
+    // `<api_url>/models/<model>:generateContent`. The OpenAI-compat
+    // translation drops Gemini tool calls silently after turn 1 per
+    // customer-service-bot research. LiteLLM exposes Gemini via the
+    // native pass-through route `/gemini/v1beta` — we rewrite the
+    // gateway base URL from `/v1` to `/gemini/v1beta` so the same
+    // LlmClient code path can talk Gemini natively.
+    //
+    // Other families → OpenAI-compat (the gateway's default).
+    let (api_url, api_format) = if provider_overlay::is_anthropic_family(&config.model) {
         tracing::info!(model = %config.model, "LLM config: routing via Anthropic native shape (LiteLLM /v1/messages)");
-        smooth_operator::llm::ApiFormat::Anthropic
+        (config.api_url.clone(), smooth_operator::llm::ApiFormat::Anthropic)
+    } else if provider_overlay::is_gemini_family(&config.model) {
+        // Map `<base>/v1` (LiteLLM OpenAI-compat) → `<base>/gemini/v1beta`
+        // (LiteLLM Gemini native pass-through). Falls back to appending
+        // `/gemini/v1beta` if the URL doesn't end in `/v1`.
+        let trimmed = config.api_url.trim_end_matches('/');
+        let gemini_url = trimmed
+            .strip_suffix("/v1")
+            .map_or_else(|| format!("{trimmed}/gemini/v1beta"), |base| format!("{base}/gemini/v1beta"));
+        tracing::info!(
+            model = %config.model,
+            gemini_url = %gemini_url,
+            "LLM config: routing via Gemini native shape (LiteLLM /gemini/v1beta pass-through)"
+        );
+        (gemini_url, smooth_operator::llm::ApiFormat::Gemini)
     } else {
-        smooth_operator::llm::ApiFormat::OpenAiCompat
+        (config.api_url.clone(), smooth_operator::llm::ApiFormat::OpenAiCompat)
     };
+
+    // Gemini family models can have ~1M context. We don't need to bump
+    // input context (Smooth's compaction strategies handle that), but
+    // Gemini also supports `max_output_tokens` up to 65k — leave at 32k
+    // (default) since longer outputs make agents wander; bump only if we
+    // see truncation in practice.
     let llm = LlmConfig {
-        api_url: config.api_url.clone(),
+        api_url,
         api_key: config.api_key.clone(),
         model: config.model.clone(),
         max_tokens: 32768,

@@ -102,6 +102,27 @@ pub fn is_anthropic_family(model: &str) -> bool {
     )
 }
 
+/// True when the model identifier indicates a Google Gemini backing.
+///
+/// Used by the operator-runner to set `LlmConfig::api_format = Gemini`
+/// so the LLM client targets `<api_url>/models/<model>:generateContent`
+/// (LiteLLM's native pass-through route at `/gemini/v1beta`, which
+/// preserves Gemini's `functionCall` / `functionResponse` content blocks).
+/// The OpenAI-compat translation path silently drops Gemini tool calls
+/// after the first turn per customer-service-bot research.
+///
+/// Matches both the smooth-* alias namespace (`smooth-fast-gemini`,
+/// `smooth-judge-gemini`) and direct Gemini model strings (`gemini-...`,
+/// `models/gemini-...`).
+#[must_use]
+pub fn is_gemini_family(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    if m.contains("gemini") {
+        return true;
+    }
+    matches!(m.as_str(), "smooth-fast-gemini" | "smooth-judge-gemini" | "smooth-summarize")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,6 +175,31 @@ mod tests {
         assert!(!is_anthropic_family("kimi-k2-thinking"));
         assert!(!is_anthropic_family("gemini-2.5-flash"));
         assert!(!is_anthropic_family("deepseek-chat"));
+    }
+
+    #[test]
+    fn is_gemini_family_matches_aliases_and_models() {
+        // Smooth alias namespace
+        assert!(is_gemini_family("smooth-fast-gemini"));
+        assert!(is_gemini_family("smooth-judge-gemini"));
+        assert!(is_gemini_family("smooth-summarize"));
+
+        // Direct Gemini model strings
+        assert!(is_gemini_family("gemini-2.5-flash"));
+        assert!(is_gemini_family("gemini-3-flash-preview"));
+        assert!(is_gemini_family("gemini-3.1-flash-lite-preview"));
+        assert!(is_gemini_family("gemini-3-pro-preview"));
+        assert!(is_gemini_family("Gemini-3.1-Pro-Preview"));
+        assert!(is_gemini_family("models/gemini-2.5-flash"));
+
+        // Negative cases — must NOT match non-Gemini models
+        assert!(!is_gemini_family("gpt-5-mini"));
+        assert!(!is_gemini_family("claude-haiku-4-5"));
+        assert!(!is_gemini_family("smooth-coding"));
+        assert!(!is_gemini_family("smooth-reasoning"));
+        assert!(!is_gemini_family("smooth-judge"));
+        assert!(!is_gemini_family("kimi-k2-thinking"));
+        assert!(!is_gemini_family("deepseek-chat"));
     }
 
     #[test]
