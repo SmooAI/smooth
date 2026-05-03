@@ -195,6 +195,13 @@ struct ChatMessage {
     content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
+    /// The name of the tool that produced this result. Required by Gemini's
+    /// OpenAI-compat shim (it maps `role: tool` to `functionResponse`,
+    /// which needs a name); ignored by OpenAI; Anthropic uses tool_use_id
+    /// instead but doesn't reject the field. Sending it always is the
+    /// safest serialization across providers.
+    #[serde(rename = "name", skip_serializing_if = "Option::is_none")]
+    tool_name: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tool_calls: Vec<ChatToolCall>,
 }
@@ -1171,10 +1178,24 @@ fn to_chat_message(msg: &Message) -> ChatMessage {
         Some(msg.content.clone())
     };
 
+    // Tool-result messages must carry the originating tool's `name` so that
+    // strict OpenAI-compat upstreams (notably Gemini, when the gateway
+    // translates `role: tool` into a Gemini `functionResponse`) can pair the
+    // result with the previous `functionCall`. Anthropic infers the tool
+    // from the `tool_use_id` already; OpenAI itself ignores `name` on tool
+    // messages but accepts it. Sending it always is the safest serialization.
+    //
+    // The name is recovered from the matching prior assistant tool_call's
+    // name, which the conversation pairs in `Message::tool_result_named`.
+    // Falls back to None for legacy callers that didn't set it — those
+    // continue to work against OpenAI/Anthropic but may surprise Gemini.
+    let tool_name = if msg.role == Role::Tool { msg.tool_name.clone() } else { None };
+
     ChatMessage {
         role: role.into(),
         content,
         tool_call_id: msg.tool_call_id.clone(),
+        tool_name,
         tool_calls,
     }
 }
@@ -1301,6 +1322,32 @@ mod tests {
     }
 
     #[test]
+    fn tool_result_named_carries_name_through_serialization() {
+        // Defensive Gemini-compat: when the OpenAI-compat path goes through
+        // a gateway that translates `role: tool` to a Gemini
+        // `functionResponse`, the result must include the originating
+        // tool's name. `Message::tool_result_named` carries it; verify the
+        // ChatMessage serialization preserves it (via the `name` JSON
+        // field) and skips it when absent so legacy callers don't see a
+        // null name on the wire.
+        let named = Message::tool_result_named("call-7", "get_weather", "sunny, 22C");
+        let chat = to_chat_message(&named);
+        assert_eq!(chat.role, "tool");
+        assert_eq!(chat.tool_call_id.as_deref(), Some("call-7"));
+        assert_eq!(chat.tool_name.as_deref(), Some("get_weather"));
+        let json = serde_json::to_string(&chat).expect("serialize");
+        assert!(json.contains(r#""name":"get_weather""#), "json={json}");
+
+        // Legacy `tool_result` without a name still works — the name field
+        // is omitted from the JSON entirely (skip_serializing_if).
+        let legacy = Message::tool_result("call-8", "result");
+        let chat = to_chat_message(&legacy);
+        assert!(chat.tool_name.is_none());
+        let json = serde_json::to_string(&chat).expect("serialize");
+        assert!(!json.contains(r#""name""#), "legacy must not emit name field: {json}");
+    }
+
+    #[test]
     fn chat_request_serialization() {
         let req = ChatRequest {
             model: "test-model".into(),
@@ -1308,6 +1355,7 @@ mod tests {
                 role: "user".into(),
                 content: Some("hello".into()),
                 tool_call_id: None,
+                tool_name: None,
                 tool_calls: vec![],
             }],
             max_tokens: 100,
