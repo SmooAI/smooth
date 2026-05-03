@@ -1556,6 +1556,25 @@ async fn main() {
     let proxy_for_bash = Some(cast.goalie_url.clone());
 
     // Build the LLM config + agent config.
+    //
+    // Family-aware api_format: when the routed model is a Claude-class
+    // model, switch to native Anthropic shape (`<api_url>/messages` with
+    // `tool_use` / `tool_result` blocks). LiteLLM's `/v1/messages`
+    // resolves smooth-* aliases AND uses native Anthropic tool calls,
+    // which is the only path where multi-turn tool flows don't get
+    // mangled by OpenAI-compat translation (per customer-service-bot
+    // research, memory: reference_litellm_native_passthrough.md).
+    //
+    // Models matched: anything containing "claude" or "anthropic"
+    // (case-insensitive) plus the smooth-* aliases that pin to Claude
+    // backings (smooth-judge, smooth-fast-haiku, smooth-reviewing-haiku
+    // if it lands).
+    let api_format = if provider_overlay::is_anthropic_family(&config.model) {
+        tracing::info!(model = %config.model, "LLM config: routing via Anthropic native shape (LiteLLM /v1/messages)");
+        smooth_operator::llm::ApiFormat::Anthropic
+    } else {
+        smooth_operator::llm::ApiFormat::OpenAiCompat
+    };
     let llm = LlmConfig {
         api_url: config.api_url.clone(),
         api_key: config.api_key.clone(),
@@ -1563,7 +1582,7 @@ async fn main() {
         max_tokens: 32768,
         temperature: 0.3,
         retry_policy: smooth_operator::llm::RetryPolicy::default(),
-        api_format: smooth_operator::llm::ApiFormat::OpenAiCompat,
+        api_format,
     };
 
     // Tools + NarcHook — register BEFORE building the system prompt so we
