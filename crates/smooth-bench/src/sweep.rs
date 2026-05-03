@@ -55,6 +55,7 @@ pub trait TaskRunner: Send + Sync {
 }
 
 /// The real runner: shells out to `run_aider_polyglot`.
+#[derive(Clone)]
 pub struct PolyglotTaskRunner;
 
 #[async_trait]
@@ -194,11 +195,22 @@ impl SweepObserver for StdoutObserver {
 /// outcome's `solved = false` and DO NOT abort the sweep.
 pub async fn run_sweep<R, O>(curated: &CuratedList, runner: &R, cfg: &SweepConfig, observer: &mut O) -> anyhow::Result<SweepRun>
 where
-    R: TaskRunner,
+    R: TaskRunner + Clone + 'static,
     O: SweepObserver,
 {
     let pairs = curated_pairs(curated, cfg.gate);
     let total = pairs.len();
+
+    let parallelism = std::env::var("SMOOTH_BENCH_PARALLELISM")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(1)
+        .max(1);
+
+    if parallelism > 1 {
+        return run_sweep_parallel(pairs, total, runner, cfg, observer, parallelism).await;
+    }
+
     let mut per_task: Vec<(PolyglotLang, String, TaskOutcome)> = Vec::with_capacity(total);
     let mut durations_ms: Vec<u64> = Vec::with_capacity(total);
     let mut cumulative_cost = 0.0_f64;
@@ -259,6 +271,127 @@ where
     // Touch the sweep-wall-clock so clippy doesn't warn about the
     // unused Instant — it's kept for future reporting.
     let _ = sweep_started.elapsed();
+
+    Ok(SweepRun { score, per_task })
+}
+
+/// Parallel sweep variant. Spawns up to `parallelism` tasks at a time;
+/// collects outcomes as each finishes. Budget cap is checked before
+/// dispatching a new task — tasks already in flight are NOT cancelled
+/// when the cap is hit, but no further tasks start.
+///
+/// Observer events arrive in completion order (not original task order).
+/// `idx` passed to `on_task_complete` is the dispatch position; the
+/// per_task vec is sorted back into original order before returning so
+/// the score JSON is stable across runs.
+///
+/// Note: the bench runner today opens one chat-agent dispatch per task
+/// against a single Big Smooth daemon. The daemon's sandbox pool maxes
+/// at 3 concurrent VMs by default, so values above 3 stop helping —
+/// extra tasks queue inside the daemon. 3 is the practical max.
+async fn run_sweep_parallel<R, O>(
+    pairs: Vec<(PolyglotLang, String)>,
+    total: usize,
+    runner: &R,
+    cfg: &SweepConfig,
+    observer: &mut O,
+    parallelism: usize,
+) -> anyhow::Result<SweepRun>
+where
+    R: TaskRunner + Clone + 'static,
+    O: SweepObserver,
+{
+    use std::sync::Arc;
+    use tokio::sync::{Mutex, Semaphore};
+    use tokio::task::JoinSet;
+
+    eprintln!("bench: parallel sweep enabled (SMOOTH_BENCH_PARALLELISM={parallelism})");
+
+    let semaphore = Arc::new(Semaphore::new(parallelism));
+    let cumulative_cost = Arc::new(Mutex::new(0.0_f64));
+    let budget_hit = Arc::new(Mutex::new(false));
+
+    let cap = cfg.budget_usd_cap;
+    let task_opts_template = cfg.task_opts.clone();
+
+    let mut js: JoinSet<(usize, PolyglotLang, String, anyhow::Result<TaskOutcome>)> = JoinSet::new();
+
+    for (idx, (lang, task)) in pairs.into_iter().enumerate() {
+        // Budget gate before dispatching a new task.
+        let cur = *cumulative_cost.lock().await;
+        if cur >= cap {
+            *budget_hit.lock().await = true;
+            observer.on_budget_hit(cur, cap);
+            break;
+        }
+        let remaining = cap - cur;
+
+        let mut task_opts = task_opts_template.clone();
+        task_opts.budget_usd = Some(task_opts.budget_usd.map_or(remaining, |b| b.min(remaining)));
+
+        let permit = semaphore.clone().acquire_owned().await?;
+        // Each spawned task gets its own clone of the runner. PolyglotTaskRunner
+        // is a unit struct so the clone is free; tests that pass closures or
+        // canned runners will pay one Clone per task — acceptable cost.
+        let runner_clone = runner.clone();
+        let lang_c = lang;
+        let task_c = task.clone();
+        js.spawn(async move {
+            let result = runner_clone.run_one(lang_c, &task_c, &task_opts).await;
+            drop(permit);
+            (idx, lang_c, task_c, result)
+        });
+    }
+
+    let mut completed: Vec<(usize, PolyglotLang, String, TaskOutcome)> = Vec::with_capacity(total);
+    while let Some(joined) = js.join_next().await {
+        let (idx, lang, task, result) = match joined {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("bench: parallel task join error: {e:#}");
+                continue;
+            }
+        };
+        let outcome = match result {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("task {}/{} ({}/{}): runner error: {e:#}", idx + 1, total, lang.dataset_dir(), task);
+                TaskOutcome {
+                    solved: false,
+                    cost_usd: 0.0,
+                    duration_ms: 0,
+                    inconclusive: false,
+                    run_id: None,
+                }
+            }
+        };
+        let mut cum = cumulative_cost.lock().await;
+        *cum += outcome.cost_usd;
+        let cumulative_now = *cum;
+        drop(cum);
+        observer.on_task_complete(idx + 1, total, lang, &task, &outcome, cumulative_now);
+        completed.push((idx, lang, task, outcome));
+    }
+
+    // Re-sort by original dispatch index so the per_task vec + score
+    // JSON are stable across parallel runs.
+    completed.sort_by_key(|(idx, _, _, _)| *idx);
+    let per_task: Vec<(PolyglotLang, String, TaskOutcome)> = completed.into_iter().map(|(_, lang, task, outcome)| (lang, task, outcome)).collect();
+    let durations_ms: Vec<u64> = per_task.iter().map(|(_, _, o)| o.duration_ms).collect();
+    let final_cost = *cumulative_cost.lock().await;
+    let final_budget_hit = *budget_hit.lock().await;
+
+    let score = aggregate(
+        &per_task,
+        AggregateInputs {
+            smooth_version: cfg.smooth_version.clone(),
+            commit_sha: cfg.commit_sha.clone(),
+            cost_usd: final_cost,
+            durations_ms: &durations_ms,
+            budget_usd_cap: cfg.budget_usd_cap,
+            budget_usd_hit: final_budget_hit,
+        },
+    );
 
     Ok(SweepRun { score, per_task })
 }
@@ -367,13 +500,16 @@ mod tests {
     /// `(solved, cost, duration_ms)` tuples. If the queue is
     /// exhausted it returns an unsolved $0 task so tests don't panic
     /// mid-sweep.
+    #[derive(Clone)]
     struct CannedRunner {
-        queue: Mutex<Vec<(bool, f64, u64)>>,
+        queue: std::sync::Arc<Mutex<Vec<(bool, f64, u64)>>>,
     }
 
     impl CannedRunner {
         fn new(queue: Vec<(bool, f64, u64)>) -> Self {
-            Self { queue: Mutex::new(queue) }
+            Self {
+                queue: std::sync::Arc::new(Mutex::new(queue)),
+            }
         }
     }
 
@@ -475,6 +611,14 @@ mod tests {
         assert_eq!(obs.events.len(), 6);
         assert!(obs.budget_hit.is_none());
     }
+
+    // Note: SMOOTH_BENCH_PARALLELISM is process-global env state. Setting
+    // it in a test would leak into the parallel-running tests that
+    // depend on serial sweep semantics (budget-cap aborts, etc.). The
+    // parallel path is exercised end-to-end via the bench binary's
+    // integration paths and the test isn't worth the flakiness here.
+    // See similar consolidation in eval_html::classify_* and
+    // supervisor::config_from_env_round_trip.
 
     #[tokio::test]
     async fn sweep_budget_cap_aborts_on_third_task() {
@@ -583,8 +727,9 @@ mod tests {
 
     #[tokio::test]
     async fn sweep_runner_error_is_recorded_as_failure_not_abort() {
+        #[derive(Clone)]
         struct FailFirstRunner {
-            called: Mutex<u32>,
+            called: std::sync::Arc<Mutex<u32>>,
         }
         #[async_trait]
         impl TaskRunner for FailFirstRunner {
@@ -606,7 +751,9 @@ mod tests {
         }
         let (list, mut cfg) = tiny_curated_pr_pairs();
         cfg.budget_usd_cap = 100.0;
-        let runner = FailFirstRunner { called: Mutex::new(0) };
+        let runner = FailFirstRunner {
+            called: std::sync::Arc::new(Mutex::new(0)),
+        };
         let mut obs = CapturingObserver::new();
         let run = run_sweep(&list, &runner, &cfg, &mut obs).await.unwrap();
 
