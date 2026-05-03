@@ -197,11 +197,11 @@ footer {
     affine-cipher: 25.6 min &rarr; 11.3 min via legacy-direct.
 </p>
 <p>
-    <strong>Live status at 1:03 elapsed: 3 / 3 PASS</strong> on python tasks (affine-cipher,
-    beer-song, book-store) &mdash; vs take 7's <strong>1 / 3</strong> at the same point
-    (book-store was a real FAIL in take 7, now PASSes). Pace per-task is similar to take 7
-    (~25-30 min) &mdash; STOP rule didn't shrink chat-agent-path time as much as expected,
-    but pass rate on real solves improved.
+    <strong>Live status at 1:36 elapsed: 4 / 6 PASS</strong> &mdash; vs take 7's
+    <strong>3 / 6</strong> at the same point with most-of-3 being timeout artifacts.
+    Confirmed real solves: 3 in take 8 (affine-cipher 31 min, book-store 26 min,
+    accumulate 14.6 min), only 1 in take 7. python/book-store and rust/accumulate are
+    now genuinely solved instead of FAIL/timeout.
 </p>
 <p>
     <strong>Cost wiring partial:</strong> <code>[METRICS]</code> comment is being posted on
