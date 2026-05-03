@@ -28,6 +28,16 @@ pub struct TaskOutcome {
     pub solved: bool,
     pub cost_usd: f64,
     pub duration_ms: u64,
+    /// True when the dispatch hit `SMOOTH_BENCH_CHAT_HTTP_TIMEOUT_S`
+    /// before the operator made meaningful progress — typically the
+    /// chat-agent never returned a pearl id within the HTTP timeout
+    /// window and the polyglot starter happens to satisfy the test
+    /// suite for that exercise. These shouldn't count as real PASSes
+    /// in the headline number even though the test runner reports
+    /// solved=true. Detection: duration is exactly the chat HTTP
+    /// timeout (within 100 ms) AND cost_usd is 0 (no LLM rounds
+    /// completed) AND no LLM error was surfaced.
+    pub inconclusive: bool,
 }
 
 /// Injection point for the per-task runner. Production implementation
@@ -46,15 +56,37 @@ pub struct PolyglotTaskRunner;
 impl TaskRunner for PolyglotTaskRunner {
     async fn run_one(&self, lang: PolyglotLang, task: &str, opts: &BenchOpts) -> anyhow::Result<TaskOutcome> {
         let res = crate::run_aider_polyglot(lang, task, opts).await?;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
+        let duration_ms: u64 = (res.duration_s * 1000.0).max(0.0) as u64;
+
+        // Detect HTTP-timeout starter passes. The chat-driver sets
+        // SMOOTH_BENCH_CHAT_HTTP_TIMEOUT_S (default 300 s) on the
+        // reqwest client; when that timeout fires before the chat-agent
+        // returns a pearl id, the bench bails and runs the test against
+        // the unmodified workspace. Some polyglot exercises happen to
+        // pass without modification (rust/accumulate stub returns the
+        // input list, etc.); these PASSes shouldn't pollute the
+        // headline.
+        //
+        // Heuristic: duration ≈ HTTP timeout (within 100 ms),
+        // cost_usd is 0 (no LLM rounds completed), and the test runner
+        // declared solved=true. The cost==0 check excludes real solves
+        // that happened to take the same wall time by coincidence —
+        // unless the cost-tracker propagation bug masks them, which
+        // we accept as conservative classification.
+        let http_timeout_secs: u64 = std::env::var("SMOOTH_BENCH_CHAT_HTTP_TIMEOUT_S")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300);
+        let http_timeout_ms = http_timeout_secs * 1000;
+        let near_timeout = duration_ms.saturating_sub(http_timeout_ms) < 100 && http_timeout_ms.saturating_sub(duration_ms) < 100;
+        let inconclusive = res.solved && near_timeout && res.cost_usd <= 0.0;
+
         Ok(TaskOutcome {
             solved: res.solved,
             cost_usd: res.cost_usd,
-            // `run_aider_polyglot` measures wall clock in seconds (f64).
-            // Convert back to whole milliseconds for the Score.
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
-            duration_ms: (res.duration_s * 1000.0).max(0.0) as u64,
-            // Unused but kept to avoid dead-field warnings when the
-            // outcome gets extended; see also the test runner below.
+            duration_ms,
+            inconclusive,
         })
     }
 }
@@ -69,6 +101,7 @@ pub fn outcome_from_result(r: &BenchResult) -> TaskOutcome {
         cost_usd: r.cost_usd,
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
         duration_ms: (r.duration_s * 1000.0).max(0.0) as u64,
+        inconclusive: false,
     }
 }
 
@@ -192,6 +225,7 @@ where
                     solved: false,
                     cost_usd: 0.0,
                     duration_ms: 0,
+                    inconclusive: false,
                 }
             }
         };
@@ -261,6 +295,7 @@ fn aggregate(per_task: &[(PolyglotLang, String, TaskOutcome)], inputs: Aggregate
     let mut by_lang_counts: BTreeMap<PolyglotLang, (u32, u32)> = BTreeMap::new();
     let mut tasks_attempted: u32 = 0;
     let mut tasks_green: u32 = 0;
+    let mut tasks_inconclusive: u32 = 0;
     for (lang, _task, outcome) in per_task {
         let entry = by_lang_counts.entry(*lang).or_insert((0, 0));
         entry.0 += 1;
@@ -268,6 +303,9 @@ fn aggregate(per_task: &[(PolyglotLang, String, TaskOutcome)], inputs: Aggregate
         if outcome.solved {
             entry.1 += 1;
             tasks_green += 1;
+        }
+        if outcome.inconclusive {
+            tasks_inconclusive += 1;
         }
     }
 
@@ -290,6 +328,7 @@ fn aggregate(per_task: &[(PolyglotLang, String, TaskOutcome)], inputs: Aggregate
         by_language,
         tasks_attempted,
         tasks_green,
+        tasks_inconclusive,
         cost_usd: inputs.cost_usd,
         median_task_ms: median_ms(inputs.durations_ms),
         budget_usd_cap: inputs.budget_usd_cap,
@@ -339,10 +378,16 @@ mod tests {
                     solved: false,
                     cost_usd: 0.0,
                     duration_ms: 0,
+                    inconclusive: false,
                 });
             }
             let (solved, cost_usd, duration_ms) = q.remove(0);
-            Ok(TaskOutcome { solved, cost_usd, duration_ms })
+            Ok(TaskOutcome {
+                solved,
+                cost_usd,
+                duration_ms,
+                inconclusive: false,
+            })
         }
     }
 
@@ -543,6 +588,7 @@ mod tests {
                         solved: true,
                         cost_usd: 0.1,
                         duration_ms: 500,
+                        inconclusive: false,
                     })
                 }
             }
