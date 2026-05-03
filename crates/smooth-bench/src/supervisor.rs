@@ -211,12 +211,17 @@ impl Supervisor {
     /// Errors (LLM failures, store failures) are logged via `tracing` and
     /// converted to `Continue` — bench supervision is non-fatal.
     pub async fn tick_async(&mut self, store: &PearlStore, pearl_id: &str, t0: Instant) -> SupervisorDecision {
-        self.last_tick = Some(Instant::now());
+        let tick_started = Instant::now();
+        self.last_tick = Some(tick_started);
 
         // Cool off: even if the LLM wants to steer twice in a row, don't
         // flood the runner's mailbox.
         if let Some(last) = self.last_steer {
             if last.elapsed() < Duration::from_secs(STEERING_COOLDOWN_S) {
+                eprintln!(
+                    "supervisor: tick {pearl_id} cooldown ({}s left)",
+                    STEERING_COOLDOWN_S.saturating_sub(last.elapsed().as_secs())
+                );
                 return SupervisorDecision::Continue;
             }
         }
@@ -232,6 +237,7 @@ impl Supervisor {
 
         // Don't supervise terminal states.
         if matches!(pearl_status, Some(PearlStatus::Closed)) {
+            eprintln!("supervisor: tick {pearl_id} STOP (pearl closed)");
             return SupervisorDecision::Stop;
         }
 
@@ -251,17 +257,31 @@ impl Supervisor {
         };
 
         let decision = parse_supervisor_response(&response.content);
-        if let SupervisorDecision::Steer(ref msg) = decision {
-            let body = format!("[STEERING:GUIDANCE] {msg}");
-            match store.add_comment(pearl_id, &body) {
-                Ok(_) => {
-                    self.last_steer = Some(Instant::now());
-                    self.steer_count += 1;
-                    eprintln!("supervisor: steered {pearl_id} ({}#{}): {msg}", self.config.model, self.steer_count);
-                }
-                Err(e) => {
-                    eprintln!("supervisor: failed to write steering on {pearl_id}: {e}");
-                    return SupervisorDecision::Continue;
+        let elapsed_ms = tick_started.elapsed().as_millis();
+        match &decision {
+            SupervisorDecision::Continue => {
+                // One-line per-tick log so silent CONTINUE runs are visible
+                // in the bench log. Kept terse — ~20 bytes per tick.
+                eprintln!("supervisor: tick {pearl_id} CONTINUE ({elapsed_ms}ms, +{new_comments} comments)");
+            }
+            SupervisorDecision::Stop => {
+                eprintln!("supervisor: tick {pearl_id} STOP ({elapsed_ms}ms)");
+            }
+            SupervisorDecision::Steer(msg) => {
+                let body = format!("[STEERING:GUIDANCE] {msg}");
+                match store.add_comment(pearl_id, &body) {
+                    Ok(_) => {
+                        self.last_steer = Some(Instant::now());
+                        self.steer_count += 1;
+                        eprintln!(
+                            "supervisor: steered {pearl_id} ({}#{}, {elapsed_ms}ms): {msg}",
+                            self.config.model, self.steer_count
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("supervisor: failed to write steering on {pearl_id}: {e}");
+                        return SupervisorDecision::Continue;
+                    }
                 }
             }
         }
