@@ -277,17 +277,41 @@ impl Supervisor {
             }
             SupervisorDecision::Steer(msg) => {
                 let body = format!("[STEERING:GUIDANCE] {msg}");
-                match store.add_comment(pearl_id, &body) {
-                    Ok(_) => {
+                // Dolt manifest contention is common under parallel sweep
+                // load (multiple pearls writing heartbeats + steers
+                // concurrently). Retry with exponential backoff before
+                // giving up — contention windows are typically sub-second.
+                let mut attempt = 0_u32;
+                let result = loop {
+                    match store.add_comment(pearl_id, &body) {
+                        Ok(_pearl) => break Ok(()),
+                        Err(e) => {
+                            let m = e.to_string();
+                            // Only retry on the manifest/read-only class
+                            // of error. Real problems (missing pearl,
+                            // perm error, disk full) shouldn't burn retries.
+                            let retryable = m.contains("read only") || m.contains("manifest") || m.contains("Error 1105");
+                            if !retryable || attempt >= 5 {
+                                break Err(e);
+                            }
+                            // 50ms, 100, 200, 400, 800 → ~1.5s total ceiling.
+                            tokio::time::sleep(Duration::from_millis(50_u64 << attempt)).await;
+                            attempt += 1;
+                        }
+                    }
+                };
+                match result {
+                    Ok(()) => {
                         self.last_steer = Some(Instant::now());
                         self.steer_count += 1;
+                        let retry_note = if attempt > 0 { format!(", {attempt} retries") } else { String::new() };
                         eprintln!(
-                            "supervisor: steered {pearl_id} ({}#{}, {elapsed_ms}ms): {msg}",
+                            "supervisor: steered {pearl_id} ({}#{}, {elapsed_ms}ms{retry_note}): {msg}",
                             self.config.model, self.steer_count
                         );
                     }
                     Err(e) => {
-                        eprintln!("supervisor: failed to write steering on {pearl_id}: {e}");
+                        eprintln!("supervisor: failed to write steering on {pearl_id} after {attempt} retries: {e}");
                         return SupervisorDecision::Continue;
                     }
                 }
