@@ -110,37 +110,53 @@ impl SupervisorConfig {
     }
 }
 
-/// Family-aware route selection — parallel to operator-runner's logic.
-/// Gemini family → native pass-through. Anthropic family → /v1/messages
-/// (LiteLLM resolves smooth-* aliases on this route). Other → OpenAI-compat.
+/// Route selection for the supervisor's LLM calls.
+///
+/// **Important asymmetry vs the operator-runner**: the supervisor doesn't
+/// use tools (`tools: &[]` on every chat call). The whole reason
+/// operator-runner forces native Anthropic / Gemini routes is that LiteLLM's
+/// OpenAI-compat translation mangles multi-turn tool calls. With no tools,
+/// the OpenAI-compat path works fine — and it's the only route where
+/// LiteLLM resolves `smooth-*` aliases. The native pass-through routes
+/// (`/gemini/v1beta`, `/anthropic/v1`) forward dumbly to upstream and 404
+/// on smooth-* names.
+///
+/// So: the supervisor only flips to native shape when the caller has
+/// supplied a *direct* upstream model name (e.g. `gemini-3.1-flash-lite-
+/// preview`, `claude-haiku-4-5`). For smooth-* aliases (`smooth-fast-gemini`,
+/// `smooth-judge`) we stay on OpenAI-compat so LiteLLM can do the lookup.
 fn resolve_supervisor_route(base_url: &str, model: &str) -> (String, ApiFormat) {
     let m = model.to_ascii_lowercase();
     let trimmed = base_url.trim_end_matches('/');
 
-    if is_gemini_family(&m) {
+    // smooth-* aliases must go through LiteLLM's OpenAI-compat router so
+    // the alias resolves. Tools-free supervisor calls don't hit the
+    // tool-translation bug.
+    if m.starts_with("smooth-") {
+        return (trimmed.to_string(), ApiFormat::OpenAiCompat);
+    }
+
+    // Direct upstream model names: prefer native shape so the supervisor
+    // can use Gemini 3.x preview models that LiteLLM's DB doesn't yet
+    // expose via /v1/chat/completions.
+    if is_direct_gemini(&m) {
         let url = trimmed
             .strip_suffix("/v1")
             .map_or_else(|| format!("{trimmed}/gemini/v1beta"), |base| format!("{base}/gemini/v1beta"));
         return (url, ApiFormat::Gemini);
     }
-    if is_anthropic_family(&m) {
+    if is_direct_anthropic(&m) {
         return (trimmed.to_string(), ApiFormat::Anthropic);
     }
     (trimmed.to_string(), ApiFormat::OpenAiCompat)
 }
 
-fn is_gemini_family(m: &str) -> bool {
-    if m.contains("gemini") {
-        return true;
-    }
-    matches!(m, "smooth-fast-gemini" | "smooth-judge-gemini" | "smooth-summarize")
+fn is_direct_gemini(m: &str) -> bool {
+    m.starts_with("gemini-") || m.starts_with("models/gemini-") || m.starts_with("google/gemini")
 }
 
-fn is_anthropic_family(m: &str) -> bool {
-    if m.contains("claude") || m.contains("anthropic") || m.contains("haiku") || m.contains("sonnet") || m.contains("opus") {
-        return true;
-    }
-    matches!(m, "smooth-judge" | "smooth-fast-haiku" | "smooth-reviewing-haiku" | "smooth-judge-haiku")
+fn is_direct_anthropic(m: &str) -> bool {
+    m.starts_with("claude-") || m.starts_with("anthropic/") || m.starts_with("models/claude")
 }
 
 /// The supervisor agent — wraps an LLM client and decides when to steer.
@@ -394,24 +410,29 @@ mod tests {
         std::env::set_var(MODEL, "   ");
         assert!(SupervisorConfig::from_env().is_none(), "expected disabled when MODEL is whitespace");
 
-        // 3. Gemini native route picked up.
+        // 3. smooth-* alias stays on OpenAI-compat so LiteLLM can resolve it.
         std::env::set_var(MODEL, "smooth-fast-gemini");
         std::env::set_var(URL, "https://llm.smoo.ai/v1");
-        let cfg = SupervisorConfig::from_env().expect("gemini config");
-        assert_eq!(cfg.api_url, "https://llm.smoo.ai/gemini/v1beta");
-        assert_eq!(cfg.api_format, ApiFormat::Gemini);
-        // Default interval when INTERVAL unset.
+        let cfg = SupervisorConfig::from_env().expect("smooth alias config");
+        assert_eq!(cfg.api_url, "https://llm.smoo.ai/v1");
+        assert_eq!(cfg.api_format, ApiFormat::OpenAiCompat);
         assert_eq!(cfg.interval, Duration::from_secs(DEFAULT_INTERVAL_S));
 
-        // 4. Custom interval.
+        // 4. Custom interval picks up.
         std::env::set_var(INTERVAL, "30");
         let cfg = SupervisorConfig::from_env().expect("custom interval");
         assert_eq!(cfg.interval, Duration::from_secs(30));
+        std::env::remove_var(INTERVAL);
 
-        // 5. Anthropic route — chat_anthropic appends /messages itself, so
-        // we keep /v1 as the base.
+        // 5. Direct gemini-* model name → native pass-through.
+        std::env::set_var(MODEL, "gemini-3.1-flash-lite-preview");
+        let cfg = SupervisorConfig::from_env().expect("direct gemini config");
+        assert_eq!(cfg.api_url, "https://llm.smoo.ai/gemini/v1beta");
+        assert_eq!(cfg.api_format, ApiFormat::Gemini);
+
+        // 6. Direct claude-* model name → Anthropic native shape.
         std::env::set_var(MODEL, "claude-haiku-4-5");
-        let cfg = SupervisorConfig::from_env().expect("anthropic config");
+        let cfg = SupervisorConfig::from_env().expect("direct anthropic config");
         assert_eq!(cfg.api_format, ApiFormat::Anthropic);
         assert_eq!(cfg.api_url, "https://llm.smoo.ai/v1");
 
@@ -468,13 +489,24 @@ mod tests {
     }
 
     #[test]
-    fn family_helpers_match_real_models() {
-        assert!(is_gemini_family("gemini-3.1-flash-lite-preview"));
-        assert!(is_gemini_family("smooth-fast-gemini"));
-        assert!(is_anthropic_family("claude-haiku-4-5"));
-        assert!(is_anthropic_family("smooth-judge"));
-        assert!(!is_gemini_family("smooth-coding"));
-        assert!(!is_anthropic_family("kimi-k2-thinking"));
+    fn direct_helpers_match_only_upstream_names() {
+        // Direct upstream names → match.
+        assert!(is_direct_gemini("gemini-3.1-flash-lite-preview"));
+        assert!(is_direct_gemini("gemini-2.5-flash"));
+        assert!(is_direct_gemini("models/gemini-3-flash-preview"));
+        assert!(is_direct_anthropic("claude-haiku-4-5"));
+        assert!(is_direct_anthropic("anthropic/claude-haiku-4-5"));
+
+        // smooth-* aliases must NOT match — they have to go through
+        // LiteLLM's OpenAI-compat router so the alias resolves.
+        assert!(!is_direct_gemini("smooth-fast-gemini"));
+        assert!(!is_direct_gemini("smooth-judge-gemini"));
+        assert!(!is_direct_anthropic("smooth-judge"));
+        assert!(!is_direct_anthropic("smooth-fast-haiku"));
+
+        // Other families never match either helper.
+        assert!(!is_direct_gemini("kimi-k2-thinking"));
+        assert!(!is_direct_anthropic("kimi-k2-thinking"));
     }
 
     #[test]
