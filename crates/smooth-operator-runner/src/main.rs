@@ -2073,15 +2073,13 @@ async fn main() {
 
     match result {
         Ok(_conv) => {
-            // Emit Completed explicitly so Big Smooth sees it in stdout even
-            // if the channel-based emission raced with process exit. This is
-            // the authoritative "I'm done" signal — Big Smooth looks for
-            // `saw_completed` before sending TaskComplete to WS clients.
-            emit_event(&AgentEvent::Completed {
-                agent_id: config.operator_id.clone(),
-                iterations: 0, // exact count was in the channel event; this is the fallback
-                cost_usd: 0.0, // authoritative cost already emitted by the channel event
-            });
+            // Channel was already drained at line ~2023 (drop(tx) +
+            // emit_task.await), so the agent's authoritative Completed
+            // event is on stdout by now. No fallback emission needed —
+            // a stale fallback with cost_usd: 0.0 was previously here
+            // but the dispatch parser already had the real cost, so
+            // the fallback only added noise. Leaving the slot for a
+            // diagnostic eprintln if needed.
             tracing::info!("smooth-operator-runner completed successfully");
             std::process::exit(0);
         }

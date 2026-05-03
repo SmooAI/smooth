@@ -85,9 +85,14 @@ pub async fn run_via_chat_agent(
         prompt = prompt,
     );
 
+    // Use a fast model for the dispatch turn — it's just pearls_create
+    // + teammate_spawn. The default reasoning-kimi takes 30-60s; gemini
+    // flash gets it back in <10s. Override via
+    // SMOOTH_BENCH_BIG_SMOOTH_MODEL to experiment.
+    let dispatch_model = std::env::var("SMOOTH_BENCH_BIG_SMOOTH_MODEL").unwrap_or_else(|_| "smooth-fast-gemini".to_string());
     let chat_resp: serde_json::Value = client
         .post(format!("{}/api/chat", big_smooth_url.trim_end_matches('/')))
-        .json(&serde_json::json!({"content": chat_content}))
+        .json(&serde_json::json!({"content": chat_content, "model": dispatch_model}))
         .send()
         .await
         .context("POST /api/chat")?
@@ -124,7 +129,7 @@ pub async fn run_via_chat_agent(
     // it can offer context-aware guidance just like the user would.
     let mut supervisor: Option<Supervisor> = SupervisorConfig::from_env().map(|cfg| {
         eprintln!(
-            "bench: supervisor enabled (LLM={} via {}, interval={}s, daemon={})",
+            "bench: woz enabled (LLM={} via {}, interval={}s, daemon={})",
             cfg.model,
             cfg.api_url,
             cfg.interval.as_secs(),
@@ -174,7 +179,13 @@ pub async fn run_via_chat_agent(
         // Comments via Big Smooth (cheap state-of-life check).
         let comments_url = format!("{api_base}/api/pearls/{pearl_id}/comments");
         let comments: Vec<smooth_pearls::PearlComment> = match poll_client.get(&comments_url).send().await {
-            Ok(resp) => resp.json::<serde_json::Value>().await.ok().and_then(|j| j.get("data").cloned()).and_then(|d| serde_json::from_value(d).ok()).unwrap_or_default(),
+            Ok(resp) => resp
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|j| j.get("data").cloned())
+                .and_then(|d| serde_json::from_value(d).ok())
+                .unwrap_or_default(),
             Err(_) => Vec::new(),
         };
 
@@ -238,7 +249,13 @@ pub async fn run_via_chat_agent(
 async fn fetch_cost_via_api(client: &reqwest::Client, api_base: &str, pearl_id: &str) -> f64 {
     let url = format!("{api_base}/api/pearls/{pearl_id}/comments");
     let comments: Vec<smooth_pearls::PearlComment> = match client.get(&url).send().await {
-        Ok(resp) => resp.json::<serde_json::Value>().await.ok().and_then(|j| j.get("data").cloned()).and_then(|d| serde_json::from_value(d).ok()).unwrap_or_default(),
+        Ok(resp) => resp
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|j| j.get("data").cloned())
+            .and_then(|d| serde_json::from_value(d).ok())
+            .unwrap_or_default(),
         Err(_) => Vec::new(),
     };
     extract_cost(&comments)

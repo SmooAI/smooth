@@ -1,3 +1,15 @@
+//! Woz — the bench-side seasoned-engineer end user.
+//!
+//! Woz drives operator pearls the way a senior engineer using smooth
+//! would: dispatch a task, wait a bit, ask "how's it going?", read
+//! Big Smooth's reply (with diffs/tool-calls), reason about whether
+//! the approach is right, ask sharper questions or ask Big Smooth
+//! to nudge the teammate.
+//!
+//! (Original module name was `supervisor`; the type kept the name
+//! `Supervisor` for back-compat with chat_driver, but everything
+//! user-facing — log lines, prompts, errors — talks about Woz.)
+//!
 //! Bench-side supervisor — drives operator pearls like an end user
 //! using smooth.
 //!
@@ -46,7 +58,14 @@ use std::time::{Duration, Instant};
 use smooth_operator::conversation::Message;
 use smooth_operator::llm::{ApiFormat, LlmClient, LlmConfig};
 
-const DEFAULT_INTERVAL_S: u64 = 60;
+/// Tick cadence. Sandbox cold-start + first PROGRESS heartbeat is
+/// typically ~30-40s, so first tick at 30s often hits *before* the
+/// teammate has done anything. We deliberately accept that — first
+/// tick mostly produces a "still spinning up" reply, but subsequent
+/// 30s checks are tight enough to catch wedges fast. Was 60s; cut
+/// after the first real-solve run showed only 4-5 supervisor turns
+/// per task — too few coaching opportunities to drive convergence.
+const DEFAULT_INTERVAL_S: u64 = 30;
 const DEFAULT_MODEL: &str = "gemini-3.1-flash-lite-preview";
 /// HTTP timeout for each `/api/chat` call. Aligned with Big Smooth's
 /// chat-turn ceiling (default 900s) plus a bit of slack so the
@@ -249,7 +268,11 @@ impl Supervisor {
             Ok(r) => r,
             Err(e) => {
                 let reason = format!("supervisor LLM call failed: {e}");
-                eprintln!("supervisor: tick {pearl_id}#{} FAILED in {ms}ms — {reason}", self.tick_count, ms = started.elapsed().as_millis());
+                eprintln!(
+                    "woz: tick {pearl_id}#{} FAILED in {ms}ms — {reason}",
+                    self.tick_count,
+                    ms = started.elapsed().as_millis()
+                );
                 // Roll back the synthetic tick hint so retry doesn't compound.
                 self.history.pop();
                 return TickResult::Failed { reason };
@@ -260,7 +283,7 @@ impl Supervisor {
         // STOP shortcut — supervisor decided we're done.
         if next_msg.eq_ignore_ascii_case("STOP") || next_msg.starts_with("STOP\n") || next_msg.starts_with("STOP ") {
             eprintln!(
-                "supervisor: tick {pearl_id}#{} STOP in {ms}ms — supervisor signalled completion",
+                "woz: tick {pearl_id}#{} STOP in {ms}ms — Woz signalled completion",
                 self.tick_count,
                 ms = started.elapsed().as_millis()
             );
@@ -269,9 +292,14 @@ impl Supervisor {
             return TickResult::Ok { reply: next_msg };
         }
 
-        // 2) Send that message to Big Smooth.
+        // 2) Send that message to Big Smooth — request a fast model for
+        // the chat-agent so coaching ticks don't take 5+ minutes each.
+        // Status checks are shallow (teammate_read + format reply); a
+        // fast Gemini handles them well. Override via
+        // SMOOTH_BENCH_BIG_SMOOTH_MODEL.
+        let big_smooth_model = std::env::var("SMOOTH_BENCH_BIG_SMOOTH_MODEL").unwrap_or_else(|_| "smooth-fast-gemini".to_string());
         let url = format!("{}/api/chat", self.config.daemon_url.trim_end_matches('/'));
-        let body = serde_json::json!({ "content": next_msg });
+        let body = serde_json::json!({ "content": next_msg, "model": big_smooth_model });
         let result = self.http.post(&url).json(&body).send().await;
         let total_ms = started.elapsed().as_millis();
 
@@ -279,7 +307,7 @@ impl Supervisor {
             Ok(r) => r,
             Err(e) => {
                 let reason = format!("HTTP send failed: {e}");
-                eprintln!("supervisor: tick {pearl_id}#{} FAILED in {total_ms}ms — {reason}", self.tick_count);
+                eprintln!("woz: tick {pearl_id}#{} FAILED in {total_ms}ms — {reason}", self.tick_count);
                 self.history.pop();
                 return TickResult::Failed { reason };
             }
@@ -289,7 +317,7 @@ impl Supervisor {
             let status = response.status();
             let body_text = response.text().await.unwrap_or_default();
             let reason = format!("status={status} body={body_text}");
-            eprintln!("supervisor: tick {pearl_id}#{} FAILED in {total_ms}ms — {reason}", self.tick_count);
+            eprintln!("woz: tick {pearl_id}#{} FAILED in {total_ms}ms — {reason}", self.tick_count);
             self.history.pop();
             return TickResult::Failed { reason };
         }
@@ -298,12 +326,31 @@ impl Supervisor {
             Ok(v) => v,
             Err(e) => {
                 let reason = format!("response parse failed: {e}");
-                eprintln!("supervisor: tick {pearl_id}#{} FAILED in {total_ms}ms — {reason}", self.tick_count);
+                eprintln!("woz: tick {pearl_id}#{} FAILED in {total_ms}ms — {reason}", self.tick_count);
                 self.history.pop();
                 return TickResult::Failed { reason };
             }
         };
         let reply = parsed.get("data").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+
+        // Empty `data` is treated as a soft failure. Big Smooth's
+        // chat-agent occasionally returns `{"data":"","ok":true}` on
+        // internal hiccups; if we appended that as the assistant turn
+        // the supervisor LLM would have nothing to react to and would
+        // confabulate (observed: hallucinated a different pearl id on
+        // a subsequent tick when the prior reply was empty). Roll back
+        // the user message we just added and let the next tick retry
+        // with the same history anchor.
+        if reply.is_empty() {
+            eprintln!(
+                "woz: tick {pearl_id}#{} EMPTY-REPLY FAILED in {total_ms}ms — Big Smooth returned data=''; rolling back",
+                self.tick_count
+            );
+            self.history.pop();
+            return TickResult::Failed {
+                reason: "empty data field in chat response".into(),
+            };
+        }
 
         // 3) Append Big Smooth's reply to history as the assistant turn.
         self.history.push(Message::assistant(reply.clone()));
@@ -313,7 +360,7 @@ impl Supervisor {
         let reply_snippet: String = reply.chars().take(120).collect();
         let trunc2 = if reply.len() > 120 { "…" } else { "" };
         eprintln!(
-            "supervisor: tick {pearl_id}#{} ok in {total_ms}ms\n  → \"{snippet}{trunc1}\"\n  ← \"{reply_snippet}{trunc2}\"",
+            "woz: tick {pearl_id}#{} ok in {total_ms}ms\n  → \"{snippet}{trunc1}\"\n  ← \"{reply_snippet}{trunc2}\"",
             self.tick_count,
         );
 
@@ -345,9 +392,11 @@ impl Supervisor {
 
 fn build_system_prompt(pearl_id: &str, task_description: &str, interval_s: u64) -> String {
     format!(
-        r#"You are a thoughtful end-user of Smooth. You dispatched a coding task to Big Smooth (the team lead AI), who put a teammate operator on it inside a sandbox. You can ONLY interact via Big Smooth's chat — exactly as a real user would in the TUI.
+        r#"You are **Woz**, a seasoned senior engineer using Smooth as your day-to-day coding tool. You dispatched a coding task to Big Smooth (the team lead AI in your TUI), who in turn put a teammate operator on it inside a sandbox. You can ONLY interact via Big Smooth's chat — exactly as a real user would.
 
-Your job: ping Big Smooth periodically, read its replies (which contain Claude-Code-style tool calls, diffs, and test output), and offer guidance like a senior engineer would. You should NOT directly call tools, write to pearls, or otherwise bypass Big Smooth — every action you want taken must be requested via natural-language chat.
+Style: terse, direct, no fluff. You've shipped code for 20 years; you've seen this kind of bug a thousand times. You don't lecture, you don't motivate, you just point at the broken thing. When something's off, you say "the round-trip test is failing because you flipped a and b in the decode formula — fix line 14." When it's fine, you say "looks right, keep going."
+
+Your job: ping Big Smooth periodically, read its replies (which contain Claude-Code-style tool calls, diffs, and test output), and offer guidance like a senior engineer would. You should NOT directly call tools, write to pearls, or otherwise bypass Big Smooth — every action you want taken must be requested via natural-language chat. Big Smooth knows about the `teammate_message` tool; just describe what you want said.
 
 # The task you dispatched
 
