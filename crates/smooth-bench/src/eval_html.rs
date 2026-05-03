@@ -55,19 +55,25 @@ impl Verdict {
     }
 }
 
-/// Apply the same INCONCLUSIVE heuristic the sweep uses: 300003 ms wall
-/// time AND no supervisor steering (a steered run is by definition not a
-/// starter-pass coincidence). Used for the per-task HTML's verdict pill.
+/// Apply the same INCONCLUSIVE heuristic the sweep's `TaskOutcome` uses:
+/// `solved && wall ≈ HTTP timeout && no supervisor activity` — a PASS at
+/// exactly the chat-agent's HTTP timeout, with no steering, is almost
+/// certainly a polyglot-starter-coincidence rather than a real solve.
+///
+/// FAILs at the same wall time are kept as FAIL (operator failed because
+/// the chat-agent never returned a pearl id and the unmodified workspace
+/// failed the suite — that's still a failure, not an inconclusive
+/// outcome). Mirrors `crate::sweep::TaskOutcome.inconclusive`.
 pub fn classify(result: &BenchResult) -> Verdict {
     let timeout_ms = std::env::var("SMOOTH_BENCH_CHAT_HTTP_TIMEOUT_S")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(300);
     let wall_ms = (result.duration_s * 1000.0) as u64;
-    // 2 ms wiggle room on either side of the exact harness timeout.
+    // 5 ms wiggle room on either side of the exact harness timeout.
     let near_timeout = wall_ms.abs_diff(timeout_ms * 1000) <= 5;
     let no_supervisor_activity = result.supervisor_steer_count.unwrap_or(0) == 0;
-    if near_timeout && no_supervisor_activity {
+    if result.solved && near_timeout && no_supervisor_activity {
         return Verdict::Inconclusive;
     }
     if result.solved {
@@ -501,11 +507,30 @@ mod tests {
         assert_eq!(classify(&r), Verdict::Fail);
     }
 
+    // Note: env-var override (SMOOTH_BENCH_CHAT_HTTP_TIMEOUT_S) is *not*
+    // unit-tested here — std::env::set_var is process-global and would
+    // race the parallel render_sweep_html_aggregates_pass_rate test
+    // (which calls classify under the hood). The env-var path is exercised
+    // end-to-end by the bench harness's own integration runs, and the
+    // supervisor's config_from_env_round_trip test covers the same
+    // pattern in a setting where it can be safely serialised.
+
     #[test]
-    fn classify_inconclusive_at_http_timeout_with_no_steers() {
-        // 300003 ms wall AND no supervisor activity → INCONCLUSIVE
+    fn classify_pass_at_timeout_with_no_steers_is_inconclusive() {
+        // PASS at 300003 ms wall AND no supervisor activity → INCONCLUSIVE
+        // (likely a polyglot-starter coincidence, not a real solve).
         let r = make_result(true, 300.003, Some(0));
         assert_eq!(classify(&r), Verdict::Inconclusive);
+    }
+
+    #[test]
+    fn classify_fail_stays_fail_even_at_timeout() {
+        // FAIL at 300003 ms wall is still a FAIL — the chat-agent never
+        // returned a pearl id, the unmodified workspace failed the suite,
+        // that's a real failure (not "we don't know"). Mirrors the sweep's
+        // TaskOutcome.inconclusive rule which only flips PASSes.
+        let r = make_result(false, 300.003, Some(0));
+        assert_eq!(classify(&r), Verdict::Fail);
     }
 
     #[test]
@@ -514,14 +539,6 @@ mod tests {
         // 300003 ms wall is no longer INCONCLUSIVE.
         let r = make_result(true, 300.003, Some(1));
         assert_eq!(classify(&r), Verdict::Pass);
-    }
-
-    #[test]
-    fn classify_uses_env_override() {
-        std::env::set_var("SMOOTH_BENCH_CHAT_HTTP_TIMEOUT_S", "120");
-        let r = make_result(true, 120.0, Some(0));
-        assert_eq!(classify(&r), Verdict::Inconclusive);
-        std::env::remove_var("SMOOTH_BENCH_CHAT_HTTP_TIMEOUT_S");
     }
 
     #[test]
