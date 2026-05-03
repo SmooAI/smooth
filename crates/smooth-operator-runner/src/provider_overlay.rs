@@ -76,6 +76,32 @@ pub fn for_model(model: &str) -> Option<&'static str> {
     None
 }
 
+/// True when the model identifier indicates a Claude / Anthropic backing.
+///
+/// Used by the operator-runner to set `LlmConfig::api_format =
+/// Anthropic` so the LLM client targets `<api_url>/messages` (LiteLLM's
+/// native Anthropic-shape route, which resolves smooth-* aliases AND
+/// preserves multi-turn tool_use / tool_result pairing). The OpenAI-compat
+/// translation path silently mangles Claude tool calls on the second turn
+/// per customer-service-bot research (memory:
+/// `reference_litellm_native_passthrough.md`).
+///
+/// Matches both the smooth-* alias namespace (`smooth-judge`,
+/// `smooth-fast-haiku`) and direct Anthropic model strings (`claude-...`,
+/// `anthropic/...`, anything containing `haiku` / `sonnet` / `opus`).
+#[must_use]
+pub fn is_anthropic_family(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    if m.contains("claude") || m.contains("anthropic") || m.contains("haiku") || m.contains("sonnet") || m.contains("opus") {
+        return true;
+    }
+    // Smooth aliases that pin to Claude in the LiteLLM gateway.
+    matches!(
+        m.as_str(),
+        "smooth-judge" | "smooth-fast-haiku" | "smooth-reviewing-haiku" | "smooth-judge-haiku"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,6 +125,35 @@ mod tests {
         assert_eq!(for_model("deepseek-v3.2-speciale"), Some(DEEPSEEK));
         assert_eq!(for_model("glm-5.1"), Some(GLM));
         assert_eq!(for_model("qwen3-coder-plus"), Some(QWEN));
+    }
+
+    #[test]
+    fn is_anthropic_family_matches_aliases_and_models() {
+        // Smooth alias namespace
+        assert!(is_anthropic_family("smooth-judge"));
+        assert!(is_anthropic_family("smooth-fast-haiku"));
+        assert!(is_anthropic_family("smooth-reviewing-haiku"));
+
+        // Direct Anthropic model strings
+        assert!(is_anthropic_family("claude-haiku-4-5"));
+        assert!(is_anthropic_family("claude-haiku-4-5-20251001"));
+        assert!(is_anthropic_family("claude-sonnet-4-6"));
+        assert!(is_anthropic_family("Claude-Opus-4-7"));
+        assert!(is_anthropic_family("anthropic/claude-haiku-4-5"));
+
+        // Substring matches
+        assert!(is_anthropic_family("haiku-3-5"));
+        assert!(is_anthropic_family("opus-4"));
+        assert!(is_anthropic_family("sonnet-4-5"));
+
+        // Negative cases — must NOT match non-Anthropic models
+        assert!(!is_anthropic_family("gpt-5-mini"));
+        assert!(!is_anthropic_family("smooth-coding"));
+        assert!(!is_anthropic_family("smooth-reasoning"));
+        assert!(!is_anthropic_family("smooth-fast-gemini"));
+        assert!(!is_anthropic_family("kimi-k2-thinking"));
+        assert!(!is_anthropic_family("gemini-2.5-flash"));
+        assert!(!is_anthropic_family("deepseek-chat"));
     }
 
     #[test]
