@@ -197,13 +197,20 @@ footer {
     affine-cipher: 25.6 min &rarr; 11.3 min via legacy-direct.
 </p>
 <p>
-    Live status (~30 min): task 1 (th-20a126) is at <strong>59 heartbeats &times; 30s
-    = 29.5 min elapsed</strong> &mdash; same pattern as take 7. The STOP rule's wall-time
-    win on the legacy-direct path didn't carry over to the chat-agent-dispatch path the
-    bench uses. Either chat-agent layering adds extra rounds, or single-task variance is
-    high. Investigating; expect take 8 to land at similar wall time to take 7 with
-    higher real-PASS rate (more iterations &rarr; more correct solves) and now-real
-    cost numbers from the <code>[METRICS]</code> wiring.
+    <strong>Live status at 1:03 elapsed: 3 / 3 PASS</strong> on python tasks (affine-cipher,
+    beer-song, book-store) &mdash; vs take 7's <strong>1 / 3</strong> at the same point
+    (book-store was a real FAIL in take 7, now PASSes). Pace per-task is similar to take 7
+    (~25-30 min) &mdash; STOP rule didn't shrink chat-agent-path time as much as expected,
+    but pass rate on real solves improved.
+</p>
+<p>
+    <strong>Cost wiring partial:</strong> <code>[METRICS]</code> comment is being posted on
+    completed pearls (verified <code>th-f1d3ac</code>: <code>[METRICS] cost_usd=0.000000
+    iterations=0</code>) &mdash; the pipe to bench's <code>extract_cost()</code> works,
+    but the upstream values from the runner's <code>AgentEvent::Completed</code> aren't
+    propagating. Bug filed for investigation: either runner emits Completed with zeros
+    (cost-tracker didn't see <code>x-litellm-response-cost</code> headers despite LiteLLM
+    emitting them), or dispatch parser missed the Completed event entirely.
 </p>
 
 <h2>Per-task results</h2>
