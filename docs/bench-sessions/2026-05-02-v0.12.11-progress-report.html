@@ -197,11 +197,11 @@ footer {
     affine-cipher: 25.6 min &rarr; 11.3 min via legacy-direct.
 </p>
 <p>
-    <strong>Live status at 1:36 elapsed: 4 / 6 PASS</strong> &mdash; vs take 7's
-    <strong>3 / 6</strong> at the same point with most-of-3 being timeout artifacts.
-    Confirmed real solves: 3 in take 8 (affine-cipher 31 min, book-store 26 min,
-    accumulate 14.6 min), only 1 in take 7. python/book-store and rust/accumulate are
-    now genuinely solved instead of FAIL/timeout.
+    <strong>Live status at 2:09 elapsed: 6 / 11 PASS = 54.5 %</strong> &mdash; pace
+    matching take 7. Confirmed real solves still 3 (affine-cipher 31 min, book-store 26 min,
+    accumulate 14.6 min); the rest are 300003 ms HTTP-timeout starter passes (5 of 11
+    tasks hit the timeout exactly &mdash; same starter-pass pollution as take 7). Tasks 12-18
+    still pending (~30 min more at this pace).
 </p>
 <p>
     <strong>Cost wiring partial:</strong> <code>[METRICS]</code> comment is being posted on
