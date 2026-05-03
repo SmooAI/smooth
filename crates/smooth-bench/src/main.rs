@@ -51,6 +51,20 @@ enum Commands {
     /// This is the "The Line" authoritative benchmark — the single
     /// pass-rate Smoo AI publishes with every release.
     Score(ScoreArgs),
+
+    /// Render a per-task HTML eval report from a bench-run dir.
+    ///
+    /// Reads `<run-dir>/result.json` + `<run-dir>/PROMPT.txt` plus the
+    /// pearl's comments (heartbeats, [STEERING], [METRICS], [IDLE])
+    /// from `~/.smooth/dolt/`, and writes `<run-dir>/eval.html`.
+    EvalReport {
+        /// Run id (last 8 chars under `~/.smooth/bench-runs/`) or full
+        /// path to a run directory.
+        run: String,
+        /// Output path. Default: `<run-dir>/eval.html`.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -137,7 +151,25 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Score(args) => run_score(args).await,
+        Commands::EvalReport { run, output } => run_eval_report(&run, output.as_deref()),
     }
+}
+
+fn run_eval_report(run: &str, output: Option<&std::path::Path>) -> Result<()> {
+    // Accept either a full path or a run-id (last 8 hex chars).
+    let run_dir = if std::path::Path::new(run).is_dir() {
+        PathBuf::from(run)
+    } else {
+        smooth_bench::runs_root()?.join(run)
+    };
+    if !run_dir.exists() {
+        anyhow::bail!("run dir not found: {}", run_dir.display());
+    }
+    let html = smooth_bench::eval_html::render_run_html(&run_dir).with_context(|| format!("render eval HTML for {}", run_dir.display()))?;
+    let out_path = output.map_or_else(|| run_dir.join("eval.html"), std::path::Path::to_path_buf);
+    std::fs::write(&out_path, html).with_context(|| format!("write {}", out_path.display()))?;
+    println!("wrote {}", out_path.display());
+    Ok(())
 }
 
 async fn run_score(args: ScoreArgs) -> Result<()> {

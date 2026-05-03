@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod chat_driver;
 pub mod curated;
+pub mod eval_html;
 pub mod score;
 pub mod supervisor;
 pub mod sweep;
@@ -173,6 +174,18 @@ pub struct BenchResult {
     pub tool_calls: Vec<ToolCallRecord>,
     pub llm_error: Option<String>,
     pub test_stdout: String,
+    /// Pearl id the chat-agent dispatched on. Lets `smooth-bench eval-report`
+    /// look up the pearl's comments (heartbeats, [STEERING] from the
+    /// supervisor, [METRICS]) so a per-task HTML can render the operator's
+    /// actual workflow. Optional for back-compat with pre-supervisor result.json.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pearl_id: Option<String>,
+    /// Number of `[STEERING:GUIDANCE]` comments the supervisor agent posted
+    /// during this run. Zero when the supervisor was disabled, when every
+    /// tick decided CONTINUE, or when LLM calls failed throughout. Optional
+    /// for back-compat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor_steer_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -220,7 +233,7 @@ pub async fn run_aider_polyglot(lang: PolyglotLang, task: &str, opts: &BenchOpts
         .unwrap_or(false);
     let deadline = std::time::Duration::from_secs(std::env::var("SMOOTH_BENCH_DEADLINE_S").ok().and_then(|v| v.parse().ok()).unwrap_or(1800));
 
-    let (cost_usd, tool_calls, llm_error) = if legacy_direct {
+    let (cost_usd, tool_calls, llm_error, pearl_id, supervisor_steer_count) = if legacy_direct {
         match smooth_code::headless::run_headless_capture(&opts.big_smooth_url, work_dir.clone(), prompt.clone(), opts.model.clone(), opts.budget_usd).await {
             Ok(out) => (
                 out.cost,
@@ -232,14 +245,17 @@ pub async fn run_aider_polyglot(lang: PolyglotLang, task: &str, opts: &BenchOpts
                     })
                     .collect(),
                 None,
+                None,
+                None,
             ),
-            Err(e) => (0.0, Vec::new(), Some(e.to_string())),
+            Err(e) => (0.0, Vec::new(), Some(e.to_string()), None, None),
         }
     } else {
         match crate::chat_driver::run_via_chat_agent(&opts.big_smooth_url, &work_dir, &prompt, opts.budget_usd, deadline).await {
             Ok(out) => (
-                out.cost,
-                out.tool_calls
+                out.headless.cost,
+                out.headless
+                    .tool_calls
                     .into_iter()
                     .map(|t| ToolCallRecord {
                         name: t.name,
@@ -247,8 +263,10 @@ pub async fn run_aider_polyglot(lang: PolyglotLang, task: &str, opts: &BenchOpts
                     })
                     .collect(),
                 None,
+                out.pearl_id,
+                Some(out.supervisor_steer_count),
             ),
-            Err(e) => (0.0, Vec::new(), Some(e.to_string())),
+            Err(e) => (0.0, Vec::new(), Some(e.to_string()), None, None),
         }
     };
 
@@ -286,6 +304,8 @@ pub async fn run_aider_polyglot(lang: PolyglotLang, task: &str, opts: &BenchOpts
         tool_calls,
         llm_error,
         test_stdout,
+        pearl_id,
+        supervisor_steer_count,
     };
 
     let json = serde_json::to_string_pretty(&result)?;

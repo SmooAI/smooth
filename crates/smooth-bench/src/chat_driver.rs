@@ -28,6 +28,15 @@ use smooth_code::headless::{HeadlessOutput, HeadlessToolCall};
 
 use crate::supervisor::{Supervisor, SupervisorConfig};
 
+/// Output of the chat-agent driver — wraps the legacy `HeadlessOutput`
+/// shape with bench-side metadata (pearl id, supervisor stats) so the
+/// eval-report renderer can stitch them together later.
+pub struct ChatDriverOutput {
+    pub headless: HeadlessOutput,
+    pub pearl_id: Option<String>,
+    pub supervisor_steer_count: u32,
+}
+
 /// Read a duration in seconds from an env var, falling back to a default.
 ///
 /// Pulled out so the bench's tunable timeouts read consistently and so
@@ -46,7 +55,7 @@ pub async fn run_via_chat_agent(
     prompt: &str,
     budget_usd: Option<f64>,
     deadline: Duration,
-) -> anyhow::Result<HeadlessOutput> {
+) -> anyhow::Result<ChatDriverOutput> {
     // The HTTP timeout covers the initial POST /api/chat call that
     // dispatches the chat-agent. The chat-agent returns once it's
     // spawned a teammate (typically <60s on a warm daemon, longer on
@@ -119,10 +128,14 @@ pub async fn run_via_chat_agent(
     loop {
         if t0.elapsed() > deadline {
             let comments = store.get_comments(&pearl_id).unwrap_or_default();
-            return Ok(HeadlessOutput {
-                content: chat_text,
-                tool_calls,
-                cost: extract_cost(&comments),
+            return Ok(ChatDriverOutput {
+                headless: HeadlessOutput {
+                    content: chat_text,
+                    tool_calls,
+                    cost: extract_cost(&comments),
+                },
+                pearl_id: Some(pearl_id),
+                supervisor_steer_count: supervisor.as_ref().map_or(0, Supervisor::steer_count),
             });
         }
 
@@ -141,10 +154,14 @@ pub async fn run_via_chat_agent(
                     });
                 }
             }
-            return Ok(HeadlessOutput {
-                content: chat_text,
-                tool_calls,
-                cost: extract_cost(&comments),
+            return Ok(ChatDriverOutput {
+                headless: HeadlessOutput {
+                    content: chat_text,
+                    tool_calls,
+                    cost: extract_cost(&comments),
+                },
+                pearl_id: Some(pearl_id),
+                supervisor_steer_count: supervisor.as_ref().map_or(0, Supervisor::steer_count),
             });
         }
 
@@ -152,10 +169,14 @@ pub async fn run_via_chat_agent(
         if let Ok(Some(p)) = store.get(&pearl_id) {
             if p.status == smooth_pearls::PearlStatus::Closed {
                 eprintln!("bench: pearl {pearl_id} closed after {:.1}s", t0.elapsed().as_secs_f64());
-                return Ok(HeadlessOutput {
-                    content: chat_text,
-                    tool_calls,
-                    cost: extract_cost(&comments),
+                return Ok(ChatDriverOutput {
+                    headless: HeadlessOutput {
+                        content: chat_text,
+                        tool_calls,
+                        cost: extract_cost(&comments),
+                    },
+                    pearl_id: Some(pearl_id),
+                    supervisor_steer_count: supervisor.as_ref().map_or(0, Supervisor::steer_count),
                 });
             }
         }
@@ -175,10 +196,14 @@ pub async fn run_via_chat_agent(
         if comments.len() == last_seen_count {
             if quiet_since.elapsed() > idle_grace {
                 eprintln!("bench: pearl {pearl_id} quiet for {}s, treating as done", idle_grace.as_secs());
-                return Ok(HeadlessOutput {
-                    content: chat_text,
-                    tool_calls,
-                    cost: extract_cost(&comments),
+                return Ok(ChatDriverOutput {
+                    headless: HeadlessOutput {
+                        content: chat_text,
+                        tool_calls,
+                        cost: extract_cost(&comments),
+                    },
+                    pearl_id: Some(pearl_id),
+                    supervisor_steer_count: supervisor.as_ref().map_or(0, Supervisor::steer_count),
                 });
             }
         } else {
