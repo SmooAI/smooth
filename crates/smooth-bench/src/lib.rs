@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 pub mod chat_driver;
 pub mod curated;
 pub mod score;
+pub mod supervisor;
 pub mod sweep;
 
 /// Where we cache the cloned polyglot-benchmark repo.

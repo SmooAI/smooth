@@ -26,6 +26,8 @@ use anyhow::Context;
 
 use smooth_code::headless::{HeadlessOutput, HeadlessToolCall};
 
+use crate::supervisor::{Supervisor, SupervisorConfig};
+
 /// Read a duration in seconds from an env var, falling back to a default.
 ///
 /// Pulled out so the bench's tunable timeouts read consistently and so
@@ -106,6 +108,14 @@ pub async fn run_via_chat_agent(
     eprintln!("bench: pearl {pearl_id} polling with idle_grace={}s", idle_grace.as_secs());
     let mut tool_calls: Vec<HeadlessToolCall> = Vec::new();
 
+    // Optional supervisor — drives operator like a coach when
+    // SMOOTH_BENCH_SUPERVISOR_MODEL is set. Disabled by default; existing
+    // bench runs are byte-for-byte unchanged when the env var is unset.
+    let mut supervisor: Option<Supervisor> = SupervisorConfig::from_env().map(|cfg| {
+        eprintln!("bench: supervisor enabled (model={}, interval={}s)", cfg.model, cfg.interval.as_secs());
+        Supervisor::new(cfg)
+    });
+
     loop {
         if t0.elapsed() > deadline {
             let comments = store.get_comments(&pearl_id).unwrap_or_default();
@@ -147,6 +157,16 @@ pub async fn run_via_chat_agent(
                     tool_calls,
                     cost: extract_cost(&comments),
                 });
+            }
+        }
+
+        // Supervisor tick — gated by the supervisor's own interval. The
+        // supervisor reads the same comments + status the bench already
+        // has, calls its LLM, and posts a [STEERING:GUIDANCE] comment
+        // when it decides to coach. Failures are non-fatal.
+        if let Some(sup) = supervisor.as_mut() {
+            if sup.should_tick(Instant::now()) {
+                let _ = sup.tick_async(&store, &pearl_id, t0).await;
             }
         }
 
