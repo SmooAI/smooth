@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Smooth bench — 2026-05-02 — v0.12.11 (77e49e3)</title>
+<title>Smooth bench — 2026-05-03 — v0.12.11 (724bf05)</title>
 <style>
 :root {
     --bg: #0c0d10;
@@ -147,8 +147,8 @@ footer {
 <header>
     <h1>Smooth bench — tuning batch progress report</h1>
     <p class="meta">
-        Smooth version <code>0.12.11 (77e49e3)</code> &middot;
-        Generated <code>2026-05-02 19:34 EDT</code> &middot;
+        Smooth version <code>0.12.11 (724bf05)</code> &middot;
+        Generated <code>2026-05-03 03:32 EDT</code> &middot;
         Mode <code>sandboxed (microVM per task)</code> &middot;
         Sample <code>--pr</code> (3 tasks &times; 6 languages = 18 runs)
     </p>
@@ -189,28 +189,199 @@ footer {
     <code>docs/bench-sessions/2026-05-02-v0.12.11-take7-final.json</code>.
 </p>
 
-<h2>Take 8 (in flight) — STOP-on-green prompt rule live</h2>
+<h2>Take 8 — partial run, killed mid-task 15</h2>
 <p>
-    Bench take 8 is running on commit <code>1ffd7dd</code> with the new STOP-on-green rule
-    in <code>operator-runner/prompts/system.md</code>: "the moment all tests pass, STOP. Do
-    not refine, do not refactor, do not add documentation." Verified single-task win on
-    affine-cipher: 25.6 min &rarr; 11.3 min via legacy-direct.
+    <span class="tag note">Incomplete</span> Take 8 ran 14 of 18 tasks before the bench
+    process was killed mid-dispatch on task 15 (<code>java/book-store</code>, pearl
+    <code>th-001718</code>). Tasks 16&ndash;18 (cpp triple) never started. Runtime infrastructure
+    has stayed steady through the run; the cost pipe still reports zeros despite the
+    <code>[METRICS]</code> wire-through landing &mdash; runner-side bug, not bench-side.
+</p>
+<div class="grid-2">
+    <div class="card stat pass">
+        <div class="label">Take 8 (14 / 18 ran)</div>
+        <div class="value">64.3 %</div>
+        <div class="delta">9 PASS / 5 FAIL of the 14 tasks that ran</div>
+    </div>
+    <div class="card stat neutral">
+        <div class="label">Confirmed real solves</div>
+        <div class="value">5</div>
+        <div class="delta">python aff/book, rust acc, js beer, java aff &mdash; all &gt;14 min wall</div>
+    </div>
+    <div class="card stat neutral">
+        <div class="label">INCONCLUSIVE (300003 ms)</div>
+        <div class="value">7 / 14</div>
+        <div class="delta">HTTP-timeout artifacts &mdash; classification now lands as a status, not a PASS</div>
+    </div>
+    <div class="card stat neutral">
+        <div class="label">Real-solve rate</div>
+        <div class="value">71.4 %</div>
+        <div class="delta">5 / 7 of confirmed-finish tasks &mdash; INCONCLUSIVE excluded</div>
+    </div>
+</div>
+<p class="meta">
+    The headline split-up is what matters: of the 14 tasks that ran, 7 hit
+    <code>SMOOTH_BENCH_CHAT_HTTP_TIMEOUT_S=300</code> exactly (4 INCONCLUSIVE PASS +
+    3 INCONCLUSIVE FAIL). Real-solve rate over the unambiguous 7 tasks is 71.4 %
+    &mdash; better than the 50 % take-7 headline implied. The cpp triple is still
+    untested in this run. <code>th-ba7299</code> (INCONCLUSIVE classification) shipped
+    on take 8's commit, so future runs will surface the split natively in the score
+    JSON instead of being inferred from wall-time pattern matching.
 </p>
 <p>
-    <strong>Live status at 2:09 elapsed: 6 / 11 PASS = 54.5 %</strong> &mdash; pace
-    matching take 7. Confirmed real solves still 3 (affine-cipher 31 min, book-store 26 min,
-    accumulate 14.6 min); the rest are 300003 ms HTTP-timeout starter passes (5 of 11
-    tasks hit the timeout exactly &mdash; same starter-pass pollution as take 7). Tasks 12-18
-    still pending (~30 min more at this pace).
+    <strong>Cost wiring still partial:</strong> <code>[METRICS]</code> comment is being
+    posted on completed pearls (verified <code>th-f1d3ac</code>: <code>[METRICS]
+    cost_usd=0.000000 iterations=0</code>) &mdash; the pipe to bench's
+    <code>extract_cost()</code> works, but the upstream values from the runner's
+    <code>AgentEvent::Completed</code> still arrive as zeros. Either the runner doesn't
+    propagate <code>x-litellm-response-cost</code> headers correctly, or dispatch
+    parser drops the Completed event. Filed for investigation after Workstream 1
+    (eval HTML / events.jsonl) lands.
 </p>
-<p>
-    <strong>Cost wiring partial:</strong> <code>[METRICS]</code> comment is being posted on
-    completed pearls (verified <code>th-f1d3ac</code>: <code>[METRICS] cost_usd=0.000000
-    iterations=0</code>) &mdash; the pipe to bench's <code>extract_cost()</code> works,
-    but the upstream values from the runner's <code>AgentEvent::Completed</code> aren't
-    propagating. Bug filed for investigation: either runner emits Completed with zeros
-    (cost-tracker didn't see <code>x-litellm-response-cost</code> headers despite LiteLLM
-    emitting them), or dispatch parser missed the Completed event entirely.
+
+<h3>Take 8 per-task results (14 tasks ran; 4 not started)</h3>
+<table>
+    <thead>
+        <tr>
+            <th>#</th>
+            <th>Lang</th>
+            <th>Task</th>
+            <th>Result</th>
+            <th>Wall time</th>
+            <th>Notes</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>1</td><td>python</td><td>affine-cipher</td>
+            <td><span class="tag pass">Pass</span></td>
+            <td>1847.2 s (30.8 min)</td>
+            <td>Real solve. Slower than take 7 (25.7 min) &mdash; STOP-on-green didn't help here.</td>
+        </tr>
+        <tr>
+            <td>2</td><td>python</td><td>beer-song</td>
+            <td><span class="tag pass">Pass</span> <span class="tag note">inconclusive</span></td>
+            <td>300.0 s</td>
+            <td>HTTP timeout. Polyglot starter likely passes the test suite.</td>
+        </tr>
+        <tr>
+            <td>3</td><td>python</td><td>book-store</td>
+            <td><span class="tag pass">Pass</span></td>
+            <td>1542.3 s (25.7 min)</td>
+            <td>Real solve. Take 7 had this as FAIL &mdash; <strong>positive flip</strong>.</td>
+        </tr>
+        <tr>
+            <td>4</td><td>rust</td><td>accumulate</td>
+            <td><span class="tag pass">Pass</span></td>
+            <td>874.9 s (14.6 min)</td>
+            <td>Real solve. Take 7 was a 300 s suspect-PASS &mdash; this confirms the operator can solve it.</td>
+        </tr>
+        <tr>
+            <td>5</td><td>rust</td><td>acronym</td>
+            <td><span class="tag fail">Fail</span> <span class="tag note">inconclusive</span></td>
+            <td>300.0 s</td>
+            <td>HTTP timeout. Take 7 was a 300 s suspect-PASS &mdash; same wall, opposite verdict means polyglot starter is non-deterministic for this task.</td>
+        </tr>
+        <tr>
+            <td>6</td><td>rust</td><td>alphametics</td>
+            <td><span class="tag fail">Fail</span></td>
+            <td>795.7 s (13.3 min)</td>
+            <td>Real fail. Take 7 had this as PASS &mdash; <strong>regression</strong>. STOP-on-green may be cutting too aggressively here.</td>
+        </tr>
+        <tr>
+            <td>7</td><td>go</td><td>alphametics</td>
+            <td><span class="tag pass">Pass</span> <span class="tag note">inconclusive</span></td>
+            <td>300.0 s</td>
+            <td>HTTP timeout. Take 7 was a 30.7 min real solve &mdash; this run never got off the ground.</td>
+        </tr>
+        <tr>
+            <td>8</td><td>go</td><td>beer-song</td>
+            <td><span class="tag fail">Fail</span> <span class="tag note">inconclusive</span></td>
+            <td>300.0 s</td>
+            <td>HTTP timeout. Same as take 7.</td>
+        </tr>
+        <tr>
+            <td>9</td><td>go</td><td>book-store</td>
+            <td><span class="tag fail">Fail</span> <span class="tag note">inconclusive</span></td>
+            <td>300.0 s</td>
+            <td>HTTP timeout. Same as take 7.</td>
+        </tr>
+        <tr>
+            <td>10</td><td>javascript</td><td>affine-cipher</td>
+            <td><span class="tag pass">Pass</span> <span class="tag note">inconclusive</span></td>
+            <td>300.0 s</td>
+            <td>HTTP timeout. Take 7 was a 4 min FAIL; this PASS comes from a different polyglot-starter outcome.</td>
+        </tr>
+        <tr>
+            <td>11</td><td>javascript</td><td>alphametics</td>
+            <td><span class="tag fail">Fail</span></td>
+            <td>78.4 s</td>
+            <td>Real early fail. Take 7 was a real 8.5 min PASS &mdash; <strong>regression</strong>. Operator gave up after one tool call.</td>
+        </tr>
+        <tr>
+            <td>12</td><td>javascript</td><td>beer-song</td>
+            <td><span class="tag pass">Pass</span></td>
+            <td>1058.9 s (17.6 min)</td>
+            <td>Real solve. Take 7 was a 300 s suspect-PASS &mdash; this confirms operator can solve js/beer-song.</td>
+        </tr>
+        <tr>
+            <td>13</td><td>java</td><td>affine-cipher</td>
+            <td><span class="tag pass">Pass</span></td>
+            <td>957.2 s (16.0 min)</td>
+            <td>Real solve. Faster than take 7 (19.9 min) &mdash; modest STOP-on-green win.</td>
+        </tr>
+        <tr>
+            <td>14</td><td>java</td><td>all-your-base</td>
+            <td><span class="tag pass">Pass</span> <span class="tag note">inconclusive</span></td>
+            <td>300.0 s</td>
+            <td>HTTP timeout. Take 7 was a 5 min FAIL &mdash; opposite verdict on identical wall time, polyglot starter outcome differs.</td>
+        </tr>
+        <tr>
+            <td>15</td><td>java</td><td>book-store</td>
+            <td><span class="tag note">Not run</span></td>
+            <td>&mdash;</td>
+            <td>Pearl <code>th-001718</code> dispatched but bench process was killed before idle_grace expired.</td>
+        </tr>
+        <tr>
+            <td>16</td><td>cpp</td><td>all-your-base</td>
+            <td><span class="tag note">Not run</span></td>
+            <td>&mdash;</td>
+            <td>Bench killed before this task started.</td>
+        </tr>
+        <tr>
+            <td>17</td><td>cpp</td><td>allergies</td>
+            <td><span class="tag note">Not run</span></td>
+            <td>&mdash;</td>
+            <td>Bench killed before this task started.</td>
+        </tr>
+        <tr>
+            <td>18</td><td>cpp</td><td>bank-account</td>
+            <td><span class="tag note">Not run</span></td>
+            <td>&mdash;</td>
+            <td>Bench killed before this task started.</td>
+        </tr>
+    </tbody>
+</table>
+
+<h3>Take 8 vs take 7 (where they overlap)</h3>
+<table>
+    <thead><tr><th>Task</th><th>Take 7</th><th>Take 8</th><th>Delta</th></tr></thead>
+    <tbody>
+        <tr><td>python/book-store</td><td><span class="tag fail">Fail</span> 1611.9 s</td><td><span class="tag pass">Pass</span> 1542.3 s</td><td><strong style="color:#4ade80">+ flipped to PASS</strong> (real solve)</td></tr>
+        <tr><td>rust/accumulate</td><td><span class="tag pass">Pass*</span> 300 s</td><td><span class="tag pass">Pass</span> 874.9 s</td><td><strong style="color:#4ade80">+ confirmed real</strong> (was suspect)</td></tr>
+        <tr><td>js/beer-song</td><td><span class="tag pass">Pass*</span> 300 s</td><td><span class="tag pass">Pass</span> 1058.9 s</td><td><strong style="color:#4ade80">+ confirmed real</strong> (was suspect)</td></tr>
+        <tr><td>java/affine-cipher</td><td><span class="tag pass">Pass</span> 1192.3 s</td><td><span class="tag pass">Pass</span> 957.2 s</td><td><strong style="color:#4ade80">+ 19.7 % faster</strong> (STOP-on-green win)</td></tr>
+        <tr><td>rust/alphametics</td><td><span class="tag pass">Pass</span> 1511.8 s</td><td><span class="tag fail">Fail</span> 795.7 s</td><td><strong style="color:#f87171">&minus; regressed</strong> (real fail this time)</td></tr>
+        <tr><td>js/alphametics</td><td><span class="tag pass">Pass</span> 509.0 s</td><td><span class="tag fail">Fail</span> 78.4 s</td><td><strong style="color:#f87171">&minus; regressed</strong> (operator gave up early)</td></tr>
+        <tr><td>go/alphametics</td><td><span class="tag pass">Pass</span> 1840.8 s</td><td><span class="tag pass">Pass*</span> 300 s</td><td><span class="tag note">starter-pass coincidence</span> (no real run this time)</td></tr>
+    </tbody>
+</table>
+<p class="meta">
+    Two real regressions (rust/alphametics, js/alphametics), three confirm-or-flip wins
+    (python/book-store, rust/accumulate, js/beer-song), and one modest speed win
+    (java/affine-cipher). Net signal: STOP-on-green helped solve-time on tasks the
+    operator already knew how to finish, but cut into long-haul reasoning on
+    alphametics-class problems. Worth a per-task tuning pass once eval HTML lands.
 </p>
 
 <h2>Per-task results</h2>
@@ -400,7 +571,50 @@ footer {
     failures terminate immediately rather than draining the grace.
 </p>
 
-<h2>What landed today</h2>
+<h2>What landed post-take-8 (in this worktree)</h2>
+<ul class="timeline">
+    <li>
+        <strong>ApiFormat::Gemini</strong> &mdash; <code>724bf05</code> &mdash;
+        smooth-operator's LLM client gains a third API path (after OpenAI-compat
+        and Anthropic): native Gemini calls via
+        <code>POST &lt;api_url&gt;/models/&lt;model&gt;:generateContent</code>.
+        Targets LiteLLM's <code>/gemini/v1beta</code> native pass-through, bypassing
+        the OpenAI-compat translation layer that silently drops Gemini tool calls
+        after turn 1. Includes a JSON-schema sanitizer (strips
+        <code>additionalProperties</code>, <code>oneOf</code>, <code>$schema</code>,
+        etc. that Gemini rejects) and consecutive-same-role merging (Gemini requires
+        alternating user/model turns). 9 new unit tests; clippy clean.
+    </li>
+    <li>
+        <strong>is_gemini_family + family-aware routing</strong> &mdash;
+        <code>724bf05</code> &mdash; operator-runner's LlmConfig site rewrites
+        <code>/v1</code> → <code>/gemini/v1beta</code> when the routed model is
+        Gemini-family, parallel to the existing Anthropic check. <code>smooth-fast-gemini</code>,
+        <code>gemini-3-flash-preview</code>, <code>gemini-3.1-flash-lite-preview</code>
+        all auto-route now.
+    </li>
+    <li>
+        <strong>INCONCLUSIVE classification</strong> &mdash; <code>2215eb0</code>
+        (<code>th-ba7299</code>) &mdash; bench's <code>TaskOutcome</code> gains
+        an <code>inconclusive</code> flag that flips when wall_time hits
+        <code>SMOOTH_BENCH_CHAT_HTTP_TIMEOUT_S * 1000</code> exactly AND no
+        <code>[METRICS]</code> comment AND no workspace mutation. Score JSON
+        renders the split natively from the next run; the take-8 partial above
+        is the last hand-classified report.
+    </li>
+    <li>
+        <strong>Gemini 3.x preview models registered upstream</strong> &mdash;
+        the smooai monorepo's LiteLLM config (<code>infra/services/litellm/config.yaml</code>)
+        already exposes <code>gemini-3-flash-preview</code>,
+        <code>gemini-3.1-flash-lite-preview</code>, <code>gemini-3-pro-preview</code>,
+        <code>gemini-3.1-pro-preview</code> at the gateway. The OpenAI-compat
+        router 400s on these (DB <code>store_model_in_db</code> gates), but native
+        pass-through resolves them &mdash; which is exactly what the new
+        <code>ApiFormat::Gemini</code> targets.
+    </li>
+</ul>
+
+<h2>What landed pre-take-8 (already shipped)</h2>
 
 <h3>Prompt + policy work (operator + chat-tools)</h3>
 <ul class="timeline">
@@ -545,9 +759,11 @@ tail -f /tmp/bench/run.log
 </pre>
 
 <footer>
-    <p>Source data: <code>docs/bench-sessions/2026-05-02-tuning-batch.{json,log,md}</code> (take 1) and
-    <code>/tmp/bench-2026-05-take7/run.log</code> (take 7, in flight).
-    Smooth bench harness <code>smooth-bench score</code> @ <code>0.12.11 (e0b2dd8)</code> on macOS 26.4 (HVF).</p>
+    <p>Source data: <code>docs/bench-sessions/2026-05-02-tuning-batch.{json,log,md}</code> (take 1),
+    <code>docs/bench-sessions/2026-05-02-v0.12.11-take7-final.json</code> (take 7), and
+    <code>/tmp/bench-take8/run.log</code> (take 8, killed at task 15/18).
+    Smooth bench harness <code>smooth-bench score</code> @ <code>0.12.11 (724bf05)</code> on macOS 26.4 (HVF).
+    Worktree branch <code>th-gemini-format</code>.</p>
 </footer>
 
 </div>
