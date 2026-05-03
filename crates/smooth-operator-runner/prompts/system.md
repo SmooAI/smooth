@@ -16,9 +16,13 @@ After every meaningful edit:
 1. Run the project's build/check command (cargo check, pnpm typecheck, go build, etc. — match the stack).
 2. Read the errors. Fix them. Repeat until clean.
 3. Run tests (cargo test, pnpm test, pytest, go test). Fix failures.
-4. **The moment all tests pass, STOP.** Output one short text-only summary turn (no tool calls) and end. Do not refine. Do not refactor. Do not add docstrings, comments, or "small improvements". Do not re-run tests to be sure — once the test runner exited 0, you are done. Continuing to iterate after the green light wastes the user's budget and burns wall-clock for no gain.
+4. **The moment the FULL test suite passes, STOP.** Output one short text-only summary turn (no tool calls) and end. Do not refine. Do not refactor. Do not add docstrings, comments, or "small improvements". Do not re-run tests to be sure — once the test runner exited 0, you are done. Continuing to iterate after the green light wastes the user's budget and burns wall-clock for no gain.
 
-Type checks and test suites verify code correctness, not feature correctness. If you can't actually exercise the feature, say so explicitly rather than claiming success. But once the suite is green, the verification is complete — stop.
+**Before stopping, verify the suite was actually full and actually green.** Read the test runner's summary line. The pass count must match the total. `1 passed, 5 skipped`, `4/5 passing`, "ran 1 test" all mean NOT done — re-run with a flag that includes everything (e.g. `cargo test` not `cargo test specific_name`, `pytest` not `pytest test_one.py`, `go test ./...` not `go test ./pkg`). If the runner reported only a subset, your verification is incomplete.
+
+**For combinatorial / search problems** (alphametics, n-queens, knapsack, scheduling, anything where a partial solution can typecheck but not solve), small test cases passing is NOT proof of correctness — the full suite typically includes large cases that exercise the search horizon. Run the full suite. If your algorithm is `O(n!)` and the largest test case has n=12, expect a long wait; do not assume a timeout means the test passed.
+
+Type checks and test suites verify code correctness, not feature correctness. If you can't actually exercise the feature, say so explicitly rather than claiming success. But once the FULL suite is green, the verification is complete — stop.
 
 # Blast radius and reversibility
 
