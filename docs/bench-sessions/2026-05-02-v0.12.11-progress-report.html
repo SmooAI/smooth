@@ -148,7 +148,7 @@ footer {
     <h1>Smooth bench — tuning batch progress report</h1>
     <p class="meta">
         Smooth version <code>0.12.11 (724bf05)</code> &middot;
-        Generated <code>2026-05-03 03:32 EDT</code> &middot;
+        Generated <code>2026-05-03 01:24 EDT</code> &middot;
         Mode <code>sandboxed (microVM per task)</code> &middot;
         Sample <code>--pr</code> (3 tasks &times; 6 languages = 18 runs)
     </p>
@@ -189,19 +189,21 @@ footer {
     <code>docs/bench-sessions/2026-05-02-v0.12.11-take7-final.json</code>.
 </p>
 
-<h2>Take 8 — partial run, killed mid-task 15</h2>
+<h2>Take 8 — partial run, killed mid-task 17</h2>
 <p>
-    <span class="tag note">Incomplete</span> Take 8 ran 14 of 18 tasks before the bench
-    process was killed mid-dispatch on task 15 (<code>java/book-store</code>, pearl
-    <code>th-001718</code>). Tasks 16&ndash;18 (cpp triple) never started. Runtime infrastructure
-    has stayed steady through the run; the cost pipe still reports zeros despite the
-    <code>[METRICS]</code> wire-through landing &mdash; runner-side bug, not bench-side.
+    <span class="tag note">Incomplete</span> Take 8 ran 16 of 18 tasks before the bench
+    process exited mid-dispatch on task 17 (<code>cpp/allergies</code>, pearl
+    <code>th-285633</code>). Task 18 (<code>cpp/bank-account</code>) never started. Big
+    update from the prior snapshot: <strong>cpp finally has a real run</strong> &mdash;
+    task 16 (<code>cpp/all-your-base</code>) executed for 21.3 min and stripped 5 agent-
+    added test files before scoring, the first time any cpp task got past the harness
+    bootstrap window in any take.
 </p>
 <div class="grid-2">
     <div class="card stat pass">
-        <div class="label">Take 8 (14 / 18 ran)</div>
-        <div class="value">64.3 %</div>
-        <div class="delta">9 PASS / 5 FAIL of the 14 tasks that ran</div>
+        <div class="label">Take 8 (16 / 18 ran)</div>
+        <div class="value">56.3 %</div>
+        <div class="delta">9 PASS / 7 FAIL of the 16 tasks that ran</div>
     </div>
     <div class="card stat neutral">
         <div class="label">Confirmed real solves</div>
@@ -210,23 +212,24 @@ footer {
     </div>
     <div class="card stat neutral">
         <div class="label">INCONCLUSIVE (300003 ms)</div>
-        <div class="value">7 / 14</div>
+        <div class="value">7 / 16</div>
         <div class="delta">HTTP-timeout artifacts &mdash; classification now lands as a status, not a PASS</div>
     </div>
     <div class="card stat neutral">
         <div class="label">Real-solve rate</div>
-        <div class="value">71.4 %</div>
-        <div class="delta">5 / 7 of confirmed-finish tasks &mdash; INCONCLUSIVE excluded</div>
+        <div class="value">55.6 %</div>
+        <div class="delta">5 / 9 of confirmed-finish tasks &mdash; INCONCLUSIVE excluded</div>
     </div>
 </div>
 <p class="meta">
-    The headline split-up is what matters: of the 14 tasks that ran, 7 hit
-    <code>SMOOTH_BENCH_CHAT_HTTP_TIMEOUT_S=300</code> exactly (4 INCONCLUSIVE PASS +
-    3 INCONCLUSIVE FAIL). Real-solve rate over the unambiguous 7 tasks is 71.4 %
-    &mdash; better than the 50 % take-7 headline implied. The cpp triple is still
-    untested in this run. <code>th-ba7299</code> (INCONCLUSIVE classification) shipped
-    on take 8's commit, so future runs will surface the split natively in the score
-    JSON instead of being inferred from wall-time pattern matching.
+    Of the 16 tasks that ran: 7 hit <code>SMOOTH_BENCH_CHAT_HTTP_TIMEOUT_S=300</code>
+    exactly (4 INCONCLUSIVE PASS + 3 INCONCLUSIVE FAIL); 9 ran to a real terminal state
+    (5 PASS + 4 FAIL). The real-solve rate of 55.6 % is the most defensible take-8
+    number once you exclude polyglot-starter coincidences. Cpp's first ever real run
+    failed (task 16, 21.3 min, real fail) &mdash; but it failed for a real reason this
+    time, not because the harness gave up before bootstrapping.
+    <code>th-ba7299</code> (INCONCLUSIVE classification) shipped on take 8's commit,
+    so future runs will surface the split natively in the score JSON.
 </p>
 <p>
     <strong>Cost wiring still partial:</strong> <code>[METRICS]</code> comment is being
@@ -337,28 +340,28 @@ footer {
             <td>HTTP timeout. Take 7 was a 5 min FAIL &mdash; opposite verdict on identical wall time, polyglot starter outcome differs.</td>
         </tr>
         <tr>
-            <td>15</td><td>java</td><td>book-store</td>
-            <td><span class="tag note">Not run</span></td>
-            <td>&mdash;</td>
-            <td>Pearl <code>th-001718</code> dispatched but bench process was killed before idle_grace expired.</td>
+            <td>15</td><td>java</td><td>alphametics</td>
+            <td><span class="tag fail">Fail</span></td>
+            <td>838.2 s (14.0 min)</td>
+            <td>Real fail. Pearl <code>th-001718</code> ran to <code>[IDLE]</code> after 804.7 s; stripped 1 agent-added test file. Mirrors the rust + js alphametics regressions &mdash; the operator hits a wall on alphametics-class search problems.</td>
         </tr>
         <tr>
             <td>16</td><td>cpp</td><td>all-your-base</td>
-            <td><span class="tag note">Not run</span></td>
-            <td>&mdash;</td>
-            <td>Bench killed before this task started.</td>
+            <td><span class="tag fail">Fail</span></td>
+            <td>1279.3 s (21.3 min)</td>
+            <td><strong>First cpp real run in any take.</strong> Pearl <code>th-34721e</code> ran to <code>[IDLE]</code> after 1246.8 s; operator authored 5 test files (stripped before scoring). Real fail, not a harness artifact &mdash; cpp toolchain finally bootstraps in time but the operator can't land 100 % green on this exercise.</td>
         </tr>
         <tr>
             <td>17</td><td>cpp</td><td>allergies</td>
             <td><span class="tag note">Not run</span></td>
             <td>&mdash;</td>
-            <td>Bench killed before this task started.</td>
+            <td>Pearl <code>th-285633</code> dispatched but bench process exited before idle_grace expired.</td>
         </tr>
         <tr>
             <td>18</td><td>cpp</td><td>bank-account</td>
             <td><span class="tag note">Not run</span></td>
             <td>&mdash;</td>
-            <td>Bench killed before this task started.</td>
+            <td>Bench exited before this task started.</td>
         </tr>
     </tbody>
 </table>
@@ -374,14 +377,25 @@ footer {
         <tr><td>rust/alphametics</td><td><span class="tag pass">Pass</span> 1511.8 s</td><td><span class="tag fail">Fail</span> 795.7 s</td><td><strong style="color:#f87171">&minus; regressed</strong> (real fail this time)</td></tr>
         <tr><td>js/alphametics</td><td><span class="tag pass">Pass</span> 509.0 s</td><td><span class="tag fail">Fail</span> 78.4 s</td><td><strong style="color:#f87171">&minus; regressed</strong> (operator gave up early)</td></tr>
         <tr><td>go/alphametics</td><td><span class="tag pass">Pass</span> 1840.8 s</td><td><span class="tag pass">Pass*</span> 300 s</td><td><span class="tag note">starter-pass coincidence</span> (no real run this time)</td></tr>
+        <tr><td>java/alphametics</td><td><span class="tag pass">Pass</span> 1689.7 s</td><td><span class="tag fail">Fail</span> 838.2 s</td><td><strong style="color:#f87171">&minus; regressed</strong> (third alphametics regression)</td></tr>
+        <tr><td>cpp/all-your-base</td><td><span class="tag fail">Fail</span> 300 s</td><td><span class="tag fail">Fail</span> 1279.3 s</td><td><strong style="color:#fbbf24">first real cpp run</strong> &mdash; harness no longer the bottleneck</td></tr>
     </tbody>
 </table>
 <p class="meta">
-    Two real regressions (rust/alphametics, js/alphametics), three confirm-or-flip wins
-    (python/book-store, rust/accumulate, js/beer-song), and one modest speed win
-    (java/affine-cipher). Net signal: STOP-on-green helped solve-time on tasks the
-    operator already knew how to finish, but cut into long-haul reasoning on
-    alphametics-class problems. Worth a per-task tuning pass once eval HTML lands.
+    Three real regressions (<strong>all three alphametics tasks</strong>: rust, js,
+    java) &mdash; that's the strongest signal in take 8. The operator's heuristic
+    backtracking-search behavior on alphametics-class problems regressed under
+    STOP-on-green. Three confirm-or-flip wins (python/book-store, rust/accumulate,
+    js/beer-song), one modest speed win (java/affine-cipher), and one milestone:
+    cpp/all-your-base ran for real for the first time (still failed, but for an
+    operator reason, not a toolchain-bootstrap reason).
+</p>
+<p class="meta">
+    <strong>Diagnosis:</strong> the alphametics regressions are consistent with
+    STOP-on-green being too cheap an exit signal &mdash; the model abandons
+    backtracking-search the moment a partial solution typechecks. The win on
+    java/affine-cipher (where solve = local fix, not search) is consistent with the
+    same theory. Pearl <code>th-076eae</code> tracks tightening the rule.
 </p>
 
 <h2>Per-task results</h2>
@@ -761,7 +775,7 @@ tail -f /tmp/bench/run.log
 <footer>
     <p>Source data: <code>docs/bench-sessions/2026-05-02-tuning-batch.{json,log,md}</code> (take 1),
     <code>docs/bench-sessions/2026-05-02-v0.12.11-take7-final.json</code> (take 7), and
-    <code>/tmp/bench-take8/run.log</code> (take 8, killed at task 15/18).
+    <code>/tmp/bench-take8/run.log</code> (take 8, exited mid-task 17/18).
     Smooth bench harness <code>smooth-bench score</code> @ <code>0.12.11 (724bf05)</code> on macOS 26.4 (HVF).
     Worktree branch <code>th-gemini-format</code>.</p>
 </footer>
