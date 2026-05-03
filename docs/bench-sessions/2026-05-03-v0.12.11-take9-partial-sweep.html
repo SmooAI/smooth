@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Bench sweep — take 9 partial 10/18 (5/10 = 50.0%)</title><style>
+:root { --bg:#0c0d10; --panel:#16181d; --panel-2:#1c1f26; --line:#2a2e38;
+    --text:#e6e8ec; --text-dim:#9ba3af; --pass:#4ade80; --fail:#f87171;
+    --warn:#fbbf24; --accent:#60a5fa; --steer:#a78bfa; }
+* { box-sizing: border-box; }
+html, body { margin:0; padding:0; background:var(--bg); color:var(--text);
+    font:14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+.container { max-width: 1200px; margin: 0 auto; padding: 32px 24px 80px; }
+header { border-bottom: 1px solid var(--line); padding-bottom: 24px; margin-bottom: 32px; }
+h1 { font-size: 22px; margin: 0 0 8px; font-weight: 600; }
+h2 { font-size: 16px; margin: 32px 0 12px; font-weight: 600; }
+p { margin: 0 0 12px; }
+.meta { color: var(--text-dim); font-size: 13px; }
+.meta code { background: var(--panel); padding:1px 6px; border-radius:3px; color:var(--accent); }
+header code { background: var(--panel); padding:1px 6px; border-radius:3px; color:var(--accent); }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin: 16px 0; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 16px; }
+.stat .label { font-size: 12px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px; }
+.stat .value { font-size: 24px; font-weight: 600; }
+.stat .delta { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+.stat.pass .value { color: var(--pass); }
+.stat.fail .value { color: var(--fail); }
+.stat.note .value { color: var(--warn); }
+pre { background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    padding: 12px; overflow-x: auto; font: 12.5px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+    white-space: pre-wrap; word-break: break-word; margin: 0; }
+pre.brief { color: var(--text-dim); }
+pre.error { color: var(--fail); border-color: var(--fail); }
+pre.test-stdout { max-height: 600px; overflow-y: auto; }
+table.timeline { width: 100%; border-collapse: collapse; font-size: 12.5px; margin: 12px 0; }
+table.timeline th { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line);
+    color:var(--text-dim); font-size:11px; text-transform:uppercase; letter-spacing:0.04em; }
+table.timeline td { padding:8px 10px; border-bottom:1px solid var(--line); vertical-align: top; }
+table.timeline td.ts { color: var(--text-dim); white-space: nowrap; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+table.timeline td.kind { white-space: nowrap; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+table.timeline tr.steering td.kind { color: var(--steer); font-weight: 600; }
+table.timeline tr.steering { background: rgba(167, 139, 250, 0.08); }
+table.timeline tr.metrics td.kind { color: var(--accent); }
+table.timeline tr.idle td.kind { color: var(--warn); }
+table.timeline tr.progress td.kind { color: var(--text-dim); }
+table.timeline pre { background: transparent; border: none; padding: 0; max-height: 300px; overflow-y: auto; }
+</style></head><body><div class="container"><header><h1>Bench sweep — take 9 partial 10/18 (5/10 = 50.0%)</h1></header><div class="grid"><div class="card stat pass"><div class="label">Pass rate</div><div class="value">50.0 %</div><div class="delta">5 / 10 tasks</div></div><div class="card stat"><div class="label">Verdict mix</div><div class="value">5/3/2</div><div class="delta">PASS / FAIL / INCONCLUSIVE</div></div><div class="card stat"><div class="label">Total cost</div><div class="value">$0.0000</div><div class="delta">supervisor steers across sweep: 0</div></div></div><h2>Per-task results</h2><table class="timeline"><thead><tr><th>#</th><th>Lang</th><th>Task</th><th>Verdict</th><th>Wall</th><th>Cost</th><th>Steers</th><th>Run</th></tr></thead><tbody><tr class="progress"><td>1</td><td>python</td><td>affine-cipher</td><td class="kind">PASS</td><td>21.3 min</td><td>$0.0000</td><td>0</td><td><a href="file:///Users/brentrager/.smooth/bench-runs/a4429843/eval.html">a4429843</a></td></tr><tr class="progress"><td>2</td><td>python</td><td>beer-song</td><td class="kind">PASS</td><td>30.8 min</td><td>$0.0000</td><td>0</td><td><a href="file:///Users/brentrager/.smooth/bench-runs/7a52e78d/eval.html">7a52e78d</a></td></tr><tr class="metrics"><td>3</td><td>python</td><td>book-store</td><td class="kind">FAIL</td><td>5.0 min</td><td>$0.0000</td><td>0</td><td><a href="file:///Users/brentrager/.smooth/bench-runs/25215056/eval.html">25215056</a></td></tr><tr class="idle"><td>4</td><td>rust</td><td>accumulate</td><td class="kind">INCONCLUSIVE</td><td>5.0 min</td><td>$0.0000</td><td>0</td><td><a href="file:///Users/brentrager/.smooth/bench-runs/ed3e07d8/eval.html">ed3e07d8</a></td></tr><tr class="progress"><td>5</td><td>rust</td><td>acronym</td><td class="kind">PASS</td><td>24.3 min</td><td>$0.0000</td><td>0</td><td><a href="file:///Users/brentrager/.smooth/bench-runs/04757b49/eval.html">04757b49</a></td></tr><tr class="metrics"><td>6</td><td>rust</td><td>alphametics</td><td class="kind">FAIL</td><td>5.0 min</td><td>$0.0000</td><td>0</td><td><a href="file:///Users/brentrager/.smooth/bench-runs/083630b5/eval.html">083630b5</a></td></tr><tr class="progress"><td>7</td><td>go</td><td>alphametics</td><td class="kind">PASS</td><td>17.6 min</td><td>$0.0000</td><td>0</td><td><a href="file:///Users/brentrager/.smooth/bench-runs/aecdb412/eval.html">aecdb412</a></td></tr><tr class="metrics"><td>8</td><td>go</td><td>beer-song</td><td class="kind">FAIL</td><td>5.0 min</td><td>$0.0000</td><td>0</td><td><a href="file:///Users/brentrager/.smooth/bench-runs/fe34dc29/eval.html">fe34dc29</a></td></tr><tr class="idle"><td>9</td><td>go</td><td>book-store</td><td class="kind">INCONCLUSIVE</td><td>5.0 min</td><td>$0.0000</td><td>0</td><td><a href="file:///Users/brentrager/.smooth/bench-runs/7e77b019/eval.html">7e77b019</a></td></tr><tr class="progress"><td>10</td><td>javascript</td><td>affine-cipher</td><td class="kind">PASS</td><td>16.0 min</td><td>$0.0000</td><td>0</td><td><a href="file:///Users/brentrager/.smooth/bench-runs/07af4c06/eval.html">07af4c06</a></td></tr></tbody></table></div></body></html>
