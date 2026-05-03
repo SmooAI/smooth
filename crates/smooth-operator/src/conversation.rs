@@ -101,6 +101,14 @@ pub struct Message {
     pub content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Name of the tool whose result this message carries. Required by
+    /// Gemini's OpenAI-compat shim (it maps `role: tool` to a
+    /// `functionResponse` block, which has a `name` field that's not
+    /// optional). OpenAI ignores it, Anthropic doesn't see it (uses
+    /// tool_use_id pairing instead). Set on tool-result messages by
+    /// `Message::tool_result_named`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<crate::tool::ToolCall>,
     pub timestamp: DateTime<Utc>,
@@ -113,6 +121,7 @@ impl Message {
             role: Role::System,
             content: content.into(),
             tool_call_id: None,
+            tool_name: None,
             tool_calls: vec![],
             timestamp: Utc::now(),
         }
@@ -124,6 +133,7 @@ impl Message {
             role: Role::User,
             content: content.into(),
             tool_call_id: None,
+            tool_name: None,
             tool_calls: vec![],
             timestamp: Utc::now(),
         }
@@ -135,6 +145,7 @@ impl Message {
             role: Role::Assistant,
             content: content.into(),
             tool_call_id: None,
+            tool_name: None,
             tool_calls: vec![],
             timestamp: Utc::now(),
         }
@@ -146,6 +157,24 @@ impl Message {
             role: Role::Tool,
             content: content.into(),
             tool_call_id: Some(tool_call_id.into()),
+            tool_name: None,
+            tool_calls: vec![],
+            timestamp: Utc::now(),
+        }
+    }
+
+    /// Tool-result message that carries the originating tool's `name` so
+    /// the Gemini OpenAI-compat shim can map it to a `functionResponse`.
+    /// Prefer this constructor when the caller knows which tool produced
+    /// the result (every code path inside the agent loop does); the older
+    /// `tool_result` is kept for legacy callers.
+    pub fn tool_result_named(tool_call_id: impl Into<String>, name: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            role: Role::Tool,
+            content: content.into(),
+            tool_call_id: Some(tool_call_id.into()),
+            tool_name: Some(name.into()),
             tool_calls: vec![],
             timestamp: Utc::now(),
         }

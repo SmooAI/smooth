@@ -624,7 +624,7 @@ impl Agent {
                         is_error: result.is_error,
                         duration_ms: 0,
                     });
-                    conversation.push(Message::tool_result(&tool_call.id, &result.content));
+                    conversation.push(Message::tool_result_named(&tool_call.id, &tool_call.name, &result.content));
                     self.maybe_checkpoint(&conversation, iteration, CheckpointEvent::ToolCallComplete);
                 }
             } else {
@@ -654,7 +654,7 @@ impl Agent {
                         duration_ms,
                     });
 
-                    conversation.push(Message::tool_result(&tool_call.id, &result.content));
+                    conversation.push(Message::tool_result_named(&tool_call.id, &tool_call.name, &result.content));
 
                     // Maybe checkpoint after each tool call
                     self.maybe_checkpoint(&conversation, iteration, CheckpointEvent::ToolCallComplete);
@@ -884,7 +884,7 @@ impl Agent {
                         tool_name: tool_call.name.clone(),
                         is_error: result.is_error,
                     });
-                    conversation.push(Message::tool_result(&tool_call.id, &result.content));
+                    conversation.push(Message::tool_result_named(&tool_call.id, &tool_call.name, &result.content));
                     self.maybe_checkpoint(&conversation, iteration, CheckpointEvent::ToolCallComplete);
                 }
             } else {
@@ -902,7 +902,7 @@ impl Agent {
                         is_error: result.is_error,
                     });
 
-                    conversation.push(Message::tool_result(&tool_call.id, &result.content));
+                    conversation.push(Message::tool_result_named(&tool_call.id, &tool_call.name, &result.content));
                     self.maybe_checkpoint(&conversation, iteration, CheckpointEvent::ToolCallComplete);
                 }
             }
