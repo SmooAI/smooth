@@ -189,6 +189,23 @@ footer {
     <code>docs/bench-sessions/2026-05-02-v0.12.11-take7-final.json</code>.
 </p>
 
+<h2>Take 8 (in flight) — STOP-on-green prompt rule live</h2>
+<p>
+    Bench take 8 is running on commit <code>1ffd7dd</code> with the new STOP-on-green rule
+    in <code>operator-runner/prompts/system.md</code>: "the moment all tests pass, STOP. Do
+    not refine, do not refactor, do not add documentation." Verified single-task win on
+    affine-cipher: 25.6 min &rarr; 11.3 min via legacy-direct.
+</p>
+<p>
+    Live status (~30 min): task 1 (th-20a126) is at <strong>59 heartbeats &times; 30s
+    = 29.5 min elapsed</strong> &mdash; same pattern as take 7. The STOP rule's wall-time
+    win on the legacy-direct path didn't carry over to the chat-agent-dispatch path the
+    bench uses. Either chat-agent layering adds extra rounds, or single-task variance is
+    high. Investigating; expect take 8 to land at similar wall time to take 7 with
+    higher real-PASS rate (more iterations &rarr; more correct solves) and now-real
+    cost numbers from the <code>[METRICS]</code> wiring.
+</p>
+
 <h2>Per-task results</h2>
 
 <h3>Take 7 (current run, all 4 infrastructure fixes live)</h3>
