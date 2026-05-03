@@ -1,23 +1,22 @@
 //! Drive a benchmark task through Big Smooth's chat-agent path.
 //!
-//! Per the user's directive (2026-04-26): bench runs go through Big Smooth,
-//! not directly through `dispatch_ws_task`. The flow:
+//! **The interface is Big Smooth, period.** The bench process never
+//! reads or writes the dolt store directly. Every interaction with
+//! the operator goes through `/api/*` endpoints exposed by the
+//! daemon, just like a real end-user TUI would.
 //!
-//! 1. POST `/api/chat` with the task prompt + working dir + budget. The
-//!    chat-agent (smooth-reasoning-kimi by default) creates a pearl and
-//!    spawns a teammate via `pearls_create` + `teammate_spawn(working_dir)`.
-//! 2. Parse the pearl id out of the chat response.
-//! 3. Open the local PearlStore and poll the pearl's comments until the
-//!    teammate posts `[IDLE]` (graceful exit) or the wall-clock timeout
-//!    fires.
-//! 4. Return cost, tool calls (best-effort, drained from comments) and any
-//!    LLM error so the caller can score the workspace as today.
-//!
-//! `[IDLE]` isn't posted by the runner today (planned for Phase 2 follow-up
-//! or Phase 4); for now we treat any of these as completion: pearl status
-//! flipping to `closed`, or the comment list growing past `idle_grace`
-//! seconds without further activity. That's enough to unblock the bench
-//! while we wire the explicit IDLE marker.
+//! Flow:
+//! 1. `POST /api/chat` with the task description. Big Smooth creates
+//!    a pearl, dispatches a teammate, and replies with the pearl id.
+//! 2. The supervisor (when enabled) periodically `POST`s status-check
+//!    messages to `/api/chat`, asking Big Smooth to inspect the pearl
+//!    and steer the teammate. Big Smooth's reply tells us whether the
+//!    operator is still working, was steered, or is done.
+//! 3. The bench polls `GET /api/pearls/{id}` for status, terminating
+//!    when the pearl flips to Closed OR the supervisor reports
+//!    `OPERATOR DONE` OR the deadline fires.
+//! 4. Final cost is read via `GET /api/pearls/{id}/comments` (looking
+//!    for the `[METRICS]` comment Big Smooth posts on completion).
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -73,10 +72,17 @@ pub async fn run_via_chat_agent(
     // workflow (search → create → spawn). We just need to give it enough
     // info to dispatch correctly.
     let chat_content = format!(
-        "Run a benchmark task. Create a pearl with the following description and dispatch a teammate on it (working_dir={}, budget_usd={}). Once the teammate is dispatched, return ONLY the pearl id on its own line as the last line of your response.\n\n--- task ---\n{}",
-        work_dir.display(),
-        budget_usd.unwrap_or(5.0),
-        prompt
+        "Dispatch a benchmark task and return IMMEDIATELY — do NOT call teammate_wait, do NOT block.\n\n\
+         Workflow (this exact sequence, then STOP):\n\
+         1. `pearls_create` with the task description below.\n\
+         2. `teammate_spawn(pearl_id, working_dir={work_dir}, budget_usd={budget})`.\n\
+         3. As SOON as teammate_spawn returns, end your reply. Output ONLY the pearl id on its own last line. \
+         **DO NOT** call teammate_wait, teammate_read, or any other tool. The user (a separate harness) will \
+         coach the teammate through follow-up chat messages — your job ends at dispatch.\n\n\
+         --- task description (give this to pearls_create.description; the teammate will see it) ---\n{prompt}",
+        work_dir = work_dir.display(),
+        budget = budget_usd.unwrap_or(5.0),
+        prompt = prompt,
     );
 
     let chat_resp: serde_json::Value = client
@@ -99,124 +105,143 @@ pub async fn run_via_chat_agent(
     let pearl_id = extract_pearl_id(&chat_text).ok_or_else(|| anyhow::anyhow!("could not find a pearl id in chat response: {chat_text}"))?;
     eprintln!("bench: chat-agent dispatched on {pearl_id}");
 
-    // Open the local pearl store to poll for completion. Bench runs are
-    // expected to share the same `~/.smooth/dolt/` Big Smooth uses (same
-    // host, same registry).
-    let dolt_dir = locate_pearl_store_dir().context("locate pearl store")?;
-    let store = smooth_pearls::PearlStore::open(&dolt_dir).context("open pearl store")?;
+    // HTTP client used for status polling + comments fetch. Reuses
+    // Big Smooth's public API — bench reads NO dolt directly.
+    let poll_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
 
-    // Poll loop: check pearl comments for [IDLE] / [PROGRESS] / status=closed.
     let t0 = Instant::now();
-    let mut last_seen_count = 0usize;
-    let mut quiet_since = Instant::now();
-    // The "no new comment for `idle_grace`" heuristic stands in for the
-    // [IDLE] post that the runner doesn't emit yet (Phase 2/4 work).
-    // Real solves have been observed taking 90-300s on harder polyglot
-    // tasks (e.g. cpp/all-your-base 218s, java/alphametics 231s) — at
-    // 120s the harness was scoring half the tasks as FAIL purely because
-    // the operator hadn't yet posted a [PROGRESS] comment when the
-    // grace expired. Default to 600s; override with
-    // `SMOOTH_BENCH_IDLE_GRACE_S` to tune for fast-feedback runs.
     let idle_grace = Duration::from_secs(env_secs("SMOOTH_BENCH_IDLE_GRACE_S", 600));
-    eprintln!("bench: pearl {pearl_id} polling with idle_grace={}s", idle_grace.as_secs());
+    eprintln!("bench: pearl {pearl_id} polling via /api/pearls (idle_grace={}s)", idle_grace.as_secs());
     let mut tool_calls: Vec<HeadlessToolCall> = Vec::new();
+    let mut last_seen_comment_count: usize = 0;
+    let mut quiet_since = Instant::now();
 
-    // Optional supervisor — drives operator like a coach when
-    // SMOOTH_BENCH_SUPERVISOR_MODEL is set. Disabled by default; existing
-    // bench runs are byte-for-byte unchanged when the env var is unset.
+    // Optional supervisor — talks to Big Smooth via /api/chat with its
+    // OWN LLM driving the conversation. Knows the task description so
+    // it can offer context-aware guidance just like the user would.
     let mut supervisor: Option<Supervisor> = SupervisorConfig::from_env().map(|cfg| {
-        eprintln!("bench: supervisor enabled (model={}, interval={}s)", cfg.model, cfg.interval.as_secs());
-        Supervisor::new(cfg)
+        eprintln!(
+            "bench: supervisor enabled (LLM={} via {}, interval={}s, daemon={})",
+            cfg.model,
+            cfg.api_url,
+            cfg.interval.as_secs(),
+            cfg.daemon_url,
+        );
+        Supervisor::new(cfg, pearl_id.clone(), prompt)
     });
+
+    let api_base = big_smooth_url.trim_end_matches('/').to_string();
 
     loop {
         if t0.elapsed() > deadline {
-            let comments = store.get_comments(&pearl_id).unwrap_or_default();
+            let cost = fetch_cost_via_api(&poll_client, &api_base, &pearl_id).await;
             return Ok(ChatDriverOutput {
                 headless: HeadlessOutput {
                     content: chat_text,
                     tool_calls,
-                    cost: extract_cost(&comments),
+                    cost,
                 },
                 pearl_id: Some(pearl_id),
-                supervisor_steer_count: supervisor.as_ref().map_or(0, Supervisor::steer_count),
+                supervisor_steer_count: supervisor.as_ref().map_or(0, Supervisor::tick_count),
             });
         }
 
-        let comments = store.get_comments(&pearl_id).unwrap_or_default();
+        // Pearl status via Big Smooth. If status flips to Closed, done.
+        let status_url = format!("{api_base}/api/pearls/{pearl_id}");
+        if let Ok(resp) = poll_client.get(&status_url).send().await {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if let Some(status) = json.get("data").and_then(|d| d.get("status")).and_then(|s| s.as_str()) {
+                    if status.eq_ignore_ascii_case("Closed") {
+                        eprintln!("bench: pearl {pearl_id} closed after {:.1}s", t0.elapsed().as_secs_f64());
+                        let cost = fetch_cost_via_api(&poll_client, &api_base, &pearl_id).await;
+                        return Ok(ChatDriverOutput {
+                            headless: HeadlessOutput {
+                                content: chat_text,
+                                tool_calls,
+                                cost,
+                            },
+                            pearl_id: Some(pearl_id),
+                            supervisor_steer_count: supervisor.as_ref().map_or(0, Supervisor::tick_count),
+                        });
+                    }
+                }
+            }
+        }
 
-        // Check for an explicit IDLE post.
+        // Comments via Big Smooth (cheap state-of-life check).
+        let comments_url = format!("{api_base}/api/pearls/{pearl_id}/comments");
+        let comments: Vec<smooth_pearls::PearlComment> = match poll_client.get(&comments_url).send().await {
+            Ok(resp) => resp.json::<serde_json::Value>().await.ok().and_then(|j| j.get("data").cloned()).and_then(|d| serde_json::from_value(d).ok()).unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
+
+        // Explicit IDLE = done.
         if comments.iter().any(|c| c.content.trim_start().starts_with("[IDLE]")) {
             eprintln!("bench: teammate posted [IDLE] on {pearl_id} after {:.1}s", t0.elapsed().as_secs_f64());
-            // Best-effort tool-call extraction from PROGRESS/CHAT comments.
             for c in &comments {
-                let t = c.content.trim_start();
-                if t.starts_with("[PROGRESS]") {
+                if c.content.trim_start().starts_with("[PROGRESS]") {
                     tool_calls.push(HeadlessToolCall {
                         name: "progress".into(),
                         success: true,
                     });
                 }
             }
+            let cost = extract_cost(&comments);
             return Ok(ChatDriverOutput {
                 headless: HeadlessOutput {
                     content: chat_text,
                     tool_calls,
-                    cost: extract_cost(&comments),
+                    cost,
                 },
                 pearl_id: Some(pearl_id),
-                supervisor_steer_count: supervisor.as_ref().map_or(0, Supervisor::steer_count),
+                supervisor_steer_count: supervisor.as_ref().map_or(0, Supervisor::tick_count),
             });
         }
 
-        // Check pearl status — closed = done.
-        if let Ok(Some(p)) = store.get(&pearl_id) {
-            if p.status == smooth_pearls::PearlStatus::Closed {
-                eprintln!("bench: pearl {pearl_id} closed after {:.1}s", t0.elapsed().as_secs_f64());
-                return Ok(ChatDriverOutput {
-                    headless: HeadlessOutput {
-                        content: chat_text,
-                        tool_calls,
-                        cost: extract_cost(&comments),
-                    },
-                    pearl_id: Some(pearl_id),
-                    supervisor_steer_count: supervisor.as_ref().map_or(0, Supervisor::steer_count),
-                });
-            }
-        }
-
-        // Supervisor tick — gated by the supervisor's own interval. The
-        // supervisor reads the same comments + status the bench already
-        // has, calls its LLM, and posts a [STEERING:GUIDANCE] comment
-        // when it decides to coach. Failures are non-fatal.
+        // Supervisor tick — gated by its own interval. The supervisor's
+        // LLM composes the next conversational user-message and POSTs
+        // it to /api/chat; Big Smooth handles all teammate steering.
         if let Some(sup) = supervisor.as_mut() {
             if sup.should_tick(Instant::now()) {
-                let _ = sup.tick_async(&store, &pearl_id, t0).await;
+                let _ = sup.tick_async(t0).await;
             }
         }
 
-        // Quiescence heuristic — no new comments for `idle_grace`
-        // means the teammate likely finished and didn't post [IDLE].
-        if comments.len() == last_seen_count {
+        // Quiescence heuristic — no new comments for `idle_grace`.
+        if comments.len() == last_seen_comment_count {
             if quiet_since.elapsed() > idle_grace {
                 eprintln!("bench: pearl {pearl_id} quiet for {}s, treating as done", idle_grace.as_secs());
+                let cost = extract_cost(&comments);
                 return Ok(ChatDriverOutput {
                     headless: HeadlessOutput {
                         content: chat_text,
                         tool_calls,
-                        cost: extract_cost(&comments),
+                        cost,
                     },
                     pearl_id: Some(pearl_id),
-                    supervisor_steer_count: supervisor.as_ref().map_or(0, Supervisor::steer_count),
+                    supervisor_steer_count: supervisor.as_ref().map_or(0, Supervisor::tick_count),
                 });
             }
         } else {
-            last_seen_count = comments.len();
+            last_seen_comment_count = comments.len();
             quiet_since = Instant::now();
         }
 
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
+}
+
+/// Fetch the pearl's `[METRICS]` cost via the comments endpoint.
+async fn fetch_cost_via_api(client: &reqwest::Client, api_base: &str, pearl_id: &str) -> f64 {
+    let url = format!("{api_base}/api/pearls/{pearl_id}/comments");
+    let comments: Vec<smooth_pearls::PearlComment> = match client.get(&url).send().await {
+        Ok(resp) => resp.json::<serde_json::Value>().await.ok().and_then(|j| j.get("data").cloned()).and_then(|d| serde_json::from_value(d).ok()).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    extract_cost(&comments)
 }
 
 /// Pull `cost_usd=X` out of a `[METRICS] cost_usd=X iterations=Y` comment.
@@ -257,41 +282,6 @@ fn extract_pearl_id(text: &str) -> Option<String> {
         }
     }
     last
-}
-
-/// Find the Dolt store the bench should poll.
-///
-/// **Priority** (this order matters — the daemon writes pearls to its own
-/// active store, which is the global one when launchd boots from `$HOME`,
-/// not the bench's repo-local store):
-///
-/// 1. `SMOOTH_BENCH_PEARL_STORE` — explicit override.
-/// 2. `~/.smooth/dolt/` — the global store the daemon defaults to. This
-///    is the right answer for almost every dev setup; the daemon's
-///    chat-agent creates pearls here and the heartbeat task writes
-///    `[PROGRESS]` comments here.
-/// 3. Walk up from `cwd` looking for `.smooth/dolt/` — covers running
-///    the bench against a project that explicitly initialised its own
-///    pearl store. Used to be priority #1, which silently bound the
-///    bench to its build directory's store and missed every comment
-///    the daemon wrote to the global store.
-fn locate_pearl_store_dir() -> anyhow::Result<std::path::PathBuf> {
-    if let Ok(p) = std::env::var("SMOOTH_BENCH_PEARL_STORE") {
-        let path = std::path::PathBuf::from(p);
-        if path.exists() {
-            return Ok(path);
-        }
-    }
-    let global = dirs_next::home_dir().context("$HOME unset")?.join(".smooth").join("dolt");
-    if global.exists() {
-        return Ok(global);
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        if let Some(d) = smooth_pearls::dolt::find_repo_dolt_dir(&cwd) {
-            return Ok(d);
-        }
-    }
-    anyhow::bail!("no .smooth/dolt found at SMOOTH_BENCH_PEARL_STORE, ~/.smooth/dolt, or repo ancestry")
 }
 
 #[cfg(test)]

@@ -394,6 +394,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/pearls/ready", get(ready_pearls_handler))
         .route("/api/pearls/stats", get(stats_handler))
         .route("/api/pearls/{id}", get(get_pearl_handler).patch(update_pearl_handler))
+        .route("/api/pearls/{id}/comments", get(get_pearl_comments_handler))
         .route("/api/pearls/{id}/close", post(close_pearl_handler))
         // Workers
         .route("/api/workers", get(list_workers_handler))
@@ -3090,6 +3091,18 @@ async fn get_pearl_handler(State(state): State<AppState>, Path(id): Path<String>
     Json(ApiResponse { data, ok: true })
 }
 
+/// `GET /api/pearls/{id}/comments` — return the pearl's full comment
+/// history (heartbeats, steering, metrics, idle, plain). Bench's
+/// supervisor uses this as its view of operator state instead of
+/// reading the local PearlStore directly, which can resolve to a
+/// different `.smooth/dolt/` than the daemon when the bench is
+/// launched from a worktree.
+async fn get_pearl_comments_handler(State(state): State<AppState>, Path(id): Path<String>) -> Json<ApiResponse<Vec<smooth_pearls::PearlComment>>> {
+    state.touch();
+    let comments = state.pearl_store.get_comments(&id).unwrap_or_default();
+    Json(ApiResponse { data: comments, ok: true })
+}
+
 async fn ready_pearls_handler(State(state): State<AppState>) -> Json<ApiResponse<Vec<smooth_pearls::Pearl>>> {
     state.touch();
     let issues = crate::pearls::get_ready(&state.pearl_store).unwrap_or_default();
@@ -3278,6 +3291,19 @@ async fn reject_review_handler(State(state): State<AppState>, Path(bead_id): Pat
 
 // ── Chat ───────────────────────────────────────────────────
 
+/// Per-turn chat ceiling. Default 900s (15 min); override via
+/// `BIG_SMOOTH_CHAT_TURN_TIMEOUT_S`.
+///
+/// 300s was the historical default, set when chat turns were
+/// purely conversational. Now they routinely include pearl creation
+/// + teammate dispatch + supervisor status-walks; 300s often fires
+/// before Big Smooth can hand back a pearl id. 900s gives slow
+/// dispatches headroom while still bounding genuinely-wedged turns.
+fn chat_turn_timeout() -> std::time::Duration {
+    let secs = std::env::var("BIG_SMOOTH_CHAT_TURN_TIMEOUT_S").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(900);
+    std::time::Duration::from_secs(secs)
+}
+
 async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>) -> Json<ApiResponse<String>> {
     state.touch();
 
@@ -3407,18 +3433,15 @@ async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>)
         Ok(last_assistant)
     }
 
-    // Same 5-minute ceiling as the session-bound chat path. Anything
-    // past this is a wedge — return an actionable error so the user
-    // can retry instead of watching a spinner indefinitely.
-    const CHAT_TURN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
-    let result: anyhow::Result<String> = match tokio::time::timeout(
-        CHAT_TURN_TIMEOUT,
-        chat_inner(state, system_prompt, &body.content, body.model.as_deref(), body.budget_usd),
-    )
-    .await
-    {
+    // 15-minute ceiling by default. Bench dispatches that spawn a
+    // teammate + register a pearl can take 60-180s on cold daemons,
+    // and supervisor status-check ticks that walk the pearl + write
+    // a teammate_message can hit 60-90s. 300s was too tight when both
+    // happened together. Override via BIG_SMOOTH_CHAT_TURN_TIMEOUT_S.
+    let chat_turn_timeout = chat_turn_timeout();
+    let result: anyhow::Result<String> = match tokio::time::timeout(chat_turn_timeout, chat_inner(state, system_prompt, &body.content, body.model.as_deref(), body.budget_usd)).await {
         Ok(inner) => inner,
-        Err(_) => Err(anyhow::anyhow!("chat turn exceeded {CHAT_TURN_TIMEOUT:?} ceiling")),
+        Err(_) => Err(anyhow::anyhow!("chat turn exceeded {chat_turn_timeout:?} ceiling")),
     };
 
     match result {
@@ -3569,17 +3592,20 @@ async fn post_chat_message_handler(
     // Hard ceiling on a single chat turn. The chat agent itself caps
     // iterations at 20 with per-tool timeouts (bash 10s, teammate_wait
     // 60s ×3), so even a worst-case run completes inside 4 minutes.
-    // 5 minutes is a generous buffer; anything past it is a wedge
-    // (dolt deadlock, gateway hang, etc.) and we're better off
-    // returning an error to the user than leaving them watching the
-    // thinking spinner forever.
-    const CHAT_TURN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
-    let assistant_text = match tokio::time::timeout(CHAT_TURN_TIMEOUT, run_chat_with_history(&state, system_prompt, &history, &user_content)).await {
+    // Configurable ceiling (default 15 min). Bench coaching loops
+    // post status checks that walk the pearl + write a steer; combined
+    // round-trip can hit 60-120s and stacks badly with the prior
+    // hardcoded 300s. Override via BIG_SMOOTH_CHAT_TURN_TIMEOUT_S.
+    let chat_turn_timeout = chat_turn_timeout();
+    let assistant_text = match tokio::time::timeout(chat_turn_timeout, run_chat_with_history(&state, system_prompt, &history, &user_content)).await {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => format!("Error: {e}"),
         Err(_) => {
-            tracing::warn!(session = %id, "chat turn exceeded {CHAT_TURN_TIMEOUT:?} ceiling — aborting");
-            "_(Big Smooth ran into a wall — the chat turn went past 5 minutes without a real answer. Try sending the message again; the next turn starts fresh.)_".to_string()
+            tracing::warn!(session = %id, "chat turn exceeded {chat_turn_timeout:?} ceiling — aborting");
+            format!(
+                "_(Big Smooth ran into a wall — the chat turn went past {} seconds without a real answer. Try sending the message again; the next turn starts fresh.)_",
+                chat_turn_timeout.as_secs()
+            )
         }
     };
 
