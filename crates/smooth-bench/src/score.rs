@@ -66,6 +66,26 @@ impl Score {
             self.tasks_green,
             self.tasks_attempted
         );
+        if self.tasks_inconclusive > 0 {
+            let real_attempts = self.tasks_attempted.saturating_sub(self.tasks_inconclusive);
+            let real_pass_rate = if real_attempts == 0 {
+                0.0
+            } else {
+                f64::from(self.tasks_green.saturating_sub(self.tasks_inconclusive)) / f64::from(real_attempts)
+            };
+            let _ = writeln!(
+                out,
+                "  inconclusive:      {} (HTTP-timeout starter passes; not counted as real)",
+                self.tasks_inconclusive
+            );
+            let _ = writeln!(
+                out,
+                "  real-attempt rate: {:.1}%  ({}/{} excluding inconclusive)",
+                real_pass_rate * 100.0,
+                self.tasks_green.saturating_sub(self.tasks_inconclusive),
+                real_attempts
+            );
+        }
         let _ = writeln!(out, "  cost:              ${:.4} (cap ${:.2})", self.cost_usd, self.budget_usd_cap);
         if self.budget_usd_hit {
             let _ = writeln!(out, "  BUDGET CAP HIT — score is partial");
@@ -95,6 +115,16 @@ pub struct Score {
     pub by_language: BTreeMap<String, LanguageScore>,
     pub tasks_attempted: u32,
     pub tasks_green: u32,
+    /// Tasks where the harness can't tell if a real attempt was made —
+    /// the chat-agent dispatch hit `SMOOTH_BENCH_CHAT_HTTP_TIMEOUT_S`
+    /// before returning a pearl id, no `[METRICS]` comment landed, and
+    /// the workspace wasn't mutated. Polyglot starter code happens to
+    /// satisfy the test suite for some tasks (e.g. rust/accumulate),
+    /// which would otherwise score as PASS without any model work being
+    /// done. Counted separately so the headline pass rate reflects
+    /// real attempts.
+    #[serde(default)]
+    pub tasks_inconclusive: u32,
     pub cost_usd: f64,
     pub median_task_ms: u64,
     pub budget_usd_cap: f64,
@@ -201,6 +231,7 @@ mod tests {
             by_language,
             tasks_attempted: 40,
             tasks_green: 32,
+            tasks_inconclusive: 0,
             cost_usd: 4.23,
             median_task_ms: 15_000,
             budget_usd_cap: 10.0,
@@ -226,6 +257,7 @@ mod tests {
             by_language,
             tasks_attempted: 5,
             tasks_green: 3,
+            tasks_inconclusive: 0,
             cost_usd: 10.07,
             median_task_ms: 8_000,
             budget_usd_cap: 10.0,
@@ -236,5 +268,54 @@ mod tests {
         let decoded: Score = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded, original);
         assert!(decoded.budget_usd_hit);
+    }
+
+    #[test]
+    fn render_table_separates_real_from_inconclusive() {
+        // 18 attempts, 9 PASS, 5 of those are HTTP-timeout starter
+        // passes. Real-attempt pass rate must drop accordingly.
+        let s = Score {
+            smooth_version: "test".into(),
+            commit_sha: "abc".into(),
+            ran_at: chrono::Utc.with_ymd_and_hms(2026, 5, 3, 0, 0, 0).unwrap(),
+            overall_pass_rate: 9.0 / 18.0,
+            by_language: BTreeMap::new(),
+            tasks_attempted: 18,
+            tasks_green: 9,
+            tasks_inconclusive: 5,
+            cost_usd: 0.42,
+            median_task_ms: 30_000,
+            budget_usd_cap: 10.0,
+            budget_usd_hit: false,
+        };
+        let table = s.render_table();
+        // Headline still reports raw pass rate.
+        assert!(table.contains("9/18"), "{table}");
+        // Inconclusive line surfaces the suspect count.
+        assert!(table.contains("inconclusive:      5"), "{table}");
+        // Real-attempt rate excludes inconclusive: (9-5) / (18-5) = 4/13.
+        assert!(table.contains("real-attempt rate"), "{table}");
+        assert!(table.contains("(4/13"), "{table}");
+    }
+
+    #[test]
+    fn render_table_omits_inconclusive_block_when_zero() {
+        let s = Score {
+            smooth_version: "test".into(),
+            commit_sha: "abc".into(),
+            ran_at: chrono::Utc.with_ymd_and_hms(2026, 5, 3, 0, 0, 0).unwrap(),
+            overall_pass_rate: 0.5,
+            by_language: BTreeMap::new(),
+            tasks_attempted: 4,
+            tasks_green: 2,
+            tasks_inconclusive: 0,
+            cost_usd: 0.0,
+            median_task_ms: 0,
+            budget_usd_cap: 10.0,
+            budget_usd_hit: false,
+        };
+        let table = s.render_table();
+        assert!(!table.contains("inconclusive"), "{table}");
+        assert!(!table.contains("real-attempt rate"), "{table}");
     }
 }

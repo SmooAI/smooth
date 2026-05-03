@@ -38,6 +38,7 @@ impl TaskRunner for AlwaysPassRunner {
             solved: true,
             cost_usd: 0.0,
             duration_ms: 10,
+            inconclusive: false,
         })
     }
 }
