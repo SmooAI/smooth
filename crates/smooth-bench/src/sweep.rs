@@ -38,6 +38,11 @@ pub struct TaskOutcome {
     /// timeout (within 100 ms) AND cost_usd is 0 (no LLM rounds
     /// completed) AND no LLM error was surfaced.
     pub inconclusive: bool,
+    /// Run-dir name (last 8 chars under `~/.smooth/bench-runs/`) so the
+    /// eval-html sweep rollup can link to the per-task artifacts.
+    /// `None` for runner errors that didn't get far enough to write a
+    /// result.json. Optional for back-compat with mocked test runners.
+    pub run_id: Option<String>,
 }
 
 /// Injection point for the per-task runner. Production implementation
@@ -87,6 +92,7 @@ impl TaskRunner for PolyglotTaskRunner {
             cost_usd: res.cost_usd,
             duration_ms,
             inconclusive,
+            run_id: Some(res.run_id.clone()),
         })
     }
 }
@@ -102,6 +108,7 @@ pub fn outcome_from_result(r: &BenchResult) -> TaskOutcome {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
         duration_ms: (r.duration_s * 1000.0).max(0.0) as u64,
         inconclusive: false,
+        run_id: Some(r.run_id.clone()),
     }
 }
 
@@ -226,6 +233,7 @@ where
                     cost_usd: 0.0,
                     duration_ms: 0,
                     inconclusive: false,
+                    run_id: None,
                 }
             }
         };
@@ -379,6 +387,7 @@ mod tests {
                     cost_usd: 0.0,
                     duration_ms: 0,
                     inconclusive: false,
+                    run_id: None,
                 });
             }
             let (solved, cost_usd, duration_ms) = q.remove(0);
@@ -387,6 +396,7 @@ mod tests {
                 cost_usd,
                 duration_ms,
                 inconclusive: false,
+                run_id: None,
             })
         }
     }
@@ -589,6 +599,7 @@ mod tests {
                         cost_usd: 0.1,
                         duration_ms: 500,
                         inconclusive: false,
+                        run_id: None,
                     })
                 }
             }

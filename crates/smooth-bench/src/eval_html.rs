@@ -292,6 +292,108 @@ pub fn render_html(result: &BenchResult, prompt: &str, comments: &[PearlComment]
     html
 }
 
+/// Render a sweep-level rollup: one row per `BenchResult`, with verdict
+/// pill + link to the per-task `eval.html` (which the caller is
+/// responsible for having generated). Self-contained HTML.
+///
+/// `title_suffix` is shown in the page title alongside the run count
+/// and aggregate pass-rate (e.g. `"take 9"`).
+pub fn render_sweep_html(results: &[BenchResult], title_suffix: &str) -> String {
+    let total = results.len();
+    let pass_count = results.iter().filter(|r| classify(r) == Verdict::Pass).count();
+    let fail_count = results.iter().filter(|r| classify(r) == Verdict::Fail).count();
+    let inc_count = results.iter().filter(|r| classify(r) == Verdict::Inconclusive).count();
+    let total_cost: f64 = results.iter().map(|r| r.cost_usd).sum();
+    let total_steers: u32 = results.iter().filter_map(|r| r.supervisor_steer_count).sum();
+    let pass_rate = if total > 0 { 100.0 * pass_count as f64 / total as f64 } else { 0.0 };
+
+    let title = format!("Bench sweep — {title_suffix} ({pass_count}/{total} = {pass_rate:.1}%)");
+
+    let mut html = String::new();
+    html.push_str(&format!(
+        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><title>{title}</title><style>{STYLE}</style></head><body><div class=\"container\">",
+        title = html_escape(&title),
+    ));
+    html.push_str(&format!("<header><h1>{title}</h1></header>", title = html_escape(&title)));
+
+    html.push_str("<div class=\"grid\">");
+    html.push_str(&format!(
+        "<div class=\"card stat pass\"><div class=\"label\">Pass rate</div><div class=\"value\">{pass_rate:.1} %</div><div class=\"delta\">{pass_count} / {total} tasks</div></div>"
+    ));
+    html.push_str(&format!(
+        "<div class=\"card stat\"><div class=\"label\">Verdict mix</div><div class=\"value\">{pass_count}/{fail_count}/{inc_count}</div><div class=\"delta\">PASS / FAIL / INCONCLUSIVE</div></div>"
+    ));
+    html.push_str(&format!(
+        "<div class=\"card stat\"><div class=\"label\">Total cost</div><div class=\"value\">${total_cost:.4}</div><div class=\"delta\">supervisor steers across sweep: {total_steers}</div></div>"
+    ));
+    html.push_str("</div>");
+
+    html.push_str("<h2>Per-task results</h2>");
+    html.push_str("<table class=\"timeline\"><thead><tr><th>#</th><th>Lang</th><th>Task</th><th>Verdict</th><th>Wall</th><th>Cost</th><th>Steers</th><th>Run</th></tr></thead><tbody>");
+    for (i, r) in results.iter().enumerate() {
+        let verdict = classify(r);
+        let wall_min = r.duration_s / 60.0;
+        let steers = r.supervisor_steer_count.unwrap_or(0);
+        let run_link = format!("<a href=\"file://{}\">{}</a>", r.run_dir.join("eval.html").display(), html_escape(&r.run_id));
+        html.push_str(&format!(
+            "<tr class=\"{cls}\"><td>{i}</td><td>{lang}</td><td>{task}</td><td class=\"kind\">{label}</td><td>{wall_min:.1} min</td><td>${cost:.4}</td><td>{steers}</td><td>{run_link}</td></tr>",
+            cls = match verdict {
+                Verdict::Pass => "progress",
+                Verdict::Fail => "metrics",
+                Verdict::Inconclusive => "idle",
+            },
+            i = i + 1,
+            lang = html_escape(&r.lang),
+            task = html_escape(&r.task),
+            label = verdict.label(),
+            wall_min = wall_min,
+            cost = r.cost_usd,
+            steers = steers,
+            run_link = run_link,
+        ));
+    }
+    html.push_str("</tbody></table>");
+
+    html.push_str("</div></body></html>");
+    html
+}
+
+/// Scan `~/.smooth/bench-runs/` for `result.json` files modified in the
+/// last `since_hours` hours. Returns deserialized `BenchResult`s sorted
+/// by timestamp (oldest first — the natural reading order for a sweep).
+/// Best-effort; unparseable result.json files are silently skipped.
+pub fn scan_recent_results(since_hours: u64) -> Result<Vec<BenchResult>> {
+    let runs_root = crate::runs_root()?;
+    let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(since_hours * 3600);
+    let mut results: Vec<BenchResult> = Vec::new();
+    if !runs_root.exists() {
+        return Ok(results);
+    }
+    for entry in std::fs::read_dir(&runs_root)? {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let result_path = entry.path().join("result.json");
+        let mtime = match result_path.metadata().and_then(|m| m.modified()) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if mtime < cutoff {
+            continue;
+        }
+        let bytes = match std::fs::read(&result_path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        if let Ok(r) = serde_json::from_slice::<BenchResult>(&bytes) {
+            results.push(r);
+        }
+    }
+    results.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+    Ok(results)
+}
+
 const STYLE: &str = r#"
 :root { --bg:#0c0d10; --panel:#16181d; --panel-2:#1c1f26; --line:#2a2e38;
     --text:#e6e8ec; --text-dim:#9ba3af; --pass:#4ade80; --fail:#f87171;
@@ -473,5 +575,34 @@ mod tests {
         let html = render_html(&r, "", &[], Verdict::Inconclusive);
         assert!(html.contains("INCONCLUSIVE"));
         assert!(html.contains("class=\"card stat note\""));
+    }
+
+    #[test]
+    fn render_sweep_html_aggregates_pass_rate() {
+        let mut a = make_result(true, 600.0, Some(2));
+        a.task = "a".into();
+        let mut b = make_result(false, 600.0, Some(1));
+        b.task = "b".into();
+        let mut c = make_result(true, 300.003, Some(0));
+        c.task = "c".into();
+        let html = render_sweep_html(&[a, b, c], "take 9");
+
+        // 1/3 PASS (a is real, c is INCONCLUSIVE, b is FAIL)
+        assert!(html.contains("33.3 %"), "{html}");
+        assert!(html.contains("1 / 3 tasks"));
+        assert!(html.contains("1/1/1"), "PASS/FAIL/INCONCLUSIVE breakdown");
+        // Total steers across the 3 tasks = 2 + 1 + 0 = 3.
+        assert!(html.contains("supervisor steers across sweep: 3"));
+        // Each task row gets a verdict label.
+        assert!(html.contains(">PASS<"));
+        assert!(html.contains(">FAIL<"));
+        assert!(html.contains(">INCONCLUSIVE<"));
+    }
+
+    #[test]
+    fn render_sweep_html_handles_empty_results() {
+        let html = render_sweep_html(&[], "empty");
+        assert!(html.contains("0 / 0 tasks"));
+        assert!(html.contains("0.0 %"));
     }
 }

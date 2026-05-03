@@ -65,6 +65,23 @@ enum Commands {
         #[arg(long)]
         output: Option<PathBuf>,
     },
+
+    /// Render a sweep-level rollup HTML over recent bench runs.
+    ///
+    /// Scans `~/.smooth/bench-runs/` for `result.json` files modified
+    /// in the last `--since` hours, generates per-task `eval.html` for
+    /// each, and writes an aggregate index linking to all of them.
+    EvalSweep {
+        /// Look back this many hours when scanning bench-runs/. Default 6.
+        #[arg(long, default_value_t = 6)]
+        since: u64,
+        /// Title suffix shown in the rollup heading (e.g. "take 9").
+        #[arg(long, default_value = "")]
+        title: String,
+        /// Output path. Default: `<HOME>/.smooth/bench-runs/sweep.html`.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -152,7 +169,44 @@ async fn main() -> Result<()> {
         }
         Commands::Score(args) => run_score(args).await,
         Commands::EvalReport { run, output } => run_eval_report(&run, output.as_deref()),
+        Commands::EvalSweep { since, title, output } => run_eval_sweep(since, &title, output.as_deref()),
     }
+}
+
+fn run_eval_sweep(since_hours: u64, title: &str, output: Option<&std::path::Path>) -> Result<()> {
+    let results = smooth_bench::eval_html::scan_recent_results(since_hours).context("scan bench-runs")?;
+    if results.is_empty() {
+        anyhow::bail!("no bench runs found in the last {since_hours}h under ~/.smooth/bench-runs/");
+    }
+    println!("Found {} bench run(s) in the last {since_hours}h.", results.len());
+
+    // Render per-task eval.html for each run as a side-effect, so the
+    // rollup's links resolve to real files.
+    for r in &results {
+        match smooth_bench::eval_html::render_run_html(&r.run_dir) {
+            Ok(html) => {
+                let path = r.run_dir.join("eval.html");
+                if let Err(e) = std::fs::write(&path, html) {
+                    eprintln!("warn: failed to write {}: {e}", path.display());
+                }
+            }
+            Err(e) => eprintln!("warn: failed to render eval.html for {}: {e}", r.run_id),
+        }
+    }
+
+    let suffix = if title.is_empty() {
+        format!("last {since_hours}h")
+    } else {
+        title.to_string()
+    };
+    let html = smooth_bench::eval_html::render_sweep_html(&results, &suffix);
+    let out_path = output.map_or_else(
+        || smooth_bench::runs_root().unwrap_or_default().join("sweep.html"),
+        std::path::Path::to_path_buf,
+    );
+    std::fs::write(&out_path, html).with_context(|| format!("write {}", out_path.display()))?;
+    println!("wrote {}", out_path.display());
+    Ok(())
 }
 
 fn run_eval_report(run: &str, output: Option<&std::path::Path>) -> Result<()> {
