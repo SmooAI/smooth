@@ -127,7 +127,19 @@ pub async fn run_via_chat_agent(
     // Optional supervisor — talks to Big Smooth via /api/chat with its
     // OWN LLM driving the conversation. Knows the task description so
     // it can offer context-aware guidance just like the user would.
-    let mut supervisor: Option<Supervisor> = SupervisorConfig::from_env().map(|cfg| {
+    //
+    // Wrapped in Arc<Mutex<...>> + AtomicBool so we can run ticks
+    // concurrently with the poll loop. Without this, a slow Big Smooth
+    // turn (Kimi can stall up to the 900s chat-turn ceiling) blocks
+    // the bench from noticing pearl-status changes — observed in cell
+    // B of the sandbox-vs-direct matrix where the operator finished
+    // at ~3 min but the bench stayed pinned for 23 min on the
+    // supervisor's slow tick.
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use tokio::sync::Mutex as AsyncMutex;
+
+    let supervisor: Option<Arc<AsyncMutex<Supervisor>>> = SupervisorConfig::from_env().map(|cfg| {
         eprintln!(
             "bench: woz enabled (LLM={} via {}, interval={}s, daemon={})",
             cfg.model,
@@ -135,8 +147,9 @@ pub async fn run_via_chat_agent(
             cfg.interval.as_secs(),
             cfg.daemon_url,
         );
-        Supervisor::new(cfg, pearl_id.clone(), prompt)
+        Arc::new(AsyncMutex::new(Supervisor::new(cfg, pearl_id.clone(), prompt)))
     });
+    let tick_in_flight = Arc::new(AtomicBool::new(false));
 
     let api_base = big_smooth_url.trim_end_matches('/').to_string();
 
@@ -150,7 +163,7 @@ pub async fn run_via_chat_agent(
                     cost,
                 },
                 pearl_id: Some(pearl_id),
-                supervisor_steer_count: supervisor.as_ref().map_or(0, Supervisor::tick_count),
+                supervisor_steer_count: supervisor_tick_count(&supervisor),
             });
         }
 
@@ -169,7 +182,7 @@ pub async fn run_via_chat_agent(
                                 cost,
                             },
                             pearl_id: Some(pearl_id),
-                            supervisor_steer_count: supervisor.as_ref().map_or(0, Supervisor::tick_count),
+                            supervisor_steer_count: supervisor_tick_count(&supervisor),
                         });
                     }
                 }
@@ -208,16 +221,34 @@ pub async fn run_via_chat_agent(
                     cost,
                 },
                 pearl_id: Some(pearl_id),
-                supervisor_steer_count: supervisor.as_ref().map_or(0, Supervisor::tick_count),
+                supervisor_steer_count: supervisor_tick_count(&supervisor),
             });
         }
 
-        // Supervisor tick — gated by its own interval. The supervisor's
-        // LLM composes the next conversational user-message and POSTs
-        // it to /api/chat; Big Smooth handles all teammate steering.
-        if let Some(sup) = supervisor.as_mut() {
-            if sup.should_tick(Instant::now()) {
-                let _ = sup.tick_async(t0).await;
+        // Supervisor tick — fire-and-forget on a separate task so the
+        // poll loop keeps checking pearl status while Big Smooth chews
+        // through tool calls. AtomicBool gates against re-entry: while
+        // a tick is in flight (lock held by the spawned task), we
+        // skip new spawns. Whatever tick is running when the pearl
+        // closes is silently abandoned — its work was already useful
+        // (it composed and sent a coaching message); no need to await
+        // its return.
+        if let Some(sup_arc) = supervisor.as_ref() {
+            if !tick_in_flight.load(Ordering::SeqCst) {
+                // Try to read should_tick without blocking — peek the
+                // mutex with try_lock; if locked, a tick is in flight
+                // (our flag is also set, this is belt-and-suspenders).
+                let should = sup_arc.try_lock().map_or(false, |sup| sup.should_tick(Instant::now()));
+                if should {
+                    tick_in_flight.store(true, Ordering::SeqCst);
+                    let sup_clone = Arc::clone(sup_arc);
+                    let flag_clone = Arc::clone(&tick_in_flight);
+                    tokio::spawn(async move {
+                        let mut sup = sup_clone.lock().await;
+                        let _ = sup.tick_async(t0).await;
+                        flag_clone.store(false, Ordering::SeqCst);
+                    });
+                }
             }
         }
 
@@ -233,7 +264,7 @@ pub async fn run_via_chat_agent(
                         cost,
                     },
                     pearl_id: Some(pearl_id),
-                    supervisor_steer_count: supervisor.as_ref().map_or(0, Supervisor::tick_count),
+                    supervisor_steer_count: supervisor_tick_count(&supervisor),
                 });
             }
         } else {
@@ -243,6 +274,14 @@ pub async fn run_via_chat_agent(
 
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
+}
+
+/// Read the supervisor's tick count without blocking on a tick that's
+/// currently in flight. Returns 0 when supervisor is disabled or the
+/// mutex is held (we'd rather report a stale-by-one count than wedge
+/// the bench's return path on a tick that's still running).
+fn supervisor_tick_count(sup: &Option<std::sync::Arc<tokio::sync::Mutex<Supervisor>>>) -> u32 {
+    sup.as_ref().map_or(0, |arc| arc.try_lock().map_or(0, |s| s.tick_count()))
 }
 
 /// Fetch the pearl's `[METRICS]` cost via the comments endpoint.
