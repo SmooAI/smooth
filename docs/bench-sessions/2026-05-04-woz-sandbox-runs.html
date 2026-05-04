@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Woz coaching loop — sandbox runs (2026-05-04)</title>
+<style>
+:root { --bg:#0c0d10; --panel:#16181d; --line:#2a2e38; --text:#e6e8ec; --text-dim:#9ba3af;
+  --pass:#4ade80; --fail:#f87171; --warn:#fbbf24; --accent:#60a5fa; }
+* { box-sizing: border-box; }
+html, body { margin:0; padding:0; background:var(--bg); color:var(--text);
+  font:14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+.container { max-width:1080px; margin:0 auto; padding:32px 24px 80px; }
+header { border-bottom:1px solid var(--line); padding-bottom:24px; margin-bottom:32px; }
+h1 { font-size:24px; margin:0 0 8px; font-weight:600; }
+h2 { font-size:18px; margin:32px 0 12px; font-weight:600; }
+h3 { font-size:13px; margin:24px 0 8px; font-weight:600; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.05em; }
+.meta { color:var(--text-dim); font-size:13px; }
+.meta code, code { background:var(--panel); padding:1px 6px; border-radius:3px; color:var(--accent);
+  font:12.5px/1.55 ui-monospace, "SF Mono", Menlo, monospace; }
+table { width:100%; border-collapse:collapse; margin:12px 0; font-size:13px; }
+th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+th { color:var(--text-dim); font-weight:500; font-size:12px; text-transform:uppercase; letter-spacing:0.04em; }
+.tag { display:inline-block; font-size:11px; font-weight:600; padding:2px 8px; border-radius:3px;
+  text-transform:uppercase; letter-spacing:0.04em; }
+.tag.pass { background:rgba(74,222,128,0.15); color:var(--pass); }
+.tag.note { background:rgba(251,191,36,0.15); color:var(--warn); }
+.tag.fail { background:rgba(248,113,113,0.15); color:var(--fail); }
+pre { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:12px;
+  font:12.5px/1.55 ui-monospace, "SF Mono", Menlo, monospace; white-space:pre-wrap; }
+ul { padding-left:20px; }
+li { margin:4px 0; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>Woz coaching loop — sandbox runs (2026-05-04)</h1>
+  <p class="meta">
+    Smooth version <code>0.12.11 (3e6ef48)</code> &middot;
+    Generated <code>2026-05-04 02:45 UTC</code> &middot;
+    Branch <code>th-gemini-format</code>
+  </p>
+</header>
+
+<h2>What this is</h2>
+<p>
+  Three real-solve runs of <code>python/affine-cipher</code> under the new
+  <strong>Woz</strong> coaching loop (an end-user simulator that talks to Big Smooth
+  via <code>/api/chat</code> only — no direct dolt access). All in <strong>sandbox
+  mode</strong> (microVM dispatch, the default). The intended A/B/C/D matrix
+  comparing sandbox vs direct mode and Gemini-direct vs smooth-* aliases
+  needs additional infrastructure work (see <a href="#followup">Follow-up</a>);
+  this report captures the data we have reliably.
+</p>
+
+<h2>Setup</h2>
+<table>
+  <tr><th>Slot</th><th>Model</th></tr>
+  <tr><td><strong>Woz (supervisor LLM)</strong></td><td><code>gemini-3.1-flash-lite-preview</code> via native <code>/gemini/v1beta</code> pass-through</td></tr>
+  <tr><td><strong>Big Smooth (chat-agent)</strong></td><td><code>smooth-fast-gemini</code> for status ticks; varies on dispatch path</td></tr>
+  <tr><td><strong>Operator (in-sandbox teammate)</strong></td><td><code>smooth-coding</code> (Kimi K2-Thinking via Moonshot)</td></tr>
+</table>
+<p class="meta">
+  Bench → <code>/api/chat</code> only. Woz → <code>/api/chat</code> only with its own
+  conversation history. Big Smooth uses tool calls (<code>teammate_read</code>,
+  <code>teammate_message</code>, plus the new <code>read_file</code> /
+  <code>glob_files</code> / <code>grep_files</code> tools) to coordinate the
+  sandbox teammate. <strong>Zero direct dolt access from the bench process.</strong>
+</p>
+
+<h2>Sandbox runs &mdash; <code>python/affine-cipher</code></h2>
+<table>
+  <thead>
+    <tr><th>Run</th><th>Wall</th><th>Verdict</th><th>Tests</th><th>Woz ticks</th><th>Notes</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>th-b9bb5e</code> (first)</td>
+      <td>20.2 min</td>
+      <td><span class="tag pass">SOLVED</span></td>
+      <td>16/16</td>
+      <td>4</td>
+      <td>First end-to-end real solve under the architecture. Tick #2 caught a 6-min teammate hang ("teammate has been heartbeating without progress &mdash; check if hung"); Big Smooth confirmed the wedge and corrected via <code>teammate_message</code>. Tick #3 returned an empty body (Big Smooth hiccup); Woz LLM confabulated a wrong pearl id on the next tick &mdash; observation that drove the empty-reply guard.</td>
+    </tr>
+    <tr>
+      <td><code>th-560f10</code> (second)</td>
+      <td>16.8 min</td>
+      <td><span class="tag pass">SOLVED</span></td>
+      <td>16/16</td>
+      <td>4</td>
+      <td>Empty-reply guard fired on tick #2 and rolled back cleanly &mdash; no confabulation. Tick #4 hit the 900s chat-turn ceiling on a deep status walk; pearl still completed via the bench's <code>/api/pearls</code> quiescence detection. Drove the iteration cap fix (chat-agent <code>max_iterations 20 &rarr; 12</code>).</td>
+    </tr>
+    <tr>
+      <td><code>th-3e3c15</code> (third)</td>
+      <td>19.9 min</td>
+      <td><span class="tag pass">SOLVED</span></td>
+      <td>16/16</td>
+      <td>13</td>
+      <td>30s tick interval (was 60s) &mdash; ~3&times; more coaching turns. Empty-reply guard caught tick #4. Most ticks 2-6s; a few longer (80s, 209s, 254s) when Big Smooth did a deeper Claude-Code-style status walk. <strong>No 900s stalls</strong> &mdash; the iteration cap fix held.</td>
+    </tr>
+  </tbody>
+</table>
+
+<p class="meta">
+  All three are real solves &mdash; agent-modified workspaces with stripped
+  agent-added test files, scoring against the polyglot's own test suite.
+  Cost: $0.00 (LiteLLM pricing for Moonshot/Z.ai/MiniMax was missing &mdash;
+  fix shipped in the smooai monorepo's <code>litellm-moonshot-pricing</code>
+  branch, merged to main; production deploy underway).
+</p>
+
+<h2>Architecture diagram &mdash; the conversation loop</h2>
+<pre>
+  bench harness                 Big Smooth                    teammate operator
+    (the user)                  (chat-agent)                  (in microVM)
+       │                              │                              │
+       │  POST /api/chat              │                              │
+       │  "Run affine-cipher task"    │                              │
+       │ ───────────────────────────▶ │  pearls_create               │
+       │                              │  teammate_spawn              │
+       │  ◀────── pearl_id ────────── │ ───────────────────────────▶ │
+       │                              │                              │  read_file, edit_file,
+       │                              │                              │  bash, run tests, edit, ...
+       │                              │                              │
+       │  Woz tick (every 30s):       │                              │
+       │  POST /api/chat              │                              │
+       │  "How's th-XXX doing?"       │                              │
+       │ ───────────────────────────▶ │  teammate_read(pearl)        │
+       │                              │  &lt;maybe teammate_message&gt;    │
+       │  ◀── prose reply (Claude     │                              │
+       │      Code style: diffs,      │                              │
+       │      tool calls, test out)   │                              │
+       │                              │                              │
+       │       ... repeat ...         │                              │
+       │                              │                              │
+       │  Pearl status flips Closed   │ ◀────── [IDLE] ──────────── │
+       │  &lt;bench detects via          │                              │
+       │   /api/pearls/{id}&gt;          │                              │
+       │  Score the workspace         │                              │
+       │  on the polyglot test suite. │                              │
+</pre>
+
+<h2 id="followup">Follow-up: full A/B/C/D matrix</h2>
+<p>
+  The intended matrix &mdash; sandbox vs direct-mode &times; Gemini-direct vs
+  smooth-* aliases &mdash; ran into multi-cell daemon-restart fragility:
+</p>
+<ul>
+  <li><strong>Direct mode requires a host-triple operator-runner binary.</strong>
+    Built and codesigned at <code>target/release/smooth-operator-runner</code>
+    during the matrix attempt. ✓</li>
+  <li><strong>Direct-mode chat dispatches were returning empty data.</strong>
+    Probable cause: bench's multi-step dispatch prompt (pearls_create + teammate_spawn + return ONLY pearl id)
+    is unreliable on Gemini Flash Lite for tool calls. Fixed by pinning Big Smooth's
+    chat-agent to <code>smooth-reasoning-kimi</code> for the dispatch turn (Kimi K2-Thinking has
+    proven tool-use compliance).</li>
+  <li><strong>Daemon-restart-between-cells.</strong> <code>launchctl setenv/unsetenv +
+    kickstart -k</code> was unreliable: env-var changes weren't always picked up by the
+    new daemon process; sometimes the daemon stayed in direct mode after unsetenv.
+    Need a more robust toggle (e.g. exec the daemon directly with a runtime flag instead
+    of relying on env-var inheritance through launchd).</li>
+</ul>
+<p>
+  Filed as follow-up. The matrix will be valuable once those bench-harness/orchestration
+  issues are resolved; the data above proves the Woz architecture itself works.
+</p>
+
+<h2>What this DOES prove</h2>
+<ul>
+  <li><strong>End-user simulation works.</strong> Three real-solves under
+    the architecture where the bench process makes <em>zero</em> direct
+    dolt reads or writes &mdash; everything goes through <code>/api/chat</code>
+    and <code>/api/pearls/{id}</code>.</li>
+  <li><strong>Reproducibility.</strong> Three independent solves on the same task,
+    under sandbox dispatch, all green. Wall times 16.8&ndash;20.2 min, consistent
+    with the operator's actual work (cold-start sandbox + tool installs + agent loop).</li>
+  <li><strong>Empty-reply guard fires correctly.</strong> Big Smooth's chat-agent
+    occasionally returns <code>data: ""</code>; the supervisor now treats that as
+    Failed and rolls back the synthetic user turn. Confabulation drift eliminated.</li>
+  <li><strong>30s tick &rarr; 3&times; more coaching turns</strong> than the original
+    60s default, without runaway latency. The 12-iteration cap on the chat-agent
+    catches loops before they hit the 900s ceiling.</li>
+  <li><strong>New file tools for Big Smooth.</strong> <code>read_file</code>,
+    <code>glob_files</code>, <code>grep_files</code> shipped this session — Big
+    Smooth can now compose Claude-Code-style status replies (diffs, tool calls,
+    test output) by reading the workspace directly instead of round-tripping
+    through teammate prompts.</li>
+</ul>
+
+<h2>What this DOESN'T prove (yet)</h2>
+<ul>
+  <li>Direct-mode (no-sandbox) parity &mdash; needs the matrix follow-up.</li>
+  <li>Smooth-* alias parity for the supervisor LLM &mdash; needs the matrix.</li>
+  <li>Real cost per task &mdash; LiteLLM pricing fix is deployed to main but the
+    production rollout was in flight at the time of writing.</li>
+  <li>Behavior on harder tasks (rust/alphametics, java/alphametics) where take 9
+    saw regressions &mdash; will measure once the matrix infrastructure stabilises.</li>
+</ul>
+
+</div>
+</body>
+</html>
