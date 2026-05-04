@@ -384,8 +384,29 @@ struct PhaseOutcome {
 /// accepts — so mapper/oracle can't accidentally write code even if
 /// the underlying tool registry has edit_file/etc.
 async fn run_role_phase(cfg: &CodingWorkflowConfig, role: &crate::cast::OperatorRole, user_prompt: &str, phase: &str, iteration: u32) -> anyhow::Result<PhaseOutcome> {
-    let llm_config = cfg.registry.llm_config_for(role.slot).with_context(|| format!("resolving {:?} slot for role '{}'", role.slot, role.name))?;
-    let alias = cfg.registry.routing.slot_for(role.slot).model.clone();
+    let mut llm_config = cfg.registry.llm_config_for(role.slot).with_context(|| format!("resolving {:?} slot for role '{}'", role.slot, role.name))?;
+    let mut alias = cfg.registry.routing.slot_for(role.slot).model.clone();
+
+    // Per-role model override. Env var name is
+    // `SMOOTH_<ROLE>_MODEL_OVERRIDE` (uppercase). When set, swaps the
+    // model on the resolved config — keeps the gateway URL + key from
+    // the slot routing, just changes which upstream model the runner
+    // asks for. Lets the bench A/B different fixers/mappers/oracles
+    // without redeploying LiteLLM.
+    let env_var = format!("SMOOTH_{}_MODEL_OVERRIDE", role.name.to_ascii_uppercase());
+    if let Ok(override_model) = std::env::var(&env_var) {
+        if !override_model.trim().is_empty() {
+            tracing::info!(
+                role = %role.name,
+                slot = ?role.slot,
+                from = %llm_config.model,
+                to = %override_model,
+                "multirole: applying per-role model override"
+            );
+            llm_config.model = override_model.clone();
+            alias = override_model;
+        }
+    }
 
     let _ = cfg.tx.send(AgentEvent::PhaseStart {
         phase: phase.into(),
