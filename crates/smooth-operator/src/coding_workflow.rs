@@ -79,7 +79,21 @@ pub struct CodingWorkflowConfig {
 }
 
 /// Run the workflow end-to-end. Returns the accumulated cost.
+///
+/// Default path is single-agent (fixer only). Set
+/// `SMOOTH_WORKFLOW_MULTIROLE=1` to invoke the multi-role chain:
+/// mapper (Planning slot) once, then oracle (Thinking slot) +
+/// fixer (Coding slot) per iteration. The mix lets a fast/cheap
+/// coder model handle code edits while a thinking model handles
+/// strategy and a planner handles up-front decomposition.
 pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f64> {
+    let multirole = std::env::var("SMOOTH_WORKFLOW_MULTIROLE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if multirole {
+        return run_coding_workflow_multirole(cfg).await;
+    }
+
     // Pull the fixer role definition from the cast so the prompt
     // lives in one place (`cast/prompts/fixer.txt`) and the slot
     // comes from the role's `slot` field instead of being hard-coded
@@ -237,6 +251,205 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
     });
 
     Ok(total_cost_usd)
+}
+
+/// Multi-role workflow: mapper (Planning) once, then oracle
+/// (Thinking) + fixer (Coding) per iteration.
+///
+/// Mapper produces a concrete plan from the task description. Each
+/// iteration the oracle reviews the latest test output (or the plan
+/// on iteration 1), reasons about strategy, and produces a directed
+/// nudge. Then the fixer (the only role with mutating tools) takes
+/// the plan + oracle's advice + last test output and writes code.
+///
+/// Each role uses its own LLM slot — so smooth-coding can be a fast
+/// cheap coder while smooth-reasoning is a slow smart thinker.
+async fn run_coding_workflow_multirole(cfg: CodingWorkflowConfig) -> anyhow::Result<f64> {
+    use crate::cast::OperatorRole;
+
+    let cast = Cast::builtin();
+    let mapper_role = cast.get("mapper").context("missing 'mapper' role in cast")?.clone();
+    let oracle_role = cast.get("oracle").context("missing 'oracle' role in cast")?.clone();
+    let fixer_role = cast.get("fixer").context("missing 'fixer' role in cast")?.clone();
+
+    let mut total_cost_usd = 0.0_f64;
+
+    // Phase 0 (once): mapper decomposes the task into a plan.
+    let mapper_input = format!(
+        "Decompose this benchmark task into a concrete implementation plan. Read the existing files to understand the starting state, the test suite, and any constraints. Produce a numbered list of steps.\n\n## Task\n\n{}",
+        cfg.task_prompt
+    );
+    let plan_outcome = run_role_phase(&cfg, &mapper_role, &mapper_input, "MAPPING", 1).await?;
+    total_cost_usd += plan_outcome.cost;
+    let plan_text = plan_outcome.transcript;
+
+    let mut last_verify_output: Option<String> = None;
+    let mut best_failed_count: Option<u32> = None;
+    let mut snapshot_taken = false;
+    let iter_cap = cfg.max_outer_iterations.max(1);
+    let mut iteration = 0u32;
+    let mut succeeded = false;
+
+    for _ in 0..iter_cap {
+        iteration += 1;
+
+        // Phase 1: oracle reviews state and recommends next move.
+        let oracle_input = build_oracle_prompt(&cfg.task_prompt, &plan_text, last_verify_output.as_deref(), iteration);
+        let advice_outcome = run_role_phase(&cfg, &oracle_role, &oracle_input, "ORACLE", iteration).await?;
+        total_cost_usd += advice_outcome.cost;
+
+        // Phase 2: fixer implements.
+        let fixer_input = build_fixer_prompt(&cfg.task_prompt, &plan_text, &advice_outcome.transcript, last_verify_output.as_deref(), iteration);
+        let fix_outcome = run_role_phase(&cfg, &fixer_role, &fixer_input, "FIXING", iteration).await?;
+        total_cost_usd += fix_outcome.cost;
+
+        let transcript = fix_outcome.transcript;
+        last_verify_output = Some(transcript.clone());
+
+        if detect_verify_pass(&transcript) {
+            succeeded = true;
+            tracing::info!(iteration, "multirole workflow: green, stopping");
+            break;
+        }
+
+        let current_failed = extract_failed_count(&transcript);
+        let improved = match (current_failed, best_failed_count) {
+            (Some(now), Some(best)) => now < best,
+            (Some(_), None) => true,
+            (None, _) if !snapshot_taken => true,
+            _ => false,
+        };
+        if improved {
+            if let Some(ref ws) = cfg.workspace_root {
+                if snapshot_workspace(ws, &best_snapshot_dir(ws)).is_ok() {
+                    snapshot_taken = true;
+                    if let Some(now) = current_failed {
+                        best_failed_count = Some(now);
+                    }
+                }
+            }
+        }
+
+        if let (Some(best), Some(now)) = (best_failed_count, current_failed) {
+            if best <= CLOSE_TO_GREEN_THRESHOLD && now >= best {
+                tracing::info!(best, now, "multirole workflow: close-to-green, stopping");
+                break;
+            }
+        }
+
+        if let Some(cap) = cfg.budget_usd {
+            if cap > 0.0 && total_cost_usd > 0.0 {
+                let per_iter = total_cost_usd / f64::from(iteration);
+                if total_cost_usd + per_iter >= cap {
+                    tracing::info!(spent = total_cost_usd, cap, "multirole workflow: budget exhausted");
+                    break;
+                }
+            }
+        }
+    }
+
+    if !succeeded {
+        if let (Some(ref ws), Some(best), true) = (&cfg.workspace_root, best_failed_count, snapshot_taken) {
+            let final_failed = extract_failed_count(last_verify_output.as_deref().unwrap_or(""));
+            let regressed = final_failed.is_some_and(|n| n > best);
+            let snap = best_snapshot_dir(ws);
+            if regressed && snap.is_dir() {
+                let _ = restore_workspace(&snap, ws);
+            }
+        }
+    }
+    if let Some(ref ws) = cfg.workspace_root {
+        let snap = best_snapshot_dir(ws);
+        if snap.is_dir() {
+            let _ = std::fs::remove_dir_all(&snap);
+        }
+    }
+
+    let _ = cfg.tx.send(AgentEvent::Completed {
+        agent_id: cfg.operator_id.clone(),
+        iterations: iteration,
+        cost_usd: total_cost_usd,
+    });
+
+    Ok(total_cost_usd)
+}
+
+struct PhaseOutcome {
+    transcript: String,
+    cost: f64,
+}
+
+/// Run a single role's Agent loop with the role's slot + clearance.
+/// Tools are filtered down to what the role's `Clearance.allows()`
+/// accepts — so mapper/oracle can't accidentally write code even if
+/// the underlying tool registry has edit_file/etc.
+async fn run_role_phase(cfg: &CodingWorkflowConfig, role: &crate::cast::OperatorRole, user_prompt: &str, phase: &str, iteration: u32) -> anyhow::Result<PhaseOutcome> {
+    let llm_config = cfg.registry.llm_config_for(role.slot).with_context(|| format!("resolving {:?} slot for role '{}'", role.slot, role.name))?;
+    let alias = cfg.registry.routing.slot_for(role.slot).model.clone();
+
+    let _ = cfg.tx.send(AgentEvent::PhaseStart {
+        phase: phase.into(),
+        alias: alias.clone(),
+        upstream: None,
+        iteration,
+    });
+
+    // Tool registry filtered by the role's clearance. Each role gets
+    // a fresh clone — mapper/oracle won't see edit_file/write_file,
+    // fixer sees the full set.
+    let mut tools = cfg.tools.clone();
+    let role_clearance = role.permissions.clone();
+    tools.retain(|name| role_clearance.allows(name));
+
+    let agent_max_iter: u32 = std::env::var("SMOOTH_WORKFLOW_AGENT_MAX_ITERATIONS").ok().and_then(|v| v.parse().ok()).unwrap_or(40);
+    let mut agent_config = crate::agent::AgentConfig::new(format!("{}/{}-{}", cfg.operator_id, role.name, iteration), role.prompt.clone(), llm_config).with_max_iterations(agent_max_iter);
+    if let Some(rx) = cfg.chat_rx.clone() {
+        agent_config = agent_config.with_chat_rx(rx);
+    }
+
+    let agent = Agent::new(agent_config, tools);
+    let conversation = agent.run_with_channel(user_prompt, cfg.tx.clone()).await?;
+    let cost = {
+        let tracker = agent.cost_tracker.lock().expect("cost_tracker lock");
+        tracker.total_cost_usd
+    };
+    let transcript = summarize_conversation(&conversation);
+
+    Ok(PhaseOutcome { transcript, cost })
+}
+
+/// Compose the oracle's user-message: tell it about the plan, the
+/// task, and the latest failure context. Output: directed advice
+/// for the fixer's next move.
+fn build_oracle_prompt(task: &str, plan: &str, prior_output: Option<&str>, iteration: u32) -> String {
+    if iteration == 1 {
+        return format!(
+            "A planner has decomposed this task. Review the plan and the existing code. Identify any sharp edges in the planned approach (off-by-one risks, missing edge cases, things the plan glossed over). Produce 2-4 short pointed notes the implementer should keep in mind, and call out which step to tackle FIRST.\n\n## Plan\n{plan}\n\n## Task (reminder)\n{task}"
+        );
+    }
+    let prior = prior_output.unwrap_or("(no prior output)");
+    format!(
+        "Previous fixer attempt didn't reach green. Read the failing test output below; identify the SPECIFIC bug (algorithm error, off-by-one, missed edge case, wrong formula). Produce 2-3 short pointed notes for the fixer's next attempt. Quote the failing test by name when it helps.\n\n## Plan\n{plan}\n\n## Last test output (truncated)\n{}\n\n## Task (reminder)\n{task}",
+        prior.chars().take(3000).collect::<String>()
+    )
+}
+
+/// Compose the fixer's user-message: plan + oracle advice + failure
+/// context + task. Single LLM-with-tools call follows.
+fn build_fixer_prompt(task: &str, plan: &str, advice: &str, prior_output: Option<&str>, iteration: u32) -> String {
+    let prior_section = match prior_output {
+        Some(p) if !p.is_empty() => format!("\n\n## Last test output\n{}", p.chars().take(3000).collect::<String>()),
+        _ => String::new(),
+    };
+    if iteration == 1 {
+        format!(
+            "Implement the task. The planner produced a decomposition; the oracle has flagged sharp edges to watch for. Make the change, run the test suite, and iterate until green. Finish your final assistant turn with a `## Test Results` line.\n\n## Plan\n{plan}\n\n## Oracle's notes\n{advice}\n\n## Task\n{task}"
+        )
+    } else {
+        format!(
+            "Iteration {iteration}: prior attempt didn't reach green. The oracle has reviewed the failure and flagged the specific bug. Apply a targeted patch and re-run. Don't rewrite working code — only fix what the oracle named. Finish with `## Test Results`.\n\n## Plan\n{plan}\n\n## Oracle's diagnosis\n{advice}{prior_section}\n\n## Task (reminder)\n{task}"
+        )
+    }
 }
 
 /// Stop escalating when we're this close to green — more
