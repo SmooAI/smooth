@@ -3352,12 +3352,16 @@ async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>)
         let registry_arc = std::sync::Arc::new(registry);
         let tools = crate::chat_tools::build_chat_tools(state.clone(), registry_arc.clone());
 
-        // 20-iteration cap: enough for the chat-agent to drive a task
-        // to completion via teammate_wait (poll + retry + format). Each
-        // teammate_wait burns just one iteration even if the underlying
-        // wait is a minute. Five was too few — the agent ran out of
-        // turns mid-poll and returned an empty assistant message.
-        let mut agent_cfg = AgentConfig::new("big-smooth-chat", system_prompt, llm_config).with_max_iterations(20);
+        // 12-iteration cap: chat-agent's job per turn is at most a
+        // pearls_create + teammate_spawn (dispatch path, 2 tool calls)
+        // OR a teammate_read + maybe-teammate_message (status path, 2-3
+        // tool calls) plus the final assistant text. 20 was lax — under
+        // a fast model (smooth-fast-gemini), the chat-agent occasionally
+        // spiraled into a re-read loop and burned all 20 iterations
+        // before timing out. 12 keeps a safety margin while catching
+        // runaway loops earlier so the bench's woz coaching ticks don't
+        // wedge waiting on a 15-min stall. Was 20.
+        let mut agent_cfg = AgentConfig::new("big-smooth-chat", system_prompt, llm_config).with_max_iterations(12);
         if let Some(cap) = budget_usd {
             agent_cfg = agent_cfg.with_budget(CostBudget {
                 max_cost_usd: Some(cap),
@@ -3728,10 +3732,11 @@ async fn run_chat_with_history(
         format!("Recent conversation history (read-only context):\n\n{history_block}---\n\nNew user message:\n\n{user_content}")
     };
 
-    // 20 iterations so the agent can spawn → wait → format without
-    // running out of turns. teammate_wait absorbs the long wait into
-    // one iteration so this stays responsive.
-    let agent_cfg = AgentConfig::new("big-smooth-chat-session", system_prompt, llm_config).with_max_iterations(20);
+    // 12 iterations — same as the stateless chat handler. Mirrors
+    // the runaway-loop containment story: the agent's job per turn
+    // is at most a teammate_read + teammate_message + final assistant
+    // text. 12 leaves comfortable headroom while catching loops fast.
+    let agent_cfg = AgentConfig::new("big-smooth-chat-session", system_prompt, llm_config).with_max_iterations(12);
     let agent = Agent::new(agent_cfg, tools);
 
     // Thought stream — Gemini Flash Lite summarizes each tool call /
