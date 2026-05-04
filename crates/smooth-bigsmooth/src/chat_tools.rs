@@ -543,6 +543,249 @@ impl Tool for TeammateWaitTool {
     }
 }
 
+// ── read_file / glob_files / grep_files (Claude-Code-style file tools) ──
+//
+// Same shape as the operator-runner's tools (in-process, structured
+// output, respects .gitignore). Lets Big Smooth answer "what's at
+// foo.py:14?" or "show me every callsite of bar()" without delegating
+// to a teammate or shelling through bash.
+//
+// Path safety: all three accept an absolute or `~`-prefixed path. The
+// tool resolves and rejects anything outside the user's home directory
+// — Big Smooth runs as the user but shouldn't be browsing /etc or
+// /private. Workspace exploration covers the typical use case.
+
+fn resolve_under_home(p: &str) -> anyhow::Result<std::path::PathBuf> {
+    let raw = if let Some(rest) = p.strip_prefix("~/") {
+        let home = dirs_next::home_dir().context("no $HOME")?;
+        home.join(rest)
+    } else if p == "~" {
+        dirs_next::home_dir().context("no $HOME")?
+    } else {
+        std::path::PathBuf::from(p)
+    };
+    let canonical = raw.canonicalize().with_context(|| format!("canonicalize {}", raw.display()))?;
+    let home = dirs_next::home_dir().context("no $HOME")?.canonicalize().context("canonicalize $HOME")?;
+    if !canonical.starts_with(&home) {
+        anyhow::bail!("path escapes $HOME: {}", canonical.display());
+    }
+    Ok(canonical)
+}
+
+pub struct ReadFileTool;
+
+#[async_trait]
+impl Tool for ReadFileTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "read_file".to_string(),
+            description: "Read a file from the host (absolute path or ~-prefixed). Optional `start_line` and `end_line` for partial reads. Output capped at 32 KB; use line ranges for big files. Path must be inside $HOME."
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "required": ["path"],
+                "properties": {
+                    "path": { "type": "string", "description": "File path (absolute or `~/...`)." },
+                    "start_line": { "type": "integer", "description": "1-indexed first line to include." },
+                    "end_line": { "type": "integer", "description": "1-indexed last line (inclusive)." }
+                }
+            }),
+        }
+    }
+
+    async fn execute(&self, arguments: serde_json::Value) -> anyhow::Result<String> {
+        let path = arguments["path"].as_str().context("missing 'path'")?;
+        let start = arguments.get("start_line").and_then(serde_json::Value::as_u64).map(|n| n as usize);
+        let end = arguments.get("end_line").and_then(serde_json::Value::as_u64).map(|n| n as usize);
+        let resolved = resolve_under_home(path)?;
+        let resolved_for_blocking = resolved.clone();
+        let body = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+            let raw = std::fs::read_to_string(&resolved_for_blocking)?;
+            if start.is_none() && end.is_none() {
+                return Ok(raw);
+            }
+            let lines: Vec<&str> = raw.lines().collect();
+            let s = start.unwrap_or(1).max(1).min(lines.len() + 1);
+            let e = end.unwrap_or(lines.len()).max(s).min(lines.len());
+            Ok(lines[(s - 1)..e].join("\n"))
+        })
+        .await
+        .context("read_file blocking task panicked")??;
+        const CAP: usize = 32 * 1024;
+        if body.len() > CAP {
+            let mut clipped: String = body.chars().take(CAP).collect();
+            clipped.push_str("\n\n[truncated at 32 KB — use start_line/end_line for partial reads]");
+            return Ok(clipped);
+        }
+        Ok(body)
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn is_concurrent_safe(&self) -> bool {
+        true
+    }
+}
+
+pub struct GlobFilesTool;
+
+#[async_trait]
+impl Tool for GlobFilesTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "glob_files".to_string(),
+            description: "List files in a directory matching a glob pattern (e.g. `**/*.rs`, `src/**`). Respects .gitignore. Sorted by mtime (newest first). Capped at 200 results."
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "required": ["base"],
+                "properties": {
+                    "base": { "type": "string", "description": "Directory to search under (absolute or `~/...`)." },
+                    "pattern": { "type": "string", "description": "Glob pattern. Default `**/*` (all files)." }
+                }
+            }),
+        }
+    }
+
+    async fn execute(&self, arguments: serde_json::Value) -> anyhow::Result<String> {
+        let base = arguments["base"].as_str().context("missing 'base'")?;
+        let pattern = arguments.get("pattern").and_then(|v| v.as_str()).unwrap_or("**/*").to_string();
+        let resolved = resolve_under_home(base)?;
+        tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+            let mut entries: Vec<(String, std::time::SystemTime)> = Vec::new();
+            let glob = globset::GlobBuilder::new(&pattern)
+                .literal_separator(true)
+                .build()
+                .and_then(|g| globset::GlobSet::builder().add(g).build())
+                .context("invalid glob pattern")?;
+            let walker = ignore::WalkBuilder::new(&resolved).hidden(false).build();
+            for entry in walker.flatten() {
+                if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+                    continue;
+                }
+                let path = entry.path();
+                let rel = path.strip_prefix(&resolved).unwrap_or(path);
+                if !glob.is_match(rel) {
+                    continue;
+                }
+                let mtime = entry
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                entries.push((rel.display().to_string(), mtime));
+            }
+            entries.sort_by(|a, b| b.1.cmp(&a.1));
+            entries.truncate(200);
+            if entries.is_empty() {
+                return Ok(format!("(no matches for `{pattern}` under {})", resolved.display()));
+            }
+            Ok(entries.into_iter().map(|(p, _)| p).collect::<Vec<_>>().join("\n"))
+        })
+        .await
+        .context("glob_files blocking task panicked")?
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn is_concurrent_safe(&self) -> bool {
+        true
+    }
+}
+
+pub struct GrepFilesTool;
+
+#[async_trait]
+impl Tool for GrepFilesTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "grep_files".to_string(),
+            description: "Search file contents for a regex pattern (in-process ripgrep). Respects .gitignore. Returns matching lines as `file:line:content`. Capped at 200 matches."
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "required": ["base", "pattern"],
+                "properties": {
+                    "base": { "type": "string", "description": "Directory to search under (absolute or `~/...`)." },
+                    "pattern": { "type": "string", "description": "Regex pattern (rust regex syntax)." },
+                    "glob": { "type": "string", "description": "Optional glob to limit which files are searched (e.g. `**/*.rs`)." }
+                }
+            }),
+        }
+    }
+
+    async fn execute(&self, arguments: serde_json::Value) -> anyhow::Result<String> {
+        let base = arguments["base"].as_str().context("missing 'base'")?;
+        let pattern = arguments["pattern"].as_str().context("missing 'pattern'")?.to_string();
+        let glob_filter = arguments.get("glob").and_then(|v| v.as_str()).map(String::from);
+        let resolved = resolve_under_home(base)?;
+        tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+            use grep_regex::RegexMatcher;
+            use grep_searcher::sinks::UTF8;
+            use grep_searcher::Searcher;
+
+            let matcher = RegexMatcher::new(&pattern).context("invalid regex pattern")?;
+            let glob = if let Some(p) = glob_filter.as_deref() {
+                Some(
+                    globset::GlobBuilder::new(p)
+                        .literal_separator(true)
+                        .build()
+                        .and_then(|g| globset::GlobSet::builder().add(g).build())
+                        .context("invalid glob filter")?,
+                )
+            } else {
+                None
+            };
+
+            let mut matches: Vec<String> = Vec::new();
+            let walker = ignore::WalkBuilder::new(&resolved).hidden(false).build();
+            for entry in walker.flatten() {
+                if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+                    continue;
+                }
+                let path = entry.path();
+                let rel = path.strip_prefix(&resolved).unwrap_or(path);
+                if let Some(g) = &glob {
+                    if !g.is_match(rel) {
+                        continue;
+                    }
+                }
+                let mut searcher = Searcher::new();
+                let _ = searcher.search_path(
+                    &matcher,
+                    path,
+                    UTF8(|line, content| {
+                        let trimmed = content.trim_end_matches('\n');
+                        matches.push(format!("{}:{}:{}", rel.display(), line, trimmed));
+                        Ok(matches.len() < 200)
+                    }),
+                );
+                if matches.len() >= 200 {
+                    break;
+                }
+            }
+            if matches.is_empty() {
+                return Ok(format!("(no matches for `{pattern}` under {})", resolved.display()));
+            }
+            Ok(matches.join("\n"))
+        })
+        .await
+        .context("grep_files blocking task panicked")?
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn is_concurrent_safe(&self) -> bool {
+        true
+    }
+}
+
 // ── bash (read-only allowlist) ─────────────────────────────────────────
 
 /// Tight-allowlist `bash` tool for the chat agent. Lets simple read-
@@ -685,6 +928,9 @@ pub fn build_chat_tools(state: AppState, registry: Arc<ProviderRegistry>) -> smo
     tools.register(TeammateReadTool { state: state.clone() });
     tools.register(TeammateWaitTool { state });
     tools.register(BashTool);
+    tools.register(ReadFileTool);
+    tools.register(GlobFilesTool);
+    tools.register(GrepFilesTool);
     tools
 }
 
