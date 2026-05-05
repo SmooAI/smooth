@@ -16,6 +16,12 @@
 /// Match exactly the `phase:` field of `AgentEvent::PhaseStart`.
 pub const PHASES: &[&str] = &["ASSESS", "PLAN", "EXECUTE", "VERIFY", "REVIEW", "TEST", "FINALIZE"];
 
+/// Synthetic phase used by the chat panel for the streaming-spinner
+/// placeholder line. Not emitted by the workflow but supported by
+/// `phrases_for` so the chat area can rotate fun phrases instead
+/// of a static "Generating…".
+pub const GENERATING_PHASE: &str = "GENERATING";
+
 /// Return the rotating phrase list for a phase. Always returns at
 /// least one entry — callers can do `phrases[idx % len]` without
 /// bounds-checking a possibly-empty slice.
@@ -84,6 +90,21 @@ pub fn phrases_for(phase: &str) -> &'static [&'static str] {
             "Wrapping up…",
             "Final pass…",
             "Settling the verdict…",
+        ],
+        // Chat-area generating spinner (no formal phase). Used when
+        // an assistant message is streaming but content is still
+        // empty — the placeholder line right under the role label.
+        "GENERATING" => &[
+            "Spinning up the response…",
+            "Gathering thoughts…",
+            "Stringing words together…",
+            "Wordsmithing…",
+            "Composing…",
+            "Drafting it out…",
+            "Tightening the phrasing…",
+            "Picking the right verb…",
+            "Channelling Big Smooth…",
+            "Pulling it together…",
         ],
         _ => FALLBACK_PHRASES,
     }

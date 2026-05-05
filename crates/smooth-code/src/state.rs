@@ -139,18 +139,33 @@ pub struct ChatMessage {
     pub tool_calls: Vec<ToolCallState>,
     /// Whether this message is currently being streamed from the agent.
     pub streaming: bool,
+    /// Whether long content is collapsed to a one-line summary.
+    /// Defaults to `true` for system messages over `LONG_MSG_THRESHOLD`
+    /// bytes (typically LiteLLM error walls). Toggle with Ctrl+O when
+    /// the message is the most-recent collapsible one.
+    pub collapsed: bool,
 }
+
+/// Content above this byte length is considered "long" and gets
+/// collapsed-by-default for system messages so the chat doesn't fill
+/// with a wall of fallback-chain noise.
+pub const LONG_MSG_THRESHOLD: usize = 400;
 
 impl ChatMessage {
     /// Create a new chat message with an auto-generated ID and current timestamp.
     pub fn new(role: ChatRole, content: impl Into<String>) -> Self {
+        let content = content.into();
+        // Collapse long system messages by default — these are
+        // typically LiteLLM 429/500 error dumps that drown the chat.
+        let collapsed = matches!(role, ChatRole::System) && content.len() > LONG_MSG_THRESHOLD;
         Self {
             id: Uuid::new_v4().to_string(),
             role,
-            content: content.into(),
+            content,
             timestamp: Utc::now(),
             tool_calls: Vec::new(),
             streaming: false,
+            collapsed,
         }
     }
 
@@ -167,6 +182,13 @@ impl ChatMessage {
     /// Create a system message.
     pub fn system(content: impl Into<String>) -> Self {
         Self::new(ChatRole::System, content)
+    }
+
+    /// Whether this message is currently shown collapsed AND has
+    /// extra content hidden behind the toggle. Used by the keybind
+    /// to decide whether toggling makes sense.
+    pub fn is_truncated(&self) -> bool {
+        self.content.len() > LONG_MSG_THRESHOLD
     }
 }
 
@@ -248,6 +270,12 @@ pub struct AppState {
     pub model_picker: ModelPickerState,
     /// Startup health check status.
     pub health_status: HealthStatus,
+    /// Animated mob-boss mascot. Sits at the top-left of the chat
+    /// when idle, flies down below the latest text while the agent
+    /// is thinking / streaming / running tools. Updated once per
+    /// render tick from the rest of the state — see
+    /// `BigSmoothActor::update`.
+    pub big_smooth: crate::big_smooth::BigSmoothActor,
 }
 
 impl AppState {
@@ -283,6 +311,7 @@ impl AppState {
             git_state: None,
             model_picker: ModelPickerState::new(),
             health_status: HealthStatus::default(),
+            big_smooth: crate::big_smooth::BigSmoothActor::new(),
         }
     }
 

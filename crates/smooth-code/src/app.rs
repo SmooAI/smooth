@@ -203,8 +203,8 @@ pub async fn run_with_session(working_dir: PathBuf, resume: Option<crate::sessio
     // blocks or errors, we've at least rendered the welcome message once
     // so the user sees the UI is alive.
     {
-        let s = state.lock().expect("state lock poisoned");
-        if let Err(e) = terminal.draw(|f| render::render(f, &s)) {
+        let mut s = state.lock().expect("state lock poisoned");
+        if let Err(e) = terminal.draw(|f| render::render_with_tick(f, &mut s)) {
             tui_debug(format!("initial terminal.draw failed: {e}"));
         } else {
             tui_debug("initial terminal.draw OK");
@@ -272,7 +272,7 @@ fn event_loop(
             let mut s = state.lock().expect("state lock poisoned");
             // Advance spinner each frame for animation
             s.advance_spinner();
-            terminal.draw(|f| render::render(f, &s))?;
+            terminal.draw(|f| render::render_with_tick(f, &mut s))?;
         }
 
         // Drain all pending agent events without blocking
@@ -294,6 +294,16 @@ fn event_loop(
                         }
                         KeyCode::Char('b') => {
                             s.sidebar_visible = !s.sidebar_visible;
+                            continue;
+                        }
+                        KeyCode::Char('o') => {
+                            // Toggle expansion on the most recent
+                            // truncated message (typically a long
+                            // System error). Walks the messages from
+                            // most-recent backwards.
+                            if let Some(msg) = s.messages.iter_mut().rev().find(|m| m.is_truncated()) {
+                                msg.collapsed = !msg.collapsed;
+                            }
                             continue;
                         }
                         _ => {}

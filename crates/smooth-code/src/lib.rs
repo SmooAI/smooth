@@ -7,6 +7,7 @@
 
 pub mod app;
 pub mod autocomplete;
+pub mod big_smooth;
 pub mod client;
 pub mod commands;
 pub mod diff_render;

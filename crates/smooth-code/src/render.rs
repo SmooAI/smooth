@@ -34,6 +34,17 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     }
 }
 
+/// Render the full TUI frame, advancing the Big Smooth animation
+/// actor before drawing. Call this from the main loop instead of
+/// [`render`]; the read-only `&AppState` variant stays for tests
+/// + headless callers that don't want a tick to fire on every
+/// snapshot.
+pub fn render_with_tick(frame: &mut Frame, state: &mut AppState) {
+    let inputs = crate::big_smooth::BigSmoothInputs::from_state(state);
+    state.big_smooth.update(inputs);
+    render(frame, state);
+}
+
 /// Render the autocomplete popup directly above the input box.
 /// Shows up to 8 rows; stays narrow (40 cols) so it doesn't cover
 /// the chat content behind it.
@@ -102,6 +113,38 @@ const BANNER_ROWS: [&str; 6] = [
     " \u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}\u{255a}\u{2550}\u{255d}     \u{255a}\u{2550}\u{255d} \u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}  \u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}    \u{255a}\u{2550}\u{255d}   \u{255a}\u{2550}\u{255d}  \u{255a}\u{2550}\u{255d}",
 ];
 
+/// Pull a short, human-readable summary out of a long message
+/// body. Designed for LiteLLM-style error walls: prefer a first
+/// useful sentence over the raw first line, which is often a noisy
+/// header. Caps at ~140 chars so it fits in one terminal row.
+pub fn summarize_message_content(content: &str) -> String {
+    const MAX: usize = 140;
+
+    // Best signal in LiteLLM 429/500 dumps is the upstream
+    // "message" field; lift it if present.
+    if let Some(start) = content.find("\"message\":\"") {
+        let rest = &content[start + "\"message\":\"".len()..];
+        if let Some(end) = rest.find("\"") {
+            let msg = &rest[..end];
+            if !msg.is_empty() {
+                return truncate_with_ellipsis(msg, MAX);
+            }
+        }
+    }
+
+    // Fall back to the first non-empty line of the content.
+    let first = content.lines().find(|l| !l.trim().is_empty()).unwrap_or(content);
+    truncate_with_ellipsis(first.trim(), MAX)
+}
+
+fn truncate_with_ellipsis(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let truncated: String = s.chars().take(max.saturating_sub(1)).collect();
+    format!("{truncated}…")
+}
+
 /// Render the welcome banner with gradient colors when there are no messages.
 fn render_welcome_banner(lines: &mut Vec<Line<'_>>) {
     let total_rows = BANNER_ROWS.len();
@@ -137,7 +180,20 @@ fn render_chat(frame: &mut Frame, state: &AppState, area: Rect) {
 
     let mut lines: Vec<Line<'_>> = Vec::new();
 
-    // Show welcome banner when there are no messages
+    // Big Smooth top-of-panel — sits at the top while idle so the
+    // user can see him chilling between turns AND on the welcome
+    // screen. He'll re-render at the BOTTOM of the panel below the
+    // latest text once the agent is thinking / streaming / running
+    // tools (handled further down).
+    if !state.big_smooth.anchored_at_bottom() {
+        for line in state.big_smooth.sprite_lines() {
+            lines.push(line);
+        }
+        lines.push(Line::from(""));
+    }
+
+    // Show welcome banner when there are no messages (after the
+    // idle sprite so Big Smooth greets the user at the top).
     if state.messages.is_empty() && !state.thinking {
         render_welcome_banner(&mut lines);
         let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
@@ -145,6 +201,7 @@ fn render_chat(frame: &mut Frame, state: &AppState, area: Rect) {
         return;
     }
 
+    let inner_width = inner.width as usize;
     for msg in &state.messages {
         let (label, label_style) = match msg.role {
             ChatRole::User => ("You", theme::user_label()),
@@ -152,21 +209,44 @@ fn render_chat(frame: &mut Frame, state: &AppState, area: Rect) {
             ChatRole::System => ("System", theme::muted()),
         };
 
-        // Role label line
-        lines.push(Line::from(Span::styled(format!("{label}:"), label_style)));
+        // Separator/header above each message: "── Label ──────────"
+        // Role-tinted label embedded in a muted rule so messages are
+        // visually walled off without the cost of bordered Block
+        // widgets per message.
+        let header = format!("── {label} ");
+        let pad = inner_width.saturating_sub(header.chars().count());
+        let rule: String = "─".repeat(pad);
+        lines.push(Line::from(vec![Span::styled(header, label_style), Span::styled(rule, theme::muted())]));
 
-        // Content lines
-        let content_lines_vec: Vec<&str> = msg.content.lines().collect();
-        let last_content_idx = content_lines_vec.len().saturating_sub(1);
-        for (i, content_line) in content_lines_vec.iter().enumerate() {
-            if msg.streaming && !msg.content.is_empty() && i == last_content_idx {
-                // Append blinking block cursor to the last line of a streaming message
-                lines.push(Line::from(vec![
-                    Span::raw(content_line.to_string()),
-                    Span::styled("█", theme::assistant_label()),
-                ]));
+        // Content lines — collapsed mode shows a one-line summary
+        // plus a hint about Ctrl+O. Otherwise full content streams
+        // through with the usual streaming-cursor handling.
+        if msg.collapsed && msg.is_truncated() {
+            let summary = summarize_message_content(&msg.content);
+            let hidden = msg.content.lines().count().saturating_sub(1);
+            let hint_suffix = if hidden > 0 {
+                format!("  [+{hidden} more lines — Ctrl+O to expand]")
             } else {
-                lines.push(Line::from(Span::raw(content_line.to_string())));
+                "  [truncated — Ctrl+O to expand]".to_string()
+            };
+            lines.push(Line::from(vec![Span::raw(summary), Span::styled(hint_suffix, theme::muted())]));
+        } else {
+            let content_lines_vec: Vec<&str> = msg.content.lines().collect();
+            let last_content_idx = content_lines_vec.len().saturating_sub(1);
+            for (i, content_line) in content_lines_vec.iter().enumerate() {
+                if msg.streaming && !msg.content.is_empty() && i == last_content_idx {
+                    lines.push(Line::from(vec![
+                        Span::raw(content_line.to_string()),
+                        Span::styled("█", theme::assistant_label()),
+                    ]));
+                } else {
+                    lines.push(Line::from(Span::raw(content_line.to_string())));
+                }
+            }
+            // If a long message has been EXPANDED, append a hint so the user
+            // knows how to recollapse it.
+            if msg.is_truncated() && !msg.collapsed {
+                lines.push(Line::from(Span::styled("[Ctrl+O to collapse]", theme::muted())));
             }
         }
 
@@ -222,19 +302,36 @@ fn render_chat(frame: &mut Frame, state: &AppState, area: Rect) {
         lines.push(Line::from(""));
     }
 
-    // Streaming indicator — spinner when waiting for first token
-    // When streaming with content, the blinking block cursor is appended
-    // to the last content line above — handled in the content rendering loop.
+    // Streaming indicator — spinner + rotating thesaurus phrase
+    // when waiting for first token. When streaming with content,
+    // the blinking block cursor is appended to the last content
+    // line above — handled in the content rendering loop.
     if let Some(last_msg) = state.messages.last() {
         if last_msg.streaming && last_msg.content.is_empty() {
             let spinner = state.spinner_char();
-            lines.push(Line::from(Span::styled(format!("{spinner} Generating..."), theme::muted())));
+            let phrases = crate::thesaurus::phrases_for(crate::thesaurus::GENERATING_PHASE);
+            let phrase = phrases[(state.phrase_idx / 30) % phrases.len()];
+            lines.push(Line::from(Span::styled(format!("{spinner} {phrase}"), theme::muted())));
         }
     }
 
-    // Thinking indicator (non-streaming fallback)
+    // Thinking indicator (non-streaming fallback) — also pulls
+    // from the GENERATING thesaurus so the wait feels alive.
     if state.thinking && state.messages.last().is_none_or(|m| !m.streaming) {
-        lines.push(Line::from(Span::styled("Thinking...", theme::muted())));
+        let phrases = crate::thesaurus::phrases_for(crate::thesaurus::GENERATING_PHASE);
+        let phrase = phrases[(state.phrase_idx / 30) % phrases.len()];
+        lines.push(Line::from(Span::styled(phrase.to_string(), theme::muted())));
+    }
+
+    // Big Smooth bottom-of-panel — flies down to just below the
+    // latest text whenever the agent is mid-turn. Rendered AFTER
+    // the streaming spinner / thinking indicator so he visually
+    // sits with the active line.
+    if state.big_smooth.anchored_at_bottom() {
+        lines.push(Line::from(""));
+        for line in state.big_smooth.sprite_lines() {
+            lines.push(line);
+        }
     }
 
     // Calculate scroll: show the bottom of the conversation
@@ -531,5 +628,49 @@ mod spend_fmt_tests {
     fn dollar_plus_has_two_decimals() {
         assert_eq!(format_spend(1.0), "$1.00");
         assert_eq!(format_spend(12.345), "$12.35");
+    }
+
+    #[test]
+    fn summarize_lifts_litellm_message_field() {
+        let raw = r#"Error: LLM API error 429 Too Many Requests: {"error":{"message":"litellm.RateLimitError: OpenAIException - The engine is currently overloaded","type":"throttling_error"}}"#;
+        let summary = super::summarize_message_content(raw);
+        assert!(summary.starts_with("litellm.RateLimitError"), "got: {summary}");
+        assert!(summary.len() <= 141, "summary too long: {summary}");
+    }
+
+    #[test]
+    fn summarize_falls_back_to_first_line_when_no_message_field() {
+        let raw = "Boom: thing exploded\nstack frame 1\nstack frame 2";
+        let summary = super::summarize_message_content(raw);
+        assert_eq!(summary, "Boom: thing exploded");
+    }
+
+    #[test]
+    fn summarize_truncates_with_ellipsis() {
+        let long = "x".repeat(300);
+        let summary = super::summarize_message_content(&long);
+        assert!(summary.ends_with('…'));
+        assert!(summary.chars().count() <= 140);
+    }
+
+    #[test]
+    fn long_system_message_collapses_by_default() {
+        let body = "x".repeat(500);
+        let msg = crate::state::ChatMessage::system(body);
+        assert!(msg.collapsed, "long system messages should default-collapse");
+        assert!(msg.is_truncated());
+    }
+
+    #[test]
+    fn short_system_message_does_not_collapse() {
+        let msg = crate::state::ChatMessage::system("brief warning");
+        assert!(!msg.collapsed);
+        assert!(!msg.is_truncated());
+    }
+
+    #[test]
+    fn user_messages_never_auto_collapse_even_when_long() {
+        let msg = crate::state::ChatMessage::user("y".repeat(500));
+        assert!(!msg.collapsed, "user paste should not be hidden");
     }
 }
