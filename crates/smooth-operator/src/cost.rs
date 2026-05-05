@@ -188,10 +188,110 @@ impl ModelPricing {
         }
     }
 
+    /// Qwen3 Coder Flash pricing (DashScope).
+    #[must_use]
+    pub fn qwen_coder_flash() -> Self {
+        Self {
+            prompt_per_mtok: 0.30,
+            completion_per_mtok: 1.50,
+        }
+    }
+
+    /// MiniMax M2 pricing.
+    #[must_use]
+    pub fn minimax_m2() -> Self {
+        Self {
+            prompt_per_mtok: 0.30,
+            completion_per_mtok: 1.20,
+        }
+    }
+
+    /// Z.AI GLM-5.1 pricing.
+    #[must_use]
+    pub fn glm_51() -> Self {
+        Self {
+            prompt_per_mtok: 0.60,
+            completion_per_mtok: 2.20,
+        }
+    }
+
+    /// Moonshot Kimi K2-Thinking pricing.
+    #[must_use]
+    pub fn kimi_k2_thinking() -> Self {
+        Self {
+            prompt_per_mtok: 0.60,
+            completion_per_mtok: 2.50,
+        }
+    }
+
+    /// Gemini 2.5 Flash Lite pricing.
+    #[must_use]
+    pub fn gemini_flash_lite() -> Self {
+        Self {
+            prompt_per_mtok: 0.10,
+            completion_per_mtok: 0.40,
+        }
+    }
+
+    /// Claude Haiku 4.5 pricing.
+    #[must_use]
+    pub fn claude_haiku_45() -> Self {
+        Self {
+            prompt_per_mtok: 1.00,
+            completion_per_mtok: 5.00,
+        }
+    }
+
     /// Look up pricing for a model name, falling back to free tier for unknown models.
+    ///
+    /// **Streaming-cost workaround**: LiteLLM doesn't carry per-call
+    /// cost in the streaming response (headers are emitted before
+    /// cost is computed; the final usage chunk has tokens but no
+    /// cost). For tool-using turns — which always stream — the
+    /// agent falls back to this lookup. The smooth-* alias prefixes
+    /// are mapped to the upstream model's published pricing so the
+    /// bench's `cost_usd` and the orchestrator's `[METRICS]` line
+    /// land on real numbers instead of 0.
+    ///
+    /// **⚠️ keep in sync with `infra/services/litellm/pricing.yaml`**.
+    /// When the gateway reroutes a smooth-* primary to a different
+    /// upstream, mirror the change here. (Tracked: SMOODEV follow-up
+    /// to pull pricing from the gateway's `/v1/model/info` at
+    /// startup so this duplication goes away.)
     #[must_use]
     pub fn for_model(model: &str) -> Self {
         let m = model.to_lowercase();
+
+        // Smooth-* aliases — match what `pricing.yaml` says the
+        // primary upstream is for each slot, today.
+        if m == "smooth-coding" || m.starts_with("smooth-coding-") && m.contains("flash") || m.contains("qwen3-coder-flash") {
+            return Self::qwen_coder_flash();
+        }
+        if m == "smooth-coding-minimax" || m == "smooth-reviewing" || m.contains("minimax-m2") {
+            return Self::minimax_m2();
+        }
+        if m == "smooth-coding-glm" || m.contains("glm-5") {
+            return Self::glm_51();
+        }
+        if m == "smooth-coding-kimi" || m == "smooth-reasoning-kimi" || m.contains("kimi-k2-thinking") {
+            return Self::kimi_k2_thinking();
+        }
+        if m == "smooth-reasoning" || m == "smooth-reasoning-qwen" {
+            // primary: deepseek-chat (V3.2-Speciale); qwen fallback uses similar tier
+            return Self::deepseek_v3();
+        }
+        if m == "smooth-planning" || m == "smooth-judge" || m == "smooth-summarize" || m == "smooth-judge-gemini" || m == "smooth-summarize-gpt" {
+            // primary: gemini-2.5-flash for all three
+            return Self::gemini_flash();
+        }
+        if m == "smooth-fast" || m.contains("flash-lite") {
+            return Self::gemini_flash_lite();
+        }
+        if m == "smooth-fast-haiku" || m == "smooth-judge-haiku" || m.contains("claude-haiku") {
+            return Self::claude_haiku_45();
+        }
+
+        // Native/concrete model names (legacy fallbacks).
         if m.contains("gpt-4o-mini") {
             Self::gpt_4o_mini()
         } else if m.contains("gpt-4o") {
@@ -214,6 +314,56 @@ impl ModelPricing {
             prompt_per_mtok: 0.0,
             completion_per_mtok: 0.0,
         }
+    }
+}
+
+#[cfg(test)]
+mod alias_pricing_tests {
+    use super::*;
+
+    #[test]
+    fn smooth_coding_resolves_to_qwen_coder_flash() {
+        let p = ModelPricing::for_model("smooth-coding");
+        assert!((p.prompt_per_mtok - 0.30).abs() < 1e-9);
+        assert!((p.completion_per_mtok - 1.50).abs() < 1e-9);
+    }
+
+    #[test]
+    fn smooth_reasoning_resolves_to_deepseek_v3() {
+        let p = ModelPricing::for_model("smooth-reasoning");
+        assert!((p.prompt_per_mtok - 0.27).abs() < 1e-9);
+    }
+
+    #[test]
+    fn smooth_planning_resolves_to_gemini_flash() {
+        let p = ModelPricing::for_model("smooth-planning");
+        assert!((p.prompt_per_mtok - 0.075).abs() < 1e-9);
+    }
+
+    #[test]
+    fn smooth_judge_resolves_to_gemini_flash() {
+        let p = ModelPricing::for_model("smooth-judge");
+        assert!((p.prompt_per_mtok - 0.075).abs() < 1e-9);
+    }
+
+    #[test]
+    fn smooth_fast_resolves_to_gemini_flash_lite() {
+        let p = ModelPricing::for_model("smooth-fast");
+        assert!((p.prompt_per_mtok - 0.10).abs() < 1e-9);
+    }
+
+    #[test]
+    fn smooth_reviewing_resolves_to_minimax_m2() {
+        let p = ModelPricing::for_model("smooth-reviewing");
+        assert!((p.prompt_per_mtok - 0.30).abs() < 1e-9);
+        assert!((p.completion_per_mtok - 1.20).abs() < 1e-9);
+    }
+
+    #[test]
+    fn unknown_model_falls_back_to_free() {
+        let p = ModelPricing::for_model("totally-made-up-model");
+        assert_eq!(p.prompt_per_mtok, 0.0);
+        assert_eq!(p.completion_per_mtok, 0.0);
     }
 }
 

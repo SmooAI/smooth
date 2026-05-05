@@ -300,26 +300,45 @@ async fn fetch_cost_via_api(client: &reqwest::Client, api_base: &str, pearl_id: 
     extract_cost(&comments)
 }
 
-/// Pull `cost_usd=X` out of a `[METRICS] cost_usd=X iterations=Y` comment.
-///
-/// `dispatch_ws_task_sandboxed` posts that comment when an operator-runner
-/// finishes successfully, so any pearl with a Completed run carries the
-/// dispatch's actual LLM spend in its history. Returns `0.0` when no
-/// `[METRICS]` line is present (pre-fix runs, errored runs, etc.).
+/// Pull total cost from `[METRICS]` (operator-runner) AND
+/// `[CHAT_METRICS]` (chat-agent / orchestrator) comments and sum
+/// them — the bench wants the total LLM spend the dispatch caused,
+/// not just one half. Both formats are `... cost_usd=X ...` lines:
+/// - `[METRICS] cost_usd=X iterations=Y` is written by
+///   `dispatch_ws_task_sandboxed` when the operator-runner finishes.
+/// - `[CHAT_METRICS] cost_usd=X model=Y` is written by `chat_handler`
+///   when the chat-agent's reply mentions a pearl id, capturing the
+///   orchestrator's spend on the dispatch.
+/// Multiple `[CHAT_METRICS]` may exist (e.g. supervisor steers add
+/// turns); each is summed.
 fn extract_cost(comments: &[smooth_pearls::PearlComment]) -> f64 {
-    for c in comments.iter().rev() {
+    let mut metrics_cost: Option<f64> = None;
+    let mut chat_total: f64 = 0.0;
+    for c in comments {
         let t = c.content.trim_start();
         if let Some(rest) = t.strip_prefix("[METRICS]") {
-            for token in rest.split_whitespace() {
-                if let Some(value) = token.strip_prefix("cost_usd=") {
-                    if let Ok(v) = value.parse::<f64>() {
-                        return v;
-                    }
-                }
+            // Newest [METRICS] wins (operator runs once per dispatch).
+            if let Some(v) = parse_cost_token(rest) {
+                metrics_cost = Some(v);
+            }
+        } else if let Some(rest) = t.strip_prefix("[CHAT_METRICS]") {
+            if let Some(v) = parse_cost_token(rest) {
+                chat_total += v;
             }
         }
     }
-    0.0
+    metrics_cost.unwrap_or(0.0) + chat_total
+}
+
+fn parse_cost_token(rest: &str) -> Option<f64> {
+    for token in rest.split_whitespace() {
+        if let Some(value) = token.strip_prefix("cost_usd=") {
+            if let Ok(v) = value.parse::<f64>() {
+                return Some(v);
+            }
+        }
+    }
+    None
 }
 
 /// Extract a pearl id (`th-[0-9a-f]{6}`) from arbitrary text. Looks for
@@ -377,5 +396,57 @@ mod tests {
         std::env::set_var(var, "999");
         assert_eq!(env_secs(var, 7), 999);
         std::env::remove_var(var);
+    }
+
+    fn comment(content: &str) -> smooth_pearls::PearlComment {
+        smooth_pearls::PearlComment {
+            id: "test".into(),
+            pearl_id: "th-aaaaaa".into(),
+            content: content.into(),
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn extract_cost_metrics_alone() {
+        let cs = vec![comment("[METRICS] cost_usd=0.0123 iterations=3")];
+        assert!((extract_cost(&cs) - 0.0123).abs() < 1e-9);
+    }
+
+    #[test]
+    fn extract_cost_sums_chat_metrics_and_metrics() {
+        let cs = vec![
+            comment("[CHAT_METRICS] cost_usd=0.0010 model=gemini-3-flash-preview"),
+            comment("[METRICS] cost_usd=0.0500 iterations=3"),
+            comment("[CHAT_METRICS] cost_usd=0.0005 model=gemini-3-flash-preview"),
+        ];
+        // 0.0500 + 0.0010 + 0.0005 = 0.0515
+        assert!((extract_cost(&cs) - 0.0515).abs() < 1e-9, "got {}", extract_cost(&cs));
+    }
+
+    #[test]
+    fn extract_cost_chat_metrics_alone_when_no_runner_metrics() {
+        let cs = vec![
+            comment("[CHAT_METRICS] cost_usd=0.0010 model=gemini-3-flash-preview"),
+            comment("[CHAT_METRICS] cost_usd=0.0007 model=gemini-3-flash-preview"),
+        ];
+        assert!((extract_cost(&cs) - 0.0017).abs() < 1e-9);
+    }
+
+    #[test]
+    fn extract_cost_zero_when_no_metrics_comments() {
+        let cs = vec![comment("[PROGRESS] running"), comment("hello")];
+        assert_eq!(extract_cost(&cs), 0.0);
+    }
+
+    #[test]
+    fn extract_cost_uses_newest_metrics_when_duplicates() {
+        // Operator runs once per dispatch; if a stale [METRICS] is
+        // present, the newest one wins (later iterations overwrite).
+        let cs = vec![
+            comment("[METRICS] cost_usd=0.0100 iterations=1"),
+            comment("[METRICS] cost_usd=0.0500 iterations=3"),
+        ];
+        assert!((extract_cost(&cs) - 0.0500).abs() < 1e-9);
     }
 }

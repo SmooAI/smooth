@@ -1002,8 +1002,22 @@ impl Agent {
 
         {
             let mut tracker = self.cost_tracker.lock().expect("lock cost_tracker");
-            if let Some(cost) = response.gateway_cost_usd {
-                tracker.record_with_cost(model, &response.usage, cost);
+            // Streaming-cost workaround: in stream mode LiteLLM
+            // emits cost headers with value 0.0 BEFORE the cost has
+            // been computed (the real number is only known after
+            // tokens flow). So `Some(0.0)` from the gateway is a
+            // placeholder, NOT an authoritative "this was free"
+            // verdict — when we have real token usage, prefer
+            // local `ModelPricing` math instead. The smooth-* alias
+            // mappings in `ModelPricing::for_model` mirror what
+            // `infra/services/litellm/pricing.yaml` says the
+            // upstream is, so the math stays accurate.
+            let usage_has_tokens = response.usage.prompt_tokens > 0 || response.usage.completion_tokens > 0;
+            let trust_gateway = matches!(response.gateway_cost_usd, Some(c) if c > 0.0 || !usage_has_tokens);
+            if trust_gateway {
+                if let Some(cost) = response.gateway_cost_usd {
+                    tracker.record_with_cost(model, &response.usage, cost);
+                }
             } else {
                 let pricing = ModelPricing::for_model(model);
                 tracker.record(model, &response.usage, &pricing);

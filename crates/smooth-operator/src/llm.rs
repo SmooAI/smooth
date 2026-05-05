@@ -294,6 +294,18 @@ pub enum StreamEvent {
     Done {
         finish_reason: String,
     },
+    /// Authoritative spend for this LLM call, lifted from the
+    /// gateway's `x-litellm-response-cost*` headers. Emitted by
+    /// `chat_stream` after the response arrives, before the byte
+    /// stream is consumed — so the accumulator can attach it to
+    /// the resulting `LlmResponse.gateway_cost_usd` and the agent's
+    /// cost tracker stays correct on the streaming path.
+    /// (The non-streaming `chat`/`chat_anthropic`/`chat_gemini`
+    /// paths attach cost directly to `LlmResponse`; this variant
+    /// is the streaming-side equivalent.)
+    Cost {
+        gateway_cost_usd: f64,
+    },
 }
 
 /// A streaming chat completion chunk (OpenAI SSE format).
@@ -734,10 +746,18 @@ impl LlmClient {
         let url = format!("{}/chat/completions", self.config.api_url);
 
         let mut request_body = serde_json::to_value(&request)?;
-        request_body
+        let req_obj = request_body
             .as_object_mut()
-            .ok_or_else(|| anyhow::anyhow!("serialized request is not a JSON object"))?
-            .insert("stream".into(), serde_json::Value::Bool(true));
+            .ok_or_else(|| anyhow::anyhow!("serialized request is not a JSON object"))?;
+        req_obj.insert("stream".into(), serde_json::Value::Bool(true));
+        // Ask the gateway to emit a final usage chunk after the
+        // tokens have streamed. OpenAI-compat (and LiteLLM) omit it
+        // by default in stream mode — without this flag the
+        // accumulator's usage stays at zero, ModelPricing × 0 = 0,
+        // and `cost_usd` shows up as zero in result.json + the
+        // `[METRICS]` pearl line. Both providers + LiteLLM honour
+        // this flag.
+        req_obj.insert("stream_options".into(), serde_json::json!({"include_usage": true}));
 
         let resp = self
             .client
@@ -775,6 +795,15 @@ impl LlmClient {
             }
             anyhow::bail!("LLM API error {status}: {body}");
         }
+
+        // Lift the gateway's authoritative cost off the response
+        // headers BEFORE consuming the byte stream — once
+        // `bytes_stream()` runs, `resp` is moved and the headers
+        // are gone. `chat`, `chat_anthropic`, `chat_gemini` already
+        // do this for non-streaming responses; without this
+        // capture, every tool-using turn (which always streams)
+        // shows cost_usd=0 in result.json + bench [METRICS] lines.
+        let gateway_cost_usd = parse_gateway_cost(resp.headers());
 
         let byte_stream = resp.bytes_stream();
 
@@ -832,6 +861,15 @@ impl LlmClient {
                         return;
                     }
                 }
+            }
+
+            // Emit the captured gateway cost as the very last event
+            // so `accumulate_stream_events` can fold it into the
+            // final `LlmResponse.gateway_cost_usd`. Skipped when the
+            // gateway didn't emit any cost header (None) — the
+            // accumulator will fall back to local ModelPricing.
+            if let Some(cost) = gateway_cost_usd {
+                let _ = tx.send(Ok(StreamEvent::Cost { gateway_cost_usd: cost })).await;
             }
         });
 
@@ -1309,6 +1347,7 @@ pub async fn accumulate_stream_events(mut stream: Pin<Box<dyn Stream<Item = anyh
     let mut content = String::new();
     let mut finish_reason = String::from("stop");
     let mut usage = Usage::default();
+    let mut gateway_cost_usd: Option<f64> = None;
 
     // Track tool calls keyed by index (stable across chunks; `id` is only sent once
     // on some providers like MiniMax, `index` is sent on every chunk). Value is
@@ -1344,6 +1383,9 @@ pub async fn accumulate_stream_events(mut stream: Pin<Box<dyn Stream<Item = anyh
             StreamEvent::Done { finish_reason: reason } => {
                 finish_reason = reason;
             }
+            StreamEvent::Cost { gateway_cost_usd: cost } => {
+                gateway_cost_usd = Some(cost);
+            }
         }
     }
 
@@ -1371,7 +1413,7 @@ pub async fn accumulate_stream_events(mut stream: Pin<Box<dyn Stream<Item = anyh
         finish_reason,
         usage,
         rate_limit: None,
-        gateway_cost_usd: None,
+        gateway_cost_usd,
     })
 }
 
@@ -2043,6 +2085,33 @@ mod tests {
         let stream: Pin<Box<dyn Stream<Item = anyhow::Result<StreamEvent>> + Send>> = Box::pin(futures_util::stream::iter(events));
         let response = accumulate_stream_events(stream).await.expect("accumulate");
         assert_eq!(response.content, "Hello world", "reasoning must NOT leak into content");
+    }
+
+    #[tokio::test]
+    async fn accumulate_stream_events_picks_up_gateway_cost() {
+        let events = vec![
+            Ok(StreamEvent::Delta { content: "ok".into() }),
+            Ok(StreamEvent::Done { finish_reason: "stop".into() }),
+            Ok(StreamEvent::Cost { gateway_cost_usd: 0.000_005_7 }),
+        ];
+        let stream: Pin<Box<dyn Stream<Item = anyhow::Result<StreamEvent>> + Send>> = Box::pin(futures_util::stream::iter(events));
+        let response = accumulate_stream_events(stream).await.expect("accumulate");
+        assert_eq!(
+            response.gateway_cost_usd,
+            Some(0.000_005_7),
+            "Cost variant must populate LlmResponse.gateway_cost_usd"
+        );
+    }
+
+    #[tokio::test]
+    async fn accumulate_stream_events_keeps_none_when_no_cost_event() {
+        let events = vec![
+            Ok(StreamEvent::Delta { content: "ok".into() }),
+            Ok(StreamEvent::Done { finish_reason: "stop".into() }),
+        ];
+        let stream: Pin<Box<dyn Stream<Item = anyhow::Result<StreamEvent>> + Send>> = Box::pin(futures_util::stream::iter(events));
+        let response = accumulate_stream_events(stream).await.expect("accumulate");
+        assert!(response.gateway_cost_usd.is_none(), "no Cost event → caller falls back to ModelPricing");
     }
 
     // --- Retry and rate-limit tests ---

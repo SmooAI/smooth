@@ -3299,8 +3299,31 @@ async fn reject_review_handler(State(state): State<AppState>, Path(bead_id): Pat
 /// + teammate dispatch + supervisor status-walks; 300s often fires
 /// before Big Smooth can hand back a pearl id. 900s gives slow
 /// dispatches headroom while still bounding genuinely-wedged turns.
+/// Extract the LAST `th-[0-9a-f]{6}+` token from a chat-agent
+/// reply so we can attach a `[CHAT_METRICS]` comment to the pearl
+/// the chat-agent created. Mirrors `chat_driver::extract_pearl_id`
+/// in the bench — kept inline here rather than factored out so the
+/// daemon doesn't take a bench dependency.
+fn extract_pearl_id_from_text(text: &str) -> Option<String> {
+    let mut last: Option<String> = None;
+    for line in text.lines() {
+        for word in line.split_whitespace() {
+            let cleaned = word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-');
+            if let Some(rest) = cleaned.strip_prefix("th-") {
+                if rest.len() >= 6 && rest.chars().all(|c| c.is_ascii_hexdigit()) {
+                    last = Some(format!("th-{rest}"));
+                }
+            }
+        }
+    }
+    last
+}
+
 fn chat_turn_timeout() -> std::time::Duration {
-    let secs = std::env::var("BIG_SMOOTH_CHAT_TURN_TIMEOUT_S").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(900);
+    let secs = std::env::var("BIG_SMOOTH_CHAT_TURN_TIMEOUT_S")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(900);
     std::time::Duration::from_secs(secs)
 }
 
@@ -3361,6 +3384,11 @@ async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>)
         // before timing out. 12 keeps a safety margin while catching
         // runaway loops earlier so the bench's woz coaching ticks don't
         // wedge waiting on a 15-min stall. Was 20.
+        // Capture the resolved model name BEFORE moving llm_config
+        // into the agent config — we use it in the [CHAT_METRICS]
+        // pearl comment we emit at the end so observers can see
+        // which alias the chat-agent was running on.
+        let chat_model = llm_config.model.clone();
         let mut agent_cfg = AgentConfig::new("big-smooth-chat", system_prompt, llm_config).with_max_iterations(12);
         if let Some(cap) = budget_usd {
             agent_cfg = agent_cfg.with_budget(CostBudget {
@@ -3434,6 +3462,23 @@ async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>)
 
         // Final assistant message is the user-facing reply.
         let last_assistant = conversation.last_assistant_content().unwrap_or("(no response)").to_string();
+
+        // Emit chat-agent cost so the bench (and any other pearl
+        // observer) can see the orchestrator's spend, not just the
+        // operator-runner's. Without this, every dispatch-style
+        // turn shows $0 in the bench's result.json — the runner's
+        // [METRICS] comment only carries operator cost, and the
+        // chat-agent's LLM calls (currently happening on
+        // gemini-3-flash-preview etc.) were invisible. Format mirrors
+        // [METRICS] so `chat_driver::extract_cost` can sum both.
+        let chat_cost_usd = agent.cost_tracker.lock().expect("cost_tracker lock").total_cost_usd;
+        if let Some(pearl_id) = extract_pearl_id_from_text(&last_assistant) {
+            let body = format!("[CHAT_METRICS] cost_usd={chat_cost_usd:.6} model={chat_model}");
+            if let Err(e) = state.pearl_store.add_comment(&pearl_id, &body) {
+                tracing::warn!(pearl_id = %pearl_id, error = %e, "[CHAT_METRICS] write failed");
+            }
+        }
+
         Ok(last_assistant)
     }
 
@@ -3443,7 +3488,12 @@ async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>)
     // a teammate_message can hit 60-90s. 300s was too tight when both
     // happened together. Override via BIG_SMOOTH_CHAT_TURN_TIMEOUT_S.
     let chat_turn_timeout = chat_turn_timeout();
-    let result: anyhow::Result<String> = match tokio::time::timeout(chat_turn_timeout, chat_inner(state, system_prompt, &body.content, body.model.as_deref(), body.budget_usd)).await {
+    let result: anyhow::Result<String> = match tokio::time::timeout(
+        chat_turn_timeout,
+        chat_inner(state, system_prompt, &body.content, body.model.as_deref(), body.budget_usd),
+    )
+    .await
+    {
         Ok(inner) => inner,
         Err(_) => Err(anyhow::anyhow!("chat turn exceeded {chat_turn_timeout:?} ceiling")),
     };
