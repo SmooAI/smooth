@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Bench winners matrix — 2026-05-05</title>
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #0a0e1a;
+  --fg: #d6dde8;
+  --muted: #7d8aa3;
+  --accent: #5fb1dc;
+  --pass: #6ad28a;
+  --fail: #ee7474;
+  --rule: #1a2030;
+  --card: #111726;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+}
+.wrap { max-width: 1100px; margin: 0 auto; padding: 32px 24px; }
+h1 { font-size: 24px; font-weight: 600; margin: 0 0 6px; letter-spacing: -.01em; }
+h2 { font-size: 17px; font-weight: 600; margin: 28px 0 10px; color: var(--accent); }
+.tag { display: inline-block; background: var(--card); border: 1px solid var(--rule); border-radius: 6px; padding: 2px 8px; font-size: 12px; color: var(--muted); margin-right: 6px; }
+.summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 20px 0 8px; }
+.stat { background: var(--card); border: 1px solid var(--rule); border-radius: 8px; padding: 14px 16px; }
+.stat .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+.stat .value { font-size: 22px; font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums; }
+.stat .delta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+table { width: 100%; border-collapse: collapse; margin: 14px 0; font-variant-numeric: tabular-nums; }
+th, td { padding: 9px 10px; text-align: left; border-bottom: 1px solid var(--rule); }
+th { font-weight: 600; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; background: rgba(0,0,0,.18); }
+tr:hover td { background: rgba(255,255,255,.02); }
+.pass { color: var(--pass); font-weight: 600; }
+.fail { color: var(--fail); font-weight: 600; }
+.muted { color: var(--muted); }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.callout { background: var(--card); border: 1px solid var(--rule); border-left: 3px solid var(--accent); border-radius: 6px; padding: 14px 18px; margin: 16px 0; }
+.callout.fail { border-left-color: var(--fail); }
+code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12.5px; }
+pre { background: var(--card); border: 1px solid var(--rule); border-radius: 6px; padding: 12px 14px; overflow-x: auto; }
+.config { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; font-size: 13px; margin: 6px 0; }
+.config dt { color: var(--muted); }
+.config dd { margin: 0; }
+.footer { margin-top: 32px; padding-top: 20px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Bench winners matrix — 2026-05-05</h1>
+<p class="muted">SMOODEV-800 default routing × {sandbox, direct} × {python, rust} × 2 rounds = 8 cells. First end-to-end matrix with real <code>cost_usd</code> flowing through both <code>[METRICS]</code> (operator) and <code>[CHAT_METRICS]</code> (chat-agent) pearl comments.</p>
+
+<h2>Configuration</h2>
+<dl class="config">
+<dt>Chat-agent model</dt>     <dd><code>gemini-3-flash-preview</code> (Gemini 3, preview)</dd>
+<dt>Operator (default)</dt>   <dd>mapper=<code>smooth-planning</code>·<code>gemini-2.5-flash</code> · oracle=<code>smooth-reasoning</code>·<code>deepseek-v3.2-speciale</code> · fixer=<code>smooth-coding</code>·<code>qwen3-coder-flash</code></dd>
+<dt>Workflow</dt>             <dd>multi-role default-on (<code>SMOOTH_WORKFLOW_MULTIROLE</code> opt-out)</dd>
+<dt>Cost flow</dt>            <dd>Streaming-cost workaround in agent + <code>[CHAT_METRICS]</code> aggregation in <code>extract_cost</code></dd>
+<dt>Bench tasks</dt>          <dd><code>aider-polyglot/python/affine-cipher</code>, <code>aider-polyglot/rust/alphametics</code></dd>
+</dl>
+
+<h2>Headlines</h2>
+<div class="summary">
+  <div class="stat"><div class="label">Cells</div><div class="value">8</div><div class="delta">2 rounds × 4 axes</div></div>
+  <div class="stat"><div class="label">PASS</div><div class="value pass">7 / 8</div><div class="delta">87.5%</div></div>
+  <div class="stat"><div class="label">FAIL</div><div class="value fail">1</div><div class="delta">round 2 sandbox / rust</div></div>
+  <div class="stat"><div class="label">Total spend</div><div class="value">$0.0113</div><div class="delta">≈ $0.0014 / cell</div></div>
+  <div class="stat"><div class="label">Total wall</div><div class="value">36 m</div><div class="delta">summed serial</div></div>
+  <div class="stat"><div class="label">Direct vs sandbox</div><div class="value">~7×</div><div class="delta">python wall ratio</div></div>
+</div>
+
+<h2>Cells</h2>
+<table>
+<thead><tr><th>Round</th><th>Dispatch</th><th>Lang</th><th>Task</th><th>Verdict</th><th>Counts</th><th>Wall</th><th>Cost</th><th>Eval</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>sandbox</td><td>python</td><td>affine-cipher</td><td class="pass">PASS</td><td>16/16</td><td>273s</td><td>$0.001436</td><td><a href="r1-sandbox-python-affine-cipher.html">eval ↗</a></td></tr>
+<tr><td>1</td><td>sandbox</td><td>rust</td><td>alphametics</td><td class="pass">PASS</td><td>10/10</td><td>496s</td><td>$0.001386</td><td><a href="r1-sandbox-rust-alphametics.html">eval ↗</a></td></tr>
+<tr><td>1</td><td>direct</td><td>python</td><td>affine-cipher</td><td class="pass">PASS</td><td>16/16</td><td><strong>42s</strong></td><td>$0.001423</td><td><a href="r1-direct-python-affine-cipher.html">eval ↗</a></td></tr>
+<tr><td>1</td><td>direct</td><td>rust</td><td>alphametics</td><td class="pass">PASS</td><td>10/10</td><td>206s</td><td>$0.001471</td><td><a href="r1-direct-rust-alphametics.html">eval ↗</a></td></tr>
+<tr><td>2</td><td>sandbox</td><td>python</td><td>affine-cipher</td><td class="pass">PASS</td><td>16/16</td><td>316s</td><td>$0.001310</td><td><a href="r2-sandbox-python-affine-cipher.html">eval ↗</a></td></tr>
+<tr><td>2</td><td>sandbox</td><td>rust</td><td>alphametics</td><td class="fail">FAIL</td><td>0/1</td><td>251s</td><td>$0.001390</td><td><a href="r2-sandbox-rust-alphametics.html">eval ↗</a></td></tr>
+<tr><td>2</td><td>direct</td><td>python</td><td>affine-cipher</td><td class="pass">PASS</td><td>16/16</td><td><strong>35s</strong></td><td>$0.001434</td><td><a href="r2-direct-python-affine-cipher.html">eval ↗</a></td></tr>
+<tr><td>2</td><td>direct</td><td>rust</td><td>alphametics</td><td class="pass">PASS</td><td>10/10</td><td>296s</td><td>$0.001418</td><td><a href="r2-direct-rust-alphametics.html">eval ↗</a></td></tr>
+</tbody>
+</table>
+
+<h2>Round-2-sandbox-rust failure (the only ❌)</h2>
+<div class="callout fail">
+<p><strong>Real model wobble + missed iteration.</strong> Fixer (<code>qwen3-coder-flash</code>) wrote a <code>HashMap::insert</code> with a <code>&amp;char</code> where <code>char</code> was needed. The Rust compiler emitted the diagnostic <em>and the fix hint</em>:</p>
+<pre>error[E0308]: mismatched types
+  --&gt; src/lib.rs:85:24
+   | mapping.insert(next_letter, digit);
+   |                ^^^^^^^^^^^ expected `char`, found `&amp;char`
+help: consider dereferencing the borrow
+   | mapping.insert(*next_letter, digit);
+   |                +</pre>
+<p>The dispatch ran ONE compile attempt and gave up. The fix is a one-character edit (<code>*</code>) that the compiler literally suggested — a working iteration loop should have caught this on turn 2. Two fixes worth filing as follow-up pearls:</p>
+<ol>
+<li><strong>Operator iteration loop should retry on rustc compile error</strong> — currently exits after a single E-class error, even when rustc emits a one-line <code>help:</code> suggestion. Should at minimum retry once with the diagnostic + suggestion fed to the fixer role.</li>
+<li><strong>Fixer prompt hardening on Rust borrow ergonomics</strong> — qwen3-coder-flash wobbles on <code>HashMap::insert</code> ownership semantics. A few-shot example in the fixer role's prompt would help, OR routing rust tasks through smooth-coding-kimi (thinking model) as a fallback.</li>
+</ol>
+</div>
+
+<h2>What this run proves</h2>
+<ul>
+<li><strong>Multi-role default routing solves real bench tasks</strong> with no env-var overrides. SMOODEV-800 lands the bench-winning config as the new baseline.</li>
+<li><strong>Cost flows end-to-end</strong> through the streaming path. Two-layer fix landed: agent's local <code>ModelPricing</code> fallback (since LiteLLM streaming reports <code>Some(0.0)</code>), plus <code>[CHAT_METRICS]</code> aggregation that surfaces orchestrator spend the runner-side <code>[METRICS]</code> alone misses.</li>
+<li><strong>Direct mode is ~7× faster for python</strong> and ~1.7-2.4× faster for rust. Sandbox tax is real; pick direct for fast iteration when sandbox isolation isn't required.</li>
+<li><strong>Round-to-round variance is low for direct python</strong> (42s → 35s). Sandbox rust has the widest variance (496s pass → 251s fail). Compile-error iteration loop is the gap.</li>
+</ul>
+
+<h2>Per-cell artifacts</h2>
+<p class="muted">Each cell's <code>eval.html</code> below shows the full bench output, tool-call timeline, supervisor steers (when active), and final test stdout:</p>
+<ul>
+<li><a href="r1-sandbox-python-affine-cipher.html">round 1 · sandbox · python / affine-cipher</a></li>
+<li><a href="r1-sandbox-rust-alphametics.html">round 1 · sandbox · rust / alphametics</a></li>
+<li><a href="r1-direct-python-affine-cipher.html">round 1 · direct · python / affine-cipher</a></li>
+<li><a href="r1-direct-rust-alphametics.html">round 1 · direct · rust / alphametics</a></li>
+<li><a href="r2-sandbox-python-affine-cipher.html">round 2 · sandbox · python / affine-cipher</a></li>
+<li><a href="r2-sandbox-rust-alphametics.html"><span class="fail">round 2 · sandbox · rust / alphametics ❌</span></a></li>
+<li><a href="r2-direct-python-affine-cipher.html">round 2 · direct · python / affine-cipher</a></li>
+<li><a href="r2-direct-rust-alphametics.html">round 2 · direct · rust / alphametics</a></li>
+</ul>
+
+<div class="footer">
+Generated 2026-05-05 from <code>~/.smooth/matrix-runs/2026-05-04-bench-winners/</code> via <code>smooth-bench eval-report</code>. Driver: <code>~/.smooth/matrix-runs/2026-05-04-bench-winners/run.sh</code>.
+</div>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>rust/alphametics — PASS (246d0eb8)</title><style>
+:root { --bg:#0c0d10; --panel:#16181d; --panel-2:#1c1f26; --line:#2a2e38;
+    --text:#e6e8ec; --text-dim:#9ba3af; --pass:#4ade80; --fail:#f87171;
+    --warn:#fbbf24; --accent:#60a5fa; --steer:#a78bfa; }
+* { box-sizing: border-box; }
+html, body { margin:0; padding:0; background:var(--bg); color:var(--text);
+    font:14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+.container { max-width: 1200px; margin: 0 auto; padding: 32px 24px 80px; }
+header { border-bottom: 1px solid var(--line); padding-bottom: 24px; margin-bottom: 32px; }
+h1 { font-size: 22px; margin: 0 0 8px; font-weight: 600; }
+h2 { font-size: 16px; margin: 32px 0 12px; font-weight: 600; }
+p { margin: 0 0 12px; }
+.meta { color: var(--text-dim); font-size: 13px; }
+.meta code { background: var(--panel); padding:1px 6px; border-radius:3px; color:var(--accent); }
+header code { background: var(--panel); padding:1px 6px; border-radius:3px; color:var(--accent); }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin: 16px 0; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 16px; }
+.stat .label { font-size: 12px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px; }
+.stat .value { font-size: 24px; font-weight: 600; }
+.stat .delta { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+.stat.pass .value { color: var(--pass); }
+.stat.fail .value { color: var(--fail); }
+.stat.note .value { color: var(--warn); }
+pre { background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    padding: 12px; overflow-x: auto; font: 12.5px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+    white-space: pre-wrap; word-break: break-word; margin: 0; }
+pre.brief { color: var(--text-dim); }
+pre.error { color: var(--fail); border-color: var(--fail); }
+pre.test-stdout { max-height: 600px; overflow-y: auto; }
+table.timeline { width: 100%; border-collapse: collapse; font-size: 12.5px; margin: 12px 0; }
+table.timeline th { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line);
+    color:var(--text-dim); font-size:11px; text-transform:uppercase; letter-spacing:0.04em; }
+table.timeline td { padding:8px 10px; border-bottom:1px solid var(--line); vertical-align: top; }
+table.timeline td.ts { color: var(--text-dim); white-space: nowrap; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+table.timeline td.kind { white-space: nowrap; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+table.timeline tr.steering td.kind { color: var(--steer); font-weight: 600; }
+table.timeline tr.steering { background: rgba(167, 139, 250, 0.08); }
+table.timeline tr.metrics td.kind { color: var(--accent); }
+table.timeline tr.idle td.kind { color: var(--warn); }
+table.timeline tr.progress td.kind { color: var(--text-dim); }
+table.timeline pre { background: transparent; border: none; padding: 0; max-height: 300px; overflow-y: auto; }
+</style></head><body><div class="container"><header><h1>rust / alphametics</h1><p class="meta">Run <code>246d0eb8</code> &middot; Pearl <code>th-3899e6</code> &middot; Generated <code>2026-05-05T02:38:46.795805+00:00</code></p></header><div class="grid"><div class="card stat pass"><div class="label">Verdict</div><div class="value">PASS</div><div class="delta">10/10 tests passed</div></div><div class="card stat"><div class="label">Wall time</div><div class="value">7.9 min</div><div class="delta">475 s</div></div><div class="card stat"><div class="label">Cost</div><div class="value">$0.0014</div><div class="delta">supervisor steers: 0</div></div><div class="card stat"><div class="label">Pearl activity</div><div class="value">17</div><div class="delta">15 PROGRESS &middot; 0 STEERING</div></div></div><h2>Task brief</h2><pre class="brief">You are solving an Aider Polyglot coding benchmark task: `alphametics` (rust).
+
+Working directory: the current directory.
+Files present:
+  - Cargo.toml
+  - INSTRUCTIONS.md
+  - src
+  - tests
+
+Your job:
+1. Read INSTRUCTIONS.md and the test file to understand the requirements.
+2. Edit the source file(s) so `cargo test -- --include-ignored` passes every test.
+3. Do not modify test files.
+4. Stop once the tests pass — do not keep iterating.
+
+Constraints:
+- Use only the standard library for the language.
+- Keep the implementation idiomatic and concise.
+</pre><h2>Pearl timeline</h2><table class="timeline"><thead><tr><th>Time</th><th>Kind</th><th>Content</th></tr></thead><tbody><tr class="chat"><td class="ts">22:30:38</td><td class="kind">Chat</td><td class="content"><pre>[CHAT_METRICS] cost_usd=0.001386 model=gemini-3-flash-preview</pre></td></tr><tr class="progress"><td class="ts">22:31:12</td><td class="kind">Progress</td><td class="content"><pre>[PROGRESS] sandbox running (30s elapsed, heartbeat #1)</pre></td></tr><tr class="progress"><td class="ts">22:31:42</td><td class="kind">Progress</td><td class="content"><pre>[PROGRESS] sandbox running (60s elapsed, heartbeat #2)</pre></td></tr><tr class="progress"><td class="ts">22:32:12</td><td class="kind">Progress</td><td class="content"><pre>[PROGRESS] sandbox running (90s elapsed, heartbeat #3)</pre></td></tr><tr class="progress"><td class="ts">22:32:42</td><td class="kind">Progress</td><td class="content"><pre>[PROGRESS] sandbox running (120s elapsed, heartbeat #4)</pre></td></tr><tr class="progress"><td class="ts">22:33:12</td><td class="kind">Progress</td><td class="content"><pre>[PROGRESS] sandbox running (150s elapsed, heartbeat #5)</pre></td></tr><tr class="progress"><td class="ts">22:33:42</td><td class="kind">Progress</td><td class="content"><pre>[PROGRESS] sandbox running (180s elapsed, heartbeat #6)</pre></td></tr><tr class="progress"><td class="ts">22:34:12</td><td class="kind">Progress</td><td class="content"><pre>[PROGRESS] sandbox running (210s elapsed, heartbeat #7)</pre></td></tr><tr class="progress"><td class="ts">22:34:42</td><td class="kind">Progress</td><td class="content"><pre>[PROGRESS] sandbox running (240s elapsed, heartbeat #8)</pre></td></tr><tr class="progress"><td class="ts">22:35:12</td><td class="kind">Progress</td><td class="content"><pre>[PROGRESS] sandbox running (270s elapsed, heartbeat #9)</pre></td></tr><tr class="progress"><td class="ts">22:35:42</td><td class="kind">Progress</td><td class="content"><pre>[PROGRESS] sandbox running (300s elapsed, heartbeat #10)</pre></td></tr><tr class="progress"><td class="ts">22:36:12</td><td class="kind">Progress</td><td class="content"><pre>[PROGRESS] sandbox running (330s elapsed, heartbeat #11)</pre></td></tr><tr class="progress"><td class="ts">22:36:42</td><td class="kind">Progress</td><td class="content"><pre>[PROGRESS] sandbox running (360s elapsed, heartbeat #12)</pre></td></tr><tr class="progress"><td class="ts">22:37:12</td><td class="kind">Progress</td><td class="content"><pre>[PROGRESS] sandbox running (390s elapsed, heartbeat #13)</pre></td></tr><tr class="progress"><td class="ts">22:37:42</td><td class="kind">Progress</td><td class="content"><pre>[PROGRESS] sandbox running (420s elapsed, heartbeat #14)</pre></td></tr><tr class="progress"><td class="ts">22:38:12</td><td class="kind">Progress</td><td class="content"><pre>[PROGRESS] sandbox running (450s elapsed, heartbeat #15)</pre></td></tr><tr class="metrics"><td class="ts">22:38:22</td><td class="kind">Metrics</td><td class="content"><pre>[METRICS] cost_usd=0.000000 iterations=3</pre></td></tr></tbody></table><h2>Tool-call summary</h2><p class="meta">0 tool call(s) recorded by the bench-side observer. Per-call detail comes from <code>events.jsonl</code> (future workstream).</p><h2>Test output</h2><pre class="test-stdout">
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 10 tests
+test solution_must_have_unique_value_for_each_letter ... ok
+test puzzle_with_two_digits_final_carry ... ok
+test puzzle_with_three_letters ... ok
+test puzzle_with_six_letters ... ok
+test puzzle_with_four_letters ... ok
+test leading_zero_solution_is_invalid ... ok
+test puzzle_with_seven_letters ... ok
+test puzzle_with_ten_letters_and_199_addends ... ok
+test puzzle_with_eight_letters ... ok
+test puzzle_with_ten_letters ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.15s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Compiling alphametics v1.3.0 (/Users/brentrager/.smooth/bench-runs/246d0eb8/work)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.82s
+     Running unittests src/lib.rs (target/debug/deps/alphametics-57dbf4088c98407a)
+     Running tests/alphametics.rs (target/debug/deps/alphametics-a1224310b796fb7d)
+   Doc-tests alphametics
+</pre></div></body></html>
