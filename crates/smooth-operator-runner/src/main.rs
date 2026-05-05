@@ -1943,14 +1943,17 @@ async fn main() {
         }
     });
 
-    // Dispatch: workflow path (per-phase slot routing) when the
-    // caller opts in via SMOOTH_WORKFLOW=1 + SMOOTH_ROUTING_JSON
-    // (serialized ProviderRegistry), else the classic single-Agent
-    // loop. Gated so existing sandboxed tests keep behaving the
-    // same until benchmark runs opt in.
-    let workflow_opt_in = std::env::var("SMOOTH_WORKFLOW")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    // Dispatch: workflow path (per-phase slot routing) is the
+    // default. Opts out only on an explicit falsey value
+    // (`SMOOTH_WORKFLOW=0/false/off/no`); the single-Agent fallback
+    // is kept for legacy sandboxed tests + debugging bisects. The
+    // daemon side (server.rs) already forces the env on; this
+    // default-on stance keeps standalone runner invocations
+    // consistent with the daemon-driven path.
+    let workflow_opt_in = !matches!(
+        std::env::var("SMOOTH_WORKFLOW").as_deref().map(str::trim),
+        Ok("0" | "false" | "False" | "FALSE" | "off" | "Off" | "OFF" | "no" | "No" | "NO")
+    );
     // Prefer the file path (bind-mounted into the sandbox, no
     // kernel-cmdline size limit). Fall back to inline env var for
     // tests and non-sandboxed dev runs.

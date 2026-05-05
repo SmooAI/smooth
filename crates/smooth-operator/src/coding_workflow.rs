@@ -299,7 +299,13 @@ async fn run_coding_workflow_multirole(cfg: CodingWorkflowConfig) -> anyhow::Res
         total_cost_usd += advice_outcome.cost;
 
         // Phase 2: fixer implements.
-        let fixer_input = build_fixer_prompt(&cfg.task_prompt, &plan_text, &advice_outcome.transcript, last_verify_output.as_deref(), iteration);
+        let fixer_input = build_fixer_prompt(
+            &cfg.task_prompt,
+            &plan_text,
+            &advice_outcome.transcript,
+            last_verify_output.as_deref(),
+            iteration,
+        );
         let fix_outcome = run_role_phase(&cfg, &fixer_role, &fixer_input, "FIXING", iteration).await?;
         total_cost_usd += fix_outcome.cost;
 
@@ -383,8 +389,17 @@ struct PhaseOutcome {
 /// Tools are filtered down to what the role's `Clearance.allows()`
 /// accepts — so mapper/oracle can't accidentally write code even if
 /// the underlying tool registry has edit_file/etc.
-async fn run_role_phase(cfg: &CodingWorkflowConfig, role: &crate::cast::OperatorRole, user_prompt: &str, phase: &str, iteration: u32) -> anyhow::Result<PhaseOutcome> {
-    let mut llm_config = cfg.registry.llm_config_for(role.slot).with_context(|| format!("resolving {:?} slot for role '{}'", role.slot, role.name))?;
+async fn run_role_phase(
+    cfg: &CodingWorkflowConfig,
+    role: &crate::cast::OperatorRole,
+    user_prompt: &str,
+    phase: &str,
+    iteration: u32,
+) -> anyhow::Result<PhaseOutcome> {
+    let mut llm_config = cfg
+        .registry
+        .llm_config_for(role.slot)
+        .with_context(|| format!("resolving {:?} slot for role '{}'", role.slot, role.name))?;
     let mut alias = cfg.registry.routing.slot_for(role.slot).model.clone();
 
     // Per-role model override. Env var name is
@@ -422,8 +437,12 @@ async fn run_role_phase(cfg: &CodingWorkflowConfig, role: &crate::cast::Operator
     let role_clearance = role.permissions.clone();
     tools.retain(|name| role_clearance.allows(name));
 
-    let agent_max_iter: u32 = std::env::var("SMOOTH_WORKFLOW_AGENT_MAX_ITERATIONS").ok().and_then(|v| v.parse().ok()).unwrap_or(40);
-    let mut agent_config = crate::agent::AgentConfig::new(format!("{}/{}-{}", cfg.operator_id, role.name, iteration), role.prompt.clone(), llm_config).with_max_iterations(agent_max_iter);
+    let agent_max_iter: u32 = std::env::var("SMOOTH_WORKFLOW_AGENT_MAX_ITERATIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(40);
+    let mut agent_config = crate::agent::AgentConfig::new(format!("{}/{}-{}", cfg.operator_id, role.name, iteration), role.prompt.clone(), llm_config)
+        .with_max_iterations(agent_max_iter);
     if let Some(rx) = cfg.chat_rx.clone() {
         agent_config = agent_config.with_chat_rx(rx);
     }
