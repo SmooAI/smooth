@@ -113,6 +113,7 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
     let mut last_verify_output: Option<String> = None;
     let mut best_failed_count: Option<u32> = None;
     let mut snapshot_taken = false;
+    let mut compile_retry_count: u32 = 0;
 
     let iter_cap = cfg.max_outer_iterations.max(1);
     let mut iteration = 0u32;
@@ -159,10 +160,15 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
         };
         total_cost_usd += turn_cost;
 
-        // Pull the agent's final assistant message — it usually
-        // contains a summary of what it did plus the last test
-        // result. We parse THIS for pass/fail and failure detail.
-        let transcript = summarize_conversation(&conversation);
+        // Pull the agent's final assistant message AND any recent
+        // tool results that captured the test runner output. The
+        // last-assistant-only view loses the verbatim compile error
+        // when the LLM summarizes "test failed because X" instead of
+        // pasting the rustc/pytest/jest block back into its message.
+        // Including the most recent tool results lets detect_verify_pass
+        // see green even when the agent forgot the `## Test Results`
+        // line, and lets detect_compile_error pull a real diagnostic.
+        let transcript = last_diagnostic_text(&conversation);
         last_verify_output = Some(transcript.clone());
 
         // Green? We're done.
@@ -170,6 +176,20 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
             succeeded = true;
             tracing::info!(iteration, "coding workflow: agent reports green, stopping");
             break;
+        }
+
+        // Compile-error retry: if the test harness never even ran
+        // because the code wouldn't compile/parse, force another
+        // fixer iteration regardless of close-to-green / regression
+        // heuristics. The next prompt's syntax-mode branch will feed
+        // the verbatim diagnostic back to the agent. Capped at
+        // MAX_COMPILE_RETRIES so a stubbornly-broken model doesn't
+        // burn the entire budget on the same dereferencing mistake.
+        let compile_err_present = detect_compile_error(&transcript).is_some();
+        if compile_err_present {
+            compile_retry_count += 1;
+        } else {
+            compile_retry_count = 0;
         }
 
         // Snapshot the workspace when this turn was the best so
@@ -200,12 +220,21 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
 
         // Close-to-green stop. When we've seen a turn at ≤3 failures
         // and this turn didn't improve on it, another cycle is more
-        // likely to regress than close the gap.
+        // likely to regress than close the gap. EXCEPTION: if this
+        // turn shipped code that doesn't compile at all, we have NOT
+        // converged — close-to-green is meaningless because no test
+        // even ran. Force another iteration so the syntax-mode prompt
+        // can feed the diagnostic back, capped at MAX_COMPILE_RETRIES.
         if let Some(best) = best_failed_count {
-            if best <= CLOSE_TO_GREEN_THRESHOLD && !improved {
+            if best <= CLOSE_TO_GREEN_THRESHOLD && !improved && !(compile_err_present && compile_retry_count <= MAX_COMPILE_RETRIES) {
                 tracing::info!(iteration, best_failed = best, "coding workflow: close to green, stopping before regression");
                 break;
             }
+        }
+
+        if compile_err_present && compile_retry_count > MAX_COMPILE_RETRIES {
+            tracing::info!(iteration, compile_retry_count, "coding workflow: max compile-error retries hit, stopping");
+            break;
         }
 
         // Budget check: next turn would blow the cap.
@@ -286,6 +315,7 @@ async fn run_coding_workflow_multirole(cfg: CodingWorkflowConfig) -> anyhow::Res
     let mut last_verify_output: Option<String> = None;
     let mut best_failed_count: Option<u32> = None;
     let mut snapshot_taken = false;
+    let mut compile_retry_count: u32 = 0;
     let iter_cap = cfg.max_outer_iterations.max(1);
     let mut iteration = 0u32;
     let mut succeeded = false;
@@ -318,6 +348,17 @@ async fn run_coding_workflow_multirole(cfg: CodingWorkflowConfig) -> anyhow::Res
             break;
         }
 
+        // Compile-error retry: see single-agent loop for rationale.
+        // A compile failure means tests never ran — close-to-green
+        // is meaningless and the next iteration MUST get the verbatim
+        // diagnostic. Capped at MAX_COMPILE_RETRIES.
+        let compile_err_present = detect_compile_error(&transcript).is_some();
+        if compile_err_present {
+            compile_retry_count += 1;
+        } else {
+            compile_retry_count = 0;
+        }
+
         let current_failed = extract_failed_count(&transcript);
         let improved = match (current_failed, best_failed_count) {
             (Some(now), Some(best)) => now < best,
@@ -337,10 +378,15 @@ async fn run_coding_workflow_multirole(cfg: CodingWorkflowConfig) -> anyhow::Res
         }
 
         if let (Some(best), Some(now)) = (best_failed_count, current_failed) {
-            if best <= CLOSE_TO_GREEN_THRESHOLD && now >= best {
+            if best <= CLOSE_TO_GREEN_THRESHOLD && now >= best && !(compile_err_present && compile_retry_count <= MAX_COMPILE_RETRIES) {
                 tracing::info!(best, now, "multirole workflow: close-to-green, stopping");
                 break;
             }
+        }
+
+        if compile_err_present && compile_retry_count > MAX_COMPILE_RETRIES {
+            tracing::info!(iteration, compile_retry_count, "multirole workflow: max compile-error retries hit, stopping");
+            break;
         }
 
         if let Some(cap) = cfg.budget_usd {
@@ -453,7 +499,11 @@ async fn run_role_phase(
         let tracker = agent.cost_tracker.lock().expect("cost_tracker lock");
         tracker.total_cost_usd
     };
-    let transcript = summarize_conversation(&conversation);
+    // Use the rich diagnostic view (assistant message + most recent
+    // tool results) so a fixer that ran the test runner but didn't
+    // paste the rustc/pytest output verbatim into its summary still
+    // surfaces compile errors and pass/fail counts to the workflow.
+    let transcript = last_diagnostic_text(&conversation);
 
     Ok(PhaseOutcome { transcript, cost })
 }
@@ -477,24 +527,44 @@ fn build_oracle_prompt(task: &str, plan: &str, prior_output: Option<&str>, itera
 /// Compose the fixer's user-message: plan + oracle advice + failure
 /// context + task. Single LLM-with-tools call follows.
 fn build_fixer_prompt(task: &str, plan: &str, advice: &str, prior_output: Option<&str>, iteration: u32) -> String {
-    let prior_section = match prior_output {
-        Some(p) if !p.is_empty() => format!("\n\n## Last test output\n{}", p.chars().take(3000).collect::<String>()),
-        _ => String::new(),
-    };
     if iteration == 1 {
-        format!(
+        return format!(
             "Implement the task. The planner produced a decomposition; the oracle has flagged sharp edges to watch for. Make the change, run the test suite, and iterate until green. Finish your final assistant turn with a `## Test Results` line.\n\n## Plan\n{plan}\n\n## Oracle's notes\n{advice}\n\n## Task\n{task}"
-        )
-    } else {
-        format!(
-            "Iteration {iteration}: prior attempt didn't reach green. The oracle has reviewed the failure and flagged the specific bug. Apply a targeted patch and re-run. Don't rewrite working code — only fix what the oracle named. Finish with `## Test Results`.\n\n## Plan\n{plan}\n\n## Oracle's diagnosis\n{advice}{prior_section}\n\n## Task (reminder)\n{task}"
-        )
+        );
     }
+    let prior = prior_output.unwrap_or("");
+    // Mirror the single-agent path's syntax-mode branch: when the
+    // prior turn shipped code that doesn't compile/parse, the rustc
+    // (or pytest, jest, javac, …) output usually contains the literal
+    // fix as a "help:" / suggestion line. Pass that block through
+    // verbatim so the fixer doesn't have to re-derive it.
+    let compile_err = detect_compile_error(prior);
+    let prior_section = if let Some(err) = compile_err.as_deref() {
+        format!(
+            "\n\n## Compile error from prior attempt\nThe code did not compile / parse — no tests ran. The compiler / parser emitted the diagnostic below; pay close attention to any `help:` / suggestion lines, they often spell out the fix.\n\n```\n{err}\n```"
+        )
+    } else if !prior.is_empty() {
+        format!("\n\n## Last test output\n{}", prior.chars().take(3000).collect::<String>())
+    } else {
+        String::new()
+    };
+    let lead = if compile_err.is_some() {
+        format!("Iteration {iteration}: prior attempt shipped code that does not compile / parse. Tests never ran. Read the compiler diagnostic carefully, apply the suggested fix (or its equivalent), and re-run the tests. The error block below contains a literal `help:` line in many cases — that is usually the answer.")
+    } else {
+        format!("Iteration {iteration}: prior attempt didn't reach green. The oracle has reviewed the failure and flagged the specific bug. Apply a targeted patch and re-run. Don't rewrite working code — only fix what the oracle named.")
+    };
+    format!("{lead} Finish with `## Test Results`.\n\n## Plan\n{plan}\n\n## Oracle's diagnosis\n{advice}{prior_section}\n\n## Task (reminder)\n{task}")
 }
 
 /// Stop escalating when we're this close to green — more
 /// iteration is more likely to regress than close the gap.
 const CLOSE_TO_GREEN_THRESHOLD: u32 = 3;
+
+/// Maximum consecutive compile-error retries before we stop forcing
+/// another iteration. If the model can't deref a `&char` after this
+/// many tries with the compiler literally telling it the answer,
+/// further iteration won't help and we'd be burning budget.
+const MAX_COMPILE_RETRIES: u32 = 3;
 
 // The coding system prompt lives in `crates/smooth-operator/src/cast/prompts/fixer.txt`
 // and is loaded by `Cast::builtin()` via `include_str!`. The
@@ -533,6 +603,7 @@ fn build_user_prompt(task: &str, iteration: u32, prior_output: Option<&str>) -> 
 // the surrounding loop is one phase or seven.
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)] // kept for any external callers; workflow itself uses last_diagnostic_text.
 fn summarize_conversation(conv: &crate::conversation::Conversation) -> String {
     conv.messages
         .iter()
@@ -540,6 +611,86 @@ fn summarize_conversation(conv: &crate::conversation::Conversation) -> String {
         .find(|m| matches!(m.role, crate::conversation::Role::Assistant))
         .map(|m| m.content.clone())
         .unwrap_or_default()
+}
+
+/// Build a compact diagnostic view of the conversation: the agent's
+/// last assistant message plus the most recent tool-result messages.
+///
+/// Why both: when a fixer agent runs `cargo test` / `pytest` via the
+/// bash tool, the verbatim runner output (compile errors, "help:"
+/// hints, "N passed / M failed" summaries) lands in the *tool result*
+/// message. The assistant's follow-up message often paraphrases —
+/// "the test failed because of a type mismatch" — which strips the
+/// suggestion line the next fixer iteration desperately needs.
+/// Including the recent tool results restores that signal for both
+/// `detect_verify_pass` (so a green run is detected even when the
+/// agent forgets `## Test Results`) and `detect_compile_error` (so
+/// the rustc/javac/SyntaxError block survives).
+///
+/// Each tool result is head/tail-trimmed to keep a verbose pip log
+/// or 100MB docker pull from drowning the actual error.
+fn last_diagnostic_text(conv: &crate::conversation::Conversation) -> String {
+    use crate::conversation::Role;
+    const PER_TOOL_RESULT_LIMIT: usize = 2000;
+    const MAX_TOOL_RESULTS: usize = 2;
+
+    let mut tool_blocks: Vec<String> = Vec::new();
+    let mut assistant_block: Option<String> = None;
+    for msg in conv.messages.iter().rev() {
+        match msg.role {
+            Role::Assistant if assistant_block.is_none() && !msg.content.trim().is_empty() => {
+                assistant_block = Some(msg.content.clone());
+            }
+            Role::Tool if tool_blocks.len() < MAX_TOOL_RESULTS => {
+                let trimmed = head_tail(&msg.content, PER_TOOL_RESULT_LIMIT);
+                tool_blocks.push(trimmed);
+            }
+            _ => {}
+        }
+        if assistant_block.is_some() && tool_blocks.len() >= MAX_TOOL_RESULTS {
+            break;
+        }
+    }
+
+    let mut out = String::new();
+    if let Some(asst) = assistant_block {
+        out.push_str(&asst);
+        out.push('\n');
+    }
+    // Tool results in chronological order (we collected them in
+    // reverse).
+    for block in tool_blocks.iter().rev() {
+        out.push_str("\n## Tool result\n");
+        out.push_str(block);
+        out.push('\n');
+    }
+    out
+}
+
+/// Keep the head and tail of a string, dropping the middle when
+/// total byte length exceeds `limit`. Useful for tool-result blocks
+/// where the early summary line + final error block carry the
+/// signal but hundreds of intermediate lines (compile units, pip
+/// install logs) don't.
+///
+/// Char-aware: never panics on a multi-byte boundary. If the input
+/// has fewer chars than `2 * limit` but more bytes (worst case all
+/// 4-byte UTF-8), the head+tail join would exceed the byte budget
+/// — we accept that here, since the goal is to bound transcript
+/// growth for typical (mostly-ASCII) compiler output, not to
+/// guarantee a strict byte cap.
+fn head_tail(s: &str, limit: usize) -> String {
+    if s.len() <= limit {
+        return s.to_string();
+    }
+    let half = limit / 2;
+    let total_chars = s.chars().count();
+    if total_chars <= half * 2 {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(half).collect();
+    let tail: String = s.chars().skip(total_chars - half).collect();
+    format!("{head}\n…[truncated middle]…\n{tail}")
 }
 
 /// True when the transcript reports the test suite is green.
@@ -628,40 +779,103 @@ fn nonzero_failure_count(upper: &str) -> bool {
 /// Pull a compile / parse / syntax error snippet out of a
 /// transcript when the failure isn't a normal test assertion.
 /// Returns `None` when we should treat the failure as a regular
-/// red-test run. Used by `build_user_prompt` to switch retry
-/// tone from "fix the failures" to "fix the syntax".
+/// red-test run. Used by `build_user_prompt` and
+/// `build_fixer_prompt` to switch retry tone from "fix the
+/// failures" to "fix the syntax / type" — and by the workflow loop
+/// to force at least one more fixer iteration when the test harness
+/// never even ran.
+///
+/// Matching strategy: pick the EARLIEST occurrence of any pattern
+/// in the transcript (not the first pattern in the list to match
+/// somewhere). Otherwise rustc output like
+///
+///   error[E0308]: mismatched types
+///   …help: consider dereferencing the borrow…
+///   error: could not compile `alphametics` …
+///
+/// would have its snippet anchored at "could not compile" (because
+/// that pattern happened to be earlier in the array), missing the
+/// actual error block + help: line.
 fn detect_compile_error(transcript: &str) -> Option<String> {
     let upper = transcript.to_uppercase();
     let patterns = [
-        // JS / TS
+        // Rust — anchor on "ERROR[E" first so the snippet starts at
+        // the actual diagnostic block (which carries the `help:`
+        // suggestion line) rather than the trailing
+        // "could not compile" summary.
+        "ERROR[E",
+        "COULD NOT COMPILE",
+        "THIS FILE CONTAINS AN UNCLOSED DELIMITER",
+        "EXPECTED ONE OF",
+        "MISMATCHED TYPES",
+        "CANNOT FIND VALUE",
+        "CANNOT FIND TYPE",
+        // Python — syntax + type/name errors that fail before tests run.
+        // pytest collection errors land here too.
         "SYNTAXERROR",
+        "INDENTATIONERROR",
+        "TABERROR",
+        "TYPEERROR:",
+        "NAMEERROR:",
+        "ATTRIBUTEERROR:",
+        "IMPORTERROR:",
+        "MODULENOTFOUNDERROR:",
+        "ERROR COLLECTING",
+        // JS / TS
         "UNEXPECTED TOKEN",
         "MISSING SEMICOLON",
         "UNCLOSED DELIMITER",
         "UNEXPECTED EOF",
-        // Rust
-        "COULD NOT COMPILE",
-        "THIS FILE CONTAINS AN UNCLOSED DELIMITER",
-        "EXPECTED ONE OF",
+        "UNEXPECTED END OF INPUT",
+        "REFERENCEERROR:",
+        "ERROR TS", // tsc errors look like `error TS2304: ...`
         // Go
         "SYNTAX ERROR:",
         "EXPECTED '{'",
         "EXPECTED ';'",
-        // Python
-        "INDENTATIONERROR",
-        "TABERROR",
+        "UNDEFINED:",
+        "CANNOT USE",
+        "CANNOT CONVERT",
         // Java
         "REACHED END OF FILE",
         "';' EXPECTED",
         "CLASS, INTERFACE, OR ENUM EXPECTED",
         "ERROR: COMPILATION FAILED",
+        "CANNOT FIND SYMBOL",
+        "INCOMPATIBLE TYPES",
+        // Generic
+        "FATAL ERROR:",
     ];
-    let hit_idx = patterns.iter().find_map(|p| upper.find(p))?;
-    let bytes_per_char = transcript.len().checked_div(upper.len()).unwrap_or(1).max(1);
+    // Earliest hit across all patterns wins.
+    let hit_idx = patterns.iter().filter_map(|p| upper.find(p)).min()?;
+    // upper.to_uppercase() can lengthen the string for some unicode
+    // characters; for ASCII it's a 1:1 byte mapping. Most compiler
+    // output is ASCII, so byte index ~= char index here.
+    let bytes_per_char = transcript.len().checked_div(upper.len().max(1)).unwrap_or(1).max(1);
     let start = hit_idx.saturating_mul(bytes_per_char).saturating_sub(120);
-    let end = (hit_idx.saturating_mul(bytes_per_char).saturating_add(600)).min(transcript.len());
+    let end = (hit_idx.saturating_mul(bytes_per_char).saturating_add(800)).min(transcript.len());
+    // Snap to char boundaries so we never panic on a multi-byte cut.
+    let start = next_char_boundary(transcript, start);
+    let end = prev_char_boundary(transcript, end);
     let snippet = transcript.get(start..end).unwrap_or(transcript);
     Some(snippet.trim().to_string())
+}
+
+fn next_char_boundary(s: &str, mut i: usize) -> usize {
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
+fn prev_char_boundary(s: &str, mut i: usize) -> usize {
+    if i > s.len() {
+        return s.len();
+    }
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
 
 // Best-state snapshot + restore. Lives under a hidden dir inside
@@ -878,6 +1092,170 @@ mod tests {
         let p = build_user_prompt("task", 2, Some(prior));
         assert!(p.contains("does not compile"));
         assert!(p.contains("Missing semicolon"));
+    }
+
+    /// Real failure record from bench run b2ff102e: rustc emitted both
+    /// the E0308 mismatched-types error AND a literal `help: consider
+    /// dereferencing the borrow` line. The fixer dispatch never retried.
+    /// `detect_compile_error` MUST flag this AND the snippet MUST
+    /// include the help: line so the next fixer prompt can paste it
+    /// verbatim into context.
+    const B2FF102E_RUST_E0308_STDOUT: &str = r"   Compiling alphametics v1.3.0 (/Users/brentrager/.smooth/bench-runs/b2ff102e/work)
+error[E0308]: mismatched types
+  --> src/lib.rs:85:24
+   |
+85 |         mapping.insert(next_letter, digit);
+   |                 ------ ^^^^^^^^^^^ expected `char`, found `&char`
+   |                 |
+   |                 arguments to this method are incorrect
+   |
+note: method defined here
+  --> /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/collections/hash/map.rs:1207:12
+help: consider dereferencing the borrow
+   |
+85 |         mapping.insert(*next_letter, digit);
+   |                        +
+
+For more information about this error, try `rustc --explain E0308`.
+error: could not compile `alphametics` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `alphametics` (lib test) due to 1 previous error
+";
+
+    #[test]
+    fn detect_compile_error_fixture_b2ff102e_e0308_includes_help_line() {
+        let snippet = detect_compile_error(B2FF102E_RUST_E0308_STDOUT).expect("rustc E0308 must be detected as a compile error");
+        // The whole point of forwarding this: the help: line literally
+        // contains the fix. If our snippet doesn't carry it, the next
+        // fixer iteration is no better off than the failed one.
+        assert!(
+            snippet.contains("help: consider dereferencing the borrow"),
+            "snippet must include the rustc `help:` suggestion line; got:\n{snippet}"
+        );
+        assert!(
+            snippet.contains("*next_letter") || snippet.contains("E0308"),
+            "snippet must anchor near the actual error block (E0308 or its fix code), not at the trailing `could not compile` summary; got:\n{snippet}"
+        );
+    }
+
+    #[test]
+    fn detect_compile_error_python_type_error() {
+        let pytest = "============================== ERRORS ===============================\n___ ERROR collecting test_x.py ___\nTypeError: unsupported operand type(s) for +: 'int' and 'str'\n";
+        assert!(detect_compile_error(pytest).is_some());
+    }
+
+    #[test]
+    fn detect_compile_error_java_cannot_find_symbol() {
+        let javac = "src/Foo.java:42: error: cannot find symbol\n  symbol: variable bar\nlocation: class Foo\n";
+        assert!(detect_compile_error(javac).is_some());
+    }
+
+    #[test]
+    fn detect_compile_error_go_undefined() {
+        let go = "./main.go:12:5: undefined: foo\n";
+        assert!(detect_compile_error(go).is_some());
+    }
+
+    #[test]
+    fn detect_compile_error_typescript() {
+        let tsc = "src/foo.ts(12,3): error TS2304: Cannot find name 'bar'.\n";
+        assert!(detect_compile_error(tsc).is_some());
+    }
+
+    #[test]
+    fn detect_compile_error_picks_earliest_match_so_help_line_survives() {
+        // Regression for the b2ff102e bug shape. A pattern list bug
+        // (find_map first-match) anchored the snippet at "could not
+        // compile" instead of "error[E0308]" — the help: line, which
+        // appears between them, fell off the end of the 600-byte window.
+        let snippet = detect_compile_error(B2FF102E_RUST_E0308_STDOUT).expect("must detect");
+        let help_idx = snippet.find("help:").expect("help: must be in snippet");
+        let cnc_idx = snippet.find("could not compile").unwrap_or(usize::MAX);
+        assert!(
+            help_idx < cnc_idx,
+            "help: line must appear BEFORE the trailing summary in the snippet (help_idx={help_idx}, cnc_idx={cnc_idx})"
+        );
+    }
+
+    #[test]
+    fn build_fixer_prompt_uses_syntax_mode_on_compile_error() {
+        let prior = B2FF102E_RUST_E0308_STDOUT;
+        let p = build_fixer_prompt("solve alphametics", "1. parse\n2. solve\n", "watch leading zeros", Some(prior), 2);
+        assert!(
+            p.contains("does not compile") || p.contains("Compile error from prior attempt"),
+            "fixer prompt must switch to syntax mode on compile error"
+        );
+        assert!(
+            p.contains("help: consider dereferencing the borrow"),
+            "verbatim rustc help: line must reach the fixer's next prompt"
+        );
+    }
+
+    #[test]
+    fn build_fixer_prompt_normal_failure_uses_test_output_section() {
+        let prior = "test result: FAILED. 28 passed; 2 failed";
+        let p = build_fixer_prompt("solve bowling", "plan", "advice", Some(prior), 2);
+        assert!(p.contains("Last test output"));
+        assert!(!p.contains("does not compile"));
+    }
+
+    #[test]
+    fn last_diagnostic_text_combines_assistant_and_recent_tool_results() {
+        use crate::conversation::{Conversation, Message};
+        let mut conv = Conversation::new(8192);
+        conv.messages.push(Message::user("do the thing"));
+        conv.messages.push(Message::tool_result("call_1", "stale tool result"));
+        conv.messages.push(Message::assistant("intermediate thought"));
+        conv.messages.push(Message::tool_result(
+            "call_2",
+            "## CARGO TEST\nerror[E0308]: mismatched types\nhelp: consider dereferencing the borrow",
+        ));
+        conv.messages.push(Message::assistant("I attempted the fix; tests should pass now."));
+
+        let view = last_diagnostic_text(&conv);
+        // Last assistant message present.
+        assert!(view.contains("I attempted the fix"), "must include last assistant message");
+        // Recent tool result present so detect_compile_error can see it.
+        assert!(view.contains("error[E0308]"), "must include recent tool-result content");
+        assert!(view.contains("help: consider dereferencing the borrow"), "must include verbatim help line");
+        // And detect_compile_error agrees.
+        assert!(detect_compile_error(&view).is_some(), "compile error must be detected via combined view");
+    }
+
+    #[test]
+    fn last_diagnostic_text_truncates_long_tool_result_via_head_tail() {
+        use crate::conversation::{Conversation, Message};
+        let mut conv = Conversation::new(8192);
+        let middle_filler: String = "x".repeat(10_000);
+        let huge = format!("error[E0308]: at start\n{middle_filler}\nhelp: at the end");
+        conv.messages.push(Message::tool_result("call_1", huge));
+        conv.messages.push(Message::assistant("done"));
+
+        let view = last_diagnostic_text(&conv);
+        // Both the head AND the tail of the tool result must survive
+        // the truncation — that's the head/tail policy.
+        assert!(view.contains("error[E0308]"), "head of tool result must survive");
+        assert!(view.contains("help: at the end"), "tail of tool result must survive");
+        assert!(view.contains("[truncated middle]"), "middle must be marked truncated");
+    }
+
+    #[test]
+    fn head_tail_passes_short_strings_through_unchanged() {
+        assert_eq!(head_tail("short", 100), "short");
+    }
+
+    #[test]
+    fn head_tail_does_not_panic_on_multibyte_boundary() {
+        // 200 grinning faces (4 bytes each); limit forces truncation
+        // and the cut points must land on char boundaries — naive
+        // byte-slicing here would panic.
+        let s: String = "😀".repeat(200);
+        let out = head_tail(&s, 100);
+        // No panic is the real assertion. We don't assert "truncated"
+        // here because at 200 chars / limit=100 bytes the function
+        // may take the head+tail path or the early return depending
+        // on `2 * (limit/2)` vs total char count. Either is correct.
+        assert!(!out.is_empty());
     }
 
     #[test]
