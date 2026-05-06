@@ -58,7 +58,8 @@ cargo test                   # Run all tests (200+ across 10 crates)
 cargo fmt                    # Format (rustfmt.toml: 160 width)
 cargo clippy                 # Lint (pedantic + nursery)
 cargo build --release -p smooth-cli  # Release binary (~10MB)
-pnpm install:th              # Install latest th to ~/.cargo/bin/
+pnpm install:th              # Build web bundle + install latest th to ~/.cargo/bin/
+pnpm build:web               # Just rebuild the embedded web SPA
 ```
 
 ### Web UI (crates/smooth-web/web/)
