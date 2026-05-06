@@ -188,6 +188,15 @@ pub struct AppState {
     pub session_title: Option<String>,
     /// Chat message history.
     pub messages: Vec<ChatMessage>,
+    /// Number of leading messages that have already been flushed into
+    /// the terminal's scrollback via `Frame::insert_before`. Inline-
+    /// viewport mode pushes finalized messages into the terminal's
+    /// own scroll buffer (so native wheel-scroll, drag-select, and
+    /// search all work) and only keeps the in-flight streaming
+    /// message inside the viewport. The render path skips messages
+    /// at indices `< committed_count` so they don't double-paint
+    /// inside the viewport while also living above it as scrollback.
+    pub committed_count: usize,
     /// Current text in the input box.
     pub input: String,
     /// Cursor position within the input string (byte offset).
@@ -268,6 +277,7 @@ impl AppState {
             session_id: Uuid::new_v4().to_string(),
             session_title: None,
             messages: Vec::new(),
+            committed_count: 0,
             input: String::new(),
             input_cursor: 0,
             sidebar_visible: false,

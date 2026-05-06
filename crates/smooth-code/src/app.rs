@@ -7,10 +7,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
-use crossterm::execute;
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::backend::CrosstermBackend;
-use ratatui::Terminal;
+use ratatui::{Terminal, TerminalOptions, Viewport};
 
 use smooth_operator::AgentEvent;
 use tokio::sync::mpsc;
@@ -93,40 +92,45 @@ pub async fn run_with_session(working_dir: PathBuf, resume: Option<crate::sessio
         std::env::var("TERM_PROGRAM").unwrap_or_default()
     ));
 
-    // Escape hatch for terminals that don't cleanly handle the
-    // alternate-screen + synchronized-output combo (some tmux configs,
-    // some Windows terminals, certain ssh multiplexes).
-    // `SMOOTH_TUI_NO_ALT_SCREEN=1` drops the alt-screen switch so the
-    // UI renders inline in the primary buffer. Scrollback gets mixed
-    // in with the TUI output but at least the user can *see* the UI.
+    // Inline-viewport mode: the TUI owns only a small region at the
+    // bottom of the terminal (input + status + an optional streaming
+    // preview). Finalized chat messages flow into the terminal's
+    // own scrollback via `Frame::insert_before`, so the user gets
+    // native wheel-scroll, drag-select, copy, and search for free.
+    // No alt-screen, no mouse capture — both would break those.
     //
-    // Mouse capture is intentionally NOT enabled. The TUI doesn't
-    // consume mouse events; capturing them would only disable the
-    // terminal's native wheel-scroll and drag-select.
-    let no_alt_screen = matches!(std::env::var("SMOOTH_TUI_NO_ALT_SCREEN").ok().as_deref(), Some("1"));
-    tui_debug(format!("no_alt_screen={no_alt_screen}"));
+    // The legacy `SMOOTH_TUI_NO_ALT_SCREEN` escape hatch is now a
+    // no-op (we never enter alt-screen). Kept readable for one
+    // release so users with the var in their shell config don't
+    // get a surprise error.
+    let _ = std::env::var("SMOOTH_TUI_NO_ALT_SCREEN");
 
-    // Setup terminal
     enable_raw_mode().map_err(|e| anyhow::anyhow!("enable_raw_mode failed ({e}); terminal may not support raw mode"))?;
     tui_debug("enable_raw_mode OK");
 
-    let mut stdout = io::stdout();
-    if !no_alt_screen {
-        execute!(stdout, EnterAlternateScreen).map_err(|e| anyhow::anyhow!("EnterAlternateScreen failed ({e}); try SMOOTH_TUI_NO_ALT_SCREEN=1"))?;
-        tui_debug("EnterAlternateScreen OK");
-    } else {
-        tui_debug("skipped alt-screen (SMOOTH_TUI_NO_ALT_SCREEN=1)");
-    }
+    // Pick a viewport height that fits the input/status plus a
+    // reasonable streaming-preview region. 14 rows (3 input + 1
+    // status + 10 preview) feels right on an 80x24 terminal; if the
+    // terminal is shorter we cap at 60% of its height so the
+    // viewport never crowds out scrollback entirely.
+    let term_h = crossterm::terminal::size().map(|(_, h)| h).unwrap_or(24);
+    let viewport_h = u16::min(14, term_h.saturating_mul(3) / 5).max(4);
+    tui_debug(format!("viewport: Inline({viewport_h}), term_height={term_h}"));
 
+    let stdout = io::stdout();
     let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend).map_err(|e| {
-        // Best-effort restore if Terminal::new fails after alt-screen entered.
+
+    let mut terminal = Terminal::with_options(
+        backend,
+        TerminalOptions {
+            viewport: Viewport::Inline(viewport_h),
+        },
+    )
+    .map_err(|e| {
         let _ = disable_raw_mode();
-        let mut stdout = io::stdout();
-        let _ = execute!(stdout, LeaveAlternateScreen);
-        anyhow::anyhow!("Terminal::new failed: {e}")
+        anyhow::anyhow!("Terminal::with_options failed: {e}")
     })?;
-    tui_debug(format!("Terminal::new OK, size={:?}", terminal.size().ok()));
+    tui_debug(format!("Terminal::with_options OK, size={:?}", terminal.size().ok()));
 
     let initial_state = match resume {
         Some(ref session) => {
@@ -229,12 +233,15 @@ pub async fn run_with_session(working_dir: PathBuf, resume: Option<crate::sessio
         }
     }
 
-    // Restore terminal
+    // Restore terminal — inline-viewport mode only needs to disable
+    // raw mode and ensure the cursor is visible. There's no alt-
+    // screen to leave: the viewport sat in the primary buffer the
+    // whole time.
     disable_raw_mode()?;
-    if !no_alt_screen {
-        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    }
     terminal.show_cursor()?;
+    // Move the cursor below the viewport so the user's next shell
+    // prompt doesn't land on top of the (now-final) input row.
+    println!();
     tui_debug("terminal restored, app::run exit");
 
     result
@@ -275,6 +282,13 @@ fn event_loop(
         // flicker-free output via crossterm's diff rendering.
         {
             let mut s = state.lock().expect("state lock poisoned");
+            // Push every finalized message into the terminal's
+            // scrollback BEFORE drawing the viewport. This way the
+            // viewport only ever paints the in-flight streaming
+            // message + input + status — finalized turns become
+            // regular terminal output the user can scroll, select,
+            // search, and copy with native terminal tooling.
+            crate::inline::flush_to_scrollback(&mut s, terminal)?;
             // Advance spinner each frame for animation
             s.advance_spinner();
             terminal.draw(|f| render::render(f, &s))?;
@@ -291,17 +305,17 @@ fn event_loop(
             if let Event::Key(key) = event::read()? {
                 let mut s = state.lock().expect("state lock poisoned");
 
-                // Global keybindings
+                // Global keybindings. Ctrl+B used to toggle the
+                // sidebar, but inline-viewport mode has no panel
+                // for one — the file tree / git pane / etc. that
+                // used to live there are reachable via slash
+                // commands (`/git`, future `/files`). The key is
+                // intentionally left unbound rather than re-purposed
+                // so muscle memory doesn't fire something
+                // unexpected.
                 if key.modifiers.contains(KeyModifiers::CONTROL) {
-                    match key.code {
-                        KeyCode::Char('c') => {
-                            s.should_quit = true;
-                        }
-                        KeyCode::Char('b') => {
-                            s.sidebar_visible = !s.sidebar_visible;
-                            continue;
-                        }
-                        _ => {}
+                    if let KeyCode::Char('c') = key.code {
+                        s.should_quit = true;
                     }
                 }
 
