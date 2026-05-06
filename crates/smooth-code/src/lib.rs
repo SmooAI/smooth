@@ -25,3 +25,4 @@ pub mod session;
 pub mod state;
 pub mod theme;
 pub mod thesaurus;
+pub mod tool_diff;

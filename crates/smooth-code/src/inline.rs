@@ -82,7 +82,26 @@ pub fn message_lines(msg: &ChatMessage) -> Vec<Line<'static>> {
             ToolStatus::Done => format!("done{duration_str}"),
             ToolStatus::Error => format!("error{duration_str}"),
         };
-        let collapse_indicator = if tc.output.is_some() {
+        // Mutating-on-disk tools (edit_file / write_file / apply_patch)
+        // get a unified-diff render below the header line. Other tools
+        // keep the existing header-plus-collapsed-output shape.
+        let diff_lines = tc
+            .arguments_full
+            .as_ref()
+            .and_then(|args| crate::tool_diff::render(&tc.tool_name, args));
+
+        // For diff-renderable tools, hide the noisy "(args_preview...)"
+        // inline payload — the diff below carries the same info, more
+        // usefully. Also drop the collapse glyph since the diff is
+        // always shown.
+        let header_args = if diff_lines.is_some() {
+            String::new()
+        } else {
+            format!("(\"{}\")", tc.arguments_preview)
+        };
+        let collapse_indicator = if diff_lines.is_some() {
+            ""
+        } else if tc.output.is_some() {
             if tc.collapsed {
                 " ▶"
             } else {
@@ -91,12 +110,16 @@ pub fn message_lines(msg: &ChatMessage) -> Vec<Line<'static>> {
         } else {
             ""
         };
+
         lines.push(Line::from(vec![
             Span::styled(format!("{icon} "), icon_style),
-            Span::styled(format!("{}(\"{}\")", tc.tool_name, tc.arguments_preview), theme::muted()),
+            Span::styled(format!("{}{header_args}", tc.tool_name), theme::muted()),
             Span::raw(format!(" ── {status_label}{collapse_indicator}")),
         ]));
-        if !tc.collapsed {
+
+        if let Some(diff) = diff_lines {
+            lines.extend(diff);
+        } else if !tc.collapsed {
             if let Some(ref output) = tc.output {
                 for output_line in output.lines() {
                     lines.push(Line::from(Span::styled(format!("  │ {output_line}"), theme::muted())));

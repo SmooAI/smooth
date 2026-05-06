@@ -17,6 +17,7 @@ async-trait.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 pulldown-cmark.workspace = true
+similar.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -643,7 +643,7 @@ fn handle_input_mode(
                             }
                             role
                         };
-                        if let Err(e) = run_agent_streaming(&message, tx.clone(), Some(agent)).await {
+                        if let Err(e) = run_agent_streaming(&message, tx.clone(), Some(agent), Arc::clone(&state_for_routing)).await {
                             let _ = tx.send(AgentEvent::Error { message: e.to_string() });
                         }
                     });
@@ -818,8 +818,11 @@ async fn auto_name_session(user_prompt: &str) -> Option<String> {
 /// to the `AgentEvent` channel the TUI already consumes. All actual tool
 /// execution happens inside a hardware-isolated sandbox — smooth-code is
 /// just a rendering client.
-async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent>, agent: Option<String>) -> anyhow::Result<()> {
+async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent>, agent: Option<String>, state: Arc<Mutex<AppState>>) -> anyhow::Result<()> {
+    use std::collections::{HashMap, VecDeque};
+
     use crate::client::{BigSmoothClient, ServerEvent};
+    use crate::state::{ChatRole, ToolCallState, ToolStatus};
 
     let url = std::env::var("SMOOTH_URL").unwrap_or_else(|_| "http://localhost:4400".into());
     let mut client = BigSmoothClient::new(&url);
@@ -828,20 +831,86 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
         .await
         .map_err(|e| anyhow::anyhow!("Cannot connect to Big Smooth at {url}: {e}. Run: th up"))?;
 
+    // Create the streaming assistant message synchronously so tool
+    // calls that arrive before the main event loop has a chance to
+    // process AgentEvent::Started have somewhere to attach. Without
+    // this, fast-arriving ToolCallStart events would lose their
+    // tool_call render entirely (the diff for the very first edit
+    // wouldn't show up).
+    {
+        let mut s = state.lock().expect("state lock poisoned");
+        s.start_streaming();
+    }
     let _ = tx.send(AgentEvent::Started { agent_id: "task".into() });
 
     let cwd = std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string());
     let mut events = client.run_task(message, None, None, cwd.as_deref(), agent.as_deref()).await?;
 
+    // Per-tool-name queues of (id, started_at, args). The runner emits
+    // a ToolCallStart, then the tool runs, then a ToolCallComplete —
+    // possibly interleaved with other tool calls. ServerEvent has no
+    // per-call id field so we associate Start with Complete by
+    // tool_name + arrival order. Tools execute in parallel within
+    // a single agent turn but the runner serializes the events
+    // per-name, so the queue stays in lockstep.
+    let mut pending: HashMap<String, VecDeque<(String, std::time::Instant, String)>> = HashMap::new();
+    let mut next_id: u64 = 0;
+
     while let Some(event) = events.recv().await {
         let agent_event = match event {
             ServerEvent::TokenDelta { content, .. } => Some(AgentEvent::TokenDelta { content }),
-            ServerEvent::ToolCallStart { tool_name, .. } => Some(AgentEvent::ToolCallStart { iteration: 0, tool_name }),
-            ServerEvent::ToolCallComplete { tool_name, is_error, .. } => Some(AgentEvent::ToolCallComplete {
-                iteration: 0,
+            ServerEvent::ToolCallStart { tool_name, arguments, .. } => {
+                next_id += 1;
+                let id = format!("tc-{next_id}");
+                {
+                    let mut s = state.lock().expect("state lock poisoned");
+                    // Tool calls hang off the most recent assistant
+                    // message. If there isn't one yet, drop the start
+                    // event — render will pick up the Complete output
+                    // anyway.
+                    let attached = s
+                        .messages
+                        .last_mut()
+                        .filter(|m| m.role == ChatRole::Assistant)
+                        .map(|msg| msg.tool_calls.push(ToolCallState::from_raw(&id, &tool_name, &arguments)))
+                        .is_some();
+                    if !attached {
+                        // No assistant message yet — skip the queue
+                        // bookkeeping too so we don't pop a phantom
+                        // entry on Complete.
+                        continue;
+                    }
+                }
+                pending.entry(tool_name.clone()).or_default().push_back((id, std::time::Instant::now(), arguments));
+                Some(AgentEvent::ToolCallStart { iteration: 0, tool_name })
+            }
+            ServerEvent::ToolCallComplete {
                 tool_name,
+                result,
                 is_error,
-            }),
+                duration_ms,
+                ..
+            } => {
+                if let Some(q) = pending.get_mut(&tool_name) {
+                    if let Some((id, _, _)) = q.pop_front() {
+                        let mut s = state.lock().expect("state lock poisoned");
+                        for msg in &mut s.messages {
+                            for tc in &mut msg.tool_calls {
+                                if tc.id == id {
+                                    tc.output = Some(result.clone());
+                                    tc.status = if is_error { ToolStatus::Error } else { ToolStatus::Done };
+                                    tc.duration_ms = Some(duration_ms);
+                                }
+                            }
+                        }
+                    }
+                }
+                Some(AgentEvent::ToolCallComplete {
+                    iteration: 0,
+                    tool_name,
+                    is_error,
+                })
+            }
             ServerEvent::TaskComplete { iterations, cost_usd, .. } => {
                 let _ = tx.send(AgentEvent::Completed {
                     agent_id: "task".into(),

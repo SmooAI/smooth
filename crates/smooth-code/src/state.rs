@@ -55,8 +55,17 @@ pub struct ToolCallState {
     pub id: String,
     /// Name of the tool being invoked.
     pub tool_name: String,
-    /// First 80 characters of the serialized arguments.
+    /// First 80 characters of the serialized arguments. Used for the
+    /// compact tool-call header line.
     pub arguments_preview: String,
+    /// Full deserialized arguments — preserved so the renderer can
+    /// produce a unified diff for `edit_file` / `write_file` /
+    /// `apply_patch`. `None` when the upstream event didn't carry
+    /// parseable JSON (e.g. legacy callers, tools that emit a raw
+    /// string). Skipped on serialize so saved sessions don't bloat
+    /// with full file contents on every edit.
+    #[serde(skip)]
+    pub arguments_full: Option<serde_json::Value>,
     /// Tool output (stdout/result), if available.
     pub output: Option<String>,
     /// Current execution status.
@@ -79,6 +88,33 @@ impl ToolCallState {
             id: id.into(),
             tool_name: tool_name.into(),
             arguments_preview,
+            arguments_full: Some(arguments.clone()),
+            output: None,
+            status: ToolStatus::Running,
+            collapsed: true,
+            started_at: Utc::now(),
+            duration_ms: None,
+        }
+    }
+
+    /// Convenience constructor used by the WebSocket dispatch path,
+    /// where the runner forwards the arguments as a serialized JSON
+    /// string. Falls back to `None` for `arguments_full` when the
+    /// string isn't valid JSON — the diff renderer will skip it and
+    /// the standard collapsed-output path still works.
+    pub fn from_raw(id: impl Into<String>, tool_name: impl Into<String>, arguments_json: &str) -> Self {
+        let parsed: Option<serde_json::Value> = serde_json::from_str(arguments_json).ok();
+        let preview_src = parsed.as_ref().map_or_else(|| arguments_json.to_string(), serde_json::Value::to_string);
+        let arguments_preview = if preview_src.len() > 80 {
+            format!("{}...", &preview_src[..80])
+        } else {
+            preview_src
+        };
+        Self {
+            id: id.into(),
+            tool_name: tool_name.into(),
+            arguments_preview,
+            arguments_full: parsed,
             output: None,
             status: ToolStatus::Running,
             collapsed: true,
@@ -434,11 +470,19 @@ impl AppState {
         Self::SPINNER_FRAMES[self.spinner_frame % Self::SPINNER_FRAMES.len()]
     }
 
-    /// Start streaming: create an empty assistant message with `streaming = true`.
+    /// Start streaming: create an empty assistant message with
+    /// `streaming = true`. Idempotent — a no-op when the last message
+    /// is already a streaming assistant message, so callers can call
+    /// it both eagerly (synchronously, before tool calls land) and
+    /// lazily (from the agent-event handler) without producing a
+    /// duplicate empty message.
     pub fn start_streaming(&mut self) {
-        let mut msg = ChatMessage::assistant("");
-        msg.streaming = true;
-        self.add_message(msg);
+        let already_streaming = self.messages.last().is_some_and(|m| m.role == ChatRole::Assistant && m.streaming);
+        if !already_streaming {
+            let mut msg = ChatMessage::assistant("");
+            msg.streaming = true;
+            self.add_message(msg);
+        }
         self.thinking = true;
     }
 
