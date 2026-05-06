@@ -1,7 +1,7 @@
 //! Main render function — draws the full TUI frame.
 
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
@@ -145,12 +145,23 @@ fn welcome_banner_into(lines: &mut Vec<Line<'static>>) {
         " \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551} \u{255a}\u{2550}\u{255d} \u{2588}\u{2588}\u{2551}\u{255a}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2554}\u{255d}\u{255a}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2554}\u{255d}   \u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}  \u{2588}\u{2588}\u{2551}",
         " \u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}\u{255a}\u{2550}\u{255d}     \u{255a}\u{2550}\u{255d} \u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}  \u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}    \u{255a}\u{2550}\u{255d}   \u{255a}\u{2550}\u{255d}  \u{255a}\u{2550}\u{255d}",
     ];
-    let total_rows = BANNER_ROWS.len();
-    // Add a blank line at top for spacing
+    // Blank line at the top for spacing
     lines.push(Line::from(""));
-    for (i, row) in BANNER_ROWS.iter().enumerate() {
-        let style = theme::gradient_row(i, total_rows);
-        lines.push(Line::from(Span::styled(*row, style)).alignment(Alignment::Center));
+    // Color each cell of every row HORIZONTALLY using the brand
+    // gradient (Smoo orange→pink, th teal→blue) so the SMOOTH
+    // wordmark reads the way it does everywhere else in the
+    // product. Previously this used theme::gradient_row, which
+    // painted vertically — top yellow, bottom green — and didn't
+    // match the brand pattern.
+    for row in &BANNER_ROWS {
+        let chars: Vec<char> = row.chars().collect();
+        let total = chars.len().max(1);
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(chars.len());
+        for (col, ch) in chars.into_iter().enumerate() {
+            let color = theme::smooth_banner_color(col, total);
+            spans.push(Span::styled(ch.to_string(), Style::default().fg(color).add_modifier(Modifier::BOLD)));
+        }
+        lines.push(Line::from(spans).alignment(Alignment::Center));
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled("AI Agent Orchestration Platform", theme::muted())).alignment(Alignment::Center));
