@@ -14,6 +14,7 @@ pub mod extensions;
 pub mod files;
 pub mod git;
 pub mod headless;
+pub mod inline;
 pub mod intent;
 pub mod layout;
 pub mod markdown;

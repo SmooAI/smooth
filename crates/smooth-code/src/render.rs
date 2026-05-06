@@ -6,31 +6,52 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::layout::compute_layout;
 use crate::state::{AppState, ChatRole, FocusPanel, HealthStatus, ToolStatus};
 use crate::theme;
 
 /// Render the full TUI frame from the current application state.
+///
+/// Inline-viewport mode: the frame area is just the small bottom
+/// region the TUI owns (preview + status + input). Finalized chat
+/// messages live in the terminal's own scrollback above the viewport
+/// and are NOT rendered here — `app.rs` calls
+/// [`crate::inline::flush_to_scrollback`] every tick to push them
+/// out of `state.messages` once they stop streaming.
 pub fn render(frame: &mut Frame, state: &AppState) {
-    let regions = compute_layout(frame.area(), state.sidebar_visible);
+    let area = frame.area();
 
-    render_chat(frame, state, regions.chat);
+    // The preview area shows the streaming/in-flight assistant
+    // message. Cap at half the viewport height so a runaway response
+    // doesn't crowd out the input/status; once it overflows, the
+    // wrap-aware Paragraph keeps the most recent rows visible.
+    let max_preview = area.height.saturating_sub(4).max(1);
+    let preview_h = crate::inline::preview_height(state, area.width, max_preview);
+    let regions = crate::inline::compute_regions(area, preview_h);
+
+    if let Some(preview_rect) = regions.preview {
+        let lines = crate::inline::viewport_preview_lines(state);
+        let total_lines = lines.len();
+        let visible = preview_rect.height as usize;
+        // When the preview is taller than its allotted region, scroll
+        // to the bottom so the most recent tokens are always visible
+        // — same behavior the user expects from a terminal that's
+        // mid-output.
+        let scroll = total_lines.saturating_sub(visible);
+        let paragraph = Paragraph::new(lines)
+            .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0))
+            .wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, preview_rect);
+    }
+
     render_input(frame, state, regions.input);
     render_status(frame, state, regions.status);
 
-    if let Some(sidebar_rect) = regions.sidebar {
-        render_sidebar(frame, state, sidebar_rect);
-    }
-
-    // Autocomplete popup — rendered last so it floats over the chat
-    // panel. Anchored just above the input box so the user's eye
-    // doesn't jump far from where they're typing.
     if state.autocomplete.active && !state.autocomplete.results.is_empty() {
         render_autocomplete_popup(frame, state, regions.input);
     }
 
     if state.model_picker.active {
-        render_model_picker(frame, state, frame.area());
+        render_model_picker(frame, state, area);
     }
 }
 
@@ -92,18 +113,19 @@ fn render_autocomplete_popup(frame: &mut Frame, state: &AppState, input_area: Re
     frame.render_widget(list, popup_rect);
 }
 
-/// The ASCII art banner rows for the welcome screen.
-const BANNER_ROWS: [&str; 6] = [
-    " \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2588}\u{2557}   \u{2588}\u{2588}\u{2588}\u{2557} \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557}  \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557} \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2557}  \u{2588}\u{2588}\u{2557}",
-    " \u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557} \u{2588}\u{2588}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2550}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2550}\u{2588}\u{2588}\u{2557}\u{255a}\u{2550}\u{2550}\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{255d}\u{2588}\u{2588}\u{2551}  \u{2588}\u{2588}\u{2551}",
-    " \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2554}\u{2588}\u{2588}\u{2588}\u{2588}\u{2554}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2551}",
-    " \u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551}\u{255a}\u{2588}\u{2588}\u{2554}\u{255d}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2588}\u{2588}\u{2551}",
-    " \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551} \u{255a}\u{2550}\u{255d} \u{2588}\u{2588}\u{2551}\u{255a}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2554}\u{255d}\u{255a}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2554}\u{255d}   \u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}  \u{2588}\u{2588}\u{2551}",
-    " \u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}\u{255a}\u{2550}\u{255d}     \u{255a}\u{2550}\u{255d} \u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}  \u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}    \u{255a}\u{2550}\u{255d}   \u{255a}\u{2550}\u{255d}  \u{255a}\u{2550}\u{255d}",
-];
-
 /// Render the welcome banner with gradient colors when there are no messages.
+#[allow(dead_code)] // kept as reference for a possible "fixed-screen mode" toggle
 fn render_welcome_banner(lines: &mut Vec<Line<'_>>) {
+    /// Box-drawing wordmark — only used by this dead helper. Inlined
+    /// here so removing the helper later removes the constant too.
+    const BANNER_ROWS: [&str; 6] = [
+        " \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2588}\u{2557}   \u{2588}\u{2588}\u{2588}\u{2557} \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557}  \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557} \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2557}  \u{2588}\u{2588}\u{2557}",
+        " \u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557} \u{2588}\u{2588}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2550}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2550}\u{2588}\u{2588}\u{2557}\u{255a}\u{2550}\u{2550}\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{255d}\u{2588}\u{2588}\u{2551}  \u{2588}\u{2588}\u{2551}",
+        " \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2554}\u{2588}\u{2588}\u{2588}\u{2588}\u{2554}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2551}",
+        " \u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551}\u{255a}\u{2588}\u{2588}\u{2554}\u{255d}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2588}\u{2588}\u{2551}",
+        " \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2551} \u{255a}\u{2550}\u{255d} \u{2588}\u{2588}\u{2551}\u{255a}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2554}\u{255d}\u{255a}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2554}\u{255d}   \u{2588}\u{2588}\u{2551}   \u{2588}\u{2588}\u{2551}  \u{2588}\u{2588}\u{2551}",
+        " \u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}\u{255a}\u{2550}\u{255d}     \u{255a}\u{2550}\u{255d} \u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}  \u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}    \u{255a}\u{2550}\u{255d}   \u{255a}\u{2550}\u{255d}  \u{255a}\u{2550}\u{255d}",
+    ];
     let total_rows = BANNER_ROWS.len();
     // Add a blank line at top for spacing
     lines.push(Line::from(""));
@@ -120,20 +142,35 @@ fn render_welcome_banner(lines: &mut Vec<Line<'_>>) {
 }
 
 /// Render the chat message area.
+#[allow(dead_code)] // superseded by inline-viewport rendering; kept for reference
 fn render_chat(frame: &mut Frame, state: &AppState, area: Rect) {
     // Build a " Smooth " title where "Smooth" uses the brand gradient
     // (matches the CLI wordmark — `smoo` orange→pink, `th` teal→blue).
+    // No box border — terminal text selection drags rectangular cells,
+    // so any border glyphs (│ ─ etc.) leak into the copy buffer when
+    // the user drags across the chat history. Role labels + blank-line
+    // spacing carry enough visual structure on their own.
     let mut title_spans: Vec<Span<'_>> = vec![Span::raw(" ")];
     title_spans.extend(theme::smooth_wordmark());
     title_spans.push(Span::raw(" "));
 
-    let block = Block::default()
-        .title(Line::from(title_spans))
-        .borders(Borders::ALL)
-        .border_style(theme::panel_border(state.focus == FocusPanel::Chat));
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    // Render the title as the first line of the area; the rest is body.
+    // The Paragraph below scrolls within `inner`, leaving the title
+    // pinned to the top.
+    let title_line = Line::from(title_spans);
+    let title_rect = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: 1.min(area.height),
+    };
+    frame.render_widget(Paragraph::new(title_line), title_rect);
+    let inner = Rect {
+        x: area.x,
+        y: area.y.saturating_add(1),
+        width: area.width,
+        height: area.height.saturating_sub(1),
+    };
 
     let mut lines: Vec<Line<'_>> = Vec::new();
 
@@ -339,6 +376,7 @@ fn render_status(frame: &mut Frame, state: &AppState, area: Rect) {
 }
 
 /// Render the sidebar panel with the file tree.
+#[allow(dead_code)] // sidebar removed when switching to inline viewport (Ctrl+B unbound)
 fn render_sidebar(frame: &mut Frame, state: &AppState, area: Rect) {
     let block = Block::default()
         .title(" Files ")
