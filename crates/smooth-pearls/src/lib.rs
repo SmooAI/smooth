@@ -15,7 +15,7 @@ pub mod store;
 pub mod tools;
 pub mod types;
 
-pub use dolt::SmoothDolt;
+pub use dolt::{PushOpts, SmoothDolt};
 pub use dolt_server::{SmoothDoltClient, SmoothDoltServer};
 pub use query::PearlQuery;
 pub use registry::Registry;
