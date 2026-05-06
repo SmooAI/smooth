@@ -134,9 +134,10 @@ pub fn welcome_banner_lines() -> Vec<Line<'static>> {
 /// content (e.g. a fixed-screen mode rebuild) don't have to
 /// allocate twice.
 fn welcome_banner_into(lines: &mut Vec<Line<'static>>) {
-    /// Box-drawing SMOOTH wordmark. Inlined inside the helper so
-    /// it doesn't pollute the module namespace; nobody else needs
-    /// it.
+    /// Box-drawing SMOOTH wordmark — figlet "ANSI Shadow" font. Solid
+    /// blocks with double-line outlines; reads as a chunky brand
+    /// statement when colored with the smooth-web logo gradient.
+    /// Inlined here so the bytes stay reviewable in source.
     const BANNER_ROWS: [&str; 6] = [
         " \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2588}\u{2557}   \u{2588}\u{2588}\u{2588}\u{2557} \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557}  \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557} \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2557}  \u{2588}\u{2588}\u{2557}",
         " \u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557} \u{2588}\u{2588}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2550}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2550}\u{2588}\u{2588}\u{2557}\u{255a}\u{2550}\u{2550}\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{255d}\u{2588}\u{2588}\u{2551}  \u{2588}\u{2588}\u{2551}",
