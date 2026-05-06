@@ -167,43 +167,67 @@ pub fn gradient_row(row: usize, total: usize) -> Style {
 }
 
 /// Color for column `col` (0-indexed) of a `total`-wide rendering of
-/// the SMOOTH wordmark, using the same brand gradient
-/// `smooth_wordmark()` applies to the chat-panel title:
+/// the "Smooth" wordmark, with stops copied verbatim from
+/// `crates/smooth-web/web/public/logo.svg`:
 ///
-///   • columns 0..2/3 of width → "Smoo" zone, orange (#f49f0a) → pink (#ff6b6c)
-///   • columns 2/3..1.0 of width → "th"   zone, teal   (#00a6a6) → blue (#1238dd)
+///   • Smoo zone (cols 0..2/3 of width)
+///       offset 0.00..0.30 → solid orange  (#f49f0a)
+///       offset 0.30..0.79 → lerp orange   → coral (#fb7a4d)
+///       offset 0.79..1.00 → lerp coral    → pink  (#ff6b6c)
+///   • th zone (cols 2/3..1.0 of width)
+///       offset 0.00..0.43 → solid teal    (#00a6a6)
+///       offset 0.43..1.00 → lerp teal     → blue  (#1238dd)
 ///
 /// The 2/3 split mirrors the 4-of-6 character split in
-/// `smooth_wordmark()` (S-m-o-o vs t-h). The legacy `gradient_row`
-/// painted uniformly top-to-bottom which doesn't match the brand
-/// pattern — use this for the welcome banner so the SMOOTH ASCII-art
-/// reads horizontally the way the brand reads everywhere else.
+/// `smooth_wordmark()` (S-m-o-o vs t-h). The leading solid bands
+/// (30 % orange / 43 % teal) come from the SVG's `<stop offset>`
+/// attributes — they give the wordmark its hold-then-fade shape
+/// instead of an even rainbow.
 #[must_use]
 pub fn smooth_banner_color(col: usize, total: usize) -> Color {
-    const SMOO_START: (u8, u8, u8) = (0xf4, 0x9f, 0x0a);
-    const SMOO_END: (u8, u8, u8) = (0xff, 0x6b, 0x6c);
-    const TH_START: (u8, u8, u8) = (0x00, 0xa6, 0xa6);
-    const TH_END: (u8, u8, u8) = (0x12, 0x38, 0xdd);
+    const SMOO_STOP_0: (u8, u8, u8) = (0xf4, 0x9f, 0x0a); // orange
+    const SMOO_STOP_1: (u8, u8, u8) = (0xfb, 0x7a, 0x4d); // coral
+    const SMOO_STOP_2: (u8, u8, u8) = (0xff, 0x6b, 0x6c); // pink
+    const TH_STOP_0: (u8, u8, u8) = (0x00, 0xa6, 0xa6); // teal
+    const TH_STOP_1: (u8, u8, u8) = (0x12, 0x38, 0xdd); // blue
 
     let total = total.max(1);
-    let smoo_end = (total * 2) / 3; // 4 of 6 letters fall in the Smoo zone
-    let smoo_end = smoo_end.max(1);
+    let smoo_end = (total * 2 / 3).max(1);
 
     if col < smoo_end {
         let t = col as f64 / (smoo_end - 1).max(1) as f64;
-        Color::Rgb(
-            lerp_u8(SMOO_START.0, SMOO_END.0, t),
-            lerp_u8(SMOO_START.1, SMOO_END.1, t),
-            lerp_u8(SMOO_START.2, SMOO_END.2, t),
-        )
+        let (r, g, b) = if t <= 0.30 {
+            SMOO_STOP_0
+        } else if t < 0.79 {
+            let u = (t - 0.30) / (0.79 - 0.30);
+            (
+                lerp_u8(SMOO_STOP_0.0, SMOO_STOP_1.0, u),
+                lerp_u8(SMOO_STOP_0.1, SMOO_STOP_1.1, u),
+                lerp_u8(SMOO_STOP_0.2, SMOO_STOP_1.2, u),
+            )
+        } else {
+            let u = (t - 0.79) / (1.0 - 0.79);
+            (
+                lerp_u8(SMOO_STOP_1.0, SMOO_STOP_2.0, u),
+                lerp_u8(SMOO_STOP_1.1, SMOO_STOP_2.1, u),
+                lerp_u8(SMOO_STOP_1.2, SMOO_STOP_2.2, u),
+            )
+        };
+        Color::Rgb(r, g, b)
     } else {
         let span = (total - smoo_end).max(1);
         let t = (col - smoo_end) as f64 / (span - 1).max(1) as f64;
-        Color::Rgb(
-            lerp_u8(TH_START.0, TH_END.0, t),
-            lerp_u8(TH_START.1, TH_END.1, t),
-            lerp_u8(TH_START.2, TH_END.2, t),
-        )
+        let (r, g, b) = if t <= 0.43 {
+            TH_STOP_0
+        } else {
+            let u = (t - 0.43) / (1.0 - 0.43);
+            (
+                lerp_u8(TH_STOP_0.0, TH_STOP_1.0, u),
+                lerp_u8(TH_STOP_0.1, TH_STOP_1.1, u),
+                lerp_u8(TH_STOP_0.2, TH_STOP_1.2, u),
+            )
+        };
+        Color::Rgb(r, g, b)
     }
 }
 
