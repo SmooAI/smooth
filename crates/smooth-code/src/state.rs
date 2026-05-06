@@ -205,6 +205,13 @@ pub struct AppState {
     /// clearance set; rendered on the status bar so the user can see
     /// which role is active without re-running `th --agent`.
     pub agent_name: String,
+    /// `true` once the user has explicitly chosen a role via `/agent`,
+    /// `/ask`, or the `--agent` CLI flag. While `false`, the dispatch
+    /// path runs an intent classifier on each message and may switch
+    /// between `fixer` (for work) and `oracle` (for questions). This
+    /// stops the chat from sliding into "writes files for read-only
+    /// questions" by default while still letting the user pin a role.
+    pub agent_pinned: bool,
     /// Running total of tokens used this session.
     pub total_tokens: u32,
     /// Running total of spend in USD this session. Accumulated on
@@ -268,6 +275,7 @@ impl AppState {
             user_scrolled: false,
             model_name: "claude-sonnet-4".to_string(),
             agent_name: "fixer".to_string(),
+            agent_pinned: false,
             total_tokens: 0,
             total_cost_usd: 0.0,
             current_phase: None,
@@ -298,6 +306,10 @@ impl AppState {
         state.total_tokens = session.total_tokens;
         if let Some(ref a) = session.agent_name {
             state.agent_name = a.clone();
+            // Resuming a session means the user already picked an
+            // agent for it — preserve their choice instead of letting
+            // the intent classifier flip it on the first new message.
+            state.agent_pinned = true;
         }
         state
     }

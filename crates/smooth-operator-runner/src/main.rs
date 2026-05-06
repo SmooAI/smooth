@@ -1925,7 +1925,24 @@ async fn main() {
         std::env::var("SMOOTH_ROUTING_JSON").ok()
     };
 
-    let result = if let (true, Some(raw)) = (workflow_opt_in, routing_json) {
+    // The coding workflow is fixer's workflow: it runs tests, expects
+    // edit/write/bash, and forces a "## Test Results: N passed, N
+    // failed" report at the end. Routing a read-only role (oracle,
+    // mapper, heckler — Reasoning/Reviewing slots, no bash) through it
+    // produces nonsense: the LLM hallucinates pass/fail counts and the
+    // workflow burns iterations on a task it can't actually execute.
+    // Gate workflow on (a) the slot being Coding AND (b) bash being
+    // allowed by the role's clearance.
+    let role_supports_coding_workflow = matches!(active_role.slot, smooth_operator::Activity::Coding) && active_role.permissions.allows("bash");
+    if workflow_opt_in && !role_supports_coding_workflow {
+        tracing::info!(
+            role = %active_role.name,
+            slot = ?active_role.slot,
+            "skipping coding_workflow: role is not a coding lead — using single-agent path"
+        );
+    }
+
+    let result = if let (true, true, Some(raw)) = (workflow_opt_in, role_supports_coding_workflow, routing_json) {
         use smooth_operator::coding_workflow::{run_coding_workflow, CodingWorkflowConfig};
         use smooth_operator::providers::ProviderRegistry;
         use std::sync::Arc;
