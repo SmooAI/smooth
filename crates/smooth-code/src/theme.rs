@@ -192,12 +192,13 @@ pub fn smooth_banner_color(col: usize, total: usize) -> Color {
     const TH_STOP_1: (u8, u8, u8) = (0x12, 0x38, 0xdd); // blue
 
     let total = total.max(1);
-    // Boundary placement: the ANSI-Shadow `T` in the SMOOTH banner
-    // is wider than the other letters (it has a long top bar), so a
-    // straight 2/3 (== 4-of-6 letters) split lands the teal start
-    // around the 2nd `O`. 3/4 of the row width pushes the boundary
-    // onto the `T` itself, where the brand wordmark intends it.
-    let smoo_end = (total * 3 / 4).max(1);
+    // Boundary placement: in the canonical 55-char ANSI-Shadow
+    // SMOOTH banner the `T` letter starts at column 38. A 2/3 split
+    // landed mid-2nd-O; a 3/4 split landed on T's midpoint
+    // (bisecting the letter). 38/55 ≈ 0.69 → use 17/25 = 0.68 so
+    // T's left edge cleanly enters the teal zone with a hair of
+    // safety margin. Scales proportionally for other widths.
+    let smoo_end = (total * 17 / 25).max(1);
 
     if col < smoo_end {
         let t = col as f64 / (smoo_end - 1).max(1) as f64;

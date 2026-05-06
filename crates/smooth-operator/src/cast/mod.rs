@@ -311,7 +311,10 @@ fn builtin_roles() -> Vec<OperatorRole> {
         OperatorRole {
             name: "mapper".into(),
             kind: RoleKind::Lead,
-            slot: Activity::Planning,
+            // `Planning` and `Thinking` collapsed into `Reasoning`
+            // (see providers.rs Activity enum). The deprecated
+            // aliases still work but trigger a build warning.
+            slot: Activity::Reasoning,
             model_override: None,
             prompt: MAPPER_PROMPT.trim().to_string(),
             permissions: Clearance {
@@ -325,7 +328,7 @@ fn builtin_roles() -> Vec<OperatorRole> {
         OperatorRole {
             name: "oracle".into(),
             kind: RoleKind::Lead,
-            slot: Activity::Thinking,
+            slot: Activity::Reasoning,
             model_override: None,
             prompt: ORACLE_PROMPT.trim().to_string(),
             permissions: Clearance {
@@ -511,8 +514,8 @@ mod tests {
     fn lead_roles_route_to_expected_slots() {
         let cast = Cast::builtin();
         assert_eq!(cast.get("fixer").unwrap().slot, Activity::Coding);
-        assert_eq!(cast.get("mapper").unwrap().slot, Activity::Planning);
-        assert_eq!(cast.get("oracle").unwrap().slot, Activity::Thinking);
+        assert_eq!(cast.get("mapper").unwrap().slot, Activity::Reasoning);
+        assert_eq!(cast.get("oracle").unwrap().slot, Activity::Reasoning);
         assert_eq!(cast.get("heckler").unwrap().slot, Activity::Reviewing);
     }
 
