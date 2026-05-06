@@ -166,75 +166,64 @@ pub fn gradient_row(row: usize, total: usize) -> Style {
     Style::default().fg(Color::Rgb(r, g, b)).add_modifier(Modifier::BOLD)
 }
 
-/// Color for column `col` (0-indexed) of a `total`-wide rendering of
-/// the "Smooth" wordmark, with stops copied verbatim from
+/// Color for column `i` of a `total`-wide rendering of the **Smoo**
+/// half of the wordmark — the orange→coral→pink gradient from
 /// `crates/smooth-web/web/public/logo.svg`:
 ///
-///   • Smoo zone (cols 0..2/3 of width)
-///       offset 0.00..0.30 → solid orange  (#f49f0a)
-///       offset 0.30..0.79 → lerp orange   → coral (#fb7a4d)
-///       offset 0.79..1.00 → lerp coral    → pink  (#ff6b6c)
-///   • th zone (cols 2/3..1.0 of width)
-///       offset 0.00..0.43 → solid teal    (#00a6a6)
-///       offset 0.43..1.00 → lerp teal     → blue  (#1238dd)
+///   offset 0.00..0.30 → solid orange (#f49f0a)
+///   offset 0.30..0.79 → lerp orange  → coral (#fb7a4d)
+///   offset 0.79..1.00 → lerp coral   → pink  (#ff6b6c)
 ///
-/// The 2/3 split mirrors the 4-of-6 character split in
-/// `smooth_wordmark()` (S-m-o-o vs t-h). The leading solid bands
-/// (30 % orange / 43 % teal) come from the SVG's `<stop offset>`
-/// attributes — they give the wordmark its hold-then-fade shape
-/// instead of an even rainbow.
+/// The 30 % solid leading band comes from the SVG `<stop offset>`
+/// values; without it the gradient looks washed-out.
 #[must_use]
-pub fn smooth_banner_color(col: usize, total: usize) -> Color {
-    const SMOO_STOP_0: (u8, u8, u8) = (0xf4, 0x9f, 0x0a); // orange
-    const SMOO_STOP_1: (u8, u8, u8) = (0xfb, 0x7a, 0x4d); // coral
-    const SMOO_STOP_2: (u8, u8, u8) = (0xff, 0x6b, 0x6c); // pink
-    const TH_STOP_0: (u8, u8, u8) = (0x00, 0xa6, 0xa6); // teal
-    const TH_STOP_1: (u8, u8, u8) = (0x12, 0x38, 0xdd); // blue
+pub fn smoo_gradient_color(i: usize, total: usize) -> Color {
+    const STOP_0: (u8, u8, u8) = (0xf4, 0x9f, 0x0a); // orange
+    const STOP_1: (u8, u8, u8) = (0xfb, 0x7a, 0x4d); // coral
+    const STOP_2: (u8, u8, u8) = (0xff, 0x6b, 0x6c); // pink
 
     let total = total.max(1);
-    // Boundary placement: in the canonical 55-char ANSI-Shadow
-    // SMOOTH banner the `T` letter starts at column 38. A 2/3 split
-    // landed mid-2nd-O; a 3/4 split landed on T's midpoint
-    // (bisecting the letter). 38/55 ≈ 0.69 → use 17/25 = 0.68 so
-    // T's left edge cleanly enters the teal zone with a hair of
-    // safety margin. Scales proportionally for other widths.
-    let smoo_end = (total * 17 / 25).max(1);
-
-    if col < smoo_end {
-        let t = col as f64 / (smoo_end - 1).max(1) as f64;
-        let (r, g, b) = if t <= 0.30 {
-            SMOO_STOP_0
-        } else if t < 0.79 {
-            let u = (t - 0.30) / (0.79 - 0.30);
-            (
-                lerp_u8(SMOO_STOP_0.0, SMOO_STOP_1.0, u),
-                lerp_u8(SMOO_STOP_0.1, SMOO_STOP_1.1, u),
-                lerp_u8(SMOO_STOP_0.2, SMOO_STOP_1.2, u),
-            )
-        } else {
-            let u = (t - 0.79) / (1.0 - 0.79);
-            (
-                lerp_u8(SMOO_STOP_1.0, SMOO_STOP_2.0, u),
-                lerp_u8(SMOO_STOP_1.1, SMOO_STOP_2.1, u),
-                lerp_u8(SMOO_STOP_1.2, SMOO_STOP_2.2, u),
-            )
-        };
-        Color::Rgb(r, g, b)
+    let t = i as f64 / (total - 1).max(1) as f64;
+    let (r, g, b) = if t <= 0.30 {
+        STOP_0
+    } else if t < 0.79 {
+        let u = (t - 0.30) / (0.79 - 0.30);
+        (
+            lerp_u8(STOP_0.0, STOP_1.0, u),
+            lerp_u8(STOP_0.1, STOP_1.1, u),
+            lerp_u8(STOP_0.2, STOP_1.2, u),
+        )
     } else {
-        let span = (total - smoo_end).max(1);
-        let t = (col - smoo_end) as f64 / (span - 1).max(1) as f64;
-        let (r, g, b) = if t <= 0.43 {
-            TH_STOP_0
-        } else {
-            let u = (t - 0.43) / (1.0 - 0.43);
-            (
-                lerp_u8(TH_STOP_0.0, TH_STOP_1.0, u),
-                lerp_u8(TH_STOP_0.1, TH_STOP_1.1, u),
-                lerp_u8(TH_STOP_0.2, TH_STOP_1.2, u),
-            )
-        };
-        Color::Rgb(r, g, b)
-    }
+        let u = (t - 0.79) / (1.0 - 0.79);
+        (
+            lerp_u8(STOP_1.0, STOP_2.0, u),
+            lerp_u8(STOP_1.1, STOP_2.1, u),
+            lerp_u8(STOP_1.2, STOP_2.2, u),
+        )
+    };
+    Color::Rgb(r, g, b)
+}
+
+/// Color for column `i` of a `total`-wide rendering of the **th**
+/// half of the wordmark — the teal→blue gradient from
+/// `crates/smooth-web/web/public/logo.svg`:
+///
+///   offset 0.00..0.43 → solid teal (#00a6a6)
+///   offset 0.43..1.00 → lerp teal  → blue (#1238dd)
+#[must_use]
+pub fn th_gradient_color(i: usize, total: usize) -> Color {
+    const STOP_0: (u8, u8, u8) = (0x00, 0xa6, 0xa6); // teal
+    const STOP_1: (u8, u8, u8) = (0x12, 0x38, 0xdd); // blue
+
+    let total = total.max(1);
+    let t = i as f64 / (total - 1).max(1) as f64;
+    let (r, g, b) = if t <= 0.43 {
+        STOP_0
+    } else {
+        let u = (t - 0.43) / (1.0 - 0.43);
+        (lerp_u8(STOP_0.0, STOP_1.0, u), lerp_u8(STOP_0.1, STOP_1.1, u), lerp_u8(STOP_0.2, STOP_1.2, u))
+    };
+    Color::Rgb(r, g, b)
 }
 
 /// Return a color for a file based on its extension.
