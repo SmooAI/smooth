@@ -6,7 +6,6 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::response::sse::{Event, Sse};
@@ -15,9 +14,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
-use smooth_narc::NarcHook;
 use smooth_operator::providers::ProviderRegistry;
-use smooth_operator::tool::{ToolCall, ToolHook, ToolResult};
 use smooth_operator::AgentEvent;
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
@@ -352,23 +349,6 @@ pub struct TaskRequest {
     /// corresponding [`smooth_operator::Clearance`].
     #[serde(default)]
     pub agent: Option<String>,
-}
-
-// ── NarcHook wrapper for ToolHook ─────────────────────────
-
-struct SharedNarcHook {
-    inner: Arc<NarcHook>,
-}
-
-#[async_trait]
-impl ToolHook for SharedNarcHook {
-    async fn pre_call(&self, call: &ToolCall) -> anyhow::Result<()> {
-        self.inner.pre_call(call).await
-    }
-
-    async fn post_call(&self, call: &ToolCall, result: &ToolResult) -> anyhow::Result<()> {
-        self.inner.post_call(call, result).await
-    }
 }
 
 // ── Router ─────────────────────────────────────────────────
@@ -1108,10 +1088,12 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
     let pearl_id: Option<String> = if let Some(supplied) = pearl_id_in {
         // Pearl already exists — reconcile status so the orchestrator
         // doesn't pick it up as "ready" and dispatch a second teammate.
-        if let Some(ref diver_client) = diver {
+        if diver.is_some() {
             // Diver knows about the pearl already; ask it to mark in_progress.
             // If Diver doesn't expose a status update (current state), the
-            // direct PearlStore fallback below covers us.
+            // direct PearlStore fallback below covers us. (No Diver client
+            // call here yet — when one is wired up, replace the is_some()
+            // check with `if let Some(ref diver_client) = diver`.)
             tracing::info!(pearl_id = %supplied, "dispatch: reusing caller-supplied pearl (Diver mode)");
         } else {
             tracing::info!(pearl_id = %supplied, "dispatch: reusing caller-supplied pearl");
@@ -3608,10 +3590,6 @@ async fn post_chat_message_handler(
         },
         ok: true,
     })
-}
-
-fn chat_system_prompt() -> &'static str {
-    "You are Big Smooth, an AI agent orchestration leader. You help users manage projects, assign work to Smooth Operators (AI agents in sandboxes), review work, and coordinate tasks.\n\nAvailable commands: th run <pearl-id>, th operators, th pause/steer/cancel <pearl-id>, th auth status, th status"
 }
 
 /// Generate a short (3–6 word) title summarizing the user's first

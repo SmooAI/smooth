@@ -170,10 +170,11 @@ impl LspClient {
             initialized: false,
         };
 
-        // Send initialize.
+        // Send initialize. `root_uri` is deprecated since LSP 3.6 in
+        // favor of `workspace_folders`; we already pass the latter,
+        // so we omit the legacy field entirely.
         let workspace_uri = path_to_uri(workspace)?;
         let init_params = InitializeParams {
-            root_uri: Some(workspace_uri.clone()),
             capabilities: ClientCapabilities::default(),
             workspace_folders: Some(vec![WorkspaceFolder {
                 uri: workspace_uri,
