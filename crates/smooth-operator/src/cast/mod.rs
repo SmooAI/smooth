@@ -177,6 +177,7 @@ impl Cast {
 const TAGGER_PROMPT: &str = include_str!("prompts/tagger.txt");
 const PRESSER_PROMPT: &str = include_str!("prompts/presser.txt");
 const RECAPPER_PROMPT: &str = include_str!("prompts/recapper.txt");
+const INTENT_CLASSIFIER_PROMPT: &str = include_str!("prompts/intent_classifier.txt");
 pub const FIXER_PROMPT: &str = include_str!("prompts/fixer.txt");
 const MAPPER_PROMPT: &str = include_str!("prompts/mapper.txt");
 const ORACLE_PROMPT: &str = include_str!("prompts/oracle.txt");
@@ -255,6 +256,21 @@ fn builtin_roles() -> Vec<OperatorRole> {
             slot: Activity::Summarize,
             model_override: None,
             prompt: RECAPPER_PROMPT.trim().to_string(),
+            permissions: Clearance::deny_all(),
+            steps: None,
+            hidden: true,
+        },
+        // `intent_classifier` is the chat TUI's auto-router: given a
+        // single user message, emit literal "WORK" or "QUESTION" so
+        // the dispatcher knows whether to run under fixer (coding
+        // workflow) or oracle (read-only Q&A). Routes through the
+        // Fast slot so it adds milliseconds, not seconds.
+        OperatorRole {
+            name: "intent_classifier".into(),
+            kind: RoleKind::Shadow,
+            slot: Activity::Fast,
+            model_override: None,
+            prompt: INTENT_CLASSIFIER_PROMPT.trim().to_string(),
             permissions: Clearance::deny_all(),
             steps: None,
             hidden: true,
@@ -462,9 +478,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtin_registers_three_shadow_roles() {
+    fn builtin_registers_shadow_roles() {
         let cast = Cast::builtin();
-        for name in ["tagger", "presser", "recapper"] {
+        for name in ["tagger", "presser", "recapper", "intent_classifier"] {
             let role = cast.get(name).unwrap_or_else(|| panic!("{name} not registered"));
             assert!(role.hidden, "{name} should be hidden");
             assert_eq!(role.kind, RoleKind::Shadow);
@@ -560,7 +576,7 @@ mod tests {
     #[test]
     fn shadow_roles_deny_all_tools() {
         let cast = Cast::builtin();
-        for name in ["tagger", "presser", "recapper"] {
+        for name in ["tagger", "presser", "recapper", "intent_classifier"] {
             let role = cast.get(name).unwrap();
             assert!(role.permissions.is_deny_all(), "{name} should deny all tools");
             assert!(!role.permissions.allows("read"), "{name} allowed read");

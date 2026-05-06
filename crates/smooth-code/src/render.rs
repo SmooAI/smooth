@@ -155,20 +155,29 @@ fn render_chat(frame: &mut Frame, state: &AppState, area: Rect) {
         // Role label line
         lines.push(Line::from(Span::styled(format!("{label}:"), label_style)));
 
-        // Content lines
-        let content_lines_vec: Vec<&str> = msg.content.lines().collect();
-        let last_content_idx = content_lines_vec.len().saturating_sub(1);
-        for (i, content_line) in content_lines_vec.iter().enumerate() {
-            if msg.streaming && !msg.content.is_empty() && i == last_content_idx {
-                // Append blinking block cursor to the last line of a streaming message
-                lines.push(Line::from(vec![
-                    Span::raw(content_line.to_string()),
-                    Span::styled("█", theme::assistant_label()),
-                ]));
-            } else {
-                lines.push(Line::from(Span::raw(content_line.to_string())));
+        // Content lines. Assistant content is markdown — bold, italic,
+        // inline code, fenced code, headings, lists. User and system
+        // messages are plain text and stay raw to avoid surprising
+        // formatting on what the user typed.
+        let mut content_lines: Vec<Line<'_>> = if matches!(msg.role, ChatRole::Assistant) && !msg.content.is_empty() {
+            crate::markdown::render(&msg.content)
+        } else {
+            msg.content.lines().map(|l| Line::from(Span::raw(l.to_string()))).collect()
+        };
+        if content_lines.is_empty() {
+            content_lines.push(Line::from(""));
+        }
+
+        if msg.streaming && !msg.content.is_empty() {
+            // Append a blinking block cursor at the end of the last
+            // content line so the user can see the response is still
+            // arriving. Owned spans only — append to the last line in
+            // place.
+            if let Some(last) = content_lines.last_mut() {
+                last.spans.push(Span::styled("█", theme::assistant_label()));
             }
         }
+        lines.append(&mut content_lines);
 
         // Tool call blocks (only rendered for assistant messages with tool calls)
         for tc in &msg.tool_calls {

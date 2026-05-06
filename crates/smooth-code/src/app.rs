@@ -93,13 +93,16 @@ pub async fn run_with_session(working_dir: PathBuf, resume: Option<crate::sessio
         std::env::var("TERM_PROGRAM").unwrap_or_default()
     ));
 
-    // Escape hatch for terminals that don't cleanly handle
-    // alternate-screen + synchronized-output + mouse-capture together
-    // (some tmux configs, some Windows terminals, certain ssh multiplexes).
-    // `SMOOTH_TUI_NO_ALT_SCREEN=1` drops the alt-screen switch and the
-    // mouse-capture mode so the UI renders inline in the primary buffer.
-    // Scrollback gets mixed in with the TUI output but at least the
-    // user can *see* the UI.
+    // Escape hatch for terminals that don't cleanly handle the
+    // alternate-screen + synchronized-output combo (some tmux configs,
+    // some Windows terminals, certain ssh multiplexes).
+    // `SMOOTH_TUI_NO_ALT_SCREEN=1` drops the alt-screen switch so the
+    // UI renders inline in the primary buffer. Scrollback gets mixed
+    // in with the TUI output but at least the user can *see* the UI.
+    //
+    // Mouse capture is intentionally NOT enabled. The TUI doesn't
+    // consume mouse events; capturing them would only disable the
+    // terminal's native wheel-scroll and drag-select.
     let no_alt_screen = matches!(std::env::var("SMOOTH_TUI_NO_ALT_SCREEN").ok().as_deref(), Some("1"));
     tui_debug(format!("no_alt_screen={no_alt_screen}"));
 
@@ -109,11 +112,10 @@ pub async fn run_with_session(working_dir: PathBuf, resume: Option<crate::sessio
 
     let mut stdout = io::stdout();
     if !no_alt_screen {
-        execute!(stdout, EnterAlternateScreen, crossterm::event::EnableMouseCapture)
-            .map_err(|e| anyhow::anyhow!("EnterAlternateScreen failed ({e}); try SMOOTH_TUI_NO_ALT_SCREEN=1"))?;
-        tui_debug("EnterAlternateScreen + EnableMouseCapture OK");
+        execute!(stdout, EnterAlternateScreen).map_err(|e| anyhow::anyhow!("EnterAlternateScreen failed ({e}); try SMOOTH_TUI_NO_ALT_SCREEN=1"))?;
+        tui_debug("EnterAlternateScreen OK");
     } else {
-        tui_debug("skipped alt-screen + mouse capture (SMOOTH_TUI_NO_ALT_SCREEN=1)");
+        tui_debug("skipped alt-screen (SMOOTH_TUI_NO_ALT_SCREEN=1)");
     }
 
     let backend = CrosstermBackend::new(stdout);
@@ -121,7 +123,7 @@ pub async fn run_with_session(working_dir: PathBuf, resume: Option<crate::sessio
         // Best-effort restore if Terminal::new fails after alt-screen entered.
         let _ = disable_raw_mode();
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, LeaveAlternateScreen, crossterm::event::DisableMouseCapture);
+        let _ = execute!(stdout, LeaveAlternateScreen);
         anyhow::anyhow!("Terminal::new failed: {e}")
     })?;
     tui_debug(format!("Terminal::new OK, size={:?}", terminal.size().ok()));
@@ -145,6 +147,9 @@ pub async fn run_with_session(working_dir: PathBuf, resume: Option<crate::sessio
     let mut initial_state = initial_state;
     if let Some(name) = agent {
         initial_state.agent_name = name;
+        // Explicit --agent on the CLI is a pin — don't let the intent
+        // classifier override the operator's deliberate choice.
+        initial_state.agent_pinned = true;
     }
 
     let state = Arc::new(Mutex::new(initial_state));
@@ -227,7 +232,7 @@ pub async fn run_with_session(working_dir: PathBuf, resume: Option<crate::sessio
     // Restore terminal
     disable_raw_mode()?;
     if !no_alt_screen {
-        execute!(terminal.backend_mut(), LeaveAlternateScreen, crossterm::event::DisableMouseCapture)?;
+        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     }
     terminal.show_cursor()?;
     tui_debug("terminal restored, app::run exit");
@@ -583,12 +588,34 @@ fn handle_input_mode(
                     }
 
                     // Spawn agent task with channel-based streaming.
-                    // Capture the active agent so the runner applies the
-                    // right permission set on this dispatch.
+                    // Capture the active agent so the runner applies
+                    // the right permission set on this dispatch. When
+                    // the user hasn't pinned a role, classify the
+                    // message via the `intent_classifier` shadow role
+                    // and pick fixer (work) vs oracle (question) so
+                    // the agent doesn't write files for a "how do
+                    // I..." question. Classification happens inside
+                    // the spawned task so the gateway round-trip
+                    // doesn't block the event loop.
                     let message = input;
                     let tx = event_tx;
-                    let agent = state.agent_name.clone();
+                    let pinned = state.agent_pinned;
+                    let pinned_agent = state.agent_name.clone();
+                    let state_for_routing = Arc::clone(&state_arc);
                     tokio::spawn(async move {
+                        let agent = if pinned {
+                            pinned_agent
+                        } else {
+                            let intent = crate::intent::classify(&message).await;
+                            let role = intent.role().to_string();
+                            // Reflect the routed role on the status
+                            // bar so the user can see what the runner
+                            // will use.
+                            if let Ok(mut s) = state_for_routing.lock() {
+                                s.agent_name = role.clone();
+                            }
+                            role
+                        };
                         if let Err(e) = run_agent_streaming(&message, tx.clone(), Some(agent)).await {
                             let _ = tx.send(AgentEvent::Error { message: e.to_string() });
                         }

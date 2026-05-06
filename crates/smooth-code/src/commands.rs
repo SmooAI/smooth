@@ -141,6 +141,14 @@ impl CommandRegistry {
 
         // /rename
         self.register("rename", "Rename the current session: /rename <title>", Box::new(cmd_rename));
+
+        // /agent — switch the active lead role (fixer / oracle / mapper / heckler / runner).
+        self.register("agent", "Show or switch lead role: /agent [name]", Box::new(cmd_agent));
+
+        // /ask — shortcut for /agent oracle: read-only Q&A, no file writes,
+        // no test-iteration loop. Pairs with the runner-side gate that
+        // skips coding_workflow when the role isn't a coding lead.
+        self.register("ask", "Switch to read-only Q&A mode (oracle role)", Box::new(cmd_ask));
     }
 
     /// Execute a slash command, handling `/skill:name` syntax by splitting the colon-separated
@@ -372,6 +380,44 @@ fn cmd_rename(args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput>
     mgr.save(&session)?;
 
     Ok(CommandOutput::Message(format!("Session renamed: {old} -> {new_title}")))
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn cmd_agent(args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput> {
+    let known = ["fixer", "oracle", "mapper", "heckler", "runner", "scout"];
+    let args = args.trim();
+    if args.is_empty() {
+        let lines = vec![
+            format!("Active role: {}", state.agent_name),
+            "Available: fixer (default — coding workflow, full tools)".to_string(),
+            "           oracle (read-only Q&A, no bash/write)".to_string(),
+            "           mapper (read-only inspection / planning)".to_string(),
+            "           heckler (adversarial review, read-only)".to_string(),
+            "           runner / scout (sidekick fallbacks)".to_string(),
+            "Usage: /agent <name>".to_string(),
+        ];
+        return Ok(CommandOutput::Message(lines.join("\n")));
+    }
+    if !known.contains(&args) {
+        return Ok(CommandOutput::Message(format!(
+            "Unknown role: {args}. Available: {}",
+            known.join(", ")
+        )));
+    }
+    let old = std::mem::replace(&mut state.agent_name, args.to_string());
+    state.agent_pinned = true;
+    Ok(CommandOutput::Message(format!(
+        "Lead role: {old} -> {args} (pinned — auto intent routing off)"
+    )))
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn cmd_ask(_args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput> {
+    let old = std::mem::replace(&mut state.agent_name, "oracle".to_string());
+    state.agent_pinned = true;
+    Ok(CommandOutput::Message(format!(
+        "Switched to read-only Q&A mode: {old} -> oracle (pinned). The agent will answer without writing files or running bash."
+    )))
 }
 
 #[allow(clippy::unnecessary_wraps)]
