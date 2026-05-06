@@ -694,7 +694,14 @@ enum PearlCommands {
         n: usize,
     },
     /// Push pearl data to git remote (refs/dolt/data)
-    Push,
+    Push {
+        /// Force-push, overwriting remote history. Useful when the
+        /// remote has a stale `Initialize data repository` commit
+        /// from an earlier `dolt init` that shares no ancestor with
+        /// the local store.
+        #[arg(short = 'f', long)]
+        force: bool,
+    },
     /// Pull pearl data from git remote
     Pull,
     /// Manage Dolt remotes for pearl sync
@@ -3364,7 +3371,7 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             }
         }
 
-        PearlCommands::Push => {
+        PearlCommands::Push { force } => {
             let dolt_dir = find_dolt_dir()?;
             // Global store at `~/.smooth/dolt` is intentionally
             // single-machine — sessions, memories, and personal-scope
@@ -3374,10 +3381,47 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             // Project stores still surface the error so the user
             // notices a missing remote on a shared board.
             let dolt = smooth_pearls::SmoothDolt::new(&dolt_dir)?;
-            match dolt.push() {
+
+            // Try a plain push first. Two recoverable failures get
+            // a friendlier outcome than the raw Dolt error:
+            //   1. "no upstream branch" — first push to a fresh
+            //      remote. Auto-retry with -u so the user doesn't
+            //      need to know the flag exists.
+            //   2. "no common ancestor" — the remote was init'd
+            //      independently (typically by an earlier abandoned
+            //      th pearls init somewhere else) and shares no
+            //      history with the local store. The bare Dolt
+            //      error is opaque; we surface a clear next step.
+            let opts = smooth_pearls::PushOpts {
+                force,
+                set_upstream: false,
+            };
+            match dolt.push_with(opts) {
                 Ok(output) => println!("{output}"),
                 Err(e) if is_global_pearl_store(&dolt_dir) && is_no_remote_error(&e) => {
                     println!("(global pearl store at {} has no remote — push skipped, this is expected)", dolt_dir.display());
+                }
+                Err(e) if is_no_upstream_error(&e) => {
+                    println!("(no upstream — retrying with --set-upstream)");
+                    let retry = smooth_pearls::PushOpts {
+                        force,
+                        set_upstream: true,
+                    };
+                    let output = dolt.push_with(retry)?;
+                    println!("{output}");
+                }
+                Err(e) if is_no_common_ancestor_error(&e) && !force => {
+                    anyhow::bail!(
+                        "{e}\n\nThe remote `refs/dolt/data` was initialized independently and shares no \
+                         ancestor with the local pearl store. Two ways to fix:\n\n  \
+                         1. If the remote has no real pearl data (just a bare \"Initialize data \
+                         repository\" commit from an earlier setup):\n     \
+                         th pearls push --force\n\n  \
+                         2. To wipe the remote ref and start clean:\n     \
+                         git push origin --delete refs/dolt/data && th pearls push\n\n\
+                         Inspect first with: smooth-dolt clone <remote-url> /tmp/check && \
+                         smooth-dolt log /tmp/check"
+                    );
                 }
                 Err(e) => return Err(e),
             }
@@ -3451,9 +3495,30 @@ fn is_global_pearl_store(dolt_dir: &std::path::Path) -> bool {
 /// Heuristic: dolt push/pull surfacing "no configured push destination"
 /// (or the equivalent for pull) is what we want to swallow on the
 /// global store. SQL/lock errors etc. should still propagate.
+///
+/// "No upstream" used to live here, but it's actually a recoverable
+/// first-push case (auto-retry with `-u`), not a "no remote at all"
+/// case — handled separately by [`is_no_upstream_error`].
 fn is_no_remote_error(e: &anyhow::Error) -> bool {
     let s = format!("{e:#}").to_lowercase();
-    s.contains("no configured push destination") || s.contains("no configured pull destination") || s.contains("no upstream") || s.contains("remote not found")
+    s.contains("no configured push destination") || s.contains("no configured pull destination") || s.contains("remote not found")
+}
+
+/// Heuristic: first push to a fresh remote without `-u` returns this.
+/// The CLI auto-retries with `set_upstream = true`.
+fn is_no_upstream_error(e: &anyhow::Error) -> bool {
+    let s = format!("{e:#}").to_lowercase();
+    s.contains("no upstream branch") || s.contains("has no upstream")
+}
+
+/// Heuristic: the local store and remote `refs/dolt/data` share no
+/// commit history. Typically because someone ran `dolt init` on the
+/// remote independently of this machine. Recovery is force-push or
+/// delete-the-ref; the CLI surfaces that as actionable text instead
+/// of the bare Dolt error.
+fn is_no_common_ancestor_error(e: &anyhow::Error) -> bool {
+    let s = format!("{e:#}").to_lowercase();
+    s.contains("no common ancestor")
 }
 
 fn cmd_migrate_from_beads(store: &smooth_pearls::PearlStore) -> Result<()> {

@@ -29,6 +29,19 @@ use crate::dolt_server::SmoothDoltServer;
 ///    `pthread_cond_wait` (see pearl `th-1a61a7`). The server itself is
 ///    spawned at startup (synchronous code, before tokio handlers run)
 ///    where the underlying issue doesn't fire.
+/// Flags for [`SmoothDolt::push_with`].
+///
+/// `set_upstream` translates to Dolt's `-u` flag and is needed on the
+/// first push to a fresh remote. `force` translates to `-f` and
+/// overrides a remote whose history shares no common ancestor with
+/// the local store (typically a stale empty `Initialize data
+/// repository` commit left by an earlier `dolt init` somewhere else).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PushOpts {
+    pub force: bool,
+    pub set_upstream: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct SmoothDolt {
     /// Path to the smooth-dolt binary. Used in CLI mode.
@@ -177,12 +190,46 @@ impl SmoothDolt {
         Ok(entries)
     }
 
-    /// Push to the configured Dolt remote (refs/dolt/data on git origin).
+    /// Push to the configured Dolt remote (refs/dolt/data on git origin)
+    /// using default flags. Equivalent to [`Self::push_with`] with all
+    /// options off.
     pub fn push(&self) -> Result<String> {
+        self.push_with(PushOpts::default())
+    }
+
+    /// Push to the configured Dolt remote with explicit options.
+    ///
+    /// First push to a fresh remote needs `set_upstream = true` (Dolt's
+    /// `-u` flag) — without it the push fails with "no upstream branch".
+    /// `force = true` (the underlying `-f` flag) overrides remote
+    /// history; only useful when the remote contains an empty
+    /// `Initialize data repository` commit from a stale init that
+    /// shares no ancestor with the local store.
+    ///
+    /// The CLI auto-retries with `set_upstream` on the first push so
+    /// callers don't have to know the flag exists; this method is
+    /// surfaced for callers that want explicit control.
+    pub fn push_with(&self, opts: PushOpts) -> Result<String> {
+        // Server mode (Bigsmooth in-process pearls) doesn't expose
+        // flags through the protocol. It also doesn't push, so the
+        // bare command is the right shape there.
         if let Some(server) = &self.server {
             return Self::run_with_self_heal(server, |s| s.with_client(|c| c.dolt("push")));
         }
-        self.run_cli(&["push", &self.data_dir_str()])
+        let mut args: Vec<&str> = vec!["push"];
+        let data_dir = self.data_dir_str();
+        args.push(&data_dir);
+        // smooth-dolt forwards trailing args after the data dir into
+        // the underlying dolt push.
+        if opts.force {
+            args.push("-f");
+        }
+        if opts.set_upstream {
+            args.push("-u");
+            args.push("origin");
+            args.push("main");
+        }
+        self.run_cli(&args)
     }
 
     /// Pull from the configured Dolt remote.
