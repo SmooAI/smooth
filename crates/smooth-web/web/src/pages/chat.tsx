@@ -35,6 +35,12 @@ interface Session {
 
 interface Msg {
     id: string;
+    /// `'user'` and `'assistant'` are real persisted messages.
+    /// `'activity'` is an ephemeral status breadcrumb pushed in
+    /// during a live dispatch — iteration boundaries, snapshot
+    /// markers, max-iter caps, Narc-Warn alerts. They render
+    /// distinctly from the chat content and aren't persisted on
+    /// the server, so a page refresh drops them.
     role: string;
     content: string;
 }
@@ -92,6 +98,8 @@ export function ChatPage() {
     const bottomRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLInputElement>(null);
     const thoughtIdRef = useRef(0);
+    const activityIdRef = useRef(0);
+    const streamingRef = useRef(false);
     const sendAbortRef = useRef<AbortController | null>(null);
     const isMobile = useIsMobile();
 
@@ -233,6 +241,14 @@ export function ChatPage() {
         bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages.length, teammateMessages.length, streaming]);
 
+    // Mirror the live `streaming` flag into a ref so the WebSocket
+    // onmessage closure (which captures from a different render
+    // pass) can read the current value without re-subscribing on
+    // every flip.
+    useEffect(() => {
+        streamingRef.current = streaming;
+    }, [streaming]);
+
     // Big Smooth's "thought stream": subscribe to /ws and surface
     // BigSmoothThought events as floating bubbles next to the face.
     // Older bubbles auto-expire so the row stays at most 3 deep.
@@ -263,6 +279,43 @@ export function ChatPage() {
                         setTimeout(() => {
                             setThoughts((prev) => prev.filter((t) => t.id !== id));
                         }, 14000);
+                        return;
+                    }
+
+                    // Activity-stream breadcrumbs. Mirrors the TUI's
+                    // recent th-c83d13 — surfaces iteration boundaries,
+                    // snapshot saves, max-iter caps, budget breaches,
+                    // and Narc warnings inline so the user can see what
+                    // the workflow is doing instead of staring at a
+                    // streaming text blob.
+                    //
+                    // /ws is broadcast across all sessions; gate on the
+                    // local `streaming` flag so a background dispatch
+                    // for another session doesn't pollute this view.
+                    if (!streamingRef.current) return;
+                    const pushActivity = (text: string) => {
+                        activityIdRef.current += 1;
+                        const id = `activity-${activityIdRef.current}`;
+                        setMessages((prev) => [...prev, { id, role: 'activity', content: text }]);
+                    };
+                    if (ev?.type === 'PhaseStart' && typeof ev.iteration === 'number') {
+                        const alias = typeof ev.alias === 'string' && ev.alias.length > 0 ? ` • ${ev.alias}` : '';
+                        pushActivity(`→ iteration ${ev.iteration}${alias}`);
+                    } else if (ev?.type === 'CheckpointSaved' && typeof ev.iteration === 'number') {
+                        pushActivity(`✓ snapshot taken (iter ${ev.iteration})`);
+                    } else if (ev?.type === 'MaxIterationsReached' && typeof ev.max === 'number') {
+                        pushActivity(`⚠ hit max iterations (${ev.max}) — stopping`);
+                    } else if (ev?.type === 'BudgetExceeded' && typeof ev.spent_usd === 'number' && typeof ev.limit_usd === 'number') {
+                        pushActivity(`⚠ budget exceeded — spent $${ev.spent_usd.toFixed(2)} of $${ev.limit_usd.toFixed(2)}`);
+                    } else if (ev?.type === 'NarcAlert') {
+                        const sev = typeof ev.severity === 'string' ? ev.severity.toLowerCase() : '';
+                        if (sev === 'warn') {
+                            const cat = typeof ev.category === 'string' && ev.category.length > 0 ? ` • ${ev.category}` : '';
+                            const msg = typeof ev.message === 'string' ? ev.message : '';
+                            pushActivity(`⚠ Narc Warn${cat}: ${msg}`);
+                        }
+                        // Block-severity alerts are surfaced via the
+                        // task's regular error path — don't double-render.
                     }
                 } catch {
                     // ignore non-JSON / unknown frames
@@ -576,7 +629,23 @@ export function ChatPage() {
                     {activeId ? 'No messages in this chat yet.' : 'Start typing below to begin a new chat.'}
                 </div>
             )}
-            {messages.map((msg) => (
+            {messages.map((msg) =>
+                msg.role === 'activity' ? (
+                    // Activity breadcrumb: a thin one-line status update
+                    // pushed via /ws (iteration boundary, snapshot, Narc
+                    // warning). Renders inline with the chat but visually
+                    // distinct — small, muted, no avatar / role label.
+                    <div
+                        key={msg.id}
+                        className="text-[11px] font-mono px-2 py-0.5 self-start"
+                        style={{
+                            color: msg.content.startsWith('⚠') ? 'var(--smoo-amber, #f59e0b)' : 'var(--muted)',
+                            opacity: 0.85,
+                        }}
+                    >
+                        {msg.content}
+                    </div>
+                ) : (
                 <div
                     key={msg.id}
                     className={`rounded-lg px-3 py-2 max-w-[90%] sm:max-w-[80%] ${msg.role === 'user' ? 'bg-blue-900/40 self-end' : ''}`}
@@ -620,7 +689,8 @@ export function ChatPage() {
                         <div className="whitespace-pre-wrap break-words">{msg.content}</div>
                     )}
                 </div>
-            ))}
+                )
+            )}
         </>
     );
 
