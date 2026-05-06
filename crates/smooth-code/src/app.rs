@@ -372,23 +372,45 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
             state.current_phase_upstream = None;
             state.finish_streaming();
         }
-        AgentEvent::PhaseStart { phase, alias, upstream, .. } => {
-            state.current_phase = Some(phase);
-            state.current_phase_alias = Some(alias);
-            state.current_phase_upstream = upstream;
+        AgentEvent::PhaseStart { phase, alias, upstream, iteration } => {
+            state.current_phase = Some(phase.clone());
+            state.current_phase_alias = Some(alias.clone());
+            state.current_phase_upstream = upstream.clone();
             // Reset phrase so the new phase shows its first word, not
             // whatever index we were on for the prior phase.
             state.phrase_idx = 0;
+            // Surface the iteration boundary inline. The 7-phase
+            // decomposition is gone (single CODING phase remains;
+            // see crates/smooth-operator/src/coding_workflow.rs:15)
+            // so the only useful per-iteration signal is "we just
+            // started iteration N", optionally with the routing
+            // alias when known.
+            let model_part = if alias.is_empty() { String::new() } else { format!(" • {alias}") };
+            state.add_message(ChatMessage::system(format!("→ iteration {iteration}{model_part}")));
         }
-        AgentEvent::StreamingComplete | AgentEvent::MaxIterationsReached { .. } => {
+        AgentEvent::CheckpointSaved { iteration, .. } => {
+            state.add_message(ChatMessage::system(format!("✓ snapshot taken (iter {iteration})")));
+        }
+        AgentEvent::StreamingComplete => {
             state.finish_streaming();
+        }
+        AgentEvent::MaxIterationsReached { max, .. } => {
+            state.finish_streaming();
+            state.add_message(ChatMessage::system(format!("⚠ hit max iterations ({max}) — stopping")));
+        }
+        AgentEvent::BudgetExceeded { spent_usd, limit_usd } => {
+            state.add_message(ChatMessage::system(format!("⚠ budget exceeded — spent ${spent_usd:.2} of ${limit_usd:.2}")));
         }
         AgentEvent::Error { message } => {
             state.finish_streaming();
             state.add_message(ChatMessage::system(format!("Error: {message}")));
         }
-        // Other events (LlmRequest, LlmResponse, ToolCallStart, ToolCallComplete, CheckpointSaved)
-        // are informational — no state change needed for now.
+        // Remaining events (LlmRequest, LlmResponse, ToolCallStart,
+        // ToolCallComplete, Delegation*, PortForwardActive, …) are
+        // either informational duplicates of state we already track
+        // (tool calls land on the assistant message; LLM round-trips
+        // would be too noisy to surface per-call), or routed via a
+        // direct state mutation in run_agent_streaming.
         _ => {}
     }
 }
@@ -923,10 +945,29 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
                 let _ = tx.send(AgentEvent::Error { message });
                 break;
             }
-            ServerEvent::NarcAlert { severity, message, .. } => {
-                let _ = tx.send(AgentEvent::Error {
-                    message: format!("[Narc {severity}] {message}"),
-                });
+            ServerEvent::NarcAlert { severity, category, message, .. } => {
+                // Narc severity: Block = the call was actually blocked
+                // (treat as error), Warn = informational alert (surface
+                // inline so the user can see it but don't kill the
+                // response), anything else = quiet by default.
+                let sev_lower = severity.to_lowercase();
+                let label = if category.is_empty() {
+                    format!("Narc {severity}")
+                } else {
+                    format!("Narc {severity} • {category}")
+                };
+                if sev_lower == "block" {
+                    let _ = tx.send(AgentEvent::Error {
+                        message: format!("[{label}] {message}"),
+                    });
+                } else if sev_lower == "warn" {
+                    // Push a system breadcrumb directly. Going through
+                    // AgentEvent::Error would terminate the run; we
+                    // want the response to keep flowing while the
+                    // user sees the warning inline.
+                    let mut s = state.lock().expect("state lock poisoned");
+                    s.add_message(crate::state::ChatMessage::system(format!("⚠ {label}: {message}")));
+                }
                 None
             }
             ServerEvent::Error { message } => {
