@@ -391,6 +391,123 @@ impl Tool for ApplyPatchTool {
 }
 
 // ---------------------------------------------------------------------------
+// Memory tools — durable per-workspace journal at .smooth/MEMORY.md.
+//
+// Cold-start agents land in a workspace they know nothing about — no
+// host path, no language signal, no project metadata. Asking them to
+// re-discover everything every session is wasteful and produces
+// hallucinated answers when discovery is partial. MEMORY.md is the
+// agent's own scratchpad: the runner auto-loads it into the system
+// prompt at startup, and the agent can append to it via
+// `write_memory` whenever it learns something durable about the
+// repo (build commands, gotchas, env vars, conventions).
+//
+// Stored under `.smooth/MEMORY.md` so it lives alongside other
+// machine-local state (audit logs, session captures) — git-ignored
+// by default; users can opt in to commit if the team wants shared
+// memory.
+// ---------------------------------------------------------------------------
+
+const MEMORY_REL_PATH: &str = ".smooth/MEMORY.md";
+
+struct ReadMemoryTool {
+    base: PathBuf,
+}
+
+#[async_trait]
+impl Tool for ReadMemoryTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "read_memory".into(),
+            description:
+                "Read this workspace's persistent memory file (.smooth/MEMORY.md) — your own notes from prior sessions about how this project is laid out, how to run/test/deploy it, env vars, gotchas, conventions. Returns an empty string when the file doesn't exist yet (fresh repo, first session). Always cheap; consult before answering project-specific questions."
+                    .into(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+        }
+    }
+
+    async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
+        let path = self.base.join(MEMORY_REL_PATH);
+        match tokio::fs::read_to_string(&path).await {
+            Ok(content) => Ok(content),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+            Err(e) => Err(anyhow::anyhow!("read_memory: {e}")),
+        }
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+struct WriteMemoryTool {
+    base: PathBuf,
+}
+
+#[async_trait]
+impl Tool for WriteMemoryTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "write_memory".into(),
+            description:
+                "Update this workspace's persistent memory file (.smooth/MEMORY.md). Use to record durable, non-obvious facts about the repo: build/test commands, env-var conventions, gotchas, layout decisions, anything you'd want a fresh agent to know without re-discovering. Two modes:\n  - mode='append' (default): adds the section to the end of MEMORY.md, separated by a blank line. Best when accumulating new findings.\n  - mode='replace': overwrites the entire file with the given content. Use when consolidating or rewriting from scratch.\nKeep entries terse — bullet points, fact-per-line. The file is git-ignored by default; this is your scratchpad, not a README."
+                    .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "content": { "type": "string", "description": "Markdown content to write" },
+                    "mode":    { "type": "string", "enum": ["append", "replace"], "description": "append (default) or replace" }
+                },
+                "required": ["content"]
+            }),
+        }
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {
+        let content = args
+            .get("content")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("missing 'content'"))?;
+        let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("append");
+        let path = self.base.join(MEMORY_REL_PATH);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        match mode {
+            "append" => {
+                let existing = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+                let mut combined = existing;
+                if !combined.is_empty() && !combined.ends_with('\n') {
+                    combined.push('\n');
+                }
+                if !combined.is_empty() {
+                    combined.push('\n');
+                }
+                combined.push_str(content);
+                if !combined.ends_with('\n') {
+                    combined.push('\n');
+                }
+                tokio::fs::write(&path, combined).await?;
+                Ok(format!("appended {} bytes to {MEMORY_REL_PATH}", content.len()))
+            }
+            "replace" => {
+                let mut body = content.to_string();
+                if !body.ends_with('\n') {
+                    body.push('\n');
+                }
+                tokio::fs::write(&path, &body).await?;
+                Ok(format!("wrote {} bytes to {MEMORY_REL_PATH}", body.len()))
+            }
+            other => Err(anyhow::anyhow!("unknown mode '{other}' (expected 'append' or 'replace')")),
+        }
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
 // LspTool — language server protocol integration.
 //
 // Spawns rust-analyzer / typescript-language-server / ty / gopls as a
@@ -1611,6 +1728,18 @@ async fn main() {
     tools.register(ListFilesTool {
         base: config.workspace.clone(),
     });
+    // Memory tools — register for ALL roles. Memory is the agent's
+    // own per-workspace journal of what it has learned (build
+    // commands, env vars, gotchas), stored at `.smooth/MEMORY.md`.
+    // Even read-only roles like oracle should be able to update
+    // it — the file is metadata, not source code, and the whole
+    // point is letting the agent persist findings across sessions.
+    tools.register(ReadMemoryTool {
+        base: config.workspace.clone(),
+    });
+    tools.register(WriteMemoryTool {
+        base: config.workspace.clone(),
+    });
     tools.register(GrepTool {
         base: config.workspace.clone(),
     });
@@ -1832,10 +1961,25 @@ async fn main() {
         active_role.prompt
     );
     let workspace_path = std::path::Path::new(&config.workspace);
-    let system_prompt = match smooth_operator::context::load_project_context(workspace_path) {
+    let mut system_prompt = match smooth_operator::context::load_project_context(workspace_path) {
         Some(ctx) => format!("{base_prompt}\n\n## Project Context\n\n{ctx}"),
         None => base_prompt,
     };
+
+    // Inject the workspace's persistent memory file as a top-level
+    // section. The agent maintains this itself (via write_memory)
+    // across sessions; loading it here means a fresh agent walks in
+    // with everything prior agents bothered to record about the
+    // repo. Empty / missing file is fine — the system prompt's
+    // Memory section tells the agent to populate it as it learns.
+    if let Ok(memory) = std::fs::read_to_string(workspace_path.join(".smooth").join("MEMORY.md")) {
+        let trimmed = memory.trim();
+        if !trimmed.is_empty() {
+            system_prompt.push_str("\n\n## Workspace Memory (.smooth/MEMORY.md)\n\n");
+            system_prompt.push_str(trimmed);
+            system_prompt.push('\n');
+        }
+    }
 
     let mut agent_config = AgentConfig::new(format!("op-{}", config.operator_id), &system_prompt, llm).with_max_iterations(config.max_iterations);
     if let Some(cap) = config.budget_usd {

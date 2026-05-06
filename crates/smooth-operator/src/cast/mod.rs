@@ -199,6 +199,12 @@ fn read_only_tools() -> Vec<String> {
         "glob".into(),
         "lsp".into(),
         "project_inspect".into(),
+        // Memory is metadata, not source code — even read-only
+        // reasoning roles can persist what they learn about the
+        // workspace to .smooth/MEMORY.md so a later session
+        // doesn't have to re-discover everything.
+        "read_memory".into(),
+        "write_memory".into(),
     ]
 }
 
@@ -225,6 +231,10 @@ fn scout_tools() -> Vec<String> {
         "list_files".into(),
         "read_file".into(),
         "find".into(),
+        // scout can READ memory (orient itself before exploring)
+        // but not WRITE — durable findings are the lead role's
+        // call; a sidekick returns a summary, not a journal entry.
+        "read_memory".into(),
     ]
 }
 
