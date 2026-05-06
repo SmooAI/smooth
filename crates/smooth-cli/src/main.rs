@@ -2200,8 +2200,18 @@ async fn cmd_code(
     }
 
     // Launch smooth-code TUI — with a resumed session if one was picked.
+    //
+    // CRITICAL: pass the *original* `agent: Option<String>` here, not
+    // the resolved `agent_name`. `agent_name` is non-optional (defaults
+    // to "fixer" for the typo-validation call above), so passing
+    // `Some(agent_name)` to run_with_session would PIN every fresh
+    // session to fixer and bypass the intent classifier entirely.
+    // Passing the original Option lets app::run_with_session see
+    // `None` when the user didn't supply `--agent` and route through
+    // the classifier per-message.
     let working_dir = std::env::current_dir()?;
-    smooth_code::app::run_with_session(working_dir, resumed_session, Some(agent_name)).await
+    let _ = agent_name; // keep the typo-validation call; value isn't used in TUI mode
+    smooth_code::app::run_with_session(working_dir, resumed_session, agent).await
 }
 
 fn cmd_hooks(cmd: HooksCommands) -> Result<()> {

@@ -381,7 +381,7 @@ fn render_status(frame: &mut Frame, state: &AppState, area: Rect) {
         state.total_tokens,
         format_spend(state.total_cost_usd),
     );
-    let status_right = " | Ctrl+C quit | Ctrl+B sidebar ";
+    let status_right = " | Ctrl+C quit ";
 
     let line = Line::from(vec![
         Span::styled(status_left, theme::status_style()),
