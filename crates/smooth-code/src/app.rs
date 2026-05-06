@@ -177,11 +177,24 @@ pub async fn run_with_session(working_dir: PathBuf, resume: Option<crate::sessio
     }
     let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentEvent>();
 
-    // Add welcome message only for fresh sessions — a resumed one
-    // already has a real message history.
+    // Push the gradient SMOOTH wordmark banner into the terminal's
+    // scrollback for fresh sessions, before any messages. Lives at
+    // the top of the session like a real terminal program's startup
+    // banner. Resumed sessions skip it — the user already saw it
+    // when they first started that session.
+    if resume.is_none() {
+        let banner = render::welcome_banner_lines();
+        if let Err(e) = crate::inline::insert_before_lines(&mut terminal, banner) {
+            tui_debug(format!("welcome banner insert_before failed: {e}"));
+        }
+    }
+
+    // Add welcome / resume message. For fresh sessions this is just
+    // the "type a message" hint; for resumed sessions it announces
+    // which session is back.
     if resume.is_none() {
         let mut s = state.lock().expect("state lock poisoned");
-        s.add_message(ChatMessage::system("Welcome to Smooth. Type a message and press Enter to chat."));
+        s.add_message(ChatMessage::system("Type a message to get started. /help for commands."));
     } else {
         let title_display = resume
             .as_ref()

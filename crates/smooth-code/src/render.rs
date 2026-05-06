@@ -113,11 +113,30 @@ fn render_autocomplete_popup(frame: &mut Frame, state: &AppState, input_area: Re
     frame.render_widget(list, popup_rect);
 }
 
-/// Render the welcome banner with gradient colors when there are no messages.
-#[allow(dead_code)] // kept as reference for a possible "fixed-screen mode" toggle
-fn render_welcome_banner(lines: &mut Vec<Line<'_>>) {
-    /// Box-drawing wordmark — only used by this dead helper. Inlined
-    /// here so removing the helper later removes the constant too.
+/// Build the gradient SMOOTH wordmark welcome banner as styled
+/// lines.
+///
+/// Used by the inline TUI at session start: `app::run` calls this
+/// once for fresh sessions and pushes the lines into terminal
+/// scrollback via [`crate::inline::insert_before_lines`], so the
+/// banner sits at the top of the session like a real terminal
+/// program's startup banner.
+#[must_use]
+pub fn welcome_banner_lines() -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    welcome_banner_into(&mut lines);
+    lines
+}
+
+/// Internal helper that appends the banner lines into a caller-
+/// provided buffer. Kept separate from [`welcome_banner_lines`] so
+/// future callers that want to weave the banner in with other
+/// content (e.g. a fixed-screen mode rebuild) don't have to
+/// allocate twice.
+fn welcome_banner_into(lines: &mut Vec<Line<'static>>) {
+    /// Box-drawing SMOOTH wordmark. Inlined inside the helper so
+    /// it doesn't pollute the module namespace; nobody else needs
+    /// it.
     const BANNER_ROWS: [&str; 6] = [
         " \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2588}\u{2557}   \u{2588}\u{2588}\u{2588}\u{2557} \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557}  \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557} \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2557}  \u{2588}\u{2588}\u{2557}",
         " \u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}\u{2588}\u{2588}\u{2588}\u{2588}\u{2557} \u{2588}\u{2588}\u{2588}\u{2588}\u{2551}\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2550}\u{2588}\u{2588}\u{2557}\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{2550}\u{2588}\u{2588}\u{2557}\u{255a}\u{2550}\u{2550}\u{2588}\u{2588}\u{2554}\u{2550}\u{2550}\u{255d}\u{2588}\u{2588}\u{2551}  \u{2588}\u{2588}\u{2551}",
@@ -172,11 +191,11 @@ fn render_chat(frame: &mut Frame, state: &AppState, area: Rect) {
         height: area.height.saturating_sub(1),
     };
 
-    let mut lines: Vec<Line<'_>> = Vec::new();
+    let mut lines: Vec<Line<'static>> = Vec::new();
 
     // Show welcome banner when there are no messages
     if state.messages.is_empty() && !state.thinking {
-        render_welcome_banner(&mut lines);
+        welcome_banner_into(&mut lines);
         let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
         frame.render_widget(paragraph, inner);
         return;
