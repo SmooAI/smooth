@@ -52,4 +52,19 @@ fi
 
 SIZE=$(wc -c < "$BIN" | tr -d ' ')
 echo "==> Built $BIN ($(( SIZE / 1024 / 1024 )) MiB, statically linked aarch64 ELF)"
+
+# Mirror the freshly-built binary into ~/.smooth/runner-bin/ as well.
+# Big Smooth's find_operator_runner_binary walks up from
+# CARGO_MANIFEST_DIR looking for `target/aarch64-unknown-linux-musl/
+# release/smooth-operator-runner`. A long-running `th up` daemon
+# compiled in a worktree whose target/ no longer holds the binary
+# can silently fall back to a stale `~/.smooth/runner-bin/` copy
+# left by an earlier setup, which means new runner code (e.g. the
+# coding_workflow role gate) never reaches the sandbox even after
+# `bash scripts/build-operator-runner.sh`. Keeping both paths in
+# lockstep removes that footgun.
+RUNNER_BIN_DIR="$HOME/.smooth/runner-bin"
+mkdir -p "$RUNNER_BIN_DIR"
+cp "$BIN" "$RUNNER_BIN_DIR/smooth-operator-runner"
+echo "==> Synced $RUNNER_BIN_DIR/smooth-operator-runner"
 echo "    Big Smooth will mount this binary into each sandbox at runtime."
