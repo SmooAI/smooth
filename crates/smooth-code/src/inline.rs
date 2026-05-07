@@ -177,8 +177,13 @@ pub fn message_lines_with_verbose(msg: &ChatMessage, verbose: bool) -> Vec<Line<
         // Force errors expanded — the failure reason is the whole point.
         // Collapsing it behind ▶ hides the actionable info ("path required",
         // "Wonk denied: ...", "tool not in allowlist") at exactly the moment
-        // the user needs it to debug.
-        let force_expand_error = matches!(tc.status, ToolStatus::Error) && tc.output.is_some();
+        // the user needs it to debug. We also force-expand when an errored
+        // tool has *no* output captured at all — there's no reason to give
+        // the user a chevron to expand into empty content; replace it with
+        // a diagnostic "(no error message captured ...)" body.
+        let is_error = matches!(tc.status, ToolStatus::Error);
+        let has_nonempty_output = tc.output.as_deref().is_some_and(|s| !s.is_empty());
+        let force_expand_error = is_error;
         let collapse_indicator = if diff_lines.is_some() || force_expand_error {
             ""
         } else if tc.output.is_some() {
@@ -200,11 +205,22 @@ pub fn message_lines_with_verbose(msg: &ChatMessage, verbose: bool) -> Vec<Line<
         if let Some(diff) = diff_lines {
             lines.extend(diff);
         } else if !tc.collapsed || force_expand_error {
-            if let Some(ref output) = tc.output {
-                let style = if force_expand_error { theme::error() } else { theme::muted() };
-                for output_line in output.lines() {
-                    lines.push(Line::from(Span::styled(format!("  │ {output_line}"), style)));
+            let style = if is_error { theme::error() } else { theme::muted() };
+            if has_nonempty_output {
+                if let Some(ref output) = tc.output {
+                    for output_line in output.lines() {
+                        lines.push(Line::from(Span::styled(format!("  │ {output_line}"), style)));
+                    }
                 }
+            } else if is_error {
+                // Errored tool with empty body — most often a stale Big
+                // Smooth daemon (pre-`result`-field parser) or a runner
+                // serialization gap. Surface a hint inline rather than
+                // leaving the user with a silent ✗.
+                lines.push(Line::from(Span::styled(
+                    "  │ (no error message captured — daemon may be stale; try `th down && th up`)".to_string(),
+                    style,
+                )));
             }
         }
     }
@@ -468,6 +484,32 @@ mod tests {
             .map(|l| !l.spans.iter().any(|s| s.content.contains('▶')))
             .unwrap_or(false);
         assert!(header_no_caret, "errored tool header should drop the ▶ collapse indicator");
+    }
+
+    #[test]
+    fn errored_tool_with_empty_output_renders_diagnostic_hint() {
+        // Wonk-denied calls and stale-daemon scenarios produce an
+        // errored tool with `output == Some("")`. Without a fallback
+        // the user sees only "✗ name() ── error" and nothing actionable.
+        // Pearl th-93ae2e — surface a diagnostic line so the failure
+        // is never silent.
+        use crate::state::{ToolCallState, ToolStatus};
+        let mut msg = ChatMessage::assistant("");
+        let tc = ToolCallState {
+            id: "1".into(),
+            tool_name: "project_inspect".into(),
+            arguments_preview: String::new(),
+            arguments_full: None,
+            output: Some(String::new()),
+            status: ToolStatus::Error,
+            collapsed: true,
+            started_at: chrono::Utc::now(),
+            duration_ms: Some(0),
+        };
+        msg.tool_calls.push(tc);
+        let lines = message_lines(&msg);
+        let has_diagnostic = lines.iter().any(|l| l.spans.iter().any(|s| s.content.contains("no error message captured")));
+        assert!(has_diagnostic, "empty-output errored tool must surface a diagnostic hint");
     }
 
     #[test]
