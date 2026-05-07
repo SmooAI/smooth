@@ -42,12 +42,23 @@ use crate::theme;
 pub fn message_lines(msg: &ChatMessage) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    let (label, label_style) = match msg.role {
-        ChatRole::User => ("You", theme::user_label()),
-        ChatRole::Assistant => ("Smooth", theme::assistant_label()),
-        ChatRole::System => ("System", theme::muted()),
-    };
-    lines.push(Line::from(Span::styled(format!("{label}:"), label_style)));
+    // Role label. Assistant uses the brand wordmark gradient
+    // (Smoo orange→pink + th teal→blue) — anywhere "Smooth" shows
+    // up on screen, it should read like the logo. User and System
+    // labels stay flat-styled since they're not brand surfaces.
+    match msg.role {
+        ChatRole::User => {
+            lines.push(Line::from(Span::styled("You:", theme::user_label())));
+        }
+        ChatRole::Assistant => {
+            let mut spans: Vec<Span<'static>> = theme::smooth_wordmark();
+            spans.push(Span::styled(":", theme::assistant_label()));
+            lines.push(Line::from(spans));
+        }
+        ChatRole::System => {
+            lines.push(Line::from(Span::styled("System:", theme::muted())));
+        }
+    }
 
     // Assistant content path: markdown for prose, ANSI-color parsing
     // for the runner-stderr block (which arrives at the tail of the
