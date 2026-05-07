@@ -257,6 +257,12 @@ pub struct AppState {
     /// stops the chat from sliding into "writes files for read-only
     /// questions" by default while still letting the user pin a role.
     pub agent_pinned: bool,
+    /// When `false` (default), the renderer hides the trailing
+    /// `[runner stderr] ... [cast-summary]` diagnostic block from
+    /// every assistant message. Toggle with `/verbose`. The content
+    /// stays in `msg.content` so saved sessions round-trip — only
+    /// the rendered output skips it.
+    pub verbose: bool,
     /// Running total of tokens used this session.
     pub total_tokens: u32,
     /// Running total of spend in USD this session. Accumulated on
@@ -322,6 +328,7 @@ impl AppState {
             model_name: "claude-sonnet-4".to_string(),
             agent_name: "fixer".to_string(),
             agent_pinned: false,
+            verbose: false,
             total_tokens: 0,
             total_cost_usd: 0.0,
             current_phase: None,

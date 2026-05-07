@@ -149,6 +149,12 @@ impl CommandRegistry {
         // no test-iteration loop. Pairs with the runner-side gate that
         // skips coding_workflow when the role isn't a coding lead.
         self.register("ask", "Switch to read-only Q&A mode (oracle role)", Box::new(cmd_ask));
+
+        // /verbose — toggle whether the trailing [runner stderr] /
+        // [cast-summary] diagnostic block is rendered on assistant
+        // messages. Off by default — diagnostics are noise for normal
+        // turns; on when the user wants to see what the runner did.
+        self.register("verbose", "Toggle [runner stderr] / [cast-summary] diagnostics (off by default)", Box::new(cmd_verbose));
     }
 
     /// Execute a slash command, handling `/skill:name` syntax by splitting the colon-separated
@@ -417,6 +423,32 @@ fn cmd_ask(_args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput> {
     state.agent_pinned = true;
     Ok(CommandOutput::Message(format!(
         "Switched to read-only Q&A mode: {old} -> oracle (pinned). The agent will answer without writing files or running bash."
+    )))
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn cmd_verbose(args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput> {
+    // No-arg toggle, or explicit on/off: /verbose, /verbose on, /verbose off.
+    let arg = args.trim().to_ascii_lowercase();
+    state.verbose = match arg.as_str() {
+        "" => !state.verbose,
+        "on" | "true" | "1" | "yes" => true,
+        "off" | "false" | "0" | "no" => false,
+        _ => {
+            return Ok(CommandOutput::Message(format!(
+                "Usage: /verbose [on|off]. Current: {}",
+                if state.verbose { "on" } else { "off" }
+            )));
+        }
+    };
+    Ok(CommandOutput::Message(format!(
+        "Verbose mode: {}. {}",
+        if state.verbose { "on" } else { "off" },
+        if state.verbose {
+            "[runner stderr] / [cast-summary] blocks will render."
+        } else {
+            "[runner stderr] / [cast-summary] blocks are hidden."
+        }
     )))
 }
 
