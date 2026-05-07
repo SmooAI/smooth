@@ -1,5 +1,915 @@
 # @smooai/smooth
 
+## 0.13.0
+
+### Minor Changes
+
+- 175e60d: Cleanup batch: empty-arg normalization, oracle prompt tightening, real args/result on tool-call events
+
+  Three pearls bundled (`th-75c3e5`, `th-962395`, `th-7a5106`):
+
+  **Empty-args normalization (`th-75c3e5`)**
+  Some small models (Gemini Flash family especially) emit a literal
+  `""` empty-string for tools that take no parameters, instead of
+  the schema-correct `{}`. Downstream hooks + tools that expect an
+  object then fail on what should have been a no-op call. Fix in
+  `smooth-operator::ToolRegistry::execute` + `execute_single`:
+  normalize `Value::String("")` and `Value::Null` args to `{}`
+  before any hook runs. `project_inspect("")` now succeeds.
+
+  **Oracle prompt: don't bail after one tool error (`th-962395`)**
+  Symptom: oracle would call `project_inspect`, get a tool error,
+  then declare "I'm unable to list files as well" without ever
+  calling `list_files` (which is in its allowlist). Prompt now has
+  a "When a tool errors, try a different one" section that
+  explicitly says: a single error doesn't mean the tool is
+  unavailable; the system-prompt allowlist is the truth; pivot to
+  the next sensible tool. Lists concrete fallbacks for the common
+  cases (`project_inspect` → `list_files` + marker reads, `read_file`
+  404 → next likely path, `grep` empty → broaden / `glob`).
+
+  **Real arguments + result on tool-call events (`th-7a5106`)**
+  `AgentEvent::ToolCallStart` only had `iteration` + `tool_name`;
+  `ToolCallComplete` had `iteration` + `tool_name` + `is_error`.
+  The full args / result / duration only flowed via the separate
+  `ReporterEvent` HTTP channel — sandboxed dispatch, which parses
+  the runner's stdout JSON-lines, ended up forwarding `arguments:
+String::new()` and `result: String::new()` for every inner tool
+  call. So inner `read_file` / `list_files` / `grep` calls
+  rendered with empty args (or, in the user's experience, didn't
+  render at all because the empty preview made them indistinguishable
+  from each other).
+
+  Adds:
+
+  - `AgentEvent::ToolCallStart::arguments: String` (default `""`
+    for backward-compat).
+  - `AgentEvent::ToolCallComplete::result: String` + `duration_ms:
+u64` (default `""` and `0`).
+  - All emit sites populate the new fields.
+  - Big Smooth's stdout parser (`server.rs`) reads them and forwards
+    in `ServerEvent` instead of empty strings.
+  - The TUI's `run_agent_streaming` already uses these fields — they
+    just have real values now, so inner `read_file` / `list_files` /
+    `grep` calls render inline with proper args + duration + result
+    preview.
+
+- 230ba6c: Per-workspace agent memory at `.smooth/MEMORY.md` (cold-start orientation)
+
+  Cold-start agents land in `/workspace` with **zero idea what the
+  project is**. The runner used to load `AGENTS.md` (if present) into
+  the system prompt and that was it. For a fresh repo without
+  AGENTS.md, the agent had no signal — it would guess from the
+  question's phrasing and hallucinate ("you mentioned dev server,
+  must be Rust") when the repo turned out to be Next.js.
+
+  Adds a writeable per-workspace memory layer the agent maintains
+  itself across sessions:
+
+  - **`.smooth/MEMORY.md`** — auto-loaded into the operator system
+    prompt at startup as a `## Workspace Memory` section, alongside
+    the existing `## Project Context` from AGENTS.md. Empty / missing
+    is fine; the system prompt tells the agent to populate it.
+  - **`read_memory` tool** — returns the current contents (empty
+    string when the file doesn't exist yet). Always cheap; intended
+    to be called before answering any project-specific question.
+  - **`write_memory` tool** — `mode='append'` (default) adds a
+    section to MEMORY.md separated by a blank line; `mode='replace'`
+    overwrites the entire file. Both modes create `.smooth/` if
+    missing.
+  - **Allowed for all roles**, including the read-only ones (oracle,
+    mapper, heckler, scout). Memory is metadata, not source code;
+    persisting findings is part of being a good cohabitant. (Scout
+    gets `read_memory` only — sidekicks return summaries, not
+    durable journal entries.)
+  - **System-prompt discipline** — new "Memory & orientation"
+    section in `prompts/system.md` codifies the loop:
+    1. Assess. Do I actually know what this project is?
+    2. Check loaded context first — `## Workspace Memory`,
+       `## Project Context`. No tool call needed.
+    3. If gaps remain, explore — `list_files` + read marker
+       files (`README.md`, `package.json`, `Cargo.toml`, etc.).
+    4. Persist what you learned — `write_memory` with terse
+       bullets so the next session inherits.
+    5. Re-check periodically — on long tasks, every several
+       iterations, ask "have I learned something durable?"
+
+  Effect: a "how do I run dev mode here" question on a fresh repo
+  now goes (1) `read_memory` → empty → (2) `list_files` →
+  `read_file package.json` → (3) answer + `write_memory` with the
+  findings. Next session, (1) `read_memory` returns the bullets and
+  the agent can answer without exploring.
+
+- 28bea04: TUI: render ANSI escape sequences as actual colors (not strip, not raw)
+
+  Previous pearl `th-a14138` stripped ANSI codes from streaming text
+  because the markdown renderer was leaving `[2m...[0m` as raw
+  literals. User wanted the colors _kept_ — they're how the runner's
+  tracing logs become readable (dim timestamps, green INFO, italic
+  field names).
+
+  Replace `crate::ansi::strip` with a real SGR parser:
+
+  - `ansi::line_has_ansi(line) -> bool` — cheap pre-check.
+  - `ansi::parse_line_to_spans(line) -> Vec<Span<'static>>` — walks
+    the SGR codes and produces styled ratatui Spans. Handles ESC-
+    prefixed and bare-bracket forms (sometimes the ESC byte is
+    scrubbed in transit). Supports: 0 reset, 1 bold, 2 dim, 3
+    italic, 4 underline, 9 strikethrough, 22/23/24/29 modifier
+    clears, 30-37 fg, 39 default fg, 40-47 bg, 49 default bg,
+    90-97 + 100-107 bright variants, 38;5;N + 48;5;N (256-color),
+    38;2;R;G;B + 48;2;R;G;B (true color).
+  - 10 unit tests including a real runner-stderr sample.
+
+  Wire-in (`inline::message_lines`): when the assistant content
+  contains `[runner stderr]`, split there. Render the prose prefix
+  through markdown as today; render the stderr suffix line-by-line
+  with `ansi::parse_line_to_spans`. Diagnostics now display with
+  their original styling instead of raw escape codes or stripped
+  plaintext.
+
+  `AppState::append_stream_content` reverts to passing content
+  through verbatim — the rendering layer owns ANSI handling now.
+
+- 2553b60: th smooth TUI: inline viewport (Claude Code style) + borderless chat
+
+  The chat TUI used to live entirely inside an alt-screen with a fixed
+  `Paragraph` that scrolled an in-app message buffer. That setup
+  disabled the terminal's native wheel-scroll, drag-select, search, and
+  copy — every one of those had to be re-implemented inside the app, and
+  none of them worked well. Switch to ratatui's `Viewport::Inline`:
+
+  - The TUI owns only ~14 rows at the bottom of the terminal: the
+    input box, status bar, and an optional preview area for the
+    in-flight streaming assistant message.
+  - Finalized chat messages flow into the **terminal's own scrollback**
+    via `Frame::insert_before`. A new `committed_count` cursor on
+    `AppState` tracks which messages have been pushed; each event-loop
+    tick flushes any newly-finalized ones before drawing the viewport.
+  - Native wheel scroll, drag-select, search, and copy all work as
+    they would for any other terminal output. No in-app reimplementation.
+
+  Side effects:
+
+  - Alt-screen is gone. `SMOOTH_TUI_NO_ALT_SCREEN=1` is now a no-op
+    (kept readable so it doesn't error on shells with the var set).
+  - The chat panel border was already redundant once selection moved
+    to the terminal; it's removed entirely. Role labels + blank-line
+    spacing carry visual structure.
+  - Sidebar (`Ctrl+B`) is dropped. It needs an inline-friendly redesign
+    (slash commands like `/git`, `/files` are the obvious next step).
+    The keybinding is intentionally left unbound rather than re-purposed.
+  - New `crate::inline` module: `message_lines` (single-message →
+    styled `Line`s, shared between viewport preview and `insert_before`
+    flush), `flush_to_scrollback`, `viewport_preview_lines`,
+    `compute_regions`. Tested.
+
+  Trade-offs:
+
+  - The streaming preview area is capped at viewport height − 4
+    rows. If a single response is taller than that, the most recent
+    rows stay visible during streaming; the full text lands in
+    scrollback when streaming completes.
+  - The fancy gradient SMOOTH wordmark welcome banner is no longer
+    rendered (kept as `#[allow(dead_code)]` for a possible
+    fixed-screen toggle later). The system "Welcome to Smooth" line
+    remains.
+
+- 89834f0: th smooth TUI: scroll, selection, markdown, and intent-aware dispatch
+
+  Four fixes to the chat TUI. They all stemmed from the same session
+  where "how do I run dev mode" caused the agent to write
+  `DEV_MODE_GUIDE.md` files and report a fabricated `1 passed, 0 failed`.
+
+  - **Drop `EnableMouseCapture`.** Mouse capture was on but the event
+    loop had no `Event::Mouse` arm — wheel scroll was dead AND text
+    selection was dead because capture stole the drag. The TUI doesn't
+    consume mouse events, so dropping capture lets the terminal handle
+    both natively.
+  - **Render assistant messages as markdown.** A new
+    `smooth-code::markdown` module walks `pulldown-cmark` events into
+    styled ratatui `Line`s. Bold, italic, inline code, fenced code
+    blocks, headings, lists, blockquotes. Streaming-friendly: an
+    unterminated fence renders as in-progress code rather than as raw
+    backticks.
+  - **`/agent` and `/ask` commands.** `/ask` switches to the read-only
+    `oracle` role for Q&A — denies `edit_file`/`write_file`/`bash` so
+    the agent answers without modifying the workspace. `/agent <name>`
+    switches to any built-in role. Both pin the role, disabling the
+    intent classifier below.
+  - **Intent-aware dispatch.** When the user hasn't pinned a role, every
+    message routes through a new `intent_classifier` shadow role (Fast
+    slot, Haiku-class) that emits `WORK` or `QUESTION`. Questions
+    dispatch under `oracle`; work dispatches under `fixer`. A pattern
+    fallback keeps dispatch alive when the LLM gateway is unreachable.
+  - **Runner: gate coding workflow on the role.** The coding workflow
+    forces a "run tests, iterate until green, report N passed/failed"
+    loop. Running it under a non-Coding-slot role (oracle, mapper,
+    heckler) was producing the hallucinated `1 passed, 0 failed` line.
+    The workflow now only runs when `active_role.slot == Coding` AND
+    `bash` is allowed.
+
+- f2c2c6f: th smooth TUI: render unified diffs for edit_file / write_file / apply_patch
+
+  Tool-call rendering used to show only `tool_name("...args preview...")
+── done`, with the actual change buried in a collapsed-by-default
+  output blob. Worse, tool calls weren't even being attached to the
+  assistant message in the first place — `ServerEvent::ToolCallStart`
+  and `ToolCallComplete` translated into stub `AgentEvent`s that the
+  event handler dropped on the floor (`_ => {}`). So the chat showed a
+  wall of streaming text, no separate tool-call indicators, and zero
+  information about what was edited.
+
+  Two changes:
+
+  - **Plumb tool calls through to state.** `run_agent_streaming` now
+    takes the AppState `Arc<Mutex<_>>` and mutates it directly when
+    it sees `ServerEvent::ToolCallStart` / `ToolCallComplete`. Tool
+    calls hang off the most recent assistant message; ordering is
+    preserved per-tool-name via a small per-name pending queue
+    (`HashMap<String, VecDeque>`). The streaming assistant message
+    is created synchronously before the recv loop so fast-arriving
+    tool starts have somewhere to land.
+  - **`crate::tool_diff` module.** `pub fn render(tool_name, args)`
+    returns `Option<Vec<Line<'static>>>`. Recognizes `edit_file`
+    (uses `path` + `old_string` + `new_string`), `write_file`
+    (renders the new content as all-`+`), and `apply_patch`
+    (renders the provided patch verbatim with consistent styling).
+    Uses the `similar` crate for unified-diff generation with a
+    2-line context radius. Caps at 200 rendered lines per call —
+    big diffs get an `… N more diff lines elided …` marker in the
+    middle. 7 unit tests.
+  - **`inline::message_lines`** now suppresses the noisy
+    `("...args preview...")` payload + the collapse glyph on
+    diff-rendered tool calls (the diff itself is the content), and
+    appends the styled diff lines after the header.
+  - **`ToolCallState::arguments_full: Option<Value>`** preserves
+    the parsed arguments for the renderer to consume. Marked
+    `#[serde(skip)]` so saved sessions don't bloat with full file
+    contents on every edit. New `ToolCallState::from_raw(id, name,
+arguments_json: &str)` constructor for the WS dispatch path.
+  - **`AppState::start_streaming` is now idempotent** — eager
+    synchronous call (in `run_agent_streaming`) plus the lazy call
+    (in `handle_agent_event`) no longer produce a duplicate empty
+    assistant message.
+
+### Patch Changes
+
+- cd8f7c5: Tighten SMOOTH banner gradient boundary + clear all build warnings
+
+  - Banner boundary: switch the Smoo→th split from 3/4 to 17/25 so
+    teal lands at the T's left edge (col 38 in the 55-char ANSI-Shadow
+    banner) instead of bisecting the letter.
+  - `smooth-operator` `Activity::Planning` / `Activity::Thinking` are
+    deprecated aliases for `Activity::Reasoning`; the `mapper` and
+    `oracle` lead roles still referenced the old names. Updated both
+    - the slot-routing test that asserted on the deprecated variants.
+  - `smooth-bigsmooth/server.rs`: `if let Some(ref diver_client) = diver`
+    bound a name that wasn't used; switch to `diver.is_some()`. Comment
+    notes the binding pattern to restore when a real Diver client call
+    is wired.
+  - `smooth-bigsmooth/server.rs`: dead `SharedNarcHook` struct +
+    `ToolHook` impl removed (never constructed). Dropped the now-
+    dangling `async_trait`, `smooth_narc::NarcHook`, and
+    `smooth_operator::tool::{ToolCall, ToolHook, ToolResult}` imports.
+  - `smooth-bigsmooth/server.rs`: dead `chat_system_prompt()`
+    function removed (no callers).
+  - `smooth-operator-runner/lsp.rs`: drop the deprecated
+    `InitializeParams::root_uri` field; we already pass
+    `workspace_folders`, which is the LSP 3.6+ replacement.
+
+  Build finishes with zero warnings; 468 tests still pass.
+
+- bea267d: TUI banner: match the actual SVG-defined brand gradient (3 stops + leading solid bands)
+
+  The previous pearl swapped vertical for horizontal coloring but used
+  a 2-stop linear gradient (orange → pink, teal → blue). The brand
+  gradient in `crates/smooth-web/web/public/logo.svg` is richer:
+
+  - **Smoo zone**: 30 % solid orange (`#f49f0a`), then orange → coral
+    (`#fb7a4d`) up to 79 %, then coral → pink (`#ff6b6c`) to 100 %
+  - **th zone**: 43 % solid teal (`#00a6a6`), then teal → blue
+    (`#1238dd`) to 100 %
+
+  `theme::smooth_banner_color` now mirrors those stops. Leading solid
+  bands give the wordmark its hold-then-fade shape — without them the
+  banner read as a flat rainbow.
+
+- cd25325: TUI welcome banner: paint the SMOOTH wordmark with the brand gradient (Smoo orange→pink + th teal→blue)
+
+  The welcome banner used `theme::gradient_row(i, total_rows)` which
+  paints each pixel-row uniformly top-to-bottom (yellow→green). Doesn't
+  match the brand pattern — `Smoo` is orange→pink, `th` is teal→blue
+  (see `theme::smooth_wordmark()`).
+
+  New `theme::smooth_banner_color(col, total)` returns the right color
+  for column `col` of a `total`-wide rendering, with the 6-letter
+  split mapped to a 2/3 column split (4 of 6 letters in the Smoo zone).
+  The banner now styles each character independently, so the brand
+  gradient runs HORIZONTALLY across the wordmark the way it reads
+  everywhere else in the product.
+
+- 0ab0c72: TUI banner: structural split into (smoo, th) chunks — no more boundary math
+
+  Previous boundary-as-fraction approach (`smoo_end = total * 17/25`)
+  was fragile because the ANSI-Shadow letter widths drift between
+  rows — some rows would land the boundary inside a glyph, leaving
+  teal artifacts on the 2nd O's right edge.
+
+  Refactor:
+
+  - `BANNER_ROWS: [(&str, &str); 6]` — each row is now an explicit
+    `(smoo_chunk, th_chunk)` tuple, split at the actual letter
+    boundary in source.
+  - `theme::smoo_gradient_color(i, total)` — the orange→coral→pink
+    3-stop gradient, applied across only the smoo chunk's own length.
+  - `theme::th_gradient_color(i, total)` — the teal→blue 2-stop
+    gradient, applied across only the th chunk's own length.
+  - `theme::smooth_banner_color` removed (was the fraction-based
+    helper).
+
+  Each half's gradient now fills exactly its half — `Smoo` is solid
+  orange→coral→pink, `th` is solid teal→blue, and the boundary lands
+  where it's supposed to, on T's left edge, not partway through it.
+
+- fb3e71f: bench: prefer `~/.smooth/dolt/` over repo-walked store
+
+  The bench's `locate_pearl_store_dir()` walked up from `cwd` first, so a
+  bench launched from `~/dev/smooai/smooth/` bound to
+  `~/dev/smooai/smooth/.smooth/dolt/`. The daemon, however, runs from
+  launchd at `$HOME` and creates pearls in `~/.smooth/dolt/`. The two
+  stores never met — the heartbeat task wrote `[PROGRESS]` comments to
+  the daemon's store while the bench polled an empty one, and the
+  600 s `idle_grace` always fired.
+
+  Resolution priority is now:
+
+  1. `SMOOTH_BENCH_PEARL_STORE` (explicit override)
+  2. `~/.smooth/dolt/` (the daemon's default — almost always correct)
+  3. Walk up from `cwd` for `.smooth/dolt/` (kept as a fallback for
+     bench runs that explicitly target a project store)
+
+  Confirmed root cause via direct inspection of pearl `th-79c2d3` during
+  take 5: the heartbeat had written 5 `[PROGRESS]` comments at 30 s
+  intervals into the smooai project store, while the bench was polling
+  the smooth project store and never saw them.
+
+- aa0cb46: bench: raise default chat-driver timeouts and make them configurable
+
+  The bench's chat-agent-driven path
+  (`crates/smooth-bench/src/chat_driver.rs`) had two hardcoded 120 s
+  timeouts that consistently scored real solves as FAIL:
+
+  - The reqwest HTTP-client timeout on `POST /api/chat` (the dispatch
+    call). On a cold daemon or first-task dispatch the chat-agent
+    sometimes legitimately takes longer than 120 s to spawn the
+    teammate and return the pearl id.
+  - The `idle_grace` quiet-timeout in the comment-polling loop. When
+    the teammate doesn't post a `[PROGRESS]` comment within 120 s of
+    the last comment, the bench treats the pearl as done and runs the
+    test against an unchanged workspace — scoring real in-flight
+    solves as FAIL.
+
+  Both are now env-configurable with raised defaults:
+
+  | Env var                            | Default | Purpose                             |
+  | ---------------------------------- | ------- | ----------------------------------- |
+  | `SMOOTH_BENCH_CHAT_HTTP_TIMEOUT_S` | 300     | reqwest timeout on `POST /api/chat` |
+  | `SMOOTH_BENCH_IDLE_GRACE_S`        | 600     | comment-polling quiet timeout       |
+
+  The chat-driver also logs `bench: pearl <id> polling with idle_grace=Ns`
+  on dispatch so the active value is visible in the run log without
+  inspecting env.
+
+  Empirical evidence from the 2026-05-02 tuning-batch run
+  (`docs/bench-sessions/2026-05-02-tuning-batch.md`): solves of
+  cpp/all-your-base (218 s), java/alphametics (231 s), python/book-store
+  (165 s), and others were all timing out at the 120 s grace. With 600 s
+  the harness will let those finish. 300 s is the wall-clock budget for
+  the dispatch-side HTTP call (the operator can run for much longer
+  after that point, polled via the pearl).
+
+  One unit test (`env_secs_falls_back_when_unset_or_invalid`) covers the
+  unset / garbage / valid-integer branches of the env-reader helper.
+
+- 77e49e3: dispatch + bench: wire cost reporting through pearl comments
+
+  The bench's chat-agent dispatch path returned `cost: 0.0` hardcoded —
+  the chat-agent dispatched a teammate, returned text to the bench, and
+  the dispatched teammate's actual LLM cost (tracked in
+  `AgentEvent::Completed` and aggregated as `final_cost_usd` in
+  `dispatch_ws_task_sandboxed`) never crossed back to the bench.
+
+  Fix uses pearl comments as the bridge:
+
+  - `dispatch_ws_task_sandboxed` posts
+    `[METRICS] cost_usd={final_cost_usd:.6} iterations={agent_iterations}`
+    to the pearl right before closing it on success. Comment is part of
+    the pearl's history, so anyone polling the pearl (the bench, the TUI,
+    future tooling) can read the dispatch's actual spend.
+  - `chat_driver::extract_cost(&[PearlComment])` scans for the latest
+    `[METRICS]` line, parses the `cost_usd=X` token, returns it. Falls
+    back to `0.0` for pre-fix runs and runs that errored before
+    Completed.
+
+  Both early-return paths in the bench's polling loop now use
+  `extract_cost(&comments)` instead of literal `0.0`. Score JSONs
+  generated by the next bench will carry real cost numbers.
+
+- e515287: dispatch: post `[IDLE]` comment when sandbox exec terminates abnormally
+
+  `dispatch_ws_task_sandboxed` only closed the pearl on the success path
+  (exit 0). On `exec_in_sandbox` `Err(_)` and on non-zero runner exit
+  codes, the pearl stayed `in_progress` with no terminal comment, so any
+  poller waiting on `[IDLE]` / status-Closed had to fall through to the
+  quiescence-grace timeout (default 600 s in the bench harness) to
+  realise the dispatch was over.
+
+  Both error paths now post a `[IDLE]` comment before returning:
+
+  - `Err(e)` on `exec_in_sandbox`: `[IDLE] sandbox exec failed: {e}`
+  - non-zero runner exit: `[IDLE] sandboxed runner exited with code {code}`,
+    and the pearl status reverts to `Open` so the orchestrator can
+    re-dispatch (matching `revert_pearl_to_open` semantics from the
+    Mode B retry path).
+
+  The bench harness's pearl-comment-polling loop already keys on
+  `[IDLE]` as one of its three completion signals (alongside
+  `PearlStatus::Closed` and the quiescence grace), so this drops
+  worst-case task-failure latency from ~10 minutes to immediate.
+
+- 230e5bd: dispatch: pearl-comment heartbeat during sandbox exec
+
+  `exec_in_sandbox` is a blocking call — the runner's
+  `AgentEvent::ToolCallStart` events arrive in one batch when the run
+  finishes, so the pearl's comment count stays flat for the entire
+  sandbox lifetime. Any external poller that uses comment-growth as a
+  liveness signal (notably the bench harness, see
+  `SMOOTH_BENCH_IDLE_GRACE_S`) gives up well before the operator is
+  genuinely done.
+
+  `dispatch_ws_task_sandboxed` now spawns a heartbeat task that posts
+  `[PROGRESS] sandbox running (Ns elapsed, heartbeat #N)` to the pearl
+  every 30s while the exec is in flight. The task is aborted as soon as
+  exec returns (success, error, or destroy path).
+
+  Tunable via `SMOOTH_DISPATCH_HEARTBEAT_S`:
+
+  - `0` — heartbeat disabled (useful for tests or when observing
+    genuine quiescence is desired)
+  - `30` (default) — 30s cadence
+  - any positive integer — custom cadence
+
+  Without this, today's bench-harness 600s `idle_grace` still
+  double-times-out tasks that are mid-LLM-call when the exec_in_sandbox
+  poll is silent for the whole window. With it, the pearl gets a fresh
+  comment every 30s and the harness's grace timer keeps resetting until
+  the run actually finishes.
+
+- 6d820e6: scripts: `pnpm install:th` now builds the embedded web SPA first
+
+  `th` embeds `crates/smooth-web/web/dist/` at compile time via
+  rust-embed. The old `install:th` was just `cargo install --path
+crates/smooth-cli --force` — if you forgot to run `pnpm build` in
+  `crates/smooth-web/web` first, the new binary would silently ship
+  a stale web bundle. Bitten by this twice in one session.
+
+  Fix:
+
+  - New `pnpm build:web` — `pnpm install` + `vite build` inside
+    `crates/smooth-web/web`, runnable on its own.
+  - `pnpm install:th` now chains `pnpm build:web && cargo install
+...`. Adds ~2 seconds per install (vite build is fast); pays
+    for itself the first time it prevents stale-bundle confusion.
+
+- af91499: Cleanup: subagent_dispatch test, smooth-web auto-placeholder, /verbose hides per-line `[runner]` stderr too
+
+  Three small fixes:
+
+  - **subagent_dispatch test** — `fixer_role_dispatches_scout_and_only_final_summary_leaks` asserted `obj.len() == 3`, but `DispatchResult` now has 4 fields when `verified_paths` is non-empty (the trust-but-verify follow-up from C4 added that field with `skip_serializing_if = Vec::is_empty`, and the test scenario triggers a `src/` path mention). Replaced the strict count check with a positive assertion that the three required fields are present and a closed-set check that no unexpected fields appear.
+  - **smooth-web build.rs placeholder** — fresh worktrees previously failed to compile until you manually ran `pnpm build:web` to populate `crates/smooth-web/web/dist/index.html` (rust-embed needs the directory to exist at macro-expansion time). New `build.rs` writes a tiny placeholder if `dist/index.html` is missing, so any cargo build / cargo test in a fresh worktree just works. The first real `vite build` overwrites it. The directory is git-ignored so the placeholder doesn't leak into commits.
+  - **`/verbose` hides per-line `[runner]` stderr** — pearl `th-ef181a` introduced `/verbose` and hid content after the `[runner stderr]` marker. But the sandboxed dispatch path (`server.rs:2596`) forwards each runner stderr line as its own TokenDelta with prefix `[runner] ` (no separator marker), and those lines kept leaking into the assistant content even with verbose off. Render now filters lines whose first 9 chars are `[runner] `, `[runner stderr]`, or `[cast-summary]` when verbose is off. Verbose on shows everything as before.
+
+- a1a1bbf: operator runner: stop the moment tests pass — no over-iteration
+
+  Empirical discovery from the M-workstream slot sweep: `glm-5.1` solved
+  python/affine-cipher correctly (16/16 tests pass) within ~5-10 minutes of
+  dispatch but kept iterating for 33+ minutes before posting `[IDLE]`. Same
+  pattern observed in take 7 with kimi-k2-thinking (25 min), and likely in
+  every "real solve" of take 7. The model lands a working answer, the test
+  suite exits 0, and then the model keeps editing — refining, re-verifying,
+  documenting, "improving" — until the iteration cap or some long quiet
+  finally fires.
+
+  Root cause: the D1 system prompt's "Verify before claiming done" block
+  told the model to verify but not to _stop verifying_ once green. Models
+  respect that ambiguity by continuing.
+
+  Fix: replace the soft "Only then declare complete" with an emphatic STOP
+  rule. Bench tasks that previously took 25-30 min should now finish in
+  the 2-5 min range — the time it actually takes the model to write a
+  correct solution and run the suite once.
+
+  Models are fine. The prompt was the bottleneck.
+
+- a9a9c86: operator: include `name` field on tool-result messages (Gemini OpenAI-compat fix)
+
+  Per customer-service-bot research (memory:
+  `reference_litellm_native_passthrough.md`), Gemini's OpenAI-compat shim
+  maps `role: tool` to a `functionResponse` block, which has a `name` field
+  that's not optional. Smooth was sending tool-result messages without
+  `name`, so any call routed through the OpenAI-compat layer to a Gemini
+  upstream would either drop the result silently or 400 with "requires a
+  tool name for each tool call response."
+
+  Fix is two-part:
+
+  - `Message::tool_result_named(call_id, name, content)` constructor that
+    attaches the originating tool's name to a tool-role message. Old
+    `tool_result` retained for legacy callers.
+  - `ChatMessage` adds a `tool_name` field that serializes as JSON
+    `"name"` with `skip_serializing_if = "Option::is_none"` — present when
+    set, omitted otherwise so legacy serialization is byte-identical.
+
+  The agent loop (`agent.rs`, all 3 tool-result push sites in `run()` and
+  `run_with_channel()`) now uses `tool_result_named(&tool_call.id,
+&tool_call.name, &result.content)`. We always know the originating
+  tool's name at result time, so the named constructor is the right
+  default everywhere going forward.
+
+  OpenAI ignores the field. Anthropic uses `tool_use_id` pairing already
+  and doesn't reject the extra field. Sending it always is the safest
+  serialization across providers.
+
+  One new unit test (`tool_result_named_carries_name_through_serialization`)
+  covers both branches: named results emit `"name":"..."`, legacy results
+  omit the field entirely.
+
+- 2163037: th pearls push: auto-set-upstream, `--force`, actionable error on diverged remotes
+
+  `th pearls push` exposed only the bare Dolt push, so first-time push
+  to a fresh remote failed with `fatal: The current branch main has no
+upstream branch` and the user had to drop into raw `smooth-dolt sql -q
+"CALL dolt_push('-u', 'origin', 'main')"` to recover. This pearl
+  files three sharp edges:
+
+  - New `PushOpts { force, set_upstream }` on `SmoothDolt::push_with`,
+    re-exported from the crate. The bare `push()` stays as a no-flag
+    shorthand for callers that don't care.
+  - `th pearls push --force` (`-f`) overrides remote history when the
+    remote has only a stale `Initialize data repository` commit from a
+    previous abandoned init. No more raw SQL detour.
+  - Auto-retry with `set_upstream = true` when the first push fails
+    with "no upstream branch". Users don't need to know the flag exists.
+  - Friendlier error on "no common ancestor" — the bare Dolt message
+    was unhelpful; now the CLI surfaces the two real recovery paths
+    (force push, or `git push origin --delete refs/dolt/data` then
+    push) with a one-liner inspection command for the curious.
+  - Tightened `is_no_remote_error` so it only matches "no configured
+    push/pull destination" — "no upstream" used to live there, which
+    meant the global pearl store silently swallowed first-push errors
+    instead of recovering with `-u`.
+
+- 1263033: operator-runner: family-aware Anthropic shape for Claude models
+
+  Probed the gateway: `https://llm.smoo.ai/v1/messages` (LiteLLM's
+  Anthropic-shape route) already resolves smooth-\* aliases AND uses native
+  Anthropic shape with proper `tool_use` / `tool_result` block pairing.
+  The OpenAI-compat translation at `/v1/chat/completions` silently mangles
+  Claude tool calls on the second turn (per customer-service-bot research,
+  memory: `reference_litellm_native_passthrough.md`).
+
+  Smooth's LLM client already supports `ApiFormat::Anthropic` and
+  `convert_messages_to_anthropic` — they construct `<api_url>/messages`
+  requests with the right shape. The gap was the operator-runner always
+  selecting `OpenAiCompat` regardless of the routed model.
+
+  Fix:
+
+  - New `provider_overlay::is_anthropic_family(&str)` helper detects
+    Claude-class models (smooth-judge, smooth-fast-haiku, smooth-reviewing-haiku
+    aliases, plus any model name containing `claude`, `anthropic`, `haiku`,
+    `sonnet`, `opus`). Case-insensitive.
+  - Operator runner's LlmConfig construction site (line ~1559) now picks
+    `ApiFormat::Anthropic` when the family check matches, otherwise the
+    existing `OpenAiCompat`. Logs the routing decision via tracing for
+    observability.
+
+  Combined with the prior tool-name compat fix (PR before this), Smooth now
+  routes:
+
+  - Claude models → `https://llm.smoo.ai/v1/messages` (Anthropic-shape,
+    alias-resolving)
+  - Everything else → `https://llm.smoo.ai/v1/chat/completions` (OpenAI-compat,
+    alias-resolving, with tool-result `name` field for Gemini compat)
+
+  One unit test covers the family detection across alias and direct-model
+  spellings + negative cases (gpt, kimi, gemini, deepseek must NOT match).
+
+- e580a9f: build-operator-runner.sh + install:th: keep `~/.smooth/runner-bin/` in lockstep with `target/`
+
+  Big Smooth's `find_operator_runner_binary` walks up from
+  `CARGO_MANIFEST_DIR` looking for
+  `target/aarch64-unknown-linux-musl/release/smooth-operator-runner`.
+  A long-running `th up` daemon compiled in a worktree whose `target/`
+  no longer holds the binary can fall back to a stale
+  `~/.smooth/runner-bin/` copy left by an earlier setup. Net effect:
+  fresh runner code (e.g. the `coding_workflow` role gate from
+  `th-c1e2c0`) never reaches the sandbox even after rebuild +
+  reinstall — sandbox runs old binary, oracle still gets shoved
+  through fixer's coding workflow.
+
+  Two fixes:
+
+  - `scripts/build-operator-runner.sh` now copies the freshly-built
+    binary into `~/.smooth/runner-bin/smooth-operator-runner` after
+    every cross-compile. Both find paths resolve to fresh.
+  - New `pnpm build:runner` script wraps the build script. `pnpm
+install:th` chains `build:web && build:runner && cargo install`,
+    so a single `pnpm install:th` now refreshes everything: web
+    bundle, sandbox runner, and host `th` binary. The script's
+    cross-compile is incremental — adds ~5s when no runner sources
+    changed, ~30s when they did. Worth it to kill the stale-binary
+    footgun.
+
+- 08470fa: runner: single-agent path now resolves the LLM config from the active role's slot
+
+  When the workflow gate skips `coding_workflow` (oracle / mapper /
+  heckler — anything that isn't a Coding-slot lead with `bash`
+  allowed), the runner falls through to the single-agent path. That
+  path was building `LlmConfig` from the `SMOOTH_*` env vars, which
+  big-smooth populates from the default provider's default model
+  (`smooth-fast-gemini` in the canonical setup). Result: oracle
+  (`slot = Reasoning`) was calling the **Fast** model instead of
+  Reasoning — both wrong-tier-for-the-task and the very model that
+  just hit a 503 on Vertex AI.
+
+  After active-role resolution but before `agent_config` is built,
+  re-parse the routing JSON (already mounted into the sandbox at
+  `/opt/smooth/policy/routing.json`), then ask
+  `ProviderRegistry::llm_config_for(active_role.slot)` for the
+  right model. That config replaces the env-var default for the
+  single-agent path. The workflow path is unaffected — it does its
+  own per-phase resolution further down using the same registry.
+
+  Falls back to the env-var default cleanly when the routing JSON
+  is missing, unparseable, or the slot can't resolve — preserves
+  existing behavior for tests and minimal setups.
+
+- 7ae64f3: Status bar: show the resolved active model, not a hardcoded "claude-sonnet-4" default
+
+  `AppState::new` defaulted `state.model_name` to `"claude-sonnet-4"`
+  and the status bar printed it verbatim — never updated, so the
+  label was wrong for any session running through Gemini, DeepSeek,
+  or anything other than Claude.
+
+  Status now derives the label live:
+
+  - **In-flight**: prefer `current_phase_alias` (e.g. `smooth-reasoning`)
+    with `current_phase_upstream` appended when known
+    (`smooth-reasoning → claude-opus-4-5`). Both are populated by the
+    runner's `PhaseStart` events.
+  - **Idle**: synthesize the alias from the active role's slot —
+    `smooth-{slot}` (`smooth-coding`, `smooth-reasoning`, etc.) —
+    matching the convention in `~/.smooth/providers.json`.
+  - **Unknown role** (typo / custom role): fall back to the role name.
+
+  `state.model_name` is left in place since the model picker + session
+  save path still use it; just no longer driving the status bar.
+
+- 869e306: TUI: strip ANSI escape sequences from streaming assistant content
+
+  The runner emits structured tracing logs colored with ANSI SGR codes
+  (`\x1b[2m...\x1b[0m`, `\x1b[32m INFO`, `\x1b[3mfield\x1b[0m=value`,
+  etc.). Big Smooth forwards runner stderr as `TokenDelta` chunks for
+  the assistant message, those codes ride along, and the markdown
+  renderer treats them as plain text — the chat fills with raw
+  `[2m2026-05-07T13:43:52.300628Z[0m [32m INFO[0m ...` litter.
+
+  New `crate::ansi::strip(s)` does a linear scan and removes any
+  `\x1b[<digits>(;<digits>)*m` sequence, plus the bare-bracket form
+  `[<digits>(;<digits>)*m` (the ESC byte is sometimes lost in transit
+  through WebSockets / terminal copy-paste). Conservative — only
+  matches digit-only param sequences ending in `m`, so legit
+  markdown like `[link](url)` and array syntax `[1, 2, 3]` stay
+  untouched. 8 unit tests including a real runner-stderr sample.
+
+  Hook point: `AppState::append_stream_content` strips before
+  pushing into the message buffer. Markdown render and
+  `flush_to_scrollback` see clean text.
+
+  (Web parity is filed separately as `th-a14138` — same fix needed
+  in chat.tsx's WebSocket handler.)
+
+- e65d0d6: th smooth TUI: surface coding-workflow activity inline
+
+  Today the TUI forwards `TokenDelta`, tool calls, and the final
+  `Completed`/`Error` events. Everything else the runner emits
+  (iteration boundaries, snapshots, max-iter caps, budget breaches,
+  Warn-level Narc alerts) was silently dropped. So a long workflow
+  run looked like one streaming blob with no signal of what was
+  actually happening.
+
+  The 7-phase decomposition (ASSESS / PLAN / EXECUTE / VERIFY /
+  REVIEW / FINALIZE) is gone — see
+  `crates/smooth-operator/src/coding_workflow.rs:15`. Only the
+  single `CODING` phase + an iteration counter remain. So the
+  "phase breadcrumbs" idea collapses into "iteration breadcrumbs".
+
+  `handle_agent_event` now surfaces:
+
+  - `PhaseStart { iteration, alias }` → inline system line
+    `→ iteration N • {alias}`. Lands once per outer iteration of
+    the coding workflow so the user can see the workflow pacing.
+  - `CheckpointSaved { iteration }` → muted line `✓ snapshot taken
+(iter N)`. Confirms the best-seen-workspace snapshotting is
+    doing its job.
+  - `MaxIterationsReached { max }` → `⚠ hit max iterations (N) —
+stopping`. Was previously dropped on the floor with no user-
+    facing signal.
+  - `BudgetExceeded { spent_usd, limit_usd }` → `⚠ budget exceeded
+— spent $X of $Y`. Same — was silent.
+
+  `ServerEvent::NarcAlert` handling is now severity-aware:
+
+  - `Block` (the call was actually denied) → unchanged, surfaces
+    as `Error` and terminates the run.
+  - `Warn` (informational alert, did NOT block execution) → new
+    inline system message `⚠ Narc Warn • {category}: {msg}`. The
+    run keeps going; the user sees the warning. Previously every
+    Warn was incorrectly routed as an Error and killed the
+    response.
+  - Anything else → quiet.
+
+  The `category` field of NarcAlert is now plumbed through (was
+  dropped via `..`) so the user knows whether the alert is
+  about secrets, prompt injection, etc.
+
+- 1280093: th smooth TUI: restore the gradient SMOOTH wordmark welcome banner
+
+  The previous pearl (Viewport::Inline switch) marked the welcome
+  banner as `#[allow(dead_code)]` because there was no longer an
+  empty-state region inside the viewport to paint it in. Bring it
+  back the inline-native way:
+
+  - `render::welcome_banner_lines()` is the public builder — returns
+    `Vec<Line<'static>>` for the gradient box-drawing wordmark + the
+    "AI Agent Orchestration Platform" / "smoo.ai" / "type a message"
+    tagline lines.
+  - `app::run` calls `inline::insert_before_lines` once at session
+    start (fresh sessions only — resumed sessions skip the banner)
+    to push it into the terminal's scrollback BEFORE any chat
+    messages. It sits at the top of the session like a real
+    terminal program's startup banner, scrollable, selectable,
+    copyable like any other terminal output.
+  - The verbose "Welcome to Smooth. Type a message and press
+    Enter to chat." system line is replaced by the shorter
+    "Type a message to get started. /help for commands." (the
+    banner already says the equivalent).
+
+- 932f15c: th smooth TUI: fix intent classifier bypass + drop dead Ctrl+B hint
+
+  The intent classifier (added to route questions to oracle and work
+  to fixer) never fired for fresh `th` invocations — every session
+  was silently pinned to fixer, so questions like "how do I run dev
+  mode" still ended up in the coding workflow with file writes and
+  hallucinated test counts.
+
+  Root cause: `cmd_code` in `smooth-cli/src/main.rs:2204` always
+  passed `Some(agent_name)` to `app::run_with_session`, where
+  `agent_name` was unconditionally resolved to `"fixer"` via
+  `resolve_primary_agent(None)`. `app::run` saw `Some(_)` and set
+  `agent_pinned = true`, which bypassed the classifier branch in
+  `handle_input_mode`.
+
+  Fix: pass the **original** `agent: Option<String>` (the unresolved
+  CLI flag) to `run_with_session`. `agent_name` stays around for the
+  typo-validation call and the headless path. Now when the user
+  runs plain `th` (no `--agent`), `agent` is `None`,
+  `agent_pinned` stays `false`, and the classifier runs per
+  message. Explicit `--agent foo` still pins as designed.
+
+  Bundled cleanup: dropped the dead `Ctrl+B sidebar` hint from the
+  status bar. The keybinding was removed when sidebar rendering went
+  away in the inline-viewport pearl, but the status bar text never
+  got updated.
+
+- 3138cbc: C4: trust-but-verify on sidekick dispatch return
+
+  `DispatchResult` (the JSON the parent agent gets back from a successful
+  `send_sidekick` call) now carries two new fields:
+
+  - `verified_paths: Vec<String>` — file paths the sidekick named in its
+    summary that the parent confirmed exist on the host filesystem at
+    dispatch return time (either as absolute paths or relative to CWD).
+  - `unverified_paths: Vec<String>` — paths the parent couldn't verify;
+    may have been renamed, moved, never existed, or be relative to a
+    workspace the parent doesn't share.
+
+  Both fields are `#[serde(default, skip_serializing_if = "Vec::is_empty")]`
+  so the JSON shape is unchanged for the common no-paths case (existing
+  parent-side parsers don't break).
+
+  Two new public free functions in `smooth-operator::cast::dispatch`:
+
+  - `extract_claimed_paths(text)` — scans free text for tokens that look
+    like file paths (contain `/`, or end with a known code/config
+    extension), strips trailing punctuation, deduplicates.
+  - `verify_paths(claimed)` — checks each claimed path against the host
+    filesystem (`Path::exists()` as-given or under CWD), returning
+    `(verified, unverified)`.
+
+  `DispatchSubagentTool::execute()` runs both after the sidekick returns,
+  so the parent's reasoning includes a structured trust-but-verify list
+  without requiring any extra plumbing on the parent side.
+
+  3 new unit tests (path extraction, dedup + prose-rejection,
+  verify_paths classification). Existing
+  `dispatch_result_serializes_to_expected_shape` extended to cover both
+  the empty-paths case (3 visible JSON fields) and the populated case.
+
+- fa2ca85: sandbox: pass `SMOOTH_API_KEY` as a plain env var (interim — secret substitution silently broken)
+
+  Sandboxed dispatch wired `SMOOTH_API_KEY` through microsandbox's
+  `SecretBuilder` with a placeholder + `allowed_hosts`, expecting the
+  network layer to swap on outbound. Confirmed in
+  `smooth-bootstrap-bill/server.rs` — `n.secret(...).env(...).value(...).
+placeholder(...).allow_host(...)`. But the runner's single-agent path
+  makes a Bearer-auth request to `https://llm.smoo.ai/v1` and the literal
+  `SMOOTH_PLACEHOLDER_API_KEY_NOT_SUBSTITUTED` reaches LiteLLM, which
+  returns 401: "Authentication Error, LiteLLM Virtual Key expected.
+  Received=SMOO\*\*\*\*UTED, expected to start with 'sk-'".
+
+  Likely cause: microsandbox 0.3.14's `NetworkPolicy::allow_all()`
+  (set when `allow_loopback=true`, which is the default for our
+  sandbox config) bypasses the secret-substitution middleware. The
+  two compose oddly. May be fixed in 0.4.x.
+
+  Until that's investigated (parent pearl `th-6030b0`), bigsmooth
+  injects the real API key directly via `env.insert("SMOOTH_API_KEY",
+api_key)` and passes an empty `secrets: Vec::new()` to the sandbox
+  config. Known regression: agents in the VM can read their own
+  LLM API key (exfil risk via tool output, scraped logs, etc.). The
+  runner still sends the same Bearer auth — LiteLLM now sees the
+  real `sk-` key and accepts.
+
+- 11271c0: TUI: hide `[runner stderr]` / `[cast-summary]` diagnostic block by default; toggle with `/verbose`
+
+  Every assistant turn was dumping the runner's tracing logs +
+  cast-summary JSON at the end of the message. Useful for debugging,
+  but for the vast majority of turns it's just noise that buries the
+  actual answer.
+
+  Default to hidden:
+
+  - New `AppState::verbose: bool` (default `false`).
+  - New `/verbose` slash command — no-arg toggle, or explicit
+    `/verbose on` / `/verbose off`.
+  - `inline::message_lines_with_verbose(msg, verbose)` — same shape
+    as `message_lines` but with explicit control. The default-export
+    `message_lines` keeps `verbose=false` for callers that don't
+    thread state. The active dispatch path (`flush_to_scrollback` +
+    `viewport_preview_lines`) reads `state.verbose` and passes
+    through.
+  - Content stays in `msg.content` either way, so saved sessions
+    round-trip correctly — only the rendered output skips the
+    diagnostic block when verbose is off.
+
+- 0203d15: smooth-web: surface coding-workflow activity inline (parity with TUI's th-c83d13)
+
+  The `/ws` endpoint already broadcasts every `ServerEvent` — but the
+  chat page only filtered for `BigSmoothThought` to drive the floating
+  bubbles next to Big Smooth's face. Iteration boundaries, snapshot
+  saves, max-iter caps, budget breaches, and Narc warnings were
+  silently dropped on the web client (the TUI got them in pearl
+  `th-c83d13`).
+
+  Frontend-only change (backend already emits everything):
+
+  - `Msg` interface gains a third role `'activity'` for ephemeral
+    status breadcrumbs. They live only in the live-session
+    `messages` state — a page refresh drops them since
+    `ChatMessageView` doesn't persist them.
+  - `chat.tsx`'s `/ws` `onmessage` handler now branches on:
+    - `PhaseStart { iteration, alias }` → `→ iteration N • {alias}`
+    - `CheckpointSaved { iteration }` → `✓ snapshot taken (iter N)`
+    - `MaxIterationsReached { max }` → `⚠ hit max iterations (N) — stopping`
+    - `BudgetExceeded { spent_usd, limit_usd }` → `⚠ budget exceeded — spent $X of $Y`
+    - `NarcAlert` (`severity === 'Warn'` only) → `⚠ Narc Warn • {category}: {msg}`
+  - Activity messages gate on a `streamingRef` so a background
+    dispatch for another session doesn't pollute the current view.
+    `/ws` is broadcast across all sessions and `ServerEvent`s don't
+    carry session ids today.
+  - The renderer treats `role: 'activity'` distinctly: thin
+    monospaced one-line, muted by default, amber when the line
+    starts with `⚠`. No avatar, no role label — they should feel
+    like terminal status lines, not chat bubbles.
+  - Block-severity Narc alerts are unchanged; they still flow
+    through the regular error path so we don't double-render.
+
+  Floating thought bubbles (the Fast-slot first-person summarizer)
+  are unaffected — additive, not in conflict.
+
 ## 0.12.11
 
 ### Patch Changes
