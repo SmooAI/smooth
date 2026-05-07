@@ -103,7 +103,11 @@ pub fn message_lines_with_verbose(msg: &ChatMessage, verbose: bool) -> Vec<Line<
         let prose_for_render: String = if verbose {
             prose_part
         } else {
-            prose_part.lines().filter(|l| !l.starts_with("[runner] ") && !l.starts_with("[runner stderr]") && !l.starts_with("[cast-summary]")).collect::<Vec<_>>().join("\n")
+            prose_part
+                .lines()
+                .filter(|l| !l.starts_with("[runner] ") && !l.starts_with("[runner stderr]") && !l.starts_with("[cast-summary]"))
+                .collect::<Vec<_>>()
+                .join("\n")
         };
 
         let mut out = if prose_for_render.trim().is_empty() {
@@ -159,10 +163,7 @@ pub fn message_lines_with_verbose(msg: &ChatMessage, verbose: bool) -> Vec<Line<
         // Mutating-on-disk tools (edit_file / write_file / apply_patch)
         // get a unified-diff render below the header line. Other tools
         // keep the existing header-plus-collapsed-output shape.
-        let diff_lines = tc
-            .arguments_full
-            .as_ref()
-            .and_then(|args| crate::tool_diff::render(&tc.tool_name, args));
+        let diff_lines = tc.arguments_full.as_ref().and_then(|args| crate::tool_diff::render(&tc.tool_name, args));
 
         // For diff-renderable tools, hide the noisy "(args_preview...)"
         // inline payload — the diff below carries the same info, more
@@ -173,7 +174,12 @@ pub fn message_lines_with_verbose(msg: &ChatMessage, verbose: bool) -> Vec<Line<
         } else {
             format!("(\"{}\")", tc.arguments_preview)
         };
-        let collapse_indicator = if diff_lines.is_some() {
+        // Force errors expanded — the failure reason is the whole point.
+        // Collapsing it behind ▶ hides the actionable info ("path required",
+        // "Wonk denied: ...", "tool not in allowlist") at exactly the moment
+        // the user needs it to debug.
+        let force_expand_error = matches!(tc.status, ToolStatus::Error) && tc.output.is_some();
+        let collapse_indicator = if diff_lines.is_some() || force_expand_error {
             ""
         } else if tc.output.is_some() {
             if tc.collapsed {
@@ -193,10 +199,11 @@ pub fn message_lines_with_verbose(msg: &ChatMessage, verbose: bool) -> Vec<Line<
 
         if let Some(diff) = diff_lines {
             lines.extend(diff);
-        } else if !tc.collapsed {
+        } else if !tc.collapsed || force_expand_error {
             if let Some(ref output) = tc.output {
+                let style = if force_expand_error { theme::error() } else { theme::muted() };
                 for output_line in output.lines() {
-                    lines.push(Line::from(Span::styled(format!("  │ {output_line}"), theme::muted())));
+                    lines.push(Line::from(Span::styled(format!("  │ {output_line}"), style)));
                 }
             }
         }
@@ -429,6 +436,38 @@ mod tests {
         let area = Rect::new(0, 0, 80, 4);
         let r = compute_regions(area, 8);
         assert!(r.preview.is_none());
+    }
+
+    #[test]
+    fn errored_tool_call_renders_output_inline_even_when_collapsed() {
+        // Even if `collapsed` is true (the default for non-streaming
+        // tool calls), an Error status should force the output to
+        // render inline so the user sees the failure reason without
+        // having to expand. Regression for pearl th-f34f45.
+        use crate::state::{ToolCallState, ToolStatus};
+        let mut msg = ChatMessage::assistant("");
+        let tc = ToolCallState {
+            id: "1".into(),
+            tool_name: "list_files".into(),
+            arguments_preview: String::new(),
+            arguments_full: None,
+            output: Some("path required".into()),
+            status: ToolStatus::Error,
+            collapsed: true,
+            started_at: chrono::Utc::now(),
+            duration_ms: Some(0),
+        };
+        msg.tool_calls.push(tc);
+        let lines = message_lines(&msg);
+        let body_visible = lines.iter().any(|l| l.spans.iter().any(|s| s.content.contains("path required")));
+        assert!(body_visible, "error output must render inline regardless of collapsed flag");
+        // And the header shouldn't carry a ▶ indicator since we forced expand.
+        let header_no_caret = lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.contains("list_files")))
+            .map(|l| !l.spans.iter().any(|s| s.content.contains('▶')))
+            .unwrap_or(false);
+        assert!(header_no_caret, "errored tool header should drop the ▶ collapse indicator");
     }
 
     #[test]

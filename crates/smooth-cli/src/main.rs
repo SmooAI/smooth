@@ -3402,10 +3402,7 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             //      th pearls init somewhere else) and shares no
             //      history with the local store. The bare Dolt
             //      error is opaque; we surface a clear next step.
-            let opts = smooth_pearls::PushOpts {
-                force,
-                set_upstream: false,
-            };
+            let opts = smooth_pearls::PushOpts { force, set_upstream: false };
             match dolt.push_with(opts) {
                 Ok(output) => println!("{output}"),
                 Err(e) if is_global_pearl_store(&dolt_dir) && is_no_remote_error(&e) => {
@@ -3413,10 +3410,7 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
                 }
                 Err(e) if is_no_upstream_error(&e) => {
                     println!("(no upstream — retrying with --set-upstream)");
-                    let retry = smooth_pearls::PushOpts {
-                        force,
-                        set_upstream: true,
-                    };
+                    let retry = smooth_pearls::PushOpts { force, set_upstream: true };
                     let output = dolt.push_with(retry)?;
                     println!("{output}");
                 }

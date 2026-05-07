@@ -188,18 +188,10 @@ pub fn smoo_gradient_color(i: usize, total: usize) -> Color {
         STOP_0
     } else if t < 0.79 {
         let u = (t - 0.30) / (0.79 - 0.30);
-        (
-            lerp_u8(STOP_0.0, STOP_1.0, u),
-            lerp_u8(STOP_0.1, STOP_1.1, u),
-            lerp_u8(STOP_0.2, STOP_1.2, u),
-        )
+        (lerp_u8(STOP_0.0, STOP_1.0, u), lerp_u8(STOP_0.1, STOP_1.1, u), lerp_u8(STOP_0.2, STOP_1.2, u))
     } else {
         let u = (t - 0.79) / (1.0 - 0.79);
-        (
-            lerp_u8(STOP_1.0, STOP_2.0, u),
-            lerp_u8(STOP_1.1, STOP_2.1, u),
-            lerp_u8(STOP_1.2, STOP_2.2, u),
-        )
+        (lerp_u8(STOP_1.0, STOP_2.0, u), lerp_u8(STOP_1.1, STOP_2.1, u), lerp_u8(STOP_1.2, STOP_2.2, u))
     };
     Color::Rgb(r, g, b)
 }
