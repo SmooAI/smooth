@@ -78,17 +78,41 @@ pub fn message_lines_with_verbose(msg: &ChatMessage, verbose: bool) -> Vec<Line<
     // dim timestamps + green INFO + italic field names render in
     // their actual colors instead of as raw `[2m...[0m` litter.
     let mut content_lines: Vec<Line<'static>> = if matches!(msg.role, ChatRole::Assistant) && !msg.content.is_empty() {
-        if let Some(pos) = msg.content.find("[runner stderr]") {
-            let (prose, stderr_block) = msg.content.split_at(pos);
-            let mut out = if prose.is_empty() {
-                Vec::new()
-            } else {
-                crate::markdown::render(prose)
-            };
-            // Diagnostics tail. Hidden unless the user has toggled
-            // `/verbose` — for normal turns it's noise that buries
-            // the actual answer. The content stays in `msg.content`
-            // either way so saved sessions round-trip.
+        // Two diagnostic "frames" the runner / Big Smooth inject
+        // into the assistant content:
+        //
+        // 1. **[runner stderr] block** — single tail block from the
+        //    direct (non-streaming) dispatch path. Marker present.
+        // 2. **`[runner] …\n` lines** — per-line stderr forwarded
+        //    by the sandboxed dispatch path (server.rs:2598). No
+        //    marker; the lines just start with `[runner] ` and
+        //    are interleaved with prose.
+        //
+        // Default render hides BOTH unless `/verbose` is on. Prose
+        // lines in between still render via markdown.
+        let (prose_part, marker_block_part) = if let Some(pos) = msg.content.find("[runner stderr]") {
+            let (a, b) = msg.content.split_at(pos);
+            (a.to_string(), Some(b.to_string()))
+        } else {
+            (msg.content.clone(), None)
+        };
+
+        // Strip per-line `[runner] ` lines from prose_part when
+        // `verbose` is off. Keep them when on so the diagnostics
+        // are complete.
+        let prose_for_render: String = if verbose {
+            prose_part
+        } else {
+            prose_part.lines().filter(|l| !l.starts_with("[runner] ") && !l.starts_with("[runner stderr]") && !l.starts_with("[cast-summary]")).collect::<Vec<_>>().join("\n")
+        };
+
+        let mut out = if prose_for_render.trim().is_empty() {
+            Vec::new()
+        } else {
+            crate::markdown::render(&prose_for_render)
+        };
+
+        if let Some(stderr_block) = marker_block_part {
             if verbose {
                 for raw_line in stderr_block.lines() {
                     let spans = if crate::ansi::line_has_ansi(raw_line) {
@@ -99,10 +123,8 @@ pub fn message_lines_with_verbose(msg: &ChatMessage, verbose: bool) -> Vec<Line<
                     out.push(Line::from(spans));
                 }
             }
-            out
-        } else {
-            crate::markdown::render(&msg.content)
         }
+        out
     } else {
         msg.content.lines().map(|l| Line::from(Span::raw(l.to_string()))).collect()
     };

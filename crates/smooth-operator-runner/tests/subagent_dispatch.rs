@@ -287,9 +287,19 @@ async fn fixer_role_dispatches_scout_and_only_final_summary_leaks() {
         "final_message must include sidekick summary: {final_message}"
     );
 
-    // Exactly three fields — no extra leakage vector.
+    // The dispatched result must contain exactly the documented
+    // schema fields and nothing else — no extra leakage vector.
+    // The `verified_paths` / `unverified_paths` fields are emitted
+    // when non-empty (the trust-but-verify follow-up from C4), so
+    // the count is 3 + however many of those two are present.
     let obj = parsed.as_object().expect("tool result is object");
-    assert_eq!(obj.len(), 3, "DispatchResult must have exactly 3 fields: {obj:?}");
+    assert!(obj.contains_key("agent"), "missing agent in DispatchResult: {obj:?}");
+    assert!(obj.contains_key("turns"), "missing turns in DispatchResult: {obj:?}");
+    assert!(obj.contains_key("final_message"), "missing final_message in DispatchResult: {obj:?}");
+    let allowed: std::collections::HashSet<&str> = ["agent", "turns", "final_message", "verified_paths", "unverified_paths"].into_iter().collect();
+    for key in obj.keys() {
+        assert!(allowed.contains(key.as_str()), "unexpected field {key} in DispatchResult: {obj:?}");
+    }
 
     // SANITY: none of the parent's messages OUTSIDE the tool result
     // body contain the sidekick's raw message. (The tool result
