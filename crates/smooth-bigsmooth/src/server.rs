@@ -2520,21 +2520,30 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
                             }
                             "ToolCallStart" => {
                                 let tool_name = event.get("tool_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                // Read arguments from the runner's
+                                // JSON-line emit (pearl th-7a5106).
+                                // Older runner builds don't populate
+                                // this field; fall back to "" so the
+                                // legacy "tool name only" behavior
+                                // still works.
+                                let arguments = event.get("arguments").and_then(|v| v.as_str()).unwrap_or("").to_string();
                                 let _ = event_tx_out.send(ServerEvent::ToolCallStart {
                                     task_id: tid_out.clone(),
                                     tool_name,
-                                    arguments: String::new(),
+                                    arguments,
                                 });
                             }
                             "ToolCallComplete" => {
                                 let tool_name = event.get("tool_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
                                 let is_error = event.get("is_error").and_then(serde_json::Value::as_bool).unwrap_or(false);
+                                let result = event.get("result").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                let duration_ms = event.get("duration_ms").and_then(serde_json::Value::as_u64).unwrap_or(0);
                                 let _ = event_tx_out.send(ServerEvent::ToolCallComplete {
                                     task_id: tid_out.clone(),
                                     tool_name,
-                                    result: String::new(),
+                                    result,
                                     is_error,
-                                    duration_ms: 0,
+                                    duration_ms,
                                 });
                             }
                             "Completed" => {
@@ -2794,11 +2803,23 @@ async fn run_task_handler(State(state): State<AppState>, Json(req): Json<TaskReq
                 Ok(event) => {
                     let agent_event = match event {
                         ServerEvent::TokenDelta { content, .. } => Some(AgentEvent::TokenDelta { content }),
-                        ServerEvent::ToolCallStart { tool_name, .. } => Some(AgentEvent::ToolCallStart { iteration: 0, tool_name }),
-                        ServerEvent::ToolCallComplete { tool_name, is_error, .. } => Some(AgentEvent::ToolCallComplete {
+                        ServerEvent::ToolCallStart { tool_name, arguments, .. } => Some(AgentEvent::ToolCallStart {
+                            iteration: 0,
+                            tool_name,
+                            arguments,
+                        }),
+                        ServerEvent::ToolCallComplete {
+                            tool_name,
+                            is_error,
+                            result,
+                            duration_ms,
+                            ..
+                        } => Some(AgentEvent::ToolCallComplete {
                             iteration: 0,
                             tool_name,
                             is_error,
+                            result,
+                            duration_ms,
                         }),
                         ServerEvent::TaskComplete { iterations, cost_usd, .. } => {
                             let _ = sse_tx.send(AgentEvent::Completed {

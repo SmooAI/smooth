@@ -256,13 +256,14 @@ async fn golden_e2e_build_web_server() -> anyhow::Result<()> {
         AgentEvent::LlmRequest { iteration, message_count } => {
             println!("[iter {iteration}] LLM request with {message_count} messages");
         }
-        AgentEvent::ToolCallStart { iteration, tool_name } => {
+        AgentEvent::ToolCallStart { iteration, tool_name, .. } => {
             println!("[iter {iteration}] calling tool: {tool_name}");
         }
         AgentEvent::ToolCallComplete {
             iteration,
             tool_name,
             is_error,
+            ..
         } => {
             let status = if *is_error { "ERROR" } else { "ok" };
             println!("[iter {iteration}] tool {tool_name} -> {status}");

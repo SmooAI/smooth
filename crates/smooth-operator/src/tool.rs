@@ -248,6 +248,19 @@ impl ToolRegistry {
     /// Returns error if a pre-hook blocks the call, the tool is not found,
     /// or the tool execution fails.
     pub async fn execute(&self, call: &ToolCall) -> ToolResult {
+        // Normalize args. Some small models (Gemini Flash family
+        // notably) emit a literal `""` empty-string when calling a
+        // tool that takes no parameters, instead of the schema-
+        // correct `{}`. Downstream hooks + tools that expect an
+        // object then fail on what should have been a no-op call.
+        // Treat empty-string and null args as equivalent to `{}`.
+        let mut call = call.clone();
+        let needs_norm = matches!(&call.arguments, serde_json::Value::String(s) if s.is_empty()) || call.arguments.is_null();
+        if needs_norm {
+            call.arguments = serde_json::Value::Object(serde_json::Map::new());
+        }
+        let call = &call;
+
         // Run pre-hooks
         for hook in &self.hooks {
             if let Err(e) = hook.pre_call(call).await {
@@ -296,6 +309,16 @@ impl ToolRegistry {
 
     /// Execute a single tool call with hooks, used internally.
     async fn execute_single(tools: &HashMap<String, Arc<dyn Tool>>, hooks: &[Arc<dyn ToolHook>], call: &ToolCall) -> ToolResult {
+        // Mirror the empty-args normalization in `execute` — same
+        // small-model bug (Gemini Flash etc. send `""` instead of
+        // `{}` for no-param tools), same fix.
+        let mut call = call.clone();
+        let needs_norm = matches!(&call.arguments, serde_json::Value::String(s) if s.is_empty()) || call.arguments.is_null();
+        if needs_norm {
+            call.arguments = serde_json::Value::Object(serde_json::Map::new());
+        }
+        let call = &call;
+
         // Run pre-hooks
         for hook in hooks {
             if let Err(e) = hook.pre_call(call).await {
