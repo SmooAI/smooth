@@ -372,7 +372,12 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
             state.current_phase_upstream = None;
             state.finish_streaming();
         }
-        AgentEvent::PhaseStart { phase, alias, upstream, iteration } => {
+        AgentEvent::PhaseStart {
+            phase,
+            alias,
+            upstream,
+            iteration,
+        } => {
             state.current_phase = Some(phase.clone());
             state.current_phase_alias = Some(alias.clone());
             state.current_phase_upstream = upstream.clone();
@@ -903,7 +908,10 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
                         continue;
                     }
                 }
-                pending.entry(tool_name.clone()).or_default().push_back((id, std::time::Instant::now(), arguments.clone()));
+                pending
+                    .entry(tool_name.clone())
+                    .or_default()
+                    .push_back((id, std::time::Instant::now(), arguments.clone()));
                 Some(AgentEvent::ToolCallStart {
                     iteration: 0,
                     tool_name,
@@ -951,7 +959,9 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
                 let _ = tx.send(AgentEvent::Error { message });
                 break;
             }
-            ServerEvent::NarcAlert { severity, category, message, .. } => {
+            ServerEvent::NarcAlert {
+                severity, category, message, ..
+            } => {
                 // Narc severity: Block = the call was actually blocked
                 // (treat as error), Warn = informational alert (surface
                 // inline so the user can see it but don't kill the

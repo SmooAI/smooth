@@ -154,7 +154,11 @@ impl CommandRegistry {
         // [cast-summary] diagnostic block is rendered on assistant
         // messages. Off by default — diagnostics are noise for normal
         // turns; on when the user wants to see what the runner did.
-        self.register("verbose", "Toggle [runner stderr] / [cast-summary] diagnostics (off by default)", Box::new(cmd_verbose));
+        self.register(
+            "verbose",
+            "Toggle [runner stderr] / [cast-summary] diagnostics (off by default)",
+            Box::new(cmd_verbose),
+        );
     }
 
     /// Execute a slash command, handling `/skill:name` syntax by splitting the colon-separated
@@ -405,16 +409,11 @@ fn cmd_agent(args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput> 
         return Ok(CommandOutput::Message(lines.join("\n")));
     }
     if !known.contains(&args) {
-        return Ok(CommandOutput::Message(format!(
-            "Unknown role: {args}. Available: {}",
-            known.join(", ")
-        )));
+        return Ok(CommandOutput::Message(format!("Unknown role: {args}. Available: {}", known.join(", "))));
     }
     let old = std::mem::replace(&mut state.agent_name, args.to_string());
     state.agent_pinned = true;
-    Ok(CommandOutput::Message(format!(
-        "Lead role: {old} -> {args} (pinned — auto intent routing off)"
-    )))
+    Ok(CommandOutput::Message(format!("Lead role: {old} -> {args} (pinned — auto intent routing off)")))
 }
 
 #[allow(clippy::unnecessary_wraps)]
