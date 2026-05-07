@@ -1931,6 +1931,46 @@ async fn main() {
         tracing::info!(active_role = %active_role.name, "send_sidekick tool registered");
     }
 
+    // Slot-aware LLM config. The default `llm` we built earlier from
+    // SMOOTH_API_URL / SMOOTH_API_KEY / SMOOTH_MODEL points at the
+    // *default* provider's *default* model — which means oracle (slot
+    // = Reasoning) and other non-Coding roles would call the cheap
+    // `smooth-fast-*` model instead of their actual slot's model.
+    // When the routing JSON is available (it always is for sandboxed
+    // dispatch), reparse it here and ask the registry for the model
+    // that maps to `active_role.slot`. The workflow path further
+    // down does its own per-phase resolution via the same registry,
+    // so this only narrows the single-agent path's choice.
+    let routing_json_for_slot = std::env::var("SMOOTH_ROUTING_JSON_FILE")
+        .ok()
+        .and_then(|path| std::fs::read_to_string(&path).ok())
+        .or_else(|| std::env::var("SMOOTH_ROUTING_JSON").ok());
+    let llm = if let Some(raw) = routing_json_for_slot.as_deref() {
+        match smooth_operator::providers::ProviderRegistry::from_json(raw) {
+            Ok(registry) => match registry.llm_config_for(active_role.slot) {
+                Ok(slot_cfg) => {
+                    tracing::info!(
+                        role = %active_role.name,
+                        slot = ?active_role.slot,
+                        model = %slot_cfg.model,
+                        "single-agent path: using slot-resolved LlmConfig (overrides SMOOTH_MODEL default)"
+                    );
+                    slot_cfg
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, slot = ?active_role.slot, "slot-resolve failed; falling back to env-var default model");
+                    llm
+                }
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "routing JSON unparseable for slot resolve; using env-var default");
+                llm
+            }
+        }
+    } else {
+        llm
+    };
+
     // System prompt is compiled in from prompts/system.md (the tool
     // harness — tool guidance, workflow constraints, error recovery).
     // On top of that we append the agent's role prompt and, when
