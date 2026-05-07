@@ -903,8 +903,12 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
                         continue;
                     }
                 }
-                pending.entry(tool_name.clone()).or_default().push_back((id, std::time::Instant::now(), arguments));
-                Some(AgentEvent::ToolCallStart { iteration: 0, tool_name })
+                pending.entry(tool_name.clone()).or_default().push_back((id, std::time::Instant::now(), arguments.clone()));
+                Some(AgentEvent::ToolCallStart {
+                    iteration: 0,
+                    tool_name,
+                    arguments,
+                })
             }
             ServerEvent::ToolCallComplete {
                 tool_name,
@@ -931,6 +935,8 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
                     iteration: 0,
                     tool_name,
                     is_error,
+                    result,
+                    duration_ms,
                 })
             }
             ServerEvent::TaskComplete { iterations, cost_usd, .. } => {

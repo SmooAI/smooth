@@ -170,11 +170,25 @@ pub enum AgentEvent {
     ToolCallStart {
         iteration: u32,
         tool_name: String,
+        /// Serialized JSON arguments the agent passed to the tool.
+        /// Default = empty string so older runner builds that
+        /// don't populate this still deserialize cleanly.
+        #[serde(default)]
+        arguments: String,
     },
     ToolCallComplete {
         iteration: u32,
         tool_name: String,
         is_error: bool,
+        /// First ~500 chars of the tool's output (truncated to
+        /// keep stdout-event sizes bounded). Default empty for
+        /// older runners.
+        #[serde(default)]
+        result: String,
+        /// Wall-clock duration of the tool call. Default 0 for
+        /// older runners.
+        #[serde(default)]
+        duration_ms: u64,
     },
     CheckpointSaved {
         checkpoint_id: String,
@@ -600,27 +614,32 @@ impl Agent {
 
             if self.config.parallel_tools {
                 for tool_call in &response.tool_calls {
+                    let args_json = tool_call.arguments.to_string();
                     self.emit(AgentEvent::ToolCallStart {
                         iteration,
                         tool_name: tool_call.name.clone(),
+                        arguments: args_json.clone(),
                     });
                     self.report_to_bigsmooth(ReporterEvent::ToolCallStart {
                         tool_name: tool_call.name.clone(),
-                        arguments: tool_call.arguments.to_string(),
+                        arguments: args_json,
                     });
                 }
 
                 let results = self.tools.execute_parallel(&response.tool_calls).await;
 
                 for (tool_call, result) in response.tool_calls.iter().zip(&results) {
+                    let result_preview: String = result.content.chars().take(500).collect();
                     self.emit(AgentEvent::ToolCallComplete {
                         iteration,
                         tool_name: tool_call.name.clone(),
                         is_error: result.is_error,
+                        result: result_preview.clone(),
+                        duration_ms: 0,
                     });
                     self.report_to_bigsmooth(ReporterEvent::ToolCallComplete {
                         tool_name: tool_call.name.clone(),
-                        result: result.content.chars().take(500).collect(),
+                        result: result_preview,
                         is_error: result.is_error,
                         duration_ms: 0,
                     });
@@ -629,27 +648,32 @@ impl Agent {
                 }
             } else {
                 for tool_call in &response.tool_calls {
+                    let args_json = tool_call.arguments.to_string();
                     self.emit(AgentEvent::ToolCallStart {
                         iteration,
                         tool_name: tool_call.name.clone(),
+                        arguments: args_json.clone(),
                     });
                     self.report_to_bigsmooth(ReporterEvent::ToolCallStart {
                         tool_name: tool_call.name.clone(),
-                        arguments: tool_call.arguments.to_string(),
+                        arguments: args_json,
                     });
 
                     let start = std::time::Instant::now();
                     let result = self.tools.execute(tool_call).await;
                     let duration_ms = start.elapsed().as_millis() as u64;
+                    let result_preview: String = result.content.chars().take(500).collect();
 
                     self.emit(AgentEvent::ToolCallComplete {
                         iteration,
                         tool_name: tool_call.name.clone(),
                         is_error: result.is_error,
+                        result: result_preview.clone(),
+                        duration_ms,
                     });
                     self.report_to_bigsmooth(ReporterEvent::ToolCallComplete {
                         tool_name: tool_call.name.clone(),
-                        result: result.content.chars().take(500).collect(),
+                        result: result_preview,
                         is_error: result.is_error,
                         duration_ms,
                     });
@@ -873,6 +897,7 @@ impl Agent {
                     let _ = tx.send(AgentEvent::ToolCallStart {
                         iteration,
                         tool_name: tool_call.name.clone(),
+                        arguments: tool_call.arguments.to_string(),
                     });
                 }
 
@@ -883,6 +908,8 @@ impl Agent {
                         iteration,
                         tool_name: tool_call.name.clone(),
                         is_error: result.is_error,
+                        result: result.content.chars().take(500).collect(),
+                        duration_ms: 0,
                     });
                     conversation.push(Message::tool_result_named(&tool_call.id, &tool_call.name, &result.content));
                     self.maybe_checkpoint(&conversation, iteration, CheckpointEvent::ToolCallComplete);
@@ -892,14 +919,19 @@ impl Agent {
                     let _ = tx.send(AgentEvent::ToolCallStart {
                         iteration,
                         tool_name: tool_call.name.clone(),
+                        arguments: tool_call.arguments.to_string(),
                     });
 
+                    let start = std::time::Instant::now();
                     let result = self.tools.execute(tool_call).await;
+                    let duration_ms = start.elapsed().as_millis() as u64;
 
                     let _ = tx.send(AgentEvent::ToolCallComplete {
                         iteration,
                         tool_name: tool_call.name.clone(),
                         is_error: result.is_error,
+                        result: result.content.chars().take(500).collect(),
+                        duration_ms,
                     });
 
                     conversation.push(Message::tool_result_named(&tool_call.id, &tool_call.name, &result.content));
@@ -1197,11 +1229,14 @@ mod tests {
             AgentEvent::ToolCallStart {
                 iteration: 1,
                 tool_name: "echo".into(),
+                arguments: String::new(),
             },
             AgentEvent::ToolCallComplete {
                 iteration: 1,
                 tool_name: "echo".into(),
                 is_error: false,
+                result: String::new(),
+                duration_ms: 0,
             },
             AgentEvent::CheckpointSaved {
                 checkpoint_id: "cp".into(),
