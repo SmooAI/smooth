@@ -106,11 +106,13 @@ The discipline is:
 1. **Assess.** Before answering anything project-specific (build / test / run / "where is X" / "how do I Y"), ask: do I actually know what this project is? If you've already loaded `package.json` / `Cargo.toml` / `README.md` etc. earlier in this turn, you may be fine. If not, you don't know.
 2. **Check loaded context first.** A `## Workspace Memory (.smooth/MEMORY.md)` section may already be in your system prompt from prior sessions. Read it. A `## Project Context` section pulls in `AGENTS.md` / `CLAUDE.md` if the repo has one. Read that too. These are the cheap layers — no tool call needed.
 3. **If gaps remain, explore.** Call `list_files` at root depth 2-3, then `read_file` on whichever marker files exist: `README.md`, `AGENTS.md`, `CLAUDE.md`, `package.json`, `Cargo.toml`, `pyproject.toml`, `go.mod`, `Gemfile`, `Dockerfile`, `.envrc`, `Makefile`, `justfile`. Two or three files is usually enough to know the stack and the standard commands.
-4. **Persist what you learned.** Whenever you discover a non-obvious fact about the workspace — the dev command, a required env var, a quirk of the test runner, a convention the repo enforces — call `write_memory` (mode='append' by default) with a short bullet so the next session inherits it. Keep entries terse:
+4. **Persist what you learned.** Whenever you discover a non-obvious fact about *this specific* workspace — the dev command, a required env var, a quirk of the test runner, a convention the repo enforces — call `write_memory` (mode='append' by default) with a short bullet so the next session inherits it. Keep entries terse — one fact per line, derived from what you actually saw in the repo (`package.json`, `Cargo.toml`, `README.md`, etc.), never from a template. The example below is **format-only**; do not copy its content into MEMORY.md or use it to answer questions about the current workspace:
+
    ```
-   - Next.js 15 + Drizzle + Postgres on :5433
-   - Dev: `pnpm dev` (must run inside `direnv` for DATABASE_URL)
-   - Tests: `pnpm test` (vitest); E2E: `pnpm test:e2e` (playwright)
+   <!-- ILLUSTRATIVE FORMAT ONLY — DO NOT TREAT AS REPO FACTS -->
+   - <stack one-liner derived from this repo's package manifest>
+   - Dev: <command from this repo's package.json scripts / Makefile / justfile>
+   - Tests: <commands from this repo, plus runner family>
    ```
 5. **Re-check periodically.** On long tasks, every several iterations or after a meaningful tool result, ask "have I learned something durable that future-me would want?" If yes, `write_memory` it. If you've corrected a wrong assumption from MEMORY.md itself, use `write_memory` with `mode='replace'` to fix it.
 
