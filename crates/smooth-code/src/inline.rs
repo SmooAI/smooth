@@ -40,6 +40,16 @@ use crate::theme;
 /// flush.
 #[must_use]
 pub fn message_lines(msg: &ChatMessage) -> Vec<Line<'static>> {
+    message_lines_with_verbose(msg, false)
+}
+
+/// Same as [`message_lines`] but with explicit control over whether
+/// the trailing `[runner stderr]` / `[cast-summary]` diagnostic
+/// block is rendered. Default callers should use [`message_lines`]
+/// which hides them; the active dispatch path passes the user's
+/// `/verbose` toggle via [`AppState::verbose`].
+#[must_use]
+pub fn message_lines_with_verbose(msg: &ChatMessage, verbose: bool) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     // Role label. Assistant uses the brand wordmark gradient
@@ -75,13 +85,19 @@ pub fn message_lines(msg: &ChatMessage) -> Vec<Line<'static>> {
             } else {
                 crate::markdown::render(prose)
             };
-            for raw_line in stderr_block.lines() {
-                let spans = if crate::ansi::line_has_ansi(raw_line) {
-                    crate::ansi::parse_line_to_spans(raw_line)
-                } else {
-                    vec![Span::styled(raw_line.to_string(), theme::muted())]
-                };
-                out.push(Line::from(spans));
+            // Diagnostics tail. Hidden unless the user has toggled
+            // `/verbose` — for normal turns it's noise that buries
+            // the actual answer. The content stays in `msg.content`
+            // either way so saved sessions round-trip.
+            if verbose {
+                for raw_line in stderr_block.lines() {
+                    let spans = if crate::ansi::line_has_ansi(raw_line) {
+                        crate::ansi::parse_line_to_spans(raw_line)
+                    } else {
+                        vec![Span::styled(raw_line.to_string(), theme::muted())]
+                    };
+                    out.push(Line::from(spans));
+                }
             }
             out
         } else {
@@ -183,12 +199,13 @@ where
     B::Error: Send + Sync + 'static,
 {
     let viewport_width = terminal.size().map_err(anyhow::Error::from)?.width.max(1);
+    let verbose = state.verbose;
     while state.committed_count < state.messages.len() {
         let msg = &state.messages[state.committed_count];
         if msg.streaming {
             break;
         }
-        let lines = message_lines(msg);
+        let lines = message_lines_with_verbose(msg, verbose);
         let height = paragraph_height(&lines, viewport_width);
         if height == 0 {
             // Nothing to render — still mark committed so we don't
@@ -270,7 +287,7 @@ fn paragraph_height(lines: &[Line<'static>], width: u16) -> u16 {
 pub fn viewport_preview_lines(state: &AppState) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     for msg in state.messages.iter().skip(state.committed_count) {
-        lines.extend(message_lines(msg));
+        lines.extend(message_lines_with_verbose(msg, state.verbose));
     }
 
     // "Generating..." spinner — only when the assistant has started
