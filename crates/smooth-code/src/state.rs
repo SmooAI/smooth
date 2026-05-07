@@ -488,18 +488,16 @@ impl AppState {
 
     /// Append content to the last streaming assistant message.
     ///
-    /// Strips ANSI escape sequences before appending — runner stderr
-    /// rides into the assistant message via `TokenDelta` chunks
-    /// carrying `\x1b[2m...` (or the bare `[2m...` form when the ESC
-    /// byte is scrubbed in transit), and the markdown renderer would
-    /// otherwise leave them as raw `[2m...[0m` litter.
+    /// Raw content goes in verbatim — ANSI escape sequences from the
+    /// runner are preserved so the renderer can turn them into actual
+    /// colored Spans instead of either stripping them or showing
+    /// `[2m...[0m` as plain text.
     ///
     /// No-op if the last message is not a streaming assistant message.
     pub fn append_stream_content(&mut self, content: &str) {
         if let Some(msg) = self.messages.last_mut() {
             if msg.role == ChatRole::Assistant && msg.streaming {
-                let cleaned = crate::ansi::strip(content);
-                msg.content.push_str(&cleaned);
+                msg.content.push_str(content);
                 // Auto-scroll to bottom when not manually scrolled
                 if !self.user_scrolled {
                     self.scroll_offset = 0;

@@ -49,8 +49,33 @@ pub fn message_lines(msg: &ChatMessage) -> Vec<Line<'static>> {
     };
     lines.push(Line::from(Span::styled(format!("{label}:"), label_style)));
 
+    // Assistant content path: markdown for prose, ANSI-color parsing
+    // for the runner-stderr block (which arrives at the tail of the
+    // message as ANSI-coded tracing logs). Split the content at the
+    // first occurrence of `[runner stderr]` — everything before is
+    // markdown, everything after gets per-line ANSI parsing so the
+    // dim timestamps + green INFO + italic field names render in
+    // their actual colors instead of as raw `[2m...[0m` litter.
     let mut content_lines: Vec<Line<'static>> = if matches!(msg.role, ChatRole::Assistant) && !msg.content.is_empty() {
-        crate::markdown::render(&msg.content)
+        if let Some(pos) = msg.content.find("[runner stderr]") {
+            let (prose, stderr_block) = msg.content.split_at(pos);
+            let mut out = if prose.is_empty() {
+                Vec::new()
+            } else {
+                crate::markdown::render(prose)
+            };
+            for raw_line in stderr_block.lines() {
+                let spans = if crate::ansi::line_has_ansi(raw_line) {
+                    crate::ansi::parse_line_to_spans(raw_line)
+                } else {
+                    vec![Span::styled(raw_line.to_string(), theme::muted())]
+                };
+                out.push(Line::from(spans));
+            }
+            out
+        } else {
+            crate::markdown::render(&msg.content)
+        }
     } else {
         msg.content.lines().map(|l| Line::from(Span::raw(l.to_string()))).collect()
     };
