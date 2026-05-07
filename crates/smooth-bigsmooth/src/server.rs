@@ -1316,20 +1316,17 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
             }
         }
 
-        // Derive the LLM gateway host from the API URL so we only
-        // substitute the secret for that destination. Minimal
-        // string parse — avoids pulling in a full URL crate just
-        // for host extraction.
-        let llm_host = extract_host_from_url(&api_url);
-        let api_key_secret = crate::sandbox::SecretConfig {
-            env_var: "SMOOTH_API_KEY".into(),
-            value: api_key,
-            // A deterministic sentinel — if this ever shows up on a
-            // server log, something routed past the microsandbox
-            // substitution and we want it obvious.
-            placeholder: "SMOOTH_PLACEHOLDER_API_KEY_NOT_SUBSTITUTED".into(),
-            allowed_hosts: if llm_host.is_empty() { Vec::new() } else { vec![llm_host] },
-        };
+        // INTERIM (pearl th-a13170 / parent investigation th-6030b0):
+        // microsandbox 0.3.14's SecretBuilder placeholder substitution
+        // wasn't firing on outbound LLM requests — agents kept sending
+        // the literal placeholder string to LiteLLM and getting 401.
+        // Until we either (a) upgrade microsandbox to 0.4.x where this
+        // may be fixed, or (b) figure out why allow_all-network +
+        // secret-builder don't compose, just inject SMOOTH_API_KEY
+        // as a plain env var. The agent in the VM can read its own
+        // key — known exfil risk, accepted to unblock dev.
+        let _ = extract_host_from_url(&api_url); // (still used by env-key-flow placeholder docs)
+        env.insert("SMOOTH_API_KEY".into(), api_key.clone());
         env.insert("SMOOTH_WORKSPACE".into(), "/workspace".into());
         env.insert("SMOOTH_OPERATOR_ID".into(), tid.clone());
 
@@ -1811,7 +1808,9 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
                 .or_else(|| Some(tid.clone())),
             image: image.clone(),
             memory_mb: memory_mb.unwrap_or(SandboxConfig::default().memory_mb),
-            secrets: vec![api_key_secret],
+            // Empty: pearl th-a13170 — interim, see SMOOTH_API_KEY env
+            // injection above for why we don't go through SecretBuilder.
+            secrets: Vec::new(),
             // Named microsandbox Volume is the default backend for
             // the project cache (th-266809 flipped this after the CLI
             // learned both backends in th-fb7bec). Setting
