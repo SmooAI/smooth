@@ -971,12 +971,17 @@ async fn cmd_up(
         let pid = child.id();
         std::fs::write(&pid_path, pid.to_string())?;
 
-        // The visible text (without ANSI) that goes inside the box
-        let inner = format!(" Smooth started (pid {pid}) ");
-        let w = inner.len() + 2; // +2 for left/right padding
+        // Box width is sized off the *visible* text — the gradient
+        // wordmark below carries ANSI escapes that inflate the byte
+        // length, so we measure the plain form and render the colored
+        // one. Wordmark matches the foreground `th up` startup line
+        // and the TUI's role label (pearl th-2ce91f).
+        let visible = format!(" Smooth started (pid {pid}) ");
+        let w = visible.len() + 2;
+        let colored = format!(" {} started (pid {pid}) ", gradient::smooth());
         println!();
         println!("  \x1b[2m\u{256d}{}\u{256e}\x1b[0m", "\u{2500}".repeat(w));
-        println!("  \x1b[2m\u{2502}\x1b[0m \x1b[32;1m{inner}\x1b[0m \x1b[2m\u{2502}\x1b[0m");
+        println!("  \x1b[2m\u{2502}\x1b[0m {colored} \x1b[2m\u{2502}\x1b[0m");
         println!("  \x1b[2m\u{2570}{}\u{256f}\x1b[0m", "\u{2500}".repeat(w));
         println!("    {}  {}", "Web UI".dimmed(), format!("http://localhost:{port}").cyan().bold());
         println!("    {}  {}", "Logs  ".dimmed(), log_path.display().to_string().dimmed());
