@@ -2009,21 +2009,33 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
                         }
                         "ToolCallStart" => {
                             let tool_name = event.get("tool_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            // Pearl th-08d821: read arguments from the runner's
+                            // emit. The direct-dispatch sibling parser was
+                            // already updated; this is the sandboxed-blocking
+                            // path. Older runner builds don't populate the
+                            // field; the "" fallback keeps them working.
+                            let arguments = event.get("arguments").and_then(|v| v.as_str()).unwrap_or("").to_string();
                             let _ = event_tx.send(ServerEvent::ToolCallStart {
                                 task_id: tid.clone(),
                                 tool_name,
-                                arguments: String::new(),
+                                arguments,
                             });
                         }
                         "ToolCallComplete" => {
                             let tool_name = event.get("tool_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
                             let is_error = event.get("is_error").and_then(serde_json::Value::as_bool).unwrap_or(false);
+                            // Pearl th-08d821: forward result + duration_ms so
+                            // the TUI can render the output body and real
+                            // timing (was "(0.0s)" with empty body for every
+                            // call regardless of how long it actually took).
+                            let result = event.get("result").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let duration_ms = event.get("duration_ms").and_then(serde_json::Value::as_u64).unwrap_or(0);
                             let _ = event_tx.send(ServerEvent::ToolCallComplete {
                                 task_id: tid.clone(),
                                 tool_name,
-                                result: String::new(),
+                                result,
                                 is_error,
-                                duration_ms: 0,
+                                duration_ms,
                             });
                         }
                         "Completed" => {
