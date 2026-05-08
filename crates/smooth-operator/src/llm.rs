@@ -1178,13 +1178,17 @@ fn to_chat_message(msg: &Message) -> ChatMessage {
         })
         .collect();
 
-    // Omit empty content when the message has tool_calls or is a tool result;
-    // some providers reject `content: ""` in those cases.
-    let content = if msg.content.is_empty() && (!msg.tool_calls.is_empty() || msg.role == Role::Tool) {
-        None
-    } else {
-        Some(msg.content.clone())
-    };
+    // Always send content as an explicit string (possibly empty) — never
+    // None/null/omitted. Three iterations on this:
+    //   1. Original: `Some("")` — failed against some compat shims that
+    //      rejected empty content alongside tool_calls.
+    //   2. th-e8e15e: `None` (omit) — failed against LiteLLM's strict
+    //      deserializer with "400 missing field content".
+    //   3. th-a0ed23: `Some("")` (this attempt) — empty string, key
+    //      always present. OpenAI / Anthropic-compat / Gemini-compat /
+    //      LiteLLM all accept this shape; the providers that historically
+    //      rejected empty-string content seem to have relaxed since.
+    let content = Some(msg.content.clone());
 
     // Tool-result messages must carry the originating tool's `name` so that
     // strict OpenAI-compat upstreams (notably Gemini, when the gateway
@@ -1297,10 +1301,11 @@ mod tests {
     }
 
     #[test]
-    fn to_chat_message_assistant_with_tool_calls_emits_null_content() {
-        // Pearl th-e8e15e: LiteLLM rejects requests where `content` is
-        // omitted ("missing field content"). Must serialize as
-        // `"content": null` instead — the field present, value null.
+    fn to_chat_message_assistant_with_tool_calls_emits_empty_string_content() {
+        // Pearl th-a0ed23: LiteLLM's strict deserializer rejects BOTH
+        // omitted content AND `content: null` for assistant messages
+        // that carry tool_calls. We send an explicit empty string
+        // instead — the field is always present, always a string.
         let mut msg = Message::assistant("");
         msg.tool_calls.push(ToolCall {
             id: "c1".into(),
@@ -1308,17 +1313,17 @@ mod tests {
             arguments: serde_json::json!({}),
         });
         let chat = to_chat_message(&msg);
-        assert!(chat.content.is_none(), "empty content on tool-call message must be None in struct");
+        assert_eq!(chat.content.as_deref(), Some(""), "empty content must be Some(\"\"), not None");
         assert_eq!(chat.tool_calls.len(), 1);
 
-        // Critical wire-format assertion: the serialized JSON must
-        // contain `"content":null`, NOT omit the field. LiteLLM's
-        // strict deserializer demands the key be present.
+        // Critical wire-format assertion: JSON must contain
+        // `"content":""` — never `null`, never omitted.
         let json = serde_json::to_string(&chat).expect("serialize");
         assert!(
-            json.contains(r#""content":null"#),
-            "JSON must explicitly serialize content as null, got: {json}"
+            json.contains(r#""content":"""#),
+            "JSON must serialize empty content as empty string, got: {json}"
         );
+        assert!(!json.contains(r#""content":null"#), "JSON must not contain content:null: {json}");
 
         // Non-empty content should still be passed through
         let mut msg2 = Message::assistant("I'll call a tool.");
@@ -1329,6 +1334,21 @@ mod tests {
         });
         let chat2 = to_chat_message(&msg2);
         assert_eq!(chat2.content.as_deref(), Some("I'll call a tool."));
+    }
+
+    #[test]
+    fn to_chat_message_tool_result_always_has_string_content() {
+        // Tool-result messages always carry the originating tool's
+        // output as content. Even an empty result must serialize as
+        // `"content": ""` so LiteLLM's deserializer is happy.
+        let msg = Message::tool_result("call-1", "");
+        let chat = to_chat_message(&msg);
+        assert_eq!(chat.content.as_deref(), Some(""), "empty tool result must be Some(\"\"), not None");
+        let json = serde_json::to_string(&chat).expect("serialize");
+        assert!(
+            json.contains(r#""content":"""#),
+            "tool result JSON must serialize empty content as empty string: {json}"
+        );
     }
 
     #[test]
