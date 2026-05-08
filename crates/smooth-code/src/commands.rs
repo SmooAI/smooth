@@ -397,7 +397,7 @@ fn cmd_agent(args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput> 
     let known = ["fixer", "oracle", "mapper", "heckler", "runner", "scout"];
     let args = args.trim();
     if args.is_empty() {
-        let lines = vec![
+        let lines = [
             format!("Active role: {}", state.agent_name),
             "Available: fixer (default — coding workflow, full tools)".to_string(),
             "           oracle (read-only Q&A, no bash/write)".to_string(),

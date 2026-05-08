@@ -154,9 +154,22 @@ pub fn message_lines_with_verbose(msg: &ChatMessage, verbose: bool) -> Vec<Line<
             let secs = ms as f64 / 1000.0;
             format!(" ({secs:.1}s)")
         });
+        // Live elapsed counter for in-flight tools — the TUI redraws
+        // every 50ms so this ticks visibly. Tools that finish in <50ms
+        // typically don't render Running at all (the Complete arrives
+        // before the next tick), so this only matters for the longer
+        // calls where the user actually wants progress feedback.
+        #[allow(clippy::cast_precision_loss)]
+        let live_elapsed_str = if matches!(tc.status, ToolStatus::Running | ToolStatus::Pending) {
+            let elapsed_ms = (chrono::Utc::now() - tc.started_at).num_milliseconds().max(0);
+            let secs = elapsed_ms as f64 / 1000.0;
+            format!(" ({secs:.1}s)")
+        } else {
+            String::new()
+        };
         let status_label = match tc.status {
-            ToolStatus::Pending => "pending...".to_string(),
-            ToolStatus::Running => "running...".to_string(),
+            ToolStatus::Pending => format!("pending{live_elapsed_str}"),
+            ToolStatus::Running => format!("running{live_elapsed_str}"),
             ToolStatus::Done => format!("done{duration_str}"),
             ToolStatus::Error => format!("error{duration_str}"),
         };

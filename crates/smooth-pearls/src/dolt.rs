@@ -13,22 +13,6 @@ use serde_json::Value;
 
 use crate::dolt_server::SmoothDoltServer;
 
-/// Handle to the smooth-dolt binary. All Dolt operations go through this.
-///
-/// Two transports are supported:
-///
-/// 1. **CLI mode** (default — [`SmoothDolt::new`]): each method spawns a
-///    fresh `smooth-dolt sql ...` subprocess via `Command::output`.
-///    Works fine for short-lived commands like `th pearls list`.
-///
-/// 2. **Server mode** ([`SmoothDolt::from_server`]): each method round-
-///    trips through a long-running `smooth-dolt serve` subprocess over a
-///    Unix socket. The Big Smooth long-running daemon uses this to avoid
-///    a known hang where the second `PearlStore::open` inside the same
-///    process wedges the spawned smooth-dolt subprocess in
-///    `pthread_cond_wait` (see pearl `th-1a61a7`). The server itself is
-///    spawned at startup (synchronous code, before tokio handlers run)
-///    where the underlying issue doesn't fire.
 /// Flags for [`SmoothDolt::push_with`].
 ///
 /// `set_upstream` translates to Dolt's `-u` flag and is needed on the
@@ -42,6 +26,21 @@ pub struct PushOpts {
     pub set_upstream: bool,
 }
 
+/// Handle to the smooth-dolt binary. All Dolt operations go through this.
+///
+/// Two transports are supported:
+///
+/// 1. **CLI mode** (default — [`SmoothDolt::new`]): each method spawns a
+///    fresh `smooth-dolt sql ...` subprocess via `Command::output`.
+///    Works fine for short-lived commands like `th pearls list`.
+/// 2. **Server mode** ([`SmoothDolt::from_server`]): each method round-
+///    trips through a long-running `smooth-dolt serve` subprocess over a
+///    Unix socket. The Big Smooth long-running daemon uses this to avoid
+///    a known hang where the second `PearlStore::open` inside the same
+///    process wedges the spawned smooth-dolt subprocess in
+///    `pthread_cond_wait` (see pearl `th-1a61a7`). The server itself is
+///    spawned at startup (synchronous code, before tokio handlers run)
+///    where the underlying issue doesn't fire.
 #[derive(Debug, Clone)]
 pub struct SmoothDolt {
     /// Path to the smooth-dolt binary. Used in CLI mode.
