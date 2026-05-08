@@ -187,11 +187,19 @@ struct ChatRequest {
 #[derive(Debug, Serialize)]
 struct ChatMessage {
     role: String,
-    /// Content is optional: when an assistant message has tool_calls and no
-    /// prose, some OpenAI-compat providers reject `content: ""` with a 400.
-    /// Sending `content: null` (via Option::None → skip) works for all
-    /// providers we've tested.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Content is `Option<String>` because assistant messages that only
+    /// carry `tool_calls` legitimately have no prose. Three wire forms
+    /// exist in the wild:
+    ///   - `"content": "..."`  (string) — normal prose
+    ///   - `"content": null`   — explicit "no prose"
+    ///   - field omitted       — also "no prose", but a foot-gun
+    ///
+    /// We tried the omit form (pearl th-e8e15e). LiteLLM's strict
+    /// deserializer rejects it with `400 missing field content` —
+    /// it requires the key to be present. We do NOT skip serializing
+    /// here; `Option<String>::None` serializes as `null`, which every
+    /// upstream we've tested (OpenAI, Anthropic compat, Gemini compat,
+    /// LiteLLM router) accepts.
     content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
@@ -1289,9 +1297,10 @@ mod tests {
     }
 
     #[test]
-    fn to_chat_message_assistant_with_tool_calls_omits_empty_content() {
-        // Regression: some providers reject `content: ""` on assistant messages
-        // that have tool_calls. We must send `content: null` (omit) in that case.
+    fn to_chat_message_assistant_with_tool_calls_emits_null_content() {
+        // Pearl th-e8e15e: LiteLLM rejects requests where `content` is
+        // omitted ("missing field content"). Must serialize as
+        // `"content": null` instead — the field present, value null.
         let mut msg = Message::assistant("");
         msg.tool_calls.push(ToolCall {
             id: "c1".into(),
@@ -1299,8 +1308,17 @@ mod tests {
             arguments: serde_json::json!({}),
         });
         let chat = to_chat_message(&msg);
-        assert!(chat.content.is_none(), "empty content on tool-call message must be None");
+        assert!(chat.content.is_none(), "empty content on tool-call message must be None in struct");
         assert_eq!(chat.tool_calls.len(), 1);
+
+        // Critical wire-format assertion: the serialized JSON must
+        // contain `"content":null`, NOT omit the field. LiteLLM's
+        // strict deserializer demands the key be present.
+        let json = serde_json::to_string(&chat).expect("serialize");
+        assert!(
+            json.contains(r#""content":null"#),
+            "JSON must explicitly serialize content as null, got: {json}"
+        );
 
         // Non-empty content should still be passed through
         let mut msg2 = Message::assistant("I'll call a tool.");
