@@ -1397,7 +1397,29 @@ writable = true
 deny_patterns = ["*.env", "*.pem", ".ssh/*", "id_rsa*"]
 
 [tools]
-allow = ["read_file", "write_file", "list_files", "bash"]
+# Allowlist must mirror the tools registered by the runner below (search
+# `tools.register(`) — anything missing is denied by Wonk with no useful
+# error body, so the agent silently can't use it. Pearl/MCP/access-
+# request tools are added dynamically when applicable; everything in this
+# list is statically registered for every operator role.
+allow = [
+    "read_file",
+    "write_file",
+    "edit_file",
+    "apply_patch",
+    "list_files",
+    "read_memory",
+    "write_memory",
+    "grep",
+    "glob",
+    "lsp",
+    "bash",
+    "project_inspect",
+    "bg_run",
+    "bg_status",
+    "bg_logs",
+    "bg_kill",
+]
 deny = []
 
 [beads]

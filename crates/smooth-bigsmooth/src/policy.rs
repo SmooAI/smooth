@@ -135,20 +135,10 @@ pub fn generate_policy_for_task(
 // ---------------------------------------------------------------------------
 
 fn task_tools_policy(phase: &str, task_type: TaskType) -> ToolsPolicy {
-    let beads_tools: Vec<String> = vec!["beads_context".into(), "beads_message".into(), "progress".into()];
-
     let allow = match task_type {
         TaskType::Coding => {
-            let mut tools = vec![
-                "read_file".into(),
-                "write_file".into(),
-                "edit_file".into(),
-                "bash".into(),
-                "code_search".into(),
-                "find_definition".into(),
-                "repo_map".into(),
-            ];
-            tools.extend(beads_tools);
+            // Full registered surface, plus phase-gated execute helpers.
+            let mut tools = registered_tool_names();
             if matches!(phase, "execute" | "finalize") {
                 tools.extend([
                     "artifact_write".into(),
@@ -163,26 +153,19 @@ fn task_tools_policy(phase: &str, task_type: TaskType) -> ToolsPolicy {
             tools
         }
         TaskType::Research => {
-            let mut tools = vec![
-                "read_file".into(),
-                "bash".into(),
-                "code_search".into(),
-                "find_definition".into(),
-                "repo_map".into(),
-            ];
-            tools.extend(beads_tools);
-            tools
+            // Read-only surface — same tools the runner's reasoning
+            // roles (oracle, mapper, heckler) carry. No edit, no bash,
+            // no write — this is the role for "tell me about this
+            // repo" / "find where X is wired up" workflows.
+            read_only_tool_names()
         }
         TaskType::Review => {
-            let mut tools = vec![
-                "read_file".into(),
-                "bash".into(),
-                "code_search".into(),
-                "find_definition".into(),
-                "repo_map".into(),
-                "git_diff".into(),
-            ];
-            tools.extend(beads_tools);
+            // Adversarial review — read-only plus git diff. Same
+            // read-only base; bash NOT allowed (review must not run
+            // arbitrary commands), git_diff layered on for diff
+            // inspection.
+            let mut tools = read_only_tool_names();
+            tools.push("git_diff".into());
             tools
         }
     };
@@ -532,17 +515,58 @@ fn filesystem_policy(phase: &str) -> FilesystemPolicy {
     }
 }
 
-fn tools_policy(phase: &str) -> ToolsPolicy {
-    let mut allow = vec![
-        "beads_context".into(),
-        "beads_message".into(),
-        "progress".into(),
-        "code_search".into(),
-        "find_definition".into(),
-        "repo_map".into(),
-    ];
+/// The static allowlist of tools the operator-runner registers for every
+/// role. Must stay in sync with `tools.register(...)` calls in
+/// `crates/smooth-operator-runner/src/main.rs`. Pearl/MCP/access-request
+/// tools are layered on dynamically and not included here.
+fn registered_tool_names() -> Vec<String> {
+    vec![
+        "read_file".into(),
+        "write_file".into(),
+        "edit_file".into(),
+        "apply_patch".into(),
+        "list_files".into(),
+        "read_memory".into(),
+        "write_memory".into(),
+        "grep".into(),
+        "glob".into(),
+        "lsp".into(),
+        "bash".into(),
+        "project_inspect".into(),
+        "bg_run".into(),
+        "bg_status".into(),
+        "bg_logs".into(),
+        "bg_kill".into(),
+    ]
+}
 
-    // Extra tools in execute/finalize phases
+/// Read-only subset — what reasoning roles (oracle, mapper, heckler) get.
+/// Must stay in sync with `read_only_tools()` in
+/// `crates/smooth-operator/src/cast/mod.rs`.
+fn read_only_tool_names() -> Vec<String> {
+    vec![
+        "read_file".into(),
+        "list_files".into(),
+        "grep".into(),
+        "glob".into(),
+        "lsp".into(),
+        "project_inspect".into(),
+        "read_memory".into(),
+        "write_memory".into(),
+    ]
+}
+
+fn tools_policy(phase: &str) -> ToolsPolicy {
+    // Default phase-based policy: full registered surface so any role can
+    // use any tool the runner registered. Per-task-type tightening lives
+    // in `task_tools_policy`. The legacy "beads_context / code_search /
+    // repo_map" names referred to tools that don't exist anymore — Wonk
+    // would deny everything because nothing the runner registers matched
+    // the allowlist.
+    let mut allow = registered_tool_names();
+
+    // Pearl + progress tools layer on dynamically when a pearl is
+    // attached; phase doesn't matter for the static surface.
     if matches!(phase, "execute" | "finalize") {
         allow.extend([
             "artifact_write".into(),
@@ -551,6 +575,7 @@ fn tools_policy(phase: &str) -> ToolsPolicy {
             "spawn_subtask".into(),
             "delegate".into(),
             "forward_port".into(),
+            "git_commit".into(),
         ]);
     }
 
@@ -616,8 +641,12 @@ mod tests {
         let policy = smooth_policy::Policy::from_toml(&toml).expect("parse");
 
         assert!(!policy.filesystem.writable); // review = read-only
-        assert!(!policy.tools.can_use("artifact_write")); // review has no write tools
-        assert!(policy.tools.can_use("code_search")); // but can search
+        assert!(!policy.tools.can_use("artifact_write")); // review has no write tools (no execute/finalize phase extras)
+        assert!(
+            policy.tools.can_use("grep"),
+            "but can grep — review uses real registered tools, not legacy code_search"
+        );
+        assert!(policy.tools.can_use("read_file"));
     }
 
     #[test]
@@ -713,8 +742,11 @@ mod tests {
             assert!(!policy.tools.can_use("write_file"), "research should not have write_file in {phase}");
             assert!(!policy.tools.can_use("edit_file"), "research should not have edit_file in {phase}");
             assert!(!policy.tools.can_use("git_commit"), "research should not have git_commit in {phase}");
+            assert!(!policy.tools.can_use("bash"), "research should not have bash in {phase}");
             assert!(policy.tools.can_use("read_file"), "research should have read_file in {phase}");
-            assert!(policy.tools.can_use("code_search"), "research should have code_search in {phase}");
+            assert!(policy.tools.can_use("grep"), "research should have grep in {phase}");
+            assert!(policy.tools.can_use("list_files"), "research should have list_files in {phase}");
+            assert!(policy.tools.can_use("project_inspect"), "research should have project_inspect in {phase}");
         }
     }
 
@@ -742,14 +774,70 @@ mod tests {
     }
 
     #[test]
-    fn all_task_types_include_beads_tools() {
+    fn all_task_types_include_core_inspection_tools() {
+        // Pearl tools are now Dolt-backed and registered dynamically by
+        // the runner when the workspace has `.smooth/dolt/`, not
+        // statically by Big Smooth's policy. The static guarantee is
+        // that *every* task type can read code — read_file, list_files,
+        // grep, project_inspect — so the agent can always orient
+        // itself before doing whatever the task type permits.
         for task_type in [TaskType::Coding, TaskType::Research, TaskType::Review] {
             let toml = generate_policy_for_task("op-b", "bead-1", "execute", "tok", &[], task_type, vec![]).expect("generate");
             let policy = smooth_policy::Policy::from_toml(&toml).expect("parse");
 
-            assert!(policy.tools.can_use("beads_context"), "{task_type:?} should have beads_context");
-            assert!(policy.tools.can_use("beads_message"), "{task_type:?} should have beads_message");
-            assert!(policy.tools.can_use("progress"), "{task_type:?} should have progress");
+            assert!(policy.tools.can_use("read_file"), "{task_type:?} should have read_file");
+            assert!(policy.tools.can_use("list_files"), "{task_type:?} should have list_files");
+            assert!(policy.tools.can_use("grep"), "{task_type:?} should have grep");
+            assert!(policy.tools.can_use("project_inspect"), "{task_type:?} should have project_inspect");
+            assert!(policy.tools.can_use("read_memory"), "{task_type:?} should have read_memory");
+        }
+    }
+
+    #[test]
+    fn registered_tool_names_matches_runner_registrations() {
+        // Pin the static surface so a future change to either
+        // the runner's `tools.register(...)` calls or
+        // `registered_tool_names()` here surfaces in CI before it
+        // breaks the agent silently. Pearl th-164834 — Wonk was
+        // denying every read tool because the two lists drifted apart.
+        let names = registered_tool_names();
+        for must_have in [
+            "read_file",
+            "write_file",
+            "edit_file",
+            "apply_patch",
+            "list_files",
+            "read_memory",
+            "write_memory",
+            "grep",
+            "glob",
+            "lsp",
+            "bash",
+            "project_inspect",
+            "bg_run",
+            "bg_status",
+            "bg_logs",
+            "bg_kill",
+        ] {
+            assert!(
+                names.iter().any(|n| n == must_have),
+                "registered_tool_names() missing {must_have} — runner registers it but Wonk would deny without an allow entry"
+            );
+        }
+    }
+
+    #[test]
+    fn read_only_tool_names_excludes_writers() {
+        let names = read_only_tool_names();
+        for must_not in ["write_file", "edit_file", "apply_patch", "bash"] {
+            assert!(
+                !names.iter().any(|n| n == must_not),
+                "read_only_tool_names() must not include {must_not} — that's a writer/executor"
+            );
+        }
+        // And it must include the obvious read surface.
+        for must_have in ["read_file", "list_files", "grep", "project_inspect", "read_memory"] {
+            assert!(names.iter().any(|n| n == must_have), "read_only_tool_names() missing {must_have}");
         }
     }
 
