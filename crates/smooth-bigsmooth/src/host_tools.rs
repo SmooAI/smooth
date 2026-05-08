@@ -138,25 +138,40 @@ pub fn generate_host_token() -> String {
 mod tests {
     use super::*;
 
+    // Tests that touch SMOOTH_HOST_TOOLS share global process env, so
+    // running them in parallel is racy: one test's `remove_var` can
+    // land between another's `set_var` and `allowed_tools()` call. A
+    // single Mutex (poisoned-on-panic is fine — the next caller just
+    // sees the panic and propagates) serialises them while still
+    // allowing the rest of the suite to run in parallel.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn default_allowlist_contains_gh() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let original = std::env::var("SMOOTH_HOST_TOOLS").ok();
         std::env::remove_var("SMOOTH_HOST_TOOLS");
         let a = allowed_tools();
-        assert!(a.iter().any(|s| s == "gh"));
-        assert!(a.iter().any(|s| s == "git"));
-        assert!(a.iter().any(|s| s == "kubectl"));
         if let Some(v) = original {
             std::env::set_var("SMOOTH_HOST_TOOLS", v);
         }
+        assert!(a.iter().any(|s| s == "gh"));
+        assert!(a.iter().any(|s| s == "git"));
+        assert!(a.iter().any(|s| s == "kubectl"));
     }
 
     #[test]
     fn env_override_replaces_allowlist() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let original = std::env::var("SMOOTH_HOST_TOOLS").ok();
         std::env::set_var("SMOOTH_HOST_TOOLS", "gh,jq");
         let a = allowed_tools();
+        if let Some(v) = original {
+            std::env::set_var("SMOOTH_HOST_TOOLS", v);
+        } else {
+            std::env::remove_var("SMOOTH_HOST_TOOLS");
+        }
         assert_eq!(a, vec!["gh".to_string(), "jq".to_string()]);
-        std::env::remove_var("SMOOTH_HOST_TOOLS");
     }
 
     #[test]
