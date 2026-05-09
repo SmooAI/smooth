@@ -132,16 +132,20 @@ pub fn message_lines_with_verbose(msg: &ChatMessage, verbose: bool) -> Vec<Line<
     } else {
         msg.content.lines().map(|l| Line::from(Span::raw(l.to_string()))).collect()
     };
-    if content_lines.is_empty() {
-        content_lines.push(Line::from(""));
-    }
     if msg.streaming && !msg.content.is_empty() {
         if let Some(last) = content_lines.last_mut() {
             last.spans.push(Span::styled("█", theme::assistant_label()));
         }
     }
-    lines.append(&mut content_lines);
 
+    // Render order: role label → tool calls → final response prose.
+    // Tool calls happen first chronologically (the model decides to
+    // call a tool, the tool runs, then the model writes its answer
+    // using the result), so the visible order in chat now matches
+    // the temporal order. The TUI's 50ms tick means tool calls show
+    // ⚙ pending → ✓ done in real time as they execute, with the
+    // final prose appearing only when the model finishes streaming
+    // its post-tool answer.
     for tc in &msg.tool_calls {
         let (icon, icon_style) = match tc.status {
             ToolStatus::Pending => ("⏳", theme::muted()),
@@ -237,6 +241,16 @@ pub fn message_lines_with_verbose(msg: &ChatMessage, verbose: bool) -> Vec<Line<
             }
         }
     }
+
+    // Blank separator between the tool-call block and the prose
+    // response — without it the answer butts up against the last
+    // tool call (`✓ list_files(...) ── done` immediately above the
+    // first prose line) and reads as one wall of text.
+    if !msg.tool_calls.is_empty() && !content_lines.is_empty() {
+        lines.push(Line::from(""));
+    }
+
+    lines.append(&mut content_lines);
 
     // Trailing blank line keeps consecutive messages visually separated
     // both in the viewport preview and in scrollback.
@@ -434,6 +448,50 @@ mod tests {
         let lines = message_lines(&msg);
         assert!(lines[0].spans.iter().any(|s| s.content.contains("You")));
         assert!(lines.iter().any(|l| l.spans.iter().any(|s| s.content.contains("hello"))));
+    }
+
+    #[test]
+    fn assistant_tool_calls_render_before_prose() {
+        // Pearl th-render-order: tool calls happen first chronologically
+        // (model decides → tool runs → model writes answer using result),
+        // so the chat order should match — tools above the response
+        // prose, with a blank separator. Regression guard against
+        // accidentally moving tool_calls back below content.
+        use crate::state::{ToolCallState, ToolStatus};
+        let mut msg = ChatMessage::assistant("the answer");
+        msg.tool_calls.push(ToolCallState {
+            id: "1".into(),
+            tool_name: "list_files".into(),
+            arguments_preview: "{}".into(),
+            arguments_full: None,
+            output: None,
+            status: ToolStatus::Done,
+            collapsed: true,
+            started_at: chrono::Utc::now(),
+            duration_ms: Some(120),
+        });
+        let lines = message_lines(&msg);
+
+        let tool_idx = lines
+            .iter()
+            .position(|l| l.spans.iter().any(|s| s.content.contains("list_files")))
+            .expect("tool call header should be present");
+        let answer_idx = lines
+            .iter()
+            .position(|l| l.spans.iter().any(|s| s.content.contains("the answer")))
+            .expect("answer prose should be present");
+
+        assert!(
+            tool_idx < answer_idx,
+            "tool calls must render BEFORE prose (got tool@{tool_idx}, answer@{answer_idx})"
+        );
+
+        // And there should be a blank line between them so they don't
+        // visually butt together.
+        let blank_between = lines[tool_idx + 1..answer_idx]
+            .iter()
+            .any(|l| l.spans.iter().all(|s| s.content.trim().is_empty()));
+        assert!(blank_between, "expected a blank separator line between tool block and prose");
     }
 
     #[test]
