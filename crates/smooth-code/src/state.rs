@@ -81,7 +81,7 @@ pub struct ToolCallState {
 impl ToolCallState {
     /// Create a new `ToolCallState` with `Running` status and a truncated arguments preview.
     pub fn new(id: impl Into<String>, tool_name: impl Into<String>, arguments: &serde_json::Value) -> Self {
-        let args_str = arguments.to_string();
+        let args_str = pretty_args_preview(arguments);
         let arguments_preview = if args_str.len() > 80 { format!("{}...", &args_str[..80]) } else { args_str };
 
         Self {
@@ -104,7 +104,7 @@ impl ToolCallState {
     /// the standard collapsed-output path still works.
     pub fn from_raw(id: impl Into<String>, tool_name: impl Into<String>, arguments_json: &str) -> Self {
         let parsed: Option<serde_json::Value> = serde_json::from_str(arguments_json).ok();
-        let preview_src = parsed.as_ref().map_or_else(|| arguments_json.to_string(), serde_json::Value::to_string);
+        let preview_src = parsed.as_ref().map_or_else(|| arguments_json.to_string(), pretty_args_preview);
         let arguments_preview = if preview_src.len() > 80 {
             format!("{}...", &preview_src[..80])
         } else {
@@ -121,6 +121,45 @@ impl ToolCallState {
             started_at: Utc::now(),
             duration_ms: None,
         }
+    }
+}
+
+/// Render an argument JSON Value into a compact, human-readable
+/// preview for the tool-call header line. Replaces the raw
+/// `serde_json::to_string` form (`{"path":"README.md"}`) with
+/// shapes that match how the user would describe the call:
+///
+///   - Empty object → `""`
+///   - Single key → just the value (`README.md` instead of
+///     `{"path":"README.md"}`)
+///   - Multiple keys → `key=value, key=value` form, with strings
+///     quoted to keep paths/patterns visually distinct from numbers
+///     and booleans (`pattern="postgres", include="*.ts"`).
+///   - Arrays / nested objects → fall back to compact JSON.
+fn pretty_args_preview(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Object(map) if map.is_empty() => String::new(),
+        serde_json::Value::Object(map) if map.len() == 1 => {
+            let (_, value) = map.iter().next().expect("len == 1");
+            format_arg_value(value)
+        }
+        serde_json::Value::Object(map) => map
+            .iter()
+            .map(|(k, val)| format!("{k}={}", format_arg_value(val)))
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => v.to_string(),
+    }
+}
+
+/// Format a single argument value for the preview. Strings get
+/// quoted (so `"*.ts"` is distinguishable from a bareword), other
+/// scalars render as JSON-compact, nested arrays/objects fall
+/// back to compact JSON.
+fn format_arg_value(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => format!("\"{s}\""),
+        _ => v.to_string(),
     }
 }
 
@@ -796,9 +835,30 @@ mod tests {
         let long_value = "x".repeat(200);
         let args = serde_json::json!({"data": long_value});
         let tc = ToolCallState::new("tc-1", "write_file", &args);
-        // The preview should be 80 chars + "..."
+        // The preview should truncate at 80 chars + "...". The exact
+        // shape comes from `pretty_args_preview` (single-key object
+        // → just the value, surrounded by quotes), but truncation
+        // logic is the only thing this test asserts.
         assert_eq!(tc.arguments_preview.len(), 83);
         assert!(tc.arguments_preview.ends_with("..."));
+    }
+
+    #[test]
+    fn test_arguments_preview_pretty_shapes() {
+        // Empty object → empty preview (no-arg tool).
+        let tc = ToolCallState::new("tc-1", "project_inspect", &serde_json::json!({}));
+        assert_eq!(tc.arguments_preview, "");
+
+        // Single-key object → unwrapped to the quoted value.
+        let tc = ToolCallState::new("tc-2", "read_file", &serde_json::json!({"path": "README.md"}));
+        assert_eq!(tc.arguments_preview, "\"README.md\"");
+
+        // Multi-key object → key=value, key=value with strings quoted.
+        let tc = ToolCallState::new("tc-3", "grep", &serde_json::json!({"pattern": "postgres", "include": "*.ts"}));
+        // Order isn't strictly stable across serde_json versions, but
+        // both keys should appear with their string values quoted.
+        assert!(tc.arguments_preview.contains(r#"pattern="postgres""#), "preview={}", tc.arguments_preview);
+        assert!(tc.arguments_preview.contains(r#"include="*.ts""#), "preview={}", tc.arguments_preview);
     }
 
     #[test]

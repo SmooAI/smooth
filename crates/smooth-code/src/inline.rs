@@ -186,10 +186,17 @@ pub fn message_lines_with_verbose(msg: &ChatMessage, verbose: bool) -> Vec<Line<
         // inline payload — the diff below carries the same info, more
         // usefully. Also drop the collapse glyph since the diff is
         // always shown.
+        // Render args as `(<preview>)` — the preview is already
+        // human-formatted by `pretty_args_preview` (single-key
+        // objects unwrapped, multi-key objects rendered as
+        // `key="val", key="val"`). Empty preview → `()` rather than
+        // `("")` so no-arg tools don't carry a phantom empty string.
         let header_args = if diff_lines.is_some() {
             String::new()
+        } else if tc.arguments_preview.is_empty() {
+            "()".to_string()
         } else {
-            format!("(\"{}\")", tc.arguments_preview)
+            format!("({})", tc.arguments_preview)
         };
         // Force errors expanded — the failure reason is the whole point.
         // Collapsing it behind ▶ hides the actionable info ("path required",
