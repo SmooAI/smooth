@@ -5,6 +5,18 @@
 
 use serde::{Deserialize, Serialize};
 
+/// One message in the TUI's prior-conversation history sent on
+/// each `TaskStart`. Replayed by the runner as native
+/// `Message::user` / `Message::assistant` entries before the
+/// current turn (pearl th-422b93).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PriorMessage {
+    /// `"user"` or `"assistant"`. Anything else is dropped at the
+    /// runner end so a malformed entry can't poison the conversation.
+    pub role: String,
+    pub content: String,
+}
+
 /// Events sent from a client to Big Smooth.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -19,6 +31,10 @@ pub enum ClientEvent {
         /// names surface as `TaskError`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<String>,
+        /// Prior turns of the calling TUI session as structured
+        /// messages. Empty / absent on the first turn.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        prior_messages: Vec<PriorMessage>,
     },
     TaskCancel {
         task_id: String,
@@ -167,6 +183,7 @@ mod tests {
             budget: Some(1.5),
             working_dir: Some("/tmp".into()),
             agent: Some("mapper".into()),
+            prior_messages: Vec::new(),
         };
         let json = serde_json::to_string(&event).expect("serialize");
         assert!(json.contains(r#""type":"TaskStart"#));
@@ -183,6 +200,7 @@ mod tests {
             budget,
             working_dir,
             agent,
+            prior_messages,
         } = parsed
         {
             assert_eq!(message, "build the thing");
@@ -190,6 +208,7 @@ mod tests {
             assert_eq!(budget, Some(1.5));
             assert_eq!(working_dir.as_deref(), Some("/tmp"));
             assert_eq!(agent.as_deref(), Some("mapper"));
+            assert!(prior_messages.is_empty());
         } else {
             panic!("unexpected variant");
         }

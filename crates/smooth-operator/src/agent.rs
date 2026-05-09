@@ -12,7 +12,7 @@ use crate::knowledge::KnowledgeBase;
 use crate::memory::Memory;
 use futures_util::StreamExt;
 
-use crate::conversation::{CompactionStrategy, Conversation, Message, ReactiveCompaction};
+use crate::conversation::{CompactionStrategy, Conversation, Message, ReactiveCompaction, Role};
 use crate::llm::{accumulate_stream_events, LlmClient, LlmConfig, StreamEvent};
 use crate::tool::{Tool, ToolRegistry, ToolSchema};
 
@@ -51,6 +51,14 @@ pub struct AgentConfig {
     /// `smooth-operator-runner` when `SMOOTH_PEARL_ID` is set so the lead
     /// (Big Smooth) can talk to a running teammate without restarting the agent.
     pub chat_rx: Option<Arc<tokio::sync::Mutex<UnboundedReceiver<InjectedMessage>>>>,
+    /// Pre-existing conversation messages to seed the agent's
+    /// `Conversation` with before the current user message. Used by
+    /// the runner to inject prior chat-session turns from the calling
+    /// TUI so the agent has continuity across dispatches (pearl
+    /// th-422b93). Each entry pushes as a native role-tagged
+    /// `Message`; tool calls / tool results are not preserved at
+    /// this layer (TUI sends prose only — that's a future extension).
+    pub prior_messages: Vec<Message>,
 }
 
 /// A message injected into a running agent's conversation from outside the loop.
@@ -92,7 +100,18 @@ impl AgentConfig {
             human_rx: None,
             reporter: None,
             chat_rx: None,
+            prior_messages: Vec::new(),
         }
+    }
+
+    /// Pre-seed the agent's conversation with prior turns. Pushed
+    /// after the system prompt and before the current user message
+    /// on each `run` / `run_with_channel`. Each `Message` should
+    /// have role `User` or `Assistant` — anything else is silently
+    /// dropped during the push.
+    pub fn with_prior_messages(mut self, messages: Vec<Message>) -> Self {
+        self.prior_messages = messages;
+        self
     }
 
     /// Wire an injection channel for the agent's mailbox. Messages drained from
@@ -464,6 +483,17 @@ impl Agent {
         let mut conversation = self.resume_or_new()?;
         let user_msg: String = user_message.into();
 
+        // Pre-seed prior session turns (pearl th-422b93) before
+        // memory/knowledge injection. Only User/Assistant roles are
+        // preserved — System prompts already came from
+        // `resume_or_new`, and Tool messages would dangle without
+        // matching tool_calls.
+        for msg in &self.config.prior_messages {
+            if matches!(msg.role, Role::User | Role::Assistant) {
+                conversation.push(msg.clone());
+            }
+        }
+
         // Inject memory/knowledge context before the user message
         let context_messages = self.build_context_messages(&user_msg);
         for msg in context_messages {
@@ -706,6 +736,17 @@ impl Agent {
     pub async fn run_with_channel(&self, user_message: impl Into<String>, tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>) -> anyhow::Result<Conversation> {
         let mut conversation = self.resume_or_new()?;
         let user_msg: String = user_message.into();
+
+        // Pre-seed prior session turns (pearl th-422b93) before
+        // memory/knowledge injection. Only User/Assistant roles are
+        // preserved — System prompts already came from
+        // `resume_or_new`, and Tool messages would dangle without
+        // matching tool_calls.
+        for msg in &self.config.prior_messages {
+            if matches!(msg.role, Role::User | Role::Assistant) {
+                conversation.push(msg.clone());
+            }
+        }
 
         // Inject memory/knowledge context before the user message
         let context_messages = self.build_context_messages(&user_msg);
@@ -1159,6 +1200,25 @@ mod tests {
 
         let config = test_config();
         assert!(!config.parallel_tools);
+    }
+
+    #[test]
+    fn agent_config_with_prior_messages_seeds_conversation() {
+        // Pearl th-422b93: AgentConfig.prior_messages should be
+        // pushed into the Conversation after resume_or_new (which
+        // installs the system prompt) and before the new user
+        // message. Verify the field is wired and order is preserved.
+        let prior = vec![Message::user("what repo is this?"), Message::assistant("It's a budgeting app.")];
+        let config = test_config().with_prior_messages(prior.clone());
+        assert_eq!(config.prior_messages.len(), 2);
+        assert!(matches!(config.prior_messages[0].role, Role::User));
+        assert_eq!(config.prior_messages[0].content, "what repo is this?");
+        assert!(matches!(config.prior_messages[1].role, Role::Assistant));
+        assert_eq!(config.prior_messages[1].content, "It's a budgeting app.");
+
+        // Default config has no prior history.
+        let bare = test_config();
+        assert!(bare.prior_messages.is_empty());
     }
 
     #[test]

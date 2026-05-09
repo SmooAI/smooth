@@ -19,6 +19,19 @@ use tokio_tungstenite::tungstenite;
 // Event types (local copies — same JSON shape as smooth-bigsmooth::events)
 // ---------------------------------------------------------------------------
 
+/// One message in the TUI's prior-conversation history sent on
+/// each `TaskStart`. Mirrors the structure that
+/// `smooth_operator::Conversation` expects so the runner can replay
+/// the array as native `Message::user` / `Message::assistant` entries
+/// without stringifying.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PriorMessage {
+    /// `"user"` or `"assistant"`. Anything else is dropped at the
+    /// runner end so a malformed entry can't poison the conversation.
+    pub role: String,
+    pub content: String,
+}
+
 /// Events sent from this client to Big Smooth.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -33,6 +46,13 @@ pub enum ClientEvent {
         /// (`fixer`). Unknown names surface as a TaskError.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<String>,
+        /// Prior turns of this TUI session as structured messages.
+        /// The runner pre-populates its `Conversation` with these
+        /// before pushing the current `message`, so the agent gets
+        /// proper role-alternating history (pearl th-422b93). Empty
+        /// or absent on the first turn.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        prior_messages: Vec<PriorMessage>,
     },
     TaskCancel {
         task_id: String,
@@ -312,6 +332,7 @@ impl BigSmoothClient {
         budget: Option<f64>,
         working_dir: Option<&str>,
         agent: Option<&str>,
+        prior_messages: Vec<PriorMessage>,
     ) -> anyhow::Result<mpsc::UnboundedReceiver<ServerEvent>> {
         let event = ClientEvent::TaskStart {
             message: message.to_string(),
@@ -319,6 +340,7 @@ impl BigSmoothClient {
             budget,
             working_dir: working_dir.map(ToString::to_string),
             agent: agent.map(ToString::to_string),
+            prior_messages,
         };
         self.send(&event).await?;
 
@@ -453,6 +475,10 @@ mod tests {
             budget: Some(1.5),
             working_dir: Some("/tmp".into()),
             agent: Some("mapper".into()),
+            prior_messages: vec![PriorMessage {
+                role: "user".into(),
+                content: "what repo is this?".into(),
+            }],
         };
         let json = serde_json::to_string(&event).expect("serialize");
         assert!(json.contains(r#""type":"TaskStart"#));
@@ -460,6 +486,7 @@ mod tests {
         assert!(json.contains(r#""model":"gpt-4"#));
         assert!(json.contains(r#""budget":1.5"#));
         assert!(json.contains(r#""agent":"mapper"#));
+        assert!(json.contains(r#""prior_messages""#));
 
         // Roundtrip
         let parsed: ClientEvent = serde_json::from_str(&json).expect("deserialize");
@@ -469,6 +496,7 @@ mod tests {
             budget,
             working_dir,
             agent,
+            prior_messages,
         } = parsed
         {
             assert_eq!(message, "build the thing");
@@ -476,6 +504,9 @@ mod tests {
             assert_eq!(budget, Some(1.5));
             assert_eq!(working_dir.as_deref(), Some("/tmp"));
             assert_eq!(agent.as_deref(), Some("mapper"));
+            assert_eq!(prior_messages.len(), 1);
+            assert_eq!(prior_messages[0].role, "user");
+            assert_eq!(prior_messages[0].content, "what repo is this?");
         } else {
             panic!("unexpected variant");
         }

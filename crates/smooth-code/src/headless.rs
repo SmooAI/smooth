@@ -102,7 +102,7 @@ pub async fn run_headless_capture(
         .map_err(|e| anyhow::anyhow!("connect to Big Smooth at {url}: {e}"))?;
 
     let mut events = client
-        .run_task(&message, model.as_deref(), budget, Some(&working_dir.to_string_lossy()), None)
+        .run_task(&message, model.as_deref(), budget, Some(&working_dir.to_string_lossy()), None, Vec::new())
         .await?;
 
     let mut content_buf = String::new();
@@ -149,7 +149,14 @@ async fn run_headless_client(
     agent: Option<String>,
 ) -> anyhow::Result<()> {
     let mut events = client
-        .run_task(&message, model.as_deref(), budget, Some(&working_dir.to_string_lossy()), agent.as_deref())
+        .run_task(
+            &message,
+            model.as_deref(),
+            budget,
+            Some(&working_dir.to_string_lossy()),
+            agent.as_deref(),
+            Vec::new(),
+        )
         .await?;
 
     let mut content_buf = String::new();

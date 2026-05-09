@@ -341,6 +341,7 @@ impl Tool for TeammateSpawnTool {
             memory_mb: None,
             agent: role,
             pearl_id: Some(pearl_id.clone()),
+            prior_messages: Vec::new(),
         };
 
         // Fire-and-forget: dispatch_ws_task is `async` and runs the whole

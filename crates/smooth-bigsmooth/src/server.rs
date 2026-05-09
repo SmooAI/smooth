@@ -694,6 +694,7 @@ async fn handle_client_event(state: &AppState, event: ClientEvent) {
             budget,
             working_dir,
             agent,
+            prior_messages,
         } => {
             // WebSocket callers don't currently carry image / keep_alive /
             // memory_mb; HTTP /api/tasks is the dispatch path for those.
@@ -705,6 +706,7 @@ async fn handle_client_event(state: &AppState, event: ClientEvent) {
                     budget,
                     working_dir,
                     agent,
+                    prior_messages,
                     ..DispatchOptions::default()
                 },
             )
@@ -811,6 +813,13 @@ pub struct DispatchOptions {
     ///     the orchestrator's "ready pearls" sweep doesn't double-
     ///     dispatch the same pearl.
     pub pearl_id: Option<String>,
+    /// Prior turns of the calling client's session. Written to the
+    /// sandbox's policy bind-mount as `prior_history.json`; the runner
+    /// reads `SMOOTH_PRIOR_HISTORY_FILE` and pre-populates its
+    /// `Conversation` with these as native role-tagged messages
+    /// before the current turn. Empty / `None` means "no history,
+    /// fresh agent" (pearl th-422b93).
+    pub prior_messages: Vec<crate::events::PriorMessage>,
 }
 
 pub async fn dispatch_ws_task(state: &AppState, opts: DispatchOptions) {
@@ -1061,6 +1070,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         memory_mb,
         agent,
         pearl_id: pearl_id_in,
+        prior_messages,
     } = opts;
     use crate::sandbox::{self, BindMount, SandboxConfig};
 
@@ -1565,6 +1575,30 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
             // the kernel cmdline for long ones — Boardroom mode needs a
             // brokered task-file path eventually.
             env.insert("SMOOTH_TASK".into(), full_task_message.clone());
+        }
+
+        // Write prior conversation history (pearl th-422b93) to a
+        // bind-mounted JSON file the runner can read. Empty list = no
+        // file written, no env var set, runner skips replay. Schema is
+        // a JSON array of {role:"user"|"assistant", content:"..."}.
+        if !prior_messages.is_empty() {
+            if let Some(ref dir) = policy_dir_guard {
+                let history_path = dir.path().join("prior_history.json");
+                match serde_json::to_vec(&prior_messages) {
+                    Ok(bytes) => match std::fs::write(&history_path, &bytes) {
+                        Ok(()) => {
+                            env.insert("SMOOTH_PRIOR_HISTORY_FILE".into(), "/opt/smooth/policy/prior_history.json".into());
+                            tracing::info!(task_id = tid, messages = prior_messages.len(), "wrote prior_history.json for runner replay");
+                        }
+                        Err(e) => {
+                            tracing::warn!(task_id = tid, error = %e, "failed to write prior_history.json; agent will start without history");
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(task_id = tid, error = %e, "failed to serialize prior_messages; agent will start without history");
+                    }
+                }
+            }
         }
 
         // When the workflow is enabled, write the full ProviderRegistry
@@ -2245,6 +2279,7 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
         memory_mb: _,
         agent,
         pearl_id: pearl_id_in,
+        prior_messages,
     } = opts;
 
     let task_id = uuid::Uuid::new_v4().to_string();
@@ -2382,6 +2417,31 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
         return;
     }
 
+    // Write prior conversation history (pearl th-422b93). Same shape
+    // as the sandboxed dispatch — JSON array of {role, content} that
+    // the runner replays into its Conversation before the current turn.
+    let prior_history_path: Option<std::path::PathBuf> = if prior_messages.is_empty() {
+        None
+    } else {
+        let p = control_dir.path().join("prior_history.json");
+        match serde_json::to_vec(&prior_messages) {
+            Ok(bytes) => match std::fs::write(&p, &bytes) {
+                Ok(()) => {
+                    tracing::info!(messages = prior_messages.len(), "direct dispatch: wrote prior_history.json");
+                    Some(p)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "direct dispatch: failed to write prior_history.json");
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "direct dispatch: failed to serialize prior_messages");
+                None
+            }
+        }
+    };
+
     // Write routing.json so the runner's workflow path picks up
     // the provider registry (needed for the coding slot).
     //
@@ -2433,6 +2493,9 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
             .env("SMOOTH_TASK_FILE", task_path.to_string_lossy().as_ref())
             .env("SMOOTH_WORKFLOW", "1")
             .env("SMOOTH_ROUTING_JSON_FILE", routing_path.to_string_lossy().as_ref());
+        if let Some(ref p) = prior_history_path {
+            cmd.env("SMOOTH_PRIOR_HISTORY_FILE", p.to_string_lossy().as_ref());
+        }
         if let Some(b) = budget {
             cmd.env("SMOOTH_BUDGET_USD", b.to_string());
         }
@@ -2802,6 +2865,7 @@ async fn run_task_handler(State(state): State<AppState>, Json(req): Json<TaskReq
         memory_mb: req.memory_mb,
         agent: req.agent.clone(),
         pearl_id: None,
+        prior_messages: Vec::new(),
     };
 
     tokio::spawn(async move {

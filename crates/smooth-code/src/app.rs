@@ -902,34 +902,32 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
 
     let cwd = std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string());
 
-    // Build a prior-conversation prefix from this TUI session's chat
-    // history so the agent has continuity across turns. Big Smooth's
-    // sandboxed dispatch starts a fresh agent per task with no prior
-    // memory; without this, the user's "why did you say postgres
-    // earlier?" gets a confused "I haven't said anything yet" because
-    // the new agent has never seen the prior turn. (Pearl th-c0n7x1.)
+    // Build a structured prior-conversation array from this TUI
+    // session's chat history. Sent over the wire as `prior_messages`
+    // on TaskStart and replayed by the runner as native
+    // `Message::user` / `Message::assistant` entries before the
+    // current turn (pearl th-422b93). This is how Claude Code /
+    // OpenCode / the Anthropic API handle history — proper role
+    // alternation, prompt-cache friendly, tool-call structure
+    // preserved.
     //
     // Constraints:
     //   - Only User and Assistant roles. System messages are TUI-side
     //     status banners that the agent doesn't need.
-    //   - Skip the just-pushed user message (it's `message`, the
-    //     current turn) and the streaming assistant placeholder
-    //     (empty content, hasn't run yet).
-    //   - Trim prior assistant content to drop runner-stderr blocks
-    //     and per-line `[runner] ` diagnostic lines so we don't feed
-    //     noise back into the model.
-    let task_message: String = {
+    //   - Skip the last two (current user message + streaming assistant
+    //     placeholder).
+    //   - Drop runner-stderr / cast-summary diagnostic lines from
+    //     prose so we don't feed noise back into the model.
+    let prior_messages: Vec<crate::client::PriorMessage> = {
         let s = state.lock().expect("state lock poisoned");
-        let mut prior_lines: Vec<String> = Vec::new();
-        // Iterate all messages except the last two (current user + streaming assistant).
         let upper = s.messages.len().saturating_sub(2);
+        let mut out = Vec::with_capacity(upper);
         for msg in s.messages.iter().take(upper) {
-            let role_label = match msg.role {
-                crate::state::ChatRole::User => "User",
-                crate::state::ChatRole::Assistant => "Assistant",
+            let role = match msg.role {
+                crate::state::ChatRole::User => "user",
+                crate::state::ChatRole::Assistant => "assistant",
                 crate::state::ChatRole::System => continue,
             };
-            // Drop runner diagnostics from the prose we feed back.
             let cleaned: String = msg
                 .content
                 .lines()
@@ -940,20 +938,15 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
             if trimmed.is_empty() {
                 continue;
             }
-            prior_lines.push(format!("{role_label}: {trimmed}"));
+            out.push(crate::client::PriorMessage {
+                role: role.to_string(),
+                content: trimmed.to_string(),
+            });
         }
-        if prior_lines.is_empty() {
-            message.to_string()
-        } else {
-            format!(
-                "## Prior conversation in this session\n\n{}\n\n## Current message\n\n{}",
-                prior_lines.join("\n\n"),
-                message
-            )
-        }
+        out
     };
 
-    let mut events = client.run_task(&task_message, None, None, cwd.as_deref(), agent.as_deref()).await?;
+    let mut events = client.run_task(message, None, None, cwd.as_deref(), agent.as_deref(), prior_messages).await?;
 
     // Per-tool-name queues of (id, started_at, args). The runner emits
     // a ToolCallStart, then the tool runs, then a ToolCallComplete —

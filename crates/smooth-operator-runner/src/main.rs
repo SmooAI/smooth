@@ -2054,6 +2054,43 @@ async fn main() {
         agent_config = agent_config.with_chat_rx(rx);
     }
 
+    // Pre-seed conversation with prior turns from the calling
+    // session (pearl th-422b93). Big Smooth wrote the JSON file
+    // during dispatch when the TUI passed `prior_messages` on
+    // TaskStart. The schema is `[{"role":"user"|"assistant","content":"..."}, ...]`.
+    // Skip silently on missing file / parse error / unknown role —
+    // the agent simply runs without history, which is the same
+    // behavior as the first turn.
+    #[derive(serde::Deserialize)]
+    struct PriorMsgWire {
+        role: String,
+        content: String,
+    }
+    if let Ok(path) = std::env::var("SMOOTH_PRIOR_HISTORY_FILE") {
+        if let Ok(bytes) = std::fs::read(&path) {
+            if let Ok(prior) = serde_json::from_slice::<Vec<PriorMsgWire>>(&bytes) {
+                let mut messages: Vec<smooth_operator::Message> = Vec::with_capacity(prior.len());
+                for entry in prior {
+                    let trimmed = entry.content.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    match entry.role.as_str() {
+                        "user" => messages.push(smooth_operator::Message::user(trimmed)),
+                        "assistant" => messages.push(smooth_operator::Message::assistant(trimmed)),
+                        _ => {} // Drop unknown roles.
+                    }
+                }
+                eprintln!("[runner] prior history: replaying {} message(s) into conversation", messages.len());
+                agent_config = agent_config.with_prior_messages(messages);
+            } else {
+                eprintln!("[runner] SMOOTH_PRIOR_HISTORY_FILE={path} did not parse as Vec<{{role,content}}>; ignoring");
+            }
+        } else {
+            eprintln!("[runner] SMOOTH_PRIOR_HISTORY_FILE={path} could not be read; ignoring");
+        }
+    }
+
     // Hook order is intentional:
     //   0. PermissionHook — FIRST: an agent that's not allowed to call
     //      a tool (plan mode trying to edit_file) is blocked here
