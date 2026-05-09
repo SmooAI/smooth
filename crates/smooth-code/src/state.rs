@@ -377,7 +377,17 @@ impl AppState {
     }
 
     /// Insert a character at the current cursor position.
+    ///
+    /// Newlines and carriage returns are normalized to spaces — the
+    /// input box is single-line, and bracketed paste is best-effort
+    /// (pearl th-paste-crash). If bracketed paste isn't supported by
+    /// the terminal, multi-line pastes arrive as a stream of Char
+    /// events including embedded \n / \r; without this clamp those
+    /// would render as literal newlines in the Paragraph and trigger
+    /// the inline-viewport buffer overflow panic seen in
+    /// `index outside of buffer: ...`.
     pub fn input_insert(&mut self, ch: char) {
+        let ch = if matches!(ch, '\n' | '\r') { ' ' } else { ch };
         self.input.insert(self.input_cursor, ch);
         self.input_cursor += ch.len_utf8();
     }

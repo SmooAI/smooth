@@ -108,6 +108,17 @@ pub async fn run_with_session(working_dir: PathBuf, resume: Option<crate::sessio
     enable_raw_mode().map_err(|e| anyhow::anyhow!("enable_raw_mode failed ({e}); terminal may not support raw mode"))?;
     tui_debug("enable_raw_mode OK");
 
+    // Enable bracketed paste so multi-line pastes arrive as one
+    // `Event::Paste(String)` instead of N Char + Enter events. Without
+    // this, pasting "line1\nline2" into the input box submits "line1"
+    // immediately on the embedded \n (Enter) and then submits each
+    // following line as its own message — a flood of TaskStarts that
+    // races the renderer and can panic ratatui's inline-viewport
+    // buffer at high enough cadence (pearl th-paste-crash). Best-effort:
+    // some terminals don't support bracketed paste; the enable call
+    // emits ESC sequences they ignore harmlessly.
+    let _ = crossterm::execute!(io::stdout(), crossterm::event::EnableBracketedPaste);
+
     // Pick a viewport height that fits the input/status plus a
     // reasonable streaming-preview region. 14 rows (3 input + 1
     // status + 10 preview) feels right on an 80x24 terminal; if the
@@ -249,7 +260,9 @@ pub async fn run_with_session(working_dir: PathBuf, resume: Option<crate::sessio
     // Restore terminal — inline-viewport mode only needs to disable
     // raw mode and ensure the cursor is visible. There's no alt-
     // screen to leave: the viewport sat in the primary buffer the
-    // whole time.
+    // whole time. Also disable bracketed paste so subsequent shell
+    // sessions in the same terminal don't inherit the mode.
+    let _ = crossterm::execute!(io::stdout(), crossterm::event::DisableBracketedPaste);
     disable_raw_mode()?;
     terminal.show_cursor()?;
     // Move the cursor below the viewport so the user's next shell
@@ -315,7 +328,24 @@ fn event_loop(
 
         // Poll for terminal events with 50ms timeout for responsive streaming UI
         if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
+            let evt = event::read()?;
+            // Handle bracketed-paste events first — they arrive as a
+            // single Event::Paste(String) when the terminal supports
+            // it. Newlines in the pasted content are normalized to
+            // spaces because the input box is single-line; multi-line
+            // input would require a vertically-growing input widget,
+            // which is out of scope for this fix. The user gets their
+            // paste as one message instead of a TaskStart-per-line
+            // flood that crashed the renderer (pearl th-paste-crash).
+            if let Event::Paste(text) = &evt {
+                let mut s = state.lock().expect("state lock poisoned");
+                let sanitized = text.replace(['\r', '\n'], " ");
+                for ch in sanitized.chars() {
+                    s.input_insert(ch);
+                }
+                continue;
+            }
+            if let Event::Key(key) = evt {
                 let mut s = state.lock().expect("state lock poisoned");
 
                 // Global keybindings. Ctrl+B used to toggle the
@@ -871,7 +901,59 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
     let _ = tx.send(AgentEvent::Started { agent_id: "task".into() });
 
     let cwd = std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string());
-    let mut events = client.run_task(message, None, None, cwd.as_deref(), agent.as_deref()).await?;
+
+    // Build a prior-conversation prefix from this TUI session's chat
+    // history so the agent has continuity across turns. Big Smooth's
+    // sandboxed dispatch starts a fresh agent per task with no prior
+    // memory; without this, the user's "why did you say postgres
+    // earlier?" gets a confused "I haven't said anything yet" because
+    // the new agent has never seen the prior turn. (Pearl th-c0n7x1.)
+    //
+    // Constraints:
+    //   - Only User and Assistant roles. System messages are TUI-side
+    //     status banners that the agent doesn't need.
+    //   - Skip the just-pushed user message (it's `message`, the
+    //     current turn) and the streaming assistant placeholder
+    //     (empty content, hasn't run yet).
+    //   - Trim prior assistant content to drop runner-stderr blocks
+    //     and per-line `[runner] ` diagnostic lines so we don't feed
+    //     noise back into the model.
+    let task_message: String = {
+        let s = state.lock().expect("state lock poisoned");
+        let mut prior_lines: Vec<String> = Vec::new();
+        // Iterate all messages except the last two (current user + streaming assistant).
+        let upper = s.messages.len().saturating_sub(2);
+        for msg in s.messages.iter().take(upper) {
+            let role_label = match msg.role {
+                crate::state::ChatRole::User => "User",
+                crate::state::ChatRole::Assistant => "Assistant",
+                crate::state::ChatRole::System => continue,
+            };
+            // Drop runner diagnostics from the prose we feed back.
+            let cleaned: String = msg
+                .content
+                .lines()
+                .filter(|l| !l.starts_with("[runner] ") && !l.starts_with("[runner stderr]") && !l.starts_with("[cast-summary]"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let trimmed = cleaned.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            prior_lines.push(format!("{role_label}: {trimmed}"));
+        }
+        if prior_lines.is_empty() {
+            message.to_string()
+        } else {
+            format!(
+                "## Prior conversation in this session\n\n{}\n\n## Current message\n\n{}",
+                prior_lines.join("\n\n"),
+                message
+            )
+        }
+    };
+
+    let mut events = client.run_task(&task_message, None, None, cwd.as_deref(), agent.as_deref()).await?;
 
     // Per-tool-name queues of (id, started_at, args). The runner emits
     // a ToolCallStart, then the tool runs, then a ToolCallComplete —
