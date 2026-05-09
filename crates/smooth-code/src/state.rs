@@ -82,7 +82,7 @@ impl ToolCallState {
     /// Create a new `ToolCallState` with `Running` status and a truncated arguments preview.
     pub fn new(id: impl Into<String>, tool_name: impl Into<String>, arguments: &serde_json::Value) -> Self {
         let args_str = pretty_args_preview(arguments);
-        let arguments_preview = if args_str.len() > 80 { format!("{}...", &args_str[..80]) } else { args_str };
+        let arguments_preview = truncate_preview(&args_str);
 
         Self {
             id: id.into(),
@@ -105,11 +105,7 @@ impl ToolCallState {
     pub fn from_raw(id: impl Into<String>, tool_name: impl Into<String>, arguments_json: &str) -> Self {
         let parsed: Option<serde_json::Value> = serde_json::from_str(arguments_json).ok();
         let preview_src = parsed.as_ref().map_or_else(|| arguments_json.to_string(), pretty_args_preview);
-        let arguments_preview = if preview_src.len() > 80 {
-            format!("{}...", &preview_src[..80])
-        } else {
-            preview_src
-        };
+        let arguments_preview = truncate_preview(&preview_src);
         Self {
             id: id.into(),
             tool_name: tool_name.into(),
@@ -160,6 +156,23 @@ fn format_arg_value(v: &serde_json::Value) -> String {
     match v {
         serde_json::Value::String(s) => format!("\"{s}\""),
         _ => v.to_string(),
+    }
+}
+
+/// Truncate the preview to ~80 characters. **Char-aware**, not
+/// byte-aware: a write_file or edit_file call frequently includes
+/// box-drawing glyphs (`│`, `├`, etc.) and non-ASCII text, and
+/// slicing by byte index in the middle of a multi-byte UTF-8
+/// sequence panics with "byte index N is not a char boundary."
+/// That panic poisoned the AppState mutex and cascaded the whole
+/// TUI process. Counting and slicing by chars sidesteps both.
+fn truncate_preview(s: &str) -> String {
+    const MAX_CHARS: usize = 80;
+    if s.chars().count() > MAX_CHARS {
+        let truncated: String = s.chars().take(MAX_CHARS).collect();
+        format!("{truncated}...")
+    } else {
+        s.to_string()
     }
 }
 
@@ -841,6 +854,26 @@ mod tests {
         // logic is the only thing this test asserts.
         assert_eq!(tc.arguments_preview.len(), 83);
         assert!(tc.arguments_preview.ends_with("..."));
+    }
+
+    #[test]
+    fn test_arguments_preview_truncation_handles_multibyte_chars() {
+        // Regression for the panic that crashed the TUI on a write_file
+        // call whose new_string contained box-drawing glyphs (`│` is
+        // 3 bytes). Slicing by byte index 80 landed inside the multi-
+        // byte sequence and panicked. Char-aware truncation makes this
+        // safe regardless of where char boundaries fall.
+        let body = "│".repeat(100); // 100 chars, 300 bytes
+        let args = serde_json::json!({"new_string": body});
+        let tc = ToolCallState::new("tc-x", "write_file", &args);
+        // Must not panic and must end with "..."
+        assert!(tc.arguments_preview.ends_with("..."));
+        // Must contain only complete `│` characters in the truncated
+        // section — never a partial byte sequence.
+        let body_part = tc.arguments_preview.trim_end_matches("...").trim_start_matches('"');
+        for ch in body_part.chars() {
+            assert!(ch == '│' || ch == '"', "unexpected char {ch:?} in truncated preview");
+        }
     }
 
     #[test]

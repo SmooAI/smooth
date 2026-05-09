@@ -204,14 +204,14 @@ pub async fn run_with_session(working_dir: PathBuf, resume: Option<crate::sessio
     // the "type a message" hint; for resumed sessions it announces
     // which session is back.
     if resume.is_none() {
-        let mut s = state.lock().expect("state lock poisoned");
+        let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
         s.add_message(ChatMessage::system("Type a message to get started. /help for commands."));
     } else {
         let title_display = resume
             .as_ref()
             .and_then(|s| s.title.clone())
             .unwrap_or_else(|| resume.as_ref().map(|s| s.id.clone()).unwrap_or_default());
-        let mut s = state.lock().expect("state lock poisoned");
+        let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
         s.add_message(ChatMessage::system(format!("Resumed session: {title_display}")));
     }
 
@@ -220,7 +220,7 @@ pub async fn run_with_session(working_dir: PathBuf, resume: Option<crate::sessio
         let state_clone = Arc::clone(&state);
         tokio::spawn(async move {
             let (health_status, warnings) = run_startup_health_checks().await;
-            let mut s = state_clone.lock().expect("state lock poisoned");
+            let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
             s.health_status = health_status;
             if !warnings.is_empty() {
                 let warning_text = format!(
@@ -236,7 +236,7 @@ pub async fn run_with_session(working_dir: PathBuf, resume: Option<crate::sessio
     // blocks or errors, we've at least rendered the welcome message once
     // so the user sees the UI is alive.
     {
-        let s = state.lock().expect("state lock poisoned");
+        let s = state.lock().unwrap_or_else(|e| e.into_inner());
         if let Err(e) = terminal.draw(|f| render::render(f, &s)) {
             tui_debug(format!("initial terminal.draw failed: {e}"));
         } else {
@@ -250,7 +250,7 @@ pub async fn run_with_session(working_dir: PathBuf, resume: Option<crate::sessio
 
     // Auto-save on quit
     {
-        let s = state.lock().expect("state lock poisoned");
+        let s = state.lock().unwrap_or_else(|e| e.into_inner());
         if let Ok(mgr) = SessionManager::new() {
             let session = Session::from_state(&s);
             let _ = mgr.save(&session);
@@ -289,7 +289,7 @@ fn event_loop(
     loop {
         // Auto-save every 30s if there are messages
         if last_save.elapsed() >= auto_save_interval {
-            let s = state.lock().expect("state lock poisoned");
+            let s = state.lock().unwrap_or_else(|e| e.into_inner());
             if !s.messages.is_empty() {
                 if let Ok(mgr) = SessionManager::new() {
                     let session = Session::from_state(&s);
@@ -307,7 +307,7 @@ fn event_loop(
         // ^C". ratatui's double-buffered backend already produces
         // flicker-free output via crossterm's diff rendering.
         {
-            let mut s = state.lock().expect("state lock poisoned");
+            let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
             // Push every finalized message into the terminal's
             // scrollback BEFORE drawing the viewport. This way the
             // viewport only ever paints the in-flight streaming
@@ -322,7 +322,7 @@ fn event_loop(
 
         // Drain all pending agent events without blocking
         while let Ok(agent_event) = event_rx.try_recv() {
-            let mut s = state.lock().expect("state lock poisoned");
+            let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
             handle_agent_event(&mut s, agent_event);
         }
 
@@ -338,7 +338,7 @@ fn event_loop(
             // paste as one message instead of a TaskStart-per-line
             // flood that crashed the renderer (pearl th-paste-crash).
             if let Event::Paste(text) = &evt {
-                let mut s = state.lock().expect("state lock poisoned");
+                let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
                 let sanitized = text.replace(['\r', '\n'], " ");
                 for ch in sanitized.chars() {
                     s.input_insert(ch);
@@ -346,7 +346,7 @@ fn event_loop(
                 continue;
             }
             if let Event::Key(key) = evt {
-                let mut s = state.lock().expect("state lock poisoned");
+                let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
 
                 // Global keybindings. Ctrl+B used to toggle the
                 // sidebar, but inline-viewport mode has no panel
@@ -374,7 +374,7 @@ fn event_loop(
         }
 
         // Check if we should quit after event handling
-        let s = state.lock().expect("state lock poisoned");
+        let s = state.lock().unwrap_or_else(|e| e.into_inner());
         if s.should_quit {
             break;
         }
@@ -639,11 +639,11 @@ fn handle_input_mode(
                                 if result.is_empty() {
                                     result = "(no output)".to_string();
                                 }
-                                let mut s = state_arc.lock().expect("state lock poisoned");
+                                let mut s = state_arc.lock().unwrap_or_else(|e| e.into_inner());
                                 s.add_message(ChatMessage::system(format!("$ {cmd}\n{result}")));
                             }
                             Err(e) => {
-                                let mut s = state_arc.lock().expect("state lock poisoned");
+                                let mut s = state_arc.lock().unwrap_or_else(|e| e.into_inner());
                                 s.add_message(ChatMessage::system(format!("Shell error: {e}")));
                             }
                         }
@@ -665,7 +665,7 @@ fn handle_input_mode(
                         let state_for_naming = Arc::clone(&state_arc);
                         tokio::spawn(async move {
                             if let Some(title) = auto_name_session(&naming_prompt).await {
-                                let mut s = state_for_naming.lock().expect("state lock poisoned");
+                                let mut s = state_for_naming.lock().unwrap_or_else(|e| e.into_inner());
                                 s.session_title = Some(title);
                             }
                         });
@@ -895,7 +895,7 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
     // tool_call render entirely (the diff for the very first edit
     // wouldn't show up).
     {
-        let mut s = state.lock().expect("state lock poisoned");
+        let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
         s.start_streaming();
     }
     let _ = tx.send(AgentEvent::Started { agent_id: "task".into() });
@@ -919,7 +919,7 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
     //   - Drop runner-stderr / cast-summary diagnostic lines from
     //     prose so we don't feed noise back into the model.
     let prior_messages: Vec<crate::client::PriorMessage> = {
-        let s = state.lock().expect("state lock poisoned");
+        let s = state.lock().unwrap_or_else(|e| e.into_inner());
         let upper = s.messages.len().saturating_sub(2);
         let mut out = Vec::with_capacity(upper);
         for msg in s.messages.iter().take(upper) {
@@ -965,7 +965,7 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
                 next_id += 1;
                 let id = format!("tc-{next_id}");
                 {
-                    let mut s = state.lock().expect("state lock poisoned");
+                    let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
                     // Tool calls hang off the most recent assistant
                     // message. If there isn't one yet, drop the start
                     // event — render will pick up the Complete output
@@ -1002,7 +1002,7 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
             } => {
                 if let Some(q) = pending.get_mut(&tool_name) {
                     if let Some((id, _, _)) = q.pop_front() {
-                        let mut s = state.lock().expect("state lock poisoned");
+                        let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
                         for msg in &mut s.messages {
                             for tc in &mut msg.tool_calls {
                                 if tc.id == id {
@@ -1056,7 +1056,7 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
                     // AgentEvent::Error would terminate the run; we
                     // want the response to keep flowing while the
                     // user sees the warning inline.
-                    let mut s = state.lock().expect("state lock poisoned");
+                    let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
                     s.add_message(crate::state::ChatMessage::system(format!("⚠ {label}: {message}")));
                 }
                 None
