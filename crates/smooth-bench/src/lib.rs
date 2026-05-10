@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod chat_driver;
 pub mod curated;
+pub mod eval_report;
 pub mod scenarios;
 pub mod score;
 pub mod sweep;

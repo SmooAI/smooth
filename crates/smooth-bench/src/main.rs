@@ -51,6 +51,18 @@ enum Commands {
     /// This is the "The Line" authoritative benchmark — the single
     /// pass-rate Smoo AI publishes with every release.
     Score(ScoreArgs),
+
+    /// Render `eval.html` per-task report from existing `result.json`
+    /// files. Pearl th-2be27b. Pure offline operation: no LLM, no
+    /// network, no agent dispatch — just HTML rendering for human
+    /// review of completed runs.
+    EvalReport {
+        /// Directory containing one or more `result.json` files. May
+        /// be a single run dir or a sweep dir (subdirs each with a
+        /// `result.json`). Default: `~/.smooth/bench-runs`.
+        #[arg(long)]
+        run_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -137,7 +149,22 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Score(args) => run_score(args).await,
+        Commands::EvalReport { run_dir } => run_eval_report(run_dir),
     }
+}
+
+fn run_eval_report(run_dir: Option<PathBuf>) -> Result<()> {
+    let dir = run_dir
+        .or_else(|| dirs_next::home_dir().map(|h| h.join(".smooth").join("bench-runs")))
+        .ok_or_else(|| anyhow::anyhow!("could not resolve default --run-dir; pass --run-dir explicitly"))?;
+    let outcome = smooth_bench::eval_report::render_dir(&dir)?;
+    for path in &outcome.eval_paths {
+        println!("wrote {}", path.display());
+    }
+    if let Some(index) = &outcome.index_path {
+        println!("wrote {} (index)", index.display());
+    }
+    Ok(())
 }
 
 async fn run_score(args: ScoreArgs) -> Result<()> {
