@@ -34,6 +34,7 @@ pub mod curated;
 pub mod eval_report;
 pub mod scenarios;
 pub mod score;
+pub mod supervisor;
 pub mod sweep;
 
 /// Where we cache the cloned polyglot-benchmark repo.
