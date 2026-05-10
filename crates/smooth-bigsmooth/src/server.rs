@@ -3541,6 +3541,38 @@ pub struct ChatMessageView {
     role: String, // "user" | "assistant"
     content: String,
     created_at: String,
+    /// Tool calls executed while producing this message. Empty for
+    /// user messages and for assistant turns that didn't invoke any
+    /// tools. Always present (rather than omitted) so web clients
+    /// don't have to guard against undefined — empty array is the
+    /// "no tools" signal. Pearl th-880f2c.
+    tool_calls: Vec<ToolCallView>,
+}
+
+/// Wire shape for one tool call. Mirrors `SessionToolCall` in
+/// `session.rs` 1:1 but lives here so the API surface stays
+/// independent of the storage layer if we ever swap stores.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ToolCallView {
+    id: String,
+    tool_name: String,
+    arguments: String,
+    output: Option<String>,
+    status: String, // "running" | "done" | "error"
+    duration_ms: Option<u64>,
+}
+
+impl From<crate::session::SessionToolCall> for ToolCallView {
+    fn from(t: crate::session::SessionToolCall) -> Self {
+        Self {
+            id: t.id,
+            tool_name: t.tool_name,
+            arguments: t.arguments,
+            output: t.output,
+            status: t.status,
+            duration_ms: t.duration_ms,
+        }
+    }
 }
 
 async fn create_chat_session_handler(State(state): State<AppState>, Json(body): Json<CreateChatSessionBody>) -> Json<ApiResponse<crate::session::ChatSession>> {
@@ -3595,6 +3627,7 @@ async fn get_chat_messages_handler(State(state): State<AppState>, Path(id): Path
             role: if m.from == "user" { "user".to_string() } else { "assistant".to_string() },
             content: m.content,
             created_at: m.timestamp.to_rfc3339(),
+            tool_calls: m.tool_calls.into_iter().map(ToolCallView::from).collect(),
         })
         .collect();
     Json(ApiResponse { data: views, ok: true })
@@ -3618,6 +3651,7 @@ async fn post_chat_message_handler(
         content: user_content.clone(),
         timestamp: chrono::Utc::now(),
         message_type: crate::session::MessageType::Command,
+        tool_calls: Vec::new(),
     };
     if let Err(e) = state.session_store.save_message(user_msg) {
         tracing::warn!(error = %e, "failed to save user chat message");
@@ -3664,12 +3698,17 @@ async fn post_chat_message_handler(
     // returning an error to the user than leaving them watching the
     // thinking spinner forever.
     const CHAT_TURN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
-    let assistant_text = match tokio::time::timeout(CHAT_TURN_TIMEOUT, run_chat_with_history(&state, system_prompt, &history, &user_content)).await {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => format!("Error: {e}"),
+    let (assistant_text, tool_calls) = match tokio::time::timeout(CHAT_TURN_TIMEOUT, run_chat_with_history(&state, system_prompt, &history, &user_content))
+        .await
+    {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(e)) => (format!("Error: {e}"), Vec::new()),
         Err(_) => {
             tracing::warn!(session = %id, "chat turn exceeded {CHAT_TURN_TIMEOUT:?} ceiling — aborting");
-            "_(Big Smooth ran into a wall — the chat turn went past 5 minutes without a real answer. Try sending the message again; the next turn starts fresh.)_".to_string()
+            (
+                "_(Big Smooth ran into a wall — the chat turn went past 5 minutes without a real answer. Try sending the message again; the next turn starts fresh.)_".to_string(),
+                Vec::new(),
+            )
         }
     };
 
@@ -3682,6 +3721,7 @@ async fn post_chat_message_handler(
         content: assistant_text.clone(),
         timestamp: chrono::Utc::now(),
         message_type: crate::session::MessageType::Response,
+        tool_calls: tool_calls.clone(),
     };
     if let Err(e) = state.session_store.save_message(assistant_msg) {
         tracing::warn!(error = %e, "failed to save assistant chat message");
@@ -3695,6 +3735,7 @@ async fn post_chat_message_handler(
             role: "assistant".into(),
             content: assistant_text,
             created_at: chrono::Utc::now().to_rfc3339(),
+            tool_calls: tool_calls.into_iter().map(ToolCallView::from).collect(),
         },
         ok: true,
     })
@@ -3753,12 +3794,17 @@ fn chat_default_model() -> String {
 /// endpoint, so making this agentic is what makes the chat actually
 /// orchestrate (search/create pearls, spawn teammates, message them)
 /// instead of returning Haiku-class one-shots.
+/// Run the chat agent and return both the final assistant text and the
+/// ordered list of tool calls captured along the way. Tool-call
+/// persistence is what backs the web UI's tool-call timeline (pearl
+/// th-880f2c) — without these we can't render the tool cards next to
+/// the assistant turn.
 async fn run_chat_with_history(
     state: &AppState,
     system_prompt: &str,
     history: &[crate::session::SessionMessage],
     user_content: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, Vec<crate::session::SessionToolCall>)> {
     use smooth_operator::agent::{Agent, AgentConfig, AgentEvent};
 
     let providers_path = dirs_next::home_dir().unwrap_or_default().join(".smooth/providers.json");
@@ -3806,19 +3852,56 @@ async fn run_chat_with_history(
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
     let last_action_drain = last_action.clone();
     let thoughts_drain = thoughts.clone();
+    // Accumulate tool calls in a shared buffer so the chat handler can
+    // persist them with the assistant message. We pair Start with
+    // Complete by walking the buffer backwards looking for the first
+    // still-`running` entry whose tool_name matches — chat agents in
+    // this server are sequential (one tool at a time), so this is
+    // unambiguous in practice. Pearl th-880f2c.
+    let captured_tools: std::sync::Arc<tokio::sync::Mutex<Vec<crate::session::SessionToolCall>>> = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let captured_drain = captured_tools.clone();
     let drain = tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
             match ev {
-                AgentEvent::ToolCallStart { tool_name, .. } => {
+                AgentEvent::ToolCallStart { tool_name, arguments, .. } => {
                     {
                         let mut la = last_action_drain.lock().await;
                         *la = (tool_name.clone(), std::time::Instant::now());
                     }
+                    {
+                        let mut buf = captured_drain.lock().await;
+                        buf.push(crate::session::SessionToolCall {
+                            id: format!("tc-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]),
+                            tool_name: tool_name.clone(),
+                            arguments,
+                            output: None,
+                            status: "running".to_string(),
+                            duration_ms: None,
+                        });
+                    }
                     thoughts_drain.emit(crate::thoughts::ThoughtContext::ToolCall { tool_name });
                 }
-                AgentEvent::ToolCallComplete { .. } => {
-                    let mut la = last_action_drain.lock().await;
-                    la.1 = std::time::Instant::now();
+                AgentEvent::ToolCallComplete {
+                    tool_name,
+                    is_error,
+                    result,
+                    duration_ms,
+                    ..
+                } => {
+                    {
+                        let mut la = last_action_drain.lock().await;
+                        la.1 = std::time::Instant::now();
+                    }
+                    {
+                        let mut buf = captured_drain.lock().await;
+                        // Match the most-recent Running entry with the
+                        // same tool_name.
+                        if let Some(slot) = buf.iter_mut().rev().find(|t| t.tool_name == tool_name && t.status == "running") {
+                            slot.output = Some(result);
+                            slot.status = if is_error { "error" } else { "done" }.to_string();
+                            slot.duration_ms = Some(duration_ms);
+                        }
+                    }
                 }
                 AgentEvent::LlmResponse { content_preview, .. } if !content_preview.trim().is_empty() => {
                     thoughts_drain.emit(crate::thoughts::ThoughtContext::AssistantPreview { snippet: content_preview });
@@ -3849,9 +3932,22 @@ async fn run_chat_with_history(
 
     let conversation = agent.run_with_channel(user_payload, tx).await.map_err(|e| anyhow::anyhow!("chat agent: {e}"))?;
     heartbeat.abort();
-    drain.abort();
+    // Wait for the drain to finish processing whatever events are
+    // already queued before we abort it — otherwise a tool's
+    // Complete event can race with the abort and we lose its output
+    // from the persisted record. The drain channel was closed when
+    // the agent dropped its `tx`, so this finishes promptly.
+    let _ = drain.await;
 
-    Ok(conversation.last_assistant_content().unwrap_or("(no response)").to_string())
+    let tool_calls = std::sync::Arc::try_unwrap(captured_tools)
+        .map(tokio::sync::Mutex::into_inner)
+        .unwrap_or_else(|arc| {
+            // Fallback: clone out of the Arc if some other reference is
+            // still held. Practically unreachable — only the drain task
+            // holds the second clone and we awaited it above.
+            arc.try_lock().map(|g| g.clone()).unwrap_or_default()
+        });
+    Ok((conversation.last_assistant_content().unwrap_or("(no response)").to_string(), tool_calls))
 }
 
 // ── Boardroom Narc — POST /api/narc/judge ─────────────────
@@ -3959,6 +4055,7 @@ async fn get_teammate_messages_handler(State(state): State<AppState>, Path(name)
             content: c.content,
             message_type: crate::session::MessageType::Response,
             timestamp: c.created_at,
+            tool_calls: Vec::new(),
         })
         .collect();
     Json(ApiResponse { data: msgs, ok: true })

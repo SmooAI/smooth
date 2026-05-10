@@ -49,6 +49,37 @@ pub struct SessionMessage {
     pub content: String,
     pub timestamp: DateTime<Utc>,
     pub message_type: MessageType,
+    /// Tool calls executed while producing this message. Empty for
+    /// user messages and for assistant messages that didn't invoke
+    /// any tools. Persisted as a JSON column on `session_messages`
+    /// so the web UI can render the full tool-call timeline alongside
+    /// the assistant text (pearl th-880f2c).
+    #[serde(default)]
+    pub tool_calls: Vec<SessionToolCall>,
+}
+
+/// One tool call captured during agent execution. Mirrors the shape
+/// the smooth-code TUI uses for its tool-call cards (id, name,
+/// arguments, output, status, duration).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionToolCall {
+    pub id: String,
+    pub tool_name: String,
+    /// JSON-serialized arguments the agent passed to the tool. May
+    /// be empty if the agent emitted no parseable JSON.
+    #[serde(default)]
+    pub arguments: String,
+    /// Tool stdout/result, truncated upstream to ~500 chars. `None`
+    /// while the call is still running (only ever observed if a
+    /// reader races a writer; persisted records are always
+    /// post-completion).
+    #[serde(default)]
+    pub output: Option<String>,
+    /// `"running"` | `"done"` | `"error"`.
+    pub status: String,
+    /// Wall-clock duration of the tool call, set on completion.
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
 }
 
 /// Point-in-time snapshot of an orchestration run — used for resuming interrupted work.
@@ -333,15 +364,28 @@ impl std::fmt::Debug for DoltSessionStore {
 impl SessionStore for DoltSessionStore {
     fn save_message(&self, message: SessionMessage) -> anyhow::Result<()> {
         let mt = format!("{:?}", message.message_type);
+        let tool_calls_sql = if message.tool_calls.is_empty() {
+            "NULL".to_string()
+        } else {
+            // JSON-serialize the tool-call vector. `unwrap_or_default`
+            // is safe because Vec<SessionToolCall> always serializes —
+            // every field is owned strings/numbers, no skip-on-failure
+            // surface — but we still defend so a serialization mishap
+            // would persist an empty array rather than poisoning the
+            // entire INSERT.
+            let json = serde_json::to_string(&message.tool_calls).unwrap_or_else(|_| "[]".to_string());
+            format!("'{}'", Self::esc(&json))
+        };
         self.dolt.exec(&format!(
-            "INSERT INTO session_messages (id, session_id, from_actor, to_actor, content, message_type, created_at) \
-             VALUES ('{}', '{}', '{}', '{}', '{}', '{}', NOW())",
+            "INSERT INTO session_messages (id, session_id, from_actor, to_actor, content, message_type, created_at, tool_calls) \
+             VALUES ('{}', '{}', '{}', '{}', '{}', '{}', NOW(), {})",
             Self::esc(&message.id),
             Self::esc(&message.session_id),
             Self::esc(&message.from),
             Self::esc(&message.to),
             Self::esc(&message.content),
             Self::esc(&mt),
+            tool_calls_sql,
         ))?;
         self.dolt.commit(&format!("save message {} in session {}", message.id, message.session_id))?;
         Ok(())
@@ -349,7 +393,7 @@ impl SessionStore for DoltSessionStore {
 
     fn get_messages(&self, session_id: &str, limit: usize) -> anyhow::Result<Vec<SessionMessage>> {
         let rows = self.dolt.sql(&format!(
-            "SELECT id, session_id, from_actor, to_actor, content, message_type, created_at \
+            "SELECT id, session_id, from_actor, to_actor, content, message_type, created_at, tool_calls \
              FROM session_messages WHERE session_id = '{}' ORDER BY created_at DESC LIMIT {}",
             Self::esc(session_id),
             limit,
@@ -364,6 +408,10 @@ impl SessionStore for DoltSessionStore {
                 content: row["content"].as_str().unwrap_or_default().to_string(),
                 timestamp: Self::parse_datetime(&row["created_at"]),
                 message_type: Self::parse_message_type(row["message_type"].as_str().unwrap_or("Command")),
+                tool_calls: row["tool_calls"]
+                    .as_str()
+                    .and_then(|s| serde_json::from_str::<Vec<SessionToolCall>>(s).ok())
+                    .unwrap_or_default(),
             })
             .collect();
         msgs.reverse(); // oldest first
@@ -524,6 +572,7 @@ mod tests {
             content: format!("content-{id}"),
             timestamp: Utc::now(),
             message_type: msg_type,
+            tool_calls: Vec::new(),
         }
     }
 
@@ -558,6 +607,46 @@ mod tests {
         assert_eq!(deser.id, msg.id);
         assert_eq!(deser.content, msg.content);
         assert_eq!(deser.message_type, MessageType::Response);
+    }
+
+    // --- SessionToolCall (pearl th-880f2c) ---
+
+    #[test]
+    fn session_message_serializes_with_tool_calls() {
+        let mut msg = make_message("m3", "s1", MessageType::Response);
+        msg.tool_calls.push(SessionToolCall {
+            id: "tc-1".into(),
+            tool_name: "bash".into(),
+            arguments: r#"{"command":"ls"}"#.into(),
+            output: Some("README.md".into()),
+            status: "done".into(),
+            duration_ms: Some(42),
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        let deser: SessionMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.tool_calls.len(), 1);
+        assert_eq!(deser.tool_calls[0].tool_name, "bash");
+        assert_eq!(deser.tool_calls[0].status, "done");
+        assert_eq!(deser.tool_calls[0].duration_ms, Some(42));
+    }
+
+    #[test]
+    fn session_message_back_compat_when_tool_calls_field_missing() {
+        // Records persisted before pearl th-880f2c don't have a
+        // `tool_calls` field. Loading them must succeed and yield an
+        // empty Vec, not a deserialization error — otherwise upgrades
+        // would orphan every existing chat.
+        let pre_th_880f2c_json = r#"{
+            "id": "m4",
+            "session_id": "s1",
+            "from": "bigsmooth",
+            "to": "user",
+            "content": "hi",
+            "timestamp": "2026-05-10T00:00:00Z",
+            "message_type": "Response"
+        }"#;
+        let deser: SessionMessage = serde_json::from_str(pre_th_880f2c_json).unwrap();
+        assert!(deser.tool_calls.is_empty());
     }
 
     // --- MessageType ---

@@ -186,9 +186,15 @@ impl PearlStore {
                 to_actor VARCHAR(100) NOT NULL,
                 content TEXT NOT NULL,
                 message_type VARCHAR(20) NOT NULL DEFAULT 'Command',
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                tool_calls TEXT NULL
             )",
         )?;
+        // Idempotent migration: existing databases created before
+        // pearl th-880f2c (tool-call persistence) won't have the
+        // column. Dolt supports `ADD COLUMN IF NOT EXISTS`; the call
+        // is a no-op when the column already exists.
+        let _ = dolt.exec("ALTER TABLE session_messages ADD COLUMN IF NOT EXISTS tool_calls TEXT NULL");
         dolt.exec(
             "CREATE TABLE IF NOT EXISTS orchestrator_snapshots (
                 id VARCHAR(40) PRIMARY KEY,

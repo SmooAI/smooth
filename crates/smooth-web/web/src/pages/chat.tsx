@@ -43,6 +43,20 @@ interface Msg {
     /// the server, so a page refresh drops them.
     role: string;
     content: string;
+    /// Tool calls executed while producing this assistant message.
+    /// Empty/absent for user, activity, and tool-less assistant
+    /// turns. Pearl th-880f2c — backend now persists these in the
+    /// `tool_calls` JSON column on `session_messages`.
+    tool_calls?: ToolCall[];
+}
+
+interface ToolCall {
+    id: string;
+    tool_name: string;
+    arguments: string;
+    output: string | null;
+    status: string; // 'running' | 'done' | 'error'
+    duration_ms: number | null;
 }
 
 interface Teammate {

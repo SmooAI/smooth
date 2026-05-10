@@ -498,6 +498,7 @@ async fn session_messages_saved_in_dolt() {
             content: "Write a Rust function to add two numbers".into(),
             timestamp: chrono::Utc::now(),
             message_type: MessageType::Command,
+            tool_calls: Vec::new(),
         })
         .expect("save msg 1");
 
@@ -510,6 +511,7 @@ async fn session_messages_saved_in_dolt() {
             content: "Dispatching Rust task to operator-1".into(),
             timestamp: chrono::Utc::now(),
             message_type: MessageType::Command,
+            tool_calls: Vec::new(),
         })
         .expect("save msg 2");
 
@@ -522,6 +524,7 @@ async fn session_messages_saved_in_dolt() {
             content: "Task completed. 12/12 tests pass.".into(),
             timestamp: chrono::Utc::now(),
             message_type: MessageType::Response,
+            tool_calls: Vec::new(),
         })
         .expect("save msg 3");
 
