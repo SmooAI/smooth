@@ -1330,15 +1330,22 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
             }
         }
 
-        // INTERIM (pearl th-a13170 / parent investigation th-6030b0):
-        // microsandbox 0.3.14's SecretBuilder placeholder substitution
-        // wasn't firing on outbound LLM requests — agents kept sending
-        // the literal placeholder string to LiteLLM and getting 401.
-        // Until we either (a) upgrade microsandbox to 0.4.x where this
-        // may be fixed, or (b) figure out why allow_all-network +
-        // secret-builder don't compose, just inject SMOOTH_API_KEY
-        // as a plain env var. The agent in the VM can read its own
-        // key — known exfil risk, accepted to unblock dev.
+        // INTERIM (pearl th-6030b0): microsandbox 0.3.14's
+        // SecretBuilder placeholder substitution wasn't firing on
+        // outbound LLM requests — agents kept sending the literal
+        // placeholder string to LiteLLM and getting 401.
+        //
+        // 2026-05-10: bumped to microsandbox 0.4.5. Build clean,
+        // 1111 workspace lib tests pass, but runtime substitution
+        // behavior on the secret-builder + allow_all-network combo
+        // is NOT yet verified end-to-end (needs real VM dispatch +
+        // Goalie audit-log inspection). Keeping the env-var
+        // workaround in place until a human can run that validation
+        // and confirm the placeholder reaches LiteLLM as the actual
+        // key. Once verified, remove the SMOOTH_API_KEY plain-env
+        // insertion below and let SecretBuilder do its job.
+        // Known exfil risk in current state — agent in the VM can
+        // read its own key — accepted to unblock dev.
         let _ = extract_host_from_url(&api_url); // (still used by env-key-flow placeholder docs)
         env.insert("SMOOTH_API_KEY".into(), api_key.clone());
         env.insert("SMOOTH_WORKSPACE".into(), "/workspace".into());

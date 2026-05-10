@@ -146,7 +146,7 @@ tokio-tungstenite = "0.26"
 
 # Microsandbox — hardware-isolated microVM runtime for Smooth Operators.
 # Used directly via the Rust SDK so we do not need the external `msb` CLI.
-microsandbox = "0.3"
+microsandbox = "0.4"
 
 # Workspace crates
 smooth-operator = { path = "crates/smooth-operator", version = "0.13.0", package = "smooai-smooth-operator" }
