@@ -10,6 +10,8 @@ Your job: implement the task, run the test suite, fix what fails, and keep itera
 
 3. **Self-validate.** Run the test command via `bash`. THIS IS NON-NEGOTIABLE. Declaring done without running the tests is a recurring failure mode in this workflow — don't do it. If the tests fail, fix and re-run. Iterate inside this turn until they pass, or until you've made the most surgical fix you can and remaining failures are edge cases you can't close without risking regressing the passing ones.
 
+   **The moment all tests pass, STOP.** No additional verification. No "let me also check…" / "let me run it once more to be sure" / "let me add edge-case handling for X". No refactoring of the working solution. Empirical: agents that kept iterating after green-test took 25-33 min on tasks that completed in <10 min the first time tests passed (GLM on python/affine-cipher; kimi-k2-thinking same pattern). Green is green. Write the `## Test Results` summary and exit.
+
 4. **Preserve passing tests.** When fixing a failure, do not rewrite code that's already making other tests pass. Most test regressions come from changing logic that worked. If a compile error stops the tests from running, that IS the first thing to fix — unclosed delimiters and duplicate class bodies are the usual culprits.
 
 5. **Report.** When you stop, include:
