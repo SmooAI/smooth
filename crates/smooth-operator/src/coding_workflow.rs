@@ -145,17 +145,51 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
         };
         total_cost_usd += turn_cost;
 
-        // Pull the agent's final assistant message — it usually
-        // contains a summary of what it did plus the last test
-        // result. We parse THIS for pass/fail and failure detail.
+        // Pull the agent's final assistant message — used for
+        // failure-context feedback into the next turn's prompt.
         let transcript = summarize_conversation(&conversation);
         last_verify_output = Some(transcript.clone());
 
-        // Green? We're done.
-        if detect_verify_pass(&transcript) {
-            succeeded = true;
-            tracing::info!(iteration, "coding workflow: agent reports green, stopping");
-            break;
+        // Pearl th-7cf405 / th-ed7bfa: trust evidence, not claims.
+        // The assistant's prose can fabricate "31 passed, 0 failed"
+        // without ever running a test; only believe a tool-result
+        // message produced by `bash` / `test_run`.
+        let evidence = verify_with_evidence(&conversation);
+
+        match evidence {
+            VerifyEvidence::EvidencedPass => {
+                succeeded = true;
+                tracing::info!(iteration, "coding workflow: tool evidence shows green, stopping");
+                break;
+            }
+            VerifyEvidence::EvidencedFail(_) => {
+                // Stay in the loop and feed failure context forward.
+            }
+            VerifyEvidence::NoEvidence => {
+                // No bash / test_run ever ran this turn. Either the
+                // task didn't require code (e.g. "can we commit
+                // this", routed here in error) OR the agent silently
+                // gave up. Either way, looping again won't help —
+                // the model already chose not to run tests when it
+                // had the chance. Exit gracefully and surface the
+                // assistant's prose so the user sees whatever
+                // happened (and any hallucinated test summary is
+                // visible as a hallucinated test summary, not
+                // accepted as truth).
+                tracing::info!(
+                    iteration,
+                    "coding workflow: no test-run evidence, exiting (agent didn't actually run tests this turn)"
+                );
+                if detect_verify_pass(&transcript) {
+                    // The assistant claimed pass without evidence.
+                    // Surface that explicitly as a hallucination
+                    // alert — both in tracing and as a stderr
+                    // comment that the runner forwards to the TUI.
+                    tracing::warn!(iteration, "coding workflow: assistant claimed pass with NO tool evidence — likely hallucinated");
+                    eprintln!("[cast-summary] WARNING: assistant claimed test pass without evidence — no `bash` / `test_run` tool actually ran this turn.");
+                }
+                break;
+            }
         }
 
         // Snapshot the workspace when this turn was the best so
@@ -287,6 +321,68 @@ fn summarize_conversation(conv: &crate::conversation::Conversation) -> String {
         .find(|m| matches!(m.role, crate::conversation::Role::Assistant))
         .map(|m| m.content.clone())
         .unwrap_or_default()
+}
+
+/// What the evidence in the conversation says about this turn —
+/// not what the assistant *claims*. Pearl th-7cf405 / th-ed7bfa:
+/// the workflow used to trust the assistant's `## Test Results: 31
+/// passed, 0 failed` line verbatim, which made hallucinated
+/// success indistinguishable from real success. We now require an
+/// actual `bash` / `test_run` tool-result message in the
+/// conversation whose output contains a recognizable test summary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerifyEvidence {
+    /// A tool actually ran and reported a green test suite.
+    EvidencedPass,
+    /// A tool actually ran and reported failures. `Some(n)` if a
+    /// failure count was parseable; `None` if the output looked
+    /// red but didn't include a count we could extract.
+    EvidencedFail(Option<u32>),
+    /// No bash / test_run tool call ever happened in this turn.
+    /// The assistant either did nothing (silently passed text
+    /// back) or hallucinated a result it never observed. Both are
+    /// "no work was actually done" — caller decides whether to
+    /// retry or exit gracefully.
+    NoEvidence,
+}
+
+/// Inspect the conversation for tool-result evidence of test
+/// outcomes. Walks tool-role messages in order and returns the
+/// LAST shaped result — later tool runs win, since the agent
+/// often runs the suite multiple times in one turn.
+pub fn verify_with_evidence(conv: &crate::conversation::Conversation) -> VerifyEvidence {
+    let mut last_outcome = VerifyEvidence::NoEvidence;
+    for msg in &conv.messages {
+        if !matches!(msg.role, crate::conversation::Role::Tool) {
+            continue;
+        }
+        // Only test-shaped tools produce evidence we believe.
+        // `bash` is the catch-all (the agent runs `pnpm test` /
+        // `cargo test` / `pytest` through it). `test_run` is the
+        // workflow's structured test tool when present. Other
+        // tool outputs (read_file, list_files, grep) don't count
+        // even if the user happened to grep for "PASS" somewhere.
+        let name = msg.tool_name.as_deref().unwrap_or("");
+        if name != "bash" && name != "test_run" && name != "shell" {
+            continue;
+        }
+        if detect_verify_pass(&msg.content) {
+            last_outcome = VerifyEvidence::EvidencedPass;
+            continue;
+        }
+        // Look for explicit failure shapes. We reuse
+        // `nonzero_failure_count` so all the same patterns the
+        // pass-detection guards against count as fail signals.
+        let upper = msg.content.to_uppercase();
+        let looks_red =
+            upper.contains("TEST RESULT: FAILED") || upper.contains("TESTS FAILED") || upper.contains("TESTS FAIL") || nonzero_failure_count(&upper);
+        if looks_red {
+            last_outcome = VerifyEvidence::EvidencedFail(extract_failed_count(&msg.content));
+        }
+        // Otherwise leave last_outcome as-is — this tool call
+        // wasn't a test, or didn't produce a recognizable summary.
+    }
+    last_outcome
 }
 
 /// True when the transcript reports the test suite is green.
@@ -600,6 +696,79 @@ mod tests {
         assert_eq!(extract_failed_count("3 failed, 28 passed"), Some(3));
         assert_eq!(extract_failed_count("Tests: 2 failed, 28 passed"), Some(2));
         assert_eq!(extract_failed_count("all tests pass"), None);
+    }
+
+    fn make_conv() -> crate::conversation::Conversation {
+        crate::conversation::Conversation::new(8192).with_system_prompt("test")
+    }
+
+    #[test]
+    fn verify_with_evidence_no_tool_calls_returns_no_evidence() {
+        // Pearl th-7cf405: a turn with no bash / test_run tool
+        // results, even if the assistant claims pass, must NOT
+        // count as evidence.
+        let mut conv = make_conv();
+        conv.push(crate::conversation::Message::user("can we commit to main"));
+        conv.push(crate::conversation::Message::assistant("## Test Results\n\n31 passed, 0 failed"));
+        assert_eq!(verify_with_evidence(&conv), VerifyEvidence::NoEvidence);
+    }
+
+    #[test]
+    fn verify_with_evidence_evidenced_pass_via_bash_tool() {
+        let mut conv = make_conv();
+        conv.push(crate::conversation::Message::user("fix the failing test"));
+        conv.push(crate::conversation::Message::tool_result_named(
+            "call-1",
+            "bash",
+            "test result: ok. 5 passed; 0 failed;",
+        ));
+        conv.push(crate::conversation::Message::assistant("Done."));
+        assert_eq!(verify_with_evidence(&conv), VerifyEvidence::EvidencedPass);
+    }
+
+    #[test]
+    fn verify_with_evidence_evidenced_fail_via_test_run() {
+        let mut conv = make_conv();
+        conv.push(crate::conversation::Message::user("fix the failing test"));
+        conv.push(crate::conversation::Message::tool_result_named(
+            "call-1",
+            "test_run",
+            "Tests: 2 failed, 5 passed",
+        ));
+        conv.push(crate::conversation::Message::assistant("Working on it."));
+        assert_eq!(verify_with_evidence(&conv), VerifyEvidence::EvidencedFail(Some(2)));
+    }
+
+    #[test]
+    fn verify_with_evidence_ignores_non_test_tool_outputs() {
+        // read_file or list_files outputs that happen to contain
+        // "passed" must not count as test evidence — agents read
+        // README files etc all the time.
+        let mut conv = make_conv();
+        conv.push(crate::conversation::Message::user("what does this repo do"));
+        conv.push(crate::conversation::Message::tool_result_named(
+            "call-1",
+            "read_file",
+            "## Test Status\n\nAll 31 tests pass.",
+        ));
+        conv.push(crate::conversation::Message::assistant("It's a budgeting app."));
+        assert_eq!(verify_with_evidence(&conv), VerifyEvidence::NoEvidence);
+    }
+
+    #[test]
+    fn verify_with_evidence_uses_last_test_run() {
+        // Multiple test runs in one turn — the last one wins
+        // (the agent often runs the suite, fixes, runs again).
+        let mut conv = make_conv();
+        conv.push(crate::conversation::Message::user("fix it"));
+        conv.push(crate::conversation::Message::tool_result_named("call-1", "bash", "Tests: 3 failed, 28 passed"));
+        conv.push(crate::conversation::Message::tool_result_named(
+            "call-2",
+            "bash",
+            "test result: ok. 31 passed; 0 failed;",
+        ));
+        conv.push(crate::conversation::Message::assistant("Fixed."));
+        assert_eq!(verify_with_evidence(&conv), VerifyEvidence::EvidencedPass);
     }
 
     #[test]
