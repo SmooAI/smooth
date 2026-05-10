@@ -137,7 +137,7 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
         }
 
         let agent = Agent::new(agent_config, cfg.tools.clone());
-        let conversation = agent.run_with_channel(user_prompt, cfg.tx.clone()).await?;
+        let mut conversation = agent.run_with_channel(user_prompt, cfg.tx.clone()).await?;
 
         let turn_cost = {
             let tracker = agent.cost_tracker.lock().expect("cost_tracker lock");
@@ -171,22 +171,23 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
                 // this", routed here in error) OR the agent silently
                 // gave up. Either way, looping again won't help —
                 // the model already chose not to run tests when it
-                // had the chance. Exit gracefully and surface the
-                // assistant's prose so the user sees whatever
-                // happened (and any hallucinated test summary is
-                // visible as a hallucinated test summary, not
-                // accepted as truth).
+                // had the chance.
                 tracing::info!(
                     iteration,
                     "coding workflow: no test-run evidence, exiting (agent didn't actually run tests this turn)"
                 );
                 if detect_verify_pass(&transcript) {
-                    // The assistant claimed pass without evidence.
-                    // Surface that explicitly as a hallucination
-                    // alert — both in tracing and as a stderr
-                    // comment that the runner forwards to the TUI.
+                    // Pearl iter-10: the assistant claimed pass
+                    // without evidence. Surface as hallucination
+                    // alert AND mutate the conversation's final
+                    // assistant message to redact the fabricated
+                    // "X passed, Y failed" claim. Without the
+                    // mutation, the user sees both the warning AND
+                    // the lie in the same chat — confusing and
+                    // ultimately accepts the lie.
                     tracing::warn!(iteration, "coding workflow: assistant claimed pass with NO tool evidence — likely hallucinated");
                     eprintln!("[cast-summary] WARNING: assistant claimed test pass without evidence — no `bash` / `test_run` tool actually ran this turn.");
+                    redact_hallucinated_test_claims(&mut conversation);
                 }
                 break;
             }
@@ -353,6 +354,94 @@ pub enum VerifyEvidence {
     /// "no work was actually done" — caller decides whether to
     /// retry or exit gracefully.
     NoEvidence,
+}
+
+/// Strip fabricated "X passed, Y failed" / "ALL TESTS PASS"
+/// claims from the last assistant message and replace with an
+/// honest annotation. Pearl iter-10: emitting a stderr WARNING
+/// alone wasn't enough — the lie still appeared verbatim in the
+/// chat, so users could miss the warning and trust the false
+/// claim. This rewrites the message itself.
+///
+/// Heuristic: look for the conventional `## Test Results` /
+/// `Test Results` block at the end of the assistant prose and
+/// replace its body. Also strip standalone count lines like
+/// "31 passed, 0 failed" / "test result: ok. 5 passed; 0 failed".
+pub fn redact_hallucinated_test_claims(conv: &mut crate::conversation::Conversation) {
+    // Find the last assistant message — that's where the user-
+    // visible final answer sits.
+    let Some(msg) = conv.messages.iter_mut().rev().find(|m| matches!(m.role, crate::conversation::Role::Assistant)) else {
+        return;
+    };
+    msg.content = redact_fabricated_test_results(&msg.content);
+}
+
+/// String-only version of the redactor — pulled out for tests.
+/// Pure function so the unit suite can pin every shape we know
+/// the model produces.
+#[must_use]
+pub fn redact_fabricated_test_results(content: &str) -> String {
+    const NOTICE: &str = "⚠️  Test Results: NOT RUN — the agent did not actually execute the test suite this turn. The change above may be correct but is unverified. Run the tests yourself before trusting it.";
+
+    // Strip "X passed, Y failed" / "X passed; Y failed" lines and
+    // replace the "## Test Results" block at the tail. Patterns:
+    //   - "## Test Results\n\n31 passed, 0 failed"
+    //   - "## Test Results\n\nALL TESTS PASS"
+    //   - "Test Results: 31 passed, 0 failed"
+    //   - bare "31 passed, 0 failed" line at end of content
+    let lines: Vec<&str> = content.lines().collect();
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + 2);
+    let mut in_test_results_block = false;
+    let mut redacted_block = false;
+    for line in &lines {
+        let trimmed = line.trim();
+        // Heading variants.
+        let is_heading =
+            trimmed.eq_ignore_ascii_case("## test results") || trimmed.eq_ignore_ascii_case("test results") || trimmed.eq_ignore_ascii_case("# test results");
+        if is_heading && !redacted_block {
+            in_test_results_block = true;
+            out.push(NOTICE.to_string());
+            redacted_block = true;
+            continue;
+        }
+        if in_test_results_block {
+            // Continue swallowing lines until a new heading
+            // (`## ...`) starts a different section.
+            if trimmed.starts_with("## ") || trimmed.starts_with("# ") {
+                in_test_results_block = false;
+                out.push((*line).to_string());
+                continue;
+            }
+            // Drop content inside the block.
+            continue;
+        }
+        // Bare "X passed, Y failed" / "X passed; Y failed" / "ALL TESTS PASS" lines.
+        let upper = trimmed.to_ascii_uppercase();
+        let looks_like_count = (trimmed.contains("passed, ") || trimmed.contains("passed; ") || trimmed.contains("PASSED, ") || trimmed.contains("PASSED; "))
+            && (trimmed.contains("failed") || trimmed.contains("FAILED"));
+        let looks_like_marker = upper.contains("ALL TESTS PASS") || upper == "TEST RESULT: OK";
+        if looks_like_count || looks_like_marker {
+            // Replace with a one-line redaction marker. Append
+            // the full notice once if we haven't already (e.g.
+            // when there's no "## Test Results" heading).
+            if !redacted_block {
+                out.push(NOTICE.to_string());
+                redacted_block = true;
+            }
+            continue;
+        }
+        out.push((*line).to_string());
+    }
+    let result = out.join("\n");
+    // Edge case: content didn't have a heading or count line
+    // pattern but still looked green to detect_verify_pass (rare;
+    // happens when the model uses idiomatic phrasing like "all
+    // tests pass" embedded in prose). In that case, append the
+    // notice at the end so the reader at least sees the warning.
+    if !redacted_block && detect_verify_pass(content) {
+        return format!("{result}\n\n{NOTICE}");
+    }
+    result
 }
 
 /// Inspect the conversation for tool-result evidence of test
@@ -709,6 +798,52 @@ mod tests {
 
     fn make_conv() -> crate::conversation::Conversation {
         crate::conversation::Conversation::new(8192).with_system_prompt("test")
+    }
+
+    #[test]
+    fn redact_replaces_hash_test_results_block() {
+        let input = "I made the change.\n\n## Test Results\n\n31 passed, 0 failed";
+        let out = redact_fabricated_test_results(input);
+        assert!(!out.contains("31 passed"), "fabricated count must be redacted: {out}");
+        assert!(out.contains("NOT RUN"));
+        assert!(out.contains("I made the change."));
+    }
+
+    #[test]
+    fn redact_replaces_bare_count_line() {
+        let input = "Fixed the bug.\n\n5 passed, 0 failed";
+        let out = redact_fabricated_test_results(input);
+        assert!(!out.contains("5 passed, 0 failed"));
+        assert!(out.contains("NOT RUN"));
+    }
+
+    #[test]
+    fn redact_preserves_following_section() {
+        // A "## Notes" heading after Test Results must survive.
+        let input = "Did the work.\n\n## Test Results\n\n31 passed, 0 failed\n\n## Notes\n\nbe careful with edge cases.";
+        let out = redact_fabricated_test_results(input);
+        assert!(out.contains("be careful with edge cases"));
+        assert!(out.contains("## Notes"));
+        assert!(out.contains("NOT RUN"));
+    }
+
+    #[test]
+    fn redact_no_op_when_content_has_no_test_claims() {
+        let input = "I read the file. It looks fine.";
+        let out = redact_fabricated_test_results(input);
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn redact_appends_notice_when_only_idiomatic_marker_present() {
+        // No heading, no "X passed" line, but content reads as
+        // green per detect_verify_pass.
+        let input = "I've finished. ALL TESTS PASS now.";
+        let out = redact_fabricated_test_results(input);
+        // The marker was on a line containing other text — current
+        // implementation matches whole-line variants only, so this
+        // exercises the trailing-append fallback.
+        assert!(out.contains("NOT RUN"));
     }
 
     #[test]
