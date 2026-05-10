@@ -207,7 +207,13 @@ async fn run_headless_client(
     // JSON output mode
     if json_output {
         let output = HeadlessOutput {
-            content: content_buf,
+            // Pearl th-2249cf: strip ANSI escape codes from the
+            // content field. The runner-stderr block gets
+            // concatenated into content with raw ESC[2m / ESC[0m
+            // / etc. sequences. The TUI parses them to colors
+            // (th-a14138 TUI-side); --json downstream consumers
+            // (bench harness, scripts) want clean text.
+            content: strip_ansi_codes(&content_buf),
             tool_calls,
             cost,
         };
@@ -215,6 +221,74 @@ async fn run_headless_client(
     }
 
     Ok(())
+}
+
+/// Strip ANSI escape sequences from text. Pearl th-2249cf — the
+/// runner forwards stderr (tracing logs colored via ANSI) into the
+/// assistant content stream. In TUI mode we parse those into
+/// styled spans (pearl th-a14138); in headless --json mode they
+/// land in the JSON `content` field as literal `[...m`
+/// strings, which is noise for downstream consumers.
+///
+/// Matches the standard CSI sequence (ESC `[` params m) and the
+/// rarer SS3 (ESC `O` letter) and OSC (ESC `]` ... BEL/ST). Pure
+/// function so the unit suite can pin every variant.
+fn strip_ansi_codes(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        // CSI: ESC [ params <letter>
+        if b == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            let mut j = i + 2;
+            while j < bytes.len() && (bytes[j].is_ascii_digit() || bytes[j] == b';' || bytes[j] == b'?') {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j].is_ascii_alphabetic() {
+                i = j + 1;
+                continue;
+            }
+        }
+        // OSC: ESC ] ... BEL or ESC \
+        if b == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b']' {
+            let mut j = i + 2;
+            while j < bytes.len() {
+                if bytes[j] == 0x07 {
+                    j += 1;
+                    break;
+                }
+                if bytes[j] == 0x1b && j + 1 < bytes.len() && bytes[j + 1] == b'\\' {
+                    j += 2;
+                    break;
+                }
+                j += 1;
+            }
+            i = j;
+            continue;
+        }
+        // Bare-bracket SGR: `[<digits>(;<digits>)*m` — the
+        // ESC-eaten variant. Only match when the bracket is
+        // immediately followed by digits (with optional `;` separators)
+        // and ends with `m`, so `[docs.rs]` and `vec![1, 2]` survive.
+        if b == b'[' {
+            let mut j = i + 1;
+            let mut saw_digit = false;
+            while j < bytes.len() && (bytes[j].is_ascii_digit() || bytes[j] == b';') {
+                if bytes[j].is_ascii_digit() {
+                    saw_digit = true;
+                }
+                j += 1;
+            }
+            if saw_digit && j < bytes.len() && bytes[j] == b'm' {
+                i = j + 1;
+                continue;
+            }
+        }
+        out.push(b);
+        i += 1;
+    }
+    String::from_utf8(out).expect("strip_ansi_codes preserves UTF-8 because it only skips ASCII control sequences")
 }
 
 /// Fallback: run headless via SSE (legacy `/api/tasks` endpoint).
@@ -461,5 +535,51 @@ mod tests {
 
         assert!(content.is_empty());
         assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn strip_ansi_removes_csi_sgr() {
+        // Standard CSI SGR (ESC [...m) — the most common shape
+        // tracing/eyre/etc. emit for colored terminal output.
+        let raw = "\x1b[2m2026-05-10T16:11:20Z\x1b[0m \x1b[32m INFO\x1b[0m starting";
+        let clean = strip_ansi_codes(raw);
+        assert_eq!(clean, "2026-05-10T16:11:20Z  INFO starting");
+    }
+
+    #[test]
+    fn strip_ansi_removes_bare_bracket_m_form() {
+        // Pearl th-2249cf: when the runner forwards stderr through
+        // a multi-stage transform, the leading ESC byte sometimes
+        // gets eaten and we see literal `[2m...[0m` strings. Still
+        // noise for downstream consumers; strip them too.
+        let raw = "[2m2026-05-10T16:11:20Z[0m [32m INFO[0m hello";
+        let clean = strip_ansi_codes(raw);
+        assert_eq!(clean, "2026-05-10T16:11:20Z  INFO hello");
+    }
+
+    #[test]
+    fn strip_ansi_preserves_normal_text() {
+        let raw = "Plain text with no escape sequences.";
+        assert_eq!(strip_ansi_codes(raw), raw);
+    }
+
+    #[test]
+    fn strip_ansi_handles_realworld_runner_stderr() {
+        // Excerpt from /tmp/smooth-bench-run/repo-overview/run-2.txt
+        // where the runner-stderr block lands in --json content.
+        let raw = "\x1b[2m2026-05-10T16:17:58.369275Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2msmooth_operator_runner\x1b[0m\x1b[2m:\x1b[0m smooth-operator-runner starting";
+        let clean = strip_ansi_codes(raw);
+        // No more ESC sequences anywhere.
+        assert!(!clean.contains('\x1b'), "ESC byte still present: {clean:?}");
+        assert!(clean.contains("smooth-operator-runner starting"));
+    }
+
+    #[test]
+    fn strip_ansi_does_not_overmatch_brackets() {
+        // Square brackets that aren't ANSI codes (markdown links,
+        // code paths, etc.) must survive.
+        let raw = "see [docs.rs](url) and `vec![1, 2]` and `fn foo[T]()`";
+        let clean = strip_ansi_codes(raw);
+        assert_eq!(clean, raw);
     }
 }
