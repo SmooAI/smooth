@@ -1992,11 +1992,23 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
                 // (the bench harness, see SMOOTH_BENCH_IDLE_GRACE_S) sees
                 // the dispatch is truly over and doesn't have to wait the
                 // full grace timeout to find out. Best-effort: a write
-                // failure here is non-fatal.
+                // failure here is non-fatal. Pearl th-139bbc: also revert
+                // pearl status to Open so the orchestrator doesn't think
+                // the task is still in_progress (matches the non-zero-exit
+                // path's behavior).
                 if let Some(ref pid) = pearl_id {
                     let body = format!("[IDLE] sandbox exec failed: {e}");
                     if let Err(write_err) = pearl_store.add_comment(pid, &body) {
                         tracing::warn!(pearl_id = %pid, error = %write_err, "[IDLE] write failed on exec error path");
+                    }
+                    if let Err(rev_err) = pearl_store.update(
+                        pid,
+                        &smooth_pearls::PearlUpdate {
+                            status: Some(smooth_pearls::PearlStatus::Open),
+                            ..Default::default()
+                        },
+                    ) {
+                        tracing::warn!(pearl_id = %pid, error = %rev_err, "pearl status revert failed on exec error path");
                     }
                 }
                 let _ = event_tx.send(ServerEvent::TaskError {
