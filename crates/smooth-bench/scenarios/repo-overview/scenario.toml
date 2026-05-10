@@ -1,0 +1,65 @@
+# Pearl: th-139b02
+#
+# Baseline scenario: user asks "what does this repo do" and the
+# agent should inspect a few obvious files and give a terse,
+# accurate answer. Routes through the intent classifier — first-turn
+# factual question with no shell-op keywords lands on `oracle`.
+#
+# What this catches:
+#   - intent classifier regressed (got routed to fixer)
+#   - oracle stops calling project_inspect / read_file
+#   - oracle hallucinates facts not present in the fixture
+#     (the fixture's package.json / README clearly identify
+#     the stack, so any hallucination is detectable)
+
+[meta]
+title = "Repo overview — first-turn factual Q routes to oracle"
+description = """
+User opens the TUI in a small TypeScript project and asks
+'what does this repo do'. The agent should:
+  1. Stay on oracle (read-only role) — not dispatch fixer.
+  2. Inspect the repo via project_inspect / read_file.
+  3. Produce a terse answer that names the stack
+     (TypeScript, Vite, React) and the project's purpose
+     (it's a 'todo list' demo from the README).
+  4. NOT mention any technology that isn't in the fixture
+     (Postgres, Drizzle, Next.js — all fixture-absent).
+"""
+agent = "auto"
+turn_timeout_s = 90
+
+[[turns]]
+input = "what does this repo do"
+
+[[turns.assert]]
+kind = "intent_role"
+expected = "oracle"
+
+[[turns.assert]]
+kind = "tool_called"
+name = "project_inspect"
+
+[[turns.assert]]
+kind = "response_contains_any"
+strings = ["todo", "task list"]
+
+[[turns.assert]]
+kind = "response_contains_any"
+strings = ["typescript", "vite", "react"]
+
+# Negative facts: the fixture does NOT use these stacks.
+# The hallucination class we're guarding against is the
+# bug from the parseBankCSV report — agents inventing
+# Postgres / Next.js / Drizzle on a repo that uses none.
+[[turns.assert]]
+kind = "response_does_not_contain"
+strings = ["postgres", "drizzle", "next.js", "django", "rails"]
+
+# The agent must NOT touch files in a read-only oracle path.
+[[turns.assert]]
+kind = "tool_not_called"
+name = "write_file"
+
+[[turns.assert]]
+kind = "tool_not_called"
+name = "edit_file"
