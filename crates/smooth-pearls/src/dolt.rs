@@ -83,17 +83,35 @@ impl SmoothDolt {
         }
     }
 
-    /// Wrap a server-mode op with one round of self-healing on
-    /// transport-looking errors (broken pipe, timeout, EOF). The
-    /// `client()` path already retries connect failures; this catches
-    /// the case where connect succeeds but the request itself wedges
-    /// (e.g. dolt mid-deadlock from a paused volume after sleep).
+    /// Wrap a server-mode op with one round of self-healing. Two
+    /// classes of recoverable failure trigger a respawn + retry:
+    ///
+    /// 1. **Transport** ([`is_transport_err`]): broken-pipe, EOF,
+    ///    connection-refused, timeout. Server is dead or unreachable.
+    ///    Respawn via `ensure_healthy()` (probes first, only kicks
+    ///    if unhealthy).
+    /// 2. **Lock wedge** ([`is_lock_wedge_err`]): server alive and
+    ///    answering ping, but every write returns `Error 1105:
+    ///    cannot update manifest: database is read only`. Pearl
+    ///    th-a97d1f: this happens when an earlier writer crashed
+    ///    and left a stale LOCK file the live server is still
+    ///    holding — `is_healthy()` passes (server pings) but the
+    ///    db is wedged. Force-respawn picks it up clean.
+    ///
+    /// Anything else propagates so callers can react meaningfully
+    /// — syntax errors, not-found, validation failures stay user-
+    /// visible. Cap is one retry per call.
     fn run_with_self_heal<T>(server: &Arc<SmoothDoltServer>, op: impl Fn(&Arc<SmoothDoltServer>) -> Result<T>) -> Result<T> {
         match op(server) {
             Ok(v) => Ok(v),
             Err(e) if is_transport_err(&e) => {
                 tracing::warn!(error = %e, "smooth-dolt op looked like a transport failure; respawning + retrying once");
                 server.ensure_healthy().context("self-heal: ensure_healthy")?;
+                op(server)
+            }
+            Err(e) if is_lock_wedge_err(&e) => {
+                tracing::warn!(error = %e, "smooth-dolt op looked like a lock wedge (db read-only); force-respawning + retrying once");
+                server.force_respawn().context("self-heal: force_respawn")?;
                 op(server)
             }
             Err(e) => Err(e),
@@ -458,6 +476,61 @@ mod is_transport_err_tests {
     fn does_not_flag_sql_errors() {
         assert!(!is_transport_err(&anyhow::anyhow!("smooth-dolt: dolt_add: Error 1105: cannot update manifest")));
         assert!(!is_transport_err(&anyhow::anyhow!("syntax error near 'SELET'")));
+    }
+}
+
+/// Heuristic for "smooth-dolt server is alive but the dolt engine
+/// is wedged in read-only mode" — Pearl th-a97d1f. Triggered by
+/// stale LOCK files / interrupted writers leaving the on-disk
+/// state with no writable session, even though the serve goroutine
+/// answers ping. Force-respawning the child unstuck this case in
+/// real-world reproductions today; killing PID and letting the
+/// daemon respawn cleared the wedge.
+///
+/// Narrow on purpose: only the specific shapes Dolt produces for
+/// this failure mode. Other Error 1105 / lock errors (deliberate
+/// rejection from the user's intent) should propagate.
+fn is_lock_wedge_err(e: &anyhow::Error) -> bool {
+    let s = format!("{e:#}").to_lowercase();
+    [
+        // Dolt's exact wording when the manifest goroutine has lost
+        // its writable session — caught in iter 22 of the bench loop.
+        "cannot update manifest: database is read only",
+        "cannot update manifest: read-only",
+        // Older Dolt builds vary slightly on phrasing.
+        "manifest is read-only",
+        "cannot acquire write lock",
+    ]
+    .iter()
+    .any(|needle| s.contains(needle))
+}
+
+#[cfg(test)]
+mod is_lock_wedge_err_tests {
+    use super::is_lock_wedge_err;
+
+    #[test]
+    fn flags_canonical_wedge() {
+        // Real error from the bench loop today.
+        assert!(is_lock_wedge_err(&anyhow::anyhow!(
+            "smooth-dolt exec failed (exit 1): smooth-dolt: exec: Error 1105: cannot update manifest: database is read only"
+        )));
+    }
+
+    #[test]
+    fn flags_variant_phrasings() {
+        assert!(is_lock_wedge_err(&anyhow::anyhow!("manifest is read-only")));
+        assert!(is_lock_wedge_err(&anyhow::anyhow!("cannot acquire write lock on dolt repo")));
+    }
+
+    #[test]
+    fn does_not_flag_unrelated_errors() {
+        assert!(!is_lock_wedge_err(&anyhow::anyhow!("syntax error near 'SELET'")));
+        assert!(!is_lock_wedge_err(&anyhow::anyhow!("table 'pearls' doesn't exist")));
+        // Plain Error 1105 without the "read only" qualifier should
+        // NOT trigger force-respawn — could be a legit user-driven
+        // constraint violation.
+        assert!(!is_lock_wedge_err(&anyhow::anyhow!("Error 1105: duplicate column name 'id'")));
     }
 }
 

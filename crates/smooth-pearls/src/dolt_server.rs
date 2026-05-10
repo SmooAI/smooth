@@ -304,6 +304,25 @@ impl SmoothDoltServer {
         self.is_healthy().context("ensure_healthy: post-respawn ping")
     }
 
+    /// Force-respawn the smooth-dolt child even when the existing one
+    /// answers `is_healthy()`. Pearl th-a97d1f: the in-process
+    /// `client()` self-heal triggers on connect/transport failures,
+    /// but the LIVE-but-WEDGED case (server responds to ping yet
+    /// reports `Error 1105: cannot update manifest: database is read
+    /// only` on every SQL op) needs an explicit force kick. Dolt
+    /// gets into this state when an earlier writer crashed and left
+    /// the on-disk LOCK file owned by a process that's gone or
+    /// confused; killing the current goroutine and respawning a
+    /// fresh smooth-dolt picks up the database in writable mode.
+    ///
+    /// # Errors
+    /// Returns the `respawn` error path's failures verbatim — see
+    /// [`SmoothDoltServer::respawn`].
+    pub fn force_respawn(&self) -> Result<()> {
+        tracing::warn!(data_dir = %self.data_dir.display(), "smooth-dolt: force-respawn (lock-wedge recovery)");
+        self.respawn()
+    }
+
     /// Kill the current child (if any) and start a fresh one. The
     /// inner handle is replaced atomically.
     fn respawn(&self) -> Result<()> {
