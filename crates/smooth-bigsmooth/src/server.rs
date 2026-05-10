@@ -1330,22 +1330,27 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
             }
         }
 
-        // INTERIM (pearl th-6030b0): microsandbox 0.3.14's
-        // SecretBuilder placeholder substitution wasn't firing on
-        // outbound LLM requests — agents kept sending the literal
-        // placeholder string to LiteLLM and getting 401.
+        // INTERIM (pearl th-a13170 / parent investigation th-6030b0):
+        // microsandbox 0.3.14's SecretBuilder placeholder substitution
+        // wasn't firing on outbound LLM requests — agents kept sending
+        // the literal placeholder string to LiteLLM and getting 401.
+        // Until we either (a) upgrade microsandbox to 0.4.x where this
+        // may be fixed, or (b) figure out why allow_all-network +
+        // secret-builder don't compose, just inject SMOOTH_API_KEY
+        // as a plain env var. The agent in the VM can read its own
+        // key — known exfil risk, accepted to unblock dev.
         //
-        // 2026-05-10: bumped to microsandbox 0.4.5. Build clean,
-        // 1111 workspace lib tests pass, but runtime substitution
-        // behavior on the secret-builder + allow_all-network combo
-        // is NOT yet verified end-to-end (needs real VM dispatch +
-        // Goalie audit-log inspection). Keeping the env-var
-        // workaround in place until a human can run that validation
-        // and confirm the placeholder reaches LiteLLM as the actual
-        // key. Once verified, remove the SMOOTH_API_KEY plain-env
-        // insertion below and let SecretBuilder do its job.
-        // Known exfil risk in current state — agent in the VM can
-        // read its own key — accepted to unblock dev.
+        // 2026-05-10 (failed bump attempt — kept here as breadcrumb):
+        // attempted 0.3 → 0.4.5 and reverted. Build was clean + lib
+        // tests passed, but real sandbox spawn failed with "sandbox
+        // process exited before sending startup info"
+        // (unix_wait_status(512)) on macOS HVF. Some runtime
+        // incompatibility between the new microsandbox host and
+        // either the operator OCI image or our Bill spawn flow.
+        // The bump itself remains the unblocker for this pearl —
+        // future attempt should reproduce the spawn failure with
+        // bisect_spawn.rs --variant baseline first to isolate the
+        // OCI image vs Bill-spawn axis.
         let _ = extract_host_from_url(&api_url); // (still used by env-key-flow placeholder docs)
         env.insert("SMOOTH_API_KEY".into(), api_key.clone());
         env.insert("SMOOTH_WORKSPACE".into(), "/workspace".into());

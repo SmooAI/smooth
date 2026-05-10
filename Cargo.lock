@@ -984,6 +984,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19d374276b40fb8bbdee95aef7c7fa6b5316ec764510eb64b8dd0e2ed0d7e7f5"
 
 [[package]]
+name = "crc32c"
+version = "0.6.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a47af21622d091a8f0fb295b88bc886ac74efcc613efc19f5d0b21de5c89e47"
+dependencies = [
+ "rustc_version",
+]
+
+[[package]]
 name = "crc32fast"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1508,12 +1517,6 @@ name = "endi"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
-
-[[package]]
-name = "endian-type"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c34f04666d835ff5d62e058c3995147c06f42fe86ff053337632bca83e42702d"
 
 [[package]]
 name = "enum-as-inner"
@@ -2152,32 +2155,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
-name = "hickory-client"
-version = "0.25.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c466cd63a4217d5b2b8e32f23f58312741ce96e3c84bf7438677d2baff0fc555"
-dependencies = [
- "cfg-if",
- "data-encoding",
- "futures-channel",
- "futures-util",
- "hickory-proto",
- "once_cell",
- "radix_trie",
- "rand 0.9.2",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "hickory-proto"
 version = "0.25.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8a6fe56c0038198998a6f217ca4e7ef3a5e51f46163bd6dd60b5c71ca6c6502"
 dependencies = [
  "async-trait",
- "bytes",
  "cfg-if",
  "data-encoding",
  "enum-as-inner",
@@ -2189,11 +2172,9 @@ dependencies = [
  "once_cell",
  "rand 0.9.2",
  "ring",
- "rustls",
  "thiserror 2.0.18",
  "tinyvec",
  "tokio",
- "tokio-rustls",
  "tracing",
  "url",
 ]
@@ -2870,7 +2851,6 @@ version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "328c4789d42200f1eeec05bd86c9c13c7f091d2ba9a6ea35acdf51f31bc0f043"
 dependencies = [
- "cc",
  "pkg-config",
 ]
 
@@ -3075,21 +3055,17 @@ dependencies = [
 
 [[package]]
 name = "microsandbox"
-version = "0.4.5"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81251b9d0124a70d95e6f5f7211f4c45a71bc24d5d2f92c4aa016d464d06e0cf"
+checksum = "9f6c0151e5272e260ca3b774625ae1efebb55eb716331a470c49ee142eb59dc3"
 dependencies = [
- "astral-tokio-tar",
- "async-compression",
  "bytes",
  "chrono",
  "crossterm",
- "dbus",
  "dirs",
  "docker_credential",
  "flate2",
  "futures",
- "hex",
  "keyring",
  "libc",
  "microsandbox-db",
@@ -3107,7 +3083,6 @@ dependencies = [
  "sea-orm",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "tar",
  "tempfile",
  "thiserror 2.0.18",
@@ -3120,22 +3095,18 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-db"
-version = "0.4.5"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0f951aec163d851c3e33081d7052749a52d8f6b8168ceb5c32b941ecb2579a6"
+checksum = "735aad5b25ce34cb2f65791244aca873dcaafe0ef7f5be9f5c528d78c27ed71a"
 dependencies = [
- "async-trait",
  "sea-orm",
- "sqlx",
- "tokio",
- "tracing",
 ]
 
 [[package]]
 name = "microsandbox-filesystem"
-version = "0.4.5"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ab50956ecc0acfe42e6122c8c77d8438d3ed59aa02a920bd82216793967e9f4"
+checksum = "ef7ede829f1e5c0a180329f5cddd4958aa91b1316246b173b751c3f57cad38cc"
 dependencies = [
  "libc",
  "microsandbox-utils",
@@ -3148,9 +3119,9 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-image"
-version = "0.4.5"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "778812da269394cf968194637e6f51b753e1d923f18860b66d7d9f1a5c268a51"
+checksum = "652b2ea32be063df09e39f99fec5df4679373b418145761e9ddab8d1d7358b7a"
 dependencies = [
  "astral-tokio-tar",
  "async-compression",
@@ -3160,7 +3131,6 @@ dependencies = [
  "microsandbox-utils",
  "oci-client",
  "oci-spec",
- "rustls-pemfile",
  "scopeguard",
  "serde",
  "serde_json",
@@ -3174,43 +3144,35 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-migration"
-version = "0.4.5"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac3464ec563ea8ee4413d91f83ce5afcd34bf978a89fb11a43f3a9ac74f1df92"
+checksum = "601e4cce133d399c26d55a81416323a378cadde32cd21b4edc25db9a0947fdf3"
 dependencies = [
  "sea-orm-migration",
 ]
 
 [[package]]
 name = "microsandbox-network"
-version = "0.4.5"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c09d853c6828f36c0e951dbf4190fc850fc5d4d976ebf5fcf26301d51d2c137"
+checksum = "293875405515a768496a0c19db7e2bd148519a2591cb948da2c5b7f575da4d52"
 dependencies = [
  "bytes",
- "core-foundation 0.9.4",
  "crossbeam-queue",
  "dirs",
- "futures",
- "hickory-client",
  "hickory-proto",
+ "hickory-resolver",
  "ipnetwork",
  "libc",
  "lru",
- "microsandbox-protocol",
  "microsandbox-utils",
  "msb_krun",
- "parking_lot",
- "pem",
  "rcgen",
- "resolv-conf",
  "rustls",
  "rustls-native-certs",
  "rustls-pemfile",
  "serde",
  "smoltcp",
- "system-configuration",
- "thiserror 2.0.18",
  "time",
  "tokio",
  "tokio-rustls",
@@ -3219,9 +3181,9 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-protocol"
-version = "0.4.5"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef509436fe7acd00f154db59b2a9d4263840849a82defe102fa9c79857be62a8"
+checksum = "bff0de503d91d4485da221b09e23cc60b48f72c90051d81f6bfe321d59d6c9b2"
 dependencies = [
  "chrono",
  "ciborium",
@@ -3233,9 +3195,9 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-runtime"
-version = "0.4.5"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed9eb5b8015349c86daf7346d6bfb7199b809109831e5d6d5ef9f5729c627fe1"
+checksum = "df0d4de7efe5a78194de7030fa96f495b2f8cedac2bb10acaac94f984ec13d6a"
 dependencies = [
  "bytes",
  "chrono",
@@ -3261,13 +3223,12 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-utils"
-version = "0.4.5"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04c59ffa6f6e779966ead475a89c42713cb2350d02f06361ffdda4febbcf0798"
+checksum = "721001e6b88dd5489f105880871376b27cbd7e1377e7e11d3ab2ffe059067711"
 dependencies = [
- "dirs",
+ "crc32c",
  "libc",
- "reflink-copy",
  "scopeguard",
 ]
 
@@ -3495,15 +3456,6 @@ dependencies = [
  "vm-memory 0.16.2",
  "vmm-sys-util",
  "zstd",
-]
-
-[[package]]
-name = "nibble_vec"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77a5d83df9f36fe23f0c3648c6bbb8b0298bb5f1939c8f2704431371f4b84d43"
-dependencies = [
- "smallvec",
 ]
 
 [[package]]
@@ -4288,16 +4240,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
-name = "radix_trie"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c069c179fcdc6a2fe24d8d18305cf085fdbd4f922c041943e203685d6a1c58fd"
-dependencies = [
- "endian-type",
- "nibble_vec",
-]
-
-[[package]]
 name = "rand"
 version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4530,18 +4472,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "reflink-copy"
-version = "0.1.29"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13362233b147e57674c37b802d216b7c5e3dcccbed8967c84f0d8d223868ae27"
-dependencies = [
- "cfg-if",
- "libc",
- "rustix",
- "windows",
 ]
 
 [[package]]
