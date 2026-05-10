@@ -250,6 +250,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn locate_pearl_store_honors_env_override_first() {
+        // Pearl th-d43cfd: env-var override wins regardless of what
+        // the homedir or repo-walk would find. Pin the priority so
+        // a future refactor can't silently reorder the fallback.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = tmp.path().join("custom-dolt");
+        std::fs::create_dir_all(&store).expect("create custom store");
+
+        // Save existing env, set override, run, restore.
+        let prev = std::env::var("SMOOTH_BENCH_PEARL_STORE").ok();
+        std::env::set_var("SMOOTH_BENCH_PEARL_STORE", &store);
+        let result = locate_pearl_store_dir();
+        if let Some(v) = prev {
+            std::env::set_var("SMOOTH_BENCH_PEARL_STORE", v);
+        } else {
+            std::env::remove_var("SMOOTH_BENCH_PEARL_STORE");
+        }
+
+        let resolved = result.expect("resolve");
+        assert_eq!(resolved, store, "env override must take priority over ~/.smooth/dolt and repo walk");
+    }
+
+    #[test]
     fn extract_pearl_id_finds_last() {
         let s = "I considered th-aaaaaa first then created\nth-bbbbbb\n\nth-cccccc";
         assert_eq!(extract_pearl_id(s).as_deref(), Some("th-cccccc"));
