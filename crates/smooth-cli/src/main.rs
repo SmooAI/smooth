@@ -2138,7 +2138,21 @@ async fn cmd_code(
             .or_else(|| file.and_then(|f| std::fs::read_to_string(f).ok()))
             .or_else(read_stdin)
             .ok_or_else(|| anyhow::anyhow!("--message, --file, or stdin required for headless mode"))?;
-        return smooth_code::headless::run_headless(working_dir, msg, model, budget, json, Some(agent_name)).await;
+        // Pearl th-c39b9a: when --agent is not explicitly pinned,
+        // run the intent classifier so headless mirrors the TUI's
+        // routing behavior. Without this, the default `agent_name`
+        // is "fixer" and a question like "what does this repo do"
+        // dispatches into the coding workflow, write_files a fake
+        // implementation, and burns a minute hallucinating. The
+        // TUI's `run_agent_streaming` already does this; we just
+        // missed wiring it on the headless path.
+        let dispatch_agent = if agent.is_some() {
+            agent_name
+        } else {
+            let intent = smooth_code::intent::classify(&msg).await;
+            intent.role().to_string()
+        };
+        return smooth_code::headless::run_headless(working_dir, msg, model, budget, json, Some(dispatch_agent)).await;
     }
 
     // Quick startup checks (non-blocking warnings)
