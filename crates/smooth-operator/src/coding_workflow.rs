@@ -283,14 +283,23 @@ const CLOSE_TO_GREEN_THRESHOLD: u32 = 3;
 // new prompt-aware role there gives all call sites the same text.
 
 /// Build the user-message prompt for a given outer iteration.
-/// The first turn just shows the task. Subsequent turns include
-/// the prior turn's test output so the agent has concrete failure
-/// context to act on — this is what turns the outer loop from
-/// "try the same thing again" into "try again with specific
-/// failure feedback."
+///
+/// Pearl iter-7 finding: the iteration-1 prompt used to ALWAYS append
+/// "Implement the solution, run the test suite, and iterate until
+/// green." That framing actively pushed the model toward green-field
+/// implementation regardless of what the user actually asked. "Make
+/// App.tsx better" became "Make App.tsx better // Implement the
+/// solution // iterate until green" → agent rewrote the whole file,
+/// added main.tsx, overwrote tsconfig.json. Same shape on "delete the
+/// src directory" → agent deleted, then re-implemented.
+///
+/// Now the iteration-1 prompt is the user's task verbatim. The fixer
+/// system prompt already covers the "run the test suite before final
+/// summary" discipline; we don't need to re-state it per turn at the
+/// cost of confusing the model on non-test-driven tasks.
 fn build_user_prompt(task: &str, iteration: u32, prior_output: Option<&str>) -> String {
     if iteration == 1 {
-        return format!("{task}\n\nImplement the solution, run the test suite, and iterate until green. Finish with a `## Test Results` line.");
+        return task.to_string();
     }
     let prior = prior_output.unwrap_or("(no prior output)");
     let compile_err = detect_compile_error(prior);
@@ -772,10 +781,17 @@ mod tests {
     }
 
     #[test]
-    fn build_user_prompt_first_iter_is_plain_task() {
+    fn build_user_prompt_first_iter_is_task_verbatim() {
+        // Pearl iter-7: the iteration-1 prompt must NOT prepend
+        // "Implement the solution, run the test suite, iterate until
+        // green" — that framing pushed the model toward green-field
+        // implementation on non-test-driven asks ("make X better"
+        // → rewrote the file). The user's task flows verbatim; the
+        // fixer system prompt covers test-running discipline.
         let p = build_user_prompt("solve bowling", 1, None);
-        assert!(p.starts_with("solve bowling"));
-        assert!(p.contains("## Test Results"));
+        assert_eq!(p, "solve bowling");
+        assert!(!p.contains("Implement the solution"), "iter 1 must not push 'Implement' framing");
+        assert!(!p.contains("iterate until green"), "iter 1 must not push 'iterate until green' framing");
         assert!(!p.contains("previous attempt"), "iter 1 has no prior context");
     }
 
