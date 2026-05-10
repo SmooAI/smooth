@@ -41,15 +41,79 @@ impl Intent {
 /// role. Falls back to [`classify_heuristic`] when the LLM call fails
 /// (no providers, gateway unreachable, unparseable response) so a
 /// transient outage doesn't strand the chat.
+///
+/// Special case: if the message reads as a git/shell-op request
+/// ([`looks_like_shell_op`]) we override to `Question` regardless of
+/// LLM/heuristic verdict. The sandboxed runner has no `git_commit` /
+/// `bash_host` tool, so dispatching to fixer's coding workflow on a
+/// "commit this" request hallucinates a fake fix loop. Routing to
+/// oracle at least produces a "I can't run git from the sandbox;
+/// here's the command" answer instead of a hallucinated diff
+/// (pearl th-919f1e).
 pub async fn classify(message: &str) -> Intent {
     if message.trim().is_empty() {
         return Intent::Work;
+    }
+    if looks_like_shell_op(message) {
+        return Intent::Question;
     }
     match classify_via_llm(message).await {
         Some(intent) => intent,
         None => classify_heuristic(message),
     }
 }
+
+/// Heuristic for "this is a git/shell operation request, not a
+/// coding task." Matches messages whose primary verb is a git or
+/// shell command. The runner's tool surface is filesystem +
+/// project-inspect + bash *inside* the sandbox; it cannot push a
+/// commit to a host remote, can't `gh pr create`, etc. Better to
+/// surface the right command than to dispatch a sandboxed coding
+/// agent that will hallucinate "I committed it!"
+///
+/// Public for tests only.
+#[must_use]
+pub fn looks_like_shell_op(message: &str) -> bool {
+    let lower = message.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    // Tokenise on whitespace + common punctuation so "can we commit"
+    // and "commit," and "commit this" all surface "commit" as a token.
+    // Hyphens stay inside tokens so "cherry-pick" is one token, not
+    // two, and matches the SHELL_OP_VERBS entry.
+    let tokens: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+        .filter(|s| !s.is_empty())
+        .collect();
+    if tokens.is_empty() {
+        return false;
+    }
+    // Direct match: any of the shell-op verbs appears as a standalone
+    // token. Captures "can we commit", "let's push", "merge to main",
+    // "git add this", "rebase onto", etc.
+    for tok in &tokens {
+        if SHELL_OP_VERBS.contains(tok) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Verbs / keywords that indicate a git-or-shell operation the
+/// sandboxed runner can't execute. Kept narrow on purpose: words
+/// that are also common in coding-task asks (run, test, build,
+/// install, branch, merge of types) stay in WORK_VERBS so "run the
+/// test suite" / "merge these two functions" still dispatches to
+/// fixer.
+///
+/// "git" and "gh" are the unambiguous wins — they almost always
+/// mean "execute a git/gh command for me." The verbs commit / push
+/// / rebase / amend are git-flavored enough that even when used as
+/// English ("can we commit to this approach") the user benefits
+/// from oracle's read-only response over fixer's hallucinated
+/// "I committed your code!"
+const SHELL_OP_VERBS: &[&str] = &["git", "gh", "commit", "push", "rebase", "amend", "stash", "cherry-pick", "checkout"];
 
 async fn classify_via_llm(message: &str) -> Option<Intent> {
     use smooth_operator::cast::Cast;
@@ -293,5 +357,37 @@ mod tests {
     fn role_mapping() {
         assert_eq!(Intent::Question.role(), "oracle");
         assert_eq!(Intent::Work.role(), "fixer");
+    }
+
+    #[test]
+    fn shell_op_detection_catches_git_verbs() {
+        // Pearl th-919f1e: messages that read as git/shell-op
+        // requests should NOT route to fixer's coding workflow.
+        // Verbatim from the bug report:
+        assert!(looks_like_shell_op("can we commit that to main"));
+        // Plus other common phrasings:
+        assert!(looks_like_shell_op("commit and push"));
+        assert!(looks_like_shell_op("git status"));
+        assert!(looks_like_shell_op("let's push to origin"));
+        assert!(looks_like_shell_op("rebase onto main"));
+        assert!(looks_like_shell_op("amend the last commit"));
+        assert!(looks_like_shell_op("checkout the feature branch"));
+        assert!(looks_like_shell_op("gh pr create"));
+        assert!(looks_like_shell_op("stash these changes"));
+        assert!(looks_like_shell_op("cherry-pick that fix"));
+    }
+
+    #[test]
+    fn shell_op_detection_does_not_overmatch_coding_verbs() {
+        // Words that are common in coding asks but NOT shell ops.
+        // These must continue to route normally (Work/fixer for verbs,
+        // Question/oracle for questions).
+        assert!(!looks_like_shell_op("merge these two functions"));
+        assert!(!looks_like_shell_op("run the tests"));
+        assert!(!looks_like_shell_op("install lodash"));
+        assert!(!looks_like_shell_op("build the project"));
+        assert!(!looks_like_shell_op("create a new branch in the parser"));
+        assert!(!looks_like_shell_op("what does this do"));
+        assert!(!looks_like_shell_op("fix the failing test"));
     }
 }
