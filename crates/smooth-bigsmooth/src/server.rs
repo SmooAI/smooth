@@ -393,6 +393,10 @@ pub fn build_router(state: AppState) -> Router {
             "/api/chat/sessions/{id}/messages",
             get(get_chat_messages_handler).post(post_chat_message_handler),
         )
+        // SSE streaming variant — perceived-latency win: tokens land in
+        // the UI as the model produces them instead of after the full
+        // turn buffers. Pearl th-26d708.
+        .route("/api/chat/sessions/{id}/messages/stream", post(post_chat_message_stream_handler))
         // Search
         .route("/api/search", get(search_handler))
         // Steering
@@ -3739,6 +3743,202 @@ async fn post_chat_message_handler(
         },
         ok: true,
     })
+}
+
+/// SSE-streaming variant of [`post_chat_message_handler`] (pearl
+/// th-26d708). End-to-end wallclock is identical, but the user sees
+/// the model's tokens arriving incrementally instead of staring at a
+/// blank panel for 20-30s.
+///
+/// Wire format mirrors `/api/tasks`: each SSE event carries a
+/// JSON-serialized `AgentEvent` so the web client can use the same
+/// stream parser. Persistence (user msg + final assistant msg with
+/// tool_calls) still runs server-side; the final `Completed` event
+/// signals the client that the message is durable.
+async fn post_chat_message_stream_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<PostChatMessageBody>,
+) -> Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>> {
+    use crate::session::SessionStore;
+    use smooth_operator::agent::{Agent, AgentConfig, AgentEvent};
+
+    state.touch();
+
+    let user_content = body.content;
+    let user_msg_id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
+    let user_msg = crate::session::SessionMessage {
+        id: user_msg_id.clone(),
+        session_id: id.clone(),
+        from: "user".into(),
+        to: "bigsmooth".into(),
+        content: user_content.clone(),
+        timestamp: chrono::Utc::now(),
+        message_type: crate::session::MessageType::Command,
+        tool_calls: Vec::new(),
+    };
+    if let Err(e) = state.session_store.save_message(user_msg) {
+        tracing::warn!(error = %e, "failed to save user chat message");
+    }
+
+    // Auto-name the session — same fire-and-forget behaviour as the
+    // buffered handler. Detached so streaming latency isn't gated on it.
+    if let Ok(Some(session)) = state.session_store.get_chat_session(&id) {
+        if session.title == "New chat" {
+            let session_store = state.session_store.clone();
+            let id_for_spawn = id.clone();
+            let prompt_for_spawn = user_content.clone();
+            tokio::spawn(async move {
+                let title = auto_name_session(&prompt_for_spawn).await.unwrap_or_else(|| {
+                    let short: String = prompt_for_spawn.chars().take(60).collect();
+                    short.trim().to_string()
+                });
+                if !title.is_empty() {
+                    let _ = session_store.rename_chat_session(&id_for_spawn, &title);
+                }
+            });
+        }
+    }
+
+    let history = state.session_store.get_messages(&id, 50).unwrap_or_default();
+
+    // Build the SSE event channel. The agent task forwards every
+    // AgentEvent it sees, then sends a final `Completed` after
+    // persisting the assistant message.
+    let (sse_tx, sse_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+
+    let state_for_agent = state.clone();
+    let session_id = id.clone();
+    tokio::spawn(async move {
+        // Resolve provider config — fail fast with an Error event if
+        // the user hasn't configured an LLM provider.
+        let providers_path = dirs_next::home_dir().unwrap_or_default().join(".smooth/providers.json");
+        let registry = match ProviderRegistry::load_from_file(&providers_path) {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = sse_tx.send(AgentEvent::Error {
+                    message: format!("no LLM providers configured: {e}"),
+                });
+                return;
+            }
+        };
+        let llm_config = match registry.llm_config_for(smooth_operator::providers::Activity::Coding) {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = sse_tx.send(AgentEvent::Error {
+                    message: format!("resolving coding slot for chat: {e}"),
+                });
+                return;
+            }
+        };
+
+        let registry_arc = std::sync::Arc::new(registry);
+        let tools = crate::chat_tools::build_chat_tools(state_for_agent.clone(), registry_arc.clone());
+
+        let mut history_block = String::new();
+        for m in &history {
+            let speaker = if m.from == "user" { "User" } else { "Big Smooth" };
+            history_block.push_str(&format!("{speaker}: {}\n\n", m.content));
+        }
+        let user_payload = if history_block.is_empty() {
+            user_content.clone()
+        } else {
+            format!("Recent conversation history (read-only context):\n\n{history_block}---\n\nNew user message:\n\n{user_content}")
+        };
+
+        let system_prompt = include_str!("chat_tools_system_prompt.txt");
+        let agent_cfg = AgentConfig::new("big-smooth-chat-stream", system_prompt, llm_config).with_max_iterations(20);
+        let agent = Agent::new(agent_cfg, tools);
+
+        // Two-pronged forward: every AgentEvent is forwarded to the
+        // SSE channel, AND ToolCallStart/Complete are accumulated for
+        // persistence with the assistant message. We tap the same
+        // channel rather than two channels because the agent driver
+        // takes a single sender.
+        let (agent_tx, mut agent_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+
+        let captured_tools: std::sync::Arc<tokio::sync::Mutex<Vec<crate::session::SessionToolCall>>> = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let captured_drain = captured_tools.clone();
+        let sse_tx_drain = sse_tx.clone();
+        let drain = tokio::spawn(async move {
+            while let Some(ev) = agent_rx.recv().await {
+                match &ev {
+                    AgentEvent::ToolCallStart { tool_name, arguments, .. } => {
+                        let mut buf = captured_drain.lock().await;
+                        buf.push(crate::session::SessionToolCall {
+                            id: format!("tc-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]),
+                            tool_name: tool_name.clone(),
+                            arguments: arguments.clone(),
+                            output: None,
+                            status: "running".to_string(),
+                            duration_ms: None,
+                        });
+                    }
+                    AgentEvent::ToolCallComplete {
+                        tool_name,
+                        is_error,
+                        result,
+                        duration_ms,
+                        ..
+                    } => {
+                        let mut buf = captured_drain.lock().await;
+                        if let Some(slot) = buf.iter_mut().rev().find(|t| t.tool_name == *tool_name && t.status == "running") {
+                            slot.output = Some(result.clone());
+                            slot.status = if *is_error { "error" } else { "done" }.to_string();
+                            slot.duration_ms = Some(*duration_ms);
+                        }
+                    }
+                    _ => {}
+                }
+                // Forward to SSE — drop on receiver hangup (client
+                // closed). The agent will keep running and still
+                // persist the result when it finishes.
+                let _ = sse_tx_drain.send(ev);
+            }
+        });
+
+        let result = agent.run_with_channel(user_payload, agent_tx).await;
+        // Drain task closes when its sender is dropped (above).
+        let _ = drain.await;
+
+        let tool_calls = std::sync::Arc::try_unwrap(captured_tools)
+            .map(tokio::sync::Mutex::into_inner)
+            .unwrap_or_else(|arc| arc.try_lock().map(|g| g.clone()).unwrap_or_default());
+
+        match result {
+            Ok(conversation) => {
+                let assistant_text = conversation.last_assistant_content().unwrap_or("(no response)").to_string();
+                let assistant_msg_id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
+                let assistant_msg = crate::session::SessionMessage {
+                    id: assistant_msg_id.clone(),
+                    session_id: session_id.clone(),
+                    from: "bigsmooth".into(),
+                    to: "user".into(),
+                    content: assistant_text,
+                    timestamp: chrono::Utc::now(),
+                    message_type: crate::session::MessageType::Response,
+                    tool_calls,
+                };
+                if let Err(e) = state_for_agent.session_store.save_message(assistant_msg) {
+                    tracing::warn!(error = %e, "failed to save assistant chat stream message");
+                }
+                let _ = state_for_agent.session_store.bump_message_count(&session_id, 2);
+            }
+            Err(e) => {
+                let _ = sse_tx.send(AgentEvent::Error {
+                    message: format!("chat agent: {e}"),
+                });
+            }
+        }
+    });
+
+    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(sse_rx);
+    let sse_stream = futures_util::StreamExt::map(stream, |event| {
+        let data = serde_json::to_string(&event).unwrap_or_else(|_| r#"{"type":"Error","message":"serialization failed"}"#.into());
+        Ok(Event::default().data(data))
+    });
+
+    Sse::new(sse_stream)
 }
 
 /// Generate a short (3–6 word) title summarizing the user's first

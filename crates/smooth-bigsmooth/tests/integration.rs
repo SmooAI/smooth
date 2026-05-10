@@ -550,6 +550,38 @@ async fn session_messages_saved_in_dolt() {
     assert!(other.is_empty());
 }
 
+// ── 12b. Chat SSE streaming endpoint (pearl th-26d708) ─────
+
+#[tokio::test]
+async fn chat_stream_endpoint_returns_event_stream() {
+    let Some((app, store)) = test_app() else { return };
+
+    // Create a chat session so the messages route has something to bind to.
+    use smooth_bigsmooth::session::DoltSessionStore;
+    let session_store = DoltSessionStore::new(&store);
+    let session = session_store.create_chat_session("Stream test", "smooth-coding").expect("create session");
+
+    let body_json = serde_json::json!({"content": "ping"});
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/chat/sessions/{}/messages/stream", session.id))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body_json).expect("json")))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    // Even without a configured LLM provider the route must answer 200
+    // with SSE content-type — the error surfaces inside the stream as
+    // an `AgentEvent::Error` data line, not as a 4xx/5xx.
+    assert_eq!(resp.status(), 200, "stream endpoint should return 200");
+    let ct = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
+    assert!(ct.starts_with("text/event-stream"), "expected SSE content-type, got {ct:?}");
+}
+
 // ── 13. Projects API ─────────────────────────────────────────
 
 #[tokio::test]
