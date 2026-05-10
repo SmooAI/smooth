@@ -57,10 +57,101 @@ pub async fn classify(message: &str) -> Intent {
     if looks_like_shell_op(message) {
         return Intent::Question;
     }
+    if looks_like_vague_improve(message) {
+        // Pearl iter-8: "make X better" / "clean up Y" / "polish Z"
+        // sent to fixer triggers wide rewrites the user didn't ask
+        // for. Route to oracle instead — it'll respond with a
+        // clarifying question ("what does 'better' mean here?")
+        // which is strictly better than fixer guessing wide.
+        return Intent::Question;
+    }
     match classify_via_llm(message).await {
         Some(intent) => intent,
         None => classify_heuristic(message),
     }
+}
+
+/// Heuristic for "this is a vague self-improvement ask, not a
+/// concrete coding task." Matches asks like "make X better",
+/// "clean up the code", "improve this", "polish the README",
+/// "tidy up the imports" — where there's a fuzzy adjective and
+/// no concrete change named.
+///
+/// We're deliberately narrow on what counts as vague: a fuzzy
+/// adjective alone, OR with "the X" / "this" / "it". A phrase
+/// like "improve performance of the parser" is concrete (says
+/// what to improve and where) and stays as Work.
+///
+/// Public for tests only.
+#[must_use]
+pub fn looks_like_vague_improve(message: &str) -> bool {
+    let lower = message.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    // Trigger phrases — vague verbs/adjectives that on their own
+    // (or with a generic object) mean "agent please figure out
+    // what to do." Each phrase must appear surrounded by word
+    // boundaries to avoid false matches like "improvement test"
+    // or "polished glass icon".
+    const VAGUE_PHRASES: &[&str] = &[
+        // "make it better" family — pronoun + fuzzy adjective.
+        "make it better",
+        "make it nicer",
+        "make it cleaner",
+        "make this better",
+        "make this nicer",
+        "make this cleaner",
+        // Verb + pronoun forms — explicit fuzz on a referent.
+        "clean it up",
+        "polish this",
+        "polish it",
+        "modernize this",
+        "modernize it",
+        // "tidy up" alone — almost always vague.
+        "tidy up",
+    ];
+    for phrase in VAGUE_PHRASES {
+        if lower.contains(phrase) {
+            return true;
+        }
+    }
+    // "make X better" / "make X cleaner" / "improve X" patterns
+    // where X is short (a single token like a filename or
+    // identifier) and there's no further qualifier. The "make X
+    // better" pattern caught us in iter 7-8.
+    let tokens: Vec<&str> = lower.split_whitespace().collect();
+    if let Some(idx) = tokens.iter().position(|t| *t == "make") {
+        // Need at least "make X <fuzzy_adj>" — 3 tokens after "make"
+        // makes the pattern a 4-token-or-shorter ask.
+        let rest = &tokens[idx + 1..];
+        if rest.len() <= 3 {
+            // Last word is one of the fuzzy adjectives?
+            if let Some(last) = rest.last() {
+                let stripped = last.trim_end_matches(|c: char| !c.is_alphanumeric());
+                if matches!(stripped, "better" | "nicer" | "cleaner" | "prettier" | "more" | "best") {
+                    return true;
+                }
+            }
+        }
+    }
+    // "improve X" / "polish X" / "clean up X" with a SHORT object
+    // (no specific quality/dimension named) → vague.
+    // "improve the parser performance" stays as Work; "improve
+    // this" / "improve App.tsx" goes Question.
+    for verb in ["improve", "polish", "modernize"] {
+        if let Some(rest) = lower.split_whitespace().skip_while(|t| *t != verb).nth(1) {
+            // After the verb there's only one token (the object) —
+            // no quality or dimension named.
+            let after_count = lower.split_whitespace().skip_while(|t| *t != verb).count();
+            // skip_while gives us [verb, object, ...] so count >= 1.
+            // count == 2 means [verb, object] only.
+            if after_count == 2 && !rest.is_empty() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Heuristic for "this is a git/shell operation request, not a
@@ -375,6 +466,43 @@ mod tests {
         assert!(looks_like_shell_op("gh pr create"));
         assert!(looks_like_shell_op("stash these changes"));
         assert!(looks_like_shell_op("cherry-pick that fix"));
+    }
+
+    #[test]
+    fn vague_improve_detection_catches_iter8_bug() {
+        // Pearl iter-8 verbatim: "make App.tsx better" triggered
+        // fixer rewriting the file. Now routes to oracle so it
+        // asks "what does better mean here" instead.
+        assert!(looks_like_vague_improve("make App.tsx better"));
+        assert!(looks_like_vague_improve("make this better"));
+        assert!(looks_like_vague_improve("make it cleaner"));
+        assert!(looks_like_vague_improve("Make this nicer"));
+        // Pronoun + fuzzy verb forms.
+        assert!(looks_like_vague_improve("clean it up"));
+        assert!(looks_like_vague_improve("polish this"));
+        assert!(looks_like_vague_improve("modernize it"));
+        // "tidy up" alone — almost always vague.
+        assert!(looks_like_vague_improve("tidy up"));
+        // "improve X" / "polish X" / "modernize X" with no further
+        // qualifier — caught by the 2-token verb-object pattern.
+        assert!(looks_like_vague_improve("improve App.tsx"));
+        assert!(looks_like_vague_improve("polish README"));
+    }
+
+    #[test]
+    fn vague_improve_does_not_overmatch_concrete_asks() {
+        // Concrete asks must stay as Work (route to fixer).
+        // Anything with a specific dimension (performance, error
+        // handling, a specific function) is concrete.
+        assert!(!looks_like_vague_improve("improve performance of the parser"));
+        assert!(!looks_like_vague_improve("improve the error handling in fetchUser"));
+        assert!(!looks_like_vague_improve("polish the README's API examples"));
+        // "make X <verb>" where the trailing word isn't a fuzzy adjective.
+        assert!(!looks_like_vague_improve("make App.tsx render a list of items"));
+        assert!(!looks_like_vague_improve("make App.tsx render properly"));
+        // Concrete verbs unaffected.
+        assert!(!looks_like_vague_improve("fix the failing test in policy.rs"));
+        assert!(!looks_like_vague_improve("add a button to the header"));
     }
 
     #[test]
