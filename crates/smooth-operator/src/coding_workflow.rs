@@ -177,16 +177,25 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
                     "coding workflow: no test-run evidence, exiting (agent didn't actually run tests this turn)"
                 );
                 if detect_verify_pass(&transcript) {
-                    // Pearl iter-10: the assistant claimed pass
-                    // without evidence. Surface as hallucination
-                    // alert AND mutate the conversation's final
-                    // assistant message to redact the fabricated
-                    // "X passed, Y failed" claim. Without the
-                    // mutation, the user sees both the warning AND
-                    // the lie in the same chat — confusing and
-                    // ultimately accepts the lie.
+                    // Pearl iter-10/11: the assistant claimed pass
+                    // without evidence. Three actions:
+                    //
+                    // 1. tracing::warn for log retention.
+                    // 2. [cast-summary] stderr line — surfaced
+                    //    by the runner stderr forward when
+                    //    /verbose is on.
+                    // 3. APPEND a TokenDelta to the live event
+                    //    stream so the user sees the correction
+                    //    INLINE in the streamed chat. The
+                    //    streaming tokens already shipped — we
+                    //    can't unsay them — but we can append a
+                    //    correction the user sees alongside.
+                    // 4. Mutate `conversation.messages` so saved
+                    //    sessions don't preserve the lie either.
                     tracing::warn!(iteration, "coding workflow: assistant claimed pass with NO tool evidence — likely hallucinated");
                     eprintln!("[cast-summary] WARNING: assistant claimed test pass without evidence — no `bash` / `test_run` tool actually ran this turn.");
+                    let correction = "\n\n---\n\n⚠️  **Correction:** the agent's `## Test Results` claim above is unverified — no `bash` / `test_run` tool actually ran this turn. The change above may be correct on its own merits but was not validated by the test suite. Run the tests yourself before trusting the result.\n";
+                    let _ = cfg.tx.send(AgentEvent::TokenDelta { content: correction.into() });
                     redact_hallucinated_test_claims(&mut conversation);
                 }
                 break;
