@@ -22,6 +22,7 @@ pub mod providers;
 pub mod quirks;
 pub mod resolution;
 pub mod tool;
+pub mod tool_search;
 pub mod workflow;
 pub mod ws_resilience;
 

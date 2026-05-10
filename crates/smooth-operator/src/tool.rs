@@ -138,9 +138,28 @@ impl Default for ParallelExecutionConfig {
 /// registry gives a new handle that shares the same tool instances
 /// and hook chain. The coding workflow relies on this to pass the
 /// same tools into each phase's fresh `Agent`.
+///
+/// Two-tier registration (pearl th-cfa1fb): in addition to plain
+/// `register()` (eager — schema visible to the LLM at every turn),
+/// callers can `register_deferred()` to add tools whose schemas are
+/// hidden from the LLM until promoted via [`promote`]. The
+/// [`tool_search`](crate::tool_search) meta-tool drives that
+/// promotion — when the LLM calls `tool_search("file …")`, matching
+/// deferred tools get their names added to the shared `promoted`
+/// set and their schemas land in the next iteration's tool list.
+/// `promoted` is `Arc<Mutex<…>>` so the set is observable across
+/// registry clones (each phase of the coding workflow takes a fresh
+/// clone, but a tool promoted in PLAN should remain visible in
+/// EXECUTE).
 #[derive(Clone)]
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
+    /// Tools registered as deferred — schema invisible until promoted.
+    deferred: HashMap<String, Arc<dyn Tool>>,
+    /// Names of deferred tools that have been promoted via
+    /// [`promote`]. Shared across clones so a tool_search call in
+    /// one phase persists into the next.
+    promoted: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     hooks: Vec<Arc<dyn ToolHook>>,
     parallel_config: ParallelExecutionConfig,
 }
@@ -149,6 +168,8 @@ impl ToolRegistry {
     pub fn new() -> Self {
         Self {
             tools: HashMap::new(),
+            deferred: HashMap::new(),
+            promoted: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             hooks: vec![],
             parallel_config: ParallelExecutionConfig::default(),
         }
@@ -172,20 +193,73 @@ impl ToolRegistry {
         self.tools.insert(schema.name, tool);
     }
 
+    /// Register a tool as deferred — its schema is hidden from
+    /// `schemas()` until [`promote`] is called for it. Pearl
+    /// th-cfa1fb. Use when a tool is rarely needed and its schema
+    /// would otherwise dilute the LLM's attention budget on every
+    /// turn.
+    pub fn register_deferred(&mut self, tool: impl Tool + 'static) {
+        let schema = tool.schema();
+        self.deferred.insert(schema.name, Arc::new(tool));
+    }
+
+    /// Promote a deferred tool so its schema appears in the next
+    /// `schemas()` call and the LLM can invoke it. Returns `false`
+    /// if the name doesn't match a registered deferred tool —
+    /// callers can use this to surface a clear error to the model.
+    pub fn promote(&self, name: &str) -> bool {
+        if !self.deferred.contains_key(name) {
+            return false;
+        }
+        let mut promoted = self.promoted.lock().expect("promoted lock poisoned");
+        promoted.insert(name.to_string())
+    }
+
+    /// Snapshot of (name, description) for every deferred tool.
+    /// The `tool_search` meta-tool walks this to fuzzy-match against
+    /// the LLM's query.
+    #[must_use]
+    pub fn deferred_summary(&self) -> Vec<(String, String)> {
+        self.deferred
+            .values()
+            .map(|t| {
+                let s = t.schema();
+                (s.name, s.description)
+            })
+            .collect()
+    }
+
     pub fn add_hook(&mut self, hook: impl ToolHook + 'static) {
         self.hooks.push(Arc::new(hook));
     }
 
     pub fn schemas(&self) -> Vec<ToolSchema> {
-        self.tools.values().map(|t| t.schema()).collect()
+        let mut out: Vec<ToolSchema> = self.tools.values().map(|t| t.schema()).collect();
+        let promoted = self.promoted.lock().expect("promoted lock poisoned");
+        for name in promoted.iter() {
+            if let Some(t) = self.deferred.get(name) {
+                out.push(t.schema());
+            }
+        }
+        out
     }
 
     pub fn has_tool(&self, name: &str) -> bool {
-        self.tools.contains_key(name)
+        if self.tools.contains_key(name) {
+            return true;
+        }
+        let promoted = self.promoted.lock().expect("promoted lock poisoned");
+        promoted.contains(name) && self.deferred.contains_key(name)
     }
 
     /// Look up a registered tool by name and clone the underlying
     /// `Arc<dyn Tool>`. Returns `None` if the tool isn't registered.
+    ///
+    /// Resolution order: eager tools first, then deferred tools
+    /// that have been promoted via [`promote`] (pearl th-cfa1fb).
+    /// Deferred tools that haven't been promoted are invisible —
+    /// the LLM's call to them surfaces as `unknown tool` until
+    /// `tool_search` adds them to the promoted set.
     ///
     /// Used by callers that need to forward a specific tool handle
     /// to another registry (e.g. the subagent dispatcher filtering
@@ -193,7 +267,14 @@ impl ToolRegistry {
     /// without re-registering the underlying implementation.
     #[must_use]
     pub fn tool_by_name(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.tools.get(name).cloned()
+        if let Some(t) = self.tools.get(name).cloned() {
+            return Some(t);
+        }
+        let promoted = self.promoted.lock().expect("promoted lock poisoned");
+        if promoted.contains(name) {
+            return self.deferred.get(name).cloned();
+        }
+        None
     }
 
     /// Drop every registered tool whose name fails the supplied
@@ -273,8 +354,9 @@ impl ToolRegistry {
             }
         }
 
-        // Find and execute tool
-        let result = match self.tools.get(&call.name) {
+        // Find and execute tool. `tool_by_name` resolves both eager
+        // and promoted-deferred tools (pearl th-cfa1fb).
+        let result = match self.tool_by_name(&call.name) {
             Some(tool) => match tool.execute(call.arguments.clone()).await {
                 Ok(content) => ToolResult {
                     tool_call_id: call.id.clone(),
@@ -384,6 +466,21 @@ impl ToolRegistry {
             return vec![];
         }
 
+        // Build a snapshot view that includes promoted-deferred
+        // tools alongside eager ones (pearl th-cfa1fb). The
+        // partition decision and the per-call dispatch both use
+        // this view so lazy-loaded tools reach the dispatcher.
+        let snapshot: HashMap<String, Arc<dyn Tool>> = {
+            let mut map = self.tools.clone();
+            let promoted = self.promoted.lock().expect("promoted lock poisoned");
+            for name in promoted.iter() {
+                if let Some(t) = self.deferred.get(name) {
+                    map.insert(name.clone(), t.clone());
+                }
+            }
+            map
+        };
+
         let mut results: Vec<Option<ToolResult>> = calls.iter().map(|_| None).collect();
 
         // Partition calls into parallel-safe (concurrent + read-only) and sequential
@@ -391,8 +488,7 @@ impl ToolRegistry {
         let mut sequential_indices = Vec::new();
 
         for (i, call) in calls.iter().enumerate() {
-            let (concurrent_safe, read_only) = self
-                .tools
+            let (concurrent_safe, read_only) = snapshot
                 .get(&call.name)
                 .map_or((true, true), |tool| (tool.is_concurrent_safe(), tool.is_read_only()));
 
@@ -407,7 +503,7 @@ impl ToolRegistry {
         if !parallel_indices.is_empty() {
             let semaphore = Arc::new(tokio::sync::Semaphore::new(self.parallel_config.max_concurrency));
             let timeout = self.parallel_config.timeout_per_tool;
-            let tools = &self.tools;
+            let tools = &snapshot;
             let hooks = &self.hooks;
 
             let mut join_set = tokio::task::JoinSet::new();
@@ -455,7 +551,7 @@ impl ToolRegistry {
             let call = &calls[index];
             let timeout = self.parallel_config.timeout_per_tool;
 
-            let result = tokio::time::timeout(timeout, Self::execute_single(&self.tools, &self.hooks, call)).await;
+            let result = tokio::time::timeout(timeout, Self::execute_single(&snapshot, &self.hooks, call)).await;
 
             let result = result.unwrap_or_else(|_| ToolResult {
                 tool_call_id: call.id.clone(),
@@ -491,10 +587,14 @@ impl Default for ToolRegistry {
 impl ToolRegistry {
     /// Clone the registry's tools (as `Arc` references) into a new registry.
     /// Hooks are NOT carried over — the new registry starts with no hooks.
+    /// Deferred tools and the shared `promoted` set are carried over so a
+    /// promotion in one phase persists into the next (pearl th-cfa1fb).
     #[must_use]
     pub fn clone_tools(&self) -> Self {
         Self {
             tools: self.tools.clone(),
+            deferred: self.deferred.clone(),
+            promoted: self.promoted.clone(),
             hooks: vec![],
             parallel_config: self.parallel_config.clone(),
         }

@@ -505,9 +505,15 @@ impl Agent {
         self.emit(AgentEvent::Started { agent_id: self.id.clone() });
 
         let llm = LlmClient::new(self.config.llm.clone());
-        let tool_schemas = self.tools.schemas();
 
         for iteration in 1..=self.config.max_iterations {
+            // Recompute schemas every iteration so tools promoted
+            // by `tool_search` mid-run land in the LLM's tool list
+            // on the next turn (pearl th-cfa1fb). Cheap: schemas()
+            // walks the registry's tools map and clones each
+            // schema, no LLM-side I/O.
+            let tool_schemas = self.tools.schemas();
+
             // Drain mailbox injections (see `drain_injected_messages` doc).
             self.drain_injected_messages(&mut conversation);
 
@@ -759,9 +765,13 @@ impl Agent {
         let _ = tx.send(AgentEvent::Started { agent_id: self.id.clone() });
 
         let llm = LlmClient::new(self.config.llm.clone());
-        let tool_schemas = self.tools.schemas();
 
         for iteration in 1..=self.config.max_iterations {
+            // Recompute schemas every iteration so tools promoted
+            // by `tool_search` mid-run become callable next turn
+            // (pearl th-cfa1fb).
+            let tool_schemas = self.tools.schemas();
+
             // Drain any out-of-band injected messages (mailbox) and push them as
             // user-turns. This is what makes the agent conversational mid-flight:
             // the lead, a direct-chat user, or an answer to an `ask_smooth` call
