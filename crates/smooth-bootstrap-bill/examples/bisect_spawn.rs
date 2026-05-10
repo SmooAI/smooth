@@ -16,6 +16,29 @@
 //!   ports    — baseline + 10 port forwards (host_port=0)
 //!   secrets-network — baseline + secrets + network (strong suspect combo)
 //!   all      — full real spec the orchestrator builds
+//!
+//! Image-collision hypothesis (pearl th-dd0cef):
+//!   mounts-collide — bind-mounts to paths that EXIST in the OCI image
+//!                    rootfs (`/var/log/x`, `/root/x`). Hypothesis: virtio
+//!                    silently drops these because they collide with the
+//!                    image rootfs entries.
+//!   mounts-fresh   — bind-mounts to paths that DO NOT exist in the OCI
+//!                    image rootfs (`/scratch/diag/a`, `/opt/diag/b`).
+//!                    Hypothesis: these always land successfully because
+//!                    they don't collide.
+//!
+//! Run the two variants back-to-back and compare:
+//!
+//! ```text
+//! cargo run --release -p smooai-smooth-bootstrap-bill --example bisect_spawn -- \
+//!   --bill 127.0.0.1:4444 --variant mounts-collide --image ghcr.io/smooai/smooth-operator:latest
+//! cargo run --release -p smooai-smooth-bootstrap-bill --example bisect_spawn -- \
+//!   --bill 127.0.0.1:4444 --variant mounts-fresh   --image ghcr.io/smooai/smooth-operator:latest
+//! ```
+//!
+//! After each spawn, exec `mount | grep virtiofs` inside the sandbox and
+//! count entries. If `mounts-fresh` consistently shows N mounts and
+//! `mounts-collide` shows < N, the hypothesis is confirmed.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -189,6 +212,50 @@ fn build_spec(variant: &str, image: &str, name: &str) -> SandboxSpec {
             spec.env_cache_key = Some("bisect-bind-key".into());
             spec.use_named_volume_for_cache = false;
             spec.env.insert("SMOOTH_API_URL".into(), "https://llm.smoo.ai/v1".into());
+        }
+        // ── Pearl th-dd0cef: image-collision hypothesis ────────
+        // Mount-targets that already exist in the smooth-operator OCI
+        // rootfs. If virtio drops these silently, this variant should
+        // exhibit the symptom (host bind-source dirs stay empty after
+        // dispatch).
+        "mounts-collide" => {
+            let collide_a = std::env::temp_dir().join("smooth-bisect-collide-a");
+            let collide_b = std::env::temp_dir().join("smooth-bisect-collide-b");
+            let _ = std::fs::create_dir_all(&collide_a);
+            let _ = std::fs::create_dir_all(&collide_b);
+            spec.mounts = vec![
+                BindMountSpec {
+                    host_path: collide_a.to_string_lossy().to_string(),
+                    guest_path: "/var/log/diag-collide".into(),
+                    readonly: false,
+                },
+                BindMountSpec {
+                    host_path: collide_b.to_string_lossy().to_string(),
+                    guest_path: "/root/diag-collide".into(),
+                    readonly: false,
+                },
+            ];
+        }
+        // Mount-targets at paths that do NOT exist in the OCI rootfs.
+        // These should always land cleanly. Compare counts vs the
+        // mounts-collide run to confirm/refute the hypothesis.
+        "mounts-fresh" => {
+            let fresh_a = std::env::temp_dir().join("smooth-bisect-fresh-a");
+            let fresh_b = std::env::temp_dir().join("smooth-bisect-fresh-b");
+            let _ = std::fs::create_dir_all(&fresh_a);
+            let _ = std::fs::create_dir_all(&fresh_b);
+            spec.mounts = vec![
+                BindMountSpec {
+                    host_path: fresh_a.to_string_lossy().to_string(),
+                    guest_path: "/scratch/diag/a".into(),
+                    readonly: false,
+                },
+                BindMountSpec {
+                    host_path: fresh_b.to_string_lossy().to_string(),
+                    guest_path: "/opt/diag/b".into(),
+                    readonly: false,
+                },
+            ];
         }
         other => panic!("unknown variant: {other}"),
     }
