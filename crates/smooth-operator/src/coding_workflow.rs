@@ -199,20 +199,37 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
                 // Stay in the loop and feed failure context forward.
             }
             VerifyEvidence::NoEvidence => {
-                // No bash / test_run ever ran this turn. Two
-                // possibilities: the task didn't require code (e.g.
-                // a "what's this repo" routed here in error), OR
-                // the agent silently skipped the test run despite
-                // editing files. Pearl th-bench-loop iter 2 found
-                // the latter is the dominant case on real benchmark
-                // dispatches — the model returns plausible code +
-                // narrative without ever running `cargo test`.
+                // No bash / test_run ever ran this turn. Three
+                // possibilities:
+                //  1. The task didn't require code at all — pure
+                //     THINK mode ("how would you do X"). No edits,
+                //     no tests, just an answer.
+                //  2. The agent edited files but skipped tests
+                //     (the dominant benchmark-dispatch failure
+                //     mode, pearl th-bench-loop iter 2).
+                //  3. The task required code but the model gave
+                //     up before doing either.
                 //
-                // First time: retry with a forcing prompt that
-                // makes the test invocation non-negotiable. Only
-                // give up if the agent ignores the forcing prompt
-                // too. Capped at MAX_NO_EVIDENCE_RETRIES so a
-                // genuinely non-test task can't trap the workflow.
+                // Retry-with-forcing-prompt only helps case (2).
+                // For case (1) the forcing prompt is a non-sequitur
+                // ("you edited but never ran tests") and surfaces
+                // as a confusing redaction notice to the user. So
+                // check: if the agent didn't edit ANYTHING this
+                // turn either, treat it as THINK mode and exit
+                // cleanly without the retry.
+                //
+                // Pearl th-fixer-think-mode (user 2026-05-10):
+                // "fixer always hallucinates tests, he should be a
+                // thinker too" — this is the workflow half of that
+                // fix; the prompt half lives in fixer.txt.
+                let made_edits = conversation_made_edits(&conversation);
+                if !made_edits {
+                    tracing::info!(
+                        iteration,
+                        "coding workflow: no test-run evidence AND no edits — treating as THINK mode, exiting cleanly"
+                    );
+                    break;
+                }
                 if no_evidence_retries < MAX_NO_EVIDENCE_RETRIES {
                     no_evidence_retries += 1;
                     tracing::info!(
@@ -751,6 +768,27 @@ fn nonzero_failure_count(upper: &str) -> bool {
 /// Returns `None` when we should treat the failure as a regular
 /// red-test run. Used by `build_user_prompt` to switch retry
 /// tone from "fix the failures" to "fix the syntax".
+/// True when ANY assistant tool_call in the conversation invoked a
+/// file-mutating tool (edit_file, write_file, apply_patch, multi_edit).
+/// Pearl th-fixer-think-mode: the NoEvidence retry only makes sense
+/// when the agent ACTUALLY changed code; if it just answered a
+/// question without editing, the "you didn't run tests" forcing
+/// prompt is a non-sequitur.
+fn conversation_made_edits(conv: &crate::conversation::Conversation) -> bool {
+    const MUTATING_TOOLS: &[&str] = &["edit_file", "write_file", "apply_patch", "multi_edit", "str_replace", "create_file"];
+    for msg in &conv.messages {
+        if !matches!(msg.role, crate::conversation::Role::Assistant) {
+            continue;
+        }
+        for tc in &msg.tool_calls {
+            if MUTATING_TOOLS.contains(&tc.name.as_str()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Scan tool-result messages in the conversation for compile-error
 /// output. Returns the first matching tool-result chunk so the
 /// workflow can feed it directly into the next iteration's prompt
@@ -1000,6 +1038,52 @@ mod tests {
 
     fn make_conv() -> crate::conversation::Conversation {
         crate::conversation::Conversation::new(8192).with_system_prompt("test")
+    }
+
+    fn assistant_with_tool(name: &str) -> crate::conversation::Message {
+        let mut m = crate::conversation::Message::assistant("");
+        m.tool_calls.push(crate::tool::ToolCall {
+            id: format!("call-{name}"),
+            name: name.into(),
+            arguments: serde_json::Value::Null,
+        });
+        m
+    }
+
+    #[test]
+    fn conversation_made_edits_detects_edit_file() {
+        // Pearl th-fixer-think-mode: when the agent calls edit_file
+        // the workflow's NoEvidence retry should still fire (the
+        // agent edited but didn't run tests — the dominant bench
+        // failure mode).
+        let mut conv = make_conv();
+        conv.push(crate::conversation::Message::user("fix it"));
+        conv.push(assistant_with_tool("edit_file"));
+        assert!(conversation_made_edits(&conv));
+    }
+
+    #[test]
+    fn conversation_made_edits_skips_read_only_tools() {
+        // Pure THINK mode: agent only read files / ran grep / listed
+        // dirs / ran git status. No edits. NoEvidence retry must
+        // NOT fire — the "you didn't run tests" forcing prompt is
+        // a non-sequitur for a question.
+        let mut conv = make_conv();
+        conv.push(crate::conversation::Message::user("how would you add a movie"));
+        for tool in &["read_file", "list_files", "grep", "bash", "project_inspect"] {
+            conv.push(assistant_with_tool(tool));
+        }
+        assert!(!conversation_made_edits(&conv), "read-only tools must not count as edits");
+    }
+
+    #[test]
+    fn conversation_made_edits_recognises_all_mutators() {
+        for tool in &["edit_file", "write_file", "apply_patch", "multi_edit", "str_replace", "create_file"] {
+            let mut conv = make_conv();
+            conv.push(crate::conversation::Message::user("do it"));
+            conv.push(assistant_with_tool(tool));
+            assert!(conversation_made_edits(&conv), "tool {tool} must register as an edit");
+        }
     }
 
     #[test]
