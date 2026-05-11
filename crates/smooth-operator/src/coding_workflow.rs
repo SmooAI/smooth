@@ -506,6 +506,20 @@ pub fn verify_with_evidence(conv: &crate::conversation::Conversation) -> VerifyE
         if name != "bash" && name != "test_run" && name != "shell" {
             continue;
         }
+        // Pearl th-bench-loop iter 13: "all tests skipped, 0 ran"
+        // is NOT a pass. Exercism JS uses `xtest()` and Java uses
+        // `@Disabled`; both default to skip and require the student
+        // to flip annotations as they implement. The agent ships
+        // implementations that look correct, the test runner returns
+        // 0 ran/0 failed (exit code 0), and the workflow used to
+        // call that a pass. It's not — nothing actually ran.
+        //
+        // Detect BEFORE detect_verify_pass since the skip-only
+        // output may also coincidentally match "0 failed" patterns.
+        if looks_all_skipped(&msg.content) {
+            last_outcome = VerifyEvidence::EvidencedFail(None);
+            continue;
+        }
         if detect_verify_pass(&msg.content) {
             last_outcome = VerifyEvidence::EvidencedPass;
             continue;
@@ -523,6 +537,76 @@ pub fn verify_with_evidence(conv: &crate::conversation::Conversation) -> VerifyE
         // wasn't a test, or didn't produce a recognizable summary.
     }
     last_outcome
+}
+
+/// True when test output indicates EVERY test was skipped — common
+/// when an exercism framework defaults to `@Disabled` / `xtest()` /
+/// `test.skip` and the student hasn't flipped them yet. Treat as
+/// failure-no-evidence (pearl th-bench-loop iter 13): 0 tests
+/// actually ran, the implementation is unverified.
+///
+/// Heuristics (all case-insensitive on uppercase input):
+///   - Jest: "Tests:       N skipped, 0 passed, N total"
+///   - Gradle/JUnit: "BUILD SUCCESSFUL" + "N tests completed, N skipped"
+///     OR all "SKIPPED" markers with no "PASSED" / "FAILED" lines
+///   - pytest: "N skipped" alongside "0 passed"
+///   - go test: "ok ... [no tests to run]" (Go has no skip annotation
+///     by default, but the no-tests case is the same problem)
+pub fn looks_all_skipped(transcript: &str) -> bool {
+    let upper = transcript.to_uppercase();
+
+    // Gradle/JUnit: count of SKIPPED markers as inline test
+    // outcomes. Check FIRST because gradle lines don't have a
+    // numeric prefix the pytest-shape path would expect.
+    let skipped_lines = upper.lines().filter(|l| l.trim_end().ends_with("SKIPPED")).count();
+    let pass_lines = upper.lines().filter(|l| l.trim_end().ends_with("PASSED")).count();
+    let fail_lines = upper.lines().filter(|l| l.trim_end().ends_with("FAILED")).count();
+    if skipped_lines >= 3 && pass_lines == 0 && fail_lines == 0 {
+        return true;
+    }
+
+    // Jest / pytest shape: explicit "N skipped, 0 passed".
+    if (upper.contains("0 PASSED") || upper.contains(" 0 PASSED,") || upper.contains(", 0 PASSED")) && upper.contains("SKIPPED") {
+        return true;
+    }
+
+    // Go: "no tests to run" + ok status.
+    if upper.contains("[NO TESTS TO RUN]") {
+        return true;
+    }
+
+    // Pytest: "N skipped" with no "passed" count at all. Last
+    // because the digit-prefix check is strict — wouldn't catch
+    // gradle's per-line shape, only pytest's summary count.
+    if upper.contains(" SKIPPED") && !upper.contains(" PASSED") && !upper.contains(" FAILED") {
+        return has_count_before(&upper, "SKIPPED");
+    }
+
+    false
+}
+
+/// True when `needle` is preceded by a digit (possibly with
+/// whitespace) somewhere in `haystack`. Used by `looks_all_skipped`
+/// to distinguish a count line (`10 SKIPPED`) from a comment
+/// ("# this section is skipped").
+fn has_count_before(haystack: &str, needle: &str) -> bool {
+    let mut search = haystack;
+    while let Some(idx) = search.find(needle) {
+        let before = &search[..idx];
+        let digits: String = before
+            .chars()
+            .rev()
+            .skip_while(|c| c.is_whitespace())
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>();
+        if let Ok(n) = digits.chars().rev().collect::<String>().parse::<u32>() {
+            if n > 0 {
+                return true;
+            }
+        }
+        search = &search[idx + needle.len()..];
+    }
+    false
 }
 
 /// True when the transcript reports the test suite is green.
@@ -939,6 +1023,77 @@ mod tests {
         ));
         conv.push(crate::conversation::Message::assistant("It's a budgeting app."));
         assert_eq!(verify_with_evidence(&conv), VerifyEvidence::NoEvidence);
+    }
+
+    #[test]
+    fn looks_all_skipped_jest_shape() {
+        // Pearl th-bench-loop iter 13: jest output when all tests
+        // are xtest. We saw this on iter 5 javascript/binary.
+        let out = "Test Suites: 1 passed, 1 total\nTests: 9 skipped, 1 passed, 10 total\nSnapshots: 0 total";
+        // Has 1 passed too so it's not ALL-skipped. Detector must be
+        // careful about partial-skip cases.
+        assert!(!looks_all_skipped(out), "must not trigger on 9 skipped + 1 passed");
+    }
+
+    #[test]
+    fn looks_all_skipped_jest_pure_skip() {
+        // Pure skip shape: 10 skipped, 0 passed.
+        let out = "Tests:       10 skipped, 0 passed, 10 total";
+        assert!(looks_all_skipped(out), "must trigger on all-skipped jest output");
+    }
+
+    #[test]
+    fn looks_all_skipped_gradle_disabled() {
+        // Iter 10 java/change shape. Gradle prints one line per test
+        // with SKIPPED suffix when @Disabled.
+        let out = r"ChangeCalculatorTest > testLilliputianCurrency() SKIPPED
+ChangeCalculatorTest > testLargeAmountOfChange() SKIPPED
+ChangeCalculatorTest > testZeroChange() SKIPPED
+ChangeCalculatorTest > testAGreedyApproachIsNotOptimal() SKIPPED";
+        assert!(looks_all_skipped(out), "must trigger on multi-line gradle SKIPPED output");
+    }
+
+    #[test]
+    fn looks_all_skipped_does_not_false_positive_on_mixed() {
+        // Mixed pass+skip = NOT all-skipped.
+        let out = r"FooTest > testOne PASSED
+FooTest > testTwo SKIPPED
+FooTest > testThree PASSED";
+        assert!(!looks_all_skipped(out), "must not trigger when some tests passed");
+    }
+
+    #[test]
+    fn looks_all_skipped_no_tests_to_run() {
+        let out = "ok      myproject  [no tests to run]";
+        assert!(looks_all_skipped(out), "must trigger on go's 'no tests to run'");
+    }
+
+    #[test]
+    fn looks_all_skipped_does_not_trigger_on_normal_pass() {
+        let out = "test result: ok. 31 passed; 0 failed";
+        assert!(!looks_all_skipped(out), "must not trigger on a real green run");
+    }
+
+    #[test]
+    fn looks_all_skipped_does_not_trigger_on_skipped_comment() {
+        // The word "skipped" appearing in prose without a count
+        // should not trigger.
+        let out = "Looking at the codebase, I notice this section is skipped.";
+        assert!(!looks_all_skipped(out), "must not trigger on prose-only 'skipped'");
+    }
+
+    #[test]
+    fn verify_with_evidence_returns_fail_on_all_skipped() {
+        let mut conv = make_conv();
+        conv.push(crate::conversation::Message::user("implement it"));
+        conv.push(crate::conversation::Message::tool_result_named(
+            "call-1",
+            "bash",
+            "Tests: 10 skipped, 0 passed, 10 total",
+        ));
+        conv.push(crate::conversation::Message::assistant("Done."));
+        let evidence = verify_with_evidence(&conv);
+        assert_eq!(evidence, VerifyEvidence::EvidencedFail(None), "all-skipped must register as fail, not pass");
     }
 
     #[test]
