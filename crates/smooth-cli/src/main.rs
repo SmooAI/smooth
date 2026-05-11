@@ -771,12 +771,46 @@ fn resolve_primary_agent(name: Option<&str>) -> Result<String> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env().add_directive("smooth=info".parse()?))
-        .init();
-
     let cli = Cli::parse();
+
+    // Pearl th-bench-loop iter 23 / user observation 2026-05-10:
+    // tracing-to-stderr trampled the ratatui TUI render whenever
+    // Big Smooth's server-side spans fired. Route to a log file
+    // by default (`~/.smooth/log/th.log`) so the TUI stays clean.
+    //
+    // Two escape hatches:
+    //   - `--headless` / `code --json` and `doctor` use stderr because
+    //     they're CLI-only and the user is expecting structured output.
+    //   - `SMOOTH_LOG=stderr` forces stderr regardless (useful for
+    //     debugging the CLI itself).
+    let log_to_stderr = std::env::var("SMOOTH_LOG").as_deref() == Ok("stderr")
+        || matches!(&cli.command, Some(Commands::Code { headless: true, .. }) | Some(Commands::Doctor { .. }));
+    let env_filter = tracing_subscriber::EnvFilter::from_default_env().add_directive("smooth=info".parse()?);
+    if log_to_stderr {
+        tracing_subscriber::fmt().with_env_filter(env_filter).init();
+    } else {
+        // Best-effort file logger. If we can't open the file, fall
+        // through to a no-op subscriber — the TUI is more important
+        // than the log.
+        let log_dir = dirs_next::home_dir().map(|h| h.join(".smooth").join("log"));
+        let writer_pair = log_dir.and_then(|dir| {
+            std::fs::create_dir_all(&dir).ok()?;
+            let log_path = dir.join("th.log");
+            std::fs::OpenOptions::new().create(true).append(true).open(&log_path).ok()
+        });
+        if let Some(file) = writer_pair {
+            let mutex_writer = std::sync::Mutex::new(file);
+            tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .with_writer(move || mutex_writer.lock().expect("th.log writer poisoned").try_clone().expect("clone th.log handle"))
+                .with_ansi(false)
+                .init();
+        } else {
+            // No writable home dir — silence tracing so the TUI
+            // doesn't get trampled.
+            tracing_subscriber::fmt().with_env_filter(env_filter).with_writer(std::io::sink).init();
+        }
+    }
 
     match cli.command {
         // No subcommand = launch smooth-code (THE Smooth experience)
