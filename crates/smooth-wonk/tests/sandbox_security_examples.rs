@@ -273,3 +273,139 @@ async fn baseline_blocks_unknown_mcp_servers() {
     let resp = post(&app, "/check/mcp", r#"{"server_name":"random-mcp-server"}"#).await;
     assert!(!resp.allowed, "unknown MCP servers must be blocked: {}", resp.reason);
 }
+
+// ───── Narc + Wonk + Goalie end-to-end ─────
+//
+// These tests wire the full escalation chain: Wonk's rule layer
+// can't decide → escalates to Narc → Narc's rule engine + LLM
+// judge decides → answer flows back. Tests use
+// `BoardroomNarc::without_llm()` so the rule engine is the entire
+// brain (deterministic, no model variance, no API key needed).
+//
+// User directive 2026-05-11: "the integration test should test
+// narc/wonk/goalie."
+
+mod narc_chain {
+    use std::sync::Arc;
+
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use smooth_narc::judge::{rule_engine_decide, JudgeDecision, JudgeRequest};
+    use smooth_wonk::hook::CheckResponse;
+    use smooth_wonk::narc_client::NarcClient;
+    use smooth_wonk::negotiate::Negotiator;
+    use smooth_wonk::policy::PolicyHolder;
+    use smooth_wonk::server::{build_router, AppState};
+
+    /// Spin up a tiny axum server that hosts the Narc judge endpoint.
+    /// Uses `smooth_narc::judge::rule_engine_decide` directly — the
+    /// same rule engine `BoardroomNarc` uses, just without the LLM
+    /// path. Falls through to `EscalateToHuman` for any input the
+    /// rules can't decide. Returns the base URL.
+    async fn spawn_narc_server() -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().route(
+            "/api/narc/judge",
+            post(|Json(req): Json<JudgeRequest>| async move {
+                let decision =
+                    rule_engine_decide(&req).unwrap_or_else(|| JudgeDecision::escalate("rule engine had no answer; escalating (test stub has no LLM)"));
+                Json(decision)
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    /// Build a Wonk app whose `AppState` is wired to a live Narc.
+    fn build_wonk_with_narc(narc_url: &str) -> Router {
+        let policy = smooth_policy::Policy::from_toml(super::BASELINE_POLICY).expect("parse policy");
+        let holder = PolicyHolder::from_policy(policy);
+        let negotiator = Negotiator::new("http://localhost:4400", holder.clone());
+        let narc_client = NarcClient::new(narc_url);
+        let state = Arc::new(AppState::new(holder, negotiator).with_narc(narc_client));
+        build_router(state)
+    }
+
+    async fn post_check(app: &Router, path: &str, body: &str) -> CheckResponse {
+        use axum::body::Body;
+        use axum::http::Request;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer smth_op_test")
+            .body(Body::from(body.to_string()))
+            .expect("request");
+        let resp = app.clone().oneshot(req).await.expect("response");
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        serde_json::from_slice(&bytes).expect("parse")
+    }
+
+    #[tokio::test]
+    async fn novel_domain_escalates_to_narc_rule_engine_and_approves_npm() {
+        // npmjs.org is in Narc's compiled-in safe-domains list, so
+        // even though Wonk's policy doesn't allow it, the escalation
+        // to Narc's rule engine should approve.
+        let (narc_url, _handle) = spawn_narc_server().await;
+        let app = build_wonk_with_narc(&narc_url);
+        let resp = post_check(&app, "/check/network", r#"{"domain":"registry.npmjs.org","method":"GET"}"#).await;
+        assert!(resp.allowed, "registry.npmjs.org should be approved by Narc's rule engine: {}", resp.reason);
+        // Reason should mention Narc — confirms the escalation actually ran.
+        assert!(
+            resp.reason.to_lowercase().contains("narc"),
+            "reason should name Narc to confirm escalation path: {}",
+            resp.reason
+        );
+    }
+
+    #[tokio::test]
+    async fn novel_attacker_domain_escalates_and_fails_closed() {
+        // attacker.example.com has no rule-engine match. Without an
+        // LLM backend, BoardroomNarc escalates to human, which
+        // Wonk converts to fail-closed deny. The test pins that the
+        // user-facing answer is a deny PLUS the Narc rationale.
+        let (narc_url, _handle) = spawn_narc_server().await;
+        let app = build_wonk_with_narc(&narc_url);
+        let resp = post_check(&app, "/check/network", r#"{"domain":"attacker.example.com","method":"POST"}"#).await;
+        assert!(!resp.allowed, "novel hostile domain must NOT be auto-approved");
+        // Either rule-engine deny OR escalate-to-human fail-closed —
+        // both are correct behavior; check the reason mentions Narc.
+        assert!(
+            resp.reason.to_lowercase().contains("narc") || resp.reason.to_lowercase().contains("allowlist"),
+            "reason should name Narc or allowlist: {}",
+            resp.reason
+        );
+    }
+
+    #[tokio::test]
+    async fn narc_unreachable_fails_closed() {
+        // Wonk's NarcClient is pointed at a non-listening address.
+        // Net error → NarcClient returns EscalateToHuman → Wonk fails
+        // closed. The whole defense-in-depth: even if Narc is down,
+        // we don't accidentally allow.
+        let app = build_wonk_with_narc("http://127.0.0.1:1"); // port 1 should be unbound
+        let resp = post_check(&app, "/check/network", r#"{"domain":"some.example.com","method":"GET"}"#).await;
+        assert!(!resp.allowed, "Narc-down must fail closed");
+    }
+
+    #[tokio::test]
+    async fn narc_decision_cached_in_wonk_runtime_allowlist() {
+        // First request to an npmjs.org subdomain escalates and gets
+        // approved. Second request to the same domain should hit
+        // Wonk's runtime cache (no escalation needed). We don't
+        // directly test the cache miss/hit count (Wonk doesn't
+        // surface it), but BOTH requests must allow.
+        let (narc_url, _handle) = spawn_narc_server().await;
+        let app = build_wonk_with_narc(&narc_url);
+        let resp1 = post_check(&app, "/check/network", r#"{"domain":"registry.npmjs.org","method":"GET"}"#).await;
+        let resp2 = post_check(&app, "/check/network", r#"{"domain":"registry.npmjs.org","method":"GET"}"#).await;
+        assert!(resp1.allowed, "first npmjs request: {}", resp1.reason);
+        assert!(resp2.allowed, "second npmjs request (should be cached): {}", resp2.reason);
+    }
+}
