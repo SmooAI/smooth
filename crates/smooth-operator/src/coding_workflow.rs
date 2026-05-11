@@ -163,6 +163,32 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
         // message produced by `bash` / `test_run`.
         let evidence = verify_with_evidence(&conversation);
 
+        // Pearl th-bf62c0 / th-bench-loop iter 9: if the conversation
+        // contains a compile-error tool output AND we still have
+        // iterations to spend, force one more turn with the compile-fix
+        // preamble REGARDLESS of the evidence verdict. The
+        // `detect_compile_error` short-circuit in `build_user_prompt`
+        // only fires when the workflow loops back; with `EvidencedPass`
+        // or unhandled `NoEvidence` paths the loop can exit on iter 1
+        // even though the agent shipped uncompilable code. Catch that
+        // here before any break.
+        if iteration < iter_cap {
+            if let Some(_err) = detect_compile_error(&transcript) {
+                tracing::info!(iteration, "coding workflow: compile error in transcript — forcing one more iteration");
+                last_verify_output = Some(transcript.clone());
+                continue;
+            }
+            // Also scan the actual tool-result messages for compile
+            // errors. The transcript above is just the final assistant
+            // prose; the cargo/go/javac output lives in the tool-result
+            // messages and is what we actually want to feed back.
+            if let Some(err_chunk) = first_compile_error_in_tools(&conversation) {
+                tracing::info!(iteration, "coding workflow: compile error in tool output — forcing one more iteration");
+                last_verify_output = Some(err_chunk);
+                continue;
+            }
+        }
+
         match evidence {
             VerifyEvidence::EvidencedPass => {
                 succeeded = true;
@@ -725,6 +751,28 @@ fn nonzero_failure_count(upper: &str) -> bool {
 /// Returns `None` when we should treat the failure as a regular
 /// red-test run. Used by `build_user_prompt` to switch retry
 /// tone from "fix the failures" to "fix the syntax".
+/// Scan tool-result messages in the conversation for compile-error
+/// output. Returns the first matching tool-result chunk so the
+/// workflow can feed it directly into the next iteration's prompt
+/// preamble. Pearl th-bf62c0 / th-bench-loop iter 9.
+fn first_compile_error_in_tools(conv: &crate::conversation::Conversation) -> Option<String> {
+    for msg in &conv.messages {
+        if !matches!(msg.role, crate::conversation::Role::Tool) {
+            continue;
+        }
+        let name = msg.tool_name.as_deref().unwrap_or("");
+        if name != "bash" && name != "test_run" && name != "shell" {
+            continue;
+        }
+        if detect_compile_error(&msg.content).is_some() {
+            // Truncate at 3000 chars so the preamble stays manageable.
+            let snippet: String = msg.content.chars().take(3000).collect();
+            return Some(snippet);
+        }
+    }
+    None
+}
+
 fn detect_compile_error(transcript: &str) -> Option<String> {
     let upper = transcript.to_uppercase();
     let patterns = [
@@ -1131,6 +1179,42 @@ FooTest > testThree PASSED";
         // should not trigger.
         let out = "Looking at the codebase, I notice this section is skipped.";
         assert!(!looks_all_skipped(out), "must not trigger on prose-only 'skipped'");
+    }
+
+    #[test]
+    fn first_compile_error_in_tools_finds_rust_e0308() {
+        // Pearl th-bf62c0 / iter 9: rust/forth shipped with E0308
+        // type mismatch. The workflow should pick this up as the
+        // forcing context for the next iteration.
+        let mut conv = make_conv();
+        conv.push(crate::conversation::Message::user("implement it"));
+        conv.push(crate::conversation::Message::tool_result_named(
+            "call-1",
+            "bash",
+            "error[E0308]: mismatched types\n  --> src/lib.rs:70:50\n   |\n70 |     self.words.insert(word_name, definition_tokens);\n   |                              expected `Vec<String>`, found `Vec<&str>`\n\nerror: could not compile `forth` (lib) due to 1 previous error",
+        ));
+        conv.push(crate::conversation::Message::assistant("Done."));
+        let result = first_compile_error_in_tools(&conv);
+        assert!(result.is_some(), "must find compile error in tool output");
+        let chunk = result.unwrap();
+        assert!(chunk.contains("E0308"), "must include the error code");
+        assert!(chunk.contains("Vec<String>"), "must include the actual mismatch text");
+    }
+
+    #[test]
+    fn first_compile_error_in_tools_ignores_non_test_tools() {
+        // read_file / list_files / grep outputs shouldn't be scanned
+        // for compile errors even if they happen to contain pattern
+        // strings.
+        let mut conv = make_conv();
+        conv.push(crate::conversation::Message::user("implement"));
+        conv.push(crate::conversation::Message::tool_result_named(
+            "call-1",
+            "read_file",
+            "// This file documents how `error[E0308]` is handled by the codebase.",
+        ));
+        conv.push(crate::conversation::Message::assistant("Read."));
+        assert!(first_compile_error_in_tools(&conv).is_none(), "must not match in read_file output");
     }
 
     #[test]
