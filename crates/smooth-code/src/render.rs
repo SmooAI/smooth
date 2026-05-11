@@ -47,7 +47,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     render_status(frame, state, regions.status);
 
     if state.autocomplete.active && !state.autocomplete.results.is_empty() {
-        render_autocomplete_popup(frame, state, regions.input);
+        render_autocomplete_popup(frame, state, regions.input, area);
     }
 
     if state.model_picker.active {
@@ -56,20 +56,43 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 }
 
 /// Render the autocomplete popup directly above the input box.
-/// Shows up to 8 rows; stays narrow (40 cols) so it doesn't cover
+/// Shows up to 8 rows; stays narrow (48 cols) so it doesn't cover
 /// the chat content behind it.
-fn render_autocomplete_popup(frame: &mut Frame, state: &AppState, input_area: Rect) {
+///
+/// User crash 2026-05-10 (pearl th-tui-popup): in inline-viewport
+/// mode `input_area.y` is an absolute terminal coordinate (e.g. 43)
+/// matching `frame_area.y`. The popup was positioned at
+/// `input_area.y - popup_height` which puts it ABOVE the frame
+/// (y=34 when frame starts at y=43), and ratatui-core panicked:
+/// "index outside of buffer: area is Rect{y:43} but index is (0,34)".
+/// Fix: clamp the popup to the frame area, and shrink popup_height
+/// when there isn't enough vertical room above the input within the
+/// frame.
+fn render_autocomplete_popup(frame: &mut Frame, state: &AppState, input_area: Rect, frame_area: Rect) {
     use crate::autocomplete::CompletionKind;
 
-    let popup_height = (state.autocomplete.results.len() as u16).min(8) + 2; // +2 for borders
     let popup_width = 48u16.min(input_area.width);
-    if popup_height == 0 || popup_width == 0 || input_area.y < popup_height {
+    if popup_width == 0 {
+        return;
+    }
+
+    // Maximum height we'd want — 8 rows of results plus 2 for the
+    // border. Shrink to fit the vertical room available ABOVE the
+    // input within the frame.
+    let desired_height = (state.autocomplete.results.len() as u16).min(8) + 2;
+    let room_above = input_area.y.saturating_sub(frame_area.y);
+    let popup_height = desired_height.min(room_above);
+    if popup_height < 3 {
+        // Not enough vertical room to render at least one row plus
+        // the top + bottom borders. Skip silently — the user can
+        // still type; the popup just doesn't render this frame.
+        // Better than a panic.
         return;
     }
 
     let popup_rect = Rect {
         x: input_area.x,
-        y: input_area.y - popup_height,
+        y: input_area.y.saturating_sub(popup_height),
         width: popup_width,
         height: popup_height,
     };
