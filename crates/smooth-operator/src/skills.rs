@@ -62,6 +62,11 @@ pub enum SkillSource {
     ClaudeCode,
     /// `~/.opencode/skills/<name>/...` — opencode.
     OpenCode,
+    /// Embedded in the smooth binary. Shipped with every install
+    /// (currently: `create-skill`). User-authored skills with the
+    /// same name OVERRIDE the built-in (the built-in is the lowest
+    /// precedence).
+    Builtin,
 }
 
 impl SkillSource {
@@ -73,6 +78,7 @@ impl SkillSource {
             Self::UserSmooth => 1,
             Self::ClaudeCode => 2,
             Self::OpenCode => 3,
+            Self::Builtin => 4,
         }
     }
 }
@@ -244,8 +250,25 @@ pub fn discover_with_overrides(workspace_root: &Path) -> Vec<Skill> {
         collect_from(&home.join(".opencode/agents"), SkillSource::OpenCode, &mut skills);
     }
 
+    // Builtin skills ship with the binary. They land last so any
+    // user-authored skill at the same name overrides them.
+    skills.extend(builtin_skills());
+
     skills.sort_by_key(|s| s.source.precedence());
     skills
+}
+
+/// Skills shipped embedded in the smooth binary. Currently just
+/// `create-skill` — the meta-skill that helps the user author new
+/// skills. Pearl th-e0f812.
+fn builtin_skills() -> Vec<Skill> {
+    const CREATE_SKILL_BODY: &str = include_str!("../builtin-skills/create-skill/SKILL.md");
+    let mut out = Vec::new();
+    let virtual_path = PathBuf::from("<builtin>/create-skill/SKILL.md");
+    if let Ok(Some(skill)) = parse_skill_string(CREATE_SKILL_BODY, &virtual_path, SkillSource::Builtin) {
+        out.push(skill);
+    }
+    out
 }
 
 /// Scan a single skills root directory and append every valid
@@ -453,5 +476,19 @@ body"#;
         assert!(SkillSource::Project.precedence() < SkillSource::UserSmooth.precedence());
         assert!(SkillSource::UserSmooth.precedence() < SkillSource::ClaudeCode.precedence());
         assert!(SkillSource::ClaudeCode.precedence() < SkillSource::OpenCode.precedence());
+        assert!(SkillSource::OpenCode.precedence() < SkillSource::Builtin.precedence());
+    }
+
+    #[test]
+    fn builtin_create_skill_loads() {
+        // Smooth ships with `create-skill` embedded — every install
+        // gets the meta-skill that bootstraps a user's skill library.
+        let built = builtin_skills();
+        assert!(!built.is_empty(), "must ship at least one built-in skill");
+        let create_skill = built.iter().find(|s| s.name == "create-skill").expect("create-skill must be built-in");
+        assert!(create_skill.description.to_lowercase().contains("skill"));
+        assert!(!create_skill.triggers.is_empty(), "create-skill needs triggers");
+        assert_eq!(create_skill.source, SkillSource::Builtin);
+        assert!(create_skill.body.contains("Process"), "body should be the markdown recipe");
     }
 }

@@ -2200,13 +2200,41 @@ async fn cmd_code(
         // implementation, and burns a minute hallucinating. The
         // TUI's `run_agent_streaming` already does this; we just
         // missed wiring it on the headless path.
-        let dispatch_agent = if agent.is_some() {
-            agent_name
+        // Pearl th-e0f812: when no agent is pinned, also let chief
+        // pick a skill. If chief picks one, prepend its body to the
+        // message so the agent follows the recipe verbatim. The
+        // skill discovery happens BEFORE we hand off to the runner,
+        // so this works for the headless path too.
+        let (dispatch_agent, msg_with_skill) = if agent.is_some() {
+            (agent_name, msg)
         } else {
-            let intent = smooth_code::intent::classify(&msg).await;
-            intent.role().to_string()
+            let (intent, skill_name) = smooth_code::intent::classify_with_skill(&msg).await;
+            let role = intent.role().to_string();
+            let composed = if let Some(name) = skill_name {
+                let workspace = working_dir.clone();
+                let skills = smooth_operator::skills::discover(&workspace);
+                if let Some(skill) = skills.iter().find(|s| s.name == name) {
+                    format!(
+                        "## Skill: {} (from {})\n\n{}\n\n---\n\n## User request\n\n{}",
+                        skill.name,
+                        match skill.source {
+                            smooth_operator::skills::SkillSource::Project => "project",
+                            smooth_operator::skills::SkillSource::UserSmooth => "user-smooth",
+                            smooth_operator::skills::SkillSource::ClaudeCode => "claude-code",
+                            smooth_operator::skills::SkillSource::OpenCode => "opencode",
+                        },
+                        skill.body,
+                        msg,
+                    )
+                } else {
+                    msg
+                }
+            } else {
+                msg
+            };
+            (role, composed)
         };
-        return smooth_code::headless::run_headless(working_dir, msg, model, budget, json, Some(dispatch_agent)).await;
+        return smooth_code::headless::run_headless(working_dir, msg_with_skill, model, budget, json, Some(dispatch_agent)).await;
     }
 
     // Quick startup checks (non-blocking warnings)

@@ -128,8 +128,18 @@ pub async fn classify(message: &str) -> Intent {
 /// unavailable or its output can't be parsed — caller falls through
 /// to the heuristic ladder.
 async fn classify_via_chief(message: &str) -> Option<Intent> {
+    classify_via_chief_full(message).await.map(|(intent, _)| intent)
+}
+
+/// Like [`classify_via_chief`] but also returns the optional skill
+/// name the chief picked. Pearl th-e0f812: chief sees available
+/// skills in its system prompt and may emit a `SKILL: <name>` line.
+/// Callers who want the skill name use this; callers who only need
+/// the role use [`classify_via_chief`].
+async fn classify_via_chief_full(message: &str) -> Option<(Intent, Option<String>)> {
     use smooth_operator::cast::Cast;
     use smooth_operator::providers::ProviderRegistry;
+    use smooth_operator::skills;
 
     let providers_path = dirs_next::home_dir()?.join(".smooth/providers.json");
     let registry = ProviderRegistry::load_from_file(&providers_path).ok()?;
@@ -138,11 +148,73 @@ async fn classify_via_chief(message: &str) -> Option<Intent> {
     let config = registry.llm_config_for(role.slot).ok()?;
     let llm = smooth_operator::llm::LlmClient::new(config);
 
-    let system = smooth_operator::conversation::Message::system(&role.prompt);
+    // Compose the system prompt with the static chief.txt body plus
+    // a dynamic "Available skills" appendix. Chief can read the list
+    // and pick zero-or-one skill that matches the user's message.
+    let workspace = std::env::current_dir().ok()?;
+    let available_skills = skills::discover(&workspace);
+    let system_prompt = compose_chief_prompt_with_skills(&role.prompt, &available_skills);
+
+    let system = smooth_operator::conversation::Message::system(&system_prompt);
     let user = smooth_operator::conversation::Message::user(message);
     let resp = llm.chat(&[&system, &user], &[]).await.ok()?;
 
-    parse_chief_response(&resp.content)
+    let intent = parse_chief_response(&resp.content)?;
+    let skill = parse_chief_skill_line(&resp.content);
+    Some((intent, skill))
+}
+
+/// Build the chief's full system prompt: static body + a list of
+/// available skills with their descriptions. When `skills` is empty
+/// the appendix is omitted entirely.
+fn compose_chief_prompt_with_skills(base: &str, skills: &[smooth_operator::skills::Skill]) -> String {
+    if skills.is_empty() {
+        return base.to_string();
+    }
+    let mut s = base.to_string();
+    s.push_str("\n\n## Available skills\n\n");
+    s.push_str(
+        "If one of these skills matches the user's intent, ALSO emit a `SKILL: <name>` line after `DISPATCH:`. \
+        Skills are recipes the chosen role will follow verbatim — pick at most one. If nothing fits, omit the SKILL line.\n\n",
+    );
+    for skill in skills {
+        s.push_str(&format!("- `{}` — {}", skill.name, skill.description));
+        if !skill.triggers.is_empty() {
+            s.push_str(&format!(" (triggers: {})", skill.triggers.join(", ")));
+        }
+        s.push('\n');
+    }
+    s
+}
+
+/// Parse an optional `SKILL: <name>` line out of the chief response.
+fn parse_chief_skill_line(content: &str) -> Option<String> {
+    let upper = content.to_ascii_uppercase();
+    let idx = upper.find("SKILL:")?;
+    // Extract the original-cased token that follows. Skip "SKILL:" len.
+    let tail = &content[idx + "SKILL:".len()..];
+    let token = tail
+        .split_whitespace()
+        .next()?
+        .trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
+    if token.is_empty() || token.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    Some(token.to_string())
+}
+
+/// Public counterpart to [`classify`] that also returns the chief's
+/// recommended skill. Used by the headless and TUI dispatch paths
+/// (pearl th-e0f812).
+pub async fn classify_with_skill(message: &str) -> (Intent, Option<String>) {
+    if message.trim().is_empty() {
+        return (Intent::Work, None);
+    }
+    if let Some(pair) = classify_via_chief_full(message).await {
+        return pair;
+    }
+    // Fallback: just the role, no skill.
+    (classify(message).await, None)
 }
 
 /// Parse a chief response into an [`Intent`]. The prompt asks for
@@ -581,6 +653,56 @@ mod tests {
         // bias as classify_heuristic so the user never silently loses
         // the ability to act.
         assert_eq!(parse_llm_response("WORK or QUESTION"), Some(Intent::Work));
+    }
+
+    #[test]
+    fn chief_parses_skill_line() {
+        // Pearl th-e0f812: chief may emit `SKILL: <name>` to indicate
+        // a recipe match. Parser extracts the name; case-insensitive
+        // on the SKILL: prefix; "none"/missing means no skill picked.
+        assert_eq!(parse_chief_skill_line("DISPATCH: fixer\nSKILL: add-show"), Some("add-show".into()));
+        assert_eq!(parse_chief_skill_line("DISPATCH: fixer\nskill: add-show"), Some("add-show".into()));
+        assert_eq!(parse_chief_skill_line("DISPATCH: oracle\nSKILL: none"), None);
+        assert_eq!(parse_chief_skill_line("DISPATCH: fixer"), None);
+        assert_eq!(parse_chief_skill_line(""), None);
+    }
+
+    #[test]
+    fn chief_skill_line_handles_punctuation() {
+        // Models sometimes wrap with backticks or trailing dots.
+        assert_eq!(parse_chief_skill_line("SKILL: `add-show`"), Some("add-show".into()));
+        assert_eq!(parse_chief_skill_line("SKILL: add-show."), Some("add-show".into()));
+    }
+
+    #[test]
+    fn compose_prompt_appends_skills_section() {
+        use smooth_operator::skills::{Skill, SkillScope, SkillSource};
+        use std::path::PathBuf;
+        let base = "BASE PROMPT";
+        let skills = vec![Skill {
+            name: "add-show".into(),
+            description: "Add a movie to the watchlist".into(),
+            triggers: vec!["add show".into(), "watchlist".into()],
+            scope: SkillScope::Host,
+            allowed_hosts: vec!["smoo-hub".into()],
+            allowed_tools: vec![],
+            body: "...".into(),
+            source: SkillSource::ClaudeCode,
+            path: PathBuf::from("/tmp/x"),
+        }];
+        let composed = compose_chief_prompt_with_skills(base, &skills);
+        assert!(composed.starts_with("BASE PROMPT"));
+        assert!(composed.contains("Available skills"));
+        assert!(composed.contains("add-show"));
+        assert!(composed.contains("Add a movie to the watchlist"));
+        assert!(composed.contains("triggers: add show, watchlist"));
+    }
+
+    #[test]
+    fn compose_prompt_omits_appendix_when_no_skills() {
+        let base = "BASE PROMPT";
+        let composed = compose_chief_prompt_with_skills(base, &[]);
+        assert_eq!(composed, "BASE PROMPT");
     }
 
     #[test]
