@@ -687,20 +687,42 @@ fn handle_input_mode(
                     let pinned_agent = state.agent_name.clone();
                     let state_for_routing = Arc::clone(&state_arc);
                     tokio::spawn(async move {
-                        let agent = if pinned {
-                            pinned_agent
+                        // Pearl th-e0f812: TUI parity with headless —
+                        // chief picks a (role, optional skill). When a
+                        // skill is picked, its body is prepended to the
+                        // user message so the runner sees the recipe.
+                        let (agent, message_with_skill) = if pinned {
+                            (pinned_agent, message.clone())
                         } else {
-                            let intent = crate::intent::classify(&message).await;
+                            let (intent, skill_name) = crate::intent::classify_with_skill(&message).await;
                             let role = intent.role().to_string();
-                            // Reflect the routed role on the status
-                            // bar so the user can see what the runner
-                            // will use.
                             if let Ok(mut s) = state_for_routing.lock() {
                                 s.agent_name = role.clone();
                             }
-                            role
+                            let composed = if let Some(name) = skill_name {
+                                let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                                let skills = smooth_operator::skills::discover(&workspace);
+                                if let Some(skill) = skills.iter().find(|s| s.name == name) {
+                                    let source_label = match skill.source {
+                                        smooth_operator::skills::SkillSource::Project => "project",
+                                        smooth_operator::skills::SkillSource::UserSmooth => "user-smooth",
+                                        smooth_operator::skills::SkillSource::ClaudeCode => "claude-code",
+                                        smooth_operator::skills::SkillSource::OpenCode => "opencode",
+                                        smooth_operator::skills::SkillSource::Builtin => "builtin",
+                                    };
+                                    format!(
+                                        "## Skill: {} (from {})\n\n{}\n\n---\n\n## User request\n\n{}",
+                                        skill.name, source_label, skill.body, message
+                                    )
+                                } else {
+                                    message.clone()
+                                }
+                            } else {
+                                message.clone()
+                            };
+                            (role, composed)
                         };
-                        if let Err(e) = run_agent_streaming(&message, tx.clone(), Some(agent), Arc::clone(&state_for_routing)).await {
+                        if let Err(e) = run_agent_streaming(&message_with_skill, tx.clone(), Some(agent), Arc::clone(&state_for_routing)).await {
                             let _ = tx.send(AgentEvent::Error { message: e.to_string() });
                         }
                     });
