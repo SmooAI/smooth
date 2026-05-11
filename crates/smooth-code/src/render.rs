@@ -72,27 +72,47 @@ fn render_autocomplete_popup(frame: &mut Frame, state: &AppState, input_area: Re
     use crate::autocomplete::CompletionKind;
 
     let popup_width = 48u16.min(input_area.width);
-    if popup_width == 0 {
+    if popup_width == 0 || frame_area.height == 0 {
         return;
     }
 
     // Maximum height we'd want — 8 rows of results plus 2 for the
-    // border. Shrink to fit the vertical room available ABOVE the
-    // input within the frame.
+    // border.
     let desired_height = (state.autocomplete.results.len() as u16).min(8) + 2;
+
+    // Try above the input first. If there's not enough room, fall
+    // through to overlapping the preview at the top of the frame.
+    // Either way the popup is clamped to fit within frame_area so
+    // we don't panic on out-of-buffer writes.
     let room_above = input_area.y.saturating_sub(frame_area.y);
-    let popup_height = desired_height.min(room_above);
+    let (popup_y, popup_height) = if room_above >= 3 {
+        let h = desired_height.min(room_above);
+        (input_area.y.saturating_sub(h), h)
+    } else {
+        // Stick the popup at the top of the frame and let it overlay
+        // the preview area. We Clear-blank the rect below anyway, so
+        // the preview behind it gets blanked while the popup is up —
+        // user is actively interacting with the popup, not reading
+        // the streaming preview.
+        let max_h = input_area.y.saturating_sub(frame_area.y).saturating_add(1).max(3);
+        let h = desired_height.min(max_h).min(frame_area.height);
+        (frame_area.y, h)
+    };
+
+    // Defensive clamp: never exceed the frame's bottom edge either —
+    // a tall popup with a small frame would otherwise extend past.
+    let frame_bottom = frame_area.y.saturating_add(frame_area.height);
+    let popup_height = popup_height.min(frame_bottom.saturating_sub(popup_y));
     if popup_height < 3 {
-        // Not enough vertical room to render at least one row plus
-        // the top + bottom borders. Skip silently — the user can
-        // still type; the popup just doesn't render this frame.
-        // Better than a panic.
+        // 3 = 1 content row + 2 border rows. Anything less and the
+        // popup would be empty. Skip silently — typing still works,
+        // the popup just isn't visible this frame.
         return;
     }
 
     let popup_rect = Rect {
         x: input_area.x,
-        y: input_area.y.saturating_sub(popup_height),
+        y: popup_y,
         width: popup_width,
         height: popup_height,
     };
