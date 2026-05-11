@@ -55,6 +55,15 @@ pub async fn classify(message: &str) -> Intent {
         return Intent::Work;
     }
     if looks_like_shell_op(message) {
+        // Pearl th-bench-loop iter 23 / user observation 2026-05-10:
+        // "what's the git status" routed to oracle (Question) because
+        // it contains "git", but oracle can't run bash — it ends up
+        // grepping .git/HEAD and inferring badly. Factual shell
+        // questions ("what's X", "show me Y", "list the changes")
+        // need a shell. Route those to Work instead.
+        if looks_like_factual_shell_query(message) {
+            return Intent::Work;
+        }
         return Intent::Question;
     }
     if looks_like_vague_improve(message) {
@@ -205,6 +214,87 @@ pub fn looks_like_shell_op(message: &str) -> bool {
 /// from oracle's read-only response over fixer's hallucinated
 /// "I committed your code!"
 const SHELL_OP_VERBS: &[&str] = &["git", "gh", "commit", "push", "rebase", "amend", "stash", "cherry-pick", "checkout"];
+
+/// True when a shell-op-flavored message reads as a FACTUAL request
+/// ("what's the git status", "show me the diff", "list staged
+/// files") rather than a policy/advice request ("should I rebase",
+/// "can we commit"). Factual asks need real shell execution and
+/// belong in fixer's tool registry, not oracle's read-only loop.
+///
+/// Pearl th-bench-loop iter 23 / user transcript 2026-05-10:
+/// oracle handling "what's the git status" couldn't run `git
+/// status` (bash blocked by PermissionHook on oracle), so it
+/// reverse-engineered the answer from .git/HEAD + .git/objects
+/// reads and got it mostly wrong. Routing to fixer gives the
+/// agent real shell access and a one-line authoritative answer.
+///
+/// Public for tests only.
+#[must_use]
+pub fn looks_like_factual_shell_query(message: &str) -> bool {
+    let lower = message.trim().to_ascii_lowercase();
+    // Question-shaped openers that imply "go look and tell me".
+    const FACTUAL_OPENERS: &[&str] = &[
+        "what's",
+        "whats",
+        "what is",
+        "what are",
+        "what's the",
+        "show me",
+        "show the",
+        "show all",
+        "list the",
+        "list all",
+        "list every",
+        "tell me what",
+        "tell me which",
+        "tell me the",
+        "how many",
+        "which files",
+        "which file",
+        "which branch",
+        "are there",
+        "is there",
+        "do we have",
+        "any uncommitted",
+        "any unstaged",
+        "any staged",
+        "any unpushed",
+    ];
+    // Counter-examples FIRST: "should we…" / "is it safe to…" /
+    // "what's the best way…" are policy questions and stay with
+    // oracle, even when they pattern-match a factual opener like
+    // "what's…". Check policy first to short-circuit before the
+    // factual-opener match.
+    const POLICY_MARKERS: &[&str] = &[
+        "should i",
+        "should we",
+        "should you",
+        "is it safe",
+        "is it ok",
+        "would it be",
+        "can i safely",
+        "can we safely",
+        "would you recommend",
+        "what's the best way",
+        "best way to",
+    ];
+    for marker in POLICY_MARKERS {
+        if lower.contains(marker) {
+            return false;
+        }
+    }
+    for opener in FACTUAL_OPENERS {
+        if lower.starts_with(opener) {
+            return true;
+        }
+    }
+    // If the message contains "can you" + a shell verb, treat as
+    // factual ("can you run git status", "can you show me the diff").
+    if lower.starts_with("can you ") {
+        return true;
+    }
+    false
+}
 
 async fn classify_via_llm(message: &str) -> Option<Intent> {
     use smooth_operator::cast::Cast;
@@ -394,6 +484,51 @@ mod tests {
         // bias as classify_heuristic so the user never silently loses
         // the ability to act.
         assert_eq!(parse_llm_response("WORK or QUESTION"), Some(Intent::Work));
+    }
+
+    #[test]
+    fn factual_shell_queries_recognized() {
+        // Pearl th-bench-loop iter 23: these all need real shell.
+        for q in &[
+            "what's the git status",
+            "what is the current branch",
+            "show me the diff",
+            "list the staged files",
+            "tell me what files changed",
+            "any uncommitted changes?",
+            "is there anything unpushed",
+            "how many commits ahead of main are we",
+            "can you run git status",
+            "which files are modified",
+        ] {
+            assert!(looks_like_factual_shell_query(q), "must classify as factual shell query: {q:?}");
+        }
+    }
+
+    #[test]
+    fn policy_shell_questions_stay_oracle() {
+        // Policy-shaped questions about shell ops should NOT become
+        // factual queries — they really do belong in oracle.
+        for q in &[
+            "should I rebase or merge",
+            "is it safe to force-push",
+            "would you recommend rebasing this branch",
+            "what's the best way to handle this merge conflict",
+            "can we safely commit secrets here",
+        ] {
+            assert!(!looks_like_factual_shell_query(q), "policy question must NOT be a factual shell query: {q:?}");
+        }
+    }
+
+    #[test]
+    fn factual_shell_takes_precedence_over_shell_op() {
+        // The shell-op verb triggers the original Question route,
+        // BUT the factual-shell guard should flip it back to Work.
+        // We can verify the predicate composition without async:
+        assert!(looks_like_shell_op("what's the git status"));
+        assert!(looks_like_factual_shell_query("what's the git status"));
+        assert!(looks_like_shell_op("should I commit this"));
+        assert!(!looks_like_factual_shell_query("should I commit this"));
     }
 
     #[test]
