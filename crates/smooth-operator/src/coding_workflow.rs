@@ -564,10 +564,28 @@ pub fn looks_all_skipped(transcript: &str) -> bool {
     if skipped_lines >= 3 && pass_lines == 0 && fail_lines == 0 {
         return true;
     }
+    // Dominant-skip: per-line gradle/jest output where SKIPPED
+    // outnumbers PASSED 3-to-1 and no failures fired. Pearl
+    // th-bench-loop iter 15: js/forth produced "48 skipped, 1
+    // passed" — the pure all-skipped check missed it because
+    // there was a single PASSED. Same root cause as iter 5
+    // js/binary (9 skipped, 1 passed): exercism flips one
+    // baseline test as a sentinel, leaves the rest skipped.
+    if skipped_lines >= 3 * (pass_lines + 1) && fail_lines == 0 && pass_lines < skipped_lines {
+        return true;
+    }
 
     // Jest / pytest shape: explicit "N skipped, 0 passed".
     if (upper.contains("0 PASSED") || upper.contains(" 0 PASSED,") || upper.contains(", 0 PASSED")) && upper.contains("SKIPPED") {
         return true;
+    }
+    // Jest summary line: "N skipped, K passed, M total" where
+    // N >> K. Catches the summary-line variant we see in iter
+    // 15 ("Tests: 48 skipped, 1 passed, 49 total").
+    if let Some((skip, pass)) = parse_jest_skip_pass(&upper) {
+        if skip >= 3 * (pass + 1) && pass < skip {
+            return true;
+        }
     }
 
     // Go: "no tests to run" + ok status.
@@ -583,6 +601,16 @@ pub fn looks_all_skipped(transcript: &str) -> bool {
     }
 
     false
+}
+
+/// Parse a jest-style summary line `Tests: 48 skipped, 1 passed,
+/// 49 total` into `(skipped, passed)`. Returns `None` when neither
+/// count is present.
+fn parse_jest_skip_pass(upper: &str) -> Option<(u32, u32)> {
+    let line = upper.lines().find(|l| l.contains("TESTS:") && l.contains("SKIPPED"))?;
+    let skip = scan_count(&line.to_lowercase(), "skipped")?;
+    let pass = scan_count(&line.to_lowercase(), "passed").unwrap_or(0);
+    Some((skip, pass))
 }
 
 /// True when `needle` is preceded by a digit (possibly with
@@ -1026,13 +1054,36 @@ mod tests {
     }
 
     #[test]
-    fn looks_all_skipped_jest_shape() {
-        // Pearl th-bench-loop iter 13: jest output when all tests
-        // are xtest. We saw this on iter 5 javascript/binary.
+    fn looks_all_skipped_jest_dominant_split_triggers() {
+        // Pearl th-bench-loop iter 13 + iter 15: jest output with
+        // 9 skipped + 1 passed IS the same anti-pattern (exercism
+        // sentinel test passes, rest skipped). The dominant-skip
+        // refinement (iter 15) correctly fires on this shape.
         let out = "Test Suites: 1 passed, 1 total\nTests: 9 skipped, 1 passed, 10 total\nSnapshots: 0 total";
-        // Has 1 passed too so it's not ALL-skipped. Detector must be
-        // careful about partial-skip cases.
-        assert!(!looks_all_skipped(out), "must not trigger on 9 skipped + 1 passed");
+        assert!(looks_all_skipped(out), "9 skipped + 1 passed = dominant-skip, must trigger");
+    }
+
+    #[test]
+    fn looks_all_skipped_jest_dominant_skip() {
+        // Pearl th-bench-loop iter 15: js/forth produced 48
+        // skipped, 1 passed. Dominant-skip should fire.
+        let out = "Tests:       48 skipped, 1 passed, 49 total";
+        assert!(looks_all_skipped(out), "must trigger on dominant-skip (48:1)");
+    }
+
+    #[test]
+    fn looks_all_skipped_iter5_pattern() {
+        // Iter 5 javascript/binary: 9 skipped, 1 passed.
+        let out = "Tests:       9 skipped, 1 passed, 10 total";
+        assert!(looks_all_skipped(out), "iter 5 pattern must trigger (9:1)");
+    }
+
+    #[test]
+    fn looks_all_skipped_balanced_skip_does_not_trigger() {
+        // 3 skipped, 2 passed — not dominant. The student is
+        // mid-implementation; not an indictment.
+        let out = "Tests:       3 skipped, 2 passed, 5 total";
+        assert!(!looks_all_skipped(out), "balanced split must not trigger");
     }
 
     #[test]
