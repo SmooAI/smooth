@@ -178,6 +178,7 @@ const TAGGER_PROMPT: &str = include_str!("prompts/tagger.txt");
 const PRESSER_PROMPT: &str = include_str!("prompts/presser.txt");
 const RECAPPER_PROMPT: &str = include_str!("prompts/recapper.txt");
 const INTENT_CLASSIFIER_PROMPT: &str = include_str!("prompts/intent_classifier.txt");
+const CHIEF_PROMPT: &str = include_str!("prompts/chief.txt");
 pub const FIXER_PROMPT: &str = include_str!("prompts/fixer.txt");
 const MAPPER_PROMPT: &str = include_str!("prompts/mapper.txt");
 const ORACLE_PROMPT: &str = include_str!("prompts/oracle.txt");
@@ -281,6 +282,24 @@ fn builtin_roles() -> Vec<OperatorRole> {
             slot: Activity::Fast,
             model_override: None,
             prompt: INTENT_CLASSIFIER_PROMPT.trim().to_string(),
+            permissions: Clearance::deny_all(),
+            steps: None,
+            hidden: true,
+        },
+        // `chief` is the Chief of Staff router (pearl th-c677f7).
+        // Replaces the heuristic-ladder in smooth-code/src/intent.rs
+        // for the routing decision: chief reads the user message and
+        // emits `DISPATCH: <role>` naming one of the lead/sidekick
+        // roles. Routes through the Fast slot so adding it costs
+        // milliseconds, not seconds. Falls back to the heuristic
+        // ladder when chief is unavailable (no providers, gateway
+        // down) so dispatch never hangs.
+        OperatorRole {
+            name: "chief".into(),
+            kind: RoleKind::Shadow,
+            slot: Activity::Fast,
+            model_override: None,
+            prompt: CHIEF_PROMPT.trim().to_string(),
             permissions: Clearance::deny_all(),
             steps: None,
             hidden: true,

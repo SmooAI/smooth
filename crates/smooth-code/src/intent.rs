@@ -7,32 +7,65 @@
 //! `DEV_MODE_GUIDE.md` files and inventing a "1 passed, 0 failed" line
 //! to satisfy the workflow's report rule.
 //!
-//! [`classify`] sends the user message to the `intent_classifier`
-//! shadow role (read-only, Fast slot — Haiku-class) and parses its
-//! response as `WORK` or `QUESTION`. If the LLM is unavailable or its
-//! response can't be parsed, [`classify_heuristic`] runs as a fallback
-//! so dispatch never hangs on a flaky gateway.
+//! Routing strategy (pearl th-c677f7 — Chief of Staff):
+//!
+//! 1. **Primary**: [`classify_via_chief`] calls the `chief` shadow role
+//!    (Fast slot — Haiku-class) with the user message. Chief picks one
+//!    of the lead/sidekick roles and emits `DISPATCH: <role>`. The full
+//!    cast (fixer, oracle, scout, mapper, recapper) is available, not
+//!    just Work/Question.
+//!
+//! 2. **Fallback**: when the chief LLM is unavailable (no providers,
+//!    gateway down, unparseable response), the legacy heuristic ladder
+//!    runs ([`looks_like_shell_op`] + [`looks_like_vague_improve`] +
+//!    [`looks_like_factual_shell_query`] + [`classify_via_llm`] against
+//!    the older `intent_classifier` shadow role). Dispatch never hangs.
 //!
 //! The classifier only runs when [`crate::state::AppState::agent_pinned`]
 //! is `false`. `/ask`, `/agent <name>`, `--agent <name>`, and resuming
 //! a saved session all pin the role and disable auto-routing.
 
-/// What the user appears to want from this turn.
+/// What role should handle this turn. Extended from the original
+/// Work/Question binary to cover every lead and sidekick the chief
+/// can dispatch to (pearl th-c677f7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Intent {
-    /// Read-only — wants information, not changes. Routes to `oracle`.
+    /// Read-only question. Routes to `oracle`.
     Question,
     /// Wants the agent to do work (write/edit code, run tests, etc.).
     /// Routes to `fixer` + coding workflow.
     Work,
+    /// Exploratory investigation — routes to the `scout` sidekick.
+    Scout,
+    /// Symbol-level navigation — routes to the `mapper` sidekick.
+    Mapper,
+    /// Recap / status summary — routes to the `recapper` shadow.
+    Recap,
 }
 
 impl Intent {
-    /// Return the lead role this intent should dispatch under.
+    /// Return the role this intent should dispatch under.
     pub fn role(self) -> &'static str {
         match self {
             Self::Question => "oracle",
             Self::Work => "fixer",
+            Self::Scout => "scout",
+            Self::Mapper => "mapper",
+            Self::Recap => "recapper",
+        }
+    }
+
+    /// Parse a role name (as emitted by the chief LLM) into an
+    /// `Intent`. Returns `None` for unknown role names.
+    #[must_use]
+    pub fn from_role_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "fixer" | "fix" | "coder" | "work" => Some(Self::Work),
+            "oracle" | "question" | "qa" | "ask" => Some(Self::Question),
+            "scout" => Some(Self::Scout),
+            "mapper" | "map" => Some(Self::Mapper),
+            "recapper" | "recap" | "summary" | "summarizer" => Some(Self::Recap),
+            _ => None,
         }
     }
 }
@@ -54,13 +87,24 @@ pub async fn classify(message: &str) -> Intent {
     if message.trim().is_empty() {
         return Intent::Work;
     }
+
+    // Primary path: ask the Chief of Staff (pearl th-c677f7).
+    // Chief sees the full message and picks one of the lead/sidekick
+    // roles — single LLM call replaces the heuristic ladder.
+    if let Some(intent) = classify_via_chief(message).await {
+        return intent;
+    }
+
+    // Fallback ladder kicks in when chief is unavailable (no providers,
+    // gateway down, unparseable response). The heuristics catch the
+    // shapes we've observed cause concrete failures in the field:
+
     if looks_like_shell_op(message) {
-        // Pearl th-bench-loop iter 23 / user observation 2026-05-10:
-        // "what's the git status" routed to oracle (Question) because
-        // it contains "git", but oracle can't run bash — it ends up
-        // grepping .git/HEAD and inferring badly. Factual shell
-        // questions ("what's X", "show me Y", "list the changes")
-        // need a shell. Route those to Work instead.
+        // Pearl th-bench-loop iter 23: "what's the git status" routed
+        // to oracle (Question) because it contains "git", but oracle
+        // can't run bash — it ends up grepping .git/HEAD and inferring
+        // badly. Factual shell questions need a shell. Route those to
+        // Work instead.
         if looks_like_factual_shell_query(message) {
             return Intent::Work;
         }
@@ -70,14 +114,67 @@ pub async fn classify(message: &str) -> Intent {
         // Pearl iter-8: "make X better" / "clean up Y" / "polish Z"
         // sent to fixer triggers wide rewrites the user didn't ask
         // for. Route to oracle instead — it'll respond with a
-        // clarifying question ("what does 'better' mean here?")
-        // which is strictly better than fixer guessing wide.
+        // clarifying question.
         return Intent::Question;
     }
     match classify_via_llm(message).await {
         Some(intent) => intent,
         None => classify_heuristic(message),
     }
+}
+
+/// Call the `chief` shadow role and parse its `DISPATCH: <role>`
+/// response into an [`Intent`]. Returns `None` when the LLM is
+/// unavailable or its output can't be parsed — caller falls through
+/// to the heuristic ladder.
+async fn classify_via_chief(message: &str) -> Option<Intent> {
+    use smooth_operator::cast::Cast;
+    use smooth_operator::providers::ProviderRegistry;
+
+    let providers_path = dirs_next::home_dir()?.join(".smooth/providers.json");
+    let registry = ProviderRegistry::load_from_file(&providers_path).ok()?;
+    let cast = Cast::builtin();
+    let role = cast.get("chief")?;
+    let config = registry.llm_config_for(role.slot).ok()?;
+    let llm = smooth_operator::llm::LlmClient::new(config);
+
+    let system = smooth_operator::conversation::Message::system(&role.prompt);
+    let user = smooth_operator::conversation::Message::user(message);
+    let resp = llm.chat(&[&system, &user], &[]).await.ok()?;
+
+    parse_chief_response(&resp.content)
+}
+
+/// Parse a chief response into an [`Intent`]. The prompt asks for
+/// `DISPATCH: <role>`; we look for that exact shape but also fall
+/// back to scanning for a bare role name when the model misformats
+/// (some Haiku-class models omit the prefix).
+#[must_use]
+fn parse_chief_response(content: &str) -> Option<Intent> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Primary shape: "DISPATCH: <role>". Anchor on the colon so we
+    // pick up the token even when the model adds a leading word like
+    // "Final answer: DISPATCH: fixer" or trailing punctuation.
+    if let Some(after) = trimmed.to_ascii_uppercase().find("DISPATCH:") {
+        let tail = &trimmed[after + "DISPATCH:".len()..];
+        let role = tail.split_whitespace().next().unwrap_or("").trim_matches(|c: char| !c.is_alphanumeric());
+        if let Some(intent) = Intent::from_role_name(role) {
+            return Some(intent);
+        }
+    }
+    // Fallback: search the response for any of the role names in
+    // priority order — fixer wins ties (same conservative bias as
+    // the legacy classifier).
+    let upper = trimmed.to_ascii_uppercase();
+    for role in ["FIXER", "SCOUT", "MAPPER", "RECAPPER", "ORACLE"] {
+        if upper.contains(role) {
+            return Intent::from_role_name(role);
+        }
+    }
+    None
 }
 
 /// Heuristic for "this is a vague self-improvement ask, not a
@@ -484,6 +581,70 @@ mod tests {
         // bias as classify_heuristic so the user never silently loses
         // the ability to act.
         assert_eq!(parse_llm_response("WORK or QUESTION"), Some(Intent::Work));
+    }
+
+    #[test]
+    fn chief_parses_canonical_dispatch_line() {
+        // Pearl th-c677f7: the chief role emits "DISPATCH: <role>"
+        // verbatim per its prompt. The parser must handle the canonical
+        // shape across every routeable role.
+        for (resp, expected) in &[
+            ("DISPATCH: fixer", Intent::Work),
+            ("DISPATCH: oracle", Intent::Question),
+            ("DISPATCH: scout", Intent::Scout),
+            ("DISPATCH: mapper", Intent::Mapper),
+            ("DISPATCH: recapper", Intent::Recap),
+        ] {
+            assert_eq!(parse_chief_response(resp), Some(*expected), "canonical: {resp:?}");
+        }
+    }
+
+    #[test]
+    fn chief_parses_role_aliases() {
+        // Models sometimes shorten or paraphrase. The from_role_name
+        // alias table covers the ones we've observed.
+        assert_eq!(parse_chief_response("DISPATCH: fix"), Some(Intent::Work));
+        assert_eq!(parse_chief_response("DISPATCH: ask"), Some(Intent::Question));
+        assert_eq!(parse_chief_response("DISPATCH: recap"), Some(Intent::Recap));
+        assert_eq!(parse_chief_response("DISPATCH: map"), Some(Intent::Mapper));
+    }
+
+    #[test]
+    fn chief_handles_filler_around_dispatch() {
+        // Wrapper text, trailing punctuation, leading prose — the
+        // parser anchors on the literal `DISPATCH:` so it survives all
+        // of these.
+        assert_eq!(parse_chief_response("Final answer: DISPATCH: fixer."), Some(Intent::Work));
+        assert_eq!(parse_chief_response("  DISPATCH: oracle\n"), Some(Intent::Question));
+        assert_eq!(parse_chief_response("Routing decision...\nDISPATCH: scout"), Some(Intent::Scout));
+    }
+
+    #[test]
+    fn chief_falls_back_to_role_search_when_prefix_missing() {
+        // Some Haiku-class models drop the DISPATCH: prefix and emit
+        // just the role name. The fallback finds it.
+        assert_eq!(parse_chief_response("fixer"), Some(Intent::Work));
+        assert_eq!(parse_chief_response("This is an oracle question"), Some(Intent::Question));
+    }
+
+    #[test]
+    fn chief_unparseable_returns_none() {
+        // Whitespace, empty, prose without any role token → None so
+        // the caller falls through to the heuristic ladder.
+        assert_eq!(parse_chief_response(""), None);
+        assert_eq!(parse_chief_response("   "), None);
+        assert_eq!(parse_chief_response("I'm not sure"), None);
+    }
+
+    #[test]
+    fn intent_role_round_trip() {
+        // Every Intent variant must round-trip through role() →
+        // from_role_name(). Guards against adding a new Intent
+        // variant without wiring its alias.
+        for intent in [Intent::Question, Intent::Work, Intent::Scout, Intent::Mapper, Intent::Recap] {
+            let name = intent.role();
+            assert_eq!(Intent::from_role_name(name), Some(intent), "round-trip {intent:?} via {name}");
+        }
     }
 
     #[test]
