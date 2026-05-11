@@ -382,6 +382,47 @@ struct WriteCheck {
     path: String,
 }
 
+/// Resolve `..` and `.` components in a guest path without
+/// touching the filesystem (the path may not exist; we're
+/// checking POLICY, not access).
+///
+/// Pearl th-515a13: `/workspace/../etc/passwd` previously slipped
+/// past the write check because nobody resolved `..`. Now we
+/// canonicalize before any policy comparison.
+fn normalize_guest_path(path: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "" | "." => continue,
+            ".." => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    let mut s = String::with_capacity(path.len());
+    if path.starts_with('/') {
+        s.push('/');
+    }
+    s.push_str(&out.join("/"));
+    if s.is_empty() {
+        s.push('/');
+    }
+    s
+}
+
+/// True when `path` is `prefix` or a descendant. Both must be
+/// already-normalized via [`normalize_guest_path`] for the
+/// comparison to be safe.
+fn path_starts_with(path: &str, prefix: &str) -> bool {
+    let p = normalize_guest_path(prefix);
+    if path == p {
+        return true;
+    }
+    let with_slash = if p.ends_with('/') { p.clone() } else { format!("{p}/") };
+    path.starts_with(&with_slash)
+}
+
 async fn check_write(State(state): State<Arc<AppState>>, Json(req): Json<WriteCheck>) -> Json<CheckResponse> {
     let policy = state.policy.load();
 
@@ -394,7 +435,28 @@ async fn check_write(State(state): State<Arc<AppState>>, Json(req): Json<WriteCh
         });
     }
 
-    // Second check: is this specific path denied by deny patterns?
+    // Path traversal + mount-boundary check (pearl th-515a13,
+    // surfaced by sandbox_security_examples integration tests
+    // 2026-05-11). Two bugs the previous deny-pattern-only check
+    // missed:
+    //   1. /etc/passwd writes "allowed" because deny_patterns
+    //      didn't list it.
+    //   2. /workspace/../etc/passwd "allowed" because we never
+    //      resolved `..`.
+    // Fix: canonicalize the path (handle `.` and `..` without
+    // hitting the filesystem) and require it sits under one of
+    // the policy's `[[mounts]]` guest_paths.
+    let canonical = normalize_guest_path(&req.path);
+    let in_mount = policy.mounts.iter().any(|m| path_starts_with(&canonical, &m.guest_path));
+    if !in_mount {
+        tracing::debug!(path = %req.path, canonical = %canonical, "write denied: outside any mounted writable region");
+        return Json(CheckResponse {
+            allowed: false,
+            reason: format!("path {} is outside the writable mounts (sandbox boundary)", canonical),
+        });
+    }
+
+    // Existing check: is this specific path denied by deny patterns?
     match policy.is_guest_path_denied(&req.path) {
         Ok(true) => {
             tracing::debug!(path = %req.path, "write denied: path matches deny pattern");
