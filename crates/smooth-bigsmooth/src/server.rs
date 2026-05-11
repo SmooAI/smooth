@@ -1291,6 +1291,12 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         };
         touch();
 
+        // Stopwatch for the sandbox.create tool — covers the env+mount
+        // setup AND the actual microsandbox spawn. The TUI shows the
+        // elapsed time on completion (user observation 2026-05-11:
+        // it always showed 0.0s because the ToolCallComplete below
+        // hardcoded duration_ms: 0).
+        let sandbox_create_started = std::time::Instant::now();
         let _ = event_tx.send(ServerEvent::ToolCallStart {
             task_id: tid.clone(),
             tool_name: "sandbox.create".into(),
@@ -1897,7 +1903,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
             tool_name: "sandbox.create".into(),
             result: handle.operator_id.clone(),
             is_error: false,
-            duration_ms: 0,
+            duration_ms: u64::try_from(sandbox_create_started.elapsed().as_millis()).unwrap_or(u64::MAX),
         });
         touch();
 
