@@ -97,6 +97,50 @@ pub fn generate_policy_for_task(
     task_type: TaskType,
     mounts: Vec<MountMapping>,
 ) -> anyhow::Result<String> {
+    generate_policy_for_task_with_extra_hosts(operator_id, bead_id, phase, token, bead_deps, task_type, mounts, &[])
+}
+
+/// Like [`generate_policy_for_task`] but also adds `extra_allowed_hosts`
+/// to the network allowlist. Pearl th-e0f812: when chief picks a skill
+/// with `allowed_hosts: [...]` declared in its frontmatter, those hosts
+/// are pre-granted into the per-dispatch policy so the agent can reach
+/// them without an interactive Wonk prompt.
+///
+/// The grant is per-dispatch only — the hosts ARE NOT persisted into
+/// `~/.smooth/wonk-allow.toml` or any other store. The user implicitly
+/// authorized the access by invoking a skill that declares it.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_policy_for_task_with_extra_hosts(
+    operator_id: &str,
+    bead_id: &str,
+    phase: &str,
+    token: &str,
+    bead_deps: &[String],
+    task_type: TaskType,
+    mounts: Vec<MountMapping>,
+    extra_allowed_hosts: &[String],
+) -> anyhow::Result<String> {
+    let mut network = task_network_policy(phase, task_type);
+    // Extend the allowlist with the skill's declared hosts. We
+    // dedupe by exact domain match (case-insensitive) so a skill
+    // re-declaring `llm.smoo.ai` is a no-op rather than a duplicate
+    // rule.
+    let existing: std::collections::HashSet<String> = network.allow.iter().map(|r| r.domain.to_lowercase()).collect();
+    for host in extra_allowed_hosts {
+        if host.trim().is_empty() {
+            continue;
+        }
+        let key = host.to_lowercase();
+        if existing.contains(&key) {
+            continue;
+        }
+        network.allow.push(smooth_policy::NetworkRule {
+            domain: host.clone(),
+            path: None,
+            methods: None,
+        });
+    }
+
     let mut policy = Policy {
         metadata: PolicyMetadata {
             operator_id: operator_id.to_string(),
@@ -108,7 +152,7 @@ pub fn generate_policy_for_task(
             token: token.to_string(),
             leader_url: "http://host.containers.internal:4400".to_string(),
         },
-        network: task_network_policy(phase, task_type),
+        network,
         beads: beads_policy(bead_id, bead_deps, phase),
         filesystem: task_filesystem_policy(phase, task_type),
         tools: task_tools_policy(phase, task_type),

@@ -1516,7 +1516,17 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
             }
             pm
         };
-        match crate::policy::generate_policy_for_task(
+        // Pearl th-e0f812: when chief picked a skill, the message
+        // starts with `## Skill: <name>`. Look it up and pre-grant
+        // its `allowed_hosts` into the dispatch policy so the agent
+        // can reach declared hosts (smoo-hub, etc.) without an
+        // interactive Wonk prompt. The user implicitly authorized
+        // the grant by triggering the skill.
+        let skill_hosts: Vec<String> = extract_skill_allowed_hosts(&message, &workspace_canon);
+        if !skill_hosts.is_empty() {
+            tracing::info!(task_id = tid, hosts = ?skill_hosts, "skill pre-grant: extending policy allowlist with skill's allowed_hosts");
+        }
+        match crate::policy::generate_policy_for_task_with_extra_hosts(
             &tid,
             &pearl_id.clone().unwrap_or_default(),
             "execute",
@@ -1524,6 +1534,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
             &[],
             crate::policy::TaskType::Coding,
             policy_mounts,
+            &skill_hosts,
         ) {
             Ok(policy_toml) => match make_control_tempdir("smooth-policy-", control_root.as_deref()) {
                 Ok(dir) => {
@@ -2964,6 +2975,44 @@ async fn run_task_handler(State(state): State<AppState>, Json(req): Json<TaskReq
     });
 
     Sse::new(sse_stream)
+}
+
+/// Pearl th-e0f812: when chief picked a skill, the dispatch
+/// message starts with a `## Skill: <name> (from <source>)`
+/// header. Extract the name, find the skill in the discovery
+/// list, return its `allowed_hosts` for policy pre-grant.
+/// Returns empty vec when no skill is detected — the common
+/// no-skill dispatch path.
+fn extract_skill_allowed_hosts(message: &str, workspace: &str) -> Vec<String> {
+    // The header shape we prepend in the CLI / TUI dispatchers:
+    //   ## Skill: <name> (from <source>)
+    // Anchor on the literal so we don't match anything else.
+    let Some(rest) = message.lines().next() else {
+        return Vec::new();
+    };
+    let trimmed = rest.trim();
+    let prefix = "## Skill:";
+    if !trimmed.starts_with(prefix) {
+        return Vec::new();
+    }
+    // Pull the name out — first whitespace-delimited token after
+    // the prefix, stripping the optional "(from ...)" suffix.
+    let tail = trimmed[prefix.len()..].trim();
+    let name = tail
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '_');
+    if name.is_empty() {
+        return Vec::new();
+    }
+    let workspace_path = std::path::PathBuf::from(workspace);
+    let skills = smooth_operator::skills::discover(&workspace_path);
+    let Some(skill) = skills.into_iter().find(|s| s.name == name) else {
+        tracing::warn!(skill_name = name, "skill named in message header but not found in discovery — no pre-grant");
+        return Vec::new();
+    };
+    skill.allowed_hosts
 }
 
 /// Truncate a string to at most `max_len` characters, appending "..." if truncated.
@@ -4964,6 +5013,42 @@ mod tests {
         let body_bytes2 = axum::body::to_bytes(response2.into_body(), usize::MAX).await.unwrap();
         let resp2: serde_json::Value = serde_json::from_slice(&body_bytes2).unwrap();
         assert_eq!(resp2["data"]["status"], "completed");
+    }
+
+    #[test]
+    fn extract_skill_allowed_hosts_no_skill_header_returns_empty() {
+        // Pearl th-e0f812: messages without the ## Skill: prefix
+        // are the common case — no pre-grant, no policy change.
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let result = extract_skill_allowed_hosts("how do I run dev mode", workspace.path().to_str().unwrap());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn extract_skill_allowed_hosts_returns_skill_hosts() {
+        // Build a project-level SKILL.md with allowed_hosts and
+        // verify the helper extracts them when the message starts
+        // with the matching ## Skill: header.
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let skill_dir = workspace.path().join(".smooth/skills/probe");
+        std::fs::create_dir_all(&skill_dir).expect("mkdir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: probe\ndescription: test\nallowed_hosts:\n  - example.test\n  - other.test\n---\n\nbody",
+        )
+        .expect("write");
+        let message = "## Skill: probe (from project)\n\nbody\n\n---\n\n## User request\n\ngo";
+        let hosts = extract_skill_allowed_hosts(message, workspace.path().to_str().unwrap());
+        assert_eq!(hosts, vec!["example.test", "other.test"]);
+    }
+
+    #[test]
+    fn extract_skill_allowed_hosts_unknown_skill_returns_empty() {
+        // Header names a skill that doesn't exist — no pre-grant,
+        // and the tracing::warn surfaces in logs (not asserted here).
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let hosts = extract_skill_allowed_hosts("## Skill: nonexistent (from project)\n\nbody", workspace.path().to_str().unwrap());
+        assert!(hosts.is_empty());
     }
 
     #[tokio::test]
