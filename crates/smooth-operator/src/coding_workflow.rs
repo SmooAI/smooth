@@ -99,6 +99,13 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
     let mut last_verify_output: Option<String> = None;
     let mut best_failed_count: Option<u32> = None;
     let mut snapshot_taken = false;
+    // Pearl th-bench-loop iter 2: track NoEvidence retries. The
+    // agent's first turn often skips the test run entirely (saw
+    // 0 bash invocations in real bench runs). One retry with a
+    // forcing prompt that demands an explicit test invocation
+    // catches most of those before we give up.
+    let mut no_evidence_retries: u32 = 0;
+    const MAX_NO_EVIDENCE_RETRIES: u32 = 1;
 
     let iter_cap = cfg.max_outer_iterations.max(1);
     let mut iteration = 0u32;
@@ -166,16 +173,33 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
                 // Stay in the loop and feed failure context forward.
             }
             VerifyEvidence::NoEvidence => {
-                // No bash / test_run ever ran this turn. Either the
-                // task didn't require code (e.g. "can we commit
-                // this", routed here in error) OR the agent silently
-                // gave up. Either way, looping again won't help —
-                // the model already chose not to run tests when it
-                // had the chance.
-                tracing::info!(
-                    iteration,
-                    "coding workflow: no test-run evidence, exiting (agent didn't actually run tests this turn)"
-                );
+                // No bash / test_run ever ran this turn. Two
+                // possibilities: the task didn't require code (e.g.
+                // a "what's this repo" routed here in error), OR
+                // the agent silently skipped the test run despite
+                // editing files. Pearl th-bench-loop iter 2 found
+                // the latter is the dominant case on real benchmark
+                // dispatches — the model returns plausible code +
+                // narrative without ever running `cargo test`.
+                //
+                // First time: retry with a forcing prompt that
+                // makes the test invocation non-negotiable. Only
+                // give up if the agent ignores the forcing prompt
+                // too. Capped at MAX_NO_EVIDENCE_RETRIES so a
+                // genuinely non-test task can't trap the workflow.
+                if no_evidence_retries < MAX_NO_EVIDENCE_RETRIES {
+                    no_evidence_retries += 1;
+                    tracing::info!(
+                        iteration,
+                        retry = no_evidence_retries,
+                        "coding workflow: no test-run evidence — re-prompting with forcing directive"
+                    );
+                    last_verify_output = Some(
+                        "Your previous turn edited the code but never ran the test suite. Before doing anything else this turn, run the project's test command via `bash` (cargo test / pytest / pnpm test / etc.) and report the actual output. The implementation is unverified until you do.".to_string(),
+                    );
+                    continue;
+                }
+                tracing::info!(iteration, "coding workflow: no test-run evidence after retry, exiting");
                 if detect_verify_pass(&transcript) {
                     // Pearl iter-10/11: the assistant claimed pass
                     // without evidence. Three actions:
@@ -312,6 +336,15 @@ fn build_user_prompt(task: &str, iteration: u32, prior_output: Option<&str>) -> 
         return task.to_string();
     }
     let prior = prior_output.unwrap_or("(no prior output)");
+    // Pearl th-bench-loop iter 2: the NoEvidence retry path
+    // injects a synthetic "you didn't run tests" message into
+    // prior_output. When we see that exact preamble, frame the
+    // next turn as a verification-only nudge instead of the
+    // standard fix-the-failures preamble — there were no
+    // failures captured because no test ever ran.
+    if prior.starts_with("Your previous turn edited the code but never ran the test suite.") {
+        return format!("{prior}\n\n## Task (reminder)\n\n{task}");
+    }
     let compile_err = detect_compile_error(prior);
     let preamble = if let Some(err) = compile_err {
         format!(
@@ -922,6 +955,24 @@ mod tests {
         ));
         conv.push(crate::conversation::Message::assistant("Fixed."));
         assert_eq!(verify_with_evidence(&conv), VerifyEvidence::EvidencedPass);
+    }
+
+    #[test]
+    fn build_user_prompt_no_evidence_retry_frames_as_verification_only() {
+        // Pearl th-bench-loop iter 2: when the NoEvidence retry path
+        // injects the forcing preamble into prior_output, the next
+        // turn's prompt must NOT prepend the standard
+        // "Your previous attempt left tests failing" preamble (it's
+        // not true — no tests ran). It should land as a clean
+        // verification nudge with the task reminder attached.
+        let prior = "Your previous turn edited the code but never ran the test suite. Before doing anything else this turn, run the project's test command via `bash` (cargo test / pytest / pnpm test / etc.) and report the actual output. The implementation is unverified until you do.";
+        let out = build_user_prompt("Implement the leap function.", 2, Some(prior));
+        assert!(out.contains("never ran the test suite"), "forcing preamble must be present");
+        assert!(out.contains("## Task (reminder)"), "task reminder must be attached");
+        assert!(out.contains("Implement the leap function."), "original task must be present");
+        // Critical: the standard fix-failures preamble must NOT appear.
+        assert!(!out.contains("Previous test output"), "must not include the fail-recovery preamble");
+        assert!(!out.contains("currently passing"), "must not include preserve-passing preamble");
     }
 
     #[test]
