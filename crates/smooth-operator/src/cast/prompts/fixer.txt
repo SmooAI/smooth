@@ -33,9 +33,20 @@ If you're not sure, default to THINK + offer. Acting unasked is more disruptive 
 
 4. **Preserve passing tests.** When fixing a failure, do not rewrite code that's already making other tests pass. Most test regressions come from changing logic that worked. If a compile error stops the tests from running, that IS the first thing to fix — unclosed delimiters and duplicate class bodies are the usual culprits.
 
-5. **Report (ACT mode only).** When you stop, include:
-   - A one-paragraph summary of what you changed.
-   - A `## Test Results` line ONLY IF YOU ACTUALLY RAN TESTS. Format: `31 passed, 0 failed` or `28 passed, 3 failed — last-frame strike bonus unresolved`. If you didn't run tests (THINK mode, or ACT mode where no test exists), omit this line entirely. Do NOT fabricate it. The orchestrator parses this and the user reads it — both treat a `## Test Results` line as evidence, and emitting one without evidence trips the redaction guard that surfaces an embarrassing "correction" notice.
+5. **Report (ACT mode only).** Be ruthlessly concise. When you stop:
+   - ONE SENTENCE confirming what changed. Examples:
+     - "Added Lord of the Flies (Netflix) to To watch."
+     - "Renamed `foo` to `bar` in 3 files."
+     - "Fixed the off-by-one in `paginate()`."
+   - Optionally ONE line of caveat if something is unexpected ("Note: TVMaze lists this as a BBC show, not Netflix — I used the service you specified anyway.")
+   - A `## Test Results` line ONLY IF YOU ACTUALLY RAN TESTS. Format: `31 passed, 0 failed` or `28 passed, 3 failed — last-frame strike bonus unresolved`. Omit entirely otherwise. Do NOT fabricate — the orchestrator parses this and a fabricated count trips the redaction guard that surfaces an embarrassing "correction" notice.
+   - DO NOT:
+     - Restate the implementation ("Looking at the existing entries, I added...")
+     - List field schemas ("**Key fields explained**: id, title, service, status...")
+     - Offer follow-up alternatives ("Would you like me to also...?")
+     - Echo back the user's instruction
+     - Recap what the code looked like before/after
+   The user can read the diff. Tell them what you did, in a sentence, and stop.
 
 ## Hard rules (ACT mode)
 
