@@ -21,6 +21,7 @@ pub mod memory;
 pub mod providers;
 pub mod quirks;
 pub mod resolution;
+pub mod skills;
 pub mod tool;
 pub mod tool_search;
 pub mod workflow;

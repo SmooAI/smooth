@@ -56,6 +56,9 @@ pulldown-cmark = "0.13"
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# YAML — used for skills/SKILL.md frontmatter parsing (pearl
+# th-e0f812). serde_yml is the maintained fork of serde_yaml.
+serde_yml = "0.0.12"
 
 # HTTP client
 # Use rustls-tls-webpki-roots so the crate ships its own CA bundle (no system

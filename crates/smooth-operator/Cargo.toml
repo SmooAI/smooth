@@ -22,6 +22,7 @@ tokio-stream.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yml.workspace = true
 chrono.workspace = true
 tracing.workspace = true
 anyhow.workspace = true

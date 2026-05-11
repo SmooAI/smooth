@@ -282,6 +282,25 @@ enum Commands {
         #[command(subcommand)]
         cmd: BenchCommands,
     },
+    /// List skills available in the current workspace. Reads
+    /// `.smooth/skills/`, `~/.smooth/skills/`, `~/.claude/skills/`,
+    /// and `~/.opencode/skills/` — first hit wins on name. Pearl
+    /// th-e0f812.
+    Skills {
+        #[command(subcommand)]
+        cmd: SkillsCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum SkillsCommands {
+    /// List all skills discovered from every source.
+    List,
+    /// Show the body + frontmatter of a specific skill.
+    Show {
+        /// Skill name.
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -880,6 +899,7 @@ async fn main() -> Result<()> {
         Some(Commands::Plugin { cmd }) => cmd_plugin(cmd),
         Some(Commands::Service { cmd }) => cmd_service(cmd),
         Some(Commands::Bench { cmd }) => cmd_bench(cmd),
+        Some(Commands::Skills { cmd }) => cmd_skills(cmd),
         Some(Commands::Prime) => cmd_prime(),
         Some(_) => {
             println!("Command not yet implemented. Coming soon!");
@@ -4437,6 +4457,115 @@ fn cmd_prime() -> Result<()> {
 fn cmd_bench(cmd: BenchCommands) -> Result<()> {
     match cmd {
         BenchCommands::Score => print_baked_score(env!("BENCH_SCORE_JSON"), &mut std::io::stdout()),
+    }
+}
+
+/// `th skills` — list / show skills discovered from every source.
+/// Pearl th-e0f812. Walks the project's `.smooth/skills/` first,
+/// then the user-level Smooth / Claude Code / opencode skill dirs.
+fn cmd_skills(cmd: SkillsCommands) -> Result<()> {
+    use owo_colors::OwoColorize;
+    use smooth_operator::skills::{discover, discover_with_overrides, Skill, SkillSource};
+
+    let workspace = std::env::current_dir().context("current directory")?;
+
+    fn source_label(src: &SkillSource) -> &'static str {
+        match src {
+            SkillSource::Project => "project",
+            SkillSource::UserSmooth => "user-smooth",
+            SkillSource::ClaudeCode => "claude-code",
+            SkillSource::OpenCode => "opencode",
+        }
+    }
+
+    match cmd {
+        SkillsCommands::List => {
+            let visible = discover(&workspace);
+            let all = discover_with_overrides(&workspace);
+            let mut overridden: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+            for s in &all {
+                *overridden.entry(s.name.as_str()).or_default() += 1;
+            }
+            if visible.is_empty() {
+                println!(
+                    "  {} {}",
+                    "ℹ".cyan(),
+                    "No skills discovered. Add one at .smooth/skills/<name>/SKILL.md or ~/.smooth/skills/<name>/SKILL.md".dimmed()
+                );
+                return Ok(());
+            }
+            println!("\n  {}", "Skills".cyan().bold());
+            for skill in &visible {
+                let count = overridden.get(skill.name.as_str()).copied().unwrap_or(0);
+                let suffix = if count > 1 {
+                    format!(" {}", format!("(overrides {} other source(s))", count - 1).dimmed())
+                } else {
+                    String::new()
+                };
+                let scope_label = match skill.scope {
+                    smooth_operator::skills::SkillScope::Sandbox => "sandbox".green().to_string(),
+                    smooth_operator::skills::SkillScope::Host => "host".yellow().to_string(),
+                };
+                println!(
+                    "  {} {:<28} {:>12}  {}{}",
+                    "•".dimmed(),
+                    skill.name.bold(),
+                    format!("[{}]", source_label(&skill.source)).dimmed(),
+                    skill.description,
+                    suffix,
+                );
+                println!("    {:<28} {} {}", "", "scope:".dimmed(), scope_label);
+                if !skill.allowed_hosts.is_empty() {
+                    println!("    {:<28} {} {}", "", "hosts:".dimmed(), skill.allowed_hosts.join(", "));
+                }
+            }
+            println!();
+            Ok(())
+        }
+        SkillsCommands::Show { name } => {
+            let all: Vec<Skill> = discover_with_overrides(&workspace).into_iter().filter(|s| s.name == name).collect();
+            if all.is_empty() {
+                anyhow::bail!("no skill named {name:?} found in any source");
+            }
+            for (i, skill) in all.iter().enumerate() {
+                if i > 0 {
+                    println!("\n{}\n", "─".repeat(64).dimmed());
+                    println!(
+                        "  {} {} {}",
+                        "↳".dimmed(),
+                        "shadowed by higher-precedence source".dimmed(),
+                        format!("[{}]", source_label(&skill.source)).dimmed()
+                    );
+                }
+                println!("\n  {}  {}", "name:".dimmed(), skill.name.bold());
+                println!(
+                    "  {}  {}",
+                    "source:".dimmed(),
+                    format!("[{}] {}", source_label(&skill.source), skill.path.display()).dimmed()
+                );
+                println!(
+                    "  {}  {}",
+                    "scope:".dimmed(),
+                    match skill.scope {
+                        smooth_operator::skills::SkillScope::Sandbox => "sandbox",
+                        smooth_operator::skills::SkillScope::Host => "host",
+                    }
+                );
+                println!("  {}  {}", "description:".dimmed(), skill.description);
+                if !skill.triggers.is_empty() {
+                    println!("  {}  {}", "triggers:".dimmed(), skill.triggers.join(", "));
+                }
+                if !skill.allowed_hosts.is_empty() {
+                    println!("  {}  {}", "allowed_hosts:".dimmed(), skill.allowed_hosts.join(", "));
+                }
+                if !skill.allowed_tools.is_empty() {
+                    println!("  {}  {}", "allowed_tools:".dimmed(), skill.allowed_tools.join(", "));
+                }
+                println!("\n{}\n", "─".repeat(64).dimmed());
+                println!("{}", skill.body);
+            }
+            Ok(())
+        }
     }
 }
 
