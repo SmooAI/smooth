@@ -2222,6 +2222,7 @@ async fn cmd_code(
                             smooth_operator::skills::SkillSource::UserSmooth => "user-smooth",
                             smooth_operator::skills::SkillSource::ClaudeCode => "claude-code",
                             smooth_operator::skills::SkillSource::OpenCode => "opencode",
+                            smooth_operator::skills::SkillSource::Builtin => "builtin",
                         },
                         skill.body,
                         msg,
@@ -4503,6 +4504,7 @@ fn cmd_skills(cmd: SkillsCommands) -> Result<()> {
             SkillSource::UserSmooth => "user-smooth",
             SkillSource::ClaudeCode => "claude-code",
             SkillSource::OpenCode => "opencode",
+            SkillSource::Builtin => "builtin",
         }
     }
 
