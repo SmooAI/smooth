@@ -121,3 +121,11 @@ preferred = "th pearls"
 command = "th pearls list --status=open"
 notes = "Or `th pearls ready` for unblocked work, `th pearls show <id>` for details. Pearl ids are `th-<6 hex chars>`."
 fallback = ""
+
+[[hint]]
+intent = "check if a host is reachable"
+keywords = ["ping", "is it up", "is X up", "check host", "reach", "alive", "smoo-hub", "tailscale", "internal host"]
+preferred = "host_tool with curl"
+command = "host_tool({tool: \"curl\", args: [\"-fsS\", \"-o\", \"/dev/null\", \"-w\", \"%{http_code}\", \"http://<HOSTNAME>\"]})"
+notes = "The sandbox has NO Tailscale routing and NO ICMP — `bash ping` won't reach private/internal hosts. Big Smooth's HOST machine does have Tailscale, so `host_tool` with `curl` is the right path for any internal hostname (e.g. `smoo-hub`). Treat bare hostnames (`smoo-hub`, `marvin`) as literal — do NOT append `.com` or guess a TLD. Use `-fsS -o /dev/null -w '%{http_code}'` for a clean up/down probe. There is NO `http_fetch` tool — if you find yourself wanting one, use `host_tool` with `curl`."
+fallback = ""

@@ -1419,6 +1419,16 @@ allow = [
     "bg_status",
     "bg_logs",
     "bg_kill",
+    # Pearl th-host-tool-allow (2026-05-12): host_tool is conditionally
+    # registered (only when SMOOTH_HOST_TOKEN is set, i.e. sandbox
+    # dispatch). It calls Big Smooth's /api/host/exec for whitelisted
+    # CLIs (gh, git, kubectl, jq, curl), with host-side allowlist
+    # enforcement. Listing it here lets the agent reach Tailscale /
+    # internal hostnames the sandbox itself can't route to (the host
+    # has Tailscale; the sandbox does not). Wonk still gates the
+    # underlying CLI choice on the host side.
+    "host_tool",
+    "tool_hints",
 ]
 deny = []
 
