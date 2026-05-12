@@ -2077,7 +2077,22 @@ async fn main() {
                     }
                     match entry.role.as_str() {
                         "user" => messages.push(smooth_operator::Message::user(trimmed)),
-                        "assistant" => messages.push(smooth_operator::Message::assistant(trimmed)),
+                        "assistant" => {
+                            // Pearl th-c65ca3 / th-c366ff: some models
+                            // hallucinate Anthropic-style XML tool calls
+                            // (`<function=…>`, `<parameter=…>`,
+                            // `<tool_call>`) as content text instead of
+                            // emitting real `tool_calls`. When that
+                            // garbage leaks into prior history, the next
+                            // turn's LLM sees its own past output as
+                            // meaningless text and tends to bail with
+                            // "I don't have context". Replace the
+                            // pseudo-XML with an explicit note so the
+                            // model can reason about what happened
+                            // instead of staring at unparseable XML.
+                            let sanitized = sanitize_pseudo_tool_xml(trimmed);
+                            messages.push(smooth_operator::Message::assistant(&sanitized));
+                        }
                         _ => {} // Drop unknown roles.
                     }
                 }
@@ -2315,5 +2330,86 @@ async fn main() {
             tracing::error!(error = %e, "smooth-operator-runner failed");
             std::process::exit(1);
         }
+    }
+}
+
+/// Strip Anthropic-style pseudo-XML tool-call syntax that some models
+/// emit as content (instead of as real `tool_calls`). Pearl th-c65ca3:
+/// the raw text `<function=host_tool> <parameter=tool> curl
+/// <parameter=args> [...] </tool_call>` reaching the next turn as
+/// "assistant content" causes the model to bail with "I don't have
+/// context" — because its own prior output is unparseable.
+///
+/// Replaces every detected block with a single bracketed marker the
+/// LLM can read as plain English. We don't try to recover the
+/// original intent — that's a separate fix at the tool-call layer.
+fn sanitize_pseudo_tool_xml(content: &str) -> String {
+    let needles = ["<function=", "<tool_call>", "</tool_call>", "<parameter="];
+    if !needles.iter().any(|n| content.contains(n)) {
+        return content.to_string();
+    }
+    let mut out = String::with_capacity(content.len());
+    let mut rest = content;
+    while !rest.is_empty() {
+        let next_idx = needles.iter().filter_map(|n| rest.find(n)).min();
+        let Some(idx) = next_idx else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..idx]);
+        // Skip until a closing-ish delimiter: `</tool_call>` end, OR
+        // `>` after a top-level `<function=`, whichever comes first
+        // on a sensible boundary. We're not a parser — we just want
+        // the model to not see literal XML. Most-common pattern is a
+        // run of `<…>` fragments terminated by `</tool_call>`. Find
+        // that end-tag if present; otherwise advance past one tag.
+        let after = &rest[idx..];
+        let advance = after
+            .find("</tool_call>")
+            .map(|p| p + "</tool_call>".len())
+            .or_else(|| after.find('>').map(|p| p + 1))
+            .unwrap_or(after.len());
+        out.push_str("[NOTE: my previous turn emitted a malformed tool-call XML block here that did NOT actually execute. The intended action did not run.]");
+        rest = &after[advance..];
+    }
+    out
+}
+
+#[cfg(test)]
+mod sanitize_tests {
+    use super::sanitize_pseudo_tool_xml;
+
+    #[test]
+    fn passes_through_plain_text() {
+        let s = "Hello, world. No XML here.";
+        assert_eq!(sanitize_pseudo_tool_xml(s), s);
+    }
+
+    #[test]
+    fn replaces_function_block_with_note() {
+        let input = "Sure, let me try.\n<function=host_tool> <parameter=tool> curl <parameter=args> [\"-I\", \"https://smoo-hub.com\"]   </tool_call>";
+        let out = sanitize_pseudo_tool_xml(input);
+        assert!(out.starts_with("Sure, let me try."));
+        assert!(out.contains("[NOTE:"));
+        assert!(!out.contains("<function="));
+        assert!(!out.contains("<parameter="));
+        assert!(!out.contains("</tool_call>"));
+    }
+
+    #[test]
+    fn replaces_lone_tool_call_block() {
+        let input = "<tool_call>\nname=bash\nargs={\"cmd\": \"ls\"}\n</tool_call>";
+        let out = sanitize_pseudo_tool_xml(input);
+        assert!(out.contains("[NOTE:"));
+        assert!(!out.contains("<tool_call>"));
+    }
+
+    #[test]
+    fn preserves_normal_prose_around_xml() {
+        let input = "Here's the plan:\n<function=foo></tool_call>\nLet me know if that's wrong.";
+        let out = sanitize_pseudo_tool_xml(input);
+        assert!(out.starts_with("Here's the plan:"));
+        assert!(out.contains("Let me know if that's wrong."));
+        assert!(out.contains("[NOTE:"));
     }
 }
