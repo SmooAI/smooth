@@ -710,6 +710,17 @@ fn handle_input_mode(
                                         smooth_operator::skills::SkillSource::OpenCode => "opencode",
                                         smooth_operator::skills::SkillSource::Builtin => "builtin",
                                     };
+                                    // Pearl th-e0f812 (user observation 2026-05-12):
+                                    // surface the chosen skill in the chat so the
+                                    // user knows what's happening. Push as a
+                                    // system-style activity line BEFORE the
+                                    // streaming response starts.
+                                    if let Ok(mut s) = state_for_routing.lock() {
+                                        s.messages.push(crate::state::ChatMessage::system(format!(
+                                            "✦ Using skill: {} (from {})",
+                                            skill.name, source_label
+                                        )));
+                                    }
                                     format!(
                                         "## Skill: {} (from {})\n\n{}\n\n---\n\n## User request\n\n{}",
                                         skill.name, source_label, skill.body, message

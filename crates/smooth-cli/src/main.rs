@@ -2214,18 +2214,20 @@ async fn cmd_code(
                 let workspace = working_dir.clone();
                 let skills = smooth_operator::skills::discover(&workspace);
                 if let Some(skill) = skills.iter().find(|s| s.name == name) {
+                    let source_label = match skill.source {
+                        smooth_operator::skills::SkillSource::Project => "project",
+                        smooth_operator::skills::SkillSource::UserSmooth => "user-smooth",
+                        smooth_operator::skills::SkillSource::ClaudeCode => "claude-code",
+                        smooth_operator::skills::SkillSource::OpenCode => "opencode",
+                        smooth_operator::skills::SkillSource::Builtin => "builtin",
+                    };
+                    // Pearl th-e0f812: tell the headless caller a skill
+                    // was picked. stderr so `--json` consumers parsing
+                    // stdout don't get tripped.
+                    eprintln!("✦ Using skill: {} (from {})", skill.name, source_label);
                     format!(
                         "## Skill: {} (from {})\n\n{}\n\n---\n\n## User request\n\n{}",
-                        skill.name,
-                        match skill.source {
-                            smooth_operator::skills::SkillSource::Project => "project",
-                            smooth_operator::skills::SkillSource::UserSmooth => "user-smooth",
-                            smooth_operator::skills::SkillSource::ClaudeCode => "claude-code",
-                            smooth_operator::skills::SkillSource::OpenCode => "opencode",
-                            smooth_operator::skills::SkillSource::Builtin => "builtin",
-                        },
-                        skill.body,
-                        msg,
+                        skill.name, source_label, skill.body, msg,
                     )
                 } else {
                     msg
