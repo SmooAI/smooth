@@ -581,6 +581,19 @@ fn registered_tool_names() -> Vec<String> {
         "bg_status".into(),
         "bg_logs".into(),
         "bg_kill".into(),
+        // Pearl th-host-tool-allow (2026-05-12): host_tool is
+        // conditionally registered by the runner when
+        // SMOOTH_HOST_TOKEN is set (i.e. sandbox dispatch — Big
+        // Smooth always threads it through). Listing it here lets
+        // the agent call it to reach Tailscale / internal hosts the
+        // sandbox itself can't route to. Wonk still gates the
+        // underlying CLI choice on the host side
+        // (gh/git/kubectl/jq/curl).
+        "host_tool".into(),
+        // tool_hints is unconditionally registered by the runner —
+        // omitting it from the allowlist made Wonk deny every
+        // "what's the canonical way to do X" lookup.
+        "tool_hints".into(),
     ]
 }
 
@@ -862,6 +875,13 @@ mod tests {
             "bg_status",
             "bg_logs",
             "bg_kill",
+            // Pearl th-host-tool-allow (2026-05-12) — host_tool and
+            // tool_hints were missing, so the agent's
+            // `host_tool({tool:"curl",args:[...]})` against a
+            // Tailscale name was denied by Wonk despite being a real
+            // registered tool.
+            "host_tool",
+            "tool_hints",
         ] {
             assert!(
                 names.iter().any(|n| n == must_have),
