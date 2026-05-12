@@ -1124,6 +1124,36 @@ pub async fn accumulate_stream_events(mut stream: Pin<Box<dyn Stream<Item = anyh
         })
         .collect();
 
+    // Pearl th-c65ca3: qwen3-coder models (DashScope upstream behind the
+    // `smooth-coding` alias) sometimes emit their native Qwen tool-call
+    // XML as `content` instead of OpenAI-style `tool_calls`. The
+    // OpenAI-compat shim at DashScope is supposed to translate this,
+    // but for some prompts it falls through. Symptom: the user sees a
+    // raw `<function=NAME><parameter=K> V</tool_call>` block in chat
+    // and the agent's tool didn't actually run. Recovery: when the
+    // accumulated content contains pseudo-XML AND no native tool_calls
+    // came through, parse the XML into synthetic ToolCalls and blank
+    // the content. The agent loop then executes them like real calls
+    // so the next turn has real tool-result history to reason about.
+    let (content, tool_calls) = if tool_calls.is_empty() && content_has_pseudo_tool_xml(&content) {
+        let parsed = parse_pseudo_tool_xml(&content);
+        if parsed.is_empty() {
+            (content, tool_calls)
+        } else {
+            tracing::warn!(
+                count = parsed.len(),
+                "recovered {} pseudo-XML tool call(s) from content (pearl th-c65ca3)",
+                parsed.len()
+            );
+            // Blank the content so it doesn't surface as raw XML in
+            // the next turn's prior_messages; the synthesized tool
+            // calls carry the real intent.
+            (String::new(), parsed)
+        }
+    } else {
+        (content, tool_calls)
+    };
+
     Ok(LlmResponse {
         content,
         tool_calls,
@@ -1132,6 +1162,123 @@ pub async fn accumulate_stream_events(mut stream: Pin<Box<dyn Stream<Item = anyh
         rate_limit: None,
         gateway_cost_usd: None,
     })
+}
+
+/// True iff `content` contains either the Qwen `<tool_call>…</tool_call>`
+/// wrapper or the malformed `<function=…>` / `<parameter=…>` variant.
+fn content_has_pseudo_tool_xml(content: &str) -> bool {
+    content.contains("<function=") || (content.contains("<tool_call>") && content.contains("</tool_call>"))
+}
+
+/// Parse Qwen-style pseudo-XML tool calls out of `content`. Handles two
+/// shapes both emitted by qwen3-coder under DashScope's OpenAI-compat
+/// shim (pearl th-c65ca3):
+///
+/// 1. Canonical wrapper — JSON body inside `<tool_call>…</tool_call>`:
+///    ```text
+///    <tool_call>
+///    {"name": "host_tool", "arguments": {"tool": "curl", "args": [...]}}
+///    </tool_call>
+///    ```
+///
+/// 2. Malformed inline — name in opening tag, args as `<parameter=K> V`
+///    chunks, closed by `</tool_call>`:
+///    ```text
+///    <function=host_tool> <parameter=tool> curl <parameter=args> ["-I", "https://x.com"] </tool_call>
+///    ```
+///    Each `<parameter=K> V` element becomes one key in arguments; the
+///    value is the text from after the `>` to the start of the next
+///    `<parameter=` or `</tool_call>`, trimmed. JSON-looking values
+///    (lists, objects, booleans, numbers) are parsed; everything else
+///    stays as a string.
+///
+/// Returns an empty vec if nothing parses cleanly — caller should leave
+/// the original content alone in that case.
+fn parse_pseudo_tool_xml(content: &str) -> Vec<crate::tool::ToolCall> {
+    let mut out: Vec<crate::tool::ToolCall> = Vec::new();
+    let mut rest = content;
+    let mut counter: u64 = 0;
+    while !rest.is_empty() {
+        // Pick whichever opener comes first.
+        let func_idx = rest.find("<function=");
+        let canon_idx = rest.find("<tool_call>");
+        let (start, is_canon) = match (func_idx, canon_idx) {
+            (Some(f), Some(c)) if c < f => (c, true),
+            (Some(f), _) => (f, false),
+            (None, Some(c)) => (c, true),
+            (None, None) => break,
+        };
+        rest = &rest[start..];
+        if is_canon {
+            let Some(close) = rest.find("</tool_call>") else {
+                break;
+            };
+            let body = rest["<tool_call>".len()..close].trim();
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+                let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                if !name.is_empty() {
+                    let arguments = v.get("arguments").cloned().unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+                    counter += 1;
+                    out.push(crate::tool::ToolCall {
+                        id: format!("xml_recovered_{counter}"),
+                        name,
+                        arguments,
+                    });
+                }
+            }
+            rest = &rest[close + "</tool_call>".len()..];
+        } else {
+            // `<function=NAME>` opener. Find the closing `>` of THIS tag.
+            let Some(name_end) = rest[1..].find('>') else {
+                break;
+            };
+            let name = rest["<function=".len()..1 + name_end].trim().to_string();
+            // Body runs from after this `>` to `</tool_call>` or, if
+            // absent, to the next `<function=` (the model sometimes
+            // omits the closer when chaining calls).
+            let body_start = 1 + name_end + 1;
+            let tail = &rest[body_start..];
+            let body_end_rel = tail.find("</tool_call>").or_else(|| tail.find("<function=")).unwrap_or(tail.len());
+            let body = &tail[..body_end_rel];
+            let mut arguments = serde_json::Map::new();
+            // Walk `<parameter=K> V` chunks.
+            let mut cursor = body;
+            while let Some(p_idx) = cursor.find("<parameter=") {
+                cursor = &cursor[p_idx..];
+                let Some(k_end) = cursor[1..].find('>') else {
+                    break;
+                };
+                let key = cursor["<parameter=".len()..1 + k_end].trim().to_string();
+                let value_start = 1 + k_end + 1;
+                let after = &cursor[value_start..];
+                let value_end = after.find("<parameter=").unwrap_or(after.len());
+                let raw_value = after[..value_end].trim();
+                let parsed: serde_json::Value = serde_json::from_str(raw_value).unwrap_or_else(|_| serde_json::Value::String(raw_value.to_string()));
+                if !key.is_empty() {
+                    arguments.insert(key, parsed);
+                }
+                cursor = &after[value_end..];
+            }
+            if !name.is_empty() {
+                counter += 1;
+                out.push(crate::tool::ToolCall {
+                    id: format!("xml_recovered_{counter}"),
+                    name,
+                    arguments: serde_json::Value::Object(arguments),
+                });
+            }
+            // Advance past the closing tag if present, else past this opener.
+            let advance = body_start
+                + body_end_rel
+                + if tail[body_end_rel..].starts_with("</tool_call>") {
+                    "</tool_call>".len()
+                } else {
+                    0
+                };
+            rest = &rest[advance..];
+        }
+    }
+    out
 }
 
 /// Serialize tool-call arguments to the canonical OpenAI wire
@@ -1930,5 +2077,55 @@ mod tests {
     #[test]
     fn canonical_args_json_empty_object_stays_empty_object() {
         assert_eq!(canonical_tool_arguments_json(&serde_json::json!({})), "{}");
+    }
+
+    // Pearl th-c65ca3 — qwen3-coder pseudo-XML tool-call recovery.
+
+    #[test]
+    fn parse_canonical_qwen_tool_call() {
+        let content = r#"<tool_call>
+{"name": "host_tool", "arguments": {"tool": "curl", "args": ["-I", "https://x.com"]}}
+</tool_call>"#;
+        let calls = super::parse_pseudo_tool_xml(content);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "host_tool");
+        assert_eq!(calls[0].arguments["tool"], "curl");
+        assert_eq!(calls[0].arguments["args"][0], "-I");
+    }
+
+    #[test]
+    fn parse_malformed_function_parameter_form() {
+        // Exact shape from user repro 2026-05-12.
+        let content = r#"<function=host_tool> <parameter=tool> curl <parameter=args> ["-I", "https://smoo-hub.com"]   </tool_call>"#;
+        let calls = super::parse_pseudo_tool_xml(content);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "host_tool");
+        assert_eq!(calls[0].arguments["tool"], "curl");
+        assert_eq!(calls[0].arguments["args"][0], "-I");
+        assert_eq!(calls[0].arguments["args"][1], "https://smoo-hub.com");
+    }
+
+    #[test]
+    fn parse_no_xml_returns_empty() {
+        assert!(super::parse_pseudo_tool_xml("just some prose, no XML.").is_empty());
+    }
+
+    #[test]
+    fn parse_handles_two_calls() {
+        let content = r#"<function=a> <parameter=x> 1 </tool_call><function=b> <parameter=y> 2 </tool_call>"#;
+        let calls = super::parse_pseudo_tool_xml(content);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "a");
+        assert_eq!(calls[1].name, "b");
+    }
+
+    #[test]
+    fn content_has_pseudo_tool_xml_detects_both_shapes() {
+        assert!(super::content_has_pseudo_tool_xml("<function=foo>"));
+        assert!(super::content_has_pseudo_tool_xml("<tool_call>{}</tool_call>"));
+        assert!(!super::content_has_pseudo_tool_xml("plain prose"));
+        // Standalone <tool_call> without closer shouldn't trigger
+        // (would otherwise mangle prose).
+        assert!(!super::content_has_pseudo_tool_xml("<tool_call> dangling"));
     }
 }
