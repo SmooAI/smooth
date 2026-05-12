@@ -345,6 +345,28 @@ fn event_loop(
                 }
                 continue;
             }
+            // Pearl th-f294fd: clear the screen on terminal resize so
+            // the previous frame's streaming-preview rows don't leak
+            // upward into scrollback as ghost content. ratatui's
+            // inline viewport autoresizes the viewport rect on the
+            // next `terminal.draw()`, but on a height-grow the
+            // viewport's NEW top is below its OLD top, so whatever
+            // was painted at the OLD position (typically a wall of
+            // tool-call rows mid-stream) becomes uncleared scrollback
+            // sitting between the legitimate committed messages and
+            // the new viewport. `Terminal::clear()` in inline mode
+            // moves the cursor to the viewport top and wipes
+            // everything from there to the end of the screen, which
+            // catches the ghost band. Also force a re-draw by
+            // continuing so the next loop iteration paints the new
+            // viewport before we wait on more events. Width changes
+            // re-wrap the live viewport content naturally; older
+            // scrollback above keeps its original wrap, which is the
+            // terminal's behavior — we don't try to re-flow it.
+            if matches!(evt, Event::Resize(_, _)) {
+                let _ = terminal.clear();
+                continue;
+            }
             if let Event::Key(key) = evt {
                 let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
 
