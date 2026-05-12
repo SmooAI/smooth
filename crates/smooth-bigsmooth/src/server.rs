@@ -1415,13 +1415,20 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
 
         // Every operator's Wonk escalates uncertain /check/* decisions to
         // the central Boardroom Narc via this URL. From inside the VM, the
-        // host's loopback is reachable as `host.containers.internal` in
-        // Boardroom mode (Bill passes it through) and as `127.0.0.1` in
-        // host-mode (Direct sandbox backend on the same machine). The port
-        // is Big Smooth's listening port, which at the time of this writing
-        // is always 4400. An override via SMOOTH_NARC_URL short-circuits
-        // both cases — useful for tests and for pointing several boards at
-        // a shared Narc.
+        // The operator runner is ALWAYS inside a microsandbox VM in this
+        // dispatch path; microsandbox exposes the outer host as
+        // `host.containers.internal` (the host's loopback gets NAT'd
+        // through that magic name). `127.0.0.1` from inside the sandbox
+        // is the sandbox's own loopback, NOT Big Smooth — so the
+        // pre-th-narc-host fallback to `127.0.0.1` in non-boardroom mode
+        // produced a real error: "calling host_exec: error sending
+        // request for url (http://127.0.0.1:4400/api/host/exec)". The
+        // boardroom/host-mode distinction was a red herring; the magic
+        // name is the same either way.
+        //
+        // Port 4400 is Big Smooth's listening port. An override via
+        // `SMOOTH_NARC_URL` short-circuits — useful for tests, or for
+        // pointing several boards at a shared Narc.
         let narc_url = if let Ok(override_url) = std::env::var("SMOOTH_NARC_URL") {
             if override_url.trim().is_empty() {
                 None
@@ -1429,12 +1436,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
                 Some(override_url)
             }
         } else {
-            let host = if boardroom_handles.is_some() {
-                "host.containers.internal"
-            } else {
-                "127.0.0.1"
-            };
-            Some(format!("http://{host}:4400"))
+            Some("http://host.containers.internal:4400".to_string())
         };
         if let Some(ref url) = narc_url {
             tracing::info!(task_id = tid, url = %url, "operator env: SMOOTH_NARC_URL set");
