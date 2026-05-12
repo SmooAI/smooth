@@ -472,7 +472,27 @@ fn refresh_autocomplete(state: &mut AppState, command_registry: &CommandRegistry
             state.autocomplete.update_at_query(&query, &files, &pearls, &workspace_root);
         }
         crate::autocomplete::CompletionKind::Command => {
-            state.autocomplete.update_command_query(&query, &command_registry.list_commands());
+            // Pearl th-e0f812: skills appear in the / popup so users
+            // can discover them visually. Built-in commands stay
+            // first (alphabetical), skills appended after.
+            let mut commands = command_registry.list_commands();
+            let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            for skill in smooth_operator::skills::discover(&workspace) {
+                // Skip if a built-in command already has the same
+                // name (precedence: built-ins win).
+                if commands.iter().any(|(n, _)| n == &skill.name) {
+                    continue;
+                }
+                let source_label = match skill.source {
+                    smooth_operator::skills::SkillSource::Project => "project",
+                    smooth_operator::skills::SkillSource::UserSmooth => "user-smooth",
+                    smooth_operator::skills::SkillSource::ClaudeCode => "claude-code",
+                    smooth_operator::skills::SkillSource::OpenCode => "opencode",
+                    smooth_operator::skills::SkillSource::Builtin => "builtin",
+                };
+                commands.push((skill.name.clone(), format!("[skill:{source_label}] {}", skill.description)));
+            }
+            state.autocomplete.update_command_query(&query, &commands);
         }
     }
     // Empty results → silently close the popup. Matters for the
@@ -616,7 +636,53 @@ fn handle_input_mode(
                             state.add_message(ChatMessage::system(format!("Command error: {e}")));
                         }
                         None => {
-                            state.add_message(ChatMessage::system(format!("Unknown command: /{name}. Type /help for available commands.")));
+                            // Pearl th-e0f812: before failing with
+                            // "Unknown command", check if the slash
+                            // matches a discovered skill name. If so,
+                            // treat `/skill-name [args]` as an
+                            // invocation: compose the skill body +
+                            // user-supplied args and dispatch through
+                            // the normal agent path.
+                            let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                            let skills = smooth_operator::skills::discover(&workspace);
+                            if let Some(skill) = skills.into_iter().find(|s| s.name == name) {
+                                let source_label = match skill.source {
+                                    smooth_operator::skills::SkillSource::Project => "project",
+                                    smooth_operator::skills::SkillSource::UserSmooth => "user-smooth",
+                                    smooth_operator::skills::SkillSource::ClaudeCode => "claude-code",
+                                    smooth_operator::skills::SkillSource::OpenCode => "opencode",
+                                    smooth_operator::skills::SkillSource::Builtin => "builtin",
+                                };
+                                state.add_message(ChatMessage::system(format!("✦ Invoking skill: {} (from {})", skill.name, source_label)));
+                                let user_request = if args.trim().is_empty() {
+                                    "Invoke the skill with reasonable defaults; if any input is required and not provided, ask the user.".to_string()
+                                } else {
+                                    args.to_string()
+                                };
+                                let composed = format!(
+                                    "## Skill: {} (from {})\n\n{}\n\n---\n\n## User request\n\n{}",
+                                    skill.name, source_label, skill.body, user_request
+                                );
+                                state.add_message(ChatMessage::user(format!("/{name} {args}").trim()));
+                                state.thinking = true;
+                                // Skills with sandbox-incompatible
+                                // operations (scp, sips, etc.) typically
+                                // mark scope: host. We don't enforce host
+                                // here yet — that's a follow-up. For now
+                                // the standard fixer path runs with the
+                                // skill body + the pre-grant from
+                                // server.rs::extract_skill_allowed_hosts.
+                                let agent = "fixer".to_string();
+                                let tx_skill = event_tx.clone();
+                                let state_for_skill = Arc::clone(&state_arc);
+                                tokio::spawn(async move {
+                                    if let Err(e) = run_agent_streaming(&composed, tx_skill.clone(), Some(agent), Arc::clone(&state_for_skill)).await {
+                                        let _ = tx_skill.send(AgentEvent::Error { message: e.to_string() });
+                                    }
+                                });
+                            } else {
+                                state.add_message(ChatMessage::system(format!("Unknown command: /{name}. Type /help for available commands.")));
+                            }
                         }
                     }
                 }

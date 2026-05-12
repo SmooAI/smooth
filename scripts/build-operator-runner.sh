@@ -44,7 +44,18 @@ fi
 echo "==> Cross-compiling smooth-operator-runner for aarch64-unknown-linux-musl"
 cargo zigbuild --target aarch64-unknown-linux-musl --release -p smooai-smooth-operator-runner
 
-BIN="target/aarch64-unknown-linux-musl/release/smooth-operator-runner"
+# Resolve cargo's target dir dynamically — pearl th-target-bloat
+# (2026-05-12) moved the workspace to a shared dir at
+# ~/.cargo/shared-target via ~/.cargo/config.toml. Hardcoding
+# "target/..." breaks under that config. `cargo metadata` returns
+# the actual path cargo would write to, regardless of overrides.
+TARGET_DIR=$(cargo metadata --format-version 1 --no-deps 2>/dev/null \
+    | python3 -c "import json,sys; print(json.load(sys.stdin)['target_directory'])")
+if [ -z "$TARGET_DIR" ]; then
+    TARGET_DIR="target"
+fi
+
+BIN="$TARGET_DIR/aarch64-unknown-linux-musl/release/smooth-operator-runner"
 if [ ! -f "$BIN" ]; then
     echo "error: expected binary at $BIN but it wasn't produced" >&2
     exit 1
