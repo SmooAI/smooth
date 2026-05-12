@@ -21,6 +21,25 @@ use owo_colors::OwoColorize;
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
+
+    /// Resume a saved session. With no value, picks the most recently
+    /// updated one. With a value, matches by id prefix or title
+    /// substring. Pair with `--list` to inspect saved sessions first.
+    /// Only takes effect when no subcommand is given (top-level `th`
+    /// launches the TUI). Same as `th code --resume`. Pearl
+    /// th-resume-top-level (2026-05-12).
+    #[arg(long, value_name = "QUERY", num_args = 0..=1, default_missing_value = "")]
+    resume: Option<String>,
+
+    /// List saved sessions and exit. Only takes effect when no
+    /// subcommand is given. Same as `th code --list`.
+    #[arg(long)]
+    list: bool,
+
+    /// Pin the lead role for this session (fixer / oracle / mapper /
+    /// scout / heckler). Same as `th code --agent <name>`.
+    #[arg(long, value_name = "NAME")]
+    agent: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -832,8 +851,12 @@ async fn main() -> Result<()> {
     }
 
     match cli.command {
-        // No subcommand = launch smooth-code (THE Smooth experience)
-        None => cmd_code(false, None, None, None, None, false, None, false, None).await,
+        // No subcommand = launch smooth-code (THE Smooth experience).
+        // Top-level --resume / --list / --agent flags flow into cmd_code
+        // so `th --resume` / `th --list` / `th --agent X` work without
+        // needing to type `th code …` (pearl th-resume-top-level
+        // 2026-05-12 per user request).
+        None => cmd_code(false, None, None, None, None, false, cli.resume.clone(), cli.list, cli.agent.clone()).await,
         Some(Commands::Code {
             headless,
             message,
@@ -2150,6 +2173,10 @@ async fn cmd_code(
                     s.updated_at.format("%Y-%m-%d %H:%M").to_string().dimmed()
                 );
             }
+            println!();
+            println!("  {} {}", "↻".dimmed(), "th --resume                  resume most recent".dimmed());
+            println!("  {} {}", "↻".dimmed(), "th --resume <id-prefix>      resume by id".dimmed());
+            println!("  {} {}", "↻".dimmed(), "th --resume <title-substr>   resume by title match".dimmed());
             println!();
         }
         return Ok(());
