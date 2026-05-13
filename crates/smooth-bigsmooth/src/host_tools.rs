@@ -108,7 +108,19 @@ pub async fn host_exec_handler(
 
     // Run the command. Inherits Big Smooth's env, including the user's
     // PATH and home dir, so authed CLIs work as the user expects.
-    let mut cmd = Command::new(&body.tool);
+    //
+    // Pearl th-c366ff (2026-05-12): on macOS launchd-managed services,
+    // the inherited PATH is minimal (usually just `/usr/bin:/bin`) and
+    // doesn't include `/sbin` (`ping`, `route`) or `/usr/local/bin` /
+    // `/opt/homebrew/bin` (Homebrew). That meant `host_tool({tool:
+    // "ping", …})` failed with ENOENT. Resolve the binary up front
+    // against a richer search path so the allowlisted tools all work
+    // under launchd. Falls back to the original behavior (let Command
+    // search Big Smooth's inherited PATH) if our explicit search
+    // doesn't find the tool — gh / kubectl / etc. may live in
+    // user-specific paths we don't know about.
+    let resolved = resolve_tool_path(&body.tool);
+    let mut cmd = Command::new(resolved.as_deref().unwrap_or(&body.tool));
     for a in &body.args {
         cmd.arg(a);
     }
@@ -137,6 +149,38 @@ pub async fn host_exec_handler(
         exit_code: out.status.code().unwrap_or(-1),
         truncated,
     }))
+}
+
+/// Search a richer set of system paths for `tool` so launchd-spawned
+/// Big Smooth can find `ping`, `dig`, etc. that live in `/sbin` or
+/// `/usr/local/bin`. Returns the absolute path on first hit, or
+/// `None` if nothing matches — caller then lets `Command` walk the
+/// inherited PATH as a fallback (gh / kubectl / Homebrew tools may
+/// live in user-specific paths we don't enumerate here).
+fn resolve_tool_path(tool: &str) -> Option<String> {
+    // Reject anything that already contains a path separator — those
+    // are caller-supplied absolute/relative paths that we don't want
+    // to second-guess (and tend to mean someone is trying to be
+    // tricky). The allowlist check upstream already rejects them
+    // anyway, but defending in depth.
+    if tool.contains('/') {
+        return None;
+    }
+    const SEARCH: &[&str] = &[
+        "/usr/local/bin",    // Intel Homebrew + many user installs
+        "/opt/homebrew/bin", // Apple Silicon Homebrew
+        "/usr/bin",
+        "/bin",
+        "/sbin", // ping, route, ifconfig on macOS
+        "/usr/sbin",
+    ];
+    for dir in SEARCH {
+        let p = std::path::Path::new(dir).join(tool);
+        if p.is_file() {
+            return p.to_str().map(String::from);
+        }
+    }
+    None
 }
 
 /// Generate a fresh bearer token. Called once at server startup; the
