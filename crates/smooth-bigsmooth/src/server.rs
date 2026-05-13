@@ -44,6 +44,40 @@ fn max_sandbox_concurrency() -> usize {
     }
 }
 
+/// Detect a routable host IP — the address the kernel would use to
+/// reach a public destination. Used to populate `SMOOTH_NARC_URL` so
+/// the operator runner inside a microsandbox VM has a destination
+/// the host's TCP proxy can actually `TcpStream::connect()` against.
+///
+/// Trick: bind a UDP socket to `0.0.0.0:0`, `connect()` it to a
+/// public IP, and read `local_addr()`. The kernel picks the source
+/// IP for the route without sending any packet. Returns `None` if
+/// no public-routable IP is available (no network at all), in which
+/// case the caller should fall back loudly — the sandbox path will
+/// not work in that state.
+///
+/// Important: we deliberately do NOT prefer 127.0.0.1, even though
+/// `allow_host_loopback: true` permits the proxy to reach it. The
+/// guest's traffic to 127.0.0.1 routes via the GUEST's lo, not the
+/// device interface, so it never reaches the host-side proxy. A
+/// real RFC1918 / public IP is the only path that lands.
+fn detect_routable_host_ip() -> Option<String> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    // Connecting to a globally-routed address forces the kernel to
+    // pick the primary outbound interface. We use a TEST-NET-like
+    // address (`1.1.1.1`) so even if a DNS misconfiguration exists,
+    // the kernel routing table answers immediately. No packets are
+    // actually sent — UDP connect() is just routing setup.
+    socket.connect("1.1.1.1:80").ok()?;
+    let addr = socket.local_addr().ok()?.ip();
+    // Reject the "all zeros" fallback some platforms hand back when
+    // no route exists; treat that as "no address detected".
+    if addr.is_unspecified() {
+        return None;
+    }
+    Some(addr.to_string())
+}
+
 /// Shared application state.
 #[derive(Clone)]
 pub struct AppState {
@@ -1414,21 +1448,34 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         }
 
         // Every operator's Wonk escalates uncertain /check/* decisions to
-        // the central Boardroom Narc via this URL. From inside the VM, the
-        // The operator runner is ALWAYS inside a microsandbox VM in this
-        // dispatch path; microsandbox exposes the outer host as
-        // `host.containers.internal` (the host's loopback gets NAT'd
-        // through that magic name). `127.0.0.1` from inside the sandbox
-        // is the sandbox's own loopback, NOT Big Smooth — so the
-        // pre-th-narc-host fallback to `127.0.0.1` in non-boardroom mode
-        // produced a real error: "calling host_exec: error sending
-        // request for url (http://127.0.0.1:4400/api/host/exec)". The
-        // boardroom/host-mode distinction was a red herring; the magic
-        // name is the same either way.
+        // the central Boardroom Narc via this URL — and `host_tool`
+        // hits Big Smooth's `/api/host/exec` over the same URL.
         //
-        // Port 4400 is Big Smooth's listening port. An override via
-        // `SMOOTH_NARC_URL` short-circuits — useful for tests, or for
-        // pointing several boards at a shared Narc.
+        // Reaching the host from inside microsandbox 0.3.14 is finicky:
+        // there is NO `host.containers.internal` DNS entry on this
+        // version (that's a 0.4+ feature), and `127.0.0.1` from inside
+        // the guest routes via the guest's own loopback (its own
+        // network namespace), not the host. The TCP proxy
+        // (`microsandbox-network::proxy::spawn_tcp_proxy`) just does
+        // `TcpStream::connect(dst)` on the host with the guest's
+        // destination IP as-is, so for the guest's traffic to land on
+        // Big Smooth we need a destination IP the host actually owns.
+        // Big Smooth listens on `0.0.0.0:4400` so any of the host's
+        // real interface IPs works.
+        //
+        // Detect a routable primary IP via the "UDP-connect-to-public-
+        // IP-and-read-local-addr" trick — no packets are actually sent;
+        // the kernel just picks the source IP it would use for that
+        // route. RFC1918 / loopback / link-local are accepted (the
+        // sandbox's `allow_host_loopback: true` flips microsandbox to
+        // `NetworkPolicy::allow_all()` which removes the denies on
+        // those ranges). Falls back to `127.0.0.1` (the historical
+        // value) only if local-IP detection fails entirely; in that
+        // pathological case host_tool will still error, but at least
+        // the previous "boardroom-mode-only" footgun is gone.
+        //
+        // `SMOOTH_NARC_URL` env override still wins — useful for
+        // tests or for pointing several boards at a shared Narc.
         let narc_url = if let Ok(override_url) = std::env::var("SMOOTH_NARC_URL") {
             if override_url.trim().is_empty() {
                 None
@@ -1436,7 +1483,11 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
                 Some(override_url)
             }
         } else {
-            Some("http://host.containers.internal:4400".to_string())
+            let host_ip = detect_routable_host_ip().unwrap_or_else(|| {
+                tracing::warn!("could not detect a routable host IP for SMOOTH_NARC_URL; falling back to 127.0.0.1 (host_tool calls from inside the sandbox will not work)");
+                "127.0.0.1".to_string()
+            });
+            Some(format!("http://{host_ip}:4400"))
         };
         if let Some(ref url) = narc_url {
             tracing::info!(task_id = tid, url = %url, "operator env: SMOOTH_NARC_URL set");
