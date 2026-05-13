@@ -123,9 +123,25 @@ notes = "Or `th pearls ready` for unblocked work, `th pearls show <id>` for deta
 fallback = ""
 
 [[hint]]
-intent = "check if a host is reachable"
-keywords = ["ping", "is it up", "is X up", "check host", "reach", "alive", "smoo-hub", "tailscale", "internal host"]
+intent = "ping a host"
+keywords = ["ping", "ICMP", "is it alive", "is X alive"]
+preferred = "host_tool with ping"
+command = "host_tool({tool: \"ping\", args: [\"-c\", \"3\", \"-W\", \"2000\", \"<HOSTNAME>\"]})"
+notes = "ICMP is NOT routable from inside the sandbox (smoltcp proxy is TCP-only). Run it on Big Smooth's host instead via host_tool. Exit 0 + 'X packets received' = host is up; exit non-zero = unreachable. Treat bare hostnames literally — `smoo-hub` is `smoo-hub`, not `smoo-hub.com`. Do NOT substitute `curl http://<host>` for `ping <host>` — curl on port 80 fails on hosts that simply don't run HTTP, which is NOT proof the host is down."
+fallback = ""
+
+[[hint]]
+intent = "check if a host is reachable on a port"
+keywords = ["is it up", "is X up", "check host", "reach", "service status", "tailscale", "internal host"]
 preferred = "host_tool with curl"
 command = "host_tool({tool: \"curl\", args: [\"-fsS\", \"-o\", \"/dev/null\", \"-w\", \"%{http_code}\", \"http://<HOSTNAME>\"]})"
-notes = "The sandbox has NO Tailscale routing and NO ICMP — `bash ping` won't reach private/internal hosts. Big Smooth's HOST machine does have Tailscale, so `host_tool` with `curl` is the right path for any internal hostname (e.g. `smoo-hub`). Treat bare hostnames (`smoo-hub`, `marvin`) as literal — do NOT append `.com` or guess a TLD. Use `-fsS -o /dev/null -w '%{http_code}'` for a clean up/down probe. There is NO `http_fetch` tool — if you find yourself wanting one, use `host_tool` with `curl`."
+notes = "For HTTP/HTTPS service reachability — returns the status code (200/503/etc). Empty / curl-error means the port didn't answer; the host may still be alive on ICMP (try `ping` next if the user actually asked about host reachability rather than service reachability). There is NO `http_fetch` tool — if you find yourself wanting one, use `host_tool` with `curl`."
 fallback = ""
+
+[[hint]]
+intent = "resolve a hostname"
+keywords = ["resolve", "DNS", "nslookup", "dig", "what IP"]
+preferred = "host_tool with dig"
+command = "host_tool({tool: \"dig\", args: [\"+short\", \"<HOSTNAME>\"]})"
+notes = "`dig +short` returns just the IPs, one per line. Use `host` or `nslookup` if dig isn't installed. Host machine's DNS resolver knows Tailscale / /etc/hosts entries the sandbox doesn't."
+fallback = "host_tool({tool: \"host\", args: [\"<HOSTNAME>\"]})"

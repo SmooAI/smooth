@@ -57,7 +57,19 @@ pub struct HostExecResponse {
     pub truncated: bool,
 }
 
-const DEFAULT_ALLOWLIST: &[&str] = &["gh", "git", "kubectl", "jq", "curl"];
+const DEFAULT_ALLOWLIST: &[&str] = &[
+    "gh", "git", "kubectl", "jq", "curl",
+    // Pearl th-c366ff continuation (2026-05-12): "ping" really means
+    // ICMP ping, not "curl as a stand-in". The sandbox's smoltcp
+    // proxy is TCP-only — there's no path for ICMP from inside the
+    // guest. Letting the agent shell out to `ping` on the HOST via
+    // host_tool gives a real reachability answer (and host has
+    // Tailscale, so `ping smoo-hub` works there). `ping` is
+    // reconnaissance-only, no host-state mutation, low risk.
+    "ping", // DNS lookup helpers — same shape, no mutation, useful for
+    // "what does <host> resolve to?" / "is DNS working?".
+    "dig", "nslookup", "host",
+];
 const TIMEOUT: Duration = Duration::from_secs(30);
 const OUTPUT_CAP: usize = 8 * 1024;
 

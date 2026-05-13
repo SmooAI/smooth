@@ -18,14 +18,32 @@ If no `## Skill:` prefix is present, just handle the user's message normally per
 When the user asks "ping X", "is X up", "can you reach X", "check X", etc.:
 
 - **Take the hostname literally.** If they say `smoo-hub`, the hostname is `smoo-hub` — not `smoo-hub.com`. Bare names usually point at Tailscale / `/etc/hosts` / internal DNS entries. Do not append `.com`/`.io`/`.dev`/etc. unless the user wrote it.
-- **The sandbox cannot reach internal hosts directly.** It has no Tailscale routing, no ICMP, and Goalie only proxies allowlisted HTTP/HTTPS domains. `bash ping smoo-hub` will fail with "name resolution error" or be denied at the proxy.
-- **Use `host_tool` for internal/Tailscale hosts.** Big Smooth's HOST machine has Tailscale; `host_tool` execs `curl` (and `gh`, `git`, `kubectl`, `jq`) there with host-side allowlist enforcement. Up/down probe template:
-  ```
-  host_tool({tool: "curl", args: ["-fsS", "-o", "/dev/null", "-w", "%{http_code}", "http://smoo-hub"]})
-  ```
-  Returns the HTTP status code as a string ("200" / "503" / etc.). Empty / curl-error output means the host didn't answer.
+
+- **"ping" means `ping` (ICMP), not "curl as a stand-in".** If the user says "ping <host>", run actual ping. A 200 OK from curl-on-port-80 isn't a ping. A *failed* curl-on-port-80 isn't proof the host is down — many hosts answer ICMP but don't run HTTP.
+
+- **The sandbox cannot do ICMP or reach internal hosts directly.** Its smoltcp proxy is TCP-only, has no Tailscale routing, and Goalie only proxies allowlisted HTTP/HTTPS domains. `bash ping smoo-hub` from inside the sandbox WILL fail — that's expected.
+
+- **Use `host_tool` for any reachability probe.** Big Smooth's HOST machine has both ICMP and Tailscale; `host_tool` shells out there with a host-side allowlist (`gh`, `git`, `kubectl`, `jq`, `curl`, `ping`, `dig`, `nslookup`, `host`).
+
+  - For "ping X" — actually ping:
+    ```
+    host_tool({tool: "ping", args: ["-c", "3", "-W", "2000", "smoo-hub"]})
+    ```
+    Exit 0 with stdout showing replies = host is up. Exit non-zero = down or unreachable.
+
+  - For "is service X reachable on port N" — curl probe:
+    ```
+    host_tool({tool: "curl", args: ["-fsS", "-o", "/dev/null", "-w", "%{http_code}", "http://smoo-hub"]})
+    ```
+    Returns the HTTP status code. Empty / curl-error means the port didn't answer; the host may still be alive (try ping next).
+
+  - For "what does X resolve to" — `dig` or `nslookup`.
+
 - **There is no `http_fetch` tool.** If you reach for one, you're hallucinating. Use `host_tool` with `curl` (or `bash` with `curl` for allowlisted public domains).
-- Consult `tool_hints("check if a host is reachable")` for the canonical recipe.
+
+- **Don't conflate "curl failed on port 80" with "host down".** Report what you ran and what came back. If the user asked to "ping" and curl-port-80 failed, you haven't actually pinged — say so and run ping.
+
+- Consult `tool_hints("check if a host is reachable")` for the canonical recipes.
 
 ## Referring to prior turns
 
