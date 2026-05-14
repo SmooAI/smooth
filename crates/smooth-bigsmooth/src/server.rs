@@ -2678,6 +2678,24 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
                 cmd.env("SMOOTH_HOME", smooth_home.to_string_lossy().as_ref());
             }
         }
+        // Point the runner's in-process Wonk at Big Smooth's
+        // Boardroom Narc so the direct path gets parity with the
+        // sandboxed path. Without this the runner's Wonk has no
+        // arbiter and hard-denies every request its local policy
+        // can't auto-approve — the agent then has no path to the
+        // Claude-Code-style auto-mode prompts because the call dies
+        // before reaching the AccessStore. Pearl th-e96aeb.
+        //
+        // Localhost is fine here because the runner is running
+        // directly on the host (no microVM); SMOOTH_BIGSMOOTH_URL
+        // overrides if Big Smooth is reachable at a non-default
+        // location (test harnesses, dev cluster setups).
+        let narc_url_for_direct = resolve_direct_dispatch_narc_url(
+            std::env::var("SMOOTH_NARC_URL").ok().as_deref(),
+            std::env::var("SMOOTH_BIGSMOOTH_URL").ok().as_deref(),
+        );
+        cmd.env("SMOOTH_NARC_URL", &narc_url_for_direct);
+        tracing::info!(task_id = %tid, narc_url = %narc_url_for_direct, "direct dispatch: runner Wonk wired to Boardroom Narc");
         cmd.current_dir(&workspace_canon)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -2872,6 +2890,33 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
 /// string on any parse failure; callers treat empty as "no
 /// substitution" (the placeholder never gets expanded on the wire,
 /// which is safer than expanding on the wrong host).
+/// Pick the URL to point the direct-dispatch runner's in-process Wonk
+/// at for Narc escalations. Precedence:
+///   1. `SMOOTH_NARC_URL` (caller override — test harnesses, shared
+///      Narc setups)
+///   2. `SMOOTH_BIGSMOOTH_URL` (general Big Smooth address override)
+///   3. `http://127.0.0.1:4400` (the default Big Smooth bind)
+///
+/// Empty / whitespace-only strings are treated as "unset" rather than
+/// blowing away the fallback — a common mistake in shell scripts that
+/// `export FOO=` without a value.
+///
+/// Pearl th-e96aeb.
+fn resolve_direct_dispatch_narc_url(narc_url: Option<&str>, bigsmooth_url: Option<&str>) -> String {
+    let non_empty = |s: &str| {
+        let t = s.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
+    };
+    narc_url
+        .and_then(non_empty)
+        .or_else(|| bigsmooth_url.and_then(non_empty))
+        .unwrap_or_else(|| "http://127.0.0.1:4400".into())
+}
+
 fn extract_host_from_url(url: &str) -> String {
     let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
     // Strip userinfo ("user:pass@").
@@ -4802,6 +4847,38 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use tower::ServiceExt;
+
+    #[test]
+    fn resolve_direct_dispatch_narc_url_prefers_explicit_narc() {
+        let got = resolve_direct_dispatch_narc_url(Some("http://narc.example/x"), Some("http://bs.example"));
+        assert_eq!(got, "http://narc.example/x");
+    }
+
+    #[test]
+    fn resolve_direct_dispatch_narc_url_falls_back_to_bigsmooth() {
+        let got = resolve_direct_dispatch_narc_url(None, Some("http://bs.example"));
+        assert_eq!(got, "http://bs.example");
+    }
+
+    #[test]
+    fn resolve_direct_dispatch_narc_url_default_is_localhost() {
+        let got = resolve_direct_dispatch_narc_url(None, None);
+        assert_eq!(got, "http://127.0.0.1:4400");
+    }
+
+    #[test]
+    fn resolve_direct_dispatch_narc_url_treats_empty_as_unset() {
+        // Common shell footgun: `export SMOOTH_NARC_URL=` without a
+        // value. The empty string should NOT win — fall through.
+        let got = resolve_direct_dispatch_narc_url(Some(""), Some("http://bs.example"));
+        assert_eq!(got, "http://bs.example");
+        // Whitespace-only is also treated as unset.
+        let got = resolve_direct_dispatch_narc_url(Some("   "), Some("http://bs.example"));
+        assert_eq!(got, "http://bs.example");
+        // Same precedence for the bigsmooth override.
+        let got = resolve_direct_dispatch_narc_url(None, Some(""));
+        assert_eq!(got, "http://127.0.0.1:4400");
+    }
 
     #[test]
     fn extract_host_handles_common_shapes() {
