@@ -334,15 +334,23 @@ async fn check_network(State(state): State<Arc<AppState>>, Json(req): Json<Netwo
                 reason: format!("Narc denied: {}", decision.reason),
             })
         }
-        Decision::EscalateToHuman => {
+        Decision::EscalateToHuman | Decision::Ask => {
+            // Ask + EscalateToHuman share the same wire semantics in Wonk:
+            // fail closed at the request boundary. The orchestrator (Big
+            // Smooth's BoardroomNarc) is responsible for holding the call
+            // open and awaiting a human resolution before returning to
+            // Wonk — so any Ask that reaches here means resolution timed
+            // out, errored, or no UI is attached. Either way: deny now,
+            // the agent's retry policy decides what to do next.
             tracing::warn!(
                 domain = %req.domain,
                 reason = %decision.reason,
-                "network check: Narc escalated to human — failing closed"
+                verdict = ?decision.decision,
+                "network check: Narc human-gated — failing closed"
             );
             Json(CheckResponse {
                 allowed: false,
-                reason: format!("Narc escalated to human (fail closed): {}", decision.reason),
+                reason: format!("Narc {} (fail closed): {}", decision.decision_label(), decision.reason),
             })
         }
     }
@@ -576,11 +584,19 @@ async fn check_cli(State(state): State<Arc<AppState>>, Json(req): Json<CliCheck>
                 reason: format!("Narc denied: {}", decision.reason),
             })
         }
-        Decision::EscalateToHuman => {
-            tracing::warn!(command = %req.command, reason = %decision.reason, "cli escalated by Narc — failing closed");
+        Decision::EscalateToHuman | Decision::Ask => {
+            // See the analogous arm in `check_network` — Wonk treats both
+            // human-gated verdicts identically: fail closed. Resolution
+            // is the orchestrator's job, upstream of Wonk.
+            tracing::warn!(
+                command = %req.command,
+                reason = %decision.reason,
+                verdict = ?decision.decision,
+                "cli check: Narc human-gated — failing closed"
+            );
             Json(CheckResponse {
                 allowed: false,
-                reason: format!("Narc escalated to human (fail closed): {}", decision.reason),
+                reason: format!("Narc {} (fail closed): {}", decision.decision_label(), decision.reason),
             })
         }
     }

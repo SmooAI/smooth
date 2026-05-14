@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use smooth_narc::judge::{Decision, JudgeDecision, JudgeRequest};
+use smooth_narc::judge::{JudgeDecision, JudgeRequest};
 
 /// HTTP client that speaks to the Boardroom Narc `/api/narc/judge` endpoint.
 #[derive(Debug, Clone)]
@@ -54,32 +54,14 @@ impl NarcClient {
             Ok(resp) => {
                 let status = resp.status();
                 if !status.is_success() {
-                    return JudgeDecision {
-                        decision: Decision::EscalateToHuman,
-                        confidence: 0.0,
-                        reason: format!("Narc returned HTTP {status}; failing closed"),
-                        add_to_allowlist_glob: None,
-                        cache_ttl_seconds: None,
-                    };
+                    return JudgeDecision::escalate(format!("Narc returned HTTP {status}; failing closed"));
                 }
                 match resp.json::<JudgeDecision>().await {
                     Ok(decision) => decision,
-                    Err(e) => JudgeDecision {
-                        decision: Decision::EscalateToHuman,
-                        confidence: 0.0,
-                        reason: format!("failed to parse Narc response: {e}"),
-                        add_to_allowlist_glob: None,
-                        cache_ttl_seconds: None,
-                    },
+                    Err(e) => JudgeDecision::escalate(format!("failed to parse Narc response: {e}")),
                 }
             }
-            Err(e) => JudgeDecision {
-                decision: Decision::EscalateToHuman,
-                confidence: 0.0,
-                reason: format!("Narc unreachable at {}: {e}", self.base_url),
-                add_to_allowlist_glob: None,
-                cache_ttl_seconds: None,
-            },
+            Err(e) => JudgeDecision::escalate(format!("Narc unreachable at {}: {e}", self.base_url)),
         }
     }
 }
@@ -87,7 +69,7 @@ impl NarcClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smooth_narc::judge::JudgeKind;
+    use smooth_narc::judge::{Decision, JudgeKind};
 
     fn req(domain: &str) -> JudgeRequest {
         JudgeRequest {

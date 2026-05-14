@@ -331,6 +331,13 @@ fn parse_judge_response(content: &str) -> anyhow::Result<JudgeDecision> {
     let decision = match raw.decision.to_ascii_lowercase().as_str() {
         "approve" | "allow" | "accept" => Decision::Approve,
         "deny" | "reject" | "block" => Decision::Deny,
+        // `ask` is the new auto-mode form (pearl th-49b4aa). The judge
+        // prompt may or may not have learned about it yet, so accept both
+        // `ask` and the legacy `escalate*` family as the same human-gated
+        // verdict. The shaping decision (which one to emit) lives in
+        // `coerce_by_confidence` and the upcoming caller-side mapping —
+        // here we just decode what the model gave us.
+        "ask" | "ask_human" | "askhuman" => Decision::Ask,
         "escalate" | "escalate_to_human" | "human" | "uncertain" => Decision::EscalateToHuman,
         other => return Err(anyhow::anyhow!("unknown decision value: {other}")),
     };
@@ -341,7 +348,10 @@ fn parse_judge_response(content: &str) -> anyhow::Result<JudgeDecision> {
     let cache_ttl_seconds = match decision {
         Decision::Approve => Some(3600),
         Decision::Deny => Some(300),
-        Decision::EscalateToHuman => None,
+        // Human-gated verdicts are bound to a specific request and a
+        // specific human resolution — caching them would mask future
+        // policy intent. Always re-ask.
+        Decision::Ask | Decision::EscalateToHuman => None,
     };
 
     Ok(JudgeDecision {
@@ -350,6 +360,14 @@ fn parse_judge_response(content: &str) -> anyhow::Result<JudgeDecision> {
         reason,
         add_to_allowlist_glob: raw.add_to_allowlist_glob,
         cache_ttl_seconds,
+        // The LLM judge doesn't pick scope options yet — that's a Phase B
+        // refinement once the TUI surfaces them. For now, any Ask the
+        // judge emits offers the full default ladder.
+        scope_options: if matches!(decision, Decision::Ask) {
+            smooth_narc::judge::Scope::default_options()
+        } else {
+            Vec::new()
+        },
     })
 }
 
@@ -483,6 +501,7 @@ mod tests {
             reason: "kinda safe".into(),
             add_to_allowlist_glob: None,
             cache_ttl_seconds: Some(60),
+            scope_options: Vec::new(),
         };
         let coerced = narc.coerce_by_confidence(approval);
         assert_eq!(coerced.decision, Decision::EscalateToHuman);
@@ -497,6 +516,7 @@ mod tests {
             reason: "clearly fine".into(),
             add_to_allowlist_glob: None,
             cache_ttl_seconds: Some(60),
+            scope_options: Vec::new(),
         };
         let coerced = narc.coerce_by_confidence(approval);
         assert_eq!(coerced.decision, Decision::Approve);
