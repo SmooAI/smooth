@@ -483,6 +483,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/search", get(search_handler))
         // Web search — native tool backed by DuckDuckGo HTML. Pearl th-70b68b.
         .route("/api/web_search", get(web_search_handler))
+        // Credential broker — mints short-lived creds for the sandbox
+        // after a human approves. Pearl th-08b65f.
+        .route("/api/creds/issue", post(creds_issue_handler))
         // Steering
         .route("/api/steering/{bead_id}/pause", post(pause_handler))
         .route("/api/steering/{bead_id}/resume", post(resume_handler))
@@ -4542,6 +4545,148 @@ async fn access_stream_handler(State(state): State<AppState>) -> Sse<impl Stream
         }
     });
     Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(15)))
+}
+
+// ── Credential broker ──────────────────────────────────────
+//
+// `/api/creds/issue` mints a short-lived credential for the sandbox.
+// The flow mirrors every other auto-mode gate: check persistent
+// grants, fall through to an AccessStore Ask, on approve mint.
+// Pearl th-08b65f.
+
+#[derive(Deserialize)]
+struct CredsIssueBody {
+    /// Server URL the sandbox needs creds for (Docker
+    /// credential-helper spec calls this `ServerURL`).
+    #[serde(rename = "ServerURL", alias = "server_url", alias = "server")]
+    server_url: String,
+    /// Read vs write scope hint — affects the backend's mint shape
+    /// (PAT scopes / STS role) in future versions. Defaults to read.
+    #[serde(default)]
+    scope_hint: crate::creds::ScopeHint,
+    /// Optional bead_id for audit + AccessStore correlation. Defaults
+    /// empty.
+    #[serde(default)]
+    bead_id: String,
+    /// Optional operator id for audit. Defaults empty.
+    #[serde(default)]
+    operator_id: String,
+}
+
+async fn creds_issue_handler(
+    State(state): State<AppState>,
+    Json(body): Json<CredsIssueBody>,
+) -> Result<Json<crate::creds::Credential>, (axum::http::StatusCode, String)> {
+    state.touch();
+    let server_url = body.server_url.trim().to_string();
+    if server_url.is_empty() {
+        return Err((axum::http::StatusCode::BAD_REQUEST, "server_url is required".into()));
+    }
+
+    // Fast path: the user already approved this host at scope=user
+    // (or scope=project) and the grant lives in wonk-allow.toml.
+    // Mint without filing a pending request.
+    if grants_cover_host(&state.wonk_grants.snapshot(), &server_url) {
+        return mint_and_log(&server_url, body.scope_hint).await.map(Json);
+    }
+
+    // Slow path: file an AccessStore Ask so the human can decide
+    // inline. The scope ladder is the same Once/Session/Project/User
+    // every other tool gate uses; for credentials, `Once` means
+    // "this one mint", `Session` means "this VM's lifetime", and
+    // Project / User write the grant into wonk-allow.toml.
+    let req = smooth_narc::NewAccessRequest {
+        bead_id: body.bead_id.clone(),
+        operator_id: body.operator_id.clone(),
+        kind: "creds".into(),
+        resource: server_url.clone(),
+        detail: Some(format!("scope_hint={:?}", body.scope_hint)),
+        reason: format!("sandbox wants credential for {server_url}"),
+        scope_options: smooth_narc::judge::Scope::default_options(),
+    };
+    let (id, fut) = state.access.file_pending(req);
+    // 60s aligns with BoardroomNarc's ASK_HOLD_TIMEOUT — same
+    // human-attention budget.
+    let Some(resolution) = fut.await_resolution_with_timeout(std::time::Duration::from_secs(60)).await else {
+        let _ = state.access.expire(&id);
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "credential request timed out without human resolution".into(),
+        ));
+    };
+
+    if !matches!(resolution.verdict, smooth_narc::ResolutionVerdict::Approve) {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            format!("credential request denied at scope {}", resolution.scope.as_str()),
+        ));
+    }
+
+    // Persist project / user grants so subsequent mints for the same
+    // server skip the prompt. We store the server's host as a
+    // network grant so a single approval flows to both `web_search` /
+    // curl gates AND future credential mints.
+    if matches!(resolution.scope, smooth_narc::judge::Scope::User | smooth_narc::judge::Scope::PearlProject) {
+        if let Some(path) = crate::wonk_grants::user_grants_path() {
+            if let Some(host) = url_host(&server_url) {
+                let _ = crate::wonk_grants::append_grant(&path, "network", &host, None);
+                if let Ok(fresh) = crate::wonk_grants::WonkGrants::load_from_path(&path) {
+                    state.wonk_grants.merge_in(fresh);
+                }
+            }
+        }
+    }
+
+    mint_and_log(&server_url, body.scope_hint).await.map(Json)
+}
+
+/// Mint via the appropriate backend and log the (sanitized) outcome.
+/// The secret never appears in the log — only the server URL +
+/// success/fail.
+async fn mint_and_log(server_url: &str, scope: crate::creds::ScopeHint) -> Result<crate::creds::Credential, (axum::http::StatusCode, String)> {
+    match crate::creds::mint(server_url, scope).await {
+        Ok(cred) => {
+            tracing::info!(server = %server_url, "creds: minted credential");
+            Ok(cred)
+        }
+        Err(e) => {
+            tracing::warn!(server = %server_url, error = %e, "creds: mint failed");
+            let status = match e {
+                crate::creds::CredsError::UnsupportedServer { .. } => axum::http::StatusCode::BAD_REQUEST,
+                crate::creds::CredsError::MintFailed { .. } => axum::http::StatusCode::BAD_GATEWAY,
+                crate::creds::CredsError::Denied { .. } => axum::http::StatusCode::FORBIDDEN,
+            };
+            Err((status, e.to_string()))
+        }
+    }
+}
+
+/// True if `wonk-allow.toml` has a network grant that covers the
+/// server's host. Reused from the network gate's matcher so a host
+/// approved for `web_search` etc. flows naturally to creds.
+fn grants_cover_host(grants: &crate::wonk_grants::WonkGrants, server_url: &str) -> bool {
+    let Some(host) = url_host(server_url) else {
+        return false;
+    };
+    grants.matches_host(&host)
+}
+
+/// Extract a bare host from a URL — `https://github.com/foo` →
+/// `github.com`. Pure (no env / FS lookups) so it can be a `fn`.
+fn url_host(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let without_scheme = trimmed.split_once("://").map(|(_, rest)| rest).unwrap_or(trimmed);
+    let after_userinfo = without_scheme.rsplit_once('@').map(|(_, rest)| rest).unwrap_or(without_scheme);
+    let host_with_port = after_userinfo.split(['/', '?', '#']).next()?;
+    let host = host_with_port.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_with_port);
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
 }
 
 // ── Web search ─────────────────────────────────────────────

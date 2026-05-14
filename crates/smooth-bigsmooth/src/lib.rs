@@ -5,6 +5,7 @@ pub mod audit;
 pub mod boardroom;
 pub mod boardroom_narc;
 pub mod chat_tools;
+pub mod creds;
 pub mod host_tools;
 pub mod teammates;
 
