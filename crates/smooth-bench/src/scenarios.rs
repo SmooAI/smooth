@@ -88,6 +88,73 @@ pub struct ScenarioMeta {
     /// doesn't hang the whole bench loop.
     #[serde(default = "default_turn_timeout_s")]
     pub turn_timeout_s: u64,
+    /// What to do when an Ask fires during the scenario run.
+    /// Defaults to `deny` — bench runs are unattended and the safe
+    /// default is to refuse anything the agent didn't have a
+    /// pre-approved grant for. Override per-scenario when the test
+    /// *wants* to exercise the auto-approve path. Pearl th-400773.
+    #[serde(default)]
+    pub auto_approve: AutoApprove,
+}
+
+/// How a bench scenario resolves Asks raised by Boardroom Narc
+/// during the run. Mirrors the CLI's `--auto-approve` flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoApprove {
+    /// Deny every Ask. The safe default for unattended runs.
+    #[default]
+    Deny,
+    /// Approve at scope=once. The narrowest possible auto-approve
+    /// — re-asks on the next request.
+    Once,
+    /// Approve at scope=session. Subsequent identical asks within
+    /// the same scenario run skip the prompt.
+    Session,
+    /// Approve at scope=project. Writes the grant to the project's
+    /// wonk-allow.toml — most bench scenarios should NOT pick this
+    /// because it pollutes the project's persistent state.
+    Project,
+    /// Approve at scope=user. Even more invasive than project; left
+    /// here for completeness but bench scenarios almost never want
+    /// it.
+    User,
+}
+
+impl AutoApprove {
+    /// Parse from the CLI flag form (`once`, `session`, `project`,
+    /// `user`, `deny`). Case-insensitive. Returns `None` for unknown
+    /// values so the caller can render a clear error.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "deny" => Some(Self::Deny),
+            "once" => Some(Self::Once),
+            "session" => Some(Self::Session),
+            "project" | "pearl_project" | "pearl-project" => Some(Self::Project),
+            "user" => Some(Self::User),
+            _ => None,
+        }
+    }
+
+    /// Stable string form for logs and the CLI flag.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Deny => "deny",
+            Self::Once => "once",
+            Self::Session => "session",
+            Self::Project => "project",
+            Self::User => "user",
+        }
+    }
+
+    /// True if this mode should deny pending Asks rather than
+    /// approve them.
+    #[must_use]
+    pub fn is_deny(self) -> bool {
+        matches!(self, Self::Deny)
+    }
 }
 
 fn default_agent() -> String {
@@ -147,6 +214,34 @@ pub enum Assertion {
     /// hallucinated-fix loop — `write_file` should not appear in
     /// a `commit-to-main` scenario response.
     ToolNotCalled { name: String },
+    /// An Ask was filed against the AccessStore during this turn.
+    /// The TUI / bench harness should observe the request for
+    /// `ask_for` (typically a hostname or tool name) and resolve
+    /// it at `resolve_with` scope (`once`/`session`/`project`/
+    /// `user`/`deny`). When `must_fire` is true, the absence of a
+    /// matching pending request fails the assertion — proves the
+    /// gating layer actually triggered. When false, the assertion
+    /// passes if the request was either resolved correctly OR
+    /// never fired (e.g. because a persistent grant covered it).
+    /// Pearl th-400773.
+    Permission {
+        /// Resource the Ask should mention — host for network,
+        /// tool name for tool, command for cli. Substring match
+        /// case-insensitive.
+        ask_for: String,
+        /// Resolution to apply: `once` / `session` / `project` /
+        /// `user` / `deny`. Same vocabulary as the CLI flag.
+        resolve_with: String,
+        /// When true (default), the assertion fails if no matching
+        /// Ask appeared. When false, only the resolution shape is
+        /// checked.
+        #[serde(default = "default_must_fire")]
+        must_fire: bool,
+    },
+}
+
+fn default_must_fire() -> bool {
+    true
 }
 
 /// Read and parse a scenario from `<dir>/scenario.toml`. The
@@ -338,10 +433,15 @@ strings = ["postgres"]
 kind = "command_proposed"
 language = "bash"
 contains_any = ["git commit", "git add"]
+
+[[turns.assert]]
+kind = "permission"
+ask_for = "api.openai.com"
+resolve_with = "session"
 "#;
         let s = parse_scenario(raw).expect("parse");
         let kinds: Vec<&Assertion> = s.turns[0].assertions.iter().collect();
-        assert_eq!(kinds.len(), 7);
+        assert_eq!(kinds.len(), 8);
         // Spot-check each variant landed in the right shape.
         assert!(matches!(kinds[0], Assertion::IntentRole { .. }));
         assert!(matches!(kinds[1], Assertion::ToolCalled { .. }));
@@ -350,6 +450,105 @@ contains_any = ["git commit", "git add"]
         assert!(matches!(kinds[4], Assertion::ResponseContainsAll { .. }));
         assert!(matches!(kinds[5], Assertion::ResponseDoesNotContain { .. }));
         assert!(matches!(kinds[6], Assertion::CommandProposed { .. }));
+        match kinds[7] {
+            Assertion::Permission {
+                ask_for,
+                resolve_with,
+                must_fire,
+            } => {
+                assert_eq!(ask_for, "api.openai.com");
+                assert_eq!(resolve_with, "session");
+                assert!(must_fire, "must_fire defaults to true");
+            }
+            other => panic!("expected Permission, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn permission_assertion_must_fire_can_be_overridden() {
+        let raw = r#"
+[meta]
+title = "T"
+description = "D"
+
+[[turns]]
+input = "x"
+
+[[turns.assert]]
+kind = "permission"
+ask_for = "api.example.com"
+resolve_with = "deny"
+must_fire = false
+"#;
+        let s = parse_scenario(raw).expect("parse");
+        match &s.turns[0].assertions[0] {
+            Assertion::Permission { must_fire, .. } => assert!(!*must_fire),
+            other => panic!("unexpected variant {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auto_approve_defaults_to_deny() {
+        let s = parse_scenario(minimal_toml()).expect("parse");
+        assert_eq!(s.meta.auto_approve, AutoApprove::Deny);
+        assert!(s.meta.auto_approve.is_deny());
+    }
+
+    #[test]
+    fn auto_approve_can_be_set_in_meta() {
+        let raw = r#"
+[meta]
+title = "T"
+description = "D"
+auto_approve = "session"
+
+[[turns]]
+input = "x"
+"#;
+        let s = parse_scenario(raw).expect("parse");
+        assert_eq!(s.meta.auto_approve, AutoApprove::Session);
+        assert!(!s.meta.auto_approve.is_deny());
+    }
+
+    #[test]
+    fn auto_approve_parses_canonical_forms() {
+        assert_eq!(AutoApprove::parse("deny"), Some(AutoApprove::Deny));
+        assert_eq!(AutoApprove::parse("once"), Some(AutoApprove::Once));
+        assert_eq!(AutoApprove::parse("session"), Some(AutoApprove::Session));
+        assert_eq!(AutoApprove::parse("project"), Some(AutoApprove::Project));
+        assert_eq!(AutoApprove::parse("user"), Some(AutoApprove::User));
+        // Aliases.
+        assert_eq!(AutoApprove::parse("pearl_project"), Some(AutoApprove::Project));
+        assert_eq!(AutoApprove::parse("Pearl-Project"), Some(AutoApprove::Project));
+        // Case-insensitive.
+        assert_eq!(AutoApprove::parse("SESSION"), Some(AutoApprove::Session));
+        // Unknown returns None so the caller can render a clear error.
+        assert_eq!(AutoApprove::parse("forever"), None);
+        assert_eq!(AutoApprove::parse(""), None);
+    }
+
+    #[test]
+    fn auto_approve_round_trips_through_as_str_and_parse() {
+        for mode in [
+            AutoApprove::Deny,
+            AutoApprove::Once,
+            AutoApprove::Session,
+            AutoApprove::Project,
+            AutoApprove::User,
+        ] {
+            let s = mode.as_str();
+            assert_eq!(AutoApprove::parse(s), Some(mode), "round-trip {s}");
+        }
+    }
+
+    #[test]
+    fn auto_approve_serde_uses_snake_case() {
+        // The TOML schema treats `pearl_project` as the canonical
+        // wire form for Project — match smooth_narc::judge::Scope
+        // exactly.
+        assert_eq!(serde_json::to_string(&AutoApprove::Project).unwrap(), "\"project\"");
+        let m: AutoApprove = serde_json::from_str("\"session\"").unwrap();
+        assert_eq!(m, AutoApprove::Session);
     }
 
     #[test]

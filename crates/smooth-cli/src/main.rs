@@ -223,6 +223,13 @@ enum Commands {
         /// out with the list above.
         #[arg(long)]
         agent: Option<String>,
+        /// How to resolve Boardroom Narc `Ask` verdicts that fire
+        /// during an unattended (headless / bench) run. One of
+        /// `deny` / `once` / `session` / `project` / `user`.
+        /// Default `deny` — unattended runs are safe by default
+        /// (asks turn into denials). Pearl th-400773.
+        #[arg(long, value_name = "MODE", default_value = "deny")]
+        auto_approve: String,
     },
     /// Git hook management (install, run).
     Hooks {
@@ -868,7 +875,21 @@ async fn main() -> Result<()> {
         // so `th --resume` / `th --list` / `th --agent X` work without
         // needing to type `th code …` (pearl th-resume-top-level
         // 2026-05-12 per user request).
-        None => cmd_code(false, None, None, None, None, false, cli.resume.clone(), cli.list, cli.agent.clone()).await,
+        None => {
+            cmd_code(
+                false,
+                None,
+                None,
+                None,
+                None,
+                false,
+                cli.resume.clone(),
+                cli.list,
+                cli.agent.clone(),
+                "deny".to_string(),
+            )
+            .await
+        }
         Some(Commands::Code {
             headless,
             message,
@@ -879,7 +900,8 @@ async fn main() -> Result<()> {
             resume,
             list,
             agent,
-        }) => cmd_code(headless, message, file, model, budget, json, resume, list, agent).await,
+            auto_approve,
+        }) => cmd_code(headless, message, file, model, budget, json, resume, list, agent, auto_approve).await,
         Some(Commands::Doctor { init_home_repo, remote }) => {
             if init_home_repo {
                 cmd_doctor_init_home_repo(remote.as_deref())
@@ -2167,11 +2189,31 @@ async fn cmd_code(
     resume: Option<String>,
     list: bool,
     agent: Option<String>,
+    auto_approve: String,
 ) -> Result<()> {
     // Validate the agent name at CLI time so a typo doesn't waste a
     // runner spin-up. The value flows into the TUI's status bar and
     // into dispatch's `agent` field when the user sends a message.
     let agent_name = resolve_primary_agent(agent.as_deref())?;
+    // Validate the auto-approve mode at CLI time too. We pin the
+    // string to one of the known forms early so a typo doesn't
+    // silently fall through to "deny" later. Pearl th-400773.
+    let auto_approve_mode = smooth_bench::scenarios::AutoApprove::parse(&auto_approve)
+        .ok_or_else(|| anyhow::anyhow!("unknown --auto-approve mode '{auto_approve}': expected one of deny/once/session/project/user"))?;
+
+    // Headless / unattended runs need someone to resolve Asks. The
+    // interactive TUI already handles this through its inline
+    // approval cards; headless mode spawns a tokio task that polls
+    // `/api/access/pending` and resolves per the configured mode.
+    // For interactive runs we leave it dormant so the TUI's own
+    // resolver flow wins.
+    let _auto_approve_handle = if headless {
+        let base = std::env::var("SMOOTH_BIGSMOOTH_URL").unwrap_or_else(|_| "http://127.0.0.1:4400".into());
+        tracing::info!(mode = auto_approve_mode.as_str(), "headless: auto-approve resolver active");
+        Some(smooth_bench::auto_approve::spawn_resolver(base, auto_approve_mode))
+    } else {
+        None
+    };
     // `--list` short-circuits everything else and prints a simple
     // table of saved sessions, newest first, then exits without
     // launching the TUI.

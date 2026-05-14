@@ -5409,6 +5409,7 @@ version = "0.13.5"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum",
  "chrono",
  "clap",
  "dirs-next",
@@ -5421,6 +5422,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "tracing",
  "uuid",
 ]
 
