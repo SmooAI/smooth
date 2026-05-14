@@ -29,6 +29,7 @@ use smooth_narc::judge::{rule_engine_decide, Decision, DecisionCache, JudgeDecis
 use smooth_operator::llm::{LlmClient, LlmConfig};
 
 use crate::access::{AccessStore, NewAccessRequest, ResolutionVerdict};
+use crate::wonk_grants::SharedWonkGrants;
 
 /// Default confidence floor. LLM verdicts below this are rewritten to
 /// `EscalateToHuman` — Narc won't auto-approve something it isn't sure
@@ -39,10 +40,12 @@ pub const DEFAULT_ESCALATION_THRESHOLD: f32 = 0.7;
 /// judge prompt. Longer summaries are truncated with an ellipsis.
 pub const MAX_TASK_SUMMARY_CHARS: usize = 600;
 
-/// How long Narc holds an `Ask` request open while waiting for a human
-/// resolution before giving up and returning `EscalateToHuman` (fail
-/// closed). 60s is long enough for the human to alt-tab to the TUI and
-/// pick a scope; tools that would block longer should be redesigned.
+/// How long Narc holds an `Ask` open before failing closed.
+///
+/// 60s is long enough for the human to alt-tab to the TUI and pick a
+/// scope; tools that would block longer should be redesigned. On
+/// timeout the judge returns `EscalateToHuman` so the caller sees the
+/// legacy fail-closed shape.
 pub const ASK_HOLD_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// In-process Boardroom Narc service.
@@ -63,6 +66,12 @@ struct Inner {
     /// How long to hold an `Ask` open before timing out. Overridable in
     /// tests; defaults to [`ASK_HOLD_TIMEOUT`].
     ask_hold_timeout: Duration,
+    /// Persistent permission grants loaded from `wonk-allow.toml`.
+    /// Consulted after the rule engine and before the LLM judge so
+    /// approvals from prior sessions short-circuit without a round
+    /// trip. `None` for tests / configurations that don't want
+    /// persistent grants (the default).
+    grants: Option<SharedWonkGrants>,
 }
 
 impl BoardroomNarc {
@@ -91,8 +100,35 @@ impl BoardroomNarc {
                 escalation_threshold: DEFAULT_ESCALATION_THRESHOLD,
                 access,
                 ask_hold_timeout,
+                grants: None,
             }),
         }
+    }
+
+    /// Attach a persistent grants store (`wonk-allow.toml` backed).
+    /// When set, the judge consults the grants after the rule engine
+    /// and before the LLM — a hit short-circuits to Approve. Chainable.
+    #[must_use]
+    pub fn with_grants(self, grants: SharedWonkGrants) -> Self {
+        // Inner is Arc'd. Rebuild rather than mutate-in-place — the
+        // shared count is always 1 here (we just constructed it), so
+        // the cost is a single reallocation at startup, never on hot
+        // paths.
+        let inner = match Arc::try_unwrap(self.inner) {
+            Ok(mut inner) => {
+                inner.grants = Some(grants);
+                inner
+            }
+            Err(arc) => Inner {
+                llm: arc.llm.clone(),
+                cache: DecisionCache::new(),
+                escalation_threshold: arc.escalation_threshold,
+                access: arc.access.clone(),
+                ask_hold_timeout: arc.ask_hold_timeout,
+                grants: Some(grants),
+            },
+        };
+        Self { inner: Arc::new(inner) }
     }
 
     /// Construct a Narc with no LLM backend — used in tests and in modes
@@ -143,6 +179,16 @@ impl BoardroomNarc {
             return decision;
         }
 
+        // 1b. Persistent user/project grants from wonk-allow.toml.
+        //     Checked before the cache so a freshly-approved grant
+        //     short-circuits even on a request the cache hasn't seen.
+        //     Pearl th-38b72c.
+        if let Some(decision) = self.check_persistent_grants(&request) {
+            self.record("wonk_grants", &request, &decision, started.elapsed().as_millis());
+            self.inner.cache.put(&request, &decision);
+            return decision;
+        }
+
         // 2. Cache hit — same (bead, kind, resource) tuple was decided
         //    recently. No network or LLM call.
         if let Some(decision) = self.inner.cache.get(&request) {
@@ -187,6 +233,37 @@ impl BoardroomNarc {
 
         self.inner.cache.put(&request, &decision);
         decision
+    }
+
+    /// Consult the persistent grants store, if any. Returns
+    /// `Some(approve)` when the request matches a stored grant for
+    /// the corresponding kind. Returns `None` if there's no grants
+    /// store wired up or no match.
+    fn check_persistent_grants(&self, request: &JudgeRequest) -> Option<JudgeDecision> {
+        let grants = self.inner.grants.as_ref()?.snapshot();
+        let matched = match request.kind {
+            smooth_narc::judge::JudgeKind::Network => grants.matches_host(&request.resource),
+            smooth_narc::judge::JudgeKind::Tool => grants.matches_tool(&request.resource),
+            smooth_narc::judge::JudgeKind::Cli => grants.matches_bash(&request.resource),
+            // File / Mcp / Port don't have a [section] in v1 yet —
+            // grants don't speak to them. Fall through.
+            smooth_narc::judge::JudgeKind::File | smooth_narc::judge::JudgeKind::Mcp | smooth_narc::judge::JudgeKind::Port => false,
+        };
+        if matched {
+            let mut approval = JudgeDecision::approve(format!(
+                "matched persistent grant in wonk-allow.toml: {} → {}",
+                request.kind.as_str(),
+                request.resource
+            ));
+            // Persistent grants don't expire from the in-memory cache
+            // any faster than they expire from the file — pin to the
+            // standard hour so subsequent requests skip the file
+            // read entirely.
+            approval.cache_ttl_seconds = Some(3600);
+            Some(approval)
+        } else {
+            None
+        }
     }
 
     /// File an `Ask` verdict into the [`AccessStore`] and await a human
@@ -804,6 +881,87 @@ mod tests {
 
         let decision = narc.hold_for_human(&req_network("uncertain.example"), coerced).await;
         let _ = resolver.await.expect("resolver task");
+        assert_eq!(decision.decision, Decision::Approve);
+    }
+
+    #[tokio::test]
+    async fn judge_short_circuits_on_persistent_grant() {
+        use crate::wonk_grants::{SharedWonkGrants, WonkGrants};
+
+        let mut grants = WonkGrants::new();
+        grants.add_host("custom.example");
+        let shared = SharedWonkGrants::new(grants);
+
+        let narc = BoardroomNarc::without_llm().with_grants(shared);
+        // `custom.example` is NOT in the rule engine's OBVIOUSLY_SAFE
+        // list, so without a persistent grant this would fall to the
+        // LLM judge and (without an LLM) get coerced to Ask. The
+        // grant should short-circuit to Approve.
+        let decision = narc.judge(req_network("custom.example")).await;
+        assert_eq!(decision.decision, Decision::Approve);
+        assert!(decision.reason.contains("wonk-allow"));
+    }
+
+    #[tokio::test]
+    async fn judge_persistent_grant_misses_fall_through() {
+        use crate::wonk_grants::{SharedWonkGrants, WonkGrants};
+
+        let mut grants = WonkGrants::new();
+        grants.add_host("granted.example");
+        let shared = SharedWonkGrants::new(grants);
+
+        let narc = BoardroomNarc::without_llm().with_grants(shared);
+        // A different host, not in grants or rule engine. Falls through
+        // to the LLM judge (missing here) → escalate.
+        let decision = narc.judge(req_network("ungranted.example")).await;
+        assert_eq!(decision.decision, Decision::EscalateToHuman);
+    }
+
+    #[tokio::test]
+    async fn judge_persistent_grant_matches_tool_kind() {
+        use crate::wonk_grants::{SharedWonkGrants, WonkGrants};
+        use smooth_narc::judge::JudgeKind;
+
+        let mut grants = WonkGrants::new();
+        grants.add_tool("custom_tool");
+        let shared = SharedWonkGrants::new(grants);
+
+        let narc = BoardroomNarc::without_llm().with_grants(shared);
+        let req = JudgeRequest {
+            kind: JudgeKind::Tool,
+            operator_id: "op".into(),
+            bead_id: "pearl".into(),
+            phase: "execute".into(),
+            resource: "custom_tool".into(),
+            detail: None,
+            task_summary: None,
+            agent_reason: None,
+        };
+        let decision = narc.judge(req).await;
+        assert_eq!(decision.decision, Decision::Approve);
+    }
+
+    #[tokio::test]
+    async fn judge_persistent_grant_matches_bash_prefix() {
+        use crate::wonk_grants::{SharedWonkGrants, WonkGrants};
+        use smooth_narc::judge::JudgeKind;
+
+        let mut grants = WonkGrants::new();
+        grants.add_bash_pattern("pnpm ");
+        let shared = SharedWonkGrants::new(grants);
+
+        let narc = BoardroomNarc::without_llm().with_grants(shared);
+        let req = JudgeRequest {
+            kind: JudgeKind::Cli,
+            operator_id: "op".into(),
+            bead_id: "pearl".into(),
+            phase: "execute".into(),
+            resource: "pnpm install".into(),
+            detail: None,
+            task_summary: None,
+            agent_reason: None,
+        };
+        let decision = narc.judge(req).await;
         assert_eq!(decision.decision, Decision::Approve);
     }
 }

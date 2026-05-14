@@ -126,6 +126,12 @@ pub struct AppState {
     /// `/api/access/{approve,deny}` routes (or the TUI inline card).
     /// See [`crate::access`] for the protocol.
     pub access: crate::access::AccessStore,
+    /// Persistent user / project permission grants loaded from
+    /// `wonk-allow.toml`. Consulted by [`crate::boardroom_narc`] after
+    /// the rule engine and before the LLM judge; new grants are
+    /// written back here when a `/api/access/approve` resolution
+    /// lands at scope `user` or `project`. Pearl th-38b72c.
+    pub wonk_grants: crate::wonk_grants::SharedWonkGrants,
 }
 
 impl AppState {
@@ -220,9 +226,40 @@ impl AppState {
             }
         });
         let access = crate::access::AccessStore::new();
+
+        // Load persistent grants from ~/.smooth/wonk-allow.toml so
+        // approvals from prior sessions survive a Big Smooth restart.
+        // Best-effort: a parse error logs and falls back to empty
+        // rather than blocking startup — a broken file shouldn't take
+        // the service down. Project-scoped grants are loaded
+        // lazily per-pearl when a dispatch picks them up; here we
+        // just seed the user layer. Pearl th-38b72c.
+        let initial_grants = match crate::wonk_grants::user_grants_path() {
+            Some(path) => match crate::wonk_grants::WonkGrants::load_from_path(&path) {
+                Ok(g) => {
+                    tracing::info!(
+                        path = %path.display(),
+                        hosts = g.network.allow_hosts.len(),
+                        tools = g.tools.allow.len(),
+                        bash = g.bash.allow_patterns.len(),
+                        "loaded user wonk-allow.toml"
+                    );
+                    g
+                }
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "failed to load user wonk-allow.toml; starting empty");
+                    crate::wonk_grants::WonkGrants::new()
+                }
+            },
+            None => crate::wonk_grants::WonkGrants::new(),
+        };
+        let wonk_grants = crate::wonk_grants::SharedWonkGrants::new(initial_grants);
+
         // Wire the same AccessStore into Narc so an `Ask` verdict can
         // file_pending + await_resolution on the live, shared queue.
-        let boardroom_narc = crate::boardroom_narc::BoardroomNarc::new(narc_llm_config, access.clone());
+        // Pass the SharedWonkGrants so the judge can short-circuit on
+        // a persisted grant before falling through to the LLM.
+        let boardroom_narc = crate::boardroom_narc::BoardroomNarc::new(narc_llm_config, access.clone()).with_grants(wonk_grants.clone());
 
         Self {
             pearl_store,
@@ -239,6 +276,7 @@ impl AppState {
             boardroom_narc,
             teammates: Arc::new(crate::teammates::OperatorRegistry::new()),
             access,
+            wonk_grants,
         }
     }
 
@@ -4345,11 +4383,70 @@ async fn resolve_access(
         axum::http::StatusCode::BAD_REQUEST,
         format!("unknown scope '{}': expected once|session|project|user", body.scope),
     ))?;
+    // Capture the pending request shape BEFORE resolving — `resolve()`
+    // removes the entry from the pending map, but we need its kind +
+    // resource to write a persistent grant.
+    let pending_snapshot = state.access.list_pending().into_iter().find(|r| r.id == body.id);
+    let glob_override = body.glob_override.clone();
     let resolution = state.access.resolve(&body.id, verdict, scope, body.glob_override).map_err(|e| match e {
         crate::access::AccessError::NotFound(id) => (axum::http::StatusCode::NOT_FOUND, format!("no pending request with id {id}")),
         crate::access::AccessError::Poisoned => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "access store mutex was poisoned".to_string()),
     })?;
+
+    // Persist Approve verdicts at project/user scope into the right
+    // wonk-allow.toml AND merge into the live SharedWonkGrants so the
+    // next check_persistent_grants call sees it. Once / Session never
+    // touch the filesystem. Pearl th-38b72c.
+    if matches!(verdict, crate::access::ResolutionVerdict::Approve) {
+        if let Some(req) = pending_snapshot {
+            let target_path = persistent_grant_path(&state, scope);
+            if let Some(path) = target_path {
+                match crate::wonk_grants::append_grant(&path, &req.kind, &req.resource, glob_override.as_deref()) {
+                    Ok(()) => {
+                        if let Ok(fresh) = crate::wonk_grants::WonkGrants::load_from_path(&path) {
+                            state.wonk_grants.merge_in(fresh);
+                        }
+                        tracing::info!(
+                            scope = scope.as_str(),
+                            path = %path.display(),
+                            kind = %req.kind,
+                            resource = %req.resource,
+                            "persisted permission grant"
+                        );
+                    }
+                    Err(e) => {
+                        // Don't fail the HTTP request — the
+                        // resolution still took effect for the live
+                        // tool call. The persistence layer is a
+                        // best-effort durability boost.
+                        tracing::warn!(
+                            scope = scope.as_str(),
+                            path = %path.display(),
+                            error = %e,
+                            "failed to persist permission grant"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     Ok(Json(resolution))
+}
+
+/// Pick the file path to persist a grant at, given the resolution
+/// scope. Returns `None` for non-persistent scopes (Once / Session).
+///
+/// Project-scope grants would ideally go to the requesting pearl's
+/// workspace, but the bead_id → workspace mapping isn't yet wired
+/// through the access flow — for v1 we route project grants to the
+/// user file so the grant still survives a restart. Refining the
+/// project routing is a sub-pearl.
+fn persistent_grant_path(_state: &AppState, scope: smooth_narc::judge::Scope) -> Option<std::path::PathBuf> {
+    match scope {
+        smooth_narc::judge::Scope::User | smooth_narc::judge::Scope::PearlProject => crate::wonk_grants::user_grants_path(),
+        smooth_narc::judge::Scope::Once | smooth_narc::judge::Scope::Session => None,
+    }
 }
 
 /// `POST /api/access/approve` — resolve a pending request as Approve.
