@@ -47,122 +47,22 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use chrono::Utc;
 use smooth_narc::judge::Scope;
 use tokio::sync::{broadcast, oneshot};
+
+// Re-export the wire types from smooth-narc so existing callers of
+// `crate::access::PendingAccessRequest` (HTTP handlers, tests) keep
+// working without an import change. The wire types live in
+// smooth-narc so the TUI / CLI can consume them without depending on
+// this crate.
+pub use smooth_narc::access_wire::{AccessEvent, AccessKind, AccessResolution, NewAccessRequest, PendingAccessRequest, ResolutionVerdict};
 
 /// Broadcast channel capacity. Larger than typical concurrent subscriber
 /// count so a slow SSE consumer can't easily drop events; if a subscriber
 /// does fall behind, broadcast::Receiver::recv returns Lagged and the
 /// subscriber re-syncs by re-fetching the pending list.
 const BROADCAST_CAPACITY: usize = 256;
-
-/// What kind of access is being requested. Mirrors
-/// [`smooth_narc::judge::JudgeKind`] as strings so this module doesn't
-/// depend on the JudgeKind enum directly.
-pub type AccessKind = String;
-
-/// A single pending access request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PendingAccessRequest {
-    pub id: String,
-    pub bead_id: String,
-    pub operator_id: String,
-    /// `network` / `tool` / `file` / `cli` / `mcp` / `port`.
-    pub kind: AccessKind,
-    /// The thing the agent wants to touch (domain, command, path…).
-    pub resource: String,
-    /// Extra context for the human: HTTP path, cwd, etc.
-    #[serde(default)]
-    pub detail: Option<String>,
-    /// Narc's reason for asking instead of auto-deciding.
-    pub reason: String,
-    /// Scopes the human can pick from when resolving.
-    pub scope_options: Vec<Scope>,
-    pub created_at: DateTime<Utc>,
-}
-
-/// Input shape for filing a pending request — keeps `file_pending` from
-/// growing into a long positional-args call. Caller fills the fields and
-/// the store stamps an id + timestamp.
-#[derive(Debug, Clone)]
-pub struct NewAccessRequest {
-    pub bead_id: String,
-    pub operator_id: String,
-    pub kind: AccessKind,
-    pub resource: String,
-    pub detail: Option<String>,
-    pub reason: String,
-    pub scope_options: Vec<Scope>,
-}
-
-impl NewAccessRequest {
-    /// Convenience: build a request with the default scope ladder. Useful
-    /// in tests and for callers that always want all four options.
-    #[must_use]
-    pub fn with_defaults(
-        bead_id: impl Into<String>,
-        operator_id: impl Into<String>,
-        kind: impl Into<String>,
-        resource: impl Into<String>,
-        reason: impl Into<String>,
-    ) -> Self {
-        Self {
-            bead_id: bead_id.into(),
-            operator_id: operator_id.into(),
-            kind: kind.into(),
-            resource: resource.into(),
-            detail: None,
-            reason: reason.into(),
-            scope_options: Scope::default_options(),
-        }
-    }
-}
-
-/// A human's resolution of a pending access request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AccessResolution {
-    pub id: String,
-    pub verdict: ResolutionVerdict,
-    pub scope: Scope,
-    /// Optional glob the human (or UI) chose to bind the approval to —
-    /// e.g. `*.openai.com` instead of just `api.openai.com`. None means
-    /// "exact resource only".
-    #[serde(default)]
-    pub glob_override: Option<String>,
-    pub resolved_at: DateTime<Utc>,
-}
-
-/// Approve or deny verdict from the human.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ResolutionVerdict {
-    Approve,
-    Deny,
-}
-
-impl ResolutionVerdict {
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Approve => "approve",
-            Self::Deny => "deny",
-        }
-    }
-}
-
-/// Events broadcast to all subscribers as the store changes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "event", rename_all = "snake_case")]
-pub enum AccessEvent {
-    /// A new pending request was filed.
-    Pending(PendingAccessRequest),
-    /// A previously-pending request was resolved.
-    Resolved(AccessResolution),
-    /// A previously-pending request expired without resolution.
-    Expired { id: String, expired_at: DateTime<Utc> },
-}
 
 /// Errors from the access store.
 #[derive(Debug, thiserror::Error)]
@@ -329,6 +229,17 @@ impl AccessStore {
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<AccessEvent> {
         self.inner.events.subscribe()
+    }
+
+    /// Number of live broadcast receivers — the SSE handler each time
+    /// it accepts a connection, plus anything else that called
+    /// [`AccessStore::subscribe`]. Used by integration tests to wait
+    /// until the wire-side subscriber has actually registered before
+    /// firing a broadcast that would otherwise be dropped (broadcast
+    /// channels deliver only to receivers that exist at send time).
+    #[must_use]
+    pub fn subscriber_count(&self) -> usize {
+        self.inner.events.receiver_count()
     }
 }
 

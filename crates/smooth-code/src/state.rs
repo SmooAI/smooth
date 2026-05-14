@@ -358,6 +358,13 @@ pub struct AppState {
     pub model_picker: ModelPickerState,
     /// Startup health check status.
     pub health_status: HealthStatus,
+    /// Inline Claude-Code-style permission prompts surfaced when
+    /// Boardroom Narc returns `Ask`. Populated by the SSE subscriber
+    /// in [`crate::auto_mode`]. Rendered inline at the bottom of the
+    /// chat; key handlers (`o` / `s` / `p` / `u` / `d` / `D`) resolve
+    /// the most recently filed open prompt by POSTing to
+    /// `/api/access/{approve,deny}`.
+    pub permission_prompts: Vec<crate::auto_mode::PermissionPromptState>,
 }
 
 impl AppState {
@@ -396,6 +403,7 @@ impl AppState {
             git_state: None,
             model_picker: ModelPickerState::new(),
             health_status: HealthStatus::default(),
+            permission_prompts: Vec::new(),
         }
     }
 

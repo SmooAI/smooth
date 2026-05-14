@@ -387,6 +387,13 @@ fn render_chat(frame: &mut Frame, state: &AppState, area: Rect) {
         lines.push(Line::from(Span::styled("Thinking...", theme::muted())));
     }
 
+    // Auto-mode permission prompts — inline approval cards. Rendered
+    // below the chat history so they sit visually right above the
+    // input box. Pearl th-670fb2.
+    for prompt in &state.permission_prompts {
+        render_permission_prompt_into(&mut lines, prompt);
+    }
+
     // Calculate scroll: show the bottom of the conversation
     let visible_height = inner.height as usize;
     let total_lines = lines.len();
@@ -401,6 +408,92 @@ fn render_chat(frame: &mut Frame, state: &AppState, area: Rect) {
         .wrap(Wrap { trim: false });
 
     frame.render_widget(paragraph, inner);
+}
+
+/// Render a single Claude-Code-style permission prompt as a compact
+/// 4-line card, appended to `lines`. Open prompts show the
+/// `[o]nce [s]ession [p]roject [u]ser [d]eny [D] forever` ladder;
+/// resolved prompts collapse to a single status line so they don't
+/// crowd the chat after the user acts on them. Pearl th-670fb2.
+fn render_permission_prompt_into(lines: &mut Vec<Line<'static>>, prompt: &crate::auto_mode::PermissionPromptState) {
+    use crate::auto_mode::PromptStatus;
+    let req = &prompt.request;
+
+    // Blank-line separator before the card so it doesn't run into
+    // whatever message came before.
+    lines.push(Line::from(""));
+
+    // Collapsed: one-line status with a glyph. Shown for any non-Open
+    // status — the user already made a decision, we just confirm the
+    // outcome.
+    if let Some((glyph, label)) = prompt.status.collapsed_label() {
+        let summary = match &prompt.status {
+            PromptStatus::Approved { scope, glob } => {
+                let glob_part = glob.as_ref().map(|g| format!(" ({g})")).unwrap_or_default();
+                format!(
+                    "{glyph} Permission {label} for {scope}: {kind} → {res}{glob_part}",
+                    scope = scope.as_str(),
+                    kind = req.kind,
+                    res = req.resource
+                )
+            }
+            PromptStatus::Denied { scope } => format!(
+                "{glyph} Permission {label} for {scope}: {kind} → {res}",
+                scope = scope.as_str(),
+                kind = req.kind,
+                res = req.resource
+            ),
+            PromptStatus::Expired => format!(
+                "{glyph} Permission request {label} (no human response): {kind} → {res}",
+                kind = req.kind,
+                res = req.resource
+            ),
+            PromptStatus::Failed { reason } => format!("{glyph} Permission resolve {label}: {reason}"),
+            PromptStatus::Resolving { verdict, scope } => format!(
+                "{glyph} Resolving {verdict} at {scope}: {kind} → {res}",
+                verdict = match verdict {
+                    smooth_narc::ResolutionVerdict::Approve => "approve",
+                    smooth_narc::ResolutionVerdict::Deny => "deny",
+                },
+                scope = scope.as_str(),
+                kind = req.kind,
+                res = req.resource
+            ),
+            PromptStatus::Open => unreachable!("Open returns None from collapsed_label"),
+        };
+        lines.push(Line::from(Span::styled(summary, theme::muted())));
+        return;
+    }
+
+    // Open card. Three lines: title, subject, keybinding row.
+    lines.push(Line::from(Span::styled(
+        format!("┌─ Permission requested ── {} ──", req.kind),
+        theme::user_label(),
+    )));
+    let detail_suffix = req.detail.as_ref().map(|d| format!("  ({d})")).unwrap_or_default();
+    lines.push(Line::from(format!("│ {res}{detail}", res = req.resource, detail = detail_suffix)));
+    lines.push(Line::from(Span::styled(format!("│ {}", req.reason), theme::muted())));
+
+    // Build the keybinding row from the offered scope_options. Falls
+    // back to the full ladder so the card always renders something
+    // useful even if the server didn't populate the list.
+    let mut binds: Vec<String> = Vec::with_capacity(6);
+    let offers_scope = |s: smooth_narc::judge::Scope| req.scope_options.iter().any(|opt| *opt == s);
+    if offers_scope(smooth_narc::judge::Scope::Once) || req.scope_options.is_empty() {
+        binds.push("[o]nce".into());
+    }
+    if offers_scope(smooth_narc::judge::Scope::Session) || req.scope_options.is_empty() {
+        binds.push("[s]ession".into());
+    }
+    if offers_scope(smooth_narc::judge::Scope::PearlProject) || req.scope_options.is_empty() {
+        binds.push("[p]roject".into());
+    }
+    if offers_scope(smooth_narc::judge::Scope::User) || req.scope_options.is_empty() {
+        binds.push("[u]ser".into());
+    }
+    binds.push("[d]eny".into());
+    binds.push("[D] forever".into());
+    lines.push(Line::from(format!("└─ {}", binds.join("  "))));
 }
 
 /// Render the text input area.
