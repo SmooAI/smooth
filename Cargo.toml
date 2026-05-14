@@ -141,7 +141,7 @@ atty = "0.2"
 
 # Async streams
 async-trait = "0.1"
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
 pin-project-lite = "0.2"
 
 # WebSocket client

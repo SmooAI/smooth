@@ -120,6 +120,12 @@ pub struct AppState {
     /// idled when the comment-tap sees `[IDLE]`. Powers `/api/teammates`
     /// and the chat-agent's `teammate_list` tool. See `crate::teammates`.
     pub teammates: Arc<crate::teammates::OperatorRegistry>,
+    /// Pending access-request queue + event bus. When Boardroom Narc
+    /// returns [`smooth_narc::judge::Decision::Ask`], the originating
+    /// tool call is held open here while a human resolves it via the
+    /// `/api/access/{approve,deny}` routes (or the TUI inline card).
+    /// See [`crate::access`] for the protocol.
+    pub access: crate::access::AccessStore,
 }
 
 impl AppState {
@@ -213,7 +219,10 @@ impl AppState {
                 }
             }
         });
-        let boardroom_narc = crate::boardroom_narc::BoardroomNarc::new(narc_llm_config);
+        let access = crate::access::AccessStore::new();
+        // Wire the same AccessStore into Narc so an `Ask` verdict can
+        // file_pending + await_resolution on the live, shared queue.
+        let boardroom_narc = crate::boardroom_narc::BoardroomNarc::new(narc_llm_config, access.clone());
 
         Self {
             pearl_store,
@@ -229,6 +238,7 @@ impl AppState {
             orchestrator: Arc::new(tokio::sync::Mutex::new(orchestrator)),
             boardroom_narc,
             teammates: Arc::new(crate::teammates::OperatorRegistry::new()),
+            access,
         }
     }
 
@@ -458,6 +468,13 @@ pub fn build_router(state: AppState) -> Router {
         // rule engine, its decision cache, and (when unresolved) the LLM
         // judge, then returns an approve/deny/escalate verdict.
         .route("/api/narc/judge", post(narc_judge_handler))
+        // Access — the Claude-Code-style auto-mode pending-request queue.
+        // When Narc returns `Ask`, the tool call holds inside `judge()`
+        // while the human resolves it through these routes. Pearl th-49b4aa.
+        .route("/api/access/pending", get(access_pending_handler))
+        .route("/api/access/approve", post(access_approve_handler))
+        .route("/api/access/deny", post(access_deny_handler))
+        .route("/api/access/stream", get(access_stream_handler))
         .route("/api/host/exec", post(crate::host_tools::host_exec_handler))
         // WebSocket — primary real-time channel
         .route("/ws", get(ws_handler))
@@ -4284,6 +4301,103 @@ async fn narc_judge_handler(State(state): State<AppState>, Json(request): Json<s
     state.touch();
     let decision = state.boardroom_narc.judge(request).await;
     Json(decision)
+}
+
+// ── Access — auto-mode-style pending-request queue ────────────
+//
+// Wonk-the-binary today calls into BoardroomNarc; when Narc returns
+// `Decision::Ask`, the call holds open inside `judge()` while a human
+// resolves it via these four routes. The TUI subscribes to the SSE
+// stream to render inline approval cards (pearl th-670fb2).
+
+/// `GET /api/access/pending` — snapshot of every currently-pending
+/// access request, oldest first. Returns the raw list (no
+/// `ApiResponse` envelope) — the TUI consumes this directly.
+async fn access_pending_handler(State(state): State<AppState>) -> Json<Vec<crate::access::PendingAccessRequest>> {
+    state.touch();
+    Json(state.access.list_pending())
+}
+
+#[derive(Deserialize)]
+struct AccessResolveBody {
+    /// The pending request id (UUID) returned in the `pending` event.
+    id: String,
+    /// One of `once` / `session` / `project` / `user` (case-insensitive).
+    scope: String,
+    /// Optional glob the human bound the approval to (e.g.
+    /// `*.openai.com`). When set, Wonk caches the entire glob in its
+    /// runtime allowlist instead of just the exact resource. Ignored
+    /// when denying.
+    #[serde(default)]
+    glob_override: Option<String>,
+}
+
+/// Map a `(verdict, scope)` resolution onto the [`crate::access::AccessStore`].
+/// Shared between the approve + deny handlers so we don't duplicate the
+/// scope parsing + error handling.
+async fn resolve_access(
+    state: AppState,
+    body: AccessResolveBody,
+    verdict: crate::access::ResolutionVerdict,
+) -> Result<Json<crate::access::AccessResolution>, (axum::http::StatusCode, String)> {
+    state.touch();
+    let scope = smooth_narc::judge::Scope::parse(&body.scope).ok_or((
+        axum::http::StatusCode::BAD_REQUEST,
+        format!("unknown scope '{}': expected once|session|project|user", body.scope),
+    ))?;
+    let resolution = state.access.resolve(&body.id, verdict, scope, body.glob_override).map_err(|e| match e {
+        crate::access::AccessError::NotFound(id) => (axum::http::StatusCode::NOT_FOUND, format!("no pending request with id {id}")),
+        crate::access::AccessError::Poisoned => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "access store mutex was poisoned".to_string()),
+    })?;
+    Ok(Json(resolution))
+}
+
+/// `POST /api/access/approve` — resolve a pending request as Approve.
+/// Body: `{ id, scope, glob_override? }`.
+async fn access_approve_handler(
+    State(state): State<AppState>,
+    Json(body): Json<AccessResolveBody>,
+) -> Result<Json<crate::access::AccessResolution>, (axum::http::StatusCode, String)> {
+    resolve_access(state, body, crate::access::ResolutionVerdict::Approve).await
+}
+
+/// `POST /api/access/deny` — resolve a pending request as Deny.
+async fn access_deny_handler(
+    State(state): State<AppState>,
+    Json(body): Json<AccessResolveBody>,
+) -> Result<Json<crate::access::AccessResolution>, (axum::http::StatusCode, String)> {
+    resolve_access(state, body, crate::access::ResolutionVerdict::Deny).await
+}
+
+/// `GET /api/access/stream` — Server-Sent Events stream of every
+/// access-store event. New subscribers should hit `/api/access/pending`
+/// once on connect to catch up; this stream only sends events from the
+/// subscription point forward.
+///
+/// Wire format: `data: <json>` for every event, where `<json>` is the
+/// serde-tagged [`crate::access::AccessEvent`] form
+/// (`{"event":"pending",...}` / `{"event":"resolved",...}` /
+/// `{"event":"expired",...}`). The connection includes a 15s keepalive
+/// so reverse proxies don't drop idle SSEs.
+async fn access_stream_handler(State(state): State<AppState>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    use futures_util::StreamExt;
+    state.touch();
+    let rx = state.access.subscribe();
+    let stream = tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(|res| async move {
+        match res {
+            Ok(event) => {
+                let json = serde_json::to_string(&event).ok()?;
+                Some(Ok(Event::default().data(json)))
+            }
+            Err(_lagged) => {
+                // Subscriber fell behind. They can resync via
+                // `/api/access/pending`; we don't try to replay missed
+                // events from the broadcast.
+                None
+            }
+        }
+    });
+    Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(15)))
 }
 
 // ── Search ─────────────────────────────────────────────────

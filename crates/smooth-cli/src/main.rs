@@ -626,19 +626,31 @@ enum TailscaleCommands {
 enum AccessCommands {
     /// List pending access requests
     Pending,
-    /// Approve domain access for a bead
+    /// Approve a pending access request.
+    ///
+    /// `id` is the request id printed by `th access pending` (or surfaced
+    /// in the SSE stream). `--scope` controls how long the approval
+    /// sticks: `once` (this request only, default), `session` (VM
+    /// lifetime), `project` (<repo>/.smooth/wonk-allow.toml), `user`
+    /// (~/.smooth/wonk-allow.toml).
     Approve {
-        /// Bead ID
-        bead: String,
-        /// Domain to approve
-        domain: String,
+        /// Pending request id (UUID)
+        id: String,
+        /// Persistence scope (default: once)
+        #[arg(long, default_value = "once")]
+        scope: String,
+        /// Optional glob to bind the approval to instead of the exact
+        /// resource — e.g. `*.openai.com` for any openai.com subdomain.
+        #[arg(long)]
+        glob: Option<String>,
     },
-    /// Deny domain access for a bead
+    /// Deny a pending access request.
     Deny {
-        /// Bead ID
-        bead: String,
-        /// Domain to deny
-        domain: String,
+        /// Pending request id (UUID)
+        id: String,
+        /// Persistence scope (default: once)
+        #[arg(long, default_value = "once")]
+        scope: String,
     },
     /// Show current policy for an operator
     Policy {
@@ -2067,42 +2079,50 @@ async fn cmd_access(cmd: AccessCommands) -> Result<()> {
                 if requests.is_empty() {
                     println!("No pending access requests.");
                 } else {
-                    println!("{:<12} {:<20} {:<30} Reason", "Bead", "Operator", "Resource");
-                    println!("{}", "-".repeat(80));
+                    println!("{:<38} {:<10} {:<14} {:<30} Reason", "ID", "Kind", "Bead", "Resource");
+                    println!("{}", "-".repeat(120));
                     for req in requests {
                         println!(
-                            "{:<12} {:<20} {:<30} {}",
+                            "{:<38} {:<10} {:<14} {:<30} {}",
+                            req["id"].as_str().unwrap_or("-"),
+                            req["kind"].as_str().unwrap_or("-"),
                             req["bead_id"].as_str().unwrap_or("-"),
-                            req["operator_id"].as_str().unwrap_or("-"),
                             req["resource"].as_str().unwrap_or("-"),
                             req["reason"].as_str().unwrap_or("-"),
                         );
                     }
+                    println!();
+                    println!("Resolve with: th access approve <id> [--scope=session|project|user] [--glob=*.example.com]");
+                    println!("              th access deny <id> [--scope=user]");
                 }
             }
         }
-        AccessCommands::Approve { bead, domain } => {
-            let resp = client
-                .post(format!("{base}/approve"))
-                .json(&serde_json::json!({"bead_id": bead, "domain": domain}))
-                .send()
-                .await?;
+        AccessCommands::Approve { id, scope, glob } => {
+            let mut body = serde_json::Map::new();
+            body.insert("id".into(), serde_json::Value::String(id.clone()));
+            body.insert("scope".into(), serde_json::Value::String(scope.clone()));
+            if let Some(g) = glob {
+                body.insert("glob_override".into(), serde_json::Value::String(g));
+            }
+            let resp = client.post(format!("{base}/approve")).json(&serde_json::Value::Object(body)).send().await?;
             if resp.status().is_success() {
-                println!("Approved {domain} for {bead}");
+                println!("Approved {id} at scope {scope}");
             } else {
-                println!("Failed: {}", resp.text().await?);
+                let status = resp.status();
+                println!("Failed ({status}): {}", resp.text().await.unwrap_or_default());
             }
         }
-        AccessCommands::Deny { bead, domain } => {
+        AccessCommands::Deny { id, scope } => {
             let resp = client
                 .post(format!("{base}/deny"))
-                .json(&serde_json::json!({"bead_id": bead, "domain": domain}))
+                .json(&serde_json::json!({"id": id, "scope": scope}))
                 .send()
                 .await?;
             if resp.status().is_success() {
-                println!("Denied {domain} for {bead}");
+                println!("Denied {id} at scope {scope}");
             } else {
-                println!("Failed: {}", resp.text().await?);
+                let status = resp.status();
+                println!("Failed ({status}): {}", resp.text().await.unwrap_or_default());
             }
         }
         AccessCommands::Policy { operator_id } => {
