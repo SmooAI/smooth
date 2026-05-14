@@ -1,5 +1,147 @@
 # @smooai/smooth
 
+## 0.13.7
+
+### Patch Changes
+
+- 8c66879: wonk/narc: close the loop on auto-mode Phase A. Boardroom Narc now
+  holds tool calls open when its verdict is `Ask` — files into the
+  shared `AccessStore`, awaits a human resolution with a 60s timeout,
+  returns Approve / Deny / EscalateToHuman accordingly. New HTTP routes
+  make the queue addressable from the TUI / CLI:
+
+  - `GET /api/access/pending` — list of pending requests
+  - `POST /api/access/approve` — resolve at a scope (once / session /
+    project / user) with an optional glob override
+  - `POST /api/access/deny` — same shape as approve
+  - `GET /api/access/stream` — SSE feed of pending / resolved / expired
+    events for inline UIs
+
+  Low-confidence LLM approvals now coerce to `Ask` instead of silent
+  `EscalateToHuman`, so the human gets agency over uncertain calls
+  instead of just denials. `th access approve/deny <id> [--scope=...]
+[--glob=...]` adopts the new id-based shape. Pearl th-49b4aa is now
+  complete.
+
+- 4cf018e: bench: permission-flow scenarios + headless `--auto-approve` flag.
+  Closes the auto-mode work queue. `scenario.toml` gains an
+  `auto_approve` meta field (default: `deny`) and a new
+  `kind = "permission"` assertion that pins the expected resource +
+  resolution scope. `th code --headless --auto-approve <mode>`
+  spawns a tokio task that polls `/api/access/pending` and resolves
+  each Ask per the configured mode — unattended runs are safe by
+  default (every Ask becomes a deny) but can opt into permissive
+  modes for bench scenarios that need them. 11 new tests across
+  `scenarios::AutoApprove` parse/serde/round-trip + `auto_approve`
+  module (fake-Big-Smooth integration for each mode, sentinel-drop
+  stops the loop). Pearl th-400773.
+- 04cdd6f: creds: credential helper broker — Docker-spec stdin/stdout binary +
+  `/api/creds/issue` route. Sandbox tools that need authentication
+  (git clone over HTTPS, gh CLI) get short-lived credentials minted
+  by Big Smooth after a human approves the issue, instead of either
+  shipping a long-lived PAT into the VM or denying the call. v1
+  supports `github.com` via the host's `gh auth token`; AWS / Docker
+  Hub / generic username/password are separate pearls.
+
+  Flow:
+
+  - `smooth-credential-helper get` reads `{ServerURL: ...}` from stdin
+  - POSTs to `/api/creds/issue` on Big Smooth
+  - BS checks wonk-allow.toml first (fast path); else files an
+    AccessStore Ask
+  - On approve at user/project scope, the host gets persisted to
+    wonk-allow.toml so future mints skip the prompt
+  - BS mints by calling the host's `gh auth token` (resolved against
+    the same richer PATH `host_tool` uses, so it works under launchd)
+  - Returns `{Username: "x-access-token", Secret: "ghs_..."}` to the
+    helper, helper writes it back to git's credential framework
+
+  19 new tests: 9 unit (backend selection, host extraction, scope
+  serde, error display, mint error path), 4 helper bin (protocol
+  PascalCase, IssueBody omits-empty, NO_CREDS git-compat string),
+  6 integration (empty server → 400, pre-approved fast-path skips
+  pending, human approve → 200, human deny → 403, pick_backend
+  github subdomains, Ask shape carries kind=creds + full URL).
+
+  Pearl th-08b65f. Mounting the helper inside the sandbox image
+  (symlink at /usr/local/bin/git-credential-smooth, `git config
+--global credential.helper smooth`) lands in a follow-up pearl —
+  the broker + binary protocol are the core that future scopes (AWS
+  STS, npm, Docker Hub) plug into.
+
+- 9d04c6f: wonk/narc: ground the Claude-Code-style auto-mode permission model.
+  `smooth_narc::judge::Decision` gains a fourth `Ask` variant with a new
+  `scope_options: Vec<Scope>` field on `JudgeDecision` carrying the
+  ladder (`Once` / `Session` / `PearlProject` / `User`) that the UI may
+  offer the human. Legacy `EscalateToHuman` remains as the no-hint
+  fail-closed form. New `smooth_bigsmooth::access::AccessStore` holds
+  pending requests, broadcasts `AccessEvent`s for SSE consumers, and
+  hands the caller a future that fires when a human resolves the
+  request. Pearl th-49b4aa (Phase A) — TUI wiring + HTTP routes land in
+  the dependent pearls.
+- f4b1511: dispatch: non-sandbox path now gets Wonk/Narc parity. The "direct"
+  dispatch path (no microVM) spawns operator-runner natively; the
+  runner already brings up its own in-process Wonk via `spawn_cast`,
+  but the spawn never received `SMOOTH_NARC_URL`. Result: the
+  in-runner Wonk had no arbiter, hard-denied anything its local
+  policy couldn't auto-approve, and the agent never reached the
+  Claude-Code-style auto-mode prompts. Setting `SMOOTH_NARC_URL` on
+  the direct-dispatch subprocess wires the runner's Wonk to Big
+  Smooth's Boardroom Narc, so the same Decision::Ask → AccessStore
+  → TUI → resolve loop now gates direct tool calls too. Pearl
+  th-e96aeb.
+- 442da1e: tests: add `sandbox_security.rs` integration suite exercising the
+  Decision::Ask → AccessStore → human resolution → BoardroomNarc replay
+  chain end-to-end. Covers: unknown domain holds-for-approve and
+  holds-for-deny, dangerous CLI patterns refused by the rule engine
+  before the Ask path runs, dangerous domains likewise, persistent
+  wonk-allow.toml grants short-circuiting without prompts, glob
+  matching against subdomains (and the adjacent-label safety guard),
+  rule-engine safe domains, decision cache dedup, hold timeout failing
+  closed, concurrent pending requests resolving independently, runtime
+  merge_in taking effect without a Narc restart, glob_override flowing
+  back through the resolution. 12 tests, in-process — the real-microVM
+  gold standard from th-9dcc40's description is still on deck but
+  needs a separate fixture investment. Pearl th-9dcc40.
+- 50b1851: TUI: inline Claude-Code-style approval cards for Wonk Ask verdicts.
+  The TUI subscribes to `/api/access/stream` and renders pending
+  requests as compact cards under the chat scroll. Keystrokes
+  `o`/`s`/`p`/`u`/`d`/`D` resolve the most recently filed open
+  prompt at the chosen scope (once/session/project/user/deny-once/
+  deny-forever) and POST to `/api/access/{approve,deny}`. Reconnects
+  the SSE stream automatically with exponential backoff so a Big
+  Smooth restart doesn't strand prompts. Pearl th-670fb2.
+
+  Wire types moved to `smooth-narc::access_wire` so the TUI consumes
+  them without taking a direct dep on smooth-bigsmooth; the orchestrator
+  crate re-exports the same types so existing call sites compile
+  unchanged. `AccessStore::subscriber_count()` lets integration tests
+  wait for the broadcast subscription to register before firing events.
+
+- dbc713a: tools: native `web_search` backed by DuckDuckGo HTML, no API key. New
+  `smooth_bigsmooth::web_search` module + `GET /api/web_search?q=&n=`
+  route. Big Smooth makes the outbound request so each sandbox doesn't
+  need a TLS HTTP client + outbound permission for the search backend.
+  `html.duckduckgo.com` and `duckduckgo.com` join the Narc obviously-
+  safe domain list so the in-VM Wonk auto-approves without a human
+  prompt. Untrusted result content is scanned for prompt-injection
+  markers (`ignore previous instructions`, `</system>`, etc.) and
+  redacted before return; `redacted_count` in the response surfaces
+  how many hits fired. 16 unit tests (parser + redaction) + 8 wire-
+  shape integration tests. Pearl th-70b68b.
+- d37ce4d: wonk: persistent permission grants via `wonk-allow.toml`. Approvals
+  at scope `user` (and for now, `project`) survive a Big Smooth
+  restart — the resolution is appended to `~/.smooth/wonk-allow.toml`
+  and Boardroom Narc consults the file at startup so subsequent
+  requests for the same resource short-circuit to Approve without
+  re-asking the human.
+
+  Schema (v1): `[network] allow_hosts`, `[tools] allow`, `[bash]
+allow_patterns`. Host patterns support `*.example.com` and
+  `.example.com` glob shapes; bare suffixes require exact match (so
+  `evil-example.com` can't slip past an `example.com` allow entry).
+  Atomic writes via tempfile + rename. Pearl th-38b72c.
+
 ## 0.13.6
 
 ### Patch Changes
