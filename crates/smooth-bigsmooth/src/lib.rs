@@ -25,5 +25,6 @@ pub mod tailscale;
 pub mod thoughts;
 pub mod tool_api;
 pub mod tools;
+pub mod web_search;
 pub mod wonk_grants;
 pub mod ws;

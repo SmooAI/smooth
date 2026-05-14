@@ -352,6 +352,12 @@ pub const OBVIOUSLY_SAFE_DOMAIN_SUFFIXES: &[&str] = &[
     "raw.githubusercontent.com",
     // MDN reference.
     "developer.mozilla.org",
+    // Web-search backends. Smooth's native `web_search` tool hits
+    // DDG's HTML endpoint via Big Smooth — the in-VM Wonk needs to
+    // auto-approve this hostname so the tool doesn't trip a human
+    // prompt on every call. Pearl th-70b68b.
+    "html.duckduckgo.com",
+    "duckduckgo.com",
 ];
 
 /// Domains we will never auto-approve without a human in the loop, even if

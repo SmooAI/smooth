@@ -481,6 +481,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/chat/sessions/{id}/messages/stream", post(post_chat_message_stream_handler))
         // Search
         .route("/api/search", get(search_handler))
+        // Web search — native tool backed by DuckDuckGo HTML. Pearl th-70b68b.
+        .route("/api/web_search", get(web_search_handler))
         // Steering
         .route("/api/steering/{bead_id}/pause", post(pause_handler))
         .route("/api/steering/{bead_id}/resume", post(resume_handler))
@@ -4540,6 +4542,70 @@ async fn access_stream_handler(State(state): State<AppState>) -> Sse<impl Stream
         }
     });
     Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(15)))
+}
+
+// ── Web search ─────────────────────────────────────────────
+//
+// Native web search backed by the DuckDuckGo HTML endpoint. Runners
+// hit this through their already-allowed Big Smooth route instead of
+// each sandbox carrying a TLS-capable HTTP client + outbound network
+// permission for `html.duckduckgo.com`. Pearl th-70b68b.
+
+#[derive(Deserialize)]
+struct WebSearchParams {
+    /// Search query. Required.
+    q: Option<String>,
+    /// Number of results. Clamped to [`crate::web_search::MAX_RESULTS`].
+    /// Defaults to 5.
+    n: Option<usize>,
+    /// Run injection redaction on the results before returning.
+    /// Defaults to `true` — callers that need raw text (debugging,
+    /// fuzzing) can set `redact=false`.
+    redact: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct WebSearchResponse {
+    results: Vec<crate::web_search::SearchResult>,
+    /// Number of injection patterns redacted. Zero on the happy path.
+    redacted_count: usize,
+}
+
+async fn web_search_handler(
+    State(state): State<AppState>,
+    Query(params): Query<WebSearchParams>,
+) -> Result<Json<WebSearchResponse>, (axum::http::StatusCode, String)> {
+    state.touch();
+    let query = params.q.unwrap_or_default();
+    let n = params.n.unwrap_or(5);
+    let redact = params.redact.unwrap_or(true);
+
+    let results = crate::web_search::search(&query, n).await.map_err(|e| {
+        let status = match &e {
+            crate::web_search::SearchError::EmptyQuery => axum::http::StatusCode::BAD_REQUEST,
+            // Network / Parse / BadStatus all surface as 502 — the
+            // upstream is misbehaving, not the caller.
+            crate::web_search::SearchError::Network { .. }
+            | crate::web_search::SearchError::Parse { .. }
+            | crate::web_search::SearchError::BadStatus { .. } => axum::http::StatusCode::BAD_GATEWAY,
+        };
+        (status, e.to_string())
+    })?;
+
+    let (final_results, redacted_count) = if redact {
+        crate::web_search::redact_injections(results)
+    } else {
+        (results, 0)
+    };
+
+    if redacted_count > 0 {
+        tracing::warn!(redacted = redacted_count, query = %query, "web_search: injection patterns redacted from results");
+    }
+
+    Ok(Json(WebSearchResponse {
+        results: final_results,
+        redacted_count,
+    }))
 }
 
 // ── Search ─────────────────────────────────────────────────
