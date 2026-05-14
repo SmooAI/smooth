@@ -1,9 +1,11 @@
 //! Big Smooth — orchestrator, policy generation, sandbox management, API server.
 
+pub mod access;
 pub mod audit;
 pub mod boardroom;
 pub mod boardroom_narc;
 pub mod chat_tools;
+pub mod creds;
 pub mod host_tools;
 pub mod teammates;
 
@@ -24,4 +26,6 @@ pub mod tailscale;
 pub mod thoughts;
 pub mod tool_api;
 pub mod tools;
+pub mod web_search;
+pub mod wonk_grants;
 pub mod ws;

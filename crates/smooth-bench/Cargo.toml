@@ -31,10 +31,15 @@ tokio.workspace = true
 toml.workspace = true
 uuid.workspace = true
 
+[dependencies.tracing]
+workspace = true
+
 [dev-dependencies]
 async-trait.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
+# Used by auto_approve tests to stand a fake Big Smooth.
+axum.workspace = true
 
 [lints]
 workspace = true

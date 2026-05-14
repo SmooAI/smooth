@@ -103,6 +103,69 @@ pub struct JudgeRequest {
     pub agent_reason: Option<String>,
 }
 
+/// Persistence scope for a human-approved access grant.
+///
+/// When Narc returns [`Decision::Ask`], it includes a list of scopes the
+/// caller (typically the TUI) may offer the human. Resolution at a given
+/// scope persists the grant for that lifetime:
+///
+/// - [`Scope::Once`] — this single request only.
+/// - [`Scope::Session`] — for the lifetime of the current VM / chat session.
+///   In-memory only.
+/// - [`Scope::PearlProject`] — checked into `<repo>/.smooth/wonk-allow.toml`
+///   so teammates pulling the pearl get the same grants.
+/// - [`Scope::User`] — written to `~/.smooth/wonk-allow.toml`. Applies to
+///   every future session for this user.
+///
+/// `Once` is always offered. Wonk + Narc default to offering all four, but
+/// surface a narrower set when a scope wouldn't make sense (e.g. a transient
+/// MCP server doesn't get a `PearlProject` grant).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Scope {
+    /// One-shot allow / deny — does not persist.
+    Once,
+    /// Persist for the current chat session / VM lifetime. In-memory.
+    Session,
+    /// Persist into `<repo>/.smooth/wonk-allow.toml`. Shared with teammates
+    /// via git.
+    PearlProject,
+    /// Persist into `~/.smooth/wonk-allow.toml`. Personal to this user.
+    User,
+}
+
+impl Scope {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Once => "once",
+            Self::Session => "session",
+            Self::PearlProject => "project",
+            Self::User => "user",
+        }
+    }
+
+    /// Parse a string form (`once`, `session`, `project`, `user`). Accepts a
+    /// few aliases (`pearl_project`, `pearl-project`) so the CLI / SSE wire
+    /// format is forgiving.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "once" => Some(Self::Once),
+            "session" => Some(Self::Session),
+            "project" | "pearl_project" | "pearl-project" | "pearlproject" => Some(Self::PearlProject),
+            "user" => Some(Self::User),
+            _ => None,
+        }
+    }
+
+    /// The full default scope ladder offered for an Ask: every option.
+    #[must_use]
+    pub fn default_options() -> Vec<Self> {
+        vec![Self::Once, Self::Session, Self::PearlProject, Self::User]
+    }
+}
+
 /// The arbiter's decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -112,10 +175,40 @@ pub enum Decision {
     Approve,
     /// Wonk should deny the request with Narc's reason.
     Deny,
-    /// Narc is not confident enough to decide autonomously. Wonk fails
-    /// closed (denies now) but also files a pending access request that a
-    /// human can approve via `th access pending`.
+    /// The arbiter is not confident enough to decide autonomously and wants
+    /// to ask a human. Wonk fails closed at the wire (no implicit approval)
+    /// but the orchestrator MAY pause the calling tool and present the human
+    /// with the [`JudgeDecision::scope_options`] for an interactive decision.
+    /// When the human resolves, the call retries against the resolved scope.
+    ///
+    /// `Ask` is the new auto-mode-style verdict introduced in pearl
+    /// th-49b4aa. [`Decision::EscalateToHuman`] remains as the no-scope-hint
+    /// legacy form for callers that didn't supply scope_options.
+    Ask,
+    /// Legacy: same fail-closed semantics as [`Decision::Ask`] but with no
+    /// scope hints. Treated as `Ask{scope_options: vec![Once]}` by anything
+    /// that knows about scopes.
     EscalateToHuman,
+}
+
+impl Decision {
+    /// True for verdicts that block the request immediately (no retry path).
+    #[must_use]
+    pub fn is_blocking(self) -> bool {
+        matches!(self, Self::Deny)
+    }
+
+    /// True for verdicts that allow the request through.
+    #[must_use]
+    pub fn is_allowing(self) -> bool {
+        matches!(self, Self::Approve)
+    }
+
+    /// True for verdicts that pause for a human (Ask + EscalateToHuman).
+    #[must_use]
+    pub fn is_human_gated(self) -> bool {
+        matches!(self, Self::Ask | Self::EscalateToHuman)
+    }
 }
 
 /// The response Narc sends back to Wonk.
@@ -137,6 +230,10 @@ pub struct JudgeDecision {
     /// means "don't cache".
     #[serde(default)]
     pub cache_ttl_seconds: Option<u64>,
+    /// For [`Decision::Ask`]: the scope options the orchestrator may offer
+    /// the human. Empty for non-Ask decisions and for legacy EscalateToHuman.
+    #[serde(default)]
+    pub scope_options: Vec<Scope>,
 }
 
 impl JudgeDecision {
@@ -149,6 +246,7 @@ impl JudgeDecision {
             reason: reason.into(),
             add_to_allowlist_glob: None,
             cache_ttl_seconds: None,
+            scope_options: Vec::new(),
         }
     }
 
@@ -161,11 +259,13 @@ impl JudgeDecision {
             reason: reason.into(),
             add_to_allowlist_glob: None,
             cache_ttl_seconds: Some(3600),
+            scope_options: Vec::new(),
         }
     }
 
     /// An escalation — the caller should fail closed now but file a pending
-    /// access request for a human to review.
+    /// access request for a human to review. Legacy: prefer [`JudgeDecision::ask`]
+    /// for new code paths so the human gets scope hints.
     #[must_use]
     pub fn escalate(reason: impl Into<String>) -> Self {
         Self {
@@ -174,6 +274,37 @@ impl JudgeDecision {
             reason: reason.into(),
             add_to_allowlist_glob: None,
             cache_ttl_seconds: None,
+            scope_options: Vec::new(),
+        }
+    }
+
+    /// Short human-readable label for this decision (used in log lines +
+    /// audit). `approved` / `denied` / `asks human` / `escalated`.
+    #[must_use]
+    pub fn decision_label(&self) -> &'static str {
+        match self.decision {
+            Decision::Approve => "approved",
+            Decision::Deny => "denied",
+            Decision::Ask => "asks human",
+            Decision::EscalateToHuman => "escalated",
+        }
+    }
+
+    /// Auto-mode-style ask: surface to a human with the given scope ladder.
+    /// Wonk fails closed at the wire; the orchestrator (Big Smooth) may
+    /// hold the call open and replay it once the human resolves.
+    ///
+    /// Pass [`Scope::default_options`] for the full ladder, or a narrower
+    /// list when some scopes wouldn't make sense for the resource.
+    #[must_use]
+    pub fn ask(reason: impl Into<String>, scope_options: Vec<Scope>) -> Self {
+        Self {
+            decision: Decision::Ask,
+            confidence: 0.0,
+            reason: reason.into(),
+            add_to_allowlist_glob: None,
+            cache_ttl_seconds: None,
+            scope_options,
         }
     }
 }
@@ -221,6 +352,12 @@ pub const OBVIOUSLY_SAFE_DOMAIN_SUFFIXES: &[&str] = &[
     "raw.githubusercontent.com",
     // MDN reference.
     "developer.mozilla.org",
+    // Web-search backends. Smooth's native `web_search` tool hits
+    // DDG's HTML endpoint via Big Smooth — the in-VM Wonk needs to
+    // auto-approve this hostname so the tool doesn't trip a human
+    // prompt on every call. Pearl th-70b68b.
+    "html.duckduckgo.com",
+    "duckduckgo.com",
 ];
 
 /// Domains we will never auto-approve without a human in the loop, even if
@@ -444,6 +581,90 @@ mod tests {
         };
         let d = rule_engine_decide(&req).expect("deny");
         assert_eq!(d.decision, Decision::Deny);
+    }
+
+    #[test]
+    fn scope_parse_and_str_roundtrip() {
+        // Canonical forms round-trip cleanly.
+        for scope in Scope::default_options() {
+            assert_eq!(Scope::parse(scope.as_str()), Some(scope));
+        }
+        // Aliases for the longest scope are accepted.
+        assert_eq!(Scope::parse("pearl_project"), Some(Scope::PearlProject));
+        assert_eq!(Scope::parse("pearl-project"), Some(Scope::PearlProject));
+        assert_eq!(Scope::parse("PearlProject"), Some(Scope::PearlProject));
+        // Unknown strings stay None.
+        assert_eq!(Scope::parse("global"), None);
+        assert_eq!(Scope::parse(""), None);
+        // The default option set offers exactly the four documented scopes
+        // in a stable order — the TUI relies on this for keybinding layout.
+        let opts = Scope::default_options();
+        assert_eq!(opts, vec![Scope::Once, Scope::Session, Scope::PearlProject, Scope::User]);
+    }
+
+    #[test]
+    fn scope_serde_uses_snake_case() {
+        // Wire format is snake_case — the TUI + bench scenarios depend on
+        // this being stable.
+        assert_eq!(serde_json::to_string(&Scope::Once).unwrap(), "\"once\"");
+        assert_eq!(serde_json::to_string(&Scope::Session).unwrap(), "\"session\"");
+        assert_eq!(serde_json::to_string(&Scope::PearlProject).unwrap(), "\"pearl_project\"");
+        assert_eq!(serde_json::to_string(&Scope::User).unwrap(), "\"user\"");
+        let scope: Scope = serde_json::from_str("\"pearl_project\"").unwrap();
+        assert_eq!(scope, Scope::PearlProject);
+    }
+
+    #[test]
+    fn decision_ask_constructor_carries_scope_options() {
+        let d = JudgeDecision::ask("not on the allowlist", Scope::default_options());
+        assert_eq!(d.decision, Decision::Ask);
+        assert_eq!(d.scope_options.len(), 4);
+        // Asks should not be cached — the resolution is per-instance.
+        assert!(d.cache_ttl_seconds.is_none());
+        assert_eq!(d.confidence, 0.0);
+        // The reason flows verbatim so the TUI can render it.
+        assert_eq!(d.reason, "not on the allowlist");
+    }
+
+    #[test]
+    fn decision_helpers_classify_correctly() {
+        assert!(Decision::Approve.is_allowing());
+        assert!(!Decision::Approve.is_blocking());
+        assert!(!Decision::Approve.is_human_gated());
+
+        assert!(Decision::Deny.is_blocking());
+        assert!(!Decision::Deny.is_allowing());
+        assert!(!Decision::Deny.is_human_gated());
+
+        assert!(Decision::Ask.is_human_gated());
+        assert!(!Decision::Ask.is_blocking());
+        assert!(!Decision::Ask.is_allowing());
+
+        // Legacy escalation matches the same human-gated semantics.
+        assert!(Decision::EscalateToHuman.is_human_gated());
+    }
+
+    #[test]
+    fn judge_decision_with_scope_options_roundtrips() {
+        let d = JudgeDecision::ask("ask the human", vec![Scope::Once, Scope::Session]);
+        let json = serde_json::to_string(&d).expect("serialize");
+        // Wire format includes scope_options as snake_case strings.
+        assert!(json.contains("\"decision\":\"ask\""));
+        assert!(json.contains("\"scope_options\":[\"once\",\"session\"]"));
+        let parsed: JudgeDecision = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.decision, Decision::Ask);
+        assert_eq!(parsed.scope_options, vec![Scope::Once, Scope::Session]);
+    }
+
+    #[test]
+    fn legacy_judge_decision_without_scope_options_still_parses() {
+        // Old clients written before scope_options existed must still
+        // produce a deserializable JudgeDecision. The field defaults to
+        // an empty vec.
+        let legacy = r#"{"decision":"approve","confidence":1.0,"reason":"ok"}"#;
+        let parsed: JudgeDecision = serde_json::from_str(legacy).expect("legacy parse");
+        assert_eq!(parsed.decision, Decision::Approve);
+        assert!(parsed.scope_options.is_empty());
     }
 
     #[test]

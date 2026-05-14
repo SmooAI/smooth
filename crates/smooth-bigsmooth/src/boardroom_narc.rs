@@ -22,11 +22,14 @@
 //!   every decision is traceable.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
-use smooth_narc::judge::{rule_engine_decide, Decision, DecisionCache, JudgeDecision, JudgeRequest};
+use smooth_narc::judge::{rule_engine_decide, Decision, DecisionCache, JudgeDecision, JudgeRequest, Scope};
 use smooth_operator::llm::{LlmClient, LlmConfig};
+
+use crate::access::{AccessStore, NewAccessRequest, ResolutionVerdict};
+use crate::wonk_grants::SharedWonkGrants;
 
 /// Default confidence floor. LLM verdicts below this are rewritten to
 /// `EscalateToHuman` — Narc won't auto-approve something it isn't sure
@@ -36,6 +39,14 @@ pub const DEFAULT_ESCALATION_THRESHOLD: f32 = 0.7;
 /// Maximum number of characters of the task summary we'll include in the
 /// judge prompt. Longer summaries are truncated with an ellipsis.
 pub const MAX_TASK_SUMMARY_CHARS: usize = 600;
+
+/// How long Narc holds an `Ask` open before failing closed.
+///
+/// 60s is long enough for the human to alt-tab to the TUI and pick a
+/// scope; tools that would block longer should be redesigned. On
+/// timeout the judge returns `EscalateToHuman` so the caller sees the
+/// legacy fail-closed shape.
+pub const ASK_HOLD_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// In-process Boardroom Narc service.
 ///
@@ -49,22 +60,75 @@ struct Inner {
     llm: Option<LlmClient>,
     cache: DecisionCache,
     escalation_threshold: f32,
+    /// Shared pending-request queue. `Ask` verdicts are filed here and
+    /// the judge awaits a human resolution before returning.
+    access: AccessStore,
+    /// How long to hold an `Ask` open before timing out. Overridable in
+    /// tests; defaults to [`ASK_HOLD_TIMEOUT`].
+    ask_hold_timeout: Duration,
+    /// Persistent permission grants loaded from `wonk-allow.toml`.
+    /// Consulted after the rule engine and before the LLM judge so
+    /// approvals from prior sessions short-circuit without a round
+    /// trip. `None` for tests / configurations that don't want
+    /// persistent grants (the default).
+    grants: Option<SharedWonkGrants>,
 }
 
 impl BoardroomNarc {
     /// Construct a Narc that will call `llm_config`'s provider for any
     /// decision the rule engine can't short-circuit. Pass `None` to get a
     /// rule-engine-only Narc that escalates every unhandled request.
+    ///
+    /// `access` is the [`AccessStore`] the judge files `Ask` verdicts
+    /// into. Big Smooth keeps a single shared instance in `AppState` so
+    /// the same queue powers both the HTTP routes and the SSE stream.
     #[must_use]
-    pub fn new(llm_config: Option<LlmConfig>) -> Self {
+    pub fn new(llm_config: Option<LlmConfig>, access: AccessStore) -> Self {
+        Self::with_timeout(llm_config, access, ASK_HOLD_TIMEOUT)
+    }
+
+    /// Like [`BoardroomNarc::new`] but with an explicit ask-hold timeout —
+    /// for tests that want to exercise the timeout fail-closed path without
+    /// sleeping a real 60s.
+    #[must_use]
+    pub fn with_timeout(llm_config: Option<LlmConfig>, access: AccessStore, ask_hold_timeout: Duration) -> Self {
         let llm = llm_config.map(LlmClient::new);
         Self {
             inner: Arc::new(Inner {
                 llm,
                 cache: DecisionCache::new(),
                 escalation_threshold: DEFAULT_ESCALATION_THRESHOLD,
+                access,
+                ask_hold_timeout,
+                grants: None,
             }),
         }
+    }
+
+    /// Attach a persistent grants store (`wonk-allow.toml` backed).
+    /// When set, the judge consults the grants after the rule engine
+    /// and before the LLM — a hit short-circuits to Approve. Chainable.
+    #[must_use]
+    pub fn with_grants(self, grants: SharedWonkGrants) -> Self {
+        // Inner is Arc'd. Rebuild rather than mutate-in-place — the
+        // shared count is always 1 here (we just constructed it), so
+        // the cost is a single reallocation at startup, never on hot
+        // paths.
+        let inner = match Arc::try_unwrap(self.inner) {
+            Ok(mut inner) => {
+                inner.grants = Some(grants);
+                inner
+            }
+            Err(arc) => Inner {
+                llm: arc.llm.clone(),
+                cache: DecisionCache::new(),
+                escalation_threshold: arc.escalation_threshold,
+                access: arc.access.clone(),
+                ask_hold_timeout: arc.ask_hold_timeout,
+                grants: Some(grants),
+            },
+        };
+        Self { inner: Arc::new(inner) }
     }
 
     /// Construct a Narc with no LLM backend — used in tests and in modes
@@ -72,7 +136,15 @@ impl BoardroomNarc {
     /// isn't short-circuited by the rule engine is escalated to a human.
     #[must_use]
     pub fn without_llm() -> Self {
-        Self::new(None)
+        Self::new(None, AccessStore::new())
+    }
+
+    /// Reference to the underlying [`AccessStore`]. Exposed so HTTP
+    /// handlers (or tests) can resolve / list pending requests through
+    /// the same store the judge files into.
+    #[must_use]
+    pub fn access(&self) -> &AccessStore {
+        &self.inner.access
     }
 
     /// Current size of the decision cache. For diagnostics.
@@ -107,6 +179,16 @@ impl BoardroomNarc {
             return decision;
         }
 
+        // 1b. Persistent user/project grants from wonk-allow.toml.
+        //     Checked before the cache so a freshly-approved grant
+        //     short-circuits even on a request the cache hasn't seen.
+        //     Pearl th-38b72c.
+        if let Some(decision) = self.check_persistent_grants(&request) {
+            self.record("wonk_grants", &request, &decision, started.elapsed().as_millis());
+            self.inner.cache.put(&request, &decision);
+            return decision;
+        }
+
         // 2. Cache hit — same (bead, kind, resource) tuple was decided
         //    recently. No network or LLM call.
         if let Some(decision) = self.inner.cache.get(&request) {
@@ -135,8 +217,133 @@ impl BoardroomNarc {
         };
 
         self.record("llm_judge", &request, &decision, started.elapsed().as_millis());
+
+        // If the verdict is Ask, hold the call open and wait for a human
+        // resolution before returning. The hold-and-replay semantic is the
+        // whole point of the auto-mode UX: instead of the tool call dying
+        // and the agent retrying, we pause it at the policy boundary,
+        // surface a card in the TUI, and resume against whatever the
+        // human picked. Approve / Deny / cache-hit verdicts return as
+        // before.
+        let decision = if matches!(decision.decision, Decision::Ask) {
+            self.hold_for_human(&request, decision).await
+        } else {
+            decision
+        };
+
         self.inner.cache.put(&request, &decision);
         decision
+    }
+
+    /// Consult the persistent grants store, if any. Returns
+    /// `Some(approve)` when the request matches a stored grant for
+    /// the corresponding kind. Returns `None` if there's no grants
+    /// store wired up or no match.
+    fn check_persistent_grants(&self, request: &JudgeRequest) -> Option<JudgeDecision> {
+        let grants = self.inner.grants.as_ref()?.snapshot();
+        let matched = match request.kind {
+            smooth_narc::judge::JudgeKind::Network => grants.matches_host(&request.resource),
+            smooth_narc::judge::JudgeKind::Tool => grants.matches_tool(&request.resource),
+            smooth_narc::judge::JudgeKind::Cli => grants.matches_bash(&request.resource),
+            // File / Mcp / Port don't have a [section] in v1 yet —
+            // grants don't speak to them. Fall through.
+            smooth_narc::judge::JudgeKind::File | smooth_narc::judge::JudgeKind::Mcp | smooth_narc::judge::JudgeKind::Port => false,
+        };
+        if matched {
+            let mut approval = JudgeDecision::approve(format!(
+                "matched persistent grant in wonk-allow.toml: {} → {}",
+                request.kind.as_str(),
+                request.resource
+            ));
+            // Persistent grants don't expire from the in-memory cache
+            // any faster than they expire from the file — pin to the
+            // standard hour so subsequent requests skip the file
+            // read entirely.
+            approval.cache_ttl_seconds = Some(3600);
+            Some(approval)
+        } else {
+            None
+        }
+    }
+
+    /// File an `Ask` verdict into the [`AccessStore`] and await a human
+    /// resolution. On approve, returns an `Approve` decision (with the
+    /// optional glob_override threaded back through to Wonk). On deny,
+    /// returns a `Deny`. On timeout / dropped resolver, returns
+    /// `EscalateToHuman` (legacy fail-closed) so the caller sees the
+    /// same denial it would have got pre-Ask.
+    async fn hold_for_human(&self, request: &JudgeRequest, ask: JudgeDecision) -> JudgeDecision {
+        debug_assert!(matches!(ask.decision, Decision::Ask));
+        let new_req = NewAccessRequest {
+            bead_id: request.bead_id.clone(),
+            operator_id: request.operator_id.clone(),
+            kind: request.kind.as_str().to_string(),
+            resource: request.resource.clone(),
+            detail: request.detail.clone(),
+            reason: ask.reason.clone(),
+            scope_options: if ask.scope_options.is_empty() {
+                Scope::default_options()
+            } else {
+                ask.scope_options.clone()
+            },
+        };
+        let (id, fut) = self.inner.access.file_pending(new_req);
+        tracing::info!(
+            id = %id,
+            kind = request.kind.as_str(),
+            resource = %request.resource,
+            timeout_secs = self.inner.ask_hold_timeout.as_secs(),
+            "boardroom narc: holding tool call open for human resolution"
+        );
+
+        let Some(resolution) = fut.await_resolution_with_timeout(self.inner.ask_hold_timeout).await else {
+            // Either the timeout fired or the caller dropped the
+            // receiver. Either way: expire the pending entry (best-
+            // effort, may already be gone) and fail closed with the
+            // legacy EscalateToHuman shape so the caller can distinguish
+            // "no human" from a deliberate human deny.
+            let _ = self.inner.access.expire(&id);
+            tracing::warn!(
+                id = %id,
+                kind = request.kind.as_str(),
+                resource = %request.resource,
+                "boardroom narc: ask timed out without human resolution — failing closed"
+            );
+            return JudgeDecision::escalate(format!("ask timed out after {}s: {}", self.inner.ask_hold_timeout.as_secs(), ask.reason));
+        };
+
+        match resolution.verdict {
+            ResolutionVerdict::Approve => {
+                let mut approved = JudgeDecision::approve(format!("human approved at scope {}: {}", resolution.scope.as_str(), ask.reason));
+                // If the human (or UI) bound the approval to a glob,
+                // thread it through so Wonk caches the glob in its
+                // runtime allowlist instead of just the exact resource.
+                approved.add_to_allowlist_glob = resolution.glob_override.clone();
+                // Cache scope-aware. `Once` never caches; the others
+                // get a session-length TTL. Persistent (project / user)
+                // grants live in wonk-allow.toml (Phase C); this cache
+                // is purely a per-process speedup.
+                approved.cache_ttl_seconds = match resolution.scope {
+                    Scope::Once => None,
+                    Scope::Session | Scope::PearlProject | Scope::User => Some(3600),
+                };
+                tracing::info!(
+                    id = %id,
+                    scope = resolution.scope.as_str(),
+                    glob = ?approved.add_to_allowlist_glob,
+                    "boardroom narc: human approved"
+                );
+                approved
+            }
+            ResolutionVerdict::Deny => {
+                tracing::info!(
+                    id = %id,
+                    scope = resolution.scope.as_str(),
+                    "boardroom narc: human denied"
+                );
+                JudgeDecision::deny(format!("human denied at scope {}: {}", resolution.scope.as_str(), ask.reason))
+            }
+        }
     }
 
     /// Run the moderation pre-filter against the provider's OpenAI-compat
@@ -197,14 +404,22 @@ impl BoardroomNarc {
         }
     }
 
-    /// Low-confidence approvals become escalations — Narc never silently
-    /// approves a request whose LLM verdict it isn't sure about.
+    /// Low-confidence approvals become `Ask` verdicts — Narc never silently
+    /// approves a request whose LLM verdict it isn't sure about. The
+    /// upstream `judge()` will then hold the call open and surface the
+    /// scope ladder to the human, instead of failing closed silently.
+    /// (Pre-auto-mode this returned `EscalateToHuman`; the new behavior
+    /// gives the user agency over uncertain calls instead of just denying
+    /// them. Pearl th-49b4aa.)
     fn coerce_by_confidence(&self, decision: JudgeDecision) -> JudgeDecision {
         if matches!(decision.decision, Decision::Approve) && decision.confidence < self.inner.escalation_threshold {
-            return JudgeDecision::escalate(format!(
-                "LLM judge approved but confidence {:.2} < threshold {:.2}; escalating to human: {}",
-                decision.confidence, self.inner.escalation_threshold, decision.reason
-            ));
+            return JudgeDecision::ask(
+                format!(
+                    "LLM judge approved but confidence {:.2} < threshold {:.2}: {}",
+                    decision.confidence, self.inner.escalation_threshold, decision.reason
+                ),
+                Scope::default_options(),
+            );
         }
         decision
     }
@@ -331,6 +546,13 @@ fn parse_judge_response(content: &str) -> anyhow::Result<JudgeDecision> {
     let decision = match raw.decision.to_ascii_lowercase().as_str() {
         "approve" | "allow" | "accept" => Decision::Approve,
         "deny" | "reject" | "block" => Decision::Deny,
+        // `ask` is the new auto-mode form (pearl th-49b4aa). The judge
+        // prompt may or may not have learned about it yet, so accept both
+        // `ask` and the legacy `escalate*` family as the same human-gated
+        // verdict. The shaping decision (which one to emit) lives in
+        // `coerce_by_confidence` and the upcoming caller-side mapping —
+        // here we just decode what the model gave us.
+        "ask" | "ask_human" | "askhuman" => Decision::Ask,
         "escalate" | "escalate_to_human" | "human" | "uncertain" => Decision::EscalateToHuman,
         other => return Err(anyhow::anyhow!("unknown decision value: {other}")),
     };
@@ -341,7 +563,10 @@ fn parse_judge_response(content: &str) -> anyhow::Result<JudgeDecision> {
     let cache_ttl_seconds = match decision {
         Decision::Approve => Some(3600),
         Decision::Deny => Some(300),
-        Decision::EscalateToHuman => None,
+        // Human-gated verdicts are bound to a specific request and a
+        // specific human resolution — caching them would mask future
+        // policy intent. Always re-ask.
+        Decision::Ask | Decision::EscalateToHuman => None,
     };
 
     Ok(JudgeDecision {
@@ -350,6 +575,14 @@ fn parse_judge_response(content: &str) -> anyhow::Result<JudgeDecision> {
         reason,
         add_to_allowlist_glob: raw.add_to_allowlist_glob,
         cache_ttl_seconds,
+        // The LLM judge doesn't pick scope options yet — that's a Phase B
+        // refinement once the TUI surfaces them. For now, any Ask the
+        // judge emits offers the full default ladder.
+        scope_options: if matches!(decision, Decision::Ask) {
+            smooth_narc::judge::Scope::default_options()
+        } else {
+            Vec::new()
+        },
     })
 }
 
@@ -475,7 +708,10 @@ mod tests {
     }
 
     #[test]
-    fn confidence_coercion_escalates_uncertain_approvals() {
+    fn confidence_coercion_asks_human_on_uncertain_approvals() {
+        // Pre-auto-mode this returned EscalateToHuman (silent fail-closed).
+        // The auto-mode flow makes Narc surface the uncertainty as an Ask
+        // so the human can pick a scope inline. Pearl th-49b4aa.
         let narc = BoardroomNarc::without_llm();
         let approval = JudgeDecision {
             decision: Decision::Approve,
@@ -483,9 +719,15 @@ mod tests {
             reason: "kinda safe".into(),
             add_to_allowlist_glob: None,
             cache_ttl_seconds: Some(60),
+            scope_options: Vec::new(),
         };
         let coerced = narc.coerce_by_confidence(approval);
-        assert_eq!(coerced.decision, Decision::EscalateToHuman);
+        assert_eq!(coerced.decision, Decision::Ask);
+        // The coerced Ask offers the full scope ladder so the TUI can
+        // present every option.
+        assert_eq!(coerced.scope_options.len(), 4);
+        // Asks never auto-cache — every uncertain decision gets re-asked.
+        assert!(coerced.cache_ttl_seconds.is_none());
     }
 
     #[test]
@@ -497,6 +739,7 @@ mod tests {
             reason: "clearly fine".into(),
             add_to_allowlist_glob: None,
             cache_ttl_seconds: Some(60),
+            scope_options: Vec::new(),
         };
         let coerced = narc.coerce_by_confidence(approval);
         assert_eq!(coerced.decision, Decision::Approve);
@@ -510,5 +753,215 @@ mod tests {
         let second = narc.judge(req_network("registry.npmjs.org")).await;
         assert_eq!(first.decision, Decision::Approve);
         assert_eq!(second.decision, Decision::Approve);
+    }
+
+    #[tokio::test]
+    async fn hold_for_human_resolves_to_approve_when_human_approves() {
+        // Build a Narc with a long ask-hold timeout so we know any test
+        // flake isn't a race with the timeout fail-closed path.
+        let access = AccessStore::new();
+        let narc = BoardroomNarc::with_timeout(None, access.clone(), Duration::from_secs(5));
+
+        // Construct an Ask verdict directly and drive hold_for_human.
+        let ask = JudgeDecision::ask("test ask", Scope::default_options());
+        let request = req_network("playwright.azureedge.net");
+
+        // Spawn the await; concurrently approve the pending request.
+        let resolver = {
+            let access = access.clone();
+            tokio::spawn(async move {
+                // Poll until the pending request shows up — the await
+                // call needs to file before we can resolve.
+                for _ in 0..50 {
+                    if let Some(pending) = access.list_pending().first().cloned() {
+                        return access
+                            .resolve(&pending.id, ResolutionVerdict::Approve, Scope::Session, Some("*.azureedge.net".into()))
+                            .expect("resolve");
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                panic!("pending request never appeared");
+            })
+        };
+
+        let decision = narc.hold_for_human(&request, ask).await;
+        let _ = resolver.await.expect("resolver task");
+
+        assert_eq!(decision.decision, Decision::Approve);
+        // The glob_override threaded through so Wonk can cache by glob.
+        assert_eq!(decision.add_to_allowlist_glob.as_deref(), Some("*.azureedge.net"));
+        // Session scope caches for the runtime allowlist window.
+        assert!(decision.cache_ttl_seconds.is_some());
+        // Reason carries enough breadcrumbs for log inspection.
+        assert!(decision.reason.contains("session"));
+    }
+
+    #[tokio::test]
+    async fn hold_for_human_resolves_to_deny_when_human_denies() {
+        let access = AccessStore::new();
+        let narc = BoardroomNarc::with_timeout(None, access.clone(), Duration::from_secs(5));
+        let ask = JudgeDecision::ask("test ask", Scope::default_options());
+        let request = req_network("attacker.example");
+
+        let resolver = {
+            let access = access.clone();
+            tokio::spawn(async move {
+                for _ in 0..50 {
+                    if let Some(pending) = access.list_pending().first().cloned() {
+                        return access.resolve(&pending.id, ResolutionVerdict::Deny, Scope::Once, None).expect("resolve");
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                panic!("pending request never appeared");
+            })
+        };
+
+        let decision = narc.hold_for_human(&request, ask).await;
+        let _ = resolver.await.expect("resolver task");
+
+        assert_eq!(decision.decision, Decision::Deny);
+    }
+
+    #[tokio::test]
+    async fn hold_for_human_times_out_to_escalate_when_no_resolver() {
+        // Short timeout — no one resolves, so we should fail closed in
+        // ~100ms with an EscalateToHuman verdict.
+        let access = AccessStore::new();
+        let narc = BoardroomNarc::with_timeout(None, access.clone(), Duration::from_millis(100));
+        let ask = JudgeDecision::ask("test ask", Scope::default_options());
+        let request = req_network("nobody.cares");
+
+        let start = std::time::Instant::now();
+        let decision = narc.hold_for_human(&request, ask).await;
+        let elapsed = start.elapsed();
+
+        assert_eq!(decision.decision, Decision::EscalateToHuman);
+        assert!(elapsed >= Duration::from_millis(100));
+        // Timed-out request was expired — no garbage in the pending list.
+        assert_eq!(access.pending_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn judge_holds_for_human_on_low_confidence_llm_approval() {
+        // We can't easily mock the LLM judge from this test boundary, but
+        // we can drive the same path by passing a low-confidence approval
+        // through coerce_by_confidence -> Ask -> hold_for_human.
+        //
+        // This test asserts the end-to-end shape: a coerced Ask is the
+        // verdict the judge() flow would emit, and hold_for_human resolves
+        // it through the AccessStore.
+        let access = AccessStore::new();
+        let narc = BoardroomNarc::with_timeout(None, access.clone(), Duration::from_secs(5));
+
+        let low_conf_approval = JudgeDecision {
+            decision: Decision::Approve,
+            confidence: 0.3,
+            reason: "kinda safe".into(),
+            add_to_allowlist_glob: None,
+            cache_ttl_seconds: None,
+            scope_options: Vec::new(),
+        };
+        let coerced = narc.coerce_by_confidence(low_conf_approval);
+        assert_eq!(coerced.decision, Decision::Ask);
+
+        let resolver = {
+            let access = access.clone();
+            tokio::spawn(async move {
+                for _ in 0..50 {
+                    if let Some(pending) = access.list_pending().first().cloned() {
+                        return access
+                            .resolve(&pending.id, ResolutionVerdict::Approve, Scope::PearlProject, None)
+                            .expect("resolve");
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                panic!("pending request never appeared");
+            })
+        };
+
+        let decision = narc.hold_for_human(&req_network("uncertain.example"), coerced).await;
+        let _ = resolver.await.expect("resolver task");
+        assert_eq!(decision.decision, Decision::Approve);
+    }
+
+    #[tokio::test]
+    async fn judge_short_circuits_on_persistent_grant() {
+        use crate::wonk_grants::{SharedWonkGrants, WonkGrants};
+
+        let mut grants = WonkGrants::new();
+        grants.add_host("custom.example");
+        let shared = SharedWonkGrants::new(grants);
+
+        let narc = BoardroomNarc::without_llm().with_grants(shared);
+        // `custom.example` is NOT in the rule engine's OBVIOUSLY_SAFE
+        // list, so without a persistent grant this would fall to the
+        // LLM judge and (without an LLM) get coerced to Ask. The
+        // grant should short-circuit to Approve.
+        let decision = narc.judge(req_network("custom.example")).await;
+        assert_eq!(decision.decision, Decision::Approve);
+        assert!(decision.reason.contains("wonk-allow"));
+    }
+
+    #[tokio::test]
+    async fn judge_persistent_grant_misses_fall_through() {
+        use crate::wonk_grants::{SharedWonkGrants, WonkGrants};
+
+        let mut grants = WonkGrants::new();
+        grants.add_host("granted.example");
+        let shared = SharedWonkGrants::new(grants);
+
+        let narc = BoardroomNarc::without_llm().with_grants(shared);
+        // A different host, not in grants or rule engine. Falls through
+        // to the LLM judge (missing here) → escalate.
+        let decision = narc.judge(req_network("ungranted.example")).await;
+        assert_eq!(decision.decision, Decision::EscalateToHuman);
+    }
+
+    #[tokio::test]
+    async fn judge_persistent_grant_matches_tool_kind() {
+        use crate::wonk_grants::{SharedWonkGrants, WonkGrants};
+        use smooth_narc::judge::JudgeKind;
+
+        let mut grants = WonkGrants::new();
+        grants.add_tool("custom_tool");
+        let shared = SharedWonkGrants::new(grants);
+
+        let narc = BoardroomNarc::without_llm().with_grants(shared);
+        let req = JudgeRequest {
+            kind: JudgeKind::Tool,
+            operator_id: "op".into(),
+            bead_id: "pearl".into(),
+            phase: "execute".into(),
+            resource: "custom_tool".into(),
+            detail: None,
+            task_summary: None,
+            agent_reason: None,
+        };
+        let decision = narc.judge(req).await;
+        assert_eq!(decision.decision, Decision::Approve);
+    }
+
+    #[tokio::test]
+    async fn judge_persistent_grant_matches_bash_prefix() {
+        use crate::wonk_grants::{SharedWonkGrants, WonkGrants};
+        use smooth_narc::judge::JudgeKind;
+
+        let mut grants = WonkGrants::new();
+        grants.add_bash_pattern("pnpm ");
+        let shared = SharedWonkGrants::new(grants);
+
+        let narc = BoardroomNarc::without_llm().with_grants(shared);
+        let req = JudgeRequest {
+            kind: JudgeKind::Cli,
+            operator_id: "op".into(),
+            bead_id: "pearl".into(),
+            phase: "execute".into(),
+            resource: "pnpm install".into(),
+            detail: None,
+            task_summary: None,
+            agent_reason: None,
+        };
+        let decision = narc.judge(req).await;
+        assert_eq!(decision.decision, Decision::Approve);
     }
 }

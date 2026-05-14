@@ -5409,6 +5409,7 @@ version = "0.13.6"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum",
  "chrono",
  "clap",
  "dirs-next",
@@ -5421,6 +5422,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "tracing",
  "uuid",
 ]
 
@@ -5527,6 +5529,7 @@ version = "0.13.6"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum",
  "chrono",
  "crossterm",
  "dirs-next",
@@ -5539,13 +5542,27 @@ dependencies = [
  "serde",
  "serde_json",
  "similar",
+ "smooai-smooth-bigsmooth",
+ "smooai-smooth-narc",
  "smooai-smooth-operator",
  "smooai-smooth-pearls",
  "tempfile",
  "tokio",
+ "tokio-stream",
  "tokio-tungstenite 0.26.2",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "smooai-smooth-credential-helper"
+version = "0.13.5"
+dependencies = [
+ "anyhow",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -6380,6 +6397,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

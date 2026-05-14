@@ -223,6 +223,13 @@ enum Commands {
         /// out with the list above.
         #[arg(long)]
         agent: Option<String>,
+        /// How to resolve Boardroom Narc `Ask` verdicts that fire
+        /// during an unattended (headless / bench) run. One of
+        /// `deny` / `once` / `session` / `project` / `user`.
+        /// Default `deny` — unattended runs are safe by default
+        /// (asks turn into denials). Pearl th-400773.
+        #[arg(long, value_name = "MODE", default_value = "deny")]
+        auto_approve: String,
     },
     /// Git hook management (install, run).
     Hooks {
@@ -626,19 +633,31 @@ enum TailscaleCommands {
 enum AccessCommands {
     /// List pending access requests
     Pending,
-    /// Approve domain access for a bead
+    /// Approve a pending access request.
+    ///
+    /// `id` is the request id printed by `th access pending` (or surfaced
+    /// in the SSE stream). `--scope` controls how long the approval
+    /// sticks: `once` (this request only, default), `session` (VM
+    /// lifetime), `project` (<repo>/.smooth/wonk-allow.toml), `user`
+    /// (~/.smooth/wonk-allow.toml).
     Approve {
-        /// Bead ID
-        bead: String,
-        /// Domain to approve
-        domain: String,
+        /// Pending request id (UUID)
+        id: String,
+        /// Persistence scope (default: once)
+        #[arg(long, default_value = "once")]
+        scope: String,
+        /// Optional glob to bind the approval to instead of the exact
+        /// resource — e.g. `*.openai.com` for any openai.com subdomain.
+        #[arg(long)]
+        glob: Option<String>,
     },
-    /// Deny domain access for a bead
+    /// Deny a pending access request.
     Deny {
-        /// Bead ID
-        bead: String,
-        /// Domain to deny
-        domain: String,
+        /// Pending request id (UUID)
+        id: String,
+        /// Persistence scope (default: once)
+        #[arg(long, default_value = "once")]
+        scope: String,
     },
     /// Show current policy for an operator
     Policy {
@@ -856,7 +875,21 @@ async fn main() -> Result<()> {
         // so `th --resume` / `th --list` / `th --agent X` work without
         // needing to type `th code …` (pearl th-resume-top-level
         // 2026-05-12 per user request).
-        None => cmd_code(false, None, None, None, None, false, cli.resume.clone(), cli.list, cli.agent.clone()).await,
+        None => {
+            cmd_code(
+                false,
+                None,
+                None,
+                None,
+                None,
+                false,
+                cli.resume.clone(),
+                cli.list,
+                cli.agent.clone(),
+                "deny".to_string(),
+            )
+            .await
+        }
         Some(Commands::Code {
             headless,
             message,
@@ -867,7 +900,8 @@ async fn main() -> Result<()> {
             resume,
             list,
             agent,
-        }) => cmd_code(headless, message, file, model, budget, json, resume, list, agent).await,
+            auto_approve,
+        }) => cmd_code(headless, message, file, model, budget, json, resume, list, agent, auto_approve).await,
         Some(Commands::Doctor { init_home_repo, remote }) => {
             if init_home_repo {
                 cmd_doctor_init_home_repo(remote.as_deref())
@@ -2067,42 +2101,50 @@ async fn cmd_access(cmd: AccessCommands) -> Result<()> {
                 if requests.is_empty() {
                     println!("No pending access requests.");
                 } else {
-                    println!("{:<12} {:<20} {:<30} Reason", "Bead", "Operator", "Resource");
-                    println!("{}", "-".repeat(80));
+                    println!("{:<38} {:<10} {:<14} {:<30} Reason", "ID", "Kind", "Bead", "Resource");
+                    println!("{}", "-".repeat(120));
                     for req in requests {
                         println!(
-                            "{:<12} {:<20} {:<30} {}",
+                            "{:<38} {:<10} {:<14} {:<30} {}",
+                            req["id"].as_str().unwrap_or("-"),
+                            req["kind"].as_str().unwrap_or("-"),
                             req["bead_id"].as_str().unwrap_or("-"),
-                            req["operator_id"].as_str().unwrap_or("-"),
                             req["resource"].as_str().unwrap_or("-"),
                             req["reason"].as_str().unwrap_or("-"),
                         );
                     }
+                    println!();
+                    println!("Resolve with: th access approve <id> [--scope=session|project|user] [--glob=*.example.com]");
+                    println!("              th access deny <id> [--scope=user]");
                 }
             }
         }
-        AccessCommands::Approve { bead, domain } => {
-            let resp = client
-                .post(format!("{base}/approve"))
-                .json(&serde_json::json!({"bead_id": bead, "domain": domain}))
-                .send()
-                .await?;
+        AccessCommands::Approve { id, scope, glob } => {
+            let mut body = serde_json::Map::new();
+            body.insert("id".into(), serde_json::Value::String(id.clone()));
+            body.insert("scope".into(), serde_json::Value::String(scope.clone()));
+            if let Some(g) = glob {
+                body.insert("glob_override".into(), serde_json::Value::String(g));
+            }
+            let resp = client.post(format!("{base}/approve")).json(&serde_json::Value::Object(body)).send().await?;
             if resp.status().is_success() {
-                println!("Approved {domain} for {bead}");
+                println!("Approved {id} at scope {scope}");
             } else {
-                println!("Failed: {}", resp.text().await?);
+                let status = resp.status();
+                println!("Failed ({status}): {}", resp.text().await.unwrap_or_default());
             }
         }
-        AccessCommands::Deny { bead, domain } => {
+        AccessCommands::Deny { id, scope } => {
             let resp = client
                 .post(format!("{base}/deny"))
-                .json(&serde_json::json!({"bead_id": bead, "domain": domain}))
+                .json(&serde_json::json!({"id": id, "scope": scope}))
                 .send()
                 .await?;
             if resp.status().is_success() {
-                println!("Denied {domain} for {bead}");
+                println!("Denied {id} at scope {scope}");
             } else {
-                println!("Failed: {}", resp.text().await?);
+                let status = resp.status();
+                println!("Failed ({status}): {}", resp.text().await.unwrap_or_default());
             }
         }
         AccessCommands::Policy { operator_id } => {
@@ -2147,11 +2189,31 @@ async fn cmd_code(
     resume: Option<String>,
     list: bool,
     agent: Option<String>,
+    auto_approve: String,
 ) -> Result<()> {
     // Validate the agent name at CLI time so a typo doesn't waste a
     // runner spin-up. The value flows into the TUI's status bar and
     // into dispatch's `agent` field when the user sends a message.
     let agent_name = resolve_primary_agent(agent.as_deref())?;
+    // Validate the auto-approve mode at CLI time too. We pin the
+    // string to one of the known forms early so a typo doesn't
+    // silently fall through to "deny" later. Pearl th-400773.
+    let auto_approve_mode = smooth_bench::scenarios::AutoApprove::parse(&auto_approve)
+        .ok_or_else(|| anyhow::anyhow!("unknown --auto-approve mode '{auto_approve}': expected one of deny/once/session/project/user"))?;
+
+    // Headless / unattended runs need someone to resolve Asks. The
+    // interactive TUI already handles this through its inline
+    // approval cards; headless mode spawns a tokio task that polls
+    // `/api/access/pending` and resolves per the configured mode.
+    // For interactive runs we leave it dormant so the TUI's own
+    // resolver flow wins.
+    let _auto_approve_handle = if headless {
+        let base = std::env::var("SMOOTH_BIGSMOOTH_URL").unwrap_or_else(|_| "http://127.0.0.1:4400".into());
+        tracing::info!(mode = auto_approve_mode.as_str(), "headless: auto-approve resolver active");
+        Some(smooth_bench::auto_approve::spawn_resolver(base, auto_approve_mode))
+    } else {
+        None
+    };
     // `--list` short-circuits everything else and prints a simple
     // table of saved sessions, newest first, then exits without
     // launching the TUI.

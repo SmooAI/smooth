@@ -120,6 +120,18 @@ pub struct AppState {
     /// idled when the comment-tap sees `[IDLE]`. Powers `/api/teammates`
     /// and the chat-agent's `teammate_list` tool. See `crate::teammates`.
     pub teammates: Arc<crate::teammates::OperatorRegistry>,
+    /// Pending access-request queue + event bus. When Boardroom Narc
+    /// returns [`smooth_narc::judge::Decision::Ask`], the originating
+    /// tool call is held open here while a human resolves it via the
+    /// `/api/access/{approve,deny}` routes (or the TUI inline card).
+    /// See [`crate::access`] for the protocol.
+    pub access: crate::access::AccessStore,
+    /// Persistent user / project permission grants loaded from
+    /// `wonk-allow.toml`. Consulted by [`crate::boardroom_narc`] after
+    /// the rule engine and before the LLM judge; new grants are
+    /// written back here when a `/api/access/approve` resolution
+    /// lands at scope `user` or `project`. Pearl th-38b72c.
+    pub wonk_grants: crate::wonk_grants::SharedWonkGrants,
 }
 
 impl AppState {
@@ -213,7 +225,41 @@ impl AppState {
                 }
             }
         });
-        let boardroom_narc = crate::boardroom_narc::BoardroomNarc::new(narc_llm_config);
+        let access = crate::access::AccessStore::new();
+
+        // Load persistent grants from ~/.smooth/wonk-allow.toml so
+        // approvals from prior sessions survive a Big Smooth restart.
+        // Best-effort: a parse error logs and falls back to empty
+        // rather than blocking startup — a broken file shouldn't take
+        // the service down. Project-scoped grants are loaded
+        // lazily per-pearl when a dispatch picks them up; here we
+        // just seed the user layer. Pearl th-38b72c.
+        let initial_grants = match crate::wonk_grants::user_grants_path() {
+            Some(path) => match crate::wonk_grants::WonkGrants::load_from_path(&path) {
+                Ok(g) => {
+                    tracing::info!(
+                        path = %path.display(),
+                        hosts = g.network.allow_hosts.len(),
+                        tools = g.tools.allow.len(),
+                        bash = g.bash.allow_patterns.len(),
+                        "loaded user wonk-allow.toml"
+                    );
+                    g
+                }
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "failed to load user wonk-allow.toml; starting empty");
+                    crate::wonk_grants::WonkGrants::new()
+                }
+            },
+            None => crate::wonk_grants::WonkGrants::new(),
+        };
+        let wonk_grants = crate::wonk_grants::SharedWonkGrants::new(initial_grants);
+
+        // Wire the same AccessStore into Narc so an `Ask` verdict can
+        // file_pending + await_resolution on the live, shared queue.
+        // Pass the SharedWonkGrants so the judge can short-circuit on
+        // a persisted grant before falling through to the LLM.
+        let boardroom_narc = crate::boardroom_narc::BoardroomNarc::new(narc_llm_config, access.clone()).with_grants(wonk_grants.clone());
 
         Self {
             pearl_store,
@@ -229,6 +275,8 @@ impl AppState {
             orchestrator: Arc::new(tokio::sync::Mutex::new(orchestrator)),
             boardroom_narc,
             teammates: Arc::new(crate::teammates::OperatorRegistry::new()),
+            access,
+            wonk_grants,
         }
     }
 
@@ -433,6 +481,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/chat/sessions/{id}/messages/stream", post(post_chat_message_stream_handler))
         // Search
         .route("/api/search", get(search_handler))
+        // Web search — native tool backed by DuckDuckGo HTML. Pearl th-70b68b.
+        .route("/api/web_search", get(web_search_handler))
+        // Credential broker — mints short-lived creds for the sandbox
+        // after a human approves. Pearl th-08b65f.
+        .route("/api/creds/issue", post(creds_issue_handler))
         // Steering
         .route("/api/steering/{bead_id}/pause", post(pause_handler))
         .route("/api/steering/{bead_id}/resume", post(resume_handler))
@@ -458,6 +511,13 @@ pub fn build_router(state: AppState) -> Router {
         // rule engine, its decision cache, and (when unresolved) the LLM
         // judge, then returns an approve/deny/escalate verdict.
         .route("/api/narc/judge", post(narc_judge_handler))
+        // Access — the Claude-Code-style auto-mode pending-request queue.
+        // When Narc returns `Ask`, the tool call holds inside `judge()`
+        // while the human resolves it through these routes. Pearl th-49b4aa.
+        .route("/api/access/pending", get(access_pending_handler))
+        .route("/api/access/approve", post(access_approve_handler))
+        .route("/api/access/deny", post(access_deny_handler))
+        .route("/api/access/stream", get(access_stream_handler))
         .route("/api/host/exec", post(crate::host_tools::host_exec_handler))
         // WebSocket — primary real-time channel
         .route("/ws", get(ws_handler))
@@ -2623,6 +2683,24 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
                 cmd.env("SMOOTH_HOME", smooth_home.to_string_lossy().as_ref());
             }
         }
+        // Point the runner's in-process Wonk at Big Smooth's
+        // Boardroom Narc so the direct path gets parity with the
+        // sandboxed path. Without this the runner's Wonk has no
+        // arbiter and hard-denies every request its local policy
+        // can't auto-approve — the agent then has no path to the
+        // Claude-Code-style auto-mode prompts because the call dies
+        // before reaching the AccessStore. Pearl th-e96aeb.
+        //
+        // Localhost is fine here because the runner is running
+        // directly on the host (no microVM); SMOOTH_BIGSMOOTH_URL
+        // overrides if Big Smooth is reachable at a non-default
+        // location (test harnesses, dev cluster setups).
+        let narc_url_for_direct = resolve_direct_dispatch_narc_url(
+            std::env::var("SMOOTH_NARC_URL").ok().as_deref(),
+            std::env::var("SMOOTH_BIGSMOOTH_URL").ok().as_deref(),
+        );
+        cmd.env("SMOOTH_NARC_URL", &narc_url_for_direct);
+        tracing::info!(task_id = %tid, narc_url = %narc_url_for_direct, "direct dispatch: runner Wonk wired to Boardroom Narc");
         cmd.current_dir(&workspace_canon)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -2817,6 +2895,33 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
 /// string on any parse failure; callers treat empty as "no
 /// substitution" (the placeholder never gets expanded on the wire,
 /// which is safer than expanding on the wrong host).
+/// Pick the URL to point the direct-dispatch runner's in-process Wonk
+/// at for Narc escalations. Precedence:
+///   1. `SMOOTH_NARC_URL` (caller override — test harnesses, shared
+///      Narc setups)
+///   2. `SMOOTH_BIGSMOOTH_URL` (general Big Smooth address override)
+///   3. `http://127.0.0.1:4400` (the default Big Smooth bind)
+///
+/// Empty / whitespace-only strings are treated as "unset" rather than
+/// blowing away the fallback — a common mistake in shell scripts that
+/// `export FOO=` without a value.
+///
+/// Pearl th-e96aeb.
+fn resolve_direct_dispatch_narc_url(narc_url: Option<&str>, bigsmooth_url: Option<&str>) -> String {
+    let non_empty = |s: &str| {
+        let t = s.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
+    };
+    narc_url
+        .and_then(non_empty)
+        .or_else(|| bigsmooth_url.and_then(non_empty))
+        .unwrap_or_else(|| "http://127.0.0.1:4400".into())
+}
+
 fn extract_host_from_url(url: &str) -> String {
     let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
     // Strip userinfo ("user:pass@").
@@ -4286,6 +4391,368 @@ async fn narc_judge_handler(State(state): State<AppState>, Json(request): Json<s
     Json(decision)
 }
 
+// ── Access — auto-mode-style pending-request queue ────────────
+//
+// Wonk-the-binary today calls into BoardroomNarc; when Narc returns
+// `Decision::Ask`, the call holds open inside `judge()` while a human
+// resolves it via these four routes. The TUI subscribes to the SSE
+// stream to render inline approval cards (pearl th-670fb2).
+
+/// `GET /api/access/pending` — snapshot of every currently-pending
+/// access request, oldest first. Returns the raw list (no
+/// `ApiResponse` envelope) — the TUI consumes this directly.
+async fn access_pending_handler(State(state): State<AppState>) -> Json<Vec<crate::access::PendingAccessRequest>> {
+    state.touch();
+    Json(state.access.list_pending())
+}
+
+#[derive(Deserialize)]
+struct AccessResolveBody {
+    /// The pending request id (UUID) returned in the `pending` event.
+    id: String,
+    /// One of `once` / `session` / `project` / `user` (case-insensitive).
+    scope: String,
+    /// Optional glob the human bound the approval to (e.g.
+    /// `*.openai.com`). When set, Wonk caches the entire glob in its
+    /// runtime allowlist instead of just the exact resource. Ignored
+    /// when denying.
+    #[serde(default)]
+    glob_override: Option<String>,
+}
+
+/// Map a `(verdict, scope)` resolution onto the [`crate::access::AccessStore`].
+/// Shared between the approve + deny handlers so we don't duplicate the
+/// scope parsing + error handling.
+async fn resolve_access(
+    state: AppState,
+    body: AccessResolveBody,
+    verdict: crate::access::ResolutionVerdict,
+) -> Result<Json<crate::access::AccessResolution>, (axum::http::StatusCode, String)> {
+    state.touch();
+    let scope = smooth_narc::judge::Scope::parse(&body.scope).ok_or((
+        axum::http::StatusCode::BAD_REQUEST,
+        format!("unknown scope '{}': expected once|session|project|user", body.scope),
+    ))?;
+    // Capture the pending request shape BEFORE resolving — `resolve()`
+    // removes the entry from the pending map, but we need its kind +
+    // resource to write a persistent grant.
+    let pending_snapshot = state.access.list_pending().into_iter().find(|r| r.id == body.id);
+    let glob_override = body.glob_override.clone();
+    let resolution = state.access.resolve(&body.id, verdict, scope, body.glob_override).map_err(|e| match e {
+        crate::access::AccessError::NotFound(id) => (axum::http::StatusCode::NOT_FOUND, format!("no pending request with id {id}")),
+        crate::access::AccessError::Poisoned => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "access store mutex was poisoned".to_string()),
+    })?;
+
+    // Persist Approve verdicts at project/user scope into the right
+    // wonk-allow.toml AND merge into the live SharedWonkGrants so the
+    // next check_persistent_grants call sees it. Once / Session never
+    // touch the filesystem. Pearl th-38b72c.
+    if matches!(verdict, crate::access::ResolutionVerdict::Approve) {
+        if let Some(req) = pending_snapshot {
+            let target_path = persistent_grant_path(&state, scope);
+            if let Some(path) = target_path {
+                match crate::wonk_grants::append_grant(&path, &req.kind, &req.resource, glob_override.as_deref()) {
+                    Ok(()) => {
+                        if let Ok(fresh) = crate::wonk_grants::WonkGrants::load_from_path(&path) {
+                            state.wonk_grants.merge_in(fresh);
+                        }
+                        tracing::info!(
+                            scope = scope.as_str(),
+                            path = %path.display(),
+                            kind = %req.kind,
+                            resource = %req.resource,
+                            "persisted permission grant"
+                        );
+                    }
+                    Err(e) => {
+                        // Don't fail the HTTP request — the
+                        // resolution still took effect for the live
+                        // tool call. The persistence layer is a
+                        // best-effort durability boost.
+                        tracing::warn!(
+                            scope = scope.as_str(),
+                            path = %path.display(),
+                            error = %e,
+                            "failed to persist permission grant"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(Json(resolution))
+}
+
+/// Pick the file path to persist a grant at, given the resolution
+/// scope. Returns `None` for non-persistent scopes (Once / Session).
+///
+/// Project-scope grants would ideally go to the requesting pearl's
+/// workspace, but the bead_id → workspace mapping isn't yet wired
+/// through the access flow — for v1 we route project grants to the
+/// user file so the grant still survives a restart. Refining the
+/// project routing is a sub-pearl.
+fn persistent_grant_path(_state: &AppState, scope: smooth_narc::judge::Scope) -> Option<std::path::PathBuf> {
+    match scope {
+        smooth_narc::judge::Scope::User | smooth_narc::judge::Scope::PearlProject => crate::wonk_grants::user_grants_path(),
+        smooth_narc::judge::Scope::Once | smooth_narc::judge::Scope::Session => None,
+    }
+}
+
+/// `POST /api/access/approve` — resolve a pending request as Approve.
+/// Body: `{ id, scope, glob_override? }`.
+async fn access_approve_handler(
+    State(state): State<AppState>,
+    Json(body): Json<AccessResolveBody>,
+) -> Result<Json<crate::access::AccessResolution>, (axum::http::StatusCode, String)> {
+    resolve_access(state, body, crate::access::ResolutionVerdict::Approve).await
+}
+
+/// `POST /api/access/deny` — resolve a pending request as Deny.
+async fn access_deny_handler(
+    State(state): State<AppState>,
+    Json(body): Json<AccessResolveBody>,
+) -> Result<Json<crate::access::AccessResolution>, (axum::http::StatusCode, String)> {
+    resolve_access(state, body, crate::access::ResolutionVerdict::Deny).await
+}
+
+/// `GET /api/access/stream` — Server-Sent Events stream of every
+/// access-store event. New subscribers should hit `/api/access/pending`
+/// once on connect to catch up; this stream only sends events from the
+/// subscription point forward.
+///
+/// Wire format: `data: <json>` for every event, where `<json>` is the
+/// serde-tagged [`crate::access::AccessEvent`] form
+/// (`{"event":"pending",...}` / `{"event":"resolved",...}` /
+/// `{"event":"expired",...}`). The connection includes a 15s keepalive
+/// so reverse proxies don't drop idle SSEs.
+async fn access_stream_handler(State(state): State<AppState>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    use futures_util::StreamExt;
+    state.touch();
+    let rx = state.access.subscribe();
+    let stream = tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(|res| async move {
+        match res {
+            Ok(event) => {
+                let json = serde_json::to_string(&event).ok()?;
+                Some(Ok(Event::default().data(json)))
+            }
+            Err(_lagged) => {
+                // Subscriber fell behind. They can resync via
+                // `/api/access/pending`; we don't try to replay missed
+                // events from the broadcast.
+                None
+            }
+        }
+    });
+    Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(15)))
+}
+
+// ── Credential broker ──────────────────────────────────────
+//
+// `/api/creds/issue` mints a short-lived credential for the sandbox.
+// The flow mirrors every other auto-mode gate: check persistent
+// grants, fall through to an AccessStore Ask, on approve mint.
+// Pearl th-08b65f.
+
+#[derive(Deserialize)]
+struct CredsIssueBody {
+    /// Server URL the sandbox needs creds for (Docker
+    /// credential-helper spec calls this `ServerURL`).
+    #[serde(rename = "ServerURL", alias = "server_url", alias = "server")]
+    server_url: String,
+    /// Read vs write scope hint — affects the backend's mint shape
+    /// (PAT scopes / STS role) in future versions. Defaults to read.
+    #[serde(default)]
+    scope_hint: crate::creds::ScopeHint,
+    /// Optional bead_id for audit + AccessStore correlation. Defaults
+    /// empty.
+    #[serde(default)]
+    bead_id: String,
+    /// Optional operator id for audit. Defaults empty.
+    #[serde(default)]
+    operator_id: String,
+}
+
+async fn creds_issue_handler(
+    State(state): State<AppState>,
+    Json(body): Json<CredsIssueBody>,
+) -> Result<Json<crate::creds::Credential>, (axum::http::StatusCode, String)> {
+    state.touch();
+    let server_url = body.server_url.trim().to_string();
+    if server_url.is_empty() {
+        return Err((axum::http::StatusCode::BAD_REQUEST, "server_url is required".into()));
+    }
+
+    // Fast path: the user already approved this host at scope=user
+    // (or scope=project) and the grant lives in wonk-allow.toml.
+    // Mint without filing a pending request.
+    if grants_cover_host(&state.wonk_grants.snapshot(), &server_url) {
+        return mint_and_log(&server_url, body.scope_hint).await.map(Json);
+    }
+
+    // Slow path: file an AccessStore Ask so the human can decide
+    // inline. The scope ladder is the same Once/Session/Project/User
+    // every other tool gate uses; for credentials, `Once` means
+    // "this one mint", `Session` means "this VM's lifetime", and
+    // Project / User write the grant into wonk-allow.toml.
+    let req = smooth_narc::NewAccessRequest {
+        bead_id: body.bead_id.clone(),
+        operator_id: body.operator_id.clone(),
+        kind: "creds".into(),
+        resource: server_url.clone(),
+        detail: Some(format!("scope_hint={:?}", body.scope_hint)),
+        reason: format!("sandbox wants credential for {server_url}"),
+        scope_options: smooth_narc::judge::Scope::default_options(),
+    };
+    let (id, fut) = state.access.file_pending(req);
+    // 60s aligns with BoardroomNarc's ASK_HOLD_TIMEOUT — same
+    // human-attention budget.
+    let Some(resolution) = fut.await_resolution_with_timeout(std::time::Duration::from_secs(60)).await else {
+        let _ = state.access.expire(&id);
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "credential request timed out without human resolution".into(),
+        ));
+    };
+
+    if !matches!(resolution.verdict, smooth_narc::ResolutionVerdict::Approve) {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            format!("credential request denied at scope {}", resolution.scope.as_str()),
+        ));
+    }
+
+    // Persist project / user grants so subsequent mints for the same
+    // server skip the prompt. We store the server's host as a
+    // network grant so a single approval flows to both `web_search` /
+    // curl gates AND future credential mints.
+    if matches!(resolution.scope, smooth_narc::judge::Scope::User | smooth_narc::judge::Scope::PearlProject) {
+        if let Some(path) = crate::wonk_grants::user_grants_path() {
+            if let Some(host) = url_host(&server_url) {
+                let _ = crate::wonk_grants::append_grant(&path, "network", &host, None);
+                if let Ok(fresh) = crate::wonk_grants::WonkGrants::load_from_path(&path) {
+                    state.wonk_grants.merge_in(fresh);
+                }
+            }
+        }
+    }
+
+    mint_and_log(&server_url, body.scope_hint).await.map(Json)
+}
+
+/// Mint via the appropriate backend and log the (sanitized) outcome.
+/// The secret never appears in the log — only the server URL +
+/// success/fail.
+async fn mint_and_log(server_url: &str, scope: crate::creds::ScopeHint) -> Result<crate::creds::Credential, (axum::http::StatusCode, String)> {
+    match crate::creds::mint(server_url, scope).await {
+        Ok(cred) => {
+            tracing::info!(server = %server_url, "creds: minted credential");
+            Ok(cred)
+        }
+        Err(e) => {
+            tracing::warn!(server = %server_url, error = %e, "creds: mint failed");
+            let status = match e {
+                crate::creds::CredsError::UnsupportedServer { .. } => axum::http::StatusCode::BAD_REQUEST,
+                crate::creds::CredsError::MintFailed { .. } => axum::http::StatusCode::BAD_GATEWAY,
+                crate::creds::CredsError::Denied { .. } => axum::http::StatusCode::FORBIDDEN,
+            };
+            Err((status, e.to_string()))
+        }
+    }
+}
+
+/// True if `wonk-allow.toml` has a network grant that covers the
+/// server's host. Reused from the network gate's matcher so a host
+/// approved for `web_search` etc. flows naturally to creds.
+fn grants_cover_host(grants: &crate::wonk_grants::WonkGrants, server_url: &str) -> bool {
+    let Some(host) = url_host(server_url) else {
+        return false;
+    };
+    grants.matches_host(&host)
+}
+
+/// Extract a bare host from a URL — `https://github.com/foo` →
+/// `github.com`. Pure (no env / FS lookups) so it can be a `fn`.
+fn url_host(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let without_scheme = trimmed.split_once("://").map(|(_, rest)| rest).unwrap_or(trimmed);
+    let after_userinfo = without_scheme.rsplit_once('@').map(|(_, rest)| rest).unwrap_or(without_scheme);
+    let host_with_port = after_userinfo.split(['/', '?', '#']).next()?;
+    let host = host_with_port.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_with_port);
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
+}
+
+// ── Web search ─────────────────────────────────────────────
+//
+// Native web search backed by the DuckDuckGo HTML endpoint. Runners
+// hit this through their already-allowed Big Smooth route instead of
+// each sandbox carrying a TLS-capable HTTP client + outbound network
+// permission for `html.duckduckgo.com`. Pearl th-70b68b.
+
+#[derive(Deserialize)]
+struct WebSearchParams {
+    /// Search query. Required.
+    q: Option<String>,
+    /// Number of results. Clamped to [`crate::web_search::MAX_RESULTS`].
+    /// Defaults to 5.
+    n: Option<usize>,
+    /// Run injection redaction on the results before returning.
+    /// Defaults to `true` — callers that need raw text (debugging,
+    /// fuzzing) can set `redact=false`.
+    redact: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct WebSearchResponse {
+    results: Vec<crate::web_search::SearchResult>,
+    /// Number of injection patterns redacted. Zero on the happy path.
+    redacted_count: usize,
+}
+
+async fn web_search_handler(
+    State(state): State<AppState>,
+    Query(params): Query<WebSearchParams>,
+) -> Result<Json<WebSearchResponse>, (axum::http::StatusCode, String)> {
+    state.touch();
+    let query = params.q.unwrap_or_default();
+    let n = params.n.unwrap_or(5);
+    let redact = params.redact.unwrap_or(true);
+
+    let results = crate::web_search::search(&query, n).await.map_err(|e| {
+        let status = match &e {
+            crate::web_search::SearchError::EmptyQuery => axum::http::StatusCode::BAD_REQUEST,
+            // Network / Parse / BadStatus all surface as 502 — the
+            // upstream is misbehaving, not the caller.
+            crate::web_search::SearchError::Network { .. }
+            | crate::web_search::SearchError::Parse { .. }
+            | crate::web_search::SearchError::BadStatus { .. } => axum::http::StatusCode::BAD_GATEWAY,
+        };
+        (status, e.to_string())
+    })?;
+
+    let (final_results, redacted_count) = if redact {
+        crate::web_search::redact_injections(results)
+    } else {
+        (results, 0)
+    };
+
+    if redacted_count > 0 {
+        tracing::warn!(redacted = redacted_count, query = %query, "web_search: injection patterns redacted from results");
+    }
+
+    Ok(Json(WebSearchResponse {
+        results: final_results,
+        redacted_count,
+    }))
+}
+
 // ── Search ─────────────────────────────────────────────────
 
 async fn search_handler(State(state): State<AppState>, Query(params): Query<SearchParams>) -> Json<ApiResponse<Vec<crate::search::SearchResult>>> {
@@ -4591,6 +5058,38 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use tower::ServiceExt;
+
+    #[test]
+    fn resolve_direct_dispatch_narc_url_prefers_explicit_narc() {
+        let got = resolve_direct_dispatch_narc_url(Some("http://narc.example/x"), Some("http://bs.example"));
+        assert_eq!(got, "http://narc.example/x");
+    }
+
+    #[test]
+    fn resolve_direct_dispatch_narc_url_falls_back_to_bigsmooth() {
+        let got = resolve_direct_dispatch_narc_url(None, Some("http://bs.example"));
+        assert_eq!(got, "http://bs.example");
+    }
+
+    #[test]
+    fn resolve_direct_dispatch_narc_url_default_is_localhost() {
+        let got = resolve_direct_dispatch_narc_url(None, None);
+        assert_eq!(got, "http://127.0.0.1:4400");
+    }
+
+    #[test]
+    fn resolve_direct_dispatch_narc_url_treats_empty_as_unset() {
+        // Common shell footgun: `export SMOOTH_NARC_URL=` without a
+        // value. The empty string should NOT win — fall through.
+        let got = resolve_direct_dispatch_narc_url(Some(""), Some("http://bs.example"));
+        assert_eq!(got, "http://bs.example");
+        // Whitespace-only is also treated as unset.
+        let got = resolve_direct_dispatch_narc_url(Some("   "), Some("http://bs.example"));
+        assert_eq!(got, "http://bs.example");
+        // Same precedence for the bigsmooth override.
+        let got = resolve_direct_dispatch_narc_url(None, Some(""));
+        assert_eq!(got, "http://127.0.0.1:4400");
+    }
 
     #[test]
     fn extract_host_handles_common_shapes() {

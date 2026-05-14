@@ -169,6 +169,16 @@ pub async fn run_with_session(working_dir: PathBuf, resume: Option<crate::sessio
 
     let state = Arc::new(Mutex::new(initial_state));
 
+    // Spawn the auto-mode SSE subscriber. Long-running tokio task that
+    // tails `/api/access/stream` and pushes Pending / Resolved /
+    // Expired events into `state.permission_prompts`. Exits when the
+    // last Arc<AppState> is dropped. Pearl th-670fb2.
+    {
+        let state_for_sse = Arc::clone(&state);
+        let base = std::env::var("SMOOTH_BIGSMOOTH_URL").unwrap_or_else(|_| "http://localhost:4400".into());
+        crate::auto_mode::spawn_subscriber(base, state_for_sse);
+    }
+
     // Load pearls for the `@` picker in a background thread so the
     // TUI can paint immediately. Pearls only matter when the user
     // types `@`; a slight delay before they show up is fine.
@@ -555,6 +565,26 @@ fn handle_input_mode(
     event_tx: mpsc::UnboundedSender<AgentEvent>,
     command_registry: &CommandRegistry,
 ) {
+    // Auto-mode permission prompts take priority over text input
+    // when the input is empty. The keystrokes o/s/p/u/d/D resolve the
+    // most recently filed open prompt at the chosen scope. Pearl
+    // th-670fb2.
+    //
+    // We require empty input so users can still type "let me think
+    // about this" mid-prompt — only naked dispatch keys act. The
+    // prompt itself collapses to a status line as soon as the SSE
+    // stream confirms (or as soon as the POST succeeds; the SSE
+    // confirmation arrives shortly after).
+    if state.input.is_empty() {
+        if let KeyCode::Char(c) = key.code {
+            if let Some((verdict, scope)) = permission_key_to_scope(c) {
+                if try_resolve_open_prompt(state, state_arc.clone(), verdict, scope) {
+                    return;
+                }
+            }
+        }
+    }
+
     // Model picker owns the keyboard while it's visible. Up/Down
     // navigates, Enter drills in or applies, Esc backs out (Models →
     // Slots → closed).
@@ -1196,4 +1226,68 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
     }
 
     Ok(())
+}
+
+/// Map a single ASCII key onto the `(verdict, scope)` it resolves a
+/// permission prompt to. Returns `None` for any key that isn't a valid
+/// prompt-resolution shortcut, so the caller can fall through to the
+/// normal text-input handling.
+///
+/// Layout matches the inline card render: `o`nce / `s`ession /
+/// `p`roject / `u`ser are approve-with-scope; lowercase `d` is a
+/// once-only deny; uppercase `D` is a permanent (user-scope) deny.
+fn permission_key_to_scope(c: char) -> Option<(smooth_narc::ResolutionVerdict, smooth_narc::judge::Scope)> {
+    use smooth_narc::judge::Scope;
+    use smooth_narc::ResolutionVerdict;
+    match c {
+        'o' => Some((ResolutionVerdict::Approve, Scope::Once)),
+        's' => Some((ResolutionVerdict::Approve, Scope::Session)),
+        'p' => Some((ResolutionVerdict::Approve, Scope::PearlProject)),
+        'u' => Some((ResolutionVerdict::Approve, Scope::User)),
+        'd' => Some((ResolutionVerdict::Deny, Scope::Once)),
+        'D' => Some((ResolutionVerdict::Deny, Scope::User)),
+        _ => None,
+    }
+}
+
+/// Resolve the most recently filed *open* permission prompt at the
+/// chosen scope. Returns `true` if a prompt was found and the
+/// resolution POST was spawned, `false` if there was nothing to do
+/// (no open prompts).
+///
+/// The state mutation lands synchronously (flip status to
+/// `Resolving`); the actual HTTP POST is spawned on tokio and updates
+/// the prompt to `Failed` if it errors. The SSE stream's matching
+/// `Resolved` event will arrive shortly after a successful POST and
+/// flip the status to `Approved`/`Denied` with the canonical
+/// resolution payload.
+fn try_resolve_open_prompt(
+    state: &mut AppState,
+    state_arc: Arc<Mutex<AppState>>,
+    verdict: smooth_narc::ResolutionVerdict,
+    scope: smooth_narc::judge::Scope,
+) -> bool {
+    use crate::auto_mode::PromptStatus;
+    let Some(prompt) = state.permission_prompts.iter_mut().rev().find(|p| p.status.is_open()) else {
+        return false;
+    };
+    let id = prompt.request.id.clone();
+    prompt.status = PromptStatus::Resolving { verdict, scope };
+
+    // Detach from the AppState mutation — POST runs in the background.
+    let base = std::env::var("SMOOTH_BIGSMOOTH_URL").unwrap_or_else(|_| "http://localhost:4400".into());
+    tokio::spawn(async move {
+        let client = reqwest::Client::new();
+        if let Err(reason) = crate::auto_mode::resolve(&base, &client, &id, verdict, scope, None).await {
+            // Mark the prompt as failed so the user can see what went
+            // wrong and retry. The SSE stream will not deliver a
+            // matching Resolved event since the POST never landed.
+            if let Ok(mut s) = state_arc.lock() {
+                if let Some(p) = s.permission_prompts.iter_mut().find(|p| p.request.id == id) {
+                    p.status = PromptStatus::Failed { reason };
+                }
+            }
+        }
+    });
+    true
 }
