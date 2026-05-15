@@ -51,6 +51,6 @@ pub mod registry;
 pub mod server;
 
 pub use backend::{Backend, BackendError, CredentialRequest, IssuedCredential, ScopeHint};
-pub use backends::{AwsStsBackend, GitHubBackend};
+pub use backends::{AwsStsBackend, GcloudBackend, GitHubBackend};
 pub use registry::BackendRegistry;
 pub use server::{serve_uds, HostStubServer};
