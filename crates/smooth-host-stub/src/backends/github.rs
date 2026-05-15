@@ -173,6 +173,7 @@ impl Backend for GitHubBackend {
             // invalidate prematurely.
             expires_at: None,
             backend: "gh".into(),
+            session_token: None,
         })
     }
 }

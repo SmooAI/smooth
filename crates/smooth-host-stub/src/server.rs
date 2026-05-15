@@ -51,6 +51,7 @@ impl pb::host_stub_server::HostStub for HostStubServer {
             secret: issued.secret,
             expires_at,
             backend: issued.backend,
+            session_token: issued.session_token.unwrap_or_default(),
         }))
     }
 
@@ -127,6 +128,7 @@ mod tests {
                 secret: "gho_test".into(),
                 expires_at: None,
                 backend: "gh".into(),
+                session_token: None,
             })
         }
     }

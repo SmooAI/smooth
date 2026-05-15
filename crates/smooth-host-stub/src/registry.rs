@@ -108,6 +108,7 @@ mod tests {
                 secret: self.secret.clone(),
                 expires_at: None,
                 backend: self.info.name.clone(),
+                session_token: None,
             })
         }
     }

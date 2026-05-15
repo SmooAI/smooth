@@ -53,6 +53,11 @@ pub struct IssuedCredential {
     /// Backend identifier (`"gh"`, `"aws-sts"`, etc.) — surfaced in
     /// audit + the TUI status bar.
     pub backend: String,
+    /// Optional AWS-STS-style session token. Set by the AWS
+    /// backend; the in-sandbox shim places it in
+    /// `AWS_SESSION_TOKEN`. Empty / None for backends that don't
+    /// issue temporary credentials.
+    pub session_token: Option<String>,
 }
 
 /// Backend-side errors. Translate to gRPC `Status` codes via

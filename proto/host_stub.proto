@@ -88,6 +88,16 @@ message IssueCredentialResponse {
   // Examples: "gh", "aws-sts", "az-acr", "gcloud", "docker-config",
   // "github-app".
   string backend = 4;
+
+  // Optional AWS-STS-style session token. Required by every AWS
+  // SDK + the `aws` CLI when using temporary credentials —
+  // packaged into the env as `AWS_SESSION_TOKEN` by the
+  // in-sandbox shim. Empty for backends that don't issue
+  // temporary credentials (gh, gcloud access tokens, etc).
+  //
+  // Added in pearl th-893801 Phase 2 iter-4c. Additive at
+  // field 5; older clients ignore it.
+  string session_token = 5;
 }
 
 message GetCredentialBackendsRequest {}
