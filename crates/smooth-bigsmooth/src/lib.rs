@@ -29,6 +29,9 @@ pub mod narc_grpc;
 /// Production Orchestrator impl over AccessStore. Pearl th-893801 iter-3d.
 pub mod orchestrator_grpc;
 
+/// Single-process gRPC cast bootstrap. Pearl th-893801 iter-3e.
+pub mod single_process;
+
 pub mod access;
 pub mod audit;
 pub mod boardroom;

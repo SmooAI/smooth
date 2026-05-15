@@ -86,6 +86,30 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let state = smooth_bigsmooth::server::AppState::new(pearl_store).with_boardroom(handles);
+
+    // Pearl th-893801 iter-3e: when SMOOTH_SINGLE_PROCESS=1,
+    // spawn the cast as in-process gRPC servers on UDS at known
+    // paths alongside (not replacing) the existing HTTP cast.
+    // Iter-3f flips the operator-runner over to dial the UDS
+    // sockets; until then this is co-resident.
+    let _grpc_cast = if smooth_bigsmooth::single_process::is_enabled() {
+        match smooth_bigsmooth::single_process::bootstrap_from_app_state(&state) {
+            Ok((handles, _wonk)) => {
+                tracing::info!(
+                    dir = %handles.socket_dir.display(),
+                    "boardroom: SMOOTH_SINGLE_PROCESS=1 — gRPC cast up alongside HTTP"
+                );
+                Some(handles)
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "boardroom: failed to bring up gRPC cast — continuing with HTTP-only");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!(%addr, "boardroom: starting Big Smooth");
     smooth_bigsmooth::server::start(state, addr).await
