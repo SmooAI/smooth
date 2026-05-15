@@ -26,6 +26,9 @@ pub mod grpc;
 /// Pearl th-893801 iter-3a.
 pub mod narc_grpc;
 
+/// Production Orchestrator impl over AccessStore. Pearl th-893801 iter-3d.
+pub mod orchestrator_grpc;
+
 pub mod access;
 pub mod audit;
 pub mod boardroom;
