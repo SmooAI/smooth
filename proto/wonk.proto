@@ -15,7 +15,7 @@ syntax = "proto3";
 
 package smooth.wonk.v1;
 
-import "smooth/narc/v1/narc.proto";
+import "narc.proto";
 
 service Wonk {
   // "Can the operator reach this domain?" Goalie calls this for

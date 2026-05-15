@@ -24,11 +24,23 @@ tracing-subscriber.workspace = true
 anyhow.workspace = true
 uuid.workspace = true
 
+# gRPC (pearl th-893801).
+tonic = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+tokio-stream = { workspace = true, features = ["net"] }
+futures-util.workspace = true
+
+[build-dependencies]
+tonic-build = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
-tower = { workspace = true }
+tower = { workspace = true, features = ["util"] }
 http-body-util.workspace = true
 hyper.workspace = true
+hyper-util = { version = "0.1", features = ["tokio"] }
+tempfile.workspace = true
 
 [lints]
 workspace = true

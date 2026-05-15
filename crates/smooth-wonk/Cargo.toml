@@ -33,11 +33,23 @@ tracing-subscriber.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 
+# gRPC (pearl th-893801). tonic-build compiles proto/wonk.proto in
+# build.rs; the workspace `proto/` is the include root so wonk's
+# import of narc.proto resolves naturally.
+tonic = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+tokio-stream = { workspace = true, features = ["net"] }
+
+[build-dependencies]
+tonic-build = { workspace = true }
+
 [dev-dependencies]
 tempfile.workspace = true
-tower.workspace = true
+tower = { workspace = true, features = ["util"] }
 http-body-util.workspace = true
 hyper.workspace = true
+hyper-util = { version = "0.1", features = ["tokio"] }
 
 [lints]
 workspace = true

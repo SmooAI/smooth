@@ -15,7 +15,7 @@ syntax = "proto3";
 
 package smooth.bigsmooth.v1;
 
-import "smooth/narc/v1/narc.proto";
+import "narc.proto";
 import "google/protobuf/timestamp.proto";
 
 service BigSmooth {
