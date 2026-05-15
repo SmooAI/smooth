@@ -31,6 +31,9 @@ pub mod pb {
 /// `smooth_wonk::server::AppState`; tests stub it.
 pub mod grpc;
 
+/// Production Checker impl on AppState. Pearl th-893801 iter-3b.
+pub mod checker;
+
 pub use hook::WonkHook;
 pub use narc_client::NarcClient;
 pub use negotiate::{AccessRequest, AccessResponse, Negotiator};

@@ -57,6 +57,43 @@ impl AppState {
         self
     }
 
+    /// Accessor for the policy holder. Used by the gRPC Checker
+    /// adapter in `crate::checker` (pearl th-893801 iter-3b).
+    #[must_use]
+    pub fn policy(&self) -> &PolicyHolder {
+        &self.policy
+    }
+
+    /// Accessor for the optional Narc escalation client. Same use
+    /// case as `policy()`.
+    #[must_use]
+    pub fn narc_client(&self) -> Option<&NarcClient> {
+        self.narc.as_ref()
+    }
+
+    /// Public-API mirror of the private `runtime_allowed_domain`
+    /// helper. Exposed so the gRPC Checker can hit the same
+    /// allowlist the HTTP handler does.
+    #[must_use]
+    pub fn runtime_allowed_domain_pub(&self, domain: &str) -> bool {
+        self.runtime_allowed_domain(domain)
+    }
+
+    /// Public-API mirror of `push_runtime_allow`. Same reason.
+    pub fn push_runtime_allow_pub(&self, glob: String, ttl: Duration) {
+        self.push_runtime_allow(glob, ttl);
+    }
+
+    /// Size of the runtime allowlist (live entries; excludes
+    /// expired). For `GetPolicySummary` over gRPC.
+    #[must_use]
+    pub fn runtime_allowlist_size(&self) -> usize {
+        let now = Instant::now();
+        self.runtime_allow
+            .lock()
+            .map_or(0, |entries| entries.iter().filter(|e| e.expires_at > now).count())
+    }
+
     /// True if the given domain matches any live runtime allowlist entry.
     /// Also garbage-collects expired entries on the way through.
     fn runtime_allowed_domain(&self, domain: &str) -> bool {
