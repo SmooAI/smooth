@@ -46,9 +46,11 @@ pub mod pb {
 }
 
 pub mod backend;
+pub mod backends;
 pub mod registry;
 pub mod server;
 
 pub use backend::{Backend, BackendError, CredentialRequest, IssuedCredential, ScopeHint};
+pub use backends::GitHubBackend;
 pub use registry::BackendRegistry;
 pub use server::{serve_uds, HostStubServer};
