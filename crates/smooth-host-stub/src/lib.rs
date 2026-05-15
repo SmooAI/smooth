@@ -47,6 +47,7 @@ pub mod pb {
 
 pub mod backend;
 pub mod backends;
+pub mod docker_socket;
 pub mod registry;
 pub mod server;
 
