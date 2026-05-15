@@ -22,6 +22,10 @@ pub mod pb {
 /// lands in iter-3.
 pub mod grpc;
 
+/// Production Judge impl on BoardroomNarc + serve_uds helper.
+/// Pearl th-893801 iter-3a.
+pub mod narc_grpc;
+
 pub mod access;
 pub mod audit;
 pub mod boardroom;
