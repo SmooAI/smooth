@@ -32,6 +32,9 @@ pub mod orchestrator_grpc;
 /// Single-process gRPC cast bootstrap. Pearl th-893801 iter-3e.
 pub mod single_process;
 
+/// Tonic UDS client adapters for the in-VM cast. Pearl th-893801 iter-3f.
+pub mod tonic_clients;
+
 pub mod access;
 pub mod audit;
 pub mod boardroom;
