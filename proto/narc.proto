@@ -1,0 +1,145 @@
+// Narc — the access-decision authority.
+//
+// The judge service: every uncertain tool/network/file/cli request from
+// Wonk lands here. Narc applies its rule engine + LLM judge + persistent
+// grants and returns Approve / Deny / Ask. Ask verdicts cause Narc to
+// hold the request open (file a pending request in AccessStore, await a
+// human resolution with a bounded timeout) and replay the human's
+// decision as the final verdict. Pearl th-49b4aa.
+//
+// Pearl th-893801 — moves this from HTTP+JSON over a host-bridge to
+// gRPC over a UDS inside the single sandbox VM.
+
+syntax = "proto3";
+
+package smooth.narc.v1;
+
+import "google/protobuf/timestamp.proto";
+
+service Narc {
+  // The judge entry point. Wonk calls this when its local policy
+  // cannot auto-approve a /check/* request. Narc may take up to
+  // ASK_HOLD_TIMEOUT (60s) to return when the verdict requires a
+  // human resolution.
+  //
+  // NOT idempotent — each call may file a pending request in
+  // AccessStore. Clients should NOT retry on transport timeouts;
+  // instead surface the timeout to the caller as fail-closed.
+  rpc Judge(JudgeRequest) returns (JudgeDecision);
+
+  // Diagnostics — current size of the in-process decision cache.
+  // For `th status` and pearl debugging. No side effects.
+  rpc GetCacheStats(GetCacheStatsRequest) returns (CacheStats);
+}
+
+// What kind of access the operator is requesting. Mirrors the
+// `JudgeKind` enum in smooth-narc::judge today.
+enum JudgeKind {
+  JUDGE_KIND_UNSPECIFIED = 0;
+  // Outbound network connection. `resource` is the host (no scheme).
+  JUDGE_KIND_NETWORK = 1;
+  // Agent tool call. `resource` is the tool name.
+  JUDGE_KIND_TOOL = 2;
+  // Filesystem read or write. `resource` is the path.
+  JUDGE_KIND_FILE = 3;
+  // Shell command. `resource` is the command line.
+  JUDGE_KIND_CLI = 4;
+  // MCP server invocation. `resource` is the server name.
+  JUDGE_KIND_MCP = 5;
+  // Forwarded port. `resource` is the port number as a string.
+  JUDGE_KIND_PORT = 6;
+}
+
+// A request for an access decision. Carries enough context for the
+// LLM judge to reason about whether the request is legitimate for
+// the task.
+message JudgeRequest {
+  JudgeKind kind = 1;
+  // Which operator subprocess is asking. Lets the same Narc serve
+  // multiple concurrent operators while keeping audit + AccessStore
+  // pending entries correctly attributed.
+  string operator_id = 2;
+  // The pearl this operator is working on. Empty when the request
+  // is out-of-band (e.g. `th access` poking Narc directly).
+  string bead_id = 3;
+  // Workflow phase the operator is in (assess/plan/execute/verify/
+  // review/finalize) — useful context for the judge prompt.
+  string phase = 4;
+  // The thing being requested. See per-kind docs above.
+  string resource = 5;
+  // Extra context: HTTP path for network, cwd for cli, etc.
+  string detail = 6;
+  // Short summary of the task the operator is executing. Truncated
+  // to MAX_TASK_SUMMARY_CHARS (600) before going into the judge
+  // prompt.
+  string task_summary = 7;
+  // Optional agent-supplied reason. Many agents leave this empty;
+  // when set it's worth a few extra confidence points.
+  string agent_reason = 8;
+}
+
+// The arbiter's decision.
+enum Decision {
+  DECISION_UNSPECIFIED = 0;
+  // Wonk should allow the request. Cache the result for cache_ttl
+  // if non-zero.
+  DECISION_APPROVE = 1;
+  // Wonk should deny the request. Don't ask the human (the deny is
+  // deterministic — dangerous pattern, baked-in policy, etc).
+  DECISION_DENY = 2;
+  // The arbiter held the request open and the human responded. The
+  // returned verdict reflects their choice (so callers will see
+  // APPROVE or DENY here, never ASK).
+  //
+  // The ASK state never leaks out of Judge — Narc internally files
+  // pending + awaits resolution + returns the resolved verdict.
+  // Clients that need to OBSERVE the Ask flow subscribe to the
+  // bigsmooth.v1.AccessEvents stream.
+  DECISION_ASK = 3;
+  // Legacy fail-closed escalation. Returned when Narc itself can't
+  // decide (LLM unreachable, AccessStore timeout, etc). Treated as
+  // a hard deny by callers.
+  DECISION_ESCALATE_TO_HUMAN = 4;
+}
+
+// Persistence scope when a grant comes through. Matches
+// smooth_narc::judge::Scope.
+enum Scope {
+  SCOPE_UNSPECIFIED = 0;
+  SCOPE_ONCE = 1;
+  SCOPE_SESSION = 2;
+  SCOPE_PEARL_PROJECT = 3;
+  SCOPE_USER = 4;
+}
+
+// The judge's response.
+message JudgeDecision {
+  Decision decision = 1;
+  // 0.0–1.0. Always 1.0 for short-circuit decisions (rule engine,
+  // cache hit, persistent grant). Derived from the LLM for LLM
+  // decisions.
+  float confidence = 2;
+  // Human-readable rationale. Surfaced in audit + the TUI's status
+  // line on resolution.
+  string reason = 3;
+  // If set, Wonk SHOULD add this glob to its runtime allowlist so
+  // subsequent requests matching the glob don't re-escalate.
+  // Example: `*.azureedge.net` when a Playwright browser download
+  // was approved.
+  string add_to_allowlist_glob = 4;
+  // How long Wonk should cache this decision locally, in seconds.
+  // Zero means "don't cache". Negative is invalid.
+  uint64 cache_ttl_seconds = 5;
+  // If the verdict came from a human resolution (Ask path), the
+  // scope they picked. ZERO/UNSPECIFIED for non-human decisions.
+  Scope resolved_scope = 6;
+}
+
+message GetCacheStatsRequest {}
+
+message CacheStats {
+  uint64 entries = 1;
+  google.protobuf.Timestamp oldest_entry_at = 2;
+  uint64 hit_count = 3;
+  uint64 miss_count = 4;
+}
