@@ -1,3 +1,7 @@
+// Pre-existing `.expect()` on test JSON parsing + mutex locks
+// (predates pearl th-893801).
+#![allow(clippy::expect_used)]
+
 use async_trait::async_trait;
 use smooth_operator::tool::{ToolCall, ToolHook, ToolResult};
 

@@ -106,7 +106,7 @@ use tokio_stream::StreamExt;
 /// Returns the underlying io::Error if binding the UDS fails.
 pub fn serve_uds<L: Logger>(logger: Arc<L>, uds_path: std::path::PathBuf) -> std::io::Result<tokio::task::JoinHandle<Result<(), tonic::transport::Error>>> {
     let _ = std::fs::remove_file(&uds_path);
-    let uds = tokio::net::UnixListener::bind(&uds_path)?;
+    let uds = tokio::net::UnixListener::bind(uds_path)?;
     let svc = pb::scribe_server::ScribeServer::new(ScribeGrpcServer::new(logger));
     let handle = tokio::spawn(async move {
         tonic::transport::Server::builder()

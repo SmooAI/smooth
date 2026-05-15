@@ -23,7 +23,17 @@ pub mod pb {
     tonic::include_proto!("smooth.scribe.v1");
 }
 
-/// gRPC server adapter — wraps a `Logger` trait implementation as
-/// the proto-generated Scribe service. Production Logger uses the
-/// existing MemoryLogStore; tests stub it.
+/// gRPC server adapter.
+///
+/// Wraps a `Logger` trait implementation as the proto-generated
+/// Scribe service. Production Logger uses the existing
+/// `MemoryLogStore`; tests stub it.
 pub mod grpc;
+
+/// Production wiring for `MemoryLogStore`.
+///
+/// Adds proto<->domain conversion and implements `grpc::Logger`.
+/// Pearl th-893801 iter-3c.
+pub mod store_grpc;
+
+pub use store_grpc::{adapter_for_memory_store, entry_from_pb, entry_to_pb, GrpcLogStoreAdapter};
