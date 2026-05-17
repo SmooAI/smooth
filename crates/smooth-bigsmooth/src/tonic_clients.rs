@@ -23,7 +23,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use smooth_narc::judge::{JudgeDecision, JudgeRequest};
+// `JudgeRequest` / `JudgeDecision` are no longer used here —
+// the Narc client moved to smooth-wonk (iter-6c) and the
+// remaining UDS clients (Scribe / BigSmooth) don't need
+// them. Import dropped to clean the unused-warnings lint.
 
 /// Build a tonic channel that dials the given UDS path. Returns
 /// an error if the initial connect fails.
@@ -52,53 +55,14 @@ pub async fn dial_uds(path: PathBuf) -> Result<tonic::transport::Channel> {
 
 // ── Narc ──────────────────────────────────────────────────
 
-/// UDS-dialing Narc client.
-///
-/// Drop-in replacement for `smooth_wonk::NarcClient` when the
-/// runner is co-resident with BS over UDS. Mirrors the HTTP
-/// client's "any error folds to EscalateToHuman" contract so
-/// upstream behavior is unchanged.
-#[derive(Clone)]
-pub struct NarcGrpcUds {
-    socket: PathBuf,
-    channel: tonic::transport::Channel,
-}
-
-impl NarcGrpcUds {
-    /// Build a client dialing `socket`.
-    ///
-    /// # Errors
-    ///
-    /// Bubbles up channel-construction errors.
-    pub async fn connect(socket: PathBuf) -> Result<Self> {
-        let channel = dial_uds(socket.clone()).await?;
-        Ok(Self { socket, channel })
-    }
-
-    /// Socket path the client is dialing. Useful for diagnostics.
-    #[must_use]
-    pub fn socket(&self) -> &PathBuf {
-        &self.socket
-    }
-
-    /// Escalate a request to Narc. Any transport / proto error
-    /// folds to an `EscalateToHuman` decision so Wonk fails
-    /// closed — same shape as the legacy HTTP client.
-    pub async fn judge(&self, request: &JudgeRequest) -> JudgeDecision {
-        let pb_req: smooth_narc::pb::JudgeRequest = request.clone().into();
-        let mut client = smooth_narc::pb::narc_client::NarcClient::new(self.channel.clone());
-        let resp = match client.judge(tonic::Request::new(pb_req)).await {
-            Ok(resp) => resp.into_inner(),
-            Err(status) => {
-                return JudgeDecision::escalate(format!("Narc gRPC at {} unreachable: {status}", self.socket.display()));
-            }
-        };
-        match smooth_narc::judge::JudgeDecision::try_from(resp) {
-            Ok(decision) => decision,
-            Err(e) => JudgeDecision::escalate(format!("failed to decode Narc response: {e}")),
-        }
-    }
-}
+/// Re-export of `smooth_wonk::NarcGrpcUds`. Pearl th-893801
+/// Phase 4 iter-6c moved the canonical impl to `smooth-wonk`
+/// alongside the `NarcEscalator` trait it now satisfies, so
+/// the operator-runner (which depends on wonk but not
+/// bigsmooth) can dial Narc directly. This re-export keeps
+/// the iter-3f import path `tonic_clients::NarcGrpcUds`
+/// working.
+pub use smooth_wonk::NarcGrpcUds;
 
 // ── Scribe ────────────────────────────────────────────────
 
@@ -229,7 +193,6 @@ impl GrpcCastClients {
 mod tests {
     use super::*;
     use crate::single_process::bootstrap_grpc_cast_in_dir;
-    use smooth_narc::judge::{Decision, JudgeKind};
     use std::sync::Arc;
     use std::time::Duration;
     use tempfile::TempDir;
@@ -277,49 +240,9 @@ enabled = true
         handles
     }
 
-    #[tokio::test]
-    async fn narc_client_round_trips_a_decision() {
-        let tmp = TempDir::new().unwrap();
-        let mut handles = bring_up_cast(&tmp).await;
-        let client = NarcGrpcUds::connect(handles.narc_sock.clone()).await.expect("connect narc");
-        let request = JudgeRequest {
-            kind: JudgeKind::Network,
-            operator_id: "op-1".into(),
-            bead_id: "pearl".into(),
-            phase: "execute".into(),
-            resource: "registry.npmjs.org".into(),
-            detail: None,
-            task_summary: None,
-            agent_reason: None,
-        };
-        let decision = client.judge(&request).await;
-        assert_eq!(decision.decision, Decision::Approve);
-        handles.shutdown();
-    }
-
-    #[tokio::test]
-    async fn narc_client_folds_dead_socket_to_escalate() {
-        let tmp = TempDir::new().unwrap();
-        let mut handles = bring_up_cast(&tmp).await;
-        let client = NarcGrpcUds::connect(handles.narc_sock.clone()).await.expect("connect narc");
-        // Tear down the server. The next call should not panic;
-        // it should fold into EscalateToHuman.
-        handles.shutdown();
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let request = JudgeRequest {
-            kind: JudgeKind::Network,
-            operator_id: "op-1".into(),
-            bead_id: "pearl".into(),
-            phase: "execute".into(),
-            resource: "x.example".into(),
-            detail: None,
-            task_summary: None,
-            agent_reason: None,
-        };
-        let decision = client.judge(&request).await;
-        assert_eq!(decision.decision, Decision::EscalateToHuman);
-        assert!(decision.reason.contains("unreachable"));
-    }
+    // Narc round-trip + dead-socket-escalate tests moved to
+    // `smooth-wonk` alongside the iter-6c canonical impl. See
+    // crates/smooth-wonk/src/narc_grpc_uds.rs.
 
     #[tokio::test]
     async fn scribe_client_appends_via_streaming_log() {

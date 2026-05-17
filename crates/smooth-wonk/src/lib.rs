@@ -6,6 +6,7 @@
 
 pub mod hook;
 pub mod narc_client;
+pub mod narc_grpc_uds;
 pub mod negotiate;
 pub mod policy;
 pub mod server;
@@ -35,7 +36,8 @@ pub mod grpc;
 pub mod checker;
 
 pub use hook::WonkHook;
-pub use narc_client::NarcClient;
+pub use narc_client::{NarcClient, NarcEscalator};
+pub use narc_grpc_uds::NarcGrpcUds;
 pub use negotiate::{AccessRequest, AccessResponse, Negotiator};
 pub use policy::PolicyHolder;
 pub use server::{build_router, run_server, AppState, CheckResponse};

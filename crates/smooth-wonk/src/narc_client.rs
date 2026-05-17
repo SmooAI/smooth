@@ -12,7 +12,27 @@
 
 use std::time::Duration;
 
+use async_trait::async_trait;
 use smooth_narc::judge::{JudgeDecision, JudgeRequest};
+
+/// Abstraction over "something Wonk can ask for a runtime
+/// decision when its local policy can't auto-approve."
+///
+/// Pearl th-893801 Phase 4 iter-6c. The legacy `NarcClient`
+/// speaks HTTP; the single-VM path uses a gRPC-over-UDS
+/// adapter. `AppState` accepts any `NarcEscalator` so call
+/// sites can swap implementations at startup.
+///
+/// Implementors MUST fail closed: any transport-level error
+/// folds to a `Decision::EscalateToHuman` decision so Wonk
+/// surfaces it as a pending access request rather than
+/// silently approving.
+#[async_trait]
+pub trait NarcEscalator: Send + Sync + 'static {
+    /// Forward a JudgeRequest to whatever Narc lives behind
+    /// this client and return its decision.
+    async fn judge(&self, request: &JudgeRequest) -> JudgeDecision;
+}
 
 /// HTTP client that speaks to the Boardroom Narc `/api/narc/judge` endpoint.
 #[derive(Debug, Clone)]
@@ -49,6 +69,10 @@ impl NarcClient {
     /// request that a human can approve. Narc is never expected to
     /// silently approve a request it couldn't reach.
     pub async fn judge(&self, request: &JudgeRequest) -> JudgeDecision {
+        self.do_judge(request).await
+    }
+
+    async fn do_judge(&self, request: &JudgeRequest) -> JudgeDecision {
         let url = format!("{}/api/narc/judge", self.base_url);
         match self.client.post(&url).json(request).send().await {
             Ok(resp) => {
@@ -63,6 +87,13 @@ impl NarcClient {
             }
             Err(e) => JudgeDecision::escalate(format!("Narc unreachable at {}: {e}", self.base_url)),
         }
+    }
+}
+
+#[async_trait]
+impl NarcEscalator for NarcClient {
+    async fn judge(&self, request: &JudgeRequest) -> JudgeDecision {
+        self.do_judge(request).await
     }
 }
 

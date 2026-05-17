@@ -24,6 +24,7 @@ use smooth_bigsmooth::access::{AccessStore, ResolutionVerdict};
 use smooth_bigsmooth::single_process::bootstrap_grpc_cast_in_dir;
 use smooth_bigsmooth::tonic_clients::GrpcCastClients;
 use smooth_narc::judge::{Decision, JudgeKind, JudgeRequest, Scope};
+use smooth_wonk::NarcEscalator;
 
 const MIN_POLICY_TOML: &str = r#"
 [metadata]

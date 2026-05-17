@@ -40,16 +40,19 @@ tonic = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
 tokio-stream = { workspace = true, features = ["net"] }
+# UDS client (NarcGrpcUds — pearl th-893801 Phase 4 iter-6c).
+# Previously dev-only; needed in normal deps so the runner can
+# dial Narc over UDS without smooth-wonk being test-cfg.
+tower = { workspace = true, features = ["util"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 
 [build-dependencies]
 tonic-build = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true
-tower = { workspace = true, features = ["util"] }
 http-body-util.workspace = true
 hyper.workspace = true
-hyper-util = { version = "0.1", features = ["tokio"] }
 
 [lints]
 workspace = true
