@@ -1865,15 +1865,24 @@ async fn main() {
         _ => None,
     };
 
-    // Host-tool proxy — when SMOOTH_HOST_TOKEN is set (Big Smooth's
-    // dispatch threads it through), register the `host_tool` tool that
-    // calls Big Smooth's /api/host/exec for whitelisted CLIs (gh, git,
-    // kubectl, …). Useful in sandbox mode where the teammate has no
-    // direct host auth; harmless in direct mode where the teammate's
-    // own BashTool already works directly against the host.
-    if std::env::var("SMOOTH_HOST_TOKEN").is_ok() {
+    // Host-tool proxy — legacy multi-VM path. When SMOOTH_HOST_TOKEN
+    // is set (Big Smooth's dispatch threads it through), register the
+    // `host_tool` tool that calls Big Smooth's /api/host/exec for
+    // whitelisted CLIs (gh, git, kubectl, …). Useful in the legacy
+    // multi-VM model where the teammate has no direct host auth.
+    //
+    // In single-VM mode (SMOOTH_SINGLE_PROCESS=1, pearl th-893801)
+    // the bundled CLIs are right there in the VM and the host-stub
+    // mints credentials via UDS — the host_tool indirection is
+    // unnecessary. Skip registration so the agent never sees it and
+    // calls the CLIs directly via BashTool (still mediated by Wonk
+    // check_cli + Narc audit).
+    let single_process = matches!(std::env::var("SMOOTH_SINGLE_PROCESS").as_deref(), Ok("1" | "true" | "TRUE"));
+    if std::env::var("SMOOTH_HOST_TOKEN").is_ok() && !single_process {
         tools.register(crate::host_tool::HostToolTool);
         tracing::info!("registered host_tool — teammate can call whitelisted host CLIs via /api/host/exec");
+    } else if single_process {
+        tracing::info!("SMOOTH_SINGLE_PROCESS=1 — skipping host_tool registration (CLIs run directly in-VM)");
     }
 
     // Tool hints registry — recommended approaches for common operator
