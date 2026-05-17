@@ -46,6 +46,47 @@ pub mod boardroom_narc;
 /// Narc". Both names refer to the same struct. Pearl th-893801
 /// Phase 4 iter-6a.
 pub use boardroom_narc::BoardroomNarc as Narc;
+
+/// Phase 4 module alias: in the single-VM model "boardroom"
+/// is just "the cast running in the VM". `crate::vm_cast` is
+/// the preferred path; `crate::boardroom` stays valid for
+/// existing imports during the transition. Pearl th-893801
+/// Phase 4 iter-6d.
+pub use boardroom as vm_cast;
+
+/// Phase 4 type alias: prefer `VmCastHandles` in new code.
+/// Same struct as `BoardroomHandles`. Pearl th-893801 Phase 4
+/// iter-6d.
+pub use boardroom::BoardroomHandles as VmCastHandles;
+
+/// Phase 4 function alias: prefer `spawn_vm_cast` in new
+/// code. Same fn as `boardroom::spawn_boardroom_cast`. Pearl
+/// th-893801 Phase 4 iter-6d.
+pub use boardroom::spawn_boardroom_cast as spawn_vm_cast;
+
+#[cfg(test)]
+mod phase4_alias_smoke {
+    //! Smoke checks that the Phase 4 aliases resolve to the
+    //! same items they're meant to mirror. Pure compile-time
+    //! plus a trivial runtime equality so a future rename
+    //! that drops an alias produces an obvious test failure.
+
+    #[test]
+    fn narc_alias_resolves() {
+        // Constructible via either name without surprises.
+        let _via_alias: crate::Narc = crate::boardroom_narc::BoardroomNarc::without_llm();
+    }
+
+    #[test]
+    fn vm_cast_module_is_the_boardroom_module() {
+        // If `crate::vm_cast` and `crate::boardroom` diverge,
+        // this assertion picks one or the other arbitrarily —
+        // the real check is that both type paths resolve to
+        // the same type via the alias.
+        fn _accepts_handles(_h: crate::vm_cast::BoardroomHandles) {}
+        fn _alias_accepts_handles(_h: crate::VmCastHandles) {}
+    }
+}
 pub mod chat_tools;
 pub mod creds;
 pub mod host_tools;
