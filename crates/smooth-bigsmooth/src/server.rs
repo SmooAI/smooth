@@ -2901,6 +2901,19 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
         let (iters, cost, prompt_tokens, completion_tokens) = stdout_task.await.unwrap_or((0, 0.0, 0, 0));
         let _ = stderr_task.await;
 
+        // Mirror sandboxed dispatch's `[METRICS]` breadcrumb on
+        // BOTH success and failure paths so the bench harness can
+        // distinguish "ran and failed" (METRICS with partial
+        // numbers) from "never ran" (no METRICS line). Includes
+        // prompt/completion token counts so a cost_usd=0 result
+        // is diagnosable. Pearl th-eff0d0.
+        if let Some(ref id) = pearl_id {
+            let body = format!("[METRICS] cost_usd={cost:.8} iterations={iters} prompt_tokens={prompt_tokens} completion_tokens={completion_tokens}");
+            if let Err(e) = pearl_store.add_comment(id, &body) {
+                tracing::warn!(pearl_id = %id, error = %e, "[METRICS] write failed (direct dispatch)");
+            }
+        }
+
         match exit {
             Ok(status) if status.success() => {
                 let _ = event_tx.send(ServerEvent::TaskComplete {
@@ -2908,23 +2921,6 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
                     iterations: iters,
                     cost_usd: cost,
                 });
-                // Mirror sandboxed dispatch's `[METRICS]` breadcrumb so
-                // the bench harness (and anyone else polling the pearl)
-                // can read the dispatch's actual spend without
-                // consuming the WS event stream. Posted before close
-                // so the comment is part of pearl history.
-                //
-                // Includes prompt/completion token counts so a
-                // cost_usd=0 result is diagnosable: if the tokens
-                // are non-zero the cost-pricing layer dropped the
-                // ball, if both are zero usage was never captured.
-                // Pearl th-eff0d0.
-                if let Some(ref id) = pearl_id {
-                    let body = format!("[METRICS] cost_usd={cost:.8} iterations={iters} prompt_tokens={prompt_tokens} completion_tokens={completion_tokens}");
-                    if let Err(e) = pearl_store.add_comment(id, &body) {
-                        tracing::warn!(pearl_id = %id, error = %e, "[METRICS] write failed (direct dispatch)");
-                    }
-                }
             }
             Ok(status) => {
                 let _ = event_tx.send(ServerEvent::TaskError {
