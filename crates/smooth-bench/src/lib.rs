@@ -118,7 +118,18 @@ impl PolyglotLang {
             // depend on a system-wide gradle of a specific version.
             // `--no-daemon` avoids leaking a background daemon per task.
             Self::Java => &["sh", "-c", "./gradlew test --no-daemon"],
-            Self::Cpp => &["sh", "-c", "mkdir -p build && cd build && cmake .. && make && ctest --output-on-failure"],
+            // -DEXERCISM_RUN_ALL_TESTS=1 unblocks every test case past
+            // the first — polyglot C++ files wrap all but the first
+            // test in `#if defined(EXERCISM_RUN_ALL_TESTS)` gates, so
+            // without the define the runner reports "1 assertion in
+            // 1 test case" no matter what the agent did. Bench
+            // previously hit this as the build-step blocker AFTER
+            // cmake was on PATH and after the work_dir rename.
+            Self::Cpp => &[
+                "sh",
+                "-c",
+                "mkdir -p build && cd build && cmake -DEXERCISM_RUN_ALL_TESTS=1 .. && make && ctest --output-on-failure",
+            ],
         }
     }
 }
