@@ -36,4 +36,11 @@ LABEL org.opencontainers.image.title="smooai-boardroom" \
 ENV PATH="/opt/smooth/bin:${PATH}"
 # SMOOTH_BOARDROOM_MODE is force-set by the boardroom binary itself
 # regardless of env, so callers don't need to know to set it.
-ENTRYPOINT ["/opt/smooth/bin/boardroom"]
+#
+# Wrap in /bin/sh (no exec) so boardroom runs as PID 2 rather than
+# PID 1. As PID 1, tokio + tracing's stderr produced an empty
+# guest.log under microsandbox's detached-sandbox path (likely a
+# libc init / PID-1 signal-handling interaction). Keeping sh as
+# init lets boardroom's stderr flow normally.
+# Pearl th-67c96b sandboxed-mode fix.
+ENTRYPOINT ["/bin/sh", "-c", "/opt/smooth/bin/boardroom"]
