@@ -2884,6 +2884,17 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
                     iterations: iters,
                     cost_usd: cost,
                 });
+                // Mirror sandboxed dispatch's `[METRICS]` breadcrumb so
+                // the bench harness (and anyone else polling the pearl)
+                // can read the dispatch's actual spend without
+                // consuming the WS event stream. Posted before close
+                // so the comment is part of pearl history.
+                if let Some(ref id) = pearl_id {
+                    let body = format!("[METRICS] cost_usd={cost:.6} iterations={iters}");
+                    if let Err(e) = pearl_store.add_comment(id, &body) {
+                        tracing::warn!(pearl_id = %id, error = %e, "[METRICS] write failed (direct dispatch)");
+                    }
+                }
             }
             Ok(status) => {
                 let _ = event_tx.send(ServerEvent::TaskError {
