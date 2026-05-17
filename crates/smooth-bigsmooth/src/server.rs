@@ -2820,8 +2820,18 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
                                 });
                             }
                             "Completed" => {
+                                // Use max for BOTH iterations and cost so a
+                                // later "fallback" Completed event (the runner
+                                // emits one with zeros at exit as belt-and-
+                                // suspenders, see operator-runner main.rs)
+                                // can't clobber the real numbers the
+                                // workflow/agent posted earlier. Pearl
+                                // th-46bc94.
                                 if let Some(iters) = event.get("iterations").and_then(serde_json::Value::as_u64) {
-                                    agent_iterations = u32::try_from(iters).unwrap_or(u32::MAX);
+                                    let iters_u32 = u32::try_from(iters).unwrap_or(u32::MAX);
+                                    if iters_u32 > agent_iterations {
+                                        agent_iterations = iters_u32;
+                                    }
                                 }
                                 if let Some(c) = event.get("cost_usd").and_then(serde_json::Value::as_f64) {
                                     if c > final_cost_usd {
