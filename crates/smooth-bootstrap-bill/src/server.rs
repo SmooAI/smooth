@@ -154,7 +154,14 @@ pub async fn spawn_sandbox(spec: SandboxSpec) -> Result<(String, Vec<PortMapping
     let mut builder = Sandbox::builder(spec.name.clone())
         .image(spec.image.as_str())
         .cpus(cpus_u8)
-        .memory(spec.memory_mb);
+        .memory(spec.memory_mb)
+        // .replace() makes the create idempotent — if a sandbox
+        // with this name already exists (e.g. a crashed previous
+        // run left an entry in microsandbox's state DB) it's
+        // removed and re-created instead of erroring. Pearl
+        // th-67c96b: needed so `th up --sandboxed` works across
+        // restarts without a manual cleanup step.
+        .replace();
     diag!("builder constructed");
 
     // Resolve any host_port == 0 requests by asking the kernel for a free

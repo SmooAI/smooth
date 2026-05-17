@@ -60,8 +60,23 @@ fi
 echo "==> Cross-compiling boardroom + smooth-dolt"
 bash scripts/build-boardroom.sh
 
+# Resolve the real cargo target dir (shared dirs are configured
+# in ~/.cargo/config.toml; see pearl th-target-bloat).
+TARGET_DIR=$(cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin)['target_directory'])")
+if [ -z "$TARGET_DIR" ]; then
+    TARGET_DIR="./target"
+fi
+SRC_BOARDROOM="$TARGET_DIR/aarch64-unknown-linux-musl/release/boardroom"
+SRC_DOLT="$TARGET_DIR/aarch64-unknown-linux-musl/release/smooth-dolt"
+
+# Dockerfile COPY paths are relative to the build context; mirror
+# the binaries under ./target/ so the Dockerfile keeps working
+# even when cargo's target dir lives elsewhere.
+mkdir -p target/aarch64-unknown-linux-musl/release
 BOARDROOM_BIN="target/aarch64-unknown-linux-musl/release/boardroom"
 DOLT_BIN="target/aarch64-unknown-linux-musl/release/smooth-dolt"
+cp -f "$SRC_BOARDROOM" "$BOARDROOM_BIN"
+cp -f "$SRC_DOLT" "$DOLT_BIN"
 
 if [ ! -f "$BOARDROOM_BIN" ]; then
     echo "error: expected $BOARDROOM_BIN but build did not produce it" >&2

@@ -47,7 +47,14 @@ echo "==> Cross-compiling boardroom binary for aarch64-unknown-linux-musl"
 cargo zigbuild --target aarch64-unknown-linux-musl --release \
     -p smooai-smooth-bigsmooth --bin boardroom --no-default-features
 
-BIN="target/aarch64-unknown-linux-musl/release/boardroom"
+# Resolve the actual target directory — workspaces with
+# ~/.cargo/config.toml `target-dir = ...` won't have the binary
+# at ./target/ (pearl th-target-bloat).
+TARGET_DIR=$(cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c "import sys, json; print(json.load(sys.stdin)['target_directory'])")
+if [ -z "$TARGET_DIR" ]; then
+    TARGET_DIR="./target"
+fi
+BIN="$TARGET_DIR/aarch64-unknown-linux-musl/release/boardroom"
 if [ ! -f "$BIN" ]; then
     echo "error: expected binary at $BIN but it wasn't produced" >&2
     exit 1
@@ -58,7 +65,7 @@ echo "==> Built $BIN ($(( SIZE / 1024 / 1024 )) MiB, statically linked aarch64 E
 
 # Also cross-compile smooth-dolt for the Boardroom VM.
 # smooth-dolt is a Go binary; Go handles cross-compilation natively.
-DOLT_BIN="target/aarch64-unknown-linux-musl/release/smooth-dolt"
+DOLT_BIN="$TARGET_DIR/aarch64-unknown-linux-musl/release/smooth-dolt"
 echo "==> Cross-compiling smooth-dolt for linux/arm64"
 if [ -d "go/smooth-dolt" ]; then
     cd go/smooth-dolt
@@ -78,11 +85,14 @@ if [ -d "go/smooth-dolt" ]; then
     fi
     if [ -n "$ZIG_BIN" ]; then
         ZIG_CC="$ZIG_BIN cc -target aarch64-linux-musl"
+        # Make sure DOLT_BIN's parent dir exists (it lives in
+        # the shared cargo target dir which cargo created above).
+        mkdir -p "$(dirname "$DOLT_BIN")"
         CC="$ZIG_CC" CGO_ENABLED=1 GOOS=linux GOARCH=arm64 \
-            go build -tags gms_pure_go -o "../../$DOLT_BIN" . 2>&1 || {
+            go build -tags gms_pure_go -o "$DOLT_BIN" . 2>&1 || {
             # Fallback: try without CGO (will fail if gozstd is needed at runtime)
             echo "  zig cross-compile failed, trying CGO_ENABLED=0..." >&2
-            GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -tags "gms_pure_go nozstd" -o "../../$DOLT_BIN" . 2>&1 || {
+            GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -tags "gms_pure_go nozstd" -o "$DOLT_BIN" . 2>&1 || {
                 echo "warning: smooth-dolt cross-compile failed (pearl store will not work in Boardroom VM)" >&2
                 cd ../..
             }

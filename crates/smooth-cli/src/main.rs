@@ -992,6 +992,121 @@ fn log_file_path() -> std::path::PathBuf {
     dirs_next::home_dir().unwrap_or_default().join(".smooth").join("smooth.log")
 }
 
+/// State file recording the sandboxed-mode VM name so `th down`
+/// can find and destroy it.
+fn sandboxed_state_path() -> std::path::PathBuf {
+    dirs_next::home_dir().unwrap_or_default().join(".smooth").join("sandboxed.vm")
+}
+
+/// Boot the boardroom OCI image as a microsandbox VM, forward
+/// :4400 out, wait for the in-VM Big Smooth to come up, and
+/// stash the VM name so `th down` can destroy it. Pearl
+/// th-67c96b (sandboxed mode).
+async fn start_sandboxed_vm(port: u16) -> Result<()> {
+    use smooth_bigsmooth::sandbox::{create_sandbox, init_sandbox_client, SandboxConfig};
+    use std::collections::HashMap;
+
+    println!();
+    println!("  {} booting boardroom microVM (image: ghcr.io/smooai/boardroom:latest)", "●".cyan());
+
+    // Pick the sandbox client (DirectSandboxClient on host, since
+    // direct-sandbox feature is on by default).
+    init_sandbox_client();
+
+    let image = std::env::var("SMOOTH_BOARDROOM_IMAGE").unwrap_or_else(|_| "ghcr.io/smooai/boardroom:latest".to_string());
+
+    let mut env = HashMap::new();
+    // Both names during the Phase 4 naming transition (pearl
+    // th-893801 iter-6a).
+    env.insert("SMOOTH_VM_MODE".into(), "1".into());
+    env.insert("SMOOTH_BOARDROOM_MODE".into(), "1".into());
+    env.insert("SMOOTH_SINGLE_PROCESS".into(), "1".into());
+    env.insert("SMOOTH_BOARDROOM_PORT".into(), port.to_string());
+
+    let config = SandboxConfig {
+        operator_id: "boardroom".into(),
+        bead_id: "boardroom".into(),
+        workspace_path: std::env::current_dir()?.to_string_lossy().into_owned(),
+        permissions: vec![],
+        system_prompt: None,
+        model: None,
+        phase: "execute".into(),
+        env,
+        cpus: 2,
+        memory_mb: 4096,
+        timeout_seconds: 0,
+        mounts: vec![],
+        allow_host_loopback: true,
+        env_cache_key: None,
+        use_named_volume_for_cache: false,
+        extra_ports: vec![smooth_bootstrap_bill::PortMapping {
+            guest_port: port,
+            host_port: port,
+            bind_all: false,
+        }],
+        image: Some(image.clone()),
+        secrets: vec![],
+    };
+
+    // The legacy second arg ("host_port") maps host→guest:4096 for
+    // the operator WebSocket bridge. We don't need that for the
+    // boardroom VM (it IS Big Smooth, not an operator). Pass 0 so
+    // the kernel picks an ephemeral port and our extra_ports
+    // entry (host:port → guest:port) gets the real 4400.
+    let handle = create_sandbox(&config, 0).await.context("boot boardroom microVM")?;
+
+    let state_path = sandboxed_state_path();
+    if let Some(parent) = state_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&state_path, &handle.msb_name)?;
+
+    println!();
+    println!("  {}", "╭──────────────────────────────╮".dimmed());
+    println!(
+        "  {}  {} sandboxed (vm: {})",
+        "│".dimmed(),
+        "Smooth started".bold(),
+        handle.msb_name.chars().take(16).collect::<String>().cyan()
+    );
+    println!("  {}", "╰──────────────────────────────╯".dimmed());
+    println!("    {}  {}", "Web UI".dimmed(), format!("http://localhost:{port}").cyan().bold());
+    println!("    {}  {}", "Image ".dimmed(), image.dimmed());
+    println!("    {}  {}", "Stop  ".dimmed(), "th down".dimmed());
+    println!();
+
+    // Bill's in-process registry holds the Sandbox Arc which
+    // spawns port-forwarder tokio tasks. Returning Ok(()) doesn't
+    // end the process because those tasks keep the runtime alive,
+    // AND they'd shadow microsandbox's own host port forwarder
+    // (msb already forwards :port — we don't need to). Exit
+    // cleanly: microsandbox manages the VM lifecycle out-of-process,
+    // so our `th` exiting doesn't kill the boardroom VM.
+    std::process::exit(0);
+}
+
+/// Destroy the boardroom microVM if one is running.
+/// Counterpart to [`start_sandboxed_vm`]. Idempotent.
+async fn stop_sandboxed_vm() -> Result<bool> {
+    use smooth_bigsmooth::sandbox::{destroy_sandbox, init_sandbox_client};
+
+    let state_path = sandboxed_state_path();
+    if !state_path.exists() {
+        return Ok(false);
+    }
+    let msb_name = std::fs::read_to_string(&state_path).context("read sandboxed.vm")?.trim().to_string();
+    if msb_name.is_empty() {
+        let _ = std::fs::remove_file(&state_path);
+        return Ok(false);
+    }
+    init_sandbox_client();
+    if let Err(e) = destroy_sandbox(&msb_name).await {
+        tracing::warn!(vm = %msb_name, error = %e, "destroy_sandbox failed; removing state file anyway");
+    }
+    let _ = std::fs::remove_file(&state_path);
+    Ok(true)
+}
+
 async fn cmd_up(
     no_leader: bool,
     port: u16,
@@ -1015,6 +1130,11 @@ async fn cmd_up(
         std::env::set_var("SMOOTH_WORKFLOW_DIRECT", "1");
     } else {
         std::env::remove_var("SMOOTH_WORKFLOW_DIRECT");
+        // Sandboxed mode shortcut: boot the boardroom OCI image
+        // via Bootstrap Bill + microsandbox, forward :4400 out,
+        // and exit. The in-VM Big Smooth is the "daemon" the
+        // user's TUI talks to; no host-side daemon-fork.
+        return start_sandboxed_vm(port).await;
     }
     // Benchmark knob — skip the TEST phase so the agent doesn't
     // add tests that change the score.
@@ -1202,6 +1322,17 @@ async fn cmd_up(
 }
 
 async fn cmd_down() -> Result<()> {
+    // Sandboxed mode: state file recorded the boardroom microVM
+    // name; destroy it via Bill (pearl th-67c96b).
+    if let Ok(true) = stop_sandboxed_vm().await {
+        println!(
+            "  \u{1f534} {} {}",
+            "Smooth stopped".green().bold(),
+            "(sandboxed boardroom microVM destroyed)".dimmed()
+        );
+        return Ok(());
+    }
+
     let pid_path = pid_file_path();
     if !pid_path.exists() {
         println!("  {}", "Smooth is not running.".yellow());
