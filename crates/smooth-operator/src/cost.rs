@@ -189,6 +189,13 @@ impl ModelPricing {
     }
 
     /// Look up pricing for a model name, falling back to free tier for unknown models.
+    ///
+    /// Includes Smoo's own routing aliases (`smooth-fast-gemini`,
+    /// `smooth-coding`, …) so the local fallback returns a usable
+    /// estimate when the gateway omits `x-litellm-response-cost`.
+    /// Pearl th-431ba2: without these, the cost tracker stays at
+    /// $0 for the entire dispatch because every smooth-* alias
+    /// landed in the free tier.
     #[must_use]
     pub fn for_model(model: &str) -> Self {
         let m = model.to_lowercase();
@@ -202,6 +209,14 @@ impl ModelPricing {
             Self::deepseek_v3()
         } else if m.contains("gemini") && m.contains("flash") {
             Self::gemini_flash()
+        } else if m.contains("smooth-fast-gemini") {
+            // routes to gemini-flash on the gateway
+            Self::gemini_flash()
+        } else if m.contains("smooth-coding") {
+            // routes through MiniMax-style coding upstream; use
+            // gpt_4o_mini as a rough peer until we have a real
+            // local entry. Better an estimate than $0.
+            Self::gpt_4o_mini()
         } else {
             Self::free()
         }
@@ -221,6 +236,25 @@ impl ModelPricing {
 mod tests {
     use super::*;
     use crate::llm::Usage;
+
+    #[test]
+    fn for_model_resolves_smooth_aliases() {
+        // Pearl th-431ba2: every smooth-* alias used to fall to
+        // the free tier, so cost stayed at $0 unless the gateway
+        // returned a cost header.
+        assert_ne!(
+            ModelPricing::for_model("smooth-fast-gemini").prompt_per_mtok,
+            0.0,
+            "smooth-fast-gemini must map to gemini-flash pricing, not free tier",
+        );
+        assert_ne!(
+            ModelPricing::for_model("smooth-coding").prompt_per_mtok,
+            0.0,
+            "smooth-coding must map to a real peer estimate, not free tier",
+        );
+        // Unknown model still hits the free tier.
+        assert_eq!(ModelPricing::for_model("totally-fake-model-name-xyz").prompt_per_mtok, 0.0);
+    }
 
     #[test]
     fn record_accumulates_tokens() {
