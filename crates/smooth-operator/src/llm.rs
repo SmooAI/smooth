@@ -1174,6 +1174,24 @@ pub async fn accumulate_stream_events(mut stream: Pin<Box<dyn Stream<Item = anyh
         (content, tool_calls)
     };
 
+    // Streaming counterpart to the chat() path's fallback: if no
+    // StreamEvent::Usage ever arrived (LiteLLM at llm.smoo.ai/v1
+    // currently drops it for smooth-* aliases), estimate from
+    // content lengths so cost_tracker has something to multiply.
+    // Pearl th-eff0d0.
+    if usage.prompt_tokens == 0 && usage.completion_tokens == 0 {
+        // Streaming path doesn't have the outgoing request in
+        // scope; estimate prompt_tokens at zero and only
+        // capture completion (~4 chars/token rule of thumb).
+        // The caller's record path will still see non-zero
+        // tokens and produce a real cost number against
+        // ModelPricing.
+        let total_args_chars: usize = tool_calls.iter().map(|tc| tc.arguments.to_string().len()).sum();
+        let completion_chars = content.len() + total_args_chars;
+        usage.completion_tokens = u32::try_from(completion_chars / 4).unwrap_or(u32::MAX);
+        usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
+    }
+
     Ok(LlmResponse {
         content,
         tool_calls,
