@@ -14,7 +14,6 @@ path = "src/main.rs"
 [dependencies]
 smooth-bench.workspace = true
 smooth-bigsmooth.workspace = true
-smooth-host-stub.workspace = true
 smooth-bootstrap-bill = { workspace = true, default-features = false, features = ["server"] }
 smooth-code.workspace = true
 smooth-diver.workspace = true

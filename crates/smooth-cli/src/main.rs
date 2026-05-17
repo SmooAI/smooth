@@ -6,7 +6,6 @@ mod gradient;
 mod hooks;
 mod mcp_config;
 mod service;
-mod vm;
 
 use std::net::SocketAddr;
 
@@ -45,57 +44,40 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start Smooth platform
+    /// Start Smooth platform — defaults to sandboxed mode (Smooth
+    /// runs inside a microsandbox microVM). Use `th up direct` to
+    /// run on the host without a sandbox (only safe in a pre-trusted
+    /// environment).
     Up {
+        /// Opt out of sandboxed mode. `th up direct` runs the cast
+        /// on the host with no microsandbox VM in front of it.
+        #[command(subcommand)]
+        mode: Option<UpMode>,
         /// Skip starting Big Smooth (API + web UI)
         #[arg(long)]
         no_leader: bool,
         /// Big Smooth API port
         #[arg(long, default_value = "4400")]
         port: u16,
-        /// Run in foreground (default: daemonize)
+        /// Run in foreground (default: daemonize). Only honored in
+        /// direct mode — sandboxed mode is foreground-by-microVM.
         #[arg(long)]
         foreground: bool,
         /// Max concurrent Smooth Operators (each is a microVM). Defaults
         /// to 3. Can also be set via SMOOTH_SANDBOX_MAX_CONCURRENCY.
         #[arg(long)]
         max_operators: Option<usize>,
-        /// Run the cast inside a microsandbox VM (the "sandboxed"
-        /// mode). Default is direct: the cast runs on the host
-        /// directly. Equivalent to clearing `SMOOTH_WORKFLOW_DIRECT`.
-        /// CLI beats env.
-        #[arg(long)]
-        sandboxed: bool,
-        /// Legacy alias for the inverse of `--sandboxed`. Kept so
-        /// existing scripts don't break. `--direct` is now the
-        /// default; passing it is a no-op.
-        #[arg(long, hide = true)]
-        direct: bool,
         /// Skip the workflow's post-implementation TEST phase
         /// (adversarial test augmentation). Benchmark runs want
         /// this so added tests don't change the score. Equivalent
         /// to `SMOOTH_WORKFLOW_SKIP_TEST=1`.
         #[arg(long)]
         skip_test: bool,
-        /// Sandbox backend when NOT in direct mode: `microsandbox`
-        /// (default — embedded libkrun microVMs) or `docker`
-        /// (containers, for CI / nested-virt environments).
-        /// Equivalent to `SMOOTH_SANDBOX_BACKEND=<value>`.
-        #[arg(long, value_parser = ["microsandbox", "docker"])]
-        sandbox_backend: Option<String>,
     },
     /// Stop Smooth platform
     Down,
     /// Show system health
     Status,
-    /// Manage the long-lived single-VM sandbox (pearl th-893801
-    /// Phase 2). `th vm up` boots it once; state persists in a
-    /// named volume across `th vm down`; `th vm prune` is the
-    /// nuclear reset.
-    Vm {
-        #[command(subcommand)]
-        cmd: vm::VmCommands,
-    },
     /// Provider authentication
     Auth {
         #[command(subcommand)]
@@ -329,6 +311,15 @@ enum Commands {
         #[command(subcommand)]
         cmd: SkillsCommands,
     },
+}
+
+#[derive(Subcommand)]
+enum UpMode {
+    /// Run Smooth directly on the host without a microsandbox VM.
+    /// Only safe inside an already-trusted environment (a CI runner,
+    /// a dedicated devbox, etc.). The default `th up` boots inside
+    /// microsandbox; this opts out.
+    Direct,
 }
 
 #[derive(Subcommand)]
@@ -925,18 +916,15 @@ async fn main() -> Result<()> {
         Some(Commands::Cache { cmd }) => cmd_cache(cmd).await,
         Some(Commands::Tunnel { cmd }) => cmd_tunnel(cmd).await,
         Some(Commands::Up {
+            mode,
             no_leader,
             port,
             foreground,
             max_operators,
-            sandboxed,
-            direct: _,
             skip_test,
-            sandbox_backend,
-        }) => cmd_up(no_leader, port, foreground, max_operators, sandboxed, skip_test, sandbox_backend).await,
+        }) => cmd_up(mode, no_leader, port, foreground, max_operators, skip_test).await,
         Some(Commands::Down) => cmd_down().await,
         Some(Commands::Status) => cmd_status().await,
-        Some(Commands::Vm { cmd }) => vm::run(cmd).await,
         Some(Commands::Db { cmd }) => cmd_db(cmd),
         Some(Commands::Auth { cmd }) => cmd_auth(cmd).await,
         Some(Commands::Operators { cmd }) => cmd_operators(cmd).await,
@@ -1107,28 +1095,23 @@ async fn stop_sandboxed_vm() -> Result<bool> {
     Ok(true)
 }
 
-async fn cmd_up(
-    no_leader: bool,
-    port: u16,
-    foreground: bool,
-    max_operators: Option<usize>,
-    sandboxed: bool,
-    skip_test: bool,
-    sandbox_backend: Option<String>,
-) -> Result<()> {
+async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, foreground: bool, max_operators: Option<usize>, skip_test: bool) -> Result<()> {
     // CLI flag beats env; set env so AppState::new() (which only sees
     // env) picks the right value in both foreground + daemon paths.
     if let Some(n) = max_operators {
         std::env::set_var("SMOOTH_SANDBOX_MAX_CONCURRENCY", n.to_string());
     }
-    // Two modes only: direct (default) runs the cast on the host;
-    // sandboxed boots the same cast inside a microsandbox VM with
-    // :4400 forwarded out. Direct skips per-task microVM creation —
-    // operators dispatch as host subprocesses (still mediated by
-    // Narc / Wonk hooks in-process).
-    if !sandboxed {
-        std::env::set_var("SMOOTH_WORKFLOW_DIRECT", "1");
-    } else {
+    // Two modes only:
+    //   * `th up` (default) — boot Smooth inside a microsandbox VM
+    //     with :4400 forwarded out.
+    //   * `th up direct`   — run on the host with no sandbox in
+    //     front. Only safe in pre-trusted environments.
+    //
+    // Subcommand beats env; env `SMOOTH_WORKFLOW_DIRECT=1` is
+    // honored as an override for harness/benchmark scripts that
+    // can't easily change argv.
+    let direct = matches!(mode, Some(UpMode::Direct)) || std::env::var("SMOOTH_WORKFLOW_DIRECT").is_ok();
+    if !direct {
         std::env::remove_var("SMOOTH_WORKFLOW_DIRECT");
         // Sandboxed mode shortcut: boot the boardroom OCI image
         // via Bootstrap Bill + microsandbox, forward :4400 out,
@@ -1136,16 +1119,11 @@ async fn cmd_up(
         // user's TUI talks to; no host-side daemon-fork.
         return start_sandboxed_vm(port).await;
     }
+    std::env::set_var("SMOOTH_WORKFLOW_DIRECT", "1");
     // Benchmark knob — skip the TEST phase so the agent doesn't
     // add tests that change the score.
     if skip_test {
         std::env::set_var("SMOOTH_WORKFLOW_SKIP_TEST", "1");
-    }
-    // Sandbox backend selection (only matters when NOT in direct
-    // mode). `microsandbox` = embedded libkrun; `docker` = shell
-    // out to the docker CLI, for nested-virt-safe isolation.
-    if let Some(backend) = sandbox_backend.as_deref() {
-        std::env::set_var("SMOOTH_SANDBOX_BACKEND", backend);
     }
 
     // Daemon mode: re-exec ourselves with --foreground and redirect output to log file
@@ -1189,6 +1167,10 @@ async fn cmd_up(
         let log_err = log_file.try_clone()?;
 
         let exe = std::env::current_exe()?;
+        // We're in the direct branch — re-exec the daemon with
+        // `th up [flags...] direct` so the child stays in direct
+        // mode without relying on env vars. Clap accepts parent
+        // flags before the subcommand.
         let mut args = vec!["up".to_string(), "--foreground".to_string(), "--port".to_string(), port.to_string()];
         if no_leader {
             args.push("--no-leader".to_string());
@@ -1197,20 +1179,10 @@ async fn cmd_up(
             args.push("--max-operators".to_string());
             args.push(n.to_string());
         }
-        // Propagate the dispatch-mode flags through the daemon
-        // re-exec. The env vars are already set on THIS process,
-        // but spawning a child that parses its own args also works
-        // — and it keeps the flags visible in `ps` / `launchctl`.
-        if sandboxed {
-            args.push("--sandboxed".to_string());
-        }
         if skip_test {
             args.push("--skip-test".to_string());
         }
-        if let Some(ref backend) = sandbox_backend {
-            args.push("--sandbox-backend".to_string());
-            args.push(backend.clone());
-        }
+        args.push("direct".to_string());
 
         let child = std::process::Command::new(exe)
             .args(&args)
