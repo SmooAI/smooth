@@ -195,7 +195,14 @@ pub async fn run_aider_polyglot(lang: PolyglotLang, task: &str, opts: &BenchOpts
     ensure_dataset()?;
     let task_src = locate_task(lang, task)?;
     let run = new_run_dir()?;
-    let work_dir = run.join("work");
+    // Name the work dir after the task slug instead of a generic
+    // "work". C++ aider-polyglot tasks derive filenames from the
+    // directory name (`get_filename_component(exercise … NAME)`
+    // then `${file}_test.cpp` etc.), so a generic dir made CMake
+    // look for `work_test.cpp` which doesn't exist and every C++
+    // task FAILed at the build step. Other languages don't depend
+    // on the directory name and aren't affected by the rename.
+    let work_dir = run.join(task);
     std::fs::create_dir_all(&work_dir).with_context(|| format!("mkdir {}", work_dir.display()))?;
 
     copy_task_files(&task_src, &work_dir)?;
