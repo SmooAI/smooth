@@ -54,11 +54,26 @@ pub async fn run_via_chat_agent(
     let chat_http_timeout = Duration::from_secs(env_secs("SMOOTH_BENCH_CHAT_HTTP_TIMEOUT_S", 300));
     let client = reqwest::Client::builder().timeout(chat_http_timeout).build()?;
 
-    // Compose the chat prompt: the chat-agent's system prompt knows the
-    // workflow (search → create → spawn). We just need to give it enough
-    // info to dispatch correctly.
+    // Compose the chat prompt. We need the chat-agent to:
+    //  1. Create a pearl + dispatch a teammate on it.
+    //  2. Return the pearl id IMMEDIATELY — do NOT teammate_wait,
+    //     teammate_read, or otherwise hold the HTTP connection
+    //     until the teammate finishes. The bench harness polls the
+    //     pearl itself via the local PearlStore once it has the id.
+    //
+    // Without the explicit "do not wait" directive the chat-agent
+    // followed its default benchmark workflow (pearls_create →
+    // teammate_spawn → teammate_wait → return pearl id at the end),
+    // which kept the HTTP call open for the full task duration
+    // (often 5+ minutes). That blew bench's 300s reqwest timeout
+    // — the chat returned an error, no pearl id reached bench,
+    // and bench fell back to scoring whatever the work_dir
+    // happened to have at the 300s mark. Pearl th-46bc94 follow-up.
     let chat_content = format!(
-        "Run a benchmark task. Create a pearl with the following description and dispatch a teammate on it (working_dir={}, budget_usd={}). Once the teammate is dispatched, return ONLY the pearl id on its own line as the last line of your response.\n\n--- task ---\n{}",
+        "Run a benchmark task. Create a pearl with the following description and dispatch a teammate on it (working_dir={}, budget_usd={}). \
+The bench harness is polling the pearl externally — your job is JUST to dispatch and return. \
+Do NOT call teammate_wait, teammate_read, or any other waiting tool. \
+The moment teammate_spawn returns, end your turn with ONLY the pearl id on its own line as your last line.\n\n--- task ---\n{}",
         work_dir.display(),
         budget_usd.unwrap_or(5.0),
         prompt

@@ -147,23 +147,24 @@ pub fn parse_gateway_cost(headers: &reqwest::header::HeaderMap) -> Option<f64> {
         "x-response-cost",
         "x-cost-usd",
     ];
-    let mut zero_fallback: Option<f64> = None;
     for name in CANDIDATES {
         if let Some(v) = headers.get(*name).and_then(|h| h.to_str().ok()) {
             if let Ok(cost) = v.trim().parse::<f64>() {
                 if cost > 0.0 {
                     return Some(cost);
                 }
-                zero_fallback = Some(cost);
             }
         }
     }
-    // All candidates reported zero (tiny request, free model, etc.).
-    // Surface 0 rather than None so the caller knows the gateway *did*
-    // report a cost — the agent's budget check can still meaningfully
-    // rely on the gateway number, and the spend meter stays at zero
-    // instead of silently falling back to ModelPricing's guess.
-    zero_fallback
+    // All candidates were either absent or reported zero. Return
+    // None so the caller falls back to local ModelPricing rather
+    // than locking in $0 for the rest of the dispatch. Pearl
+    // th-431ba2: LiteLLM's cost-tracking config on llm.smoo.ai
+    // currently returns 0 for smooth-* aliases on every response
+    // — taking that at face value pinned cost_usd at 0 across
+    // every bench run even when ModelPricing could give a
+    // reasonable token-count estimate.
+    None
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
