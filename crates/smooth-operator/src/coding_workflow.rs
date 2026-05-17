@@ -228,6 +228,29 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
                 // fix; the prompt half lives in fixer.txt.
                 let made_edits = conversation_made_edits(&conversation);
                 if !made_edits {
+                    // Pearl th-fc8a51: on the FIRST iteration with no
+                    // edits AND no test runs, retry once with a strong
+                    // forcing prompt before falling back to THINK mode.
+                    // The original "exit immediately as THINK" path was
+                    // designed for chat questions, but for dispatched
+                    // code tasks an agent that just read the
+                    // INSTRUCTIONS.md and returned without coding is a
+                    // give-up, not a thinker. cpp/bank-account hit this
+                    // on bench sweep b32wx055q: 23s, $0.0001, 0 edits,
+                    // FAIL — when the same task with the same model
+                    // SOLVED 17/17 on a focused rerun.
+                    if iteration == 1 && no_evidence_retries < MAX_NO_EVIDENCE_RETRIES {
+                        no_evidence_retries += 1;
+                        tracing::info!(
+                            iteration,
+                            retry = no_evidence_retries,
+                            "coding workflow: no edits + no tests on iter 1 — forcing one retry before THINK-mode exit"
+                        );
+                        last_verify_output = Some(
+                            "Your previous turn made no edits to any source file. This is a code task — you need to actually implement the solution. Read the source files (the stub plus the test file), then use edit_file or bash to write the implementation, then run the project's test command via `bash`. Do not return until you've at least attempted both.".to_string(),
+                        );
+                        continue;
+                    }
                     tracing::info!(
                         iteration,
                         "coding workflow: no test-run evidence AND no edits — treating as THINK mode, exiting cleanly"
