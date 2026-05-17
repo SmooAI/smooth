@@ -47,9 +47,12 @@ async fn main() -> anyhow::Result<()> {
         smooth_pearls::PearlStore::init(&dolt_dir)?
     };
 
-    // Force boardroom mode regardless of the env var if the caller used
-    // this binary directly (it's dedicated to Boardroom mode — the
-    // `th up` path on the host uses a different binary).
+    // Force in-process-cast mode regardless of the env var if the
+    // caller used this binary directly (it's dedicated to that mode —
+    // the `th up` path on the host uses the same flag). Set both the
+    // new and legacy var names during the Phase 4 transition
+    // (pearl th-893801 iter-6a).
+    std::env::set_var("SMOOTH_VM_MODE", "1");
     std::env::set_var("SMOOTH_BOARDROOM_MODE", "1");
 
     // Initialize the sandbox client BEFORE spawning the cast or serving

@@ -163,8 +163,11 @@ WORKDIR /workspace
 
 # Single-process gRPC cast on by default. The boardroom binary
 # spawns Narc/Wonk/Scribe/BigSmooth on UDS sockets under
-# $XDG_RUNTIME_DIR/smooth/.
+# $XDG_RUNTIME_DIR/smooth/. SMOOTH_VM_MODE is the post-Phase-4
+# name; SMOOTH_BOARDROOM_MODE is kept for back-compat with the
+# legacy boardroom mode flag (both set during the transition).
 ENV SMOOTH_SINGLE_PROCESS=1 \
+    SMOOTH_VM_MODE=1 \
     SMOOTH_BOARDROOM_MODE=1 \
     XDG_RUNTIME_DIR=/run/user/0
 

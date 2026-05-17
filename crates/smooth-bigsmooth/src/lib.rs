@@ -39,6 +39,13 @@ pub mod access;
 pub mod audit;
 pub mod boardroom;
 pub mod boardroom_narc;
+
+/// Phase 4 alias: `BoardroomNarc` keeps the legacy name on
+/// the type but new code should prefer `Narc` — in the
+/// single-VM model there's no "boardroom" anymore, just "the
+/// Narc". Both names refer to the same struct. Pearl th-893801
+/// Phase 4 iter-6a.
+pub use boardroom_narc::BoardroomNarc as Narc;
 pub mod chat_tools;
 pub mod creds;
 pub mod host_tools;

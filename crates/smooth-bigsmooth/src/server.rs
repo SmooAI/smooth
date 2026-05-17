@@ -534,27 +534,34 @@ pub fn build_router(state: AppState) -> Router {
 /// On first call this also:
 /// - Initialises the process-global sandbox client (Direct vs Bill,
 ///   selected by the `SMOOTH_BOOTSTRAP_BILL_URL` env var).
-/// - If `SMOOTH_BOARDROOM_MODE=1`, spawns the Boardroom cast (Wonk/Goalie/
-///   Narc/Scribe/Archivist) as tokio tasks in this process and attaches
-///   their handles to `AppState`. Idempotent if the state already carries
-///   boardroom handles.
+/// - If `SMOOTH_VM_MODE=1` (or the legacy `SMOOTH_BOARDROOM_MODE=1`),
+///   spawns the in-process cast (Wonk/Goalie/Narc/Scribe/Archivist)
+///   as tokio tasks in this process and attaches their handles to
+///   `AppState`. Idempotent if the state already carries cast
+///   handles. Pearl th-893801 Phase 4 renames the env var to drop
+///   the "boardroom" framing; both names are honored during the
+///   transition.
 pub async fn start(mut state: AppState, addr: SocketAddr) -> anyhow::Result<()> {
     // Pick the sandbox client (Direct or Bill) exactly once.
     crate::sandbox::init_sandbox_client();
 
-    // Boardroom bootstrap.
-    if state.boardroom.is_none()
-        && std::env::var("SMOOTH_BOARDROOM_MODE")
-            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
-            .unwrap_or(false)
-    {
+    // In-process cast bootstrap.
+    fn truthy(v: &str) -> bool {
+        matches!(v, "1" | "true" | "TRUE" | "yes" | "on")
+    }
+    let cast_mode = std::env::var("SMOOTH_VM_MODE")
+        .ok()
+        .map(|v| truthy(&v))
+        .or_else(|| std::env::var("SMOOTH_BOARDROOM_MODE").ok().map(|v| truthy(&v)))
+        .unwrap_or(false);
+    if state.boardroom.is_none() && cast_mode {
         match crate::boardroom::spawn_boardroom_cast(None).await {
             Ok(handles) => {
-                tracing::info!(archivist = %handles.archivist_url, "Big Smooth running in Boardroom mode");
+                tracing::info!(archivist = %handles.archivist_url, "Big Smooth running with in-process cast");
                 state.boardroom = Some(handles);
             }
             Err(e) => {
-                tracing::error!(error = %e, "boardroom: failed to spawn cast; continuing without it");
+                tracing::error!(error = %e, "in-process cast: spawn failed; continuing without it");
             }
         }
     }
