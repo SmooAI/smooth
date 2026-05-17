@@ -1075,14 +1075,44 @@ async fn start_sandboxed_vm(port: u16) -> Result<()> {
     println!("    {}  {}", "Stop  ".dimmed(), "th down".dimmed());
     println!();
 
-    // Bill's in-process registry holds the Sandbox Arc which
-    // spawns port-forwarder tokio tasks. Returning Ok(()) doesn't
-    // end the process because those tasks keep the runtime alive,
-    // AND they'd shadow microsandbox's own host port forwarder
-    // (msb already forwards :port — we don't need to). Exit
-    // cleanly: microsandbox manages the VM lifecycle out-of-process,
-    // so our `th` exiting doesn't kill the boardroom VM.
-    std::process::exit(0);
+    // Pearl th-dd0cef: we cannot exit here. The boardroom binary
+    // runs *inside* the VM as an exec session, addressed via the
+    // host-side `AgentClient` connection to agentd's UDS. If this
+    // host process exits, microsandbox-runtime's agent relay sees
+    // "client disconnected" on the host socket and immediately
+    // SIGKILLs every active exec session in the guest — including
+    // boardroom. The VM stays running (kernel + agentd are
+    // process-tree-owned by the child msb binary, which keeps
+    // going), but the *boardroom server* dies and port 4400 stops
+    // having a listener inside the guest. From the outside that
+    // looks like microsandbox's port forwarder accepting the TCP
+    // SYN and immediately closing the connection ("Empty reply
+    // from server") — the bug this pearl tracks.
+    //
+    // Block until SIGINT / SIGTERM so the AgentClient stays alive.
+    tracing::info!("boardroom microVM running; awaiting ctrl-c");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("ctrl-c received, shutting down boardroom microVM");
+        }
+        _ = async {
+            // Also exit if SIGTERM arrives (LaunchAgents / systemd).
+            #[cfg(unix)]
+            {
+                let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("install SIGTERM handler");
+                term.recv().await;
+            }
+            #[cfg(not(unix))]
+            {
+                std::future::pending::<()>().await;
+            }
+        } => {
+            tracing::info!("SIGTERM received, shutting down boardroom microVM");
+        }
+    }
+    let _ = stop_sandboxed_vm().await;
+    Ok(())
 }
 
 /// Destroy the boardroom microVM if one is running.
