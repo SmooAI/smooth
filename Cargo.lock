@@ -5692,6 +5692,7 @@ dependencies = [
  "smooai-smooth-bootstrap-bill",
  "smooai-smooth-code",
  "smooai-smooth-diver",
+ "smooai-smooth-host-stub",
  "smooai-smooth-operator",
  "smooai-smooth-pearls",
  "smooai-smooth-tunnel",
@@ -5785,6 +5786,31 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "smooai-smooth-host-stub"
+version = "0.13.6"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "glob",
+ "hyper-util",
+ "prost",
+ "prost-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-build",
+ "tower 0.5.3",
+ "tracing",
+ "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
