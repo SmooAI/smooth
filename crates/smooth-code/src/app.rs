@@ -1178,6 +1178,8 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
                     agent_id: "task".into(),
                     iterations,
                     cost_usd,
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
                 });
                 break;
             }

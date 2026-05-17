@@ -2763,6 +2763,8 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
         let stdout_task = tokio::spawn(async move {
             let mut agent_iterations: u32 = 0;
             let mut final_cost_usd: f64 = 0.0;
+            let mut final_prompt_tokens: u64 = 0;
+            let mut final_completion_tokens: u64 = 0;
             let mut first_line_logged = false;
             while let Ok(Some(line)) = out_reader.next_line().await {
                 let trimmed = line.trim();
@@ -2820,13 +2822,15 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
                                 });
                             }
                             "Completed" => {
-                                // Use max for BOTH iterations and cost so a
-                                // later "fallback" Completed event (the runner
-                                // emits one with zeros at exit as belt-and-
-                                // suspenders, see operator-runner main.rs)
-                                // can't clobber the real numbers the
+                                // Use max for iterations, cost, AND tokens so
+                                // a later "fallback" Completed event (the
+                                // runner emits one with zeros at exit as
+                                // belt-and-suspenders, see operator-runner
+                                // main.rs) can't clobber the real numbers the
                                 // workflow/agent posted earlier. Pearl
-                                // th-46bc94.
+                                // th-46bc94 (iterations + cost), pearl
+                                // th-eff0d0 (tokens for the cost-is-zero
+                                // diagnostic).
                                 if let Some(iters) = event.get("iterations").and_then(serde_json::Value::as_u64) {
                                     let iters_u32 = u32::try_from(iters).unwrap_or(u32::MAX);
                                     if iters_u32 > agent_iterations {
@@ -2836,6 +2840,16 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
                                 if let Some(c) = event.get("cost_usd").and_then(serde_json::Value::as_f64) {
                                     if c > final_cost_usd {
                                         final_cost_usd = c;
+                                    }
+                                }
+                                if let Some(t) = event.get("prompt_tokens").and_then(serde_json::Value::as_u64) {
+                                    if t > final_prompt_tokens {
+                                        final_prompt_tokens = t;
+                                    }
+                                }
+                                if let Some(t) = event.get("completion_tokens").and_then(serde_json::Value::as_u64) {
+                                    if t > final_completion_tokens {
+                                        final_completion_tokens = t;
                                     }
                                 }
                             }
@@ -2859,7 +2873,7 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
                     }
                 }
             }
-            (agent_iterations, final_cost_usd)
+            (agent_iterations, final_cost_usd, final_prompt_tokens, final_completion_tokens)
         });
 
         let event_tx_err = event_tx.clone();
@@ -2884,7 +2898,7 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
         });
 
         let exit = child.wait().await;
-        let (iters, cost) = stdout_task.await.unwrap_or((0, 0.0));
+        let (iters, cost, prompt_tokens, completion_tokens) = stdout_task.await.unwrap_or((0, 0.0, 0, 0));
         let _ = stderr_task.await;
 
         match exit {
@@ -2899,8 +2913,14 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
                 // can read the dispatch's actual spend without
                 // consuming the WS event stream. Posted before close
                 // so the comment is part of pearl history.
+                //
+                // Includes prompt/completion token counts so a
+                // cost_usd=0 result is diagnosable: if the tokens
+                // are non-zero the cost-pricing layer dropped the
+                // ball, if both are zero usage was never captured.
+                // Pearl th-eff0d0.
                 if let Some(ref id) = pearl_id {
-                    let body = format!("[METRICS] cost_usd={cost:.6} iterations={iters}");
+                    let body = format!("[METRICS] cost_usd={cost:.8} iterations={iters} prompt_tokens={prompt_tokens} completion_tokens={completion_tokens}");
                     if let Err(e) = pearl_store.add_comment(id, &body) {
                         tracing::warn!(pearl_id = %id, error = %e, "[METRICS] write failed (direct dispatch)");
                     }
@@ -3148,6 +3168,8 @@ async fn run_task_handler(State(state): State<AppState>, Json(req): Json<TaskReq
                                 agent_id: "task".into(),
                                 iterations,
                                 cost_usd,
+                                prompt_tokens: 0,
+                                completion_tokens: 0,
                             });
                             break;
                         }

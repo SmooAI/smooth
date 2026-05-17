@@ -2370,6 +2370,8 @@ async fn main() {
                 agent_id: config.operator_id.clone(),
                 iterations: 0, // exact count was in the channel event; this is the fallback
                 cost_usd: 0.0, // authoritative cost already emitted by the channel event
+                prompt_tokens: 0,
+                completion_tokens: 0,
             });
             tracing::info!("smooth-operator-runner completed successfully");
             std::process::exit(0);
