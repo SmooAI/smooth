@@ -536,11 +536,30 @@ impl LlmClient {
                     })
                     .collect();
 
-                let usage = chat_resp.usage.map_or_else(Usage::default, |u| Usage {
+                let mut usage = chat_resp.usage.map_or_else(Usage::default, |u| Usage {
                     prompt_tokens: u.prompt_tokens,
                     completion_tokens: u.completion_tokens,
                     total_tokens: u.total_tokens,
                 });
+
+                // Fallback estimation when the gateway omits usage
+                // entirely (LiteLLM at llm.smoo.ai/v1 currently does
+                // for smooth-* aliases — see pearl th-eff0d0).
+                // ~4 chars per token is the standard OpenAI rule of
+                // thumb; this isn't billing-grade but a non-zero
+                // estimate is a real improvement on a hard zero.
+                let content_for_estimate = choice.message.content.clone().unwrap_or_default();
+                if usage.prompt_tokens == 0 && usage.completion_tokens == 0 {
+                    let prompt_chars: usize = serde_json::to_string(&request).map(|s| s.len()).unwrap_or(0);
+                    usage.prompt_tokens = u32::try_from(prompt_chars / 4).unwrap_or(u32::MAX);
+                    usage.completion_tokens = u32::try_from(content_for_estimate.len() / 4).unwrap_or(u32::MAX);
+                    usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
+                    tracing::debug!(
+                        prompt_tokens_est = usage.prompt_tokens,
+                        completion_tokens_est = usage.completion_tokens,
+                        "gateway returned no usage — estimating from char counts (pearl th-eff0d0)"
+                    );
+                }
 
                 return Ok(LlmResponse {
                     content: choice.message.content.unwrap_or_default(),
