@@ -60,12 +60,16 @@ enum Commands {
         /// to 3. Can also be set via SMOOTH_SANDBOX_MAX_CONCURRENCY.
         #[arg(long)]
         max_operators: Option<usize>,
-        /// Run the agent as a host subprocess instead of inside a
-        /// microVM. Skips Narc / Wonk / Goalie enforcement — use
-        /// only for bench runs, fast dev loops on trusted code, or
-        /// nested-virt environments where microsandbox can't boot.
-        /// Equivalent to `SMOOTH_WORKFLOW_DIRECT=1`. CLI beats env.
+        /// Run the cast inside a microsandbox VM (the "sandboxed"
+        /// mode). Default is direct: the cast runs on the host
+        /// directly. Equivalent to clearing `SMOOTH_WORKFLOW_DIRECT`.
+        /// CLI beats env.
         #[arg(long)]
+        sandboxed: bool,
+        /// Legacy alias for the inverse of `--sandboxed`. Kept so
+        /// existing scripts don't break. `--direct` is now the
+        /// default; passing it is a no-op.
+        #[arg(long, hide = true)]
         direct: bool,
         /// Skip the workflow's post-implementation TEST phase
         /// (adversarial test augmentation). Benchmark runs want
@@ -925,10 +929,11 @@ async fn main() -> Result<()> {
             port,
             foreground,
             max_operators,
-            direct,
+            sandboxed,
+            direct: _,
             skip_test,
             sandbox_backend,
-        }) => cmd_up(no_leader, port, foreground, max_operators, direct, skip_test, sandbox_backend).await,
+        }) => cmd_up(no_leader, port, foreground, max_operators, sandboxed, skip_test, sandbox_backend).await,
         Some(Commands::Down) => cmd_down().await,
         Some(Commands::Status) => cmd_status().await,
         Some(Commands::Vm { cmd }) => vm::run(cmd).await,
@@ -992,7 +997,7 @@ async fn cmd_up(
     port: u16,
     foreground: bool,
     max_operators: Option<usize>,
-    direct: bool,
+    sandboxed: bool,
     skip_test: bool,
     sandbox_backend: Option<String>,
 ) -> Result<()> {
@@ -1001,10 +1006,15 @@ async fn cmd_up(
     if let Some(n) = max_operators {
         std::env::set_var("SMOOTH_SANDBOX_MAX_CONCURRENCY", n.to_string());
     }
-    // Direct-dispatch mode: host subprocess instead of microVM.
-    // Skips Narc/Wonk/Goalie — for bench + trusted code only.
-    if direct {
+    // Two modes only: direct (default) runs the cast on the host;
+    // sandboxed boots the same cast inside a microsandbox VM with
+    // :4400 forwarded out. Direct skips per-task microVM creation —
+    // operators dispatch as host subprocesses (still mediated by
+    // Narc / Wonk hooks in-process).
+    if !sandboxed {
         std::env::set_var("SMOOTH_WORKFLOW_DIRECT", "1");
+    } else {
+        std::env::remove_var("SMOOTH_WORKFLOW_DIRECT");
     }
     // Benchmark knob — skip the TEST phase so the agent doesn't
     // add tests that change the score.
@@ -1071,8 +1081,8 @@ async fn cmd_up(
         // re-exec. The env vars are already set on THIS process,
         // but spawning a child that parses its own args also works
         // — and it keeps the flags visible in `ps` / `launchctl`.
-        if direct {
-            args.push("--direct".to_string());
+        if sandboxed {
+            args.push("--sandboxed".to_string());
         }
         if skip_test {
             args.push("--skip-test".to_string());
