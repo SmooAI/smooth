@@ -55,9 +55,29 @@ pub struct SmoothDolt {
 }
 
 impl SmoothDolt {
-    /// Create a CLI-mode handle pointing at the given data directory.
-    /// Locates the `smooth-dolt` binary automatically.
+    /// Create a handle pointing at the given data directory.
+    ///
+    /// If a long-running `smooth-dolt serve` is already running for
+    /// this dir (e.g. the Big Smooth daemon spawned one at startup),
+    /// attach to it via [`SmoothDoltServer::try_attach`] and use
+    /// server mode. Otherwise fall back to per-call CLI mode —
+    /// never spawns a new server from this path, so one-shot `th
+    /// pearls X` commands stay cheap.
     pub fn new(data_dir: impl Into<PathBuf>) -> Result<Self> {
+        let data_dir: PathBuf = data_dir.into();
+        if let Some(server) = SmoothDoltServer::try_attach(&data_dir) {
+            tracing::debug!(data_dir = %data_dir.display(), "SmoothDolt::new attached to existing server");
+            return Ok(Self::from_server(Arc::new(server), data_dir));
+        }
+        let bin = find_smooth_dolt_binary().context("smooth-dolt binary not found. Run: scripts/build-smooth-dolt.sh")?;
+        Ok(Self { bin, data_dir, server: None })
+    }
+
+    /// Always-CLI handle — used by initialization paths that need to
+    /// run `dolt init` on a fresh directory before any server can
+    /// reasonably attach. Bypasses the attach-or-spawn flow that
+    /// [`SmoothDolt::new`] performs.
+    pub fn new_cli_only(data_dir: impl Into<PathBuf>) -> Result<Self> {
         let bin = find_smooth_dolt_binary().context("smooth-dolt binary not found. Run: scripts/build-smooth-dolt.sh")?;
         Ok(Self {
             bin,

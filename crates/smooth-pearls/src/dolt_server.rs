@@ -16,6 +16,9 @@
 //! on a single connection. The server child is killed and the socket
 //! file is removed on `Drop`.
 
+use std::collections::hash_map::DefaultHasher;
+use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -29,6 +32,39 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::dolt::{find_smooth_dolt_binary, find_smooth_dolt_launcher_binary};
+
+/// Compute a deterministic shared-socket path for a given dolt
+/// data dir. All `SmoothDoltServer` instances pointing at the same
+/// canonical path land here, so a second caller (e.g. a fresh `th
+/// pearls create` while the daemon is running) can detect and
+/// reuse the existing server's socket rather than spawning a
+/// competing `smooth-dolt serve` subprocess.
+///
+/// The directory `/tmp/smooth-dolt-shared/` is created mode 0700
+/// so other users on a shared host can't inject sockets. The
+/// filename is `<8-hex-chars>.sock` derived from the canonical
+/// path hash — collisions are vanishingly unlikely for the small
+/// number of dolt dirs a user has and cause no security issue
+/// (the colliding caller just fails to connect and falls back to
+/// spawning its own server).
+fn shared_socket_path(data_dir: &Path) -> PathBuf {
+    let canon = data_dir.canonicalize().unwrap_or_else(|_| data_dir.to_path_buf());
+    let mut hasher = DefaultHasher::new();
+    canon.to_string_lossy().hash(&mut hasher);
+    let h = hasher.finish();
+    let dir = PathBuf::from("/tmp/smooth-dolt-shared");
+    let _ = fs::create_dir_all(&dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::metadata(&dir) {
+            let mut perms = meta.permissions();
+            perms.set_mode(0o700);
+            let _ = fs::set_permissions(&dir, perms);
+        }
+    }
+    dir.join(format!("{h:016x}.sock"))
+}
 
 /// Wallclock timeout applied to every request/response on a client
 /// connection. Without this, a wedged `smooth-dolt serve` (e.g. after
@@ -90,10 +126,13 @@ fn kill_stale_serve_for(data_dir: &Path) {
 #[derive(Debug)]
 struct ServerHandle {
     socket: PathBuf,
+    /// `None` for "attached" handles — we're talking to a server
+    /// another process owns and must not kill it on drop.
     child: Option<Child>,
-    /// Held to clean up the socket directory on drop. Replaced wholesale
-    /// when the server is respawned so the old socket gets unlinked.
-    _socket_dir: tempfile::TempDir,
+    /// `true` when this process spawned the server; controls whether
+    /// `Drop` sends SIGKILL. Attached handles set this to `false`
+    /// (server is owned by another process — leave it running).
+    owned: bool,
 }
 
 /// Long-running `smooth-dolt serve` subprocess + the Unix socket it's
@@ -138,19 +177,78 @@ impl SmoothDoltServer {
     /// Fails when the `smooth-dolt` binary can't be located or both
     /// spawn attempts time out / the server fails to respond.
     pub fn spawn(data_dir: &Path) -> Result<Self> {
+        // First, see if another process (e.g. the Big Smooth daemon)
+        // already has a `smooth-dolt serve` running for this data dir.
+        // The shared-socket discovery path attaches to that server
+        // instead of spawning a competing subprocess that would
+        // contend on the Dolt manifest lock and surface as
+        // "database is read only" to one of the two.
+        if let Some(handle) = Self::try_attach_handle(data_dir) {
+            tracing::debug!(data_dir = %data_dir.display(), socket = %handle.socket.display(), "attached to existing smooth-dolt serve");
+            return Ok(Self {
+                data_dir: data_dir.to_path_buf(),
+                inner: Mutex::new(handle),
+                serial_lock: Mutex::new(()),
+            });
+        }
+
         let handle = match Self::spawn_handle_once(data_dir) {
             Ok(h) => h,
             Err(first) => {
-                tracing::warn!(data_dir = %data_dir.display(), error = %first, "smooth-dolt spawn failed; killing zombies and retrying once");
-                kill_stale_serve_for(data_dir);
-                std::thread::sleep(Duration::from_millis(500));
-                Self::spawn_handle_once(data_dir).with_context(|| format!("smooth-dolt spawn retry also failed (first attempt: {first:#})"))?
+                // Spawn lost a race: another in-process call beat us
+                // to bind() at the shared socket. Attach to their
+                // server instead of killing it.
+                if let Some(attached) = Self::try_attach_handle(data_dir) {
+                    tracing::debug!(data_dir = %data_dir.display(), error = %first, "lost spawn race; attaching to winner");
+                    attached
+                } else {
+                    tracing::warn!(data_dir = %data_dir.display(), error = %first, "smooth-dolt spawn failed; killing zombies and retrying once");
+                    kill_stale_serve_for(data_dir);
+                    std::thread::sleep(Duration::from_millis(500));
+                    Self::spawn_handle_once(data_dir).with_context(|| format!("smooth-dolt spawn retry also failed (first attempt: {first:#})"))?
+                }
             }
         };
         Ok(Self {
             data_dir: data_dir.to_path_buf(),
             inner: Mutex::new(handle),
             serial_lock: Mutex::new(()),
+        })
+    }
+
+    /// Attach to an existing `smooth-dolt serve` (one this process did
+    /// NOT spawn) without ever forking a new subprocess. Returns
+    /// `None` when no live server is reachable.
+    ///
+    /// Use this when you want server-mode iff a daemon is already
+    /// running for this dir — the typical CLI case where a one-shot
+    /// `th pearls X` should attach to the long-running `th up`
+    /// daemon's server but should NOT spawn its own.
+    pub fn try_attach(data_dir: &Path) -> Option<Self> {
+        let handle = Self::try_attach_handle(data_dir)?;
+        Some(Self {
+            data_dir: data_dir.to_path_buf(),
+            inner: Mutex::new(handle),
+            serial_lock: Mutex::new(()),
+        })
+    }
+
+    /// Best-effort attach to an existing `smooth-dolt serve` at the
+    /// shared socket for this data dir. Returns `Some` only when the
+    /// socket exists AND a ping succeeds — a stale socket file from
+    /// a dead server returns `None` so the caller falls through to
+    /// the spawn path. Never blocks longer than `HEALTH_PROBE_TIMEOUT`.
+    fn try_attach_handle(data_dir: &Path) -> Option<ServerHandle> {
+        let socket = shared_socket_path(data_dir);
+        if !socket.exists() {
+            return None;
+        }
+        let mut probe = SmoothDoltClient::connect_with_timeout(&socket, HEALTH_PROBE_TIMEOUT).ok()?;
+        probe.ping().ok()?;
+        Some(ServerHandle {
+            socket,
+            child: None,
+            owned: false,
         })
     }
 
@@ -180,8 +278,34 @@ impl SmoothDoltServer {
     fn spawn_handle_once(data_dir: &Path) -> Result<ServerHandle> {
         let bin = find_smooth_dolt_binary().context("smooth-dolt binary not found. Run: scripts/build-smooth-dolt.sh")?;
 
-        let socket_dir = tempfile::Builder::new().prefix("smooth-dolt-").tempdir().context("create socket tempdir")?;
-        let socket = socket_dir.path().join("dolt.sock");
+        // Bind at the deterministic shared path so concurrent
+        // `SmoothDoltServer::spawn` calls for the same dir can
+        // attach instead of starting a second server.
+        //
+        // If a socket file is already there, distinguish between
+        //   a) live server we should attach to — but our caller
+        //      already failed `try_attach_handle` so it isn't this
+        //      case in practice;
+        //   b) stale path from a dead server.
+        // Probe with a quick ping: only remove on (b). Removing
+        // under a live server unlinks its bind path and breaks
+        // subsequent attach attempts, even though the listening
+        // socket inode keeps working for already-connected
+        // clients (see /tmp/smooth-dolt-shared "no such file" but
+        // netstat still shows listeners after a racing spawn).
+        let socket = shared_socket_path(data_dir);
+        if socket.exists() {
+            let still_live = SmoothDoltClient::connect_with_timeout(&socket, HEALTH_PROBE_TIMEOUT)
+                .and_then(|mut c| c.ping())
+                .is_ok();
+            if still_live {
+                anyhow::bail!(
+                    "another smooth-dolt serve is already running at {} — caller should attach via SmoothDoltServer::try_attach",
+                    socket.display()
+                );
+            }
+            let _ = fs::remove_file(&socket);
+        }
 
         // Spawn through `smooth-dolt-launcher` if available — a tiny
         // C wrapper that resets the inherited signal mask, closes
@@ -242,7 +366,7 @@ impl SmoothDoltServer {
         let handle = ServerHandle {
             socket: socket.clone(),
             child: Some(child),
-            _socket_dir: socket_dir,
+            owned: true,
         };
 
         // Verify the server is actually responding before returning.
@@ -349,14 +473,24 @@ impl SmoothDoltServer {
 
 impl Drop for ServerHandle {
     fn drop(&mut self) {
+        // Only kill the child if WE spawned it. Attached handles
+        // borrow another process's server and must not stop it on
+        // drop — that other process is still using it.
+        if !self.owned {
+            return;
+        }
         if let Some(mut child) = self.child.take() {
             // SIGTERM equivalent — the Go server handles it cleanly,
             // unlinks its socket file, and exits.
             let _ = child.kill();
             let _ = child.wait();
         }
-        // tempfile::TempDir cleanup runs after this; if the server
-        // forgot to remove its socket, that takes care of it.
+        // Best-effort cleanup of the shared socket path. If the
+        // server exited cleanly it already removed this file;
+        // otherwise we tidy up here so the next caller sees a
+        // missing socket and falls through to spawn rather than
+        // probing a dead-but-present socket.
+        let _ = fs::remove_file(&self.socket);
     }
 }
 
@@ -566,7 +700,7 @@ mod tests {
             Err(_) => return,
         };
         let dolt_dir = tmp.path().join("dolt");
-        if crate::dolt::SmoothDolt::new(&dolt_dir).and_then(|d| d.init()).is_err() {
+        if crate::dolt::SmoothDolt::new_cli_only(&dolt_dir).and_then(|d| d.init()).is_err() {
             return;
         }
         let server = match SmoothDoltServer::spawn(&dolt_dir) {
@@ -617,7 +751,7 @@ mod tests {
         let dolt_dir = tmp.path().join("dolt");
 
         // Initialize via the existing one-shot path.
-        if crate::dolt::SmoothDolt::new(&dolt_dir).and_then(|d| d.init()).is_err() {
+        if crate::dolt::SmoothDolt::new_cli_only(&dolt_dir).and_then(|d| d.init()).is_err() {
             // No binary or init failed — skip.
             return;
         }

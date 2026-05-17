@@ -99,13 +99,19 @@ impl PearlStore {
     }
 
     /// Initialize the Dolt database and create the pearl schema.
+    ///
+    /// Uses the CLI-only constructor because `dolt init` must run
+    /// before any long-running server could reasonably attach.
     pub fn init(dolt_dir: &Path) -> Result<Self> {
-        let dolt = SmoothDolt::new(dolt_dir)?;
-        dolt.init()?;
-        Self::ensure_schema(&dolt)?;
-        dolt.commit("initialize pearl schema")?;
+        let cli = SmoothDolt::new_cli_only(dolt_dir)?;
+        cli.init()?;
+        Self::ensure_schema(&cli)?;
+        cli.commit("initialize pearl schema")?;
         // Auto-register in global registry (best-effort)
         Self::auto_register_project(dolt_dir);
+        // Re-open via the attach-or-spawn path so subsequent
+        // operations share a server with any other process.
+        let dolt = SmoothDolt::new(dolt_dir)?;
         Ok(Self { dolt })
     }
 

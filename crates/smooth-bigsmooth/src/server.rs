@@ -161,6 +161,14 @@ impl AppState {
         // in pearl `th-1a61a7` doesn't fire here. Failures are logged
         // and skipped — a single broken project shouldn't take the
         // service down.
+        // The caller already opened a PearlStore for some dolt
+        // dir (typically the cwd's). Don't spawn a SECOND
+        // smooth-dolt server for the same dir — that causes
+        // "manifest read only" lock contention because both
+        // writers try to flush at once. The caller's store is
+        // already in `pearl_store`; we only spawn for OTHER
+        // registry entries here. Pearl th-67c96b benchmark fix.
+        let caller_dolt_dir = pearl_store.dolt().data_dir().to_path_buf();
         let (project_pearl_stores, project_dolt_servers) = match smooth_pearls::Registry::load() {
             Ok(registry) => {
                 let mut stores: HashMap<std::path::PathBuf, smooth_pearls::PearlStore> = HashMap::new();
@@ -171,6 +179,13 @@ impl AppState {
                         continue;
                     }
                     let dolt_dir = entry.path.join(".smooth").join("dolt");
+                    if dolt_dir == caller_dolt_dir {
+                        // Reuse caller's PearlStore for this entry —
+                        // don't spawn a duplicate smooth-dolt.
+                        tracing::debug!(path = %path_str, "reusing caller's pearl_store for matching registry entry");
+                        stores.insert(entry.path.clone(), pearl_store.clone());
+                        continue;
+                    }
                     match smooth_pearls::SmoothDoltServer::spawn(&dolt_dir) {
                         Ok(server) => {
                             let server = Arc::new(server);
