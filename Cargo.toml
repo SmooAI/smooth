@@ -147,6 +147,14 @@ pin-project-lite = "0.2"
 # WebSocket client
 tokio-tungstenite = "0.26"
 
+# gRPC stack for in-VM IPC (pearl th-893801). Pinned to current
+# stable versions; tonic-build runs in each gRPC-serving crate's
+# build.rs to codegen from proto/.
+tonic = "0.12"
+tonic-build = "0.12"
+prost = "0.13"
+prost-types = "0.13"
+
 # Microsandbox — hardware-isolated microVM runtime for Smooth Operators.
 # Used directly via the Rust SDK so we do not need the external `msb` CLI.
 #
@@ -174,4 +182,5 @@ smooth-pearls = { path = "crates/smooth-pearls", version = "0.13.7", package = "
 smooth-diver = { version = "0.13.7", path = "crates/smooth-diver", package = "smooai-smooth-diver" }
 smooth-bootstrap-bill = { version = "0.13.7", path = "crates/smooth-bootstrap-bill", default-features = false, package = "smooai-smooth-bootstrap-bill" }
 smooth-tunnel = { version = "0.13.7", path = "crates/smooth-tunnel", package = "smooai-smooth-tunnel" }
+smooth-host-stub = { version = "0.13.7", path = "crates/smooth-host-stub", package = "smooai-smooth-host-stub" }
 smooth-bench = { version = "0.13.7", path = "crates/smooth-bench", package = "smooai-smooth-bench" }

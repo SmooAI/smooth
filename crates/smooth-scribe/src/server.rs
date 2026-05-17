@@ -1,3 +1,8 @@
+// Pre-existing `.expect()` in tests (predates pearl th-893801).
+// The HTTP server here is the legacy /log + /query surface; it
+// will retire when the gRPC Scribe ships in iter-3f.
+#![allow(clippy::expect_used)]
+
 use std::sync::Arc;
 
 use axum::extract::State;

@@ -1521,16 +1521,46 @@ async fn spawn_cast(policy_toml: &str, operator_id: &str) -> anyhow::Result<Cast
     // default — we can wire it up later.
     let negotiator = Negotiator::new("http://127.0.0.1:1/no-leader", holder.clone());
 
-    // Narc escalation client — every denied /check/network and
-    // /check/cli call that Wonk can't auto-approve locally gets forwarded
-    // to this URL, which points at Big Smooth's `/api/narc/judge` endpoint.
-    // If SMOOTH_NARC_URL isn't set (e.g. a standalone unit test), Wonk
-    // runs without an arbiter and hard-denies anything its local policy
-    // doesn't allow — the legacy behaviour.
+    // Narc escalation client. Two transports, gated by
+    // SMOOTH_SINGLE_PROCESS (pearl th-893801 Phase 4 iter-6c):
+    //
+    // - Single-VM mode (SMOOTH_SINGLE_PROCESS=1): dial Narc on
+    //   the local UDS at $XDG_RUNTIME_DIR/smooth/narc.sock (or
+    //   SMOOTH_SINGLE_PROCESS_SOCKET_DIR/narc.sock when set).
+    //   That's the gRPC server Big Smooth's bootstrap stood up
+    //   in iter-3e.
+    // - Legacy mode: SMOOTH_NARC_URL points at Big Smooth's
+    //   `/api/narc/judge` HTTP endpoint. Same shape as before.
+    //
+    // When neither is configured, Wonk runs without an arbiter
+    // and hard-denies anything its local policy doesn't allow.
     let mut wonk_state = WonkAppState::new(holder, negotiator);
-    if let Ok(narc_url) = std::env::var("SMOOTH_NARC_URL") {
+    let single_process_mode = matches!(std::env::var("SMOOTH_SINGLE_PROCESS").as_deref(), Ok("1" | "true" | "TRUE"));
+    if single_process_mode {
+        let socket_dir = std::env::var("SMOOTH_SINGLE_PROCESS_SOCKET_DIR")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var("XDG_RUNTIME_DIR").ok().map(|x| std::path::PathBuf::from(x).join("smooth")))
+            .unwrap_or_else(|| std::path::PathBuf::from(format!("/tmp/smooth-{}", std::process::id())));
+        let narc_sock = socket_dir.join("narc.sock");
+        match smooth_wonk::NarcGrpcUds::connect(narc_sock.clone()).await {
+            Ok(client) => {
+                tracing::info!(operator = operator_id, sock = %narc_sock.display(), "Wonk wiring gRPC-over-UDS Narc client");
+                wonk_state = wonk_state.with_narc(client);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    operator = operator_id,
+                    sock = %narc_sock.display(),
+                    error = %e,
+                    "SMOOTH_SINGLE_PROCESS=1 but Narc UDS unreachable — Wonk will hard-deny non-allowlisted requests"
+                );
+            }
+        }
+    } else if let Ok(narc_url) = std::env::var("SMOOTH_NARC_URL") {
         if !narc_url.trim().is_empty() {
-            tracing::info!(operator = operator_id, narc_url = %narc_url, "Wonk wiring Narc escalation client");
+            tracing::info!(operator = operator_id, narc_url = %narc_url, "Wonk wiring HTTP Narc escalation client");
             wonk_state = wonk_state.with_narc(smooth_wonk::NarcClient::new(narc_url));
         }
     }
@@ -1865,15 +1895,24 @@ async fn main() {
         _ => None,
     };
 
-    // Host-tool proxy — when SMOOTH_HOST_TOKEN is set (Big Smooth's
-    // dispatch threads it through), register the `host_tool` tool that
-    // calls Big Smooth's /api/host/exec for whitelisted CLIs (gh, git,
-    // kubectl, …). Useful in sandbox mode where the teammate has no
-    // direct host auth; harmless in direct mode where the teammate's
-    // own BashTool already works directly against the host.
-    if std::env::var("SMOOTH_HOST_TOKEN").is_ok() {
+    // Host-tool proxy — legacy multi-VM path. When SMOOTH_HOST_TOKEN
+    // is set (Big Smooth's dispatch threads it through), register the
+    // `host_tool` tool that calls Big Smooth's /api/host/exec for
+    // whitelisted CLIs (gh, git, kubectl, …). Useful in the legacy
+    // multi-VM model where the teammate has no direct host auth.
+    //
+    // In single-VM mode (SMOOTH_SINGLE_PROCESS=1, pearl th-893801)
+    // the bundled CLIs are right there in the VM and the host-stub
+    // mints credentials via UDS — the host_tool indirection is
+    // unnecessary. Skip registration so the agent never sees it and
+    // calls the CLIs directly via BashTool (still mediated by Wonk
+    // check_cli + Narc audit).
+    let single_process = matches!(std::env::var("SMOOTH_SINGLE_PROCESS").as_deref(), Ok("1" | "true" | "TRUE"));
+    if std::env::var("SMOOTH_HOST_TOKEN").is_ok() && !single_process {
         tools.register(crate::host_tool::HostToolTool);
         tracing::info!("registered host_tool — teammate can call whitelisted host CLIs via /api/host/exec");
+    } else if single_process {
+        tracing::info!("SMOOTH_SINGLE_PROCESS=1 — skipping host_tool registration (CLIs run directly in-VM)");
     }
 
     // Tool hints registry — recommended approaches for common operator

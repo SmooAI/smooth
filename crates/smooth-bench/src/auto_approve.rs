@@ -177,11 +177,13 @@ mod tests {
     async fn wait_for_resolve(state: &FakeBs, want_verdict: &str, want_scope: &str, timeout: Duration) -> bool {
         let deadline = std::time::Instant::now() + timeout;
         while std::time::Instant::now() < deadline {
-            let resolved = state.resolved.lock().unwrap();
-            if resolved.iter().any(|(v, b)| v == want_verdict && b.scope == want_scope) {
+            let found = {
+                let resolved = state.resolved.lock().unwrap();
+                resolved.iter().any(|(v, b)| v == want_verdict && b.scope == want_scope)
+            };
+            if found {
                 return true;
             }
-            drop(resolved);
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         false

@@ -2,15 +2,16 @@
 //!
 //! The full route depends on Big Smooth's `AppState`, which is
 //! heavy. To exercise the route's behavior without the orchestrator
-//! + Dolt subprocess fixture cost we mount the same handler logic
+//! and Dolt subprocess fixture cost we mount the same handler logic
 //! against a minimal axum router and a fake DDG.
 //!
 //! What's covered:
-//!   - Empty `q` → 400
-//!   - Parser fixture → 200 with parsed results
-//!   - Injection in a result → `redacted_count > 0` and the danger
-//!     text replaced
-//!   - `redact=false` flag preserves raw text
+//!
+//! * Empty `q` → 400
+//! * Parser fixture → 200 with parsed results
+//!   * Injection in a result → `redacted_count > 0` and the
+//!     danger text replaced
+//!   * `redact=false` flag preserves raw text
 //!
 //! Pearl th-70b68b.
 

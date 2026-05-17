@@ -478,7 +478,7 @@ fn render_permission_prompt_into(lines: &mut Vec<Line<'static>>, prompt: &crate:
     // back to the full ladder so the card always renders something
     // useful even if the server didn't populate the list.
     let mut binds: Vec<String> = Vec::with_capacity(6);
-    let offers_scope = |s: smooth_narc::judge::Scope| req.scope_options.iter().any(|opt| *opt == s);
+    let offers_scope = |s: smooth_narc::judge::Scope| req.scope_options.contains(&s);
     if offers_scope(smooth_narc::judge::Scope::Once) || req.scope_options.is_empty() {
         binds.push("[o]nce".into());
     }

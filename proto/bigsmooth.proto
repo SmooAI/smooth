@@ -1,0 +1,272 @@
+// Big Smooth — orchestrator + AccessStore + dispatch control plane.
+//
+// In the single-VM model BS is the supervisor for the cast (narc, wonk,
+// goalie, scribe) and the parent of every operator-runner subprocess.
+// This proto is the BS-internal gRPC surface — what the TUI uses, what
+// operators use to file access requests, what `th` CLI subcommands hit.
+//
+// The TUI also talks to BS over HTTP+WS at :4400 (unchanged from today);
+// that's the user-facing edge. The gRPC service here is the in-VM
+// edge — used by everything inside the sandbox.
+//
+// Pearl th-893801.
+
+syntax = "proto3";
+
+package smooth.bigsmooth.v1;
+
+import "narc.proto";
+import "google/protobuf/timestamp.proto";
+
+service BigSmooth {
+  // --- Dispatch ---
+
+  // Spawn an operator subprocess for a pearl. Returns the operator_id
+  // immediately; the actual agent loop runs async. Subscribe to
+  // OperatorEvents to follow progress.
+  rpc Dispatch(DispatchRequest) returns (DispatchResponse);
+
+  // Cancel a running operator. Sends SIGTERM, then SIGKILL after a
+  // grace period. Idempotent (cancelling an already-finished
+  // operator returns OK).
+  rpc Cancel(CancelRequest) returns (CancelResponse);
+
+  // List currently-running operators.
+  rpc ListOperators(ListOperatorsRequest) returns (ListOperatorsResponse);
+
+  // --- AccessStore ---
+
+  // File a pending access request. Called by Boardroom Narc when
+  // its judge returns Ask. Returns the request id immediately;
+  // the resolution arrives later via the SubscribeAccessEvents
+  // stream OR can be polled with ListPendingAccess.
+  //
+  // Narc holds its caller-side future on this request and matches
+  // resolutions by id; this RPC is what makes that future fire.
+  rpc FilePendingAccess(FilePendingAccessRequest) returns (FilePendingAccessResponse);
+
+  // Resolve a pending request. Called by the TUI when the human
+  // picks a scope on the inline card, by `th access approve`, or
+  // by the bench harness's auto-resolver.
+  rpc ResolveAccess(ResolveAccessRequest) returns (ResolveAccessResponse);
+
+  // Snapshot of currently-pending requests. Used by the TUI's
+  // initial subscribe + `th access pending`.
+  rpc ListPendingAccess(ListPendingAccessRequest) returns (ListPendingAccessResponse);
+
+  // Server-streaming SSE-equivalent: every Pending / Resolved /
+  // Expired event arrives on this stream. Subscribers should
+  // call ListPendingAccess first to catch up on existing state,
+  // then consume this stream from "now."
+  rpc SubscribeAccessEvents(SubscribeAccessEventsRequest) returns (stream AccessEvent);
+
+  // --- Operator events ---
+
+  // Server-streaming agent events for a given operator. Tokens,
+  // tool calls, completion. This is the same stream the TUI WS
+  // consumes; exposed in gRPC so other in-VM subscribers (the
+  // learned-context collector, eval/bench runners) can tap in.
+  rpc SubscribeOperatorEvents(SubscribeOperatorEventsRequest) returns (stream OperatorEvent);
+}
+
+// --- Dispatch ---
+
+message DispatchRequest {
+  // Pearl this operator is working on. BS reads workspace +
+  // task description from the pearl record.
+  string bead_id = 1;
+  // Optional task override — used by `th code --message "..."` to
+  // dispatch ad-hoc work without authoring a pearl first.
+  string task_message = 2;
+  // Lead role: "fixer" / "mapper" / "oracle" / "heckler" / "auto".
+  // "auto" lets the intent classifier pick.
+  string agent = 3;
+  // Model override (routing alias). Empty = use default routing.
+  string model = 4;
+  // Budget cap in USD. Zero = no cap.
+  double budget_usd = 5;
+  // Workspace bind-mount target inside sandbox (e.g.
+  // /workspace/foo). When empty, BS derives from pearl record.
+  string workspace = 6;
+}
+
+message DispatchResponse {
+  string operator_id = 1;
+  google.protobuf.Timestamp started_at = 2;
+}
+
+message CancelRequest {
+  string operator_id = 1;
+  // Why — surfaced in audit + the operator's last-known status.
+  string reason = 2;
+}
+
+message CancelResponse {
+  bool was_running = 1;
+}
+
+message ListOperatorsRequest {
+  // Filter to operators on a specific pearl. Empty = all.
+  string bead_id = 1;
+}
+
+message ListOperatorsResponse {
+  repeated OperatorSummary operators = 1;
+}
+
+message OperatorSummary {
+  string operator_id = 1;
+  string bead_id = 2;
+  string agent = 3;
+  string model = 4;
+  google.protobuf.Timestamp started_at = 5;
+  uint32 iterations = 6;
+  double cost_usd = 7;
+  OperatorPhase phase = 8;
+}
+
+enum OperatorPhase {
+  OPERATOR_PHASE_UNSPECIFIED = 0;
+  OPERATOR_PHASE_ASSESS = 1;
+  OPERATOR_PHASE_PLAN = 2;
+  OPERATOR_PHASE_EXECUTE = 3;
+  OPERATOR_PHASE_VERIFY = 4;
+  OPERATOR_PHASE_REVIEW = 5;
+  OPERATOR_PHASE_FINALIZE = 6;
+  OPERATOR_PHASE_IDLE = 7;
+  OPERATOR_PHASE_DONE = 8;
+}
+
+// --- AccessStore ---
+
+message FilePendingAccessRequest {
+  smooth.narc.v1.JudgeKind kind = 1;
+  string operator_id = 2;
+  string bead_id = 3;
+  string resource = 4;
+  string detail = 5;
+  string reason = 6;
+  // Scope ladder offered to the human. Empty = the default
+  // ladder (Once / Session / PearlProject / User).
+  repeated smooth.narc.v1.Scope scope_options = 7;
+}
+
+message FilePendingAccessResponse {
+  string id = 1;
+  google.protobuf.Timestamp created_at = 2;
+}
+
+message ResolveAccessRequest {
+  string id = 1;
+  Verdict verdict = 2;
+  smooth.narc.v1.Scope scope = 3;
+  // Optional glob the human bound the approval to (e.g.
+  // `*.openai.com` instead of the exact host).
+  string glob_override = 4;
+}
+
+enum Verdict {
+  VERDICT_UNSPECIFIED = 0;
+  VERDICT_APPROVE = 1;
+  VERDICT_DENY = 2;
+}
+
+message ResolveAccessResponse {
+  google.protobuf.Timestamp resolved_at = 1;
+}
+
+message ListPendingAccessRequest {}
+
+message ListPendingAccessResponse {
+  repeated PendingAccess pending = 1;
+}
+
+message PendingAccess {
+  string id = 1;
+  smooth.narc.v1.JudgeKind kind = 2;
+  string operator_id = 3;
+  string bead_id = 4;
+  string resource = 5;
+  string detail = 6;
+  string reason = 7;
+  repeated smooth.narc.v1.Scope scope_options = 8;
+  google.protobuf.Timestamp created_at = 9;
+}
+
+message SubscribeAccessEventsRequest {}
+
+message AccessEvent {
+  oneof event {
+    PendingAccess pending = 1;
+    AccessResolution resolved = 2;
+    AccessExpiration expired = 3;
+  }
+}
+
+message AccessResolution {
+  string id = 1;
+  Verdict verdict = 2;
+  smooth.narc.v1.Scope scope = 3;
+  string glob_override = 4;
+  google.protobuf.Timestamp resolved_at = 5;
+}
+
+message AccessExpiration {
+  string id = 1;
+  google.protobuf.Timestamp expired_at = 2;
+}
+
+// --- Operator events ---
+
+message SubscribeOperatorEventsRequest {
+  // Empty = subscribe to all operators. Non-empty = filter to
+  // events for this single operator.
+  string operator_id = 1;
+}
+
+message OperatorEvent {
+  string operator_id = 1;
+  google.protobuf.Timestamp timestamp = 2;
+
+  oneof event {
+    TokenDelta token_delta = 3;
+    ToolCallStart tool_call_start = 4;
+    ToolCallComplete tool_call_complete = 5;
+    PhaseChange phase_change = 6;
+    OperatorCompleted completed = 7;
+    OperatorErrored errored = 8;
+  }
+}
+
+message TokenDelta {
+  string content = 1;
+}
+
+message ToolCallStart {
+  string tool_call_id = 1;
+  string tool_name = 2;
+  string arguments_preview = 3;
+}
+
+message ToolCallComplete {
+  string tool_call_id = 1;
+  string tool_name = 2;
+  bool is_error = 3;
+  string result_preview = 4;
+  uint64 duration_ms = 5;
+}
+
+message PhaseChange {
+  OperatorPhase phase = 1;
+  string routing_alias = 2;
+  string upstream_model = 3;
+}
+
+message OperatorCompleted {
+  uint32 iterations = 1;
+  double cost_usd = 2;
+}
+
+message OperatorErrored {
+  string error_message = 1;
+}

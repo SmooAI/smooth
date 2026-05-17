@@ -1,0 +1,105 @@
+// Scribe — the single-VM logger.
+//
+// Collapses today's per-VM Scribe + Boardroom Archivist. One service,
+// one log store, one query surface. Every operator subprocess +
+// every cast member ships log entries here.
+//
+// Pearl th-893801.
+
+syntax = "proto3";
+
+package smooth.scribe.v1;
+
+import "google/protobuf/timestamp.proto";
+
+service Scribe {
+  // Client-streaming log ingest. Operators + cast members open a
+  // long-lived stream; each LogEntry is appended to the store. The
+  // server acks with a count after the client half-closes.
+  //
+  // Client-streaming (not bidi) because we don't want per-entry
+  // server responses on the hot path — it'd halve throughput for
+  // no value. Errors during ingest manifest as a stream-end with
+  // an error status.
+  rpc Log(stream LogEntry) returns (LogAck);
+
+  // Server-streaming query. Filters apply; matches stream as found.
+  // The server stops sending when it reaches the end of the matched
+  // entries OR the client cancels.
+  rpc Query(QueryRequest) returns (stream LogEntry);
+
+  // Diagnostics — total entries, store size on disk, oldest entry
+  // timestamp.
+  rpc GetStats(GetStatsRequest) returns (Stats);
+}
+
+message LogEntry {
+  google.protobuf.Timestamp timestamp = 1;
+
+  // Where the entry came from.
+  string source = 2;       // "operator-runner" | "narc" | "wonk" | "goalie" | "bigsmooth" | ...
+  string operator_id = 3;  // empty for cast members
+  string bead_id = 4;      // empty for cast members + setup/teardown
+
+  Level level = 5;
+  string message = 6;
+
+  // Structured fields. Kept as a flat map (not nested) so query
+  // filters can match on field equality cheaply. Values are JSON-
+  // encoded scalars (string, number, bool); nested objects get
+  // flattened by the emitter side.
+  map<string, string> fields = 7;
+
+  // Optional trace context — when a request flows runner→wonk→narc
+  // they all log under the same trace_id, so a query can replay
+  // the whole call graph.
+  string trace_id = 8;
+  string span_id = 9;
+}
+
+enum Level {
+  LEVEL_UNSPECIFIED = 0;
+  LEVEL_TRACE = 1;
+  LEVEL_DEBUG = 2;
+  LEVEL_INFO = 3;
+  LEVEL_WARN = 4;
+  LEVEL_ERROR = 5;
+}
+
+message LogAck {
+  uint64 entries_received = 1;
+  uint64 entries_persisted = 2;
+  // Non-empty when ingest hit a back-pressure threshold and
+  // dropped entries (rare).
+  string dropped_reason = 3;
+}
+
+message QueryRequest {
+  // Time bounds. Either can be zero to mean "open-ended."
+  google.protobuf.Timestamp since = 1;
+  google.protobuf.Timestamp until = 2;
+
+  // Filters — AND of all set fields. Empty fields ignored.
+  string source = 3;        // exact match
+  string operator_id = 4;
+  string bead_id = 5;
+  Level min_level = 6;      // INFO matches INFO/WARN/ERROR
+  string trace_id = 7;
+
+  // Substring search on the message text. Case-insensitive.
+  string message_contains = 8;
+
+  // Cap on results. 0 = uncapped (use with care — Query streams).
+  uint32 limit = 9;
+}
+
+message GetStatsRequest {}
+
+message Stats {
+  uint64 total_entries = 1;
+  uint64 bytes_on_disk = 2;
+  google.protobuf.Timestamp oldest_entry_at = 3;
+  google.protobuf.Timestamp newest_entry_at = 4;
+  // Per-source counts. For "where are my logs coming from?"
+  map<string, uint64> counts_by_source = 5;
+}

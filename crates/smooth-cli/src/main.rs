@@ -6,6 +6,7 @@ mod gradient;
 mod hooks;
 mod mcp_config;
 mod service;
+mod vm;
 
 use std::net::SocketAddr;
 
@@ -83,6 +84,14 @@ enum Commands {
     Down,
     /// Show system health
     Status,
+    /// Manage the long-lived single-VM sandbox (pearl th-893801
+    /// Phase 2). `th vm up` boots it once; state persists in a
+    /// named volume across `th vm down`; `th vm prune` is the
+    /// nuclear reset.
+    Vm {
+        #[command(subcommand)]
+        cmd: vm::VmCommands,
+    },
     /// Provider authentication
     Auth {
         #[command(subcommand)]
@@ -922,6 +931,7 @@ async fn main() -> Result<()> {
         }) => cmd_up(no_leader, port, foreground, max_operators, direct, skip_test, sandbox_backend).await,
         Some(Commands::Down) => cmd_down().await,
         Some(Commands::Status) => cmd_status().await,
+        Some(Commands::Vm { cmd }) => vm::run(cmd).await,
         Some(Commands::Db { cmd }) => cmd_db(cmd),
         Some(Commands::Auth { cmd }) => cmd_auth(cmd).await,
         Some(Commands::Operators { cmd }) => cmd_operators(cmd).await,

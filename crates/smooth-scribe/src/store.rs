@@ -1,3 +1,8 @@
+// Pre-existing `.expect()` on poisoned Mutex lock (predates pearl
+// th-893801). Acceptable here — a poisoned lock means another
+// thread panicked while holding it; propagating is correct.
+#![allow(clippy::expect_used)]
+
 use std::sync::Mutex;
 
 use serde::Deserialize;

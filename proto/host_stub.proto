@@ -1,0 +1,127 @@
+// Host stub — the credential bridge between the single sandbox VM and
+// the host.
+//
+// Pearl th-893801. The host stub is tiny by design: the sandbox is
+// self-sufficient (all CLIs installed inside, network egress via
+// host's stack with Tailscale userspace, file IO via bind-mounts,
+// Docker via socket bind-mount, SSH via agent forwarding). The ONE
+// thing that crosses the trust boundary as an RPC is credentials —
+// because they need to be short-lived and ungainfully scoped.
+//
+// Runs as `smooth-host-stub` on the host. Listens on a Unix socket
+// bind-mounted into the sandbox at /run/smooth/host.sock. Single
+// crate, <500 lines, security-strict clippy, audited as one unit.
+//
+// Trust rule: the host stub never trusts the sandbox. Every credential
+// request is gated by Narc on the sandbox side AND validated by the
+// stub server-side (server_url allowlist, scope checks).
+
+syntax = "proto3";
+
+package smooth.host_stub.v1;
+
+import "google/protobuf/timestamp.proto";
+
+service HostStub {
+  // Mint a short-lived credential for a server URL. The stub picks
+  // a backend per server (gh, aws-sts, az, github-app, …) and shells
+  // out to the appropriate host tool with the user's session.
+  //
+  // Examples:
+  //   server_url=https://github.com         → `gh auth token`
+  //   server_url=https://*.amazonaws.com    → `aws sts get-session-token`
+  //   server_url=https://*.azurecr.io       → `az acr login --expose-token`
+  //   server_url=https://gcr.io             → `gcloud auth print-access-token`
+  //
+  // Per-tool credential-provider shims inside the sandbox
+  // (`git-credential-smooth`, `aws-credential-process`, etc.) call
+  // this and emit the format their CLI expects.
+  //
+  // The sandbox-side Narc gates this through the standard Ask flow
+  // before the call even reaches the stub. The stub re-validates
+  // the server_url against its own allowlist as a defense layer.
+  rpc IssueCredential(IssueCredentialRequest) returns (IssueCredentialResponse);
+
+  // Diagnostics — current configured backends + recent issuances.
+  // Used by `th status` and the TUI's status bar to show "credentials
+  // available for: github.com, *.amazonaws.com, …".
+  rpc GetCredentialBackends(GetCredentialBackendsRequest) returns (CredentialBackends);
+}
+
+message IssueCredentialRequest {
+  // The server the credential is needed for. Stub matches against
+  // its allowlist; unknown servers return NOT_FOUND. Glob patterns
+  // in the allowlist (`*.amazonaws.com`) accept the call when the
+  // request URL falls under the glob.
+  string server_url = 1;
+
+  // Read vs write — affects which backend mode is used. For AWS
+  // STS this maps to different IAM roles; for github-app it picks
+  // the installation permissions; for `gh auth token` it's ignored
+  // (the user's PAT has whatever scopes it has).
+  ScopeHint scope_hint = 2;
+
+  // For audit. Which operator + pearl asked. Empty when the call
+  // is out-of-band (e.g. `th creds test` poking the stub).
+  string operator_id = 3;
+  string bead_id = 4;
+}
+
+enum ScopeHint {
+  SCOPE_HINT_UNSPECIFIED = 0;
+  SCOPE_HINT_READ = 1;
+  SCOPE_HINT_WRITE = 2;
+}
+
+message IssueCredentialResponse {
+  // Docker credential-helper spec field names — the shims expect
+  // these casings exactly.
+  string username = 1;
+  string secret = 2;
+
+  // When this credential expires. Zero = no explicit expiry (e.g.
+  // a long-lived PAT). Useful for the in-sandbox shim to know
+  // when to invalidate its own short-term cache.
+  google.protobuf.Timestamp expires_at = 3;
+
+  // Which backend produced this. Surfaced in audit + the TUI status.
+  // Examples: "gh", "aws-sts", "az-acr", "gcloud", "docker-config",
+  // "github-app".
+  string backend = 4;
+
+  // Optional AWS-STS-style session token. Required by every AWS
+  // SDK + the `aws` CLI when using temporary credentials —
+  // packaged into the env as `AWS_SESSION_TOKEN` by the
+  // in-sandbox shim. Empty for backends that don't issue
+  // temporary credentials (gh, gcloud access tokens, etc).
+  //
+  // Added in pearl th-893801 Phase 2 iter-4c. Additive at
+  // field 5; older clients ignore it.
+  string session_token = 5;
+}
+
+message GetCredentialBackendsRequest {}
+
+message CredentialBackends {
+  repeated Backend backends = 1;
+}
+
+message Backend {
+  // Backend identifier (matches the `backend` field in
+  // IssueCredentialResponse).
+  string name = 1;
+
+  // Server URL globs this backend handles. Examples:
+  //   "github.com", "*.github.com"
+  //   "*.amazonaws.com"
+  //   "ghcr.io"
+  repeated string server_globs = 2;
+
+  // True if the backend is currently usable (CLI installed, user
+  // is logged in). Surfaced so the TUI can warn "gh CLI not logged
+  // in — run `gh auth login` on host before agent tries github."
+  bool ready = 3;
+
+  // Free-text status. Reason for ready=false, version info, etc.
+  string status = 4;
+}

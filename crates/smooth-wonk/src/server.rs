@@ -8,18 +8,23 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use smooth_narc::judge::{Decision, JudgeKind, JudgeRequest};
 
-use crate::narc_client::NarcClient;
+// `NarcEscalator` is referenced via fully-qualified paths in
+// the trait bounds below; no direct use-import needed.
 use crate::negotiate::{AccessRequest, Negotiator};
 use crate::policy::PolicyHolder;
 
 pub struct AppState {
     policy: PolicyHolder,
     negotiator: Negotiator,
-    /// Optional escalation client for talking to Boardroom Narc. `None`
-    /// means Wonk is running in a legacy or test configuration without a
-    /// central arbiter — every denied request is returned as-is and the
-    /// operator sees a hard deny.
-    narc: Option<NarcClient>,
+    /// Optional escalation client. `None` means Wonk is
+    /// running in a legacy or test configuration without a
+    /// central arbiter — every denied request is returned
+    /// as-is and the operator sees a hard deny.
+    ///
+    /// Boxed-trait so the legacy HTTP `NarcClient` and the
+    /// single-VM gRPC client can both satisfy it (pearl
+    /// th-893801 Phase 4 iter-6c).
+    narc: Option<Arc<dyn crate::narc_client::NarcEscalator>>,
     /// Runtime allowlist populated by Narc approvals. Each entry is a glob
     /// plus an expiry; [`check_network`] consults this alongside the static
     /// policy allowlist so that approvals don't have to round-trip to Narc
@@ -50,11 +55,61 @@ impl AppState {
         }
     }
 
-    /// Attach a Narc escalation client. Chainable.
+    /// Attach a Narc escalation client. Accepts any
+    /// `NarcEscalator` impl — HTTP `NarcClient`, the
+    /// single-VM gRPC client (pearl th-893801 iter-6c), or a
+    /// test stub. Chainable.
     #[must_use]
-    pub fn with_narc(mut self, narc: NarcClient) -> Self {
+    pub fn with_narc<N: crate::narc_client::NarcEscalator>(mut self, narc: N) -> Self {
+        self.narc = Some(Arc::new(narc));
+        self
+    }
+
+    /// Attach a pre-arced Narc escalator. Useful when the
+    /// caller already owns the `Arc<dyn NarcEscalator>` (e.g.
+    /// hot-swapping between HTTP / UDS clients without
+    /// re-allocating).
+    #[must_use]
+    pub fn with_narc_arc(mut self, narc: Arc<dyn crate::narc_client::NarcEscalator>) -> Self {
         self.narc = Some(narc);
         self
+    }
+
+    /// Accessor for the policy holder. Used by the gRPC Checker
+    /// adapter in `crate::checker` (pearl th-893801 iter-3b).
+    #[must_use]
+    pub fn policy(&self) -> &PolicyHolder {
+        &self.policy
+    }
+
+    /// Accessor for the optional Narc escalation client. Same use
+    /// case as `policy()`.
+    #[must_use]
+    pub fn narc_client(&self) -> Option<&Arc<dyn crate::narc_client::NarcEscalator>> {
+        self.narc.as_ref()
+    }
+
+    /// Public-API mirror of the private `runtime_allowed_domain`
+    /// helper. Exposed so the gRPC Checker can hit the same
+    /// allowlist the HTTP handler does.
+    #[must_use]
+    pub fn runtime_allowed_domain_pub(&self, domain: &str) -> bool {
+        self.runtime_allowed_domain(domain)
+    }
+
+    /// Public-API mirror of `push_runtime_allow`. Same reason.
+    pub fn push_runtime_allow_pub(&self, glob: String, ttl: Duration) {
+        self.push_runtime_allow(glob, ttl);
+    }
+
+    /// Size of the runtime allowlist (live entries; excludes
+    /// expired). For `GetPolicySummary` over gRPC.
+    #[must_use]
+    pub fn runtime_allowlist_size(&self) -> usize {
+        let now = Instant::now();
+        self.runtime_allow
+            .lock()
+            .map_or(0, |entries| entries.iter().filter(|e| e.expires_at > now).count())
     }
 
     /// True if the given domain matches any live runtime allowlist entry.

@@ -99,7 +99,7 @@ pub async fn search(query: &str, n: usize) -> Result<Vec<SearchResult>, SearchEr
     if trimmed.is_empty() {
         return Err(SearchError::EmptyQuery);
     }
-    let n = n.min(MAX_RESULTS).max(1);
+    let n = n.clamp(1, MAX_RESULTS);
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS))
@@ -135,7 +135,7 @@ pub async fn search(query: &str, n: usize) -> Result<Vec<SearchResult>, SearchEr
 /// found — most often this means DDG returned a captcha / rate-
 /// limit page.
 pub fn parse_ddg_html(html: &str, n: usize) -> Result<Vec<SearchResult>, SearchError> {
-    let n = n.min(MAX_RESULTS).max(1);
+    let n = n.clamp(1, MAX_RESULTS);
     let mut results = Vec::with_capacity(n);
 
     // Block boundary: every result starts with `<div class="result` —

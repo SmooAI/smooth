@@ -23,8 +23,25 @@ async-trait.workspace = true
 uuid.workspace = true
 regex = "1"
 
+# gRPC. tonic provides the server/client runtime; prost is the proto
+# runtime. tonic-build runs in build.rs and codegens from
+# proto/narc.proto at the workspace root. Pearl th-893801.
+tonic = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+# `serve_uds` in src/grpc.rs uses tokio_stream::wrappers::UnixListenerStream
+# to feed tonic's `serve_with_incoming`. Needs the `net` feature
+# in non-test code, so it's a real dep here.
+tokio-stream = { workspace = true, features = ["net"] }
+
+[build-dependencies]
+tonic-build = { workspace = true }
+
 [dev-dependencies]
 tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net"] }
+tower = { version = "0.5", features = ["util"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 
 [lints]
 workspace = true

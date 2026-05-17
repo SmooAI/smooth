@@ -1,0 +1,149 @@
+// Wonk — the policy gate.
+//
+// Every tool call, network connection, file IO, and shell command from
+// an operator subprocess hits Wonk first. Wonk evaluates against its
+// local policy (the user's wonk-allow.toml + the project's grants +
+// the in-VM runtime allowlist + the rule engine). If the local policy
+// can auto-decide (deterministic allow or deny), Wonk returns
+// immediately. Otherwise it escalates to Narc.
+//
+// Wonk used to be a per-VM process; in the single-VM design it's the
+// singleton in-sandbox service. Operators reach it directly over UDS.
+// Pearl th-893801.
+
+syntax = "proto3";
+
+package smooth.wonk.v1;
+
+import "narc.proto";
+
+service Wonk {
+  // "Can the operator reach this domain?" Goalie calls this for
+  // every outbound HTTP request the agent makes through the
+  // proxy. Hot path — should be sub-millisecond when the answer
+  // is cached.
+  rpc CheckNetwork(CheckNetworkRequest) returns (CheckResponse);
+
+  // "Can the operator use this tool?" The runner's WonkHook
+  // calls this before every tool execution. Tool name only —
+  // arg-level gating is per-RPC where it matters (e.g. CheckCli
+  // for shell commands, CheckFile for path validation).
+  rpc CheckTool(CheckToolRequest) returns (CheckResponse);
+
+  // "Can the operator run this shell command?" Called by the
+  // bash tool's pre-hook. Wonk's local rule engine catches the
+  // baseline dangerous patterns (rm -rf /, curl | sh, etc) and
+  // hard-denies. Anything else escalates to Narc.
+  rpc CheckCli(CheckCliRequest) returns (CheckResponse);
+
+  // "Can the operator read/write this file path?" Called by
+  // file_write / apply_patch / file_read tool pre-hooks. Wonk
+  // enforces the workspace boundary + the project's
+  // filesystem.deny_patterns.
+  rpc CheckFile(CheckFileRequest) returns (CheckResponse);
+
+  // Reload the policy from disk. Triggered when the user edits
+  // wonk-allow.toml. Returns the new policy summary.
+  rpc ReloadPolicy(ReloadPolicyRequest) returns (ReloadPolicyResponse);
+
+  // Diagnostics — what's in the runtime allowlist + cache size.
+  // For `th policy` and the TUI's status bar.
+  rpc GetPolicySummary(GetPolicySummaryRequest) returns (PolicySummary);
+}
+
+// --- Request shapes ---
+
+message CheckNetworkRequest {
+  // Domain (no scheme, no port). For IPv6, the bracketless form.
+  string domain = 1;
+  // Path the agent is requesting. Used as judge-prompt context
+  // when escalation happens; ignored for direct allow/deny.
+  string path = 2;
+  // HTTP method (GET / POST / PUT / DELETE / ...). Same: context
+  // for escalation, ignored otherwise.
+  string method = 3;
+  // Operator + pearl, for audit + AccessStore correlation.
+  string operator_id = 4;
+  string bead_id = 5;
+}
+
+message CheckToolRequest {
+  string tool_name = 1;
+  string operator_id = 2;
+  string bead_id = 3;
+}
+
+message CheckCliRequest {
+  // Full command line as the agent passed it to bash.
+  string command = 1;
+  // Working directory the command would run in. Must be under
+  // the operator's workspace; Wonk rejects otherwise.
+  string cwd = 2;
+  string operator_id = 3;
+  string bead_id = 4;
+}
+
+message CheckFileRequest {
+  // Absolute path the operator wants to access.
+  string path = 1;
+  // What kind of access. Reads against `~/.smooth/wonk-allow.toml`
+  // are fine; writes to anywhere outside workspace are not.
+  AccessKind access = 2;
+  string operator_id = 3;
+  string bead_id = 4;
+}
+
+enum AccessKind {
+  ACCESS_KIND_UNSPECIFIED = 0;
+  ACCESS_KIND_READ = 1;
+  ACCESS_KIND_WRITE = 2;
+  ACCESS_KIND_EXECUTE = 3;
+}
+
+// --- Common response ---
+
+message CheckResponse {
+  bool allowed = 1;
+  // Human-readable rationale. Surfaced in TUI when the check
+  // denies + in audit logs.
+  string reason = 2;
+  // True when Wonk had to escalate to Narc to make the call.
+  // Useful for performance debugging and surfacing "Narc judged
+  // this" vs "local policy decided this" to the user.
+  bool was_escalated = 3;
+  // When was_escalated AND the resolution came from a human
+  // resolution, the scope they picked. UNSPECIFIED otherwise.
+  smooth.narc.v1.Scope resolved_scope = 4;
+}
+
+// --- Policy reload ---
+
+message ReloadPolicyRequest {}
+
+message ReloadPolicyResponse {
+  bool reloaded = 1;
+  // If the new policy failed to parse, this carries the error;
+  // the OLD policy stays active (no fail-open on bad reload).
+  string error = 2;
+  uint32 network_allow_hosts = 3;
+  uint32 tools_allow = 4;
+  uint32 bash_allow_patterns = 5;
+}
+
+// --- Diagnostics ---
+
+message GetPolicySummaryRequest {}
+
+message PolicySummary {
+  // Currently-allowed network hosts (user + project grants merged).
+  repeated string allow_hosts = 1;
+  // Currently-allowed tool names.
+  repeated string allow_tools = 2;
+  // Currently-allowed bash prefix patterns.
+  repeated string allow_bash_patterns = 3;
+  // Runtime allowlist size — domains Narc approved this session.
+  uint32 runtime_allowlist_size = 4;
+  // Where the persistent grants live on disk.
+  string user_grants_path = 5;
+  string project_grants_path = 6;
+}

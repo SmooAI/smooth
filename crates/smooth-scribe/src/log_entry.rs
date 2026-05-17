@@ -1,3 +1,6 @@
+// Pre-existing `.expect()` in tests (predates pearl th-893801).
+#![allow(clippy::expect_used)]
+
 use std::collections::HashMap;
 use std::fmt;
 

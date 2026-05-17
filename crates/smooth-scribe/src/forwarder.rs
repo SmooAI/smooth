@@ -1,3 +1,8 @@
+// Pre-existing lints (predate pearl th-893801). The forwarder is
+// scheduled for removal in Phase 4 once the gRPC Scribe surface
+// is the only ingest path; cleanup happens then rather than now.
+#![allow(clippy::expect_used, clippy::needless_pass_by_value, clippy::single_match_else, clippy::single_match)]
+
 //! Scribe → Archivist forwarder.
 //!
 //! Runs as a background tokio task inside the Scribe process. Every
