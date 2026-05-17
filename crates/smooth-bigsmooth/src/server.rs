@@ -694,6 +694,28 @@ pub async fn start(mut state: AppState, addr: SocketAddr) -> anyhow::Result<()> 
         dispatch = dispatch_mode,
         "Smooth leader running at http://{addr}"
     );
+
+    // Preflight the direct-dispatch runner binary so a missing /
+    // moved smooth-operator-runner shows up as a loud startup warn,
+    // not as silently-failed pearls. Pearl from the post-loop sweep
+    // diagnostic: the entire shared-target/release dir got nuked
+    // between build and sweep, every dispatch hit the
+    // "native smooth-operator-runner not found" error path, and
+    // the pearls closed in milliseconds with no METRICS. Hard to
+    // spot without grepping the daemon log.
+    let direct_mode = std::env::var("SMOOTH_WORKFLOW_DIRECT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if direct_mode {
+        match find_native_operator_runner_binary() {
+            Some(p) => tracing::info!(runner_bin = %p.display(), "direct dispatch: resolved native smooth-operator-runner"),
+            None => tracing::warn!(
+                env_var = ?std::env::var("SMOOTH_OPERATOR_RUNNER_NATIVE").ok(),
+                "direct dispatch: native smooth-operator-runner NOT FOUND — every dispatch will silently close its pearl with cost_usd=0 until this is fixed. Run `cargo build --release -p smooai-smooth-operator-runner` or set SMOOTH_OPERATOR_RUNNER_NATIVE=/absolute/path."
+            ),
+        }
+    }
+
     axum::serve(listener, app).await?;
     Ok(())
 }
