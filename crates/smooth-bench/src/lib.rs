@@ -814,7 +814,7 @@ pub fn print_summary(r: &BenchResult) {
         status, r.counts.passed, r.counts.total, r.counts.failed
     );
     println!("Duration:  {:.1}s", r.duration_s);
-    println!("Cost:      ${:.4}", r.cost_usd);
+    println!("Cost:      ${:.6}", r.cost_usd);
     if let Some(m) = &r.model {
         println!("Model:     {m}");
     }
