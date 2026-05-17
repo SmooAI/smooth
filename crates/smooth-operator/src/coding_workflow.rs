@@ -695,10 +695,35 @@ pub fn detect_verify_pass(transcript: &str) -> bool {
     if nonzero_failure_count(&upper) || upper.contains("TEST RESULT: FAILED") {
         return false;
     }
-    upper.contains("TEST RESULT: OK")                       // cargo test
+    if upper.contains("TEST RESULT: OK")                    // cargo test
         || upper.contains(" PASSED, 0 FAILED")              // pytest / go / jest
         || upper.contains("0 FAILED, 0 ERRORS")             // go test verbose
         || (upper.contains("TESTS:") && upper.contains(" PASSED") && upper.contains("0 FAILED"))
+    {
+        return true;
+    }
+    // pytest -q (quiet mode): output is just dots/letters then a
+    // terminal line like "15 passed in 0.05s" — no "failed" word
+    // at all. Earlier guards already rejected anything with a
+    // non-zero failure count, so seeing "N passed in <time>" and
+    // no "FAILED" anywhere is a green signal.
+    //
+    // Pearl th-1a5469: phone-number bench ran pytest -q twice
+    // and got NoEvidence on each because none of the patterns
+    // above match the terse output. Add the pytest-quiet shape
+    // so the workflow can break on green instead of grinding to
+    // the iteration cap.
+    if let Some(idx) = upper.find(" PASSED IN ") {
+        // Ensure the "N PASSED IN" comes right after a digit (so
+        // we don't false-positive on prose like "the test we just
+        // passed in the previous turn"). Walk backwards from `idx`
+        // skipping whitespace, then require a digit.
+        let prefix = &upper[..idx];
+        if prefix.chars().rev().find(|c| !c.is_whitespace()).is_some_and(|c| c.is_ascii_digit()) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Extract the "N failed" count from a transcript. `None` when
@@ -1001,6 +1026,20 @@ mod tests {
         assert!(detect_verify_pass("test result: ok. 31 passed; 0 failed;"));
         assert!(detect_verify_pass("Tests:       30 passed, 0 failed, 30 total"));
         assert!(!detect_verify_pass("Tests: 2 failed, 28 passed"));
+    }
+
+    #[test]
+    fn detect_verify_pass_recognises_pytest_quiet_shape() {
+        // pytest -q success doesn't print "failed" at all. Pearl
+        // th-1a5469: missing this pattern made the workflow grind
+        // through retries on every passing Python task.
+        assert!(detect_verify_pass("...............\n15 passed in 0.05s"));
+        assert!(detect_verify_pass("...\n3 passed in 0.01s\n"));
+        // The pattern must require a digit before "passed in" so
+        // prose narration doesn't false-positive.
+        assert!(!detect_verify_pass("the test we passed in the previous turn"));
+        // Real failures still fail.
+        assert!(!detect_verify_pass("F..\n1 failed, 2 passed in 0.02s"));
     }
 
     #[test]
