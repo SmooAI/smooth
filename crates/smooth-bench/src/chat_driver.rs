@@ -167,9 +167,28 @@ The moment teammate_spawn returns, end your turn with ONLY the pearl id on its o
 
         // Quiescence heuristic — no new comments for `idle_grace`
         // means the teammate likely finished and didn't post [IDLE].
+        //
+        // Pearl from sweep post-mortem (2026-05-17): only fire
+        // quiescence when the pearl is ALSO no longer in_progress.
+        // The runner often spends 4+ minutes between [PROGRESS]
+        // comments while the agent works through tool calls;
+        // firing quiescence on the comment timer alone was bailing
+        // before the runner posted [METRICS] / closed the pearl,
+        // and bench was scoring against work that hadn't completed.
+        // The pearl-status check is a much sharper liveness signal:
+        // a still-`in_progress` pearl means dispatch_ws_task_direct
+        // hasn't returned yet, the runner is still alive, keep
+        // waiting (up to the outer `deadline`).
         if comments.len() == last_seen_count {
-            if quiet_since.elapsed() > idle_grace {
-                eprintln!("bench: pearl {pearl_id} quiet for {}s, treating as done", idle_grace.as_secs());
+            let pearl_still_active = matches!(
+                store.get(&pearl_id),
+                Ok(Some(p)) if p.status == smooth_pearls::PearlStatus::InProgress
+            );
+            if !pearl_still_active && quiet_since.elapsed() > idle_grace {
+                eprintln!(
+                    "bench: pearl {pearl_id} quiet for {}s + not in_progress, treating as done",
+                    idle_grace.as_secs()
+                );
                 return Ok(HeadlessOutput {
                     content: chat_text,
                     tool_calls,
