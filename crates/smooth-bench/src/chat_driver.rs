@@ -227,20 +227,25 @@ fn extract_pearl_id(text: &str) -> Option<String> {
 
 /// Find the Dolt store the bench should poll.
 ///
-/// **Priority** (this order matters — the daemon writes pearls to its own
-/// active store, which is the global one when launchd boots from `$HOME`,
-/// not the bench's repo-local store):
+/// **Priority** (this order matters — the bench must read from the
+/// SAME dolt store the daemon's chat-agent writes to, otherwise the
+/// pearl id we get back lives in a different database and polling
+/// returns stale/empty comments):
 ///
-/// 1. `SMOOTH_BENCH_PEARL_STORE` — explicit override.
-/// 2. `~/.smooth/dolt/` — the global store the daemon defaults to. This
-///    is the right answer for almost every dev setup; the daemon's
-///    chat-agent creates pearls here and the heartbeat task writes
-///    `[PROGRESS]` comments here.
-/// 3. Walk up from `cwd` looking for `.smooth/dolt/` — covers running
-///    the bench against a project that explicitly initialised its own
-///    pearl store. Used to be priority #1, which silently bound the
-///    bench to its build directory's store and missed every comment
-///    the daemon wrote to the global store.
+/// 1. `SMOOTH_BENCH_PEARL_STORE` — explicit override for unusual layouts.
+/// 2. Walk up from `cwd` looking for `.smooth/dolt/`. The daemon's
+///    `cmd_up` uses `find_dolt_dir()` with the same walk; running the
+///    bench from any subdir of a repo that has `.smooth/dolt/` lands
+///    on the daemon's primary store.
+/// 3. `~/.smooth/dolt/` — global fallback for the launchd-from-$HOME
+///    case where the daemon also ends up here.
+///
+/// Pearl th-eff0d0 (2026-05-17): the priority used to put the global
+/// store first based on the historical assumption that the daemon
+/// always defaulted there. In dev that's wrong — `th up` from a repo
+/// dir opens `<repo>/.smooth/dolt`, the chat-agent writes pearls
+/// there, and the bench used to poll the empty global store and time
+/// out reading `cost_usd=0` despite the run succeeding.
 fn locate_pearl_store_dir() -> anyhow::Result<std::path::PathBuf> {
     if let Ok(p) = std::env::var("SMOOTH_BENCH_PEARL_STORE") {
         let path = std::path::PathBuf::from(p);
@@ -248,16 +253,16 @@ fn locate_pearl_store_dir() -> anyhow::Result<std::path::PathBuf> {
             return Ok(path);
         }
     }
-    let global = dirs_next::home_dir().context("$HOME unset")?.join(".smooth").join("dolt");
-    if global.exists() {
-        return Ok(global);
-    }
     if let Ok(cwd) = std::env::current_dir() {
         if let Some(d) = smooth_pearls::dolt::find_repo_dolt_dir(&cwd) {
             return Ok(d);
         }
     }
-    anyhow::bail!("no .smooth/dolt found at SMOOTH_BENCH_PEARL_STORE, ~/.smooth/dolt, or repo ancestry")
+    let global = dirs_next::home_dir().context("$HOME unset")?.join(".smooth").join("dolt");
+    if global.exists() {
+        return Ok(global);
+    }
+    anyhow::bail!("no .smooth/dolt found at SMOOTH_BENCH_PEARL_STORE, repo ancestry, or ~/.smooth/dolt")
 }
 
 #[cfg(test)]
