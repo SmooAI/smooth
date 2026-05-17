@@ -9,6 +9,7 @@
 pub mod dolt;
 pub mod dolt_server;
 pub mod memory;
+pub mod memory_tools;
 pub mod query;
 pub mod registry;
 #[allow(clippy::missing_errors_doc)]
@@ -19,6 +20,7 @@ pub mod types;
 pub use dolt::{PushOpts, SmoothDolt};
 pub use dolt_server::{SmoothDoltClient, SmoothDoltServer};
 pub use memory::{Memory, MemoryStore};
+pub use memory_tools::register_memory_tools;
 pub use query::PearlQuery;
 pub use registry::Registry;
 pub use store::PearlStore;
