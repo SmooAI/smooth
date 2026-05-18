@@ -1,0 +1,45 @@
+[package]
+name = "smooai-smooth-api-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Smoo AI platform API client — typed bindings generated from api.smoo.ai/openapi.json plus a small auth wrapper (token store, bearer middleware, refresh-on-401)."
+
+[lib]
+name = "smooth_api_client"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+dirs-next = { workspace = true }
+url = "2"
+async-trait = { workspace = true }
+uuid = { workspace = true, features = ["serde"] }
+
+# progenitor's generated code uses these directly.
+progenitor-client = "0.10"
+bytes = "1"
+futures-core = { workspace = true }
+rand = "0.8"
+# progenitor's generated code references these crates directly for
+# regex pattern validation and UUID/duration parsing in models.
+regress = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
+
+[build-dependencies]
+prettyplease = "0.2"
+syn = "2"
+progenitor = "0.10"
+openapiv3 = "2"
+serde_json = { workspace = true }

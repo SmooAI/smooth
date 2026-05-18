@@ -184,3 +184,4 @@ smooth-bootstrap-bill = { version = "0.13.7", path = "crates/smooth-bootstrap-bi
 smooth-tunnel = { version = "0.13.7", path = "crates/smooth-tunnel", package = "smooai-smooth-tunnel" }
 smooth-host-stub = { version = "0.13.7", path = "crates/smooth-host-stub", package = "smooai-smooth-host-stub" }
 smooth-bench = { version = "0.13.7", path = "crates/smooth-bench", package = "smooai-smooth-bench" }
+smooth-api-client = { version = "0.13.7", path = "crates/smooth-api-client", package = "smooai-smooth-api-client" }
