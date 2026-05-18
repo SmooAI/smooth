@@ -406,6 +406,141 @@ pub async fn spawn_sandbox(spec: SandboxSpec) -> Result<(String, Vec<PortMapping
         }
     };
 
+    // pearl th-dd0cef: microsandbox 0.3 `builder.create()` boots the VM
+    // (kernel + agentd) but does NOT launch the image's ENTRYPOINT/CMD.
+    // The docstring on `Sandbox::create` says it plainly: "Boots the VM
+    // with agentd ready to accept commands. Does not run any user
+    // workload — use `exec()`, `shell()`, etc. afterward."
+    //
+    // Without this step, port 4400 has no listener inside the guest, so
+    // host:4400 accepts the TCP connection (microsandbox's relay sees
+    // the SYN) and immediately disconnects with "Empty reply from
+    // server". guest.log stays 0 bytes because nothing in the guest
+    // ever writes to stderr.
+    //
+    // We resolve the entrypoint+cmd from `sandbox.config()` (already
+    // merged with the image defaults inside `create_with_mode`) and
+    // fire-and-forget an `exec_stream`. Dropping the `ExecHandle` does
+    // NOT signal the underlying process (no `impl Drop` on
+    // `ExecHandle`), so the process keeps running for the VM's lifetime.
+    {
+        let cfg = sandbox.config();
+        let entrypoint: Vec<String> = cfg.entrypoint.clone().unwrap_or_default();
+        let cmd: Vec<String> = cfg.cmd.clone().unwrap_or_default();
+        let argv: Vec<String> = entrypoint.into_iter().chain(cmd.into_iter()).collect();
+        if argv.is_empty() {
+            diag!("no entrypoint/cmd in image config — skipping startup exec (caller will exec on demand)");
+        } else {
+            diag!("launching image entrypoint via exec_stream", argv = ?argv);
+            // Safe: `argv.is_empty()` short-circuits on the branch above.
+            let Some((exec_cmd, exec_args)) = argv.split_first() else {
+                unreachable!("argv.is_empty() handled above");
+            };
+            let mut handle = sandbox.exec_stream(exec_cmd.clone(), exec_args.to_vec()).await.with_context(|| {
+                format!(
+                    "bill: failed to launch entrypoint inside '{}'; sandbox is running but the image's ENTRYPOINT/CMD never started",
+                    spec.name
+                )
+            })?;
+            diag!("entrypoint exec_stream dispatched, awaiting Started event");
+
+            // Block until the guest reports a PID for the entrypoint.
+            // Without this, the calling host process (e.g. `th up
+            // --sandboxed`) can exit BEFORE the exec request has
+            // traversed the UDS to agentd, which means the entrypoint
+            // never runs at all. Pearl th-dd0cef: the visible symptom
+            // is host:port accepts the TCP SYN (microsandbox's
+            // built-in port forwarder is set up at boot) but the
+            // connection closes empty because no guest process is
+            // bound to the port. Bounded by a 30s timeout so a
+            // misbehaving agentd doesn't wedge the caller.
+            use microsandbox::sandbox::exec::ExecEvent;
+            let start_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                let remaining = start_deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    diag!("timed out waiting for entrypoint Started event after 30s");
+                    return Err(anyhow::anyhow!(
+                        "bill: entrypoint exec did not produce a Started event within 30s in sandbox '{}'",
+                        spec.name
+                    ));
+                }
+                match tokio::time::timeout(remaining, handle.recv()).await {
+                    Ok(Some(ExecEvent::Started { pid })) => {
+                        tracing::info!(name = %spec.name, pid, "bill: entrypoint started inside guest");
+                        diag!("entrypoint Started", pid);
+                        break;
+                    }
+                    Ok(Some(ExecEvent::Exited { code })) => {
+                        tracing::error!(name = %spec.name, code, "bill: entrypoint exited before reporting a PID");
+                        return Err(anyhow::anyhow!(
+                            "bill: entrypoint in sandbox '{}' exited with code {} before reporting Started",
+                            spec.name,
+                            code
+                        ));
+                    }
+                    Ok(Some(_other)) => {
+                        // Stdout/Stderr can arrive before Started in some
+                        // protocol orderings — keep waiting.
+                    }
+                    Ok(None) => {
+                        return Err(anyhow::anyhow!(
+                            "bill: entrypoint exec event stream closed before Started in sandbox '{}'",
+                            spec.name
+                        ));
+                    }
+                    Err(_elapsed) => {
+                        diag!("timed out waiting for entrypoint Started event after 30s");
+                        return Err(anyhow::anyhow!(
+                            "bill: entrypoint exec did not produce a Started event within 30s in sandbox '{}'",
+                            spec.name
+                        ));
+                    }
+                }
+            }
+
+            // Hand the handle off to a background task that drains
+            // remaining events and logs the eventual exit. Dropping
+            // the handle without draining would lose visibility into
+            // exits; ExecHandle has no Drop impl so the underlying
+            // process keeps running regardless of the receiver's
+            // fate, but we want logs.
+            let watch_name = spec.name.clone();
+            tokio::spawn(async move {
+                let mut handle = handle;
+                loop {
+                    match handle.recv().await {
+                        Some(ExecEvent::Exited { code }) => {
+                            tracing::warn!(name = %watch_name, code, "bill: entrypoint exited inside guest");
+                            break;
+                        }
+                        Some(ExecEvent::Stdout(bytes)) => {
+                            let s = String::from_utf8_lossy(&bytes);
+                            for line in s.lines() {
+                                if !line.is_empty() {
+                                    tracing::info!(name = %watch_name, stream = "stdout", "bill entrypoint: {line}");
+                                }
+                            }
+                        }
+                        Some(ExecEvent::Stderr(bytes)) => {
+                            let s = String::from_utf8_lossy(&bytes);
+                            for line in s.lines() {
+                                if !line.is_empty() {
+                                    tracing::info!(name = %watch_name, stream = "stderr", "bill entrypoint: {line}");
+                                }
+                            }
+                        }
+                        Some(_) => {}
+                        None => {
+                            tracing::debug!(name = %watch_name, "bill: entrypoint event stream closed");
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+    }
+
     register(&spec.name, sandbox);
 
     // For any port with `bind_all: true`, spawn a TCP forwarder on
