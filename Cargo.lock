@@ -5692,7 +5692,6 @@ dependencies = [
  "smooai-smooth-bootstrap-bill",
  "smooai-smooth-code",
  "smooai-smooth-diver",
- "smooai-smooth-host-stub",
  "smooai-smooth-operator",
  "smooai-smooth-pearls",
  "smooai-smooth-tunnel",
