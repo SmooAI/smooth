@@ -1,0 +1,155 @@
+/*
+ * Smoo AI Brand Theme
+ *
+ * Colors from packages/ui/globals.css
+ * Orange: #f49f0a  |  Red: #ff6b6c  |  Teal: #00a6a6
+ * Blue: #bbdef0    |  Dark Blue: #020618  |  Rose: #f0e2e7
+ */
+
+/* ─── Brand gradient on H1 headings ─── */
+.markdown-preview-view h1,
+.cm-header-1 {
+    background: linear-gradient(135deg, #f49f0a 0%, #ff6b6c 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+/* ─── Accent color on H2 headings ─── */
+.markdown-preview-view h2,
+.cm-header-2 {
+    color: #00a6a6;
+    border-bottom: 1px solid rgba(0, 166, 166, 0.2);
+    padding-bottom: 4px;
+}
+
+/* ─── Subtle teal tint on H3 ─── */
+.markdown-preview-view h3,
+.cm-header-3 {
+    color: #f49f0a;
+}
+
+/* ─── Tag colors by category ─── */
+.tag[href*="moc"] {
+    background-color: rgba(244, 159, 10, 0.15);
+    color: #f49f0a;
+    border: 1px solid rgba(244, 159, 10, 0.3);
+}
+
+.tag[href*="architecture"] {
+    background-color: rgba(0, 166, 166, 0.15);
+    color: #00a6a6;
+    border: 1px solid rgba(0, 166, 166, 0.3);
+}
+
+.tag[href*="product"] {
+    background-color: rgba(255, 107, 108, 0.15);
+    color: #ff6b6c;
+    border: 1px solid rgba(255, 107, 108, 0.3);
+}
+
+.tag[href*="database"] {
+    background-color: rgba(57, 91, 239, 0.15);
+    color: #395bef;
+    border: 1px solid rgba(57, 91, 239, 0.3);
+}
+
+.tag[href*="infrastructure"] {
+    background-color: rgba(187, 222, 240, 0.2);
+    color: #257aa6;
+    border: 1px solid rgba(37, 122, 166, 0.3);
+}
+
+.tag[href*="ai"] {
+    background-color: rgba(244, 159, 10, 0.12);
+    color: #be7c08;
+    border: 1px solid rgba(190, 124, 8, 0.3);
+}
+
+.tag[href*="customer"] {
+    background-color: rgba(240, 226, 231, 0.3);
+    color: #9f526e;
+    border: 1px solid rgba(159, 82, 110, 0.3);
+}
+
+.tag[href*="decision"] {
+    background-color: rgba(0, 166, 166, 0.1);
+    color: #006e6e;
+    border: 1px solid rgba(0, 110, 110, 0.3);
+}
+
+.tag[href*="security"] {
+    background-color: rgba(255, 107, 108, 0.1);
+    color: #c20001;
+    border: 1px solid rgba(194, 0, 1, 0.2);
+}
+
+.tag[href*="realtime"] {
+    background-color: rgba(0, 248, 248, 0.1);
+    color: #00a6a6;
+    border: 1px solid rgba(0, 166, 166, 0.2);
+}
+
+.tag[href*="billing"] {
+    background-color: rgba(244, 159, 10, 0.1);
+    color: #be7c08;
+    border: 1px solid rgba(190, 124, 8, 0.2);
+}
+
+/* ─── Custom callout: smoo ─── */
+.callout[data-callout="smoo"] {
+    --callout-color: 244, 159, 10;
+    --callout-icon: lucide-sparkles;
+}
+
+.callout[data-callout="arch"] {
+    --callout-color: 0, 166, 166;
+    --callout-icon: lucide-layers;
+}
+
+.callout[data-callout="warn-prod"] {
+    --callout-color: 255, 107, 108;
+    --callout-icon: lucide-alert-triangle;
+}
+
+/* ─── Wikilink styling ─── */
+.internal-link {
+    color: #00a6a6;
+}
+
+.internal-link:hover {
+    color: #f49f0a;
+}
+
+/* ─── Graph view node colors ─── */
+.graph-view.color-fill-tag {
+    color: #f49f0a;
+}
+
+.graph-view.color-fill-attachment {
+    color: #00a6a6;
+}
+
+/* ─── Table header accent ─── */
+.markdown-preview-view th {
+    background-color: rgba(0, 166, 166, 0.08);
+    border-bottom: 2px solid rgba(0, 166, 166, 0.3);
+}
+
+/* ─── Horizontal rule with brand gradient ─── */
+.markdown-preview-view hr {
+    border: none;
+    height: 2px;
+    background: linear-gradient(90deg, #f49f0a, #ff6b6c, #00a6a6);
+    opacity: 0.4;
+}
+
+/* ─── Code block accent ─── */
+.markdown-preview-view pre {
+    border-left: 3px solid #f49f0a;
+}
+
+/* ─── Blockquote accent ─── */
+.markdown-preview-view blockquote {
+    border-left: 3px solid #00a6a6;
+}
