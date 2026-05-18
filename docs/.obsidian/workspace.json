@@ -207,6 +207,8 @@
   },
   "active": "3478761e011bfefc",
   "lastOpenFiles": [
+    "Decisions/ADR-003-rename-boardroom-to-safehouse.md",
+    "Architecture/Transport.md",
     "Start-Here/What-Is-Smooth.md",
     "Architecture/Operators.md",
     "Architecture/Dispatch.md",

@@ -627,24 +627,18 @@ mod is_corruption_err_tests {
 
     #[test]
     fn flags_corrupt_manifest() {
-        assert!(is_corruption_err(&anyhow::anyhow!(
-            "failed to load database with error: corrupt manifest"
-        )));
+        assert!(is_corruption_err(&anyhow::anyhow!("failed to load database with error: corrupt manifest")));
     }
 
     #[test]
     fn flags_invalid_repo() {
-        assert!(is_corruption_err(&anyhow::anyhow!(
-            "The current directory is not a valid dolt repository."
-        )));
+        assert!(is_corruption_err(&anyhow::anyhow!("The current directory is not a valid dolt repository.")));
     }
 
     #[test]
     fn does_not_flag_unrelated() {
         assert!(!is_corruption_err(&anyhow::anyhow!("syntax error")));
-        assert!(!is_corruption_err(&anyhow::anyhow!(
-            "cannot update manifest: database is read only"
-        )));
+        assert!(!is_corruption_err(&anyhow::anyhow!("cannot update manifest: database is read only")));
     }
 }
 
@@ -674,9 +668,7 @@ pub enum DoctorDiagnosis {
         detail: String,
     },
     /// No dolt dir or unrecognized state. Repair = init or clone.
-    NotInitialized {
-        detail: String,
-    },
+    NotInitialized { detail: String },
 }
 
 /// Best-effort detection of git conflict markers in a noms manifest.
@@ -695,11 +687,7 @@ fn detect_manifest_conflict_markers(manifest_path: &std::path::Path) -> Option<V
         .lines()
         .filter(|l| {
             let l = l.trim_end();
-            !l.is_empty()
-                && !l.starts_with("<<<<<<<")
-                && !l.starts_with("=======")
-                && !l.starts_with(">>>>>>>")
-                && !l.starts_with("|||||||")
+            !l.is_empty() && !l.starts_with("<<<<<<<") && !l.starts_with("=======") && !l.starts_with(">>>>>>>") && !l.starts_with("|||||||")
         })
         .map(str::to_string)
         .collect();
@@ -779,8 +767,7 @@ impl SmoothDolt {
         std::fs::copy(&manifest, &backup).with_context(|| format!("backup manifest → {}", backup.display()))?;
 
         // Write without a trailing newline — noms expects a bare record.
-        std::fs::write(&manifest, chosen.as_bytes())
-            .with_context(|| format!("write {}", manifest.display()))?;
+        std::fs::write(&manifest, chosen.as_bytes()).with_context(|| format!("write {}", manifest.display()))?;
 
         Ok(chosen)
     }
@@ -797,24 +784,17 @@ impl SmoothDolt {
     /// `--force` when a server is attached.
     pub fn recover_from_remote(&self) -> Result<PathBuf> {
         let data_dir = &self.data_dir;
-        let remote_url = read_origin_url(data_dir).context(
-            "no `origin` remote in repo_state.json — manual `dolt clone <url> <dir>` required",
-        )?;
+        let remote_url = read_origin_url(data_dir).context("no `origin` remote in repo_state.json — manual `dolt clone <url> <dir>` required")?;
         let parent = data_dir.parent().context("data_dir has no parent")?;
-        let leaf = data_dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .context("data_dir has no leaf name")?;
+        let leaf = data_dir.file_name().and_then(|n| n.to_str()).context("data_dir has no leaf name")?;
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let broken_path = parent.join(format!("{leaf}.broken-{ts}"));
-        std::fs::rename(data_dir, &broken_path)
-            .with_context(|| format!("snapshot corrupt dir → {}", broken_path.display()))?;
+        std::fs::rename(data_dir, &broken_path).with_context(|| format!("snapshot corrupt dir → {}", broken_path.display()))?;
 
-        let bin = find_smooth_dolt_binary()
-            .context("smooth-dolt binary not found for clone — Run: scripts/build-smooth-dolt.sh")?;
+        let bin = find_smooth_dolt_binary().context("smooth-dolt binary not found for clone — Run: scripts/build-smooth-dolt.sh")?;
         let output = Command::new(&bin)
             .args(["clone", &remote_url, &data_dir.to_string_lossy()])
             .stdin(Stdio::null())
@@ -825,11 +805,7 @@ impl SmoothDolt {
         if !output.status.success() {
             // Restore the broken dir so the user isn't stranded.
             let _ = std::fs::rename(&broken_path, data_dir);
-            let stderr: String = String::from_utf8_lossy(&output.stderr)
-                .trim()
-                .chars()
-                .take(400)
-                .collect();
+            let stderr: String = String::from_utf8_lossy(&output.stderr).trim().chars().take(400).collect();
             anyhow::bail!("smooth-dolt clone failed (exit {}): {}", output.status.code().unwrap_or(-1), stderr);
         }
         Ok(broken_path)
