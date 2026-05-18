@@ -653,7 +653,22 @@ mod is_corruption_err_tests {
 pub enum DoctorDiagnosis {
     /// Cold CLI probe succeeded — manifest readable, log accessible.
     Healthy,
-    /// On-disk storage is corrupt. Repair = re-clone from remote.
+    /// On-disk noms manifest has unresolved git merge-conflict markers.
+    /// Distinct from generic Corrupt because the fix is "pick a side"
+    /// (hand-resolve the conflict), not "re-clone from remote".
+    ///
+    /// Cause: someone (you) git-merged or stashed across branches whose
+    /// `.smooth/dolt/*/.dolt/noms/manifest` files diverged, and git's
+    /// text-merger turned a single-line binary record into a multi-line
+    /// file with `<<<<<<<` / `=======` / `>>>>>>>` markers in it.
+    ConflictMarkers {
+        /// All non-marker, non-empty candidate lines (raw bytes UTF-8
+        /// best-effort) — each is a complete prior-state manifest. The
+        /// repair picks the longest (most-data, usually most-recent).
+        candidates: Vec<String>,
+    },
+    /// On-disk storage is corrupt for some other reason. Repair = re-clone
+    /// from remote if origin is canonical, or rebuild from chunks.
     Corrupt {
         /// Underlying error message (clipped).
         detail: String,
@@ -662,6 +677,33 @@ pub enum DoctorDiagnosis {
     NotInitialized {
         detail: String,
     },
+}
+
+/// Best-effort detection of git conflict markers in a noms manifest.
+/// Returns Some(candidate_lines) when markers are present, with
+/// the candidate lines (i.e. the *content* between markers) ordered
+/// by occurrence in the file. Each candidate is a full prior-state
+/// manifest line — pick one to recover.
+fn detect_manifest_conflict_markers(manifest_path: &std::path::Path) -> Option<Vec<String>> {
+    let bytes = std::fs::read(manifest_path).ok()?;
+    let text = std::str::from_utf8(&bytes).ok()?;
+    // Cheap rejection of healthy manifests (single-line, no '<').
+    if !text.contains("<<<<<<<") {
+        return None;
+    }
+    let candidates: Vec<String> = text
+        .lines()
+        .filter(|l| {
+            let l = l.trim_end();
+            !l.is_empty()
+                && !l.starts_with("<<<<<<<")
+                && !l.starts_with("=======")
+                && !l.starts_with(">>>>>>>")
+                && !l.starts_with("|||||||")
+        })
+        .map(str::to_string)
+        .collect();
+    Some(candidates)
 }
 
 impl SmoothDolt {
@@ -673,6 +715,15 @@ impl SmoothDolt {
     /// Cheap: runs `dolt log -n 1` which loads the manifest + walks one
     /// ref. Returns within ~50–200ms on a healthy dir.
     pub fn diagnose(data_dir: &std::path::Path) -> DoctorDiagnosis {
+        // Cheap pre-check: is the manifest itself a git-merge-conflict
+        // mess? That's a common cause we can fix without a network
+        // round-trip and surfacing it specifically gives the user a
+        // much friendlier remediation than "re-clone".
+        let manifest = data_dir.join(".dolt").join("noms").join("manifest");
+        if let Some(candidates) = detect_manifest_conflict_markers(&manifest) {
+            return DoctorDiagnosis::ConflictMarkers { candidates };
+        }
+
         let cli = match Self::new_cli_only(data_dir) {
             Ok(c) => c,
             Err(e) => {
@@ -695,6 +746,43 @@ impl SmoothDolt {
                 }
             }
         }
+    }
+
+    /// Repair a manifest that has git conflict markers in it. Picks the
+    /// longest candidate line (most data, usually the most-recent prior
+    /// state) and writes it as the new manifest. Backs up the broken
+    /// version to `manifest.with-conflicts-<ts>` so the user can manually
+    /// inspect / pick a different line if the longest one isn't right.
+    ///
+    /// Returns the chosen candidate so the caller can log which one was
+    /// picked.
+    pub fn repair_manifest_conflict(data_dir: &std::path::Path, candidates: &[String]) -> Result<String> {
+        if candidates.is_empty() {
+            anyhow::bail!("no candidate manifest lines to choose from");
+        }
+        let manifest = data_dir.join(".dolt").join("noms").join("manifest");
+        // Heuristic: longest line has the most table-entries, almost
+        // always the most-recent state. Tied-length → take the last
+        // candidate (closer to "their" side of the merge).
+        let chosen = candidates
+            .iter()
+            .enumerate()
+            .max_by_key(|(i, c)| (c.len(), *i))
+            .map(|(_, c)| c.clone())
+            .expect("non-empty");
+
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let backup = manifest.with_file_name(format!("manifest.with-conflicts-{ts}"));
+        std::fs::copy(&manifest, &backup).with_context(|| format!("backup manifest → {}", backup.display()))?;
+
+        // Write without a trailing newline — noms expects a bare record.
+        std::fs::write(&manifest, chosen.as_bytes())
+            .with_context(|| format!("write {}", manifest.display()))?;
+
+        Ok(chosen)
     }
 
     /// Recover from on-disk corruption by snapshotting the broken dir

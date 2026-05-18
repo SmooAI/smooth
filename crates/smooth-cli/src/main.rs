@@ -3941,6 +3941,53 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
                         println!("  ✗ not a valid dolt dir: {detail}");
                         any_failed_repair = true;
                     }
+                    DoctorDiagnosis::ConflictMarkers { candidates } => {
+                        any_corrupt = true;
+                        println!(
+                            "  ✗ manifest has unresolved git merge-conflict markers ({} candidate lines)",
+                            candidates.len()
+                        );
+                        println!("    cause: git's text-merger ran on the binary noms/manifest file.");
+                        println!(
+                            "    fix:  pick the right pre-merge manifest line (the longest is usually the most-recent state)."
+                        );
+                        for (idx, line) in candidates.iter().enumerate() {
+                            println!(
+                                "      [{idx}] {} chars: {}…",
+                                line.len(),
+                                line.chars().take(60).collect::<String>()
+                            );
+                        }
+                        if !auto_repair {
+                            continue;
+                        }
+                        match smooth_pearls::SmoothDolt::repair_manifest_conflict(db_dir, &candidates) {
+                            Ok(chosen) => {
+                                println!(
+                                    "  ✓ wrote chosen candidate ({} chars) — original kept at manifest.with-conflicts-<ts>",
+                                    chosen.len()
+                                );
+                            }
+                            Err(e) => {
+                                println!("  ✗ manifest repair failed: {e:#}");
+                                any_failed_repair = true;
+                                continue;
+                            }
+                        }
+                        match smooth_pearls::SmoothDolt::diagnose(db_dir) {
+                            DoctorDiagnosis::Healthy => println!("  ✓ post-repair probe healthy"),
+                            other => {
+                                println!("  ✗ post-repair probe still unhealthy: {other:?}");
+                                println!(
+                                    "    Try a different candidate by hand: copy a line from manifest.with-conflicts-<ts>"
+                                );
+                                println!(
+                                    "    into .dolt/noms/manifest (no trailing newline) and re-run doctor."
+                                );
+                                any_failed_repair = true;
+                            }
+                        }
+                    }
                     DoctorDiagnosis::Corrupt { detail } => {
                         any_corrupt = true;
                         println!("  ✗ corrupt: {detail}");
