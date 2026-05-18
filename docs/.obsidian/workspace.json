@@ -20,8 +20,23 @@
               "icon": "lucide-file",
               "title": "Home"
             }
+          },
+          {
+            "id": "3478761e011bfefc",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "Start-Here/What-Is-Smooth.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "What-Is-Smooth"
+            }
           }
-        ]
+        ],
+        "currentTab": 1
       }
     ],
     "direction": "vertical"
@@ -39,7 +54,39 @@
             "type": "leaf",
             "state": {
               "type": "file-explorer",
-              "state": { "sortOrder": "alphabetical" }
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false
+              },
+              "icon": "lucide-folder-closed",
+              "title": "Files"
+            }
+          },
+          {
+            "id": "1d6ae5affe89ec59",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Search"
+            }
+          },
+          {
+            "id": "f94c56b11426ea00",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {},
+              "icon": "lucide-bookmark",
+              "title": "Bookmarks"
             }
           }
         ]
@@ -48,11 +95,124 @@
     "direction": "horizontal",
     "width": 280
   },
-  "active": "smooth-vault-home",
+  "right": {
+    "id": "5b7f8f407fb3d3d0",
+    "type": "split",
+    "children": [
+      {
+        "id": "25c4fe6d001235ea",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "6dccabb6fe5bb4d7",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "file": "Start-Here/What-Is-Smooth.md",
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Backlinks for What-Is-Smooth"
+            }
+          },
+          {
+            "id": "93dcfe2e712e7cf2",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "file": "Start-Here/What-Is-Smooth.md",
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Outgoing links from What-Is-Smooth"
+            }
+          },
+          {
+            "id": "264720a742bdbd4f",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Tags"
+            }
+          },
+          {
+            "id": "c8856a1247900953",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "All properties"
+            }
+          },
+          {
+            "id": "e2809f193e4c732b",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "Start-Here/What-Is-Smooth.md",
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Outline of What-Is-Smooth"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Open quick switcher": false,
+      "graph:Open graph view": false,
+      "canvas:Create new canvas": false,
+      "command-palette:Open command palette": false,
+      "markdown-importer:Open format converter": false,
+      "bases:Create new base": false,
+      "mermaid-tools:Open Mermaid Toolbar": false,
+      "obsidian-excalidraw-plugin:New drawing": false,
+      "terminal:Open terminal": false,
+      "homepage:Open homepage": false,
+      "table-editor-obsidian:Advanced Tables Toolbar": false,
+      "templater-obsidian:Templater": false,
+      "obsidian-kanban:Create new board": false
+    }
+  },
+  "active": "3478761e011bfefc",
   "lastOpenFiles": [
+    "Architecture/Operators.md",
+    "Architecture/Dispatch.md",
+    "Architecture/Direct-Mode.md",
+    "Architecture/Data-Storage.md",
+    "Architecture/Architecture-Overview.md",
     "Home.md",
     "Start-Here/What-Is-Smooth.md",
-    "Architecture/Architecture-Overview.md",
     "Architecture/The-Cast.md",
     "Architecture/Sandboxed-Mode.md"
   ]

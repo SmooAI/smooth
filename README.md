@@ -50,7 +50,7 @@ cargo install --path crates/smooth-cli
 # Authenticate with Smoo AI's gateway (resolves every smooth-* slot)
 th auth login smooai-gateway
 
-# Start Smooth (Big Smooth API + embedded web dashboard)
+# Start Smooth — default boots inside a microsandbox microVM
 th up
 
 # Open the interactive coding assistant
@@ -61,6 +61,27 @@ Or bring your own provider — see [Authentication](#authentication)
 below for the full list.
 
 No Docker. No Node.js. No runtime dependencies. One 10MB binary.
+
+### Two modes, one cast
+
+Smooth has exactly two ways to run, and they share the same agents,
+tools, and surveillance — the only thing that differs is the blast
+radius:
+
+| Command | What it does | When to use it |
+|---|---|---|
+| `th up` (default) | Boots the entire cast inside a hardware-isolated [Microsandbox](https://github.com/microsandbox/microsandbox) microVM (libkrun on Linux, HVF on macOS). `:4400` forwards out for the TUI / web UI. | Your laptop, anywhere the host can run microsandbox. |
+| `th up direct` | Runs the same cast as host processes with no sandbox in front. | CI runners, dedicated devboxes, nested-virt VMs — environments that are *already* sandboxed. |
+
+Docker is never the sandbox runtime. The `docker` CLI is still bundled
+*inside* the microVM so the agent can reach a host Docker / OrbStack /
+Colima / Rancher / Podman daemon for nested-virt-free workloads, but
+Smooth itself runs on microsandbox or directly on the host — nothing
+else.
+
+See [ADR-001](docs/Decisions/ADR-001-Consolidate-into-one-microVM.md)
+for the consolidation rationale and [ADR-002](docs/Decisions/ADR-002-microsandbox-0.4.6-and-remove-docker-backend.md)
+for the most recent microsandbox bump + Docker-backend removal.
 
 ---
 
@@ -168,60 +189,69 @@ per-project, git-syncable).
 %%{init: {"flowchart": {"defaultRenderer": "elk"}, "themeVariables": {"lineColor": "#f49f0a"}}}%%
 graph TB
     subgraph Host["Host Machine"]
-        MSB["msb server<br/><small>Microsandbox daemon</small>"]
+        TH["th binary<br/><small>embedded microsandbox SDK</small>"]
+        HS["smooth-host-stub<br/><small>credential broker on UDS</small>"]
+        DOCK["Docker / OrbStack / Colima<br/><small>optional, reachable from inside</small>"]
+        CACHE["~/.smooth/project-cache/<br/><small>pnpm · cargo · mise toolchains</small>"]
     end
 
-    subgraph Boardroom["The Boardroom (microsandbox)"]
+    subgraph VM["The microVM (microsandbox — libkrun / HVF)"]
         BS["Big Smooth<br/><small>orchestrator, READ-ONLY</small>"]
         AR["Archivist<br/><small>central log aggregator</small>"]
-        BW["Wonk<br/><small>Boardroom access control</small>"]
-        BG["Goalie<br/><small>Boardroom network proxy</small>"]
-        BN["Narc<br/><small>blocks Big Smooth writes</small>"]
-        BSc["Scribe<br/><small>Boardroom logging</small>"]
+        W["Wonk<br/><small>access control</small>"]
+        G["Goalie<br/><small>network + fs proxy</small>"]
+        N["Narc<br/><small>tool surveillance</small>"]
+        SC["Scribe<br/><small>structured logging</small>"]
+        GR["Groove<br/><small>checkpoint + resume</small>"]
+
+        subgraph Ops["Smooth Operators (subprocesses)"]
+            OP1["operator-runner #1"]
+            OP2["operator-runner #2"]
+            OP3["operator-runner #N"]
+        end
     end
 
-    subgraph Op1["Operator VM 1 (microsandbox)"]
-        OC1["smooth-operator-runner<br/><small>agent + tools</small>"]
-        W1["Wonk<br/><small>access control</small>"]
-        G1["Goalie<br/><small>network + fs proxy</small>"]
-        N1["Narc<br/><small>tool surveillance</small>"]
-        S1["Scribe<br/><small>structured logging</small>"]
-    end
-
-    subgraph Op2["Operator VM 2 (microsandbox)"]
-        OC2["smooth-operator-runner<br/><small>agent + tools</small>"]
-        W2["Wonk"] & G2["Goalie"] & N2["Narc"] & S2["Scribe"]
-    end
-
-    MSB --> Boardroom
-    MSB --> Op1
-    MSB --> Op2
-    BS -->|orchestrates| Op1
-    BS -->|orchestrates| Op2
-    S1 -->|events| AR
-    S2 -->|events| AR
+    TH -->|spawns| VM
+    HS -.->|creds UDS| VM
+    DOCK -.->|docker.sock| VM
+    CACHE -.->|bind-mount| VM
+    BS -->|orchestrates| Ops
+    Ops -->|HTTP_PROXY| G
+    G -->|"is this allowed?"| W
+    N -->|intercepts| Ops
+    Ops --> SC
+    SC -->|events| AR
 
     style Host fill:#020618,stroke:#30363d,color:#f8fafc
-    style Boardroom fill:#040d30,stroke:#f49f0a,color:#f8fafc
-    style Op1 fill:#040d30,stroke:#22c55e,color:#f8fafc
-    style Op2 fill:#040d30,stroke:#22c55e,color:#f8fafc
+    style VM fill:#040d30,stroke:#f49f0a,color:#f8fafc
+    style Ops fill:#0a1f7a,stroke:#22c55e,color:#f8fafc
 ```
+
+`th up direct` runs the exact same cast as host processes — same gRPC
+sockets, same surveillance, same credential broker — just without the
+microsandbox boundary in front. Same diagram, the microVM box is just
+not there.
 
 ### The Cast
 
-Everything runs inside [Microsandbox](https://github.com/nicholasgasior/microsandbox) microVMs — including the orchestrator.
+Big Smooth, Archivist, Wonk, Goalie, Narc, Scribe, and Groove all live
+in the same microVM (sandboxed mode) or the same process tree (direct
+mode). Smooth Operators are subprocesses spawned inside that same
+boundary, one per dispatched pearl.
 
-| Service | Role | Where it runs |
-|---|---|---|
-| **Big Smooth** | Orchestrator. Schedules work, generates policies, handles access requests. **READ-ONLY** — cannot write to the filesystem. | The Boardroom |
-| **Archivist** | Central log + trace aggregator. Receives events and OTLP traces from all Scribes. Stores traces in SQLite, optionally forwards to external OTel backends (Jaeger, Tempo, Honeycomb). Can write, but only to log paths. | The Boardroom |
-| **Wonk** | Access control authority. Reads policy TOML, answers "is this allowed?" for every network request, tool call, pearl access, and CLI command. No LLM. | Every VM |
-| **Goalie** | Network + filesystem proxy. Dumb pipe — forwards or blocks based on Wonk's answer. iptables + FUSE enforced at kernel level. | Every VM |
-| **Narc** | Tool surveillance + prompt injection guard. Two-tier detection: fast regex pre-filters + LLM-as-a-judge for ambiguous cases. | Every VM |
-| **Scribe** | Structured logging service. All services log through Scribe, which writes to on-pod SQLite and feeds Archivist. | Every VM |
-| **Groove** | LLM checkpointing + session resume. Captures conversation state after tool calls. Enables interrupted operators to resume from last checkpoint. | Every VM |
+| Service | Role |
+|---|---|
+| **Big Smooth** | Orchestrator. Schedules work, generates policies, handles access requests. **READ-ONLY** — cannot write to the filesystem. |
+| **Archivist** | Central log + trace aggregator. Receives events and OTLP traces from every Scribe. Stores traces in SQLite, optionally forwards to external OTel backends (Jaeger, Tempo, Honeycomb). Can write, but only to log paths. |
+| **Wonk** | Access control authority. Reads policy TOML, answers "is this allowed?" for every network request, tool call, pearl access, and CLI command. No LLM. |
+| **Goalie** | Network + filesystem proxy. Dumb pipe — forwards or blocks based on Wonk's answer. iptables + FUSE enforced at the kernel level inside the VM. |
+| **Narc** | Tool surveillance + prompt-injection guard. Two-tier detection: fast regex pre-filters + LLM-as-a-judge for ambiguous cases. |
+| **Scribe** | Structured logging service. All services log through Scribe, which writes to in-memory SQLite and feeds Archivist. |
+| **Groove** | LLM checkpointing + session resume. Captures conversation state after tool calls so an interrupted operator picks up at the last checkpoint. |
 
-**The Board** = Big Smooth + Archivist (leadership). **The Boardroom** = the VM where The Board operates, with its own Wonk, Goalie, Narc, Scribe, and Groove.
+**The Board** = Big Smooth + Archivist (leadership). **The Boardroom**
+is the microVM (or, in direct mode, the host process tree) where The
+Board operates alongside the rest of the cast.
 
 **Smooth Operators** = the AI agents. The only ones who write code.
 
@@ -289,7 +319,7 @@ graph TD
 ```
 
 **Key invariants:**
-- Big Smooth **never writes**. Narc in the Boardroom enforces this — any write attempt is instantly blocked.
+- Big Smooth **never writes**. Narc enforces this in-VM — any write attempt is instantly blocked.
 - Archivist **can write**, but only to log paths. Writes to any other path are blocked.
 - Operators can only see their assigned pearls and dependencies (scoped by auth token).
 - All outbound traffic goes through Goalie. No process can bypass the proxy — enforced at the kernel level.
