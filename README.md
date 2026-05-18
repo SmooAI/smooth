@@ -232,6 +232,17 @@ sockets, same surveillance, same credential broker — just without the
 microsandbox boundary in front. Same diagram, the microVM box is just
 not there.
 
+**Wire transport.** The cast services bind four tonic-gRPC servers on
+Unix-domain sockets at startup (`narc.sock`, `wonk.sock`, `scribe.sock`,
+`bigsmooth.sock` under `$SMOOTH_SINGLE_PROCESS_SOCKET_DIR`). Each
+operator-runner subprocess dials those sockets for every tool check,
+policy decision, and log entry — see `proto/{narc,wonk,scribe,bigsmooth}.proto`
+and `crates/smooth-bigsmooth/src/single_process.rs::bootstrap_from_app_state`.
+Inside Big Smooth's own process the same services are reached via
+`Arc<AppState>` directly (no wire). The outer TUI/web UI/bench harness
+speaks HTTP+WebSocket to Big Smooth on `:4400`. Full topology lives in
+[`docs/Architecture/Transport.md`](docs/Architecture/Transport.md).
+
 ### The Cast
 
 Big Smooth, Archivist, Wonk, Goalie, Narc, Scribe, and Groove all live
