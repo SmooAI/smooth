@@ -1014,17 +1014,10 @@ async fn start_sandboxed_vm(port: u16) -> Result<()> {
     use std::collections::HashMap;
 
     println!();
-    // Default image is now `ghcr.io/smooai/safehouse:latest`
-    // (published as of ADR-003). `SMOOTH_BOARDROOM_IMAGE` remains
-    // an accepted env-var fallback for any ad-hoc script still
-    // setting the pre-rename name. The image's entrypoint at
-    // `/opt/smooth/bin/boardroom` is intentionally unchanged so the
-    // bind-mount overlay path below can keep dropping a freshly
-    // cross-compiled `safehouse` binary on top of it without
-    // needing a new image entrypoint flag.
-    let image = std::env::var("SMOOTH_SAFEHOUSE_IMAGE")
-        .or_else(|_| std::env::var("SMOOTH_BOARDROOM_IMAGE"))
-        .unwrap_or_else(|_| "ghcr.io/smooai/safehouse:latest".to_string());
+    // The Safehouse image. No fallback to any pre-rename name —
+    // ADR-003 + this user directive: replace everything, no
+    // backwards compat.
+    let image = std::env::var("SMOOTH_SAFEHOUSE_IMAGE").unwrap_or_else(|_| "ghcr.io/smooai/safehouse:latest".to_string());
     println!("  {} booting safehouse microVM (image: {image})", "●".cyan());
 
     // Pick the sandbox client (DirectSandboxClient on host, since
@@ -1032,8 +1025,6 @@ async fn start_sandboxed_vm(port: u16) -> Result<()> {
     init_sandbox_client();
 
     let mut env = HashMap::new();
-    // Both names during the Phase 4 naming transition (pearl
-    // th-893801 iter-6a).
     env.insert("SMOOTH_VM_MODE".into(), "1".into());
     env.insert("SMOOTH_SAFEHOUSE_MODE".into(), "1".into());
     env.insert("SMOOTH_SINGLE_PROCESS".into(), "1".into());
@@ -1085,16 +1076,12 @@ async fn start_sandboxed_vm(port: u16) -> Result<()> {
         // crates/smooth-bigsmooth/src/bin/safehouse.rs (and the
         // dispatch fork that decides direct-vs-sandboxed inside
         // the VM) reach the running safehouse without rebuilding
-        // and pushing the OCI image. The image's entrypoint is
-        // still `/opt/smooth/bin/boardroom` (pre-rename name) until
-        // the OCI image is republished, so we mount our renamed
-        // binary at the legacy entrypoint path so the image's CMD
-        // / ENTRYPOINT executes our new code.
+        // and pushing the OCI image.
         let safehouse_bin = home.join(".smooth").join("runner-bin").join("safehouse");
         if safehouse_bin.is_file() {
             mounts.push(smooth_bigsmooth::sandbox::BindMount {
                 host_path: safehouse_bin.to_string_lossy().into_owned(),
-                guest_path: "/opt/smooth/bin/boardroom".into(),
+                guest_path: "/opt/smooth/bin/safehouse".into(),
                 readonly: true,
             });
         }
