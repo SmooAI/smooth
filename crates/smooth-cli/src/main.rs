@@ -772,6 +772,25 @@ enum PearlCommands {
     },
     /// Garbage collect the pearl database (compact for git)
     Gc,
+    /// Diagnose + (optionally) auto-repair the on-disk dolt state.
+    ///
+    /// Cold-loads the pearl DB through the CLI (not the running server)
+    /// and reports whether the noms manifest reads cleanly. If it
+    /// doesn't, `--auto-repair` snapshots the broken dir and re-clones
+    /// from the configured `origin` remote.
+    Doctor {
+        /// Snapshot the broken dir and re-clone from `origin` if a
+        /// corrupt manifest is found. Without this flag, `doctor` just
+        /// reports — no destructive changes.
+        #[arg(long)]
+        auto_repair: bool,
+        /// Repair even when a `smooth-dolt serve` is attached to this
+        /// dir. Stops the server first. Without this flag, doctor
+        /// refuses to repair when a server is running (in-memory state
+        /// could differ from disk; you'd lose any unsaved work).
+        #[arg(long)]
+        force: bool,
+    },
     /// Migrate from beads
     MigrateFromBeads,
     /// List all registered pearl projects
@@ -3889,6 +3908,106 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             let dolt = smooth_pearls::SmoothDolt::new(&dolt_dir)?;
             let output = dolt.gc()?;
             println!("{output}");
+        }
+
+        PearlCommands::Doctor { auto_repair, force } => {
+            use smooth_pearls::dolt::DoctorDiagnosis;
+
+            let dolt_root = find_dolt_dir()?;
+            // .smooth/dolt/ is a multi-db root — each subdir with its own
+            // `.dolt/` is an independent dolt repo. Probe each.
+            let db_dirs: Vec<std::path::PathBuf> = std::fs::read_dir(&dolt_root)
+                .with_context(|| format!("read {}", dolt_root.display()))?
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.path().join(".dolt").is_dir())
+                .map(|entry| entry.path())
+                .collect();
+            if db_dirs.is_empty() {
+                anyhow::bail!("no dolt dbs found under {} — is this an initialized pearl root?", dolt_root.display());
+            }
+
+            let mut any_corrupt = false;
+            let mut any_failed_repair = false;
+            for db_dir in &db_dirs {
+                let name = db_dir.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+                println!("probing db: {} at {}", name, db_dir.display());
+                let diagnosis = smooth_pearls::SmoothDolt::diagnose(db_dir);
+
+                match diagnosis {
+                    DoctorDiagnosis::Healthy => {
+                        println!("  ✓ healthy");
+                    }
+                    DoctorDiagnosis::NotInitialized { detail } => {
+                        println!("  ✗ not a valid dolt dir: {detail}");
+                        any_failed_repair = true;
+                    }
+                    DoctorDiagnosis::Corrupt { detail } => {
+                        any_corrupt = true;
+                        println!("  ✗ corrupt: {detail}");
+                        if !auto_repair {
+                            continue;
+                        }
+
+                        // Auto-repair path
+                        let server_attached =
+                            smooth_pearls::dolt_server::SmoothDoltServer::try_attach(db_dir).is_some();
+                        if server_attached && !force {
+                            println!(
+                                "  ! a smooth-dolt server is attached to this db — skipping repair.\n    \
+                                 • Run `th pearls push` first if you have local writes to preserve.\n    \
+                                 • Then re-run with `--force` to stop the server and re-clone."
+                            );
+                            any_failed_repair = true;
+                            continue;
+                        }
+                        if server_attached {
+                            println!("  stopping attached smooth-dolt server...");
+                            // Drop the attach handle so the socket is released.
+                            drop(smooth_pearls::dolt_server::SmoothDoltServer::try_attach(db_dir));
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                        }
+
+                        let cli = match smooth_pearls::SmoothDolt::new_cli_only(db_dir) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                println!("  ✗ couldn't construct CLI handle: {e:#}");
+                                any_failed_repair = true;
+                                continue;
+                            }
+                        };
+                        match cli.recover_from_remote() {
+                            Ok(broken) => {
+                                println!("  ✓ snapshot at: {}", broken.display());
+                                println!("    delete with `rm -rf {}` once verified", broken.display());
+                            }
+                            Err(e) => {
+                                println!("  ✗ repair failed: {e:#}");
+                                any_failed_repair = true;
+                                continue;
+                            }
+                        }
+
+                        // Re-probe
+                        match smooth_pearls::SmoothDolt::diagnose(db_dir) {
+                            DoctorDiagnosis::Healthy => println!("  ✓ post-repair probe healthy"),
+                            other => {
+                                println!("  ✗ post-repair probe still unhealthy: {other:?}");
+                                any_failed_repair = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if any_corrupt && !auto_repair {
+                anyhow::bail!(
+                    "one or more dbs are corrupt. Re-run with `--auto-repair` to snapshot + re-clone\n\
+                     from the configured `origin` remote for each affected db."
+                );
+            }
+            if any_failed_repair {
+                anyhow::bail!("some repairs failed — see output above");
+            }
         }
     }
 
