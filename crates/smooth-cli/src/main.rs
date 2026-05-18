@@ -6,6 +6,9 @@ mod gradient;
 mod hooks;
 mod mcp_config;
 mod service;
+mod smooai;
+
+use smooai::{cmd_login, cmd_logout, cmd_orgs, cmd_whoami};
 
 use std::net::SocketAddr;
 
@@ -82,6 +85,22 @@ enum Commands {
     Auth {
         #[command(subcommand)]
         cmd: AuthCommands,
+    },
+    /// Authenticate `th` against the Smoo AI platform API
+    /// (`api.smoo.ai`). Opens a browser for the device-flow handshake
+    /// and stores the resulting tokens at
+    /// `~/.smooth/auth/smooai.json`. After this, commands like
+    /// `th whoami`, `th orgs`, etc. work against your account.
+    Login,
+    /// Forget the current Smoo AI platform session — deletes
+    /// `~/.smooth/auth/smooai.json`. Idempotent.
+    Logout,
+    /// Print the currently-logged-in Smoo AI user + active org.
+    Whoami,
+    /// Smoo AI organization management.
+    Orgs {
+        #[command(subcommand)]
+        cmd: OrgsCommands,
     },
     /// Run a pearl through a Smooth Operator in a microVM — streams
     /// agent events to stdout. With --keep-alive, the VM stays up
@@ -379,6 +398,24 @@ enum TunnelCommands {
     /// Show the configured endpoints and a previewed ephemeral slug.
     /// Runs entirely client-side; does not hit the network.
     Status,
+}
+
+#[derive(Subcommand)]
+enum OrgsCommands {
+    /// List organizations the logged-in user belongs to.
+    List,
+    /// Show details of an organization. Defaults to the active org.
+    Show {
+        /// Org id (UUID). Omit to use the active org from
+        /// `~/.smooth/auth/smooai.json`.
+        org_id: Option<String>,
+    },
+    /// Switch the active org persisted in `~/.smooth/auth/smooai.json`.
+    /// Subsequent commands default to this org unless `--org` is set.
+    Switch {
+        /// Org id to make active.
+        org_id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -946,6 +983,10 @@ async fn main() -> Result<()> {
         Some(Commands::Status) => cmd_status().await,
         Some(Commands::Db { cmd }) => cmd_db(cmd),
         Some(Commands::Auth { cmd }) => cmd_auth(cmd).await,
+        Some(Commands::Login) => cmd_login().await,
+        Some(Commands::Logout) => cmd_logout().await,
+        Some(Commands::Whoami) => cmd_whoami().await,
+        Some(Commands::Orgs { cmd }) => cmd_orgs(cmd).await,
         Some(Commands::Operators { cmd }) => cmd_operators(cmd).await,
         Some(Commands::Inbox) => cmd_inbox().await,
         Some(Commands::Run {

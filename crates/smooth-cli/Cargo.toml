@@ -20,6 +20,7 @@ smooth-diver.workspace = true
 smooth-pearls.workspace = true
 smooth-operator.workspace = true
 smooth-tunnel.workspace = true
+smooth-api-client.workspace = true
 smooth-web.workspace = true
 url = "2"
 axum.workspace = true
