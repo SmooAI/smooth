@@ -1477,7 +1477,7 @@ struct Cast {
 async fn spawn_cast(policy_toml: &str, operator_id: &str) -> anyhow::Result<Cast> {
     // --- Scribe ---
     // If SMOOTH_ARCHIVIST_URL is set, mirror every log entry to the
-    // Boardroom's Archivist via a background forwarder. Otherwise run
+    // Safehouse's Archivist via a background forwarder. Otherwise run
     // standalone (legacy behavior, fine for host-mode sandboxed tests).
     let archivist_url = std::env::var("SMOOTH_ARCHIVIST_URL").ok().filter(|s| !s.trim().is_empty());
     // Diagnostic: write the archivist URL to the workspace for host-side

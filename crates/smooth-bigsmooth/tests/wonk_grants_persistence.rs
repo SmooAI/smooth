@@ -96,7 +96,7 @@ async fn approve_at_user_scope_persists_to_file_and_live_grants() {
     let access = AccessStore::new();
     let grants = SharedWonkGrants::new(WonkGrants::new());
 
-    // File a pending request — same shape Boardroom Narc would file
+    // File a pending request — same shape Safehouse Narc would file
     // when its judge returns Ask.
     let (id, _fut) = access.file_pending(NewAccessRequest::with_defaults(
         "pearl-1",

@@ -1,4 +1,4 @@
-//! Boardroom + Bootstrap Bill + cross-language E2E.
+//! Safehouse + Bootstrap Bill + cross-language E2E.
 //!
 //! This is the payoff test: it runs Smooth as its intended architecture
 //! end-to-end, without any shortcuts, and validates that real LLM-driven
@@ -11,27 +11,27 @@
 //! test process
 //!   ├── spawns Bootstrap Bill (host subprocess, binds 0.0.0.0:<bill_port>)
 //!   └── Bill spawns:
-//!         ├── Boardroom VM (alpine + `boardroom` binary)
+//!         ├── Safehouse VM (alpine + `safehouse` binary)
 //!         │     ├── Big Smooth (axum :4400)
 //!         │     ├── Archivist (:4401, reachable on host via port map)
-//!         │     └── Boardroom cast: Wonk, Goalie, Narc, Scribe (all tokio tasks)
+//!         │     └── Safehouse cast: Wonk, Goalie, Narc, Scribe (all tokio tasks)
 //!         │
 //!         ├── Operator VM #1 (Rust)
 //!         │     └── smooth-operator-runner + per-VM cast
 //!         │         → LLM reads task_api_spec/tests/spec_test.rs
 //!         │         → writes src/lib.rs into bind-mounted host workspace
-//!         │         → Scribe forwards logs to Boardroom Archivist
+//!         │         → Scribe forwards logs to Safehouse Archivist
 //!         │
 //!         └── Operator VM #2 (TypeScript)
 //!               └── smooth-operator-runner + per-VM cast
 //!                   → LLM reads hono_api_spec/tests/spec.test.ts
 //!                   → writes src/server.ts into bind-mounted host workspace
-//!                   → Scribe forwards logs to Boardroom Archivist
+//!                   → Scribe forwards logs to Safehouse Archivist
 //! ```
 //!
 //! # What gets asserted
 //!
-//! 1. Boardroom VM boots and Big Smooth's `/health` responds.
+//! 1. Safehouse VM boots and Big Smooth's `/health` responds.
 //! 2. Rust agent writes `src/lib.rs`. Host runs `cargo test`. ≥50% pass.
 //! 3. LLM judge evaluates the Rust code. `pass` verdict or score ≥ 5.
 //! 4. TypeScript agent writes `src/server.ts`. Host runs
@@ -64,12 +64,12 @@ use common::{call_llm_judge, copy_tree, find_workspace_target, parse_cargo_test_
 struct TeardownGuard {
     bill_child: Option<Child>,
     bill_client: Option<BillClient>,
-    boardroom_name: Option<String>,
+    safehouse_name: Option<String>,
 }
 
 impl TeardownGuard {
     async fn cleanup(mut self) {
-        if let (Some(client), Some(name)) = (self.bill_client.take(), self.boardroom_name.take()) {
+        if let (Some(client), Some(name)) = (self.bill_client.take(), self.safehouse_name.take()) {
             let _ = client.destroy(&name).await;
         }
         if let Some(mut child) = self.bill_child.take() {
@@ -80,8 +80,8 @@ impl TeardownGuard {
 }
 
 #[tokio::test]
-#[ignore = "full Boardroom + Bill + two operator VMs + real LLM + cargo test + pnpm + LLM judge — requires hardware virt, providers.json, pnpm, node>=20"]
-async fn boardroom_full_stack_rust_and_typescript_with_judge() {
+#[ignore = "full Safehouse + Bill + two operator VMs + real LLM + cargo test + pnpm + LLM judge — requires hardware virt, providers.json, pnpm, node>=20"]
+async fn safehouse_full_stack_rust_and_typescript_with_judge() {
     // --- Prereq gate -------------------------------------------------------
     let providers_path = dirs_next::home_dir().expect("home dir").join(".smooth/providers.json");
     if !providers_path.exists() {
@@ -96,11 +96,11 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
         .canonicalize()
         .expect("canon");
     let _operator_runner_host_dir = operator_runner_host_path.parent().expect("runner has parent").to_path_buf();
-    let boardroom_bin_path = find_workspace_target("aarch64-unknown-linux-musl/release/boardroom")
-        .expect("boardroom binary missing — run scripts/build-boardroom.sh")
+    let safehouse_bin_path = find_workspace_target("aarch64-unknown-linux-musl/release/safehouse")
+        .expect("safehouse binary missing — run scripts/build-safehouse.sh")
         .canonicalize()
         .expect("canon");
-    let boardroom_bin_dir = boardroom_bin_path.parent().expect("has parent").to_path_buf();
+    let safehouse_bin_dir = safehouse_bin_path.parent().expect("has parent").to_path_buf();
 
     assert!(which_exists("pnpm"), "pnpm is required on PATH for the TypeScript leg");
     assert!(which_exists("node"), "node is required on PATH for the TypeScript leg");
@@ -114,9 +114,9 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
     let version = bill_client.ping().await.expect("bill ping");
     eprintln!("bill version: {version}");
 
-    // --- Spawn Boardroom VM ------------------------------------------------
+    // --- Spawn Safehouse VM ------------------------------------------------
     // Probe a free host port for Archivist BEFORE calling Bill so we can
-    // put it in the Boardroom's env (which the Boardroom then uses to
+    // put it in the Safehouse's env (which the Safehouse then uses to
     // construct the operator-facing archivist URL). This is the chicken-
     // and-egg solution: we know the port before the VM boots, Bill
     // honors it via the fixed host_port in the PortMapping.
@@ -138,9 +138,9 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
     eprintln!("pre-reserved bigsmooth host port: {bigsmooth_host_port_fixed}");
 
     let home_dot_smooth = dirs_next::home_dir().expect("home").join(".smooth");
-    let boardroom_name = format!("smooth-boardroom-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-    let mut boardroom_env: HashMap<String, String> = HashMap::new();
-    boardroom_env.insert("SMOOTH_BOARDROOM_MODE".into(), "1".into());
+    let safehouse_name = format!("smooth-safehouse-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    let mut safehouse_env: HashMap<String, String> = HashMap::new();
+    safehouse_env.insert("SMOOTH_SAFEHOUSE_MODE".into(), "1".into());
     // Critical: tells Big Smooth to take dispatch_ws_task_sandboxed, which
     // routes operator spawns through our sandbox client (which, with
     // SMOOTH_BOOTSTRAP_BILL_URL set, is BillSandboxClient). Without this,
@@ -160,53 +160,53 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
     // private-network (192.168.x, etc.) outbound through the proxy.
     let host_ip = detect_host_ip();
     eprintln!("host IP for VM→host connectivity: {host_ip}");
-    boardroom_env.insert("SMOOTH_BOOTSTRAP_BILL_URL".into(), format!("http://{host_ip}:{bill_host_port}"));
-    boardroom_env.insert(
+    safehouse_env.insert("SMOOTH_BOOTSTRAP_BILL_URL".into(), format!("http://{host_ip}:{bill_host_port}"));
+    safehouse_env.insert(
         "SMOOTH_OPERATOR_RUNNER_HOST_PATH".into(),
         operator_runner_host_path.to_string_lossy().to_string(),
     );
-    boardroom_env.insert("SMOOTH_ARCHIVIST_HOST_PORT".into(), archivist_host_port.to_string());
-    boardroom_env.insert("SMOOTH_BOARDROOM_DB".into(), "/root/.smooth/smooth.db".into());
-    boardroom_env.insert("SMOOTH_BOARDROOM_PORT".into(), "4400".into());
+    safehouse_env.insert("SMOOTH_ARCHIVIST_HOST_PORT".into(), archivist_host_port.to_string());
+    safehouse_env.insert("SMOOTH_SAFEHOUSE_DB".into(), "/root/.smooth/smooth.db".into());
+    safehouse_env.insert("SMOOTH_SAFEHOUSE_PORT".into(), "4400".into());
     // Alpine's base image has no HOME set by default, which breaks
     // dirs_next::home_dir() inside the VM and therefore breaks
     // load_llm_config_for_runner. Set HOME explicitly to /root so Big
     // Smooth finds the bind-mounted ~/.smooth/providers.json.
-    boardroom_env.insert("HOME".into(), "/root".into());
-    boardroom_env.insert("RUST_LOG".into(), "info,smooth_bigsmooth=debug".into());
-    // Tell the Boardroom VM where to find smooth-dolt for the pearl store.
-    boardroom_env.insert("SMOOTH_DOLT".into(), "/opt/smooth/bin/smooth-dolt".into());
+    safehouse_env.insert("HOME".into(), "/root".into());
+    safehouse_env.insert("RUST_LOG".into(), "info,smooth_bigsmooth=debug".into());
+    // Tell the Safehouse VM where to find smooth-dolt for the pearl store.
+    safehouse_env.insert("SMOOTH_DOLT".into(), "/opt/smooth/bin/smooth-dolt".into());
     // Stable cache key so Rust deps compiled on the first test run
-    // persist to ~/.smooth/pearl-env/boardroom-e2e-test/ and are reused
+    // persist to ~/.smooth/pearl-env/safehouse-e2e-test/ and are reused
     // on subsequent runs. First run is cold (~5 min for cargo build);
     // every run after is warm (~5s).
-    boardroom_env.insert("SMOOTH_ENV_CACHE_KEY".into(), "boardroom-e2e-test".into());
-    // Tell the Boardroom the host port of its own Big Smooth API, so it
+    safehouse_env.insert("SMOOTH_ENV_CACHE_KEY".into(), "safehouse-e2e-test".into());
+    // Tell the Safehouse the host port of its own Big Smooth API, so it
     // can pass SMOOTH_BIGSMOOTH_URL to operators for pearl tool access.
-    boardroom_env.insert("SMOOTH_BIGSMOOTH_HOST_PORT".into(), bigsmooth_host_port_fixed.to_string());
+    safehouse_env.insert("SMOOTH_BIGSMOOTH_HOST_PORT".into(), bigsmooth_host_port_fixed.to_string());
     // Pre-compute the full operator-facing Big Smooth URL so operators can
     // call pearl tools. This is simpler than deriving it inside the VM.
     let bigsmooth_operator_url = format!("http://{host_ip}:{bigsmooth_host_port_fixed}");
-    boardroom_env.insert("SMOOTH_BIGSMOOTH_OPERATOR_URL".into(), bigsmooth_operator_url);
-    // Tell the Boardroom the host path to ~/.smooth so it can tell Bill to
+    safehouse_env.insert("SMOOTH_BIGSMOOTH_OPERATOR_URL".into(), bigsmooth_operator_url);
+    // Tell the Safehouse the host path to ~/.smooth so it can tell Bill to
     // bind-mount it into operator VMs. Inside the VM, dirs_next gives /root
     // which is the guest home, not the host home.
     if let Some(home) = dirs_next::home_dir() {
         let smooth_home = home.join(".smooth");
         if smooth_home.exists() {
-            boardroom_env.insert("SMOOTH_HOME_HOST_PATH".into(), smooth_home.to_string_lossy().to_string());
+            safehouse_env.insert("SMOOTH_HOME_HOST_PATH".into(), smooth_home.to_string_lossy().to_string());
         }
     }
 
     let spec = SandboxSpec {
-        name: boardroom_name.clone(),
+        name: safehouse_name.clone(),
         image: "alpine".into(),
         cpus: 2,
         memory_mb: 2048,
-        env: boardroom_env,
+        env: safehouse_env,
         mounts: vec![
             BindMountSpec {
-                host_path: boardroom_bin_dir.to_string_lossy().to_string(),
+                host_path: safehouse_bin_dir.to_string_lossy().to_string(),
                 guest_path: "/opt/smooth/bin".into(),
                 readonly: true,
             },
@@ -237,23 +237,23 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
             },
         ],
         timeout_seconds: 1800,
-        // The Boardroom VM must reach Bill on host loopback
+        // The Safehouse VM must reach Bill on host loopback
         // (127.0.0.1:<bill_port>) so Big Smooth can request operator pods.
         // Default microsandbox policy denies loopback/private outbound.
         allow_host_loopback: true,
-        // Boardroom itself doesn't need env caching (it's Big Smooth, not
+        // Safehouse itself doesn't need env caching (it's Big Smooth, not
         // an operator). Operator VMs get caching via the dispatch path.
         env_cache_key: None,
         use_named_volume_for_cache: false,
         secrets: vec![],
     };
 
-    let (resolved_name, host_ports, _created_at) = bill_client.spawn(spec).await.expect("spawn boardroom");
-    eprintln!("boardroom: {resolved_name} host_ports={host_ports:?}");
+    let (resolved_name, host_ports, _created_at) = bill_client.spawn(spec).await.expect("spawn safehouse");
+    eprintln!("safehouse: {resolved_name} host_ports={host_ports:?}");
     let teardown = TeardownGuard {
         bill_child: Some(bill_child),
         bill_client: Some(bill_client.clone()),
-        boardroom_name: Some(resolved_name.clone()),
+        safehouse_name: Some(resolved_name.clone()),
     };
 
     let bigsmooth_host_port = host_ports.iter().find(|p| p.guest_port == 4400).map(|p| p.host_port).expect("4400 mapping");
@@ -264,10 +264,10 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
     // archivist_host_port was pre-reserved above; confirm Bill honored it.
     let archivist_resolved = host_ports.iter().find(|p| p.guest_port == 4401).map(|p| p.host_port).expect("4401 mapping");
     assert_eq!(archivist_resolved, archivist_host_port, "bill should have honored our fixed archivist port");
-    eprintln!("boardroom API : http://127.0.0.1:{bigsmooth_host_port}");
-    eprintln!("boardroom ARCH: http://127.0.0.1:{archivist_host_port}");
+    eprintln!("safehouse API : http://127.0.0.1:{bigsmooth_host_port}");
+    eprintln!("safehouse ARCH: http://127.0.0.1:{archivist_host_port}");
 
-    // Exec the boardroom binary. This is a long-running server; we spawn
+    // Exec the safehouse binary. This is a long-running server; we spawn
     // the exec in a background task and let it run until we destroy the
     // sandbox at teardown. The exec future will return with an error
     // when the sandbox is destroyed, which is fine.
@@ -275,15 +275,15 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
         let exec_client = bill_client.clone();
         let exec_name = resolved_name.clone();
         tokio::spawn(async move {
-            match exec_client.exec(&exec_name, &["/opt/smooth/bin/boardroom".to_string()]).await {
+            match exec_client.exec(&exec_name, &["/opt/smooth/bin/safehouse".to_string()]).await {
                 Ok((stdout, stderr, code)) => {
                     eprintln!(
-                        "boardroom exec finished: code={code}\nstdout: {stdout}\nstderr tail: {}",
+                        "safehouse exec finished: code={code}\nstdout: {stdout}\nstderr tail: {}",
                         &stderr[stderr.len().saturating_sub(2000)..]
                     );
                 }
                 Err(e) => {
-                    eprintln!("boardroom exec error: {e}");
+                    eprintln!("safehouse exec error: {e}");
                 }
             }
         });
@@ -292,14 +292,14 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
     // Wait for Big Smooth to come up.
     wait_for_http_ok(&format!("http://127.0.0.1:{bigsmooth_host_port}/health"), Duration::from_secs(120))
         .await
-        .expect("boardroom /health never came up");
-    eprintln!("boardroom Big Smooth is healthy");
+        .expect("safehouse /health never came up");
+    eprintln!("safehouse Big Smooth is healthy");
 
     // Wait for Archivist too.
     wait_for_http_ok(&format!("http://127.0.0.1:{archivist_host_port}/health"), Duration::from_secs(30))
         .await
-        .expect("boardroom Archivist /health never came up");
-    eprintln!("boardroom Archivist is healthy");
+        .expect("safehouse Archivist /health never came up");
+    eprintln!("safehouse Archivist is healthy");
 
     // --- Open WS to Big Smooth --------------------------------------------
     let ws_url = format!("ws://127.0.0.1:{bigsmooth_host_port}/ws");
@@ -379,7 +379,7 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
             // Both tasks completed, so pearls should be closed.
             assert!(closed >= 2, "expected at least 2 closed pearls, got {closed}");
         } else {
-            eprintln!("pearl stats: API returned ok=false (smooth-dolt may not be available in VM — build with scripts/build-boardroom.sh)");
+            eprintln!("pearl stats: API returned ok=false (smooth-dolt may not be available in VM — build with scripts/build-safehouse.sh)");
         }
     } else {
         eprintln!("pearl stats: could not query (pearl store may not be available in VM)");
@@ -407,7 +407,7 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
     // --- Workspace pearl verification (agent-created pearls) ----------------
     eprintln!("\n===== WORKSPACE PEARL VERIFICATION =====");
     // The agents create/close pearls in the WORKSPACE's .smooth/dolt/, not
-    // the Boardroom's. Check the host-side Dolt DB for each workspace.
+    // the Safehouse's. Check the host-side Dolt DB for each workspace.
     for (name, ws_path) in [("rust", rust_workspace.path()), ("ts", ts_workspace.path())] {
         let ws_dolt = ws_path.join(".smooth").join("dolt");
         if ws_dolt.exists() {
@@ -504,7 +504,7 @@ async fn boardroom_full_stack_rust_and_typescript_with_judge() {
         by_vm.len()
     );
 
-    eprintln!("\n✓ boardroom_full_stack_rust_and_typescript_with_judge: GREEN");
+    eprintln!("\n✓ safehouse_full_stack_rust_and_typescript_with_judge: GREEN");
 
     // Explicit async teardown — Drop cannot create a new runtime from
     // inside the test's runtime.

@@ -13,8 +13,8 @@
 ## Runtime
 
 - **`th`** — The Smooth CLI binary. One Rust binary, every command.
-- **Boardroom microVM** — The single microsandbox VM `th up` boots. Hosts Big Smooth and the rest of the cast.
-- **Boardroom image** — `ghcr.io/smooai/boardroom:latest`. OCI image baking the in-VM `smooth-bigsmooth` binary.
+- **Safehouse microVM** — The single microsandbox VM `th up` boots. Hosts Big Smooth and the rest of the cast.
+- **Safehouse image** — `ghcr.io/smooai/safehouse:latest`. OCI image baking the in-VM `smooth-bigsmooth` binary.
 - **microsandbox** — The Rust SDK we use to boot hardware-isolated microVMs. Embedded as a crate dependency; no external `msb` CLI required at runtime.
 
 ## The Cast

@@ -24,7 +24,7 @@ where the bar is.
      │   │  Big Smooth (READ-ONLY orchestrator)      │   │
      │   │                                           │   │
      │   │   - Generates per-task policies           │   │
-     │   │   - Runs Boardroom Narc (LLM judge)       │   │
+     │   │   - Runs Safehouse Narc (LLM judge)       │   │
      │   │   - Spawns operator microVMs              │   │
      │   │   - Never writes files, never runs tools  │   │
      │   └───────────────────────────────────────────┘   │
@@ -97,14 +97,14 @@ an attacker-controlled domain, pulls a package from a typosquat mirror.
 goes through Goalie (in-VM forward proxy), which asks Wonk before
 allowing. Wonk's network policy is generated per-task by Big Smooth with
 a tight default allowlist (LLM provider, package registries, toolchain
-sources). New domains escalate to Boardroom Narc which runs an LLM judge
+sources). New domains escalate to Safehouse Narc which runs an LLM judge
 before approving.
 
 ### Obviously-malicious LLM requests
 **Scenario:** prompt injection in a file the agent reads convinces it to
 exfiltrate secrets, reach cryptocurrency wallets, etc.
 
-**Defense:** Boardroom Narc's rule engine short-circuits requests to a
+**Defense:** Safehouse Narc's rule engine short-circuits requests to a
 deny-list of obviously-dangerous domains (pastebin, crypto wallets,
 credential-harvest infra) before any LLM call. Additionally, Narc's
 injection detector scans every tool call's arguments for 6 injection
@@ -268,7 +268,7 @@ are false in your environment, the security properties above are weaker
 than advertised.
 
 1. **The host is trusted.** Smooth's orchestrator, the runner binary,
-   the policy generator, Boardroom Narc, and everything else outside the
+   the policy generator, Safehouse Narc, and everything else outside the
    operator VM run on the host. A compromised host means a compromised
    Smooth.
 

@@ -1,6 +1,6 @@
 //! TUI side of the Claude-Code-style auto-mode permission UX.
 //!
-//! Big Smooth holds a tool call open whenever Boardroom Narc returns
+//! Big Smooth holds a tool call open whenever Safehouse Narc returns
 //! [`smooth_narc::Decision::Ask`] (pearl th-49b4aa). The TUI hooks in
 //! through two pieces:
 //!

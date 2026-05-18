@@ -41,7 +41,7 @@ for alert in narc.alerts_above(Severity::Block) {
 }
 ```
 
-Wired to a `Scribe`, alerts forward to the Boardroom's central `Archivist` for cross-VM correlation. Wired to a `Wonk`, escalations feed the per-VM decision cache.
+Wired to a `Scribe`, alerts forward to the Safehouse's central `Archivist` for cross-VM correlation. Wired to a `Wonk`, escalations feed the per-VM decision cache.
 
 ## License
 

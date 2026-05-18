@@ -97,7 +97,7 @@ pub struct ScenarioMeta {
     pub auto_approve: AutoApprove,
 }
 
-/// How a bench scenario resolves Asks raised by Boardroom Narc
+/// How a bench scenario resolves Asks raised by Safehouse Narc
 /// during the run. Mirrors the CLI's `--auto-approve` flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]

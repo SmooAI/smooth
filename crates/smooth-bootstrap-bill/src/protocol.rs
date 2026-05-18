@@ -47,9 +47,9 @@ pub struct PortMapping {
 pub struct SandboxSpec {
     /// Name used as the registry key and the microsandbox name (must be
     /// unique per-host while the sandbox is alive). Typical format:
-    /// `smooth-operator-<short-uuid>` or `smooth-boardroom-<short-uuid>`.
+    /// `smooth-operator-<short-uuid>` or `smooth-safehouse-<short-uuid>`.
     pub name: String,
-    /// OCI image reference (e.g. `alpine`, or a custom boardroom image tag).
+    /// OCI image reference (e.g. `alpine`, or a custom safehouse image tag).
     pub image: String,
     /// Guest CPU count. Clamped to `u8::MAX` on Bill's side.
     pub cpus: u32,
@@ -70,7 +70,7 @@ pub struct SandboxSpec {
     /// policy (which denies loopback + RFC1918 outbound). When true, Bill
     /// applies `NetworkPolicy::allow_all()` to this sandbox, so the guest
     /// can TCP to `127.0.0.1:<port>` and reach host services like Bill
-    /// itself or the Boardroom's Archivist.
+    /// itself or the Safehouse's Archivist.
     ///
     /// Under the hood, microsandbox's TCP proxy calls `TcpStream::connect`
     /// on the host with the guest's destination address verbatim. With the

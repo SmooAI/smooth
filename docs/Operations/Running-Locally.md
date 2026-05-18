@@ -33,9 +33,9 @@ th down
 ## Sandboxed mode (default)
 
 ```bash
-th up                                # Boots the Boardroom microVM
+th up                                # Boots the Safehouse microVM
 th up --port 4500                    # Use a different forwarded port
-SMOOTH_BOARDROOM_IMAGE=ghcr.io/smooai/boardroom:dev th up
+SMOOTH_SAFEHOUSE_IMAGE=ghcr.io/smooai/safehouse:dev th up
                                      # Override the OCI image
 ```
 
@@ -73,7 +73,7 @@ See [[../Architecture/Direct-Mode]] for what changes.
 | `--max-operators N`           | 3              | Sandbox-pool concurrency cap                         |
 | `--skip-test`                 | off            | Pass-through to runner: skip TEST phase (bench only) |
 | `--foreground`                | off            | Don't daemonise (direct mode only)                   |
-| `SMOOTH_BOARDROOM_IMAGE`      | `…/boardroom:latest` | OCI image for the boardroom VM                  |
+| `SMOOTH_SAFEHOUSE_IMAGE`      | `…/safehouse:latest` | OCI image for the safehouse VM                  |
 | `SMOOTH_SANDBOX_MAX_CONCURRENCY` | 3           | Equivalent to `--max-operators`                      |
 | `SMOOTH_WORKFLOW_DIRECT`      | unset          | Force direct mode (for harnesses)                    |
 | `SMOOTH_WORKFLOW`             | 1              | Multi-phase workflow; `0` falls back to single-Agent |

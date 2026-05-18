@@ -1,6 +1,6 @@
 //! # Smooth Diver
 //!
-//! The Pearl Diver — Boardroom cast member that owns the pearl lifecycle.
+//! The Pearl Diver — Safehouse cast member that owns the pearl lifecycle.
 //! Creates pearls on dispatch, closes on completion, tracks sub-pearls,
 //! manages the work model (parent-child, deps, labels, costs), and syncs
 //! bidirectionally with Jira.

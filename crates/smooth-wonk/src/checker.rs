@@ -37,7 +37,7 @@ impl Checker for AppState {
         if self.runtime_allowed_domain_pub(&req.domain) {
             return Verdict {
                 allowed: true,
-                reason: "domain approved by Boardroom Narc (runtime allowlist)".into(),
+                reason: "domain approved by Safehouse Narc (runtime allowlist)".into(),
                 was_escalated: false,
                 resolved_scope: None,
             };
@@ -54,7 +54,7 @@ impl Checker for AppState {
             };
         }
 
-        // 4. Escalate to Boardroom Narc. With no Narc wired in, fall
+        // 4. Escalate to Safehouse Narc. With no Narc wired in, fall
         //    straight to deny — same fail-closed shape as today's
         //    HTTP path.
         let Some(narc) = self.narc_client() else {

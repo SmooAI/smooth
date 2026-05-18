@@ -12,8 +12,8 @@
 //!   the default when `SMOOTH_BOOTSTRAP_BILL_URL` is unset. All existing
 //!   host-mode tests keep working because the trait wraps the same
 //!   functions they used before.
-//! * **Brokered mode** (production / Boardroom): Big Smooth runs inside a
-//!   Boardroom microVM and calls an out-of-process Bill over TCP via
+//! * **Brokered mode** (production / Safehouse): Big Smooth runs inside a
+//!   Safehouse microVM and calls an out-of-process Bill over TCP via
 //!   `host.containers.internal`. Set `SMOOTH_BOOTSTRAP_BILL_URL` to enable.
 //!
 //! The selection happens once at process startup via [`init_sandbox_client`].
@@ -77,7 +77,7 @@ pub struct SandboxConfig {
     pub mounts: Vec<BindMount>,
     /// Let the guest reach host loopback (127.0.0.1, 10.x, 192.168.x) via
     /// microsandbox's TCP proxy. Required when the operator needs to talk
-    /// back to Bill or to the Boardroom's Archivist. Defaults to false
+    /// back to Bill or to the Safehouse's Archivist. Defaults to false
     /// because the untrusted agent inside a standalone operator VM
     /// shouldn't be able to probe host services by default.
     pub allow_host_loopback: bool,
@@ -225,7 +225,7 @@ pub trait SandboxClient: Send + Sync {
 /// Smooth IS Bill (e.g., in tests that spawn Big Smooth on the host).
 ///
 /// Only compiled when the `direct-sandbox` feature is enabled (it is by
-/// default on the host). The Boardroom binary builds with
+/// default on the host). The Safehouse binary builds with
 /// `--no-default-features` because microsandbox doesn't cross-compile
 /// to aarch64-musl.
 #[cfg(feature = "direct-sandbox")]
@@ -426,7 +426,7 @@ fn global_slot() -> &'static OnceLock<Arc<dyn SandboxClient>> {
 /// Initialize the process-global sandbox client. Selection order:
 ///
 /// 1. `SMOOTH_BOOTSTRAP_BILL_URL` set → `BillSandboxClient`
-///    (brokered microsandbox over TCP; Boardroom mode).
+///    (brokered microsandbox over TCP; Safehouse mode).
 /// 2. `direct-sandbox` feature enabled → `DirectSandboxClient`
 ///    (embedded microsandbox in-process — the dev-mac default).
 /// 3. Otherwise → a broken `BillSandboxClient` pointed at an
@@ -453,7 +453,7 @@ pub fn init_sandbox_client() {
         }
         #[cfg(not(feature = "direct-sandbox"))]
         {
-            // Boardroom binary: no direct backend, no Bill URL, no hope.
+            // Safehouse binary: no direct backend, no Bill URL, no hope.
             // This is a configuration bug, not a runtime condition we can
             // recover from. Point at an obviously-wrong URL so the first
             // call fails loudly with a network error.

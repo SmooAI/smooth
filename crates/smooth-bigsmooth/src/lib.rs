@@ -22,7 +22,7 @@ pub mod pb {
 /// lands in iter-3.
 pub mod grpc;
 
-/// Production Judge impl on BoardroomNarc + serve_uds helper.
+/// Production Judge impl on SafehouseNarc + serve_uds helper.
 /// Pearl th-893801 iter-3a.
 pub mod narc_grpc;
 
@@ -37,32 +37,32 @@ pub mod tonic_clients;
 
 pub mod access;
 pub mod audit;
-pub mod boardroom;
-pub mod boardroom_narc;
+pub mod safehouse;
+pub mod safehouse_narc;
 
-/// Phase 4 alias: `BoardroomNarc` keeps the legacy name on
+/// Phase 4 alias: `SafehouseNarc` keeps the legacy name on
 /// the type but new code should prefer `Narc` — in the
-/// single-VM model there's no "boardroom" anymore, just "the
+/// single-VM model there's no "safehouse" anymore, just "the
 /// Narc". Both names refer to the same struct. Pearl th-893801
 /// Phase 4 iter-6a.
-pub use boardroom_narc::BoardroomNarc as Narc;
+pub use safehouse_narc::SafehouseNarc as Narc;
 
-/// Phase 4 module alias: in the single-VM model "boardroom"
+/// Phase 4 module alias: in the single-VM model "safehouse"
 /// is just "the cast running in the VM". `crate::vm_cast` is
-/// the preferred path; `crate::boardroom` stays valid for
+/// the preferred path; `crate::safehouse` stays valid for
 /// existing imports during the transition. Pearl th-893801
 /// Phase 4 iter-6d.
-pub use boardroom as vm_cast;
+pub use safehouse as vm_cast;
 
 /// Phase 4 type alias: prefer `VmCastHandles` in new code.
-/// Same struct as `BoardroomHandles`. Pearl th-893801 Phase 4
+/// Same struct as `SafehouseHandles`. Pearl th-893801 Phase 4
 /// iter-6d.
-pub use boardroom::BoardroomHandles as VmCastHandles;
+pub use safehouse::SafehouseHandles as VmCastHandles;
 
 /// Phase 4 function alias: prefer `spawn_vm_cast` in new
-/// code. Same fn as `boardroom::spawn_boardroom_cast`. Pearl
+/// code. Same fn as `safehouse::spawn_safehouse_cast`. Pearl
 /// th-893801 Phase 4 iter-6d.
-pub use boardroom::spawn_boardroom_cast as spawn_vm_cast;
+pub use safehouse::spawn_safehouse_cast as spawn_vm_cast;
 
 #[cfg(test)]
 mod phase4_alias_smoke {
@@ -74,16 +74,16 @@ mod phase4_alias_smoke {
     #[test]
     fn narc_alias_resolves() {
         // Constructible via either name without surprises.
-        let _via_alias: crate::Narc = crate::boardroom_narc::BoardroomNarc::without_llm();
+        let _via_alias: crate::Narc = crate::safehouse_narc::SafehouseNarc::without_llm();
     }
 
     #[test]
-    fn vm_cast_module_is_the_boardroom_module() {
-        // If `crate::vm_cast` and `crate::boardroom` diverge,
+    fn vm_cast_module_is_the_safehouse_module() {
+        // If `crate::vm_cast` and `crate::safehouse` diverge,
         // this assertion picks one or the other arbitrarily —
         // the real check is that both type paths resolve to
         // the same type via the alias.
-        fn _accepts_handles(_h: crate::vm_cast::BoardroomHandles) {}
+        fn _accepts_handles(_h: crate::vm_cast::SafehouseHandles) {}
         fn _alias_accepts_handles(_h: crate::VmCastHandles) {}
     }
 }

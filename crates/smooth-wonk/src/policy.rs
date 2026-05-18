@@ -54,7 +54,7 @@ impl PolicyHolder {
         Ok(holder)
     }
 
-    /// Create a `PolicyHolder` from an in-memory policy (for testing or boardroom).
+    /// Create a `PolicyHolder` from an in-memory policy (for testing or safehouse).
     #[allow(dead_code)]
     pub fn from_policy(policy: Policy) -> Self {
         Self {

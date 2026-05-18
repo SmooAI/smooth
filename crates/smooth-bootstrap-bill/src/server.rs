@@ -287,9 +287,9 @@ pub async fn spawn_sandbox(spec: SandboxSpec) -> Result<(String, Vec<PortMapping
     // Opt-in: let the guest reach host loopback + RFC1918 addresses.
     // microsandbox's default policy is `public_only`, which denies
     // loopback/private outbound — fine for untrusted operator work, but
-    // the Boardroom VM (and operator VMs dispatched by a Boardroom-mode
+    // the Safehouse VM (and operator VMs dispatched by a Safehouse-mode
     // Big Smooth) must be able to talk back to Bill on 127.0.0.1 and to
-    // the Boardroom's Archivist. When this flag is set we apply
+    // the Safehouse's Archivist. When this flag is set we apply
     // `allow_all()` which removes those denies.
     //
     // The secrets layer rides on the same `.network(|n| ...)` closure,
@@ -568,7 +568,7 @@ pub async fn spawn_sandbox(spec: SandboxSpec) -> Result<(String, Vec<PortMapping
 ///
 /// microsandbox publishes guest ports on 127.0.0.1 only (hardcoded in the
 /// builder). For cross-VM traffic (e.g., an operator's Scribe forwarding
-/// logs to the Boardroom's Archivist), the port must also be reachable
+/// logs to the Safehouse's Archivist), the port must also be reachable
 /// via the host's real network interface. This tiny proxy accepts
 /// connections on `0.0.0.0:<port>` and forwards each one to
 /// `127.0.0.1:<port>` via tokio::io::copy_bidirectional.

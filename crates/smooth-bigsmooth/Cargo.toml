@@ -15,7 +15,7 @@ default = ["direct-sandbox"]
 # Enables the in-process `DirectSandboxClient`, which links microsandbox
 # transitively via `smooth-bootstrap-bill/server`. Required on the host
 # (`th up` dev mode, integration tests that boot VMs directly). Disabled
-# when cross-compiling the Boardroom binary for
+# when cross-compiling the Safehouse binary for
 # aarch64-unknown-linux-musl, because microsandbox's `msb_krun_devices`
 # can't compile for musl/aarch64 (Linux VM ioctls absent from musl libc).
 direct-sandbox = ["smooth-bootstrap-bill/server"]
@@ -27,8 +27,8 @@ smooth-operator = { path = "../smooth-operator", package = "smooai-smooth-operat
 smooth-code = { path = "../smooth-code", package = "smooai-smooth-code" }
 smooth-policy.workspace = true
 smooth-web = { path = "../smooth-web", package = "smooai-smooth-web" }
-# Boardroom cast — Big Smooth hosts these as tokio tasks when it boots
-# inside a Boardroom VM (SMOOTH_BOARDROOM_MODE=1). They mirror the per-VM
+# Safehouse cast — Big Smooth hosts these as tokio tasks when it boots
+# inside a Safehouse VM (SMOOTH_SAFEHOUSE_MODE=1). They mirror the per-VM
 # cast every Operator spawns inside its own pod.
 smooth-wonk.workspace = true
 smooth-goalie.workspace = true

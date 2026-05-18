@@ -17,7 +17,7 @@
 //! * **Fire-and-forget**: a POST failure is logged and swallowed. Archivist
 //!   downtime cannot wedge the agent.
 //! * **No shared state with Big Smooth's Scribe instance**: even when
-//!   Scribe and Archivist run in the same process (Boardroom mode), the
+//!   Scribe and Archivist run in the same process (Safehouse mode), the
 //!   forwarder uses its own reqwest client and its own mpsc channel.
 
 use std::time::Duration;

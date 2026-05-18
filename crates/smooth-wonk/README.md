@@ -22,7 +22,7 @@ Wonk is the security authority inside every Smooth Operator microVM. It holds th
 
 Every endpoint requires `Authorization: Bearer <operator_token>` from the per-VM policy's `[auth]` section. Constant-time comparison. Localhost origin is not enough — we expect Goalie and the runner to carry the token; stray binaries installed via `apk add` cannot.
 
-When the rule engine returns "unknown", Wonk escalates to the Boardroom Narc's LLM-judge via `NarcClient`, caches the decision by policy hash, and serves the answer. No per-call latency tax for common decisions.
+When the rule engine returns "unknown", Wonk escalates to the Safehouse Narc's LLM-judge via `NarcClient`, caches the decision by policy hash, and serves the answer. No per-call latency tax for common decisions.
 
 ```
 agent tool ─▶ WonkHook ─▶ /check/tool ─▶ decision
@@ -38,7 +38,7 @@ Part of **[Smooth](https://github.com/SmooAI/smooth)**, the security-first AI-ag
 - **`PolicyHolder`** — hot-reloadable policy container backed by `ArcSwap` + `notify`.
 - **`Negotiator`** / **`AccessRequest`** / **`AccessResponse`** — runtime access negotiation with Big Smooth (for requests a policy doesn't predict).
 - **`WonkHook`** — `ToolHook` impl that wires Wonk decisions into the agent's tool registry.
-- **`NarcClient`** — LLM-judge escalation to the Boardroom's central Narc.
+- **`NarcClient`** — LLM-judge escalation to the Safehouse's central Narc.
 
 ## Usage
 
@@ -47,7 +47,7 @@ use smooth_wonk::{build_router, AppState, PolicyHolder, Negotiator};
 use std::sync::Arc;
 
 let policy = PolicyHolder::from_toml(include_str!("policy.toml"))?;
-let negotiator = Negotiator::new("http://big-smooth.boardroom:4400", policy.clone());
+let negotiator = Negotiator::new("http://big-smooth.safehouse:4400", policy.clone());
 let state = Arc::new(AppState::new(policy, negotiator));
 let app = build_router(state);
 axum::serve(listener, app).await?;

@@ -3,7 +3,7 @@
 #architecture #cast
 
 > [!arch] One process or one VM, eight roles — two transports between them
-> Every cast member runs as a tokio task or in-process service alongside Big Smooth. There are no per-actor VMs. In sandboxed mode they share the Boardroom microVM; in direct mode they share the `th` host process. Crate boundaries are preserved so each role keeps its own state, hooks, and tests.
+> Every cast member runs as a tokio task or in-process service alongside Big Smooth. There are no per-actor VMs. In sandboxed mode they share the Safehouse microVM; in direct mode they share the `th` host process. Crate boundaries are preserved so each role keeps its own state, hooks, and tests.
 >
 > Within Big Smooth's process they talk over **`Arc`-shared state** (no wire, no serialization). Across the operator-runner subprocess boundary — which exists in both modes — they talk over **tonic gRPC on UDS**. See [[Transport]] for the full topology.
 
@@ -34,9 +34,9 @@ The orchestrator. The `axum` server on `:4400`. Owns:
 - The teammate registry (the UI's "who's running right now").
 - The access store (pending and approved access requests).
 
-**Invariant: Big Smooth never writes user-code paths.** Operators write code; Big Smooth records, dispatches, and reports. The boardroom-mode Narc enforces this with the WriteGuard hook.
+**Invariant: Big Smooth never writes user-code paths.** Operators write code; Big Smooth records, dispatches, and reports. The safehouse-mode Narc enforces this with the WriteGuard hook.
 
-**Boots** via `crates/smooth-bigsmooth/src/bin/boardroom.rs` (in-VM) or via the host-side `cmd_up` path when running in direct mode.
+**Boots** via `crates/smooth-bigsmooth/src/bin/safehouse.rs` (in-VM) or via the host-side `cmd_up` path when running in direct mode.
 
 ---
 
@@ -59,7 +59,7 @@ Goalie and Narc both delegate every decision to Wonk. A single source of policy 
 The outbound HTTP/HTTPS forward proxy. Dumb pipe: every request asks Wonk, then forwards or returns 403.
 
 - Binds an ephemeral loopback port; `HTTP_PROXY` + `HTTPS_PROXY` in operator env point to it.
-- JSON-lines audit log (default `/tmp/goalie-boardroom.jsonl` for the boardroom Goalie; per-operator path otherwise).
+- JSON-lines audit log (default `/tmp/goalie-safehouse.jsonl` for the safehouse Goalie; per-operator path otherwise).
 - In sandboxed mode, microsandbox's `allow_host_loopback` exposes the host's gateway IP to the guest so Goalie can reach LLM providers, Docker / OrbStack / Kalima APIs, or anything the policy allows on `host.docker.internal`.
 
 Goalie has no policy of its own. Everything is delegated.
@@ -75,7 +75,7 @@ Tool surveillance. Two layers:
 
 Narc is wired as a `ToolHook` in `smooth-operator`. Every tool call passes through `pre_call` (block before exec) and `post_call` (block before result is handed back to LLM). Severity-tagged alerts are forwarded to Scribe.
 
-**How operator-runner subprocesses reach Narc.** Each runner dials the local UDS at `$SMOOTH_SINGLE_PROCESS_SOCKET_DIR/narc.sock` (or the boardroom default `$XDG_RUNTIME_DIR/smooth/narc.sock`) via `smooth_wonk::NarcGrpcUds::connect` — see `crates/smooth-operator-runner/src/main.rs` ≈ line 1546. The wire is `tonic 0.12` + `prost 0.13` speaking the `smooth.narc.v1.Judge` service defined in `proto/narc.proto`. The legacy `SMOOTH_NARC_URL` HTTP fallback is only kept for old dispatch paths that haven't been ported to UDS.
+**How operator-runner subprocesses reach Narc.** Each runner dials the local UDS at `$SMOOTH_SINGLE_PROCESS_SOCKET_DIR/narc.sock` (or the safehouse default `$XDG_RUNTIME_DIR/smooth/narc.sock`) via `smooth_wonk::NarcGrpcUds::connect` — see `crates/smooth-operator-runner/src/main.rs` ≈ line 1546. The wire is `tonic 0.12` + `prost 0.13` speaking the `smooth.narc.v1.Judge` service defined in `proto/narc.proto`. The legacy `SMOOTH_NARC_URL` HTTP fallback is only kept for old dispatch paths that haven't been ported to UDS.
 
 ---
 
@@ -92,7 +92,7 @@ A background `ForwarderHandle` batches entries and POSTs them to the [[#Archivis
 
 ## Archivist
 
-Central log + event aggregator. One per Smooth instance — bound to `0.0.0.0:4401` inside the Boardroom VM (the guest port microsandbox forwards to the host so all Scribes can reach it, even across VM boundaries).
+Central log + event aggregator. One per Smooth instance — bound to `0.0.0.0:4401` inside the Safehouse VM (the guest port microsandbox forwards to the host so all Scribes can reach it, even across VM boundaries).
 
 - Stores log entries in a `MemoryArchiveStore` (in-RAM) by default; persistent backends are pluggable.
 - Stores rich agent events (`AgentEvent` variants) in `MemoryEventArchive`.

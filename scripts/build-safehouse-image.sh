@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
-# Build (and optionally push) the Boardroom OCI image.
+# Build (and optionally push) the Safehouse OCI image.
 #
-# Default publishing target: ghcr.io/smooai/boardroom (public).
+# Default publishing target: ghcr.io/smooai/safehouse (public).
 #
 # Steps:
-#   1. Cross-compile boardroom + smooth-dolt to aarch64-unknown-linux-musl
-#      (delegates to build-boardroom.sh — incremental).
-#   2. docker/podman build docker/Dockerfile.boardroom tagged with the
+#   1. Cross-compile safehouse + smooth-dolt to aarch64-unknown-linux-musl
+#      (delegates to build-safehouse.sh — incremental).
+#   2. docker/podman build docker/Dockerfile.safehouse tagged with the
 #      workspace version and `latest`.
 #   3. If --push is passed, push both tags to the registry.
 #
 # Usage:
-#   scripts/build-boardroom-image.sh                 # build only, tag with workspace version
-#   scripts/build-boardroom-image.sh v1.2.3          # explicit tag, build only
-#   scripts/build-boardroom-image.sh --push          # build + push
-#   scripts/build-boardroom-image.sh v1.2.3 --push   # build v1.2.3 + push
+#   scripts/build-safehouse-image.sh                 # build only, tag with workspace version
+#   scripts/build-safehouse-image.sh v1.2.3          # explicit tag, build only
+#   scripts/build-safehouse-image.sh --push          # build + push
+#   scripts/build-safehouse-image.sh v1.2.3 --push   # build v1.2.3 + push
 #
 # Environment:
 #   SMOOTH_IMAGE_TOOL   `docker` (default) or `podman`
-#   SMOOTH_IMAGE_REPO   image repository (default: ghcr.io/smooai/boardroom)
+#   SMOOTH_IMAGE_REPO   image repository (default: ghcr.io/smooai/safehouse)
 #
 # Pushing to ghcr.io requires a token with `write:packages` scope:
 #     gh auth refresh -h github.com -s write:packages,read:packages
@@ -29,7 +29,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 TOOL="${SMOOTH_IMAGE_TOOL:-docker}"
-REPO="${SMOOTH_IMAGE_REPO:-ghcr.io/smooai/boardroom}"
+REPO="${SMOOTH_IMAGE_REPO:-ghcr.io/smooai/safehouse}"
 
 if ! command -v "$TOOL" >/dev/null 2>&1; then
     echo "error: $TOOL not found on PATH (override with SMOOTH_IMAGE_TOOL)" >&2
@@ -57,8 +57,8 @@ if [ -z "$VERSION" ]; then
     fi
 fi
 
-echo "==> Cross-compiling boardroom + smooth-dolt"
-bash scripts/build-boardroom.sh
+echo "==> Cross-compiling safehouse + smooth-dolt"
+bash scripts/build-safehouse.sh
 
 # Resolve the real cargo target dir (shared dirs are configured
 # in ~/.cargo/config.toml; see pearl th-target-bloat).
@@ -66,31 +66,31 @@ TARGET_DIR=$(cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -
 if [ -z "$TARGET_DIR" ]; then
     TARGET_DIR="./target"
 fi
-SRC_BOARDROOM="$TARGET_DIR/aarch64-unknown-linux-musl/release/boardroom"
+SRC_SAFEHOUSE="$TARGET_DIR/aarch64-unknown-linux-musl/release/safehouse"
 SRC_DOLT="$TARGET_DIR/aarch64-unknown-linux-musl/release/smooth-dolt"
 
 # Dockerfile COPY paths are relative to the build context; mirror
 # the binaries under ./target/ so the Dockerfile keeps working
 # even when cargo's target dir lives elsewhere.
 mkdir -p target/aarch64-unknown-linux-musl/release
-BOARDROOM_BIN="target/aarch64-unknown-linux-musl/release/boardroom"
+SAFEHOUSE_BIN="target/aarch64-unknown-linux-musl/release/safehouse"
 DOLT_BIN="target/aarch64-unknown-linux-musl/release/smooth-dolt"
-cp -f "$SRC_BOARDROOM" "$BOARDROOM_BIN"
+cp -f "$SRC_SAFEHOUSE" "$SAFEHOUSE_BIN"
 cp -f "$SRC_DOLT" "$DOLT_BIN"
 
-if [ ! -f "$BOARDROOM_BIN" ]; then
-    echo "error: expected $BOARDROOM_BIN but build did not produce it" >&2
+if [ ! -f "$SAFEHOUSE_BIN" ]; then
+    echo "error: expected $SAFEHOUSE_BIN but build did not produce it" >&2
     exit 1
 fi
 if [ ! -f "$DOLT_BIN" ]; then
     echo "error: expected $DOLT_BIN but build did not produce it" >&2
-    echo "       (boardroom needs smooth-dolt to be cross-compiled too; see build-boardroom.sh)" >&2
+    echo "       (safehouse needs smooth-dolt to be cross-compiled too; see build-safehouse.sh)" >&2
     exit 1
 fi
 
 echo "==> Building $REPO:$VERSION"
 $TOOL build \
-    --file docker/Dockerfile.boardroom \
+    --file docker/Dockerfile.safehouse \
     --tag "$REPO:$VERSION" \
     --tag "$REPO:latest" \
     --build-arg "VERSION=$VERSION" \

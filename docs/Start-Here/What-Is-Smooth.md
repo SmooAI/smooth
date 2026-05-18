@@ -9,10 +9,10 @@
 
 `th up` (the default, no subcommand) does this:
 
-1. Pulls the Boardroom OCI image (`ghcr.io/smooai/boardroom:latest`).
+1. Pulls the Safehouse OCI image (`ghcr.io/smooai/safehouse:latest`).
 2. Boots a single microsandbox microVM from that image.
 3. Forwards guest `:4400` out to the host so your browser / `th code` can reach the API.
-4. Inside the VM, the Boardroom binary brings up [[Architecture/The-Cast#Big-Smooth|Big Smooth]] plus the rest of the [[Architecture/The-Cast|cast]] as tokio tasks.
+4. Inside the VM, the Safehouse binary brings up [[Architecture/The-Cast#Big-Smooth|Big Smooth]] plus the rest of the [[Architecture/The-Cast|cast]] as tokio tasks.
 5. Exits. The VM runs out-of-process; `th down` later tears it back down.
 
 That's the whole user experience. There is no daemon to manage on the host, no Docker container, no persistent named volume, no `th vm` subsystem. The microVM IS Smooth.
@@ -39,7 +39,7 @@ See [[Architecture/Dispatch]] for the dispatch flow, [[Architecture/Operators]] 
 
 - Not a hosted service. Everything runs on your machine.
 - Not Docker. No container runtime is required; outbound to a host Docker / OrbStack / Kalima is supported via `allow_host_loopback`, but Smooth never invokes Docker itself.
-- Not multi-tenant. One user, one boardroom VM per host.
+- Not multi-tenant. One user, one safehouse VM per host.
 
 ## Related
 

@@ -3,7 +3,7 @@
 #moc #architecture
 
 > [!arch] One VM, one cast, two modes
-> Smooth is a Rust binary that boots Big Smooth + the security cast + an operator runtime in one address space (direct) or one microVM (sandboxed). There is no per-operator VM and no separate boardroom VM. Operators are dispatched as work units inside the same process or VM where Big Smooth lives.
+> Smooth is a Rust binary that boots Big Smooth + the security cast + an operator runtime in one address space (direct) or one microVM (sandboxed). There is no per-operator VM and no separate safehouse VM. Operators are dispatched as work units inside the same process or VM where Big Smooth lives.
 
 ## System diagram
 
@@ -61,8 +61,8 @@
 ## Control flow (sandboxed)
 
 1. User runs `th up` on the host.
-2. `th` calls `start_sandboxed_vm()` — boots the Boardroom microVM via the embedded `microsandbox` SDK, forwards `:4400` to host `:4400`, exits.
-3. Inside the VM, the `boardroom` binary launches. It opens the Dolt pearl store, calls `spawn_boardroom_cast()` to bring up Wonk / Goalie / Narc / Scribe / Archivist / Diver as tokio tasks, and starts the Big Smooth axum server.
+2. `th` calls `start_sandboxed_vm()` — boots the Safehouse microVM via the embedded `microsandbox` SDK, forwards `:4400` to host `:4400`, exits.
+3. Inside the VM, the `safehouse` binary launches. It opens the Dolt pearl store, calls `spawn_safehouse_cast()` to bring up Wonk / Goalie / Narc / Scribe / Archivist / Diver as tokio tasks, and starts the Big Smooth axum server.
 4. User opens `http://localhost:4400` or runs `th code`. UI talks to Big Smooth's REST + WebSocket API.
 5. User issues a task. Big Smooth's `dispatch_ws_task` decides direct vs sandboxed (env / flag) and runs the operator. See [[Dispatch]].
 6. Operator emits `AgentEvent`s as JSON-lines; Big Smooth re-emits them as `ServerEvent`s on the WebSocket. The dashboard and TUI subscribe.
@@ -73,7 +73,7 @@
 | ---------------------------- | -------------------------------------------------------------------- |
 | `smooth-cli`                 | The `th` binary. Clap entry point, `th up`, `th down`, all subcommands. |
 | `smooth-bigsmooth`           | Big Smooth itself. axum server, dispatch, sandbox SDK, pearl + Diver wiring. |
-| `smooth-bigsmooth/bin/boardroom` | In-VM Big Smooth binary. Cross-compiled to musl, baked into Boardroom image. |
+| `smooth-bigsmooth/bin/safehouse` | In-VM Big Smooth binary. Cross-compiled to musl, baked into Safehouse image. |
 | `smooth-wonk`                | Access-control authority. tonic gRPC server on `wonk.sock`.          |
 | `smooth-goalie`              | HTTP/HTTPS forward proxy. Delegates every decision to Wonk via the gRPC client. |
 | `smooth-narc`                | Tool-surveillance hook. Regex + LLM judge. tonic gRPC server on `narc.sock`. |

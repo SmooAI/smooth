@@ -4,7 +4,7 @@
 
 **Bootstrap Bill — The Board's host-side broker**
 
-*Bill walks between worlds. Big Smooth lives inside the Boardroom VM where the hypervisor cannot be reached. Bill lives on the host where the hypervisor is. He takes his orders from Big Smooth, and he spawns the pods nobody else can.*
+*Bill walks between worlds. Big Smooth lives inside the Safehouse VM where the hypervisor cannot be reached. Bill lives on the host where the hypervisor is. He takes his orders from Big Smooth, and he spawns the pods nobody else can.*
 
 [![crates.io](https://img.shields.io/crates/v/smooai-smooth-bootstrap-bill)](https://crates.io/crates/smooai-smooth-bootstrap-bill)
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/SmooAI/smooth/blob/main/LICENSE)
@@ -15,9 +15,9 @@
 
 ## Why Bill exists
 
-Big Smooth, the orchestrator, lives inside a hardware-isolated Boardroom microVM for a reason — it's the one process in the cast that's `READ-ONLY` and never touches the host. But HVF on Apple Silicon (and KVM under most configs) don't offer nested virtualization. Big Smooth cannot call `microsandbox` from inside its own VM to spawn operator pods.
+Big Smooth, the orchestrator, lives inside a hardware-isolated Safehouse microVM for a reason — it's the one process in the cast that's `READ-ONLY` and never touches the host. But HVF on Apple Silicon (and KVM under most configs) don't offer nested virtualization. Big Smooth cannot call `microsandbox` from inside its own VM to spawn operator pods.
 
-Bill is the one process on the host that holds `microsandbox::Sandbox` handles. Everyone else — Big Smooth, Archivist, the test harness, the `th` CLI itself in Boardroom mode — asks Bill over TCP loopback (via `host.containers.internal` when the caller lives inside a VM) and Bill does the actual spawn, exec, destroy.
+Bill is the one process on the host that holds `microsandbox::Sandbox` handles. Everyone else — Big Smooth, Archivist, the test harness, the `th` CLI itself in Safehouse mode — asks Bill over TCP loopback (via `host.containers.internal` when the caller lives inside a VM) and Bill does the actual spawn, exec, destroy.
 
 ## Protocol
 
@@ -26,7 +26,7 @@ Line-delimited JSON over TCP. One request per connection, one response line, clo
 ```
 ┌──────────────────────┐              ┌──────────────────────┐
 │   Big Smooth         │              │   Bootstrap Bill     │
-│   (Boardroom VM)     │ ── TCP ───▶  │   (host process)     │
+│   (Safehouse VM)     │ ── TCP ───▶  │   (host process)     │
 │                      │  loopback    │                      │
 │   orchestrator       │              │   holds microsandbox │
 │   READ-ONLY          │              │   Sandbox registry   │

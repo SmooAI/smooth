@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Bootstrap Bill — The Board's host-side broker. Owns microsandbox, spawns pods on behalf of Big Smooth and the rest of the Boardroom cast."
+description = "Bootstrap Bill — The Board's host-side broker. Owns microsandbox, spawns pods on behalf of Big Smooth and the rest of the Safehouse cast."
 readme = "README.md"
 
 [lib]
@@ -14,10 +14,10 @@ name = "smooth_bootstrap_bill"
 default = ["server"]
 # `server`: compile the microsandbox registry + TCP accept loop + the
 # `bootstrap-bill` binary. Required on the host. Disabled when building
-# the Boardroom image (cross-compiling to aarch64-unknown-linux-musl)
+# the Safehouse image (cross-compiling to aarch64-unknown-linux-musl)
 # because `microsandbox` pulls `msb_krun_devices` which references Linux
 # VM device ioctls that don't exist in musl's libc bindings. Inside the
-# Boardroom VM, Big Smooth only needs `BillClient` anyway.
+# Safehouse VM, Big Smooth only needs `BillClient` anyway.
 server = ["dep:microsandbox", "dep:chrono", "dep:uuid", "dep:dirs-next"]
 
 [dependencies]

@@ -20,7 +20,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::configure()
         .build_server(true)
         // Iter-1: the smooth-narc crate hosts both the proto types
-        // and a thin server adapter. The bigsmooth-side BoardroomNarc
+        // and a thin server adapter. The bigsmooth-side SafehouseNarc
         // (which has the AccessStore + grants state) implements the
         // generated trait. We still need the client side because
         // tests in this crate spin a server and dial it.

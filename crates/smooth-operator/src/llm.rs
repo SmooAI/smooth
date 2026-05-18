@@ -856,7 +856,7 @@ impl LlmClient {
     }
 
     /// Call the OpenAI-compatible `/v1/moderations` endpoint to classify
-    /// text as safe or unsafe. Used by Boardroom Narc as a pre-filter
+    /// text as safe or unsafe. Used by Safehouse Narc as a pre-filter
     /// before the LLM judge — flagged content is denied without burning
     /// judge tokens.
     ///

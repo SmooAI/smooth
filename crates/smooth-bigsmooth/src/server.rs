@@ -98,11 +98,11 @@ pub struct AppState {
     pub idle_timeout: Duration,
     /// Broadcast channel for pushing [`ServerEvent`]s to all connected WebSocket clients.
     pub event_tx: broadcast::Sender<ServerEvent>,
-    /// When running inside a Boardroom microVM (`SMOOTH_BOARDROOM_MODE=1`),
+    /// When running inside a Safehouse microVM (`SMOOTH_SAFEHOUSE_MODE=1`),
     /// this carries the URLs of the in-process cast (Wonk/Goalie/Narc/
     /// Scribe/Archivist). `None` in host-mode / dev-mode.
-    pub boardroom: Option<crate::boardroom::BoardroomHandles>,
-    /// Diver client — available when running in Boardroom mode with Diver.
+    pub safehouse: Option<crate::safehouse::SafehouseHandles>,
+    /// Diver client — available when running in Safehouse mode with Diver.
     /// When present, dispatch/complete go through Diver's HTTP API (with
     /// Jira sync, cost tracking, etc.) instead of direct PearlStore calls.
     pub diver: Option<crate::diver_client::DiverClient>,
@@ -110,24 +110,24 @@ pub struct AppState {
     /// ready pearls and dispatching operators. Behind `Arc<tokio::sync::Mutex<>>`
     /// since the background loop and API handlers both need access.
     pub orchestrator: Arc<tokio::sync::Mutex<crate::orchestrator::Orchestrator>>,
-    /// Boardroom Narc — central LLM-judge-backed access arbiter. Every
+    /// Safehouse Narc — central LLM-judge-backed access arbiter. Every
     /// per-VM Wonk escalates to this when its local policy can't
     /// auto-approve a `/check/*` request. Always present (constructed with
     /// or without an LLM backend) so the `/api/narc/*` routes can unwrap
     /// unconditionally.
-    pub boardroom_narc: crate::boardroom_narc::BoardroomNarc,
+    pub safehouse_narc: crate::safehouse_narc::SafehouseNarc,
     /// Registry of live teammates (operators) — populated on dispatch,
     /// idled when the comment-tap sees `[IDLE]`. Powers `/api/teammates`
     /// and the chat-agent's `teammate_list` tool. See `crate::teammates`.
     pub teammates: Arc<crate::teammates::OperatorRegistry>,
-    /// Pending access-request queue + event bus. When Boardroom Narc
+    /// Pending access-request queue + event bus. When Safehouse Narc
     /// returns [`smooth_narc::judge::Decision::Ask`], the originating
     /// tool call is held open here while a human resolves it via the
     /// `/api/access/{approve,deny}` routes (or the TUI inline card).
     /// See [`crate::access`] for the protocol.
     pub access: crate::access::AccessStore,
     /// Persistent user / project permission grants loaded from
-    /// `wonk-allow.toml`. Consulted by [`crate::boardroom_narc`] after
+    /// `wonk-allow.toml`. Consulted by [`crate::safehouse_narc`] after
     /// the rule engine and before the LLM judge; new grants are
     /// written back here when a `/api/access/approve` resolution
     /// lands at scope `user` or `project`. Pearl th-38b72c.
@@ -208,7 +208,7 @@ impl AppState {
             }
         };
 
-        // Construct the Boardroom Narc. If the host has an LLM provider
+        // Construct the Safehouse Narc. If the host has an LLM provider
         // configured, Narc uses the default provider for its judge; otherwise
         // it runs rule-engine-only and escalates any unhandled request to a
         // human. Load is best-effort — a missing providers.json is fine in
@@ -230,12 +230,12 @@ impl AppState {
                 {
                     Ok(cfg) => Some(cfg),
                     Err(e) => {
-                        tracing::warn!(error = %e, "boardroom narc: no judge/default LLM provider; Narc will escalate unknown requests to humans");
+                        tracing::warn!(error = %e, "safehouse narc: no judge/default LLM provider; Narc will escalate unknown requests to humans");
                         None
                     }
                 },
                 Err(e) => {
-                    tracing::warn!(error = %e, "boardroom narc: failed to load providers.json; Narc will escalate unknown requests to humans");
+                    tracing::warn!(error = %e, "safehouse narc: failed to load providers.json; Narc will escalate unknown requests to humans");
                     None
                 }
             }
@@ -274,7 +274,7 @@ impl AppState {
         // file_pending + await_resolution on the live, shared queue.
         // Pass the SharedWonkGrants so the judge can short-circuit on
         // a persisted grant before falling through to the LLM.
-        let boardroom_narc = crate::boardroom_narc::BoardroomNarc::new(narc_llm_config, access.clone()).with_grants(wonk_grants.clone());
+        let safehouse_narc = crate::safehouse_narc::SafehouseNarc::new(narc_llm_config, access.clone()).with_grants(wonk_grants.clone());
 
         Self {
             pearl_store,
@@ -285,23 +285,23 @@ impl AppState {
             last_activity: Arc::new(Mutex::new(Instant::now())),
             idle_timeout: Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS),
             event_tx,
-            boardroom: None,
+            safehouse: None,
             diver: None,
             orchestrator: Arc::new(tokio::sync::Mutex::new(orchestrator)),
-            boardroom_narc,
+            safehouse_narc,
             teammates: Arc::new(crate::teammates::OperatorRegistry::new()),
             access,
             wonk_grants,
         }
     }
 
-    /// Attach Boardroom cast handles to an existing state. Chainable.
+    /// Attach Safehouse cast handles to an existing state. Chainable.
     #[must_use]
-    pub fn with_boardroom(mut self, handles: crate::boardroom::BoardroomHandles) -> Self {
+    pub fn with_safehouse(mut self, handles: crate::safehouse::SafehouseHandles) -> Self {
         if !handles.diver_url.is_empty() {
             self.diver = Some(crate::diver_client::DiverClient::new(&handles.diver_url));
         }
-        self.boardroom = Some(handles);
+        self.safehouse = Some(handles);
         self
     }
 
@@ -521,7 +521,7 @@ pub fn build_router(state: AppState) -> Router {
         // Jira
         .route("/api/jira/status", get(jira_status_handler))
         .route("/api/jira/sync", post(jira_sync_handler))
-        // Boardroom Narc — central LLM-judge access arbiter. Per-VM Wonks
+        // Safehouse Narc — central LLM-judge access arbiter. Per-VM Wonks
         // POST their uncertain /check/* decisions here; Narc applies the
         // rule engine, its decision cache, and (when unresolved) the LLM
         // judge, then returns an approve/deny/escalate verdict.
@@ -549,12 +549,12 @@ pub fn build_router(state: AppState) -> Router {
 /// On first call this also:
 /// - Initialises the process-global sandbox client (Direct vs Bill,
 ///   selected by the `SMOOTH_BOOTSTRAP_BILL_URL` env var).
-/// - If `SMOOTH_VM_MODE=1` (or the legacy `SMOOTH_BOARDROOM_MODE=1`),
+/// - If `SMOOTH_VM_MODE=1` (or the legacy `SMOOTH_SAFEHOUSE_MODE=1`),
 ///   spawns the in-process cast (Wonk/Goalie/Narc/Scribe/Archivist)
 ///   as tokio tasks in this process and attaches their handles to
 ///   `AppState`. Idempotent if the state already carries cast
 ///   handles. Pearl th-893801 Phase 4 renames the env var to drop
-///   the "boardroom" framing; both names are honored during the
+///   the "safehouse" framing; both names are honored during the
 ///   transition.
 pub async fn start(mut state: AppState, addr: SocketAddr) -> anyhow::Result<()> {
     // Pick the sandbox client (Direct or Bill) exactly once.
@@ -567,13 +567,13 @@ pub async fn start(mut state: AppState, addr: SocketAddr) -> anyhow::Result<()> 
     let cast_mode = std::env::var("SMOOTH_VM_MODE")
         .ok()
         .map(|v| truthy(&v))
-        .or_else(|| std::env::var("SMOOTH_BOARDROOM_MODE").ok().map(|v| truthy(&v)))
+        .or_else(|| std::env::var("SMOOTH_SAFEHOUSE_MODE").ok().map(|v| truthy(&v)))
         .unwrap_or(false);
-    if state.boardroom.is_none() && cast_mode {
-        match crate::boardroom::spawn_boardroom_cast(None).await {
+    if state.safehouse.is_none() && cast_mode {
+        match crate::safehouse::spawn_safehouse_cast(None).await {
             Ok(handles) => {
                 tracing::info!(archivist = %handles.archivist_url, "Big Smooth running with in-process cast");
-                state.boardroom = Some(handles);
+                state.safehouse = Some(handles);
             }
             Err(e) => {
                 tracing::error!(error = %e, "in-process cast: spawn failed; continuing without it");
@@ -968,7 +968,7 @@ pub async fn dispatch_ws_task(state: &AppState, opts: DispatchOptions) {
     // Three cases:
     //   1. `SMOOTH_WORKFLOW_DIRECT=1`         → spawn runner as host subprocess
     //      (user opted into direct mode; no microVM around them).
-    //   2. `SMOOTH_BOARDROOM_MODE=1`          → spawn runner as boardroom-internal
+    //   2. `SMOOTH_SAFEHOUSE_MODE=1`          → spawn runner as safehouse-internal
     //      subprocess. We ARE the microsandbox VM the user paid for; per-operator
     //      nested microVMs would need nested virt (which macOS HVF doesn't have)
     //      and would defeat the consolidated single-VM architecture anyway. Narc /
@@ -981,10 +981,10 @@ pub async fn dispatch_ws_task(state: &AppState, opts: DispatchOptions) {
     let direct_mode = std::env::var("SMOOTH_WORKFLOW_DIRECT")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    let boardroom_mode = std::env::var("SMOOTH_BOARDROOM_MODE")
+    let safehouse_mode = std::env::var("SMOOTH_SAFEHOUSE_MODE")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    if direct_mode || boardroom_mode {
+    if direct_mode || safehouse_mode {
         dispatch_ws_task_direct(state, opts).await;
     } else {
         dispatch_ws_task_sandboxed(state, opts).await;
@@ -1239,7 +1239,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
     let event_tx = state.event_tx.clone();
     let pearl_store = state.pearl_store.clone();
     let last_activity = state.last_activity.clone();
-    let boardroom_handles = state.boardroom.clone();
+    let safehouse_handles = state.safehouse.clone();
     let orchestrator = state.orchestrator.clone();
 
     // Note: the old printable-ASCII guard was removed — the task message
@@ -1253,7 +1253,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
     //      already created a pearl and passed `pearl_id`, REUSE it. We just
     //      flip its status to in_progress (via Diver if available) so the
     //      orchestrator's ready-pearls sweep doesn't dispatch a duplicate.
-    //   2. Otherwise dispatch through Diver when available (Boardroom mode).
+    //   2. Otherwise dispatch through Diver when available (Safehouse mode).
     //   3. Fall back to direct PearlStore when neither applies.
     let diver = state.diver.clone();
     let pearl_id: Option<String> = if let Some(supplied) = pearl_id_in {
@@ -1372,7 +1372,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
     //
     //   * **Host mode** (Direct sandbox): Big Smooth IS on the host. We can
     //     dereference `working_dir` ourselves, create it if missing, etc.
-    //   * **Boardroom mode** (Bill sandbox, brokered): Big Smooth runs
+    //   * **Safehouse mode** (Bill sandbox, brokered): Big Smooth runs
     //     inside its own microVM and the `working_dir` is an **opaque host
     //     path** (from the test harness / operator). It does not exist in
     //     our filesystem view — we must not stat, canonicalize, or create
@@ -1551,11 +1551,11 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         if let Some(b) = budget {
             env.insert("SMOOTH_BUDGET_USD".into(), b.to_string());
         }
-        // In Boardroom mode, tell every operator VM how to reach the
-        // Boardroom's Archivist and Big Smooth's pearl API. The Scribe
+        // In Safehouse mode, tell every operator VM how to reach the
+        // Safehouse's Archivist and Big Smooth's pearl API. The Scribe
         // forwarder inside the operator will POST batches to the Archivist
         // URL, and pearl tools will call Big Smooth's API.
-        if let Some(ref room) = boardroom_handles {
+        if let Some(ref room) = safehouse_handles {
             match room.operator_facing_archivist_url() {
                 Some(archivist_url) => {
                     tracing::info!(task_id = tid, url = %archivist_url, "operator env: SMOOTH_ARCHIVIST_URL set");
@@ -1571,7 +1571,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         }
 
         // Every operator's Wonk escalates uncertain /check/* decisions to
-        // the central Boardroom Narc via this URL — and `host_tool`
+        // the central Safehouse Narc via this URL — and `host_tool`
         // hits Big Smooth's `/api/host/exec` over the same URL.
         //
         // Reaching the host from inside microsandbox 0.3.14 is finicky:
@@ -1595,7 +1595,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         // those ranges). Falls back to `127.0.0.1` (the historical
         // value) only if local-IP detection fails entirely; in that
         // pathological case host_tool will still error, but at least
-        // the previous "boardroom-mode-only" footgun is gone.
+        // the previous "safehouse-mode-only" footgun is gone.
         //
         // `SMOOTH_NARC_URL` env override still wins — useful for
         // tests or for pointing several boards at a shared Narc.
@@ -1730,19 +1730,19 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         }
 
         // If we managed to write a policy file, point the runner at it and
-        // add a bind mount for the dir. In Boardroom mode the tempdir is
-        // inside the Boardroom VM's filesystem — Bill can't bind-mount it
+        // add a bind mount for the dir. In Safehouse mode the tempdir is
+        // inside the Safehouse VM's filesystem — Bill can't bind-mount it
         // into the operator VM because it doesn't exist on the host. Skip
         // the mount; the runner will use its default policy which covers
         // the execute phase. Future: pipe policy content through Bill's
         // protocol so the file lands on the host.
-        let in_boardroom = boardroom_handles.is_some();
+        let in_safehouse = safehouse_handles.is_some();
 
-        // Make sure we have *some* tempdir in non-boardroom mode so we can
+        // Make sure we have *some* tempdir in non-safehouse mode so we can
         // hand the task message to the runner via a file (avoids the
         // kernel-cmdline size limit on long messages). If policy generation
         // failed earlier, fall back to a bare tempdir here.
-        if !in_boardroom && policy_dir_guard.is_none() {
+        if !in_safehouse && policy_dir_guard.is_none() {
             if let Ok(dir) = make_control_tempdir("smooth-control-", control_root.as_deref()) {
                 policy_dir_guard = Some(dir);
             }
@@ -1779,9 +1779,9 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
             false
         };
         if !task_file_set {
-            // Boardroom mode or tempdir creation failed: stuff the task in an
+            // Safehouse mode or tempdir creation failed: stuff the task in an
             // env var. This still works for short messages but will overflow
-            // the kernel cmdline for long ones — Boardroom mode needs a
+            // the kernel cmdline for long ones — Safehouse mode needs a
             // brokered task-file path eventually.
             env.insert("SMOOTH_TASK".into(), full_task_message.clone());
         }
@@ -1851,12 +1851,12 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
             } else {
                 tracing::warn!(
                     task_id = tid,
-                    "SMOOTH_WORKFLOW=1 but no policy dir (Boardroom mode); routing config path not plumbed yet"
+                    "SMOOTH_WORKFLOW=1 but no policy dir (Safehouse mode); routing config path not plumbed yet"
                 );
             }
         }
 
-        let policy_mount = if !in_boardroom {
+        let policy_mount = if !in_safehouse {
             if let Some(ref dir) = policy_dir_guard {
                 let host = dir
                     .path()
@@ -1879,13 +1879,13 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
                 None
             }
         } else {
-            tracing::info!(task_id = tid, "boardroom mode: skipping policy bind mount (runner will use default policy)");
+            tracing::info!(task_id = tid, "safehouse mode: skipping policy bind mount (runner will use default policy)");
             None
         };
 
         // Operator VMs need to reach Bill on host loopback so Big Smooth
-        // (running inside the Boardroom VM) can request exec/destroy, AND
-        // their in-VM Scribe needs to reach the Boardroom's Archivist for
+        // (running inside the Safehouse VM) can request exec/destroy, AND
+        // their in-VM Scribe needs to reach the Safehouse's Archivist for
         // log forwarding. Both destinations are 127.0.0.1:<port> from the
         // guest's perspective, which microsandbox's default `public_only`
         // policy denies. Always opt operator VMs in — Wonk's in-VM policy
@@ -2009,7 +2009,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
                 // Mount ~/.smooth for global config, registry, and pearl access.
                 // RW so operators can update pearls, write audit logs, etc.
                 //
-                // In brokered mode (Boardroom VM), we can't resolve the host
+                // In brokered mode (Safehouse VM), we can't resolve the host
                 // home directory — dirs_next gives the guest /root. Use
                 // SMOOTH_HOME_HOST_PATH if set (the launcher/test harness sets
                 // it to the real host ~/.smooth path). In host mode, resolve
@@ -2747,7 +2747,7 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
             }
         }
         // Point the runner's in-process Wonk at Big Smooth's
-        // Boardroom Narc so the direct path gets parity with the
+        // Safehouse Narc so the direct path gets parity with the
         // sandboxed path. Without this the runner's Wonk has no
         // arbiter and hard-denies every request its local policy
         // can't auto-approve — the agent then has no path to the
@@ -2763,7 +2763,7 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
             std::env::var("SMOOTH_BIGSMOOTH_URL").ok().as_deref(),
         );
         cmd.env("SMOOTH_NARC_URL", &narc_url_for_direct);
-        tracing::info!(task_id = %tid, narc_url = %narc_url_for_direct, "direct dispatch: runner Wonk wired to Boardroom Narc");
+        tracing::info!(task_id = %tid, narc_url = %narc_url_for_direct, "direct dispatch: runner Wonk wired to Safehouse Narc");
         cmd.current_dir(&workspace_canon)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -4477,7 +4477,7 @@ async fn run_chat_with_history(
     Ok((conversation.last_assistant_content().unwrap_or("(no response)").to_string(), tool_calls))
 }
 
-// ── Boardroom Narc — POST /api/narc/judge ─────────────────
+// ── Safehouse Narc — POST /api/narc/judge ─────────────────
 
 /// Arbitrate a runtime access request escalated from a per-VM Wonk.
 ///
@@ -4489,13 +4489,13 @@ async fn run_chat_with_history(
 /// wire format shared with `smooth-narc::judge`.
 async fn narc_judge_handler(State(state): State<AppState>, Json(request): Json<smooth_narc::judge::JudgeRequest>) -> Json<smooth_narc::judge::JudgeDecision> {
     state.touch();
-    let decision = state.boardroom_narc.judge(request).await;
+    let decision = state.safehouse_narc.judge(request).await;
     Json(decision)
 }
 
 // ── Access — auto-mode-style pending-request queue ────────────
 //
-// Wonk-the-binary today calls into BoardroomNarc; when Narc returns
+// Wonk-the-binary today calls into SafehouseNarc; when Narc returns
 // `Decision::Ask`, the call holds open inside `judge()` while a human
 // resolves it via these four routes. The TUI subscribes to the SSE
 // stream to render inline approval cards (pearl th-670fb2).
@@ -4707,7 +4707,7 @@ async fn creds_issue_handler(
         scope_options: smooth_narc::judge::Scope::default_options(),
     };
     let (id, fut) = state.access.file_pending(req);
-    // 60s aligns with BoardroomNarc's ASK_HOLD_TIMEOUT — same
+    // 60s aligns with SafehouseNarc's ASK_HOLD_TIMEOUT — same
     // human-attention budget.
     let Some(resolution) = fut.await_resolution_with_timeout(std::time::Duration::from_secs(60)).await else {
         let _ = state.access.expire(&id);
