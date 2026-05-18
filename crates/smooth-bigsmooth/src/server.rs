@@ -1076,6 +1076,16 @@ fn find_operator_runner_binary() -> Option<std::path::PathBuf> {
             return Some(p);
         }
     }
+    // ~/.smooth/runner-bin/smooth-operator-runner — the canonical sync
+    // location written by `scripts/build-operator-runner.sh`. Checked
+    // first so a release `th` (running outside any workspace) still
+    // discovers the cross-compiled runner the dev built.
+    if let Some(home) = dirs_next::home_dir() {
+        let synced = home.join(".smooth").join("runner-bin").join("smooth-operator-runner");
+        if synced.is_file() {
+            return Some(synced);
+        }
+    }
     let manifest = env!("CARGO_MANIFEST_DIR");
     let mut dir = std::path::PathBuf::from(manifest);
     for _ in 0..5 {
