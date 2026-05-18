@@ -2610,37 +2610,50 @@ async fn cmd_code(
         }
     }
 
-    // Check if Big Smooth is running
+    // Check if Big Smooth is running. If not, boot the Safehouse —
+    // the same daemonized sandboxed path `th up` takes. This is the
+    // only auto-start path; we never start a bare in-process Big
+    // Smooth on the host, because that bypasses every guarantee of
+    // the Safehouse (microsandbox isolation, in-VM cast, SAFEHOUSE_MODE
+    // dispatch routing). See ADR-001 + ADR-003 + the user-facing rule
+    // that this is dev tooling, not a release artifact — no fallback
+    // to the legacy host-bind path.
     let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(2)).build()?;
     let health = client.get("http://localhost:4400/health").send().await;
 
     if health.is_err() || !health.as_ref().is_ok_and(|r| r.status().is_success()) {
         println!("Starting Smooth...");
 
-        // Start Big Smooth in background
-        let pearl_store = match find_dolt_dir() {
-            Ok(dolt_dir) => smooth_pearls::PearlStore::open(&dolt_dir)?,
-            Err(_) => {
-                let cwd = std::env::current_dir()?;
-                let dolt_dir = cwd.join(".smooth").join("dolt");
-                smooth_pearls::PearlStore::init(&dolt_dir)?
-            }
-        };
-        let state = smooth_bigsmooth::server::AppState::new(pearl_store);
-        let addr: SocketAddr = "127.0.0.1:4400".parse()?;
+        // Re-exec ourselves as `th up` so the Safehouse daemonizes
+        // exactly the way it would if the user had typed `th up`. The
+        // child detaches its stdio to ~/.smooth/smooth.log, writes
+        // ~/.smooth/smooth.pid, returns immediately, and the safehouse
+        // microVM keeps running in the background until `th down`.
+        let exe = std::env::current_exe()?;
+        let status = std::process::Command::new(exe)
+            .arg("up")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .stdin(std::process::Stdio::null())
+            .status()
+            .context("spawn `th up` to boot the Safehouse")?;
+        if !status.success() {
+            anyhow::bail!("`th up` failed (exit {})", status.code().unwrap_or(-1));
+        }
 
-        tokio::spawn(async move {
-            if let Err(e) = smooth_bigsmooth::server::start(state, addr).await {
-                tracing::error!(error = %e, "Big Smooth failed");
-            }
-        });
-
-        // Wait for health check (up to 5s)
-        for _ in 0..50 {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Poll health up to 30s — sandboxed boot takes longer than the
+        // old in-process spawn (~5-10s for the microsandbox VM to come
+        // up, longer on a cold pull).
+        let mut ready = false;
+        for _ in 0..120 {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             if client.get("http://localhost:4400/health").send().await.is_ok_and(|r| r.status().is_success()) {
+                ready = true;
                 break;
             }
+        }
+        if !ready {
+            anyhow::bail!("Safehouse booted but :4400 never became healthy — check ~/.smooth/smooth.log");
         }
     }
 
