@@ -1230,22 +1230,24 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, foreground: bo
     // honored as an override for harness/benchmark scripts that
     // can't easily change argv.
     let direct = matches!(mode, Some(UpMode::Direct)) || std::env::var("SMOOTH_WORKFLOW_DIRECT").is_ok();
-    if !direct {
+    if direct {
+        std::env::set_var("SMOOTH_WORKFLOW_DIRECT", "1");
+    } else {
         std::env::remove_var("SMOOTH_WORKFLOW_DIRECT");
-        // Sandboxed mode shortcut: boot the safehouse OCI image
-        // via Bootstrap Bill + microsandbox, forward :4400 out,
-        // and exit. The in-VM Big Smooth is the "daemon" the
-        // user's TUI talks to; no host-side daemon-fork.
-        return start_sandboxed_vm(port).await;
     }
-    std::env::set_var("SMOOTH_WORKFLOW_DIRECT", "1");
     // Benchmark knob — skip the TEST phase so the agent doesn't
     // add tests that change the score.
     if skip_test {
         std::env::set_var("SMOOTH_WORKFLOW_SKIP_TEST", "1");
     }
 
-    // Daemon mode: re-exec ourselves with --foreground and redirect output to log file
+    // Daemon mode: re-exec ourselves with --foreground and redirect
+    // output to log file. Applies to BOTH sandboxed and direct mode
+    // — sandboxed needs daemonization too because start_sandboxed_vm
+    // has to keep the host-side `AgentClient` alive (pearl th-dd0cef)
+    // for the duration of the VM's run. Without daemonizing, `th up`
+    // would block its caller until ctrl-c, breaking shell chains
+    // like `th down && th up && th`.
     if !foreground {
         // Check if already running
         let pid_path = pid_file_path();
@@ -1286,10 +1288,11 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, foreground: bo
         let log_err = log_file.try_clone()?;
 
         let exe = std::env::current_exe()?;
-        // We're in the direct branch — re-exec the daemon with
-        // `th up [flags...] direct` so the child stays in direct
-        // mode without relying on env vars. Clap accepts parent
-        // flags before the subcommand.
+        // Re-exec the daemon with `th up --foreground [flags...]
+        // [direct]`. The `direct` subcommand is appended only in
+        // direct mode; sandboxed mode goes through the same daemon
+        // path without it so start_sandboxed_vm holds the
+        // AgentClient open in the child process.
         let mut args = vec!["up".to_string(), "--foreground".to_string(), "--port".to_string(), port.to_string()];
         if no_leader {
             args.push("--no-leader".to_string());
@@ -1301,7 +1304,9 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, foreground: bo
         if skip_test {
             args.push("--skip-test".to_string());
         }
-        args.push("direct".to_string());
+        if direct {
+            args.push("direct".to_string());
+        }
 
         let child = std::process::Command::new(exe)
             .args(&args)
@@ -1332,7 +1337,16 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, foreground: bo
         return Ok(());
     }
 
-    // Foreground mode — actual server startup
+    // Foreground mode — actual server startup. If we were called
+    // without --direct, hand off to start_sandboxed_vm; that path
+    // both boots the microsandbox VM AND blocks holding the host
+    // AgentClient until SIGTERM (per pearl th-dd0cef). When this is
+    // the daemon-child re-exec, the parent has already detached
+    // stdio to the log file, written the pid, and returned.
+    if !direct {
+        return start_sandboxed_vm(port).await;
+    }
+
     println!();
     println!("  {} / {}", gradient::smoo_ai(), gradient::smooth());
     println!();
@@ -1414,36 +1428,45 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, foreground: bo
 
 async fn cmd_down() -> Result<()> {
     // Sandboxed mode: state file recorded the safehouse microVM
-    // name; destroy it via Bill (pearl th-67c96b).
-    if let Ok(true) = stop_sandboxed_vm().await {
-        println!(
-            "  \u{1f534} {} {}",
-            "Smooth stopped".green().bold(),
-            "(sandboxed safehouse microVM destroyed)".dimmed()
-        );
-        return Ok(());
-    }
+    // name; destroy it via Bill (pearl th-67c96b). Also kill the
+    // daemonized child holding the AgentClient — without that, the
+    // child sits idle on a dead connection until its SIGTERM
+    // handler fires (which it never will, since nobody else signals
+    // it).
+    let vm_destroyed = matches!(stop_sandboxed_vm().await, Ok(true));
 
     let pid_path = pid_file_path();
-    if !pid_path.exists() {
-        println!("  {}", "Smooth is not running.".yellow());
-        return Ok(());
+    let mut pid_killed: Option<u32> = None;
+    if pid_path.exists() {
+        if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+            if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                let _ = std::process::Command::new("kill").arg(pid.to_string()).status();
+                pid_killed = Some(pid);
+            }
+        }
+        let _ = std::fs::remove_file(&pid_path);
     }
 
-    let pid_str = std::fs::read_to_string(&pid_path)?;
-    let pid: u32 = pid_str.trim().parse().context("invalid pid file")?;
-
-    // Send SIGTERM
-    let status = std::process::Command::new("kill").arg(pid.to_string()).status()?;
-
-    let pid_tag_owned = format!("(pid {pid})");
-    let pid_tag = pid_tag_owned.dimmed();
-    if status.success() {
-        println!("  \u{1f534} {} {pid_tag}", "Smooth stopped".green().bold());
-    } else {
-        println!("  {} {pid_tag}", "Cleaning up stale pid file".dimmed());
+    match (vm_destroyed, pid_killed) {
+        (true, Some(pid)) => {
+            let tag = format!("(pid {pid}, sandboxed safehouse microVM destroyed)");
+            println!("  \u{1f534} {} {}", "Smooth stopped".green().bold(), tag.dimmed());
+        }
+        (true, None) => {
+            println!(
+                "  \u{1f534} {} {}",
+                "Smooth stopped".green().bold(),
+                "(sandboxed safehouse microVM destroyed)".dimmed()
+            );
+        }
+        (false, Some(pid)) => {
+            let tag = format!("(pid {pid})");
+            println!("  \u{1f534} {} {}", "Smooth stopped".green().bold(), tag.dimmed());
+        }
+        (false, None) => {
+            println!("  {}", "Smooth is not running.".yellow());
+        }
     }
-    std::fs::remove_file(&pid_path)?;
     Ok(())
 }
 
@@ -3943,20 +3966,11 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
                     }
                     DoctorDiagnosis::ConflictMarkers { candidates } => {
                         any_corrupt = true;
-                        println!(
-                            "  ✗ manifest has unresolved git merge-conflict markers ({} candidate lines)",
-                            candidates.len()
-                        );
+                        println!("  ✗ manifest has unresolved git merge-conflict markers ({} candidate lines)", candidates.len());
                         println!("    cause: git's text-merger ran on the binary noms/manifest file.");
-                        println!(
-                            "    fix:  pick the right pre-merge manifest line (the longest is usually the most-recent state)."
-                        );
+                        println!("    fix:  pick the right pre-merge manifest line (the longest is usually the most-recent state).");
                         for (idx, line) in candidates.iter().enumerate() {
-                            println!(
-                                "      [{idx}] {} chars: {}…",
-                                line.len(),
-                                line.chars().take(60).collect::<String>()
-                            );
+                            println!("      [{idx}] {} chars: {}…", line.len(), line.chars().take(60).collect::<String>());
                         }
                         if !auto_repair {
                             continue;
@@ -3978,12 +3992,8 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
                             DoctorDiagnosis::Healthy => println!("  ✓ post-repair probe healthy"),
                             other => {
                                 println!("  ✗ post-repair probe still unhealthy: {other:?}");
-                                println!(
-                                    "    Try a different candidate by hand: copy a line from manifest.with-conflicts-<ts>"
-                                );
-                                println!(
-                                    "    into .dolt/noms/manifest (no trailing newline) and re-run doctor."
-                                );
+                                println!("    Try a different candidate by hand: copy a line from manifest.with-conflicts-<ts>");
+                                println!("    into .dolt/noms/manifest (no trailing newline) and re-run doctor.");
                                 any_failed_repair = true;
                             }
                         }
@@ -3996,8 +4006,7 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
                         }
 
                         // Auto-repair path
-                        let server_attached =
-                            smooth_pearls::dolt_server::SmoothDoltServer::try_attach(db_dir).is_some();
+                        let server_attached = smooth_pearls::dolt_server::SmoothDoltServer::try_attach(db_dir).is_some();
                         if server_attached && !force {
                             println!(
                                 "  ! a smooth-dolt server is attached to this db — skipping repair.\n    \
