@@ -597,3 +597,167 @@ mod tests {
         assert!(find_repo_dolt_dir(&tmp).is_none());
     }
 }
+
+/// Classify a Dolt error as on-disk-storage corruption (manifest /
+/// chunk index torn write, partial flush across macOS sleep, etc.).
+///
+/// Treated separately from [`is_transport_err`] and [`is_lock_wedge_err`]
+/// because the remediation is different: respawning the server doesn't
+/// help — the on-disk state itself needs to be rebuilt. `th pearls
+/// doctor` does the rebuild via re-clone from the configured remote.
+pub fn is_corruption_err(e: &anyhow::Error) -> bool {
+    let s = format!("{e:#}").to_lowercase();
+    [
+        // Canonical wording — produced when noms/manifest is torn or has
+        // an invalid leading-version byte.
+        "corrupt manifest",
+        "current directory is not a valid dolt repository",
+        // Chunk index mismatch (manifest references chunks that aren't on disk).
+        "chunk not found",
+        // Newer Dolt builds occasionally surface this on noms corruption.
+        "noms: chunk store",
+    ]
+    .iter()
+    .any(|needle| s.contains(needle))
+}
+
+#[cfg(test)]
+mod is_corruption_err_tests {
+    use super::is_corruption_err;
+
+    #[test]
+    fn flags_corrupt_manifest() {
+        assert!(is_corruption_err(&anyhow::anyhow!(
+            "failed to load database with error: corrupt manifest"
+        )));
+    }
+
+    #[test]
+    fn flags_invalid_repo() {
+        assert!(is_corruption_err(&anyhow::anyhow!(
+            "The current directory is not a valid dolt repository."
+        )));
+    }
+
+    #[test]
+    fn does_not_flag_unrelated() {
+        assert!(!is_corruption_err(&anyhow::anyhow!("syntax error")));
+        assert!(!is_corruption_err(&anyhow::anyhow!(
+            "cannot update manifest: database is read only"
+        )));
+    }
+}
+
+/// Result of a doctor health check against the on-disk dolt state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DoctorDiagnosis {
+    /// Cold CLI probe succeeded — manifest readable, log accessible.
+    Healthy,
+    /// On-disk storage is corrupt. Repair = re-clone from remote.
+    Corrupt {
+        /// Underlying error message (clipped).
+        detail: String,
+    },
+    /// No dolt dir or unrecognized state. Repair = init or clone.
+    NotInitialized {
+        detail: String,
+    },
+}
+
+impl SmoothDolt {
+    /// Cold-process probe of the data dir. Uses a CLI handle (never the
+    /// attached long-running server) so it actually exercises the noms
+    /// manifest read path — the very thing that gets wedged in the
+    /// failure mode this guards against.
+    ///
+    /// Cheap: runs `dolt log -n 1` which loads the manifest + walks one
+    /// ref. Returns within ~50–200ms on a healthy dir.
+    pub fn diagnose(data_dir: &std::path::Path) -> DoctorDiagnosis {
+        let cli = match Self::new_cli_only(data_dir) {
+            Ok(c) => c,
+            Err(e) => {
+                return DoctorDiagnosis::NotInitialized {
+                    detail: format!("cannot construct CLI handle: {e:#}"),
+                };
+            }
+        };
+        match cli.log(1) {
+            Ok(_) => DoctorDiagnosis::Healthy,
+            Err(e) if is_corruption_err(&e) => DoctorDiagnosis::Corrupt {
+                detail: format!("{e:#}").chars().take(400).collect(),
+            },
+            Err(e) => {
+                // Anything else that prevents a cold log probe — we
+                // surface as "needs init" with the detail so the user
+                // can decide.
+                DoctorDiagnosis::NotInitialized {
+                    detail: format!("{e:#}").chars().take(400).collect(),
+                }
+            }
+        }
+    }
+
+    /// Recover from on-disk corruption by snapshotting the broken dir
+    /// (so the user can fish unpushed work out of it if needed) and
+    /// re-cloning fresh from the configured `origin` remote.
+    ///
+    /// Returns the path to the snapshotted broken dir on success.
+    ///
+    /// Caller is responsible for ensuring no `smooth-dolt serve` is
+    /// holding a writable handle on `data_dir` — the rename will fail
+    /// otherwise. The CLI dispatcher handles this by refusing without
+    /// `--force` when a server is attached.
+    pub fn recover_from_remote(&self) -> Result<PathBuf> {
+        let data_dir = &self.data_dir;
+        let remote_url = read_origin_url(data_dir).context(
+            "no `origin` remote in repo_state.json — manual `dolt clone <url> <dir>` required",
+        )?;
+        let parent = data_dir.parent().context("data_dir has no parent")?;
+        let leaf = data_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .context("data_dir has no leaf name")?;
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let broken_path = parent.join(format!("{leaf}.broken-{ts}"));
+        std::fs::rename(data_dir, &broken_path)
+            .with_context(|| format!("snapshot corrupt dir → {}", broken_path.display()))?;
+
+        let bin = find_smooth_dolt_binary()
+            .context("smooth-dolt binary not found for clone — Run: scripts/build-smooth-dolt.sh")?;
+        let output = Command::new(&bin)
+            .args(["clone", &remote_url, &data_dir.to_string_lossy()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .context("exec smooth-dolt clone")?;
+        if !output.status.success() {
+            // Restore the broken dir so the user isn't stranded.
+            let _ = std::fs::rename(&broken_path, data_dir);
+            let stderr: String = String::from_utf8_lossy(&output.stderr)
+                .trim()
+                .chars()
+                .take(400)
+                .collect();
+            anyhow::bail!("smooth-dolt clone failed (exit {}): {}", output.status.code().unwrap_or(-1), stderr);
+        }
+        Ok(broken_path)
+    }
+}
+
+/// Read the `origin` remote URL from `<data_dir>/.dolt/repo_state.json`.
+fn read_origin_url(data_dir: &std::path::Path) -> Result<String> {
+    let path = data_dir.join(".dolt").join("repo_state.json");
+    let raw = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let v: serde_json::Value = serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
+    let url = v
+        .get("remotes")
+        .and_then(|r| r.get("origin"))
+        .and_then(|o| o.get("url"))
+        .and_then(|u| u.as_str())
+        .context("repo_state.json: missing remotes.origin.url")?;
+    Ok(url.to_string())
+}
