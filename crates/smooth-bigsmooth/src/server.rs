@@ -1002,6 +1002,36 @@ pub async fn dispatch_ws_task(state: &AppState, opts: DispatchOptions) {
 ///    `target/release/smooth-operator-runner`, then
 ///    `target/debug/smooth-operator-runner`.
 /// 3. Same walk from `std::env::current_dir`.
+/// Strip ANSI CSI escape sequences (`\x1b[...m`) and the bare `\x1b`
+/// from a string. Used to flatten colorized tracing output from the
+/// operator-runner before pattern-matching, so a line like
+/// `\x1b[2m2026-…\x1b[0m \x1b[32m INFO\x1b[0m smooth_operator_runner:`
+/// matches a plain ` INFO ` filter.
+fn strip_ansi_escapes(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b {
+            // Skip ESC + optional `[` + zero or more params + final byte.
+            i += 1;
+            if i < bytes.len() && bytes[i] == b'[' {
+                i += 1;
+                while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
 fn find_native_operator_runner_binary() -> Option<std::path::PathBuf> {
     if let Ok(explicit) = std::env::var("SMOOTH_OPERATOR_RUNNER_NATIVE") {
         let p = std::path::PathBuf::from(explicit);
@@ -2933,16 +2963,46 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
         let tid_err = tid.clone();
         let stderr_task = tokio::spawn(async move {
             while let Ok(Some(line)) = err_reader.next_line().await {
-                if line.trim().is_empty() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
                     continue;
                 }
-                // Mirror to tracing so the host's service.log captures
-                // runner stderr — without this the only consumer was
-                // the WebSocket TokenDelta below, which is great for
-                // live UI but useless for post-mortem on a hang. Now
-                // a wedged runner that did manage to print "panic:"
-                // or a tracing init message will show up in the log.
+                // Mirror EVERY stderr line to tracing so the host's
+                // service.log keeps a full post-mortem record — a
+                // wedged runner that printed "panic:" before dying
+                // will still show up there.
                 tracing::warn!(task_id = %tid_err, line = %line, "runner stderr");
+
+                // Suppress chat-stream noise:
+                //
+                //   `[cast-summary] {...}` — per-task in-VM cast
+                //   telemetry (Narc alert counts, Scribe entries,
+                //   Goalie audit). Useful for the bench harness and
+                //   post-mortem (still in service.log via tracing
+                //   above) but useless to the user reading the chat;
+                //   it dumped a multi-KB JSON blob after every reply.
+                //
+                //   Plain tracing-formatted lines (timestamp + level
+                //   + target) — these are the runner's own tracing
+                //   subscriber output. We log them via the
+                //   tracing::warn! above; piping them straight into
+                //   the user's chat as TokenDeltas is duplicate noise.
+                // Strip ANSI escape sequences before matching — the
+                // runner's tracing subscriber emits color-coded level
+                // markers (`\x1b[32m INFO\x1b[0m`), so a plain
+                // `contains(" INFO ")` misses them and the line leaks
+                // into the chat anyway.
+                let plain = strip_ansi_escapes(trimmed);
+                let is_cast_summary = plain.starts_with("[cast-summary]");
+                let looks_like_tracing = plain.contains(" INFO ")
+                    || plain.contains(" WARN ")
+                    || plain.contains(" ERROR ")
+                    || plain.contains(" DEBUG ")
+                    || plain.contains(" TRACE ");
+                if is_cast_summary || looks_like_tracing {
+                    continue;
+                }
+
                 let _ = event_tx_err.send(ServerEvent::TokenDelta {
                     task_id: tid_err.clone(),
                     content: format!("[runner] {line}\n"),
