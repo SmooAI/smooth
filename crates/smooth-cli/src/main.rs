@@ -1087,6 +1087,23 @@ async fn start_sandboxed_vm(port: u16) -> Result<()> {
         }
     }
 
+    // Bind-mount the user's working directory at /workspace (RW) so
+    // operator-runners dispatched from inside the Safehouse can read
+    // and write the user's repo. Without this the in-VM runner sees
+    // only the safehouse rootfs (essentially empty) and the agent
+    // reports "this workspace is empty" on its first list_files.
+    // Pass SMOOTH_HOST_WORKSPACE so Big Smooth's dispatch can
+    // translate any host-path `working_dir` the TUI sends back to
+    // the in-VM /workspace path.
+    let cwd = std::env::current_dir()?;
+    let cwd_canon = cwd.canonicalize().unwrap_or(cwd.clone());
+    mounts.push(smooth_bigsmooth::sandbox::BindMount {
+        host_path: cwd_canon.to_string_lossy().into_owned(),
+        guest_path: "/workspace".into(),
+        readonly: false,
+    });
+    env.insert("SMOOTH_HOST_WORKSPACE".into(), cwd_canon.to_string_lossy().into_owned());
+
     let config = SandboxConfig {
         operator_id: "safehouse".into(),
         bead_id: "safehouse".into(),

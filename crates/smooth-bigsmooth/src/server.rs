@@ -2573,10 +2573,22 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
         }
     };
 
-    let host_workspace: std::path::PathBuf = working_dir
-        .as_ref()
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+    // Inside the Safehouse, the user's repo is bind-mounted at
+    // `/workspace` (see `start_sandboxed_vm` on the host side). Any
+    // host-shaped `working_dir` the TUI sends is meaningless in here
+    // — that path doesn't exist in this VM's filesystem. Translate
+    // it to `/workspace`. SMOOTH_HOST_WORKSPACE is the host path the
+    // mount came from, set by `start_sandboxed_vm` for the rare
+    // diagnostic case where the agent needs to know.
+    let safehouse_mode = std::env::var("SMOOTH_SAFEHOUSE_MODE").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+    let host_workspace: std::path::PathBuf = if safehouse_mode {
+        std::path::PathBuf::from("/workspace")
+    } else {
+        working_dir
+            .as_ref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
+    };
     if !host_workspace.exists() {
         if let Err(e) = std::fs::create_dir_all(&host_workspace) {
             let msg = format!("failed to create workspace {}: {e}", host_workspace.display());
