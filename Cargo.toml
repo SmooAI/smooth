@@ -158,13 +158,13 @@ prost-types = "0.13"
 # Microsandbox — hardware-isolated microVM runtime for Smooth Operators.
 # Used directly via the Rust SDK so we do not need the external `msb` CLI.
 #
-# Pinned to 0.3 — see pearl th-6030b0. 2026-05-10: tried bumping to
-# 0.4.5; build was clean and 1111 lib tests passed, but real sandbox
-# spawn failed with "sandbox process exited before sending startup info"
-# (unix_wait_status(512)) on macOS HVF — the runtime broke even though
-# our call sites compile against the new SDK. Reverted to 0.3 until
-# someone can debug the spawn failure end-to-end.
-microsandbox = "0.3"
+# 0.4.6 (pearl th-9f04c2): brings PR #673 (bounded relay handshake reads
+# + boot-error.json on timeout) so failed boots surface a structured
+# error instead of the opaque "sandbox process exited before sending
+# startup info" we saw on the 0.4.5 attempt; PR #650 (exec.log capture
+# + typed ExecFailed); PR #697 (SIGKILL on replace-grace overruns,
+# relevant to the bind-mount silent drop tracked in th-dd0cef).
+microsandbox = "0.4"
 
 # Workspace crates
 smooth-operator = { path = "crates/smooth-operator", version = "0.13.7", package = "smooai-smooth-operator" }
