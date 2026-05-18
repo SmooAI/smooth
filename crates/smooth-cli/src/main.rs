@@ -1014,17 +1014,17 @@ async fn start_sandboxed_vm(port: u16) -> Result<()> {
     use std::collections::HashMap;
 
     println!();
-    // The internal name is `safehouse` (post-rename); the published
-    // OCI image is still `ghcr.io/smooai/boardroom:latest` because
-    // the registry repo hasn't been republished yet. The image's
-    // entrypoint at `/opt/smooth/bin/boardroom` is overridden below
-    // with a fresh cross-compiled `safehouse` binary bind-mount, so
-    // the rename is complete at runtime even though the image tag
-    // still reads "boardroom". TODO: republish image as
-    // `ghcr.io/smooai/safehouse:latest` and drop this comment.
+    // Default image is now `ghcr.io/smooai/safehouse:latest`
+    // (published as of ADR-003). `SMOOTH_BOARDROOM_IMAGE` remains
+    // an accepted env-var fallback for any ad-hoc script still
+    // setting the pre-rename name. The image's entrypoint at
+    // `/opt/smooth/bin/boardroom` is intentionally unchanged so the
+    // bind-mount overlay path below can keep dropping a freshly
+    // cross-compiled `safehouse` binary on top of it without
+    // needing a new image entrypoint flag.
     let image = std::env::var("SMOOTH_SAFEHOUSE_IMAGE")
         .or_else(|_| std::env::var("SMOOTH_BOARDROOM_IMAGE"))
-        .unwrap_or_else(|_| "ghcr.io/smooai/boardroom:latest".to_string());
+        .unwrap_or_else(|_| "ghcr.io/smooai/safehouse:latest".to_string());
     println!("  {} booting safehouse microVM (image: {image})", "●".cyan());
 
     // Pick the sandbox client (DirectSandboxClient on host, since
