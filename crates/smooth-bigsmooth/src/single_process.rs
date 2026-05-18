@@ -9,7 +9,7 @@
 //!
 //! Socket layout (under `socket_dir()`):
 //!
-//! * `narc.sock` — `smooth_narc::grpc::Judge` over `BoardroomNarc`
+//! * `narc.sock` — `smooth_narc::grpc::Judge` over `SafehouseNarc`
 //!   (iter-3a wiring).
 //! * `wonk.sock` — `smooth_wonk::grpc::Checker` over the Wonk
 //!   `AppState` (iter-3b wiring).
@@ -179,9 +179,9 @@ where
 
 /// Bootstrap helper specific to BS's existing state shape.
 ///
-/// Pulls the `BoardroomNarc` + `AccessStore` directly out of an
+/// Pulls the `SafehouseNarc` + `AccessStore` directly out of an
 /// `AppState` and constructs a fresh Wonk `AppState` seeded with
-/// a permissive default policy (mirrors the legacy boardroom
+/// a permissive default policy (mirrors the legacy safehouse
 /// spawn). Returns the handles + the Wonk `Arc` so callers that
 /// need to mutate policy at runtime can hold a reference.
 ///
@@ -191,10 +191,10 @@ where
 /// default-policy generation + parse path.
 pub fn bootstrap_from_app_state(state: &crate::server::AppState) -> Result<(GrpcCastHandles, Arc<smooth_wonk::server::AppState>)> {
     let default_policy_toml = crate::policy::generate_policy_for_task(
-        "boardroom",
-        "boardroom",
+        "safehouse",
+        "safehouse",
         "execute",
-        "boardroom-token",
+        "safehouse-token",
         &[],
         crate::policy::TaskType::Coding,
         vec![],
@@ -205,7 +205,7 @@ pub fn bootstrap_from_app_state(state: &crate::server::AppState) -> Result<(Grpc
     let negotiator = smooth_wonk::negotiate::Negotiator::new("http://127.0.0.1:1/no-leader", policy_holder.clone());
     let wonk = Arc::new(smooth_wonk::server::AppState::new(policy_holder, negotiator));
 
-    let narc = Arc::new(state.boardroom_narc.clone());
+    let narc = Arc::new(state.safehouse_narc.clone());
     let handles = bootstrap_grpc_cast(narc, wonk.clone(), state.access.clone())?;
     Ok((handles, wonk))
 }
@@ -220,11 +220,11 @@ mod tests {
     use tower::service_fn;
 
     fn build_state() -> (
-        Arc<crate::boardroom_narc::BoardroomNarc>,
+        Arc<crate::safehouse_narc::SafehouseNarc>,
         Arc<smooth_wonk::server::AppState>,
         crate::access::AccessStore,
     ) {
-        let narc = Arc::new(crate::boardroom_narc::BoardroomNarc::without_llm());
+        let narc = Arc::new(crate::safehouse_narc::SafehouseNarc::without_llm());
         let policy = smooth_policy::Policy::from_toml(MIN_POLICY_TOML).expect("parse policy");
         let policy_holder = smooth_wonk::policy::PolicyHolder::from_policy(policy);
         let negotiator = smooth_wonk::negotiate::Negotiator::new("http://127.0.0.1:1/no-leader", policy_holder.clone());
@@ -303,7 +303,7 @@ enabled = true
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Narc: GetCacheStats should respond with the default
-        // entries=0 on a fresh BoardroomNarc.
+        // entries=0 on a fresh SafehouseNarc.
         let mut narc_client = connect_uds(handles.narc_sock.clone(), smooth_narc::pb::narc_client::NarcClient::new).await;
         let stats = narc_client
             .get_cache_stats(tonic::Request::new(smooth_narc::pb::GetCacheStatsRequest {}))

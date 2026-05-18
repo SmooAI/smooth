@@ -1,7 +1,7 @@
-//! Production wiring: BoardroomNarc serves as the gRPC Narc judge.
+//! Production wiring: SafehouseNarc serves as the gRPC Narc judge.
 //!
 //! Pearl th-893801 iter-3a. The Judge trait from smooth-narc::grpc
-//! matches BoardroomNarc::judge's signature already — this module
+//! matches SafehouseNarc::judge's signature already — this module
 //! just implements the trait and exposes a `serve_uds` helper that
 //! Big Smooth's startup code can call to bring the gRPC server up
 //! at a known socket path (e.g. `$XDG_RUNTIME_DIR/smooth/narc.sock`).
@@ -12,28 +12,28 @@ use smooth_narc::judge::{JudgeDecision, JudgeRequest};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::boardroom_narc::BoardroomNarc;
+use crate::safehouse_narc::SafehouseNarc;
 
 #[async_trait]
-impl Judge for BoardroomNarc {
+impl Judge for SafehouseNarc {
     async fn judge(&self, request: JudgeRequest) -> JudgeDecision {
-        BoardroomNarc::judge(self, request).await
+        SafehouseNarc::judge(self, request).await
     }
 
     fn cache_len(&self) -> usize {
-        BoardroomNarc::cache_len(self)
+        SafehouseNarc::cache_len(self)
     }
 }
 
 /// Spawn a tonic Narc server on a UDS, backed by the production
-/// BoardroomNarc. Thin wrapper over `smooth_narc::grpc::serve_uds`
+/// SafehouseNarc. Thin wrapper over `smooth_narc::grpc::serve_uds`
 /// — kept here so callers don't need to thread the Judge trait
 /// import through.
 ///
 /// # Errors
 ///
 /// Returns the underlying io::Error if binding the UDS fails.
-pub fn serve_uds(narc: Arc<BoardroomNarc>, uds_path: PathBuf) -> std::io::Result<tokio::task::JoinHandle<Result<(), tonic::transport::Error>>> {
+pub fn serve_uds(narc: Arc<SafehouseNarc>, uds_path: PathBuf) -> std::io::Result<tokio::task::JoinHandle<Result<(), tonic::transport::Error>>> {
     smooth_narc::grpc::serve_uds(narc, uds_path)
 }
 
@@ -76,7 +76,7 @@ mod tests {
         }
     }
 
-    /// Production BoardroomNarc's rule engine short-circuits
+    /// Production SafehouseNarc's rule engine short-circuits
     /// OBVIOUSLY_SAFE domains without touching the LLM. The
     /// `without_llm()` constructor is exactly what we want for an
     /// integration test that doesn't need network egress to
@@ -86,7 +86,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let sock = tmp.path().join("narc.sock");
 
-        let narc = Arc::new(BoardroomNarc::without_llm());
+        let narc = Arc::new(SafehouseNarc::without_llm());
         let _server = serve_uds(narc, sock.clone()).unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
 
@@ -104,7 +104,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let sock = tmp.path().join("narc.sock");
 
-        let narc = Arc::new(BoardroomNarc::without_llm());
+        let narc = Arc::new(SafehouseNarc::without_llm());
         let _server = serve_uds(narc, sock.clone()).unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
 
@@ -118,11 +118,11 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let sock = tmp.path().join("narc.sock");
 
-        // No LLM + unknown domain → BoardroomNarc returns
+        // No LLM + unknown domain → SafehouseNarc returns
         // EscalateToHuman (the legacy fail-closed shape). The Ask
         // path is only entered when an LLM is actually configured
         // and returns low confidence.
-        let narc = Arc::new(BoardroomNarc::without_llm());
+        let narc = Arc::new(SafehouseNarc::without_llm());
         let _server = serve_uds(narc, sock.clone()).unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
 
@@ -137,7 +137,7 @@ mod tests {
 
     #[tokio::test]
     async fn serve_uds_with_persistent_grant_short_circuits() {
-        // BoardroomNarc::with_grants makes the persistent-grants
+        // SafehouseNarc::with_grants makes the persistent-grants
         // path live. A grant for `custom.example` should
         // short-circuit to Approve over the gRPC.
         let tmp = TempDir::new().unwrap();
@@ -147,7 +147,7 @@ mod tests {
         grants.add_host("custom.example");
         let shared = crate::wonk_grants::SharedWonkGrants::new(grants);
 
-        let narc = Arc::new(BoardroomNarc::without_llm().with_grants(shared));
+        let narc = Arc::new(SafehouseNarc::without_llm().with_grants(shared));
         let _server = serve_uds(narc, sock.clone()).unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
 
@@ -158,11 +158,11 @@ mod tests {
     }
 
     /// Sanity check: the Judge impl exposed via the gRPC matches
-    /// the trait's signature exactly. If BoardroomNarc::judge ever
+    /// the trait's signature exactly. If SafehouseNarc::judge ever
     /// gains a parameter, this test stops compiling.
     #[tokio::test]
     async fn judge_trait_routes_to_inherent_method() {
-        let narc = BoardroomNarc::without_llm();
+        let narc = SafehouseNarc::without_llm();
         let req = JudgeRequest {
             kind: JudgeKind::Network,
             operator_id: "op".into(),
@@ -176,7 +176,7 @@ mod tests {
         // Call through the trait — same answer as calling the
         // inherent method directly.
         let via_trait = Judge::judge(&narc, req.clone()).await;
-        let via_inherent = BoardroomNarc::judge(&narc, req).await;
+        let via_inherent = SafehouseNarc::judge(&narc, req).await;
         assert_eq!(via_trait.decision, via_inherent.decision);
         assert_eq!(via_trait.decision, Decision::Approve);
     }
@@ -189,7 +189,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let sock = tmp.path().join("narc.sock");
 
-        let narc = Arc::new(BoardroomNarc::without_llm());
+        let narc = Arc::new(SafehouseNarc::without_llm());
         let _server = serve_uds(narc.clone(), sock.clone()).unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
 
@@ -216,14 +216,14 @@ mod tests {
     /// no-LLM path (we just verify the Narc constructor accepts it
     /// without crashing). The actual Ask flow requires an LLM that
     /// can return low-confidence approvals — exercised in the
-    /// existing iter-2 tests at the boardroom_narc unit-test layer.
+    /// existing iter-2 tests at the safehouse_narc unit-test layer.
     #[tokio::test]
     async fn serve_uds_with_access_store_does_not_change_no_llm_path() {
         let tmp = TempDir::new().unwrap();
         let sock = tmp.path().join("narc.sock");
 
         let access = AccessStore::new();
-        let narc = Arc::new(BoardroomNarc::new(None, access));
+        let narc = Arc::new(SafehouseNarc::new(None, access));
         let _server = serve_uds(narc, sock.clone()).unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
 

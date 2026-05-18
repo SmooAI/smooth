@@ -322,7 +322,7 @@ async fn check_network(State(state): State<Arc<AppState>>, Json(req): Json<Netwo
         tracing::debug!(domain = %req.domain, "network check: runtime allow (Narc-approved)");
         return Json(CheckResponse {
             allowed: true,
-            reason: "domain approved by Boardroom Narc (runtime allowlist)".into(),
+            reason: "domain approved by Safehouse Narc (runtime allowlist)".into(),
         });
     }
 
@@ -337,7 +337,7 @@ async fn check_network(State(state): State<Arc<AppState>>, Json(req): Json<Netwo
         });
     }
 
-    // 4. Escalate to Boardroom Narc. If Narc isn't wired in (tests / legacy
+    // 4. Escalate to Safehouse Narc. If Narc isn't wired in (tests / legacy
     //    mode), fall straight to deny.
     let Some(ref narc) = state.narc else {
         return Json(CheckResponse {
@@ -392,7 +392,7 @@ async fn check_network(State(state): State<Arc<AppState>>, Json(req): Json<Netwo
         Decision::EscalateToHuman | Decision::Ask => {
             // Ask + EscalateToHuman share the same wire semantics in Wonk:
             // fail closed at the request boundary. The orchestrator (Big
-            // Smooth's BoardroomNarc) is responsible for holding the call
+            // Smooth's SafehouseNarc) is responsible for holding the call
             // open and awaiting a human resolution before returning to
             // Wonk — so any Ask that reaches here means resolution timed
             // out, errored, or no UI is attached. Either way: deny now,

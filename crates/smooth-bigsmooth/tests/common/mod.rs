@@ -1,4 +1,4 @@
-//! Shared helpers for `boardroom_e2e.rs` and friends.
+//! Shared helpers for `safehouse_e2e.rs` and friends.
 //!
 //! Kept as a module (not a separate test file) so cargo doesn't try to
 //! run it as its own test binary.
@@ -25,7 +25,7 @@ pub async fn spawn_bill_subprocess() -> anyhow::Result<(Child, std::net::SocketA
     let bill_bin = find_workspace_target("release/bootstrap-bill")
         .ok_or_else(|| anyhow::anyhow!("bootstrap-bill binary not found. Run: cargo build --release --bin bootstrap-bill"))?;
 
-    // Bind 0.0.0.0 so the Boardroom VM can reach Bill via host.containers.internal.
+    // Bind 0.0.0.0 so the Safehouse VM can reach Bill via host.containers.internal.
     let mut child = Command::new(&bill_bin)
         .arg("--listen")
         .arg("0.0.0.0:0")

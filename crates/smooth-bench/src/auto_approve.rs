@@ -1,4 +1,4 @@
-//! Unattended-run resolver for Boardroom Narc `Ask` verdicts.
+//! Unattended-run resolver for Safehouse Narc `Ask` verdicts.
 //!
 //! When a scenario or `th code --headless --auto-approve <mode>` run
 //! is in flight, no human is at the TUI to pick a scope on the

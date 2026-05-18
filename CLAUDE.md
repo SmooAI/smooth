@@ -145,7 +145,7 @@ headless E2E tests. New features should target the sandboxed path.
 
 The sandbox access control system uses named services running inside each microVM:
 
-- **Big Smooth** — READ-ONLY orchestrator in "The Boardroom" VM
+- **Big Smooth** — READ-ONLY orchestrator in "The Safehouse" VM
 - **Archivist** — central log aggregator (can write only to log paths)
 - **Wonk** — per-VM access control authority (rule engine, no LLM)
 - **Goalie** — per-VM network + FUSE filesystem proxy (iptables enforced)

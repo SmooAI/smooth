@@ -260,7 +260,7 @@ boundary, one per dispatched pearl.
 | **Scribe** | Structured logging service. All services log through Scribe, which writes to in-memory SQLite and feeds Archivist. |
 | **Groove** | LLM checkpointing + session resume. Captures conversation state after tool calls so an interrupted operator picks up at the last checkpoint. |
 
-**The Board** = Big Smooth + Archivist (leadership). **The Boardroom**
+**The Board** = Big Smooth + Archivist (leadership). **The Safehouse**
 is the microVM (or, in direct mode, the host process tree) where The
 Board operates alongside the rest of the cast.
 

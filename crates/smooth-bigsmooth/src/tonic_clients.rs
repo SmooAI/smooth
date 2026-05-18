@@ -229,7 +229,7 @@ enabled = true
 "#;
 
     async fn bring_up_cast(tmp: &TempDir) -> crate::single_process::GrpcCastHandles {
-        let narc = Arc::new(crate::boardroom_narc::BoardroomNarc::without_llm());
+        let narc = Arc::new(crate::safehouse_narc::SafehouseNarc::without_llm());
         let policy = smooth_policy::Policy::from_toml(MIN_POLICY_TOML).expect("parse policy");
         let policy_holder = smooth_wonk::policy::PolicyHolder::from_policy(policy);
         let negotiator = smooth_wonk::negotiate::Negotiator::new("http://127.0.0.1:1/no-leader", policy_holder.clone());
@@ -280,7 +280,7 @@ enabled = true
     #[tokio::test]
     async fn bigsmooth_client_lists_pending_access() {
         let tmp = TempDir::new().unwrap();
-        let narc = Arc::new(crate::boardroom_narc::BoardroomNarc::without_llm());
+        let narc = Arc::new(crate::safehouse_narc::SafehouseNarc::without_llm());
         let policy = smooth_policy::Policy::from_toml(MIN_POLICY_TOML).expect("parse policy");
         let policy_holder = smooth_wonk::policy::PolicyHolder::from_policy(policy);
         let negotiator = smooth_wonk::negotiate::Negotiator::new("http://127.0.0.1:1/no-leader", policy_holder.clone());

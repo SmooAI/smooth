@@ -1,7 +1,7 @@
-//! Wonk → Boardroom Narc escalation client.
+//! Wonk → Safehouse Narc escalation client.
 //!
 //! When Wonk's local policy can't auto-approve a `/check/*` request, it
-//! escalates the decision to Boardroom Narc by POSTing a [`JudgeRequest`]
+//! escalates the decision to Safehouse Narc by POSTing a [`JudgeRequest`]
 //! to `{narc_url}/api/narc/judge`. This module wraps that HTTP call with a
 //! bounded timeout and a clean failure mode: any network error is
 //! converted to an `EscalateToHuman` decision so Wonk fails closed.
@@ -34,7 +34,7 @@ pub trait NarcEscalator: Send + Sync + 'static {
     async fn judge(&self, request: &JudgeRequest) -> JudgeDecision;
 }
 
-/// HTTP client that speaks to the Boardroom Narc `/api/narc/judge` endpoint.
+/// HTTP client that speaks to the Safehouse Narc `/api/narc/judge` endpoint.
 #[derive(Debug, Clone)]
 pub struct NarcClient {
     base_url: String,

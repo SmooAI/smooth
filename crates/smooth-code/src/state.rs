@@ -359,7 +359,7 @@ pub struct AppState {
     /// Startup health check status.
     pub health_status: HealthStatus,
     /// Inline Claude-Code-style permission prompts surfaced when
-    /// Boardroom Narc returns `Ask`. Populated by the SSE subscriber
+    /// Safehouse Narc returns `Ask`. Populated by the SSE subscriber
     /// in [`crate::auto_mode`]. Rendered inline at the bottom of the
     /// chat; key handlers (`o` / `s` / `p` / `u` / `d` / `D`) resolve
     /// the most recently filed open prompt by POSTing to

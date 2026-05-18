@@ -13,7 +13,7 @@
 
 ---
 
-Scribe runs inside every Smooth Operator microVM. It takes structured `LogEntry` records from the agent's audit hook, stores them locally so the operator has full replay even if the network drops, and batch-forwards to a central `Archivist` in the Boardroom for cross-VM correlation.
+Scribe runs inside every Smooth Operator microVM. It takes structured `LogEntry` records from the agent's audit hook, stores them locally so the operator has full replay even if the network drops, and batch-forwards to a central `Archivist` in the Safehouse for cross-VM correlation.
 
 The point isn't logs. The point is an unbroken audit trail: when a tool call blocks, when a secret gets redacted, when a policy escalates — it's in Scribe first, in the Archivist seconds later, and never gets un-written.
 

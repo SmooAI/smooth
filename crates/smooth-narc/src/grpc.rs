@@ -1,6 +1,6 @@
 //! Thin server adapter that turns a `Judge` trait into a tonic gRPC
 //! service. The Judge trait abstracts the actual decision engine —
-//! `smooth_bigsmooth::boardroom_narc::BoardroomNarc` implements it,
+//! `smooth_bigsmooth::safehouse_narc::SafehouseNarc` implements it,
 //! and tests can implement it with a stub.
 //!
 //! Pearl th-893801 spike (iter-1).
@@ -27,7 +27,7 @@ pub trait Judge: Send + Sync + 'static {
 
 /// Tonic-facing wrapper around a `Judge` implementation.
 ///
-/// `BoardroomNarc::judge` is already `async fn judge(&self, JudgeRequest)
+/// `SafehouseNarc::judge` is already `async fn judge(&self, JudgeRequest)
 /// -> JudgeDecision` — wrapping it as `Judge` is a one-line impl on
 /// the smooth-bigsmooth side.
 pub struct NarcGrpcServer<J: Judge> {

@@ -218,7 +218,7 @@ enum Commands {
         /// out with the list above.
         #[arg(long)]
         agent: Option<String>,
-        /// How to resolve Boardroom Narc `Ask` verdicts that fire
+        /// How to resolve Safehouse Narc `Ask` verdicts that fire
         /// during an unattended (headless / bench) run. One of
         /// `deny` / `once` / `session` / `project` / `user`.
         /// Default `deny` — unattended runs are safe by default
@@ -986,7 +986,7 @@ fn sandboxed_state_path() -> std::path::PathBuf {
     dirs_next::home_dir().unwrap_or_default().join(".smooth").join("sandboxed.vm")
 }
 
-/// Boot the boardroom OCI image as a microsandbox VM, forward
+/// Boot the safehouse OCI image as a microsandbox VM, forward
 /// :4400 out, wait for the in-VM Big Smooth to come up, and
 /// stash the VM name so `th down` can destroy it. Pearl
 /// th-67c96b (sandboxed mode).
@@ -995,22 +995,31 @@ async fn start_sandboxed_vm(port: u16) -> Result<()> {
     use std::collections::HashMap;
 
     println!();
-    println!("  {} booting boardroom microVM (image: ghcr.io/smooai/boardroom:latest)", "●".cyan());
+    // The internal name is `safehouse` (post-rename); the published
+    // OCI image is still `ghcr.io/smooai/boardroom:latest` because
+    // the registry repo hasn't been republished yet. The image's
+    // entrypoint at `/opt/smooth/bin/boardroom` is overridden below
+    // with a fresh cross-compiled `safehouse` binary bind-mount, so
+    // the rename is complete at runtime even though the image tag
+    // still reads "boardroom". TODO: republish image as
+    // `ghcr.io/smooai/safehouse:latest` and drop this comment.
+    let image = std::env::var("SMOOTH_SAFEHOUSE_IMAGE")
+        .or_else(|_| std::env::var("SMOOTH_BOARDROOM_IMAGE"))
+        .unwrap_or_else(|_| "ghcr.io/smooai/boardroom:latest".to_string());
+    println!("  {} booting safehouse microVM (image: {image})", "●".cyan());
 
     // Pick the sandbox client (DirectSandboxClient on host, since
     // direct-sandbox feature is on by default).
     init_sandbox_client();
 
-    let image = std::env::var("SMOOTH_BOARDROOM_IMAGE").unwrap_or_else(|_| "ghcr.io/smooai/boardroom:latest".to_string());
-
     let mut env = HashMap::new();
     // Both names during the Phase 4 naming transition (pearl
     // th-893801 iter-6a).
     env.insert("SMOOTH_VM_MODE".into(), "1".into());
-    env.insert("SMOOTH_BOARDROOM_MODE".into(), "1".into());
+    env.insert("SMOOTH_SAFEHOUSE_MODE".into(), "1".into());
     env.insert("SMOOTH_SINGLE_PROCESS".into(), "1".into());
-    env.insert("SMOOTH_BOARDROOM_PORT".into(), port.to_string());
-    // The boardroom binary runs as uid 0 inside the microVM and
+    env.insert("SMOOTH_SAFEHOUSE_PORT".into(), port.to_string());
+    // The safehouse binary runs as uid 0 inside the microVM and
     // reads `~/.smooth/providers.json` for LLM credentials. We
     // bind-mount the host's ~/.smooth at /root/.smooth (RO) below
     // so HOME resolution lands on real credentials instead of
@@ -1020,7 +1029,7 @@ async fn start_sandboxed_vm(port: u16) -> Result<()> {
     env.insert("HOME".into(), "/root".into());
 
     // Bind-mount the host's ~/.smooth providers + registry into the
-    // VM (RO) so the boardroom can read LLM credentials, the project
+    // VM (RO) so the safehouse can read LLM credentials, the project
     // registry, and the cross-compiled operator-runner sync dir.
     // Without this, an in-VM `dirs_next::home_dir().join(".smooth/
     // providers.json")` lookup returns either nothing or an empty
@@ -1036,11 +1045,11 @@ async fn start_sandboxed_vm(port: u16) -> Result<()> {
             });
         }
         // Also mount the cross-compiled operator-runner into the
-        // boardroom so Big Smooth dispatch (running inside the
-        // boardroom) can exec it as a subprocess per pearl. Mount
+        // safehouse so Big Smooth dispatch (running inside the
+        // safehouse) can exec it as a subprocess per pearl. Mount
         // the runner-bin dir at /opt/smooth/runner-bin — NOT
         // /opt/smooth/bin, because the OCI image ships the
-        // boardroom binary at /opt/smooth/bin/boardroom and a
+        // safehouse binary at /opt/smooth/bin/safehouse and a
         // bind-mount over that path would shadow the entrypoint.
         let runner = home.join(".smooth").join("runner-bin").join("smooth-operator-runner");
         if runner.is_file() {
@@ -1051,19 +1060,21 @@ async fn start_sandboxed_vm(port: u16) -> Result<()> {
             });
             env.insert("SMOOTH_OPERATOR_RUNNER_NATIVE".into(), "/opt/smooth/runner-bin/smooth-operator-runner".into());
         }
-        // If a freshly cross-compiled boardroom binary is sitting
+        // If a freshly cross-compiled safehouse binary is sitting
         // alongside the runner, prefer it over the one baked into
         // the OCI image — that lets dev iteration on
-        // crates/smooth-bigsmooth/src/bin/boardroom.rs (and the
+        // crates/smooth-bigsmooth/src/bin/safehouse.rs (and the
         // dispatch fork that decides direct-vs-sandboxed inside
-        // the VM) reach the running boardroom without rebuilding
-        // and pushing the OCI image. Mount it as a single-file
-        // overlay at /opt/smooth/bin/boardroom so the image's
-        // entrypoint picks it up unchanged.
-        let boardroom_bin = home.join(".smooth").join("runner-bin").join("boardroom");
-        if boardroom_bin.is_file() {
+        // the VM) reach the running safehouse without rebuilding
+        // and pushing the OCI image. The image's entrypoint is
+        // still `/opt/smooth/bin/boardroom` (pre-rename name) until
+        // the OCI image is republished, so we mount our renamed
+        // binary at the legacy entrypoint path so the image's CMD
+        // / ENTRYPOINT executes our new code.
+        let safehouse_bin = home.join(".smooth").join("runner-bin").join("safehouse");
+        if safehouse_bin.is_file() {
             mounts.push(smooth_bigsmooth::sandbox::BindMount {
-                host_path: boardroom_bin.to_string_lossy().into_owned(),
+                host_path: safehouse_bin.to_string_lossy().into_owned(),
                 guest_path: "/opt/smooth/bin/boardroom".into(),
                 readonly: true,
             });
@@ -1071,8 +1082,8 @@ async fn start_sandboxed_vm(port: u16) -> Result<()> {
     }
 
     let config = SandboxConfig {
-        operator_id: "boardroom".into(),
-        bead_id: "boardroom".into(),
+        operator_id: "safehouse".into(),
+        bead_id: "safehouse".into(),
         workspace_path: std::env::current_dir()?.to_string_lossy().into_owned(),
         permissions: vec![],
         system_prompt: None,
@@ -1097,10 +1108,10 @@ async fn start_sandboxed_vm(port: u16) -> Result<()> {
 
     // The legacy second arg ("host_port") maps host→guest:4096 for
     // the operator WebSocket bridge. We don't need that for the
-    // boardroom VM (it IS Big Smooth, not an operator). Pass 0 so
+    // safehouse VM (it IS Big Smooth, not an operator). Pass 0 so
     // the kernel picks an ephemeral port and our extra_ports
     // entry (host:port → guest:port) gets the real 4400.
-    let handle = create_sandbox(&config, 0).await.context("boot boardroom microVM")?;
+    let handle = create_sandbox(&config, 0).await.context("boot safehouse microVM")?;
 
     let state_path = sandboxed_state_path();
     if let Some(parent) = state_path.parent() {
@@ -1122,25 +1133,25 @@ async fn start_sandboxed_vm(port: u16) -> Result<()> {
     println!("    {}  {}", "Stop  ".dimmed(), "th down".dimmed());
     println!();
 
-    // Pearl th-dd0cef: we cannot exit here. The boardroom binary
+    // Pearl th-dd0cef: we cannot exit here. The safehouse binary
     // runs *inside* the VM as an exec session, addressed via the
     // host-side `AgentClient` connection to agentd's UDS. If this
     // host process exits, microsandbox-runtime's agent relay sees
     // "client disconnected" on the host socket and immediately
     // SIGKILLs every active exec session in the guest — including
-    // boardroom. The VM stays running (kernel + agentd are
+    // safehouse. The VM stays running (kernel + agentd are
     // process-tree-owned by the child msb binary, which keeps
-    // going), but the *boardroom server* dies and port 4400 stops
+    // going), but the *safehouse server* dies and port 4400 stops
     // having a listener inside the guest. From the outside that
     // looks like microsandbox's port forwarder accepting the TCP
     // SYN and immediately closing the connection ("Empty reply
     // from server") — the bug this pearl tracks.
     //
     // Block until SIGINT / SIGTERM so the AgentClient stays alive.
-    tracing::info!("boardroom microVM running; awaiting ctrl-c");
+    tracing::info!("safehouse microVM running; awaiting ctrl-c");
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
-            tracing::info!("ctrl-c received, shutting down boardroom microVM");
+            tracing::info!("ctrl-c received, shutting down safehouse microVM");
         }
         _ = async {
             // Also exit if SIGTERM arrives (LaunchAgents / systemd).
@@ -1155,14 +1166,14 @@ async fn start_sandboxed_vm(port: u16) -> Result<()> {
                 std::future::pending::<()>().await;
             }
         } => {
-            tracing::info!("SIGTERM received, shutting down boardroom microVM");
+            tracing::info!("SIGTERM received, shutting down safehouse microVM");
         }
     }
     let _ = stop_sandboxed_vm().await;
     Ok(())
 }
 
-/// Destroy the boardroom microVM if one is running.
+/// Destroy the safehouse microVM if one is running.
 /// Counterpart to [`start_sandboxed_vm`]. Idempotent.
 async fn stop_sandboxed_vm() -> Result<bool> {
     use smooth_bigsmooth::sandbox::{destroy_sandbox, init_sandbox_client};
@@ -1202,7 +1213,7 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, foreground: bo
     let direct = matches!(mode, Some(UpMode::Direct)) || std::env::var("SMOOTH_WORKFLOW_DIRECT").is_ok();
     if !direct {
         std::env::remove_var("SMOOTH_WORKFLOW_DIRECT");
-        // Sandboxed mode shortcut: boot the boardroom OCI image
+        // Sandboxed mode shortcut: boot the safehouse OCI image
         // via Bootstrap Bill + microsandbox, forward :4400 out,
         // and exit. The in-VM Big Smooth is the "daemon" the
         // user's TUI talks to; no host-side daemon-fork.
@@ -1383,13 +1394,13 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, foreground: bo
 }
 
 async fn cmd_down() -> Result<()> {
-    // Sandboxed mode: state file recorded the boardroom microVM
+    // Sandboxed mode: state file recorded the safehouse microVM
     // name; destroy it via Bill (pearl th-67c96b).
     if let Ok(true) = stop_sandboxed_vm().await {
         println!(
             "  \u{1f534} {} {}",
             "Smooth stopped".green().bold(),
-            "(sandboxed boardroom microVM destroyed)".dimmed()
+            "(sandboxed safehouse microVM destroyed)".dimmed()
         );
         return Ok(());
     }

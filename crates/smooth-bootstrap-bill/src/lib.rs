@@ -1,12 +1,12 @@
 //! Bootstrap Bill — The Board's host-side broker.
 //!
 //! Bill is cursed to walk between worlds: he lives on the host because the
-//! hypervisor lives there, but he serves **The Board** (the Boardroom cast)
+//! hypervisor lives there, but he serves **The Board** (the Safehouse cast)
 //! and takes his orders from Big Smooth.
 //!
 //! # Why Bill exists
 //!
-//! Big Smooth runs inside a Boardroom microVM. HVF on Apple Silicon has no
+//! Big Smooth runs inside a Safehouse microVM. HVF on Apple Silicon has no
 //! nested virtualization, so Big Smooth cannot call `microsandbox` from
 //! inside its own VM to spawn operator pods. Bill is the one process on the
 //! host that holds `microsandbox::Sandbox` handles; everyone else calls him
@@ -27,7 +27,7 @@
 //! * [`protocol`] — wire types.
 //! * [`server`] — TCP accept loop + dispatch to the microsandbox registry.
 //! * [`client`] — [`client::BillClient`] used by Big Smooth (or any other
-//!   Boardroom cast member) to talk to Bill.
+//!   Safehouse cast member) to talk to Bill.
 
 pub mod client;
 #[cfg(feature = "server")]

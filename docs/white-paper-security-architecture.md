@@ -27,7 +27,7 @@ The industry response has been software-level guardrails: regex pattern matching
 
 Smooth takes a fundamentally different approach: **hardware isolation first, software enforcement second**.
 
-### 2.1 The Boardroom Model
+### 2.1 The Safehouse Model
 
 Every Smooth deployment runs in a layered VM topology:
 
@@ -36,7 +36,7 @@ Every Smooth deployment runs in a layered VM topology:
 │                    Host Machine                       │
 │                                                       │
 │  ┌─────────────────────────────────────────────────┐ │
-│  │           The Boardroom (microVM)                │ │
+│  │           The Safehouse (microVM)                │ │
 │  │                                                   │ │
 │  │  ┌──────────┐  ┌──────────┐  ┌──────────┐      │ │
 │  │  │Big Smooth│  │Archivist │  │  Diver   │      │ │
@@ -78,7 +78,7 @@ Every operator VM runs four independent security services:
 | **Narc** | Tool surveillance | Secret detection (10 regex patterns), prompt injection guard (6 patterns), write guard |
 | **Scribe** | Audit logging | Every tool call, network request, and file write logged with trace context |
 
-These services are **independent processes** communicating over HTTP. A compromised agent cannot disable Wonk because Wonk runs in a separate process with its own address space. A compromised Wonk cannot suppress audit logs because Scribe forwards directly to the Archivist in the Boardroom.
+These services are **independent processes** communicating over HTTP. A compromised agent cannot disable Wonk because Wonk runs in a separate process with its own address space. A compromised Wonk cannot suppress audit logs because Scribe forwards directly to the Archivist in the Safehouse.
 
 ### 2.3 Policy Enforcement
 
@@ -151,7 +151,7 @@ A critical subtlety: operators see guest paths (`/workspace/.env`) but policies 
 | Agent communicates with C2 server | All network traffic through Goalie; only allowlisted domains |
 | Lateral movement to other services | Hardware VM isolation; no host network access by default |
 | Agent modifies its own security config | Wonk/Goalie/Narc run as independent processes in the VM |
-| Audit log tampering | Scribe forwards to Archivist in the Boardroom (separate VM) |
+| Audit log tampering | Scribe forwards to Archivist in the Safehouse (separate VM) |
 
 ### 3.2 Threats Not Addressed (Current Limitations)
 

@@ -1,8 +1,8 @@
-//! Integration test for the Wonk → Boardroom Narc escalation loop.
+//! Integration test for the Wonk → Safehouse Narc escalation loop.
 //!
 //! This test spins two independent in-process services:
 //!
-//! 1. A **Boardroom Narc** service (backed by Big Smooth's `AppState`
+//! 1. A **Safehouse Narc** service (backed by Big Smooth's `AppState`
 //!    exposing `/api/narc/judge`) bound to an ephemeral port.
 //! 2. A per-VM **Wonk** server (`smooth_wonk::build_router`) bound to a
 //!    different ephemeral port, configured with a restrictive base policy
@@ -19,7 +19,7 @@
 //! - **Unknown domain with no LLM** → Wonk escalates to Narc, Narc
 //!   escalates to human (fail closed).
 //!
-//! The test uses `BoardroomNarc::without_llm()` so there is no LLM call —
+//! The test uses `SafehouseNarc::without_llm()` so there is no LLM call —
 //! it exercises the rule engine and the escalation plumbing end to end, and
 //! runs in ~1 second with no external dependencies.
 
@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use axum::routing::post;
 use axum::{Json, Router};
-use smooth_bigsmooth::boardroom_narc::BoardroomNarc;
+use smooth_bigsmooth::safehouse_narc::SafehouseNarc;
 use smooth_narc::judge::{JudgeDecision, JudgeRequest};
 use smooth_policy::Policy;
 use smooth_wonk::{build_router as wonk_router, AppState as WonkAppState, NarcClient};
@@ -68,10 +68,10 @@ auto_approve_tools = []
 "#;
 
 /// Spawn a minimal Big Smooth axum router exposing just the Narc route,
-/// backed by a `BoardroomNarc::without_llm()` so we never make real LLM
+/// backed by a `SafehouseNarc::without_llm()` so we never make real LLM
 /// calls in this test.
 async fn spawn_narc_service() -> String {
-    let narc = BoardroomNarc::without_llm();
+    let narc = SafehouseNarc::without_llm();
     let router = Router::new()
         .route(
             "/api/narc/judge",

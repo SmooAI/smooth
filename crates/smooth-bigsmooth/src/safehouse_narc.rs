@@ -1,6 +1,6 @@
-//! Boardroom Narc — Big Smooth's central access arbiter.
+//! Safehouse Narc — Big Smooth's central access arbiter.
 //!
-//! `BoardroomNarc` is the in-process service that backs `POST
+//! `SafehouseNarc` is the in-process service that backs `POST
 //! /api/narc/judge`. Per-VM Wonks escalate to it when their local policy
 //! cannot auto-approve a `/check/*` request; Narc runs a rule engine + LLM
 //! judge and returns an `approve` / `deny` / `escalate_to_human` verdict.
@@ -8,7 +8,7 @@
 //! Narc is designed to be the default decision layer for the whole Smooth
 //! fleet:
 //!
-//! - Every operator VM's Wonk talks to the same Boardroom Narc, so
+//! - Every operator VM's Wonk talks to the same Safehouse Narc, so
 //!   decisions are consistent across nodes.
 //! - Short-circuit rules (see [`smooth_narc::judge`]) handle obviously-safe
 //!   and obviously-dangerous resources without touching the LLM.
@@ -48,11 +48,11 @@ pub const MAX_TASK_SUMMARY_CHARS: usize = 600;
 /// legacy fail-closed shape.
 pub const ASK_HOLD_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// In-process Boardroom Narc service.
+/// In-process Safehouse Narc service.
 ///
 /// Cheap to clone — everything inside is `Arc<_>` or a thin config value.
 #[derive(Clone)]
-pub struct BoardroomNarc {
+pub struct SafehouseNarc {
     inner: Arc<Inner>,
 }
 
@@ -74,7 +74,7 @@ struct Inner {
     grants: Option<SharedWonkGrants>,
 }
 
-impl BoardroomNarc {
+impl SafehouseNarc {
     /// Construct a Narc that will call `llm_config`'s provider for any
     /// decision the rule engine can't short-circuit. Pass `None` to get a
     /// rule-engine-only Narc that escalates every unhandled request.
@@ -87,7 +87,7 @@ impl BoardroomNarc {
         Self::with_timeout(llm_config, access, ASK_HOLD_TIMEOUT)
     }
 
-    /// Like [`BoardroomNarc::new`] but with an explicit ask-hold timeout —
+    /// Like [`SafehouseNarc::new`] but with an explicit ask-hold timeout —
     /// for tests that want to exercise the timeout fail-closed path without
     /// sleeping a real 60s.
     #[must_use]
@@ -293,7 +293,7 @@ impl BoardroomNarc {
             kind = request.kind.as_str(),
             resource = %request.resource,
             timeout_secs = self.inner.ask_hold_timeout.as_secs(),
-            "boardroom narc: holding tool call open for human resolution"
+            "safehouse narc: holding tool call open for human resolution"
         );
 
         let Some(resolution) = fut.await_resolution_with_timeout(self.inner.ask_hold_timeout).await else {
@@ -307,7 +307,7 @@ impl BoardroomNarc {
                 id = %id,
                 kind = request.kind.as_str(),
                 resource = %request.resource,
-                "boardroom narc: ask timed out without human resolution — failing closed"
+                "safehouse narc: ask timed out without human resolution — failing closed"
             );
             return JudgeDecision::escalate(format!("ask timed out after {}s: {}", self.inner.ask_hold_timeout.as_secs(), ask.reason));
         };
@@ -331,7 +331,7 @@ impl BoardroomNarc {
                     id = %id,
                     scope = resolution.scope.as_str(),
                     glob = ?approved.add_to_allowlist_glob,
-                    "boardroom narc: human approved"
+                    "safehouse narc: human approved"
                 );
                 approved
             }
@@ -339,7 +339,7 @@ impl BoardroomNarc {
                 tracing::info!(
                     id = %id,
                     scope = resolution.scope.as_str(),
-                    "boardroom narc: human denied"
+                    "safehouse narc: human denied"
                 );
                 JudgeDecision::deny(format!("human denied at scope {}: {}", resolution.scope.as_str(), ask.reason))
             }
@@ -397,7 +397,7 @@ impl BoardroomNarc {
                     error = %e,
                     kind = request.kind.as_str(),
                     resource = %request.resource,
-                    "boardroom narc: moderation pre-filter errored; falling through to LLM judge"
+                    "safehouse narc: moderation pre-filter errored; falling through to LLM judge"
                 );
                 None
             }
@@ -435,7 +435,7 @@ impl BoardroomNarc {
             confidence = decision.confidence,
             duration_ms,
             reason = %decision.reason,
-            "boardroom narc: access decision"
+            "safehouse narc: access decision"
         );
     }
 
@@ -649,21 +649,21 @@ mod tests {
 
     #[tokio::test]
     async fn rule_engine_short_circuits_before_llm() {
-        let narc = BoardroomNarc::without_llm();
+        let narc = SafehouseNarc::without_llm();
         let decision = narc.judge(req_network("registry.npmjs.org")).await;
         assert_eq!(decision.decision, Decision::Approve);
     }
 
     #[tokio::test]
     async fn without_llm_unknown_domain_escalates() {
-        let narc = BoardroomNarc::without_llm();
+        let narc = SafehouseNarc::without_llm();
         let decision = narc.judge(req_network("playwright.azureedge.net")).await;
         assert_eq!(decision.decision, Decision::EscalateToHuman);
     }
 
     #[tokio::test]
     async fn cli_dangerous_pattern_denies() {
-        let narc = BoardroomNarc::without_llm();
+        let narc = SafehouseNarc::without_llm();
         let req = JudgeRequest {
             kind: JudgeKind::Cli,
             operator_id: "op".into(),
@@ -712,7 +712,7 @@ mod tests {
         // Pre-auto-mode this returned EscalateToHuman (silent fail-closed).
         // The auto-mode flow makes Narc surface the uncertainty as an Ask
         // so the human can pick a scope inline. Pearl th-49b4aa.
-        let narc = BoardroomNarc::without_llm();
+        let narc = SafehouseNarc::without_llm();
         let approval = JudgeDecision {
             decision: Decision::Approve,
             confidence: 0.5, // below default threshold 0.7
@@ -732,7 +732,7 @@ mod tests {
 
     #[test]
     fn confidence_coercion_keeps_high_confidence_approvals() {
-        let narc = BoardroomNarc::without_llm();
+        let narc = SafehouseNarc::without_llm();
         let approval = JudgeDecision {
             decision: Decision::Approve,
             confidence: 0.95,
@@ -747,7 +747,7 @@ mod tests {
 
     #[tokio::test]
     async fn cache_dedup_returns_same_decision_twice() {
-        let narc = BoardroomNarc::without_llm();
+        let narc = SafehouseNarc::without_llm();
         // Rule engine approves registry.npmjs.org on first call AND caches it.
         let first = narc.judge(req_network("registry.npmjs.org")).await;
         let second = narc.judge(req_network("registry.npmjs.org")).await;
@@ -760,7 +760,7 @@ mod tests {
         // Build a Narc with a long ask-hold timeout so we know any test
         // flake isn't a race with the timeout fail-closed path.
         let access = AccessStore::new();
-        let narc = BoardroomNarc::with_timeout(None, access.clone(), Duration::from_secs(5));
+        let narc = SafehouseNarc::with_timeout(None, access.clone(), Duration::from_secs(5));
 
         // Construct an Ask verdict directly and drive hold_for_human.
         let ask = JudgeDecision::ask("test ask", Scope::default_options());
@@ -799,7 +799,7 @@ mod tests {
     #[tokio::test]
     async fn hold_for_human_resolves_to_deny_when_human_denies() {
         let access = AccessStore::new();
-        let narc = BoardroomNarc::with_timeout(None, access.clone(), Duration::from_secs(5));
+        let narc = SafehouseNarc::with_timeout(None, access.clone(), Duration::from_secs(5));
         let ask = JudgeDecision::ask("test ask", Scope::default_options());
         let request = req_network("attacker.example");
 
@@ -827,7 +827,7 @@ mod tests {
         // Short timeout — no one resolves, so we should fail closed in
         // ~100ms with an EscalateToHuman verdict.
         let access = AccessStore::new();
-        let narc = BoardroomNarc::with_timeout(None, access.clone(), Duration::from_millis(100));
+        let narc = SafehouseNarc::with_timeout(None, access.clone(), Duration::from_millis(100));
         let ask = JudgeDecision::ask("test ask", Scope::default_options());
         let request = req_network("nobody.cares");
 
@@ -851,7 +851,7 @@ mod tests {
         // verdict the judge() flow would emit, and hold_for_human resolves
         // it through the AccessStore.
         let access = AccessStore::new();
-        let narc = BoardroomNarc::with_timeout(None, access.clone(), Duration::from_secs(5));
+        let narc = SafehouseNarc::with_timeout(None, access.clone(), Duration::from_secs(5));
 
         let low_conf_approval = JudgeDecision {
             decision: Decision::Approve,
@@ -892,7 +892,7 @@ mod tests {
         grants.add_host("custom.example");
         let shared = SharedWonkGrants::new(grants);
 
-        let narc = BoardroomNarc::without_llm().with_grants(shared);
+        let narc = SafehouseNarc::without_llm().with_grants(shared);
         // `custom.example` is NOT in the rule engine's OBVIOUSLY_SAFE
         // list, so without a persistent grant this would fall to the
         // LLM judge and (without an LLM) get coerced to Ask. The
@@ -910,7 +910,7 @@ mod tests {
         grants.add_host("granted.example");
         let shared = SharedWonkGrants::new(grants);
 
-        let narc = BoardroomNarc::without_llm().with_grants(shared);
+        let narc = SafehouseNarc::without_llm().with_grants(shared);
         // A different host, not in grants or rule engine. Falls through
         // to the LLM judge (missing here) → escalate.
         let decision = narc.judge(req_network("ungranted.example")).await;
@@ -926,7 +926,7 @@ mod tests {
         grants.add_tool("custom_tool");
         let shared = SharedWonkGrants::new(grants);
 
-        let narc = BoardroomNarc::without_llm().with_grants(shared);
+        let narc = SafehouseNarc::without_llm().with_grants(shared);
         let req = JudgeRequest {
             kind: JudgeKind::Tool,
             operator_id: "op".into(),
@@ -950,7 +950,7 @@ mod tests {
         grants.add_bash_pattern("pnpm ");
         let shared = SharedWonkGrants::new(grants);
 
-        let narc = BoardroomNarc::without_llm().with_grants(shared);
+        let narc = SafehouseNarc::without_llm().with_grants(shared);
         let req = JudgeRequest {
             kind: JudgeKind::Cli,
             operator_id: "op".into(),

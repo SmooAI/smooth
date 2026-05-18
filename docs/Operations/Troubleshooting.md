@@ -5,11 +5,11 @@
 > [!info] Known traps
 > Things we've hit, what they look like, and how to get past them. Add new entries as you find them.
 
-## `th up` hangs at "booting boardroom microVM"
+## `th up` hangs at "booting safehouse microVM"
 
 Cause: the microsandbox daemon hasn't pulled the image yet, or your internet is slow.
 
-Fix: wait. First pull of `ghcr.io/smooai/boardroom:latest` can take a minute. After the first pull it's cached locally.
+Fix: wait. First pull of `ghcr.io/smooai/safehouse:latest` can take a minute. After the first pull it's cached locally.
 
 Check progress with `microsandbox` SDK logs (look at the launching `th` process's stderr).
 
@@ -39,7 +39,7 @@ Fix: `rm ~/.smooth/smooth.pid` and retry `th up direct`. The CLI already detects
 Cause: the inside-VM `microsandbox` SDK can't spawn nested microVMs (no nested virt on Apple HVF).
 
 > [!todo] Known transition gap
-> Operator dispatch from inside the Boardroom VM is the in-progress half of the consolidation. While this is being resolved, run end-to-end loops in direct mode:
+> Operator dispatch from inside the Safehouse VM is the in-progress half of the consolidation. While this is being resolved, run end-to-end loops in direct mode:
 >
 > ```bash
 > th down

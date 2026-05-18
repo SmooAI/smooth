@@ -1,4 +1,4 @@
-//! Boardroom Narc — central LLM-judge-backed access arbiter.
+//! Safehouse Narc — central LLM-judge-backed access arbiter.
 //!
 //! This module defines the wire types and in-process service that Big Smooth
 //! uses to arbitrate runtime access decisions for every operator microVM.
@@ -6,8 +6,8 @@
 //! ## Flow
 //!
 //! When a per-VM Wonk receives a `/check/*` request that its local policy
-//! cannot auto-approve, Wonk escalates to the Boardroom Narc over HTTP
-//! (`POST /api/narc/judge`). Boardroom Narc:
+//! cannot auto-approve, Wonk escalates to the Safehouse Narc over HTTP
+//! (`POST /api/narc/judge`). Safehouse Narc:
 //!
 //! 1. Consults a small LRU cache of prior decisions for the same
 //!    `(operator_id, kind, resource)` tuple — if warm, return immediately
@@ -31,7 +31,7 @@
 //!   approves a request it couldn't decide.
 //! - **Wire-compatible across node types**: the same `JudgeRequest` /
 //!   `JudgeDecision` types are used by operator VM Wonks escalating in and
-//!   by any future boardroom-internal caller escalating out. A single Narc
+//!   by any future safehouse-internal caller escalating out. A single Narc
 //!   arbitrates across all nodes.
 
 use std::collections::HashMap;
@@ -74,7 +74,7 @@ impl JudgeKind {
 
 /// A request for a runtime access decision.
 ///
-/// Escalated from Wonk to Boardroom Narc when local policy can't
+/// Escalated from Wonk to Safehouse Narc when local policy can't
 /// auto-approve. Carries enough context for the LLM judge to reason about
 /// whether the request is legitimate for the task.
 #[derive(Debug, Clone, Serialize, Deserialize)]

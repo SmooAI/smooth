@@ -64,7 +64,7 @@ async fn single_process_cast_round_trips_a_narc_then_resolve_flow() {
     let tmp = TempDir::new().unwrap();
 
     // ── Bring up the cast ───────────────────────────────
-    let narc = Arc::new(smooth_bigsmooth::boardroom_narc::BoardroomNarc::without_llm());
+    let narc = Arc::new(smooth_bigsmooth::safehouse_narc::SafehouseNarc::without_llm());
     let policy = smooth_policy::Policy::from_toml(MIN_POLICY_TOML).expect("policy");
     let policy_holder = smooth_wonk::policy::PolicyHolder::from_policy(policy);
     let negotiator = smooth_wonk::negotiate::Negotiator::new("http://127.0.0.1:1/no-leader", policy_holder.clone());
@@ -170,11 +170,11 @@ async fn bootstrap_shutdown_rebootstrap_cycle_works() {
     let tmp = TempDir::new().unwrap();
 
     fn build_state() -> (
-        Arc<smooth_bigsmooth::boardroom_narc::BoardroomNarc>,
+        Arc<smooth_bigsmooth::safehouse_narc::SafehouseNarc>,
         Arc<smooth_wonk::server::AppState>,
         AccessStore,
     ) {
-        let narc = Arc::new(smooth_bigsmooth::boardroom_narc::BoardroomNarc::without_llm());
+        let narc = Arc::new(smooth_bigsmooth::safehouse_narc::SafehouseNarc::without_llm());
         let policy = smooth_policy::Policy::from_toml(MIN_POLICY_TOML).expect("policy");
         let policy_holder = smooth_wonk::policy::PolicyHolder::from_policy(policy);
         let negotiator = smooth_wonk::negotiate::Negotiator::new("http://127.0.0.1:1/no-leader", policy_holder.clone());

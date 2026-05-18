@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Cross-compile the Boardroom binary for aarch64-unknown-linux-musl.
+# Cross-compile the Safehouse binary for aarch64-unknown-linux-musl.
 #
-# The Boardroom binary runs Big Smooth *inside* its own microVM (alongside
-# the Boardroom cast: Wonk, Goalie, Narc, Scribe, Archivist). Bootstrap
-# Bill spawns the Boardroom VM on the host, bind-mounts this binary in,
+# The Safehouse binary runs Big Smooth *inside* its own microVM (alongside
+# the Safehouse cast: Wonk, Goalie, Narc, Scribe, Archivist). Bootstrap
+# Bill spawns the Safehouse VM on the host, bind-mounts this binary in,
 # and execs it on boot.
 #
 # One-time dev setup (share with build-operator-runner.sh):
@@ -38,14 +38,14 @@ if ! command -v python-zig >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "==> Cross-compiling boardroom binary for aarch64-unknown-linux-musl"
+echo "==> Cross-compiling safehouse binary for aarch64-unknown-linux-musl"
 # `--no-default-features` strips the `direct-sandbox` feature from
 # smooth-bigsmooth (and in turn strips the `server` feature from
 # smooth-bootstrap-bill and the whole `microsandbox` tree). Inside the
-# Boardroom VM, Big Smooth talks to Bill over TCP; it never links
+# Safehouse VM, Big Smooth talks to Bill over TCP; it never links
 # microsandbox.
 cargo zigbuild --target aarch64-unknown-linux-musl --release \
-    -p smooai-smooth-bigsmooth --bin boardroom --no-default-features
+    -p smooai-smooth-bigsmooth --bin safehouse --no-default-features
 
 # Resolve the actual target directory — workspaces with
 # ~/.cargo/config.toml `target-dir = ...` won't have the binary
@@ -54,7 +54,7 @@ TARGET_DIR=$(cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -
 if [ -z "$TARGET_DIR" ]; then
     TARGET_DIR="./target"
 fi
-BIN="$TARGET_DIR/aarch64-unknown-linux-musl/release/boardroom"
+BIN="$TARGET_DIR/aarch64-unknown-linux-musl/release/safehouse"
 if [ ! -f "$BIN" ]; then
     echo "error: expected binary at $BIN but it wasn't produced" >&2
     exit 1
@@ -63,7 +63,7 @@ fi
 SIZE=$(wc -c < "$BIN" | tr -d ' ')
 echo "==> Built $BIN ($(( SIZE / 1024 / 1024 )) MiB, statically linked aarch64 ELF)"
 
-# Also cross-compile smooth-dolt for the Boardroom VM.
+# Also cross-compile smooth-dolt for the Safehouse VM.
 # smooth-dolt is a Go binary; Go handles cross-compilation natively.
 DOLT_BIN="$TARGET_DIR/aarch64-unknown-linux-musl/release/smooth-dolt"
 echo "==> Cross-compiling smooth-dolt for linux/arm64"
@@ -93,7 +93,7 @@ if [ -d "go/smooth-dolt" ]; then
             # Fallback: try without CGO (will fail if gozstd is needed at runtime)
             echo "  zig cross-compile failed, trying CGO_ENABLED=0..." >&2
             GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -tags "gms_pure_go nozstd" -o "$DOLT_BIN" . 2>&1 || {
-                echo "warning: smooth-dolt cross-compile failed (pearl store will not work in Boardroom VM)" >&2
+                echo "warning: smooth-dolt cross-compile failed (pearl store will not work in Safehouse VM)" >&2
                 cd ../..
             }
         }
@@ -109,4 +109,4 @@ else
     echo "warning: go/smooth-dolt not found, skipping smooth-dolt build" >&2
 fi
 
-echo "    Bootstrap Bill mounts these binaries into the Boardroom VM at runtime."
+echo "    Bootstrap Bill mounts these binaries into the Safehouse VM at runtime."

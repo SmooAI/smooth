@@ -8,11 +8,11 @@ services.
 
 Today's architecture has two trust boundaries:
 
-1. **Host ↔ Boardroom** — Big Smooth on host, talking to per-bead VMs.
-2. **Boardroom ↔ Operator** — per-VM Wonk/Goalie/Scribe inside each
+1. **Host ↔ Safehouse** — Big Smooth on host, talking to per-bead VMs.
+2. **Safehouse ↔ Operator** — per-VM Wonk/Goalie/Scribe inside each
    microVM.
 
-The boardroom↔operator boundary protects against attacks the threat
+The safehouse↔operator boundary protects against attacks the threat
 model doesn't actually cover (Smooth's worry is prompt injection of an
 honest LLM, not a maliciously fine-tuned model). Removing it collapses
 a *lot* of plumbing: SMOOTH_NARC_URL detection, host.containers.internal
@@ -76,7 +76,7 @@ HOST                                          SANDBOX VM
 1. **Collapse service topology + first gRPC pass.** Refactor BS so all services run in one process. Switch internal HTTP+JSON to gRPC over UDS. No microsandbox change yet. ~1.5 weeks.
 2. **Host stub + sandbox image + `th up` boot.** Build smooth-host-stub. Build sandbox image with all the CLIs. Wire `th up` to boot one VM, port-forward 4400 to host. ~2 weeks.
 3. **Persistent state + learned context.** Bind-mount the state dirs. Add the learned-context collector. ~1 week.
-4. **Cleanup.** Drop `boardroom_*` terms, `host_tool` as a user-visible tool, `SMOOTH_NARC_URL` detection. ~3 days.
+4. **Cleanup.** Drop `safehouse_*` terms, `host_tool` as a user-visible tool, `SMOOTH_NARC_URL` detection. ~3 days.
 
 Total: ~5 weeks. The endpoint is a system that's *materially* simpler than today's.
 
@@ -98,7 +98,7 @@ Total: ~5 weeks. The endpoint is a system that's *materially* simpler than today
 
 ## Things that should NOT exist after the migration
 
-- `boardroom`, `boardroom_narc`, `BoardroomNarc` — the word goes. There's no boardroom in the new model.
+- `safehouse`, `safehouse_narc`, `SafehouseNarc` — the word goes. There's no safehouse in the new model.
 - `host.containers.internal` workarounds.
 - `detect_routable_host_ip()` in dispatch.
 - `SMOOTH_NARC_URL` discovery.

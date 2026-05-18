@@ -3,7 +3,7 @@
 #architecture #grpc #transport
 
 > [!arch] Two boundaries, three transports
-> Smooth has **two** real process boundaries: the host vs. the boardroom microVM (sandboxed mode) and Big Smooth vs. each operator-runner subprocess (both modes). Cross-boundary calls inside the same VM (or host process tree) are **tonic gRPC over UDS**. Calls within Big Smooth's own process are **in-process `Arc`-shared state** — no wire, no serialization. The outer world (TUI, web UI, bench harness) speaks **HTTP + WebSocket** to Big Smooth on `:4400`.
+> Smooth has **two** real process boundaries: the host vs. the safehouse microVM (sandboxed mode) and Big Smooth vs. each operator-runner subprocess (both modes). Cross-boundary calls inside the same VM (or host process tree) are **tonic gRPC over UDS**. Calls within Big Smooth's own process are **in-process `Arc`-shared state** — no wire, no serialization. The outer world (TUI, web UI, bench harness) speaks **HTTP + WebSocket** to Big Smooth on `:4400`.
 
 ## Why this matters
 
@@ -24,8 +24,8 @@ All four are spawned together by `crates/smooth-bigsmooth/src/single_process.rs:
 
 The runtime location is controlled by `$SMOOTH_SINGLE_PROCESS_SOCKET_DIR`:
 
-- **Sandboxed mode (in-VM):** defaults to `$XDG_RUNTIME_DIR/smooth/` inside the microVM, i.e. `/run/user/0/smooth/` for the root-uid boardroom.
-- **Direct mode (host):** the boardroom is the host process, so the socket dir is a per-launch tempdir under `~/.smooth/run/` (see `cmd_up` for the exact construction).
+- **Sandboxed mode (in-VM):** defaults to `$XDG_RUNTIME_DIR/smooth/` inside the microVM, i.e. `/run/user/0/smooth/` for the root-uid safehouse.
+- **Direct mode (host):** the safehouse is the host process, so the socket dir is a per-launch tempdir under `~/.smooth/run/` (see `cmd_up` for the exact construction).
 - **Tests:** override with `SMOOTH_SINGLE_PROCESS_SOCKET_DIR=/tmp/whatever` — `single_process::tests::bootstrap_spawns_all_four_sockets` does exactly this.
 
 The operator-runner subprocess discovers them the same way:

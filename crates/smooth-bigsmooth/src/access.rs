@@ -1,7 +1,7 @@
 //! Access request store — the in-process queue + broadcast that backs the
 //! Claude-Code-style auto-mode permission model.
 //!
-//! When Boardroom Narc decides [`smooth_narc::judge::Decision::Ask`] (or the
+//! When Safehouse Narc decides [`smooth_narc::judge::Decision::Ask`] (or the
 //! legacy `EscalateToHuman`), the request is filed here. The TUI (or any
 //! other UI) can:
 //!

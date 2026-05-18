@@ -1,6 +1,6 @@
 //! HTTP client for the Diver pearl lifecycle service.
 //!
-//! When running in Boardroom mode, Big Smooth calls Diver's HTTP API
+//! When running in Safehouse mode, Big Smooth calls Diver's HTTP API
 //! instead of touching PearlStore directly. This keeps pearl lifecycle
 //! management centralized in Diver (with Jira sync, cost tracking, etc.)
 

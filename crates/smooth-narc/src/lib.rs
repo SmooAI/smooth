@@ -34,7 +34,7 @@ pub mod convert;
 
 /// gRPC server adapter — wraps a `Judge` trait implementation as a
 /// tonic service. The production Judge is
-/// `smooth_bigsmooth::boardroom_narc::BoardroomNarc`; tests can
+/// `smooth_bigsmooth::safehouse_narc::SafehouseNarc`; tests can
 /// implement Judge with a stub.
 pub mod grpc;
 

@@ -4,7 +4,7 @@
 
 ### Patch Changes
 
-- 8c66879: wonk/narc: close the loop on auto-mode Phase A. Boardroom Narc now
+- 8c66879: wonk/narc: close the loop on auto-mode Phase A. Safehouse Narc now
   holds tool calls open when its verdict is `Ask` — files into the
   shared `AccessStore`, awaits a human resolution with a 60s timeout,
   returns Approve / Deny / EscalateToHuman accordingly. New HTTP routes
@@ -87,11 +87,11 @@
   policy couldn't auto-approve, and the agent never reached the
   Claude-Code-style auto-mode prompts. Setting `SMOOTH_NARC_URL` on
   the direct-dispatch subprocess wires the runner's Wonk to Big
-  Smooth's Boardroom Narc, so the same Decision::Ask → AccessStore
+  Smooth's Safehouse Narc, so the same Decision::Ask → AccessStore
   → TUI → resolve loop now gates direct tool calls too. Pearl
   th-e96aeb.
 - 442da1e: tests: add `sandbox_security.rs` integration suite exercising the
-  Decision::Ask → AccessStore → human resolution → BoardroomNarc replay
+  Decision::Ask → AccessStore → human resolution → SafehouseNarc replay
   chain end-to-end. Covers: unknown domain holds-for-approve and
   holds-for-deny, dangerous CLI patterns refused by the rule engine
   before the Ask path runs, dangerous domains likewise, persistent
@@ -132,7 +132,7 @@
 - d37ce4d: wonk: persistent permission grants via `wonk-allow.toml`. Approvals
   at scope `user` (and for now, `project`) survive a Big Smooth
   restart — the resolution is appended to `~/.smooth/wonk-allow.toml`
-  and Boardroom Narc consults the file at startup so subsequent
+  and Safehouse Narc consults the file at startup so subsequent
   requests for the same resource short-circuit to Approve without
   re-asking the human.
 
@@ -189,12 +189,12 @@ allow_patterns`. Host patterns support `*.example.com` and
 
 - 7d1497a: Fix `host_tool` connectivity from inside the sandbox: the runner now
   reaches Big Smooth's `/api/host/exec` at
-  `http://host.containers.internal:4400` in both boardroom and
+  `http://host.containers.internal:4400` in both safehouse and
   host-modes. Previous code fell back to `http://127.0.0.1:4400` in
   host-mode, which inside the microsandbox VM means the SANDBOX'S
   loopback — not the host's — so every `host_tool` call failed with
   "error sending request for url (http://127.0.0.1:4400/api/host/exec)".
-  The boardroom/host-mode distinction was a red herring; microsandbox
+  The safehouse/host-mode distinction was a red herring; microsandbox
   exposes the outer host under `host.containers.internal` in both
   modes. `SMOOTH_NARC_URL` env override still wins.
 
@@ -1793,7 +1793,7 @@ clone`, `mkdir -p`, `curl -o`) are now explicit `bash` territory.
 
   `smooth_code::thesaurus` provides the rotating phrase lists (Pondering… / Hammering… / Nitpicking… per phase). Spinner ticks advance the cycle.
 
-  Companion fixes: `BoardroomNarc` now routes through `Activity::Judge` instead of the Default slot (what the Judge alias was named for), and `ToolRegistry` is `Clone` so multiple phase Agents can share the same tool handles.
+  Companion fixes: `SafehouseNarc` now routes through `Activity::Judge` instead of the Default slot (what the Judge alias was named for), and `ToolRegistry` is `Clone` so multiple phase Agents can share the same tool handles.
 
 - c53943f: Add `th routing resolved` — hits the LiteLLM `/model/info` admin endpoint on each configured provider and prints the alias → concrete-upstream map. Answers "what model actually runs behind `smooth-coding` today?" without needing server-side access. Internally exposed as `smooth_operator::resolution::{fetch_model_info, parse_model_info, ResolvedModel}` so other callers (bench harness, TUI status bar) can reuse it.
 - d54cc78: New internal crate `smooai-smooth-bench` — benchmark harness for Aider Polyglot single-task runs. Not part of the user-facing `th` binary; invoke via `cargo run -p smooai-smooth-bench --` or `scripts/bench.sh`. Dispatches to Big Smooth over the headless WebSocket path, runs the language's test command in the scratch work dir, and writes a scored `result.json` to `~/.smooth/bench-runs/<run-id>/`. Parsers for pytest and `cargo test` summaries included; Go / JS / Java / C++ command shapes wired but not exercised yet. SWE-bench, Terminal-Bench, batch mode, and the web scoreboard are separate pearls.
@@ -2053,20 +2053,20 @@ EXISTS` pass and commits. On an up-to-date store it's a single
   Current state:
 
   - `ghcr.io/smooai/smooth-operator:0.2.0` / `:latest` and
-    `ghcr.io/smooai/boardroom:0.2.0` / `:latest` are already public on
+    `ghcr.io/smooai/safehouse:0.2.0` / `:latest` are already public on
     GHCR (pushed manually the day we went public). Smooth pulls `:latest`
     by default so end users are unaffected.
   - The `images` job was green through docker login after the `GH_PAT`
-    scope fix, but then failed on `build-boardroom.sh` — that script
+    scope fix, but then failed on `build-safehouse.sh` — that script
     expects a cross-compiled `smooth-dolt` at
     `target/aarch64-unknown-linux-musl/release/smooth-dolt`, which
     nothing currently produces. `build-smooth-dolt.sh` is a host-arch
     `go build` that lands at `target/release/` (glibc-linked), so the
-    alpine-based boardroom image can't copy it.
+    alpine-based safehouse image can't copy it.
 
   Options for the follow-up (tracked in a pearl):
 
-  1. Switch the boardroom image base from alpine to
+  1. Switch the safehouse image base from alpine to
      `debian:slim-aarch64` so a host-linked smooth-dolt runs natively.
   2. Cross-compile smooth-dolt to aarch64-musl using `zig cc` as the Go
      CGO compiler (the same zigbuild workflow Rust uses).
@@ -2075,7 +2075,7 @@ EXISTS` pass and commits. On an up-to-date store it's a single
 
   Until then, image pushes are manual via
   `scripts/build-smooth-operator-image.sh --push` and
-  `scripts/build-boardroom-image.sh --push`.
+  `scripts/build-safehouse-image.sh --push`.
 
 - 83ba4d1: Fix **th-dfd0d3**: every sandboxed tool call was being rejected with
   "error decoding response body" because `WonkHook` inside the operator
@@ -2149,7 +2149,7 @@ write_package` on subsequent CI pushes. `GH_PAT` has write:packages
   - **GHCR image job zigbuild deps.** The OCI-image job called
     `scripts/build-operator-runner.sh` which requires `cargo-zigbuild`
     - `ziglang`. Now installed explicitly in the job. Also added
-      `libicu-dev` + `setup-go` for `smooth-dolt`, which the boardroom
+      `libicu-dev` + `setup-go` for `smooth-dolt`, which the safehouse
       image bundles.
 
 ## 0.5.0
@@ -2168,7 +2168,7 @@ write_package` on subsequent CI pushes. `GH_PAT` has write:packages
     `smooth-operator-runner` are marked `publish = false` for now; the
     first three need a web/dist include fix, the binaries ship as tarballs.
 
-  - **GHCR**: `smooai/smooth-operator` and `smooai/boardroom` images are
+  - **GHCR**: `smooai/smooth-operator` and `smooai/safehouse` images are
     built on `ubuntu-24.04-arm` (native linux/arm64, avoiding qemu
     emulation) and pushed to `ghcr.io/smooai/*` with both the release
     version tag and `:latest`. Uses the Actions-default `GITHUB_TOKEN`
@@ -2384,7 +2384,7 @@ not been configured to support cross-compilation` — libdbus-sys's
   store and microsandbox couldn't pull it; alpine has an empty `/opt`,
   so every mount missed.
 
-  Fix: publish `smooai/smooth-operator` and `smooai/boardroom` images
+  Fix: publish `smooai/smooth-operator` and `smooai/safehouse` images
   to GitHub Container Registry (public), and default to pulling from
   there. The `Dockerfile.smooth-operator` pre-creates `/workspace`,
   `/opt/smooth/bin`, and `/opt/smooth/cache/mise` — so every bind-mount
@@ -2392,7 +2392,7 @@ not been configured to support cross-compilation` — libdbus-sys's
 
   - `SandboxConfig` default image: `alpine` → `ghcr.io/smooai/smooth-operator:latest`
   - `th run` default: `smooai/smooth-operator:latest` → `ghcr.io/smooai/smooth-operator:latest`
-  - `scripts/build-smooth-operator-image.sh` + `build-boardroom-image.sh`:
+  - `scripts/build-smooth-operator-image.sh` + `build-safehouse-image.sh`:
     default `SMOOTH_IMAGE_REPO` to `ghcr.io/smooai/...`, add `--push`
     flag so one command builds + publishes.
   - Preflight probe now confirms mounts land: `/opt/smooth/bin/smooth-operator-runner`
@@ -2406,11 +2406,11 @@ not been configured to support cross-compilation` — libdbus-sys's
 
   - `docker/Dockerfile.smooth-operator` + `scripts/build-smooth-operator-image.sh`
     → `smooai/smooth-operator:<version>` (alpine + mise + runner).
-  - `docker/Dockerfile.boardroom` + `scripts/build-boardroom-image.sh`
-    → `smooai/boardroom:<version>` (alpine + boardroom bin + smooth-dolt).
+  - `docker/Dockerfile.safehouse` + `scripts/build-safehouse-image.sh`
+    → `smooai/safehouse:<version>` (alpine + safehouse bin + smooth-dolt).
   - Both scripts delegate to the existing cross-compile flow
-    (`build-operator-runner.sh` / `build-boardroom.sh`).
-  - Fixed a latent package-name bug in `build-boardroom.sh`
+    (`build-operator-runner.sh` / `build-safehouse.sh`).
+  - Fixed a latent package-name bug in `build-safehouse.sh`
     (`-p smooth-bigsmooth` → `smooai-smooth-bigsmooth`).
 
   Still pending: registry publish on release so `microsandbox` can

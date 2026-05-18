@@ -1,17 +1,17 @@
-//! Boardroom binary — Big Smooth running inside its own microVM.
+//! Safehouse binary — Big Smooth running inside its own microVM.
 //!
 //! This binary is cross-compiled to `aarch64-unknown-linux-musl` via
-//! `scripts/build-boardroom.sh` and baked into the Boardroom OCI image.
-//! Bill spawns the VM with `SMOOTH_BOARDROOM_MODE=1`, which tells Big
+//! `scripts/build-safehouse.sh` and baked into the Safehouse OCI image.
+//! Bill spawns the VM with `SMOOTH_SAFEHOUSE_MODE=1`, which tells Big
 //! Smooth to boot with its own cast (Wonk/Goalie/Narc/Scribe/Archivist)
 //! and expose its API on guest port 4400 and Archivist on guest port
 //! 4401.
 //!
 //! Env vars consumed:
 //!
-//! * `SMOOTH_BOARDROOM_DB` — path to `smooth.db` (default `/root/.smooth/smooth.db`)
-//! * `SMOOTH_BOARDROOM_PORT` — Big Smooth API port (default `4400`)
-//! * `SMOOTH_BOARDROOM_MODE=1` — enables the boardroom cast bootstrap
+//! * `SMOOTH_SAFEHOUSE_DB` — path to `smooth.db` (default `/root/.smooth/smooth.db`)
+//! * `SMOOTH_SAFEHOUSE_PORT` — Big Smooth API port (default `4400`)
+//! * `SMOOTH_SAFEHOUSE_MODE=1` — enables the safehouse cast bootstrap
 //! * `SMOOTH_BOOTSTRAP_BILL_URL` — Bill's URL (from the host) so Big Smooth
 //!   can ask Bill to spawn operator pods. Typical value:
 //!   `http://host.containers.internal:<bill_port>`.
@@ -31,19 +31,19 @@ async fn main() -> anyhow::Result<()> {
         .try_init()
         .ok();
 
-    let port: u16 = std::env::var("SMOOTH_BOARDROOM_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(4400);
+    let port: u16 = std::env::var("SMOOTH_SAFEHOUSE_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(4400);
 
     // Pearl store: Dolt-backed. Use a per-session temp dir so each
-    // Boardroom boot starts with a clean pearl database (no stale data
+    // Safehouse boot starts with a clean pearl database (no stale data
     // from previous runs). The Dolt DB is ephemeral to the VM session.
     let dolt_dir = std::env::var("SMOOTH_DOLT_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/tmp/smooth-dolt"));
     let pearl_store = if dolt_dir.exists() {
-        tracing::info!(dolt = %dolt_dir.display(), "boardroom: opening existing Dolt pearl store");
+        tracing::info!(dolt = %dolt_dir.display(), "safehouse: opening existing Dolt pearl store");
         smooth_pearls::PearlStore::open(&dolt_dir)?
     } else {
-        tracing::info!(dolt = %dolt_dir.display(), "boardroom: initializing Dolt pearl store");
+        tracing::info!(dolt = %dolt_dir.display(), "safehouse: initializing Dolt pearl store");
         smooth_pearls::PearlStore::init(&dolt_dir)?
     };
 
@@ -53,14 +53,14 @@ async fn main() -> anyhow::Result<()> {
     // new and legacy var names during the Phase 4 transition
     // (pearl th-893801 iter-6a).
     std::env::set_var("SMOOTH_VM_MODE", "1");
-    std::env::set_var("SMOOTH_BOARDROOM_MODE", "1");
+    std::env::set_var("SMOOTH_SAFEHOUSE_MODE", "1");
 
     // Initialize the sandbox client BEFORE spawning the cast or serving
-    // requests. In Boardroom mode, SMOOTH_BOOTSTRAP_BILL_URL is always
+    // requests. In Safehouse mode, SMOOTH_BOOTSTRAP_BILL_URL is always
     // set, so this picks the BillSandboxClient.
     smooth_bigsmooth::sandbox::init_sandbox_client();
 
-    // Spawn the Boardroom's own security cast: Wonk, Goalie, Narc,
+    // Spawn the Safehouse's own security cast: Wonk, Goalie, Narc,
     // Scribe, and Archivist. The handles carry URLs that
     // dispatch_ws_task_sandboxed needs to inject SMOOTH_ARCHIVIST_URL
     // into every operator VM's env.
@@ -68,9 +68,9 @@ async fn main() -> anyhow::Result<()> {
     // can be reopened from the same directory).
     let dolt_dir_for_diver = dolt_dir.clone();
     let diver_pearl_store = smooth_pearls::PearlStore::open(&dolt_dir_for_diver).ok();
-    let handles = smooth_bigsmooth::boardroom::spawn_boardroom_cast(diver_pearl_store)
+    let handles = smooth_bigsmooth::safehouse::spawn_safehouse_cast(diver_pearl_store)
         .await
-        .expect("boardroom: failed to spawn cast");
+        .expect("safehouse: failed to spawn cast");
     // Diagnostic: confirm the env vars that operator_facing_archivist_url() depends on.
     let bill_url = std::env::var("SMOOTH_BOOTSTRAP_BILL_URL").unwrap_or_else(|_| "<NOT SET>".into());
     let arch_port = std::env::var("SMOOTH_ARCHIVIST_HOST_PORT").unwrap_or_else(|_| "<NOT SET>".into());
@@ -78,17 +78,17 @@ async fn main() -> anyhow::Result<()> {
         bill_url = %bill_url,
         archivist_host_port = %arch_port,
         operator_facing = ?handles.operator_facing_archivist_url(),
-        "boardroom: archivist env diagnostic"
+        "safehouse: archivist env diagnostic"
     );
     tracing::info!(
         archivist = %handles.archivist_url,
         wonk = %handles.wonk_url,
         scribe = %handles.scribe_url,
         goalie = %handles.goalie_url,
-        "boardroom: cast spawned"
+        "safehouse: cast spawned"
     );
 
-    let state = smooth_bigsmooth::server::AppState::new(pearl_store).with_boardroom(handles);
+    let state = smooth_bigsmooth::server::AppState::new(pearl_store).with_safehouse(handles);
 
     // Pearl th-893801 iter-3e: when SMOOTH_SINGLE_PROCESS=1,
     // spawn the cast as in-process gRPC servers on UDS at known
@@ -100,12 +100,12 @@ async fn main() -> anyhow::Result<()> {
             Ok((handles, _wonk)) => {
                 tracing::info!(
                     dir = %handles.socket_dir.display(),
-                    "boardroom: SMOOTH_SINGLE_PROCESS=1 — gRPC cast up alongside HTTP"
+                    "safehouse: SMOOTH_SINGLE_PROCESS=1 — gRPC cast up alongside HTTP"
                 );
                 Some(handles)
             }
             Err(e) => {
-                tracing::error!(error = %e, "boardroom: failed to bring up gRPC cast — continuing with HTTP-only");
+                tracing::error!(error = %e, "safehouse: failed to bring up gRPC cast — continuing with HTTP-only");
                 None
             }
         }
@@ -114,6 +114,6 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    tracing::info!(%addr, "boardroom: starting Big Smooth");
+    tracing::info!(%addr, "safehouse: starting Big Smooth");
     smooth_bigsmooth::server::start(state, addr).await
 }

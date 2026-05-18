@@ -279,7 +279,7 @@ async fn baseline_blocks_unknown_mcp_servers() {
 // These tests wire the full escalation chain: Wonk's rule layer
 // can't decide → escalates to Narc → Narc's rule engine + LLM
 // judge decides → answer flows back. Tests use
-// `BoardroomNarc::without_llm()` so the rule engine is the entire
+// `SafehouseNarc::without_llm()` so the rule engine is the entire
 // brain (deterministic, no model variance, no API key needed).
 //
 // User directive 2026-05-11: "the integration test should test
@@ -299,7 +299,7 @@ mod narc_chain {
 
     /// Spin up a tiny axum server that hosts the Narc judge endpoint.
     /// Uses `smooth_narc::judge::rule_engine_decide` directly — the
-    /// same rule engine `BoardroomNarc` uses, just without the LLM
+    /// same rule engine `SafehouseNarc` uses, just without the LLM
     /// path. Falls through to `EscalateToHuman` for any input the
     /// rules can't decide. Returns the base URL.
     async fn spawn_narc_server() -> (String, tokio::task::JoinHandle<()>) {
@@ -367,7 +367,7 @@ mod narc_chain {
     #[tokio::test]
     async fn novel_attacker_domain_escalates_and_fails_closed() {
         // attacker.example.com has no rule-engine match. Without an
-        // LLM backend, BoardroomNarc escalates to human, which
+        // LLM backend, SafehouseNarc escalates to human, which
         // Wonk converts to fail-closed deny. The test pins that the
         // user-facing answer is a deny PLUS the Narc rationale.
         let (narc_url, _handle) = spawn_narc_server().await;

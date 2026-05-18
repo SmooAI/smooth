@@ -264,7 +264,7 @@ pub fn append_grant(path: &Path, kind: &str, entry: &str, glob_override: Option<
 }
 
 /// Thread-safe wrapper for shared access to the merged grants. The
-/// orchestrator hands one of these to BoardroomNarc; the access
+/// orchestrator hands one of these to SafehouseNarc; the access
 /// handlers also hold a reference so writes-back invalidate the
 /// in-memory copy.
 #[derive(Debug, Clone, Default)]

@@ -13,7 +13,7 @@
 
 ---
 
-Diver is the pearl-lifecycle service in Smooth's Boardroom. Big Smooth calls `POST /dispatch` with a task; Diver creates a pearl via [`smooth-pearls`](https://crates.io/crates/smooai-smooth-pearls), records the dispatch, and returns the id. When the operator finishes, `POST /complete/:id` closes the pearl, persists the agent's session messages, records token + VM costs, and (if Jira is wired) pushes status back to the source ticket.
+Diver is the pearl-lifecycle service in Smooth's Safehouse. Big Smooth calls `POST /dispatch` with a task; Diver creates a pearl via [`smooth-pearls`](https://crates.io/crates/smooai-smooth-pearls), records the dispatch, and returns the id. When the operator finishes, `POST /complete/:id` closes the pearl, persists the agent's session messages, records token + VM costs, and (if Jira is wired) pushes status back to the source ticket.
 
 The full work model lives in Diver:
 

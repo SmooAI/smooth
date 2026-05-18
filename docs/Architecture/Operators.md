@@ -9,7 +9,7 @@
 
 `crates/smooth-operator-runner/` is a standalone Rust binary. It is the only crate that runs the agent loop in production.
 
-- **Sandboxed mode:** cross-compiled to `aarch64-unknown-linux-musl`, baked into the Boardroom image at `/opt/smooth/bin/`, and exec'd inside the microVM.
+- **Sandboxed mode:** cross-compiled to `aarch64-unknown-linux-musl`, baked into the Safehouse image at `/opt/smooth/bin/`, and exec'd inside the microVM.
 - **Direct mode:** the native build (host triple) from `target/release/` or `target/debug/`.
 
 Build it with:

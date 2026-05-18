@@ -20,7 +20,7 @@ pub struct AppState {
     pub store: Arc<MemoryLogStore>,
     /// Optional Archivist forwarder. When `Some`, every `POST /log` entry
     /// is cloned into the forwarder channel for cross-VM aggregation.
-    /// `None` keeps Scribe standalone (matching pre-Boardroom behavior).
+    /// `None` keeps Scribe standalone (matching pre-Safehouse behavior).
     pub forwarder: Option<ForwarderHandle>,
 }
 
