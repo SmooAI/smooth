@@ -1010,6 +1010,65 @@ async fn start_sandboxed_vm(port: u16) -> Result<()> {
     env.insert("SMOOTH_BOARDROOM_MODE".into(), "1".into());
     env.insert("SMOOTH_SINGLE_PROCESS".into(), "1".into());
     env.insert("SMOOTH_BOARDROOM_PORT".into(), port.to_string());
+    // The boardroom binary runs as uid 0 inside the microVM and
+    // reads `~/.smooth/providers.json` for LLM credentials. We
+    // bind-mount the host's ~/.smooth at /root/.smooth (RO) below
+    // so HOME resolution lands on real credentials instead of
+    // "no LLM providers configured" with an empty `~`. Set HOME
+    // explicitly so dirs_next::home_dir() inside the guest
+    // resolves correctly even if /etc/passwd isn't populated.
+    env.insert("HOME".into(), "/root".into());
+
+    // Bind-mount the host's ~/.smooth providers + registry into the
+    // VM (RO) so the boardroom can read LLM credentials, the project
+    // registry, and the cross-compiled operator-runner sync dir.
+    // Without this, an in-VM `dirs_next::home_dir().join(".smooth/
+    // providers.json")` lookup returns either nothing or an empty
+    // path, and dispatch fails with "no LLM providers configured".
+    let mut mounts: Vec<smooth_bigsmooth::sandbox::BindMount> = Vec::new();
+    if let Some(home) = dirs_next::home_dir() {
+        let host_smooth = home.join(".smooth");
+        if host_smooth.is_dir() {
+            mounts.push(smooth_bigsmooth::sandbox::BindMount {
+                host_path: host_smooth.to_string_lossy().into_owned(),
+                guest_path: "/root/.smooth".into(),
+                readonly: true,
+            });
+        }
+        // Also mount the cross-compiled operator-runner into the
+        // boardroom so Big Smooth dispatch (running inside the
+        // boardroom) can exec it as a subprocess per pearl. Mount
+        // the runner-bin dir at /opt/smooth/runner-bin — NOT
+        // /opt/smooth/bin, because the OCI image ships the
+        // boardroom binary at /opt/smooth/bin/boardroom and a
+        // bind-mount over that path would shadow the entrypoint.
+        let runner = home.join(".smooth").join("runner-bin").join("smooth-operator-runner");
+        if runner.is_file() {
+            mounts.push(smooth_bigsmooth::sandbox::BindMount {
+                host_path: runner.parent().unwrap().to_string_lossy().into_owned(),
+                guest_path: "/opt/smooth/runner-bin".into(),
+                readonly: true,
+            });
+            env.insert("SMOOTH_OPERATOR_RUNNER_NATIVE".into(), "/opt/smooth/runner-bin/smooth-operator-runner".into());
+        }
+        // If a freshly cross-compiled boardroom binary is sitting
+        // alongside the runner, prefer it over the one baked into
+        // the OCI image — that lets dev iteration on
+        // crates/smooth-bigsmooth/src/bin/boardroom.rs (and the
+        // dispatch fork that decides direct-vs-sandboxed inside
+        // the VM) reach the running boardroom without rebuilding
+        // and pushing the OCI image. Mount it as a single-file
+        // overlay at /opt/smooth/bin/boardroom so the image's
+        // entrypoint picks it up unchanged.
+        let boardroom_bin = home.join(".smooth").join("runner-bin").join("boardroom");
+        if boardroom_bin.is_file() {
+            mounts.push(smooth_bigsmooth::sandbox::BindMount {
+                host_path: boardroom_bin.to_string_lossy().into_owned(),
+                guest_path: "/opt/smooth/bin/boardroom".into(),
+                readonly: true,
+            });
+        }
+    }
 
     let config = SandboxConfig {
         operator_id: "boardroom".into(),
@@ -1023,7 +1082,7 @@ async fn start_sandboxed_vm(port: u16) -> Result<()> {
         cpus: 2,
         memory_mb: 4096,
         timeout_seconds: 0,
-        mounts: vec![],
+        mounts,
         allow_host_loopback: true,
         env_cache_key: None,
         use_named_volume_for_cache: false,

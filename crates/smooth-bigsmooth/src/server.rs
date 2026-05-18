@@ -965,17 +965,26 @@ pub struct DispatchOptions {
 }
 
 pub async fn dispatch_ws_task(state: &AppState, opts: DispatchOptions) {
-    // Direct mode: spawn the operator runner as a host subprocess
-    // instead of a microVM. No Narc/Wonk/Goalie enforcement — the
-    // agent has raw host access. Gated behind `SMOOTH_WORKFLOW_DIRECT=1`
-    // so the default behaviour is the sandboxed path. Intended for
-    // bench runs, fast dev loops, and environments that can't do
-    // nested virtualisation (GitHub Actions, most cloud VMs, k8s
-    // pods) — NOT for untrusted code.
+    // Three cases:
+    //   1. `SMOOTH_WORKFLOW_DIRECT=1`         → spawn runner as host subprocess
+    //      (user opted into direct mode; no microVM around them).
+    //   2. `SMOOTH_BOARDROOM_MODE=1`          → spawn runner as boardroom-internal
+    //      subprocess. We ARE the microsandbox VM the user paid for; per-operator
+    //      nested microVMs would need nested virt (which macOS HVF doesn't have)
+    //      and would defeat the consolidated single-VM architecture anyway. Narc /
+    //      Wonk / Goalie are already running in the same VM as gRPC servers, so
+    //      the runner gets the full enforcement story by dialing them over UDS.
+    //   3. Otherwise                          → real per-task microVM via
+    //      `dispatch_ws_task_sandboxed`. This is the host-side path when neither
+    //      flag is set; in practice it's exercised by `th up direct` re-enabling
+    //      sandboxed dispatch (rare) or by old test harnesses.
     let direct_mode = std::env::var("SMOOTH_WORKFLOW_DIRECT")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    if direct_mode {
+    let boardroom_mode = std::env::var("SMOOTH_BOARDROOM_MODE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if direct_mode || boardroom_mode {
         dispatch_ws_task_direct(state, opts).await;
     } else {
         dispatch_ws_task_sandboxed(state, opts).await;

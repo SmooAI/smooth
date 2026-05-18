@@ -25,22 +25,30 @@ The CLI flag wins over the env var when both are set.
               th up direct
                  │
                  ▼
-   ┌───────────────────────────────────────────────────────┐
-   │  Host process (daemonised as ~/.smooth/smooth.pid)    │
-   │                                                       │
-   │   tokio runtime                                       │
-   │   ├── Big Smooth (axum on :4400)                      │
-   │   ├── Wonk, Goalie, Narc, Scribe, Archivist, Diver    │
-   │   └── Operator runner(s) — native subprocess per      │
-   │       dispatched pearl                                │
-   │                                                       │
-   │   Filesystem: full host access (workspace = cwd)      │
-   │   Network:    direct, only mediated by Goalie at app  │
-   │                level (not iptables)                   │
-   └───────────────────────────────────────────────────────┘
+   ┌────────────────────────────────────────────────────────┐
+   │  Host process (daemonised as ~/.smooth/smooth.pid)     │
+   │                                                        │
+   │   tokio runtime — Big Smooth                           │
+   │   ├── Big Smooth      (axum :4400; gRPC bigsmooth.sock)│
+   │   ├── Wonk            (gRPC wonk.sock)                 │
+   │   ├── Goalie          (HTTP proxy on loopback)         │
+   │   ├── Narc            (gRPC narc.sock + LLM judge)     │
+   │   ├── Scribe          (gRPC scribe.sock)               │
+   │   ├── Archivist       (HTTP :4401 + SSE /events)       │
+   │   └── Diver           (in-process)                     │
+   │                                                        │
+   │   Operator runner(s) — native subprocess per pearl     │
+   │   └── Dials the same .sock files in a host tempdir     │
+   │                                                        │
+   │   UDS dir: ~/.smooth/run/$XXXXX/ (tempdir per `th up`) │
+   │   Filesystem: full host access (workspace = cwd)       │
+   │   Network:    direct, only mediated by Goalie at app   │
+   │                level (not iptables)                    │
+   └────────────────────────────────────────────────────────┘
 ```
 
 - **No microVM boot.** Big Smooth comes up as a daemonised child of `th`, writing stdout/stderr to `~/.smooth/smooth.log`. `th down` `kill`s the pid.
+- **Same gRPC topology as sandboxed mode.** `single_process::bootstrap_from_app_state` still binds `narc.sock`, `wonk.sock`, `scribe.sock`, `bigsmooth.sock` — just under a tempdir on the host instead of `$XDG_RUNTIME_DIR/smooth/` inside a VM. The operator-runner subprocess dials them with the same `tonic` clients. See [[Transport]].
 - **Native operator-runner binary.** `dispatch_ws_task_direct` resolves `smooth-operator-runner` from `target/release` (or `target/debug`, or `SMOOTH_OPERATOR_RUNNER_NATIVE`), not the cross-compiled musl one.
 - **No bind mounts.** Workspace = host cwd. Tool sandbox root = `SMOOTH_WORKSPACE` (default the cwd).
 - **No kernel-level egress.** Goalie still gets HTTP_PROXY pointed at it, but the host kernel won't reject bypasses — anything the operator does outside the agent loop is unmediated.

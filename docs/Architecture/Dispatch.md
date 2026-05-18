@@ -92,8 +92,9 @@ The runner reads its task and config from env vars (no file I/O):
 | `SMOOTH_WORKSPACE`          | `/workspace` (mount root)                                  |
 | `SMOOTH_OPERATOR_ID`        | UUID; used in log lines                                   |
 | `SMOOTH_AGENT`              | Role name (`fixer`, `tester`, …)                          |
-| `SMOOTH_NARC_URL`           | Routable host IP for the boardroom Narc                   |
-| `SMOOTH_ARCHIVIST_URL`      | Host-facing Archivist URL (forwarder destination)         |
+| `SMOOTH_SINGLE_PROCESS_SOCKET_DIR` | UDS dir containing `narc.sock` / `wonk.sock` / `scribe.sock` / `bigsmooth.sock`. Runner uses tonic over UDS; this is the primary cast transport in both sandboxed and direct mode. |
+| `SMOOTH_NARC_URL`           | **Legacy HTTP fallback.** Only used by old dispatch paths that haven't been ported to UDS; the runner prefers the local socket when the dir env var is set. |
+| `SMOOTH_ARCHIVIST_URL`      | Host-facing Archivist URL (forwarder destination, still HTTP)         |
 | `SMOOTH_PEARL_ID`           | Pearl id (for mailbox + comment tap)                       |
 | `SMOOTH_HOST_TOKEN`         | Bearer for `host_tool` calls back to Big Smooth (gated)   |
 | `SMOOTH_WORKFLOW`           | `1` enables multi-phase workflow (default)                 |
@@ -101,7 +102,7 @@ The runner reads its task and config from env vars (no file I/O):
 
 ## Operator env (direct)
 
-A subset of the above. No `SMOOTH_NARC_URL` (Narc is in-process); `SMOOTH_WORKSPACE` defaults to the host cwd unless overridden; no bind mounts.
+A subset of the above. `SMOOTH_SINGLE_PROCESS_SOCKET_DIR` still points at a real UDS dir (a tempdir under `~/.smooth/run/` instead of the in-VM `$XDG_RUNTIME_DIR/smooth/`), so the runner dials the same `narc.sock` / `wonk.sock` / `scribe.sock` / `bigsmooth.sock` over tonic gRPC — the cast topology is identical between modes. `SMOOTH_WORKSPACE` defaults to the host cwd unless overridden; no bind mounts.
 
 ## AgentEvent → ServerEvent
 

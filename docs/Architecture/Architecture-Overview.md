@@ -74,11 +74,11 @@
 | `smooth-cli`                 | The `th` binary. Clap entry point, `th up`, `th down`, all subcommands. |
 | `smooth-bigsmooth`           | Big Smooth itself. axum server, dispatch, sandbox SDK, pearl + Diver wiring. |
 | `smooth-bigsmooth/bin/boardroom` | In-VM Big Smooth binary. Cross-compiled to musl, baked into Boardroom image. |
-| `smooth-wonk`                | Access-control authority. HTTP + gRPC.                               |
-| `smooth-goalie`              | HTTP/HTTPS forward proxy. Delegates to Wonk.                         |
-| `smooth-narc`                | Tool-surveillance hook. Regex + LLM judge.                           |
-| `smooth-scribe`              | Per-actor structured logging.                                        |
-| `smooth-archivist`           | Central log aggregator. Backs the dashboard.                         |
+| `smooth-wonk`                | Access-control authority. tonic gRPC server on `wonk.sock`.          |
+| `smooth-goalie`              | HTTP/HTTPS forward proxy. Delegates every decision to Wonk via the gRPC client. |
+| `smooth-narc`                | Tool-surveillance hook. Regex + LLM judge. tonic gRPC server on `narc.sock`. |
+| `smooth-scribe`              | Per-actor structured logging. tonic gRPC server on `scribe.sock`; forwards batches over HTTP to Archivist. |
+| `smooth-archivist`           | Central log aggregator. HTTP `:4401` + SSE `/events`. Backs the dashboard. |
 | `smooth-diver`               | Pearl lifecycle manager + Jira sync.                                 |
 | `smooth-operator`            | Agent framework: LLM client, tools, conversation, checkpoints (Groove). |
 | `smooth-operator-runner`     | Binary the dispatcher exec's per task. Hosts the agent loop.         |
@@ -92,6 +92,7 @@
 - [[Sandboxed-Mode]] — what's inside the microVM
 - [[Direct-Mode]] — what changes without it
 - [[The-Cast]] — every named role, definitively
+- [[Transport]] — gRPC over UDS topology, .proto files, what's wired where
 - [[Dispatch]] — how tasks get from chat to operator
 - [[Operators]] — the agent runtime
 - [[Data-Storage]] — Dolt, named volumes, sessions

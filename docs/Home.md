@@ -49,6 +49,7 @@ One VM. Same cast. Same dispatch path. Direct mode is the escape hatch when you 
 | [[Architecture/The-Cast]]                         | Big Smooth, Wonk, Goalie, Narc, Scribe, Archivist, Diver, Groove |
 | [[Architecture/Sandboxed-Mode]]                   | The default. microsandbox microVM, what's inside             |
 | [[Architecture/Direct-Mode]]                      | Host runtime. When to reach for it                           |
+| [[Architecture/Transport]]                        | gRPC over UDS, in-process Arc, HTTP at the edge — the wire story |
 | [[Architecture/Dispatch]]                         | How a task flows from `th up` chat to an operator and back  |
 | [[Architecture/Operators]]                        | The agent runtime, the operator-runner binary, tool surface  |
 | [[Architecture/Pearls]]                           | The work-item tracker (Dolt-backed)                          |

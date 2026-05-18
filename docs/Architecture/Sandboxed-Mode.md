@@ -8,33 +8,37 @@
 ## What runs inside the VM
 
 ```
-   ┌─────────────────────────────────────────────────────┐
-   │  Boardroom microVM (microsandbox)                   │
-   │  Image: ghcr.io/smooai/boardroom:latest             │
-   │  Guest port :4400 → host :4400 (Big Smooth API)     │
-   │  Guest port :4401 (Archivist; only routed when      │
-   │  another VM needs it — currently unused)            │
-   │                                                     │
-   │   tokio runtime                                     │
-   │   ├── Big Smooth (axum on :4400)                    │
-   │   ├── Wonk (loopback :ephemeral)                    │
-   │   ├── Goalie (loopback :ephemeral)                  │
-   │   ├── Narc (in-process; ToolHook)                   │
-   │   ├── Scribe (loopback :ephemeral, forwards to      │
-   │   │           Archivist over loopback)              │
-   │   ├── Archivist (0.0.0.0:4401)                      │
-   │   ├── Diver (loopback :ephemeral)                   │
-   │   └── Operator runner(s) per dispatched pearl       │
-   │                                                     │
-   │   Bind mounts:                                      │
-   │   ├── /workspace        (RW; the user's repo)       │
-   │   ├── /opt/smooth/bin   (RO; runner binary)         │
-   │   ├── /opt/smooth/policy(RO; per-task policy TOML)  │
-   │   └── /opt/smooth/cache (RW; named volume cache)    │
-   └─────────────────────────────────────────────────────┘
+   ┌────────────────────────────────────────────────────────┐
+   │  Boardroom microVM (microsandbox · libkrun / HVF)      │
+   │  Image: ghcr.io/smooai/boardroom:latest                │
+   │  Guest port :4400 → host :4400 (Big Smooth HTTP+WS)    │
+   │  Guest port :4401  Archivist HTTP (in-VM only)         │
+   │                                                        │
+   │   tokio runtime — Big Smooth process                   │
+   │   ├── Big Smooth      (axum :4400; gRPC bigsmooth.sock)│
+   │   ├── Wonk            (gRPC wonk.sock)                 │
+   │   ├── Goalie          (in-VM HTTP proxy)               │
+   │   ├── Narc            (gRPC narc.sock + LLM judge)     │
+   │   ├── Scribe          (gRPC scribe.sock)               │
+   │   ├── Archivist       (HTTP :4401 + SSE /events)       │
+   │   └── Diver           (in-process)                     │
+   │                                                        │
+   │   Operator runner(s) — one subprocess per pearl        │
+   │   ├── Dials narc.sock / wonk.sock / scribe.sock        │
+   │   └── via tonic gRPC over UDS (no network hop)         │
+   │                                                        │
+   │   UDS dir: $XDG_RUNTIME_DIR/smooth/  (in-VM default,   │
+   │           override via SMOOTH_SINGLE_PROCESS_SOCKET_DIR)│
+   │                                                        │
+   │   Bind mounts:                                         │
+   │   ├── /workspace         (RW; the user's repo)         │
+   │   ├── /opt/smooth/bin    (RO; runner binary)           │
+   │   ├── /opt/smooth/policy (RO; per-task policy TOML)    │
+   │   └── /opt/smooth/cache  (RW; named volume cache)      │
+   └────────────────────────────────────────────────────────┘
 ```
 
-The boot path is in `crates/smooth-cli/src/main.rs::start_sandboxed_vm` (calls `microsandbox::create_sandbox`) and `crates/smooth-bigsmooth/src/bin/boardroom.rs` (the binary the VM runs).
+The boot path is in `crates/smooth-cli/src/main.rs::start_sandboxed_vm` (calls `microsandbox::create_sandbox`) and `crates/smooth-bigsmooth/src/bin/boardroom.rs` (the binary the VM runs). The four gRPC servers are bound by `crates/smooth-bigsmooth/src/single_process.rs::bootstrap_from_app_state`. See [[Transport]] for the full wire story.
 
 ## Boot sequence
 
