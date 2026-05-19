@@ -108,6 +108,60 @@ impl SmoothApiClient {
     pub fn pb(&self) -> crate::pb::Client {
         crate::pb::Client::new_with_client(&self.base_url, self.http.clone())
     }
+
+    /// Issue a raw HTTP request against the platform API. Used by
+    /// the CLI commands — easier than threading 92 distinct typed
+    /// signatures through the dispatch when most calls are
+    /// "GET /thing/{id}, print JSON".
+    ///
+    /// `path` is appended to `self.base_url` directly. `body` is
+    /// serialized as JSON when Some.
+    ///
+    /// # Errors
+    /// Network errors, non-2xx responses, and JSON-parse failures
+    /// all surface as `anyhow::Error`s.
+    pub async fn raw(&self, method: reqwest::Method, path: &str, body: Option<&serde_json::Value>) -> anyhow::Result<serde_json::Value> {
+        let url = format!("{}{}", self.base_url.trim_end_matches('/'), if path.starts_with('/') { path.to_string() } else { format!("/{path}") });
+        let mut req = self.http.request(method.clone(), &url);
+        if let Some(b) = body {
+            req = req.json(b);
+        }
+        let resp = req.send().await.map_err(|e| anyhow::anyhow!("{method} {url}: {e}"))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!("{method} {url} returned HTTP {status}: {text}");
+        }
+        if text.trim().is_empty() {
+            return Ok(serde_json::json!({"ok": true}));
+        }
+        serde_json::from_str::<serde_json::Value>(&text).map_err(|e| anyhow::anyhow!("parse JSON response from {url}: {e}\nbody: {text}"))
+    }
+
+    /// Convenience: `raw(GET, path, None)`.
+    pub async fn get(&self, path: &str) -> anyhow::Result<serde_json::Value> {
+        self.raw(reqwest::Method::GET, path, None).await
+    }
+
+    /// Convenience: `raw(POST, path, body)`.
+    pub async fn post(&self, path: &str, body: Option<&serde_json::Value>) -> anyhow::Result<serde_json::Value> {
+        self.raw(reqwest::Method::POST, path, body).await
+    }
+
+    /// Convenience: `raw(PATCH, path, body)`.
+    pub async fn patch(&self, path: &str, body: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        self.raw(reqwest::Method::PATCH, path, Some(body)).await
+    }
+
+    /// Convenience: `raw(PUT, path, body)`.
+    pub async fn put(&self, path: &str, body: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        self.raw(reqwest::Method::PUT, path, Some(body)).await
+    }
+
+    /// Convenience: `raw(DELETE, path, None)`.
+    pub async fn delete(&self, path: &str) -> anyhow::Result<serde_json::Value> {
+        self.raw(reqwest::Method::DELETE, path, None).await
+    }
 }
 
 fn user_agent() -> String {

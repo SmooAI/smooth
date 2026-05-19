@@ -1,13 +1,109 @@
-//! Smoo AI platform CLI commands — `th login` / `logout` / `whoami` /
-//! `orgs *`. All go through `smooth_api_client` against `api.smoo.ai`.
+//! Smoo AI platform CLI commands. All go through `smooth_api_client`
+//! against `api.smoo.ai`. Resources are split into submodules; this
+//! file keeps the auth flow (`login` / `logout` / `whoami`) and the
+//! org commands because every other command needs an authenticated
+//! client + active org id and that machinery lives here.
 //!
-//! Output uses the same `colored` palette + spacing the rest of the
-//! CLI uses, so help / status / login share a look.
+//! Helper: `require_active_org(&client)` resolves the `--org` flag
+//! → `SMOOAI_ORG_ID` env → `active_org_id` in credentials, in that
+//! order. Most resource commands take an `Option<String>` for `--org`
+//! and call this helper.
+
+pub mod agents;
+pub mod config;
+pub mod jobs;
+pub mod keys;
+pub mod knowledge;
+pub mod members;
+pub mod products;
+pub mod profile;
+pub mod testing;
 
 use anyhow::{Context, Result};
 use owo_colors::OwoColorize;
 use smooth_api_client::auth::{poll_until_complete, start_login};
 use smooth_api_client::{CredentialsStore, SmoothApiClient};
+
+/// Build an authenticated client or fail with the standard "run
+/// `th login`" message. Every resource command starts with this.
+pub fn require_authed() -> Result<SmoothApiClient> {
+    let client = SmoothApiClient::from_disk().context("load credentials")?;
+    if !client.is_authenticated() {
+        anyhow::bail!("not logged in — run `th login` first");
+    }
+    Ok(client)
+}
+
+/// Resolve the active org id. Order:
+///   1. `--org` flag (the `override_org` argument)
+///   2. `SMOOAI_ORG_ID` env (handy for CI scripts)
+///   3. `active_org_id` from `~/.smooth/auth/smooai.json`
+pub fn require_active_org(client: &SmoothApiClient, override_org: Option<String>) -> Result<String> {
+    if let Some(o) = override_org.filter(|s| !s.trim().is_empty()) {
+        return Ok(o);
+    }
+    if let Ok(o) = std::env::var("SMOOAI_ORG_ID") {
+        if !o.trim().is_empty() {
+            return Ok(o);
+        }
+    }
+    client
+        .credentials()
+        .and_then(|c| c.active_org_id)
+        .context("no active org set — pass `--org <id>`, set SMOOAI_ORG_ID, or run `th orgs switch <id>`")
+}
+
+/// Read a JSON body from `path` (or stdin when `path == "-"`).
+pub fn read_body(path: &str) -> Result<serde_json::Value> {
+    let raw = if path == "-" {
+        use std::io::Read;
+        let mut s = String::new();
+        std::io::stdin().read_to_string(&mut s).context("read stdin")?;
+        s
+    } else {
+        std::fs::read_to_string(path).with_context(|| format!("read {path}"))?
+    };
+    serde_json::from_str(&raw).with_context(|| format!("parse JSON from {path}"))
+}
+
+/// Pretty-print a JSON value to stdout with a leading + trailing
+/// blank line so command output looks consistent with the rest of
+/// the CLI.
+pub fn print_json(body: &serde_json::Value) {
+    println!();
+    println!("{}", serde_json::to_string_pretty(body).unwrap_or_default());
+    println!();
+}
+
+/// Pretty-print a `{"data": [...]}` collection envelope as a compact
+/// list. Each entry shows whichever of `id`, `name`, `email`,
+/// `status` are present. Falls back to full JSON when the shape
+/// doesn't match the envelope.
+pub fn print_list_envelope(body: &serde_json::Value, item_label: &str) {
+    let items = body.get("data").and_then(|v| v.as_array()).or_else(|| body.as_array());
+    let Some(items) = items else {
+        print_json(body);
+        return;
+    };
+    println!();
+    if items.is_empty() {
+        println!("  {} {}", "●".dimmed(), format!("no {item_label}").dimmed());
+        println!();
+        return;
+    }
+    for item in items {
+        let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+        let name = item.get("name").and_then(|v| v.as_str()).or_else(|| item.get("email").and_then(|v| v.as_str())).unwrap_or("");
+        let status = item.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        let suffix = if status.is_empty() {
+            String::new()
+        } else {
+            format!(" [{status}]")
+        };
+        println!("  {} {} {}{}", "○".dimmed(), id.cyan(), name.bold(), suffix.dimmed());
+    }
+    println!();
+}
 
 /// `th login` — device-flow handshake. Prints the verification URL +
 /// user code, blocks until the user approves in the browser, persists

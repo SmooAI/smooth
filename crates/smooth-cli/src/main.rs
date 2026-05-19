@@ -102,6 +102,55 @@ enum Commands {
         #[command(subcommand)]
         cmd: OrgsCommands,
     },
+    /// Smoo AI agents — list / show / create / update / delete + the
+    /// regenerate-* and per-agent knowledge endpoints.
+    Agents {
+        #[command(subcommand)]
+        cmd: smooai::agents::Cmd,
+    },
+    /// Smoo AI M2M auth clients ("API keys") — list / create /
+    /// rotate / revoke.
+    Keys {
+        #[command(subcommand)]
+        cmd: smooai::keys::Cmd,
+    },
+    /// Smoo AI org members + invitations.
+    Members {
+        #[command(subcommand)]
+        cmd: smooai::members::Cmd,
+    },
+    /// Smoo AI configuration — schemas, environments, values, feature
+    /// flags.
+    Config {
+        #[command(subcommand)]
+        cmd: smooai::config::Cmd,
+    },
+    /// Smoo AI knowledge documents (text, websites, files).
+    Knowledge {
+        #[command(subcommand)]
+        cmd: smooai::knowledge::Cmd,
+    },
+    /// Smoo AI async job queue.
+    Jobs {
+        #[command(subcommand)]
+        cmd: smooai::jobs::Cmd,
+    },
+    /// Smoo AI billing products / plans.
+    Products {
+        #[command(subcommand)]
+        cmd: smooai::products::Cmd,
+    },
+    /// Smoo AI profile (the currently-logged-in user).
+    Profile {
+        #[command(subcommand)]
+        cmd: smooai::profile::Cmd,
+    },
+    /// Smoo AI testing platform — deployments, cases, environments,
+    /// runs.
+    Testing {
+        #[command(subcommand)]
+        cmd: smooai::testing::Cmd,
+    },
     /// Run a pearl through a Smooth Operator in a microVM — streams
     /// agent events to stdout. With --keep-alive, the VM stays up
     /// after the agent completes so you can poke at dev servers,
@@ -159,11 +208,6 @@ enum Commands {
         #[command(subcommand)]
         cmd: ProjectCommands,
     },
-    /// View/set local configuration
-    Config {
-        #[command(subcommand)]
-        cmd: ConfigCommands,
-    },
     /// Database management
     Db {
         #[command(subcommand)]
@@ -173,11 +217,6 @@ enum Commands {
     Jira {
         #[command(subcommand)]
         cmd: JiraCommands,
-    },
-    /// Smoo AI platform tools
-    Smoo {
-        #[command(subcommand)]
-        cmd: SmooCommands,
     },
     /// View audit logs
     Audit {
@@ -592,14 +631,6 @@ enum ProjectCommands {
 }
 
 #[derive(Subcommand)]
-enum ConfigCommands {
-    /// Show configuration
-    Show,
-    /// Set a config value
-    Set { key: String, value: String },
-}
-
-#[derive(Subcommand)]
 enum DbCommands {
     /// Show database status
     Status,
@@ -615,27 +646,6 @@ enum JiraCommands {
     Sync,
     /// Show Jira status
     Status,
-}
-
-#[derive(Subcommand)]
-enum SmooCommands {
-    /// Config schema management
-    Config {
-        #[command(subcommand)]
-        cmd: SmooConfigCommands,
-    },
-    /// List Smoo AI agents
-    Agents,
-}
-
-#[derive(Subcommand)]
-enum SmooConfigCommands {
-    Push,
-    Pull,
-    Set { key: String, value: String },
-    Get { key: String },
-    List,
-    Diff,
 }
 
 #[derive(Subcommand)]
@@ -987,6 +997,15 @@ async fn main() -> Result<()> {
         Some(Commands::Logout) => cmd_logout().await,
         Some(Commands::Whoami) => cmd_whoami().await,
         Some(Commands::Orgs { cmd }) => cmd_orgs(cmd).await,
+        Some(Commands::Agents { cmd }) => smooai::agents::cmd(cmd).await,
+        Some(Commands::Keys { cmd }) => smooai::keys::cmd(cmd).await,
+        Some(Commands::Members { cmd }) => smooai::members::cmd(cmd).await,
+        Some(Commands::Config { cmd }) => smooai::config::cmd(cmd).await,
+        Some(Commands::Knowledge { cmd }) => smooai::knowledge::cmd(cmd).await,
+        Some(Commands::Jobs { cmd }) => smooai::jobs::cmd(cmd).await,
+        Some(Commands::Products { cmd }) => smooai::products::cmd(cmd).await,
+        Some(Commands::Profile { cmd }) => smooai::profile::cmd(cmd).await,
+        Some(Commands::Testing { cmd }) => smooai::testing::cmd(cmd).await,
         Some(Commands::Operators { cmd }) => cmd_operators(cmd).await,
         Some(Commands::Inbox) => cmd_inbox().await,
         Some(Commands::Run {
