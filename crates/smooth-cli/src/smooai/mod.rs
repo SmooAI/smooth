@@ -20,8 +20,9 @@ pub mod profile;
 pub mod testing;
 
 use anyhow::{Context, Result};
+use dialoguer::{theme::ColorfulTheme, Input, Password};
 use owo_colors::OwoColorize;
-use smooth_api_client::auth::{poll_until_complete, start_login};
+use smooth_api_client::auth::{client_credentials_grant, token_url};
 use smooth_api_client::{CredentialsStore, SmoothApiClient};
 
 /// Build an authenticated client or fail with the standard "run
@@ -105,41 +106,84 @@ pub fn print_list_envelope(body: &serde_json::Value, item_label: &str) {
     println!();
 }
 
-/// `th login` — device-flow handshake. Prints the verification URL +
-/// user code, blocks until the user approves in the browser, persists
-/// the resulting tokens at `~/.smooth/auth/smooai.json`.
-pub async fn cmd_login() -> Result<()> {
+/// `th api login` — exchange a client_credentials pair for a bearer
+/// JWT against `https://auth.smoo.ai/token` and persist it.
+///
+/// Credential resolution: flags → env vars → interactive prompt.
+pub async fn cmd_login(client_id: Option<String>, client_secret: Option<String>) -> Result<()> {
+    let client_id = resolve_client_id(client_id)?;
+    let client_secret = resolve_client_secret(client_secret)?;
+
     println!();
-    let base_url = smooth_api_client::base_url();
+    println!("  {} Exchanging client_credentials at {}", "●".cyan(), token_url().dimmed());
+
     let http = reqwest::Client::builder()
         .user_agent(format!("smooth-cli/{} (https://github.com/SmooAI/smooth)", env!("CARGO_PKG_VERSION")))
         .build()
         .context("build http client")?;
+    let creds = client_credentials_grant(&http, &client_id, &client_secret).await.context("client_credentials_grant")?;
 
-    println!("  {} Starting device-flow against {}", "●".cyan(), base_url.dimmed());
-    let start = start_login(&base_url, &http).await.context("start_login")?;
-
-    println!();
-    println!("  {}  {}", "Open  ".dimmed(), start.verification_url.cyan().bold());
-    println!("  {}  {}", "Enter ".dimmed(), start.user_code.yellow().bold());
-    println!();
-    println!("  {}", "Waiting for approval…".dimmed());
-
-    let creds = poll_until_complete(&base_url, &http, &start).await.context("poll_until_complete")?;
     let store = CredentialsStore::default_path()?;
     store.save(&creds).context("save credentials")?;
 
     println!();
     println!("  {} {}", "✓".green().bold(), "Logged in".green().bold());
     if let Some(ref u) = creds.user {
-        println!("    {}  {}", "User  ".dimmed(), u.cyan());
+        println!("    {}  {}", "Identity".dimmed(), u.cyan());
     }
-    if let Some(ref o) = creds.active_org_id {
-        println!("    {}  {}", "Org   ".dimmed(), o.cyan());
+    if let Some(exp) = creds.expires_at {
+        let remaining = exp - chrono::Utc::now();
+        let label = if remaining.num_hours() >= 1 {
+            format!("{}h", remaining.num_hours())
+        } else {
+            format!("{}m", remaining.num_minutes())
+        };
+        println!("    {}  {} {}", "Expires ".dimmed(), label.green(), "from now".dimmed());
     }
-    println!("    {}  {}", "Saved ".dimmed(), store.path().display().to_string().dimmed());
+    println!("    {}  {}", "Saved   ".dimmed(), store.path().display().to_string().dimmed());
+    println!();
+    println!(
+        "  {} {}",
+        "→".dimmed(),
+        "next: `th api orgs list` to see your orgs, then `th api orgs switch <id>`.".dimmed()
+    );
     println!();
     Ok(())
+}
+
+/// Resolve a client_id: flag → SMOOAI_CLIENT_ID env → interactive
+/// prompt. Returns an error only if all three sources are empty.
+fn resolve_client_id(flag: Option<String>) -> Result<String> {
+    if let Some(v) = flag.filter(|s| !s.trim().is_empty()) {
+        return Ok(v);
+    }
+    if let Ok(v) = std::env::var("SMOOAI_CLIENT_ID") {
+        if !v.trim().is_empty() {
+            return Ok(v);
+        }
+    }
+    Input::<String>::with_theme(&ColorfulTheme::default())
+        .with_prompt("Client ID")
+        .interact_text()
+        .context("read client id from prompt")
+}
+
+/// Resolve a client_secret: flag → SMOOAI_CLIENT_SECRET env →
+/// interactive Password prompt (no echo). Failing all three returns
+/// an error.
+fn resolve_client_secret(flag: Option<String>) -> Result<String> {
+    if let Some(v) = flag.filter(|s| !s.trim().is_empty()) {
+        return Ok(v);
+    }
+    if let Ok(v) = std::env::var("SMOOAI_CLIENT_SECRET") {
+        if !v.trim().is_empty() {
+            return Ok(v);
+        }
+    }
+    Password::with_theme(&ColorfulTheme::default())
+        .with_prompt("Client Secret")
+        .interact()
+        .context("read client secret from prompt")
 }
 
 /// `th logout` — delete the credentials file. Idempotent.

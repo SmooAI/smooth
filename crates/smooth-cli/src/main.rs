@@ -403,12 +403,23 @@ enum OrgsCommands {
 
 #[derive(Subcommand)]
 enum ApiCommands {
-    /// Authenticate `th` against the Smoo AI platform API
-    /// (`api.smoo.ai`). Opens a browser for the device-flow handshake
-    /// and stores the resulting tokens at
-    /// `~/.smooth/auth/smooai.json`. After this, commands like
-    /// `th api whoami`, `th api orgs`, etc. work against your account.
-    Login,
+    /// Authenticate `th` against the Smoo AI platform API. Exchanges
+    /// an OAuth2 client_credentials grant at `https://auth.smoo.ai/token`
+    /// for a bearer JWT and stores it at `~/.smooth/auth/smooai.json`.
+    ///
+    /// Credential resolution order (first present wins):
+    ///   1. `--client-id` + `--client-secret` flags
+    ///   2. `SMOOAI_CLIENT_ID` + `SMOOAI_CLIENT_SECRET` env vars
+    ///   3. Interactive prompt
+    ///
+    /// Create a client_id / client_secret pair in the smooai web app
+    /// (Organization Settings → API Keys) before running this.
+    Login {
+        #[arg(long)]
+        client_id: Option<String>,
+        #[arg(long)]
+        client_secret: Option<String>,
+    },
     /// Forget the current Smoo AI platform session — deletes
     /// `~/.smooth/auth/smooai.json`. Idempotent.
     Logout,
@@ -1007,7 +1018,7 @@ async fn main() -> Result<()> {
         Some(Commands::Db { cmd }) => cmd_db(cmd),
         Some(Commands::Auth { cmd }) => cmd_auth(cmd).await,
         Some(Commands::Api { cmd }) => match cmd {
-            ApiCommands::Login => cmd_login().await,
+            ApiCommands::Login { client_id, client_secret } => cmd_login(client_id, client_secret).await,
             ApiCommands::Logout => cmd_logout().await,
             ApiCommands::Whoami => cmd_whoami().await,
             ApiCommands::Orgs { cmd } => cmd_orgs(cmd).await,
