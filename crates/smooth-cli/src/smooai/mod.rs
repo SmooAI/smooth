@@ -29,7 +29,7 @@ use smooth_api_client::{CredentialsStore, SmoothApiClient};
 pub fn require_authed() -> Result<SmoothApiClient> {
     let client = SmoothApiClient::from_disk().context("load credentials")?;
     if !client.is_authenticated() {
-        anyhow::bail!("not logged in — run `th login` first");
+        anyhow::bail!("not logged in — run `th api login` first");
     }
     Ok(client)
 }
@@ -50,7 +50,7 @@ pub fn require_active_org(client: &SmoothApiClient, override_org: Option<String>
     client
         .credentials()
         .and_then(|c| c.active_org_id)
-        .context("no active org set — pass `--org <id>`, set SMOOAI_ORG_ID, or run `th orgs switch <id>`")
+        .context("no active org set — pass `--org <id>`, set SMOOAI_ORG_ID, or run `th api orgs switch <id>`")
 }
 
 /// Read a JSON body from `path` (or stdin when `path == "-"`).
@@ -165,7 +165,7 @@ pub async fn cmd_whoami() -> Result<()> {
     let client = SmoothApiClient::from_disk().context("load credentials")?;
     let Some(creds) = client.credentials() else {
         println!();
-        println!("  {} {}", "●".yellow(), "Not logged in — run `th login`".yellow());
+        println!("  {} {}", "●".yellow(), "Not logged in — run `th api login`".yellow());
         println!();
         return Ok(());
     };
@@ -179,7 +179,7 @@ pub async fn cmd_whoami() -> Result<()> {
     if let Some(ref o) = creds.active_org_id {
         println!("  {}  {}", "Active org".dimmed(), o.cyan());
     } else {
-        println!("  {}  {}", "Active org".dimmed(), "(none — `th orgs switch <id>`)".dimmed());
+        println!("  {}  {}", "Active org".dimmed(), "(none — `th api orgs switch <id>`)".dimmed());
     }
     if let Some(exp) = creds.expires_at {
         let now = chrono::Utc::now();
@@ -192,7 +192,7 @@ pub async fn cmd_whoami() -> Result<()> {
             };
             println!("  {}  {} {}", "Expires   ".dimmed(), label.green(), "left".dimmed());
         } else {
-            println!("  {}  {}", "Expires   ".dimmed(), "expired — `th login`".red());
+            println!("  {}  {}", "Expires   ".dimmed(), "expired — `th api login`".red());
         }
     }
     println!("  {}  {}", "Stored at ".dimmed(), client.store.path().display().to_string().dimmed());
@@ -205,7 +205,7 @@ pub async fn cmd_orgs(cmd: super::OrgsCommands) -> Result<()> {
     let client = SmoothApiClient::from_disk().context("load credentials")?;
     if !client.is_authenticated() {
         println!();
-        println!("  {} {}", "●".yellow(), "Not logged in — run `th login` first".yellow());
+        println!("  {} {}", "●".yellow(), "Not logged in — run `th api login` first".yellow());
         println!();
         anyhow::bail!("not authenticated");
     }
@@ -225,7 +225,7 @@ pub async fn cmd_orgs(cmd: super::OrgsCommands) -> Result<()> {
             println!();
         }
         super::OrgsCommands::Show { org_id } => {
-            let resolved = org_id.or_else(|| client.credentials().and_then(|c| c.active_org_id)).context("no org id specified and no active org set — pass <org_id> or run `th orgs switch <id>`")?;
+            let resolved = org_id.or_else(|| client.credentials().and_then(|c| c.active_org_id)).context("no org id specified and no active org set — pass <org_id> or run `th api orgs switch <id>`")?;
             let resp = pb.get_organizations_org_id(&resolved).await.context("GET /organizations/{org_id}")?;
             let body = serde_json::to_value(resp.into_inner()).context("serialize response")?;
             println!();

@@ -86,70 +86,14 @@ enum Commands {
         #[command(subcommand)]
         cmd: AuthCommands,
     },
-    /// Authenticate `th` against the Smoo AI platform API
-    /// (`api.smoo.ai`). Opens a browser for the device-flow handshake
-    /// and stores the resulting tokens at
-    /// `~/.smooth/auth/smooai.json`. After this, commands like
-    /// `th whoami`, `th orgs`, etc. work against your account.
-    Login,
-    /// Forget the current Smoo AI platform session — deletes
-    /// `~/.smooth/auth/smooai.json`. Idempotent.
-    Logout,
-    /// Print the currently-logged-in Smoo AI user + active org.
-    Whoami,
-    /// Smoo AI organization management.
-    Orgs {
+    /// Smoo AI platform API — everything backed by `api.smoo.ai`.
+    /// Login + orgs + agents + keys + members + config + knowledge
+    /// + jobs + products + profile + testing all live under here so
+    /// resource names like `config` / `jobs` / `agents` don't
+    /// collide with Smooth's local subcommands.
+    Api {
         #[command(subcommand)]
-        cmd: OrgsCommands,
-    },
-    /// Smoo AI agents — list / show / create / update / delete + the
-    /// regenerate-* and per-agent knowledge endpoints.
-    Agents {
-        #[command(subcommand)]
-        cmd: smooai::agents::Cmd,
-    },
-    /// Smoo AI M2M auth clients ("API keys") — list / create /
-    /// rotate / revoke.
-    Keys {
-        #[command(subcommand)]
-        cmd: smooai::keys::Cmd,
-    },
-    /// Smoo AI org members + invitations.
-    Members {
-        #[command(subcommand)]
-        cmd: smooai::members::Cmd,
-    },
-    /// Smoo AI configuration — schemas, environments, values, feature
-    /// flags.
-    Config {
-        #[command(subcommand)]
-        cmd: smooai::config::Cmd,
-    },
-    /// Smoo AI knowledge documents (text, websites, files).
-    Knowledge {
-        #[command(subcommand)]
-        cmd: smooai::knowledge::Cmd,
-    },
-    /// Smoo AI async job queue.
-    Jobs {
-        #[command(subcommand)]
-        cmd: smooai::jobs::Cmd,
-    },
-    /// Smoo AI billing products / plans.
-    Products {
-        #[command(subcommand)]
-        cmd: smooai::products::Cmd,
-    },
-    /// Smoo AI profile (the currently-logged-in user).
-    Profile {
-        #[command(subcommand)]
-        cmd: smooai::profile::Cmd,
-    },
-    /// Smoo AI testing platform — deployments, cases, environments,
-    /// runs.
-    Testing {
-        #[command(subcommand)]
-        cmd: smooai::testing::Cmd,
+        cmd: ApiCommands,
     },
     /// Run a pearl through a Smooth Operator in a microVM — streams
     /// agent events to stdout. With --keep-alive, the VM stays up
@@ -454,6 +398,75 @@ enum OrgsCommands {
     Switch {
         /// Org id to make active.
         org_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ApiCommands {
+    /// Authenticate `th` against the Smoo AI platform API
+    /// (`api.smoo.ai`). Opens a browser for the device-flow handshake
+    /// and stores the resulting tokens at
+    /// `~/.smooth/auth/smooai.json`. After this, commands like
+    /// `th api whoami`, `th api orgs`, etc. work against your account.
+    Login,
+    /// Forget the current Smoo AI platform session — deletes
+    /// `~/.smooth/auth/smooai.json`. Idempotent.
+    Logout,
+    /// Print the currently-logged-in Smoo AI user + active org.
+    Whoami,
+    /// Smoo AI organization management.
+    Orgs {
+        #[command(subcommand)]
+        cmd: OrgsCommands,
+    },
+    /// Smoo AI agents — list / show / create / update / delete + the
+    /// regenerate-* and per-agent knowledge endpoints.
+    Agents {
+        #[command(subcommand)]
+        cmd: smooai::agents::Cmd,
+    },
+    /// Smoo AI M2M auth clients ("API keys") — list / create /
+    /// rotate / revoke.
+    Keys {
+        #[command(subcommand)]
+        cmd: smooai::keys::Cmd,
+    },
+    /// Smoo AI org members + invitations.
+    Members {
+        #[command(subcommand)]
+        cmd: smooai::members::Cmd,
+    },
+    /// Smoo AI configuration — schemas, environments, values, feature
+    /// flags.
+    Config {
+        #[command(subcommand)]
+        cmd: smooai::config::Cmd,
+    },
+    /// Smoo AI knowledge documents (text, websites, files).
+    Knowledge {
+        #[command(subcommand)]
+        cmd: smooai::knowledge::Cmd,
+    },
+    /// Smoo AI async job queue.
+    Jobs {
+        #[command(subcommand)]
+        cmd: smooai::jobs::Cmd,
+    },
+    /// Smoo AI billing products / plans.
+    Products {
+        #[command(subcommand)]
+        cmd: smooai::products::Cmd,
+    },
+    /// Smoo AI profile (the currently-logged-in user).
+    Profile {
+        #[command(subcommand)]
+        cmd: smooai::profile::Cmd,
+    },
+    /// Smoo AI testing platform — deployments, cases, environments,
+    /// runs.
+    Testing {
+        #[command(subcommand)]
+        cmd: smooai::testing::Cmd,
     },
 }
 
@@ -993,19 +1006,21 @@ async fn main() -> Result<()> {
         Some(Commands::Status) => cmd_status().await,
         Some(Commands::Db { cmd }) => cmd_db(cmd),
         Some(Commands::Auth { cmd }) => cmd_auth(cmd).await,
-        Some(Commands::Login) => cmd_login().await,
-        Some(Commands::Logout) => cmd_logout().await,
-        Some(Commands::Whoami) => cmd_whoami().await,
-        Some(Commands::Orgs { cmd }) => cmd_orgs(cmd).await,
-        Some(Commands::Agents { cmd }) => smooai::agents::cmd(cmd).await,
-        Some(Commands::Keys { cmd }) => smooai::keys::cmd(cmd).await,
-        Some(Commands::Members { cmd }) => smooai::members::cmd(cmd).await,
-        Some(Commands::Config { cmd }) => smooai::config::cmd(cmd).await,
-        Some(Commands::Knowledge { cmd }) => smooai::knowledge::cmd(cmd).await,
-        Some(Commands::Jobs { cmd }) => smooai::jobs::cmd(cmd).await,
-        Some(Commands::Products { cmd }) => smooai::products::cmd(cmd).await,
-        Some(Commands::Profile { cmd }) => smooai::profile::cmd(cmd).await,
-        Some(Commands::Testing { cmd }) => smooai::testing::cmd(cmd).await,
+        Some(Commands::Api { cmd }) => match cmd {
+            ApiCommands::Login => cmd_login().await,
+            ApiCommands::Logout => cmd_logout().await,
+            ApiCommands::Whoami => cmd_whoami().await,
+            ApiCommands::Orgs { cmd } => cmd_orgs(cmd).await,
+            ApiCommands::Agents { cmd } => smooai::agents::cmd(cmd).await,
+            ApiCommands::Keys { cmd } => smooai::keys::cmd(cmd).await,
+            ApiCommands::Members { cmd } => smooai::members::cmd(cmd).await,
+            ApiCommands::Config { cmd } => smooai::config::cmd(cmd).await,
+            ApiCommands::Knowledge { cmd } => smooai::knowledge::cmd(cmd).await,
+            ApiCommands::Jobs { cmd } => smooai::jobs::cmd(cmd).await,
+            ApiCommands::Products { cmd } => smooai::products::cmd(cmd).await,
+            ApiCommands::Profile { cmd } => smooai::profile::cmd(cmd).await,
+            ApiCommands::Testing { cmd } => smooai::testing::cmd(cmd).await,
+        },
         Some(Commands::Operators { cmd }) => cmd_operators(cmd).await,
         Some(Commands::Inbox) => cmd_inbox().await,
         Some(Commands::Run {
