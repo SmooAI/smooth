@@ -32,19 +32,37 @@ pub fn token_url() -> String {
     std::env::var("SMOOAI_AUTH_URL").unwrap_or_else(|_| DEFAULT_AUTH_URL.to_string())
 }
 
-/// Wire shape of the token endpoint response (subset of
-/// `components/schemas/TokenResponse`).
+/// Wire shape of the token endpoint response.
+///
+/// The published OpenAPI spec declares `access_token`, `token_type`,
+/// and `expires_in` as required. The live server (observed
+/// 2026-05-19 against `auth.smoo.ai`) actually returns
+/// `{access_token, refresh_token}` with neither `token_type` nor
+/// `expires_in`, so every field except `access_token` is optional
+/// here. We default `expires_in` to 1 hour when missing — that's the
+/// industry-standard short-lived JWT lifetime and erring on the
+/// short side just means we re-exchange a few minutes early.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TokenResponse {
     pub access_token: String,
     #[serde(default = "default_token_type")]
     pub token_type: String,
-    /// Seconds until the token expires.
+    /// Seconds until the token expires. Defaults to 3600 when the
+    /// server omits the field.
+    #[serde(default = "default_expires_in")]
     pub expires_in: u64,
+    /// Refresh token. Not part of the OpenAPI spec but the live
+    /// server returns one for org-scoped M2M grants.
+    #[serde(default)]
+    pub refresh_token: Option<String>,
 }
 
 fn default_token_type() -> String {
     "Bearer".to_string()
+}
+
+const fn default_expires_in() -> u64 {
+    3600
 }
 
 /// What we send to `/token` — form-urlencoded per OAuth2 spec, plus
@@ -85,7 +103,7 @@ pub async fn client_credentials_grant(http: &reqwest::Client, client_id: &str, c
     let expires_at = Utc::now() + chrono::Duration::seconds(i64::try_from(body.expires_in).unwrap_or(3600));
     Ok(Credentials {
         access_token: body.access_token,
-        refresh_token: None,
+        refresh_token: body.refresh_token,
         expires_at: Some(expires_at),
         // `client_credentials` doesn't identify a user — the API key
         // is its own identity. We store the client_id as a display

@@ -109,19 +109,40 @@ pub fn print_list_envelope(body: &serde_json::Value, item_label: &str) {
 /// `th api login` — exchange a client_credentials pair for a bearer
 /// JWT against `https://auth.smoo.ai/token` and persist it.
 ///
-/// Credential resolution: flags → env vars → interactive prompt.
+/// Credential resolution order (first present wins):
+///   1. `--client-id` + `--client-secret` flags
+///   2. `SMOOAI_CLIENT_ID` + `SMOOAI_CLIENT_SECRET` env vars (our own)
+///   3. `SMOOAI_CONFIG_CLIENT_ID` + `SMOOAI_CONFIG_CLIENT_SECRET`
+///      env vars (the `@smooai/config` convention — set by direnv
+///      when you're cd'd into the smooai monorepo). Also picks up
+///      `SMOOAI_CONFIG_ORG_ID` to seed `active_org_id` so the user
+///      skips `th api orgs switch` afterward.
+///   4. Interactive dialoguer prompt.
 pub async fn cmd_login(client_id: Option<String>, client_secret: Option<String>) -> Result<()> {
-    let client_id = resolve_client_id(client_id)?;
-    let client_secret = resolve_client_secret(client_secret)?;
+    let resolved = resolve_credentials(client_id, client_secret)?;
 
     println!();
+    if let Some(ref source) = resolved.source {
+        println!("  {} Using credentials from {}", "●".cyan(), source.dimmed());
+    }
     println!("  {} Exchanging client_credentials at {}", "●".cyan(), token_url().dimmed());
 
     let http = reqwest::Client::builder()
         .user_agent(format!("smooth-cli/{} (https://github.com/SmooAI/smooth)", env!("CARGO_PKG_VERSION")))
         .build()
         .context("build http client")?;
-    let creds = client_credentials_grant(&http, &client_id, &client_secret).await.context("client_credentials_grant")?;
+    let mut creds = client_credentials_grant(&http, &resolved.client_id, &resolved.client_secret).await.context("client_credentials_grant")?;
+
+    // If `@smooai/config`'s direnv block also exports
+    // `SMOOAI_CONFIG_ORG_ID`, seed it as the active org. Saves the
+    // user a `th api orgs switch <id>` step after login.
+    if creds.active_org_id.is_none() {
+        if let Ok(org_id) = std::env::var("SMOOAI_CONFIG_ORG_ID") {
+            if !org_id.trim().is_empty() {
+                creds.active_org_id = Some(org_id);
+            }
+        }
+    }
 
     let store = CredentialsStore::default_path()?;
     store.save(&creds).context("save credentials")?;
@@ -130,6 +151,9 @@ pub async fn cmd_login(client_id: Option<String>, client_secret: Option<String>)
     println!("  {} {}", "✓".green().bold(), "Logged in".green().bold());
     if let Some(ref u) = creds.user {
         println!("    {}  {}", "Identity".dimmed(), u.cyan());
+    }
+    if let Some(ref o) = creds.active_org_id {
+        println!("    {}  {}", "Org     ".dimmed(), o.cyan());
     }
     if let Some(exp) = creds.expires_at {
         let remaining = exp - chrono::Utc::now();
@@ -142,48 +166,86 @@ pub async fn cmd_login(client_id: Option<String>, client_secret: Option<String>)
     }
     println!("    {}  {}", "Saved   ".dimmed(), store.path().display().to_string().dimmed());
     println!();
-    println!(
-        "  {} {}",
-        "→".dimmed(),
-        "next: `th api orgs list` to see your orgs, then `th api orgs switch <id>`.".dimmed()
-    );
+    if creds.active_org_id.is_some() {
+        println!("  {} {}", "→".dimmed(), "next: `th api whoami` to confirm, or `th api orgs list`.".dimmed());
+    } else {
+        println!(
+            "  {} {}",
+            "→".dimmed(),
+            "next: `th api orgs list` to see your orgs, then `th api orgs switch <id>`.".dimmed()
+        );
+    }
     println!();
     Ok(())
 }
 
-/// Resolve a client_id: flag → SMOOAI_CLIENT_ID env → interactive
-/// prompt. Returns an error only if all three sources are empty.
-fn resolve_client_id(flag: Option<String>) -> Result<String> {
-    if let Some(v) = flag.filter(|s| !s.trim().is_empty()) {
-        return Ok(v);
-    }
-    if let Ok(v) = std::env::var("SMOOAI_CLIENT_ID") {
-        if !v.trim().is_empty() {
-            return Ok(v);
-        }
-    }
-    Input::<String>::with_theme(&ColorfulTheme::default())
-        .with_prompt("Client ID")
-        .interact_text()
-        .context("read client id from prompt")
+/// Outcome of credential resolution. `source` is `Some("<env var
+/// name>")` / `Some("@smooai/config")` / `Some("--client-id flag")` so
+/// the login command can tell the user which knob it picked up.
+struct ResolvedCredentials {
+    client_id: String,
+    client_secret: String,
+    source: Option<String>,
 }
 
-/// Resolve a client_secret: flag → SMOOAI_CLIENT_SECRET env →
-/// interactive Password prompt (no echo). Failing all three returns
-/// an error.
-fn resolve_client_secret(flag: Option<String>) -> Result<String> {
-    if let Some(v) = flag.filter(|s| !s.trim().is_empty()) {
-        return Ok(v);
+/// Walk the resolution chain. Returns the first complete pair found,
+/// or falls back to interactive prompts (no `source` set in that case).
+fn resolve_credentials(flag_id: Option<String>, flag_secret: Option<String>) -> Result<ResolvedCredentials> {
+    // 1. Flags. Require BOTH so we don't mix a flag-set id with a
+    //    secret from somewhere else (which is almost always a typo).
+    match (flag_id.filter(|s| !s.trim().is_empty()), flag_secret.filter(|s| !s.trim().is_empty())) {
+        (Some(id), Some(secret)) => {
+            return Ok(ResolvedCredentials {
+                client_id: id,
+                client_secret: secret,
+                source: Some("--client-id / --client-secret flags".into()),
+            })
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            anyhow::bail!("pass BOTH --client-id and --client-secret (or neither — env vars / prompt take over)");
+        }
+        (None, None) => {}
     }
-    if let Ok(v) = std::env::var("SMOOAI_CLIENT_SECRET") {
-        if !v.trim().is_empty() {
-            return Ok(v);
+
+    // 2. Our own env-var pair.
+    if let (Ok(id), Ok(secret)) = (std::env::var("SMOOAI_CLIENT_ID"), std::env::var("SMOOAI_CLIENT_SECRET")) {
+        if !id.trim().is_empty() && !secret.trim().is_empty() {
+            return Ok(ResolvedCredentials {
+                client_id: id,
+                client_secret: secret,
+                source: Some("$SMOOAI_CLIENT_ID / $SMOOAI_CLIENT_SECRET".into()),
+            });
         }
     }
-    Password::with_theme(&ColorfulTheme::default())
+
+    // 3. The @smooai/config convention. direnv pulls these in for
+    //    anyone working inside the smooai monorepo, which is the most
+    //    common case for `th api login` right now.
+    if let (Ok(id), Ok(secret)) = (std::env::var("SMOOAI_CONFIG_CLIENT_ID"), std::env::var("SMOOAI_CONFIG_CLIENT_SECRET")) {
+        if !id.trim().is_empty() && !secret.trim().is_empty() {
+            return Ok(ResolvedCredentials {
+                client_id: id,
+                client_secret: secret,
+                source: Some("@smooai/config ($SMOOAI_CONFIG_CLIENT_ID / $SMOOAI_CONFIG_CLIENT_SECRET)".into()),
+            });
+        }
+    }
+
+    // 4. Interactive prompts. No `source` — the user is literally
+    //    typing the values into a TTY.
+    let id = Input::<String>::with_theme(&ColorfulTheme::default())
+        .with_prompt("Client ID")
+        .interact_text()
+        .context("read client id from prompt")?;
+    let secret = Password::with_theme(&ColorfulTheme::default())
         .with_prompt("Client Secret")
         .interact()
-        .context("read client secret from prompt")
+        .context("read client secret from prompt")?;
+    Ok(ResolvedCredentials {
+        client_id: id,
+        client_secret: secret,
+        source: None,
+    })
 }
 
 /// `th logout` — delete the credentials file. Idempotent.
@@ -246,35 +308,17 @@ pub async fn cmd_whoami() -> Result<()> {
 
 /// `th orgs *` dispatch — list / show / switch.
 pub async fn cmd_orgs(cmd: super::OrgsCommands) -> Result<()> {
-    let client = SmoothApiClient::from_disk().context("load credentials")?;
-    if !client.is_authenticated() {
-        println!();
-        println!("  {} {}", "●".yellow(), "Not logged in — run `th api login` first".yellow());
-        println!();
-        anyhow::bail!("not authenticated");
-    }
-
-    let pb = client.pb();
+    let client = require_authed()?;
     match cmd {
         super::OrgsCommands::List => {
-            let resp = pb.get_organizations().await.context("GET /organizations")?;
-            println!();
-            // The response is the generated wrapper; pull the JSON
-            // value out and walk it generically. We don't bind to a
-            // concrete struct here because the typed Organization
-            // model from progenitor has nullable fields we don't
-            // want to enumerate one-by-one for pretty-printing.
-            let body = serde_json::to_value(resp.into_inner()).context("serialize response")?;
+            let body = client.get("/organizations").await.context("GET /organizations")?;
             print_orgs_list(&body);
-            println!();
         }
         super::OrgsCommands::Show { org_id } => {
-            let resolved = org_id.or_else(|| client.credentials().and_then(|c| c.active_org_id)).context("no org id specified and no active org set — pass <org_id> or run `th api orgs switch <id>`")?;
-            let resp = pb.get_organizations_org_id(&resolved).await.context("GET /organizations/{org_id}")?;
-            let body = serde_json::to_value(resp.into_inner()).context("serialize response")?;
-            println!();
-            println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
-            println!();
+            let resolved = org_id
+                .or_else(|| client.credentials().and_then(|c| c.active_org_id))
+                .context("no org id specified and no active org set — pass <org_id> or run `th api orgs switch <id>`")?;
+            print_json(&client.get(&format!("/organizations/{resolved}")).await.context("GET /organizations/{org_id}")?);
         }
         super::OrgsCommands::Switch { org_id } => {
             let mut creds = client.credentials().context("no credentials loaded")?;
