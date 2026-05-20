@@ -36,21 +36,39 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::List { org } => {
             let org = require_active_org(&client, org)?;
-            print_list_envelope(&client.get(&format!("/organizations/{org}/auth-clients")).await.context("GET auth-clients")?, "API keys");
+            print_list_envelope(
+                &client.get(&format!("/organizations/{org}/auth-clients")).await.context("GET auth-clients")?,
+                "API keys",
+            );
         }
         Cmd::Create { body, org } => {
             let org = require_active_org(&client, org)?;
             let body = read_body(&body)?;
-            print_json(&client.post(&format!("/organizations/{org}/auth-clients"), Some(&body)).await.context("POST auth-client")?);
+            print_json(
+                &client
+                    .post(&format!("/organizations/{org}/auth-clients"), Some(&body))
+                    .await
+                    .context("POST auth-client")?,
+            );
         }
         Cmd::Update { client_id, body, org } => {
             let org = require_active_org(&client, org)?;
             let body = read_body(&body)?;
-            print_json(&client.patch(&format!("/organizations/{org}/auth-clients/{client_id}"), &body).await.context("PATCH auth-client")?);
+            print_json(
+                &client
+                    .patch(&format!("/organizations/{org}/auth-clients/{client_id}"), &body)
+                    .await
+                    .context("PATCH auth-client")?,
+            );
         }
         Cmd::Revoke { client_id, org } => {
             let org = require_active_org(&client, org)?;
-            print_json(&client.delete(&format!("/organizations/{org}/auth-clients/{client_id}")).await.context("DELETE auth-client")?);
+            print_json(
+                &client
+                    .delete(&format!("/organizations/{org}/auth-clients/{client_id}"))
+                    .await
+                    .context("DELETE auth-client")?,
+            );
         }
     }
     Ok(())

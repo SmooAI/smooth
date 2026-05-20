@@ -61,14 +61,22 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
         Cmd::Invitations { org } => {
             let org = require_active_org(&client, org)?;
             print_list_envelope(
-                &client.get(&format!("/organizations/{org}/member-invitations")).await.context("GET invitations")?,
+                &client
+                    .get(&format!("/organizations/{org}/member-invitations"))
+                    .await
+                    .context("GET invitations")?,
                 "invitations",
             );
         }
         Cmd::Invite { body, org } => {
             let org = require_active_org(&client, org)?;
             let body = read_body(&body)?;
-            print_json(&client.post(&format!("/organizations/{org}/member-invitations"), Some(&body)).await.context("POST invitation")?);
+            print_json(
+                &client
+                    .post(&format!("/organizations/{org}/member-invitations"), Some(&body))
+                    .await
+                    .context("POST invitation")?,
+            );
         }
         Cmd::Revoke { invitation_id, org } => {
             let org = require_active_org(&client, org)?;

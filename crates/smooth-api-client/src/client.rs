@@ -132,7 +132,9 @@ impl SmoothApiClient {
             return Ok(());
         };
         let bare = reqwest::Client::builder().user_agent(user_agent()).build()?;
-        let fresh = crate::auth::client_credentials_grant(&bare, &cid, &csecret).await.context("auto-refresh client_credentials grant")?;
+        let fresh = crate::auth::client_credentials_grant(&bare, &cid, &csecret)
+            .await
+            .context("auto-refresh client_credentials grant")?;
         let mut merged = fresh;
         // Preserve display-only fields the grant doesn't know about.
         merged.active_org_id = creds.active_org_id;
@@ -179,7 +181,11 @@ impl SmoothApiClient {
     /// Single send. Returns `(status, body_text)` for the caller to
     /// decide whether to retry / decode / bail.
     async fn send_once(&self, method: &reqwest::Method, path: &str, body: Option<&serde_json::Value>) -> anyhow::Result<(reqwest::StatusCode, String)> {
-        let url = format!("{}{}", self.base_url.trim_end_matches('/'), if path.starts_with('/') { path.to_string() } else { format!("/{path}") });
+        let url = format!(
+            "{}{}",
+            self.base_url.trim_end_matches('/'),
+            if path.starts_with('/') { path.to_string() } else { format!("/{path}") }
+        );
         // Use the current access_token from credentials at send-time,
         // not the cached header in self.http — that way ensure_fresh_token
         // doesn't have to mutate the reqwest::Client.
@@ -262,6 +268,8 @@ mod tests {
             expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
             user: None,
             active_org_id: None,
+            client_id: None,
+            client_secret: None,
             created_at: Utc::now(),
         };
         let client = SmoothApiClient::new("https://api.smoo.ai", Some(creds), store).expect("build");
@@ -280,6 +288,8 @@ mod tests {
             expires_at: None,
             user: Some("brent@smoo.ai".into()),
             active_org_id: None,
+            client_id: None,
+            client_secret: None,
             created_at: Utc::now(),
         };
         client.set_credentials(creds.clone()).expect("set");

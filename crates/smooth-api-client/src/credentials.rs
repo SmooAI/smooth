@@ -86,7 +86,9 @@ impl CredentialsStore {
             return Ok(Self { path: PathBuf::from(explicit) });
         }
         let home = dirs_next::home_dir().context("$HOME not set; pass SMOOAI_AUTH_FILE to override")?;
-        Ok(Self { path: home.join(".smooth").join("auth").join("smooai.json") })
+        Ok(Self {
+            path: home.join(".smooth").join("auth").join("smooai.json"),
+        })
     }
 
     /// Construct with an explicit path. Mainly for tests.

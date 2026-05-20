@@ -109,13 +109,13 @@ pub fn print_list_envelope(body: &serde_json::Value, item_label: &str) {
     }
     for item in items {
         let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-        let name = item.get("name").and_then(|v| v.as_str()).or_else(|| item.get("email").and_then(|v| v.as_str())).unwrap_or("");
+        let name = item
+            .get("name")
+            .and_then(|v| v.as_str())
+            .or_else(|| item.get("email").and_then(|v| v.as_str()))
+            .unwrap_or("");
         let status = item.get("status").and_then(|v| v.as_str()).unwrap_or("");
-        let suffix = if status.is_empty() {
-            String::new()
-        } else {
-            format!(" [{status}]")
-        };
+        let suffix = if status.is_empty() { String::new() } else { format!(" [{status}]") };
         println!("  {} {} {}{}", "○".dimmed(), id.cyan(), name.bold(), suffix.dimmed());
     }
     println!();
@@ -146,7 +146,9 @@ pub async fn cmd_login(client_id: Option<String>, client_secret: Option<String>)
         .user_agent(format!("smooth-cli/{} (https://github.com/SmooAI/smooth)", env!("CARGO_PKG_VERSION")))
         .build()
         .context("build http client")?;
-    let mut creds = client_credentials_grant(&http, &resolved.client_id, &resolved.client_secret).await.context("client_credentials_grant")?;
+    let mut creds = client_credentials_grant(&http, &resolved.client_id, &resolved.client_secret)
+        .await
+        .context("client_credentials_grant")?;
 
     // If `@smooai/config`'s direnv block also exports
     // `SMOOAI_CONFIG_ORG_ID`, seed it as the active org. Saves the
@@ -270,7 +272,7 @@ pub async fn cmd_logout() -> Result<()> {
     store.delete().context("delete credentials")?;
     println!();
     if existed {
-        println!("  {} Logged out", "🔴".to_string());
+        println!("  🔴 Logged out");
     } else {
         println!("  {} {}", "●".dimmed(), "Already logged out".dimmed());
     }
@@ -331,7 +333,12 @@ pub async fn cmd_whoami() -> Result<()> {
                 .and_then(|v| v.as_array())
                 .map(|a| a.iter().filter_map(|r| r.get("name").and_then(|n| n.as_str()).map(str::to_string)).collect())
                 .unwrap_or_default();
-            println!("  {}  {} {}", "Admin roles".dimmed(), role_names.join(", ").yellow(), format!("({admin})").dimmed());
+            println!(
+                "  {}  {} {}",
+                "Admin roles".dimmed(),
+                role_names.join(", ").yellow(),
+                format!("({admin})").dimmed()
+            );
         }
     }
 
@@ -341,11 +348,7 @@ pub async fn cmd_whoami() -> Result<()> {
         if let Ok(org) = client.get(&format!("/organizations/{o}")).await {
             let name = org.get("name").and_then(|v| v.as_str()).unwrap_or("(unnamed)");
             let access = org.get("accessType").and_then(|v| v.as_str()).unwrap_or("");
-            let access_suffix = if access.is_empty() {
-                String::new()
-            } else {
-                format!(" [{access}]")
-            };
+            let access_suffix = if access.is_empty() { String::new() } else { format!(" [{access}]") };
             println!("  {}  {} {}{}", "Org        ".dimmed(), o.cyan(), name.bold(), access_suffix.dimmed());
             shown = true;
         }
@@ -354,7 +357,11 @@ pub async fn cmd_whoami() -> Result<()> {
         }
         // Member count is a separate call; safe to fail.
         if let Ok(members) = client.get(&format!("/organizations/{o}/members")).await {
-            let count = members.get("data").and_then(|v| v.as_array()).or_else(|| members.as_array()).map_or(0, std::vec::Vec::len);
+            let count = members
+                .get("data")
+                .and_then(|v| v.as_array())
+                .or_else(|| members.as_array())
+                .map_or(0, std::vec::Vec::len);
             if count > 0 {
                 println!("  {}  {}", "Members    ".dimmed(), count.to_string().bold());
             }
@@ -429,11 +436,7 @@ fn print_orgs_list(body: &serde_json::Value) {
         let id = org.get("id").and_then(|v| v.as_str()).unwrap_or("?");
         let name = org.get("name").and_then(|v| v.as_str()).unwrap_or("(unnamed)");
         let slug = org.get("slug").and_then(|v| v.as_str()).unwrap_or("");
-        let slug_part = if slug.is_empty() {
-            String::new()
-        } else {
-            format!(" ({slug})")
-        };
+        let slug_part = if slug.is_empty() { String::new() } else { format!(" ({slug})") };
         println!("  {} {} {}{}", "○".dimmed(), id.cyan(), name.bold(), slug_part.dimmed());
     }
 }

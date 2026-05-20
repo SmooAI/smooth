@@ -91,7 +91,12 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
         }
         Cmd::Summary { agent_id, org } => {
             let org = require_active_org(&client, org)?;
-            print_json(&client.get(&format!("/organizations/{org}/agents/{agent_id}/summary")).await.context("GET agent summary")?);
+            print_json(
+                &client
+                    .get(&format!("/organizations/{org}/agents/{agent_id}/summary"))
+                    .await
+                    .context("GET agent summary")?,
+            );
         }
         Cmd::Create { body, org } => {
             let org = require_active_org(&client, org)?;
@@ -101,11 +106,21 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
         Cmd::Update { agent_id, body, org } => {
             let org = require_active_org(&client, org)?;
             let body = read_body(&body)?;
-            print_json(&client.patch(&format!("/organizations/{org}/agents/{agent_id}"), &body).await.context("PATCH agent")?);
+            print_json(
+                &client
+                    .patch(&format!("/organizations/{org}/agents/{agent_id}"), &body)
+                    .await
+                    .context("PATCH agent")?,
+            );
         }
         Cmd::Delete { agent_id, org } => {
             let org = require_active_org(&client, org)?;
-            print_json(&client.delete(&format!("/organizations/{org}/agents/{agent_id}")).await.context("DELETE agent")?);
+            print_json(
+                &client
+                    .delete(&format!("/organizations/{org}/agents/{agent_id}"))
+                    .await
+                    .context("DELETE agent")?,
+            );
         }
         Cmd::Regenerate { agent_id, slot, org } => {
             let org = require_active_org(&client, org)?;
@@ -125,17 +140,32 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
         }
         Cmd::ListKnowledge { agent_id, org } => {
             let org = require_active_org(&client, org)?;
-            print_json(&client.get(&format!("/organizations/{org}/agents/{agent_id}/knowledge")).await.context("GET agent knowledge")?);
+            print_json(
+                &client
+                    .get(&format!("/organizations/{org}/agents/{agent_id}/knowledge"))
+                    .await
+                    .context("GET agent knowledge")?,
+            );
         }
         Cmd::SetKnowledge { agent_id, body, org } => {
             let org = require_active_org(&client, org)?;
             let body = read_body(&body)?;
-            print_json(&client.put(&format!("/organizations/{org}/agents/{agent_id}/knowledge"), &body).await.context("PUT agent knowledge")?);
+            print_json(
+                &client
+                    .put(&format!("/organizations/{org}/agents/{agent_id}/knowledge"), &body)
+                    .await
+                    .context("PUT agent knowledge")?,
+            );
         }
         Cmd::GenerateConfig { body, org } => {
             let org = require_active_org(&client, org)?;
             let body = read_body(&body)?;
-            print_json(&client.post(&format!("/organizations/{org}/agents/generate-config"), Some(&body)).await.context("POST generate-config")?);
+            print_json(
+                &client
+                    .post(&format!("/organizations/{org}/agents/generate-config"), Some(&body))
+                    .await
+                    .context("POST generate-config")?,
+            );
         }
     }
     Ok(())

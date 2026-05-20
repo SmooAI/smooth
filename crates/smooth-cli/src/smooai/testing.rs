@@ -166,7 +166,10 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             DeploymentsCmd::List { org } => {
                 let o = require_active_org(&client, org)?;
                 print_list_envelope(
-                    &client.get(&format!("/organizations/{o}/testing/deployments")).await.context("GET deployments")?,
+                    &client
+                        .get(&format!("/organizations/{o}/testing/deployments"))
+                        .await
+                        .context("GET deployments")?,
                     "deployments",
                 );
             }
@@ -221,23 +224,41 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             CasesCmd::Create { body, org } => {
                 let o = require_active_org(&client, org)?;
                 let b = opt_body(body)?;
-                print_json(&client.post(&format!("/organizations/{o}/testing/cases"), b.as_ref()).await.context("POST case")?);
+                print_json(
+                    &client
+                        .post(&format!("/organizations/{o}/testing/cases"), b.as_ref())
+                        .await
+                        .context("POST case")?,
+                );
             }
             CasesCmd::Update { case_id, body, org } => {
                 let o = require_active_org(&client, org)?;
                 let b = opt_body(body)?.unwrap_or_else(|| serde_json::json!({}));
-                print_json(&client.patch(&format!("/organizations/{o}/testing/cases/{case_id}"), &b).await.context("PATCH case")?);
+                print_json(
+                    &client
+                        .patch(&format!("/organizations/{o}/testing/cases/{case_id}"), &b)
+                        .await
+                        .context("PATCH case")?,
+                );
             }
             CasesCmd::Delete { case_id, org } => {
                 let o = require_active_org(&client, org)?;
-                print_json(&client.delete(&format!("/organizations/{o}/testing/cases/{case_id}")).await.context("DELETE case")?);
+                print_json(
+                    &client
+                        .delete(&format!("/organizations/{o}/testing/cases/{case_id}"))
+                        .await
+                        .context("DELETE case")?,
+                );
             }
         },
         Cmd::Environments { cmd } => match cmd {
             EnvironmentsCmd::List { org } => {
                 let o = require_active_org(&client, org)?;
                 print_list_envelope(
-                    &client.get(&format!("/organizations/{o}/testing/environments")).await.context("GET test environments")?,
+                    &client
+                        .get(&format!("/organizations/{o}/testing/environments"))
+                        .await
+                        .context("GET test environments")?,
                     "environments",
                 );
             }
@@ -288,11 +309,21 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             RunsCmd::Update { run_id, body, org } => {
                 let o = require_active_org(&client, org)?;
                 let b = opt_body(body)?.unwrap_or_else(|| serde_json::json!({}));
-                print_json(&client.patch(&format!("/organizations/{o}/testing/runs/{run_id}"), &b).await.context("PATCH run")?);
+                print_json(
+                    &client
+                        .patch(&format!("/organizations/{o}/testing/runs/{run_id}"), &b)
+                        .await
+                        .context("PATCH run")?,
+                );
             }
             RunsCmd::Delete { run_id, org } => {
                 let o = require_active_org(&client, org)?;
-                print_json(&client.delete(&format!("/organizations/{o}/testing/runs/{run_id}")).await.context("DELETE run")?);
+                print_json(
+                    &client
+                        .delete(&format!("/organizations/{o}/testing/runs/{run_id}"))
+                        .await
+                        .context("DELETE run")?,
+                );
             }
             RunsCmd::Results { run_id, body, org } => {
                 let o = require_active_org(&client, org)?;

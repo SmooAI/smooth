@@ -136,30 +136,58 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
         Cmd::Schemas { cmd } => match cmd {
             SchemasCmd::List { org } => {
                 let o = require_active_org(&client, org)?;
-                print_list_envelope(&client.get(&format!("/organizations/{o}/config/schemas")).await.context("GET schemas")?, "schemas");
+                print_list_envelope(
+                    &client.get(&format!("/organizations/{o}/config/schemas")).await.context("GET schemas")?,
+                    "schemas",
+                );
             }
             SchemasCmd::Show { schema_id, org } => {
                 let o = require_active_org(&client, org)?;
-                print_json(&client.get(&format!("/organizations/{o}/config/schemas/{schema_id}")).await.context("GET schema")?);
+                print_json(
+                    &client
+                        .get(&format!("/organizations/{o}/config/schemas/{schema_id}"))
+                        .await
+                        .context("GET schema")?,
+                );
             }
             SchemasCmd::Create { body, org } => {
                 let o = require_active_org(&client, org)?;
                 let b = read_body(&body)?;
-                print_json(&client.post(&format!("/organizations/{o}/config/schemas"), Some(&b)).await.context("POST schema")?);
+                print_json(
+                    &client
+                        .post(&format!("/organizations/{o}/config/schemas"), Some(&b))
+                        .await
+                        .context("POST schema")?,
+                );
             }
             SchemasCmd::Update { schema_id, body, org } => {
                 let o = require_active_org(&client, org)?;
                 let b = read_body(&body)?;
-                print_json(&client.patch(&format!("/organizations/{o}/config/schemas/{schema_id}"), &b).await.context("PATCH schema")?);
+                print_json(
+                    &client
+                        .patch(&format!("/organizations/{o}/config/schemas/{schema_id}"), &b)
+                        .await
+                        .context("PATCH schema")?,
+                );
             }
             SchemasCmd::Delete { schema_id, org } => {
                 let o = require_active_org(&client, org)?;
-                print_json(&client.delete(&format!("/organizations/{o}/config/schemas/{schema_id}")).await.context("DELETE schema")?);
+                print_json(
+                    &client
+                        .delete(&format!("/organizations/{o}/config/schemas/{schema_id}"))
+                        .await
+                        .context("DELETE schema")?,
+                );
             }
             SchemasCmd::Push { schema_id, body, org } => {
                 let o = require_active_org(&client, org)?;
                 let b = read_body(&body)?;
-                print_json(&client.post(&format!("/organizations/{o}/config/schemas/{schema_id}/push"), Some(&b)).await.context("POST schema push")?);
+                print_json(
+                    &client
+                        .post(&format!("/organizations/{o}/config/schemas/{schema_id}/push"), Some(&b))
+                        .await
+                        .context("POST schema push")?,
+                );
             }
             SchemasCmd::Values { schema_id, env_id, org } => {
                 let o = require_active_org(&client, org)?;
@@ -175,27 +203,50 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             EnvironmentsCmd::List { org } => {
                 let o = require_active_org(&client, org)?;
                 print_list_envelope(
-                    &client.get(&format!("/organizations/{o}/config/environments")).await.context("GET environments")?,
+                    &client
+                        .get(&format!("/organizations/{o}/config/environments"))
+                        .await
+                        .context("GET environments")?,
                     "environments",
                 );
             }
             EnvironmentsCmd::Create { body, org } => {
                 let o = require_active_org(&client, org)?;
                 let b = read_body(&body)?;
-                print_json(&client.post(&format!("/organizations/{o}/config/environments"), Some(&b)).await.context("POST environment")?);
+                print_json(
+                    &client
+                        .post(&format!("/organizations/{o}/config/environments"), Some(&b))
+                        .await
+                        .context("POST environment")?,
+                );
             }
             EnvironmentsCmd::Update { env_id, body, org } => {
                 let o = require_active_org(&client, org)?;
                 let b = read_body(&body)?;
-                print_json(&client.patch(&format!("/organizations/{o}/config/environments/{env_id}"), &b).await.context("PATCH environment")?);
+                print_json(
+                    &client
+                        .patch(&format!("/organizations/{o}/config/environments/{env_id}"), &b)
+                        .await
+                        .context("PATCH environment")?,
+                );
             }
             EnvironmentsCmd::Delete { env_id, org } => {
                 let o = require_active_org(&client, org)?;
-                print_json(&client.delete(&format!("/organizations/{o}/config/environments/{env_id}")).await.context("DELETE environment")?);
+                print_json(
+                    &client
+                        .delete(&format!("/organizations/{o}/config/environments/{env_id}"))
+                        .await
+                        .context("DELETE environment")?,
+                );
             }
             EnvironmentsCmd::Values { env_id, org } => {
                 let o = require_active_org(&client, org)?;
-                print_json(&client.get(&format!("/organizations/{o}/config/environments/{env_id}/values")).await.context("GET env values")?);
+                print_json(
+                    &client
+                        .get(&format!("/organizations/{o}/config/environments/{env_id}/values"))
+                        .await
+                        .context("GET env values")?,
+                );
             }
         },
         Cmd::Values { cmd } => match cmd {
@@ -215,11 +266,21 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             ValuesCmd::BulkSet { body, org } => {
                 let o = require_active_org(&client, org)?;
                 let b = read_body(&body)?;
-                print_json(&client.put(&format!("/organizations/{o}/config/values/bulk"), &b).await.context("PUT values bulk")?);
+                print_json(
+                    &client
+                        .put(&format!("/organizations/{o}/config/values/bulk"), &b)
+                        .await
+                        .context("PUT values bulk")?,
+                );
             }
             ValuesCmd::Delete { value_id, org } => {
                 let o = require_active_org(&client, org)?;
-                print_json(&client.delete(&format!("/organizations/{o}/config/values/{value_id}")).await.context("DELETE value")?);
+                print_json(
+                    &client
+                        .delete(&format!("/organizations/{o}/config/values/{value_id}"))
+                        .await
+                        .context("DELETE value")?,
+                );
             }
         },
         Cmd::FeatureFlag { key, context, org } => {

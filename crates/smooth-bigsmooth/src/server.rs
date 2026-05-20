@@ -991,17 +991,6 @@ pub async fn dispatch_ws_task(state: &AppState, opts: DispatchOptions) {
     }
 }
 
-/// Find the NATIVE operator-runner binary (built for the host
-/// triple, not cross-compiled to `aarch64-unknown-linux-musl`).
-/// Used by the direct-dispatch path where we exec the runner as
-/// a regular subprocess rather than inside a microVM.
-///
-/// Resolution order:
-/// 1. `SMOOTH_OPERATOR_RUNNER_NATIVE` env var (explicit override).
-/// 2. Walk up from `CARGO_MANIFEST_DIR` looking for
-///    `target/release/smooth-operator-runner`, then
-///    `target/debug/smooth-operator-runner`.
-/// 3. Same walk from `std::env::current_dir`.
 /// Strip ANSI CSI escape sequences (`\x1b[...m`) and the bare `\x1b`
 /// from a string. Used to flatten colorized tracing output from the
 /// operator-runner before pattern-matching, so a line like
@@ -1032,6 +1021,17 @@ fn strip_ansi_escapes(s: &str) -> String {
     out
 }
 
+/// Find the NATIVE operator-runner binary (built for the host
+/// triple, not cross-compiled to `aarch64-unknown-linux-musl`).
+/// Used by the direct-dispatch path where we exec the runner as
+/// a regular subprocess rather than inside a microVM.
+///
+/// Resolution order:
+/// 1. `SMOOTH_OPERATOR_RUNNER_NATIVE` env var (explicit override).
+/// 2. Walk up from `CARGO_MANIFEST_DIR` looking for
+///    `target/release/smooth-operator-runner`, then
+///    `target/debug/smooth-operator-runner`.
+/// 3. Same walk from `std::env::current_dir`.
 fn find_native_operator_runner_binary() -> Option<std::path::PathBuf> {
     if let Ok(explicit) = std::env::var("SMOOTH_OPERATOR_RUNNER_NATIVE") {
         let p = std::path::PathBuf::from(explicit);
@@ -2610,7 +2610,9 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
     // it to `/workspace`. SMOOTH_HOST_WORKSPACE is the host path the
     // mount came from, set by `start_sandboxed_vm` for the rare
     // diagnostic case where the agent needs to know.
-    let safehouse_mode = std::env::var("SMOOTH_SAFEHOUSE_MODE").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+    let safehouse_mode = std::env::var("SMOOTH_SAFEHOUSE_MODE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
     let host_workspace: std::path::PathBuf = if safehouse_mode {
         std::path::PathBuf::from("/workspace")
     } else {
@@ -2994,11 +2996,8 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
                 // into the chat anyway.
                 let plain = strip_ansi_escapes(trimmed);
                 let is_cast_summary = plain.starts_with("[cast-summary]");
-                let looks_like_tracing = plain.contains(" INFO ")
-                    || plain.contains(" WARN ")
-                    || plain.contains(" ERROR ")
-                    || plain.contains(" DEBUG ")
-                    || plain.contains(" TRACE ");
+                let looks_like_tracing =
+                    plain.contains(" INFO ") || plain.contains(" WARN ") || plain.contains(" ERROR ") || plain.contains(" DEBUG ") || plain.contains(" TRACE ");
                 if is_cast_summary || looks_like_tracing {
                     continue;
                 }

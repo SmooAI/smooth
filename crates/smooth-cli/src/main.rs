@@ -87,8 +87,8 @@ enum Commands {
         cmd: AuthCommands,
     },
     /// Smoo AI platform API — everything backed by `api.smoo.ai`.
-    /// Login + orgs + agents + keys + members + config + knowledge
-    /// + jobs + products + profile + testing all live under here so
+    /// Login + orgs + agents + keys + members + config + knowledge,
+    /// jobs + products + profile + testing all live under here so
     /// resource names like `config` / `jobs` / `agents` don't
     /// collide with Smooth's local subcommands.
     Api {

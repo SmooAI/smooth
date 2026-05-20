@@ -25,7 +25,12 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             let b = read_body(&body)?;
             print_json(&client.patch("/profile", &b).await.context("PATCH profile")?);
         }
-        Cmd::Invitations => print_json(&client.get("/profile/organization-member-invitations").await.context("GET profile invitations")?),
+        Cmd::Invitations => print_json(
+            &client
+                .get("/profile/organization-member-invitations")
+                .await
+                .context("GET profile invitations")?,
+        ),
     }
     Ok(())
 }

@@ -34,7 +34,12 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
         }
         Cmd::Free { org } => {
             let o = require_active_org(&client, org)?;
-            print_json(&client.post(&format!("/organizations/{o}/products/free"), None).await.context("POST products free")?);
+            print_json(
+                &client
+                    .post(&format!("/organizations/{o}/products/free"), None)
+                    .await
+                    .context("POST products free")?,
+            );
         }
         Cmd::Bypass { body, org } => {
             let o = require_active_org(&client, org)?;
@@ -42,7 +47,12 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                 Some(p) => Some(read_body(&p)?),
                 None => None,
             };
-            print_json(&client.post(&format!("/organizations/{o}/products/bypass"), b.as_ref()).await.context("POST products bypass")?);
+            print_json(
+                &client
+                    .post(&format!("/organizations/{o}/products/bypass"), b.as_ref())
+                    .await
+                    .context("POST products bypass")?,
+            );
         }
     }
     Ok(())
