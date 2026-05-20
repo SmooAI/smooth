@@ -2,6 +2,7 @@
 //!
 //! Single binary for agent orchestration, config management, and platform tools.
 
+mod boot_ui;
 mod gradient;
 mod hooks;
 mod mcp_config;
@@ -1460,6 +1461,80 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, foreground: bo
         let pid = child.id();
         std::fs::write(&pid_path, pid.to_string())?;
 
+        // Pearl th-7840d8 — animated boot indicator while the
+        // daemon child boots the Safehouse microVM. Same step set
+        // and timing budget as the cold-start path in main() so
+        // `th up` and `th code` (with no leader running) look
+        // identical to the user.
+        let indicator = boot_ui::BootIndicator::new();
+        let step_vm = indicator.step("starting Safehouse microVM");
+        let step_cast = indicator.step("cast online (wonk · goalie · narc · scribe · archivist · diver · groove)");
+        let step_runner = indicator.step("operator-runner pool warm");
+        let step_health = indicator.step("health check");
+
+        const TIMEOUT_PER_STEP: std::time::Duration = std::time::Duration::from_secs(30);
+
+        let probe = reqwest::Client::builder().timeout(std::time::Duration::from_secs(2)).build()?;
+        let probe_url = format!("http://localhost:{port}/health");
+
+        // Step 1: TCP listener on :{port}.
+        let vm_deadline = std::time::Instant::now() + TIMEOUT_PER_STEP;
+        let mut vm_up = false;
+        while std::time::Instant::now() < vm_deadline {
+            if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+                vm_up = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        if !vm_up {
+            step_vm.fail("timeout");
+            step_cast.fail("not reached");
+            step_runner.fail("not reached");
+            step_health.fail("not reached");
+            indicator.finish();
+            anyhow::bail!("Safehouse microVM never opened :{port} — check {}", log_path.display());
+        }
+        step_vm.ok();
+
+        // Step 2 + 3: HTTP listener answers /health.
+        let listener_deadline = std::time::Instant::now() + TIMEOUT_PER_STEP;
+        let mut listener_up = false;
+        while std::time::Instant::now() < listener_deadline {
+            if probe.get(&probe_url).send().await.is_ok() {
+                listener_up = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        if !listener_up {
+            step_cast.fail("timeout");
+            step_runner.fail("not reached");
+            step_health.fail("not reached");
+            indicator.finish();
+            anyhow::bail!("Safehouse :{port} accepted TCP but never answered HTTP — check {}", log_path.display());
+        }
+        step_cast.ok();
+        step_runner.ok();
+
+        // Step 4: /health returns 200.
+        let health_deadline = std::time::Instant::now() + TIMEOUT_PER_STEP;
+        let mut ready = false;
+        while std::time::Instant::now() < health_deadline {
+            if probe.get(&probe_url).send().await.is_ok_and(|r| r.status().is_success()) {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        if !ready {
+            step_health.fail("timeout");
+            indicator.finish();
+            anyhow::bail!("Safehouse booted but :{port} never became healthy — check {}", log_path.display());
+        }
+        step_health.ok();
+        indicator.finish();
+
         // Box width is sized off the *visible* text — the gradient
         // wordmark below carries ANSI escapes that inflate the byte
         // length, so we measure the plain form and render the colored
@@ -2810,39 +2885,123 @@ async fn cmd_code(
     let health = client.get("http://localhost:4400/health").send().await;
 
     if health.is_err() || !health.as_ref().is_ok_and(|r| r.status().is_success()) {
-        println!("Starting Smooth...");
+        // Pearl th-7840d8 — animated boot indicator (was a bare
+        // `Starting Smooth...`). The Safehouse daemonization
+        // happens in the background via `th up`; the parent polls
+        // `/health` and advances steps based on observable signals.
+        let indicator = boot_ui::BootIndicator::new();
+        let step_vm = indicator.step("starting Safehouse microVM");
+        let step_cast = indicator.step("cast online (wonk · goalie · narc · scribe · archivist · diver · groove)");
+        let step_runner = indicator.step("operator-runner pool warm");
+        let step_health = indicator.step("health check");
 
         // Re-exec ourselves as `th up` so the Safehouse daemonizes
-        // exactly the way it would if the user had typed `th up`. The
-        // child detaches its stdio to ~/.smooth/smooth.log, writes
-        // ~/.smooth/smooth.pid, returns immediately, and the safehouse
-        // microVM keeps running in the background until `th down`.
+        // exactly the way it would if the user had typed `th up`.
+        // The child detaches its stdio to ~/.smooth/smooth.log,
+        // writes ~/.smooth/smooth.pid, returns immediately, and the
+        // safehouse microVM keeps running in the background until
+        // `th down`.
         let exe = std::env::current_exe()?;
         let status = std::process::Command::new(exe)
             .arg("up")
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::null())
             .stdin(std::process::Stdio::null())
             .status()
             .context("spawn `th up` to boot the Safehouse")?;
         if !status.success() {
+            // The daemon spawn itself failed before the VM ever
+            // got off the ground. Mark every step failed so the
+            // user has a clear transcript.
+            step_vm.fail(&format!("`th up` exited {}", status.code().unwrap_or(-1)));
+            step_cast.fail("not started");
+            step_runner.fail("not started");
+            step_health.fail("not started");
+            indicator.finish();
             anyhow::bail!("`th up` failed (exit {})", status.code().unwrap_or(-1));
         }
 
-        // Poll health up to 30s — sandboxed boot takes longer than the
-        // old in-process spawn (~5-10s for the microsandbox VM to come
-        // up, longer on a cold pull).
-        let mut ready = false;
-        for _ in 0..120 {
+        // VM daemon spawned. From here on we poll observable
+        // signals to advance the steps. Total budget is ~30s — the
+        // same as the old hard-coded health-poll loop — split across
+        // the four steps.
+        //
+        // The signals we can actually probe from the host:
+        //   * VM up: TCP connect to localhost:4400 succeeds (port
+        //     forward is plumbed).
+        //   * cast online + runner pool: implied once /health
+        //     responds; the safehouse only flips the listener on
+        //     after its internal init is done.
+        //
+        // So we drive step_vm off the TCP probe, and once /health
+        // returns 200 we cascade the remaining three. This is
+        // intentionally coarse — v1 doesn't thread real progress
+        // events out of the daemon (would need a separate IPC
+        // channel; pearl can land later if we want finer-grained
+        // visibility).
+        const TIMEOUT_PER_STEP: std::time::Duration = std::time::Duration::from_secs(30);
+
+        // Step 1: wait for TCP listener on :4400.
+        let vm_deadline = std::time::Instant::now() + TIMEOUT_PER_STEP;
+        let mut vm_up = false;
+        while std::time::Instant::now() < vm_deadline {
+            if tokio::net::TcpStream::connect(("127.0.0.1", 4400)).await.is_ok() {
+                vm_up = true;
+                break;
+            }
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        if !vm_up {
+            step_vm.fail("timeout");
+            step_cast.fail("not reached");
+            step_runner.fail("not reached");
+            step_health.fail("not reached");
+            indicator.finish();
+            anyhow::bail!("Safehouse microVM never opened :4400 — check ~/.smooth/smooth.log");
+        }
+        step_vm.ok();
+
+        // Step 2 + 3: wait for /health to respond at all (any
+        // response means the safehouse listener is up; the cast +
+        // runner-pool init is what's gating that listener flipping
+        // on). We split them visually for the receipt.
+        let cast_deadline = std::time::Instant::now() + TIMEOUT_PER_STEP;
+        let mut listener_up = false;
+        while std::time::Instant::now() < cast_deadline {
+            if client.get("http://localhost:4400/health").send().await.is_ok() {
+                listener_up = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        if !listener_up {
+            step_cast.fail("timeout");
+            step_runner.fail("not reached");
+            step_health.fail("not reached");
+            indicator.finish();
+            anyhow::bail!("Safehouse :4400 accepted TCP but never answered HTTP — check ~/.smooth/smooth.log");
+        }
+        step_cast.ok();
+        step_runner.ok();
+
+        // Step 4: /health returns 200 (state.touch + everything
+        // wired up).
+        let health_deadline = std::time::Instant::now() + TIMEOUT_PER_STEP;
+        let mut ready = false;
+        while std::time::Instant::now() < health_deadline {
             if client.get("http://localhost:4400/health").send().await.is_ok_and(|r| r.status().is_success()) {
                 ready = true;
                 break;
             }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         }
         if !ready {
+            step_health.fail("timeout");
+            indicator.finish();
             anyhow::bail!("Safehouse booted but :4400 never became healthy — check ~/.smooth/smooth.log");
         }
+        step_health.ok();
+        indicator.finish();
     }
 
     // Launch smooth-code TUI — with a resumed session if one was picked.
