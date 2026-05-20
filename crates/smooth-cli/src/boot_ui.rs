@@ -33,6 +33,8 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use owo_colors::OwoColorize;
 use std::time::Duration;
 
+use crate::gradient;
+
 /// Tick interval for the spinner animation. 80ms matches what the
 /// rest of the Smooth CLI uses (see e.g. `smooth-code`'s status spinner).
 const SPINNER_TICK_MS: u64 = 80;
@@ -63,7 +65,7 @@ impl BootIndicator {
         // doesn't get cleared on Drop and so it always lands above
         // the first spinner.
         println!();
-        println!("  {} {}", "✻".cyan().bold(), "Smooth booting".bold());
+        println!("  {} {} {}", "✻".cyan().bold(), gradient::smooth(), "booting".bold());
         Self { mp: MultiProgress::new() }
     }
 

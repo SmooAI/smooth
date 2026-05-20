@@ -1251,9 +1251,10 @@ async fn start_sandboxed_vm(port: u16) -> Result<()> {
     println!();
     println!("  {}", "╭──────────────────────────────╮".dimmed());
     println!(
-        "  {}  {} sandboxed (vm: {})",
+        "  {}  {} {} sandboxed (vm: {})",
         "│".dimmed(),
-        "Smooth started".bold(),
+        gradient::smooth(),
+        "started".bold(),
         handle.msb_name.chars().take(16).collect::<String>().cyan()
     );
     println!("  {}", "╰──────────────────────────────╯".dimmed());
@@ -1408,7 +1409,12 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, foreground: bo
                     if alive {
                         println!();
                         println!();
-                        println!("  {} {}", "●".yellow(), format!("Smooth is already running (pid {pid})").yellow());
+                        println!(
+                            "  {} {} {}",
+                            "●".yellow(),
+                            gradient::smooth(),
+                            format!("is already running (pid {pid})").yellow()
+                        );
                         println!();
                         println!("    {}  {}", "Web UI".dimmed(), format!("http://localhost:{port}").cyan().bold());
                         println!("    {}  {}", "Logs  ".dimmed(), log_file_path().display().to_string().dimmed());
@@ -1620,7 +1626,7 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, foreground: bo
 
     if no_leader {
         println!();
-        println!("  {}", "Smooth infrastructure ready (Big Smooth skipped).".green());
+        println!("  {} {}", gradient::smooth(), "infrastructure ready (Big Smooth skipped).".green());
         return Ok(());
     }
 
@@ -1629,8 +1635,9 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, foreground: bo
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     println!(
-        "  {} Big Smooth {}",
+        "  {} Big {} {}",
         "\u{2713}".green().bold(),
+        gradient::smooth(),
         format!("http://localhost:{port}").cyan().bold()
     );
     println!(
@@ -1667,21 +1674,22 @@ async fn cmd_down() -> Result<()> {
     match (vm_destroyed, pid_killed) {
         (true, Some(pid)) => {
             let tag = format!("(pid {pid}, sandboxed safehouse microVM destroyed)");
-            println!("  \u{1f534} {} {}", "Smooth stopped".green().bold(), tag.dimmed());
+            println!("  \u{1f534} {} {} {}", gradient::smooth(), "stopped".green().bold(), tag.dimmed());
         }
         (true, None) => {
             println!(
-                "  \u{1f534} {} {}",
-                "Smooth stopped".green().bold(),
+                "  \u{1f534} {} {} {}",
+                gradient::smooth(),
+                "stopped".green().bold(),
                 "(sandboxed safehouse microVM destroyed)".dimmed()
             );
         }
         (false, Some(pid)) => {
             let tag = format!("(pid {pid})");
-            println!("  \u{1f534} {} {}", "Smooth stopped".green().bold(), tag.dimmed());
+            println!("  \u{1f534} {} {} {}", gradient::smooth(), "stopped".green().bold(), tag.dimmed());
         }
         (false, None) => {
-            println!("  {}", "Smooth is not running.".yellow());
+            println!("  {} {}", gradient::smooth(), "is not running.".yellow());
         }
     }
     Ok(())
@@ -1718,10 +1726,13 @@ async fn cmd_status() -> Result<()> {
             println!();
 
             // Align every label to 16 chars so "Smooth Operators" fits cleanly.
+            // The gradient wordmark carries ANSI escapes that inflate byte
+            // length, so we hand-pad off the visible width ("Big Smooth" = 10,
+            // "Smooth Operators" = 16) instead of using `{:<16}`.
             // Big Smooth
             let leader_status = body["leader"].as_str().or_else(|| body["status"].as_str()).unwrap_or("healthy");
             let (icon, label) = status_indicator(leader_status);
-            println!("  {icon} {:<16} {label}", "Big Smooth");
+            println!("  {icon} Big {}{} {label}", gradient::smooth(), " ".repeat(6));
 
             // Dolt store (backs pearls, sessions, memories, config)
             let db_status = body["database"].as_str().unwrap_or("healthy");
@@ -1733,7 +1744,12 @@ async fn cmd_status() -> Result<()> {
             let active = body["sandbox_active"].as_u64().or_else(|| body["sandboxes_active"].as_u64()).unwrap_or(0);
             let max = body["sandbox_max"].as_u64().or_else(|| body["sandboxes_max"].as_u64()).unwrap_or(3);
             let (icon, label) = status_indicator(sandbox_status);
-            println!("  {icon} {:<16} {} {}", "Smooth Operators", label, format!("({active}/{max} active)").dimmed());
+            println!(
+                "  {icon} {} Operators {} {}",
+                gradient::smooth(),
+                label,
+                format!("({active}/{max} active)").dimmed()
+            );
 
             // Tailscale
             if let Some(ts) = body.get("tailscale") {
@@ -1761,7 +1777,7 @@ async fn cmd_status() -> Result<()> {
         }
         Err(_) => {
             println!();
-            println!("  {}", "Smooth is not running.".yellow());
+            println!("  {} {}", gradient::smooth(), "is not running.".yellow());
             println!("  Start with: {}", "th up".bold());
             println!();
         }
@@ -1852,10 +1868,19 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
             }
 
             let leader_up = reqwest::get("http://localhost:4400/health").await.is_ok();
+            // "Big Smooth" visible width = 10; the original `{:<12} ` formatter
+            // added two trailing spaces + one literal separator (= 3 spaces).
+            // Reproduce that by hand since the gradient escapes inflate byte
+            // length and would confuse `{:<12}`.
             if leader_up {
-                println!("  {} {:<12} {}", "\u{2713}".green().bold(), "Big Smooth", "running".green());
+                println!("  {} Big {}   {}", "\u{2713}".green().bold(), gradient::smooth(), "running".green());
             } else {
-                println!("  {} {:<12} {}", "\u{2717}".red().bold(), "Big Smooth", "not running \u{2014} run: th up".red());
+                println!(
+                    "  {} Big {}   {}",
+                    "\u{2717}".red().bold(),
+                    gradient::smooth(),
+                    "not running \u{2014} run: th up".red()
+                );
             }
             println!();
         }
@@ -1867,10 +1892,14 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
             // top of the picker. Smoo AI Gateway is the hosted LiteLLM-backed
             // gateway run by Smoo AI with billing, moderation, governance,
             // and provider routing on the server side.
-            let catalog: Vec<(&str, &str, Vec<&str>, bool)> = vec![
+            // Display names are `String` so the recommended entry can carry
+            // the gradient wordmark for "Smoo AI" alongside the rest of the
+            // label.
+            let smoo_ai_gateway_name = format!("{} Gateway (recommended)", gradient::smoo_ai());
+            let catalog: Vec<(&str, String, Vec<&str>, bool)> = vec![
                 (
                     "smooai-gateway",
-                    "Smoo AI Gateway (recommended)",
+                    smoo_ai_gateway_name,
                     vec![
                         "smooth-coding",
                         "smooth-reasoning",
@@ -1884,15 +1913,15 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
                 ),
                 (
                     "llmgateway",
-                    "LLM Gateway",
+                    "LLM Gateway".to_string(),
                     vec!["openai/gpt-4o", "anthropic/claude-sonnet-4", "google/gemini-2.5-flash", "deepseek/deepseek-v3"],
                     true,
                 ),
-                ("kimi-code", "Kimi Code", vec!["kimi-for-coding"], true),
-                ("kimi", "Kimi", vec!["kimi-k2.5", "kimi-k2", "moonshot-v1-auto"], true),
+                ("kimi-code", "Kimi Code".to_string(), vec!["kimi-for-coding"], true),
+                ("kimi", "Kimi".to_string(), vec!["kimi-k2.5", "kimi-k2", "moonshot-v1-auto"], true),
                 (
                     "openrouter",
-                    "OpenRouter",
+                    "OpenRouter".to_string(),
                     vec![
                         "deepseek/deepseek-v3",
                         "openai/gpt-4o",
@@ -1902,15 +1931,15 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
                     ],
                     true,
                 ),
-                ("openai", "OpenAI", vec!["gpt-4o", "gpt-4o-mini", "o3-mini", "gpt-5.4-mini"], true),
+                ("openai", "OpenAI".to_string(), vec!["gpt-4o", "gpt-4o-mini", "o3-mini", "gpt-5.4-mini"], true),
                 (
                     "anthropic",
-                    "Anthropic",
+                    "Anthropic".to_string(),
                     vec!["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-haiku-4-5-20251001"],
                     true,
                 ),
-                ("google", "Google AI", vec!["gemini-2.5-flash", "gemini-2.5-pro"], true),
-                ("ollama", "Ollama (local)", vec!["llama3.3", "qwen3", "deepseek-r1"], false),
+                ("google", "Google AI".to_string(), vec!["gemini-2.5-flash", "gemini-2.5-pro"], true),
+                ("ollama", "Ollama (local)".to_string(), vec!["llama3.3", "qwen3", "deepseek-r1"], false),
             ];
 
             // Step 1: Pick provider (interactive if not given)
@@ -1925,7 +1954,7 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
                     }
                 }
             } else {
-                let display_names: Vec<&str> = catalog.iter().map(|(_, name, ..)| *name).collect();
+                let display_names: Vec<&str> = catalog.iter().map(|(_, name, ..)| name.as_str()).collect();
                 let selection = Select::with_theme(&ColorfulTheme::default())
                     .with_prompt("Select a provider")
                     .items(&display_names)
@@ -2204,17 +2233,17 @@ async fn cmd_operators(cmd: Option<OperatorsCommands>) -> Result<()> {
             let json: serde_json::Value = match resp {
                 Ok(r) => r.json().await.unwrap_or(serde_json::json!({"data": []})),
                 Err(_) => {
-                    println!("Cannot reach Big Smooth. Run: th up");
+                    println!("Cannot reach Big {}. Run: th up", gradient::smooth());
                     return Ok(());
                 }
             };
             let empty = vec![];
             let workers = json["data"].as_array().unwrap_or(&empty);
             if workers.is_empty() {
-                println!("\n  {} No active Smooth Operators.\n", "ℹ".cyan());
+                println!("\n  {} No active {} Operators.\n", "ℹ".cyan(), gradient::smooth());
                 return Ok(());
             }
-            println!("\n  {}\n", "Active Smooth Operators".cyan().bold());
+            println!("\n  {} {} {}\n", "Active".cyan().bold(), gradient::smooth(), "Operators".cyan().bold());
             for w in workers {
                 let id = w.get("operator_id").and_then(|v| v.as_str()).unwrap_or("?");
                 let bead = w.get("bead_id").and_then(|v| v.as_str()).unwrap_or("");
@@ -2248,7 +2277,7 @@ async fn cmd_operators(cmd: Option<OperatorsCommands>) -> Result<()> {
                         println!("\n  {} No active operator with id {}\n", "✗".red().bold(), operator_id.bold());
                     }
                 }
-                Err(_) => println!("Cannot reach Big Smooth. Run: th up"),
+                Err(_) => println!("Cannot reach Big {}. Run: th up", gradient::smooth()),
             }
             Ok(())
         }
@@ -2268,7 +2297,7 @@ async fn cmd_inbox() -> Result<()> {
                 }
             }
         }
-        Err(_) => println!("Cannot reach Big Smooth. Run: th up"),
+        Err(_) => println!("Cannot reach Big {}. Run: th up", gradient::smooth()),
     }
     Ok(())
 }
@@ -2667,24 +2696,41 @@ fn read_stdin() -> Option<String> {
 fn print_explainer() {
     let version = env!("TH_VERSION");
     println!("{} {}", "th".bold().bright_cyan(), format!("v{version}").dimmed());
-    println!("{}", "Smooth's CLI for AI-driven coding, orchestration, and the Smoo AI platform.".bold());
+    println!(
+        "{}{}",
+        gradient::smooth(),
+        format!("'s CLI for AI-driven coding, orchestration, and the {} platform.", gradient::smoo_ai()).bold()
+    );
     println!();
     println!("{}", "What it does".bold().bright_yellow());
     println!("  • Interactive AI coding TUI                 {}", "th code".bright_cyan());
     println!(
-        "  • microVM orchestration via Big Smooth + cast  {}",
+        "  • microVM orchestration via Big {} + cast  {}",
+        gradient::smooth(),
         "th up / th down / th status".bright_cyan()
     );
     println!("  • Pearl issue tracker                       {}", "th pearls".bright_cyan());
-    println!("  • Smoo AI platform CLI                      {}", "th api".bright_cyan());
+    println!("  • {} platform CLI                      {}", gradient::smoo_ai(), "th api".bright_cyan());
     println!("  • LLM gateway aliases (smooth-coding, …)    {}", "th cast".bright_cyan());
     println!("  • MCP server roster                         {}", "th mcp".bright_cyan());
     println!();
     println!("{}", "Get started".bold().bright_yellow());
     println!("  {}  {}", "th code".bright_cyan(), "— launch the interactive coding TUI".dimmed());
     println!("  {}  {}", "th pearls ready".bright_cyan(), "— show pearls ready to work on".dimmed());
-    println!("  {}  {}", "th up".bright_cyan(), "— start the Smooth platform (sandboxed)".dimmed());
-    println!("  {}  {}", "th api login".bright_cyan(), "— sign in to the Smoo AI platform".dimmed());
+    println!(
+        "  {}  {} {} {}",
+        "th up".bright_cyan(),
+        "— start the".dimmed(),
+        gradient::smooth(),
+        "platform (sandboxed)".dimmed()
+    );
+    println!(
+        "  {}  {} {} {}",
+        "th api login".bright_cyan(),
+        "— sign in to the".dimmed(),
+        gradient::smoo_ai(),
+        "platform".dimmed()
+    );
     println!();
     println!("{}", "Help".bold().bright_yellow());
     println!("  {}                 list every subcommand", "th --help".bright_cyan());
@@ -3047,14 +3093,24 @@ async fn cmd_doctor() -> Result<()> {
     let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(2)).build()?;
     match client.get("http://localhost:4400/health").send().await {
         Ok(r) if r.status().is_success() => {
-            println!("  {} Big Smooth API: {}", "✓".green().bold(), "healthy".green());
+            println!("  {} Big {} API: {}", "✓".green().bold(), gradient::smooth(), "healthy".green());
         }
         Ok(r) => {
-            println!("  {} Big Smooth API: {}", "✗".red().bold(), format!("unhealthy (status {})", r.status()).red());
+            println!(
+                "  {} Big {} API: {}",
+                "✗".red().bold(),
+                gradient::smooth(),
+                format!("unhealthy (status {})", r.status()).red()
+            );
             issues += 1;
         }
         Err(_) => {
-            println!("  {} Big Smooth API: {}", "✗".red().bold(), "not running (start with: th up)".red());
+            println!(
+                "  {} Big {} API: {}",
+                "✗".red().bold(),
+                gradient::smooth(),
+                "not running (start with: th up)".red()
+            );
             issues += 1;
         }
     }
@@ -3082,9 +3138,14 @@ async fn cmd_doctor() -> Result<()> {
     let smooth_home = dirs_next::home_dir().map(|h| h.join(".smooth"));
     if let Some(ref dir) = smooth_home {
         if dir.exists() {
-            println!("  {} Smooth home: {}", "✓".green().bold(), format!("{}", dir.display()).green());
+            println!("  {} {} home: {}", "✓".green().bold(), gradient::smooth(), format!("{}", dir.display()).green());
         } else {
-            println!("  {} Smooth home: {}", "○".dimmed(), format!("will be created at {}", dir.display()).dimmed());
+            println!(
+                "  {} {} home: {}",
+                "○".dimmed(),
+                gradient::smooth(),
+                format!("will be created at {}", dir.display()).dimmed()
+            );
         }
     }
 
@@ -3177,7 +3238,7 @@ async fn cmd_doctor() -> Result<()> {
 
     println!();
     if issues == 0 {
-        println!("{}", "All checks passed. Smooth is ready.".green().bold());
+        println!("{} {} {}", "All checks passed.".green().bold(), gradient::smooth(), "is ready.".green().bold());
     } else {
         println!("{}", format!("{issues} issue(s) found. Fix them and run: th doctor").yellow().bold());
     }
@@ -3547,7 +3608,12 @@ fn cmd_doctor_init_home_repo(remote: Option<&str>) -> Result<()> {
     let smooth_home = home.join(".smooth");
     std::fs::create_dir_all(&smooth_home)?;
 
-    println!("\n  {} {}", "Smooth home repo".bold().cyan(), smooth_home.display().to_string().dimmed());
+    println!(
+        "\n  {} {} {}",
+        gradient::smooth(),
+        "home repo".bold().cyan(),
+        smooth_home.display().to_string().dimmed()
+    );
 
     let git = |args: &[&str]| -> Result<std::process::Output> {
         let out = std::process::Command::new("git")
