@@ -2273,6 +2273,9 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         // fallback emit (exit-path race) reports 0.0 so we don't
         // over-count — we take the max across all Completed events.
         let mut final_cost_usd: f64 = 0.0;
+        // Same max-across-Completed strategy for cache-hit token counts.
+        // Pearl th-litellm-caching-client.
+        let mut final_cached_tokens: u64 = 0;
         for line in stdout.lines() {
             let line = line.trim();
             if line.is_empty() {
@@ -2331,6 +2334,11 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
                             if let Some(c) = event.get("cost_usd").and_then(serde_json::Value::as_f64) {
                                 if c > final_cost_usd {
                                     final_cost_usd = c;
+                                }
+                            }
+                            if let Some(t) = event.get("cached_tokens").and_then(serde_json::Value::as_u64) {
+                                if t > final_cached_tokens {
+                                    final_cached_tokens = t;
                                 }
                             }
                         }
@@ -2425,7 +2433,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
             // stream. Posted before the pearl is closed so the comment
             // is part of the pearl's history.
             if let Some(ref id) = pearl_id {
-                let body = format!("[METRICS] cost_usd={final_cost_usd:.6} iterations={agent_iterations}");
+                let body = format!("[METRICS] cost_usd={final_cost_usd:.6} iterations={agent_iterations} cached_tokens={final_cached_tokens}");
                 if let Err(e) = pearl_store.add_comment(id, &body) {
                     tracing::warn!(pearl_id = %id, error = %e, "[METRICS] write failed");
                 }
@@ -2850,6 +2858,7 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
             let mut final_cost_usd: f64 = 0.0;
             let mut final_prompt_tokens: u64 = 0;
             let mut final_completion_tokens: u64 = 0;
+            let mut final_cached_tokens: u64 = 0;
             let mut first_line_logged = false;
             while let Ok(Some(line)) = out_reader.next_line().await {
                 let trimmed = line.trim();
@@ -2937,6 +2946,17 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
                                         final_completion_tokens = t;
                                     }
                                 }
+                                // Pearl th-litellm-caching-client: read cached
+                                // prompt tokens (Anthropic prompt-cache hits)
+                                // from the runner's Completed event so the
+                                // dispatch's `[METRICS]` line can surface the
+                                // session's cache-hit ratio. Defaults to 0 for
+                                // older runner builds.
+                                if let Some(t) = event.get("cached_tokens").and_then(serde_json::Value::as_u64) {
+                                    if t > final_cached_tokens {
+                                        final_cached_tokens = t;
+                                    }
+                                }
                             }
                             "Error" => {
                                 if let Some(msg) = event.get("message").and_then(|v| v.as_str()) {
@@ -2958,7 +2978,13 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
                     }
                 }
             }
-            (agent_iterations, final_cost_usd, final_prompt_tokens, final_completion_tokens)
+            (
+                agent_iterations,
+                final_cost_usd,
+                final_prompt_tokens,
+                final_completion_tokens,
+                final_cached_tokens,
+            )
         });
 
         let event_tx_err = event_tx.clone();
@@ -3010,7 +3036,7 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
         });
 
         let exit = child.wait().await;
-        let (iters, cost, prompt_tokens, completion_tokens) = stdout_task.await.unwrap_or((0, 0.0, 0, 0));
+        let (iters, cost, prompt_tokens, completion_tokens, cached_tokens) = stdout_task.await.unwrap_or((0, 0.0, 0, 0, 0));
         let _ = stderr_task.await;
 
         // Mirror sandboxed dispatch's `[METRICS]` breadcrumb on
@@ -3018,9 +3044,13 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
         // distinguish "ran and failed" (METRICS with partial
         // numbers) from "never ran" (no METRICS line). Includes
         // prompt/completion token counts so a cost_usd=0 result
-        // is diagnosable. Pearl th-eff0d0.
+        // is diagnosable. Pearl th-eff0d0. Also includes
+        // `cached_tokens` (subset of prompt_tokens that hit
+        // Anthropic's prompt cache) — pearl th-litellm-caching-client.
         if let Some(ref id) = pearl_id {
-            let body = format!("[METRICS] cost_usd={cost:.8} iterations={iters} prompt_tokens={prompt_tokens} completion_tokens={completion_tokens}");
+            let body = format!(
+                "[METRICS] cost_usd={cost:.8} iterations={iters} prompt_tokens={prompt_tokens} completion_tokens={completion_tokens} cached_tokens={cached_tokens}"
+            );
             if let Err(e) = pearl_store.add_comment(id, &body) {
                 tracing::warn!(pearl_id = %id, error = %e, "[METRICS] write failed (direct dispatch)");
             }
@@ -3278,6 +3308,7 @@ async fn run_task_handler(State(state): State<AppState>, Json(req): Json<TaskReq
                                 cost_usd,
                                 prompt_tokens: 0,
                                 completion_tokens: 0,
+                                cached_tokens: 0,
                             });
                             break;
                         }

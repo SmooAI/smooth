@@ -232,6 +232,16 @@ pub enum AgentEvent {
         /// this agent run. Same back-compat rules as `prompt_tokens`.
         #[serde(default)]
         completion_tokens: u64,
+        /// Accumulated prompt-cache hits (subset of `prompt_tokens`).
+        /// Sourced from `usage.prompt_tokens_details.cached_tokens` on
+        /// each LLM response — non-zero only when the upstream supports
+        /// Anthropic prompt caching AND the LiteLLM gateway has
+        /// `cache_control_injection_points` configured. Surfaced in
+        /// Big Smooth's `[METRICS]` line so a session's cache-hit ratio
+        /// is observable. Default 0 for older runner builds.
+        /// Pearl th-litellm-caching-client.
+        #[serde(default)]
+        cached_tokens: u64,
     },
     /// Emitted by `coding_workflow` each time the orchestrator enters
     /// a new phase (ASSESS / PLAN / EXECUTE / VERIFY / REVIEW / FINALIZE).
@@ -646,9 +656,14 @@ impl Agent {
             // Act: execute tool calls
             if response.tool_calls.is_empty() {
                 // No tool calls = agent is done thinking
-                let (cost, prompt_tokens, completion_tokens) = {
+                let (cost, prompt_tokens, completion_tokens, cached_tokens) = {
                     let tracker = self.cost_tracker.lock().expect("lock cost_tracker");
-                    (tracker.total_cost_usd, tracker.total_prompt_tokens, tracker.total_completion_tokens)
+                    (
+                        tracker.total_cost_usd,
+                        tracker.total_prompt_tokens,
+                        tracker.total_completion_tokens,
+                        tracker.total_cached_tokens,
+                    )
                 };
                 self.emit(AgentEvent::Completed {
                     agent_id: self.id.clone(),
@@ -656,6 +671,7 @@ impl Agent {
                     cost_usd: cost,
                     prompt_tokens,
                     completion_tokens,
+                    cached_tokens,
                 });
                 self.report_to_bigsmooth(ReporterEvent::TaskComplete {
                     iterations: iteration,
@@ -950,9 +966,14 @@ impl Agent {
             self.maybe_checkpoint(&conversation, iteration, CheckpointEvent::LlmResponse);
 
             if response.tool_calls.is_empty() {
-                let (cost, prompt_tokens, completion_tokens) = {
+                let (cost, prompt_tokens, completion_tokens, cached_tokens) = {
                     let tracker = self.cost_tracker.lock().expect("lock cost_tracker");
-                    (tracker.total_cost_usd, tracker.total_prompt_tokens, tracker.total_completion_tokens)
+                    (
+                        tracker.total_cost_usd,
+                        tracker.total_prompt_tokens,
+                        tracker.total_completion_tokens,
+                        tracker.total_cached_tokens,
+                    )
                 };
                 let _ = tx.send(AgentEvent::Completed {
                     agent_id: self.id.clone(),
@@ -960,6 +981,7 @@ impl Agent {
                     cost_usd: cost,
                     prompt_tokens,
                     completion_tokens,
+                    cached_tokens,
                 });
                 return Ok(conversation);
             }
@@ -1339,6 +1361,7 @@ mod tests {
                 cost_usd: 0.042,
                 prompt_tokens: 0,
                 completion_tokens: 0,
+                cached_tokens: 0,
             },
             AgentEvent::MaxIterationsReached { agent_id: "a".into(), max: 50 },
             AgentEvent::BudgetExceeded {
