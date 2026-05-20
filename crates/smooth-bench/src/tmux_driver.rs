@@ -240,25 +240,78 @@ impl TmuxDriver {
     /// immediately — does not wait for the TUI to react. Callers who
     /// need to wait should follow with [`wait_for_idle`].
     ///
+    /// Uses tmux's `load-buffer` + `paste-buffer` instead of
+    /// `send-keys -l` because the latter interprets embedded `\n`
+    /// bytes as the `C-j` keysym, and in literal-mode (`-l`) `C-j`
+    /// degrades to the bare letter `j`. The result was the
+    /// score-tui-pr regression where every newline in a multi-line
+    /// task prompt rendered as a literal `j` in the TUI (pearl
+    /// th-7fdfa9 debug log lines 1065/1151, etc.). `load-buffer`
+    /// reads the payload as raw bytes from stdin and `paste-buffer`
+    /// inserts it as terminal input the same way a real human paste
+    /// would — newlines included. After pasting the buffer we send a
+    /// separate `Enter` keystroke to submit, just as before.
+    ///
     /// # Errors
-    /// Errors if tmux send-keys fails (e.g. session was killed).
+    /// Errors if tmux send-keys / load-buffer / paste-buffer fails
+    /// (e.g. session was killed).
     pub fn send(&self, text: &str) -> Result<()> {
         if let Some(dbg) = &self.debug {
             dbg.record("send", text);
         }
-        // Use `-l` (literal) so backticks / dollar signs / quotes in
-        // the LLM-generated message are typed verbatim rather than
-        // interpreted by tmux's key parser.
-        let out = Command::new("tmux")
-            .args(["send-keys", "-t", &self.session, "-l", text])
-            .output()
-            .context("tmux send-keys (literal payload)")?;
-        if !out.status.success() {
-            return Err(anyhow!("tmux send-keys (payload) exited non-zero: {}", String::from_utf8_lossy(&out.stderr)));
+
+        // Use a uniquely named tmux buffer per send so concurrent
+        // drivers don't trample each other's payloads. The buffer
+        // name only has to be valid ASCII and distinct from any
+        // other live buffer; we delete it immediately after pasting.
+        let buffer_name = format!("smooth-bench-{}-{}", self.session, uuid::Uuid::new_v4().simple());
+
+        // `load-buffer -b NAME -` reads raw bytes from stdin into the
+        // named buffer. We feed `text` verbatim — no escaping needed.
+        let mut child = Command::new("tmux")
+            .args(["load-buffer", "-b", &buffer_name, "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("spawning tmux load-buffer")?;
+        {
+            use std::io::Write;
+            let stdin = child.stdin.as_mut().context("tmux load-buffer stdin missing")?;
+            stdin.write_all(text.as_bytes()).context("writing payload to tmux load-buffer")?;
         }
-        // Submit. Separate call so `-l` only applies to the payload —
-        // we DO want `Enter` to be interpreted as the key, not the
-        // literal characters "Enter".
+        let out = child.wait_with_output().context("waiting on tmux load-buffer")?;
+        if !out.status.success() {
+            return Err(anyhow!("tmux load-buffer exited non-zero: {}", String::from_utf8_lossy(&out.stderr)));
+        }
+
+        // `paste-buffer -b NAME -t SESSION -d` inserts the buffer's
+        // bytes into the pane as if pasted, then deletes the buffer.
+        // `-p` would pipe through bracketed-paste markers if the
+        // application requested them — we deliberately omit it so the
+        // TUI sees plain typed input, matching what `send-keys -l`
+        // used to do (but with correct newline handling).
+        let out = Command::new("tmux")
+            .args(["paste-buffer", "-b", &buffer_name, "-t", &self.session, "-d"])
+            .output()
+            .context("tmux paste-buffer")?;
+        if !out.status.success() {
+            // Best-effort buffer cleanup in case the paste failed
+            // after load — otherwise the buffer leaks for the
+            // session's lifetime.
+            let _ = Command::new("tmux")
+                .args(["delete-buffer", "-b", &buffer_name])
+                .stderr(Stdio::null())
+                .stdout(Stdio::null())
+                .status();
+            return Err(anyhow!("tmux paste-buffer exited non-zero: {}", String::from_utf8_lossy(&out.stderr)));
+        }
+
+        // Submit. Separate call so the Enter is interpreted as the
+        // key, not as a pasted literal newline (which on most TUIs
+        // would be equivalent anyway, but bracketed-paste-aware apps
+        // could distinguish them). Matches prior behaviour where the
+        // explicit Enter keystroke is what triggers submit.
         let out = Command::new("tmux")
             .args(["send-keys", "-t", &self.session, "Enter"])
             .output()
@@ -364,6 +417,36 @@ impl TmuxDriver {
     #[must_use]
     pub fn session(&self) -> &str {
         &self.session
+    }
+
+    /// Append a free-form labelled record to this driver's debug
+    /// log, if one is attached. Used by higher-level harness code
+    /// (e.g. the human-driver loop's slash-command guard) to leave
+    /// a breadcrumb in the same pane.log a human would read.
+    pub fn debug_record(&self, label: &str, payload: &str) {
+        if let Some(dbg) = &self.debug {
+            dbg.record(label, payload);
+        }
+    }
+
+    /// Test helper: attach to an already-created tmux session
+    /// without running the boot-render gate. Lets unit tests build a
+    /// minimal `cat` session that wouldn't pass the first-render
+    /// floor (since `cat` produces no output until typed at). Not
+    /// intended for production code.
+    ///
+    /// # Errors
+    /// Errors if the session doesn't exist.
+    #[cfg(test)]
+    pub fn attach_existing_for_test(session: &str, workdir: &Path) -> Result<Self> {
+        if !session_exists(session) {
+            return Err(anyhow!("tmux session `{session}` does not exist"));
+        }
+        Ok(Self {
+            session: session.to_string(),
+            workdir: workdir.to_path_buf(),
+            debug: None,
+        })
     }
 
     /// Block until the first non-trivial render, with timeout. The
@@ -687,6 +770,91 @@ mod tests {
         std::thread::sleep(Duration::from_millis(500));
         let text = driver.capture().expect("capture");
         assert!(text.contains("hello-echo-back"), "expected pane to contain typed text; got:\n{text}");
+    }
+
+    #[test]
+    fn send_preserves_newlines_no_j_leakage() {
+        // Regression for pearl th-7fdfa9: `send-keys -l` interpreted
+        // every `\n` in the payload as the `C-j` keysym, which in
+        // literal-mode degrades to the bare letter `j`. Multi-line
+        // task prompts ended up with `j` characters where the
+        // newlines should have been. The fix switches `send` to
+        // `load-buffer` + `paste-buffer`. This test asserts that a
+        // 3-line message lands as 3 lines in a file written by `cat
+        // > tmpfile` — no stray `j`s anywhere.
+        if !tmux_present() {
+            eprintln!("tmux not installed — skipping");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let outfile = tmp.path().join("captured.txt");
+        let session = unique_session("newlines");
+        // `cat > FILE` writes typed input to the file until EOF /
+        // session kill. We want the file to contain exactly what we
+        // sent. Use `sh -c` so the redirection takes effect.
+        let cmd = format!("cat > {}", outfile.display());
+
+        // `cat` produces no first-render output, so start_command's
+        // boot gate would time out. Build the driver manually.
+        let status = Command::new("tmux")
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                &session,
+                "-x",
+                &PANE_WIDTH.to_string(),
+                "-y",
+                &PANE_HEIGHT.to_string(),
+                "-c",
+                &tmp.path().to_string_lossy(),
+                "sh",
+                "-c",
+                &cmd,
+            ])
+            .status()
+            .expect("tmux new-session");
+        assert!(status.success(), "tmux new-session failed");
+        let driver = TmuxDriver {
+            session: session.clone(),
+            workdir: tmp.path().to_path_buf(),
+            debug: None,
+        };
+
+        // Send a 3-line message. The Enter after the buffer paste
+        // adds a 4th newline; that's intentional and matches what a
+        // human pressing Enter at the end of a multi-line paste
+        // would produce. We assert on the first 3 lines.
+        let payload = "line-one\nline-two\nline-three";
+        driver.send(payload).expect("send multi-line");
+
+        // Give `cat` a moment to flush its input into the file. Then
+        // kill the session so `cat` sees EOF and exits cleanly.
+        std::thread::sleep(Duration::from_millis(500));
+        let _ = Command::new("tmux")
+            .args(["kill-session", "-t", &session])
+            .stderr(Stdio::null())
+            .stdout(Stdio::null())
+            .status();
+        // Give the FS a beat to settle the redirect target.
+        std::thread::sleep(Duration::from_millis(150));
+
+        let written = std::fs::read_to_string(&outfile).expect("read captured file");
+        // No stray `j`s — the regression's signature.
+        assert!(!written.contains('j'), "captured file contains a stray `j` (newline regression):\n{written}");
+        // Real newlines preserved.
+        let lines: Vec<&str> = written.lines().collect();
+        assert!(
+            lines.len() >= 3,
+            "expected at least 3 lines from 3-line payload + Enter; got {}:\n{written}",
+            lines.len()
+        );
+        assert_eq!(lines[0], "line-one", "line 1 mismatch in:\n{written}");
+        assert_eq!(lines[1], "line-two", "line 2 mismatch in:\n{written}");
+        assert_eq!(lines[2], "line-three", "line 3 mismatch in:\n{written}");
+        // Driver's Drop best-effort kills the already-dead session;
+        // that's fine, errors are swallowed there.
+        drop(driver);
     }
 
     #[test]
