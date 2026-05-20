@@ -27,7 +27,8 @@
 //! - `Drop` kills the session so a failed bench run doesn't leak.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
@@ -43,10 +44,68 @@ pub const DEFAULT_IDLE_DWELL: Duration = Duration::from_millis(2_000);
 /// without burning a CPU core on capture-pane.
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
+/// Minimum number of non-whitespace bytes the captured pane must
+/// contain before `wait_for_idle` will declare the TUI idle. Below
+/// this floor we treat the pane as "still booting" and keep polling.
+/// The `th code` TUI's steady-state frame (header + status line +
+/// input prompt) is comfortably over 200 chars, so this floor is well
+/// below the real signal but above an "empty pane" false-idle.
+pub const DEFAULT_IDLE_MIN_BYTES: usize = 200;
+
 /// Pane geometry — wide enough that wrap doesn't shred tool output.
 /// 200x80 mirrors a typical large terminal; the TUI scales to it.
 pub const PANE_WIDTH: u32 = 200;
 pub const PANE_HEIGHT: u32 = 80;
+
+/// Per-task debug sink. When set on a `TmuxDriver`, every `send` and
+/// every `wait_for_idle` boundary appends a timestamped record to the
+/// underlying writer. Created at the top of a task and dropped when
+/// the driver is dropped — one file per (lang, task) pair.
+///
+/// Thread-safe so it can be cloned across the async task boundary.
+#[derive(Clone)]
+pub struct PaneDebugLog {
+    inner: Arc<Mutex<Box<dyn std::io::Write + Send>>>,
+}
+
+impl std::fmt::Debug for PaneDebugLog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PaneDebugLog").finish_non_exhaustive()
+    }
+}
+
+impl PaneDebugLog {
+    /// Open a debug log at `path`, creating parent dirs. The writer
+    /// is buffered — caller doesn't need to flush manually.
+    ///
+    /// # Errors
+    /// Errors when the path can't be created/opened.
+    pub fn create(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| format!("mkdir -p {}", parent.display()))?;
+        }
+        let f = std::fs::File::create(path).with_context(|| format!("create debug log {}", path.display()))?;
+        let writer: Box<dyn std::io::Write + Send> = Box::new(std::io::BufWriter::new(f));
+        Ok(Self {
+            inner: Arc::new(Mutex::new(writer)),
+        })
+    }
+
+    /// Append a labelled record. `label` is a short tag (e.g.
+    /// `"send"`, `"idle"`, `"boot"`); `payload` is the pane snapshot
+    /// or the text being sent. Errors are intentionally swallowed —
+    /// debug logging must never crash a bench run.
+    pub fn record(&self, label: &str, payload: &str) {
+        let Ok(mut guard) = self.inner.lock() else {
+            return;
+        };
+        let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let bytes = payload.len();
+        let _ = writeln!(guard, "===== {ts} [{label}] bytes={bytes} =====");
+        let _ = writeln!(guard, "{payload}");
+        let _ = writeln!(guard);
+    }
+}
 
 /// Drives a TUI process inside a detached tmux session. Owns the
 /// session for its entire lifetime and tears it down on drop.
@@ -56,6 +115,10 @@ pub struct TmuxDriver {
     /// Kept for diagnostic logging only; not used to address the pane.
     #[allow(dead_code)]
     workdir: PathBuf,
+    /// Optional per-task debug log. Populated when the bench is run
+    /// with `--debug`. Records every send + every idle/boot pane
+    /// snapshot with timestamps.
+    debug: Option<PaneDebugLog>,
 }
 
 impl TmuxDriver {
@@ -73,6 +136,14 @@ impl TmuxDriver {
         Self::start_command(session, workdir, "th code", boot_timeout)
     }
 
+    /// Attach (or replace) a debug log on this driver. Returns
+    /// `self` for builder-style chaining at the call site.
+    #[must_use]
+    pub fn with_debug_log(mut self, debug: PaneDebugLog) -> Self {
+        self.debug = Some(debug);
+        self
+    }
+
     /// Generic starter used both by the production `th code` path and
     /// by unit tests that drive `cat`, `echo`, etc. The command is
     /// run as a shell string so callers can chain (e.g. `cd … &&
@@ -81,6 +152,17 @@ impl TmuxDriver {
     /// # Errors
     /// See [`start_th_code`].
     pub fn start_command(session: &str, workdir: &Path, shell_cmd: &str, boot_timeout: Duration) -> Result<Self> {
+        Self::start_command_with_debug(session, workdir, shell_cmd, boot_timeout, None)
+    }
+
+    /// Same as [`start_command`] but with an optional `PaneDebugLog`
+    /// attached BEFORE the first-render gate. Use this when you want
+    /// the boot-screen captures recorded too — needed for diagnosing
+    /// `th code` boot failures (pearl th-f46efa).
+    ///
+    /// # Errors
+    /// See [`start_command`].
+    pub fn start_command_with_debug(session: &str, workdir: &Path, shell_cmd: &str, boot_timeout: Duration, debug: Option<PaneDebugLog>) -> Result<Self> {
         require_tmux()?;
 
         // Reject existing sessions loudly — silently piggybacking onto
@@ -92,8 +174,12 @@ impl TmuxDriver {
             ));
         }
 
-        // `new-session -d -s NAME -x W -y H -c WORKDIR sh -c CMD`
-        let status = Command::new("tmux")
+        // `new-session -d -s NAME -x W -y H -c WORKDIR sh -c CMD`.
+        // We capture stderr so an actual failure surfaces with a
+        // useful message rather than being silently redirected — only
+        // the "no server running" probe messages get swallowed (see
+        // `session_exists` and `require_tmux`).
+        let out = Command::new("tmux")
             .args([
                 "new-session",
                 "-d",
@@ -109,15 +195,37 @@ impl TmuxDriver {
                 "-c",
                 shell_cmd,
             ])
-            .status()
+            .output()
             .context("spawning tmux new-session")?;
-        if !status.success() {
-            return Err(anyhow!("tmux new-session for `{session}` exited non-zero"));
+        if !out.status.success() {
+            return Err(anyhow!(
+                "tmux new-session for `{session}` exited non-zero: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+
+        // After `new-session -d`, the server is up but the pane may
+        // not yet exist for `capture-pane`. Poll `has-session` until
+        // it reports the session is fully present (or boot_timeout).
+        // This guards against a race where the very first `capture`
+        // races the session creation. Without this, capture-pane can
+        // return "can't find session" stderr noise — same family as
+        // the "no server running" lines that triggered this pearl.
+        let poll_start = Instant::now();
+        loop {
+            if session_exists(session) {
+                break;
+            }
+            if poll_start.elapsed() > boot_timeout {
+                return Err(anyhow!("tmux session `{session}` never showed up after new-session"));
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
 
         let driver = Self {
             session: session.to_string(),
             workdir: workdir.to_path_buf(),
+            debug,
         };
 
         // Wait for the TUI to render at least one non-empty frame
@@ -135,25 +243,28 @@ impl TmuxDriver {
     /// # Errors
     /// Errors if tmux send-keys fails (e.g. session was killed).
     pub fn send(&self, text: &str) -> Result<()> {
+        if let Some(dbg) = &self.debug {
+            dbg.record("send", text);
+        }
         // Use `-l` (literal) so backticks / dollar signs / quotes in
         // the LLM-generated message are typed verbatim rather than
         // interpreted by tmux's key parser.
-        let status = Command::new("tmux")
+        let out = Command::new("tmux")
             .args(["send-keys", "-t", &self.session, "-l", text])
-            .status()
+            .output()
             .context("tmux send-keys (literal payload)")?;
-        if !status.success() {
-            return Err(anyhow!("tmux send-keys (payload) exited non-zero"));
+        if !out.status.success() {
+            return Err(anyhow!("tmux send-keys (payload) exited non-zero: {}", String::from_utf8_lossy(&out.stderr)));
         }
         // Submit. Separate call so `-l` only applies to the payload —
         // we DO want `Enter` to be interpreted as the key, not the
         // literal characters "Enter".
-        let status = Command::new("tmux")
+        let out = Command::new("tmux")
             .args(["send-keys", "-t", &self.session, "Enter"])
-            .status()
+            .output()
             .context("tmux send-keys (Enter)")?;
-        if !status.success() {
-            return Err(anyhow!("tmux send-keys (Enter) exited non-zero"));
+        if !out.status.success() {
+            return Err(anyhow!("tmux send-keys (Enter) exited non-zero: {}", String::from_utf8_lossy(&out.stderr)));
         }
         Ok(())
     }
@@ -161,14 +272,22 @@ impl TmuxDriver {
     /// Capture the currently visible pane text (no escape codes).
     ///
     /// # Errors
-    /// Errors only on tmux failure; an empty pane returns `Ok("")`.
+    /// Errors only on tmux failure (e.g. the session was killed —
+    /// usually because the child command exited). An empty pane
+    /// returns `Ok("")`.
     pub fn capture(&self) -> Result<String> {
         let out = Command::new("tmux")
             .args(["capture-pane", "-t", &self.session, "-p"])
             .output()
             .context("tmux capture-pane")?;
         if !out.status.success() {
-            return Err(anyhow!("tmux capture-pane exited non-zero"));
+            // Include tmux's own stderr in the error — it tells you
+            // *why* (e.g. "can't find session", "no server running").
+            return Err(anyhow!(
+                "tmux capture-pane exited non-zero (session `{}`): {}",
+                self.session,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
@@ -193,6 +312,22 @@ impl TmuxDriver {
     /// Errors on tmux failure, or if the pane never settles within
     /// `overall_timeout`.
     pub fn wait_for_idle(&self, dwell: Duration, poll_interval: Duration, overall_timeout: Duration) -> Result<String> {
+        self.wait_for_idle_with_floor(dwell, poll_interval, overall_timeout, DEFAULT_IDLE_MIN_BYTES)
+    }
+
+    /// Same as [`wait_for_idle`] but with a configurable minimum
+    /// non-whitespace byte count the pane must contain before being
+    /// considered "idle". Below the floor, we treat the pane as still
+    /// rendering / still booting and keep polling. This protects
+    /// against the empty-pane false-idle that masked PR #55's broken
+    /// runs (driver bailed in 38s because `capture-pane` returned
+    /// stable empty output after the boot).
+    ///
+    /// `min_bytes` of 0 reproduces the original behaviour.
+    ///
+    /// # Errors
+    /// As [`wait_for_idle`].
+    pub fn wait_for_idle_with_floor(&self, dwell: Duration, poll_interval: Duration, overall_timeout: Duration, min_bytes: usize) -> Result<String> {
         let started = Instant::now();
         let mut last_text = self.capture()?;
         let mut stable_since = Instant::now();
@@ -202,7 +337,11 @@ impl TmuxDriver {
             let now_text = self.capture()?;
 
             if now_text == last_text {
-                if stable_since.elapsed() >= dwell {
+                let printable = now_text.chars().filter(|c| !c.is_whitespace()).count();
+                if stable_since.elapsed() >= dwell && printable >= min_bytes {
+                    if let Some(dbg) = &self.debug {
+                        dbg.record("idle", &now_text);
+                    }
                     return Ok(now_text);
                 }
             } else {
@@ -211,8 +350,11 @@ impl TmuxDriver {
             }
 
             if started.elapsed() > overall_timeout {
+                if let Some(dbg) = &self.debug {
+                    dbg.record("idle_timeout", &last_text);
+                }
                 return Err(anyhow!(
-                    "tmux pane did not settle within {overall_timeout:?} (dwell {dwell:?}); last capture follows:\n{last_text}"
+                    "tmux pane did not settle within {overall_timeout:?} (dwell {dwell:?}, min_bytes {min_bytes}); last capture follows:\n{last_text}"
                 ));
             }
         }
@@ -224,20 +366,57 @@ impl TmuxDriver {
         &self.session
     }
 
-    /// Block until the very first non-empty render, with timeout.
-    /// "Non-empty" = at least one printable character in the capture.
+    /// Block until the first non-trivial render, with timeout. The
+    /// pane must contain at least `DEFAULT_IDLE_MIN_BYTES`
+    /// non-whitespace characters — guards against "a single dot or
+    /// cursor blink counts as rendered" false positives that were
+    /// letting the bench race ahead of the TUI's actual boot.
     fn wait_for_first_render(&self, timeout: Duration) -> Result<()> {
         let started = Instant::now();
+        let mut last_text = String::new();
         loop {
-            let text = self.capture()?;
-            if text.chars().any(|c| !c.is_whitespace()) {
+            // Note: a capture failure most commonly means the child
+            // command exited and tmux killed the session. Record the
+            // failure + the last-known good capture so the debug log
+            // tells the story (last frame the user saw before the
+            // session went away). Then surface the error.
+            let text = match self.capture() {
+                Ok(t) => t,
+                Err(e) => {
+                    if let Some(dbg) = &self.debug {
+                        dbg.record("capture_error", &format!("{e:#}\n(last good capture follows)\n{last_text}"));
+                    }
+                    return Err(e);
+                }
+            };
+            let printable = text.chars().filter(|c| !c.is_whitespace()).count();
+            if printable >= DEFAULT_IDLE_MIN_BYTES {
+                if let Some(dbg) = &self.debug {
+                    dbg.record("boot", &text);
+                }
                 return Ok(());
             }
+            // Stream low-content captures into the debug log too —
+            // otherwise a boot screen that animates without growing
+            // past the floor leaves zero debug output and the op has
+            // nothing to look at. Cap to one record per second by
+            // recording only when the text changes.
+            if let Some(dbg) = &self.debug {
+                if text != last_text {
+                    dbg.record("boot_partial", &text);
+                }
+            }
+            last_text = text.clone();
             if started.elapsed() > timeout {
+                if let Some(dbg) = &self.debug {
+                    dbg.record("boot_timeout", &text);
+                }
                 return Err(anyhow!(
-                    "tmux session `{}` never produced visible output within {:?} — did the command exit immediately?",
+                    "tmux session `{}` never reached {} non-whitespace chars within {:?} — did the command exit immediately? Last capture follows:\n{}",
                     self.session,
-                    timeout
+                    DEFAULT_IDLE_MIN_BYTES,
+                    timeout,
+                    text
                 ));
             }
             std::thread::sleep(Duration::from_millis(100));
@@ -247,14 +426,28 @@ impl TmuxDriver {
 
 impl Drop for TmuxDriver {
     fn drop(&mut self) {
-        // Best-effort cleanup: silently ignore errors — the session
-        // may already be gone if start_command failed mid-way.
-        let _ = Command::new("tmux").args(["kill-session", "-t", &self.session]).status();
+        // Best-effort cleanup: silently ignore errors AND silence
+        // tmux's stderr — the session may already be gone if
+        // start_command failed mid-way (e.g. `th code` crashed
+        // during boot, the server is gone), and tmux prints "no
+        // server running on …" to stderr in that case. Without the
+        // Stdio::null redirect that line leaked into the bench
+        // observer log — the original score-tui-pr.log showed two
+        // copies per task because both this drop and a follow-on
+        // probe each surfaced a copy.
+        let _ = Command::new("tmux")
+            .args(["kill-session", "-t", &self.session])
+            .stderr(Stdio::null())
+            .stdout(Stdio::null())
+            .status();
     }
 }
 
 fn require_tmux() -> Result<()> {
-    let out = Command::new("tmux").arg("-V").output();
+    // Suppress stderr — `tmux -V` succeeds without a server, but on
+    // some systems it still prints diagnostic noise we don't want
+    // leaking into the bench observer output.
+    let out = Command::new("tmux").arg("-V").stderr(Stdio::null()).output();
     match out {
         Ok(o) if o.status.success() => Ok(()),
         Ok(_) => Err(anyhow!("`tmux -V` exited non-zero — is tmux installed?")),
@@ -264,12 +457,18 @@ fn require_tmux() -> Result<()> {
 
 fn session_exists(session: &str) -> bool {
     // `tmux has-session -t NAME` returns 0 if present, 1 otherwise.
-    // We can't trust stderr (tmux prints "can't find session" to it,
-    // which is normal); use the status code as the source of truth.
+    // We can't trust stderr (tmux prints "no server running on …" or
+    // "can't find session" to it, which is *normal* when probing
+    // before any session has been created). Use the status code as
+    // the source of truth and silence stderr so the user-facing
+    // bench observer log stays clean.
+    //
     // A missing tmux binary returns false here — `require_tmux`
     // surfaces that separately with a clearer message.
     Command::new("tmux")
         .args(["has-session", "-t", session])
+        .stderr(Stdio::null())
+        .stdout(Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
@@ -292,6 +491,13 @@ mod tests {
         Command::new("tmux").arg("-V").output().map(|o| o.status.success()).unwrap_or(false)
     }
 
+    /// Generate a payload of `n` repeated copies of `stem` joined by
+    /// spaces — used by tests to clear the boot-floor + idle-floor
+    /// thresholds without coupling to magic numbers.
+    fn long_payload(stem: &str, n: usize) -> String {
+        std::iter::repeat_n(stem, n).collect::<Vec<_>>().join(" ")
+    }
+
     #[test]
     fn capture_returns_echoed_text() {
         if !tmux_present() {
@@ -301,10 +507,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let session = unique_session("capture");
 
-        // `echo hello && sleep 60` so the session stays alive long
-        // enough for us to capture it. tmux closes the pane when the
-        // command exits.
-        let driver = TmuxDriver::start_command(&session, tmp.path(), "echo hello-from-bench && sleep 60", Duration::from_secs(5)).expect("start tmux session");
+        // Emit ≥ DEFAULT_IDLE_MIN_BYTES non-whitespace chars so the
+        // first-render gate fires. "hello-from-bench" repeated 30
+        // times is comfortably over the 200-char floor.
+        let payload = long_payload("hello-from-bench", 30);
+        let cmd = format!("echo '{payload}' && sleep 60");
+        let driver = TmuxDriver::start_command(&session, tmp.path(), &cmd, Duration::from_secs(5)).expect("start tmux session");
 
         // The echo'd text should be visible.
         let text = driver.capture().expect("capture");
@@ -319,7 +527,9 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let session = unique_session("idle");
-        let driver = TmuxDriver::start_command(&session, tmp.path(), "echo initial-text && sleep 60", Duration::from_secs(5)).expect("start tmux session");
+        let payload = long_payload("initial-text", 30);
+        let cmd = format!("echo '{payload}' && sleep 60");
+        let driver = TmuxDriver::start_command(&session, tmp.path(), &cmd, Duration::from_secs(5)).expect("start tmux session");
 
         // After echo, the pane is quiescent — wait_for_idle should
         // return promptly once dwell has elapsed.
@@ -337,6 +547,93 @@ mod tests {
             elapsed >= Duration::from_millis(500),
             "wait_for_idle returned before dwell elapsed ({elapsed:?})"
         );
+    }
+
+    #[test]
+    fn wait_for_idle_with_floor_rejects_empty_pane() {
+        // Regression for the score-tui-pr empty-pane false-idle bug:
+        // a pane that is stable but holds < min_bytes printable chars
+        // must NOT be declared idle. Without the floor, the bench
+        // raced past `th code`'s actual boot and burned the run.
+        if !tmux_present() {
+            eprintln!("tmux not installed — skipping");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let session = unique_session("idle-floor");
+        // `sleep 60` produces zero output — pane is stable & empty.
+        // We can't call start_command (its boot gate would fail too)
+        // so we construct manually.
+        let status = Command::new("tmux")
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                &session,
+                "-x",
+                &PANE_WIDTH.to_string(),
+                "-y",
+                &PANE_HEIGHT.to_string(),
+                "-c",
+                &tmp.path().to_string_lossy(),
+                "sh",
+                "-c",
+                "sleep 60",
+            ])
+            .status()
+            .expect("tmux new-session");
+        assert!(status.success());
+        let driver = TmuxDriver {
+            session: session.clone(),
+            workdir: tmp.path().to_path_buf(),
+            debug: None,
+        };
+
+        // With min_bytes=200, an empty pane must time out — not be
+        // mistaken for idle.
+        let err = driver
+            .wait_for_idle_with_floor(Duration::from_millis(400), Duration::from_millis(100), Duration::from_millis(1_200), 200)
+            .expect_err("empty pane must not be treated as idle");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("did not settle"), "expected timeout error; got: {msg}");
+
+        // And with min_bytes=0 the old behaviour returns idle.
+        let text = driver
+            .wait_for_idle_with_floor(Duration::from_millis(400), Duration::from_millis(100), Duration::from_secs(2), 0)
+            .expect("empty pane treated as idle with no floor");
+        assert!(text.trim().is_empty(), "expected empty pane; got: {text:?}");
+    }
+
+    #[test]
+    fn debug_log_records_send_and_idle() {
+        if !tmux_present() {
+            eprintln!("tmux not installed — skipping");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let session = unique_session("debug-log");
+        let payload = long_payload("boot-payload", 30);
+        let cmd = format!("echo '{payload}' && cat");
+        let driver = TmuxDriver::start_command(&session, tmp.path(), &cmd, Duration::from_secs(5)).expect("start");
+
+        let log_path = tmp.path().join("debug.log");
+        let dbg = PaneDebugLog::create(&log_path).expect("create debug log");
+        let driver = driver.with_debug_log(dbg);
+
+        // Idle should record the boot pane snapshot.
+        let _ = driver
+            .wait_for_idle(Duration::from_millis(400), Duration::from_millis(100), Duration::from_secs(3))
+            .expect("idle settles");
+        driver.send("hi-debug").expect("send");
+
+        // Drop the driver so the BufWriter inside the log gets
+        // flushed on Drop.
+        drop(driver);
+
+        let logged = std::fs::read_to_string(&log_path).expect("read debug log");
+        assert!(logged.contains("[idle]"), "expected idle record; got:\n{logged}");
+        assert!(logged.contains("[send]"), "expected send record; got:\n{logged}");
+        assert!(logged.contains("hi-debug"), "expected sent payload in log; got:\n{logged}");
     }
 
     #[test]
@@ -380,6 +677,7 @@ mod tests {
                 TmuxDriver {
                     session: session2,
                     workdir: tmp.path().to_path_buf(),
+                    debug: None,
                 }
             }
         };
@@ -399,9 +697,11 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let session = unique_session("dup");
-        let _driver = TmuxDriver::start_command(&session, tmp.path(), "echo first && sleep 30", Duration::from_secs(5)).expect("first start");
+        let payload = long_payload("first-aaaaa", 30);
+        let cmd = format!("echo '{payload}' && sleep 30");
+        let _driver = TmuxDriver::start_command(&session, tmp.path(), &cmd, Duration::from_secs(5)).expect("first start");
 
-        let err = TmuxDriver::start_command(&session, tmp.path(), "echo second && sleep 30", Duration::from_secs(5)).expect_err("second start must fail");
+        let err = TmuxDriver::start_command(&session, tmp.path(), &cmd, Duration::from_secs(5)).expect_err("second start must fail");
         let msg = format!("{err:#}");
         assert!(msg.contains("already exists"), "expected duplicate-session error; got: {msg}");
     }
@@ -414,8 +714,10 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let session = unique_session("dropkill");
+        let payload = long_payload("alive-aaaaa", 30);
+        let cmd = format!("echo '{payload}' && sleep 60");
         {
-            let _driver = TmuxDriver::start_command(&session, tmp.path(), "echo alive && sleep 60", Duration::from_secs(5)).expect("start");
+            let _driver = TmuxDriver::start_command(&session, tmp.path(), &cmd, Duration::from_secs(5)).expect("start");
             assert!(session_exists(&session), "session should exist while driver alive");
         }
         // Drop ran — session must be gone.

@@ -43,6 +43,18 @@ pub struct TuiTaskConfig {
     /// Outer per-task wall-clock cap. Independent of the per-turn
     /// idle timeout — bounds total time spent on a task.
     pub task_timeout: Duration,
+    /// When `true`, write a per-task pane-debug log to the run dir
+    /// at `<run_dir>/<lang>-<task>.pane.log`. Each `send` and each
+    /// `wait_for_idle` boundary appends a timestamped record so a
+    /// failed bench can be inspected post-hoc.
+    pub debug_pane_log: bool,
+    /// When `true`, a TUI task that exits with `Stuck` / `TurnCap` /
+    /// `IdleTimeout` on turn 1 (i.e. driver bailed before any real
+    /// interaction) is forced to `solved=false` regardless of the
+    /// raw test result. This stops the harness from reporting a
+    /// passing score on a workspace the agent never touched — see
+    /// pearl th-f46efa.
+    pub stuck_means_failed: bool,
 }
 
 impl Default for TuiTaskConfig {
@@ -50,9 +62,18 @@ impl Default for TuiTaskConfig {
         Self {
             th_binary: "th".into(),
             tmux_session_prefix: "smooth-bench-tui".into(),
-            boot_timeout: Duration::from_secs(15),
+            // `th code` boots an entire microVM cast (wonk, goalie,
+            // narc, scribe, archivist, diver, groove) plus the
+            // operator-runner pool before reaching the input prompt.
+            // Empirically this takes 30-60s on a warm machine; 15s
+            // (the old default) was way under, which is what made the
+            // first-render gate fire prematurely on every PR run. 120s
+            // gives generous headroom for a cold sandbox image pull.
+            boot_timeout: Duration::from_secs(120),
             loop_cfg: LoopConfig::default(),
             task_timeout: Duration::from_secs(900),
+            debug_pane_log: false,
+            stuck_means_failed: true,
         }
     }
 }
@@ -116,7 +137,28 @@ pub async fn run_polyglot_task_via_tui<D: DriverModel>(lang: PolyglotLang, task:
     let session = format!("{}-{}-{}", cfg.tmux_session_prefix, lang.dataset_dir(), task);
     let shell_cmd = format!("{} code", shell_escape(&cfg.th_binary));
 
-    let driver = TmuxDriver::start_command(&session, &setup.work_dir, &shell_cmd, cfg.boot_timeout).context("spawn th code in tmux")?;
+    // Build the optional per-task pane-debug log BEFORE spawning so
+    // the boot screen + a `start_command` failure both end up in the
+    // log. Path mirrors the result file layout — sibling to
+    // PROMPT.txt under the run dir — so an op looking at a failed
+    // task has every artifact in one place.
+    let debug_log = if cfg.debug_pane_log {
+        let log_path = setup.run_dir.join(format!("{}-{}.pane.log", lang.dataset_dir(), task));
+        match crate::tmux_driver::PaneDebugLog::create(&log_path) {
+            Ok(dbg) => {
+                eprintln!("score-tui: debug pane log → {}", log_path.display());
+                Some(dbg)
+            }
+            Err(e) => {
+                eprintln!("score-tui: warning — could not open debug log {}: {e:#}", log_path.display());
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let driver = TmuxDriver::start_command_with_debug(&session, &setup.work_dir, &shell_cmd, cfg.boot_timeout, debug_log).context("spawn th code in tmux")?;
 
     // Outer timeout: hard cap on per-task time. Implemented by
     // racing the human-loop future against a sleep; the tmux session
@@ -148,8 +190,34 @@ pub async fn run_polyglot_task_via_tui<D: DriverModel>(lang: PolyglotLang, task:
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
     let duration_ms: u64 = (t0.elapsed().as_secs_f64() * 1000.0).max(0.0) as u64;
 
+    // Stuck-means-failed guard. If the LLM-as-human loop bailed
+    // before any real interaction (turn==1 and exit != Complete) we
+    // refuse to count a passing test result. Rationale: aider-polyglot
+    // fixtures should not pass un-edited (the failing tests are the
+    // point), so a "passing" result here is almost certainly the
+    // harness scoring the wrong directory or a runner that prints
+    // ok-on-empty. See pearl th-f46efa for the regression that
+    // surfaced this — the un-fixed PR reported 2/3 Rust passes on
+    // runs where the agent never typed anything.
+    let solved_raw = counts.solved();
+    let driver_bailed_immediately = loop_result.turns <= 1 && !matches!(loop_result.exit, LoopExit::Complete);
+    let solved = if cfg.stuck_means_failed && driver_bailed_immediately {
+        if solved_raw {
+            eprintln!(
+                "score-tui: WARNING — {}/{} reported solved=true but driver bailed on turn {} ({:?}); forcing solved=false (pearl th-f46efa)",
+                lang.dataset_dir(),
+                task,
+                loop_result.turns,
+                loop_result.exit,
+            );
+        }
+        false
+    } else {
+        solved_raw
+    };
+
     Ok(TuiTaskOutcome {
-        solved: counts.solved(),
+        solved,
         // Cost from the TUI path is not yet plumbed — see module doc.
         cost_usd: 0.0,
         duration_ms,
@@ -199,6 +267,10 @@ pub struct TuiSweepConfig {
     /// sweep shape.
     pub task_opts: BenchOpts,
     pub tui_cfg: TuiTaskConfig,
+    /// When `Some(n)`, run at most `n` tasks before stopping. Useful
+    /// for harness debug runs (`--task-limit 1` to inspect a single
+    /// pane log). `None` = run all tasks selected by `gate`.
+    pub task_limit: Option<usize>,
 }
 
 /// The same shape as the WebSocket `SweepRun` plus a `via` marker so
@@ -253,7 +325,10 @@ fn curated_pairs(curated: &CuratedList, gate: SweepGate) -> Vec<(PolyglotLang, S
 /// degrade to `solved=false` outcomes (logged to stderr, sweep
 /// continues).
 pub async fn run_tui_sweep<D: DriverModel, O: SweepObserver>(curated: &CuratedList, model: &D, cfg: &TuiSweepConfig, observer: &mut O) -> Result<TuiSweepRun> {
-    let pairs = curated_pairs(curated, cfg.gate);
+    let mut pairs = curated_pairs(curated, cfg.gate);
+    if let Some(limit) = cfg.task_limit {
+        pairs.truncate(limit);
+    }
     let total = pairs.len();
     let mut per_task: Vec<(PolyglotLang, String, TuiTaskOutcome)> = Vec::with_capacity(total);
     let mut durations_ms: Vec<u64> = Vec::with_capacity(total);
@@ -305,6 +380,18 @@ pub async fn run_tui_sweep<D: DriverModel, O: SweepObserver>(curated: &CuratedLi
             budget_usd_hit: budget_hit,
         },
     );
+
+    // Sanity-check the result: a real sweep should report > $0 of
+    // model spend. If every task reports $0.00, the cost surface
+    // wasn't wired (a real risk on the TUI path — see module doc on
+    // `run_polyglot_task_via_tui` re: TUI cost not yet plumbed) and
+    // any pass-rate claim should be treated with extreme suspicion.
+    if score.tasks_attempted > 0 && score.cost_usd == 0.0 {
+        eprintln!(
+            "score-tui: WARNING — cost reported as $0.00 across {} task(s). TUI cost surfacing is not yet wired (pearl follow-up); pass-rate may not reflect real model behaviour.",
+            score.tasks_attempted
+        );
+    }
 
     Ok(TuiSweepRun { score, per_task, via: "tui" })
 }
