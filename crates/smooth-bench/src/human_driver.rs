@@ -141,6 +141,26 @@ pub fn is_slash_command(msg: &str) -> bool {
     msg.trim_start().starts_with('/')
 }
 
+/// Collapse a multi-line message into a single line so the
+/// `smooth-code` TUI submits it as one turn rather than N.
+///
+/// The TUI's input handler treats every embedded newline as Enter
+/// (submit). Driver-model replies often contain `\n` (paragraph
+/// breaks, lists) — without flattening these become N separate
+/// `You:` submissions, fragmenting the conversation. Belt-and-
+/// suspenders with `tmux paste-buffer -p` (bracketed paste): even
+/// when the TUI honors bracketed paste, the flattened form is
+/// robust against future input-handler changes.
+///
+/// Strategy: trim each line, drop empty lines, join with `" | "`.
+/// `" | "` is unambiguous separator-text — neither valid prose nor
+/// markdown — so a reader (the assistant under test) can still
+/// recover the structure if it cares to.
+#[must_use]
+pub fn flatten_for_tui(text: &str) -> String {
+    text.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" | ")
+}
+
 /// Abstract "ask an LLM what to type next" — generic so production
 /// code can wire `smooth-operator`'s `LlmClient` and unit tests can
 /// inject a deterministic stub.
@@ -300,8 +320,12 @@ impl Default for LoopConfig {
 /// Errors only on tmux failure or driver-LLM failure. Sentinel exits
 /// and turn caps are returned as `Ok(LoopResult)`.
 pub async fn run_human_loop<D: DriverModel>(driver: &TmuxDriver, model: &D, task: &str, task_prompt: &str, cfg: &LoopConfig) -> Result<LoopResult> {
-    // Turn 1: send the seeded task prompt to the TUI.
-    driver.send(task_prompt).context("seeding task prompt")?;
+    // Turn 1: send the seeded task prompt to the TUI. Flatten as a
+    // defence-in-depth — `build_prompt` should already return a
+    // single line, but if a caller passes multi-line text the TUI
+    // would split it into multiple `You:` submissions. See pearl
+    // th-01c714.
+    driver.send(&flatten_for_tui(task_prompt)).context("seeding task prompt")?;
 
     let mut turns = 1usize;
     let mut final_pane;
@@ -395,7 +419,11 @@ pub async fn run_human_loop<D: DriverModel>(driver: &TmuxDriver, model: &D, task
                     // a bare newline so the TUI advances.
                     driver.send("").context("send empty turn")?;
                 } else {
-                    driver.send(&text).context("send driver turn")?;
+                    // Flatten newlines to ` | ` — the TUI submits on
+                    // every newline, so a multi-paragraph driver
+                    // reply would fragment into N `You:` turns.
+                    // Pearl th-01c714.
+                    driver.send(&flatten_for_tui(&text)).context("send driver turn")?;
                 }
             }
         }
@@ -406,6 +434,40 @@ pub async fn run_human_loop<D: DriverModel>(driver: &TmuxDriver, model: &D, task
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn flatten_for_tui_collapses_newlines_to_pipe_separator() {
+        // Regression for pearl th-01c714: the TUI submits on every
+        // `\n`, so multi-line text would arrive as N `You:` turns.
+        let out = flatten_for_tui("first paragraph\n\nsecond paragraph\nthird line");
+        assert!(!out.contains('\n'), "flattened text contains newline: {out}");
+        assert_eq!(out, "first paragraph | second paragraph | third line");
+    }
+
+    #[test]
+    fn flatten_for_tui_trims_each_line() {
+        let out = flatten_for_tui("  hello \n  world  ");
+        assert_eq!(out, "hello | world");
+    }
+
+    #[test]
+    fn flatten_for_tui_handles_empty_input() {
+        assert_eq!(flatten_for_tui(""), "");
+        assert_eq!(flatten_for_tui("\n\n"), "");
+        assert_eq!(flatten_for_tui("   "), "");
+    }
+
+    #[test]
+    fn flatten_for_tui_handles_single_line_passthrough() {
+        let s = "already a single line";
+        assert_eq!(flatten_for_tui(s), s);
+    }
+
+    #[test]
+    fn flatten_for_tui_drops_blank_lines() {
+        let out = flatten_for_tui("a\n\n\nb");
+        assert_eq!(out, "a | b");
+    }
 
     #[test]
     fn parse_plain_message_is_send() {
