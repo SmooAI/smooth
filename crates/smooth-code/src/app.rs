@@ -458,6 +458,19 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
         AgentEvent::CheckpointSaved { iteration, .. } => {
             state.add_message(ChatMessage::system(format!("✓ snapshot taken (iter {iteration})")));
         }
+        AgentEvent::ModelResolved { alias, upstream } => {
+            // Pearl th-a10c2d: when running through a smooth-* alias,
+            // the gateway resolves to a concrete upstream (e.g.
+            // `smooth-coding` → `qwen3-coder-flash`). Surface the
+            // upstream so the status bar shows `alias → upstream`
+            // even outside of phase-driven runs. This both populates
+            // current_phase_upstream (so the render path can pick it
+            // up) AND drops an inline system note so the user
+            // notices the resolution the first time.
+            state.current_phase_alias = Some(alias.clone());
+            state.current_phase_upstream = Some(upstream.clone());
+            state.add_message(ChatMessage::system(format!("model: {alias} → {upstream}")));
+        }
         AgentEvent::StreamingComplete => {
             state.finish_streaming();
         }
