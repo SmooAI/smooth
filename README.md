@@ -450,6 +450,9 @@ th access policy <operator-id>      # Show current policy
 th mcp add playwright npx @playwright/mcp@latest
 th mcp add --project repo-fs npx @modelcontextprotocol/server-filesystem /workspace
 th mcp list                      # Global + project scopes
+th mcp defaults                  # Show shipped defaults (budget-aware-mcp, …)
+th mcp install                   # Register all shipped defaults (idempotent)
+th mcp install budget-aware-mcp  # Register a single shipped default
 th mcp test playwright           # Health check
 th mcp remove playwright
 
@@ -556,7 +559,14 @@ Two extension points add tools without rebuilding the binary:
 - **MCP servers** — spawn [Model Context
   Protocol](https://modelcontextprotocol.io) servers like Playwright
   MCP or GitHub MCP; their tools land in the agent's registry as
-  `<server>.<tool>`.
+  `<server>.<tool>`. Smooth ships one default out of the box:
+  [`budget-aware-mcp`](https://github.com/Doorman11991/budget-aware-mcp)
+  — token-budgeted code-graph queries (`graph_walk`, `search_graph`,
+  `check_scope`, `explain_symbol`, `find_dead_code`, …) so the
+  operator can pull just the structurally-relevant code instead of
+  ripgrep-then-read-file dumping entire files. Registered on first
+  `th up`; opt out with `SMOOTH_SKIP_DEFAULT_MCP=1` or remove via
+  `th mcp remove budget-aware-mcp`.
 - **CLI-wrapper plugins** — drop a TOML manifest at
   `.smooth/plugins/<name>/plugin.toml` and the runner registers it as
   `plugin.<name>`, rendering `{{placeholder}}` args into a shell

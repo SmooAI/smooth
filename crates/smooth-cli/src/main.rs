@@ -598,6 +598,14 @@ enum McpCommands {
         #[arg(long)]
         project: bool,
     },
+    /// List MCP servers Smooth ships as defaults
+    Defaults,
+    /// Register a shipped-default MCP server into `~/.smooth/mcp.toml`
+    /// (idempotent — never touches an existing entry of the same name).
+    Install {
+        /// Default name (`budget-aware-mcp`, …). Omit to install every default.
+        name: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1309,6 +1317,39 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, foreground: bo
     // env) picks the right value in both foreground + daemon paths.
     if let Some(n) = max_operators {
         std::env::set_var("SMOOTH_SANDBOX_MAX_CONCURRENCY", n.to_string());
+    }
+
+    // Shipped-default MCP servers — populate `~/.smooth/mcp.toml` with our
+    // baseline tool set (budget-aware-mcp, …) before the safehouse VM
+    // bind-mounts `~/.smooth` into the guest. Idempotent: never touches an
+    // existing entry of the same name (the user's config always wins).
+    // Failures here are non-fatal — `th up` must still boot if disk is
+    // read-only, the home dir is unwriteable, etc. Set
+    // `SMOOTH_SKIP_DEFAULT_MCP=1` to opt out entirely.
+    if std::env::var("SMOOTH_SKIP_DEFAULT_MCP").is_err() {
+        if let Some(p) = mcp_config::McpConfig::default_path() {
+            match mcp_config::ensure_default_mcp_servers(&p) {
+                Ok(report) => {
+                    for (name, outcome) in &report {
+                        if matches!(outcome, mcp_config::DefaultOutcome::Added) {
+                            tracing::info!(server = %name, path = %p.display(), "MCP defaults: registered shipped server");
+                        }
+                    }
+                    // Surface a one-line install hint per default whose host probe is missing.
+                    for d in mcp_config::default_mcp_servers() {
+                        if !mcp_config::host_probe_on_path(d.host_probe) {
+                            tracing::warn!(
+                                server = d.name,
+                                probe = d.host_probe,
+                                hint = d.install_hint,
+                                "MCP default's runtime is not on PATH — server will fail to spawn until installed"
+                            );
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, path = %p.display(), "MCP defaults: ensure failed"),
+            }
+        }
     }
     // Two modes only:
     //   * `th up` (default) — boot Smooth inside a microsandbox VM
@@ -4798,6 +4839,109 @@ fn cmd_mcp(cmd: McpCommands) -> Result<()> {
                     Err(anyhow::anyhow!("wait failed: {e}"))
                 }
             }
+        }
+
+        McpCommands::Defaults => {
+            use mcp_config::{default_mcp_servers, host_probe_on_path, McpConfig};
+            let global = McpConfig::load(&global_path).unwrap_or_default();
+            println!("\n  {}\n", "Shipped MCP defaults".cyan().bold());
+            for d in default_mcp_servers() {
+                let installed = global.find(d.name).is_some();
+                let probe_ok = host_probe_on_path(d.host_probe);
+                let status = if installed {
+                    "✓ registered".green().bold().to_string()
+                } else {
+                    "○ not registered".dimmed().to_string()
+                };
+                let probe = if probe_ok {
+                    format!("{} on PATH", d.host_probe).green().to_string()
+                } else {
+                    format!("{} NOT on PATH", d.host_probe).yellow().to_string()
+                };
+                println!("  {}  {}  [{}]", d.name.bold(), status, probe);
+                println!("    {} {}", "▸".dimmed(), d.description.dimmed());
+                if !probe_ok {
+                    println!("    {} install hint: {}", "↳".dimmed(), d.install_hint.cyan());
+                }
+                println!();
+            }
+            println!("  {} Add them all: {}\n", "→".dimmed(), "th mcp install".cyan());
+            Ok(())
+        }
+
+        McpCommands::Install { name } => {
+            use mcp_config::{default_mcp_servers, ensure_default_mcp_servers, host_probe_on_path, DefaultOutcome, McpConfig, McpServerConfig};
+            // Targeted install: only one default by name. Implement as a
+            // pre-filter on the shared `ensure_default_mcp_servers` helper.
+            if let Some(ref n) = name {
+                let Some(target) = default_mcp_servers().iter().find(|d| d.name == n) else {
+                    anyhow::bail!("no shipped default named `{n}` — run `th mcp defaults` to see the list");
+                };
+                let mut cfg = McpConfig::load(&global_path).unwrap_or_default();
+                if cfg.find(target.name).is_some() {
+                    println!(
+                        "\n  {} `{}` already registered (left as-is) → {}\n",
+                        "ℹ".cyan(),
+                        target.name.bold(),
+                        global_path.display().to_string().dimmed()
+                    );
+                } else {
+                    cfg.servers.push(McpServerConfig {
+                        name: target.name.to_string(),
+                        command: target.command.to_string(),
+                        args: target.args.iter().map(|s| (*s).to_string()).collect(),
+                        env: std::collections::HashMap::new(),
+                        disabled: false,
+                    });
+                    cfg.save(&global_path)?;
+                    println!(
+                        "\n  {} Installed default MCP server {} → {}\n",
+                        "✓".green().bold(),
+                        target.name.bold(),
+                        global_path.display().to_string().dimmed()
+                    );
+                }
+                if !host_probe_on_path(target.host_probe) {
+                    println!(
+                        "  {} `{}` is not on PATH — install it to actually run the server:",
+                        "!".yellow().bold(),
+                        target.host_probe
+                    );
+                    println!("    {}\n", target.install_hint.cyan());
+                }
+                return Ok(());
+            }
+
+            // No name → install every missing default.
+            let report = ensure_default_mcp_servers(&global_path)?;
+            println!("\n  {} → {}\n", "Defaults".cyan().bold(), global_path.display().to_string().dimmed());
+            for (name, outcome) in &report {
+                let line = match outcome {
+                    DefaultOutcome::Added => format!("  {} {} (added)", "✓".green().bold(), name.bold()),
+                    DefaultOutcome::AlreadyPresent => format!("  {} {} (already present, left as-is)", "·".dimmed(), name.bold()),
+                    DefaultOutcome::SkippedByUser => format!("  {} {} (skipped — user-disabled)", "○".dimmed(), name.bold()),
+                };
+                println!("{line}");
+            }
+            // Surface any missing host probes so the user knows what to install.
+            let mut warned = false;
+            for d in default_mcp_servers() {
+                if !host_probe_on_path(d.host_probe) {
+                    if !warned {
+                        println!();
+                        warned = true;
+                    }
+                    println!(
+                        "  {} `{}` is not on PATH for `{}` — {}",
+                        "!".yellow().bold(),
+                        d.host_probe,
+                        d.name.bold(),
+                        d.install_hint.cyan()
+                    );
+                }
+            }
+            println!();
+            Ok(())
         }
     }
 }
