@@ -41,6 +41,7 @@
 
 mod ask_smooth_tool;
 mod delegate;
+mod forgiving_parse;
 mod host_tool;
 mod mailbox;
 mod pearl_tools;
@@ -2209,8 +2210,20 @@ async fn main() {
     // Run the agent on a channel and re-emit every AgentEvent as JSON-lines.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
+    // We scrub TokenDelta content for stray pseudo-XML tool calls before
+    // emitting downstream (pearl th-c65ca3). The chat UI shouldn't show
+    // users the raw `<function=…>` blob — that's noise from a small
+    // model that meant to call a tool but emitted XML instead. If the
+    // forgiving parser recognizes the block, the rest of the prose is
+    // preserved and the malformed call is replaced with a short note.
     let emit_task = tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
+            let event = match event {
+                AgentEvent::TokenDelta { content } => AgentEvent::TokenDelta {
+                    content: scrub_inline_tool_xml(&content),
+                },
+                other => other,
+            };
             emit_event(&event);
         }
     });
@@ -2391,10 +2404,60 @@ async fn main() {
 /// "assistant content" causes the model to bail with "I don't have
 /// context" — because its own prior output is unparseable.
 ///
-/// Replaces every detected block with a single bracketed marker the
-/// LLM can read as plain English. We don't try to recover the
-/// original intent — that's a separate fix at the tool-call layer.
+/// First tries the forgiving parser (see `forgiving_parse`) — if the
+/// block parses into a real `(name, arguments)` pair, we rewrite it
+/// as a human-readable note that NAMES the tool and its arguments so
+/// the next turn's LLM understands what its prior self meant to do.
+/// Only when the forgiving parser fails do we fall back to the
+/// "[NOTE: malformed]" stub. We don't auto-execute parsed calls from
+/// prior history — by definition they already happened (or failed to
+/// happen) in a previous session.
 fn sanitize_pseudo_tool_xml(content: &str) -> String {
+    // First pass: if the forgiving parser recognizes a tool call, rewrite
+    // the recognizable block with a structured English note instead of
+    // the generic stub. This makes prior-history far more useful — the
+    // model can see WHICH tool its prior self tried to call.
+    if let Some(parsed) = forgiving_parse::forgiving_parse_tool_call(content) {
+        tracing::warn!(
+            tool_name = %parsed.name,
+            "tool call parsed from prior-history visible content via forgiving parser"
+        );
+        let note = format!(
+            "[NOTE: my previous turn emitted an inline `{}` tool-call (args={}) as visible text instead of a real tool call. The action did not execute. If still needed, call the tool properly this turn.]",
+            parsed.name, parsed.arguments
+        );
+        return content.replacen(&parsed.raw, &note, 1);
+    }
+    legacy_strip_pseudo_tool_xml(content)
+}
+
+/// Live-stream variant of `sanitize_pseudo_tool_xml`. The agent loop
+/// streams assistant content as `TokenDelta` events; we don't want
+/// the chat UI to ever flash raw `<function=…>` XML at users (pearl
+/// th-c65ca3). When a forgiving parse succeeds the block is replaced
+/// with a short bracketed marker; when it fails the legacy stub
+/// replacer runs. Returns the original string when no XML is present
+/// — the common case for normal streamed text.
+fn scrub_inline_tool_xml(content: &str) -> String {
+    let needles = ["<function=", "<tool_call>", "</tool_call>", "<parameter="];
+    if !needles.iter().any(|n| content.contains(n)) {
+        return content.to_string();
+    }
+    if let Some(parsed) = forgiving_parse::forgiving_parse_tool_call(content) {
+        tracing::warn!(
+            tool_name = %parsed.name,
+            "tool call parsed from streamed visible content via forgiving parser"
+        );
+        return content.replacen(&parsed.raw, &format!("[suppressed inline tool-call block for `{}`]", parsed.name), 1);
+    }
+    legacy_strip_pseudo_tool_xml(content)
+}
+
+/// Conservative fallback used when the forgiving parser can't recover
+/// a structured `(name, arguments)` pair. Replaces every detected
+/// pseudo-XML block with a single bracketed English note. Kept for
+/// the long tail of broken-JSON-inside-XML cases the parser refuses.
+fn legacy_strip_pseudo_tool_xml(content: &str) -> String {
     let needles = ["<function=", "<tool_call>", "</tool_call>", "<parameter="];
     if !needles.iter().any(|n| content.contains(n)) {
         return content.to_string();
@@ -2428,7 +2491,34 @@ fn sanitize_pseudo_tool_xml(content: &str) -> String {
 
 #[cfg(test)]
 mod sanitize_tests {
-    use super::sanitize_pseudo_tool_xml;
+    use super::{sanitize_pseudo_tool_xml, scrub_inline_tool_xml};
+
+    #[test]
+    fn scrub_passes_through_plain_text() {
+        let s = "Streamed plain content with no XML at all.";
+        assert_eq!(scrub_inline_tool_xml(s), s);
+    }
+
+    #[test]
+    fn scrub_suppresses_parseable_xml_block() {
+        // Live-stream version of the th-c65ca3 case: the chat UI must
+        // not see the raw `<function=…>` blob.
+        let input = "Working on it...\n<function=bash>{\"cmd\":\"ls -la\"}</function>\nDone.";
+        let out = scrub_inline_tool_xml(input);
+        assert!(out.contains("[suppressed inline tool-call block for `bash`]"), "got: {out}");
+        assert!(!out.contains("<function="), "raw XML must not survive: got {out}");
+        assert!(out.contains("Working on it..."));
+        assert!(out.contains("Done."));
+    }
+
+    #[test]
+    fn scrub_falls_back_to_stub_for_unparseable_xml() {
+        // Broken JSON inside the XML — parser refuses, legacy stub runs.
+        let input = "<function=bash>{cmd: ls}</function>";
+        let out = scrub_inline_tool_xml(input);
+        assert!(out.contains("[NOTE:"), "expected legacy stub: got {out}");
+        assert!(!out.contains("<function="));
+    }
 
     #[test]
     fn passes_through_plain_text() {
@@ -2462,5 +2552,21 @@ mod sanitize_tests {
         assert!(out.starts_with("Here's the plan:"));
         assert!(out.contains("Let me know if that's wrong."));
         assert!(out.contains("[NOTE:"));
+    }
+
+    #[test]
+    fn structured_note_when_forgiving_parser_succeeds() {
+        // Pearl th-c65ca3: the th-c65ca3 case has parseable JSON inside
+        // the <function=…> block. Sanitizer should rewrite it as a
+        // STRUCTURED note that names the tool + args, not the generic
+        // stub. The next turn's LLM can then reason about what its
+        // prior self meant to do.
+        let input = r#"Sure, let me try.
+<function=host_tool>{"tool":"curl","args":["-I","https://smoo-hub.com"]}</function>"#;
+        let out = sanitize_pseudo_tool_xml(input);
+        assert!(out.contains("`host_tool`"), "structured note must name the tool: got {out}");
+        assert!(out.contains("curl"), "structured note must echo the args: got {out}");
+        assert!(!out.contains("<function="), "raw XML must be removed");
+        assert!(out.starts_with("Sure, let me try."), "surrounding prose preserved");
     }
 }
