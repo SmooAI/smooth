@@ -691,25 +691,30 @@ fn is_test_file(lang: PolyglotLang, rel: &Path) -> bool {
 
 fn build_prompt(task: &str, lang: PolyglotLang, work_dir: &Path) -> anyhow::Result<String> {
     let files = list_non_hidden_files(work_dir)?;
-    let files_joined = files.iter().map(|p| format!("  - {p}")).collect::<Vec<_>>().join("\n");
+    let files_joined = files.join(", ");
     let cmd = lang.test_command().join(" ");
 
+    // Deliberately a SINGLE LINE (no embedded `\n`s). The bench
+    // drives the `smooth-code` TUI via tmux paste-buffer; that TUI's
+    // input handler treats every newline as Enter (submit). Without
+    // this flattening, a multi-line prompt arrives as N separate
+    // `You:` submissions — see pearl th-01c714 and the regression
+    // log at `~/.smooth/bench-runs/80c092b0/python-affine-cipher.pane.log`
+    // where a 13-line prompt produced 13 `You:` blocks. Bracketed
+    // paste (`paste-buffer -p`) would let a bracketed-paste-aware
+    // TUI keep multi-line content intact, but we do not depend on
+    // that — flattening guarantees one submission regardless of
+    // receiver behaviour.
     Ok(format!(
-        "You are solving an Aider Polyglot coding benchmark task: `{task}` ({lang}).\n\
-\n\
-Working directory: the current directory.\n\
-Files present:\n\
-{files_joined}\n\
-\n\
-Your job:\n\
-1. Read INSTRUCTIONS.md and the test file to understand the requirements.\n\
-2. Edit the source file(s) so `{cmd}` passes every test.\n\
-3. Do not modify test files.\n\
-4. Stop once the tests pass — do not keep iterating.\n\
-\n\
-Constraints:\n\
-- Use only the standard library for the language.\n\
-- Keep the implementation idiomatic and concise.\n",
+        "You are solving Aider Polyglot task `{task}` ({lang}). \
+Working directory: the current directory. \
+Files present: {files_joined}. \
+Your job: read INSTRUCTIONS.md and the test file to understand the requirements; \
+edit the source file(s) so `{cmd}` passes every test; \
+do not modify test files; \
+stop once the tests pass — do not keep iterating. \
+Constraints: use only the standard library for the language; \
+keep the implementation idiomatic and concise.",
         lang = lang.dataset_dir(),
     ))
 }
@@ -1057,6 +1062,31 @@ mod tests {
         assert!(prompt.contains("grade_school_test.py"));
         assert!(prompt.contains("INSTRUCTIONS.md"));
         assert!(prompt.contains("python3 -m pytest"));
+    }
+
+    /// Regression for pearl th-01c714: the bench-driven `smooth-code`
+    /// TUI treats every newline in pasted input as Enter (submit), so
+    /// a multi-line prompt arrived as N separate `You:` submissions
+    /// instead of one cohesive task. The fix flattens `build_prompt`
+    /// to a single line. This test guards that no `\n` ever sneaks
+    /// back in — neither from the template itself nor from a file
+    /// name with embedded whitespace.
+    #[test]
+    fn build_prompt_is_single_line() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        std::fs::write(tmp.path().join("affine_cipher.py"), b"").unwrap();
+        std::fs::write(tmp.path().join("affine_cipher_test.py"), b"").unwrap();
+        std::fs::write(tmp.path().join("INSTRUCTIONS.md"), b"stuff").unwrap();
+
+        let prompt = build_prompt("affine-cipher", PolyglotLang::Python, tmp.path()).expect("prompt");
+        assert!(
+            !prompt.contains('\n'),
+            "build_prompt produced a multi-line prompt; the TUI would split it into multiple You: submissions. Prompt was:\n{prompt}"
+        );
+        assert!(
+            !prompt.contains('\r'),
+            "build_prompt produced a carriage return; same hazard as `\\n`. Prompt was:\n{prompt}"
+        );
     }
 
     #[test]

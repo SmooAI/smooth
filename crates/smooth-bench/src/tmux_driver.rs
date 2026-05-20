@@ -285,14 +285,30 @@ impl TmuxDriver {
             return Err(anyhow!("tmux load-buffer exited non-zero: {}", String::from_utf8_lossy(&out.stderr)));
         }
 
-        // `paste-buffer -b NAME -t SESSION -d` inserts the buffer's
+        // `paste-buffer -b NAME -t SESSION -d -p` inserts the buffer's
         // bytes into the pane as if pasted, then deletes the buffer.
-        // `-p` would pipe through bracketed-paste markers if the
-        // application requested them — we deliberately omit it so the
-        // TUI sees plain typed input, matching what `send-keys -l`
-        // used to do (but with correct newline handling).
+        // The `-p` flag wraps the paste in bracketed-paste markers
+        // (`\e[200~ ... \e[201~`) when the receiving application has
+        // enabled bracketed-paste mode (`\e[?2004h`). Bracketed-paste-
+        // aware TUIs use this to distinguish pasted content from typed
+        // input — critically, they treat embedded newlines as soft
+        // newlines (insert) rather than Enter (submit).
+        //
+        // Without `-p`, multi-line task prompts arrived in the
+        // `smooth-code` TUI as N separate `You:` submissions, one per
+        // newline, because the input handler treats each `\n` as
+        // Enter. With `-p`, a bracketed-paste-aware TUI receives the
+        // whole prompt as one submission. If the TUI hasn't enabled
+        // bracketed-paste mode, tmux strips the `-p` markers and
+        // behaviour is identical to the non-`-p` path — `-p` is safe
+        // for non-aware applications.
+        //
+        // Belt-and-suspenders: the prompt is also constructed as a
+        // single line in `build_prompt` so the multi-line interpretation
+        // never arises regardless of the receiver's bracketed-paste
+        // support. See pearl th-01c714.
         let out = Command::new("tmux")
-            .args(["paste-buffer", "-b", &buffer_name, "-t", &self.session, "-d"])
+            .args(["paste-buffer", "-b", &buffer_name, "-t", &self.session, "-d", "-p"])
             .output()
             .context("tmux paste-buffer")?;
         if !out.status.success() {
