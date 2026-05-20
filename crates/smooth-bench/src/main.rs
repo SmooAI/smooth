@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use smooth_bench::curated::CuratedList;
 use smooth_bench::sweep::{current_commit_sha, run_sweep, PolyglotTaskRunner, StdoutObserver, SweepConfig, SweepGate, SweepRun};
+use smooth_bench::tui_score::{run_tui_sweep, TuiSweepConfig, TuiTaskConfig};
 use smooth_bench::{print_summary, run_aider_polyglot, BenchOpts, PolyglotLang};
 
 #[derive(Parser)]
@@ -63,6 +64,15 @@ enum Commands {
         #[arg(long)]
         run_dir: Option<PathBuf>,
     },
+
+    /// Run the curated aider-polyglot sweep through `th code` (the
+    /// real TUI), driving the agent with an LLM-as-human loop over
+    /// tmux. Emits the same Score shape as `score`. Pearl th-399196.
+    ///
+    /// Same flag surface as `score` plus `--tmux-session` /
+    /// `--driver-model`. The TUI path requires `tmux` on PATH and
+    /// `th` (this binary's sibling) reachable via `--th-binary`.
+    ScoreTui(ScoreTuiArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -98,6 +108,78 @@ struct ScoreArgs {
     /// Big Smooth URL.
     #[arg(long, default_value = "http://localhost:4400")]
     url: String,
+}
+
+#[derive(Parser, Debug)]
+struct ScoreTuiArgs {
+    /// Authoritative sample (120 runs). Mutually exclusive with `--pr`.
+    #[arg(long, conflicts_with = "pr")]
+    release: bool,
+
+    /// CI-gate sample (18 runs). Mutually exclusive with `--release`.
+    /// If neither is set, defaults to `--pr`.
+    #[arg(long)]
+    pr: bool,
+
+    /// Hard USD cap. (TUI cost reporting isn't yet wired — see
+    /// `tui_score::run_polyglot_task_via_tui` doc — so this cap
+    /// effectively never fires in v1. Kept for flag parity with
+    /// `score` so wrapper scripts work unchanged.)
+    #[arg(long, default_value_t = 10.0)]
+    budget_usd: f64,
+
+    /// Output path. If the path ends in `.json`, only JSON is written;
+    /// otherwise a human table is rendered. Default: stdout.
+    #[arg(long)]
+    output: Option<PathBuf>,
+
+    /// Big Smooth URL. `th code` connects to this — must be running.
+    #[arg(long, default_value = "http://localhost:4400")]
+    url: String,
+
+    /// tmux session name prefix. Each task uses
+    /// `{prefix}-{lang}-{task}` so parallel runs don't collide.
+    #[arg(long, default_value = "smooth-bench-tui")]
+    tmux_session: String,
+
+    /// Path to the `th` binary to drive. Defaults to "th" (relying
+    /// on PATH). Override when bench-testing a worktree build that
+    /// isn't installed.
+    #[arg(long, default_value = "th")]
+    th_binary: String,
+
+    /// Routing slot the driver LLM uses to compose user messages.
+    /// `Summarize` is the default — cheap, fast, doesn't burn the
+    /// model under test's budget.
+    #[arg(long, default_value_t = DriverModelSlot::Summarize, value_enum)]
+    driver_model: DriverModelSlot,
+
+    /// Maximum LLM-as-human turns per task before bailing as
+    /// "turn cap hit" and scoring the workspace as-is.
+    #[arg(long, default_value_t = 15)]
+    max_turns: usize,
+
+    /// Per-task wall-clock cap. Hard ceiling on time spent driving a
+    /// single task — independent of the per-turn idle timeout.
+    #[arg(long, default_value_t = 900)]
+    task_timeout_s: u64,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum DriverModelSlot {
+    Summarize,
+    Fast,
+    Judge,
+}
+
+impl DriverModelSlot {
+    fn to_activity(self) -> smooth_operator::providers::Activity {
+        match self {
+            Self::Summarize => smooth_operator::providers::Activity::Summarize,
+            Self::Fast => smooth_operator::providers::Activity::Fast,
+            Self::Judge => smooth_operator::providers::Activity::Judge,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
@@ -150,6 +232,7 @@ async fn main() -> Result<()> {
         }
         Commands::Score(args) => run_score(args).await,
         Commands::EvalReport { run_dir } => run_eval_report(run_dir),
+        Commands::ScoreTui(args) => run_score_tui(args).await,
     }
 }
 
@@ -203,6 +286,58 @@ async fn run_score(args: ScoreArgs) -> Result<()> {
 
     // Non-zero exit when budget was hit — CI gate will notice.
     if score.budget_usd_hit {
+        std::process::exit(2);
+    }
+    Ok(())
+}
+
+async fn run_score_tui(args: ScoreTuiArgs) -> Result<()> {
+    // Neither flag set → default to --pr.
+    let gate = if args.release {
+        SweepGate::Release
+    } else {
+        if !args.pr {
+            eprintln!("neither --release nor --pr given; defaulting to --pr (3 tasks × 6 langs = 18 runs)");
+        }
+        SweepGate::Pr { tasks_per_language: 3 }
+    };
+
+    let curated = CuratedList::default_embedded().context("loading embedded curated task list")?;
+    let driver_model = smooth_bench::human_driver::LlmDriverModel::from_activity(args.driver_model.to_activity())
+        .context("loading driver model from providers.json — is the slot configured?")?;
+
+    let loop_cfg = smooth_bench::human_driver::LoopConfig {
+        max_turns: args.max_turns,
+        ..smooth_bench::human_driver::LoopConfig::default()
+    };
+
+    let tui_cfg = TuiTaskConfig {
+        th_binary: args.th_binary.clone(),
+        tmux_session_prefix: args.tmux_session.clone(),
+        boot_timeout: std::time::Duration::from_secs(15),
+        loop_cfg,
+        task_timeout: std::time::Duration::from_secs(args.task_timeout_s),
+    };
+
+    let cfg = TuiSweepConfig {
+        gate,
+        budget_usd_cap: args.budget_usd,
+        smooth_version: env!("CARGO_PKG_VERSION").to_string(),
+        commit_sha: current_commit_sha(),
+        task_opts: BenchOpts {
+            big_smooth_url: args.url.clone(),
+            budget_usd: Some(args.budget_usd),
+            model: None,
+        },
+        tui_cfg,
+    };
+
+    let mut observer = StdoutObserver;
+    let run = run_tui_sweep(&curated, &driver_model, &cfg, &mut observer).await?;
+    eprintln!("score-tui: via={}", run.via);
+
+    emit_score(&run.score, args.output.as_deref())?;
+    if run.score.budget_usd_hit {
         std::process::exit(2);
     }
     Ok(())
