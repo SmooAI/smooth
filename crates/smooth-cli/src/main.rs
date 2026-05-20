@@ -972,25 +972,36 @@ async fn main() -> Result<()> {
     }
 
     match cli.command {
-        // No subcommand = launch smooth-code (THE Smooth experience).
-        // Top-level --resume / --list / --agent flags flow into cmd_code
-        // so `th --resume` / `th --list` / `th --agent X` work without
-        // needing to type `th code …` (pearl th-resume-top-level
-        // 2026-05-12 per user request).
+        // No subcommand = decide between explainer and the TUI.
+        //
+        // Bare `th` (no subcommand AND no resume/list/agent flags)
+        // prints a short explainer so first-time users learn what
+        // `th` is for instead of being dropped into a TUI cold.
+        // Pearl th-91d8af (2026-05-20).
+        //
+        // `th --resume` / `th --list` / `th --agent X` continue to
+        // forward into `cmd_code` so the top-level shortcuts from
+        // pearl th-resume-top-level (2026-05-12) still work.
         None => {
-            cmd_code(
-                false,
-                None,
-                None,
-                None,
-                None,
-                false,
-                cli.resume.clone(),
-                cli.list,
-                cli.agent.clone(),
-                "deny".to_string(),
-            )
-            .await
+            let any_code_flag = cli.resume.is_some() || cli.list || cli.agent.is_some();
+            if any_code_flag {
+                cmd_code(
+                    false,
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                    cli.resume.clone(),
+                    cli.list,
+                    cli.agent.clone(),
+                    "deny".to_string(),
+                )
+                .await
+            } else {
+                print_explainer();
+                Ok(())
+            }
         }
         Some(Commands::Code {
             headless,
@@ -2570,6 +2581,39 @@ fn read_stdin() -> Option<String> {
     } else {
         Some(buf)
     }
+}
+
+/// Print a short, friendly explainer when the user runs bare `th`
+/// with no subcommand and no top-level code flags. Pearl th-91d8af
+/// — first-time users should see what `th` is for before getting
+/// dropped into the TUI cold; explicit entry via `th code` (or any
+/// of the top-level `--resume` / `--list` / `--agent` shortcuts)
+/// still launches the TUI immediately.
+fn print_explainer() {
+    let version = env!("TH_VERSION");
+    println!("{} {}", "th".bold().bright_cyan(), format!("v{version}").dimmed());
+    println!("{}", "Smooth's CLI for AI-driven coding, orchestration, and the Smoo AI platform.".bold());
+    println!();
+    println!("{}", "What it does".bold().bright_yellow());
+    println!("  • Interactive AI coding TUI                 {}", "th code".bright_cyan());
+    println!(
+        "  • microVM orchestration via Big Smooth + cast  {}",
+        "th up / th down / th status".bright_cyan()
+    );
+    println!("  • Pearl issue tracker                       {}", "th pearls".bright_cyan());
+    println!("  • Smoo AI platform CLI                      {}", "th api".bright_cyan());
+    println!("  • LLM gateway aliases (smooth-coding, …)    {}", "th cast".bright_cyan());
+    println!("  • MCP server roster                         {}", "th mcp".bright_cyan());
+    println!();
+    println!("{}", "Get started".bold().bright_yellow());
+    println!("  {}  {}", "th code".bright_cyan(), "— launch the interactive coding TUI".dimmed());
+    println!("  {}  {}", "th pearls ready".bright_cyan(), "— show pearls ready to work on".dimmed());
+    println!("  {}  {}", "th up".bright_cyan(), "— start the Smooth platform (sandboxed)".dimmed());
+    println!("  {}  {}", "th api login".bright_cyan(), "— sign in to the Smoo AI platform".dimmed());
+    println!();
+    println!("{}", "Help".bold().bright_yellow());
+    println!("  {}                 list every subcommand", "th --help".bright_cyan());
+    println!("  {}  drill into a subcommand", "th <subcommand> --help".bright_cyan());
 }
 
 /// Launch smooth-code — THE Smooth experience.

@@ -125,6 +125,16 @@ pub struct LlmResponse {
     /// `None` when the gateway didn't report a cost — the caller
     /// falls back to local `ModelPricing` in that case.
     pub gateway_cost_usd: Option<f64>,
+    /// The concrete upstream model the gateway resolved this
+    /// request to, copied from the `model` field of the OpenAI- or
+    /// Anthropic-shape response body. When the request was routed
+    /// through a smooth-* alias (e.g. `smooth-coding`) this is the
+    /// actual provider model (e.g. `qwen3-coder-flash`); when the
+    /// request asked for a concrete model directly it'll just echo
+    /// it back. `None` only when the response body omitted the
+    /// field (rare — LiteLLM and OpenAI both populate it). Pearl
+    /// th-a10c2d.
+    pub resolved_model: Option<String>,
 }
 
 /// Parse the gateway's authoritative cost from an HTTP response's
@@ -330,6 +340,12 @@ struct ChatResponse {
     choices: Vec<ChatChoice>,
     #[serde(default)]
     usage: Option<ChatUsage>,
+    /// Concrete model the gateway resolved this request to. Both
+    /// OpenAI and LiteLLM populate this; smooth-* aliases get
+    /// rewritten here (e.g. `smooth-coding` → `qwen3-coder-flash`).
+    /// `None` when the upstream omitted it. Pearl th-a10c2d.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -388,6 +404,11 @@ pub enum StreamEvent {
         arguments_chunk: String,
     },
     Usage(Usage),
+    /// Concrete upstream model the gateway resolved this stream to.
+    /// Carries the `model` field from the SSE chunks. Pearl th-a10c2d.
+    Model {
+        name: String,
+    },
     Done {
         finish_reason: String,
     },
@@ -401,6 +422,12 @@ struct StreamChunk {
     choices: Vec<StreamChoice>,
     #[serde(default)]
     usage: Option<ChatUsage>,
+    /// Concrete upstream model resolved by the gateway. Echoed by
+    /// LiteLLM on every chunk; we only need it once, so the
+    /// accumulator captures the first non-empty value it sees.
+    /// Pearl th-a10c2d.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -491,6 +518,10 @@ struct AnthropicResponse {
     content: Vec<AnthropicContentBlock>,
     stop_reason: Option<String>,
     usage: AnthropicUsage,
+    /// Concrete model the upstream resolved this request to. Pearl
+    /// th-a10c2d.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -619,6 +650,7 @@ impl LlmClient {
             if status.is_success() {
                 let gateway_cost_usd = parse_gateway_cost(resp.headers());
                 let chat_resp: ChatResponse = resp.json().await?;
+                let resolved_model = chat_resp.model.clone().filter(|s| !s.is_empty());
                 let choice = chat_resp.choices.into_iter().next().ok_or_else(|| anyhow::anyhow!("no choices in response"))?;
 
                 let tool_calls = choice
@@ -669,6 +701,7 @@ impl LlmClient {
                     usage,
                     rate_limit: Some(rate_limit_info),
                     gateway_cost_usd,
+                    resolved_model,
                 });
             }
 
@@ -894,6 +927,7 @@ impl LlmClient {
             if status.is_success() {
                 let gateway_cost_usd = parse_gateway_cost(resp.headers());
                 let anthropic_resp: AnthropicResponse = resp.json().await?;
+                let resolved_model = anthropic_resp.model.clone().filter(|s| !s.is_empty());
 
                 let mut content = String::new();
                 let mut tool_calls = Vec::new();
@@ -933,6 +967,7 @@ impl LlmClient {
                     },
                     rate_limit: Some(rate_limit_info),
                     gateway_cost_usd,
+                    resolved_model,
                 });
             }
 
@@ -1118,6 +1153,16 @@ fn parse_sse_line(line: &str) -> Vec<anyhow::Result<StreamEvent>> {
 
     let mut events = Vec::new();
 
+    // Surface the resolved upstream model (LiteLLM / OpenAI both
+    // populate `model` on every chunk). The accumulator only keeps
+    // the first non-empty value, so emitting on every chunk is fine
+    // — duplicates collapse downstream. Pearl th-a10c2d.
+    if let Some(model) = chunk.model.as_deref() {
+        if !model.is_empty() {
+            events.push(Ok(StreamEvent::Model { name: model.to_string() }));
+        }
+    }
+
     for choice in &chunk.choices {
         // Text delta
         if let Some(content) = &choice.delta.content {
@@ -1201,6 +1246,7 @@ pub async fn accumulate_stream_events(mut stream: Pin<Box<dyn Stream<Item = anyh
     let mut content = String::new();
     let mut finish_reason = String::from("stop");
     let mut usage = Usage::default();
+    let mut resolved_model: Option<String> = None;
 
     // Track tool calls keyed by index (stable across chunks; `id` is only sent once
     // on some providers like MiniMax, `index` is sent on every chunk). Value is
@@ -1232,6 +1278,13 @@ pub async fn accumulate_stream_events(mut stream: Pin<Box<dyn Stream<Item = anyh
             }
             StreamEvent::Usage(u) => {
                 usage = u;
+            }
+            StreamEvent::Model { name } => {
+                // Capture the first non-empty model name and ignore
+                // subsequent ones — LiteLLM echoes it on every chunk.
+                if resolved_model.is_none() && !name.is_empty() {
+                    resolved_model = Some(name);
+                }
             }
             StreamEvent::Done { finish_reason: reason } => {
                 finish_reason = reason;
@@ -1312,6 +1365,7 @@ pub async fn accumulate_stream_events(mut stream: Pin<Box<dyn Stream<Item = anyh
         usage,
         rate_limit: None,
         gateway_cost_usd: None,
+        resolved_model,
     })
 }
 
@@ -1849,6 +1903,79 @@ mod tests {
     fn usage_default() {
         let usage = Usage::default();
         assert_eq!(usage.total_tokens, 0);
+    }
+
+    #[test]
+    fn chat_response_captures_resolved_model() {
+        // Pearl th-a10c2d: LiteLLM rewrites smooth-* aliases to a
+        // concrete upstream and echoes it in the response's top-level
+        // `model` field. Confirm the parser picks it up so the agent
+        // can surface `smooth-coding → qwen3-coder-flash` to the TUI.
+        let json = r#"{
+            "choices": [{
+                "message": {"content": "ok"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
+            "model": "qwen3-coder-flash"
+        }"#;
+        let resp: ChatResponse = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(resp.model.as_deref(), Some("qwen3-coder-flash"));
+    }
+
+    #[test]
+    fn chat_response_model_absent_is_none() {
+        // Defensive: providers that omit `model` (rare but possible)
+        // must still deserialize cleanly. Pearl th-a10c2d.
+        let json = r#"{
+            "choices": [{
+                "message": {"content": "ok"},
+                "finish_reason": "stop"
+            }]
+        }"#;
+        let resp: ChatResponse = serde_json::from_str(json).expect("deserialize");
+        assert!(resp.model.is_none());
+    }
+
+    #[tokio::test]
+    async fn accumulate_stream_captures_resolved_model_once() {
+        // Pearl th-a10c2d: when LiteLLM streams an aliased request it
+        // echoes the resolved model on every chunk. The accumulator
+        // should capture the FIRST non-empty value and ignore later
+        // duplicates so consumers see a single canonical name.
+        use futures_util::stream;
+
+        let events: Vec<anyhow::Result<StreamEvent>> = vec![
+            Ok(StreamEvent::Model {
+                name: "qwen3-coder-flash".into(),
+            }),
+            Ok(StreamEvent::Delta { content: "hello".into() }),
+            // Later "Model" event with a different upstream — must be ignored
+            // so we don't flap mid-turn.
+            Ok(StreamEvent::Model {
+                name: "should-not-clobber".into(),
+            }),
+            Ok(StreamEvent::Done { finish_reason: "stop".into() }),
+        ];
+        let stream: Pin<Box<dyn Stream<Item = anyhow::Result<StreamEvent>> + Send>> = Box::pin(stream::iter(events));
+        let resp = accumulate_stream_events(stream).await.expect("accumulate");
+        assert_eq!(resp.resolved_model.as_deref(), Some("qwen3-coder-flash"));
+        assert_eq!(resp.content, "hello");
+    }
+
+    #[tokio::test]
+    async fn accumulate_stream_no_model_event_returns_none() {
+        // Older providers that don't populate `model` on stream chunks
+        // shouldn't synthesize one. Pearl th-a10c2d.
+        use futures_util::stream;
+
+        let events: Vec<anyhow::Result<StreamEvent>> = vec![
+            Ok(StreamEvent::Delta { content: "hi".into() }),
+            Ok(StreamEvent::Done { finish_reason: "stop".into() }),
+        ];
+        let stream: Pin<Box<dyn Stream<Item = anyhow::Result<StreamEvent>> + Send>> = Box::pin(stream::iter(events));
+        let resp = accumulate_stream_events(stream).await.expect("accumulate");
+        assert!(resp.resolved_model.is_none());
     }
 
     // --- Streaming tests ---

@@ -308,6 +308,26 @@ pub enum AgentEvent {
         guest_port: u16,
         host_port: u16,
     },
+    /// The gateway resolved the configured model alias to a concrete
+    /// upstream model. Emitted once per agent session when the
+    /// upstream differs from the alias (so TUIs can render
+    /// `smooth-coding → qwen3-coder-flash`) and again only if the
+    /// upstream changes mid-run. When alias == upstream, this event
+    /// is suppressed to avoid clutter. Pearl th-a10c2d.
+    ///
+    /// Old runners that don't emit this event don't break anything —
+    /// the TUI's `_ => {}` arm just ignores it for new clients
+    /// connected to old servers, and old clients silently drop
+    /// unknown variants on the deserialize side.
+    ModelResolved {
+        /// The alias the agent was configured with (e.g.
+        /// `smooth-coding`). When the user pointed at a concrete
+        /// model directly, this is just that model name.
+        alias: String,
+        /// The concrete upstream the gateway routed to (e.g.
+        /// `qwen3-coder-flash`).
+        upstream: String,
+    },
 }
 
 /// Configuration for a sub-agent spawned via delegation.
@@ -423,6 +443,13 @@ pub struct Agent {
     event_handler: Option<Box<dyn Fn(AgentEvent) + Send + Sync>>,
     reactive_compaction: std::sync::Mutex<ReactiveCompaction>,
     pub cost_tracker: Arc<Mutex<CostTracker>>,
+    /// Last upstream model the gateway resolved this agent's alias
+    /// to. Used to decide whether to emit `AgentEvent::ModelResolved`:
+    /// emit on the first non-empty resolution that differs from the
+    /// configured alias, then again only when the upstream changes.
+    /// `Mutex<Option<String>>` so both `run` and `run_streaming`
+    /// (which take `&self`) can update it. Pearl th-a10c2d.
+    last_resolved_model: std::sync::Mutex<Option<String>>,
 }
 
 impl Agent {
@@ -435,6 +462,7 @@ impl Agent {
             event_handler: None,
             reactive_compaction: std::sync::Mutex::new(ReactiveCompaction::new()),
             cost_tracker: Arc::new(Mutex::new(CostTracker::default())),
+            last_resolved_model: std::sync::Mutex::new(None),
         }
     }
 
@@ -637,6 +665,12 @@ impl Agent {
                 content_preview,
                 tool_call_count: response.tool_calls.len(),
             });
+
+            // Surface the resolved upstream model once per session
+            // (and again only if it changes). Pearl th-a10c2d.
+            if let Some(event) = self.model_resolution_event(&response) {
+                self.emit(event);
+            }
 
             // Record cost and check budget
             if self.record_cost_and_check_budget(&response) {
@@ -952,6 +986,12 @@ impl Agent {
                 tool_call_count: response.tool_calls.len(),
             });
 
+            // Surface the resolved upstream model once per session
+            // (and again only if it changes). Pearl th-a10c2d.
+            if let Some(event) = self.model_resolution_event(&response) {
+                let _ = tx.send(event);
+            }
+
             // Record cost and check budget
             if self.record_cost_and_check_budget(&response) {
                 return Ok(conversation);
@@ -1155,6 +1195,40 @@ impl Agent {
         }
     }
 
+    /// Decide whether the latest `LlmResponse` warrants an
+    /// `AgentEvent::ModelResolved`. Returns the event when the
+    /// gateway's resolved upstream differs from the configured
+    /// alias AND hasn't already been reported (or has changed
+    /// since the last report); returns `None` otherwise — the
+    /// common case where the alias and upstream match (concrete
+    /// model selected directly) or nothing has changed.
+    ///
+    /// Caller is responsible for emitting/sending the event; this
+    /// keeps the function callable from both the sync `emit` path
+    /// in `run` and the channel-based path in `run_streaming`.
+    /// Pearl th-a10c2d.
+    fn model_resolution_event(&self, response: &crate::llm::LlmResponse) -> Option<AgentEvent> {
+        let upstream = response.resolved_model.as_deref()?;
+        if upstream.is_empty() {
+            return None;
+        }
+        let alias = &self.config.llm.model;
+        if alias == upstream {
+            // Concrete model selected directly — nothing to surface.
+            return None;
+        }
+        let mut last = self.last_resolved_model.lock().expect("lock last_resolved_model");
+        if last.as_deref() == Some(upstream) {
+            // Already reported this exact upstream — suppress.
+            return None;
+        }
+        *last = Some(upstream.to_string());
+        Some(AgentEvent::ModelResolved {
+            alias: alias.clone(),
+            upstream: upstream.to_string(),
+        })
+    }
+
     /// Report an event to Big Smooth via the reporter (if configured). Fire-and-forget.
     fn report_to_bigsmooth(&self, event: ReporterEvent) {
         if let Some(reporter) = &self.config.reporter {
@@ -1329,6 +1403,109 @@ mod tests {
         let json = serde_json::to_string(&event).expect("serialize");
         assert!(json.contains("LlmResponse"));
         assert!(json.contains("\"iteration\":3"));
+    }
+
+    #[test]
+    fn model_resolution_event_emits_when_alias_differs() {
+        // Pearl th-a10c2d: when the configured model is a smooth-*
+        // alias and the gateway resolves it to a different upstream,
+        // the agent should emit one ModelResolved event so the TUI
+        // can show `smooth-coding → qwen3-coder-flash`.
+        let config = AgentConfig::new("t", "sys", LlmConfig::openrouter("k").with_model("smooth-coding"));
+        let agent = Agent::new(config, ToolRegistry::new());
+
+        let resp = crate::llm::LlmResponse {
+            content: "ok".into(),
+            tool_calls: vec![],
+            finish_reason: "stop".into(),
+            usage: crate::llm::Usage::default(),
+            rate_limit: None,
+            gateway_cost_usd: None,
+            resolved_model: Some("qwen3-coder-flash".into()),
+        };
+
+        let event = agent.model_resolution_event(&resp).expect("event on first resolution");
+        match event {
+            AgentEvent::ModelResolved { alias, upstream } => {
+                assert_eq!(alias, "smooth-coding");
+                assert_eq!(upstream, "qwen3-coder-flash");
+            }
+            other => panic!("expected ModelResolved, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn model_resolution_event_idempotent_on_repeat_resolution() {
+        // Same upstream as last time = no event. Pearl th-a10c2d.
+        let config = AgentConfig::new("t", "sys", LlmConfig::openrouter("k").with_model("smooth-coding"));
+        let agent = Agent::new(config, ToolRegistry::new());
+
+        let resp = crate::llm::LlmResponse {
+            content: "ok".into(),
+            tool_calls: vec![],
+            finish_reason: "stop".into(),
+            usage: crate::llm::Usage::default(),
+            rate_limit: None,
+            gateway_cost_usd: None,
+            resolved_model: Some("qwen3-coder-flash".into()),
+        };
+
+        assert!(agent.model_resolution_event(&resp).is_some(), "first time emits");
+        assert!(agent.model_resolution_event(&resp).is_none(), "second turn with same upstream is suppressed");
+        assert!(agent.model_resolution_event(&resp).is_none(), "and a third");
+
+        // But if the upstream changes mid-run, we emit again so the
+        // status bar updates.
+        let resp2 = crate::llm::LlmResponse {
+            resolved_model: Some("qwen3-coder-plus".into()),
+            ..resp
+        };
+        let event = agent.model_resolution_event(&resp2).expect("emit on change");
+        match event {
+            AgentEvent::ModelResolved { upstream, .. } => assert_eq!(upstream, "qwen3-coder-plus"),
+            other => panic!("expected ModelResolved, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn model_resolution_event_suppressed_when_alias_equals_upstream() {
+        // Concrete model selected directly — no rewrite happened, no
+        // event needed. Pearl th-a10c2d.
+        let config = AgentConfig::new("t", "sys", LlmConfig::openrouter("k").with_model("qwen3-coder-flash"));
+        let agent = Agent::new(config, ToolRegistry::new());
+
+        let resp = crate::llm::LlmResponse {
+            content: "ok".into(),
+            tool_calls: vec![],
+            finish_reason: "stop".into(),
+            usage: crate::llm::Usage::default(),
+            rate_limit: None,
+            gateway_cost_usd: None,
+            resolved_model: Some("qwen3-coder-flash".into()),
+        };
+
+        assert!(agent.model_resolution_event(&resp).is_none());
+    }
+
+    #[test]
+    fn model_resolution_event_suppressed_when_response_omits_model() {
+        // Older providers may not populate `model` on the response —
+        // we must not emit a bogus event in that case. Pearl
+        // th-a10c2d.
+        let config = AgentConfig::new("t", "sys", LlmConfig::openrouter("k").with_model("smooth-coding"));
+        let agent = Agent::new(config, ToolRegistry::new());
+
+        let resp = crate::llm::LlmResponse {
+            content: "ok".into(),
+            tool_calls: vec![],
+            finish_reason: "stop".into(),
+            usage: crate::llm::Usage::default(),
+            rate_limit: None,
+            gateway_cost_usd: None,
+            resolved_model: None,
+        };
+
+        assert!(agent.model_resolution_event(&resp).is_none());
     }
 
     #[test]
