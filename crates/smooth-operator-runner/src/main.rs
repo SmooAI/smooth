@@ -2372,6 +2372,7 @@ async fn main() {
                 cost_usd: 0.0, // authoritative cost already emitted by the channel event
                 prompt_tokens: 0,
                 completion_tokens: 0,
+                cached_tokens: 0,
             });
             tracing::info!("smooth-operator-runner completed successfully");
             std::process::exit(0);

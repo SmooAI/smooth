@@ -98,6 +98,7 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
     let mut total_cost_usd = 0.0_f64;
     let mut total_prompt_tokens = 0u64;
     let mut total_completion_tokens = 0u64;
+    let mut total_cached_tokens = 0u64;
     let mut last_verify_output: Option<String> = None;
     let mut best_failed_count: Option<u32> = None;
     let mut snapshot_taken = false;
@@ -148,13 +149,19 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
         let agent = Agent::new(agent_config, cfg.tools.clone());
         let mut conversation = agent.run_with_channel(user_prompt, cfg.tx.clone()).await?;
 
-        let (turn_cost, turn_prompt_tokens, turn_completion_tokens) = {
+        let (turn_cost, turn_prompt_tokens, turn_completion_tokens, turn_cached_tokens) = {
             let tracker = agent.cost_tracker.lock().expect("cost_tracker lock");
-            (tracker.total_cost_usd, tracker.total_prompt_tokens, tracker.total_completion_tokens)
+            (
+                tracker.total_cost_usd,
+                tracker.total_prompt_tokens,
+                tracker.total_completion_tokens,
+                tracker.total_cached_tokens,
+            )
         };
         total_cost_usd += turn_cost;
         total_prompt_tokens += turn_prompt_tokens;
         total_completion_tokens += turn_completion_tokens;
+        total_cached_tokens += turn_cached_tokens;
 
         // Pull the agent's final assistant message — used for
         // failure-context feedback into the next turn's prompt.
@@ -374,6 +381,7 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
         cost_usd: total_cost_usd,
         prompt_tokens: total_prompt_tokens,
         completion_tokens: total_completion_tokens,
+        cached_tokens: total_cached_tokens,
     });
 
     Ok(total_cost_usd)

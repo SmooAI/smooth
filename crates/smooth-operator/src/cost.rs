@@ -15,6 +15,12 @@ use crate::llm::Usage;
 pub struct CostTracker {
     pub total_prompt_tokens: u64,
     pub total_completion_tokens: u64,
+    /// Subset of `total_prompt_tokens` that hit Anthropic's prompt cache.
+    /// Aggregated from `Usage::cached_tokens` (which comes from the OpenAI-shaped
+    /// `usage.prompt_tokens_details.cached_tokens` field). Pearl
+    /// th-litellm-caching-client.
+    #[serde(default)]
+    pub total_cached_tokens: u64,
     pub total_cost_usd: f64,
     pub calls: u32,
     entries: Vec<CostEntry>,
@@ -86,6 +92,7 @@ impl CostTracker {
     pub fn record_with_cost(&mut self, model: &str, usage: &Usage, cost_usd: f64) {
         self.total_prompt_tokens += u64::from(usage.prompt_tokens);
         self.total_completion_tokens += u64::from(usage.completion_tokens);
+        self.total_cached_tokens += u64::from(usage.cached_tokens);
         self.total_cost_usd += cost_usd;
         self.calls += 1;
 
@@ -129,6 +136,7 @@ impl CostTracker {
     pub fn reset(&mut self) {
         self.total_prompt_tokens = 0;
         self.total_completion_tokens = 0;
+        self.total_cached_tokens = 0;
         self.total_cost_usd = 0.0;
         self.calls = 0;
         self.entries.clear();
@@ -267,6 +275,7 @@ mod tests {
                 prompt_tokens: 100,
                 completion_tokens: 50,
                 total_tokens: 150,
+                ..Default::default()
             },
             &pricing,
         );
@@ -276,6 +285,7 @@ mod tests {
                 prompt_tokens: 200,
                 completion_tokens: 100,
                 total_tokens: 300,
+                ..Default::default()
             },
             &pricing,
         );
@@ -300,6 +310,7 @@ mod tests {
                 prompt_tokens: 1000,
                 completion_tokens: 0,
                 total_tokens: 1000,
+                ..Default::default()
             },
             &pricing,
         );
@@ -321,6 +332,7 @@ mod tests {
                 prompt_tokens: 100,
                 completion_tokens: 50,
                 total_tokens: 150,
+                ..Default::default()
             },
             &ModelPricing::gpt_4o_mini(),
         );
@@ -346,6 +358,7 @@ mod tests {
                 prompt_tokens: 100,
                 completion_tokens: 0,
                 total_tokens: 100,
+                ..Default::default()
             },
             &pricing,
         );
@@ -368,6 +381,7 @@ mod tests {
                 prompt_tokens: 5000,
                 completion_tokens: 5000,
                 total_tokens: 10000,
+                ..Default::default()
             },
             &ModelPricing::gpt_4o(),
         );
@@ -415,6 +429,7 @@ mod tests {
                 prompt_tokens: 10,
                 completion_tokens: 10,
                 total_tokens: 20,
+                ..Default::default()
             },
             &ModelPricing::gpt_4o(),
         );

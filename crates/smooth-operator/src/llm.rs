@@ -172,6 +172,13 @@ pub struct Usage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    /// Subset of `prompt_tokens` that hit Anthropic's prompt cache (or the
+    /// equivalent on other providers). Surfaced by OpenAI-compat gateways
+    /// (LiteLLM, vLLM with prompt caching) in `usage.prompt_tokens_details.
+    /// cached_tokens`. Defaults to 0 when the gateway doesn't report it.
+    /// Pearl th-litellm-caching-client.
+    #[serde(default)]
+    pub cached_tokens: u32,
 }
 
 /// OpenAI-compatible chat completion request.
@@ -188,20 +195,29 @@ struct ChatRequest {
 #[derive(Debug, Serialize)]
 struct ChatMessage {
     role: String,
-    /// Content is `Option<String>` because assistant messages that only
-    /// carry `tool_calls` legitimately have no prose. Three wire forms
-    /// exist in the wild:
+    /// Content is either a plain string (the common shape that every
+    /// OpenAI-compat upstream we've tested accepts), `null` for
+    /// assistant messages that only carry `tool_calls`, or — when
+    /// Anthropic prompt caching is enabled (pearl
+    /// th-litellm-caching-client) — an array of content blocks so we
+    /// can attach `cache_control: {type: ephemeral}` to specific
+    /// blocks. LiteLLM (with `cache_control_injection_points`
+    /// configured) forwards Anthropic-shaped content blocks through to
+    /// Anthropic and accepts them on the inbound side without choking.
+    /// See the LiteLLM prompt-caching docs.
+    ///
+    /// We default to the plain-string form to avoid risking 400s on
+    /// providers that haven't been verified with the block form
+    /// (Gemini's compat shim, older LiteLLM versions). The cache-mark
+    /// path opts a message into the array form.
+    ///
+    /// Wire-form history (string form):
     ///   - `"content": "..."`  (string) — normal prose
     ///   - `"content": null`   — explicit "no prose"
     ///   - field omitted       — also "no prose", but a foot-gun
-    ///
-    /// We tried the omit form (pearl th-e8e15e). LiteLLM's strict
-    /// deserializer rejects it with `400 missing field content` —
-    /// it requires the key to be present. We do NOT skip serializing
-    /// here; `Option<String>::None` serializes as `null`, which every
-    /// upstream we've tested (OpenAI, Anthropic compat, Gemini compat,
-    /// LiteLLM router) accepts.
-    content: Option<String>,
+    ///     (LiteLLM's strict deserializer rejected it as "400 missing
+    ///     field content", pearl th-e8e15e).
+    content: ChatContent,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
     /// The name of the tool that produced this result. Required by Gemini's
@@ -215,10 +231,77 @@ struct ChatMessage {
     tool_calls: Vec<ChatToolCall>,
 }
 
+/// Wire form for a chat message's `content` field. See `ChatMessage::content`.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum ChatContent {
+    /// Plain string (or null) — the default for every provider.
+    Text(Option<String>),
+    /// Anthropic-style content blocks. Used when we need to attach
+    /// `cache_control` to a specific text block. LiteLLM's
+    /// `cache_control_injection_points` config forwards these through
+    /// to Anthropic.
+    Blocks(Vec<ChatTextBlock>),
+}
+
+/// One block in a `ChatContent::Blocks` array. We currently only emit
+/// text blocks; tool_use / tool_result still ride on the top-level
+/// `tool_calls` / `tool_call_id` fields. `cache_control` on a block
+/// caches THAT block plus everything before it in the request.
+#[derive(Debug, Serialize)]
+struct ChatTextBlock {
+    #[serde(rename = "type")]
+    block_type: &'static str,
+    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
+}
+
+/// Anthropic-shaped cache-control marker. `{"type": "ephemeral"}`
+/// gives Anthropic's default 5-minute TTL — what we want for the
+/// agent-loop pattern (system + tools + recent history reused turn
+/// after turn within a single dispatch).
+#[derive(Debug, Clone, Serialize)]
+struct CacheControl {
+    #[serde(rename = "type")]
+    kind: &'static str,
+}
+
+impl CacheControl {
+    const fn ephemeral() -> Self {
+        Self { kind: "ephemeral" }
+    }
+}
+
+impl ChatContent {
+    /// Test helper: returns the plain text when the content is in the
+    /// string form, or the concatenated block text when it's in the
+    /// block form. Always returns `Some` for both forms (the `None`
+    /// case is only the explicit-null wire shape).
+    #[cfg(test)]
+    fn as_text(&self) -> Option<&str> {
+        match self {
+            Self::Text(s) => s.as_deref(),
+            // Test paths only construct single-block content arrays
+            // when verifying the cache-control wire shape; the
+            // serialization assertions cover the JSON itself.
+            Self::Blocks(blocks) => blocks.first().map(|b| b.text.as_str()),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct ChatTool {
     r#type: String,
     function: ChatFunction,
+    /// Anthropic prompt-cache marker. When attached to the LAST tool in
+    /// the tools array (per LiteLLM's `cache_control_injection_points`
+    /// pattern), Anthropic caches the entire tool-definitions block plus
+    /// everything before it (the system prompt). Tools and system rarely
+    /// change inside an agent run, so this is the highest-ROI cache
+    /// breakpoint. Pearl th-litellm-caching-client.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
 }
 
 #[derive(Debug, Serialize)]
@@ -269,6 +352,18 @@ struct ChatUsage {
     prompt_tokens: u32,
     completion_tokens: u32,
     total_tokens: u32,
+    /// OpenAI-shaped cache-hit reporting nested under `usage`. Anthropic via
+    /// LiteLLM, OpenAI's gpt-4o prompt caching, and a few other providers
+    /// surface cache hits here. Default-None for upstreams that omit it.
+    /// Pearl th-litellm-caching-client.
+    #[serde(default)]
+    prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: u32,
 }
 
 /// Events emitted during streaming LLM responses.
@@ -483,9 +578,9 @@ impl LlmClient {
             ApiFormat::OpenAiCompat => {}
         }
 
-        let chat_messages: Vec<ChatMessage> = messages.iter().map(|m| to_chat_message(m)).collect();
+        let mut chat_messages: Vec<ChatMessage> = messages.iter().map(|m| to_chat_message(m)).collect();
 
-        let chat_tools: Vec<ChatTool> = tools
+        let mut chat_tools: Vec<ChatTool> = tools
             .iter()
             .map(|t| ChatTool {
                 r#type: "function".into(),
@@ -494,8 +589,13 @@ impl LlmClient {
                     description: t.description.clone(),
                     parameters: t.parameters.clone(),
                 },
+                cache_control: None,
             })
             .collect();
+
+        if supports_anthropic_cache_control(&self.config.model, &self.config.api_url) {
+            apply_cache_control(&mut chat_messages, &mut chat_tools);
+        }
 
         let request = ChatRequest {
             model: self.config.model.clone(),
@@ -540,6 +640,7 @@ impl LlmClient {
                     prompt_tokens: u.prompt_tokens,
                     completion_tokens: u.completion_tokens,
                     total_tokens: u.total_tokens,
+                    cached_tokens: u.prompt_tokens_details.as_ref().map_or(0, |d| d.cached_tokens),
                 });
 
                 // Fallback estimation when the gateway omits usage
@@ -612,9 +713,9 @@ impl LlmClient {
         messages: &[&Message],
         tools: &[ToolSchema],
     ) -> anyhow::Result<Pin<Box<dyn Stream<Item = anyhow::Result<StreamEvent>> + Send>>> {
-        let chat_messages: Vec<ChatMessage> = messages.iter().map(|m| to_chat_message(m)).collect();
+        let mut chat_messages: Vec<ChatMessage> = messages.iter().map(|m| to_chat_message(m)).collect();
 
-        let chat_tools: Vec<ChatTool> = tools
+        let mut chat_tools: Vec<ChatTool> = tools
             .iter()
             .map(|t| ChatTool {
                 r#type: "function".into(),
@@ -623,8 +724,13 @@ impl LlmClient {
                     description: t.description.clone(),
                     parameters: t.parameters.clone(),
                 },
+                cache_control: None,
             })
             .collect();
+
+        if supports_anthropic_cache_control(&self.config.model, &self.config.api_url) {
+            apply_cache_control(&mut chat_messages, &mut chat_tools);
+        }
 
         let tool_count = chat_tools.len();
         let msg_count = chat_messages.len();
@@ -818,6 +924,12 @@ impl LlmClient {
                         prompt_tokens: anthropic_resp.usage.input_tokens,
                         completion_tokens: anthropic_resp.usage.output_tokens,
                         total_tokens: total,
+                        // The Anthropic native API uses different cache-hit
+                        // fields (`cache_read_input_tokens`); not surfaced
+                        // here because Smoo dispatches through LiteLLM
+                        // (OpenAI-compat) in practice. Default-0 keeps the
+                        // Anthropic-native path compiling.
+                        cached_tokens: 0,
                     },
                     rate_limit: Some(rate_limit_info),
                     gateway_cost_usd,
@@ -1070,6 +1182,7 @@ fn parse_sse_line(line: &str) -> Vec<anyhow::Result<StreamEvent>> {
             prompt_tokens: usage.prompt_tokens,
             completion_tokens: usage.completion_tokens,
             total_tokens: usage.total_tokens,
+            cached_tokens: usage.prompt_tokens_details.as_ref().map_or(0, |d| d.cached_tokens),
         })));
     }
 
@@ -1342,6 +1455,112 @@ pub fn canonical_tool_arguments_json(value: &serde_json::Value) -> String {
     }
 }
 
+/// Decide whether the configured upstream understands Anthropic-shaped
+/// `cache_control` markers. We send them when:
+///   - the model id looks Claude-ish (`claude-`, `sonnet`, `opus`, `haiku`),
+///     OR
+///   - the model is one of our LiteLLM gateway aliases (`smooth-coding-claude`,
+///     `smooth-thinking`, etc. that route to Claude), OR
+///   - the api_base looks like our LiteLLM gateway (`llm.smoo.ai`, `litellm`)
+///     or anthropic.* directly.
+///
+/// We deliberately do NOT send cache_control to bare OpenAI / Gemini /
+/// Groq endpoints — they 400 on unknown extension fields. The LiteLLM
+/// gateway's `cache_control_injection_points` config is what actually
+/// passes the markers through to Anthropic; without that gateway-side
+/// change this code is a no-op.
+fn supports_anthropic_cache_control(model: &str, api_url: &str) -> bool {
+    let model_lower = model.to_ascii_lowercase();
+    let url_lower = api_url.to_ascii_lowercase();
+    let model_looks_claude = model_lower.contains("claude") || model_lower.contains("sonnet") || model_lower.contains("opus") || model_lower.contains("haiku");
+    // Smooth's LiteLLM aliases that we know route to Claude. The
+    // generic `smooth-` prefix alone isn't enough — `smooth-fast`
+    // routes to Groq/Llama, which would 400 on cache_control.
+    let model_is_smooth_claude_alias = model_lower.starts_with("smooth-coding")
+        || model_lower.starts_with("smooth-thinking")
+        || model_lower.starts_with("smooth-planning")
+        || model_lower.starts_with("smooth-reviewing");
+    let url_is_litellm = url_lower.contains("litellm") || url_lower.contains("llm.smoo.ai");
+    let url_is_anthropic = url_lower.contains("anthropic.");
+    (model_looks_claude || model_is_smooth_claude_alias) && (url_is_litellm || url_is_anthropic)
+}
+
+/// Attach `cache_control: ephemeral` to the strategic prefix boundaries
+/// so Anthropic's prompt cache covers what changes least:
+///   1. The (last) system message — caches the system prompt.
+///   2. The last tool definition — caches the tool block + system prefix
+///      ahead of it. This is the highest-ROI breakpoint: tools rarely
+///      change inside a dispatch but are large (the whole tool registry
+///      schema lives here).
+///   3. The last message in history — caches the running conversation
+///      so each turn within a 5-minute window pays only for the new
+///      delta. Skipping this gets you cache hits on system+tools only;
+///      including it gets you turn-by-turn savings too.
+///
+/// Per Anthropic's docs, marking a block caches THAT block plus
+/// everything before it. We only need cache_control on the last block
+/// of each prefix we want to reuse.
+fn apply_cache_control(messages: &mut [ChatMessage], tools: &mut [ChatTool]) {
+    // 1. Mark the last system message — its content gets rewritten
+    //    into the Blocks form with cache_control on the (single) text
+    //    block.
+    if let Some(sys) = messages.iter_mut().rfind(|m| m.role == "system") {
+        sys.content = wrap_with_cache_control(&sys.content);
+    }
+
+    // 2. Mark the last tool — cache_control here covers the entire
+    //    tools array plus the system prefix.
+    if let Some(last_tool) = tools.last_mut() {
+        last_tool.cache_control = Some(CacheControl::ephemeral());
+    }
+
+    // 3. Mark the last message in history so turn-by-turn caching
+    //    extends. Skip when the only message is the system we already
+    //    marked (avoid double-marking the same block).
+    let last_idx = messages.len().saturating_sub(1);
+    if messages.len() > 1 {
+        if let Some(last) = messages.get_mut(last_idx) {
+            // Tool-result messages don't currently get block-form
+            // content (the result text is the whole payload); mark
+            // them by wrapping the content too.
+            last.content = wrap_with_cache_control(&last.content);
+        }
+    }
+}
+
+/// Convert a `ChatContent` into the block form with the (single) text
+/// block carrying `cache_control: ephemeral`. Tool-call-only messages
+/// (content == None) stay as `Text(None)` — there's nothing to cache
+/// on them, and the marker on the LAST block before the assistant turn
+/// already covers the prefix.
+fn wrap_with_cache_control(existing: &ChatContent) -> ChatContent {
+    let text = match existing {
+        ChatContent::Text(Some(s)) => s.clone(),
+        ChatContent::Text(None) => return ChatContent::Text(None),
+        ChatContent::Blocks(blocks) => {
+            // Already in block form (re-marking case). Re-emit with
+            // cache_control on the last block.
+            let mut new_blocks: Vec<ChatTextBlock> = blocks
+                .iter()
+                .map(|b| ChatTextBlock {
+                    block_type: b.block_type,
+                    text: b.text.clone(),
+                    cache_control: None,
+                })
+                .collect();
+            if let Some(last) = new_blocks.last_mut() {
+                last.cache_control = Some(CacheControl::ephemeral());
+            }
+            return ChatContent::Blocks(new_blocks);
+        }
+    };
+    ChatContent::Blocks(vec![ChatTextBlock {
+        block_type: "text",
+        text,
+        cache_control: Some(CacheControl::ephemeral()),
+    }])
+}
+
 fn to_chat_message(msg: &Message) -> ChatMessage {
     let role = match msg.role {
         Role::System => "system",
@@ -1373,7 +1592,7 @@ fn to_chat_message(msg: &Message) -> ChatMessage {
     //      always present. OpenAI / Anthropic-compat / Gemini-compat /
     //      LiteLLM all accept this shape; the providers that historically
     //      rejected empty-string content seem to have relaxed since.
-    let content = Some(msg.content.clone());
+    let content = ChatContent::Text(Some(msg.content.clone()));
 
     // Tool-result messages must carry the originating tool's `name` so that
     // strict OpenAI-compat upstreams (notably Gemini, when the gateway
@@ -1481,7 +1700,7 @@ mod tests {
         let msg = Message::user("Hello");
         let chat = to_chat_message(&msg);
         assert_eq!(chat.role, "user");
-        assert_eq!(chat.content.as_deref(), Some("Hello"));
+        assert_eq!(chat.content.as_text(), Some("Hello"));
         assert!(chat.tool_call_id.is_none());
     }
 
@@ -1498,7 +1717,7 @@ mod tests {
             arguments: serde_json::json!({}),
         });
         let chat = to_chat_message(&msg);
-        assert_eq!(chat.content.as_deref(), Some(""), "empty content must be Some(\"\"), not None");
+        assert_eq!(chat.content.as_text(), Some(""), "empty content must be Some(\"\"), not None");
         assert_eq!(chat.tool_calls.len(), 1);
 
         // Critical wire-format assertion: JSON must contain
@@ -1518,7 +1737,7 @@ mod tests {
             arguments: serde_json::json!({}),
         });
         let chat2 = to_chat_message(&msg2);
-        assert_eq!(chat2.content.as_deref(), Some("I'll call a tool."));
+        assert_eq!(chat2.content.as_text(), Some("I'll call a tool."));
     }
 
     #[test]
@@ -1528,7 +1747,7 @@ mod tests {
         // `"content": ""` so LiteLLM's deserializer is happy.
         let msg = Message::tool_result("call-1", "");
         let chat = to_chat_message(&msg);
-        assert_eq!(chat.content.as_deref(), Some(""), "empty tool result must be Some(\"\"), not None");
+        assert_eq!(chat.content.as_text(), Some(""), "empty tool result must be Some(\"\"), not None");
         let json = serde_json::to_string(&chat).expect("serialize");
         assert!(
             json.contains(r#""content":"""#),
@@ -1576,7 +1795,7 @@ mod tests {
             model: "test-model".into(),
             messages: vec![ChatMessage {
                 role: "user".into(),
-                content: Some("hello".into()),
+                content: ChatContent::Text(Some("hello".into())),
                 tool_call_id: None,
                 tool_name: None,
                 tool_calls: vec![],
@@ -1784,6 +2003,7 @@ mod tests {
                 prompt_tokens: 10,
                 completion_tokens: 5,
                 total_tokens: 15,
+                cached_tokens: 0,
             })),
             Ok(StreamEvent::Done { finish_reason: "stop".into() }),
         ];
@@ -2165,5 +2385,176 @@ mod tests {
         // Standalone <tool_call> without closer shouldn't trigger
         // (would otherwise mangle prose).
         assert!(!super::content_has_pseudo_tool_xml("<tool_call> dangling"));
+    }
+
+    // -------- Anthropic prompt-caching tests (th-litellm-caching-client) --------
+
+    fn build_test_request(system: &str, user: &str, tools: &[(&str, &str)]) -> ChatRequest {
+        let mut messages: Vec<ChatMessage> = vec![
+            ChatMessage {
+                role: "system".into(),
+                content: ChatContent::Text(Some(system.into())),
+                tool_call_id: None,
+                tool_name: None,
+                tool_calls: vec![],
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: ChatContent::Text(Some(user.into())),
+                tool_call_id: None,
+                tool_name: None,
+                tool_calls: vec![],
+            },
+        ];
+        let mut chat_tools: Vec<ChatTool> = tools
+            .iter()
+            .map(|(name, desc)| ChatTool {
+                r#type: "function".into(),
+                function: ChatFunction {
+                    name: (*name).to_string(),
+                    description: (*desc).to_string(),
+                    parameters: serde_json::json!({}),
+                },
+                cache_control: None,
+            })
+            .collect();
+        apply_cache_control(&mut messages, &mut chat_tools);
+        ChatRequest {
+            model: "smooth-coding-claude".into(),
+            messages,
+            max_tokens: 100,
+            temperature: 0.0,
+            tools: chat_tools,
+        }
+    }
+
+    #[test]
+    fn cache_control_gate_recognizes_claude_routes() {
+        // Claude model id + LiteLLM url → cache it.
+        assert!(supports_anthropic_cache_control("claude-sonnet-4-20250514", "https://llm.smoo.ai/v1"));
+        // Smooth-coding alias + LiteLLM url → cache it.
+        assert!(supports_anthropic_cache_control("smooth-coding-claude", "https://llm.smoo.ai/v1"));
+        // Direct Anthropic API + Claude id → cache it.
+        assert!(supports_anthropic_cache_control("claude-opus-4", "https://api.anthropic.com/v1"));
+        // GPT model on OpenAI → no cache control (would 400).
+        assert!(!supports_anthropic_cache_control("gpt-4o", "https://api.openai.com/v1"));
+        // Gemini-compat → no cache control.
+        assert!(!supports_anthropic_cache_control("gemini-1.5-pro", "https://generativelanguage.googleapis.com"));
+        // Claude id but bare OpenAI url (someone mis-configured) — still
+        // gated off because the wire isn't LiteLLM/Anthropic.
+        assert!(!supports_anthropic_cache_control("claude-3-sonnet", "https://api.openai.com/v1"));
+        // smooth-fast routes to Groq/Llama via LiteLLM — must NOT be cached.
+        assert!(!supports_anthropic_cache_control("smooth-fast", "https://llm.smoo.ai/v1"));
+    }
+
+    #[test]
+    fn claude_request_body_has_cache_control_on_system_and_tools() {
+        let req = build_test_request("You are smooth.", "Hi", &[("bash", "Run a command"), ("file_write", "Write a file")]);
+        let json = serde_json::to_value(&req).expect("serialize");
+
+        // System message must be in the block form with cache_control on
+        // its single text block.
+        let sys = &json["messages"][0];
+        assert_eq!(sys["role"], "system");
+        let sys_content = &sys["content"];
+        assert!(sys_content.is_array(), "system content must be an array of blocks, got {sys_content}");
+        let sys_block = &sys_content[0];
+        assert_eq!(sys_block["type"], "text");
+        assert_eq!(sys_block["text"], "You are smooth.");
+        assert_eq!(sys_block["cache_control"]["type"], "ephemeral");
+
+        // LAST tool must carry top-level cache_control: ephemeral.
+        let tools = json["tools"].as_array().expect("tools array");
+        assert_eq!(tools.len(), 2);
+        assert!(
+            tools[0].get("cache_control").is_none_or(serde_json::Value::is_null),
+            "first tool must not carry cache_control"
+        );
+        assert_eq!(tools[1]["cache_control"]["type"], "ephemeral");
+
+        // The user (last) message must also be marked so turn-by-turn
+        // history caching extends.
+        let last = &json["messages"][1];
+        assert_eq!(last["role"], "user");
+        let last_content = &last["content"];
+        assert!(last_content.is_array(), "last message content must be in block form");
+        assert_eq!(last_content[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn gpt_request_body_has_no_cache_control() {
+        // Simulate the GPT/OpenAI path: we DON'T call apply_cache_control.
+        let messages = vec![
+            ChatMessage {
+                role: "system".into(),
+                content: ChatContent::Text(Some("You are smooth.".into())),
+                tool_call_id: None,
+                tool_name: None,
+                tool_calls: vec![],
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: ChatContent::Text(Some("Hi".into())),
+                tool_call_id: None,
+                tool_name: None,
+                tool_calls: vec![],
+            },
+        ];
+        let chat_tools = vec![ChatTool {
+            r#type: "function".into(),
+            function: ChatFunction {
+                name: "bash".into(),
+                description: "Run a command".into(),
+                parameters: serde_json::json!({}),
+            },
+            cache_control: None,
+        }];
+        let req = ChatRequest {
+            model: "gpt-4o".into(),
+            messages,
+            max_tokens: 100,
+            temperature: 0.0,
+            tools: chat_tools,
+        };
+        let json = serde_json::to_string(&req).expect("serialize");
+        assert!(
+            !json.contains("cache_control"),
+            "GPT/OpenAI request body must NOT contain `cache_control`: {json}"
+        );
+        // System content must serialize as a plain string for OpenAI compat.
+        assert!(json.contains(r#""content":"You are smooth.""#), "system content must be a plain string: {json}");
+    }
+
+    #[test]
+    fn usage_parses_prompt_tokens_details_cached_tokens() {
+        // LiteLLM/Anthropic-compat wire shape: usage carries a nested
+        // `prompt_tokens_details.cached_tokens` field. Our ChatUsage must
+        // pick it up so CostTracker can aggregate cache hits.
+        let json = r#"{
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 1200,
+                "completion_tokens": 50,
+                "total_tokens": 1250,
+                "prompt_tokens_details": {"cached_tokens": 1000}
+            }
+        }"#;
+        let resp: ChatResponse = serde_json::from_str(json).expect("deserialize");
+        let usage = resp.usage.expect("usage present");
+        assert_eq!(usage.prompt_tokens, 1200);
+        assert_eq!(
+            usage.prompt_tokens_details.as_ref().map(|d| d.cached_tokens),
+            Some(1000),
+            "must capture cached_tokens from nested prompt_tokens_details"
+        );
+
+        // Missing prompt_tokens_details: falls through cleanly as None
+        // (zero hits, not a deserialization error).
+        let json2 = r#"{
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 5, "total_tokens": 105}
+        }"#;
+        let resp2: ChatResponse = serde_json::from_str(json2).expect("deserialize");
+        assert!(resp2.usage.expect("usage").prompt_tokens_details.is_none());
     }
 }
