@@ -278,10 +278,17 @@ pub async fn cmd_logout() -> Result<()> {
     Ok(())
 }
 
-/// `th whoami` — print user + active org from the stored credentials.
-/// No network call — pure local lookup. Real "is the token still
-/// valid" check requires a server endpoint we'll wire later (probably
-/// `GET /profile`).
+/// `th api whoami` — show who you are and what you can see.
+///
+/// Triggers the same auto-refresh path the resource commands do, so a
+/// stale token gets re-minted before we report. Then makes two light
+/// network calls (`GET /profile` for the human identity behind the
+/// client credentials, `GET /organizations/{id}` for the active org
+/// name) plus an optional members count if the membership endpoint is
+/// allowed for this principal. Each call is tolerant of failure — if
+/// the endpoint 403s or 404s for this principal we just skip that
+/// row, so M2M clients (which often can't read `/profile`) still see
+/// useful output.
 pub async fn cmd_whoami() -> Result<()> {
     let client = SmoothApiClient::from_disk().context("load credentials")?;
     let Some(creds) = client.credentials() else {
@@ -291,17 +298,71 @@ pub async fn cmd_whoami() -> Result<()> {
         return Ok(());
     };
 
+    // Refresh before reporting so the user sees the real state, not
+    // the stale state. ensure_fresh_token is a no-op when the token
+    // is still valid.
+    let _ = client.ensure_fresh_token().await;
+    // Re-read after refresh — the access_token / expires_at may have
+    // rotated underneath us.
+    let creds = client.credentials().unwrap_or(creds);
+
     println!();
     if let Some(ref u) = creds.user {
-        println!("  {}  {}", "User      ".dimmed(), u.cyan().bold());
+        println!("  {}  {}", "Identity   ".dimmed(), u.cyan().bold());
     } else {
-        println!("  {}  {}", "User      ".dimmed(), "(unknown)".dimmed());
+        println!("  {}  {}", "Identity   ".dimmed(), "(unknown)".dimmed());
     }
+
+    // /profile — only works for user-bearer tokens, often 403/404
+    // for M2M client_credentials. Best-effort.
+    if let Ok(profile) = client.get("/profile").await {
+        let email = profile.get("email").and_then(|v| v.as_str());
+        let name = profile.get("fullName").and_then(|v| v.as_str());
+        let admin = profile.get("adminRoles").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+        if let Some(e) = email {
+            println!("  {}  {}", "Email      ".dimmed(), e.cyan());
+        }
+        if let Some(n) = name {
+            println!("  {}  {}", "Name       ".dimmed(), n.bold());
+        }
+        if admin > 0 {
+            let role_names: Vec<String> = profile
+                .get("adminRoles")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|r| r.get("name").and_then(|n| n.as_str()).map(str::to_string)).collect())
+                .unwrap_or_default();
+            println!("  {}  {} {}", "Admin roles".dimmed(), role_names.join(", ").yellow(), format!("({admin})").dimmed());
+        }
+    }
+
+    // Active org id + (if reachable) name + member count.
     if let Some(ref o) = creds.active_org_id {
-        println!("  {}  {}", "Active org".dimmed(), o.cyan());
+        let mut shown = false;
+        if let Ok(org) = client.get(&format!("/organizations/{o}")).await {
+            let name = org.get("name").and_then(|v| v.as_str()).unwrap_or("(unnamed)");
+            let access = org.get("accessType").and_then(|v| v.as_str()).unwrap_or("");
+            let access_suffix = if access.is_empty() {
+                String::new()
+            } else {
+                format!(" [{access}]")
+            };
+            println!("  {}  {} {}{}", "Org        ".dimmed(), o.cyan(), name.bold(), access_suffix.dimmed());
+            shown = true;
+        }
+        if !shown {
+            println!("  {}  {}", "Org        ".dimmed(), o.cyan());
+        }
+        // Member count is a separate call; safe to fail.
+        if let Ok(members) = client.get(&format!("/organizations/{o}/members")).await {
+            let count = members.get("data").and_then(|v| v.as_array()).or_else(|| members.as_array()).map_or(0, std::vec::Vec::len);
+            if count > 0 {
+                println!("  {}  {}", "Members    ".dimmed(), count.to_string().bold());
+            }
+        }
     } else {
-        println!("  {}  {}", "Active org".dimmed(), "(none — `th api orgs switch <id>`)".dimmed());
+        println!("  {}  {}", "Org        ".dimmed(), "(none — `th api orgs switch <id>`)".dimmed());
     }
+
     if let Some(exp) = creds.expires_at {
         let now = chrono::Utc::now();
         if exp > now {
@@ -311,15 +372,16 @@ pub async fn cmd_whoami() -> Result<()> {
             } else {
                 format!("{}m", remaining.num_minutes())
             };
-            println!("  {}  {} {}", "Expires   ".dimmed(), label.green(), "left".dimmed());
+            println!("  {}  {} {}", "Expires    ".dimmed(), label.green(), "left".dimmed());
         } else if creds.client_id.is_some() && creds.client_secret.is_some() {
-            // Auto-refresh will fire on the next API call.
-            println!("  {}  {}", "Expires   ".dimmed(), "expired (will auto-refresh on next call)".yellow());
+            // Auto-refresh failed silently above — only land here if
+            // ensure_fresh_token didn't manage to update expires_at.
+            println!("  {}  {}", "Expires    ".dimmed(), "expired — auto-refresh failed, run `th api login`".red());
         } else {
-            println!("  {}  {}", "Expires   ".dimmed(), "expired — `th api login`".red());
+            println!("  {}  {}", "Expires    ".dimmed(), "expired — `th api login`".red());
         }
     }
-    println!("  {}  {}", "Stored at ".dimmed(), client.store.path().display().to_string().dimmed());
+    println!("  {}  {}", "Stored at  ".dimmed(), client.store.path().display().to_string().dimmed());
     println!();
     Ok(())
 }
