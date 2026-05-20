@@ -163,6 +163,27 @@ struct ScoreTuiArgs {
     /// single task — independent of the per-turn idle timeout.
     #[arg(long, default_value_t = 900)]
     task_timeout_s: u64,
+
+    /// Write a per-task pane-debug log to the run dir. Each `send`
+    /// and each `wait_for_idle` boundary appends a timestamped record
+    /// so a failed bench task can be inspected post-hoc. Heavyweight
+    /// — leave off in CI gates.
+    #[arg(long, default_value_t = false)]
+    debug: bool,
+
+    /// Cap the number of tasks attempted (post-gate-selection). 0 =
+    /// no cap (the default). Used for harness debug runs like
+    /// `--task-limit 1` to inspect a single pane log.
+    #[arg(long, default_value_t = 0)]
+    task_limit: usize,
+
+    /// Allow a task to be marked solved=true even when the
+    /// LLM-as-human driver bailed on turn 1. Default is to refuse:
+    /// aider-polyglot fixtures should not pass un-edited, so a
+    /// passing result without any agent interaction is almost
+    /// always a harness bug. Pearl th-f46efa.
+    #[arg(long, default_value_t = false)]
+    allow_stuck_passes: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
@@ -314,9 +335,14 @@ async fn run_score_tui(args: ScoreTuiArgs) -> Result<()> {
     let tui_cfg = TuiTaskConfig {
         th_binary: args.th_binary.clone(),
         tmux_session_prefix: args.tmux_session.clone(),
-        boot_timeout: std::time::Duration::from_secs(15),
+        // Pull boot_timeout from the default — `th code` needs > 15s
+        // to bring up the Safehouse microVM + cast. See
+        // `TuiTaskConfig::default` for the rationale.
+        boot_timeout: TuiTaskConfig::default().boot_timeout,
         loop_cfg,
         task_timeout: std::time::Duration::from_secs(args.task_timeout_s),
+        debug_pane_log: args.debug,
+        stuck_means_failed: !args.allow_stuck_passes,
     };
 
     let cfg = TuiSweepConfig {
@@ -330,6 +356,7 @@ async fn run_score_tui(args: ScoreTuiArgs) -> Result<()> {
             model: None,
         },
         tui_cfg,
+        task_limit: if args.task_limit == 0 { None } else { Some(args.task_limit) },
     };
 
     let mut observer = StdoutObserver;
