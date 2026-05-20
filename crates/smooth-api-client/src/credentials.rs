@@ -38,6 +38,18 @@ pub struct Credentials {
     /// to it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_org_id: Option<String>,
+    /// M2M client id we authenticated with. Stored so the SDK can
+    /// silently re-exchange a fresh access_token when the current
+    /// one expires without re-prompting the user. None for flows
+    /// where we didn't use client_credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// M2M client secret. Same trust level as `access_token` (a
+    /// short-lived JWT minted with this secret would let an attacker
+    /// do everything the secret itself does), so we store both in the
+    /// same 0600 file. Used for auto-refresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
     /// When the credentials were stored. Display-only.
     #[serde(default = "Utc::now")]
     pub created_at: DateTime<Utc>,
@@ -160,6 +172,8 @@ mod tests {
             expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
             user: Some("brent@smoo.ai".into()),
             active_org_id: Some("org_abc123".into()),
+            client_id: Some("cid".into()),
+            client_secret: Some("csecret".into()),
             created_at: Utc::now(),
         }
     }

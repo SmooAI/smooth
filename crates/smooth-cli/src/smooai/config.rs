@@ -131,7 +131,7 @@ pub enum ValuesCmd {
 }
 
 pub async fn cmd(cmd: Cmd) -> Result<()> {
-    let client = require_authed()?;
+    let client = require_authed().await?;
     match cmd {
         Cmd::Schemas { cmd } => match cmd {
             SchemasCmd::List { org } => {

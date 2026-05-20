@@ -154,7 +154,7 @@ pub enum RunsCmd {
 }
 
 pub async fn cmd(cmd: Cmd) -> Result<()> {
-    let client = require_authed()?;
+    let client = require_authed().await?;
     let opt_body = |body: Option<String>| -> Result<Option<serde_json::Value>> {
         match body {
             Some(p) => Ok(Some(read_body(&p)?)),

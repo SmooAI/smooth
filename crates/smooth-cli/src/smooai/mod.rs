@@ -26,11 +26,26 @@ use smooth_api_client::auth::{client_credentials_grant, token_url};
 use smooth_api_client::{CredentialsStore, SmoothApiClient};
 
 /// Build an authenticated client or fail with the standard "run
-/// `th login`" message. Every resource command starts with this.
-pub fn require_authed() -> Result<SmoothApiClient> {
+/// `th api login`" message. Every resource command starts with this.
+///
+/// Triggers a silent token refresh first if creds exist but are
+/// expired AND we have stored client_id/client_secret. So a stale
+/// session re-mints transparently — the user doesn't see the
+/// expiry unless their stored M2M credentials were rotated.
+pub async fn require_authed() -> Result<SmoothApiClient> {
     let client = SmoothApiClient::from_disk().context("load credentials")?;
-    if !client.is_authenticated() {
+    if client.credentials().is_none() {
         anyhow::bail!("not logged in — run `th api login` first");
+    }
+    // Try to refresh if expired. ensure_fresh_token is a no-op when
+    // the token is still valid or when no client_credentials are on
+    // disk to re-exchange with.
+    client.ensure_fresh_token().await.ok();
+    if !client.is_authenticated() {
+        anyhow::bail!(
+            "session expired and no stored client credentials to auto-refresh — run `th api login` again \
+             (or set SMOOAI_CONFIG_CLIENT_ID + SMOOAI_CONFIG_CLIENT_SECRET so the next call refreshes silently)"
+        );
     }
     Ok(client)
 }
@@ -297,6 +312,9 @@ pub async fn cmd_whoami() -> Result<()> {
                 format!("{}m", remaining.num_minutes())
             };
             println!("  {}  {} {}", "Expires   ".dimmed(), label.green(), "left".dimmed());
+        } else if creds.client_id.is_some() && creds.client_secret.is_some() {
+            // Auto-refresh will fire on the next API call.
+            println!("  {}  {}", "Expires   ".dimmed(), "expired (will auto-refresh on next call)".yellow());
         } else {
             println!("  {}  {}", "Expires   ".dimmed(), "expired — `th api login`".red());
         }
@@ -308,7 +326,7 @@ pub async fn cmd_whoami() -> Result<()> {
 
 /// `th orgs *` dispatch — list / show / switch.
 pub async fn cmd_orgs(cmd: super::OrgsCommands) -> Result<()> {
-    let client = require_authed()?;
+    let client = require_authed().await?;
     match cmd {
         super::OrgsCommands::List => {
             let body = client.get("/organizations").await.context("GET /organizations")?;

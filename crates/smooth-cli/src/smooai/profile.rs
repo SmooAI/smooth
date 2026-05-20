@@ -18,7 +18,7 @@ pub enum Cmd {
 }
 
 pub async fn cmd(cmd: Cmd) -> Result<()> {
-    let client = require_authed()?;
+    let client = require_authed().await?;
     match cmd {
         Cmd::Show => print_json(&client.get("/profile").await.context("GET profile")?),
         Cmd::Update { body } => {

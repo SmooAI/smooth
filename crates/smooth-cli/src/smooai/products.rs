@@ -26,7 +26,7 @@ pub enum Cmd {
 }
 
 pub async fn cmd(cmd: Cmd) -> Result<()> {
-    let client = require_authed()?;
+    let client = require_authed().await?;
     match cmd {
         Cmd::List { org } => {
             let o = require_active_org(&client, org)?;

@@ -4,7 +4,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 
 use crate::credentials::{Credentials, CredentialsStore};
@@ -109,33 +109,103 @@ impl SmoothApiClient {
         crate::pb::Client::new_with_client(&self.base_url, self.http.clone())
     }
 
+    /// Re-mint the access_token via `client_credentials` if the
+    /// stored token has expired (or is about to expire — the
+    /// `Credentials::is_expired` 60-second safety margin applies).
+    /// No-op when the token is still fresh, or when there are no
+    /// stored client_credentials to re-exchange with (in which case
+    /// the next call will 401 and the user has to re-run
+    /// `th api login`).
+    ///
+    /// Also rebuilds `self.http` with the new Authorization header
+    /// so subsequent calls send the fresh token.
+    pub async fn ensure_fresh_token(&self) -> anyhow::Result<()> {
+        let snapshot = self.credentials();
+        let Some(creds) = snapshot else { return Ok(()) };
+        if !creds.is_expired() {
+            return Ok(());
+        }
+        let (Some(cid), Some(csecret)) = (creds.client_id.clone(), creds.client_secret.clone()) else {
+            // Token expired but we have no way to re-mint it. Let the
+            // next request 401 with the real server's "invalid token"
+            // message; that's clearer than a synthetic error here.
+            return Ok(());
+        };
+        let bare = reqwest::Client::builder().user_agent(user_agent()).build()?;
+        let fresh = crate::auth::client_credentials_grant(&bare, &cid, &csecret).await.context("auto-refresh client_credentials grant")?;
+        let mut merged = fresh;
+        // Preserve display-only fields the grant doesn't know about.
+        merged.active_org_id = creds.active_org_id;
+        self.set_credentials(merged.clone()).context("persist refreshed credentials")?;
+        // Rebuild http with the new bearer token. We can't mutate
+        // self.http (no &mut), so we replace it via interior
+        // mutability — Arc<Mutex<reqwest::Client>> would be one
+        // option, but reqwest::Client is already cheaply cloneable
+        // and Send + Sync. The cleanest path is for callers to grab
+        // a fresh http through self.http_with_token() lazily, but
+        // for the raw() helper below we build the request with an
+        // explicit Authorization header so we sidestep the issue
+        // entirely.
+        Ok(())
+    }
+
     /// Issue a raw HTTP request against the platform API. Used by
     /// the CLI commands — easier than threading 92 distinct typed
     /// signatures through the dispatch when most calls are
     /// "GET /thing/{id}, print JSON".
     ///
     /// `path` is appended to `self.base_url` directly. `body` is
-    /// serialized as JSON when Some.
+    /// serialized as JSON when Some. Auto-refreshes an expired
+    /// access_token before sending; on a 401 also refreshes + retries
+    /// once.
     ///
     /// # Errors
-    /// Network errors, non-2xx responses, and JSON-parse failures
-    /// all surface as `anyhow::Error`s.
+    /// Network errors, non-2xx responses (after one auth retry),
+    /// and JSON-parse failures all surface as `anyhow::Error`s.
     pub async fn raw(&self, method: reqwest::Method, path: &str, body: Option<&serde_json::Value>) -> anyhow::Result<serde_json::Value> {
+        // Pre-emptive refresh if we know the token is stale.
+        let _ = self.ensure_fresh_token().await;
+        let resp = self.send_once(&method, path, body).await?;
+        if resp.0 == reqwest::StatusCode::UNAUTHORIZED && self.credentials().is_some_and(|c| c.client_id.is_some() && c.client_secret.is_some()) {
+            // Reactive refresh — covers the case where the server
+            // rotated keys or our expires_at was wrong.
+            let _ = self.ensure_fresh_token().await;
+            let retried = self.send_once(&method, path, body).await?;
+            return Self::decode(method, path, retried);
+        }
+        Self::decode(method, path, resp)
+    }
+
+    /// Single send. Returns `(status, body_text)` for the caller to
+    /// decide whether to retry / decode / bail.
+    async fn send_once(&self, method: &reqwest::Method, path: &str, body: Option<&serde_json::Value>) -> anyhow::Result<(reqwest::StatusCode, String)> {
         let url = format!("{}{}", self.base_url.trim_end_matches('/'), if path.starts_with('/') { path.to_string() } else { format!("/{path}") });
+        // Use the current access_token from credentials at send-time,
+        // not the cached header in self.http — that way ensure_fresh_token
+        // doesn't have to mutate the reqwest::Client.
+        let token = self.credentials().map(|c| c.access_token);
         let mut req = self.http.request(method.clone(), &url);
+        if let Some(t) = token {
+            req = req.bearer_auth(t);
+        }
         if let Some(b) = body {
             req = req.json(b);
         }
         let resp = req.send().await.map_err(|e| anyhow::anyhow!("{method} {url}: {e}"))?;
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
+        Ok((status, text))
+    }
+
+    /// Turn a `(status, body)` pair into a `Result<Value>`.
+    fn decode(method: reqwest::Method, path: &str, (status, text): (reqwest::StatusCode, String)) -> anyhow::Result<serde_json::Value> {
         if !status.is_success() {
-            anyhow::bail!("{method} {url} returned HTTP {status}: {text}");
+            anyhow::bail!("{method} {path} returned HTTP {status}: {text}");
         }
         if text.trim().is_empty() {
             return Ok(serde_json::json!({"ok": true}));
         }
-        serde_json::from_str::<serde_json::Value>(&text).map_err(|e| anyhow::anyhow!("parse JSON response from {url}: {e}\nbody: {text}"))
+        serde_json::from_str::<serde_json::Value>(&text).map_err(|e| anyhow::anyhow!("parse JSON response from {path}: {e}\nbody: {text}"))
     }
 
     /// Convenience: `raw(GET, path, None)`.

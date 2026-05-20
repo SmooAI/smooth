@@ -110,6 +110,11 @@ pub async fn client_credentials_grant(http: &reqwest::Client, client_id: &str, c
         // string so `th api whoami` shows *something* useful.
         user: Some(format!("client:{client_id}")),
         active_org_id: None,
+        // Persist the M2M credentials so the SDK can silently
+        // re-exchange a fresh access_token when this one expires
+        // (see `SmoothApiClient::ensure_fresh_token`).
+        client_id: Some(client_id.to_string()),
+        client_secret: Some(client_secret.to_string()),
         created_at: Utc::now(),
     })
 }
