@@ -33,10 +33,13 @@ pub mod auto_approve;
 pub mod chat_driver;
 pub mod curated;
 pub mod eval_report;
+pub mod human_driver;
 pub mod scenarios;
 pub mod score;
 pub mod supervisor;
 pub mod sweep;
+pub mod tmux_driver;
+pub mod tui_score;
 
 /// Where we cache the cloned polyglot-benchmark repo.
 pub fn cache_root() -> anyhow::Result<PathBuf> {
@@ -195,14 +198,32 @@ pub struct ToolCallRecord {
     pub success: bool,
 }
 
-/// Run one Aider Polyglot task end-to-end.
+/// Set-up artefacts produced by `prepare_task` — shared between
+/// `run_aider_polyglot` (WebSocket path) and the score-tui flow so
+/// both exercise the same scratch dir, prompt, and file snapshot.
+#[derive(Debug, Clone)]
+pub struct TaskSetup {
+    pub run_dir: PathBuf,
+    pub work_dir: PathBuf,
+    pub prompt: String,
+    /// Snapshot of files present BEFORE the agent runs — used by
+    /// `strip_agent_added_tests` after the agent finishes.
+    pub original_files: std::collections::HashSet<PathBuf>,
+}
+
+/// Prepare a scratch run dir for an aider-polyglot task: clone the
+/// dataset if needed, copy the task files, enable skipped tests,
+/// snapshot the original file set, write `PROMPT.txt`. Returns the
+/// `TaskSetup` for the caller to drive however they like.
+///
+/// Extracted so the WebSocket path (`run_aider_polyglot`) and the
+/// TUI path (`tui_score::run_polyglot_task_via_tui`) share identical
+/// setup logic — drift here would silently shift the benchmark.
 ///
 /// # Errors
-/// Returns an error for setup failures (dataset clone, scratch dir
-/// creation, task not found). LLM-side errors are captured in the
-/// `llm_error` field of the result rather than propagated, so a
-/// 504-interrupted run still produces a scored result.
-pub async fn run_aider_polyglot(lang: PolyglotLang, task: &str, opts: &BenchOpts) -> anyhow::Result<BenchResult> {
+/// Errors when the upstream dataset can't be cloned, the task
+/// directory doesn't exist, or the scratch dir can't be created.
+pub fn prepare_task(lang: PolyglotLang, task: &str) -> anyhow::Result<TaskSetup> {
     ensure_dataset()?;
     let task_src = locate_task(lang, task)?;
     let run = new_run_dir()?;
@@ -228,6 +249,48 @@ pub async fn run_aider_polyglot(lang: PolyglotLang, task: &str, opts: &BenchOpts
     let original_files = snapshot_files(&work_dir)?;
     let prompt = build_prompt(task, lang, &work_dir)?;
     std::fs::write(run.join("PROMPT.txt"), &prompt)?;
+
+    Ok(TaskSetup {
+        run_dir: run,
+        work_dir,
+        prompt,
+        original_files,
+    })
+}
+
+/// Strip agent-added test files + score the work dir's test output.
+/// Mirrors the post-dispatch tail of `run_aider_polyglot` so the
+/// score-tui path can call it once the human-loop driver finishes.
+///
+/// Returns `(test_stdout, counts)` exactly like `score_work_dir`.
+///
+/// # Errors
+/// Errors only when the test command can't be spawned. LLM-judge
+/// failures degrade to zero counts rather than propagate.
+pub async fn finalize_and_score(lang: PolyglotLang, setup: &TaskSetup) -> anyhow::Result<(String, TestCounts)> {
+    let stripped_files = strip_agent_added_tests(lang, &setup.work_dir, &setup.original_files)?;
+    if !stripped_files.is_empty() {
+        eprintln!(
+            "bench: stripped {} agent-added test file(s) before scoring: {:?}",
+            stripped_files.len(),
+            stripped_files
+        );
+    }
+    score_work_dir(lang, &setup.work_dir).await
+}
+
+/// Run one Aider Polyglot task end-to-end.
+///
+/// # Errors
+/// Returns an error for setup failures (dataset clone, scratch dir
+/// creation, task not found). LLM-side errors are captured in the
+/// `llm_error` field of the result rather than propagated, so a
+/// 504-interrupted run still produces a scored result.
+pub async fn run_aider_polyglot(lang: PolyglotLang, task: &str, opts: &BenchOpts) -> anyhow::Result<BenchResult> {
+    let setup = prepare_task(lang, task)?;
+    let run = setup.run_dir.clone();
+    let work_dir = setup.work_dir.clone();
+    let prompt = setup.prompt.clone();
 
     let t0 = Instant::now();
 
@@ -275,21 +338,9 @@ pub async fn run_aider_polyglot(lang: PolyglotLang, task: &str, opts: &BenchOpts
 
     let duration_s = t0.elapsed().as_secs_f64();
 
-    // Delete any test-file-pattern files the agent added that
-    // weren't in the original task. Leaves production-code files
-    // alone regardless of name, and leaves original test files
-    // intact — only new files matching per-language test patterns
-    // get cleaned. See `strip_agent_added_tests` for the patterns.
-    let stripped_files = strip_agent_added_tests(lang, &work_dir, &original_files)?;
-    if !stripped_files.is_empty() {
-        eprintln!(
-            "bench: stripped {} agent-added test file(s) before scoring: {:?}",
-            stripped_files.len(),
-            stripped_files
-        );
-    }
-
-    let (test_stdout, counts) = score_work_dir(lang, &work_dir).await?;
+    // Delete agent-added test files and run the test command. Shared
+    // tail with the score-tui path so both surface identical scores.
+    let (test_stdout, counts) = finalize_and_score(lang, &setup).await?;
 
     let result = BenchResult {
         run_id: run.file_name().and_then(|s| s.to_str()).unwrap_or("unknown").to_string(),
