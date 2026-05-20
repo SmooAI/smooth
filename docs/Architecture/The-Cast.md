@@ -123,6 +123,10 @@ The pearl store is Groove's checkpoint backing — session messages, tool calls,
 
 ---
 
+## Budget-Aware MCP (default tool surface)
+
+Not a cast member in the security sense — it's an [external MCP server](https://github.com/Doorman11991/budget-aware-mcp) Smooth registers by default in `~/.smooth/mcp.toml` on first `th up`. The operator gets a focused, token-budgeted alternative to ripgrep-then-read-file: `graph_walk(symbol, hop=2, max_tokens=8000)` returns exactly the structurally-connected code under the budget, `check_scope` answers feasibility questions without an LLM call, `explain_symbol` produces signature + callers + callees in a few hundred bytes, `search_graph` does fuzzy-match-then-graph-walk, and `find_dead_code` surfaces zero-inbound-edge symbols for cleanup. Backed by SQLite + tree-sitter (with a built-in regex fallback parser when the optional CodeGraphContext Python service isn't present, MIT-licensed). Spawned via `npx -y budget-aware-mcp` so it auto-fetches the first time and runs out of the operator's microVM. Opt out with `SMOOTH_SKIP_DEFAULT_MCP=1` or `th mcp remove budget-aware-mcp`. See `th mcp defaults` / `th mcp install` for the management surface.
+
 ## How they wire together
 
 ```
