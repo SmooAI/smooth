@@ -15,6 +15,8 @@
 //! See the module-level doc on [`run_polyglot_task_via_tui`] for the
 //! per-task flow.
 
+use std::collections::HashMap;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -55,6 +57,19 @@ pub struct TuiTaskConfig {
     /// passing score on a workspace the agent never touched — see
     /// pearl th-f46efa.
     pub stuck_means_failed: bool,
+    /// When `true` (default), a task that reports `solved=true` but
+    /// where the agent made NO edits to any editable file is
+    /// downgraded to `solved=false`. The polyglot fixtures ship with
+    /// failing tests; a passing result on an unmodified workspace is
+    /// almost certainly a test-runner artefact (e.g. cargo's shared
+    /// target cache reusing a previously-compiled binary) rather
+    /// than a real solve. See pearl th-a5ca18 Bug 3 — the original
+    /// PR runs reported 2/3 Rust passes on workspaces where the
+    /// `src/lib.rs` still held the dataset's `todo!()` macro.
+    ///
+    /// Operators can set this to `false` via the `--allow-no-edit-
+    /// passes` CLI flag for paranoid debugging only.
+    pub require_edits_for_pass: bool,
 }
 
 impl Default for TuiTaskConfig {
@@ -74,6 +89,7 @@ impl Default for TuiTaskConfig {
             task_timeout: Duration::from_secs(900),
             debug_pane_log: false,
             stuck_means_failed: true,
+            require_edits_for_pass: true,
         }
     }
 }
@@ -134,6 +150,17 @@ pub async fn run_polyglot_task_via_tui<D: DriverModel>(lang: PolyglotLang, task:
     let setup = prepare_task(lang, task).context("prepare polyglot task")?;
     let t0 = Instant::now();
 
+    // Hash every editable file in the work dir BEFORE the agent runs
+    // so we can later prove (or disprove) that the agent actually
+    // changed something. Bug 3 in pearl th-a5ca18: the cargo shared
+    // target cache was reusing a previously-compiled test binary
+    // from an earlier successful run, so `cargo test` returned
+    // "ok" even on workspaces where the agent never touched
+    // src/lib.rs. The fix is a hash-based no-edit guard plus a
+    // per-task isolated `CARGO_TARGET_DIR` (set inside score_work_dir's
+    // child process); they're belt-and-suspenders.
+    let pre_hashes = hash_editable_files(lang, &setup.work_dir).context("hashing editable files before agent run")?;
+
     let session = format!("{}-{}-{}", cfg.tmux_session_prefix, lang.dataset_dir(), task);
     let shell_cmd = format!("{} code", shell_escape(&cfg.th_binary));
 
@@ -180,10 +207,43 @@ pub async fn run_polyglot_task_via_tui<D: DriverModel>(lang: PolyglotLang, task:
     // the count is for trend tracking, not a load-bearing assertion.
     let tool_calls = count_tool_call_lines(&loop_result.final_pane);
 
+    // Cost scraping (Bug 2). The TUI renders a status line
+    // `agent: NAME | TASK | tokens: N | spend: $X.XXX | …` along
+    // the bottom of the pane. We grab a final visible-only capture
+    // (cheaper than the full-scrollback capture, and the status
+    // line is always visible by definition) and regex out the
+    // spend. Falls back to 0.0 + a warning if the line isn't
+    // present — better to under-report than to fabricate cost.
+    let cost_usd = match driver.capture_visible() {
+        Ok(final_visible) => extract_spend_usd(&final_visible).unwrap_or_else(|| {
+            eprintln!(
+                "score-tui: WARNING — could not extract `spend: $X.XX` from final pane for {}/{}; reporting cost as $0.00",
+                lang.dataset_dir(),
+                task
+            );
+            0.0
+        }),
+        Err(e) => {
+            eprintln!(
+                "score-tui: WARNING — final capture_visible failed for {}/{} ({e:#}); reporting cost as $0.00",
+                lang.dataset_dir(),
+                task
+            );
+            0.0
+        }
+    };
+
     // Drop the driver early so the tmux session goes away BEFORE we
     // run the test command. Tests run in the same scratch dir and
     // we don't want `th code` still holding a file watcher on it.
     drop(driver);
+
+    // Re-hash editable files AFTER the agent's work. If the set is
+    // byte-identical to the pre-run snapshot we know the agent
+    // didn't actually edit anything — used downstream to refuse a
+    // passing test result on an unmodified workspace.
+    let post_hashes = hash_editable_files(lang, &setup.work_dir).unwrap_or_default();
+    let agent_made_edits = post_hashes != pre_hashes;
 
     let (_test_stdout, counts) = finalize_and_score(lang, &setup).await.context("score work dir")?;
 
@@ -201,7 +261,7 @@ pub async fn run_polyglot_task_via_tui<D: DriverModel>(lang: PolyglotLang, task:
     // runs where the agent never typed anything.
     let solved_raw = counts.solved();
     let driver_bailed_immediately = loop_result.turns <= 1 && !matches!(loop_result.exit, LoopExit::Complete);
-    let solved = if cfg.stuck_means_failed && driver_bailed_immediately {
+    let solved_after_stuck_guard = if cfg.stuck_means_failed && driver_bailed_immediately {
         if solved_raw {
             eprintln!(
                 "score-tui: WARNING — {}/{} reported solved=true but driver bailed on turn {} ({:?}); forcing solved=false (pearl th-f46efa)",
@@ -216,15 +276,164 @@ pub async fn run_polyglot_task_via_tui<D: DriverModel>(lang: PolyglotLang, task:
         solved_raw
     };
 
+    // Hash-based no-edit guard (pearl th-a5ca18 Bug 3). A passing
+    // test result on a workspace where the agent edited NOTHING is
+    // virtually certain to be a tooling artefact (compiled-binary
+    // cache, ok-on-empty test runner, etc.), not a real solve.
+    // Force solved=false in that case. The original PR runs
+    // reported `rust/acronym` and `rust/alphametics` as PASS with
+    // pristine `todo!()` sources because cargo's shared target dir
+    // had a previously-compiled binary cached.
+    let solved = if cfg.require_edits_for_pass && solved_after_stuck_guard && !agent_made_edits {
+        eprintln!(
+            "score-tui: WARNING — {}/{} reported solved=true but agent made ZERO edits to editable files; \
+             forcing solved=false (pearl th-a5ca18 Bug 3). Disable with --allow-no-edit-passes.",
+            lang.dataset_dir(),
+            task,
+        );
+        false
+    } else {
+        solved_after_stuck_guard
+    };
+
     Ok(TuiTaskOutcome {
         solved,
-        // Cost from the TUI path is not yet plumbed — see module doc.
-        cost_usd: 0.0,
+        cost_usd,
         duration_ms,
         turns: loop_result.turns,
         tool_calls,
         exit: loop_result.exit,
     })
+}
+
+/// Hash every "editable" file in `work_dir` for hash-based change
+/// detection. Editable = not a test file (per the language's
+/// `is_test_file` patterns), not a build artefact, not VCS metadata.
+/// Returns a map from relative path to a content hash.
+///
+/// We deliberately exclude test files from the hash domain because:
+/// 1. The agent is NEVER supposed to edit them (the polyglot rules
+///    require leaving the tests alone). If the agent did modify
+///    them, the `strip_agent_added_tests` step will catch newly-
+///    added test files but won't roll back edits to existing ones —
+///    so including them would let the agent "cheat" the no-edit
+///    guard by writing a test that always passes.
+/// 2. The harness's own `enable_skipped_tests` step CAN mutate test
+///    files (e.g. stripping @Disabled annotations in Java). Hashing
+///    them would make the harness's own preprocessing trip the
+///    no-edit guard.
+fn hash_editable_files(lang: PolyglotLang, work_dir: &Path) -> Result<HashMap<std::path::PathBuf, u64>> {
+    let mut out = HashMap::new();
+    walk_editable(lang, work_dir, work_dir, &mut out)?;
+    Ok(out)
+}
+
+fn walk_editable(lang: PolyglotLang, base: &Path, dir: &Path, out: &mut HashMap<std::path::PathBuf, u64>) -> Result<()> {
+    for entry in std::fs::read_dir(dir).with_context(|| format!("read_dir {}", dir.display()))? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy().into_owned();
+        // Skip dirs that fill up with build artefacts. These can
+        // grow to tens of MiB on Rust/Java/JS tasks and hashing
+        // them is both expensive and noisy (compiler timestamps
+        // differ across runs). The set mirrors
+        // `lib.rs::snapshot_files`.
+        if name_str == ".git" || name_str == ".smooth" || name_str == "node_modules" || name_str == "target" || name_str == "build" || name_str == ".gradle" {
+            continue;
+        }
+        let path = entry.path();
+        let ft = entry.file_type()?;
+        if ft.is_dir() {
+            walk_editable(lang, base, &path, out)?;
+            continue;
+        }
+        let Ok(rel) = path.strip_prefix(base) else {
+            continue;
+        };
+        let rel = rel.to_path_buf();
+        // Skip test files — see fn doc.
+        if crate::is_test_file_for_hash(lang, &rel) {
+            continue;
+        }
+        // INSTRUCTIONS.md is editable in theory but agents are not
+        // supposed to modify it. Skip it from the hash to keep the
+        // change-detection signal focused on source code edits, not
+        // noise from the agent accidentally appending to the prompt.
+        if rel.as_os_str() == "INSTRUCTIONS.md" {
+            continue;
+        }
+        let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        let hash = hash_bytes(&bytes);
+        out.insert(rel, hash);
+    }
+    Ok(())
+}
+
+/// Cheap deterministic content hash. We don't need cryptographic
+/// strength — just "did this byte sequence change?". DefaultHasher
+/// (SipHash) is good enough and zero-deps.
+fn hash_bytes(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    h.finish()
+}
+
+/// Extract the `spend: $X.XXX` value from a pane capture. The TUI
+/// renders a status line like
+/// `agent: fixer | smooth-coding | tokens: 0 | spend: $0.109 | ● | Ctrl+C quit`
+/// along the bottom of the pane. We grab the dollar amount
+/// following the literal `spend: $`. If multiple matches appear
+/// (e.g. several status-line repaints in scrollback) we take the
+/// LAST one — that's the most recent value and the one we want for
+/// the final cost. Returns `None` when no match is found so callers
+/// can warn rather than silently report a fabricated 0.0.
+#[must_use]
+pub fn extract_spend_usd(pane: &str) -> Option<f64> {
+    // Hand-rolled scan instead of pulling in `regex` as a new dep
+    // just for one pattern. We look for the literal `spend:` then
+    // skip whitespace, optionally a `$`, then parse a float. Take
+    // the LAST match in the input since the most recent status-line
+    // repaint is the freshest cost number.
+    let mut last: Option<f64> = None;
+    let mut search_start = 0;
+    while let Some(rel) = pane[search_start..].find("spend:") {
+        let pos = search_start + rel + "spend:".len();
+        // Skip whitespace.
+        let bytes = pane.as_bytes();
+        let mut i = pos;
+        while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+            i += 1;
+        }
+        // Optional `$`.
+        if i < bytes.len() && bytes[i] == b'$' {
+            i += 1;
+        }
+        // Parse the float: [0-9]*\.?[0-9]+
+        let num_start = i;
+        let mut seen_digit = false;
+        let mut seen_dot = false;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if b.is_ascii_digit() {
+                seen_digit = true;
+                i += 1;
+            } else if b == b'.' && !seen_dot {
+                seen_dot = true;
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        if seen_digit {
+            if let Ok(v) = pane[num_start..i].parse::<f64>() {
+                last = Some(v);
+            }
+        }
+        // Advance past this match to find subsequent occurrences.
+        search_start = pos.max(i);
+    }
+    last
 }
 
 /// Minimal shell escape for `th_binary` so a path with a space (e.g.
@@ -382,13 +591,15 @@ pub async fn run_tui_sweep<D: DriverModel, O: SweepObserver>(curated: &CuratedLi
     );
 
     // Sanity-check the result: a real sweep should report > $0 of
-    // model spend. If every task reports $0.00, the cost surface
-    // wasn't wired (a real risk on the TUI path — see module doc on
-    // `run_polyglot_task_via_tui` re: TUI cost not yet plumbed) and
-    // any pass-rate claim should be treated with extreme suspicion.
+    // model spend. If every task reports $0.00, the cost-scraping
+    // path has regressed (the TUI's status line format may have
+    // drifted from `spend: $X.XX`); flag it loudly so we don't
+    // silently lose the metric again (pearl th-a5ca18 Bug 2).
     if score.tasks_attempted > 0 && score.cost_usd == 0.0 {
         eprintln!(
-            "score-tui: WARNING — cost reported as $0.00 across {} task(s). TUI cost surfacing is not yet wired (pearl follow-up); pass-rate may not reflect real model behaviour.",
+            "score-tui: WARNING — cost reported as $0.00 across {} task(s). \
+             The per-task scrape from the TUI's status line returned 0 for every task; \
+             status-line format may have changed (see `extract_spend_usd`).",
             score.tasks_attempted
         );
     }
@@ -594,5 +805,126 @@ final line
         assert_eq!(score.by_language["python"].tasks_green, 1);
         assert_eq!(score.by_language["rust"].tasks_attempted, 1);
         assert_eq!(score.by_language["rust"].tasks_green, 1);
+    }
+
+    // ----- Bug 2 (cost extraction) -----
+
+    #[test]
+    fn extract_spend_handles_actual_status_line() {
+        // Real status-line captured from the bench pane log.
+        let pane = " agent: fixer | smooth-coding | tokens: 0 | spend: $0.109 | ● | Ctrl+C quit";
+        assert_eq!(extract_spend_usd(pane), Some(0.109));
+    }
+
+    #[test]
+    fn extract_spend_takes_last_match_when_status_line_repeated() {
+        // When the full-scrollback capture contains several
+        // status-line repaints, we want the LAST (freshest) value.
+        let pane = " agent: scout | spend: $0.013 | ●\nlater\nlater\n agent: fixer | spend: $0.063 | ●\nmore\n agent: fixer | spend: $0.109 | ●";
+        assert_eq!(extract_spend_usd(pane), Some(0.109));
+    }
+
+    #[test]
+    fn extract_spend_handles_zero_dollars_format() {
+        let pane = " agent: fixer | tokens: 0 | spend: $0 | ●";
+        assert_eq!(extract_spend_usd(pane), Some(0.0));
+    }
+
+    #[test]
+    fn extract_spend_handles_no_dollar_sign_format() {
+        // Defensive: some TUI variants may render without `$`.
+        let pane = " agent: fixer | spend: 1.42 | ●";
+        assert_eq!(extract_spend_usd(pane), Some(1.42));
+    }
+
+    #[test]
+    fn extract_spend_returns_none_on_no_match() {
+        assert_eq!(extract_spend_usd("nothing here"), None);
+        assert_eq!(extract_spend_usd(""), None);
+    }
+
+    #[test]
+    fn extract_spend_returns_none_on_malformed() {
+        // `spend:` with no number after it. Don't fabricate.
+        assert_eq!(extract_spend_usd("spend: $"), None);
+        assert_eq!(extract_spend_usd("spend: abc"), None);
+    }
+
+    #[test]
+    fn extract_spend_handles_dot_only_number() {
+        let pane = "spend: $.05 |";
+        assert_eq!(extract_spend_usd(pane), Some(0.05));
+    }
+
+    // ----- Bug 3 (hash-based no-edit guard) -----
+
+    #[test]
+    fn hash_editable_returns_identical_for_unmodified_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("lib.py"), "def foo(): pass\n").unwrap();
+        std::fs::write(tmp.path().join("INSTRUCTIONS.md"), "do the thing").unwrap();
+        let a = hash_editable_files(PolyglotLang::Python, tmp.path()).unwrap();
+        let b = hash_editable_files(PolyglotLang::Python, tmp.path()).unwrap();
+        assert_eq!(a, b, "two snapshots of an untouched dir must hash identically");
+        // Editable lib.py present.
+        assert!(a.contains_key(std::path::Path::new("lib.py")));
+        // INSTRUCTIONS.md excluded.
+        assert!(!a.contains_key(std::path::Path::new("INSTRUCTIONS.md")));
+    }
+
+    #[test]
+    fn hash_editable_detects_a_file_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("lib.py");
+        std::fs::write(&lib, "def foo(): pass\n").unwrap();
+        let before = hash_editable_files(PolyglotLang::Python, tmp.path()).unwrap();
+        // Modify the file.
+        std::fs::write(&lib, "def foo(): return 42\n").unwrap();
+        let after = hash_editable_files(PolyglotLang::Python, tmp.path()).unwrap();
+        assert_ne!(before, after, "modifying a file must change the hash map");
+    }
+
+    #[test]
+    fn hash_editable_excludes_test_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("lib.py"), "pass\n").unwrap();
+        std::fs::write(tmp.path().join("test_lib.py"), "def test_x(): pass\n").unwrap();
+        let h = hash_editable_files(PolyglotLang::Python, tmp.path()).unwrap();
+        assert!(h.contains_key(std::path::Path::new("lib.py")));
+        assert!(
+            !h.contains_key(std::path::Path::new("test_lib.py")),
+            "test files must be excluded from the editable hash"
+        );
+    }
+
+    #[test]
+    fn hash_editable_excludes_test_files_rust() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("src")).unwrap();
+        std::fs::create_dir(tmp.path().join("tests")).unwrap();
+        std::fs::write(tmp.path().join("src").join("lib.rs"), "pub fn foo() {}\n").unwrap();
+        std::fs::write(tmp.path().join("tests").join("integration.rs"), "// test\n").unwrap();
+        let h = hash_editable_files(PolyglotLang::Rust, tmp.path()).unwrap();
+        assert!(h.contains_key(std::path::Path::new("src/lib.rs")) || h.contains_key(std::path::Path::new("src\\lib.rs")));
+        // Rust integration tests live under tests/ — excluded.
+        assert!(
+            !h.iter().any(|(k, _)| k.starts_with("tests")),
+            "rust tests/ files must be excluded; got keys: {:?}",
+            h.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn hash_editable_skips_target_and_build_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("lib.py"), "pass\n").unwrap();
+        std::fs::create_dir(tmp.path().join("target")).unwrap();
+        std::fs::write(tmp.path().join("target").join("artifact.bin"), "binary").unwrap();
+        std::fs::create_dir(tmp.path().join("node_modules")).unwrap();
+        std::fs::write(tmp.path().join("node_modules").join("foo.js"), "x").unwrap();
+        let h = hash_editable_files(PolyglotLang::Python, tmp.path()).unwrap();
+        assert!(!h.iter().any(|(k, _)| k.starts_with("target")), "target/ must be skipped");
+        assert!(!h.iter().any(|(k, _)| k.starts_with("node_modules")), "node_modules/ must be skipped");
+        assert!(h.contains_key(std::path::Path::new("lib.py")));
     }
 }

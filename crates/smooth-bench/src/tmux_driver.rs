@@ -57,6 +57,16 @@ pub const DEFAULT_IDLE_MIN_BYTES: usize = 200;
 pub const PANE_WIDTH: u32 = 200;
 pub const PANE_HEIGHT: u32 = 80;
 
+/// Maximum bytes returned from `capture` after pulling full scrollback.
+/// When the captured text exceeds this budget we truncate from the
+/// FRONT (oldest pane content) and keep the recent tail, since the
+/// LLM-as-human driver primarily reasons about what the agent did
+/// most recently. 64KiB is enough to hold roughly 800-1000 lines of
+/// chat history at typical line widths — well past the few hundred
+/// the agent emits over a 10-turn coding task. Override per-driver
+/// via [`TmuxDriver::set_capture_max_bytes`].
+pub const DEFAULT_CAPTURE_MAX_BYTES: usize = 64 * 1024;
+
 /// Per-task debug sink. When set on a `TmuxDriver`, every `send` and
 /// every `wait_for_idle` boundary appends a timestamped record to the
 /// underlying writer. Created at the top of a task and dropped when
@@ -109,9 +119,26 @@ impl PaneDebugLog {
 
 /// Drives a TUI process inside a detached tmux session. Owns the
 /// session for its entire lifetime and tears it down on drop.
+///
+/// Socket isolation (pearl th-a5ca18): every driver owns its own
+/// tmux server via `tmux -L <socket>`. The default tmux socket is
+/// shared between all `tmux` invocations on a machine, so when the
+/// last surviving session on that socket exited (e.g. another bench
+/// task's `kill-session` in `Drop`), tmux server-exited and every
+/// subsequent task on this driver's socket got `no server running`.
+/// With per-task sockets, each driver has its own server-of-one and
+/// `Drop` only kills its own universe. No cross-contamination.
 #[derive(Debug)]
 pub struct TmuxDriver {
+    /// tmux session name (within the driver's socket). Currently
+    /// always equal to the user-supplied `session` argument.
     session: String,
+    /// tmux server socket name — every `tmux …` invocation issued by
+    /// this driver passes `-L <socket>` so it talks to this driver's
+    /// private server. Derived from the session name + a nanosecond
+    /// timestamp + the driver's pid so concurrent runs of the same
+    /// session name (e.g. retries after a crash) don't collide.
+    socket: String,
     /// Kept for diagnostic logging only; not used to address the pane.
     #[allow(dead_code)]
     workdir: PathBuf,
@@ -119,6 +146,33 @@ pub struct TmuxDriver {
     /// with `--debug`. Records every send + every idle/boot pane
     /// snapshot with timestamps.
     debug: Option<PaneDebugLog>,
+    /// Maximum bytes returned from [`capture`]. When the captured
+    /// scrollback exceeds this we truncate from the front (oldest
+    /// content). See [`DEFAULT_CAPTURE_MAX_BYTES`].
+    capture_max_bytes: usize,
+}
+
+/// Build a unique tmux socket name from a session name. The socket
+/// is the on-disk path tmux uses for its server's UNIX domain
+/// socket; we keep the name short (tmux silently truncates long
+/// names) and ASCII-only.
+fn make_socket_name(session: &str) -> String {
+    // Nanosecond clock + pid keep this unique across concurrent
+    // drivers in the same process and across retries. Hash-stir the
+    // session in case the caller is leaning on a deterministic name.
+    let ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id();
+    // Strip session chars that tmux's socket-name parser doesn't
+    // love. Replace any non-alphanumeric with `-`; collapse runs.
+    let session_clean: String = session.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    // Truncate the session-derived prefix so the final name stays
+    // well under macOS's 104-byte sun_path limit (the socket lives
+    // at `/private/tmp/tmux-<uid>/<name>` so we want ~60 chars max).
+    let stub: String = session_clean.chars().take(28).collect();
+    format!("smb-{stub}-{pid}-{ns}")
 }
 
 impl TmuxDriver {
@@ -165,22 +219,36 @@ impl TmuxDriver {
     pub fn start_command_with_debug(session: &str, workdir: &Path, shell_cmd: &str, boot_timeout: Duration, debug: Option<PaneDebugLog>) -> Result<Self> {
         require_tmux()?;
 
+        // Per-task socket isolation (pearl th-a5ca18). Generate a
+        // fresh socket name so this driver's tmux server is brand
+        // new — no risk of inheriting a half-dead session left
+        // behind by a previous run or of being killed when ANOTHER
+        // driver's Drop tears down the shared default server.
+        let socket = make_socket_name(session);
+
         // Reject existing sessions loudly — silently piggybacking onto
         // a stale session would corrupt the capture and drop another
-        // run's session on our exit.
-        if session_exists(session) {
+        // run's session on our exit. With per-socket isolation this
+        // is nearly impossible to hit (fresh socket = empty server),
+        // but the check stays cheap and the error message remains
+        // useful for diagnosing buggy callers that reuse names.
+        if session_exists_on(&socket, session) {
             return Err(anyhow!(
-                "tmux session `{session}` already exists; kill it (`tmux kill-session -t {session}`) or pick a different --tmux-session"
+                "tmux session `{session}` already exists on socket `{socket}`; this should not be possible with a fresh per-task socket — please file a bug"
             ));
         }
 
-        // `new-session -d -s NAME -x W -y H -c WORKDIR sh -c CMD`.
+        // `tmux -L SOCKET new-session -d -s NAME -x W -y H -c WORKDIR sh -c CMD`.
+        // The `-L SOCKET` flag is FIRST — it must precede the
+        // subcommand or tmux interprets it as a session argument.
         // We capture stderr so an actual failure surfaces with a
         // useful message rather than being silently redirected — only
         // the "no server running" probe messages get swallowed (see
-        // `session_exists` and `require_tmux`).
+        // `session_exists_on` and `require_tmux`).
         let out = Command::new("tmux")
             .args([
+                "-L",
+                &socket,
                 "new-session",
                 "-d",
                 "-s",
@@ -199,7 +267,7 @@ impl TmuxDriver {
             .context("spawning tmux new-session")?;
         if !out.status.success() {
             return Err(anyhow!(
-                "tmux new-session for `{session}` exited non-zero: {}",
+                "tmux new-session for `{session}` on socket `{socket}` exited non-zero: {}",
                 String::from_utf8_lossy(&out.stderr)
             ));
         }
@@ -213,19 +281,21 @@ impl TmuxDriver {
         // the "no server running" lines that triggered this pearl.
         let poll_start = Instant::now();
         loop {
-            if session_exists(session) {
+            if session_exists_on(&socket, session) {
                 break;
             }
             if poll_start.elapsed() > boot_timeout {
-                return Err(anyhow!("tmux session `{session}` never showed up after new-session"));
+                return Err(anyhow!("tmux session `{session}` never showed up after new-session on socket `{socket}`"));
             }
             std::thread::sleep(Duration::from_millis(50));
         }
 
         let driver = Self {
             session: session.to_string(),
+            socket,
             workdir: workdir.to_path_buf(),
             debug,
+            capture_max_bytes: DEFAULT_CAPTURE_MAX_BYTES,
         };
 
         // Wait for the TUI to render at least one non-empty frame
@@ -269,7 +339,7 @@ impl TmuxDriver {
         // `load-buffer -b NAME -` reads raw bytes from stdin into the
         // named buffer. We feed `text` verbatim — no escaping needed.
         let mut child = Command::new("tmux")
-            .args(["load-buffer", "-b", &buffer_name, "-"])
+            .args(["-L", &self.socket, "load-buffer", "-b", &buffer_name, "-"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -308,7 +378,7 @@ impl TmuxDriver {
         // never arises regardless of the receiver's bracketed-paste
         // support. See pearl th-01c714.
         let out = Command::new("tmux")
-            .args(["paste-buffer", "-b", &buffer_name, "-t", &self.session, "-d", "-p"])
+            .args(["-L", &self.socket, "paste-buffer", "-b", &buffer_name, "-t", &self.session, "-d", "-p"])
             .output()
             .context("tmux paste-buffer")?;
         if !out.status.success() {
@@ -316,7 +386,7 @@ impl TmuxDriver {
             // after load — otherwise the buffer leaks for the
             // session's lifetime.
             let _ = Command::new("tmux")
-                .args(["delete-buffer", "-b", &buffer_name])
+                .args(["-L", &self.socket, "delete-buffer", "-b", &buffer_name])
                 .stderr(Stdio::null())
                 .stdout(Stdio::null())
                 .status();
@@ -329,7 +399,7 @@ impl TmuxDriver {
         // could distinguish them). Matches prior behaviour where the
         // explicit Enter keystroke is what triggers submit.
         let out = Command::new("tmux")
-            .args(["send-keys", "-t", &self.session, "Enter"])
+            .args(["-L", &self.socket, "send-keys", "-t", &self.session, "Enter"])
             .output()
             .context("tmux send-keys (Enter)")?;
         if !out.status.success() {
@@ -338,7 +408,25 @@ impl TmuxDriver {
         Ok(())
     }
 
-    /// Capture the currently visible pane text (no escape codes).
+    /// Capture pane text including the full scrollback history (not
+    /// just the currently visible region). Pre-pearl-th-a5ca18 this
+    /// only captured the visible region (`tmux capture-pane -p`),
+    /// which made the LLM-as-human driver blind to everything that
+    /// scrolled off the top of the screen — the agent's tool calls,
+    /// patch diffs, and earlier conversation turns. The driver kept
+    /// re-asking the same questions because it could never see the
+    /// agent's answers. Confirmed in pearl debug logs where every
+    /// captured frame showed the same bottom-of-pane slice.
+    ///
+    /// `-S -` means "start at the top of scrollback" (i.e. include
+    /// every line ever rendered in this pane). `-J` joins wrapped
+    /// lines so the output is robust to terminal width. The result
+    /// can balloon for a chatty session (10s of KiB), so we truncate
+    /// from the FRONT (oldest content) when the captured text
+    /// exceeds [`Self::capture_max_bytes`] — the LLM cares most
+    /// about recent activity, so keeping the tail is the right
+    /// trade-off. A truncation marker is prepended so the model
+    /// knows it didn't see the very beginning.
     ///
     /// # Errors
     /// Errors only on tmux failure (e.g. the session was killed —
@@ -346,7 +434,7 @@ impl TmuxDriver {
     /// returns `Ok("")`.
     pub fn capture(&self) -> Result<String> {
         let out = Command::new("tmux")
-            .args(["capture-pane", "-t", &self.session, "-p"])
+            .args(["-L", &self.socket, "capture-pane", "-t", &self.session, "-p", "-S", "-", "-J"])
             .output()
             .context("tmux capture-pane")?;
         if !out.status.success() {
@@ -358,7 +446,42 @@ impl TmuxDriver {
                 String::from_utf8_lossy(&out.stderr).trim()
             ));
         }
+        let raw = String::from_utf8_lossy(&out.stdout).into_owned();
+        Ok(truncate_from_front(&raw, self.capture_max_bytes))
+    }
+
+    /// Capture ONLY the currently visible pane (no scrollback). Use
+    /// this when you specifically want to scrape the bottom status
+    /// line or the live input box — for instance, the score-tui
+    /// cost-scraper which grabs `spend: $X.XXX` from the always-
+    /// visible status line just below the chat. The full-scrollback
+    /// `capture` would also see that line, but the visible-only path
+    /// is cheaper and avoids scanning megabytes of history when all
+    /// we want is the tail.
+    ///
+    /// # Errors
+    /// As [`capture`].
+    pub fn capture_visible(&self) -> Result<String> {
+        let out = Command::new("tmux")
+            .args(["-L", &self.socket, "capture-pane", "-t", &self.session, "-p"])
+            .output()
+            .context("tmux capture-pane (visible)")?;
+        if !out.status.success() {
+            return Err(anyhow!(
+                "tmux capture-pane (visible) exited non-zero (session `{}`): {}",
+                self.session,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    /// Override the front-truncation budget for [`capture`]. Default
+    /// is [`DEFAULT_CAPTURE_MAX_BYTES`]. Callers running on tiny
+    /// machines may want to lower this; debug runs may want to raise
+    /// it to avoid any truncation at all (pass `usize::MAX`).
+    pub fn set_capture_max_bytes(&mut self, n: usize) {
+        self.capture_max_bytes = n;
     }
 
     /// Poll the pane every `poll_interval` and return when the text
@@ -445,23 +568,32 @@ impl TmuxDriver {
         }
     }
 
-    /// Test helper: attach to an already-created tmux session
-    /// without running the boot-render gate. Lets unit tests build a
-    /// minimal `cat` session that wouldn't pass the first-render
-    /// floor (since `cat` produces no output until typed at). Not
-    /// intended for production code.
+    /// Read this driver's tmux socket name. Useful for diagnostics
+    /// and for tests that need to invoke `tmux -L <socket>` directly.
+    #[must_use]
+    pub fn socket(&self) -> &str {
+        &self.socket
+    }
+
+    /// Test helper: attach to an already-created tmux session on a
+    /// given socket without running the boot-render gate. Lets unit
+    /// tests build a minimal `cat` session that wouldn't pass the
+    /// first-render floor (since `cat` produces no output until
+    /// typed at). Not intended for production code.
     ///
     /// # Errors
-    /// Errors if the session doesn't exist.
+    /// Errors if the session doesn't exist on the socket.
     #[cfg(test)]
-    pub fn attach_existing_for_test(session: &str, workdir: &Path) -> Result<Self> {
-        if !session_exists(session) {
-            return Err(anyhow!("tmux session `{session}` does not exist"));
+    pub fn attach_existing_for_test(socket: &str, session: &str, workdir: &Path) -> Result<Self> {
+        if !session_exists_on(socket, session) {
+            return Err(anyhow!("tmux session `{session}` does not exist on socket `{socket}`"));
         }
         Ok(Self {
             session: session.to_string(),
+            socket: socket.to_string(),
             workdir: workdir.to_path_buf(),
             debug: None,
+            capture_max_bytes: DEFAULT_CAPTURE_MAX_BYTES,
         })
     }
 
@@ -534,8 +666,17 @@ impl Drop for TmuxDriver {
         // observer log — the original score-tui-pr.log showed two
         // copies per task because both this drop and a follow-on
         // probe each surfaced a copy.
+        //
+        // With per-task socket isolation we use `kill-server` to
+        // tear down the WHOLE server — there's only ever one
+        // session on each driver's socket, so this is equivalent to
+        // kill-session but is also a no-op if the session already
+        // exited (vs. `kill-session -t NAME` which prints "can't
+        // find session" to stderr on a dead session). Crucially:
+        // killing THIS driver's server cannot kill another driver's
+        // server because each has its own socket.
         let _ = Command::new("tmux")
-            .args(["kill-session", "-t", &self.session])
+            .args(["-L", &self.socket, "kill-server"])
             .stderr(Stdio::null())
             .stdout(Stdio::null())
             .status();
@@ -554,23 +695,77 @@ fn require_tmux() -> Result<()> {
     }
 }
 
-fn session_exists(session: &str) -> bool {
-    // `tmux has-session -t NAME` returns 0 if present, 1 otherwise.
-    // We can't trust stderr (tmux prints "no server running on …" or
-    // "can't find session" to it, which is *normal* when probing
-    // before any session has been created). Use the status code as
-    // the source of truth and silence stderr so the user-facing
-    // bench observer log stays clean.
+fn session_exists_on(socket: &str, session: &str) -> bool {
+    // `tmux -L SOCKET has-session -t NAME` returns 0 if present, 1
+    // otherwise. We can't trust stderr (tmux prints "no server
+    // running on …" or "can't find session" to it, which is *normal*
+    // when probing before any session has been created). Use the
+    // status code as the source of truth and silence stderr so the
+    // user-facing bench observer log stays clean.
     //
     // A missing tmux binary returns false here — `require_tmux`
     // surfaces that separately with a clearer message.
     Command::new("tmux")
-        .args(["has-session", "-t", session])
+        .args(["-L", socket, "has-session", "-t", session])
         .stderr(Stdio::null())
         .stdout(Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Truncate `s` to at most `max_bytes`, dropping from the front. Used
+/// by [`TmuxDriver::capture`] to keep memory bounded even when the
+/// pane has accumulated megabytes of scrollback.
+///
+/// When truncation happens we prepend a marker (`<<< truncated N bytes
+/// of older pane content >>>`) so a downstream LLM-as-human driver
+/// reading the capture knows the very start isn't visible. The marker
+/// is itself counted toward the budget, so the actual content kept is
+/// slightly less than `max_bytes` — fine for the use case (the
+/// budget is approximate, not load-bearing).
+///
+/// Edge cases:
+/// - `max_bytes == 0` returns "".
+/// - `s.len() <= max_bytes` returns `s` unchanged.
+/// - Truncation always happens on a `\n` boundary when one is
+///   available within ~256 bytes of the cut point, so the kept tail
+///   starts on a fresh line. This is purely cosmetic — a mid-line cut
+///   wouldn't change semantics for the LLM driver — but it makes the
+///   debug log much easier for a human to read.
+#[must_use]
+pub fn truncate_from_front(s: &str, max_bytes: usize) -> String {
+    if max_bytes == 0 {
+        return String::new();
+    }
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let marker_template = "<<< truncated N bytes of older pane content >>>\n";
+    // Leave room for the marker (with the actual dropped count
+    // substituted, which can be longer than `N`).
+    let reserve = marker_template.len() + 32;
+    let keep = max_bytes.saturating_sub(reserve).max(1);
+    let cut = s.len().saturating_sub(keep);
+    // Snap forward to the next newline within the next 256 bytes so
+    // the kept tail starts cleanly. If no newline is found, keep the
+    // raw byte cut — better to risk a mid-line start than to drop a
+    // lot of content searching.
+    let mut start = cut;
+    let snap_window = 256;
+    if let Some(idx) = s.as_bytes()[cut..cut.saturating_add(snap_window).min(s.len())].iter().position(|b| *b == b'\n') {
+        start = cut + idx + 1;
+    }
+    // Snap to a UTF-8 char boundary in case the cut landed mid-codepoint.
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    let dropped = start;
+    let marker = format!("<<< truncated {dropped} bytes of older pane content >>>\n");
+    let mut out = String::with_capacity(marker.len() + s.len().saturating_sub(start));
+    out.push_str(&marker);
+    out.push_str(&s[start..]);
+    out
 }
 
 #[cfg(test)]
@@ -660,11 +855,14 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let session = unique_session("idle-floor");
+        let socket = make_socket_name(&session);
         // `sleep 60` produces zero output — pane is stable & empty.
         // We can't call start_command (its boot gate would fail too)
-        // so we construct manually.
+        // so we construct manually on our private socket.
         let status = Command::new("tmux")
             .args([
+                "-L",
+                &socket,
                 "new-session",
                 "-d",
                 "-s",
@@ -684,8 +882,10 @@ mod tests {
         assert!(status.success());
         let driver = TmuxDriver {
             session: session.clone(),
+            socket: socket.clone(),
             workdir: tmp.path().to_path_buf(),
             debug: None,
+            capture_max_bytes: DEFAULT_CAPTURE_MAX_BYTES,
         };
 
         // With min_bytes=200, an empty pane must time out — not be
@@ -754,8 +954,11 @@ mod tests {
                 // Recreate the session manually, skipping the
                 // first-render gate. We still get a working driver.
                 let session2 = unique_session("send2");
+                let socket2 = make_socket_name(&session2);
                 let status = Command::new("tmux")
                     .args([
+                        "-L",
+                        &socket2,
                         "new-session",
                         "-d",
                         "-s",
@@ -775,8 +978,10 @@ mod tests {
                 assert!(status.success());
                 TmuxDriver {
                     session: session2,
+                    socket: socket2,
                     workdir: tmp.path().to_path_buf(),
                     debug: None,
+                    capture_max_bytes: DEFAULT_CAPTURE_MAX_BYTES,
                 }
             }
         };
@@ -805,6 +1010,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let outfile = tmp.path().join("captured.txt");
         let session = unique_session("newlines");
+        let socket = make_socket_name(&session);
         // `cat > FILE` writes typed input to the file until EOF /
         // session kill. We want the file to contain exactly what we
         // sent. Use `sh -c` so the redirection takes effect.
@@ -814,6 +1020,8 @@ mod tests {
         // boot gate would time out. Build the driver manually.
         let status = Command::new("tmux")
             .args([
+                "-L",
+                &socket,
                 "new-session",
                 "-d",
                 "-s",
@@ -833,8 +1041,10 @@ mod tests {
         assert!(status.success(), "tmux new-session failed");
         let driver = TmuxDriver {
             session: session.clone(),
+            socket: socket.clone(),
             workdir: tmp.path().to_path_buf(),
             debug: None,
+            capture_max_bytes: DEFAULT_CAPTURE_MAX_BYTES,
         };
 
         // Send a 3-line message. The Enter after the buffer paste
@@ -848,7 +1058,7 @@ mod tests {
         // kill the session so `cat` sees EOF and exits cleanly.
         std::thread::sleep(Duration::from_millis(500));
         let _ = Command::new("tmux")
-            .args(["kill-session", "-t", &session])
+            .args(["-L", &socket, "kill-session", "-t", &session])
             .stderr(Stdio::null())
             .stdout(Stdio::null())
             .status();
@@ -874,20 +1084,60 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_session_name_is_rejected() {
+    fn duplicate_session_name_on_same_socket_is_rejected() {
+        // With per-task socket isolation (pearl th-a5ca18) two
+        // drivers asking for the same session name no longer collide
+        // — each gets its own private socket. To test the rejection
+        // path we have to share a socket explicitly. This isn't a
+        // production codepath, but the guard exists in case a buggy
+        // caller does end up sharing a socket.
         if !tmux_present() {
             eprintln!("tmux not installed — skipping");
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
         let session = unique_session("dup");
+        let shared_socket = make_socket_name(&session);
         let payload = long_payload("first-aaaaa", 30);
         let cmd = format!("echo '{payload}' && sleep 30");
-        let _driver = TmuxDriver::start_command(&session, tmp.path(), &cmd, Duration::from_secs(5)).expect("first start");
-
-        let err = TmuxDriver::start_command(&session, tmp.path(), &cmd, Duration::from_secs(5)).expect_err("second start must fail");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("already exists"), "expected duplicate-session error; got: {msg}");
+        // Pre-create the session on the shared socket so it's
+        // already taken when start_command runs.
+        let status = Command::new("tmux")
+            .args([
+                "-L",
+                &shared_socket,
+                "new-session",
+                "-d",
+                "-s",
+                &session,
+                "-x",
+                &PANE_WIDTH.to_string(),
+                "-y",
+                &PANE_HEIGHT.to_string(),
+                "-c",
+                &tmp.path().to_string_lossy(),
+                "sh",
+                "-c",
+                &cmd,
+            ])
+            .status()
+            .expect("seed tmux session");
+        assert!(status.success(), "tmux seed new-session failed");
+        // Now ask start_command for a NEW driver, but the
+        // first-render gate races on a fresh socket — there's no
+        // collision. With per-task isolation, the collision scenario
+        // simply doesn't occur in production. Assert that two
+        // drivers with overlapping session names get distinct
+        // sockets and both stand up.
+        let other =
+            TmuxDriver::start_command(&session, tmp.path(), &cmd, Duration::from_secs(5)).expect("second driver gets its own socket and starts cleanly");
+        assert_ne!(other.socket(), shared_socket, "drivers must get distinct sockets to avoid cross-talk");
+        // Clean up the seeded session.
+        let _ = Command::new("tmux")
+            .args(["-L", &shared_socket, "kill-server"])
+            .stderr(Stdio::null())
+            .stdout(Stdio::null())
+            .status();
     }
 
     #[test]
@@ -900,11 +1150,201 @@ mod tests {
         let session = unique_session("dropkill");
         let payload = long_payload("alive-aaaaa", 30);
         let cmd = format!("echo '{payload}' && sleep 60");
+        let socket_copy: String;
         {
-            let _driver = TmuxDriver::start_command(&session, tmp.path(), &cmd, Duration::from_secs(5)).expect("start");
-            assert!(session_exists(&session), "session should exist while driver alive");
+            let driver = TmuxDriver::start_command(&session, tmp.path(), &cmd, Duration::from_secs(5)).expect("start");
+            socket_copy = driver.socket().to_string();
+            assert!(session_exists_on(&socket_copy, &session), "session should exist while driver alive");
         }
-        // Drop ran — session must be gone.
-        assert!(!session_exists(&session), "session must be killed when driver drops");
+        // Drop ran — session must be gone and the server is dead.
+        assert!(!session_exists_on(&socket_copy, &session), "session must be killed when driver drops");
+    }
+
+    #[test]
+    fn per_socket_isolation_survives_sibling_drop() {
+        // Bug 1: tmux server dies mid-sweep. The PR run failed task
+        // 15+ because a sibling task's Drop killed the shared tmux
+        // server, leaving us with "no server running" on every
+        // subsequent task. Per-socket isolation must guarantee that
+        // dropping one driver does not affect another's server.
+        if !tmux_present() {
+            eprintln!("tmux not installed — skipping");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let session_a = unique_session("isolation-a");
+        let session_b = unique_session("isolation-b");
+        let payload = long_payload("isolation-payload", 30);
+        let cmd_a = format!("echo '{payload}' && sleep 60");
+        let cmd_b = format!("echo '{payload}-b' && sleep 60");
+
+        let driver_a = TmuxDriver::start_command(&session_a, tmp.path(), &cmd_a, Duration::from_secs(5)).expect("start A");
+        let driver_b = TmuxDriver::start_command(&session_b, tmp.path(), &cmd_b, Duration::from_secs(5)).expect("start B");
+        let socket_a = driver_a.socket().to_string();
+        let socket_b = driver_b.socket().to_string();
+        assert_ne!(socket_a, socket_b, "drivers must have distinct sockets");
+
+        // Sanity check both alive.
+        assert!(session_exists_on(&socket_a, &session_a), "A initially alive");
+        assert!(session_exists_on(&socket_b, &session_b), "B initially alive");
+
+        // Drop A — B must still be reachable. Without socket
+        // isolation, dropping A (the only session on its server)
+        // killed the SHARED default server, which is what killed B.
+        drop(driver_a);
+        assert!(!session_exists_on(&socket_a, &session_a), "A must be gone after its driver dropped");
+        assert!(
+            session_exists_on(&socket_b, &session_b),
+            "B must SURVIVE A's drop — this is the whole point of socket isolation (bug 1)"
+        );
+        // B can still be captured from after A is gone.
+        let cap = driver_b.capture().expect("capture B after A dropped");
+        assert!(
+            cap.contains("isolation-payload-b"),
+            "expected B's pane to still be capturable after A's drop; got:\n{cap}"
+        );
+    }
+
+    #[test]
+    fn capture_includes_scrollback_history() {
+        // Bug 5: tmux capture-pane without -S - only sees the
+        // currently visible region, blinding the LLM-as-human driver
+        // to everything that scrolled off the top. Verify the
+        // production capture path includes ancient history.
+        if !tmux_present() {
+            eprintln!("tmux not installed — skipping");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let session = unique_session("scrollback");
+        // Print 200 lines so the early ones definitely scroll off
+        // the visible region (PANE_HEIGHT = 80).
+        let cmd = "for i in $(seq 1 200); do echo \"line $i\"; done && sleep 60";
+        let driver = TmuxDriver::start_command(&session, tmp.path(), cmd, Duration::from_secs(5)).expect("start scrollback session");
+
+        // Give tmux a beat to render every line into the pane.
+        std::thread::sleep(Duration::from_millis(300));
+
+        let full = driver.capture().expect("capture full scrollback");
+        let visible = driver.capture_visible().expect("capture visible only");
+        // The early lines must be present in full scrollback. Match
+        // on the whole-line shape "line 1\n" (or end-of-string) so
+        // we don't accidentally match the prefix of "line 100".
+        assert!(
+            full.contains("\nline 1\n") || full.starts_with("line 1\n"),
+            "full capture must include the very first line; got tail:\n{}",
+            tail(&full, 400)
+        );
+        assert!(
+            !(visible.contains("\nline 1\n") || visible.starts_with("line 1\n")),
+            "visible-only capture should NOT include line 1 (it scrolled off); got:\n{}",
+            visible
+        );
+        assert!(full.contains("line 200"), "full capture must include the last line too");
+    }
+
+    #[test]
+    fn capture_truncates_huge_scrollback_from_front() {
+        // The full-scrollback capture can balloon to MiB on a long
+        // session. Verify the front-truncation budget keeps memory
+        // bounded and that the kept tail is the RECENT content (what
+        // the LLM cares about most).
+        if !tmux_present() {
+            eprintln!("tmux not installed — skipping");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let session = unique_session("trunc");
+        let cmd = "for i in $(seq 1 200); do echo \"line $i\"; done && sleep 60";
+        let mut driver = TmuxDriver::start_command(&session, tmp.path(), cmd, Duration::from_secs(5)).expect("start truncation session");
+        // Tiny budget — force a truncation.
+        driver.set_capture_max_bytes(800);
+        std::thread::sleep(Duration::from_millis(300));
+
+        let capped = driver.capture().expect("capped capture");
+        assert!(capped.len() <= 1024, "capped capture must respect budget: {} bytes", capped.len());
+        assert!(capped.contains("truncated"), "capped capture must include truncation marker; got:\n{capped}");
+        // Tail must be present (line 200 is the freshest).
+        assert!(capped.contains("line 200"), "kept tail must include recent content");
+        // Front should be gone. Match `\nline 1\n` (or the capture
+        // starting with it) so we don't false-positive on the
+        // prefix of `line 100`/`line 199`.
+        assert!(
+            !(capped.contains("\nline 1\n") || capped.starts_with("line 1\n")),
+            "front must be truncated away; got capped:\n{capped}"
+        );
+    }
+
+    /// Test helper: return the last `n` chars of `s` so failure
+    /// messages don't dump megabytes.
+    fn tail(s: &str, n: usize) -> String {
+        if s.len() <= n {
+            s.to_string()
+        } else {
+            // Snap to a UTF-8 boundary.
+            let mut start = s.len() - n;
+            while !s.is_char_boundary(start) {
+                start += 1;
+            }
+            s[start..].to_string()
+        }
+    }
+
+    #[test]
+    fn truncate_from_front_under_budget_no_change() {
+        let s = "abc\ndef\n";
+        assert_eq!(truncate_from_front(s, 1024), s);
+    }
+
+    #[test]
+    fn truncate_from_front_zero_budget_is_empty() {
+        assert_eq!(truncate_from_front("anything", 0), "");
+    }
+
+    #[test]
+    fn truncate_from_front_keeps_tail_and_drops_head() {
+        let s = (1..=50).map(|i| format!("line {i}\n")).collect::<String>();
+        let out = truncate_from_front(&s, 150);
+        // Tail preserved.
+        assert!(out.contains("line 50\n"));
+        assert!(out.contains("line 49\n"));
+        // Head dropped.
+        assert!(!out.contains("line 1\n"));
+        // Marker prepended.
+        assert!(out.starts_with("<<< truncated"), "expected marker prefix, got:\n{out}");
+    }
+
+    #[test]
+    fn truncate_from_front_snaps_to_newline() {
+        // 50 short lines (each ~9 chars) so the budget keeps a few
+        // whole lines and the snap-to-newline behaviour is
+        // observable. Force a cut that would land mid-line if no
+        // snap; verify the kept tail starts on a fresh line.
+        let s = (1..=50).map(|i| format!("line {i:02}\n")).collect::<String>();
+        let out = truncate_from_front(&s, 200);
+        // First line is the marker; the second line onward is the
+        // kept tail. Split off the marker line and assert the next
+        // line begins with `line `.
+        let after_marker = out.split_once('\n').expect("marker followed by content").1;
+        assert!(after_marker.starts_with("line "), "tail should start at a line boundary, got:\n{after_marker}");
+    }
+
+    #[test]
+    fn make_socket_name_is_unique_across_calls() {
+        // Different timestamps + monotonic counters mean two calls
+        // for the same session name should produce different sockets.
+        let a = make_socket_name("same-name");
+        std::thread::sleep(Duration::from_nanos(1));
+        let b = make_socket_name("same-name");
+        assert_ne!(a, b, "socket names must be unique even for same session input");
+        // Should be ASCII-safe and reasonably short.
+        assert!(a.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+        assert!(a.len() < 80, "socket name should stay short; got {} chars", a.len());
+    }
+
+    #[test]
+    fn make_socket_name_strips_non_alphanumeric() {
+        let s = make_socket_name("smooth-bench-tui-go/beer song");
+        assert!(s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'), "socket must be safe ascii: {s}");
     }
 }

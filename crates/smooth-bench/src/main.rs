@@ -184,6 +184,16 @@ struct ScoreTuiArgs {
     /// always a harness bug. Pearl th-f46efa.
     #[arg(long, default_value_t = false)]
     allow_stuck_passes: bool,
+
+    /// Allow a task to be marked solved=true even when the agent
+    /// made ZERO edits to editable source files. Default is to
+    /// refuse: a passing test result on a workspace where the agent
+    /// changed nothing is almost certainly a tooling artefact (e.g.
+    /// cargo's shared target cache reusing a previously-compiled
+    /// binary). Pearl th-a5ca18 Bug 3. Set this only for paranoid
+    /// debugging.
+    #[arg(long, default_value_t = false)]
+    allow_no_edit_passes: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
@@ -343,6 +353,7 @@ async fn run_score_tui(args: ScoreTuiArgs) -> Result<()> {
         task_timeout: std::time::Duration::from_secs(args.task_timeout_s),
         debug_pane_log: args.debug,
         stuck_means_failed: !args.allow_stuck_passes,
+        require_edits_for_pass: !args.allow_no_edit_passes,
     };
 
     let cfg = TuiSweepConfig {

@@ -621,8 +621,14 @@ mod tests {
         use std::process::Command as Cmd;
         let tmp = tempfile::tempdir().unwrap();
         let session = format!("smooth-bench-driver-test-{stem}-{}", std::process::id());
+        // Per-task socket isolation (pearl th-a5ca18): give this
+        // test its own private tmux server so a sibling test or
+        // bench process can't kill our server out from under us.
+        let socket = format!("smb-drv-test-{stem}-{}", std::process::id());
         let status = Cmd::new("tmux")
             .args([
+                "-L",
+                &socket,
                 "new-session",
                 "-d",
                 "-s",
@@ -645,7 +651,7 @@ mod tests {
         // `cat` produces no first-render output, so start_command's
         // boot-render gate would time out. Attach to the
         // already-created session via the test-only helper.
-        let driver = match crate::tmux_driver::TmuxDriver::attach_existing_for_test(&session, tmp.path()) {
+        let driver = match crate::tmux_driver::TmuxDriver::attach_existing_for_test(&socket, &session, tmp.path()) {
             Ok(d) => d,
             Err(_) => return None,
         };
