@@ -108,7 +108,7 @@ fn parse_function_xml(text: &str) -> Option<ParsedToolCall> {
     let body_start_abs = open_idx + "<function=".len() + name_end + 1;
     let body = &text[body_start_abs..];
     let (args_str, close_end_rel) = find_close_tag(body, &["</function>", "</tool_call>"])?;
-    let arguments = parse_args_json_loose(args_str)?;
+    let arguments = parse_args_json_loose(args_str).or_else(|| parse_args_bare_text(args_str, &name))?;
     let raw_end = body_start_abs + close_end_rel;
     Some(ParsedToolCall {
         name,
@@ -291,6 +291,54 @@ fn parse_args_json_loose(s: &str) -> Option<Value> {
     None
 }
 
+/// Last-ditch arg recovery for `<function=NAME>BARE TEXT</function>` —
+/// the pattern small models love when they "know they should call a
+/// tool" but haven't internalized JSON. Pearl th-67e338.
+///
+/// We strip orphaned closing tags (`</parameter>`, `</param>`, `</args>`),
+/// trim whitespace, and if a single non-empty line remains, wrap it as
+/// `{"<first-arg>": "<line>"}` where the arg name is inferred from the
+/// tool name's first parameter (`read_file` → `path`, `bash` → `command`,
+/// `search` → `query`, …). When we can't infer, we use `arg` as a
+/// generic fallback so the structured note in
+/// `sanitize_pseudo_tool_xml` still NAMES the tool — much more useful
+/// to the next-turn LLM than a vague "malformed XML" stub.
+fn parse_args_bare_text(s: &str, tool_name: &str) -> Option<Value> {
+    let stripped = s
+        .replace("</parameter>", "")
+        .replace("</param>", "")
+        .replace("</args>", "")
+        .replace("</arg>", "");
+    let trimmed = stripped.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Reject things that look like JSON (already handled by the loose
+    // parser above; if we're here it failed to parse, but we still want
+    // to avoid treating broken JSON as a bare path).
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        return None;
+    }
+    // Reject anything still containing structured tags (e.g. Claude's
+    // `<parameter=...>` opening tags) — the body isn't a single bare
+    // value, it's a multi-arg pseudo-XML payload we can't trivially
+    // collapse to one positional argument. Fall through to the legacy
+    // stub for those.
+    if trimmed.contains('<') {
+        return None;
+    }
+    // Map the tool name to its most-likely first positional arg.
+    let key = match tool_name {
+        "read_file" | "read" | "open_file" | "cat" => "path",
+        "write_file" | "write" | "create_file" | "edit_file" | "patch_file" => "path",
+        "bash" | "shell" | "sh" | "exec" | "run" | "run_bash" | "run_shell" => "command",
+        "search" | "grep" | "rg" | "ripgrep" | "code_search" => "query",
+        "list_files" | "ls" | "list" => "path",
+        _ => "arg",
+    };
+    Some(serde_json::json!({ key: trimmed.to_string() }))
+}
+
 fn strip_trailing_commas(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -356,6 +404,34 @@ mod tests {
             m.insert((*k).to_string(), v.clone());
         }
         Value::Object(m)
+    }
+
+    // -- Pearl th-67e338: bare-text args ---------------------------------
+
+    #[test]
+    fn parses_function_xml_with_bare_text_arg_th_67e338() {
+        // The exact pattern from coding-sessions/fa62ad8c-…json — agent
+        // emits a path as the body, with a stray </parameter> closing tag.
+        let input = "<function=read_file>\nINSTRUCTIONS.md\n</parameter>\n</function>";
+        let parsed = forgiving_parse_tool_call(input).expect("bare-text args must parse");
+        assert_eq!(parsed.name, "read_file");
+        assert_eq!(parsed.arguments, obj(&[("path", Value::String("INSTRUCTIONS.md".into()))]));
+    }
+
+    #[test]
+    fn parses_function_xml_with_bare_text_bash_arg_th_67e338() {
+        let input = "<function=bash>\npython3 -m pytest -q\n</function>";
+        let parsed = forgiving_parse_tool_call(input).expect("bare-text bash must parse");
+        assert_eq!(parsed.name, "bash");
+        assert_eq!(parsed.arguments, obj(&[("command", Value::String("python3 -m pytest -q".into()))]));
+    }
+
+    #[test]
+    fn parses_function_xml_with_bare_text_unknown_tool_uses_generic_arg_th_67e338() {
+        let input = "<function=mystery_tool>\nsome value\n</function>";
+        let parsed = forgiving_parse_tool_call(input).expect("unknown-tool bare-text must parse");
+        assert_eq!(parsed.name, "mystery_tool");
+        assert_eq!(parsed.arguments, obj(&[("arg", Value::String("some value".into()))]));
     }
 
     // -- Format 1: <function=NAME>{json}</function> ------------------------

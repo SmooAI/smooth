@@ -2434,7 +2434,7 @@ fn sanitize_pseudo_tool_xml(content: &str) -> String {
             "tool call parsed from prior-history visible content via forgiving parser"
         );
         let note = format!(
-            "[NOTE: my previous turn emitted an inline `{}` tool-call (args={}) as visible text instead of a real tool call. The action did not execute. If still needed, call the tool properly this turn.]",
+            "[NOTE: my previous turn emitted an inline `{}` tool-call (args={}) as visible text instead of a real tool call. The action DID NOT execute. To actually run it, emit a proper tool_call via the API's tool_calls field this turn — do NOT write pseudo-XML function blocks in the message body. Pearl th-67e338.]",
             parsed.name, parsed.arguments
         );
         return content.replacen(&parsed.raw, &note, 1);
@@ -2494,7 +2494,7 @@ fn legacy_strip_pseudo_tool_xml(content: &str) -> String {
             .map(|p| p + "</tool_call>".len())
             .or_else(|| after.find('>').map(|p| p + 1))
             .unwrap_or(after.len());
-        out.push_str("[NOTE: my previous turn emitted a malformed tool-call XML block here that did NOT actually execute. The intended action did not run.]");
+        out.push_str("[NOTE: my previous turn emitted a pseudo-tool-call block in plain text that the runtime cannot execute. Tools MUST be invoked via the API's native tool_calls field (the same field used for read_file, write_file, bash, list_files, etc.) — they are NOT invoked by writing pseudo-XML function blocks in the message body. To act, emit a proper tool_call this turn. Pearl th-67e338.]");
         rest = &after[advance..];
     }
     out
