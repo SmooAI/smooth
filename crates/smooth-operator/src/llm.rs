@@ -830,6 +830,21 @@ impl LlmClient {
             let mut buffer = String::new();
             let mut stream = byte_stream;
 
+            // Pearl th-cb3c2a: per-stream content + per-tool-call argument
+            // normalizer. Most OpenAI-compatible providers stream `delta.content`
+            // as incremental deltas, but some (LiteLLM proxies of certain
+            // upstreams, Azure OpenAI in some configs, several OpenRouter
+            // providers) emit cumulative content per chunk — the chunk
+            // contains everything-so-far rather than just the new tail.
+            // Treating those as deltas produces N²-sized output ("II'll",
+            // "LetLet me me first first read read", whole-paragraph repeats).
+            // We track the running accumulated content per stream and convert
+            // any chunk that's a strict prefix-extension of the accumulator
+            // into a real delta before forwarding. True deltas pass through
+            // unchanged. See `normalize_delta_against_accumulator`.
+            let mut content_norm = StreamContentNormalizer::default();
+            let mut tool_arg_norms: std::collections::HashMap<usize, StreamContentNormalizer> = std::collections::HashMap::new();
+
             // Per-chunk idle timeout: if no bytes arrive for 60s, abort the stream.
             // This catches the case where an LLM endpoint opens an SSE stream and
             // then stalls indefinitely (e.g. during reasoning). Total request
@@ -862,8 +877,11 @@ impl LlmClient {
 
                     let events = parse_sse_line(&line);
                     for event in events {
-                        if tx.send(event).await.is_err() {
-                            return; // receiver dropped
+                        let event = normalize_stream_event(event, &mut content_norm, &mut tool_arg_norms);
+                        if let Some(event) = event {
+                            if tx.send(event).await.is_err() {
+                                return; // receiver dropped
+                            }
                         }
                     }
                 }
@@ -874,8 +892,11 @@ impl LlmClient {
             if !remaining.is_empty() {
                 let events = parse_sse_line(&remaining);
                 for event in events {
-                    if tx.send(event).await.is_err() {
-                        return;
+                    let event = normalize_stream_event(event, &mut content_norm, &mut tool_arg_norms);
+                    if let Some(event) = event {
+                        if tx.send(event).await.is_err() {
+                            return;
+                        }
                     }
                 }
             }
@@ -1117,6 +1138,96 @@ impl ModerationResult {
     #[must_use]
     pub fn flagged_categories(&self) -> Vec<&str> {
         self.categories.iter().filter_map(|(k, v)| if *v { Some(k.as_str()) } else { None }).collect()
+    }
+}
+
+/// Per-stream running accumulator used to normalize cumulative-content
+/// providers into true deltas. Pearl th-cb3c2a.
+///
+/// Some OpenAI-compatible providers (notably some LiteLLM-proxied
+/// Anthropic / Vertex configurations and Azure OpenAI under certain
+/// stream modes) emit `delta.content` chunks that contain the
+/// **entire response so far** instead of the new tail. The agent
+/// loop, the in-VM runner, and the TUI all treat each chunk as a
+/// delta and `push_str` it onto the running buffer; if the provider
+/// is actually sending cumulative chunks this produces quadratic
+/// blowup: `"I"`, `"I'll"`, `"I'll help"` accumulates to
+/// `"II'llI'll help"`, and a full 200-chunk response explodes into
+/// the prose-repeats-itself-4-times pattern observed in
+/// `~/.smooth/coding-sessions/*.json`.
+///
+/// The normalizer remembers everything it has emitted as a delta so
+/// far. For each incoming chunk:
+///   * If the chunk is the exact accumulated content (cumulative
+///     restart, common on retry chunks), it's dropped entirely.
+///   * If the chunk strictly starts with the accumulated content,
+///     only the new tail is emitted as a delta.
+///   * If the chunk doesn't start with the accumulated content,
+///     it's treated as a normal delta (the provider is well-behaved
+///     or the chunk is unrelated text like a reasoning token).
+///
+/// This is correct for both well-behaved (delta-emitting) providers
+/// and cumulative-emitting providers: a delta chunk never starts with
+/// the full accumulated buffer (it would have to be longer than the
+/// buffer for that to be coherent), so the normalizer reduces to a
+/// no-op `push_str` on well-behaved streams.
+#[derive(Default, Debug)]
+struct StreamContentNormalizer {
+    accumulated: String,
+}
+
+impl StreamContentNormalizer {
+    /// Normalize an incoming chunk against the running accumulator.
+    /// Returns the actual delta to emit, or `None` to drop the chunk.
+    fn normalize<'a>(&mut self, chunk: &'a str) -> Option<&'a str> {
+        if chunk.is_empty() {
+            return None;
+        }
+        if self.accumulated.is_empty() {
+            self.accumulated.push_str(chunk);
+            return Some(chunk);
+        }
+        // Cumulative restart — chunk is exactly what we already emitted.
+        if chunk == self.accumulated.as_str() {
+            return None;
+        }
+        // Cumulative extension — chunk = accumulated + new tail.
+        if chunk.len() > self.accumulated.len() && chunk.starts_with(self.accumulated.as_str()) {
+            let tail = &chunk[self.accumulated.len()..];
+            self.accumulated.push_str(tail);
+            return Some(tail);
+        }
+        // True delta (well-behaved provider). Just append.
+        self.accumulated.push_str(chunk);
+        Some(chunk)
+    }
+}
+
+/// Run a `StreamEvent` through the per-stream normalizers. Returns the
+/// possibly-rewritten event or `None` when the event collapsed to empty
+/// (e.g. a cumulative-restart chunk that adds nothing new).
+fn normalize_stream_event(
+    event: anyhow::Result<StreamEvent>,
+    content_norm: &mut StreamContentNormalizer,
+    tool_arg_norms: &mut std::collections::HashMap<usize, StreamContentNormalizer>,
+) -> Option<anyhow::Result<StreamEvent>> {
+    match event {
+        Ok(StreamEvent::Delta { content }) => {
+            let normalized = content_norm.normalize(&content)?;
+            Some(Ok(StreamEvent::Delta {
+                content: normalized.to_string(),
+            }))
+        }
+        Ok(StreamEvent::ToolCallArgumentsDelta { index, arguments_chunk }) => {
+            let norm = tool_arg_norms.entry(index).or_default();
+            let normalized = norm.normalize(&arguments_chunk)?;
+            Some(Ok(StreamEvent::ToolCallArgumentsDelta {
+                index,
+                arguments_chunk: normalized.to_string(),
+            }))
+        }
+        // Reasoning, tool call starts, model, usage, done, errors — pass through.
+        other => Some(other),
     }
 }
 
@@ -2196,6 +2307,151 @@ mod tests {
         assert_eq!(response.tool_calls[0].name, "write_file");
         assert_eq!(response.tool_calls[0].id, "call_abc");
         assert_eq!(response.tool_calls[0].arguments["path"], "x.rs");
+    }
+
+    // --- Pearl th-cb3c2a: cumulative-vs-delta streaming normalizer ---
+
+    #[test]
+    fn stream_content_normalizer_passes_true_deltas_through_unchanged() {
+        let mut n = StreamContentNormalizer::default();
+        assert_eq!(n.normalize("Hello"), Some("Hello"));
+        assert_eq!(n.normalize(" world"), Some(" world"));
+        assert_eq!(n.accumulated, "Hello world");
+    }
+
+    #[test]
+    fn stream_content_normalizer_strips_cumulative_chunks() {
+        // Simulates a provider that emits cumulative content per chunk —
+        // each chunk is "everything-so-far". Without the normalizer, naive
+        // push_str on each chunk would yield "II'llI'll help" (the bug we
+        // saw in ~/.smooth/coding-sessions/*.json: "II'll help you" etc.).
+        let mut n = StreamContentNormalizer::default();
+        assert_eq!(n.normalize("I"), Some("I"));
+        assert_eq!(n.normalize("I'll"), Some("'ll"));
+        assert_eq!(n.normalize("I'll help"), Some(" help"));
+        assert_eq!(n.normalize("I'll help you"), Some(" you"));
+        assert_eq!(n.accumulated, "I'll help you");
+    }
+
+    #[test]
+    fn stream_content_normalizer_drops_exact_duplicate_chunks() {
+        // Some providers send the cumulative content AGAIN after a `done`-
+        // adjacent chunk as a "final state" message. That whole chunk is
+        // already in our accumulator — drop it to avoid double-emission.
+        let mut n = StreamContentNormalizer::default();
+        n.normalize("Hello world");
+        assert_eq!(n.normalize("Hello world"), None);
+        assert_eq!(n.accumulated, "Hello world");
+    }
+
+    #[test]
+    fn stream_content_normalizer_handles_word_level_cumulative() {
+        // Regression for the exact pattern seen in the bug session:
+        //   "LetLet me me first first read read the current file again the current file again"
+        // — that's "Let", "Let me", "Let me first", "Let me first read",
+        // "Let me first read the current file again" if cumulative were
+        // misinterpreted as delta. With the normalizer, the accumulator
+        // should be exactly "Let me first read the current file again".
+        let mut n = StreamContentNormalizer::default();
+        let chunks = ["Let", "Let me", "Let me first", "Let me first read", "Let me first read the current file again"];
+        let mut emitted = String::new();
+        for c in chunks {
+            if let Some(delta) = n.normalize(c) {
+                emitted.push_str(delta);
+            }
+        }
+        assert_eq!(emitted, "Let me first read the current file again");
+        assert_eq!(n.accumulated, "Let me first read the current file again");
+    }
+
+    #[test]
+    fn stream_content_normalizer_drops_empty_chunks() {
+        let mut n = StreamContentNormalizer::default();
+        assert_eq!(n.normalize(""), None);
+        assert_eq!(n.normalize("Hello"), Some("Hello"));
+        assert_eq!(n.normalize(""), None);
+    }
+
+    #[tokio::test]
+    async fn accumulate_stream_after_normalizer_yields_clean_content_on_cumulative_provider() {
+        // End-to-end: run cumulative chunks through normalize_stream_event
+        // then through accumulate_stream_events. The final response content
+        // should be the single intended sentence, not the quadratic blowup.
+        let mut content_norm = StreamContentNormalizer::default();
+        let mut tool_norms = std::collections::HashMap::new();
+        let raw: Vec<anyhow::Result<StreamEvent>> = vec![
+            Ok(StreamEvent::Delta { content: "I".into() }),
+            Ok(StreamEvent::Delta { content: "I'll".into() }),
+            Ok(StreamEvent::Delta {
+                content: "I'll help you".into(),
+            }),
+            Ok(StreamEvent::Delta {
+                content: "I'll help you read the file".into(),
+            }),
+            Ok(StreamEvent::Done { finish_reason: "stop".into() }),
+        ];
+        let normalized: Vec<anyhow::Result<StreamEvent>> = raw
+            .into_iter()
+            .filter_map(|e| normalize_stream_event(e, &mut content_norm, &mut tool_norms))
+            .collect();
+        let stream: Pin<Box<dyn Stream<Item = anyhow::Result<StreamEvent>> + Send>> = Box::pin(futures_util::stream::iter(normalized));
+        let response = accumulate_stream_events(stream).await.expect("accumulate");
+        assert_eq!(
+            response.content, "I'll help you read the file",
+            "cumulative chunks must NOT produce 'II'llI'll help youI'll help you read the file' — see pearl th-cb3c2a"
+        );
+    }
+
+    #[tokio::test]
+    async fn accumulate_stream_after_normalizer_preserves_well_behaved_delta_provider() {
+        // The normalizer must be a no-op for well-behaved providers
+        // (true deltas). Otherwise we'd break every OpenAI / Anthropic
+        // stream we've ever shipped.
+        let mut content_norm = StreamContentNormalizer::default();
+        let mut tool_norms = std::collections::HashMap::new();
+        let raw: Vec<anyhow::Result<StreamEvent>> = vec![
+            Ok(StreamEvent::Delta { content: "Hello".into() }),
+            Ok(StreamEvent::Delta { content: " ".into() }),
+            Ok(StreamEvent::Delta { content: "world".into() }),
+            Ok(StreamEvent::Done { finish_reason: "stop".into() }),
+        ];
+        let normalized: Vec<anyhow::Result<StreamEvent>> = raw
+            .into_iter()
+            .filter_map(|e| normalize_stream_event(e, &mut content_norm, &mut tool_norms))
+            .collect();
+        let stream: Pin<Box<dyn Stream<Item = anyhow::Result<StreamEvent>> + Send>> = Box::pin(futures_util::stream::iter(normalized));
+        let response = accumulate_stream_events(stream).await.expect("accumulate");
+        assert_eq!(response.content, "Hello world");
+    }
+
+    #[test]
+    fn normalize_stream_event_normalizes_tool_call_arguments_independently_per_index() {
+        // Cumulative arguments are an even nastier failure mode than
+        // cumulative content: malformed JSON breaks the tool dispatcher
+        // entirely. Each tool-call index keeps its own accumulator.
+        let mut content_norm = StreamContentNormalizer::default();
+        let mut tool_norms: std::collections::HashMap<usize, StreamContentNormalizer> = std::collections::HashMap::new();
+        let raw: Vec<anyhow::Result<StreamEvent>> = vec![
+            Ok(StreamEvent::ToolCallArgumentsDelta {
+                index: 0,
+                arguments_chunk: r#"{"path""#.into(),
+            }),
+            Ok(StreamEvent::ToolCallArgumentsDelta {
+                index: 0,
+                arguments_chunk: r#"{"path":"a.rs"}"#.into(),
+            }),
+        ];
+        let normalized: Vec<_> = raw
+            .into_iter()
+            .filter_map(|e| normalize_stream_event(e, &mut content_norm, &mut tool_norms))
+            .collect();
+        let mut total = String::new();
+        for ev in normalized {
+            if let Ok(StreamEvent::ToolCallArgumentsDelta { arguments_chunk, .. }) = ev {
+                total.push_str(&arguments_chunk);
+            }
+        }
+        assert_eq!(total, r#"{"path":"a.rs"}"#, "tool args must not duplicate when cumulative");
     }
 
     #[tokio::test]
