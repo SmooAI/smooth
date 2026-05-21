@@ -135,6 +135,16 @@ pub struct LlmResponse {
     /// field (rare — LiteLLM and OpenAI both populate it). Pearl
     /// th-a10c2d.
     pub resolved_model: Option<String>,
+    /// Reasoning/thinking content captured from streaming
+    /// `reasoning_content` / `reasoning` deltas. Pearl th-eae0f8:
+    /// LiteLLM thinking-mode upstreams (DeepSeek R1, Anthropic
+    /// extended thinking, OpenAI o-series) REQUIRE this be passed
+    /// back on subsequent requests; failing to do so triggers a 400
+    /// "reasoning_content in the thinking mode must be passed back".
+    /// The agent loop copies this into the assistant `Message` it
+    /// appends to the conversation, and the chat builder serializes
+    /// it back into the wire request.
+    pub reasoning_content: Option<String>,
 }
 
 /// Parse the gateway's authoritative cost from an HTTP response's
@@ -248,6 +258,14 @@ struct ChatMessage {
     tool_name: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tool_calls: Vec<ChatToolCall>,
+    /// Reasoning content captured from the prior turn's response.
+    /// Pearl th-eae0f8: LiteLLM thinking-mode upstreams REQUIRE this
+    /// be replayed on assistant messages or they 400 with
+    /// "reasoning_content must be passed back in the thinking mode".
+    /// Omitted for non-assistant messages and when the prior turn
+    /// didn't produce reasoning.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_content: Option<String>,
 }
 
 /// Wire form for a chat message's `content` field. See `ChatMessage::content`.
@@ -369,6 +387,11 @@ struct ChatResponseMessage {
     content: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<ChatToolCall>>,
+    /// Reasoning/thinking content from LiteLLM thinking-mode upstreams.
+    /// Pearl th-eae0f8. LiteLLM emits both names depending on the
+    /// upstream provider; deserialize either via the alias attribute.
+    #[serde(default, alias = "reasoning")]
+    reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -713,6 +736,7 @@ impl LlmClient {
                     rate_limit: Some(rate_limit_info),
                     gateway_cost_usd,
                     resolved_model,
+                    reasoning_content: choice.message.reasoning_content.clone(),
                 });
             }
 
@@ -999,6 +1023,7 @@ impl LlmClient {
                     content,
                     tool_calls,
                     finish_reason,
+                    reasoning_content: None, // Anthropic native path: reasoning lives in `thinking` blocks within content, handled differently
                     usage: Usage {
                         prompt_tokens: anthropic_resp.usage.input_tokens,
                         completion_tokens: anthropic_resp.usage.output_tokens,
@@ -1379,6 +1404,7 @@ fn parse_sse_line(line: &str) -> Vec<anyhow::Result<StreamEvent>> {
 /// Returns error if any stream event is an error.
 pub async fn accumulate_stream_events(mut stream: Pin<Box<dyn Stream<Item = anyhow::Result<StreamEvent>> + Send>>) -> anyhow::Result<LlmResponse> {
     let mut content = String::new();
+    let mut reasoning = String::new();
     let mut finish_reason = String::from("stop");
     let mut usage = Usage::default();
     let mut resolved_model: Option<String> = None;
@@ -1394,9 +1420,15 @@ pub async fn accumulate_stream_events(mut stream: Pin<Box<dyn Stream<Item = anyh
             StreamEvent::Delta { content: delta } => {
                 content.push_str(&delta);
             }
-            StreamEvent::Reasoning { .. } => {
-                // Reasoning tokens are surfaced downstream for progress visibility
-                // but intentionally NOT accumulated into the final response content.
+            StreamEvent::Reasoning { content: delta } => {
+                // Pearl th-eae0f8: ACCUMULATE reasoning into a separate
+                // buffer so we can pass it back on the next turn.
+                // LiteLLM thinking-mode upstreams (DeepSeek R1, etc.)
+                // 400 us with "reasoning_content must be passed back"
+                // when this is missing on the assistant message replay.
+                // It does NOT go into `content` — that stays
+                // strictly the model's final answer text.
+                reasoning.push_str(&delta);
             }
             StreamEvent::ToolCallStart { index, id, name } => {
                 if !tool_call_map.contains_key(&index) {
@@ -1501,6 +1533,7 @@ pub async fn accumulate_stream_events(mut stream: Pin<Box<dyn Stream<Item = anyh
         rate_limit: None,
         gateway_cost_usd: None,
         resolved_model,
+        reasoning_content: if reasoning.is_empty() { None } else { Some(reasoning) },
     })
 }
 
@@ -1802,6 +1835,7 @@ fn to_chat_message(msg: &Message) -> ChatMessage {
         tool_call_id: msg.tool_call_id.clone(),
         tool_name,
         tool_calls,
+        reasoning_content: if msg.role == Role::Assistant { msg.reasoning_content.clone() } else { None },
     }
 }
 
@@ -1988,6 +2022,7 @@ mod tests {
                 tool_call_id: None,
                 tool_name: None,
                 tool_calls: vec![],
+                reasoning_content: None,
             }],
             max_tokens: 100,
             temperature: 0.0,
@@ -2805,6 +2840,7 @@ mod tests {
                 tool_call_id: None,
                 tool_name: None,
                 tool_calls: vec![],
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "user".into(),
@@ -2812,6 +2848,7 @@ mod tests {
                 tool_call_id: None,
                 tool_name: None,
                 tool_calls: vec![],
+                reasoning_content: None,
             },
         ];
         let mut chat_tools: Vec<ChatTool> = tools
@@ -2900,6 +2937,7 @@ mod tests {
                 tool_call_id: None,
                 tool_name: None,
                 tool_calls: vec![],
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "user".into(),
@@ -2907,6 +2945,7 @@ mod tests {
                 tool_call_id: None,
                 tool_name: None,
                 tool_calls: vec![],
+                reasoning_content: None,
             },
         ];
         let chat_tools = vec![ChatTool {

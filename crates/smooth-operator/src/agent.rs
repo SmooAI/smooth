@@ -678,9 +678,13 @@ impl Agent {
             }
 
             // If LLM returned content, add it as assistant message
-            if !response.content.is_empty() || !response.tool_calls.is_empty() {
+            if !response.content.is_empty() || !response.tool_calls.is_empty() || response.reasoning_content.is_some() {
                 let mut msg = Message::assistant(&response.content);
                 msg.tool_calls.clone_from(&response.tool_calls);
+                // Pearl th-eae0f8: preserve reasoning so the next
+                // turn's wire request includes it. LiteLLM thinking-
+                // mode upstreams 400 us without this.
+                msg.reasoning_content.clone_from(&response.reasoning_content);
                 conversation.push(msg);
             }
 
@@ -997,9 +1001,13 @@ impl Agent {
                 return Ok(conversation);
             }
 
-            if !response.content.is_empty() || !response.tool_calls.is_empty() {
+            if !response.content.is_empty() || !response.tool_calls.is_empty() || response.reasoning_content.is_some() {
                 let mut msg = Message::assistant(&response.content);
                 msg.tool_calls.clone_from(&response.tool_calls);
+                // Pearl th-eae0f8: preserve reasoning so the next
+                // turn's wire request includes it. LiteLLM thinking-
+                // mode upstreams 400 us without this.
+                msg.reasoning_content.clone_from(&response.reasoning_content);
                 conversation.push(msg);
             }
 
@@ -1422,6 +1430,7 @@ mod tests {
             rate_limit: None,
             gateway_cost_usd: None,
             resolved_model: Some("qwen3-coder-flash".into()),
+            reasoning_content: None,
         };
 
         let event = agent.model_resolution_event(&resp).expect("event on first resolution");
@@ -1448,6 +1457,7 @@ mod tests {
             rate_limit: None,
             gateway_cost_usd: None,
             resolved_model: Some("qwen3-coder-flash".into()),
+            reasoning_content: None,
         };
 
         assert!(agent.model_resolution_event(&resp).is_some(), "first time emits");
@@ -1482,6 +1492,7 @@ mod tests {
             rate_limit: None,
             gateway_cost_usd: None,
             resolved_model: Some("qwen3-coder-flash".into()),
+            reasoning_content: None,
         };
 
         assert!(agent.model_resolution_event(&resp).is_none());
@@ -1503,6 +1514,7 @@ mod tests {
             rate_limit: None,
             gateway_cost_usd: None,
             resolved_model: None,
+            reasoning_content: None,
         };
 
         assert!(agent.model_resolution_event(&resp).is_none());

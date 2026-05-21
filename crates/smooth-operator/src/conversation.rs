@@ -111,6 +111,16 @@ pub struct Message {
     pub tool_name: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<crate::tool::ToolCall>,
+    /// Reasoning/thinking content from the model (DeepSeek R1, Kimi
+    /// K2.5-thinking, MiniMax, Anthropic extended thinking, OpenAI
+    /// o-series). Pearl th-eae0f8: LiteLLM rejects subsequent requests
+    /// with 400 "reasoning_content must be passed back" if we don't
+    /// replay this on assistant messages — that's the root cause of
+    /// the bench's 0% pass rate. Captured from the streaming
+    /// `reasoning_content` / `reasoning` deltas, serialized back into
+    /// the chat request as a parallel field on the assistant message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     pub timestamp: DateTime<Utc>,
 }
 
@@ -123,6 +133,7 @@ impl Message {
             tool_call_id: None,
             tool_name: None,
             tool_calls: vec![],
+            reasoning_content: None,
             timestamp: Utc::now(),
         }
     }
@@ -135,6 +146,7 @@ impl Message {
             tool_call_id: None,
             tool_name: None,
             tool_calls: vec![],
+            reasoning_content: None,
             timestamp: Utc::now(),
         }
     }
@@ -147,6 +159,7 @@ impl Message {
             tool_call_id: None,
             tool_name: None,
             tool_calls: vec![],
+            reasoning_content: None,
             timestamp: Utc::now(),
         }
     }
@@ -159,6 +172,7 @@ impl Message {
             tool_call_id: Some(tool_call_id.into()),
             tool_name: None,
             tool_calls: vec![],
+            reasoning_content: None,
             timestamp: Utc::now(),
         }
     }
@@ -176,6 +190,7 @@ impl Message {
             tool_call_id: Some(tool_call_id.into()),
             tool_name: Some(name.into()),
             tool_calls: vec![],
+            reasoning_content: None,
             timestamp: Utc::now(),
         }
     }
