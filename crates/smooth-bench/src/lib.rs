@@ -653,6 +653,14 @@ fn strip_agent_added_tests(lang: PolyglotLang, work_dir: &Path, original: &std::
     Ok(stripped)
 }
 
+/// Public re-export of [`is_test_file`] under a more descriptive name
+/// for callers in `tui_score` who use it to scope the hash-based
+/// no-edit guard (pearl th-a5ca18 Bug 3) to non-test files.
+#[must_use]
+pub fn is_test_file_for_hash(lang: PolyglotLang, rel: &Path) -> bool {
+    is_test_file(lang, rel)
+}
+
 /// Per-language test-file naming conventions. Only matches files
 /// the agent ADDED; originals stay in place (they're excluded at a
 /// higher level via the snapshot diff).
@@ -737,13 +745,29 @@ fn list_non_hidden_files(dir: &Path) -> anyhow::Result<Vec<String>> {
 /// extract counts from its stdout. Agentic scoring — no per-language
 /// regex parsers, so new languages and test runner format drift
 /// don't require harness changes.
+///
+/// CARGO isolation (pearl th-a5ca18 Bug 3): we forcibly point
+/// `CARGO_TARGET_DIR` at a per-task `<work_dir>/target` so the
+/// machine-wide `~/.cargo/shared-target` (set in user
+/// `~/.cargo/config.toml`) can't cache a previously-compiled test
+/// binary across bench runs of the same package name. Without this,
+/// `cargo test` returned "ok" on un-edited workspaces because the
+/// cached test binary still held a previously-edited run's compiled
+/// implementation — confirmed by hand-running `cargo test` in the
+/// bench-run scratch dir with vs. without `CARGO_TARGET_DIR`
+/// override (un-edited: "10 passed" via shared cache; "10 failed
+/// (todo!() panic)" with isolated target dir). The override has no
+/// effect on non-Rust languages; setting it unconditionally is the
+/// simplest defence.
 async fn score_work_dir(lang: PolyglotLang, work_dir: &Path) -> anyhow::Result<(String, TestCounts)> {
     let argv = lang.test_command();
     let program = argv[0];
     let args = &argv[1..];
+    let isolated_target = work_dir.join("target");
     let output = Command::new(program)
         .args(args)
         .current_dir(work_dir)
+        .env("CARGO_TARGET_DIR", &isolated_target)
         .output()
         .with_context(|| format!("spawning `{}`", argv.join(" ")))?;
     let mut combined = String::new();
