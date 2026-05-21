@@ -200,6 +200,15 @@ struct ChatRequest {
     temperature: f32,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<ChatTool>,
+    /// Explicit `"auto"` when we send tools. Pearl th-67e338: small
+    /// coding models (e.g. qwen3-coder-flash) sometimes default to
+    /// emitting `<function=...>` XML in content when tool_choice is
+    /// omitted; sending `"auto"` explicitly makes the API's tool-call
+    /// path more salient for those upstreams. Skip when no tools are
+    /// attached so we don't trip OpenAI-compat shims that reject
+    /// the field without `tools`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -628,12 +637,14 @@ impl LlmClient {
             apply_cache_control(&mut chat_messages, &mut chat_tools);
         }
 
+        let tool_choice = if chat_tools.is_empty() { None } else { Some("auto".to_string()) };
         let request = ChatRequest {
             model: self.config.model.clone(),
             messages: chat_messages,
             max_tokens: self.config.max_tokens,
             temperature: self.config.temperature,
             tools: chat_tools,
+            tool_choice,
         };
 
         let url = format!("{}/chat/completions", self.config.api_url);
@@ -769,12 +780,14 @@ impl LlmClient {
         let msg_count = chat_messages.len();
         tracing::debug!(model = %self.config.model, tool_count, msg_count, "chat_stream: sending request");
 
+        let tool_choice = if chat_tools.is_empty() { None } else { Some("auto".to_string()) };
         let request = ChatRequest {
             model: self.config.model.clone(),
             messages: chat_messages,
             max_tokens: self.config.max_tokens,
             temperature: self.config.temperature,
             tools: chat_tools,
+            tool_choice,
         };
 
         let url = format!("{}/chat/completions", self.config.api_url);
@@ -1968,6 +1981,7 @@ mod tests {
             max_tokens: 100,
             temperature: 0.0,
             tools: vec![],
+            tool_choice: None,
         };
         let json = serde_json::to_string(&req).expect("serialize");
         assert!(json.contains("test-model"));
@@ -2808,6 +2822,7 @@ mod tests {
             max_tokens: 100,
             temperature: 0.0,
             tools: chat_tools,
+            tool_choice: None,
         }
     }
 
@@ -2898,6 +2913,7 @@ mod tests {
             max_tokens: 100,
             temperature: 0.0,
             tools: chat_tools,
+            tool_choice: None,
         };
         let json = serde_json::to_string(&req).expect("serialize");
         assert!(
