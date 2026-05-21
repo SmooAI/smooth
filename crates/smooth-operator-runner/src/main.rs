@@ -1339,31 +1339,41 @@ impl RunnerConfig {
 
 /// Resolve a policy TOML string from env vars, a standard path, or the
 /// permissive default. This runs before Wonk's `PolicyHolder` is built.
+///
+/// Pearl th-7b95ef: all diagnostic output goes through `tracing` (which
+/// is routed to stderr by `main`). NEVER write to stdout from here —
+/// stdout is reserved for the JSON `AgentEvent` stream and any non-JSON
+/// line on it gets dropped by the bigsmooth consumer as defense-in-depth.
+/// The hardcoded-default branch is the intended path in every dev VM, so
+/// the "env var not set" and "HARDCODED DEFAULT" messages are demoted to
+/// `debug` — they fire on every policy load (multiple times per agent
+/// turn) and used to dominate the chat transcript when bigsmooth was
+/// forwarding stderr lines verbatim.
 fn resolve_policy_toml() -> String {
     if let Ok(inline) = std::env::var("SMOOTH_POLICY_TOML") {
         if !inline.trim().is_empty() {
-            eprintln!("[runner] policy source: SMOOTH_POLICY_TOML inline ({} bytes)", inline.len());
+            tracing::info!(bytes = inline.len(), "policy source: SMOOTH_POLICY_TOML inline");
             return inline;
         }
     }
     if let Ok(file) = std::env::var("SMOOTH_POLICY_FILE") {
         match std::fs::read_to_string(&file) {
             Ok(contents) => {
-                eprintln!("[runner] policy source: SMOOTH_POLICY_FILE={file} ({} bytes)", contents.len());
+                tracing::info!(file = %file, bytes = contents.len(), "policy source: SMOOTH_POLICY_FILE");
                 return contents;
             }
             Err(e) => {
-                eprintln!("[runner] SMOOTH_POLICY_FILE={file} read failed: {e}");
+                tracing::warn!(file = %file, error = %e, "SMOOTH_POLICY_FILE read failed");
             }
         }
     } else {
-        eprintln!("[runner] SMOOTH_POLICY_FILE env var not set");
+        tracing::debug!("SMOOTH_POLICY_FILE env var not set");
     }
     if let Ok(contents) = std::fs::read_to_string("/opt/smooth/policy.toml") {
-        eprintln!("[runner] policy source: /opt/smooth/policy.toml fallback ({} bytes)", contents.len());
+        tracing::info!(bytes = contents.len(), "policy source: /opt/smooth/policy.toml fallback");
         return contents;
     }
-    eprintln!("[runner] policy source: HARDCODED DEFAULT (no SMOOTH_POLICY_TOML, SMOOTH_POLICY_FILE, or /opt/smooth/policy.toml)");
+    tracing::debug!("policy source: HARDCODED DEFAULT (no SMOOTH_POLICY_TOML, SMOOTH_POLICY_FILE, or /opt/smooth/policy.toml)");
     default_policy_toml()
 }
 
@@ -1692,24 +1702,22 @@ async fn main() {
     // (log sink). All three run as tokio tasks bound to ephemeral localhost
     // ports. The agent's tool hooks will talk to Wonk + Scribe over HTTP.
     //
-    // Diagnostic: parse the policy TOML so we can echo the network allowlist
-    // and policy source path back through stdout. This makes it possible to
-    // verify from a test (which only sees runner stdout) which policy the
-    // sandbox is actually enforcing.
+    // Diagnostic: parse the policy TOML so we can log the network allowlist
+    // and policy source. Pearl th-7b95ef — this used to go out as
+    // `AgentEvent::TokenDelta` (stdout), which made bigsmooth treat it as
+    // an LLM-authored chat fragment and persist it as `role: assistant`
+    // content. The runner's stdout channel is reserved for real agent
+    // events; diagnostic chatter goes to stderr via tracing.
     if let Ok(parsed) = smooth_policy::Policy::from_toml(&config.policy_toml) {
         let domains: Vec<String> = parsed.network.allow.iter().map(|r| r.domain.clone()).collect();
-        emit_event(&AgentEvent::TokenDelta {
-            content: format!(
-                "[runner] loaded policy: phase={}, allowed_domains=[{}], total_rules={}\n",
-                parsed.metadata.phase,
-                domains.join(", "),
-                parsed.network.allow.len()
-            ),
-        });
+        tracing::info!(
+            phase = %parsed.metadata.phase,
+            allowed_domains = %domains.join(", "),
+            total_rules = parsed.network.allow.len(),
+            "loaded policy"
+        );
     } else {
-        emit_event(&AgentEvent::TokenDelta {
-            content: format!("[runner] FAILED to parse policy TOML ({} bytes)\n", config.policy_toml.len()),
-        });
+        tracing::warn!(bytes = config.policy_toml.len(), "FAILED to parse policy TOML");
     }
 
     let cast = match spawn_cast(&config.policy_toml, &config.operator_id).await {
@@ -2146,13 +2154,13 @@ async fn main() {
                         _ => {} // Drop unknown roles.
                     }
                 }
-                eprintln!("[runner] prior history: replaying {} message(s) into conversation", messages.len());
+                tracing::info!(messages = messages.len(), "prior history: replaying into conversation");
                 agent_config = agent_config.with_prior_messages(messages);
             } else {
-                eprintln!("[runner] SMOOTH_PRIOR_HISTORY_FILE={path} did not parse as Vec<{{role,content}}>; ignoring");
+                tracing::warn!(path = %path, "SMOOTH_PRIOR_HISTORY_FILE did not parse as Vec<{{role,content}}>; ignoring");
             }
         } else {
-            eprintln!("[runner] SMOOTH_PRIOR_HISTORY_FILE={path} could not be read; ignoring");
+            tracing::warn!(path = %path, "SMOOTH_PRIOR_HISTORY_FILE could not be read; ignoring");
         }
     }
 
@@ -2186,26 +2194,28 @@ async fn main() {
     tools.add_hook(WonkHook::with_auth(&cast.wonk_url, &cast.operator_token));
     tools.add_hook(ScribeAuditHook::new(&cast.scribe_url, &config.operator_id));
 
-    // Announce the active agent + its permission shape on the stream so
-    // callers (CLI, tests, dashboards) can see what the sandbox is
-    // actually enforcing without reading env vars.
-    emit_event(&AgentEvent::TokenDelta {
-        content: format!(
-            "[runner] active role: {} (slot={:?}, allow={}, deny={})\n",
-            active_role.name,
-            active_role.slot,
-            if active_role.permissions.allow_tools.is_empty() {
-                "*".to_string()
-            } else {
-                active_role.permissions.allow_tools.join(",")
-            },
-            if active_role.permissions.deny_tools.is_empty() {
-                "-".to_string()
-            } else {
-                active_role.permissions.deny_tools.join(",")
-            },
-        ),
-    });
+    // Announce the active agent + its permission shape via tracing so
+    // operators tailing the runner's stderr / service.log can see what
+    // the sandbox is actually enforcing without reading env vars.
+    //
+    // Pearl th-7b95ef: this used to go out as `AgentEvent::TokenDelta`
+    // (stdout), which made bigsmooth persist it as `role: assistant`
+    // chat content for every agent turn. Diagnostic, not a chat token.
+    tracing::info!(
+        role = %active_role.name,
+        slot = ?active_role.slot,
+        allow = %if active_role.permissions.allow_tools.is_empty() {
+            "*".to_string()
+        } else {
+            active_role.permissions.allow_tools.join(",")
+        },
+        deny = %if active_role.permissions.deny_tools.is_empty() {
+            "-".to_string()
+        } else {
+            active_role.permissions.deny_tools.join(",")
+        },
+        "active role"
+    );
 
     // Run the agent on a channel and re-emit every AgentEvent as JSON-lines.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();

@@ -991,34 +991,43 @@ pub async fn dispatch_ws_task(state: &AppState, opts: DispatchOptions) {
     }
 }
 
-/// Strip ANSI CSI escape sequences (`\x1b[...m`) and the bare `\x1b`
-/// from a string. Used to flatten colorized tracing output from the
-/// operator-runner before pattern-matching, so a line like
-/// `\x1b[2m2026-…\x1b[0m \x1b[32m INFO\x1b[0m smooth_operator_runner:`
-/// matches a plain ` INFO ` filter.
-fn strip_ansi_escapes(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = String::with_capacity(s.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == 0x1b {
-            // Skip ESC + optional `[` + zero or more params + final byte.
-            i += 1;
-            if i < bytes.len() && bytes[i] == b'[' {
-                i += 1;
-                while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
-                    i += 1;
-                }
-                if i < bytes.len() {
-                    i += 1;
-                }
-            }
-            continue;
-        }
-        out.push(bytes[i] as char);
-        i += 1;
+// Pearl th-7b95ef: `strip_ansi_escapes` was used to flatten the
+// runner's colorized tracing output before pattern-matching to suppress
+// it from the chat-stream forward. The forwarder now drops runner
+// stderr unconditionally (it's never model content), so the ANSI
+// matcher is obsolete and was removed.
+
+/// Outcome of inspecting a single line from the operator-runner's
+/// stdout stream. Stdout is contractually the JSON `AgentEvent`
+/// transport; anything else is a contract violation and must NOT be
+/// forwarded to the chat-token stream (where it would be persisted
+/// as fake `role: assistant` content). Pearl th-7b95ef.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RunnerStdoutLine {
+    /// Line parsed as JSON. `serde_json::Value` for downstream
+    /// dispatch; tag/payload extraction happens at the call site so
+    /// this helper stays cheap.
+    Json,
+    /// Empty/whitespace-only line — skip silently.
+    Empty,
+    /// Anything else. The caller MUST drop it (warn-log only); do not
+    /// forward as a `TokenDelta`.
+    NonJson,
+}
+
+/// Classify a single runner-stdout line for downstream dispatch.
+/// Pulled out so the "drop non-JSON, never forward as chat content"
+/// invariant has a direct unit test. See pearl th-7b95ef.
+pub(crate) fn classify_runner_stdout_line(line: &str) -> RunnerStdoutLine {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return RunnerStdoutLine::Empty;
     }
-    out
+    if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+        RunnerStdoutLine::Json
+    } else {
+        RunnerStdoutLine::NonJson
+    }
 }
 
 /// Find the NATIVE operator-runner binary (built for the host
@@ -2276,11 +2285,18 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         // Same max-across-Completed strategy for cache-hit token counts.
         // Pearl th-litellm-caching-client.
         let mut final_cached_tokens: u64 = 0;
-        for line in stdout.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
+        for raw_line in stdout.lines() {
+            // Pearl th-7b95ef: classify before parsing so the
+            // "non-JSON → drop" contract is enforced through the
+            // unit-tested helper rather than ad-hoc per call site.
+            let line = match classify_runner_stdout_line(raw_line) {
+                RunnerStdoutLine::Empty => continue,
+                RunnerStdoutLine::Json => raw_line.trim(),
+                RunnerStdoutLine::NonJson => {
+                    tracing::warn!(task_id = %tid, line = %raw_line, "non-JSON line on runner stdout (dropped)");
+                    continue;
+                }
+            };
             match serde_json::from_str::<serde_json::Value>(line) {
                 Ok(event) => {
                     let Some(ty) = event.get("type").and_then(|v| v.as_str()) else {
@@ -2361,23 +2377,23 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
                         _ => {}
                     }
                 }
-                Err(_) => {
-                    // Non-JSON line — forward as TokenDelta so the user can
-                    // see any debugging output the runner prints directly.
-                    let _ = event_tx.send(ServerEvent::TokenDelta {
-                        task_id: tid.clone(),
-                        content: format!("{line}\n"),
-                    });
+                Err(e) => {
+                    // Unreachable in practice: `classify_runner_stdout_line`
+                    // above already drops non-JSON. Kept as defense-in-depth
+                    // so a future refactor that bypasses the classifier
+                    // can't accidentally forward bad lines as TokenDelta.
+                    tracing::warn!(task_id = %tid, line = %line, error = %e, "non-JSON line slipped past classifier (dropped)");
                 }
             }
         }
         if !stderr.is_empty() {
-            // Runner stderr is tracing output + NarcHook alert summaries.
-            // Forward it so operators can audit what the in-VM stack saw.
-            let _ = event_tx.send(ServerEvent::TokenDelta {
-                task_id: tid.clone(),
-                content: format!("[runner stderr]\n{stderr}"),
-            });
+            // Pearl th-7b95ef: runner stderr is diagnostic tracing
+            // output + NarcHook summaries — never LLM content. It used
+            // to be forwarded as `[runner stderr]\n…` TokenDelta, which
+            // appended the whole blob to the session's last assistant
+            // message. Log to service.log for audit and drop from chat.
+            tracing::warn!(task_id = %tid, stderr_bytes = stderr.len(), "runner stderr (sandboxed path) — see service.log for body");
+            tracing::warn!(task_id = %tid, stderr = %stderr, "runner stderr body");
         }
 
         let _ = event_tx.send(ServerEvent::ToolCallComplete {
@@ -2861,10 +2877,16 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
             let mut final_cached_tokens: u64 = 0;
             let mut first_line_logged = false;
             while let Ok(Some(line)) = out_reader.next_line().await {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
+                // Pearl th-7b95ef: classify first, drop non-JSON so it
+                // can't be forwarded as fake assistant chat content.
+                let trimmed = match classify_runner_stdout_line(&line) {
+                    RunnerStdoutLine::Empty => continue,
+                    RunnerStdoutLine::Json => line.trim(),
+                    RunnerStdoutLine::NonJson => {
+                        tracing::warn!(task_id = %tid_out, line = %line, "non-JSON line on runner stdout (dropped)");
+                        continue;
+                    }
+                };
                 if !first_line_logged {
                     first_line_logged = true;
                     let preview: String = trimmed.chars().take(160).collect();
@@ -2969,12 +2991,12 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
                             _ => {} // informational; not forwarded
                         }
                     }
-                    Err(_) => {
-                        // Non-JSON — forward as TokenDelta for visibility.
-                        let _ = event_tx_out.send(ServerEvent::TokenDelta {
-                            task_id: tid_out.clone(),
-                            content: format!("{trimmed}\n"),
-                        });
+                    Err(e) => {
+                        // Unreachable in practice: classify_runner_stdout_line
+                        // above already drops non-JSON. Kept as defense-in-
+                        // depth so a future refactor that bypasses the
+                        // classifier can't accidentally forward bad lines.
+                        tracing::warn!(task_id = %tid_out, line = %trimmed, error = %e, "non-JSON line slipped past classifier (dropped)");
                     }
                 }
             }
@@ -2987,7 +3009,6 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
             )
         });
 
-        let event_tx_err = event_tx.clone();
         let tid_err = tid.clone();
         let stderr_task = tokio::spawn(async move {
             while let Ok(Some(line)) = err_reader.next_line().await {
@@ -3001,37 +3022,18 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
                 // will still show up there.
                 tracing::warn!(task_id = %tid_err, line = %line, "runner stderr");
 
-                // Suppress chat-stream noise:
-                //
-                //   `[cast-summary] {...}` — per-task in-VM cast
-                //   telemetry (Narc alert counts, Scribe entries,
-                //   Goalie audit). Useful for the bench harness and
-                //   post-mortem (still in service.log via tracing
-                //   above) but useless to the user reading the chat;
-                //   it dumped a multi-KB JSON blob after every reply.
-                //
-                //   Plain tracing-formatted lines (timestamp + level
-                //   + target) — these are the runner's own tracing
-                //   subscriber output. We log them via the
-                //   tracing::warn! above; piping them straight into
-                //   the user's chat as TokenDeltas is duplicate noise.
-                // Strip ANSI escape sequences before matching — the
-                // runner's tracing subscriber emits color-coded level
-                // markers (`\x1b[32m INFO\x1b[0m`), so a plain
-                // `contains(" INFO ")` misses them and the line leaks
-                // into the chat anyway.
-                let plain = strip_ansi_escapes(trimmed);
-                let is_cast_summary = plain.starts_with("[cast-summary]");
-                let looks_like_tracing =
-                    plain.contains(" INFO ") || plain.contains(" WARN ") || plain.contains(" ERROR ") || plain.contains(" DEBUG ") || plain.contains(" TRACE ");
-                if is_cast_summary || looks_like_tracing {
-                    continue;
-                }
-
-                let _ = event_tx_err.send(ServerEvent::TokenDelta {
-                    task_id: tid_err.clone(),
-                    content: format!("[runner] {line}\n"),
-                });
+                // Pearl th-7b95ef: runner stderr is diagnostic
+                // tracing output + NarcHook summaries — it is NEVER
+                // model-authored chat content. Everything stderr says
+                // is already mirrored to service.log via the
+                // `tracing::warn!` above, so we drop it from the
+                // session transcript entirely. Previously a subset of
+                // stderr lines was forwarded as `[runner] {line}`
+                // TokenDelta, which made every policy/role/history
+                // diagnostic land in the user's chat as `role:
+                // assistant` content (visible as `[runner] [runner]
+                // SMOOTH_POLICY_FILE env var not set` etc. in
+                // `~/.smooth/coding-sessions/*.json`).
             }
         });
 
@@ -5831,5 +5833,68 @@ mod tests {
         let resp: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
         assert_eq!(resp["ok"], false);
         assert!(resp["data"]["error"].as_str().unwrap().contains("not found"));
+    }
+
+    // ===== pearl th-7b95ef: runner-stdout classification =====
+    //
+    // The dispatch loop used to forward any non-JSON line on the
+    // runner's stdout as a `ServerEvent::TokenDelta`, which was then
+    // persisted as `role: assistant` chat content. That made every
+    // session JSON file open with multi-KB blobs of `[runner]
+    // SMOOTH_POLICY_FILE env var not set` etc. — see
+    // `~/.smooth/coding-sessions/08f084fc-…json` from the smoking
+    // gun. These tests pin the new contract: non-JSON stdout is
+    // classified `NonJson` and the caller must drop it.
+
+    #[test]
+    fn classify_runner_stdout_line_recognizes_valid_agent_event_json() {
+        // Realistic AgentEvent the runner emits constantly.
+        let line = r#"{"type":"TokenDelta","content":"hello"}"#;
+        assert_eq!(classify_runner_stdout_line(line), RunnerStdoutLine::Json);
+    }
+
+    #[test]
+    fn classify_runner_stdout_line_recognizes_json_with_surrounding_whitespace() {
+        let line = "  {\"type\":\"Started\",\"agent_id\":\"a\"}  ";
+        assert_eq!(classify_runner_stdout_line(line), RunnerStdoutLine::Json);
+    }
+
+    #[test]
+    fn classify_runner_stdout_line_treats_empty_as_empty() {
+        assert_eq!(classify_runner_stdout_line(""), RunnerStdoutLine::Empty);
+        assert_eq!(classify_runner_stdout_line("   "), RunnerStdoutLine::Empty);
+        assert_eq!(classify_runner_stdout_line("\t\n"), RunnerStdoutLine::Empty);
+    }
+
+    #[test]
+    fn classify_runner_stdout_line_flags_bracket_runner_prefix_as_non_json() {
+        // The exact regression that motivated pearl th-7b95ef. This
+        // text used to be wrapped as TokenDelta and persisted as
+        // assistant content. The new contract is: drop with a warn.
+        let line = "[runner] SMOOTH_POLICY_FILE env var not set";
+        assert_eq!(classify_runner_stdout_line(line), RunnerStdoutLine::NonJson);
+
+        let line = "[runner] loaded policy: phase=execute, allowed_domains=[openrouter.ai], total_rules=5";
+        assert_eq!(classify_runner_stdout_line(line), RunnerStdoutLine::NonJson);
+
+        let line = "[runner] active role: fixer (slot=Coding, allow=*, deny=-)";
+        assert_eq!(classify_runner_stdout_line(line), RunnerStdoutLine::NonJson);
+    }
+
+    #[test]
+    fn classify_runner_stdout_line_flags_arbitrary_text_as_non_json() {
+        // Stray `println!("debug: hit hot path")` style noise must NOT
+        // be forwarded — it would land in the chat transcript.
+        assert_eq!(classify_runner_stdout_line("debug: hit hot path"), RunnerStdoutLine::NonJson);
+        // Partial JSON (common print-debugging mistake) is also dropped.
+        assert_eq!(classify_runner_stdout_line(r#"{"type":"Token"#), RunnerStdoutLine::NonJson);
+    }
+
+    #[test]
+    fn classify_runner_stdout_line_accepts_completed_event_with_metrics() {
+        // Smoke-test the most stat-heavy event the runner emits so we
+        // don't regress on serde-json strictness later.
+        let line = r#"{"type":"Completed","agent_id":"op-1","iterations":3,"cost_usd":0.04,"prompt_tokens":1024,"completion_tokens":256,"cached_tokens":512}"#;
+        assert_eq!(classify_runner_stdout_line(line), RunnerStdoutLine::Json);
     }
 }
