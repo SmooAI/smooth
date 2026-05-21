@@ -414,10 +414,14 @@ pub async fn run_human_loop<D: DriverModel>(driver: &TmuxDriver, model: &D, task
             DriverDecision::Send(text) => {
                 turns += 1;
                 if text.trim().is_empty() {
-                    // Empty drive message — treat as "user has
-                    // nothing to add, agent should keep going". Send
-                    // a bare newline so the TUI advances.
-                    driver.send("").context("send empty turn")?;
+                    // Empty drive message — treat as "user has nothing
+                    // to add, agent should keep going". Skip the send
+                    // entirely: tmux load-buffer rejects empty payloads
+                    // ("no buffer NAME") so we can't paste-buffer here.
+                    // Next iteration's wait_for_idle gives the agent
+                    // more time to produce output, then re-prompts the
+                    // driver with a richer pane snapshot.
+                    tracing::debug!(turns, "human_driver: empty driver reply, skipping send");
                 } else {
                     // Flatten newlines to ` | ` — the TUI submits on
                     // every newline, so a multi-paragraph driver
