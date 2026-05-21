@@ -138,6 +138,22 @@ impl SessionManager {
     /// Returns an error if the home directory cannot be determined or the
     /// directory cannot be created.
     pub fn new() -> anyhow::Result<Self> {
+        // Pearl th-11cb9b: when SMOOTH_BENCH_FRESH_SESSION is set, use
+        // a unique per-process sessions dir under $TMPDIR (or /tmp) so
+        // bench tasks never inherit each other's session state.
+        // Without this, every bench task's `th code` boot loads the
+        // most-recent session from ~/.smooth/coding-sessions and
+        // contaminates the prompt with prior-task content.
+        if std::env::var("SMOOTH_BENCH_FRESH_SESSION").is_ok() {
+            let pid = std::process::id();
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let sessions_dir = std::env::temp_dir().join(format!("smooth-bench-sessions-{pid}-{nanos}"));
+            fs::create_dir_all(&sessions_dir)?;
+            return Ok(Self { sessions_dir });
+        }
         let home = dirs_next::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
         let sessions_dir = home.join(".smooth").join("coding-sessions");
         fs::create_dir_all(&sessions_dir)?;

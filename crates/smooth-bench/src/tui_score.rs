@@ -70,6 +70,15 @@ pub struct TuiTaskConfig {
     /// Operators can set this to `false` via the `--allow-no-edit-
     /// passes` CLI flag for paranoid debugging only.
     pub require_edits_for_pass: bool,
+    /// Optional `--model NAME` override forwarded to `th code`. None
+    /// means use the agent's default routing (`smooth-coding` for the
+    /// fixer role). Set to a Smoo semantic alias (e.g.
+    /// `smooth-coding-claude`) or a concrete model id to test a
+    /// specific routing target without changing LiteLLM config. Pearl
+    /// th-67e338 — useful when the default smooth-coding primary
+    /// doesn't reliably use native tool_calls and we want a baseline
+    /// number from a tool-call-friendly model.
+    pub under_test_model: Option<String>,
 }
 
 impl Default for TuiTaskConfig {
@@ -90,6 +99,7 @@ impl Default for TuiTaskConfig {
             debug_pane_log: false,
             stuck_means_failed: true,
             require_edits_for_pass: true,
+            under_test_model: None,
         }
     }
 }
@@ -162,7 +172,20 @@ pub async fn run_polyglot_task_via_tui<D: DriverModel>(lang: PolyglotLang, task:
     let pre_hashes = hash_editable_files(lang, &setup.work_dir).context("hashing editable files before agent run")?;
 
     let session = format!("{}-{}-{}", cfg.tmux_session_prefix, lang.dataset_dir(), task);
-    let shell_cmd = format!("{} code", shell_escape(&cfg.th_binary));
+    // Pearl th-11cb9b: SMOOTH_BENCH_FRESH_SESSION makes smooth-code's
+    // SessionManager write to a per-process tmp dir instead of
+    // ~/.smooth/coding-sessions/. Without this, every bench task
+    // inherited (via auto-resume + session-store proximity) prior
+    // tasks' state, so the agent's prompt context was contaminated
+    // with content from earlier benches — affine-cipher sessions
+    // ended up discussing book-store math because that was the most
+    // recent task's content. The env var is opt-in so non-bench
+    // callers keep the normal persistent-session behavior.
+    let env_prefix = "SMOOTH_BENCH_FRESH_SESSION=1";
+    let shell_cmd = match cfg.under_test_model.as_deref() {
+        Some(model) => format!("{} {} code --model {}", env_prefix, shell_escape(&cfg.th_binary), shell_escape(model)),
+        None => format!("{} {} code", env_prefix, shell_escape(&cfg.th_binary)),
+    };
 
     // Build the optional per-task pane-debug log BEFORE spawning so
     // the boot screen + a `start_command` failure both end up in the
