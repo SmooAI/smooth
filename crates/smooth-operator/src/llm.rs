@@ -779,6 +779,17 @@ impl LlmClient {
         let tool_count = chat_tools.len();
         let msg_count = chat_messages.len();
         tracing::debug!(model = %self.config.model, tool_count, msg_count, "chat_stream: sending request");
+        // Bench-debug instrumentation (pearl th-67e338): print the
+        // tool count to stderr so a bench operator can confirm tools
+        // are actually being attached to the request. Gated behind
+        // SMOOTH_BENCH_TRACE_TOOLS so production runs aren't noisy.
+        if std::env::var("SMOOTH_BENCH_TRACE_TOOLS").is_ok() {
+            let first_tool = chat_tools.first().map(|t| t.function.name.as_str()).unwrap_or("<none>");
+            eprintln!(
+                "[SMOOTH_BENCH_TRACE] chat_stream: model={} tools={} first_tool={} msgs={}",
+                self.config.model, tool_count, first_tool, msg_count,
+            );
+        }
 
         let tool_choice = if chat_tools.is_empty() { None } else { Some("auto".to_string()) };
         let request = ChatRequest {

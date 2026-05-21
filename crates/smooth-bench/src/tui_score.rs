@@ -181,7 +181,7 @@ pub async fn run_polyglot_task_via_tui<D: DriverModel>(lang: PolyglotLang, task:
     // ended up discussing book-store math because that was the most
     // recent task's content. The env var is opt-in so non-bench
     // callers keep the normal persistent-session behavior.
-    let env_prefix = "SMOOTH_BENCH_FRESH_SESSION=1";
+    let env_prefix = "SMOOTH_BENCH_FRESH_SESSION=1 SMOOTH_BENCH_TRACE_TOOLS=1";
     let shell_cmd = match cfg.under_test_model.as_deref() {
         Some(model) => format!("{} {} code --model {}", env_prefix, shell_escape(&cfg.th_binary), shell_escape(model)),
         None => format!("{} {} code", env_prefix, shell_escape(&cfg.th_binary)),
