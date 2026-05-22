@@ -70,6 +70,16 @@ pub enum ServerEvent {
         task_id: String,
         content: String,
     },
+    /// Iteration boundary signal — fires when the agent starts a new
+    /// LLM round (e.g. ASSESS → THINK → EXECUTE workflow phases, or
+    /// simply turn N+1 of the agent loop). Clients listening for this
+    /// reset their streaming-message accumulator so deltas from
+    /// successive iterations don't concatenate into one giant bubble.
+    /// Pearl th-486bd0.
+    LlmIteration {
+        task_id: String,
+        iteration: u32,
+    },
     ToolCallStart {
         task_id: String,
         tool_name: String,

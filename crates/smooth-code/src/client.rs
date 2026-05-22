@@ -73,6 +73,14 @@ pub enum ServerEvent {
         task_id: String,
         content: String,
     },
+    /// Iteration boundary — fires when the agent enters a new LLM
+    /// round. Pearl th-486bd0: clients use this to reset their
+    /// streaming-message accumulator so successive iterations don't
+    /// pile into one giant assistant bubble.
+    LlmIteration {
+        task_id: String,
+        iteration: u32,
+    },
     ToolCallStart {
         task_id: String,
         tool_name: String,

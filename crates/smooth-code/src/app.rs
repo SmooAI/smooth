@@ -1140,6 +1140,17 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
     while let Some(event) = events.recv().await {
         let agent_event = match event {
             ServerEvent::TokenDelta { content, .. } => Some(AgentEvent::TokenDelta { content }),
+            // Pearl th-486bd0: iteration boundary — reset the
+            // streaming ChatMessage so deltas from the next agent
+            // iteration land in a fresh bubble, not concatenated
+            // into the prior iteration's content.
+            ServerEvent::LlmIteration { iteration, .. } => {
+                if iteration > 1 {
+                    let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+                    s.start_iteration();
+                }
+                None
+            }
             ServerEvent::ToolCallStart { tool_name, arguments, .. } => {
                 next_id += 1;
                 let id = format!("tc-{next_id}");

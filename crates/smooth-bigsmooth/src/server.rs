@@ -2371,9 +2371,22 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
                             let host = event.get("host_port").and_then(serde_json::Value::as_u64).unwrap_or(0) as u16;
                             tracing::info!(task_id = tid, guest_port = guest, host_port = host, "port forward active");
                         }
-                        // Started / LlmRequest / LlmResponse / etc. are
-                        // informational — we don't forward them yet but can
-                        // later if clients want richer visibility.
+                        // Pearl th-486bd0: bridge LlmRequest and PhaseStart
+                        // to ServerEvent::LlmIteration so the TUI can reset
+                        // its streaming bubble at iteration boundaries.
+                        // Without this the deltas from N agent iterations
+                        // pile into one ChatMessage, producing the giant
+                        // mixed-content assistant bubbles with stream
+                        // duplications observed in the bench matrix.
+                        "LlmRequest" | "PhaseStart" => {
+                            let iteration = event.get("iteration").and_then(serde_json::Value::as_u64).unwrap_or(0) as u32;
+                            let _ = event_tx.send(ServerEvent::LlmIteration {
+                                task_id: tid.clone(),
+                                iteration,
+                            });
+                        }
+                        // LlmResponse / Started / etc. are informational —
+                        // not currently forwarded.
                         _ => {}
                     }
                 }
@@ -2987,6 +3000,18 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
                                         message: msg.to_string(),
                                     });
                                 }
+                            }
+                            // Pearl th-486bd0: bridge LlmRequest / PhaseStart
+                            // as ServerEvent::LlmIteration so the TUI can
+                            // reset its streaming bubble at iteration
+                            // boundaries (direct-dispatch sibling of the
+                            // sandboxed parser above).
+                            "LlmRequest" | "PhaseStart" => {
+                                let iteration = event.get("iteration").and_then(serde_json::Value::as_u64).unwrap_or(0) as u32;
+                                let _ = event_tx_out.send(ServerEvent::LlmIteration {
+                                    task_id: tid_out.clone(),
+                                    iteration,
+                                });
                             }
                             _ => {} // informational; not forwarded
                         }
