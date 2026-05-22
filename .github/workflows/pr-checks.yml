@@ -16,7 +16,7 @@ jobs:
             - uses: actions/checkout@v4
 
             - name: Install system dependencies
-              run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libcap-ng-dev pkg-config
+              run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libcap-ng-dev pkg-config protobuf-compiler
 
             - uses: dtolnay/rust-toolchain@stable
               with:
