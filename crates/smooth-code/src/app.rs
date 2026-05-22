@@ -454,6 +454,11 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
             // alias when known.
             let model_part = if alias.is_empty() { String::new() } else { format!(" • {alias}") };
             state.add_message(ChatMessage::system(format!("→ iteration {iteration}{model_part}")));
+            // Pearl th-486bd0: start a fresh streaming ChatMessage
+            // for this iteration so the next batch of TokenDeltas
+            // doesn't concatenate into the prior iteration's bubble
+            // (which produced `III'll help` / `LetLet me me` dupes).
+            state.start_iteration();
         }
         AgentEvent::CheckpointSaved { iteration, .. } => {
             state.add_message(ChatMessage::system(format!("✓ snapshot taken (iter {iteration})")));
@@ -485,12 +490,22 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
             state.finish_streaming();
             state.add_message(ChatMessage::system(format!("Error: {message}")));
         }
-        // Remaining events (LlmRequest, LlmResponse, ToolCallStart,
-        // ToolCallComplete, Delegation*, PortForwardActive, …) are
-        // either informational duplicates of state we already track
-        // (tool calls land on the assistant message; LLM round-trips
-        // would be too noisy to surface per-call), or routed via a
-        // direct state mutation in run_agent_streaming.
+        // Pearl th-486bd0: non-workflow agent paths (single-Agent
+        // loop without coding_workflow phases) emit LlmRequest at
+        // each iteration boundary but no PhaseStart. Treat LlmRequest
+        // as a fallback iteration signal: start a fresh streaming
+        // bubble so subsequent TokenDeltas don't concatenate with
+        // the prior iteration's content. Iteration #1 is a no-op
+        // because the prior empty stub from Started gets recycled.
+        AgentEvent::LlmRequest { iteration, .. } if iteration > 1 => {
+            state.start_iteration();
+        }
+        // Remaining events (LlmResponse, ToolCallStart, ToolCallComplete,
+        // Delegation*, PortForwardActive, …) are either informational
+        // duplicates of state we already track (tool calls land on the
+        // assistant message; LLM responses are already streamed via
+        // TokenDelta), or routed via a direct state mutation in
+        // run_agent_streaming.
         _ => {}
     }
 }

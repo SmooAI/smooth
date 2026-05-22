@@ -592,6 +592,37 @@ impl AppState {
         }
         self.thinking = false;
     }
+
+    /// Start a fresh streaming ChatMessage for a new agent iteration
+    /// within the same user turn. Pearl th-486bd0: coding-workflow
+    /// runs emit multiple LlmRequest/PhaseStart events per user
+    /// message (ASSESS → THINK → EXECUTE → VERIFY phases, or even
+    /// just a multi-iteration agent loop). `start_streaming` is
+    /// idempotent and would have appended each iteration's stream
+    /// content into the SAME ChatMessage — producing massive
+    /// concatenated walls of text with duplications across iteration
+    /// boundaries (the `III'll help` / `LetLet me me` patterns
+    /// observed in the bench). This finishes the current streaming
+    /// message (only when it has content; an empty stub gets dropped
+    /// so we don't litter the chat with empty bubbles) and starts a
+    /// fresh one.
+    pub fn start_iteration(&mut self) {
+        // If the last message is a streaming assistant message AND
+        // has no content, drop it — happens when LlmRequest fires
+        // before any TokenDelta on the prior iteration (e.g. the
+        // iteration was tool-call only). Otherwise finalize it.
+        if let Some(last) = self.messages.last() {
+            if last.role == ChatRole::Assistant && last.streaming && last.content.is_empty() {
+                self.messages.pop();
+            } else {
+                self.finish_streaming();
+            }
+        }
+        let mut msg = ChatMessage::assistant("");
+        msg.streaming = true;
+        self.add_message(msg);
+        self.thinking = true;
+    }
 }
 
 #[cfg(test)]
