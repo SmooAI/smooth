@@ -44,7 +44,7 @@ jobs:
                   cache: "pnpm"
 
             - name: Install system dependencies
-              run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libcap-ng-dev pkg-config
+              run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libcap-ng-dev pkg-config protobuf-compiler
 
             - name: Setup Rust toolchain
               uses: dtolnay/rust-toolchain@stable
@@ -169,7 +169,7 @@ jobs:
                   # libcap-ng-dev: linker needs `-lcap-ng` — microsandbox's
                   # Linux-only msb_krun_devices uses libcap-ng for CAP_*
                   # capability management in the VM host shim.
-                  sudo apt-get install -y pkg-config libdbus-1-dev libcap-ng-dev
+                  sudo apt-get install -y pkg-config libdbus-1-dev libcap-ng-dev protobuf-compiler
 
 
             - name: Install pnpm
