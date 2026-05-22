@@ -354,6 +354,7 @@ async fn run_score_tui(args: ScoreTuiArgs) -> Result<()> {
         debug_pane_log: args.debug,
         stuck_means_failed: !args.allow_stuck_passes,
         require_edits_for_pass: !args.allow_no_edit_passes,
+        under_test_model: None,
     };
 
     let cfg = TuiSweepConfig {

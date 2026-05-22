@@ -314,6 +314,34 @@ enum Commands {
         #[command(subcommand)]
         cmd: SkillsCommands,
     },
+    /// Inspect the LLM cast — model aliases and the live model groups
+    /// the configured provider exposes (e.g. llm.smoo.ai).
+    Cast {
+        #[command(subcommand)]
+        cmd: CastCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum CastCommands {
+    /// List live model groups exposed by the configured LiteLLM
+    /// provider via `GET /v1/models`. Useful for confirming deploys,
+    /// debugging routing, and copying alias names. Pearl th-2b5f63.
+    Models {
+        /// Provider id to query. Defaults to the provider backing the
+        /// `default` routing slot (the one `th routing show` highlights).
+        /// Pass an explicit id (e.g. `smooai-gateway`, `openrouter`)
+        /// when multiple providers are configured.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Emit JSON `{"data":[{"id":...}]}` instead of the colorized
+        /// list. Stable shape for scripts.
+        #[arg(long)]
+        json: bool,
+        /// Case-insensitive substring filter applied to model ids.
+        #[arg(long)]
+        filter: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1085,6 +1113,7 @@ async fn main() -> Result<()> {
         Some(Commands::Service { cmd }) => cmd_service(cmd),
         Some(Commands::Bench { cmd }) => cmd_bench(cmd),
         Some(Commands::Skills { cmd }) => cmd_skills(cmd),
+        Some(Commands::Cast { cmd }) => cmd_cast(cmd).await,
         Some(Commands::Prime) => cmd_prime(),
         Some(_) => {
             println!("Command not yet implemented. Coming soon!");
@@ -4870,6 +4899,381 @@ async fn cmd_routing(cmd: RoutingCommands) -> Result<()> {
     }
 
     Ok(())
+}
+
+// ── `th cast` — inspect the LLM cast ───────────────────────────────
+
+/// `th cast models` — list live model groups from the configured
+/// provider's `GET /v1/models` endpoint. Pearl th-2b5f63.
+async fn cmd_cast(cmd: CastCommands) -> Result<()> {
+    match cmd {
+        CastCommands::Models { provider, json, filter } => {
+            // `cmd_cast_models` uses `reqwest::blocking`, which panics
+            // if dropped inside a tokio runtime context. Hop onto a
+            // dedicated blocking thread to keep the runtime happy.
+            tokio::task::spawn_blocking(move || cmd_cast_models(provider.as_deref(), json, filter.as_deref()))
+                .await
+                .context("cast models task panicked")?
+        }
+    }
+}
+
+/// Sniff out the LiteLLM-compatible `/v1/models` endpoint for a
+/// `ProviderConfig`. Most provider URLs in the registry already end in
+/// `/v1` (OpenAI-compatible), so we just append `/models`. If the URL
+/// already ends in `/models` we leave it alone. Trailing slashes are
+/// normalized so we don't produce `//models`.
+fn models_url_for(api_url: &str) -> String {
+    let trimmed = api_url.trim_end_matches('/');
+    if trimmed.ends_with("/models") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/models")
+    }
+}
+
+/// Strip ASCII control characters (0x00-0x1F) other than TAB / LF / CR
+/// from `s`. LiteLLM occasionally returns responses with embedded
+/// NULs / SOH bytes that break strict JSON parsers; tolerate them.
+fn strip_control_chars(s: &str) -> String {
+    s.chars().filter(|c| !matches!(*c as u32, 0..=8 | 11 | 12 | 14..=31)).collect()
+}
+
+/// Extract every `"id": "..."` substring from `body` as a fallback
+/// when strict JSON parsing fails (e.g. truncated response). Returns
+/// model ids in the order they appear, deduped. No regex crate — we
+/// scan bytes for the `"id"` key followed by a string value.
+fn extract_model_ids_lossy(body: &str) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let bytes = body.as_bytes();
+    let mut i = 0usize;
+    while i + 4 < bytes.len() {
+        // Look for `"id"` key — must be preceded by `{`, `,`, or whitespace,
+        // and followed by optional whitespace, `:`, optional whitespace, `"`.
+        if &bytes[i..i + 4] == b"\"id\"" {
+            let mut j = i + 4;
+            // skip whitespace
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b':' {
+                j += 1;
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'"' {
+                    j += 1;
+                    let start = j;
+                    // read until closing `"` (no escape handling — model ids
+                    // don't contain quotes in any provider we hit)
+                    while j < bytes.len() && bytes[j] != b'"' {
+                        if bytes[j] == b'\\' && j + 1 < bytes.len() {
+                            j += 2;
+                            continue;
+                        }
+                        j += 1;
+                    }
+                    // Only record if we actually saw a closing quote —
+                    // an unterminated string at EOF means the response
+                    // was truncated mid-value and we should NOT count it.
+                    if j < bytes.len() && bytes[j] == b'"' && j > start {
+                        if let Ok(id) = std::str::from_utf8(&bytes[start..j]) {
+                            if !id.is_empty() && seen.insert(id.to_string()) {
+                                ids.push(id.to_string());
+                            }
+                        }
+                    }
+                    i = j.saturating_add(1);
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    ids
+}
+
+/// Parse `"data": [{"id": ...}]` from a `/v1/models` response body.
+/// Returns `(strict_ids, lossy_ids)`. `strict_ids` may be empty if the
+/// body isn't valid JSON; `lossy_ids` is always best-effort from the
+/// byte scan. Callers compare counts and surface a note if they differ.
+fn parse_models_response(body: &str) -> (Vec<String>, Vec<String>) {
+    let cleaned = strip_control_chars(body);
+    let strict_ids: Vec<String> = serde_json::from_str::<serde_json::Value>(&cleaned)
+        .ok()
+        .as_ref()
+        .and_then(|v| v.get("data"))
+        .and_then(|d| d.as_array())
+        .map(|arr| arr.iter().filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(String::from)).collect())
+        .unwrap_or_default();
+    let lossy_ids = extract_model_ids_lossy(&cleaned);
+    (strict_ids, lossy_ids)
+}
+
+/// Apply substring filter (case-insensitive) and sort alphabetically.
+fn filter_and_sort(mut ids: Vec<String>, filter: Option<&str>) -> Vec<String> {
+    if let Some(pat) = filter {
+        let needle = pat.to_lowercase();
+        ids.retain(|id| id.to_lowercase().contains(&needle));
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+#[allow(clippy::too_many_lines)]
+fn cmd_cast_models(provider_override: Option<&str>, json_out: bool, filter: Option<&str>) -> Result<()> {
+    let providers_path = dirs_next::home_dir()
+        .map(|h| h.join(".smooth/providers.json"))
+        .context("cannot determine home directory")?;
+
+    if !providers_path.exists() {
+        eprintln!("not authed \u{2014} run th auth login");
+        std::process::exit(2);
+    }
+
+    let registry = smooth_operator::providers::ProviderRegistry::load_from_file(&providers_path)?;
+
+    // Resolve provider id: explicit --provider wins, else the default
+    // routing slot's provider, else the first registered provider.
+    let provider_id = if let Some(p) = provider_override {
+        p.to_string()
+    } else {
+        let default_id = registry.routing.default.provider.clone();
+        if registry.get_provider(&default_id).is_some() {
+            default_id
+        } else if let Some(first) = registry.list_providers().first().map(|s| (*s).to_string()) {
+            first
+        } else {
+            eprintln!("not authed \u{2014} run th auth login");
+            std::process::exit(2);
+        }
+    };
+
+    let Some(config) = registry.get_provider(&provider_id) else {
+        eprintln!("provider '{provider_id}' not configured \u{2014} run th auth login");
+        std::process::exit(2);
+    };
+
+    if config.api_key.is_empty() && provider_id != "ollama" {
+        eprintln!("not authed \u{2014} run th auth login");
+        std::process::exit(2);
+    }
+
+    let url = models_url_for(&config.api_url);
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .context("building http client")?;
+
+    let mut req = client.get(&url);
+    if !config.api_key.is_empty() {
+        req = req.bearer_auth(&config.api_key);
+    }
+
+    let resp = req.send().with_context(|| format!("GET {url}"))?;
+    let status = resp.status();
+    let body = resp.text().unwrap_or_default();
+
+    if !status.is_success() {
+        let snippet: String = body.chars().take(200).collect();
+        eprintln!("GET {url} \u{2014} {status}");
+        if !snippet.is_empty() {
+            eprintln!("{snippet}");
+        }
+        std::process::exit(1);
+    }
+
+    let (strict_ids, lossy_ids) = parse_models_response(&body);
+
+    // Prefer strict; fall back to lossy if strict came up empty.
+    let chosen = if strict_ids.is_empty() { lossy_ids.clone() } else { strict_ids.clone() };
+    let chosen = filter_and_sort(chosen, filter);
+
+    if json_out {
+        // Stable shape: `{"data": [{"id": "..."}]}`.
+        let payload = serde_json::json!({
+            "data": chosen.iter().map(|id| serde_json::json!({ "id": id })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string(&payload)?);
+        return Ok(());
+    }
+
+    // Colorized list output with the gradient wordmark header.
+    println!();
+    println!("  {} {}", gradient::smooth(), "cast \u{00b7} models".bold());
+    println!("  {}", config.api_url.dimmed());
+    println!();
+
+    if chosen.is_empty() {
+        println!("  {}", "no models returned".yellow());
+    } else {
+        for id in &chosen {
+            println!("  {id}");
+        }
+    }
+
+    println!();
+    let display_url = config.api_url.trim_end_matches('/');
+    println!("  {} models on {}", chosen.len().to_string().cyan().bold(), display_url.cyan());
+
+    // Surface a discrepancy between strict + lossy counts — a sign the
+    // response was truncated or malformed.
+    if !strict_ids.is_empty() && lossy_ids.len() > strict_ids.len() {
+        println!(
+            "  {} strict-parsed {}, byte-scan found {} \u{2014} response may be truncated",
+            "!".yellow().bold(),
+            strict_ids.len(),
+            lossy_ids.len()
+        );
+    } else if strict_ids.is_empty() && !lossy_ids.is_empty() {
+        println!(
+            "  {} strict JSON parse failed, fell back to byte scan ({} ids)",
+            "!".yellow().bold(),
+            lossy_ids.len()
+        );
+    }
+    println!();
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod cast_models_tests {
+    use super::{extract_model_ids_lossy, filter_and_sort, models_url_for, parse_models_response, strip_control_chars};
+
+    #[test]
+    fn models_url_appends_models_when_missing() {
+        assert_eq!(models_url_for("https://llm.smoo.ai/v1"), "https://llm.smoo.ai/v1/models");
+        assert_eq!(models_url_for("https://llm.smoo.ai/v1/"), "https://llm.smoo.ai/v1/models");
+    }
+
+    #[test]
+    fn models_url_leaves_already_models_alone() {
+        assert_eq!(models_url_for("https://llm.smoo.ai/v1/models"), "https://llm.smoo.ai/v1/models");
+        assert_eq!(models_url_for("https://llm.smoo.ai/v1/models/"), "https://llm.smoo.ai/v1/models");
+    }
+
+    #[test]
+    fn strip_control_chars_removes_nuls_and_soh() {
+        let s = "abc\x00def\x01ghi\njkl\t";
+        let cleaned = strip_control_chars(s);
+        // 0x00 and 0x01 stripped; \n and \t preserved.
+        assert_eq!(cleaned, "abcdefghi\njkl\t");
+    }
+
+    #[test]
+    fn extract_model_ids_lossy_picks_up_ids_in_truncated_json() {
+        let body = r#"{"data":[{"id":"smooth-coding","object":"model"},{"id":"smooth-reasoning""#;
+        let ids = extract_model_ids_lossy(body);
+        assert_eq!(ids, vec!["smooth-coding".to_string(), "smooth-reasoning".to_string()]);
+    }
+
+    #[test]
+    fn extract_model_ids_lossy_dedupes() {
+        let body = r#"[{"id":"a"},{"id":"a"},{"id":"b"}]"#;
+        let ids = extract_model_ids_lossy(body);
+        assert_eq!(ids, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn parse_models_response_strict_matches_lossy_on_clean_json() {
+        let body = r#"{"data":[{"id":"smooth-coding"},{"id":"smooth-judge"}]}"#;
+        let (strict, lossy) = parse_models_response(body);
+        assert_eq!(strict.len(), 2);
+        assert_eq!(lossy.len(), 2);
+        assert!(strict.contains(&"smooth-coding".to_string()));
+        assert!(strict.contains(&"smooth-judge".to_string()));
+    }
+
+    #[test]
+    fn parse_models_response_recovers_from_control_chars() {
+        // Embed a 0x00 in the middle — strict parse should still
+        // succeed because we strip control chars before parsing.
+        let body = "{\"data\":[{\"id\":\"smooth-coding\"}\x00,{\"id\":\"smooth-judge\"}]}";
+        let (strict, _) = parse_models_response(body);
+        assert_eq!(strict.len(), 2);
+    }
+
+    #[test]
+    fn parse_models_response_lossy_when_strict_fails() {
+        // Truncated body — strict parse fails, byte scan recovers.
+        let body = r#"{"data":[{"id":"smooth-coding"},{"id":"smooth-rea"#;
+        let (strict, lossy) = parse_models_response(body);
+        assert!(strict.is_empty());
+        assert_eq!(lossy, vec!["smooth-coding".to_string()]);
+    }
+
+    #[test]
+    fn filter_and_sort_orders_alphabetically() {
+        let ids = vec!["zebra".to_string(), "apple".to_string(), "mango".to_string()];
+        let out = filter_and_sort(ids, None);
+        assert_eq!(out, vec!["apple", "mango", "zebra"]);
+    }
+
+    #[test]
+    fn filter_and_sort_substring_case_insensitive() {
+        let ids = vec!["smooth-coding".to_string(), "smooth-judge".to_string(), "claude-sonnet-4".to_string()];
+        let out = filter_and_sort(ids, Some("SMOOTH"));
+        assert_eq!(out, vec!["smooth-coding", "smooth-judge"]);
+    }
+
+    #[test]
+    fn filter_and_sort_dedupes_after_sort() {
+        let ids = vec!["a".to_string(), "b".to_string(), "a".to_string()];
+        let out = filter_and_sort(ids, None);
+        assert_eq!(out, vec!["a", "b"]);
+    }
+
+    /// End-to-end against a hand-rolled HTTP server: GET /v1/models
+    /// returns a known body, we hit it with the same blocking reqwest
+    /// client used by the real command, then run the response through
+    /// parse_models_response + filter_and_sort. Verifies the wire
+    /// path, sort, filter, and JSON shape all line up.
+    #[test]
+    fn end_to_end_against_mock_server() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let url = format!("http://{addr}/v1/models");
+
+        let handle = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 2048];
+            let _ = sock.read(&mut buf);
+            let body = r#"{"data":[{"id":"smooth-judge"},{"id":"smooth-coding"},{"id":"claude-sonnet-4"}]}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            sock.write_all(resp.as_bytes()).expect("write");
+        });
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("client");
+        let resp = client.get(&url).bearer_auth("test-key").send().expect("send");
+        assert!(resp.status().is_success());
+        let body = resp.text().expect("body");
+        let (strict, _) = parse_models_response(&body);
+        let sorted = filter_and_sort(strict, Some("smooth"));
+        assert_eq!(sorted, vec!["smooth-coding", "smooth-judge"]);
+
+        // JSON shape: `{"data":[{"id":...}]}`
+        let json = serde_json::json!({
+            "data": sorted.iter().map(|id| serde_json::json!({ "id": id })).collect::<Vec<_>>(),
+        });
+        let out = serde_json::to_string(&json).expect("json");
+        assert_eq!(out, r#"{"data":[{"id":"smooth-coding"},{"id":"smooth-judge"}]}"#);
+
+        handle.join().expect("server thread");
+    }
 }
 
 #[allow(clippy::too_many_lines)]
