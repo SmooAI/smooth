@@ -194,6 +194,15 @@ struct ScoreTuiArgs {
     /// debugging.
     #[arg(long, default_value_t = false)]
     allow_no_edit_passes: bool,
+
+    /// Pass `--model NAME` through to `th code` so the under-test
+    /// agent uses a specific Smoo alias / model id instead of the
+    /// `smooth-coding` default. Useful for proving the harness end-
+    /// to-end against a tool-call-friendly model (e.g.
+    /// `smooth-coding-claude`) when the default primary is still
+    /// emitting pseudo-XML. Pearl th-67e338.
+    #[arg(long)]
+    under_test_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
@@ -354,7 +363,7 @@ async fn run_score_tui(args: ScoreTuiArgs) -> Result<()> {
         debug_pane_log: args.debug,
         stuck_means_failed: !args.allow_stuck_passes,
         require_edits_for_pass: !args.allow_no_edit_passes,
-        under_test_model: None,
+        under_test_model: args.under_test_model.clone(),
     };
 
     let cfg = TuiSweepConfig {

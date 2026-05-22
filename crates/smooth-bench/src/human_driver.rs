@@ -36,6 +36,12 @@ use crate::tmux_driver::TmuxDriver;
 pub enum DriverDecision {
     /// Type this message verbatim into the TUI.
     Send(String),
+    /// The driver wants to let the agent keep going (no input this
+    /// turn). Triggered by the literal `WAIT` token. Pearl
+    /// th-driver-hallucination — earlier the driver would fill quiet
+    /// turns with invented first-person narration; `WAIT` is the
+    /// explicit "I have nothing to say, give the agent more time."
+    Wait,
     /// The driver believes the task is finished successfully — stop
     /// the loop and let the bench score the workspace.
     Complete,
@@ -61,6 +67,14 @@ impl DriverDecision {
         }
         if upper.contains("TASK_STUCK") {
             return Self::Stuck;
+        }
+        // Pearl th-driver-hallucination: standalone `WAIT` means
+        // "agent still working, give it more time". Accept it as
+        // exact match (whole-line, case-insensitive) so we don't
+        // confuse a question containing the word "wait" with a real
+        // wait directive.
+        if upper == "WAIT" {
+            return Self::Wait;
         }
         // Strip a leading code fence if the model wraps the message —
         // some chat models default to triple-backtick wrapping. We
@@ -94,6 +108,17 @@ fn strip_code_fence(s: &str) -> &str {
 /// `max_turns` — total turn cap.
 #[must_use]
 pub fn build_driver_prompt(task: &str, pane: &str, turn_idx: usize, max_turns: usize) -> String {
+    // Pearl th-driver-hallucination: strip the user-side ("You:") of the
+    // captured conversation before showing it to the driver. Seeing its
+    // own prior turns let the driver continue the user-narrative —
+    // emitting things like "Okay, I will read INSTRUCTIONS.md for you."
+    // followed by "Okay, I have read INSTRUCTIONS.md. It says: ..." with
+    // entirely invented file contents. Every "User" line below acted as
+    // a template the model auto-completed. By showing the driver ONLY
+    // the assistant's output, it can no longer pretend to be the
+    // assistant — the only way to drive progress is to ask the real
+    // assistant a question.
+    let agent_only = strip_user_turns_from_pane(pane);
     format!(
         "You are simulating a NON-TECHNICAL human user testing an AI coding assistant in a chat-style TUI.\n\
          You type plain English messages and press Enter to send. That's it. You are NOT a power user; you do NOT have a shell, file access, or any direct way to read or edit files. The AI assistant is the only one that can do those things — you must ask it to.\n\n\
@@ -101,14 +126,43 @@ pub fn build_driver_prompt(task: &str, pane: &str, turn_idx: usize, max_turns: u
          - Reply with the EXACT TEXT you would type into the chat box, nothing else. No preamble, no quotes, no code fences, no commentary.\n\
          - NEVER start a message with `/`. Slash commands (e.g. /open, /read, /edit, /run, /help) do NOT exist in this TUI — they will be rejected as unknown commands. You have NO direct file access or shell access; only the agent under test does.\n\
          - To get the assistant to do something, ASK in plain English. Example — wrong: `/read INSTRUCTIONS.md`. Right: `Please read INSTRUCTIONS.md and tell me what it says.`\n\
-         - The assistant replies in plain prose. Read what it just said (in the terminal capture below) and reply naturally to it.\n\
-         - Only two special tokens exist. Send `TASK_COMPLETE` on its own line when you're confident the task is done and tests pass. Send `TASK_STUCK` on its own line when the assistant is not making progress.\n\n\
+         - The assistant replies in plain prose. Read what it just said (below) and reply naturally to it.\n\
+         - CRITICAL: never role-play the assistant. Do NOT type messages like \"Okay, I will read it\", \"Okay, I have read it, it says...\", \"I'll edit the file now\", or any first-person narration of actions YOU don't take. You only type questions / requests to the assistant; YOU do not read files, edit code, or run tests — the assistant does. If you find yourself describing what you did, STOP and instead ask the assistant about it.\n\
+         - If the assistant appears to still be working (mid-sentence, mid-tool-call, no clear prompt for input), reply with the single token `WAIT` to let it keep going.\n\
+         - Only two terminal tokens exist. Send `TASK_COMPLETE` on its own line when you're confident the task is done and tests pass. Send `TASK_STUCK` on its own line when the assistant is not making progress.\n\n\
          Task you're asking the assistant to solve:\n\n\
          {task}\n\n\
-         What's currently visible in the assistant's terminal (turn {turn_idx} of {max_turns}):\n\n\
-         {pane}\n\n\
-         Your next message (plain English, no leading `/`):"
+         The assistant's most recent output (turn {turn_idx} of {max_turns}):\n\n\
+         {agent_only}\n\n\
+         Your next message (plain English, no leading `/`, no first-person action narration):"
     )
+}
+
+/// Strip user-side turns from a `tmux capture-pane` snapshot before
+/// feeding it to the driver. The `smooth-code` TUI prefixes every
+/// human-side submission with `You:` on its own line and the
+/// assistant's replies with `Smooth:` (or `System:`). Anything
+/// between a `You:` marker and the next `Smooth:`/`System:` marker is
+/// the driver's own past turn — drop it so the driver can't
+/// auto-complete the narrative. Pearl th-driver-hallucination.
+#[must_use]
+pub fn strip_user_turns_from_pane(pane: &str) -> String {
+    let mut out: Vec<&str> = Vec::with_capacity(pane.lines().count());
+    let mut in_user_block = false;
+    for line in pane.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("You:") {
+            in_user_block = true;
+            continue;
+        }
+        if trimmed.starts_with("Smooth:") || trimmed.starts_with("System:") || trimmed.starts_with("Assistant:") {
+            in_user_block = false;
+        }
+        if !in_user_block {
+            out.push(line);
+        }
+    }
+    out.join("\n")
 }
 
 /// Build the reinforcement prompt sent when the driver model
@@ -410,6 +464,14 @@ pub async fn run_human_loop<D: DriverModel>(driver: &TmuxDriver, model: &D, task
                     exit: LoopExit::Stuck,
                     final_pane,
                 });
+            }
+            DriverDecision::Wait => {
+                // Driver wants the agent to keep going. Skip the
+                // send, loop back to wait_for_idle. Counts as a turn
+                // so we still hit max_turns eventually. Pearl
+                // th-driver-hallucination.
+                turns += 1;
+                tracing::debug!(turns, "human_driver: WAIT — letting agent continue");
             }
             DriverDecision::Send(text) => {
                 turns += 1;
