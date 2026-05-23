@@ -1124,24 +1124,68 @@ impl LlmClient {
 
         let url = format!("{}/messages", self.config.api_url);
 
-        let resp = self
-            .client
-            .post(&url)
-            .header("x-api-key", &self.config.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| {
-                let mut chain = vec![format!("{e}")];
-                let mut source: &dyn std::error::Error = &e;
-                while let Some(s) = source.source() {
-                    chain.push(format!("{s}"));
-                    source = s;
-                }
-                anyhow::anyhow!("HTTP request failed: {}", chain.join(" → "))
-            })?;
+        // Pearl th-ceadff: retry the initial POST on 429 / 5xx with
+        // exponential backoff seeded from Anthropic's `retry-after`
+        // header. Anthropic returns 429 when the per-minute token
+        // budget is exceeded — bench tasks hit the lowest-tier limit
+        // (30k input tokens/min) within ~2 prompts because each task
+        // turn replays the full prior_history. Without retry every
+        // 429 surfaces as a fatal error to the agent loop, which the
+        // workflow then re-dispatches as a fresh runner — wasting
+        // budget on the same retry storm. The retry happens BEFORE
+        // we start consuming the bytes_stream so partial-token loss
+        // is impossible.
+        const MAX_RETRIES: u32 = 5;
+        const BASE_BACKOFF_MS: u64 = 1_000;
+        let mut attempt: u32 = 0;
+        let resp = loop {
+            attempt += 1;
+            let resp = self
+                .client
+                .post(&url)
+                .header("x-api-key", &self.config.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .json(&request_body)
+                .send()
+                .await
+                .map_err(|e| {
+                    let mut chain = vec![format!("{e}")];
+                    let mut source: &dyn std::error::Error = &e;
+                    while let Some(s) = source.source() {
+                        chain.push(format!("{s}"));
+                        source = s;
+                    }
+                    anyhow::anyhow!("HTTP request failed: {}", chain.join(" → "))
+                })?;
+
+            let status = resp.status();
+            let retryable = status.as_u16() == 429 || (500..600).contains(&status.as_u16());
+            if status.is_success() || !retryable || attempt >= MAX_RETRIES {
+                break resp;
+            }
+
+            // Honor Anthropic's `retry-after` if present (seconds, integer).
+            // Cap at 60s to keep individual waits bounded — repeated 429s
+            // with long retry-after will exhaust MAX_RETRIES quickly and
+            // surface as a normal error rather than hanging the agent.
+            let header_wait_ms = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .map(|secs| secs.saturating_mul(1_000).min(60_000));
+            let backoff_ms = header_wait_ms.unwrap_or_else(|| BASE_BACKOFF_MS.saturating_mul(1u64 << (attempt - 1).min(5)));
+            tracing::warn!(
+                attempt,
+                max_retries = MAX_RETRIES,
+                status = %status,
+                backoff_ms,
+                "Anthropic API throttle/error — backing off and retrying"
+            );
+            drop(resp);
+            tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+        };
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -1154,11 +1198,11 @@ impl LlmClient {
                 let dump_path = dump_dir.join(format!("{ts}-anthropic-{}.json", status.as_u16()));
                 let dump_contents = format!("// status={status}\n// body={body}\n{req_json}\n");
                 let _ = std::fs::write(&dump_path, dump_contents);
-                tracing::error!(status = %status, response_body = %body, dump = %dump_path.display(), "Anthropic stream request failed (full request dumped)");
+                tracing::error!(status = %status, response_body = %body, dump = %dump_path.display(), "Anthropic stream request failed after {attempt} attempt(s) (full request dumped)");
             } else {
-                tracing::error!(status = %status, response_body = %body, "Anthropic stream request failed");
+                tracing::error!(status = %status, response_body = %body, "Anthropic stream request failed after {attempt} attempt(s)");
             }
-            anyhow::bail!("Anthropic API error {status}: {body}");
+            anyhow::bail!("Anthropic API error {status} after {attempt} attempt(s): {body}");
         }
 
         let byte_stream = resp.bytes_stream();
