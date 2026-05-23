@@ -106,6 +106,31 @@ fn strip_code_fence(s: &str) -> &str {
 /// `pane` — the current visible TUI output (`tmux capture-pane -p`).
 /// `turn_idx` — 1-based turn counter (used for the stuck heuristic).
 /// `max_turns` — total turn cap.
+/// Pearl th-44a61f: the TUI shows explicit markers while the agent is
+/// still working — `Thinking...`, `⠋ Generating...` (with any braille
+/// spinner glyph U+2800–U+28FF), and the `[runner stderr] ...` lines
+/// that fire while the runner subprocess is alive. If any of those
+/// appear in the captured pane, the agent is mid-turn and the driver
+/// should NOT fire its next message — doing so spawns a fresh runner
+/// that interrupts the live one. Used by `run_human_loop`'s active-
+/// wait extension to keep polling past `wait_for_idle`'s pane-stable
+/// signal until the real work is done.
+#[must_use]
+pub fn pane_shows_agent_activity(pane: &str) -> bool {
+    if pane.contains("Thinking...") || pane.contains("Generating...") {
+        return true;
+    }
+    // Any braille spinner glyph anywhere is a strong signal — the TUI
+    // uses U+2800–U+28FF for its streaming animation and they don't
+    // appear in agent prose. Cheap scan: bail on first hit.
+    for ch in pane.chars() {
+        if ('\u{2800}'..='\u{28FF}').contains(&ch) {
+            return true;
+        }
+    }
+    false
+}
+
 #[must_use]
 pub fn build_driver_prompt(task: &str, pane: &str, turn_idx: usize, max_turns: usize) -> String {
     // Pearl th-driver-hallucination: strip the user-side ("You:") of the
@@ -403,7 +428,7 @@ pub async fn run_human_loop<D: DriverModel>(driver: &TmuxDriver, model: &D, task
 
     loop {
         // Wait for the TUI to react to the last message we sent.
-        let Ok(pane) = driver.wait_for_idle(cfg.idle_dwell, cfg.idle_poll, cfg.per_turn_timeout) else {
+        let Ok(mut pane) = driver.wait_for_idle(cfg.idle_dwell, cfg.idle_poll, cfg.per_turn_timeout) else {
             // Idle timeout — score whatever's on the pane.
             let last = driver.capture().unwrap_or_default();
             return Ok(LoopResult {
@@ -412,6 +437,41 @@ pub async fn run_human_loop<D: DriverModel>(driver: &TmuxDriver, model: &D, task
                 final_pane: last,
             });
         };
+        // Pearl th-44a61f: pane-stable does NOT mean agent-done. Claude can
+        // pause 3-5s between tool calls (waiting on tool result, model
+        // response, etc.) without producing any pane output — the
+        // 2s-default idle_dwell fires while the agent is mid-iteration.
+        // Each premature driver send spawns a NEW runner that interrupts
+        // the previous one, pollutes the workspace context, and prevents
+        // any single agent run from reaching the write phase. Recognize
+        // the TUI's active-work markers ("Thinking...", "Generating..."
+        // with leading braille spinner glyphs ⠋-⠿) and keep waiting
+        // while either is on the pane. Bounded by per_turn_timeout so a
+        // truly stuck agent still terminates the loop.
+        let mut activity_polls = 0u32;
+        while pane_shows_agent_activity(&pane) {
+            activity_polls += 1;
+            std::thread::sleep(cfg.idle_dwell);
+            match driver.wait_for_idle(cfg.idle_dwell, cfg.idle_poll, cfg.per_turn_timeout) {
+                Ok(refreshed) => pane = refreshed,
+                Err(_) => {
+                    let last = driver.capture().unwrap_or_default();
+                    return Ok(LoopResult {
+                        turns,
+                        exit: LoopExit::IdleTimeout,
+                        final_pane: last,
+                    });
+                }
+            }
+            // Hard cap: even with activity markers, after 5 reaps cut
+            // the loop loose. Five `idle_dwell + per_turn_timeout`
+            // waits is enough to detect either a finished turn or a
+            // wedged agent — beyond that we'd rather report what we
+            // have than spin forever.
+            if activity_polls >= 5 {
+                break;
+            }
+        }
         final_pane = pane.clone();
 
         if turns >= cfg.max_turns {
@@ -517,6 +577,38 @@ pub async fn run_human_loop<D: DriverModel>(driver: &TmuxDriver, model: &D, task
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn pane_shows_agent_activity_detects_thinking_text() {
+        assert!(pane_shows_agent_activity("Smooth: Thinking...\n┌ ▶ Message ┐"));
+    }
+
+    #[test]
+    fn pane_shows_agent_activity_detects_generating_text() {
+        assert!(pane_shows_agent_activity("⠧ Generating...\nstreaming content"));
+    }
+
+    #[test]
+    fn pane_shows_agent_activity_detects_braille_spinner_alone() {
+        // Spinner glyph without "Generating" / "Thinking" — covers
+        // the case where the TUI animates a bare spinner during tool
+        // execution (no surrounding label text).
+        assert!(pane_shows_agent_activity("agent: fixer | ⠹ | spend: $0.012"));
+        assert!(pane_shows_agent_activity("first line\n⠿ working...\nlast"));
+    }
+
+    #[test]
+    fn pane_shows_agent_activity_false_on_idle_input_prompt() {
+        // Normal idle pane: status dot ●, prompt visible, no spinner.
+        let pane = " agent: fixer | smooth-coding | tokens: 0 | spend: $0 | ● | Ctrl+C quit\n┌ ▶ Message ┐\n│         │\n└──────────┘";
+        assert!(!pane_shows_agent_activity(pane));
+    }
+
+    #[test]
+    fn pane_shows_agent_activity_false_on_completed_assistant_reply() {
+        let pane = "Smooth:\nI read INSTRUCTIONS.md. The task is to implement an affine cipher.\n agent: fixer | smooth-coding | spend: $0.04 | ● | Ctrl+C quit";
+        assert!(!pane_shows_agent_activity(pane));
+    }
 
     #[test]
     fn flatten_for_tui_collapses_newlines_to_pipe_separator() {
