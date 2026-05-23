@@ -374,6 +374,23 @@ impl Default for LoopConfig {
 /// Errors only on tmux failure or driver-LLM failure. Sentinel exits
 /// and turn caps are returned as `Ok(LoopResult)`.
 pub async fn run_human_loop<D: DriverModel>(driver: &TmuxDriver, model: &D, task: &str, task_prompt: &str, cfg: &LoopConfig) -> Result<LoopResult> {
+    // Pearl th-bench-agent-pin: bench tasks are coding work, not Q&A.
+    // The TUI's chief-LLM intent classifier was routing seeded task
+    // prompts to `oracle` (Reasoning slot, read-only — deny=edit_file
+    // /write_file/apply_patch/bash), so the agent could read
+    // INSTRUCTIONS.md + the test file but never edit the solution
+    // file. Pin `fixer` up-front via the /agent slash command so every
+    // bench task runs under the full-tool coding role regardless of
+    // how the chief classifies the prompt. Slash commands from the
+    // driver model itself are still filtered out below — this is the
+    // ONE legitimate slash command in a bench run and it goes through
+    // the unfiltered seed path.
+    driver.send("/agent fixer").context("pinning bench agent to fixer")?;
+    // Brief settle so the TUI processes /agent before the task message
+    // arrives; without it the two `You:` submissions race and the TUI
+    // may interleave them.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
     // Turn 1: send the seeded task prompt to the TUI. Flatten as a
     // defence-in-depth — `build_prompt` should already return a
     // single line, but if a caller passes multi-line text the TUI
