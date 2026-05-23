@@ -5997,6 +5997,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "urlencoding",
+ "walkdir",
 ]
 
 [[package]]
