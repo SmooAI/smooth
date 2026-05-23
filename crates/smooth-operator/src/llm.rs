@@ -781,6 +781,15 @@ impl LlmClient {
         messages: &[&Message],
         tools: &[ToolSchema],
     ) -> anyhow::Result<Pin<Box<dyn Stream<Item = anyhow::Result<StreamEvent>> + Send>>> {
+        // Pearl th-366aa8: dispatch on api_format so Anthropic-native
+        // providers go through `/v1/messages` SSE instead of the
+        // OpenAI-compat `/chat/completions` shim. The shim mangles
+        // Claude's native tool_use blocks, which caused Claude to
+        // score 0/6 in the bench matrix.
+        if let ApiFormat::Anthropic = self.config.api_format {
+            return self.chat_anthropic_stream(messages, tools).await;
+        }
+
         let mut chat_messages: Vec<ChatMessage> = messages.iter().map(|m| to_chat_message(m)).collect();
 
         let mut chat_tools: Vec<ChatTool> = tools
@@ -1068,6 +1077,161 @@ impl LlmClient {
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Anthropic API request failed after retries")))
     }
 
+    /// Send a streaming chat completion request using the Anthropic native
+    /// `/v1/messages` SSE API. Pearl th-366aa8.
+    ///
+    /// Anthropic SSE uses standard `event: NAME\ndata: JSON\n\n` framing.
+    /// We translate each event into the `StreamEvent` shape the agent loop
+    /// already consumes (Delta, Reasoning, ToolCallStart,
+    /// ToolCallArgumentsDelta, Usage, Model, Done) so the downstream
+    /// accumulator and tool dispatcher need no further changes.
+    ///
+    /// # Errors
+    /// Returns error if the API call fails. Individual stream items may
+    /// also contain errors for malformed event blocks.
+    async fn chat_anthropic_stream(
+        &self,
+        messages: &[&Message],
+        tools: &[ToolSchema],
+    ) -> anyhow::Result<Pin<Box<dyn Stream<Item = anyhow::Result<StreamEvent>> + Send>>> {
+        let (system, anthropic_messages) = convert_messages_to_anthropic(messages);
+
+        let anthropic_tools: Vec<AnthropicTool> = tools
+            .iter()
+            .map(|t| AnthropicTool {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                input_schema: t.parameters.clone(),
+            })
+            .collect();
+
+        let request = AnthropicRequest {
+            model: self.config.model.clone(),
+            max_tokens: self.config.max_tokens,
+            system,
+            messages: anthropic_messages,
+            tools: anthropic_tools,
+        };
+
+        // Add `stream: true` to the request body. AnthropicRequest doesn't
+        // carry the flag in its typed form (the non-streaming path doesn't
+        // need it) — patch the JSON object on the wire instead.
+        let mut request_body = serde_json::to_value(&request)?;
+        request_body
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("serialized Anthropic request is not a JSON object"))?
+            .insert("stream".into(), serde_json::Value::Bool(true));
+
+        let url = format!("{}/messages", self.config.api_url);
+
+        let resp = self
+            .client
+            .post(&url)
+            .header("x-api-key", &self.config.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| {
+                let mut chain = vec![format!("{e}")];
+                let mut source: &dyn std::error::Error = &e;
+                while let Some(s) = source.source() {
+                    chain.push(format!("{s}"));
+                    source = s;
+                }
+                anyhow::anyhow!("HTTP request failed: {}", chain.join(" → "))
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            let req_json = serde_json::to_string_pretty(&request_body).unwrap_or_default();
+            if let Some(home) = dirs_next::home_dir() {
+                let dump_dir = home.join(".smooth/llm-errors");
+                let _ = std::fs::create_dir_all(&dump_dir);
+                let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3f");
+                let dump_path = dump_dir.join(format!("{ts}-anthropic-{}.json", status.as_u16()));
+                let dump_contents = format!("// status={status}\n// body={body}\n{req_json}\n");
+                let _ = std::fs::write(&dump_path, dump_contents);
+                tracing::error!(status = %status, response_body = %body, dump = %dump_path.display(), "Anthropic stream request failed (full request dumped)");
+            } else {
+                tracing::error!(status = %status, response_body = %body, "Anthropic stream request failed");
+            }
+            anyhow::bail!("Anthropic API error {status}: {body}");
+        }
+
+        let byte_stream = resp.bytes_stream();
+        let (tx, rx) = tokio::sync::mpsc::channel::<anyhow::Result<StreamEvent>>(256);
+
+        tokio::spawn(async move {
+            let mut buffer = String::new();
+            let mut stream = byte_stream;
+            // Track per-content-block kind so we know how to interpret
+            // input_json_delta vs text_delta.
+            let mut block_kinds: std::collections::HashMap<usize, AnthropicBlockKind> = std::collections::HashMap::new();
+            // Track usage from message_start so we can emit a complete
+            // Usage event at message_stop (message_start carries
+            // input_tokens; message_delta usage carries final
+            // output_tokens).
+            let mut prompt_tokens: u32 = 0;
+            let mut completion_tokens: u32 = 0;
+            let mut stop_reason: Option<String> = None;
+
+            const CHUNK_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+            loop {
+                let chunk_result = match tokio::time::timeout(CHUNK_IDLE_TIMEOUT, stream.next()).await {
+                    Ok(Some(r)) => r,
+                    Ok(None) => break,
+                    Err(_) => {
+                        let _ = tx
+                            .send(Err(anyhow::anyhow!("Anthropic stream idle timeout: no data for {CHUNK_IDLE_TIMEOUT:?}")))
+                            .await;
+                        return;
+                    }
+                };
+                let chunk: Bytes = match chunk_result {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = tx.send(Err(anyhow::anyhow!("Anthropic stream read error: {e}"))).await;
+                        return;
+                    }
+                };
+
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                // Anthropic SSE event blocks are separated by blank
+                // lines (`\n\n`). Drain complete blocks from the buffer.
+                while let Some(sep) = buffer.find("\n\n") {
+                    let block = buffer[..sep].to_string();
+                    buffer = buffer[sep + 2..].to_string();
+                    let events = parse_anthropic_sse_block(&block, &mut block_kinds, &mut prompt_tokens, &mut completion_tokens, &mut stop_reason);
+                    for ev in events {
+                        if tx.send(ev).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+
+            // Trailing block without final blank line — rare, but
+            // handle for robustness.
+            let remaining = std::mem::take(&mut buffer);
+            let remaining = remaining.trim();
+            if !remaining.is_empty() {
+                let events = parse_anthropic_sse_block(remaining, &mut block_kinds, &mut prompt_tokens, &mut completion_tokens, &mut stop_reason);
+                for ev in events {
+                    if tx.send(ev).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
     pub fn config(&self) -> &LlmConfig {
         &self.config
     }
@@ -1282,6 +1446,203 @@ fn normalize_stream_event(
 
 /// Parse a single SSE line into zero or more `StreamEvent`s.
 ///
+/// Per-content-block kind for an Anthropic streaming response. Pearl
+/// th-366aa8. Anthropic SSE emits `content_block_start` once per block
+/// with the block type (text, tool_use, thinking), then a sequence of
+/// `content_block_delta` events keyed by block index. We need to
+/// remember the type so we know how to interpret each delta:
+/// `text_delta` for text blocks, `input_json_delta` for tool_use,
+/// `thinking_delta` for thinking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnthropicBlockKind {
+    Text,
+    ToolUse,
+    Thinking,
+    /// Server text+image blocks (rare for chat completions) or
+    /// future types we haven't taught the parser yet. Deltas on
+    /// these blocks are dropped with a tracing::debug! so the
+    /// stream keeps flowing.
+    Unknown,
+}
+
+/// Parse one Anthropic SSE event block — the text between two
+/// `\n\n` separators — into zero or more `StreamEvent`s.
+///
+/// Anthropic SSE shape (one block):
+/// ```text
+/// event: content_block_delta
+/// data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}
+/// ```
+///
+/// We ignore the `event:` line (the `data:` JSON has its own `type`
+/// field) and parse the `data:` payload. Multi-line `data:` (Anthropic
+/// doesn't currently use this, but the SSE spec allows it) is joined
+/// with `\n` before JSON parse.
+///
+/// The mutable state tracks cross-block context: per-block kinds
+/// (set on `content_block_start`, read on `content_block_delta`),
+/// usage tokens (input from `message_start`, output from
+/// `message_delta.usage`), and the final stop reason (from
+/// `message_delta.delta.stop_reason`). On `message_stop` we emit a
+/// `Usage` event with the accumulated counts plus a `Done` event
+/// carrying the stop reason — symmetric to how the OpenAI SSE path
+/// emits `Done` at `[DONE]`.
+fn parse_anthropic_sse_block(
+    block: &str,
+    block_kinds: &mut std::collections::HashMap<usize, AnthropicBlockKind>,
+    prompt_tokens: &mut u32,
+    completion_tokens: &mut u32,
+    stop_reason: &mut Option<String>,
+) -> Vec<anyhow::Result<StreamEvent>> {
+    // Concatenate all `data:` lines in the block (per SSE spec; in
+    // practice Anthropic emits one `data:` line per block).
+    let mut data_lines: Vec<&str> = Vec::new();
+    for line in block.lines() {
+        let line = line.trim_start();
+        if line.starts_with(':') || line.is_empty() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("data:") {
+            data_lines.push(rest.trim_start());
+        }
+        // `event:` lines are decorative — the JSON has the type.
+    }
+    if data_lines.is_empty() {
+        return vec![];
+    }
+    let payload = data_lines.join("\n");
+
+    let value: serde_json::Value = match serde_json::from_str(&payload) {
+        Ok(v) => v,
+        Err(e) => return vec![Err(anyhow::anyhow!("anthropic sse: parse data payload: {e} (payload={payload:.200?})"))],
+    };
+    let ty = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+    let mut out: Vec<anyhow::Result<StreamEvent>> = Vec::new();
+    match ty {
+        "message_start" => {
+            if let Some(msg) = value.get("message") {
+                if let Some(model) = msg.get("model").and_then(|v| v.as_str()) {
+                    out.push(Ok(StreamEvent::Model { name: model.to_string() }));
+                }
+                if let Some(u) = msg.get("usage") {
+                    if let Some(n) = u.get("input_tokens").and_then(serde_json::Value::as_u64) {
+                        *prompt_tokens = u32::try_from(n).unwrap_or(u32::MAX);
+                    }
+                    if let Some(n) = u.get("output_tokens").and_then(serde_json::Value::as_u64) {
+                        *completion_tokens = u32::try_from(n).unwrap_or(u32::MAX);
+                    }
+                }
+            }
+        }
+        "content_block_start" => {
+            let idx = value.get("index").and_then(serde_json::Value::as_u64).unwrap_or(0) as usize;
+            let cb = value.get("content_block").cloned().unwrap_or_default();
+            let cb_type = cb.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let kind = match cb_type {
+                "text" => AnthropicBlockKind::Text,
+                "tool_use" => AnthropicBlockKind::ToolUse,
+                "thinking" | "redacted_thinking" => AnthropicBlockKind::Thinking,
+                _ => AnthropicBlockKind::Unknown,
+            };
+            block_kinds.insert(idx, kind);
+            if kind == AnthropicBlockKind::ToolUse {
+                let id = cb.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let name = cb.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                out.push(Ok(StreamEvent::ToolCallStart { index: idx, id, name }));
+            }
+        }
+        "content_block_delta" => {
+            let idx = value.get("index").and_then(serde_json::Value::as_u64).unwrap_or(0) as usize;
+            let kind = block_kinds.get(&idx).copied().unwrap_or(AnthropicBlockKind::Unknown);
+            let delta = value.get("delta").cloned().unwrap_or_default();
+            let delta_type = delta.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            match (kind, delta_type) {
+                (AnthropicBlockKind::Text, "text_delta") => {
+                    if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
+                        if !text.is_empty() {
+                            out.push(Ok(StreamEvent::Delta { content: text.to_string() }));
+                        }
+                    }
+                }
+                (AnthropicBlockKind::ToolUse, "input_json_delta") => {
+                    if let Some(partial) = delta.get("partial_json").and_then(|v| v.as_str()) {
+                        out.push(Ok(StreamEvent::ToolCallArgumentsDelta {
+                            index: idx,
+                            arguments_chunk: partial.to_string(),
+                        }));
+                    }
+                }
+                (AnthropicBlockKind::Thinking, "thinking_delta") => {
+                    if let Some(text) = delta.get("thinking").and_then(|v| v.as_str()) {
+                        if !text.is_empty() {
+                            out.push(Ok(StreamEvent::Reasoning { content: text.to_string() }));
+                        }
+                    }
+                }
+                _ => {
+                    // Unknown (block_kind, delta_type) pair — log and
+                    // skip rather than failing the stream.
+                    tracing::debug!(?kind, delta_type, "anthropic sse: skipping unknown delta");
+                }
+            }
+        }
+        "content_block_stop" => {
+            // No-op: the agent loop accumulates per-block content
+            // until message_stop.
+        }
+        "message_delta" => {
+            if let Some(d) = value.get("delta") {
+                if let Some(r) = d.get("stop_reason").and_then(|v| v.as_str()) {
+                    *stop_reason = Some(r.to_string());
+                }
+            }
+            if let Some(u) = value.get("usage") {
+                // Anthropic's `message_delta.usage` carries only the
+                // running output_tokens (the input was emitted at
+                // message_start). Take the latest.
+                if let Some(n) = u.get("output_tokens").and_then(serde_json::Value::as_u64) {
+                    *completion_tokens = u32::try_from(n).unwrap_or(u32::MAX);
+                }
+            }
+        }
+        "message_stop" => {
+            // Flush usage + done at end of message. The OpenAI SSE
+            // path emits these from `[DONE]` + the final usage chunk;
+            // Anthropic separates them.
+            let total = prompt_tokens.saturating_add(*completion_tokens);
+            out.push(Ok(StreamEvent::Usage(Usage {
+                prompt_tokens: *prompt_tokens,
+                completion_tokens: *completion_tokens,
+                total_tokens: total,
+                cached_tokens: 0,
+            })));
+            let reason = stop_reason.clone().unwrap_or_else(|| "stop".to_string());
+            // Anthropic's stop_reason vocabulary is "end_turn",
+            // "max_tokens", "stop_sequence", "tool_use". Normalize
+            // "end_turn" → "stop" so downstream gates that key on the
+            // OpenAI vocabulary keep working. Pass others through.
+            let normalized = if reason == "end_turn" { "stop".to_string() } else { reason };
+            out.push(Ok(StreamEvent::Done { finish_reason: normalized }));
+        }
+        "ping" => {
+            // Heartbeat — drop.
+        }
+        "error" => {
+            let msg = value
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("anthropic stream returned `error` event");
+            out.push(Err(anyhow::anyhow!("anthropic stream error: {msg}")));
+        }
+        other => {
+            tracing::debug!(event_type = other, "anthropic sse: skipping unknown event type");
+        }
+    }
+    out
+}
+
 /// Returns an empty vec for blank lines, `event:` lines, and comments.
 /// Returns `Done` for the `[DONE]` sentinel.
 /// Parses `data: {...}` JSON chunks into the appropriate event types.
@@ -2197,6 +2558,161 @@ mod tests {
             StreamEvent::Reasoning { content } => assert_eq!(content, "thinking..."),
             _ => panic!("expected Reasoning"),
         }
+    }
+
+    // ─── Pearl th-366aa8: Anthropic-native SSE parser ──────────────
+
+    fn run_anth_blocks(blocks: &[&str]) -> Vec<StreamEvent> {
+        let mut kinds = std::collections::HashMap::new();
+        let mut pt: u32 = 0;
+        let mut ct: u32 = 0;
+        let mut sr: Option<String> = None;
+        let mut out: Vec<StreamEvent> = Vec::new();
+        for b in blocks {
+            for ev in parse_anthropic_sse_block(b, &mut kinds, &mut pt, &mut ct, &mut sr) {
+                out.push(ev.expect("ok"));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn parse_anthropic_message_start_emits_model_and_seeds_usage() {
+        let blocks = ["event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":42,\"output_tokens\":0}}}"];
+        let events = run_anth_blocks(&blocks);
+        assert!(matches!(events.first(), Some(StreamEvent::Model { name }) if name == "claude-sonnet-4-5"));
+    }
+
+    #[test]
+    fn parse_anthropic_text_delta_emits_delta() {
+        let blocks = [
+            r#"event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            r#"event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello, world!"}}"#,
+        ];
+        let events = run_anth_blocks(&blocks);
+        assert!(events.iter().any(|e| matches!(e, StreamEvent::Delta { content } if content == "Hello, world!")));
+    }
+
+    #[test]
+    fn parse_anthropic_tool_use_emits_start_and_args_delta() {
+        let blocks = [
+            r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_42","name":"read_file","input":{}}}"#,
+            r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}"#,
+            r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"INSTRUCTIONS.md\"}"}}"#,
+        ];
+        let events = run_anth_blocks(&blocks);
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::ToolCallStart { index, id, name } if *index == 1 && id == "toolu_42" && name == "read_file")));
+        let chunks: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::ToolCallArgumentsDelta { index, arguments_chunk } if *index == 1 => Some(arguments_chunk.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(chunks.concat(), "{\"path\":\"INSTRUCTIONS.md\"}");
+    }
+
+    #[test]
+    fn parse_anthropic_thinking_delta_emits_reasoning() {
+        let blocks = [
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}"#,
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"let me approach this"}}"#,
+        ];
+        let events = run_anth_blocks(&blocks);
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::Reasoning { content } if content == "let me approach this")));
+    }
+
+    #[test]
+    fn parse_anthropic_message_stop_emits_usage_and_done() {
+        let blocks = [
+            r#"data: {"type":"message_start","message":{"model":"claude-sonnet-4-5","usage":{"input_tokens":10,"output_tokens":0}}}"#,
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":25}}"#,
+            r#"data: {"type":"message_stop"}"#,
+        ];
+        let events = run_anth_blocks(&blocks);
+        let usage = events
+            .iter()
+            .find_map(|e| if let StreamEvent::Usage(u) = e { Some(u.clone()) } else { None })
+            .expect("usage");
+        assert_eq!(usage.prompt_tokens, 10);
+        assert_eq!(usage.completion_tokens, 25);
+        assert_eq!(usage.total_tokens, 35);
+        let done_reason = events.iter().find_map(|e| {
+            if let StreamEvent::Done { finish_reason } = e {
+                Some(finish_reason.clone())
+            } else {
+                None
+            }
+        });
+        assert_eq!(done_reason.as_deref(), Some("tool_use"));
+    }
+
+    #[test]
+    fn parse_anthropic_end_turn_normalizes_to_stop() {
+        let blocks = [
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}"#,
+            r#"data: {"type":"message_stop"}"#,
+        ];
+        let events = run_anth_blocks(&blocks);
+        let done_reason = events.iter().find_map(|e| {
+            if let StreamEvent::Done { finish_reason } = e {
+                Some(finish_reason.clone())
+            } else {
+                None
+            }
+        });
+        // Anthropic's "end_turn" → OpenAI vocab "stop" so downstream
+        // gates that key on the string don't have to learn two vocabs.
+        assert_eq!(done_reason.as_deref(), Some("stop"));
+    }
+
+    #[test]
+    fn parse_anthropic_error_event_propagates() {
+        let block = r#"data: {"type":"error","error":{"type":"overloaded_error","message":"upstream overloaded"}}"#;
+        let mut kinds = std::collections::HashMap::new();
+        let mut pt: u32 = 0;
+        let mut ct: u32 = 0;
+        let mut sr: Option<String> = None;
+        let events = parse_anthropic_sse_block(block, &mut kinds, &mut pt, &mut ct, &mut sr);
+        assert!(matches!(events.as_slice(), [Err(e)] if e.to_string().contains("upstream overloaded")));
+    }
+
+    #[test]
+    fn parse_anthropic_ping_is_noop() {
+        let block = "event: ping\ndata: {\"type\":\"ping\"}";
+        let mut kinds = std::collections::HashMap::new();
+        let mut pt: u32 = 0;
+        let mut ct: u32 = 0;
+        let mut sr: Option<String> = None;
+        let events = parse_anthropic_sse_block(block, &mut kinds, &mut pt, &mut ct, &mut sr);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn parse_anthropic_unknown_block_kind_drops_delta_silently() {
+        // A content_block of an unknown type (e.g. a future
+        // multimodal `image` block) shouldn't break the stream — we
+        // record it as Unknown and drop its deltas. Pearl th-366aa8.
+        let blocks = [
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"image"}}"#,
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"image_delta","source":{"data":"<base64>"}}}"#,
+            r#"data: {"type":"message_stop"}"#,
+        ];
+        let events = run_anth_blocks(&blocks);
+        // Should have usage + done but no Delta / Reasoning / ToolCall events
+        let has_content = events.iter().any(|e| {
+            matches!(
+                e,
+                StreamEvent::Delta { .. } | StreamEvent::Reasoning { .. } | StreamEvent::ToolCallStart { .. } | StreamEvent::ToolCallArgumentsDelta { .. }
+            )
+        });
+        assert!(!has_content, "unknown block deltas must be dropped, not emitted");
     }
 
     #[test]
