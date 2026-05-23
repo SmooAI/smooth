@@ -15,6 +15,7 @@ pub mod jobs;
 pub mod keys;
 pub mod knowledge;
 pub mod members;
+pub mod observability;
 pub mod products;
 pub mod profile;
 pub mod testing;

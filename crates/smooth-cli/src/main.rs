@@ -508,6 +508,12 @@ enum ApiCommands {
         #[command(subcommand)]
         cmd: smooai::testing::Cmd,
     },
+    /// Smoo AI Observability — source maps, traces, LLM telemetry.
+    /// SMOODEV-1164.
+    Observability {
+        #[command(subcommand)]
+        cmd: smooai::observability::Cmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1079,6 +1085,7 @@ async fn main() -> Result<()> {
             ApiCommands::Products { cmd } => smooai::products::cmd(cmd).await,
             ApiCommands::Profile { cmd } => smooai::profile::cmd(cmd).await,
             ApiCommands::Testing { cmd } => smooai::testing::cmd(cmd).await,
+            ApiCommands::Observability { cmd } => smooai::observability::cmd(cmd).await,
         },
         Some(Commands::Operators { cmd }) => cmd_operators(cmd).await,
         Some(Commands::Inbox) => cmd_inbox().await,
