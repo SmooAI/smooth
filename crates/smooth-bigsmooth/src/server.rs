@@ -2647,11 +2647,53 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
     // it to `/workspace`. SMOOTH_HOST_WORKSPACE is the host path the
     // mount came from, set by `start_sandboxed_vm` for the rare
     // diagnostic case where the agent needs to know.
+    //
+    // EXCEPT: when the TUI sends a working_dir that lives under the
+    // outer host's `~/.smooth/` (the bench harness does this — its
+    // per-task work_dirs are at ~/.smooth/bench-runs/<id>/<task>/),
+    // we DO have a way to reach it. `th up` also bind-mounts the
+    // outer ~/.smooth at /root/.smooth (RO), so we can translate the
+    // outer-host prefix to the safehouse-visible prefix and bind
+    // THAT into the operator VM's /workspace. Without this, every
+    // bench task gets the SAME workspace contents (= cwd at
+    // `th up` time, usually the smooth repo), and read_file calls
+    // for task fixtures all fail. Pearl th-14d773.
     let safehouse_mode = std::env::var("SMOOTH_SAFEHOUSE_MODE")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     let host_workspace: std::path::PathBuf = if safehouse_mode {
-        std::path::PathBuf::from("/workspace")
+        let tui_working_dir = working_dir.as_deref();
+        let host_home_smooth = std::env::var("SMOOTH_HOME_HOST_PATH").ok();
+        match (tui_working_dir, host_home_smooth.as_deref()) {
+            (Some(wd), Some(home_smooth)) => {
+                let prefix = format!("{}/", home_smooth.trim_end_matches('/'));
+                if wd.starts_with(&prefix) {
+                    // Outer ~/.smooth/foo → inside safehouse /root/.smooth/foo
+                    let suffix = &wd[prefix.len()..];
+                    let translated = std::path::PathBuf::from("/root/.smooth").join(suffix);
+                    if translated.exists() {
+                        tracing::info!(
+                            task_id = %task_id,
+                            host_path = %wd,
+                            translated = %translated.display(),
+                            "safehouse: translated host-side ~/.smooth working_dir to /root/.smooth"
+                        );
+                        translated
+                    } else {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            host_path = %wd,
+                            translated = %translated.display(),
+                            "safehouse: translated path does not exist; falling back to /workspace"
+                        );
+                        std::path::PathBuf::from("/workspace")
+                    }
+                } else {
+                    std::path::PathBuf::from("/workspace")
+                }
+            }
+            _ => std::path::PathBuf::from("/workspace"),
+        }
     } else {
         working_dir
             .as_ref()

@@ -1193,8 +1193,26 @@ async fn start_sandboxed_vm(port: u16) -> Result<()> {
             mounts.push(smooth_bigsmooth::sandbox::BindMount {
                 host_path: host_smooth.to_string_lossy().into_owned(),
                 guest_path: "/root/.smooth".into(),
-                readonly: true,
+                // Pearl th-14d773: was RO, but the bench harness needs the
+                // agent to edit task fixtures under ~/.smooth/bench-runs/.
+                // Without RW the operator VM's /workspace (bound from
+                // /root/.smooth/bench-runs/<id>/<task>) is also RO and
+                // edit_file/write_file fail. The operator VM still gets
+                // Narc + Wonk guards on top so writes are policy-checked.
+                readonly: false,
             });
+            // Pearl th-14d773: tell the in-safehouse Big Smooth where the
+            // host's ~/.smooth lives. When the TUI dispatches a task with
+            // a working_dir under the outer host's ~/.smooth/ (the bench
+            // harness does this — work_dirs live at
+            // ~/.smooth/bench-runs/<id>/<task>/), Big Smooth needs to
+            // translate that path to the safehouse-visible /root/.smooth/
+            // prefix before bind-mounting it into the operator VM.
+            // Without this, safehouse-mode dispatch ignores the TUI's
+            // working_dir and uses the shared /workspace (= cwd at
+            // `th up` time), so every bench task sees the SAME workspace
+            // contents — usually the smooth repo, never the task fixture.
+            env.insert("SMOOTH_HOME_HOST_PATH".into(), host_smooth.to_string_lossy().into_owned());
         }
         // Also mount the cross-compiled operator-runner into the
         // safehouse so Big Smooth dispatch (running inside the
