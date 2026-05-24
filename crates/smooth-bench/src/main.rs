@@ -177,6 +177,15 @@ struct ScoreTuiArgs {
     #[arg(long, default_value_t = 0)]
     task_limit: usize,
 
+    /// Pause (seconds) between tasks. Lets the upstream Anthropic
+    /// per-minute TPM bucket roll over before the next task starts.
+    /// On a 30K input-TPM tier, three back-to-back coding tasks
+    /// easily starve the 4th of budget — 60s gives one full bucket
+    /// refill. 0 disables (the historical behaviour). Pearl
+    /// th-4dd874.
+    #[arg(long, default_value_t = 0)]
+    inter_task_sleep_s: u64,
+
     /// Allow a task to be marked solved=true even when the
     /// LLM-as-human driver bailed on turn 1. Default is to refuse:
     /// aider-polyglot fixtures should not pass un-edited, so a
@@ -378,6 +387,7 @@ async fn run_score_tui(args: ScoreTuiArgs) -> Result<()> {
         },
         tui_cfg,
         task_limit: if args.task_limit == 0 { None } else { Some(args.task_limit) },
+        inter_task_sleep_s: args.inter_task_sleep_s,
     };
 
     let mut observer = StdoutObserver;
