@@ -4017,6 +4017,319 @@ fn open_pearl_store() -> Result<smooth_pearls::PearlStore> {
     smooth_pearls::PearlStore::open(&dolt_dir)
 }
 
+/// Returns the pearl store along with the on-disk dolt_dir, so
+/// callers that need both don't have to walk the tree twice. The
+/// dolt_dir is what `auto_commit_pearl_state` needs to find the
+/// enclosing git repo.
+fn open_pearl_store_with_path() -> Result<(smooth_pearls::PearlStore, std::path::PathBuf)> {
+    let dolt_dir = find_dolt_dir()?;
+    let store = smooth_pearls::PearlStore::open(&dolt_dir)?;
+    Ok((store, dolt_dir))
+}
+
+/// Auto-commit the on-disk pearl store state to the enclosing git
+/// repo, if there is one.
+///
+/// Pearl mutations write to `.smooth/dolt/<db>/.dolt/noms/...` files.
+/// If those changes never make it into git, the working tree silently
+/// accumulates drift forever — `git status` becomes noise, teammates
+/// can't sync via `git pull`, and the only "source of truth" is the
+/// one machine that ran `th pearls create`.
+///
+/// This wraps each mutating `th pearls` subcommand so the dolt state
+/// lands in git automatically. Scoped strictly to `.smooth/dolt/` so
+/// it never touches the user's index or in-progress code commits.
+///
+/// `--no-verify` is intentional: pearl commits aren't code, running
+/// clippy/fmt/tests on a status change is pure overhead and would
+/// regress the UX of `th pearls update <id> --status=in_progress`.
+///
+/// Silent no-ops when:
+/// - the global `~/.smooth/dolt` store is used (no enclosing repo
+///   expected; sessions/memories don't need cross-machine sync),
+/// - the project isn't a git repo,
+/// - nothing under `.smooth/dolt/` actually changed (idempotent).
+fn auto_commit_pearl_state(dolt_dir: &std::path::Path, action: &str) -> Result<()> {
+    if is_global_pearl_store(dolt_dir) {
+        return Ok(());
+    }
+
+    let Some(repo_root) = git_toplevel(dolt_dir) else {
+        return Ok(());
+    };
+
+    let canonical_repo = repo_root.canonicalize().unwrap_or_else(|_| repo_root.clone());
+    let canonical_dolt = dolt_dir.canonicalize().unwrap_or_else(|_| dolt_dir.to_path_buf());
+    let Ok(relative) = canonical_dolt.strip_prefix(&canonical_repo) else {
+        // Symlink or unrelated layout: skip rather than committing
+        // something the user wouldn't expect.
+        return Ok(());
+    };
+
+    let add_status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&canonical_repo)
+        .args(["add", "--"])
+        .arg(relative)
+        .status()
+        .map_err(|e| anyhow::anyhow!("git add for pearl auto-commit failed to launch: {e}"))?;
+    if !add_status.success() {
+        anyhow::bail!("git add .smooth/dolt/ failed (exit {add_status})");
+    }
+
+    let diff_status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&canonical_repo)
+        .args(["diff", "--cached", "--quiet", "--"])
+        .arg(relative)
+        .status()
+        .map_err(|e| anyhow::anyhow!("git diff for pearl auto-commit failed to launch: {e}"))?;
+    if diff_status.success() {
+        // Exit 0 from --quiet means "no diff" → nothing to commit.
+        return Ok(());
+    }
+
+    let msg = format!("pearl: {action}");
+    let commit_status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&canonical_repo)
+        .args(["commit", "--no-verify", "-m", &msg, "--"])
+        .arg(relative)
+        .status()
+        .map_err(|e| anyhow::anyhow!("git commit for pearl auto-commit failed to launch: {e}"))?;
+    if !commit_status.success() {
+        anyhow::bail!("git commit for pearl auto-commit failed (exit {commit_status})");
+    }
+    Ok(())
+}
+
+/// `git rev-parse --show-toplevel` rooted at the given directory.
+/// Returns `None` if not in a git repo (worktree-safe — works whether
+/// `.git` is a directory or a worktree pointer file).
+fn git_toplevel(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(start)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let s = String::from_utf8(output.stdout).ok()?;
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(trimmed))
+}
+
+/// Trim a pearl title down to a length that fits comfortably in a
+/// one-line commit subject (keeps `git log --oneline` readable).
+fn truncate_for_msg(s: &str) -> String {
+    const MAX: usize = 72;
+    if s.chars().count() <= MAX {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(MAX - 1).collect();
+    out.push('…');
+    out
+}
+
+/// Run `git push` for the enclosing repo if there are pearl auto-commits
+/// ahead of `@{u}`. Best-effort; returns Err with a short reason on
+/// failure so the caller can log and continue with the dolt push.
+fn git_push_pearl_state(dolt_dir: &std::path::Path) -> Result<()> {
+    if is_global_pearl_store(dolt_dir) {
+        return Ok(());
+    }
+    let Some(repo_root) = git_toplevel(dolt_dir) else {
+        anyhow::bail!("not a git repo");
+    };
+    // Check whether there's anything ahead of the upstream. If
+    // `@{u}` doesn't resolve (no upstream configured), just attempt
+    // a `git push` which will produce its own clear error.
+    let ahead = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo_root)
+        .args(["rev-list", "--count", "@{u}..HEAD"])
+        .output();
+    if let Ok(out) = ahead {
+        if out.status.success() {
+            let n: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0);
+            if n == 0 {
+                return Ok(());
+            }
+        }
+    }
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo_root)
+        .arg("push")
+        .status()
+        .map_err(|e| anyhow::anyhow!("failed to launch git push: {e}"))?;
+    if !status.success() {
+        anyhow::bail!("git push failed (exit {status})");
+    }
+    Ok(())
+}
+
+/// Run `git pull --rebase` for the enclosing repo. Best-effort — see
+/// [`git_push_pearl_state`].
+fn git_pull_pearl_state(dolt_dir: &std::path::Path) -> Result<()> {
+    if is_global_pearl_store(dolt_dir) {
+        return Ok(());
+    }
+    let Some(repo_root) = git_toplevel(dolt_dir) else {
+        anyhow::bail!("not a git repo");
+    };
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo_root)
+        .args(["pull", "--rebase"])
+        .status()
+        .map_err(|e| anyhow::anyhow!("failed to launch git pull: {e}"))?;
+    if !status.success() {
+        anyhow::bail!("git pull --rebase failed (exit {status})");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod pearl_autocommit_tests {
+    use super::*;
+    use std::process::Command;
+
+    fn git(args: &[&str], cwd: &std::path::Path) {
+        let out = Command::new("git").arg("-C").arg(cwd).args(args).output().expect("git");
+        assert!(out.status.success(), "git {args:?} in {cwd:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    fn init_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        git(&["init", "--initial-branch=main"], dir.path());
+        git(&["config", "user.email", "test@example.com"], dir.path());
+        git(&["config", "user.name", "Test"], dir.path());
+        git(&["config", "commit.gpgsign", "false"], dir.path());
+        std::fs::create_dir_all(dir.path().join(".smooth/dolt")).unwrap();
+        std::fs::write(dir.path().join("README.md"), "init\n").unwrap();
+        git(&["add", "."], dir.path());
+        git(&["commit", "--no-verify", "-m", "initial"], dir.path());
+        dir
+    }
+
+    #[test]
+    fn truncate_for_msg_short_passes_through() {
+        assert_eq!(truncate_for_msg("hello"), "hello");
+    }
+
+    #[test]
+    fn truncate_for_msg_long_truncates_with_ellipsis() {
+        let long: String = "x".repeat(100);
+        let out = truncate_for_msg(&long);
+        assert!(out.chars().count() <= 72);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn auto_commit_skips_outside_git_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let dolt = dir.path().join(".smooth/dolt");
+        std::fs::create_dir_all(&dolt).unwrap();
+        std::fs::write(dolt.join("foo"), "bar").unwrap();
+        // No git init — should be a silent no-op.
+        auto_commit_pearl_state(&dolt, "test").expect("should not error outside git repo");
+    }
+
+    #[test]
+    fn auto_commit_skips_when_nothing_changed() {
+        let dir = init_repo();
+        let dolt = dir.path().join(".smooth/dolt");
+        let before = String::from_utf8(
+            Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        auto_commit_pearl_state(&dolt, "no-op").expect("idempotent");
+        let after = String::from_utf8(
+            Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        assert_eq!(before, after, "no commit should have been created");
+    }
+
+    #[test]
+    fn auto_commit_creates_commit_on_change() {
+        let dir = init_repo();
+        let dolt = dir.path().join(".smooth/dolt");
+        std::fs::write(dolt.join("new_file"), "pearl state").unwrap();
+        auto_commit_pearl_state(&dolt, "create th-deadbe Test pearl").expect("commits");
+        let log = String::from_utf8(
+            Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(["log", "--oneline", "-1"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        assert!(log.contains("pearl: create th-deadbe Test pearl"), "got: {log}");
+    }
+
+    #[test]
+    fn auto_commit_only_stages_smooth_dolt() {
+        let dir = init_repo();
+        let dolt = dir.path().join(".smooth/dolt");
+        // User has unstaged code changes in their working tree.
+        std::fs::write(dir.path().join("src.rs"), "user code").unwrap();
+        // Pearl state changes too.
+        std::fs::write(dolt.join("new_file"), "pearl state").unwrap();
+
+        auto_commit_pearl_state(&dolt, "test scoped").expect("commits");
+
+        // The user's `src.rs` should still be untracked — auto-commit
+        // must not have swept up files outside `.smooth/dolt/`.
+        let status = String::from_utf8(
+            Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(["status", "--porcelain", "src.rs"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        assert!(status.contains("?? src.rs"), "expected src.rs to remain untracked, got: {status:?}");
+
+        // The pearl commit landed and only contains `.smooth/dolt/` paths.
+        let files = String::from_utf8(
+            Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(["show", "--name-only", "--pretty=format:", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        for line in files.lines().filter(|l| !l.is_empty()) {
+            assert!(line.starts_with(".smooth/dolt/"), "auto-commit included non-pearl path: {line}");
+        }
+    }
+}
+
 fn format_pearl_line(issue: &smooth_pearls::Pearl) -> String {
     let labels_str = if issue.labels.is_empty() {
         String::new()
@@ -4035,7 +4348,13 @@ fn format_pearl_line(issue: &smooth_pearls::Pearl) -> String {
 }
 
 async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
-    let store = open_pearl_store()?;
+    // `Init` runs *before* a store exists, so opening one here would
+    // fail with "no .smooth/dolt/ found". Handle it up front; every
+    // other subcommand needs an existing store.
+    if matches!(cmd, PearlCommands::Init) {
+        return cmd_pearls_init().await;
+    }
+    let (store, dolt_dir) = open_pearl_store_with_path()?;
 
     match cmd {
         PearlCommands::Create {
@@ -4060,6 +4379,7 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             let issue = store.create(&new)?;
             println!("{} Created {}", "✓".green().bold(), issue.id.green().bold());
             println!("  {}", format_pearl_line(&issue));
+            auto_commit_pearl_state(&dolt_dir, &format!("create {} {}", issue.id, truncate_for_msg(&issue.title)))?;
         }
 
         PearlCommands::List { status } => {
@@ -4149,34 +4469,40 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             let updated = store.update(&id, &updates)?;
             println!("{} Updated {}", "✓".green().bold(), updated.id);
             println!("  {}", format_pearl_line(&updated));
+            auto_commit_pearl_state(&dolt_dir, &format!("update {}", updated.id))?;
         }
 
         PearlCommands::Close { ids } => {
             let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
             let count = store.close(&id_refs)?;
             println!("{} Closed {count} issue(s)", "✓".green().bold());
+            auto_commit_pearl_state(&dolt_dir, &format!("close {}", ids.join(", ")))?;
         }
 
         PearlCommands::Reopen { id } => {
             let issue = store.reopen(&id)?;
             println!("{} Reopened {}", "✓".green().bold(), issue.id);
             println!("  {}", format_pearl_line(&issue));
+            auto_commit_pearl_state(&dolt_dir, &format!("reopen {}", issue.id))?;
         }
 
         PearlCommands::Dep { cmd } => match cmd {
             DepCommands::Add { issue, depends_on } => {
                 store.add_dep(&issue, &depends_on)?;
                 println!("{} {issue} now depends on {depends_on}", "✓".green().bold());
+                auto_commit_pearl_state(&dolt_dir, &format!("dep add {issue} → {depends_on}"))?;
             }
             DepCommands::Remove { issue, depends_on } => {
                 store.remove_dep(&issue, &depends_on)?;
                 println!("{} Removed dependency {issue} → {depends_on}", "✓".green().bold());
+                auto_commit_pearl_state(&dolt_dir, &format!("dep remove {issue} → {depends_on}"))?;
             }
         },
 
         PearlCommands::Comment { id, content } => {
             let comment = store.add_comment(&id, &content)?;
             println!("{} Comment added ({})", "✓".green().bold(), comment.id.dimmed());
+            auto_commit_pearl_state(&dolt_dir, &format!("comment on {id}"))?;
         }
 
         PearlCommands::Search { query } => {
@@ -4234,15 +4560,18 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             LabelCommands::Add { label } => {
                 store.add_label(&id, &label)?;
                 println!("{} Added label \"{label}\" to {id}", "✓".green().bold());
+                auto_commit_pearl_state(&dolt_dir, &format!("label add {id} +{label}"))?;
             }
             LabelCommands::Remove { label } => {
                 store.remove_label(&id, &label)?;
                 println!("{} Removed label \"{label}\" from {id}", "✓".green().bold());
+                auto_commit_pearl_state(&dolt_dir, &format!("label remove {id} -{label}"))?;
             }
         },
 
         PearlCommands::MigrateFromBeads => {
             cmd_migrate_from_beads(&store)?;
+            auto_commit_pearl_state(&dolt_dir, "migrate from beads")?;
         }
 
         PearlCommands::Projects => {
@@ -4269,29 +4598,8 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
         }
 
         // ── Dolt commands ────────────────────────────────────────────
-        PearlCommands::Init => {
-            let cwd = std::env::current_dir()?;
-            let dolt_dir = cwd.join(".smooth").join("dolt");
-            if dolt_dir.exists() {
-                println!("Pearl database already initialized at {}", dolt_dir.display());
-            } else {
-                smooth_pearls::PearlStore::init(&dolt_dir)?;
-                println!("{} Pearl database initialized at {}", "✓".green().bold(), dolt_dir.display());
-                println!("  Tables: pearls, pearl_dependencies, pearl_labels, pearl_comments, pearl_history, sessions, memories");
-                println!("  Run: th pearls remote add origin <git-remote-url>");
-                println!("  Then: th pearls push");
-            }
-
-            // Install git hooks if not already present
-            let hooks_status = hooks::check(None);
-            if !hooks_status.is_ok() {
-                println!();
-                match hooks::install(None) {
-                    Ok(hooks_dir) => hooks::print_install_result(&hooks_dir),
-                    Err(e) => eprintln!("  Could not install git hooks: {e}"),
-                }
-            }
-        }
+        // `Init` is handled before the match above (no store exists yet).
+        PearlCommands::Init => unreachable!("Init is handled at the top of cmd_pearls"),
 
         PearlCommands::Log { n } => {
             let dolt_dir = find_dolt_dir()?;
@@ -4307,7 +4615,14 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
         }
 
         PearlCommands::Push { force } => {
-            let dolt_dir = find_dolt_dir()?;
+            // Before pushing dolt, push any pending git commits under
+            // `.smooth/dolt/` so teammates' `git pull` brings the same
+            // pearl state down. Best-effort: log and continue on a
+            // git failure (e.g. no remote, detached HEAD) so the
+            // dolt push still runs.
+            if let Err(e) = git_push_pearl_state(&dolt_dir) {
+                eprintln!("(git push for pearl state skipped: {e})");
+            }
             // Global store at `~/.smooth/dolt` is intentionally
             // single-machine — sessions, memories, and personal-scope
             // pearls don't need cross-machine sync. Treat "no remote
@@ -4357,7 +4672,14 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
         }
 
         PearlCommands::Pull => {
-            let dolt_dir = find_dolt_dir()?;
+            // Pull git first so any auto-commits from teammates
+            // (under `.smooth/dolt/`) land in the working tree before
+            // the dolt layer reads it. Best-effort: failure to git
+            // pull doesn't block the dolt pull (e.g. no remote, no
+            // upstream branch).
+            if let Err(e) = git_pull_pearl_state(&dolt_dir) {
+                eprintln!("(git pull for pearl state skipped: {e})");
+            }
             let dolt = smooth_pearls::SmoothDolt::new(&dolt_dir)?;
             match dolt.pull() {
                 Ok(output) => println!("{output}"),
@@ -4541,6 +4863,36 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
 fn find_dolt_dir() -> Result<std::path::PathBuf> {
     let cwd = std::env::current_dir()?;
     smooth_pearls::dolt::find_repo_dolt_dir(&cwd).ok_or_else(|| anyhow::anyhow!("no .smooth/dolt/ found. Run: th pearls init"))
+}
+
+/// `th pearls init` — create `.smooth/dolt/` in cwd if missing, then
+/// auto-commit the freshly-initialized store to the enclosing git
+/// repo (if any). Bootstrapping a pearl board should land in git the
+/// same way a normal pearl mutation does.
+async fn cmd_pearls_init() -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let dolt_dir = cwd.join(".smooth").join("dolt");
+    if dolt_dir.exists() {
+        println!("Pearl database already initialized at {}", dolt_dir.display());
+    } else {
+        smooth_pearls::PearlStore::init(&dolt_dir)?;
+        println!("{} Pearl database initialized at {}", "✓".green().bold(), dolt_dir.display());
+        println!("  Tables: pearls, pearl_dependencies, pearl_labels, pearl_comments, pearl_history, sessions, memories");
+        println!("  Run: th pearls remote add origin <git-remote-url>");
+        println!("  Then: th pearls push");
+        auto_commit_pearl_state(&dolt_dir, "init pearl board")?;
+    }
+
+    // Install git hooks if not already present
+    let hooks_status = hooks::check(None);
+    if !hooks_status.is_ok() {
+        println!();
+        match hooks::install(None) {
+            Ok(hooks_dir) => hooks::print_install_result(&hooks_dir),
+            Err(e) => eprintln!("  Could not install git hooks: {e}"),
+        }
+    }
+    Ok(())
 }
 
 /// True if `dolt_dir` resolves to the global `~/.smooth/dolt` store.
