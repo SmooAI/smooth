@@ -717,10 +717,12 @@ fn build_prompt(task: &str, lang: PolyglotLang, work_dir: &Path) -> anyhow::Resu
         "You are solving Aider Polyglot task `{task}` ({lang}). \
 Working directory: the current directory. \
 Files present: {files_joined}. \
-Your job: read INSTRUCTIONS.md and the test file to understand the requirements; \
-edit the source file(s) so `{cmd}` passes every test; \
-do not modify test files; \
-stop once the tests pass — do not keep iterating. \
+Your job: read INSTRUCTIONS.md and the EXISTING test file to understand the requirements; \
+edit the source file(s) so `{cmd}` passes every test in the existing test file; \
+do not modify, replace, or create test files (any new test file you add will be DELETED \
+before scoring — only the original test file determines pass/fail); \
+run `{cmd}` exactly (no other test command or subset) to verify; \
+stop once `{cmd}` exits successfully — do not keep iterating. \
 Constraints: use only the standard library for the language; \
 keep the implementation idiomatic and concise.",
         lang = lang.dataset_dir(),
@@ -1086,6 +1088,37 @@ mod tests {
         assert!(prompt.contains("grade_school_test.py"));
         assert!(prompt.contains("INSTRUCTIONS.md"));
         assert!(prompt.contains("python3 -m pytest"));
+    }
+
+    /// Pearl th-71e1fa regression: the agent claimed "6/6 PASSED" but the
+    /// scorer reported FAIL. Root cause was the agent creating a tiny fake
+    /// test file that passed (e.g. `test_affine_simple.py`), claiming
+    /// success, then `strip_agent_added_tests` removed it before scoring
+    /// ran the REAL test file. The prompt now explicitly forbids creating
+    /// new test files AND tells the agent the original test command is
+    /// the only one that counts. Guards both phrasings so future tweaks
+    /// don't silently lose either.
+    #[test]
+    fn build_prompt_forbids_creating_test_files() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        std::fs::write(tmp.path().join("affine_cipher.py"), b"").unwrap();
+        std::fs::write(tmp.path().join("affine_cipher_test.py"), b"").unwrap();
+        std::fs::write(tmp.path().join("INSTRUCTIONS.md"), b"stuff").unwrap();
+
+        let prompt = build_prompt("affine-cipher", PolyglotLang::Python, tmp.path()).expect("prompt");
+        let lower = prompt.to_lowercase();
+        assert!(
+            lower.contains("do not modify") && lower.contains("create test files"),
+            "prompt must forbid both modifying AND creating test files. Prompt was:\n{prompt}"
+        );
+        assert!(
+            lower.contains("deleted before scoring"),
+            "prompt must warn that agent-added test files get stripped before scoring. Prompt was:\n{prompt}"
+        );
+        assert!(
+            lower.contains("(no other test command or subset)"),
+            "prompt must tell the agent to run the exact `{{cmd}}`, not a subset or fake. Prompt was:\n{prompt}"
+        );
     }
 
     /// Regression for pearl th-01c714: the bench-driven `smooth-code`
