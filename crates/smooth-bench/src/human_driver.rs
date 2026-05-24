@@ -606,7 +606,8 @@ mod tests {
 
     #[test]
     fn pane_shows_agent_activity_false_on_completed_assistant_reply() {
-        let pane = "Smooth:\nI read INSTRUCTIONS.md. The task is to implement an affine cipher.\n agent: fixer | smooth-coding | spend: $0.04 | ● | Ctrl+C quit";
+        let pane =
+            "Smooth:\nI read INSTRUCTIONS.md. The task is to implement an affine cipher.\n agent: fixer | smooth-coding | spend: $0.04 | ● | Ctrl+C quit";
         assert!(!pane_shows_agent_activity(pane));
     }
 
