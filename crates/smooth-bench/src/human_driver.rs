@@ -374,6 +374,21 @@ pub struct LoopConfig {
     pub idle_poll: Duration,
     /// Overall per-turn idle timeout (gives up on a frozen TUI).
     pub per_turn_timeout: Duration,
+    /// Maximum time to wait for the agent to show ANY visible
+    /// progress after a send before treating the turn as stuck.
+    /// Pearl th-90377e: an LLM call inside the safehouse runner
+    /// can spend 30–120s in 429 retry-backoff with no visible
+    /// TUI output (status line stays at `tokens: 0`, no `Smooth:`
+    /// reply text). If `wait_for_idle` returns "pane stable" and
+    /// the driver fires the next prompt anyway, the TUI dispatches
+    /// ANOTHER WebSocket TaskStart which spawns ANOTHER runner —
+    /// 5 runners simultaneously share the 30K-token-per-minute
+    /// bucket, all 429-deadlock, the task fails silently. This
+    /// cap forces the driver to wait until either (a) the tokens
+    /// counter moved (real LLM progress), (b) a non-empty `Smooth:`
+    /// reply appeared (real output), or (c) this timeout elapsed
+    /// (truly dead — bail the task instead of spawning more runners).
+    pub progress_timeout: Duration,
 }
 
 impl Default for LoopConfig {
@@ -387,8 +402,45 @@ impl Default for LoopConfig {
             // ballpark `chat_driver.rs` uses for its `idle_grace`
             // default scaled down for a single turn.
             per_turn_timeout: Duration::from_secs(180),
+            // 5 min — covers two full 429 retry cycles (10 attempts
+            // each, ~30s avg backoff). Beyond that the runner is
+            // genuinely dead and we should bail the task.
+            progress_timeout: Duration::from_secs(300),
         }
     }
+}
+
+/// Lightweight progress fingerprint for a TUI pane. Two snapshots
+/// with the same fingerprint represent "no meaningful change" — same
+/// token counter AND same visible non-status content. Used by
+/// [`run_human_loop`] to detect "agent in flight but invisible"
+/// (a 429 retry loop, a network stall) and avoid firing duplicate
+/// prompts that spawn duplicate runners.
+#[must_use]
+pub fn pane_progress_fingerprint(pane: &str) -> ProgressFingerprint {
+    let tokens = crate::tui_score::extract_tokens_total(pane).unwrap_or(0);
+    // Strip the status line itself — it ALSO contains the tokens
+    // counter, and our content hash should reflect the conversation
+    // body (Smooth: replies, tool calls) NOT the cost meter ticking.
+    let content_hash = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for line in pane.lines() {
+            if line.contains("tokens:") && line.contains("spend:") {
+                continue;
+            }
+            line.hash(&mut h);
+        }
+        h.finish()
+    };
+    ProgressFingerprint { tokens, content_hash }
+}
+
+/// See [`pane_progress_fingerprint`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProgressFingerprint {
+    pub tokens: u64,
+    pub content_hash: u64,
 }
 
 /// Drive a TUI session through one full task using the LLM-as-human
@@ -422,6 +474,10 @@ pub async fn run_human_loop<D: DriverModel>(driver: &TmuxDriver, model: &D, task
     // would split it into multiple `You:` submissions. See pearl
     // th-01c714.
     driver.send(&flatten_for_tui(task_prompt)).context("seeding task prompt")?;
+    // Snapshot the pane fingerprint right after the send so the
+    // first wait_for_idle/progress_timeout cycle has a baseline to
+    // compare against. Pearl th-90377e.
+    let mut last_send_fingerprint = pane_progress_fingerprint(&driver.capture().unwrap_or_default());
 
     let mut turns = 1usize;
     let mut final_pane;
@@ -470,6 +526,45 @@ pub async fn run_human_loop<D: DriverModel>(driver: &TmuxDriver, model: &D, task
             // have than spin forever.
             if activity_polls >= 5 {
                 break;
+            }
+        }
+
+        // Pearl th-90377e: pane-stable can also mean "agent is in
+        // flight but invisible" — a runner inside the safehouse is
+        // 429-retrying for 30-120s with no TUI surface. Check whether
+        // anything actually progressed since the last send. If neither
+        // the token counter NOR the conversation content changed,
+        // poll for up to `progress_timeout` before either firing the
+        // next prompt or giving up.
+        //
+        // Only applies to real `th code` TUI sessions — detected by
+        // the presence of a `tokens:` status line. Stub tests that
+        // wrap shells (cat, echo) have no status line, so the
+        // watchdog correctly skips them.
+        if crate::tui_score::extract_tokens_total(&pane).is_some() {
+            let progress_started = std::time::Instant::now();
+            let mut waited_for_progress = false;
+            while progress_started.elapsed() < cfg.progress_timeout && pane_progress_fingerprint(&pane) == last_send_fingerprint {
+                waited_for_progress = true;
+                std::thread::sleep(cfg.idle_dwell);
+                pane = driver.capture().unwrap_or(pane);
+            }
+            if waited_for_progress && pane_progress_fingerprint(&pane) == last_send_fingerprint {
+                // Genuine timeout — agent never produced ANY observable
+                // progress in `progress_timeout`. Bail the task instead
+                // of firing another prompt that would spawn yet another
+                // runner. Counts as Stuck because the agent visibly
+                // failed to make progress.
+                tracing::warn!(
+                    turns,
+                    progress_timeout_s = cfg.progress_timeout.as_secs(),
+                    "no observable agent progress (tokens unchanged, no new content) — bailing as Stuck"
+                );
+                return Ok(LoopResult {
+                    turns,
+                    exit: LoopExit::Stuck,
+                    final_pane: pane,
+                });
             }
         }
         final_pane = pane.clone();
@@ -567,6 +662,11 @@ pub async fn run_human_loop<D: DriverModel>(driver: &TmuxDriver, model: &D, task
                     // reply would fragment into N `You:` turns.
                     // Pearl th-01c714.
                     driver.send(&flatten_for_tui(&text)).context("send driver turn")?;
+                    // Refresh the progress baseline so the next
+                    // iteration's progress-timeout check measures
+                    // post-send progress, not pre-send. Pearl
+                    // th-90377e.
+                    last_send_fingerprint = pane_progress_fingerprint(&driver.capture().unwrap_or_default());
                 }
             }
         }
@@ -577,6 +677,40 @@ pub async fn run_human_loop<D: DriverModel>(driver: &TmuxDriver, model: &D, task
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Pearl th-90377e: two pane snapshots taken before the agent
+    /// produces ANY output should fingerprint identically. The
+    /// progress-timeout watchdog uses this equality to detect
+    /// "agent in flight but invisible" (a 429 retry loop).
+    #[test]
+    fn pane_progress_fingerprint_unchanged_when_only_status_repaints() {
+        let p1 = "Smooth:\n\n agent: fixer | smooth-coding | tokens: 0 | spend: $0 | ● | Ctrl+C quit";
+        let p2 = "Smooth:\n\n agent: fixer | smooth-coding | tokens: 0 | spend: $0 | ●";
+        // Different status-line suffix but no real conversation
+        // change. Tokens still 0. Fingerprint must match so the
+        // watchdog correctly identifies "no progress".
+        assert_eq!(pane_progress_fingerprint(p1), pane_progress_fingerprint(p2));
+    }
+
+    /// Pearl th-90377e: a non-zero tokens counter is the canonical
+    /// "agent made an LLM call" signal. Fingerprints with different
+    /// token counts MUST differ so the watchdog sees progress.
+    #[test]
+    fn pane_progress_fingerprint_changes_when_tokens_move() {
+        let p1 = "Smooth:\n agent: fixer | tokens: 0 | spend: $0";
+        let p2 = "Smooth:\n agent: fixer | tokens: 1234 | spend: $0.012";
+        assert_ne!(pane_progress_fingerprint(p1), pane_progress_fingerprint(p2));
+    }
+
+    /// Pearl th-90377e: a new `Smooth:` reply with body content is
+    /// also progress (e.g. tool calls without a token-counter update
+    /// in flight). Fingerprints must differ.
+    #[test]
+    fn pane_progress_fingerprint_changes_when_conversation_content_changes() {
+        let p1 = "Smooth:\n agent: fixer | tokens: 0 | spend: $0";
+        let p2 = "Smooth:\n✓ bash(\"ls\") ── done (0.1s)\n agent: fixer | tokens: 0 | spend: $0";
+        assert_ne!(pane_progress_fingerprint(p1), pane_progress_fingerprint(p2));
+    }
 
     #[test]
     fn pane_shows_agent_activity_detects_thinking_text() {
@@ -893,6 +1027,11 @@ mod tests {
             idle_dwell: Duration::from_millis(150),
             idle_poll: Duration::from_millis(50),
             per_turn_timeout: Duration::from_secs(3),
+            // Tests don't exercise the progress watchdog (the
+            // shell-based stub doesn't have a `tokens:` status line),
+            // but it must be set. Make it short so a test that
+            // somehow triggers the watchdog still returns quickly.
+            progress_timeout: Duration::from_millis(500),
         }
     }
 

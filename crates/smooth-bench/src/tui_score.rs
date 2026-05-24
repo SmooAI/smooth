@@ -402,6 +402,42 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
     h.finish()
 }
 
+/// Extract the `tokens: N` value from a pane capture. Same status-
+/// line scrape strategy as [`extract_spend_usd`] — used by the
+/// human-driver to detect "agent made progress" between turns: if
+/// the token counter changed since the last send, the agent
+/// successfully called the LLM and we can move on. If it stayed at
+/// 0 (or unchanged), the agent is in-flight (retry loop, network
+/// stall, etc.) and the driver should NOT fire another prompt that
+/// would spawn a duplicate runner.
+///
+/// Returns `None` when no `tokens:` marker is found so callers can
+/// distinguish "no signal" from "signal=0".
+#[must_use]
+pub fn extract_tokens_total(pane: &str) -> Option<u64> {
+    let mut last: Option<u64> = None;
+    let mut search_start = 0;
+    while let Some(rel) = pane[search_start..].find("tokens:") {
+        let pos = search_start + rel + "tokens:".len();
+        let bytes = pane.as_bytes();
+        let mut i = pos;
+        while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+            i += 1;
+        }
+        let num_start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i > num_start {
+            if let Ok(v) = pane[num_start..i].parse::<u64>() {
+                last = Some(v);
+            }
+        }
+        search_start = pos.max(i);
+    }
+    last
+}
+
 /// Extract the `spend: $X.XXX` value from a pane capture. The TUI
 /// renders a status line like
 /// `agent: fixer | smooth-coding | tokens: 0 | spend: $0.109 | ● | Ctrl+C quit`
@@ -503,6 +539,13 @@ pub struct TuiSweepConfig {
     /// for harness debug runs (`--task-limit 1` to inspect a single
     /// pane log). `None` = run all tasks selected by `gate`.
     pub task_limit: Option<usize>,
+    /// Wall-clock pause between tasks (post task N, pre task N+1).
+    /// Lets the Anthropic per-minute TPM bucket roll over before
+    /// the next task starts — on a 30K input-TPM tier, three
+    /// back-to-back coding tasks easily starve the 4th of budget.
+    /// 0 disables. Default 0 to preserve historical behaviour; the
+    /// CLI surfaces a `--inter-task-sleep-s` flag.
+    pub inter_task_sleep_s: u64,
 }
 
 /// The same shape as the WebSocket `SweepRun` plus a `via` marker so
@@ -572,6 +615,15 @@ pub async fn run_tui_sweep<D: DriverModel, O: SweepObserver>(curated: &CuratedLi
             budget_hit = true;
             observer.on_budget_hit(cumulative_cost, cfg.budget_usd_cap);
             break;
+        }
+
+        // Inter-task sleep — give the upstream's per-minute TPM
+        // bucket time to refill before the next task. Skipped on
+        // task 1 (nothing to recover from yet) and skipped entirely
+        // when the knob is 0. Pearl th-4dd874.
+        if idx > 0 && cfg.inter_task_sleep_s > 0 {
+            eprintln!("score-tui: inter-task sleep {}s (TPM recovery)…", cfg.inter_task_sleep_s);
+            tokio::time::sleep(std::time::Duration::from_secs(cfg.inter_task_sleep_s)).await;
         }
 
         let outcome = match run_polyglot_task_via_tui(*lang, task, model, &cfg.tui_cfg).await {
@@ -837,6 +889,33 @@ final line
         // Real status-line captured from the bench pane log.
         let pane = " agent: fixer | smooth-coding | tokens: 0 | spend: $0.109 | ● | Ctrl+C quit";
         assert_eq!(extract_spend_usd(pane), Some(0.109));
+    }
+
+    // ----- Pearl th-90377e (token-counter scrape) -----
+
+    #[test]
+    fn extract_tokens_total_handles_actual_status_line() {
+        let pane = " agent: fixer | smooth-coding | tokens: 4280 | spend: $0.109 | ● | Ctrl+C quit";
+        assert_eq!(extract_tokens_total(pane), Some(4280));
+    }
+
+    #[test]
+    fn extract_tokens_total_returns_zero_for_fresh_run() {
+        let pane = " agent: fixer | smooth-coding | tokens: 0 | spend: $0 | ●";
+        assert_eq!(extract_tokens_total(pane), Some(0));
+    }
+
+    #[test]
+    fn extract_tokens_total_returns_none_when_no_status_line() {
+        assert_eq!(extract_tokens_total("Smooth: hello there"), None);
+    }
+
+    #[test]
+    fn extract_tokens_total_takes_last_match_for_scrollback_repaints() {
+        // Multiple status-line repaints in scrollback — the LAST
+        // value (most recent) is what we want.
+        let pane = "tokens: 100\n...\ntokens: 500\n...\ntokens: 1200";
+        assert_eq!(extract_tokens_total(pane), Some(1200));
     }
 
     #[test]
