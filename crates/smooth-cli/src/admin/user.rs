@@ -80,7 +80,7 @@ pub async fn dispatch(cmd: UserCommands) -> Result<()> {
                 Format::from_flag(json),
                 &TableOptions::default()
                     .with_label("users")
-                    .with_columns(&["id", "email", "full_name", "created_at"]),
+                    .with_columns(&["id", "email", "fullName", "createdAt"]),
             );
         }
         UserCommands::Search { query, limit, json } => {
@@ -89,7 +89,7 @@ pub async fn dispatch(cmd: UserCommands) -> Result<()> {
             render(
                 &body,
                 Format::from_flag(json),
-                &TableOptions::default().with_label("matches").with_columns(&["id", "email", "full_name"]),
+                &TableOptions::default().with_label("matches").with_columns(&["id", "email", "fullName"]),
             );
         }
         UserCommands::Roles { user_id, json } => {

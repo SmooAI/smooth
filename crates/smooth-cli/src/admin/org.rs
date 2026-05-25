@@ -124,7 +124,9 @@ pub async fn dispatch(cmd: OrgCommands) -> Result<()> {
             render(
                 &body,
                 Format::from_flag(json),
-                &TableOptions::default().with_label("organizations").with_columns(&["id", "name", "created_at"]),
+                &TableOptions::default()
+                    .with_label("organizations")
+                    .with_columns(&["id", "name", "memberCount", "createdAt"]),
             );
         }
         OrgCommands::Show { org_id, json } => {
@@ -140,7 +142,7 @@ pub async fn dispatch(cmd: OrgCommands) -> Result<()> {
                     Format::Table,
                     &TableOptions::default()
                         .with_label("members")
-                        .with_columns(&["id", "email", "role", "created_at"]),
+                        .with_columns(&["id", "email", "fullName", "role", "createdAt"]),
                 );
                 println!();
                 render(
@@ -148,7 +150,7 @@ pub async fn dispatch(cmd: OrgCommands) -> Result<()> {
                     Format::Table,
                     &TableOptions::default()
                         .with_label("products")
-                        .with_columns(&["id", "stripe_product_id", "status", "created_at"]),
+                        .with_columns(&["id", "stripeProductId", "status", "createdAt"]),
                 );
             }
         }
@@ -164,7 +166,7 @@ pub async fn dispatch(cmd: OrgCommands) -> Result<()> {
                 Format::from_flag(json),
                 &TableOptions::default()
                     .with_label("members")
-                    .with_columns(&["id", "email", "role", "created_at"]),
+                    .with_columns(&["id", "email", "fullName", "role", "createdAt"]),
             );
         }
         OrgCommands::AddMember { org_id, user_id, json } => {
@@ -186,7 +188,7 @@ pub async fn dispatch(cmd: OrgCommands) -> Result<()> {
                 Format::from_flag(json),
                 &TableOptions::default()
                     .with_label("products")
-                    .with_columns(&["id", "stripe_product_id", "status", "created_at"]),
+                    .with_columns(&["id", "stripeProductId", "status", "createdAt"]),
             );
         }
         OrgCommands::ActivateProduct { org_id, product, json } => {
