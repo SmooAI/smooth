@@ -2,7 +2,7 @@
 //!
 //! Single binary for agent orchestration, config management, and platform tools.
 
-mod admin;
+mod auth;
 mod boot_ui;
 mod gradient;
 mod hooks;
@@ -83,10 +83,24 @@ enum Commands {
     Down,
     /// Show system health
     Status,
-    /// Provider authentication
+    /// LLM provider credential management (Anthropic, Smoo AI Gateway,
+    /// OpenRouter, OpenAI, …). Edits `~/.smooth/providers.json`.
+    ///
+    /// Was `th auth` before 2026-05 — that name now belongs to Smoo
+    /// AI identity (`th auth login` for user/email-password, `th auth
+    /// login --m2m` for service accounts). LLM-provider config moved
+    /// here so the two concerns don't share a verb.
+    Model {
+        #[command(subcommand)]
+        cmd: ModelCommands,
+    },
+    /// Smoo AI identity — log in to the Smoo AI platform as a user
+    /// (email + password) or service account (M2M client_credentials).
+    /// Used by `th admin *`, `th api *`, and (soon) llm.smoo.ai's
+    /// user-attributed LLM session exchange.
     Auth {
         #[command(subcommand)]
-        cmd: AuthCommands,
+        cmd: auth::AuthCommands,
     },
     /// Smoo AI platform API — everything backed by `api.smoo.ai`.
     /// Login + orgs + agents + keys + members + config + knowledge,
@@ -242,16 +256,6 @@ enum Commands {
     Pearls {
         #[command(subcommand)]
         cmd: PearlCommands,
-    },
-    /// Smoo AI superadmin operations (`login`, `logout`, `whoami` today;
-    /// `onboard-customer` and friends land in follow-up pearls).
-    ///
-    /// Authenticates as a *user* of the Smoo AI app via Supabase OAuth
-    /// (browser flow), distinct from `th api login` which uses a
-    /// service-account `client_credentials` grant.
-    Admin {
-        #[command(subcommand)]
-        cmd: admin::AdminCommands,
     },
     /// Configure per-activity model routing (which model for thinking, coding, etc.)
     Routing {
@@ -681,8 +685,8 @@ enum RoutingCommands {
 }
 
 #[derive(Subcommand)]
-enum AuthCommands {
-    /// Add or update a provider
+enum ModelCommands {
+    /// Add or update an LLM provider's API key in ~/.smooth/providers.json.
     Login {
         /// Provider: kimi-code, kimi, openrouter, openai, anthropic, ollama, google
         provider: Option<String>,
@@ -696,7 +700,7 @@ enum AuthCommands {
     Default { provider: Option<String> },
     /// Remove a provider
     Remove { provider: String },
-    /// Show authentication status
+    /// Show LLM provider configuration status
     Status,
 }
 
@@ -1081,7 +1085,8 @@ async fn main() -> Result<()> {
         Some(Commands::Down) => cmd_down().await,
         Some(Commands::Status) => cmd_status().await,
         Some(Commands::Db { cmd }) => cmd_db(cmd),
-        Some(Commands::Auth { cmd }) => cmd_auth(cmd).await,
+        Some(Commands::Model { cmd }) => cmd_model(cmd).await,
+        Some(Commands::Auth { cmd }) => auth::dispatch(cmd).await,
         Some(Commands::Api { cmd }) => match cmd {
             ApiCommands::Login { client_id, client_secret } => cmd_login(client_id, client_secret).await,
             ApiCommands::Logout => cmd_logout().await,
@@ -1115,7 +1120,6 @@ async fn main() -> Result<()> {
         Some(Commands::Cancel { bead_id }) => cmd_steer(&bead_id, "cancel", None).await,
         Some(Commands::Hooks { cmd }) => cmd_hooks(cmd),
         Some(Commands::Pearls { cmd }) => cmd_pearls(cmd).await,
-        Some(Commands::Admin { cmd }) => admin::dispatch(cmd).await,
         Some(Commands::Audit { cmd }) => cmd_audit(cmd),
         Some(Commands::Web) => {
             println!("Web UI: http://localhost:4400");
@@ -1882,11 +1886,11 @@ fn cmd_db(cmd: DbCommands) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
+async fn cmd_model(cmd: ModelCommands) -> Result<()> {
     let providers_path = dirs_next::home_dir().map(|h| h.join(".smooth/providers.json"));
 
     match cmd {
-        AuthCommands::Status => {
+        ModelCommands::Status => {
             println!();
             println!("  {}", "Auth Status".bold().cyan());
             println!();
@@ -1950,7 +1954,7 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
             }
             println!();
         }
-        AuthCommands::Login { provider, api_key } => {
+        ModelCommands::Login { provider, api_key } => {
             let path = providers_path.as_ref().context("cannot determine home directory")?;
 
             // Provider catalog: (id, display name, models, needs_key)
@@ -2228,7 +2232,7 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
             println!("{}: configured ✓", provider_id.green().bold());
             println!("  Saved to: {}", path.display());
         }
-        AuthCommands::Providers => {
+        ModelCommands::Providers => {
             if let Some(ref path) = providers_path {
                 if path.exists() {
                     match smooth_operator::providers::ProviderRegistry::load_from_file(path) {
@@ -2251,7 +2255,7 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
                 }
             }
         }
-        AuthCommands::Default { provider } => {
+        ModelCommands::Default { provider } => {
             let path = providers_path.as_ref().context("cannot determine home directory")?;
             if let Some(p) = provider {
                 if !path.exists() {
@@ -2276,7 +2280,7 @@ async fn cmd_auth(cmd: AuthCommands) -> Result<()> {
                 println!("No providers configured. Run: th auth login <provider> --api-key YOUR_KEY");
             }
         }
-        AuthCommands::Remove { provider } => {
+        ModelCommands::Remove { provider } => {
             let path = providers_path.as_ref().context("cannot determine home directory")?;
             if !path.exists() {
                 println!("No providers configured.");
