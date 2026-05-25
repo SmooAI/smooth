@@ -50,6 +50,106 @@ smooth/
 
 ---
 
+## 1a. Using `th` — The Daily-Driver Reference
+
+> **Full doc**: [`docs/Engineering/Using-th-CLI.md`](docs/Engineering/Using-th-CLI.md). The bullets below are the muscle-memory summary; everything below covers what the binary built from this repo can do for you and how to extend it.
+
+`th` is **the** CLI we use across smooth and smooai. Reach for it before `curl`, before the web app, before Supabase Studio. Run `th --help` and `th <command> --help` liberally — every subcommand is self-documenting.
+
+### Auth — `auth.smoo.ai` and what to expect from login
+
+- `th api login` exchanges OAuth2 `grant_type=client_credentials` at `https://auth.smoo.ai/token` and stores a ~60-minute JWT at `~/.smooth/auth/smooai.json`.
+- Credential resolution order: `--client-id`/`--client-secret` flags → `SMOOAI_CLIENT_ID`/`SMOOAI_CLIENT_SECRET` env → interactive prompt.
+- Mint client credentials in the web app (Org Settings → API Keys) — the secret is shown **once**.
+- `th api whoami` shows the active identity (`client:…` for M2M, `user:…` for dashboard), the active org, the JWT TTL, and any `Admin roles` grants (e.g. `super_admin` → cross-org powers).
+- `th api orgs list / switch <id>` to change the active org. `th api logout` deletes the cached JWT.
+- `th auth login` (no `api`) is **provider** auth — LLM creds at `~/.smooth/providers.json`. Different system. Don't confuse them.
+
+### The high-leverage subtrees
+
+```bash
+# Smoo platform — replaces every curl to api.smoo.ai
+th api orgs|agents|knowledge|jobs|members|config|keys|observability|profile|testing
+
+# Cross-org admin (planned — pearl th-feebd2, blocked on th-abc4e2)
+th admin onboard-customer / mint-key / set-secret / org list|show
+
+# Jira — replaces curl -u "$JIRA_EMAIL:$JIRA_API_TOKEN" .../rest/api/3/...
+th jira sync / status
+
+# Pearls (the only spelling — no `th issues` / `th beads` aliases)
+th pearls create / ready / list / show / update / close / push / pull
+
+# Worktrees, sandbox/operators, audit, cache, service
+th worktree create / list / merge / remove
+th up / down / status / run / operators / access / inbox
+th audit tail · th doctor · th cache list · th service install
+th cast models
+```
+
+### What lives where (so you put new code in the right place)
+
+```
+Need to call api.smoo.ai?
+├── Per-org resource (acts on your active org)
+│   └── th api <resource> <verb>  →  crates/smooth-cli/src/api/<resource>.rs
+├── Cross-org / requires admin grants
+│   └── th admin <verb>           →  crates/smooth-cli/src/admin/   (paired API pearl required)
+└── Purely local (no api.smoo.ai roundtrip)
+    └── Top-level namespace        →  th pearls, th worktree, th cache, th doctor, …
+```
+
+| Lives in `th api` | Lives in `th admin` |
+|---|---|
+| Acts on **your active org** | Acts **across orgs** or on the platform itself |
+| Authenticated as M2M client or regular dashboard user | Authenticated as **admin-grant dashboard user** |
+| Backed by `/organizations/{org_id}/…` | Backed by `/admin/…` (paired endpoints don't exist yet) |
+| `agents`, `knowledge`, `members`, `config`, `jobs`, `keys`, `observability` | `onboard-customer`, `mint-key`, `set-secret`, `org list/show`, `feature-flag set` |
+| **Adding one**: file under `src/api/` + clap subcommand | **Adding one**: API endpoint + CLI subcommand together |
+
+### What does NOT belong in `th`
+
+- One-off scripts → `scripts/` in the relevant repo
+- `$EDITOR`-driven interactive flows (`th pearls edit` is discouraged for the same reason)
+- TUI-only workflows with no scriptable form → ship the headless surface first
+- `exec("curl ...")` wrappers with no value-add (auth refresh, error parsing, pagination, typing) → those go in `~/.smooth/plugins/` as file-based plugin manifests, not in the binary
+
+### Adding a `th` subcommand — the checklist
+
+1. **Search** — `rg "th api <something>" crates/`; someone may have started it
+2. **Pearl** — `th pearls create --title="th api X: add Y" --type=feature --priority=2`
+3. **Worktree** — `th worktree create th-<id>-…`
+4. **Code** — clone the nearest sibling under `crates/smooth-cli/src/api/` (they all follow the same shape), register in `src/api/mod.rs` + parent `Commands` enum
+5. **Test exhaustively** — colocated `#[cfg(test)]`, happy + error paths (§8 is non-negotiable)
+6. **Doc** — update help text **and** `docs/Engineering/Using-th-CLI.md`
+7. **Gate** — `cargo fmt && cargo clippy && cargo test && pnpm install:th`
+8. **Land** per §10
+
+### The `th-curl-hint` hook
+
+`.claude/hooks/th-curl-hint.sh` flags Bash commands that should be `th` calls and asks before letting them through:
+
+| Pattern | Suggestion |
+|---|---|
+| `curl … api.smoo.ai` | `th api …` |
+| `curl … auth.smoo.ai/token` | `th api login` |
+| `curl … atlassian.net/rest/api` | `th jira sync` (or file a pearl) |
+| `echo \| gh secret set … --body -` | `scripts/secret-helpers/gh-secret-set` (SMOODEV-879) |
+| `pnpm sst secret list` (raw) | `scripts/secret-helpers/sst-secret-list` (SMOODEV-908) |
+
+Override with ` # th-curl-hint:ack reason=…` if you genuinely need raw curl. **Overriding the same hint twice = file a pearl for the missing wrapper.**
+
+### Continuous improvement
+
+`th` is built from this repo. Every gap is a pearl waiting to happen:
+
+- Daily friction → `th pearls create --type=task --priority=3`
+- New API surface in `apps/web` → mirror under `th api <resource>` the same week + changeset
+- New admin operation → `th admin <verb>` (blocked on `th-feebd2`; file the sub-pearl now)
+- Shell-helper pattern that survives more than two uses → promote to a `th` subcommand or a `~/.smooth/plugins/` plugin
+
+---
+
 ## 2. Build, Test, Format, Lint
 
 ```bash
