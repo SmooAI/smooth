@@ -2,6 +2,7 @@
 //!
 //! Single binary for agent orchestration, config management, and platform tools.
 
+mod admin;
 mod auth;
 mod boot_ui;
 mod gradient;
@@ -101,6 +102,13 @@ enum Commands {
     Auth {
         #[command(subcommand)]
         cmd: auth::AuthCommands,
+    },
+    /// Smoo AI superadmin operations against the /admin/* endpoints
+    /// on api.smoo.ai. Requires a `th auth login` user session whose
+    /// account has the requireSuperAdmin role (403 otherwise).
+    Admin {
+        #[command(subcommand)]
+        cmd: admin::AdminCommands,
     },
     /// Smoo AI platform API — everything backed by `api.smoo.ai`.
     /// Login + orgs + agents + keys + members + config + knowledge,
@@ -1087,6 +1095,7 @@ async fn main() -> Result<()> {
         Some(Commands::Db { cmd }) => cmd_db(cmd),
         Some(Commands::Model { cmd }) => cmd_model(cmd).await,
         Some(Commands::Auth { cmd }) => auth::dispatch(cmd).await,
+        Some(Commands::Admin { cmd }) => admin::dispatch(cmd).await,
         Some(Commands::Api { cmd }) => match cmd {
             ApiCommands::Login { client_id, client_secret } => cmd_login(client_id, client_secret).await,
             ApiCommands::Logout => cmd_logout().await,
