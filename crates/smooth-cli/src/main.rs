@@ -2,6 +2,7 @@
 //!
 //! Single binary for agent orchestration, config management, and platform tools.
 
+mod admin;
 mod boot_ui;
 mod gradient;
 mod hooks;
@@ -241,6 +242,16 @@ enum Commands {
     Pearls {
         #[command(subcommand)]
         cmd: PearlCommands,
+    },
+    /// Smoo AI superadmin operations (`login`, `logout`, `whoami` today;
+    /// `onboard-customer` and friends land in follow-up pearls).
+    ///
+    /// Authenticates as a *user* of the Smoo AI app via Supabase OAuth
+    /// (browser flow), distinct from `th api login` which uses a
+    /// service-account `client_credentials` grant.
+    Admin {
+        #[command(subcommand)]
+        cmd: admin::AdminCommands,
     },
     /// Configure per-activity model routing (which model for thinking, coding, etc.)
     Routing {
@@ -1104,6 +1115,7 @@ async fn main() -> Result<()> {
         Some(Commands::Cancel { bead_id }) => cmd_steer(&bead_id, "cancel", None).await,
         Some(Commands::Hooks { cmd }) => cmd_hooks(cmd),
         Some(Commands::Pearls { cmd }) => cmd_pearls(cmd).await,
+        Some(Commands::Admin { cmd }) => admin::dispatch(cmd).await,
         Some(Commands::Audit { cmd }) => cmd_audit(cmd),
         Some(Commands::Web) => {
             println!("Web UI: http://localhost:4400");

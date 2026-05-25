@@ -188,3 +188,9 @@ smooth-tunnel = { version = "0.13.7", path = "crates/smooth-tunnel", package = "
 smooth-host-stub = { version = "0.13.7", path = "crates/smooth-host-stub", package = "smooai-smooth-host-stub" }
 smooth-bench = { version = "0.13.7", path = "crates/smooth-bench", package = "smooai-smooth-bench" }
 smooth-api-client = { version = "0.13.7", path = "crates/smooth-api-client", package = "smooai-smooth-api-client" }
+# Cross-runtime client shared library (~/dev/smooai/client-shared/).
+# Path dep for local dev; switch to git or published dep once the
+# client-shared repo is pushed to github.com/SmooAI/client-shared.
+# Pearls: th-33d57b (scaffolded), th-0398c1 (auth module),
+# th-abc4e2 (this — wires `th admin login`).
+smooai-client-shared = { path = "../client-shared/rust", features = ["auth"] }
