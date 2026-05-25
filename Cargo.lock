@@ -20,18 +20,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ahash"
-version = "0.8.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
-dependencies = [
- "cfg-if",
- "once_cell",
- "version_check",
- "zerocopy",
-]
-
-[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1653,18 +1641,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fallible-iterator"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
-
-[[package]]
-name = "fallible-streaming-iterator"
-version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
-
-[[package]]
 name = "fancy-regex"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2096,15 +2072,6 @@ checksum = "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888"
 
 [[package]]
 name = "hashbrown"
-version = "0.14.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
-dependencies = [
- "ahash",
-]
-
-[[package]]
-name = "hashbrown"
 version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
@@ -2123,15 +2090,6 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash 0.2.0",
-]
-
-[[package]]
-name = "hashlink"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ba4ff7128dee98c7dc9794b6a411377e1404dba1c97deb8d1a55297bd25d8af"
-dependencies = [
- "hashbrown 0.14.5",
 ]
 
 [[package]]
@@ -5060,20 +5018,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rusqlite"
-version = "0.32.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7753b721174eb8ff87a9a0e799e2d7bc3749323e773db92e0984debb00019d6e"
-dependencies = [
- "bitflags 2.11.0",
- "fallible-iterator",
- "fallible-streaming-iterator",
- "hashlink 0.9.1",
- "libsqlite3-sys",
- "smallvec",
-]
-
-[[package]]
 name = "rust-embed"
 version = "8.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5817,6 +5761,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "smooai-agent"
+version = "0.1.0"
+source = "git+https://github.com/SmooAI/agent.git?rev=34951e46d675ea5bc57c940ae311ec3e612076cc#34951e46d675ea5bc57c940ae311ec3e612076cc"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "dirs-next",
+ "futures-core",
+ "futures-util",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "serde_yml",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite 0.26.2",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "smooai-smooth-api-client"
 version = "0.13.7"
 dependencies = [
@@ -5877,8 +5845,8 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "smooai-agent",
  "smooai-smooth-code",
- "smooai-smooth-operator",
  "smooai-smooth-pearls",
  "tempfile",
  "tokio",
@@ -5909,13 +5877,13 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "smooai-agent",
  "smooai-smooth-archivist",
  "smooai-smooth-bootstrap-bill",
  "smooai-smooth-code",
  "smooai-smooth-diver",
  "smooai-smooth-goalie",
  "smooai-smooth-narc",
- "smooai-smooth-operator",
  "smooai-smooth-pearls",
  "smooai-smooth-policy",
  "smooai-smooth-scribe",
@@ -5973,13 +5941,13 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "smooai-agent",
  "smooai-smooth-api-client",
  "smooai-smooth-bench",
  "smooai-smooth-bigsmooth",
  "smooai-smooth-bootstrap-bill",
  "smooai-smooth-code",
  "smooai-smooth-diver",
- "smooai-smooth-operator",
  "smooai-smooth-pearls",
  "smooai-smooth-tunnel",
  "smooai-smooth-web",
@@ -6012,9 +5980,9 @@ dependencies = [
  "serde",
  "serde_json",
  "similar",
+ "smooai-agent",
  "smooai-smooth-bigsmooth",
  "smooai-smooth-narc",
- "smooai-smooth-operator",
  "smooai-smooth-pearls",
  "tempfile",
  "tokio",
@@ -6115,39 +6083,13 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "smooai-smooth-operator",
+ "smooai-agent",
  "tempfile",
  "tokio",
  "tokio-stream",
  "tonic",
  "tonic-build",
  "tower 0.5.3",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "smooai-smooth-operator"
-version = "0.13.7"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "chrono",
- "dirs-next",
- "futures-core",
- "futures-util",
- "reqwest 0.12.28",
- "rusqlite",
- "serde",
- "serde_json",
- "serde_yml",
- "smooai-smooth-narc",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tokio-tungstenite 0.26.2",
  "tracing",
  "uuid",
 ]
@@ -6171,9 +6113,9 @@ dependencies = [
  "serde",
  "serde_json",
  "similar",
+ "smooai-agent",
  "smooai-smooth-goalie",
  "smooai-smooth-narc",
- "smooai-smooth-operator",
  "smooai-smooth-pearls",
  "smooai-smooth-policy",
  "smooai-smooth-scribe",
@@ -6196,7 +6138,7 @@ dependencies = [
  "dirs-next",
  "serde",
  "serde_json",
- "smooai-smooth-operator",
+ "smooai-agent",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -6213,7 +6155,7 @@ dependencies = [
  "axum 0.8.8",
  "serde",
  "serde_json",
- "smooai-smooth-operator",
+ "smooai-agent",
  "tokio",
  "tracing",
 ]
@@ -6247,7 +6189,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "smooai-smooth-operator",
+ "smooai-agent",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -6305,8 +6247,8 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "smooai-agent",
  "smooai-smooth-narc",
- "smooai-smooth-operator",
  "smooai-smooth-policy",
  "tempfile",
  "tokio",
@@ -6388,7 +6330,7 @@ dependencies = [
  "futures-io",
  "futures-util",
  "hashbrown 0.15.5",
- "hashlink 0.10.0",
+ "hashlink",
  "indexmap 2.13.0",
  "log",
  "memchr",

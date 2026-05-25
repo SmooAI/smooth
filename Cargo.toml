@@ -170,7 +170,7 @@ prost-types = "0.13"
 microsandbox = "0.4"
 
 # Workspace crates
-smooth-operator = { path = "crates/smooth-operator", version = "0.13.7", package = "smooai-smooth-operator" }
+smooth-operator = { git = "https://github.com/SmooAI/agent.git", rev = "34951e46d675ea5bc57c940ae311ec3e612076cc", package = "smooai-agent" }
 smooth-bigsmooth = { version = "0.13.7", path = "crates/smooth-bigsmooth", package = "smooai-smooth-bigsmooth" }
 smooth-policy = { path = "crates/smooth-policy", version = "0.13.7", package = "smooai-smooth-policy" }
 smooth-web = { version = "0.13.7", path = "crates/smooth-web", package = "smooai-smooth-web" }
