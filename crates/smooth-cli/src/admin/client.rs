@@ -130,14 +130,6 @@ impl AdminClient {
     }
 }
 
-/// Print a JSON value as pretty-indented JSON to stdout.
-pub fn print_json(value: &serde_json::Value) {
-    match serde_json::to_string_pretty(value) {
-        Ok(s) => println!("{s}"),
-        Err(_) => println!("{value}"),
-    }
-}
-
 /// Print a one-line status hint when an operation succeeded.
 pub fn print_ok(msg: impl AsRef<str>) {
     println!("{} {}", "✓".green().bold(), msg.as_ref());

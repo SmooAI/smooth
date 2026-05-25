@@ -48,6 +48,8 @@ futures-util.workspace = true
 # and url-encode query params for the list endpoint.
 walkdir = "2"
 urlencoding = "2"
+# Pretty tables for `th admin` default output (with --json opt-out).
+comfy-table = "7"
 
 [dev-dependencies]
 tempfile = "3"

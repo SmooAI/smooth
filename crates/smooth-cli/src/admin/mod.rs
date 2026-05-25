@@ -19,6 +19,7 @@ use clap::Subcommand;
 
 pub mod client;
 pub mod org;
+pub mod render;
 pub mod user;
 
 #[derive(Debug, Subcommand)]
