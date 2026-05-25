@@ -772,11 +772,211 @@ async fn score_work_dir(lang: PolyglotLang, work_dir: &Path) -> anyhow::Result<(
         .env("CARGO_TARGET_DIR", &isolated_target)
         .output()
         .with_context(|| format!("spawning `{}`", argv.join(" ")))?;
+    let exit_code = output.status.code();
     let mut combined = String::new();
     combined.push_str(&String::from_utf8_lossy(&output.stdout));
     combined.push_str(&String::from_utf8_lossy(&output.stderr));
-    let counts = judge_test_output(&combined).await.unwrap_or_default();
+
+    // Pearl th-086f0f: prefer deterministic regex parse of the test
+    // runner's own summary line (cargo's "test result:", pytest's
+    // `N passed, N failed`, etc.) over the LLM judge. The judge gets
+    // 4 KB of trimmed output and routinely returns 0/0/0 when the
+    // canonical summary line is in the trimmed-out middle — which
+    // marks the task FAIL even when every test passed. We saw this
+    // on rust-acronym across all 4 models in the 4-model matrix:
+    // saved src/lib.rs passed 10/10 against `cargo test` on the
+    // host, but bench scored FAIL because the judge couldn't see
+    // the summary in the trimmed window.
+    //
+    // Regex first → judge fallback → forensic dump (always).
+    let (counts, source) = match parse_native_test_summary(lang, &combined) {
+        Some(c) => (c, "native_regex"),
+        None => (judge_test_output(&combined).await.unwrap_or_default(), "judge_llm"),
+    };
+
+    if let Err(e) = write_score_forensic(work_dir, lang, argv, exit_code, &combined, source, counts) {
+        // Don't fail the score on a forensic-write error; just log.
+        eprintln!("bench: score forensic write failed for {}: {e:#}", work_dir.display());
+    }
+
     Ok((combined, counts))
+}
+
+/// Deterministic regex parse of the test-runner's own summary line.
+/// Returns `None` when no summary line is found — caller falls back
+/// to the LLM judge. Returning `None` is a *signal* that the output
+/// doesn't have the canonical shape; `Some(passed: 0, failed: 0)`
+/// would be a real "the runner found nothing" result.
+#[must_use]
+pub fn parse_native_test_summary(lang: PolyglotLang, combined: &str) -> Option<TestCounts> {
+    match lang {
+        PolyglotLang::Rust => parse_cargo_summary(combined),
+        PolyglotLang::Python => parse_pytest_summary(combined),
+        PolyglotLang::Javascript => parse_jest_summary(combined),
+        // Go, Java, Cpp: TODO once we hit a case where the judge LLM
+        // miscounts them. The judge handles them OK today.
+        _ => None,
+    }
+}
+
+/// `cargo test` prints one or more `test result: ok|FAILED. N passed; N failed; …`
+/// lines (one per test binary, plus one for doc-tests). Sum across all
+/// of them — a task with 1 unit test + 9 integration tests reports two
+/// summary lines and we want the union.
+#[must_use]
+pub fn parse_cargo_summary(combined: &str) -> Option<TestCounts> {
+    let mut total_passed = 0u32;
+    let mut total_failed = 0u32;
+    let mut found = false;
+    for line in combined.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("test result:") {
+            continue;
+        }
+        found = true;
+        if let Some(p) = extract_count_before(trimmed, " passed") {
+            total_passed = total_passed.saturating_add(p);
+        }
+        if let Some(f) = extract_count_before(trimmed, " failed") {
+            total_failed = total_failed.saturating_add(f);
+        }
+    }
+    if !found {
+        return None;
+    }
+    Some(TestCounts {
+        passed: total_passed,
+        failed: total_failed,
+        total: total_passed.saturating_add(total_failed),
+    })
+}
+
+/// pytest summary line: `===== 10 passed, 2 failed, 1 skipped in 1.23s =====`
+/// or `========== 10 passed in 0.01s ==========`. Take the LAST occurrence
+/// since pytest can print interim summaries; the final one is the suite total.
+#[must_use]
+pub fn parse_pytest_summary(combined: &str) -> Option<TestCounts> {
+    let mut last_passed = None;
+    let mut last_failed = None;
+    for line in combined.lines() {
+        let trimmed = line.trim();
+        // Heuristic: pytest summary lines start with `=` and contain
+        // "passed" or "failed" or "error".
+        if !trimmed.starts_with('=') {
+            continue;
+        }
+        if !(trimmed.contains(" passed") || trimmed.contains(" failed") || trimmed.contains(" error")) {
+            continue;
+        }
+        if let Some(p) = extract_count_before(trimmed, " passed") {
+            last_passed = Some(p);
+        }
+        if let Some(f) = extract_count_before(trimmed, " failed") {
+            last_failed = Some(f);
+        }
+        // pytest's "error" counts (collection errors) as failures.
+        if let Some(e) = extract_count_before(trimmed, " error") {
+            last_failed = Some(last_failed.unwrap_or(0).saturating_add(e));
+        }
+    }
+    if last_passed.is_none() && last_failed.is_none() {
+        return None;
+    }
+    let passed = last_passed.unwrap_or(0);
+    let failed = last_failed.unwrap_or(0);
+    Some(TestCounts {
+        passed,
+        failed,
+        total: passed.saturating_add(failed),
+    })
+}
+
+/// jest summary line: `Tests:       1 failed, 10 passed, 11 total`.
+/// Take the last occurrence (jest can print per-file then aggregate).
+#[must_use]
+pub fn parse_jest_summary(combined: &str) -> Option<TestCounts> {
+    let mut last: Option<(u32, u32, u32)> = None;
+    for line in combined.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("Tests:") {
+            continue;
+        }
+        let passed = extract_count_before(trimmed, " passed").unwrap_or(0);
+        let failed = extract_count_before(trimmed, " failed").unwrap_or(0);
+        let total = extract_count_before(trimmed, " total").unwrap_or_else(|| passed.saturating_add(failed));
+        last = Some((passed, failed, total));
+    }
+    last.map(|(passed, failed, total)| TestCounts { passed, failed, total })
+}
+
+/// Find the integer that immediately precedes `suffix` in `line`.
+/// e.g. `extract_count_before("test result: ok. 10 passed; 0 failed", " passed")`
+/// returns `Some(10)`. Returns `None` when the suffix isn't present or
+/// no digits precede it.
+fn extract_count_before(line: &str, suffix: &str) -> Option<u32> {
+    let idx = line.find(suffix)?;
+    let prefix = &line[..idx];
+    // Walk back from the end of prefix collecting digits.
+    let bytes = prefix.as_bytes();
+    let mut end = bytes.len();
+    // Skip a trailing whitespace, if any (cargo prints "10 passed",
+    // pytest prints " 10 passed" with leading space we don't need).
+    while end > 0 && bytes[end - 1] == b' ' {
+        end -= 1;
+    }
+    let mut start = end;
+    while start > 0 && bytes[start - 1].is_ascii_digit() {
+        start -= 1;
+    }
+    if start == end {
+        return None;
+    }
+    std::str::from_utf8(&bytes[start..end]).ok()?.parse().ok()
+}
+
+/// Forensic dump for `cargo test` runs: writes a JSON sidecar +
+/// the raw combined stdout/stderr to `work_dir/.smooth-score-forensic/`
+/// so any future FAIL is debuggable in 30 seconds instead of "where
+/// did the bench score this from?".
+fn write_score_forensic(
+    work_dir: &Path,
+    lang: PolyglotLang,
+    argv: &[&str],
+    exit_code: Option<i32>,
+    combined: &str,
+    source: &str,
+    counts: TestCounts,
+) -> anyhow::Result<()> {
+    let dir = work_dir.join(".smooth-score-forensic");
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+
+    // Full raw output — the only authoritative record. Capped at 1 MiB
+    // so a runaway loop doesn't fill disk.
+    let raw = if combined.len() > 1_048_576 {
+        let truncated = &combined[..1_048_576];
+        format!("{truncated}\n\n[... truncated, original was {} bytes ...]\n", combined.len())
+    } else {
+        combined.to_string()
+    };
+    std::fs::write(dir.join("combined.txt"), raw).with_context(|| format!("write {}", dir.join("combined.txt").display()))?;
+
+    let summary = serde_json::json!({
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "lang": lang.dataset_dir(),
+        "command": argv,
+        "exit_code": exit_code,
+        "parsed_via": source,
+        "counts": {
+            "passed": counts.passed,
+            "failed": counts.failed,
+            "total": counts.total,
+            "solved": counts.solved(),
+        },
+        "combined_bytes": combined.len(),
+    });
+    std::fs::write(dir.join("summary.json"), serde_json::to_string_pretty(&summary)?)
+        .with_context(|| format!("write {}", dir.join("summary.json").display()))?;
+    Ok(())
 }
 
 /// Ask the `smooth-judge` slot to extract pass/fail/total counts
@@ -927,6 +1127,149 @@ pub fn print_summary(r: &BenchResult) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Pearl th-086f0f: native-summary parsers ───────────────────
+
+    /// Regression for the rust-acronym scoring bug: glm-5.1's saved
+    /// src/lib.rs passes 10/10 when run with `cargo test
+    /// -- --include-ignored`, but bench scored FAIL because the
+    /// judge LLM couldn't see the summary line in the 4 KB trim
+    /// window. The native parser must extract 10 passed / 0 failed
+    /// from this exact stdout.
+    #[test]
+    fn parse_cargo_summary_extracts_passed_failed_from_real_output() {
+        let real = "\nrunning 10 tests\ntest basic ... ok\ntest lowercase_words ... ok\ntest consecutive_delimiters ... ok\n\
+                    test punctuation ... ok\ntest punctuation_without_whitespace ... ok\n\
+                    test underscore_emphasis ... ok\ntest very_long_abbreviation ... ok\n\
+                    test all_caps_word ... ok\ntest two_letter_abbreviation ... ok\n\
+                    test consecutive_delimiters_in_camel_case ... ok\n\n\
+                    test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n";
+        let counts = parse_cargo_summary(real).expect("regex must match");
+        assert_eq!(counts.passed, 10);
+        assert_eq!(counts.failed, 0);
+        assert_eq!(counts.total, 10);
+        assert!(counts.solved());
+    }
+
+    #[test]
+    fn parse_cargo_summary_handles_failures() {
+        let out = "running 5 tests\ntest result: FAILED. 2 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out\n";
+        let counts = parse_cargo_summary(out).expect("matches");
+        assert_eq!(counts.passed, 2);
+        assert_eq!(counts.failed, 3);
+        assert_eq!(counts.total, 5);
+        assert!(!counts.solved());
+    }
+
+    #[test]
+    fn parse_cargo_summary_sums_multiple_test_binaries_and_doctests() {
+        // A typical task with unit tests, integration tests, AND
+        // doctests prints three "test result:" lines.
+        let out = "test result: ok. 5 passed; 0 failed; 0 ignored\n\
+                   test result: ok. 3 passed; 1 failed; 0 ignored\n\
+                   test result: ok. 2 passed; 0 failed; 0 ignored\n";
+        let counts = parse_cargo_summary(out).expect("matches");
+        assert_eq!(counts.passed, 10);
+        assert_eq!(counts.failed, 1);
+        assert_eq!(counts.total, 11);
+    }
+
+    #[test]
+    fn parse_cargo_summary_returns_none_when_no_summary_present() {
+        // Compilation failure → no "test result:" lines. Caller falls
+        // back to the LLM judge, which knows to count build failures
+        // as failed=1.
+        let out = "error[E0599]: no method named `foo` found\nerror: could not compile `acronym`\n";
+        assert!(parse_cargo_summary(out).is_none());
+    }
+
+    #[test]
+    fn parse_pytest_summary_extracts_passed_failed_from_real_output() {
+        // Real pytest output format.
+        let out = "============== 10 passed, 2 failed in 1.23s ==============\n";
+        let counts = parse_pytest_summary(out).expect("matches");
+        assert_eq!(counts.passed, 10);
+        assert_eq!(counts.failed, 2);
+        assert_eq!(counts.total, 12);
+    }
+
+    #[test]
+    fn parse_pytest_summary_handles_passed_only() {
+        let out = "============== 12 passed in 0.01s ==============\n";
+        let counts = parse_pytest_summary(out).expect("matches");
+        assert_eq!(counts.passed, 12);
+        assert_eq!(counts.failed, 0);
+        assert_eq!(counts.total, 12);
+    }
+
+    #[test]
+    fn parse_pytest_summary_treats_collection_errors_as_failed() {
+        // pytest's "error" count covers collection errors (broken
+        // imports, syntax errors). Score those as failures.
+        let out = "============== 5 passed, 2 errors in 0.01s ==============\n";
+        let counts = parse_pytest_summary(out).expect("matches");
+        assert_eq!(counts.passed, 5);
+        assert_eq!(counts.failed, 2);
+    }
+
+    #[test]
+    fn parse_pytest_summary_takes_last_summary_line() {
+        // Interim "X passed" can appear earlier; the final aggregate
+        // line is the truth.
+        let out = "============== 1 passed in 0.5s ==============\n\
+                   ============== 10 passed, 2 failed in 1.2s ==============\n";
+        let counts = parse_pytest_summary(out).expect("matches");
+        assert_eq!(counts.passed, 10);
+        assert_eq!(counts.failed, 2);
+    }
+
+    #[test]
+    fn parse_jest_summary_extracts_passed_failed_total() {
+        let out = "Tests:       1 failed, 10 passed, 11 total\nTest Suites: 1 failed, 1 total\n";
+        let counts = parse_jest_summary(out).expect("matches");
+        assert_eq!(counts.passed, 10);
+        assert_eq!(counts.failed, 1);
+        assert_eq!(counts.total, 11);
+    }
+
+    #[test]
+    fn parse_native_dispatches_per_language() {
+        let cargo = "test result: ok. 3 passed; 0 failed";
+        assert_eq!(parse_native_test_summary(PolyglotLang::Rust, cargo).unwrap().passed, 3);
+        assert!(parse_native_test_summary(PolyglotLang::Python, cargo).is_none());
+        assert!(parse_native_test_summary(PolyglotLang::Go, cargo).is_none()); // not yet wired
+    }
+
+    #[test]
+    fn extract_count_before_handles_leading_and_trailing_whitespace() {
+        assert_eq!(extract_count_before("test result: ok. 10 passed; 0 failed", " passed"), Some(10));
+        assert_eq!(extract_count_before("Tests:       1 failed, 10 passed, 11 total", " passed"), Some(10));
+        assert_eq!(extract_count_before("===== 12 passed in 0.01s =====", " passed"), Some(12));
+        assert_eq!(extract_count_before("no numeric prefix passed", " passed"), None);
+        assert_eq!(extract_count_before("missing suffix", " passed"), None);
+    }
+
+    #[test]
+    fn write_score_forensic_creates_summary_and_combined() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let work = tmp.path();
+        let out = "test result: ok. 10 passed; 0 failed\n";
+        let counts = TestCounts {
+            passed: 10,
+            failed: 0,
+            total: 10,
+        };
+        write_score_forensic(work, PolyglotLang::Rust, &["cargo", "test"], Some(0), out, "native_regex", counts).expect("write");
+        let forensic_dir = work.join(".smooth-score-forensic");
+        assert!(forensic_dir.join("combined.txt").exists());
+        assert!(forensic_dir.join("summary.json").exists());
+        let summary: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(forensic_dir.join("summary.json")).unwrap()).unwrap();
+        assert_eq!(summary["parsed_via"], "native_regex");
+        assert_eq!(summary["counts"]["passed"], 10);
+        assert_eq!(summary["counts"]["solved"], true);
+    }
+
+    // ──────────────────────────────────────────────────────────────
 
     #[test]
     fn polyglot_lang_parses_common_names() {
