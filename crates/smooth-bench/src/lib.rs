@@ -1037,6 +1037,7 @@ pub async fn judge_test_output(combined_stdout: &str) -> anyhow::Result<TestCoun
 /// strips code fences, finds the first `{...}` block, accepts
 /// partial totals (infers total when the model only gives passed +
 /// failed). Unit-tested without a live LLM.
+#[allow(clippy::cast_possible_truncation)]
 pub fn parse_judge_response(raw: &str) -> TestCounts {
     let body = strip_code_fence(raw.trim());
     let Some(json_slice) = extract_first_object(body) else {
@@ -1051,20 +1052,16 @@ pub fn parse_judge_response(raw: &str) -> TestCounts {
     let total = value
         .get("total")
         .and_then(serde_json::Value::as_u64)
-        .map_or(passed.saturating_add(failed), |n| n as u32);
+        .map_or_else(|| passed.saturating_add(failed), |n| n as u32);
 
     TestCounts { passed, failed, total }
 }
 
 fn strip_code_fence(s: &str) -> &str {
     let s = s.trim();
-    if let Some(rest) = s.strip_prefix("```json") {
-        rest.trim_end_matches("```").trim()
-    } else if let Some(rest) = s.strip_prefix("```") {
-        rest.trim_end_matches("```").trim()
-    } else {
-        s
-    }
+    s.strip_prefix("```json")
+        .or_else(|| s.strip_prefix("```"))
+        .map_or(s, |rest| rest.trim_end_matches("```").trim())
 }
 
 fn extract_first_object(s: &str) -> Option<&str> {
