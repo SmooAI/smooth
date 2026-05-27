@@ -42,6 +42,53 @@ fn tui_debug(msg: impl AsRef<str>) {
     let _ = writeln!(f, "[{ts}] {}", msg.as_ref());
 }
 
+/// Write the running cumulative `total_cost_usd` to the path in
+/// `SMOOTH_BENCH_COST_SIDECAR` (or do nothing when unset). The bench
+/// reads this on task completion to avoid scraping the TUI's status
+/// bar, which is brittle against render-timing races and format drift.
+/// Opt-in via env so regular `th code` sessions don't drop a file.
+/// Best-effort: a write failure must not affect the user's session.
+/// Pearl th-a08fa3.
+fn write_bench_cost_sidecar(total_cost_usd: f64, iterations: u32) {
+    let Ok(path) = std::env::var("SMOOTH_BENCH_COST_SIDECAR") else {
+        return;
+    };
+    if path.is_empty() {
+        return;
+    }
+    write_bench_cost_sidecar_to(std::path::Path::new(&path), total_cost_usd, iterations);
+}
+
+/// Path-taking core of [`write_bench_cost_sidecar`]. Pulled out so the
+/// IO behavior is unit-testable without touching the process-global
+/// `SMOOTH_BENCH_COST_SIDECAR` env var (which would require `unsafe`
+/// under Rust 2024 and is forbidden crate-wide).
+fn write_bench_cost_sidecar_to(path: &std::path::Path, total_cost_usd: f64, iterations: u32) {
+    let body = serde_json::json!({
+        "cost_usd": total_cost_usd,
+        "iterations": iterations,
+        "ts_unix_ms": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+    });
+    let Ok(serialized) = serde_json::to_string(&body) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // Atomic-ish write: rename(tmp → final). A reader catching us
+    // mid-write at the final path is the failure mode we want to
+    // avoid — bench polls this file and can race the writer.
+    let mut tmp_path = path.as_os_str().to_os_string();
+    tmp_path.push(".tmp");
+    let tmp_path = std::path::PathBuf::from(tmp_path);
+    if std::fs::write(&tmp_path, serialized.as_bytes()).is_ok() {
+        let _ = std::fs::rename(&tmp_path, path);
+    }
+}
+
 /// Run the Smooth TUI.
 ///
 /// This is the main entry point — it sets up the terminal, runs the event loop,
@@ -424,8 +471,16 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
         AgentEvent::TokenDelta { content } => {
             state.append_stream_content(&content);
         }
-        AgentEvent::Completed { cost_usd, .. } => {
+        AgentEvent::Completed { cost_usd, iterations, .. } => {
             state.total_cost_usd += cost_usd;
+            // Pearl th-a08fa3: write a JSON cost sidecar when
+            // SMOOTH_BENCH_COST_SIDECAR is set. The bench needs a
+            // deterministic cost signal that doesn't depend on the
+            // TUI's render timing or status-bar string format. Opt-in
+            // via env so non-bench `th code` sessions don't drop a
+            // file. Best-effort: a write error must not affect the
+            // user's session.
+            write_bench_cost_sidecar(state.total_cost_usd, iterations);
             // Workflow has wrapped up — clear the phase indicator so
             // the status bar doesn't keep showing "FINALIZE" while
             // the agent is idle.
@@ -1332,4 +1387,70 @@ fn try_resolve_open_prompt(
         }
     });
     true
+}
+
+#[cfg(test)]
+mod bench_cost_sidecar_tests {
+    use super::write_bench_cost_sidecar_to;
+
+    #[test]
+    fn writes_json_file_with_cost_and_iterations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cost.json");
+        write_bench_cost_sidecar_to(&path, 0.4242, 9);
+        let body = std::fs::read_to_string(&path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["cost_usd"].as_f64(), Some(0.4242));
+        assert_eq!(v["iterations"].as_u64(), Some(9));
+        assert!(v["ts_unix_ms"].is_u64());
+    }
+
+    #[test]
+    fn write_is_atomic_via_tmp_then_rename() {
+        // After a successful write, only the final path exists — the
+        // `.tmp` shadow has been renamed away. A bench polling the
+        // final path should never see a half-written file.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cost.json");
+        write_bench_cost_sidecar_to(&path, 0.5, 1);
+        assert!(path.exists());
+        let mut tmp_shadow = path.as_os_str().to_os_string();
+        tmp_shadow.push(".tmp");
+        assert!(!std::path::Path::new(&tmp_shadow).exists());
+    }
+
+    #[test]
+    fn creates_parent_dirs_if_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("deep").join("nested").join("cost.json");
+        write_bench_cost_sidecar_to(&path, 0.5, 1);
+        assert!(path.exists(), "sidecar should be created with parents");
+    }
+
+    #[test]
+    fn write_failure_does_not_panic() {
+        // Point at a path that can't be created (existing file as a
+        // parent dir). The function must swallow the error rather than
+        // poison the agent loop.
+        let tmp = tempfile::tempdir().unwrap();
+        let blocker = tmp.path().join("blocker");
+        std::fs::write(&blocker, b"i am a file").unwrap();
+        let bad_path = blocker.join("cost.json"); // parent is a regular file
+        write_bench_cost_sidecar_to(&bad_path, 0.1, 1);
+        assert!(!bad_path.exists());
+    }
+
+    #[test]
+    fn overwrites_existing_file() {
+        // The bench may call `th code` multiple times in a sweep against
+        // the same task. Each Completed event should clobber the prior
+        // sidecar — the freshest cost wins.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cost.json");
+        write_bench_cost_sidecar_to(&path, 0.10, 1);
+        write_bench_cost_sidecar_to(&path, 0.25, 2);
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["cost_usd"].as_f64(), Some(0.25));
+        assert_eq!(v["iterations"].as_u64(), Some(2));
+    }
 }

@@ -181,7 +181,19 @@ pub async fn run_polyglot_task_via_tui<D: DriverModel>(lang: PolyglotLang, task:
     // ended up discussing book-store math because that was the most
     // recent task's content. The env var is opt-in so non-bench
     // callers keep the normal persistent-session behavior.
-    let env_prefix = "SMOOTH_BENCH_FRESH_SESSION=1 SMOOTH_BENCH_TRACE_TOOLS=1";
+    // Pearl th-a08fa3: SMOOTH_BENCH_COST_SIDECAR tells smooth-code to
+    // write a deterministic JSON cost file on `AgentEvent::Completed`,
+    // sidestepping the brittle pane-scrape path (which races against
+    // ratatui repaints and is fragile against status-bar format drift).
+    // Path is per-task so multi-task sweeps don't clobber each other;
+    // sibling to the pane debug log under the run dir for forensic
+    // co-location.
+    let cost_sidecar_path = setup.run_dir.join(format!("{}-{}.cost.json", lang.dataset_dir(), task));
+    let cost_sidecar_path_str = cost_sidecar_path.to_string_lossy().to_string();
+    let env_prefix = format!(
+        "SMOOTH_BENCH_FRESH_SESSION=1 SMOOTH_BENCH_TRACE_TOOLS=1 SMOOTH_BENCH_COST_SIDECAR={}",
+        shell_escape(&cost_sidecar_path_str),
+    );
     let shell_cmd = match cfg.under_test_model.as_deref() {
         Some(model) => format!("{} {} code --model {}", env_prefix, shell_escape(&cfg.th_binary), shell_escape(model)),
         None => format!("{} {} code", env_prefix, shell_escape(&cfg.th_binary)),
@@ -230,30 +242,35 @@ pub async fn run_polyglot_task_via_tui<D: DriverModel>(lang: PolyglotLang, task:
     // the count is for trend tracking, not a load-bearing assertion.
     let tool_calls = count_tool_call_lines(&loop_result.final_pane);
 
-    // Cost scraping (Bug 2). The TUI renders a status line
-    // `agent: NAME | TASK | tokens: N | spend: $X.XXX | …` along
-    // the bottom of the pane. We grab a final visible-only capture
-    // (cheaper than the full-scrollback capture, and the status
-    // line is always visible by definition) and regex out the
-    // spend. Falls back to 0.0 + a warning if the line isn't
-    // present — better to under-report than to fabricate cost.
-    let cost_usd = match driver.capture_visible() {
-        Ok(final_visible) => extract_spend_usd(&final_visible).unwrap_or_else(|| {
-            eprintln!(
-                "score-tui: WARNING — could not extract `spend: $X.XX` from final pane for {}/{}; reporting cost as $0.00",
-                lang.dataset_dir(),
-                task
-            );
-            0.0
-        }),
-        Err(e) => {
-            eprintln!(
-                "score-tui: WARNING — final capture_visible failed for {}/{} ({e:#}); reporting cost as $0.00",
-                lang.dataset_dir(),
-                task
-            );
-            0.0
-        }
+    // Cost extraction (pearl th-a08fa3). Preferred path: read the JSON
+    // sidecar smooth-code writes when SMOOTH_BENCH_COST_SIDECAR is set
+    // (we set it above). The sidecar is fed directly by
+    // `AgentEvent::Completed.cost_usd` and is immune to render timing,
+    // ANSI escapes, and status-bar format drift. Fallback path: the
+    // legacy pane-scrape via `extract_spend_usd`, kept for backward
+    // compatibility with older `th` binaries that don't emit the
+    // sidecar yet. Final fallback: $0.00 + a loud warning so a regression
+    // is visible rather than silently fabricated.
+    let cost_usd = match read_cost_sidecar(&cost_sidecar_path) {
+        Some(v) => v,
+        None => match driver.capture_visible() {
+            Ok(final_visible) => extract_spend_usd(&final_visible).unwrap_or_else(|| {
+                eprintln!(
+                    "score-tui: WARNING — sidecar missing AND could not extract `spend: $X.XX` from final pane for {}/{}; reporting cost as $0.00",
+                    lang.dataset_dir(),
+                    task
+                );
+                0.0
+            }),
+            Err(e) => {
+                eprintln!(
+                    "score-tui: WARNING — sidecar missing AND capture_visible failed for {}/{} ({e:#}); reporting cost as $0.00",
+                    lang.dataset_dir(),
+                    task
+                );
+                0.0
+            }
+        },
     };
 
     // Drop the driver early so the tmux session goes away BEFORE we
@@ -493,6 +510,19 @@ pub fn extract_spend_usd(pane: &str) -> Option<f64> {
         search_start = pos.max(i);
     }
     last
+}
+
+/// Read the JSON cost sidecar smooth-code writes on
+/// `AgentEvent::Completed`. Returns the `cost_usd` field when the file
+/// exists, parses as valid JSON, and contains a numeric `cost_usd`.
+/// Returns `None` for any failure (file missing, unparseable, missing
+/// field, wrong type) so the caller can fall back to the legacy
+/// pane-scrape path. Pearl th-a08fa3.
+#[must_use]
+pub fn read_cost_sidecar(path: &std::path::Path) -> Option<f64> {
+    let body = std::fs::read_to_string(path).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&body).ok()?;
+    parsed.get("cost_usd")?.as_f64()
 }
 
 /// Minimal shell escape for `th_binary` so a path with a space (e.g.
@@ -956,6 +986,58 @@ final line
     fn extract_spend_handles_dot_only_number() {
         let pane = "spend: $.05 |";
         assert_eq!(extract_spend_usd(pane), Some(0.05));
+    }
+
+    // ----- Pearl th-a08fa3: JSON cost sidecar -----
+
+    #[test]
+    fn read_cost_sidecar_returns_value_from_valid_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cost.json");
+        std::fs::write(&path, r#"{"cost_usd": 0.1234, "iterations": 7, "ts_unix_ms": 0}"#).unwrap();
+        assert_eq!(read_cost_sidecar(&path), Some(0.1234));
+    }
+
+    #[test]
+    fn read_cost_sidecar_accepts_integer_cost() {
+        // serde_json renders 0.0 as `0` — make sure as_f64 still picks it up.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cost.json");
+        std::fs::write(&path, r#"{"cost_usd": 0}"#).unwrap();
+        assert_eq!(read_cost_sidecar(&path), Some(0.0));
+    }
+
+    #[test]
+    fn read_cost_sidecar_returns_none_when_file_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("does-not-exist.json");
+        assert_eq!(read_cost_sidecar(&path), None);
+    }
+
+    #[test]
+    fn read_cost_sidecar_returns_none_on_malformed_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cost.json");
+        std::fs::write(&path, "not json at all").unwrap();
+        assert_eq!(read_cost_sidecar(&path), None);
+    }
+
+    #[test]
+    fn read_cost_sidecar_returns_none_when_field_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cost.json");
+        std::fs::write(&path, r#"{"iterations": 3}"#).unwrap();
+        assert_eq!(read_cost_sidecar(&path), None);
+    }
+
+    #[test]
+    fn read_cost_sidecar_returns_none_when_field_is_string() {
+        // Defensive: if smooth-code ever writes the wrong type, fall back
+        // to the legacy pane-scrape rather than fabricating a number.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cost.json");
+        std::fs::write(&path, r#"{"cost_usd": "0.42"}"#).unwrap();
+        assert_eq!(read_cost_sidecar(&path), None);
     }
 
     // ----- Bug 3 (hash-based no-edit guard) -----
