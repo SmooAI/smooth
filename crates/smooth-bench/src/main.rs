@@ -154,6 +154,16 @@ struct ScoreTuiArgs {
     #[arg(long, default_value_t = DriverModelSlot::Summarize, value_enum)]
     driver_model: DriverModelSlot,
 
+    /// Driver persona. `user` is the historical non-technical-end-user
+    /// driver (default — preserves comparability with prior matrices).
+    /// `coach` is the senior pair-programmer persona from pearl
+    /// th-e17b1a that probes for actual test runs before firing
+    /// `TASK_COMPLETE` and suggests concrete debugging steps without
+    /// giving the answer. The driver model is identical between the
+    /// two; only the system prompt + per-turn template change.
+    #[arg(long, default_value_t = DriverPersonaArg::User, value_enum)]
+    driver_persona: DriverPersonaArg,
+
     /// Maximum LLM-as-human turns per task before bailing as
     /// "turn cap hit" and scoring the workspace as-is.
     #[arg(long, default_value_t = 15)]
@@ -227,6 +237,34 @@ impl DriverModelSlot {
             Self::Summarize => smooth_operator::providers::Activity::Summarize,
             Self::Fast => smooth_operator::providers::Activity::Fast,
             Self::Judge => smooth_operator::providers::Activity::Judge,
+        }
+    }
+}
+
+/// Clap-friendly mirror of [`smooth_bench::human_driver::DriverPersona`].
+/// We keep a separate enum here so the `--driver-persona` flag's value
+/// names (`user`, `coach`) stay independent of any future rename in the
+/// library type. Pearl th-e17b1a.
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum DriverPersonaArg {
+    User,
+    Coach,
+}
+
+impl std::fmt::Display for DriverPersonaArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::User => "user",
+            Self::Coach => "coach",
+        })
+    }
+}
+
+impl DriverPersonaArg {
+    fn to_persona(self) -> smooth_bench::human_driver::DriverPersona {
+        match self {
+            Self::User => smooth_bench::human_driver::DriverPersona::User,
+            Self::Coach => smooth_bench::human_driver::DriverPersona::Coach,
         }
     }
 }
@@ -352,8 +390,9 @@ async fn run_score_tui(args: ScoreTuiArgs) -> Result<()> {
     };
 
     let curated = CuratedList::default_embedded().context("loading embedded curated task list")?;
-    let driver_model = smooth_bench::human_driver::LlmDriverModel::from_activity(args.driver_model.to_activity())
-        .context("loading driver model from providers.json — is the slot configured?")?;
+    let driver_model =
+        smooth_bench::human_driver::LlmDriverModel::from_activity_with_persona(args.driver_model.to_activity(), args.driver_persona.to_persona())
+            .context("loading driver model from providers.json — is the slot configured?")?;
 
     let loop_cfg = smooth_bench::human_driver::LoopConfig {
         max_turns: args.max_turns,

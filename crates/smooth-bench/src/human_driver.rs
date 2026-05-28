@@ -133,6 +133,14 @@ pub fn pane_shows_agent_activity(pane: &str) -> bool {
 
 #[must_use]
 pub fn build_driver_prompt(task: &str, pane: &str, turn_idx: usize, max_turns: usize) -> String {
+    build_driver_prompt_with_persona(task, pane, turn_idx, max_turns, DriverPersona::default())
+}
+
+/// Persona-aware variant of [`build_driver_prompt`]. Pearl th-e17b1a.
+/// The original signature delegates here with `DriverPersona::default()`
+/// to preserve callers + existing unit tests.
+#[must_use]
+pub fn build_driver_prompt_with_persona(task: &str, pane: &str, turn_idx: usize, max_turns: usize, persona: DriverPersona) -> String {
     // Pearl th-driver-hallucination: strip the user-side ("You:") of the
     // captured conversation before showing it to the driver. Seeing its
     // own prior turns let the driver continue the user-narrative —
@@ -144,23 +152,48 @@ pub fn build_driver_prompt(task: &str, pane: &str, turn_idx: usize, max_turns: u
     // assistant — the only way to drive progress is to ask the real
     // assistant a question.
     let agent_only = strip_user_turns_from_pane(pane);
-    format!(
-        "You are simulating a NON-TECHNICAL human user testing an AI coding assistant in a chat-style TUI.\n\
-         You type plain English messages and press Enter to send. That's it. You are NOT a power user; you do NOT have a shell, file access, or any direct way to read or edit files. The AI assistant is the only one that can do those things — you must ask it to.\n\n\
-         RULES:\n\
-         - Reply with the EXACT TEXT you would type into the chat box, nothing else. No preamble, no quotes, no code fences, no commentary.\n\
-         - NEVER start a message with `/`. Slash commands (e.g. /open, /read, /edit, /run, /help) do NOT exist in this TUI — they will be rejected as unknown commands. You have NO direct file access or shell access; only the agent under test does.\n\
-         - To get the assistant to do something, ASK in plain English. Example — wrong: `/read INSTRUCTIONS.md`. Right: `Please read INSTRUCTIONS.md and tell me what it says.`\n\
-         - The assistant replies in plain prose. Read what it just said (below) and reply naturally to it.\n\
-         - CRITICAL: never role-play the assistant. Do NOT type messages like \"Okay, I will read it\", \"Okay, I have read it, it says...\", \"I'll edit the file now\", or any first-person narration of actions YOU don't take. You only type questions / requests to the assistant; YOU do not read files, edit code, or run tests — the assistant does. If you find yourself describing what you did, STOP and instead ask the assistant about it.\n\
-         - If the assistant appears to still be working (mid-sentence, mid-tool-call, no clear prompt for input), reply with the single token `WAIT` to let it keep going.\n\
-         - Only two terminal tokens exist. Send `TASK_COMPLETE` on its own line when you're confident the task is done and tests pass. Send `TASK_STUCK` on its own line when the assistant is not making progress.\n\n\
-         Task you're asking the assistant to solve:\n\n\
-         {task}\n\n\
-         The assistant's most recent output (turn {turn_idx} of {max_turns}):\n\n\
-         {agent_only}\n\n\
-         Your next message (plain English, no leading `/`, no first-person action narration):"
-    )
+    match persona {
+        DriverPersona::User => format!(
+            "You are simulating a NON-TECHNICAL human user testing an AI coding assistant in a chat-style TUI.\n\
+             You type plain English messages and press Enter to send. That's it. You are NOT a power user; you do NOT have a shell, file access, or any direct way to read or edit files. The AI assistant is the only one that can do those things — you must ask it to.\n\n\
+             RULES:\n\
+             - Reply with the EXACT TEXT you would type into the chat box, nothing else. No preamble, no quotes, no code fences, no commentary.\n\
+             - NEVER start a message with `/`. Slash commands (e.g. /open, /read, /edit, /run, /help) do NOT exist in this TUI — they will be rejected as unknown commands. You have NO direct file access or shell access; only the agent under test does.\n\
+             - To get the assistant to do something, ASK in plain English. Example — wrong: `/read INSTRUCTIONS.md`. Right: `Please read INSTRUCTIONS.md and tell me what it says.`\n\
+             - The assistant replies in plain prose. Read what it just said (below) and reply naturally to it.\n\
+             - CRITICAL: never role-play the assistant. Do NOT type messages like \"Okay, I will read it\", \"Okay, I have read it, it says...\", \"I'll edit the file now\", or any first-person narration of actions YOU don't take. You only type questions / requests to the assistant; YOU do not read files, edit code, or run tests — the assistant does. If you find yourself describing what you did, STOP and instead ask the assistant about it.\n\
+             - If the assistant appears to still be working (mid-sentence, mid-tool-call, no clear prompt for input), reply with the single token `WAIT` to let it keep going.\n\
+             - Only two terminal tokens exist. Send `TASK_COMPLETE` on its own line when you're confident the task is done and tests pass. Send `TASK_STUCK` on its own line when the assistant is not making progress.\n\n\
+             Task you're asking the assistant to solve:\n\n\
+             {task}\n\n\
+             The assistant's most recent output (turn {turn_idx} of {max_turns}):\n\n\
+             {agent_only}\n\n\
+             Your next message (plain English, no leading `/`, no first-person action narration):"
+        ),
+        DriverPersona::Coach => format!(
+            "You are a SENIOR PAIR-PROGRAMMER coaching an AI coding assistant through this task via chat. \
+             You are TECHNICAL — you understand testing, you read the spec carefully, you spot suspicious output. \
+             You CANNOT touch the keyboard; only the assistant has shell, file, and tool access. Your only output is the next chat message you'd send.\n\n\
+             RULES:\n\
+             - Reply with the EXACT TEXT you would type into the chat box, nothing else. No preamble, no quotes, no code fences, no commentary.\n\
+             - NEVER start a message with `/`. Slash commands do NOT exist in this TUI.\n\
+             - NEVER role-play the assistant. Do NOT narrate actions YOU don't take (\"I'll edit the file\", \"I ran the tests\"). You can't edit or run anything — you ask the assistant to.\n\
+             - NEVER give the answer. Do NOT write code. Do NOT say \"the fix is X.\" If you spot a bug, point at the SYMPTOM (\"your output still has spaces in it\") and ask a QUESTION (\"does the spec example show spaces in decoded output?\"). Push the assistant to figure it out.\n\
+             - If the assistant appears mid-thought or mid-tool-call, reply with the single token `WAIT`.\n\n\
+             COACHING DUTIES:\n\
+             - Before TASK_COMPLETE: the assistant MUST have actually run the tests and pasted the result in chat. If it says \"done\" without showing a test run, ask: \"have you actually run the tests yet? paste the last line of output\". Do NOT fire TASK_COMPLETE on hope.\n\
+             - If output looks wrong: point at the specific symptom, ask the assistant to compare it to the expected output in the spec, suggest a concrete debugging step (\"try pytest -x to find the first failure\", \"print the intermediate decoded string before grouping\").\n\
+             - If the assistant repeats itself across turns: nudge it toward a different angle (read the test file, simplify a single failing case, re-read the spec example).\n\n\
+             EXIT TOKENS:\n\
+             - Send `TASK_COMPLETE` on its own line ONLY after you've seen the assistant report a passing test run in chat.\n\
+             - Send `TASK_STUCK` on its own line when the assistant has tried multiple distinct approaches and none worked.\n\n\
+             Task the assistant is solving:\n\n\
+             {task}\n\n\
+             The assistant's most recent output (turn {turn_idx} of {max_turns}):\n\n\
+             {agent_only}\n\n\
+             Your next message (plain English, no leading `/`, no first-person action narration, no code):"
+        ),
+    }
 }
 
 /// Strip user-side turns from a `tmux capture-pane` snapshot before
@@ -273,21 +306,55 @@ pub trait DriverModel: Send + Sync {
     }
 }
 
+/// Driver persona — controls the system prompt + per-turn template.
+/// `User` is the original baseline ("non-technical end user"); `Coach`
+/// is the pair-programmer variant added in pearl th-e17b1a that
+/// actively probes the agent for test runs before accepting
+/// `TASK_COMPLETE`. Default `User` preserves comparability with prior
+/// bench runs — switch via `--driver-persona=coach`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DriverPersona {
+    /// Original non-technical end-user persona. The driver has no
+    /// shell/file/tool access and isn't expected to evaluate
+    /// correctness — it just nudges the assistant and fires the exit
+    /// sentinel when the assistant says it's done.
+    #[default]
+    User,
+    /// Senior pair-programmer persona (pearl th-e17b1a). The driver
+    /// still has no tools — it can't run tests or read files — but it
+    /// IS technical enough to ask probing questions, suggest concrete
+    /// debugging steps (without giving the answer), and refuse to fire
+    /// `TASK_COMPLETE` until the assistant has actually run the tests
+    /// and pasted the result.
+    Coach,
+}
+
 /// Default production driver: wraps an `LlmClient` (one of the
 /// configured routing slots, typically `smooth-summarize`).
 pub struct LlmDriverModel {
     client: smooth_operator::llm::LlmClient,
+    persona: DriverPersona,
 }
 
 impl LlmDriverModel {
     /// Build an `LlmDriverModel` from a routing slot via the
     /// user-level `providers.json`. `slot` defaults to
-    /// `Activity::Summarize` — cheap and fast.
+    /// `Activity::Summarize` — cheap and fast. Persona defaults to
+    /// [`DriverPersona::User`] for baseline comparability.
     ///
     /// # Errors
     /// Errors if `providers.json` can't be loaded or the slot isn't
     /// configured.
     pub fn from_activity(slot: smooth_operator::providers::Activity) -> Result<Self> {
+        Self::from_activity_with_persona(slot, DriverPersona::default())
+    }
+
+    /// Same as [`from_activity`](Self::from_activity) but with an
+    /// explicit driver persona. Wired by `--driver-persona` on the CLI.
+    ///
+    /// # Errors
+    /// As [`from_activity`](Self::from_activity).
+    pub fn from_activity_with_persona(slot: smooth_operator::providers::Activity, persona: DriverPersona) -> Result<Self> {
         let providers_path = dirs_next::home_dir().map(|h| h.join(".smooth/providers.json")).context("no home dir")?;
         let registry = smooth_operator::providers::ProviderRegistry::load_from_file(&providers_path).context("loading providers.json")?;
         let config = registry
@@ -295,6 +362,7 @@ impl LlmDriverModel {
             .with_context(|| format!("no routing slot configured for {slot:?}"))?;
         Ok(Self {
             client: smooth_operator::llm::LlmClient::new(config),
+            persona,
         })
     }
 }
@@ -304,8 +372,8 @@ impl DriverModel for LlmDriverModel {
     async fn next_decision(&self, task: &str, pane: &str, turn_idx: usize, max_turns: usize) -> Result<DriverDecision> {
         use smooth_operator::conversation::Message;
 
-        let system = Message::system(system_prompt());
-        let user = Message::user(build_driver_prompt(task, pane, turn_idx, max_turns));
+        let system = Message::system(system_prompt(self.persona));
+        let user = Message::user(build_driver_prompt_with_persona(task, pane, turn_idx, max_turns, self.persona));
         let response = self.client.chat(&[&system, &user], &[]).await.context("driver LLM call failed")?;
         Ok(DriverDecision::parse(&response.content))
     }
@@ -321,7 +389,7 @@ impl DriverModel for LlmDriverModel {
     ) -> Result<DriverDecision> {
         use smooth_operator::conversation::Message;
 
-        let system = Message::system(system_prompt());
+        let system = Message::system(system_prompt(self.persona));
         let user = Message::user(build_slash_retry_prompt(task, pane, turn_idx, max_turns, bad_turn, attempts_remaining));
         let response = self.client.chat(&[&system, &user], &[]).await.context("driver LLM retry call failed")?;
         Ok(DriverDecision::parse(&response.content))
@@ -330,16 +398,38 @@ impl DriverModel for LlmDriverModel {
 
 /// System prompt used by `LlmDriverModel`. Shared between the
 /// normal-turn and slash-retry paths so both reinforce the same
-/// no-slash-commands directive.
-fn system_prompt() -> &'static str {
-    "You roleplay a non-technical human user chatting with an AI coding assistant in a TUI. \
+/// no-slash-commands directive. Branches on persona — see
+/// [`DriverPersona`] for the rationale of each variant.
+fn system_prompt(persona: DriverPersona) -> &'static str {
+    match persona {
+        DriverPersona::User => SYSTEM_PROMPT_USER,
+        DriverPersona::Coach => SYSTEM_PROMPT_COACH,
+    }
+}
+
+const SYSTEM_PROMPT_USER: &str = "You roleplay a non-technical human user chatting with an AI coding assistant in a TUI. \
      You have NO shell, NO file access, and NO slash commands. \
      The TUI ignores anything starting with `/` — there is no /open, /read, /edit, /run, /help. \
      If you want the assistant to do something, ask in plain English (the assistant has the tools). \
      Reply with the EXACT TEXT to type into the chat, nothing else: no preamble, no quotes, no code fences. \
      Never start a reply with `/`. \
-     Use TASK_COMPLETE on its own line when the task is clearly done and tests pass, TASK_STUCK when out of ideas."
-}
+     Use TASK_COMPLETE on its own line when the task is clearly done and tests pass, TASK_STUCK when out of ideas.";
+
+const SYSTEM_PROMPT_COACH: &str = "You roleplay a SENIOR PAIR-PROGRAMMER coaching an AI coding assistant via chat. \
+     You are technical: you read INSTRUCTIONS.md (you see it in every prompt), you know what `pytest`/`cargo test` does, \
+     and you can tell whether the assistant's output looks plausible. \
+     You CANNOT touch the keyboard — only the assistant has shell, file, and tool access. You don't have any slash commands. \
+     The TUI ignores anything starting with `/` — there is no /open, /read, /edit, /run, /help. \
+     Reply with the EXACT TEXT to type into the chat, nothing else: no preamble, no quotes, no code fences. Never start with `/`. \
+     YOUR JOB IS TO COACH THE ASSISTANT TO ACTUALLY FINISH, NOT JUST LOOK FINISHED. \
+     - Before sending TASK_COMPLETE: demand the assistant has actually run the tests and pasted the result in chat. \
+       If the assistant says \"it's done\" without showing a test run, reply \"have you actually run the tests yet? paste the last line of output\" — do NOT fire TASK_COMPLETE. \
+     - When the assistant's output looks off: ask probing questions, point at the specific symptom you see, suggest a concrete debugging step \
+       (\"try running pytest -x to find the first failure\", \"re-read the example in the spec — does the expected output have spaces?\"). \
+       NEVER give the answer. Don't write code. Don't say \"the fix is X.\" Ask questions that make the assistant figure it out. \
+     - If the assistant says it's stuck or keeps repeating the same approach: suggest a different angle (read the test file, print intermediate values, simplify the case). \
+     Use TASK_COMPLETE on its own line ONLY after you've seen the assistant report a passing test run. \
+     Use TASK_STUCK on its own line when the assistant has tried multiple distinct approaches and none worked.";
 
 /// Outcome of a `run_human_loop` invocation. Recorded for the SweepRun
 /// row so downstream analysis can distinguish "completed via sentinel"
@@ -825,6 +915,120 @@ mod tests {
         assert!(p.contains("turn 4 of 15"), "prompt missing turn idx: {p}");
         assert!(p.contains("TASK_COMPLETE"), "prompt missing complete sentinel: {p}");
         assert!(p.contains("TASK_STUCK"), "prompt missing stuck sentinel: {p}");
+    }
+
+    // ----- Pearl th-e17b1a: coach persona -----
+
+    #[test]
+    fn default_persona_is_user_for_baseline_compat() {
+        // build_driver_prompt() without a persona arg must keep producing
+        // the historical "non-technical end user" text so callers and
+        // prior bench runs stay comparable.
+        let user_p = build_driver_prompt("t", "pane", 1, 15);
+        let explicit_user_p = build_driver_prompt_with_persona("t", "pane", 1, 15, DriverPersona::User);
+        assert_eq!(user_p, explicit_user_p, "default persona must equal explicit User");
+        assert!(user_p.contains("NON-TECHNICAL"), "default prompt must be the non-technical-user persona");
+    }
+
+    #[test]
+    fn coach_prompt_includes_task_and_pane_and_turn() {
+        let p = build_driver_prompt_with_persona("make tests pass", "pane line A\npane line B", 4, 15, DriverPersona::Coach);
+        assert!(p.contains("make tests pass"), "coach prompt missing task: {p}");
+        assert!(p.contains("pane line A"), "coach prompt missing pane: {p}");
+        assert!(p.contains("turn 4 of 15"), "coach prompt missing turn idx: {p}");
+        assert!(p.contains("TASK_COMPLETE"), "coach prompt missing complete sentinel: {p}");
+        assert!(p.contains("TASK_STUCK"), "coach prompt missing stuck sentinel: {p}");
+    }
+
+    #[test]
+    fn coach_prompt_demands_test_run_before_complete() {
+        // The whole point of the coach persona — refuse TASK_COMPLETE
+        // until the assistant has actually run the tests and shown the
+        // result in chat. If this guidance disappears the coach
+        // collapses back into the non-technical-user behavior we were
+        // trying to escape.
+        let p = build_driver_prompt_with_persona("task", "pane", 1, 15, DriverPersona::Coach);
+        let lower = p.to_lowercase();
+        assert!(lower.contains("actually run the tests"), "coach prompt must require an actual test run: {p}");
+        assert!(
+            lower.contains("paste the last line") || lower.contains("paste the result"),
+            "coach prompt must require the assistant paste test output: {p}"
+        );
+        assert!(
+            lower.contains("do not fire task_complete") || lower.contains("only after"),
+            "coach prompt must explicitly gate TASK_COMPLETE on seeing test output: {p}"
+        );
+    }
+
+    #[test]
+    fn coach_prompt_forbids_giving_the_answer() {
+        // The coach is a coach, not a co-author. It must not produce
+        // code or say "the fix is X". This is the invariant that keeps
+        // the coach from "cheating" the bench (solving for the agent
+        // under test).
+        let p = build_driver_prompt_with_persona("task", "pane", 1, 15, DriverPersona::Coach);
+        let lower = p.to_lowercase();
+        assert!(lower.contains("never give the answer"), "coach prompt must forbid giving the answer: {p}");
+        assert!(lower.contains("do not write code"), "coach prompt must forbid writing code: {p}");
+    }
+
+    #[test]
+    fn coach_prompt_still_blocks_slash_commands() {
+        // Same hard rule as the user persona — slash commands aren't a
+        // real TUI feature and start-with-`/` replies get rejected by
+        // the harness. Coach must inherit that.
+        let p = build_driver_prompt_with_persona("task", "pane", 1, 15, DriverPersona::Coach);
+        assert!(p.to_lowercase().contains("never start"), "coach prompt must keep no-slash rule: {p}");
+        assert!(p.contains("/"), "rule mentions slash: {p}");
+        assert!(p.contains("no leading `/`"), "submit-line rule must keep no leading slash: {p}");
+    }
+
+    #[test]
+    fn coach_prompt_forbids_first_person_action_narration() {
+        // Pearl th-driver-hallucination: same anti-hallucination rule
+        // as the user persona — the coach must not narrate doing
+        // things only the assistant can do. Otherwise it'll happily
+        // "describe running the tests" and fire TASK_COMPLETE on
+        // imaginary output.
+        let p = build_driver_prompt_with_persona("task", "pane", 1, 15, DriverPersona::Coach);
+        let lower = p.to_lowercase();
+        assert!(lower.contains("never role-play"), "coach prompt must forbid assistant role-play: {p}");
+        assert!(
+            lower.contains("you can't edit or run anything") || lower.contains("you cannot touch the keyboard"),
+            "coach prompt must remind: no shell, no edits: {p}"
+        );
+    }
+
+    #[test]
+    fn coach_system_prompt_includes_no_answer_invariant() {
+        // The system-level coach prompt also needs the no-code-no-fix
+        // rule — system prompt is what's shared across all turns and
+        // the slash-retry path.
+        assert_eq!(system_prompt(DriverPersona::User), SYSTEM_PROMPT_USER);
+        assert_eq!(system_prompt(DriverPersona::Coach), SYSTEM_PROMPT_COACH);
+        let coach = SYSTEM_PROMPT_COACH;
+        assert!(
+            coach.to_lowercase().contains("never give the answer"),
+            "system coach prompt must forbid giving the answer: {coach}"
+        );
+        assert!(coach.contains("TASK_COMPLETE"), "system coach prompt must mention completion sentinel: {coach}");
+        assert!(coach.contains("TASK_STUCK"), "system coach prompt must mention stuck sentinel: {coach}");
+    }
+
+    #[test]
+    fn coach_persona_strips_user_turns_from_pane_same_as_user() {
+        // The agent-only pane projection (pearl th-driver-hallucination)
+        // must apply to both personas. Coach is more proactive than
+        // the user persona but it still must not see its own prior
+        // turns auto-completed into the next turn.
+        let pane = "Smooth: hello\nYou: i was the driver last turn\nSmooth: ok\n";
+        let coach_p = build_driver_prompt_with_persona("t", pane, 1, 15, DriverPersona::Coach);
+        let user_p = build_driver_prompt_with_persona("t", pane, 1, 15, DriverPersona::User);
+        assert!(
+            !coach_p.contains("i was the driver last turn"),
+            "coach must strip user turns from pane: {coach_p}"
+        );
+        assert!(!user_p.contains("i was the driver last turn"), "user must strip user turns from pane: {user_p}");
     }
 
     /// Deterministic fake driver — returns a canned sequence of
