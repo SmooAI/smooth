@@ -1,0 +1,25 @@
+{
+  "smooth_version": "0.13.7",
+  "commit_sha": "170bbf49923ca14779e2ad932ed213e1088d6886",
+  "ran_at": "2026-05-29T16:38:50.030343Z",
+  "overall_pass_rate": 0.4,
+  "by_language": {
+    "python": {
+      "pass_rate": 0.3333333333333333,
+      "tasks_attempted": 3,
+      "tasks_green": 1
+    },
+    "rust": {
+      "pass_rate": 0.5,
+      "tasks_attempted": 2,
+      "tasks_green": 1
+    }
+  },
+  "tasks_attempted": 5,
+  "tasks_green": 2,
+  "tasks_inconclusive": 0,
+  "cost_usd": 0.07808820000000001,
+  "median_task_ms": 312442,
+  "budget_usd_cap": 10.0,
+  "budget_usd_hit": false
+}

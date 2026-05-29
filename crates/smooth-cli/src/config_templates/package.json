@@ -1,0 +1,11 @@
+{
+    "name": "@local/smooai-config",
+    "private": true,
+    "version": "0.0.0",
+    "description": "Local @smooai/config schema for this workspace.",
+    "type": "module",
+    "main": "config.ts",
+    "dependencies": {
+        "@smooai/config": "*"
+    }
+}

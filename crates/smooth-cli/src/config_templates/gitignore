@@ -1,0 +1,2 @@
+# Smoo AI local config — never commit per-machine overrides
+.smooai-config/local.*
