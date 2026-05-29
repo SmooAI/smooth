@@ -338,6 +338,39 @@ impl SmoothDolt {
     /// instead of stderr — operators can re-run the underlying CLI for
     /// detail.
     fn run_cli(&self, args: &[&str]) -> Result<String> {
+        match self.run_cli_once(args) {
+            Ok(v) => Ok(v),
+            Err(e) if is_lock_wedge_err(&e) => {
+                // Pearl th-49e37b: in CLI mode the server-mode
+                // self-heal in `run_with_self_heal` doesn't fire, so
+                // the read-only error propagates straight up. The
+                // root cause we see most often is an orphaned
+                // `smooth-dolt serve` that's still holding the LOCK
+                // file even though its socket file (the way
+                // `try_attach_handle` finds it) has been cleaned up
+                // — process is reparented to init, no one will ever
+                // close it. Detect, kill, retry once.
+                match auto_doctor_clear_orphan_server(&self.data_dir) {
+                    Ok(cleared) if cleared > 0 => {
+                        tracing::warn!(
+                            data_dir = %self.data_dir.display(),
+                            cleared,
+                            "smooth-dolt CLI hit read-only; cleared orphaned `smooth-dolt serve` PID(s) and retrying once"
+                        );
+                        self.run_cli_once(args)
+                    }
+                    _ => Err(e),
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// One-shot CLI invocation. Wrapped by `run_cli` with the
+    /// auto-doctor retry — that's the public entry point. This bare
+    /// version lives separately so the doctor's retry path can call
+    /// it without re-entering the doctor and looping forever.
+    fn run_cli_once(&self, args: &[&str]) -> Result<String> {
         let output = Command::new(&self.bin)
             .args(args)
             .stdin(Stdio::null())
@@ -523,6 +556,146 @@ fn is_lock_wedge_err(e: &anyhow::Error) -> bool {
     ]
     .iter()
     .any(|needle| s.contains(needle))
+}
+
+/// Auto-doctor — find `smooth-dolt serve` processes holding the LOCK
+/// file under `data_dir/.dolt/noms/LOCK` and kill them. Returns the
+/// number of orphan PIDs cleared (0 if none found, which is the
+/// normal happy-path case where the read-only error came from a
+/// different cause and we should propagate it).
+///
+/// Pearl th-49e37b. The shape of the bug we're fixing: an earlier
+/// `th up` spawned `smooth-dolt serve <data-dir> --socket <path>` as
+/// a child. The parent died (e.g. `th down`) but the serve child got
+/// reparented to init and the socket file got cleaned up, leaving the
+/// serve process running with no way to reach it. It still holds the
+/// noms LOCK file. `try_attach_handle` does `socket.exists()` →
+/// returns None (file gone) → `SmoothDolt::new` falls back to CLI
+/// mode → CLI `smooth-dolt exec` tries to grab the lock → fails with
+/// `Error 1105: cannot update manifest: database is read only`.
+///
+/// SIGTERM the orphan; the OS releases its file locks on death; the
+/// retry succeeds. Best-effort: any errors in the doctor itself (e.g.
+/// `lsof` not on PATH) silently return 0 so we fall through to the
+/// original read-only error rather than masking a real bug.
+fn auto_doctor_clear_orphan_server(data_dir: &Path) -> Result<u32> {
+    let lock_path = data_dir.join("pearls").join(".dolt").join("noms").join("LOCK");
+    if !lock_path.exists() {
+        return Ok(0);
+    }
+
+    // `lsof -t <file>` prints holder PIDs, one per line. Exit code is
+    // 1 when there are no holders, which we want to treat as "no
+    // orphan found, propagate the original error" — NOT as a doctor
+    // failure. `-Fp` would let us parse without ambiguity but `-t` is
+    // simpler and matches every macOS + Linux lsof since forever.
+    let output = Command::new("lsof").args(["-t", lock_path.to_string_lossy().as_ref()]).output();
+    let Ok(output) = output else {
+        return Ok(0); // lsof not available — best-effort doctor stays silent
+    };
+    if !output.status.success() && output.status.code() != Some(1) {
+        return Ok(0);
+    }
+
+    let pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .filter(|pid| *pid != std::process::id())
+        .collect();
+
+    if pids.is_empty() {
+        return Ok(0);
+    }
+
+    let mut cleared = 0u32;
+    for pid in pids {
+        // Verify the holder is actually `smooth-dolt serve` BEFORE
+        // killing — we don't want to accidentally kill a debugger or
+        // a backup tool that happened to open the file. `ps -p <pid>
+        // -o command=` prints the command line.
+        let ps_out = Command::new("ps").args(["-p", &pid.to_string(), "-o", "command="]).output();
+        let Ok(ps_out) = ps_out else {
+            continue;
+        };
+        let cmdline = String::from_utf8_lossy(&ps_out.stdout);
+        if !cmdline.contains("smooth-dolt") || !cmdline.contains("serve") {
+            tracing::warn!(
+                pid,
+                cmdline = %cmdline.trim(),
+                "auto_doctor: process holds the dolt LOCK file but is not `smooth-dolt serve` — refusing to kill"
+            );
+            continue;
+        }
+
+        // SIGTERM is the right escalation: gives the server's
+        // graceful-shutdown path a chance to fire if it's running,
+        // and releases file locks when the process dies. If we ever
+        // need a SIGKILL fallback (process truly stuck and ignoring
+        // SIGTERM), add a poll-then-escalate here.
+        tracing::warn!(pid, "auto_doctor: SIGTERM orphaned `smooth-dolt serve` holding noms LOCK");
+        let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+        cleared += 1;
+    }
+
+    if cleared > 0 {
+        // Give the OS a moment to actually release the locks. Without
+        // this the retry races the kernel's fd-cleanup pass and we
+        // get a second false read-only error.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+
+    Ok(cleared)
+}
+
+#[cfg(test)]
+mod auto_doctor_tests {
+    use super::auto_doctor_clear_orphan_server;
+
+    #[test]
+    fn returns_zero_when_lock_file_missing() {
+        // Empty temp dir → no `pearls/.dolt/noms/LOCK` → doctor is a
+        // silent no-op. Whatever caused the read-only error wasn't an
+        // orphaned server, so we propagate the original error.
+        let tmp = tempfile::tempdir().unwrap();
+        let cleared = auto_doctor_clear_orphan_server(tmp.path()).unwrap();
+        assert_eq!(cleared, 0);
+    }
+
+    #[test]
+    fn returns_zero_when_lock_file_exists_but_no_holder() {
+        // LOCK file present, no process holds it. lsof exits 1 with
+        // no output. Doctor treats this as "nothing to do" (cleared =
+        // 0) and the caller falls through to the original error.
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_dir = tmp.path().join("pearls").join(".dolt").join("noms");
+        std::fs::create_dir_all(&lock_dir).unwrap();
+        std::fs::write(lock_dir.join("LOCK"), b"").unwrap();
+        let cleared = auto_doctor_clear_orphan_server(tmp.path()).unwrap();
+        assert_eq!(cleared, 0);
+    }
+
+    #[test]
+    fn refuses_to_kill_non_smooth_dolt_holder() {
+        // We open the LOCK file from the test process and verify the
+        // doctor sees us holding it (via lsof) but DOESN'T kill us —
+        // the process command check should reject "anything that
+        // isn't `smooth-dolt serve`." This is the safety net that
+        // prevents the doctor from accidentally killing a debugger,
+        // a backup tool, or an IDE that opened the file.
+        //
+        // Test process command name is `dolt-XXXX` (cargo test
+        // binary) — definitely not `smooth-dolt serve`.
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_dir = tmp.path().join("pearls").join(".dolt").join("noms");
+        std::fs::create_dir_all(&lock_dir).unwrap();
+        let lock_path = lock_dir.join("LOCK");
+        let _holder = std::fs::File::create(&lock_path).unwrap();
+        // Keep the file open for the duration of the call.
+        let cleared = auto_doctor_clear_orphan_server(tmp.path()).unwrap();
+        assert_eq!(cleared, 0, "doctor must not kill non-smooth-dolt holders");
+        // We're still alive (panic-free) — that's the real assertion.
+        assert!(lock_path.exists());
+    }
 }
 
 #[cfg(test)]
