@@ -120,14 +120,18 @@ enum Commands {
         #[command(subcommand)]
         cmd: ApiCommands,
     },
-    /// Smoo AI `@smooai/config` values — ergonomic get / set / list
-    /// shortcuts over the `/config/values` endpoints on `api.smoo.ai`.
+    /// Smoo AI `@smooai/config` — ergonomic shortcuts over the
+    /// `/config/*` endpoints on `api.smoo.ai`. Reads + writes a single
+    /// value (`get` / `set` / `list`); syncs the full schema document
+    /// between `.smooai-config/schema.json` and the org's remote
+    /// schema (`push` / `pull` / `diff`); scaffolds a fresh local
+    /// schema package (`init`).
+    ///
     /// Prefers the user JWT at `~/.smooth/auth/smooai-user.json`;
     /// pass `--m2m` to use the M2M session instead.
     ///
     /// The full schemas + environments surface lives under
-    /// `th api config` — this top-level command is just the
-    /// day-to-day "read or write a single value" workflow.
+    /// `th api config`.
     Config {
         #[command(subcommand)]
         cmd: config::Cmd,
