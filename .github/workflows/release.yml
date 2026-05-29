@@ -262,6 +262,13 @@ jobs:
         if: needs.version.outputs.should_release == 'true'
         runs-on: ubuntu-latest
         steps:
+            # Need package.json on disk to read the version that was
+            # just bumped by the `version` job. Same `ref: main` as
+            # the build job uses so we see the post-bump tree.
+            - uses: actions/checkout@v4
+              with:
+                  ref: main
+
             - name: Bump tap to this release
               env:
                   TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
@@ -271,7 +278,7 @@ jobs:
                       exit 0
                   fi
 
-                  VERSION=$(node -p "require('./package.json').version" 2>/dev/null || cat package.json | grep '"version"' | head -1 | sed -E 's/.*"version"[^"]*"([^"]+)".*/\1/')
+                  VERSION=$(node -p "require('./package.json').version")
                   TAG="v${VERSION}"
                   echo "▸ release version = ${VERSION}"
 
@@ -343,11 +350,6 @@ jobs:
                     end
                   end
                   EOF
-
-                  # Strip leading whitespace that the YAML block scalar
-                  # introduced. Match smooblue's tap files which are
-                  # column-zero-anchored.
-                  sed -i 's/^                  //' "$FORMULA"
 
                   if git diff --quiet -- "$FORMULA"; then
                       echo "▸ tap already at ${VERSION} — nothing to push"
