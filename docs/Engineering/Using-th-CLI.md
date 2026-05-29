@@ -150,6 +150,22 @@ th api knowledge delete <doc-id>
 
 ### Config (org-scoped feature flags + values)
 
+For day-to-day get / set / list against `@smooai/config`, the
+top-level `th config` command is the muscle-memory shortcut —
+auths via the user JWT by default and auto-refreshes via the
+stored Supabase refresh_token:
+
+```bash
+th config get <key> --environment=<env>             # raw value (use --json to wrap)
+th config set <key> <value> --environment=<env>     # parses value as JSON when possible
+th config list --environment=<env>                  # key→value map (--json for raw)
+th config <sub> --m2m                               # use ~/.smooth/auth/smooai.json instead
+th config <sub> --org-id=<id>                       # override active org
+```
+
+The full schemas + environments + feature-flag-evaluation surface
+still lives under `th api config`:
+
 ```bash
 th api config schemas
 th api config environments
