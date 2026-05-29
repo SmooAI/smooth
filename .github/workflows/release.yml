@@ -239,12 +239,33 @@ jobs:
               id: version
               run: echo "version=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
 
+            # Pearl th-release-notes: build a self-serve install/upgrade
+            # release body. Replaces the bare CHANGELOG-only body that
+            # GitHub generates by default — users hitting the release
+            # page from an "update available" notification need
+            # copy-pasteable install + upgrade commands BEFORE the
+            # changelog, not after.
+            #
+            # The script queries `gh release view` to enumerate actual
+            # asset filenames for the Downloads table; running BEFORE
+            # `gh release create` (as we are here) falls back to the
+            # workflow's expected naming convention. Either way the
+            # body matches the assets that get attached in the next
+            # step.
+            - name: Build release body
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  scripts/build-release-notes.sh "${{ steps.version.outputs.version }}" CHANGELOG.md > /tmp/release-notes.md
+                  echo "▸ rendered $(wc -l < /tmp/release-notes.md) lines of release notes"
+                  head -30 /tmp/release-notes.md
+
             - name: Create GitHub Release
               uses: softprops/action-gh-release@v2
               with:
                   tag_name: v${{ steps.version.outputs.version }}
                   files: dist/*
-                  generate_release_notes: true
+                  body_path: /tmp/release-notes.md
 
     # Bump the SmooAI/homebrew-tools tap so `brew upgrade th` picks up
     # this release. Mirrors the pattern from SmooAI/smooblue's
