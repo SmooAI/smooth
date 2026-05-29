@@ -73,6 +73,23 @@ enum Commands {
     /// `--driver-model`. The TUI path requires `tmux` on PATH and
     /// `th` (this binary's sibling) reachable via `--th-binary`.
     ScoreTui(ScoreTuiArgs),
+
+    /// SWE-bench (Princeton / SWE-bench Verified or Lite). Real
+    /// GitHub issues from popular Python repos with held-out test
+    /// suites. Industry-comparable score. Pearl th-swe-bench.
+    ScoreSweBench(ScoreSweBenchArgs),
+
+    /// Multi-axis benchmark on our stack (Rust + Python + TS), curated
+    /// mini-projects with hidden test suites + grade.toml weights.
+    /// Scores not just pass/fail but edit efficiency, verify
+    /// discipline, tool-use quality, and cost. Pearl th-score-real.
+    ScoreReal(ScoreRealArgs),
+
+    /// Auto-harvest tasks from real merged PRs. Each task = a PR's
+    /// title + body as prompt, parent-commit workspace, score by
+    /// whether the agent makes the same test(s) pass that the human
+    /// PR did. Pearl th-score-replay.
+    ScoreReplay(ScoreReplayArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -290,6 +307,94 @@ impl Slot {
     }
 }
 
+#[derive(Parser, Debug)]
+struct ScoreSweBenchArgs {
+    /// Variant — `verified` (default) or `lite`.
+    #[arg(long, default_value = "verified")]
+    variant: String,
+
+    /// Cap on number of instances. 0 = run every instance the dataset
+    /// yields (~500 for verified).
+    #[arg(long, default_value_t = 0)]
+    task_limit: usize,
+
+    /// Routing alias / concrete model id forwarded to `th code --model`.
+    #[arg(long)]
+    under_test_model: Option<String>,
+
+    /// Driver persona.
+    #[arg(long, default_value_t = DriverPersonaArg::User, value_enum)]
+    driver_persona: DriverPersonaArg,
+
+    /// Output path. If ends in `.json`, only JSON is written; otherwise
+    /// stdout gets a human table.
+    #[arg(long)]
+    output: Option<PathBuf>,
+
+    /// Path to the `th` binary to drive. Defaults to "th" on PATH.
+    #[arg(long, default_value = "th")]
+    th_binary: String,
+
+    /// Per-task wall-clock cap (seconds).
+    #[arg(long, default_value_t = 900)]
+    task_timeout_s: u64,
+}
+
+#[derive(Parser, Debug)]
+struct ScoreRealArgs {
+    /// Cap on number of tasks. 0 = run every task in `--tasks-dir`.
+    #[arg(long, default_value_t = 0)]
+    task_limit: usize,
+
+    /// Routing alias / concrete model id forwarded to `th code --model`.
+    #[arg(long)]
+    under_test_model: Option<String>,
+
+    /// Driver persona.
+    #[arg(long, default_value_t = DriverPersonaArg::User, value_enum)]
+    driver_persona: DriverPersonaArg,
+
+    /// Directory containing one subdir per curated task. Defaults to
+    /// the in-repo `crates/smooth-bench/tasks-real/`.
+    #[arg(long)]
+    tasks_dir: Option<PathBuf>,
+
+    /// Output path. `.json` → JSON only; otherwise human table.
+    #[arg(long)]
+    output: Option<PathBuf>,
+
+    /// Hard USD cap on cumulative cost across the sweep.
+    #[arg(long, default_value_t = 10.0)]
+    budget_usd: f64,
+}
+
+#[derive(Parser, Debug)]
+struct ScoreReplayArgs {
+    /// Target repo in `owner/repo` form. PRs are harvested via `gh`.
+    #[arg(long)]
+    repo: String,
+
+    /// Only consider PRs merged on or after this date (`YYYY-MM-DD`).
+    #[arg(long)]
+    since: String,
+
+    /// Cap on the number of PRs to replay.
+    #[arg(long, default_value_t = 20)]
+    task_limit: usize,
+
+    /// Routing alias / concrete model id forwarded to `th code --model`.
+    #[arg(long)]
+    under_test_model: Option<String>,
+
+    /// Driver persona.
+    #[arg(long, default_value_t = DriverPersonaArg::User, value_enum)]
+    driver_persona: DriverPersonaArg,
+
+    /// Output path. `.json` → JSON only.
+    #[arg(long)]
+    output: Option<PathBuf>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -320,7 +425,115 @@ async fn main() -> Result<()> {
         Commands::Score(args) => run_score(args).await,
         Commands::EvalReport { run_dir } => run_eval_report(run_dir),
         Commands::ScoreTui(args) => run_score_tui(args).await,
+        Commands::ScoreSweBench(args) => run_score_swe_bench(args).await,
+        Commands::ScoreReal(args) => run_score_real(args).await,
+        Commands::ScoreReplay(args) => run_score_replay(args).await,
     }
+}
+
+async fn run_score_swe_bench(args: ScoreSweBenchArgs) -> Result<()> {
+    use smooth_bench::score_swe_bench::{run_swe_bench_sweep, SweBenchConfig};
+    use smooth_bench::swe_bench_dataset::{cache_dir, SweBenchVariant};
+    use smooth_bench::tui_score::TuiTaskConfig;
+
+    let variant = match args.variant.to_lowercase().as_str() {
+        "verified" => SweBenchVariant::Verified,
+        "lite" => SweBenchVariant::Lite,
+        other => anyhow::bail!("unknown --variant {other:?}; valid values: verified, lite"),
+    };
+
+    let home = dirs_next::home_dir().ok_or_else(|| anyhow::anyhow!("home dir unknown"))?;
+    let work_root = home.join(".smooth").join("bench-runs").join(format!("swe-bench-{}", random_run_id()));
+    std::fs::create_dir_all(&work_root).context("create work_root")?;
+
+    let mut tui_cfg = TuiTaskConfig::default();
+    tui_cfg.th_binary = args.th_binary.clone();
+    tui_cfg.task_timeout = std::time::Duration::from_secs(args.task_timeout_s);
+
+    let cfg = SweBenchConfig {
+        variant,
+        task_limit: (args.task_limit > 0).then_some(args.task_limit),
+        under_test_model: args.under_test_model.unwrap_or_default(),
+        driver_persona: args.driver_persona.to_persona(),
+        cache_dir: cache_dir(variant)?,
+        work_root,
+        smooth_version: env!("CARGO_PKG_VERSION").to_string(),
+        commit_sha: smooth_bench::sweep::current_commit_sha(),
+        budget_usd_cap: 100.0,
+        tui_cfg,
+    };
+
+    let run = run_swe_bench_sweep(&cfg).await?;
+    emit_score_json_or_table(&run.score, args.output.as_deref())
+}
+
+async fn run_score_real(args: ScoreRealArgs) -> Result<()> {
+    use smooth_bench::score_real::{run_real_sweep, RealConfig};
+
+    let tasks_dir = args.tasks_dir.unwrap_or_else(|| {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("smooth-bench")
+            .join("tasks-real")
+    });
+
+    let cfg = RealConfig {
+        task_limit: (args.task_limit > 0).then_some(args.task_limit),
+        under_test_model: args.under_test_model.unwrap_or_default(),
+        driver_persona: args.driver_persona.to_persona(),
+        tasks_dir,
+        smooth_version: env!("CARGO_PKG_VERSION").to_string(),
+        commit_sha: smooth_bench::sweep::current_commit_sha(),
+        budget_usd_cap: args.budget_usd,
+    };
+
+    let run = run_real_sweep(&cfg).await?;
+    emit_score_json_or_table(&run.base, args.output.as_deref())
+}
+
+async fn run_score_replay(args: ScoreReplayArgs) -> Result<()> {
+    use smooth_bench::score_replay::{run_replay_sweep, ReplayConfig};
+
+    let since = chrono::NaiveDate::parse_from_str(&args.since, "%Y-%m-%d").with_context(|| format!("--since must be YYYY-MM-DD, got {:?}", args.since))?;
+
+    let home = dirs_next::home_dir().ok_or_else(|| anyhow::anyhow!("home dir unknown"))?;
+    let work_root = home.join(".smooth").join("bench-runs").join(format!("replay-{}", random_run_id()));
+    std::fs::create_dir_all(&work_root).context("create work_root")?;
+
+    let cfg = ReplayConfig {
+        repo: args.repo,
+        since,
+        task_limit: args.task_limit,
+        under_test_model: args.under_test_model.unwrap_or_default(),
+        driver_persona: args.driver_persona.to_persona(),
+        work_root,
+    };
+
+    let score = run_replay_sweep(&cfg).await?;
+    emit_score_json_or_table(&score, args.output.as_deref())
+}
+
+fn random_run_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    format!("{nanos:x}")
+}
+
+fn emit_score_json_or_table(score: &smooth_bench::score::Score, output: Option<&std::path::Path>) -> Result<()> {
+    match output {
+        Some(p) if p.extension().and_then(|s| s.to_str()) == Some("json") => {
+            std::fs::write(p, serde_json::to_string_pretty(score)?).context("write output json")?;
+            eprintln!("wrote {}", p.display());
+        }
+        Some(p) => {
+            std::fs::write(p, score.render_table()).context("write output table")?;
+            eprintln!("wrote {}", p.display());
+        }
+        None => {
+            println!("{}", score.render_table());
+        }
+    }
+    Ok(())
 }
 
 fn run_eval_report(run_dir: Option<PathBuf>) -> Result<()> {

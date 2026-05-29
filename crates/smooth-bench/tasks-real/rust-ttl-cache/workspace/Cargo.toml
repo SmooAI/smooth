@@ -1,0 +1,12 @@
+[package]
+name = "rust-ttl-cache"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[test]]
+name = "cache"
+path = "tests/cache.rs"
