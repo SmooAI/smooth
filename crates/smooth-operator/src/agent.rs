@@ -27,6 +27,30 @@ Do not start new tool chains. Respond with text only:\n\
 3. List any remaining tasks that were not completed.\n\
 4. Recommend what should be done next (a follow-up dispatch, a manual step, a question for the user).";
 
+/// Verify-tests-before-done system-prompt rule. Appended by
+/// [`AgentConfig::with_verify_tests_before_done`]. The anchor lets the
+/// builder detect a prior append and avoid double-stacking the rule.
+/// Pearl th-operator-verify-rule (sub-pearl of th-VERIFY-PHASE).
+pub const VERIFY_TESTS_RULE_ANCHOR: &str = "[verify-tests-before-done:v1]";
+
+/// Body of the verify-tests rule. Kept narrow on purpose: don't try to
+/// override the agent's normal completion logic, just gate the
+/// terminal "I'm done" message on having actually seen passing tests.
+/// The agent is free to skip the test run if the task genuinely
+/// doesn't have tests — the rule is "if tests exist, you must run
+/// them," not "you must run tests even when there are none."
+pub const VERIFY_TESTS_RULE: &str = "[verify-tests-before-done:v1] \
+This task is being scored against a test suite. You MUST NOT produce a final response (or stop iterating) until you have:\n\
+1. Run the project's test command at least once. The typical commands are:\n\
+   - Python: `pytest -q` (or `python3 -m pytest -q`)\n\
+   - Rust: `cargo test` (with `-- --include-ignored` if the workspace uses ignored tests)\n\
+   - JS / TS: `npm test` or `pnpm test`\n\
+   - Go: `go test ./...`\n\
+   Pick the one that matches the project files you can see.\n\
+2. Seen all tests pass.\n\n\
+If tests are failing after a run, your ONLY valid next action is to fix the failures and re-run the test command. Do NOT summarize. Do NOT declare done. Do NOT say things like \"the implementation should work\" or \"all tests should pass now\" — re-run the tests and quote the actual output.\n\n\
+The test-runner output (exit code + summary line) is the authoritative completion signal. Your own assessment of correctness is not.\n";
+
 /// Configuration for an agent.
 #[allow(missing_debug_implementations)]
 pub struct AgentConfig {
@@ -124,6 +148,35 @@ impl AgentConfig {
 
     pub fn with_max_iterations(mut self, max: u32) -> Self {
         self.max_iterations = max;
+        self
+    }
+
+    /// Append a "no final response until tests pass" rule to the
+    /// system prompt. Stopgap for the full VERIFY phase (the
+    /// architectural fix). Targets the failure mode surfaced by the
+    /// 2026-05-29 coach matrix: deepseek/kimi/claude all stopped at
+    /// 2-3 iterations with partial solutions (11/16, 18/20, 8/10)
+    /// because the model decided it was done — not because the
+    /// iteration cap was hit. glm-5.1 won by iterating 16 times
+    /// naturally on the same task. The driver-side coach probe
+    /// ("did you run the tests?") fires too late — the agent has
+    /// already emitted Completed by the time the driver gets a turn.
+    /// This rule applies the same intent INSIDE the agent loop where
+    /// it actually fires.
+    ///
+    /// Opt-in so general `th code` sessions stay snappy (default off);
+    /// bench dispatch turns it on. Idempotent: calling twice still
+    /// appends only one copy of the rule.
+    #[must_use]
+    pub fn with_verify_tests_before_done(mut self, enabled: bool) -> Self {
+        if !enabled || self.system_prompt.contains(VERIFY_TESTS_RULE_ANCHOR) {
+            return self;
+        }
+        if !self.system_prompt.is_empty() && !self.system_prompt.ends_with('\n') {
+            self.system_prompt.push('\n');
+        }
+        self.system_prompt.push('\n');
+        self.system_prompt.push_str(VERIFY_TESTS_RULE);
         self
     }
 
@@ -1310,6 +1363,79 @@ mod tests {
     fn agent_config_builder() {
         let config = test_config().with_max_iterations(10).with_checkpoint_strategy(CheckpointStrategy::Never);
         assert_eq!(config.max_iterations, 10);
+    }
+
+    // ----- pearl th-operator-verify-rule: with_verify_tests_before_done -----
+
+    #[test]
+    fn verify_rule_off_by_default_in_new_config() {
+        let cfg = test_config();
+        assert!(!cfg.system_prompt.contains(VERIFY_TESTS_RULE_ANCHOR));
+    }
+
+    #[test]
+    fn verify_rule_appended_when_enabled() {
+        let cfg = test_config().with_verify_tests_before_done(true);
+        assert!(
+            cfg.system_prompt.contains(VERIFY_TESTS_RULE_ANCHOR),
+            "system_prompt should contain the verify-rule anchor when enabled: {}",
+            cfg.system_prompt
+        );
+        // Body keywords — bench-runner names must be present so the
+        // model can pick the right test command from the workspace
+        // shape without us having to wire a workspace-shape detector
+        // in Rust.
+        assert!(cfg.system_prompt.contains("pytest -q"));
+        assert!(cfg.system_prompt.contains("cargo test"));
+        assert!(cfg.system_prompt.contains("npm test"));
+        assert!(cfg.system_prompt.contains("go test"));
+        // Headline rule
+        assert!(cfg.system_prompt.to_lowercase().contains("must not produce a final response"));
+    }
+
+    #[test]
+    fn verify_rule_skipped_when_disabled() {
+        let cfg = test_config().with_verify_tests_before_done(false);
+        assert!(!cfg.system_prompt.contains(VERIFY_TESTS_RULE_ANCHOR));
+    }
+
+    #[test]
+    fn verify_rule_preserves_original_system_prompt() {
+        let original = "You are a test agent";
+        let cfg = test_config().with_verify_tests_before_done(true);
+        assert!(
+            cfg.system_prompt.starts_with(original),
+            "original system_prompt must lead, rule appended after: {}",
+            cfg.system_prompt
+        );
+    }
+
+    #[test]
+    fn verify_rule_is_idempotent_on_double_apply() {
+        // Calling twice must not stack — otherwise repeated dispatcher
+        // configurations could double-tax the context with the rule.
+        let cfg = test_config().with_verify_tests_before_done(true).with_verify_tests_before_done(true);
+        let anchor_count = cfg.system_prompt.matches(VERIFY_TESTS_RULE_ANCHOR).count();
+        assert_eq!(anchor_count, 1, "anchor must appear exactly once after double-apply: {}", cfg.system_prompt);
+    }
+
+    #[test]
+    fn verify_rule_handles_trailing_newline_in_original_prompt() {
+        let mut cfg = AgentConfig::new("test-agent", "You are a test agent\n", LlmConfig::openrouter("fake-key")).with_verify_tests_before_done(true);
+        // Should NOT double up the newline.
+        assert!(!cfg.system_prompt.contains("\n\n\n"));
+        assert!(cfg.system_prompt.contains(VERIFY_TESTS_RULE_ANCHOR));
+        // sanity: drain the value to confirm we didn't move ownership
+        cfg.system_prompt.clear();
+    }
+
+    #[test]
+    fn verify_rule_handles_empty_system_prompt() {
+        // Defensive: if someone constructs AgentConfig with an empty
+        // system prompt, the rule should still apply cleanly.
+        let cfg = AgentConfig::new("test-agent", "", LlmConfig::openrouter("fake-key")).with_verify_tests_before_done(true);
+        assert!(cfg.system_prompt.contains(VERIFY_TESTS_RULE_ANCHOR));
+        assert!(cfg.system_prompt.starts_with('\n') || cfg.system_prompt.starts_with("[verify-tests"));
     }
 
     #[test]

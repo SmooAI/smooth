@@ -187,6 +187,9 @@ pub fn build_driver_prompt_with_persona(task: &str, pane: &str, turn_idx: usize,
              EXIT TOKENS:\n\
              - Send `TASK_COMPLETE` on its own line ONLY after you've seen the assistant report a passing test run in chat.\n\
              - Send `TASK_STUCK` on its own line when the assistant has tried multiple distinct approaches and none worked.\n\n\
+             BACK-OFF RULE (read this carefully):\n\
+             If the assistant's output already shows a successful test run — e.g. lines like `N passed in X.XXs` with NO `failed`/`error` count, or `test result: ok. N passed; 0 failed`, or `Tests:       N passed, N total` — your job is DONE. Reply with `TASK_COMPLETE` on its own line. Do NOT re-probe. Do NOT ask the assistant to run tests AGAIN. Do NOT ask follow-up questions. The work is verifiably finished and any further coaching just wastes turns and makes the assistant second-guess working code.\n\
+             Only re-probe if the assistant CLAIMS done but you have NOT seen passing test output in the chat.\n\n\
              Task the assistant is solving:\n\n\
              {task}\n\n\
              The assistant's most recent output (turn {turn_idx} of {max_turns}):\n\n\
@@ -429,7 +432,10 @@ const SYSTEM_PROMPT_COACH: &str = "You roleplay a SENIOR PAIR-PROGRAMMER coachin
        NEVER give the answer. Don't write code. Don't say \"the fix is X.\" Ask questions that make the assistant figure it out. \
      - If the assistant says it's stuck or keeps repeating the same approach: suggest a different angle (read the test file, print intermediate values, simplify the case). \
      Use TASK_COMPLETE on its own line ONLY after you've seen the assistant report a passing test run. \
-     Use TASK_STUCK on its own line when the assistant has tried multiple distinct approaches and none worked.";
+     Use TASK_STUCK on its own line when the assistant has tried multiple distinct approaches and none worked. \
+     BACK-OFF RULE: if the assistant has ALREADY shown a passing test run in the current output (e.g. \"N passed in X.XXs\" with no failed/error count, or \"test result: ok. N passed; 0 failed\"), \
+     fire TASK_COMPLETE this turn. Do NOT re-probe. Do NOT ask for more verification. The work is verifiably done and your job is to acknowledge it, not to keep coaching. \
+     Re-probing after a confirmed passing run wastes turns AND makes the assistant second-guess working code.";
 
 /// Outcome of a `run_human_loop` invocation. Recorded for the SweepRun
 /// row so downstream analysis can distinguish "completed via sentinel"
@@ -1013,6 +1019,41 @@ mod tests {
         );
         assert!(coach.contains("TASK_COMPLETE"), "system coach prompt must mention completion sentinel: {coach}");
         assert!(coach.contains("TASK_STUCK"), "system coach prompt must mention stuck sentinel: {coach}");
+    }
+
+    #[test]
+    fn coach_prompt_contains_back_off_rule() {
+        // Coach matrix 2026-05-29: claude-sonnet-4-6 REGRESSED from
+        // 3/5 (user persona) to 2/5 (coach persona) because the coach
+        // kept re-probing AFTER claude had already shown a passing
+        // test run. The back-off rule is the fix: if the assistant's
+        // output contains evidence of a passing test run, fire
+        // TASK_COMPLETE immediately — do NOT re-probe.
+        let p = build_driver_prompt_with_persona("t", "pane", 1, 15, DriverPersona::Coach);
+        let lower = p.to_lowercase();
+        assert!(lower.contains("back-off rule"), "coach prompt must announce a back-off rule: {p}");
+        assert!(
+            lower.contains("n passed") || lower.contains("test result: ok") || lower.contains("tests:"),
+            "coach prompt must teach the rule by example of a passing summary line: {p}"
+        );
+        assert!(
+            lower.contains("do not re-probe"),
+            "coach prompt must explicitly forbid re-probing after a passing run: {p}"
+        );
+        assert!(
+            lower.contains("fire") && lower.contains("task_complete"),
+            "coach prompt must instruct firing TASK_COMPLETE on the back-off trigger: {p}"
+        );
+    }
+
+    #[test]
+    fn coach_system_prompt_contains_back_off_rule() {
+        // Same invariant on the system prompt that's shared across the
+        // normal-turn AND slash-retry paths.
+        let coach = SYSTEM_PROMPT_COACH;
+        let lower = coach.to_lowercase();
+        assert!(lower.contains("back-off rule"), "system coach prompt must include the back-off rule: {coach}");
+        assert!(lower.contains("do not re-probe"), "system coach prompt must forbid re-probing: {coach}");
     }
 
     #[test]
