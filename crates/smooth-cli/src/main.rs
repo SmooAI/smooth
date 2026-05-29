@@ -5,6 +5,7 @@
 mod admin;
 mod auth;
 mod boot_ui;
+mod config;
 mod gradient;
 mod hooks;
 mod mcp_config;
@@ -118,6 +119,18 @@ enum Commands {
     Api {
         #[command(subcommand)]
         cmd: ApiCommands,
+    },
+    /// Smoo AI `@smooai/config` values — ergonomic get / set / list
+    /// shortcuts over the `/config/values` endpoints on `api.smoo.ai`.
+    /// Prefers the user JWT at `~/.smooth/auth/smooai-user.json`;
+    /// pass `--m2m` to use the M2M session instead.
+    ///
+    /// The full schemas + environments surface lives under
+    /// `th api config` — this top-level command is just the
+    /// day-to-day "read or write a single value" workflow.
+    Config {
+        #[command(subcommand)]
+        cmd: config::Cmd,
     },
     /// Run a pearl through a Smooth Operator in a microVM — streams
     /// agent events to stdout. With --keep-alive, the VM stays up
@@ -1112,6 +1125,7 @@ async fn main() -> Result<()> {
             ApiCommands::Testing { cmd } => smooai::testing::cmd(cmd).await,
             ApiCommands::Observability { cmd } => smooai::observability::cmd(cmd).await,
         },
+        Some(Commands::Config { cmd }) => config::cmd(cmd).await,
         Some(Commands::Operators { cmd }) => cmd_operators(cmd).await,
         Some(Commands::Inbox) => cmd_inbox().await,
         Some(Commands::Run {
