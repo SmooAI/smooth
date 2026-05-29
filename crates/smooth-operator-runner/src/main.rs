@@ -2110,7 +2110,20 @@ async fn main() {
         }
     }
 
-    let mut agent_config = AgentConfig::new(format!("op-{}", config.operator_id), &system_prompt, llm).with_max_iterations(config.max_iterations);
+    // Pearl th-393aed (stopgap for th-VERIFY-PHASE): when
+    // SMOOTH_VERIFY_TESTS=1 is set, append a system-prompt rule
+    // forbidding the agent from producing a final response until it
+    // has actually run the project's test command and seen passing
+    // tests. Targets the 2026-05-29 coach matrix failure mode where
+    // models bail at 2-3 iterations with partial solutions. The
+    // bench sets this var in its env_prefix; general `th code`
+    // sessions don't set it so behavior is unchanged for users.
+    let verify_tests = std::env::var("SMOOTH_VERIFY_TESTS")
+        .ok()
+        .map_or(false, |v| v == "1" || v.eq_ignore_ascii_case("true"));
+    let mut agent_config = AgentConfig::new(format!("op-{}", config.operator_id), &system_prompt, llm)
+        .with_max_iterations(config.max_iterations)
+        .with_verify_tests_before_done(verify_tests);
     if let Some(cap) = config.budget_usd {
         agent_config = agent_config.with_budget(CostBudget {
             max_cost_usd: Some(cap),

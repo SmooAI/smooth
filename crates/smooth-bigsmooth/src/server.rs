@@ -2857,6 +2857,15 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
         if let Ok(iters) = std::env::var("SMOOTH_WORKFLOW_AGENT_MAX_ITERATIONS") {
             cmd.env("SMOOTH_WORKFLOW_AGENT_MAX_ITERATIONS", iters);
         }
+        // Pearl th-393aed: SMOOTH_VERIFY_TESTS=1 tells the operator-
+        // runner to append a "no final response until tests pass"
+        // rule to the agent's system prompt. Default off so general
+        // `th code` users are unaffected; bench dispatch flips it on
+        // before booting Big Smooth so all in-bench operator runs
+        // see the rule.
+        if let Ok(v) = std::env::var("SMOOTH_VERIFY_TESTS") {
+            cmd.env("SMOOTH_VERIFY_TESTS", v);
+        }
         if let Some(ref pid) = pearl_id {
             cmd.env("SMOOTH_PEARL_ID", pid);
         }
