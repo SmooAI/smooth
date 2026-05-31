@@ -75,6 +75,9 @@ jobs:
               run: cargo clippy -- -D warnings
               continue-on-error: true
 
+            - name: Build examples (needed by cross-process file-lock test, pearl th-9799fa)
+              run: cargo build --examples --workspace
+
             - name: Test
               run: cargo test
 

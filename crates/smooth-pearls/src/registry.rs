@@ -112,10 +112,11 @@ impl Registry {
 /// Auto-register the current project when opening a pearl store.
 /// Call this from `PearlStore::open` or `th pearls init`.
 ///
-/// Serialized through a process-wide mutex so concurrent
-/// `PearlStore::init` calls (eg integration tests each opening a
-/// store under their own tempdir) can't race the load → modify →
-/// save sequence and lose entries — pearl `th-96e525`.
+/// Serialized through both a process-wide mutex and a cross-process
+/// OS file lock so concurrent `PearlStore::init` calls (including
+/// nextest, which spawns one process per test) can't race the
+/// load → modify → save sequence and lose entries — pearls
+/// `th-96e525` (in-process) and `th-9799fa` (cross-process).
 pub fn auto_register(project_root: &Path) -> Result<()> {
     let registry_path = Registry::registry_path()?;
     auto_register_at(project_root, &registry_path)
@@ -125,8 +126,37 @@ pub fn auto_register(project_root: &Path) -> Result<()> {
 /// Exposed for tests that want to exercise the concurrency lock
 /// without touching `~/.smooth/registry.json`.
 pub fn auto_register_at(project_root: &Path, registry_path: &Path) -> Result<()> {
+    use fs4::fs_std::FileExt;
+
+    // In-process Mutex: fast path for thread-races inside the same
+    // process (`cargo test` runs tests as threads in one binary).
+    // The file lock below catches cross-process races (`cargo nextest`
+    // runs each test in its own process — the in-process mutex is
+    // useless there).
     static REGISTRY_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = REGISTRY_WRITE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    if let Some(parent) = registry_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Cross-process exclusive lock on a sidecar file. Using a sidecar
+    // instead of locking the json directly so the lock acquisition
+    // doesn't race the json open: open-with-create + lock would lose
+    // the truncate, and locking BEFORE creating means the json may
+    // not yet exist. The sidecar always exists once we create it
+    // here.
+    let lock_path = registry_path.with_extension("lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    lock_file.lock_exclusive()?;
+    // _lock_drop holds the lock until end of function. Drop releases
+    // it (per fs4 docs).
+    let _lock_drop = LockGuard(&lock_file);
 
     let name = project_root
         .file_name()
@@ -140,12 +170,22 @@ pub fn auto_register_at(project_root: &Path, registry_path: &Path) -> Result<()>
         Registry::default()
     };
     registry.register(project_root, &name);
-    if let Some(parent) = registry_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let json = serde_json::to_string_pretty(&registry)?;
     std::fs::write(registry_path, json)?;
     Ok(())
+}
+
+/// RAII guard that releases the fs4 file lock on drop. Without this
+/// the lock would only release when `lock_file` itself is dropped at
+/// end of scope, which is the same effect — but having the guard
+/// makes the intent obvious to readers and prevents accidental
+/// reordering.
+struct LockGuard<'a>(&'a std::fs::File);
+impl Drop for LockGuard<'_> {
+    fn drop(&mut self) {
+        use fs4::fs_std::FileExt;
+        let _ = FileExt::unlock(self.0);
+    }
 }
 
 #[cfg(test)]
@@ -222,5 +262,73 @@ mod tests {
         let contents = std::fs::read_to_string(&registry_file).expect("read registry");
         let registry: Registry = serde_json::from_str(&contents).expect("parse registry");
         assert_eq!(registry.projects.len(), WRITERS, "all {WRITERS} concurrent registrations must survive");
+    }
+
+    /// Pearl `th-9799fa`: the in-process Mutex above doesn't help
+    /// `cargo nextest`, which runs each test in its own process.
+    /// This test fans out N concurrent OS processes (each invoking
+    /// the `auto_register_cross_process_writer` example binary) and
+    /// asserts all N entries survive — proving the fs4 file lock
+    /// holds across process boundaries.
+    #[test]
+    fn auto_register_at_serializes_cross_process_writers() {
+        const WRITERS: usize = 12;
+
+        let helper = find_example_binary("auto_register_cross_process_writer");
+        let Some(helper) = helper else {
+            eprintln!("skipping cross-process test: example binary not built (run `cargo build --examples -p smooai-smooth-pearls`)");
+            return;
+        };
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let registry_file = tmp.path().join("registry.json");
+
+        let children: Vec<_> = (0..WRITERS)
+            .map(|i| {
+                let project_root = tmp.path().join(format!("xp-project-{i}"));
+                std::process::Command::new(&helper)
+                    .arg(&registry_file)
+                    .arg(&project_root)
+                    .spawn()
+                    .expect("spawn writer process")
+            })
+            .collect();
+
+        for mut child in children {
+            let status = child.wait().expect("wait for writer process");
+            assert!(status.success(), "writer process exited non-zero: {status:?}");
+        }
+
+        let contents = std::fs::read_to_string(&registry_file).expect("read registry");
+        let registry: Registry = serde_json::from_str(&contents).expect("parse registry");
+        assert_eq!(
+            registry.projects.len(),
+            WRITERS,
+            "all {WRITERS} cross-process registrations must survive — file lock isn't holding across processes"
+        );
+    }
+
+    /// Locate an example binary built alongside the test. Cargo puts
+    /// examples in `<target>/<profile>/examples/<name>` — walk up
+    /// from `current_exe()` (the test binary in `deps/`) to find it.
+    /// Returns None if the example hasn't been built yet.
+    fn find_example_binary(name: &str) -> Option<std::path::PathBuf> {
+        let exe = std::env::current_exe().ok()?;
+        // `<target>/<profile>/deps/<test>-<hash>` → up two = profile dir.
+        let profile_dir = exe.parent()?.parent()?;
+        let candidate = profile_dir.join("examples").join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        // CARGO_TARGET_DIR override or alternate layout: try
+        // <profile>/examples/<name>.exe on windows.
+        #[cfg(windows)]
+        {
+            let win = profile_dir.join("examples").join(format!("{name}.exe"));
+            if win.is_file() {
+                return Some(win);
+            }
+        }
+        None
     }
 }

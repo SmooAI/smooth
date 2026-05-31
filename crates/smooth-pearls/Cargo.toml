@@ -24,6 +24,7 @@ tracing.workspace = true
 smooth-operator.workspace = true
 async-trait.workspace = true
 tempfile.workspace = true
+fs4.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
