@@ -585,7 +585,7 @@ mod tests {
     fn fake_pr(number: u64) -> HarvestedPR {
         HarvestedPR {
             number,
-            title: format!("Add greet to lib"),
+            title: "Add greet to lib".to_string(),
             body: "Implements pub fn greet() returning \"hello\".".into(),
             base_sha: "base".into(),
             merge_sha: "merge".into(),

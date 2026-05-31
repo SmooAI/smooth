@@ -188,9 +188,13 @@ smooth-tunnel = { version = "0.13.7", path = "crates/smooth-tunnel", package = "
 smooth-host-stub = { version = "0.13.7", path = "crates/smooth-host-stub", package = "smooai-smooth-host-stub" }
 smooth-bench = { version = "0.13.7", path = "crates/smooth-bench", package = "smooai-smooth-bench" }
 smooth-api-client = { version = "0.13.7", path = "crates/smooth-api-client", package = "smooai-smooth-api-client" }
-# Cross-runtime client shared library (~/dev/smooai/client-shared/).
-# Path dep for local dev; switch to git or published dep once the
-# client-shared repo is pushed to github.com/SmooAI/client-shared.
+# Cross-runtime client shared library (github.com/SmooAI/client-shared).
+# SMOODEV-1464: switched from a local `path = "../client-shared/rust"` dep to
+# a rev-pinned git dep. The path form only resolved on a dev laptop, so every
+# CI release since v0.13.7 failed at `cargo metadata` ("failed to load manifest
+# for workspace member crates/smooth-cli") — surfaced misleadingly as the
+# "Format check" step. Rev-pinned (not branch) for reproducible release builds;
+# bump the rev when client-shared changes.
 # Pearls: th-33d57b (scaffolded), th-0398c1 (auth module),
-# th-abc4e2 (this — wires `th admin login`).
-smooai-client-shared = { path = "../client-shared/rust", features = ["auth"] }
+# th-abc4e2 (wires `th admin login`).
+smooai-client-shared = { git = "https://github.com/SmooAI/client-shared.git", rev = "7309040afe15e20e7439cb9201cceed826cd2347", features = ["auth"] }

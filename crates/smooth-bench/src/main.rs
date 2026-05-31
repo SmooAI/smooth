@@ -446,9 +446,11 @@ async fn run_score_swe_bench(args: ScoreSweBenchArgs) -> Result<()> {
     let work_root = home.join(".smooth").join("bench-runs").join(format!("swe-bench-{}", random_run_id()));
     std::fs::create_dir_all(&work_root).context("create work_root")?;
 
-    let mut tui_cfg = TuiTaskConfig::default();
-    tui_cfg.th_binary = args.th_binary.clone();
-    tui_cfg.task_timeout = std::time::Duration::from_secs(args.task_timeout_s);
+    let tui_cfg = TuiTaskConfig {
+        th_binary: args.th_binary.clone(),
+        task_timeout: std::time::Duration::from_secs(args.task_timeout_s),
+        ..Default::default()
+    };
 
     let cfg = SweBenchConfig {
         variant,

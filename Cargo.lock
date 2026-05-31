@@ -6009,6 +6009,7 @@ dependencies = [
 [[package]]
 name = "smooai-client-shared"
 version = "0.1.0"
+source = "git+https://github.com/SmooAI/client-shared.git?rev=7309040afe15e20e7439cb9201cceed826cd2347#7309040afe15e20e7439cb9201cceed826cd2347"
 dependencies = [
  "anyhow",
  "axum 0.7.9",

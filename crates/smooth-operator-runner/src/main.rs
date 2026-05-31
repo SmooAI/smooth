@@ -2120,7 +2120,7 @@ async fn main() {
     // sessions don't set it so behavior is unchanged for users.
     let verify_tests = std::env::var("SMOOTH_VERIFY_TESTS")
         .ok()
-        .map_or(false, |v| v == "1" || v.eq_ignore_ascii_case("true"));
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
     let mut agent_config = AgentConfig::new(format!("op-{}", config.operator_id), &system_prompt, llm)
         .with_max_iterations(config.max_iterations)
         .with_verify_tests_before_done(verify_tests);
