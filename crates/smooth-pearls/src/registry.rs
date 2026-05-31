@@ -111,14 +111,40 @@ impl Registry {
 
 /// Auto-register the current project when opening a pearl store.
 /// Call this from `PearlStore::open` or `th pearls init`.
+///
+/// Serialized through a process-wide mutex so concurrent
+/// `PearlStore::init` calls (eg integration tests each opening a
+/// store under their own tempdir) can't race the load → modify →
+/// save sequence and lose entries — pearl `th-96e525`.
 pub fn auto_register(project_root: &Path) -> Result<()> {
+    let registry_path = Registry::registry_path()?;
+    auto_register_at(project_root, &registry_path)
+}
+
+/// Same as [`auto_register`] but writes to an explicit registry file.
+/// Exposed for tests that want to exercise the concurrency lock
+/// without touching `~/.smooth/registry.json`.
+pub fn auto_register_at(project_root: &Path, registry_path: &Path) -> Result<()> {
+    static REGISTRY_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = REGISTRY_WRITE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
     let name = project_root
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "unknown".to_string());
-    let mut registry = Registry::load()?;
+
+    let mut registry = if registry_path.exists() {
+        let contents = std::fs::read_to_string(registry_path)?;
+        serde_json::from_str(&contents)?
+    } else {
+        Registry::default()
+    };
     registry.register(project_root, &name);
-    registry.save()?;
+    if let Some(parent) = registry_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(&registry)?;
+    std::fs::write(registry_path, json)?;
     Ok(())
 }
 
@@ -164,5 +190,37 @@ mod tests {
         let deser: Registry = serde_json::from_str(&json).unwrap();
         assert_eq!(deser.projects.len(), 1);
         assert_eq!(deser.projects["/tmp/project-a"].name, "project-a");
+    }
+
+    /// Pearl `th-96e525`: prior to the process-wide mutex in
+    /// `auto_register_at`, concurrent registrations would race the
+    /// load → modify → save sequence and lose entries — flaking the
+    /// bigsmooth `project_pearls_returns_pearls_for_path` integration
+    /// test in CI. This test fans out N concurrent registrations
+    /// against a single file and asserts all N survive.
+    #[test]
+    fn auto_register_at_serializes_concurrent_writers() {
+        const WRITERS: usize = 16;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let registry_file = tmp.path().join("registry.json");
+
+        let handles: Vec<_> = (0..WRITERS)
+            .map(|i| {
+                let registry_file = registry_file.clone();
+                let project_root = tmp.path().join(format!("project-{i}"));
+                std::thread::spawn(move || {
+                    std::fs::create_dir_all(&project_root).expect("create project root");
+                    auto_register_at(&project_root, &registry_file).expect("auto_register_at");
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("thread join");
+        }
+
+        let contents = std::fs::read_to_string(&registry_file).expect("read registry");
+        let registry: Registry = serde_json::from_str(&contents).expect("parse registry");
+        assert_eq!(registry.projects.len(), WRITERS, "all {WRITERS} concurrent registrations must survive");
     }
 }

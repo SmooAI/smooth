@@ -8,11 +8,11 @@
 //! # Typical usage
 //!
 //! ```no_run
-//! # use smooth_api_client::{SmoothApiClient, Credentials};
+//! # use smooth_api_client::SmoothApiClient;
 //! # async fn ex() -> anyhow::Result<()> {
 //! let client = SmoothApiClient::from_disk()?; // loads ~/.smooth/auth/smooai.json
-//! let me = client.profile_get().await?;
-//! println!("logged in as {}", me.email);
+//! let me = client.pb().get_profile().await?;
+//! println!("logged in as {}", me.into_inner().email);
 //! # Ok(()) }
 //! ```
 //!
