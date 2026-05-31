@@ -17,6 +17,7 @@ pub mod cost;
 pub mod human;
 pub mod knowledge;
 pub mod llm;
+pub mod llm_provider;
 pub mod memory;
 pub mod providers;
 pub mod quirks;
