@@ -446,6 +446,155 @@ fn row_to_checkpoint(row: &rusqlite::Row<'_>) -> anyhow::Result<Checkpoint> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// PostgresCheckpointStore — durable Postgres-backed store (feature = "postgres")
+// ---------------------------------------------------------------------------
+
+/// Postgres-backed checkpoint store for durable agent state.
+///
+/// Parity with LangGraph's `PostgresSaver`: per-`agent_id` thread state survives
+/// process restarts (e.g. Lambda cold starts). Backed by an r2d2 pool of
+/// *synchronous* `postgres` clients because [`CheckpointStore`] is a sync trait
+/// (same shape as [`SqliteCheckpointStore`]).
+#[cfg(feature = "postgres")]
+pub struct PostgresCheckpointStore {
+    pool: r2d2::Pool<r2d2_postgres::PostgresConnectionManager<postgres::NoTls>>,
+}
+
+#[cfg(feature = "postgres")]
+impl PostgresCheckpointStore {
+    const SCHEMA: &str = "
+        CREATE TABLE IF NOT EXISTS checkpoints (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            iteration BIGINT NOT NULL,
+            conversation BYTEA NOT NULL,
+            metadata TEXT NOT NULL DEFAULT '{}',
+            created_at BIGINT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_checkpoints_agent
+            ON checkpoints(agent_id, created_at DESC);
+    ";
+
+    /// Connect to Postgres at `conn_str` (libpq URL or `key=value` form), build
+    /// the connection pool, and ensure the `checkpoints` schema exists.
+    ///
+    /// # Errors
+    /// Returns an error if the connection string is invalid, the pool cannot be
+    /// built, or the schema migration fails.
+    pub fn connect(conn_str: &str) -> anyhow::Result<Self> {
+        let config: postgres::Config = conn_str.parse()?;
+        let manager = r2d2_postgres::PostgresConnectionManager::new(config, postgres::NoTls);
+        let pool = r2d2::Pool::new(manager)?;
+        pool.get()?.batch_execute(Self::SCHEMA)?;
+        Ok(Self { pool })
+    }
+
+    /// Build a store from an already-constructed pool (e.g. a shared app pool).
+    #[must_use]
+    pub fn from_pool(pool: r2d2::Pool<r2d2_postgres::PostgresConnectionManager<postgres::NoTls>>) -> Self {
+        Self { pool }
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl CheckpointStore for PostgresCheckpointStore {
+    fn save(&self, checkpoint: &Checkpoint) -> anyhow::Result<()> {
+        let mut client = self.pool.get()?;
+        let conversation_blob = serde_json::to_vec(&checkpoint.conversation)?;
+        let metadata_json = serde_json::to_string(&checkpoint.metadata)?;
+        let iteration = i64::from(checkpoint.iteration);
+        let created_at = checkpoint.created_at.timestamp();
+        client.execute(
+            "INSERT INTO checkpoints (id, agent_id, iteration, conversation, metadata, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (id) DO UPDATE SET
+                agent_id = EXCLUDED.agent_id,
+                iteration = EXCLUDED.iteration,
+                conversation = EXCLUDED.conversation,
+                metadata = EXCLUDED.metadata,
+                created_at = EXCLUDED.created_at",
+            &[
+                &checkpoint.id,
+                &checkpoint.agent_id,
+                &iteration,
+                &conversation_blob,
+                &metadata_json,
+                &created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn load_latest(&self, agent_id: &str) -> anyhow::Result<Option<Checkpoint>> {
+        let mut client = self.pool.get()?;
+        let row = client.query_opt(
+            "SELECT id, agent_id, iteration, conversation, metadata, created_at
+             FROM checkpoints WHERE agent_id = $1 ORDER BY created_at DESC LIMIT 1",
+            &[&agent_id],
+        )?;
+        row.as_ref().map(pg_row_to_checkpoint).transpose()
+    }
+
+    fn load(&self, checkpoint_id: &str) -> anyhow::Result<Option<Checkpoint>> {
+        let mut client = self.pool.get()?;
+        let row = client.query_opt(
+            "SELECT id, agent_id, iteration, conversation, metadata, created_at
+             FROM checkpoints WHERE id = $1",
+            &[&checkpoint_id],
+        )?;
+        row.as_ref().map(pg_row_to_checkpoint).transpose()
+    }
+
+    fn list(&self, agent_id: &str) -> anyhow::Result<Vec<Checkpoint>> {
+        let mut client = self.pool.get()?;
+        let rows = client.query(
+            "SELECT id, agent_id, iteration, conversation, metadata, created_at
+             FROM checkpoints WHERE agent_id = $1 ORDER BY created_at DESC",
+            &[&agent_id],
+        )?;
+        rows.iter().map(pg_row_to_checkpoint).collect()
+    }
+
+    fn prune(&self, agent_id: &str, keep: usize) -> anyhow::Result<usize> {
+        let mut client = self.pool.get()?;
+        let keep_i64 = i64::try_from(keep).unwrap_or(i64::MAX);
+        let deleted = client.execute(
+            "DELETE FROM checkpoints WHERE agent_id = $1 AND id NOT IN (
+                SELECT id FROM checkpoints WHERE agent_id = $1
+                ORDER BY created_at DESC LIMIT $2
+            )",
+            &[&agent_id, &keep_i64],
+        )?;
+        Ok(usize::try_from(deleted).unwrap_or(usize::MAX))
+    }
+}
+
+/// Convert a Postgres row into a `Checkpoint`.
+#[cfg(feature = "postgres")]
+fn pg_row_to_checkpoint(row: &postgres::Row) -> anyhow::Result<Checkpoint> {
+    let id: String = row.get(0);
+    let agent_id: String = row.get(1);
+    let iteration_i64: i64 = row.get(2);
+    let conversation_blob: Vec<u8> = row.get(3);
+    let metadata_json: String = row.get(4);
+    let created_at_ts: i64 = row.get(5);
+
+    let conversation: crate::conversation::Conversation = serde_json::from_slice(&conversation_blob)?;
+    let metadata: HashMap<String, String> = serde_json::from_str(&metadata_json)?;
+    let created_at = DateTime::from_timestamp(created_at_ts, 0).ok_or_else(|| anyhow::anyhow!("invalid timestamp: {created_at_ts}"))?;
+    let iteration = u32::try_from(iteration_i64).unwrap_or(0);
+
+    Ok(Checkpoint {
+        id,
+        agent_id,
+        conversation,
+        iteration,
+        metadata,
+        created_at,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -770,5 +919,84 @@ mod sqlite_tests {
             store.save(&test_checkpoint("agent-1", i)).expect("save");
         }
         assert_eq!(store.list("agent-1").expect("list").len(), 50);
+    }
+}
+
+// SMOODEV-1468: PostgresCheckpointStore contract test against a throwaway
+// Postgres spun up via testcontainers (needs a running Docker daemon).
+#[cfg(all(test, feature = "postgres"))]
+mod postgres_tests {
+    use super::*;
+    use crate::conversation::Conversation;
+    use testcontainers_modules::postgres::Postgres;
+    use testcontainers_modules::testcontainers::runners::AsyncRunner;
+
+    fn cp(id: &str, agent_id: &str, iteration: u32, ts: i64) -> Checkpoint {
+        Checkpoint {
+            id: id.into(),
+            agent_id: agent_id.into(),
+            conversation: Conversation::new(100_000).with_system_prompt("sys-prompt"),
+            iteration,
+            metadata: HashMap::new(),
+            created_at: DateTime::from_timestamp(ts, 0).expect("valid ts"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn postgres_checkpoint_store_contract() -> anyhow::Result<()> {
+        let node = Postgres::default().start().await?;
+        let host = node.get_host().await?;
+        let port = node.get_host_port_ipv4(5432).await?;
+        let conn_str = format!("host={host} port={port} user=postgres password=postgres dbname=postgres");
+
+        // The store is synchronous; exercise it off the async runtime threads.
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let store = PostgresCheckpointStore::connect(&conn_str)?;
+
+            // Empty store.
+            assert!(store.load_latest("a")?.is_none());
+            assert!(store.load("missing")?.is_none());
+            assert!(store.list("a")?.is_empty());
+
+            // Two checkpoints for agent "a" (distinct created_at), one for "b".
+            store.save(&cp("a1", "a", 1, 1000))?;
+            store.save(&cp("a2", "a", 2, 2000))?;
+            store.save(&cp("b1", "b", 1, 1500))?;
+
+            // load_latest picks the newest by created_at, and the conversation round-trips.
+            let latest = store.load_latest("a")?.expect("latest for a");
+            assert_eq!(latest.id, "a2");
+            assert_eq!(latest.iteration, 2);
+            assert!(
+                !latest.conversation.context_window().is_empty(),
+                "conversation should deserialize with its system message"
+            );
+
+            // load by id.
+            assert_eq!(store.load("a1")?.expect("a1").iteration, 1);
+
+            // list is newest-first and agent-scoped.
+            let ids: Vec<String> = store.list("a")?.into_iter().map(|c| c.id).collect();
+            assert_eq!(ids, vec!["a2".to_string(), "a1".to_string()]);
+
+            // Upsert: same id, new iteration -> updated in place (still 2 rows for "a").
+            store.save(&cp("a1", "a", 9, 1000))?;
+            assert_eq!(store.list("a")?.len(), 2);
+            assert_eq!(store.load("a1")?.expect("a1").iteration, 9);
+
+            // prune keeps the newest N, returns the count removed.
+            assert_eq!(store.prune("a", 1)?, 1);
+            let remaining = store.list("a")?;
+            assert_eq!(remaining.len(), 1);
+            assert_eq!(remaining[0].id, "a2");
+
+            // Other agents are untouched by prune.
+            assert_eq!(store.list("b")?.len(), 1);
+
+            Ok(())
+        })
+        .await??;
+
+        Ok(())
     }
 }

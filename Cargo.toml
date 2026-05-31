@@ -42,6 +42,14 @@ tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
 # unify. rusqlite 0.32 uses the same APIs we care about (Connection, params!,
 # query, prepare, Row, types::ToSql).
 rusqlite = { version = "0.32", features = ["bundled"] }
+# SMOODEV-1468: sync Postgres checkpoint store (smooth-operator `postgres` feature)
+# + testcontainers-backed integration tests. Sync `postgres` crate (not async
+# sqlx) because the CheckpointStore trait is synchronous, mirroring rusqlite.
+postgres = "0.19"
+r2d2 = "0.8"
+r2d2_postgres = "0.18"
+testcontainers = "0.24"
+testcontainers-modules = { version = "0.12", features = ["postgres"] }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
