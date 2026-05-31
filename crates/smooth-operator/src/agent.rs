@@ -14,6 +14,7 @@ use futures_util::StreamExt;
 
 use crate::conversation::{CompactionStrategy, Conversation, Message, ReactiveCompaction, Role};
 use crate::llm::{accumulate_stream_events, LlmClient, LlmConfig, StreamEvent};
+use crate::llm_provider::LlmProvider;
 use crate::tool::{Tool, ToolRegistry, ToolSchema};
 
 /// Reminder injected as a system message on the final iteration of the agent
@@ -503,6 +504,11 @@ pub struct Agent {
     /// `Mutex<Option<String>>` so both `run` and `run_streaming`
     /// (which take `&self`) can update it. Pearl th-a10c2d.
     last_resolved_model: std::sync::Mutex<Option<String>>,
+    /// Optional override for the LLM call surface. When `None` (production
+    /// default), each run builds a real [`LlmClient`] from `config.llm`. Tests
+    /// inject a [`MockLlmClient`](crate::llm_provider::MockLlmClient) here to
+    /// drive the loop deterministically without a live model.
+    llm_provider: Option<Arc<dyn LlmProvider>>,
 }
 
 impl Agent {
@@ -516,7 +522,18 @@ impl Agent {
             reactive_compaction: std::sync::Mutex::new(ReactiveCompaction::new()),
             cost_tracker: Arc::new(Mutex::new(CostTracker::default())),
             last_resolved_model: std::sync::Mutex::new(None),
+            llm_provider: None,
         }
+    }
+
+    /// Inject a custom [`LlmProvider`] (e.g. a
+    /// [`MockLlmClient`](crate::llm_provider::MockLlmClient) in tests). When set,
+    /// `run` / `run_with_channel` use it instead of building an [`LlmClient`]
+    /// from `config.llm`.
+    #[must_use]
+    pub fn with_llm_provider(mut self, provider: Arc<dyn LlmProvider>) -> Self {
+        self.llm_provider = Some(provider);
+        self
     }
 
     pub fn with_checkpoint_store(mut self, store: Arc<dyn CheckpointStore>) -> Self {
@@ -606,7 +623,10 @@ impl Agent {
 
         self.emit(AgentEvent::Started { agent_id: self.id.clone() });
 
-        let llm = LlmClient::new(self.config.llm.clone());
+        let llm: Arc<dyn LlmProvider> = match &self.llm_provider {
+            Some(provider) => Arc::clone(provider),
+            None => Arc::new(LlmClient::new(self.config.llm.clone())),
+        };
 
         for iteration in 1..=self.config.max_iterations {
             // Recompute schemas every iteration so tools promoted
@@ -887,7 +907,10 @@ impl Agent {
 
         let _ = tx.send(AgentEvent::Started { agent_id: self.id.clone() });
 
-        let llm = LlmClient::new(self.config.llm.clone());
+        let llm: Arc<dyn LlmProvider> = match &self.llm_provider {
+            Some(provider) => Arc::clone(provider),
+            None => Arc::new(LlmClient::new(self.config.llm.clone())),
+        };
 
         for iteration in 1..=self.config.max_iterations {
             // Recompute schemas every iteration so tools promoted
@@ -1357,6 +1380,25 @@ mod tests {
 
     fn test_config() -> AgentConfig {
         AgentConfig::new("test-agent", "You are a test agent", LlmConfig::openrouter("fake-key"))
+    }
+
+    #[tokio::test]
+    async fn run_drives_the_loop_via_injected_llm_provider() {
+        use crate::llm_provider::MockLlmClient;
+
+        let mock = MockLlmClient::new();
+        mock.push_text("the answer is 42");
+        let agent = Agent::new(test_config(), ToolRegistry::new()).with_llm_provider(Arc::new(mock.clone()));
+
+        let convo = agent.run("what is the answer?").await.expect("run completes");
+
+        // A text response with no tool calls ends the loop after one LLM call,
+        // and the assistant turn is the mock's scripted content.
+        assert_eq!(convo.last_assistant_content(), Some("the answer is 42"));
+        assert_eq!(mock.call_count(), 1);
+        // The user's message reached the model.
+        let calls = mock.calls();
+        assert!(calls[0].messages.iter().any(|m| m.content.contains("what is the answer?")));
     }
 
     #[test]
