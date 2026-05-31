@@ -63,6 +63,21 @@ impl PearlStore {
             .iter()
             .filter_map(|row| row.as_object()?.values().next()?.as_str().map(String::from))
             .collect();
+
+        // Column-level heal: pearl_comments gained a `seq` AUTO_INCREMENT
+        // column so get_comments can order by insertion sequence (created_at
+        // alone ties when two comments land in the same NOW() tick — a flaky
+        // ordering bug; SMOODEV-1464). `IF NOT EXISTS` makes this a no-op on
+        // already-migrated stores. Best-effort: a Dolt without the column
+        // gets it; failures (already present / concurrent migrator) are logged.
+        if present.contains("pearl_comments") {
+            if let Err(e) = dolt.exec("ALTER TABLE pearl_comments ADD COLUMN IF NOT EXISTS seq BIGINT AUTO_INCREMENT UNIQUE") {
+                tracing::debug!(error = %e, "migrate_schema: pearl_comments.seq add returned error (likely already present)");
+            } else if let Err(e) = dolt.commit("schema migration: add pearl_comments.seq") {
+                tracing::debug!(error = %e, "migrate_schema: pearl_comments.seq commit returned error (likely no-op)");
+            }
+        }
+
         if REQUIRED_TABLES.iter().all(|t| present.contains(*t)) {
             return Ok(());
         }
@@ -160,7 +175,8 @@ impl PearlStore {
                 id VARCHAR(20) PRIMARY KEY,
                 pearl_id VARCHAR(20) NOT NULL,
                 content TEXT NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                seq BIGINT AUTO_INCREMENT UNIQUE
             )",
         )?;
         dolt.exec(
@@ -686,7 +702,7 @@ impl PearlStore {
     /// Get all comments for a pearl, ordered by creation time.
     pub fn get_comments(&self, pearl_id: &str) -> Result<Vec<PearlComment>> {
         let rows = self.dolt.sql(&format!(
-            "SELECT id, pearl_id, content, created_at FROM pearl_comments WHERE pearl_id = '{}' ORDER BY created_at ASC",
+            "SELECT id, pearl_id, content, created_at FROM pearl_comments WHERE pearl_id = '{}' ORDER BY created_at ASC, seq ASC",
             sql_escape(pearl_id),
         ))?;
         let mut comments = Vec::with_capacity(rows.len());
