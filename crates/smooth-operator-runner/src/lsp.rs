@@ -19,7 +19,7 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
-use lsp_types::*;
+use lsp_types::{Uri, InitializeParams, ClientCapabilities, WorkspaceFolder, DidOpenTextDocumentParams, TextDocumentItem, GotoDefinitionParams, TextDocumentPositionParams, TextDocumentIdentifier, Position, ReferenceParams, ReferenceContext, HoverParams, HoverContents, DocumentSymbolParams, WorkspaceSymbolParams, Location, LocationLink, MarkedString, LanguageString, MarkupContent};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
@@ -489,7 +489,7 @@ fn format_hover_contents(contents: &HoverContents) -> String {
 }
 
 fn format_symbols_response(result: &serde_json::Value) -> anyhow::Result<String> {
-    if result.is_null() || (result.is_array() && result.as_array().is_some_and(|a| a.is_empty())) {
+    if result.is_null() || (result.is_array() && result.as_array().is_some_and(std::vec::Vec::is_empty)) {
         return Ok("no symbols found".into());
     }
 
@@ -497,24 +497,22 @@ fn format_symbols_response(result: &serde_json::Value) -> anyhow::Result<String>
     if let Some(arr) = result.as_array() {
         for item in arr.iter().take(50) {
             let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-            let kind = item.get("kind").and_then(|v| v.as_u64()).unwrap_or(0);
+            let kind = item.get("kind").and_then(serde_json::Value::as_u64).unwrap_or(0);
             let kind_str = symbol_kind_name(kind);
             if let Some(loc) = item.get("location") {
                 let line = loc
                     .get("range")
                     .and_then(|r| r.get("start"))
                     .and_then(|s| s.get("line"))
-                    .and_then(|l| l.as_u64())
-                    .map(|l| l + 1)
-                    .unwrap_or(0);
+                    .and_then(serde_json::Value::as_u64)
+                    .map_or(0, |l| l + 1);
                 output.push_str(&format!("{kind_str} {name} (line {line})\n"));
             } else if let Some(range) = item.get("range") {
                 let line = range
                     .get("start")
                     .and_then(|s| s.get("line"))
-                    .and_then(|l| l.as_u64())
-                    .map(|l| l + 1)
-                    .unwrap_or(0);
+                    .and_then(serde_json::Value::as_u64)
+                    .map_or(0, |l| l + 1);
                 output.push_str(&format!("{kind_str} {name} (line {line})\n"));
             } else {
                 output.push_str(&format!("{kind_str} {name}\n"));
@@ -534,7 +532,7 @@ fn format_diagnostics_response(result: &serde_json::Value) -> anyhow::Result<Str
     };
     let mut output = String::new();
     for diag in items.iter().take(30) {
-        let severity = diag.get("severity").and_then(|v| v.as_u64()).unwrap_or(0);
+        let severity = diag.get("severity").and_then(serde_json::Value::as_u64).unwrap_or(0);
         let sev_str = match severity {
             1 => "error",
             2 => "warning",
@@ -547,9 +545,8 @@ fn format_diagnostics_response(result: &serde_json::Value) -> anyhow::Result<Str
             .get("range")
             .and_then(|r| r.get("start"))
             .and_then(|s| s.get("line"))
-            .and_then(|l| l.as_u64())
-            .map(|l| l + 1)
-            .unwrap_or(0);
+            .and_then(serde_json::Value::as_u64)
+            .map_or(0, |l| l + 1);
         output.push_str(&format!("line {line}: [{sev_str}] {msg}\n"));
     }
     if output.is_empty() {

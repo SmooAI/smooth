@@ -358,7 +358,7 @@ impl SmoothDoltServer {
                 let mut zombie = child;
                 let _ = zombie.kill();
                 let _ = zombie.wait();
-                anyhow::bail!("smooth-dolt serve did not create socket within {:?}", SERVER_START_TIMEOUT);
+                anyhow::bail!("smooth-dolt serve did not create socket within {SERVER_START_TIMEOUT:?}");
             }
             std::thread::sleep(Duration::from_millis(50));
         }

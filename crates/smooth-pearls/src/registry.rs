@@ -38,7 +38,7 @@ impl Registry {
             return Ok(Self::default());
         }
         let contents = std::fs::read_to_string(&path)?;
-        let registry: Registry = serde_json::from_str(&contents)?;
+        let registry: Self = serde_json::from_str(&contents)?;
         Ok(registry)
     }
 
@@ -113,9 +113,7 @@ impl Registry {
 /// Call this from `PearlStore::open` or `th pearls init`.
 pub fn auto_register(project_root: &Path) -> Result<()> {
     let name = project_root
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+        .file_name().map_or_else(|| "unknown".to_string(), |n| n.to_string_lossy().to_string());
     let mut registry = Registry::load()?;
     registry.register(project_root, &name);
     registry.save()?;

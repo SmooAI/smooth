@@ -79,6 +79,10 @@ pub struct CodingWorkflowConfig {
 }
 
 /// Run the workflow end-to-end. Returns the accumulated cost.
+///
+/// # Errors
+/// Returns an error if the agent run or any workflow stage fails fatally.
+#[allow(clippy::too_many_lines, clippy::items_after_statements)]
 pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f64> {
     // Pull the fixer role definition from the cast so the prompt
     // lives in one place (`cast/prompts/fixer.txt`) and the slot
@@ -150,7 +154,7 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
         let mut conversation = agent.run_with_channel(user_prompt, cfg.tx.clone()).await?;
 
         let (turn_cost, turn_prompt_tokens, turn_completion_tokens, turn_cached_tokens) = {
-            let tracker = agent.cost_tracker.lock().expect("cost_tracker lock");
+            let tracker = agent.cost_tracker.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             (
                 tracker.total_cost_usd,
                 tracker.total_prompt_tokens,
@@ -411,6 +415,7 @@ const CLOSE_TO_GREEN_THRESHOLD: u32 = 3;
 /// system prompt already covers the "run the test suite before final
 /// summary" discipline; we don't need to re-state it per turn at the
 /// cost of confusing the model on non-test-driven tasks.
+#[allow(clippy::option_if_let_else)] // multi-line branches read clearer as if/let
 fn build_user_prompt(task: &str, iteration: u32, prior_output: Option<&str>) -> String {
     if iteration == 1 {
         return task.to_string();
@@ -456,7 +461,9 @@ fn summarize_conversation(conv: &crate::conversation::Conversation) -> String {
 }
 
 /// What the evidence in the conversation says about this turn —
-/// not what the assistant *claims*. Pearl th-7cf405 / th-ed7bfa:
+/// not what the assistant *claims*.
+///
+/// Pearl th-7cf405 / th-ed7bfa:
 /// the workflow used to trust the assistant's `## Test Results: 31
 /// passed, 0 failed` line verbatim, which made hallucinated
 /// success indistinguishable from real success. We now require an
@@ -480,7 +487,9 @@ pub enum VerifyEvidence {
 
 /// Strip fabricated "X passed, Y failed" / "ALL TESTS PASS"
 /// claims from the last assistant message and replace with an
-/// honest annotation. Pearl iter-10: emitting a stderr WARNING
+/// honest annotation.
+///
+/// Pearl iter-10: emitting a stderr WARNING
 /// alone wasn't enough — the lie still appeared verbatim in the
 /// chat, so users could miss the warning and trust the false
 /// claim. This rewrites the message itself.
@@ -566,8 +575,9 @@ pub fn redact_fabricated_test_results(content: &str) -> String {
     result
 }
 
-/// Inspect the conversation for tool-result evidence of test
-/// outcomes. Walks tool-role messages in order and returns the
+/// Inspect the conversation for tool-result evidence of test outcomes.
+///
+/// Walks tool-role messages in order and returns the
 /// LAST shaped result — later tool runs win, since the agent
 /// often runs the suite multiple times in one turn.
 pub fn verify_with_evidence(conv: &crate::conversation::Conversation) -> VerifyEvidence {
@@ -619,7 +629,9 @@ pub fn verify_with_evidence(conv: &crate::conversation::Conversation) -> VerifyE
     last_outcome
 }
 
-/// True when test output indicates EVERY test was skipped — common
+/// True when test output indicates EVERY test was skipped.
+///
+/// Common
 /// when an exercism framework defaults to `@Disabled` / `xtest()` /
 /// `test.skip` and the student hasn't flipped them yet. Treat as
 /// failure-no-evidence (pearl th-bench-loop iter 13): 0 tests
@@ -705,7 +717,7 @@ fn has_count_before(haystack: &str, needle: &str) -> bool {
             .chars()
             .rev()
             .skip_while(|c| c.is_whitespace())
-            .take_while(|c| c.is_ascii_digit())
+            .take_while(char::is_ascii_digit)
             .collect::<String>();
         if let Ok(n) = digits.chars().rev().collect::<String>().parse::<u32>() {
             if n > 0 {
@@ -718,6 +730,7 @@ fn has_count_before(haystack: &str, needle: &str) -> bool {
 }
 
 /// True when the transcript reports the test suite is green.
+///
 /// Explicit prefix (`ALL TESTS PASS`) wins; runner-summary
 /// fallbacks are narrow to avoid false positives on prose or
 /// on Rust `Ok(..)` values that appear in failure diffs.
@@ -809,7 +822,7 @@ fn nonzero_failure_count(upper: &str) -> bool {
                 .chars()
                 .rev()
                 .skip_while(|c| c.is_whitespace() || matches!(*c, ',' | ';' | '(' | '—' | '-'))
-                .take_while(|c| c.is_ascii_digit())
+                .take_while(char::is_ascii_digit)
                 .collect::<Vec<_>>()
                 .into_iter()
                 .rev()
@@ -918,18 +931,9 @@ fn best_snapshot_dir(workspace: &Path) -> PathBuf {
 fn is_snapshot_excluded(name: &std::ffi::OsStr) -> bool {
     matches!(
         name.to_str(),
-        Some(".git")
-            | Some(".smooth-best-snapshot")
-            | Some("node_modules")
-            | Some("target")
-            | Some("build")
-            | Some("dist")
-            | Some("__pycache__")
-            | Some(".pytest_cache")
-            | Some(".venv")
-            | Some("venv")
-            | Some(".gradle")
-            | Some(".cargo")
+        Some(".git" | ".smooth-best-snapshot" | "node_modules" | "target" | "build" |
+"dist" | "__pycache__" | ".pytest_cache" | ".venv" | "venv" | ".gradle" |
+".cargo")
     )
 }
 
@@ -963,7 +967,7 @@ fn is_unsafe_to_snapshot(src: &Path) -> bool {
             let name = entry.file_name();
             if matches!(
                 name.to_str(),
-                Some("Library") | Some("Desktop") | Some("Documents") | Some("Movies") | Some("Pictures")
+                Some("Library" | "Desktop" | "Documents" | "Movies" | "Pictures")
             ) {
                 return true;
             }

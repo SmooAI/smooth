@@ -268,7 +268,7 @@ pub fn input_border(mode: crate::state::Mode) -> Style {
 
 /// Linear interpolation between two u8 values.
 fn lerp_u8(a: u8, b: u8, t: f64) -> u8 {
-    let result = f64::from(a) + (f64::from(b) - f64::from(a)) * t;
+    let result = (f64::from(b) - f64::from(a)).mul_add(t, f64::from(a));
     result.round().clamp(0.0, 255.0) as u8
 }
 

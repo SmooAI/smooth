@@ -247,7 +247,7 @@ impl DiverStore {
 
     /// Get total cost for a pearl (including sub-pearls).
     pub fn total_cost(&self, pearl_id: &str) -> f64 {
-        let costs = self.costs.lock().unwrap_or_else(|e| e.into_inner());
+        let costs = self.costs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut total: f64 = costs.iter().filter(|c| c.pearl_id == pearl_id).map(|c| c.cost_usd).sum();
 
         // Include sub-pearl costs
@@ -262,7 +262,7 @@ impl DiverStore {
 
     /// Get all cost entries for a pearl.
     pub fn costs(&self, pearl_id: &str) -> Vec<CostEntry> {
-        let costs = self.costs.lock().unwrap_or_else(|e| e.into_inner());
+        let costs = self.costs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         costs.iter().filter(|c| c.pearl_id == pearl_id).cloned().collect()
     }
 }

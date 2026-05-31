@@ -204,9 +204,7 @@ impl Orchestrator for OrchestratorAdapter {
             .access
             .list_pending()
             .into_iter()
-            .find(|r| r.id == id)
-            .map(|r| r.created_at)
-            .unwrap_or_else(Utc::now);
+            .find(|r| r.id == id).map_or_else(Utc::now, |r| r.created_at);
         pb::FilePendingAccessResponse {
             id,
             created_at: Some(ts_to_pb(created_at)),

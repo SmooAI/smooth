@@ -414,7 +414,7 @@ impl AppState {
         let mut state = Self::new(working_dir);
         state.session_id = session.id.clone();
         state.session_title = session.title.clone();
-        state.messages = session.messages.iter().map(|m| m.to_chat_message()).collect();
+        state.messages = session.messages.iter().map(super::session::SerializableMessage::to_chat_message).collect();
         state.model_name = session.model_name.clone();
         state.total_tokens = session.total_tokens;
         if let Some(ref a) = session.agent_name {

@@ -143,7 +143,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                         failed.push((map_path.clone(), format!("S3 PUT {status}: {body}")));
                     }
                     Err(e) => failed.push((map_path.clone(), format!("S3 PUT: {e}"))),
-                };
+                }
             }
 
             println!();
@@ -185,7 +185,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
 /// extension corresponds to a JavaScript bundle (`.js`, `.mjs`, `.cjs`).
 fn find_sourcemaps(root: &Path) -> Result<Vec<PathBuf>> {
     let mut out: Vec<PathBuf> = Vec::new();
-    for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(root).into_iter().filter_map(std::result::Result::ok) {
         let p = entry.path();
         if !p.is_file() {
             continue;

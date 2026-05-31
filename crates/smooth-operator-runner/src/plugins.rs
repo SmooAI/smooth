@@ -93,7 +93,7 @@ pub fn load_plugins_merged(global_dir: Option<&Path>, project_dir: Option<&Path>
 
     for (dir, scope) in [(global_dir, "global"), (project_dir, "project")]
         .into_iter()
-        .flat_map(|(d, s)| d.map(|d| (d, s)))
+        .filter_map(|(d, s)| d.map(|d| (d, s)))
     {
         let (manifests, fails) = scan_dir(dir);
         for m in manifests {

@@ -1018,7 +1018,7 @@ async fn main() -> Result<()> {
     //   - `SMOOTH_LOG=stderr` forces stderr regardless (useful for
     //     debugging the CLI itself).
     let log_to_stderr = std::env::var("SMOOTH_LOG").as_deref() == Ok("stderr")
-        || matches!(&cli.command, Some(Commands::Code { headless: true, .. }) | Some(Commands::Doctor { .. }));
+        || matches!(&cli.command, Some(Commands::Code { headless: true, .. } | Commands::Doctor { .. }));
     let env_filter = tracing_subscriber::EnvFilter::from_default_env().add_directive("smooth=info".parse()?);
     if log_to_stderr {
         tracing_subscriber::fmt().with_env_filter(env_filter).init();
@@ -1380,7 +1380,7 @@ async fn start_sandboxed_vm(port: u16) -> Result<()> {
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("ctrl-c received, shutting down safehouse microVM");
         }
-        _ = async {
+        () = async {
             // Also exit if SIGTERM arrives (LaunchAgents / systemd).
             #[cfg(unix)]
             {
@@ -1681,21 +1681,18 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, foreground: bo
     // read only" on smoo-hub when concurrent CLI opens race the Dolt
     // manifest lock. Server-mode opens the database once and serializes
     // writes through a single goroutine, dodging the issue entirely.
-    let dolt_dir = match find_dolt_dir() {
-        Ok(d) => d,
-        Err(_) => {
-            // Auto-init Dolt in cwd if no .smooth/dolt/ found
-            let cwd = std::env::current_dir()?;
-            let dir = cwd.join(".smooth").join("dolt");
-            smooth_pearls::PearlStore::init(&dir)?;
-            println!(
-                "  {} Pearls     {} {}",
-                "\u{2713}".green().bold(),
-                dir.display().to_string().dimmed(),
-                "(auto-initialized)".dimmed()
-            );
-            dir
-        }
+    let dolt_dir = if let Ok(d) = find_dolt_dir() { d } else {
+        // Auto-init Dolt in cwd if no .smooth/dolt/ found
+        let cwd = std::env::current_dir()?;
+        let dir = cwd.join(".smooth").join("dolt");
+        smooth_pearls::PearlStore::init(&dir)?;
+        println!(
+            "  {} Pearls     {} {}",
+            "\u{2713}".green().bold(),
+            dir.display().to_string().dimmed(),
+            "(auto-initialized)".dimmed()
+        );
+        dir
     };
     let pearl_store = match smooth_pearls::SmoothDoltServer::spawn(&dolt_dir) {
         Ok(server) => {
@@ -1794,90 +1791,87 @@ async fn cmd_down() -> Result<()> {
 
 async fn cmd_status() -> Result<()> {
     let url = "http://localhost:4400/health";
-    match reqwest::get(url).await {
-        Ok(resp) => {
-            let body: serde_json::Value = resp.json().await?;
+    if let Ok(resp) = reqwest::get(url).await {
+        let body: serde_json::Value = resp.json().await?;
 
-            // Version
-            let version = body["version"].as_str().unwrap_or("unknown");
-            println!();
-            println!(
-                "  {} {} {} {}",
-                gradient::smooth(),
-                format!("v{version}").bold().green(),
-                "\u{2014}".dimmed(),
-                "http://localhost:4400".cyan().bold()
-            );
+        // Version
+        let version = body["version"].as_str().unwrap_or("unknown");
+        println!();
+        println!(
+            "  {} {} {} {}",
+            gradient::smooth(),
+            format!("v{version}").bold().green(),
+            "\u{2014}".dimmed(),
+            "http://localhost:4400".cyan().bold()
+        );
 
-            // Uptime
-            if let Some(uptime_secs) = body["uptime_seconds"].as_u64().or_else(|| body["uptime"].as_u64()) {
-                let formatted = if uptime_secs >= 3600 {
-                    format!("{}h {}m", uptime_secs / 3600, (uptime_secs % 3600) / 60)
-                } else if uptime_secs >= 60 {
-                    format!("{}m {}s", uptime_secs / 60, uptime_secs % 60)
-                } else {
-                    format!("{uptime_secs}s")
-                };
-                println!("  {}: {}", "Uptime".dimmed(), formatted);
-            }
-            println!();
-
-            // Align every label to 16 chars so "Smooth Operators" fits cleanly.
-            // The gradient wordmark carries ANSI escapes that inflate byte
-            // length, so we hand-pad off the visible width ("Big Smooth" = 10,
-            // "Smooth Operators" = 16) instead of using `{:<16}`.
-            // Big Smooth
-            let leader_status = body["leader"].as_str().or_else(|| body["status"].as_str()).unwrap_or("healthy");
-            let (icon, label) = status_indicator(leader_status);
-            println!("  {icon} Big {}{} {label}", gradient::smooth(), " ".repeat(6));
-
-            // Dolt store (backs pearls, sessions, memories, config)
-            let db_status = body["database"].as_str().unwrap_or("healthy");
-            let (icon, label) = status_indicator(db_status);
-            println!("  {icon} {:<16} {} {}", "Dolt store", label, "(pearls + config)".dimmed());
-
-            // Smooth Operators (sandboxed AI agents in microVMs)
-            let sandbox_status = body["sandbox"].as_str().or_else(|| body["sandboxes"].as_str()).unwrap_or("healthy");
-            let active = body["sandbox_active"].as_u64().or_else(|| body["sandboxes_active"].as_u64()).unwrap_or(0);
-            let max = body["sandbox_max"].as_u64().or_else(|| body["sandboxes_max"].as_u64()).unwrap_or(3);
-            let (icon, label) = status_indicator(sandbox_status);
-            println!(
-                "  {icon} {} Operators {} {}",
-                gradient::smooth(),
-                label,
-                format!("({active}/{max} active)").dimmed()
-            );
-
-            // Tailscale
-            if let Some(ts) = body.get("tailscale") {
-                let ts_status = ts.as_str().unwrap_or("unknown");
-                let hostname = body["tailscale_hostname"].as_str().unwrap_or("");
-                let (icon, label) = status_indicator(ts_status);
-                let suffix = if hostname.is_empty() { String::new() } else { format!(" ({})", hostname) };
-                println!("  {icon} {:<16} {label}{}", "Tailscale", suffix.dimmed());
-            }
-
-            // Pearls
-            if let Ok(store) = open_pearl_store() {
-                if let Ok(stats) = store.stats() {
-                    println!(
-                        "  {} {:<16} {} open, {} active, {} closed",
-                        "\u{2713}".green().bold(),
-                        "Pearls",
-                        stats.open.to_string().bold(),
-                        stats.in_progress.to_string().bold(),
-                        stats.closed.to_string().dimmed()
-                    );
-                }
-            }
-            println!();
+        // Uptime
+        if let Some(uptime_secs) = body["uptime_seconds"].as_u64().or_else(|| body["uptime"].as_u64()) {
+            let formatted = if uptime_secs >= 3600 {
+                format!("{}h {}m", uptime_secs / 3600, (uptime_secs % 3600) / 60)
+            } else if uptime_secs >= 60 {
+                format!("{}m {}s", uptime_secs / 60, uptime_secs % 60)
+            } else {
+                format!("{uptime_secs}s")
+            };
+            println!("  {}: {}", "Uptime".dimmed(), formatted);
         }
-        Err(_) => {
-            println!();
-            println!("  {} {}", gradient::smooth(), "is not running.".yellow());
-            println!("  Start with: {}", "th up".bold());
-            println!();
+        println!();
+
+        // Align every label to 16 chars so "Smooth Operators" fits cleanly.
+        // The gradient wordmark carries ANSI escapes that inflate byte
+        // length, so we hand-pad off the visible width ("Big Smooth" = 10,
+        // "Smooth Operators" = 16) instead of using `{:<16}`.
+        // Big Smooth
+        let leader_status = body["leader"].as_str().or_else(|| body["status"].as_str()).unwrap_or("healthy");
+        let (icon, label) = status_indicator(leader_status);
+        println!("  {icon} Big {}{} {label}", gradient::smooth(), " ".repeat(6));
+
+        // Dolt store (backs pearls, sessions, memories, config)
+        let db_status = body["database"].as_str().unwrap_or("healthy");
+        let (icon, label) = status_indicator(db_status);
+        println!("  {icon} {:<16} {} {}", "Dolt store", label, "(pearls + config)".dimmed());
+
+        // Smooth Operators (sandboxed AI agents in microVMs)
+        let sandbox_status = body["sandbox"].as_str().or_else(|| body["sandboxes"].as_str()).unwrap_or("healthy");
+        let active = body["sandbox_active"].as_u64().or_else(|| body["sandboxes_active"].as_u64()).unwrap_or(0);
+        let max = body["sandbox_max"].as_u64().or_else(|| body["sandboxes_max"].as_u64()).unwrap_or(3);
+        let (icon, label) = status_indicator(sandbox_status);
+        println!(
+            "  {icon} {} Operators {} {}",
+            gradient::smooth(),
+            label,
+            format!("({active}/{max} active)").dimmed()
+        );
+
+        // Tailscale
+        if let Some(ts) = body.get("tailscale") {
+            let ts_status = ts.as_str().unwrap_or("unknown");
+            let hostname = body["tailscale_hostname"].as_str().unwrap_or("");
+            let (icon, label) = status_indicator(ts_status);
+            let suffix = if hostname.is_empty() { String::new() } else { format!(" ({hostname})") };
+            println!("  {icon} {:<16} {label}{}", "Tailscale", suffix.dimmed());
         }
+
+        // Pearls
+        if let Ok(store) = open_pearl_store() {
+            if let Ok(stats) = store.stats() {
+                println!(
+                    "  {} {:<16} {} open, {} active, {} closed",
+                    "\u{2713}".green().bold(),
+                    "Pearls",
+                    stats.open.to_string().bold(),
+                    stats.in_progress.to_string().bold(),
+                    stats.closed.to_string().dimmed()
+                );
+            }
+        }
+        println!();
+    } else {
+        println!();
+        println!("  {} {}", gradient::smooth(), "is not running.".yellow());
+        println!("  Start with: {}", "th up".bold());
+        println!();
     }
     Ok(())
 }
@@ -2042,13 +2036,10 @@ async fn cmd_model(cmd: ModelCommands) -> Result<()> {
             // Step 1: Pick provider (interactive if not given)
             let (provider_id, models, needs_key) = if let Some(ref p) = provider {
                 let entry = catalog.iter().find(|(id, ..)| *id == p.as_str());
-                match entry {
-                    Some((id, _, models, needs_key)) => (id.to_string(), models.clone(), *needs_key),
-                    None => {
-                        println!("Unknown provider: {p}");
-                        println!("Available: {}", catalog.iter().map(|(id, ..)| *id).collect::<Vec<_>>().join(", "));
-                        return Ok(());
-                    }
+                if let Some((id, _, models, needs_key)) = entry { (id.to_string(), models.clone(), *needs_key) } else {
+                    println!("Unknown provider: {p}");
+                    println!("Available: {}", catalog.iter().map(|(id, ..)| *id).collect::<Vec<_>>().join(", "));
+                    return Ok(());
                 }
             } else {
                 let display_names: Vec<&str> = catalog.iter().map(|(_, name, ..)| name.as_str()).collect();
@@ -2079,14 +2070,15 @@ async fn cmd_model(cmd: ModelCommands) -> Result<()> {
                 .filter(|(name, _, _)| {
                     name.starts_with(&provider_id)
                         || smooth_operator::providers::Preset::from_name(name)
-                            .map(|p| p.provider_id() == provider_id)
-                            .unwrap_or(false)
+                            .is_some_and(|p| p.provider_id() == provider_id)
                 })
                 .copied()
                 .collect();
 
             // Ask: preset or single model?
-            let use_preset = if !provider_presets.is_empty() {
+            let use_preset = if provider_presets.is_empty() {
+                false
+            } else {
                 let choices = vec![
                     format!(
                         "Apply a routing preset ({})",
@@ -2100,8 +2092,6 @@ async fn cmd_model(cmd: ModelCommands) -> Result<()> {
                     .default(0)
                     .interact()?;
                 selection == 0
-            } else {
-                false
             };
 
             if use_preset {
@@ -2142,39 +2132,33 @@ async fn cmd_model(cmd: ModelCommands) -> Result<()> {
                         "ollama" => "http://localhost:11434/v1/models",
                         _ => "",
                     };
-                    if !api_url.is_empty() {
+                    if api_url.is_empty() {
+                        Vec::new()
+                    } else {
                         print!("  Fetching models... ");
                         let _ = std::io::Write::flush(&mut std::io::stdout());
-                        match reqwest::blocking::get(api_url) {
-                            Ok(resp) => match resp.json::<serde_json::Value>() {
-                                Ok(body) => {
-                                    let ids: Vec<String> = body
-                                        .get("data")
-                                        .and_then(|d| d.as_array())
-                                        .map(|arr| arr.iter().filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(String::from)).collect())
-                                        .unwrap_or_default();
-                                    println!("{} models available", ids.len());
-                                    ids
-                                }
-                                Err(_) => {
-                                    println!("failed to parse");
-                                    Vec::new()
-                                }
-                            },
-                            Err(_) => {
-                                println!("unavailable");
-                                Vec::new()
-                            }
+                        if let Ok(resp) = reqwest::blocking::get(api_url) { if let Ok(body) = resp.json::<serde_json::Value>() {
+                            let ids: Vec<String> = body
+                                .get("data")
+                                .and_then(|d| d.as_array())
+                                .map(|arr| arr.iter().filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(String::from)).collect())
+                                .unwrap_or_default();
+                            println!("{} models available", ids.len());
+                            ids
+                        } else {
+                            println!("failed to parse");
+                            Vec::new()
+                        } } else {
+                            println!("unavailable");
+                            Vec::new()
                         }
-                    } else {
-                        Vec::new()
                     }
                 } else {
                     Vec::new()
                 };
 
                 let all_models: Vec<String> = if live_models.is_empty() {
-                    models.iter().map(|s| s.to_string()).collect()
+                    models.iter().map(std::string::ToString::to_string).collect()
                 } else {
                     live_models
                 };
@@ -2327,12 +2311,9 @@ async fn cmd_operators(cmd: Option<OperatorsCommands>) -> Result<()> {
     match cmd.unwrap_or(OperatorsCommands::List) {
         OperatorsCommands::List => {
             let resp = client.get("http://localhost:4400/api/workers").send().await;
-            let json: serde_json::Value = match resp {
-                Ok(r) => r.json().await.unwrap_or(serde_json::json!({"data": []})),
-                Err(_) => {
-                    println!("Cannot reach Big {}. Run: th up", gradient::smooth());
-                    return Ok(());
-                }
+            let json: serde_json::Value = if let Ok(r) = resp { r.json().await.unwrap_or(serde_json::json!({"data": []})) } else {
+                println!("Cannot reach Big {}. Run: th up", gradient::smooth());
+                return Ok(());
             };
             let empty = vec![];
             let workers = json["data"].as_array().unwrap_or(&empty);
@@ -2436,7 +2417,7 @@ async fn cmd_run(
             }
             let title = data.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let desc = data.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let body = if desc.is_empty() { title.clone() } else { format!("{title}\n\n{desc}") };
+            let body = if desc.is_empty() { title } else { format!("{title}\n\n{desc}") };
             (Some(arg.to_string()), body)
         }
         Some(adhoc) => (None, adhoc.to_string()),
@@ -2448,7 +2429,7 @@ async fn cmd_run(
             let id = first.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
             let title = first.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let desc = first.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let body = if desc.is_empty() { title.clone() } else { format!("{title}\n\n{desc}") };
+            let body = if desc.is_empty() { title } else { format!("{title}\n\n{desc}") };
             (Some(id), body)
         }
     };
@@ -2457,7 +2438,7 @@ async fn cmd_run(
 
     // Default image is always smooai/smooth-operator (agent installs
     // its own toolchain via mise). --image overrides for special cases.
-    let resolved_image: String = image.map(String::from).unwrap_or_else(default_smooth_operator_image);
+    let resolved_image: String = image.map_or_else(default_smooth_operator_image, String::from);
 
     if let Some(ref id) = pearl_id {
         println!("\n  {} {} {}", "▶".cyan().bold(), "Running pearl".bold(), id.bold());
@@ -2909,25 +2890,22 @@ async fn cmd_code(
     let resumed_session = if let Some(query) = resume.as_deref() {
         let mgr = smooth_code::session::SessionManager::new()?;
         let summary = if query.is_empty() { mgr.most_recent()? } else { mgr.find_by_query(query)? };
-        match summary {
-            Some(s) => {
-                let loaded = mgr.load(&s.id)?;
-                println!(
-                    "  {} {} {}",
-                    "↻".cyan(),
-                    "Resuming".bold(),
-                    loaded.title.as_deref().unwrap_or(&loaded.id).bold()
-                );
-                Some(loaded)
-            }
-            None => {
-                let hint = if query.is_empty() {
-                    "No saved sessions yet".to_string()
-                } else {
-                    format!("No session matched '{query}'. Run `th code --list` to see saved ones.")
-                };
-                anyhow::bail!(hint);
-            }
+        if let Some(s) = summary {
+            let loaded = mgr.load(&s.id)?;
+            println!(
+                "  {} {} {}",
+                "↻".cyan(),
+                "Resuming".bold(),
+                loaded.title.as_deref().unwrap_or(&loaded.id).bold()
+            );
+            Some(loaded)
+        } else {
+            let hint = if query.is_empty() {
+                "No saved sessions yet".to_string()
+            } else {
+                format!("No session matched '{query}'. Run `th code --list` to see saved ones.")
+            };
+            anyhow::bail!(hint);
         }
     } else {
         None
@@ -3004,8 +2982,7 @@ async fn cmd_code(
         if !dolt_on_path {
             let in_target = std::env::current_dir()
                 .ok()
-                .map(|d| d.join("target/release/smooth-dolt").exists())
-                .unwrap_or(false);
+                .is_some_and(|d| d.join("target/release/smooth-dolt").exists());
             if !in_target {
                 println!(
                     "  {} {}",
@@ -3723,52 +3700,52 @@ fn cmd_doctor_init_home_repo(remote: Option<&str>) -> Result<()> {
 
     // Seed .gitignore before `git init` runs so the first status is clean.
     let gitignore_path = smooth_home.join(".gitignore");
-    if !gitignore_path.exists() {
-        std::fs::write(
-            &gitignore_path,
-            r"# Secrets — never commit LLM keys / Jira tokens
-providers.json
+    if gitignore_path.exists() {
+            println!("  {} .gitignore already present — leaving as-is", "○".dimmed());
+        } else {
+            std::fs::write(
+                &gitignore_path,
+                r"# Secrets — never commit LLM keys / Jira tokens
+    providers.json
 
-# High-churn / ephemeral state
-service.log
-service.err
-smooth.log
-smooth.pid
-smooth.db
-smooth.db-journal
-smooth.db-wal
-smooth.db-shm
+    # High-churn / ephemeral state
+    service.log
+    service.err
+    smooth.log
+    smooth.pid
+    smooth.db
+    smooth.db-journal
+    smooth.db-wal
+    smooth.db-shm
 
-# Rotating audit logs
-audit/
+    # Rotating audit logs
+    audit/
 
-# Dolt store has its own push/pull via `th pearls push/pull`
-dolt/
+    # Dolt store has its own push/pull via `th pearls push/pull`
+    dolt/
 
-# Project-scoped sandbox caches — machine-local, large
-project-cache/
-pearl-env/
+    # Project-scoped sandbox caches — machine-local, large
+    project-cache/
+    pearl-env/
 
-# Debug / session captures — ephemeral runtime artifacts
-coding-sessions/
-llm-errors/
-",
-        )?;
-        println!("  {} wrote .gitignore", "✓".green().bold());
-    } else {
-        println!("  {} .gitignore already present — leaving as-is", "○".dimmed());
-    }
+    # Debug / session captures — ephemeral runtime artifacts
+    coding-sessions/
+    llm-errors/
+    ",
+            )?;
+            println!("  {} wrote .gitignore", "✓".green().bold());
+        }
 
     // Is this already a git repo?
     let is_repo = smooth_home.join(".git").exists();
-    if !is_repo {
+    if is_repo {
+        println!("  {} already a git repo", "○".dimmed());
+    } else {
         let out = git(&["init", "-q"])?;
         if !out.status.success() {
             anyhow::bail!("git init failed: {}", String::from_utf8_lossy(&out.stderr).trim());
         }
         println!("  {} git init", "✓".green().bold());
-    } else {
-        println!("  {} already a git repo", "○".dimmed());
     }
 
     // Stage everything that survives .gitignore.
@@ -3787,7 +3764,9 @@ llm-errors/
             "th doctor: initial Smooth home commit"
         };
         let commit = git(&["commit", "-q", "-m", msg])?;
-        if !commit.status.success() {
+        if commit.status.success() {
+            println!("  {} committed: {msg}", "✓".green().bold());
+        } else {
             let stderr = String::from_utf8_lossy(&commit.stderr);
             if stderr.contains("user.email") || stderr.contains("user.name") {
                 println!("  {} git has no user.email/user.name configured globally — commit skipped", "!".yellow().bold());
@@ -3795,8 +3774,6 @@ llm-errors/
             } else {
                 anyhow::bail!("git commit failed: {}", stderr.trim());
             }
-        } else {
-            println!("  {} committed: {msg}", "✓".green().bold());
         }
     } else {
         println!("  {} nothing new to commit", "○".dimmed());
@@ -4773,7 +4750,7 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             // `.dolt/` is an independent dolt repo. Probe each.
             let db_dirs: Vec<std::path::PathBuf> = std::fs::read_dir(&dolt_root)
                 .with_context(|| format!("read {}", dolt_root.display()))?
-                .filter_map(|entry| entry.ok())
+                .filter_map(std::result::Result::ok)
                 .filter(|entry| entry.path().join(".dolt").is_dir())
                 .map(|entry| entry.path())
                 .collect();
@@ -5189,24 +5166,20 @@ async fn cmd_routing(cmd: RoutingCommands) -> Result<()> {
 
             for (label, provider, alias) in &slot_rows {
                 let upstream = resolved.get(provider).and_then(|m| m.get(alias)).and_then(|r| r.upstream.as_deref());
-                match upstream {
-                    Some(u) => {
-                        println!("  {} {:<11} {} {} {}", "✓".green().bold(), label.bold(), alias.cyan(), "→".dimmed(), u.yellow());
-                    }
-                    None => {
-                        let hint = errors
-                            .get(provider)
-                            .map(std::string::String::as_str)
-                            .unwrap_or("gateway did not report an upstream for this alias");
-                        println!(
-                            "  {} {:<11} {} {} {}",
-                            "?".yellow().bold(),
-                            label.bold(),
-                            alias.cyan(),
-                            "→".dimmed(),
-                            hint.dimmed()
-                        );
-                    }
+                if let Some(u) = upstream {
+                    println!("  {} {:<11} {} {} {}", "✓".green().bold(), label.bold(), alias.cyan(), "→".dimmed(), u.yellow());
+                } else {
+                    let hint = errors
+                        .get(provider)
+                        .map_or("gateway did not report an upstream for this alias", std::string::String::as_str);
+                    println!(
+                        "  {} {:<11} {} {} {}",
+                        "?".yellow().bold(),
+                        label.bold(),
+                        alias.cyan(),
+                        "→".dimmed(),
+                        hint.dimmed()
+                    );
                 }
             }
             println!();
@@ -5234,14 +5207,11 @@ async fn cmd_routing(cmd: RoutingCommands) -> Result<()> {
                 all_presets[selection].0.to_string()
             };
 
-            let preset = match smooth_operator::providers::Preset::from_name(&preset_name) {
-                Some(p) => p,
-                None => {
-                    let names: Vec<&str> = all_presets.iter().map(|(n, _, _)| *n).collect();
-                    println!("Unknown preset: {preset_name}");
-                    println!("Available: {}", names.join(", "));
-                    return Ok(());
-                }
+            let preset = if let Some(p) = smooth_operator::providers::Preset::from_name(&preset_name) { p } else {
+                let names: Vec<&str> = all_presets.iter().map(|(n, _, _)| *n).collect();
+                println!("Unknown preset: {preset_name}");
+                println!("Available: {}", names.join(", "));
+                return Ok(());
             };
 
             let required_provider = preset.provider_id();
@@ -5254,12 +5224,9 @@ async fn cmd_routing(cmd: RoutingCommands) -> Result<()> {
                 None
             };
 
-            let api_key = match api_key {
-                Some(k) => k,
-                None => {
-                    println!("  {} requires {} provider. Enter API key:", "⚠".yellow(), required_provider.bold());
-                    Password::with_theme(&ColorfulTheme::default()).with_prompt("API key").interact()?
-                }
+            let api_key = if let Some(k) = api_key { k } else {
+                println!("  {} requires {} provider. Enter API key:", "⚠".yellow(), required_provider.bold());
+                Password::with_theme(&ColorfulTheme::default()).with_prompt("API key").interact()?
             };
 
             let registry = smooth_operator::providers::ProviderRegistry::from_preset(preset, &api_key);
@@ -5847,7 +5814,7 @@ fn cmd_mcp(cmd: McpCommands) -> Result<()> {
                     }
                 }
                 if hit.is_none() && try_remove(&global_path)? {
-                    hit = Some(global_path.clone());
+                    hit = Some(global_path);
                 }
                 hit
             };
@@ -6214,7 +6181,7 @@ required = [{required}]
                     }
                 }
                 if hit.is_none() && attempt(&global_dir)? {
-                    hit = Some(global_dir.clone());
+                    hit = Some(global_dir);
                 }
                 hit
             };

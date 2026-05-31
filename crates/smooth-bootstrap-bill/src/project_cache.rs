@@ -102,7 +102,7 @@ pub async fn list_project_cache_volumes() -> Result<Vec<ProjectCacheVolumeInfo>>
         let cache_key = labels
             .iter()
             .find(|(k, _)| k == PROJECT_CACHE_KEY_LABEL)
-            .map_or_else(|| h.name().strip_prefix("smooth-cache-").unwrap_or(h.name()).to_string(), |(_, v)| v.clone());
+            .map_or_else(|| h.name().strip_prefix("smooth-cache-").unwrap_or_else(|| h.name()).to_string(), |(_, v)| v.clone());
 
         let path = volumes_dir.join(h.name());
         let size_bytes = dir_size_bytes(&path);

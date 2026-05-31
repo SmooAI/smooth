@@ -101,6 +101,10 @@ pub async fn destroy_all() {
 /// - `spec.name` is already registered
 /// - Any env var value contains non-ASCII bytes (would panic microsandbox)
 /// - The VM fails to boot (missing hardware virt, bad image, port clash)
+// Long orchestration fn with `diag!`-macro timestamp breadcrumbs: the
+// `elapsed().as_millis() as u64` casts are bounded by wall-clock spawn time
+// and the inner `use` is scoped to the wait loop.
+#[allow(clippy::too_many_lines, clippy::cast_possible_truncation, clippy::items_after_statements)]
 pub async fn spawn_sandbox(spec: SandboxSpec) -> Result<(String, Vec<PortMapping>, String)> {
     // Pre-flight: env values must be printable ASCII or microsandbox will
     // panic from `msb_krun_vmm::builder`. Catch it here with a clean error.
@@ -351,9 +355,7 @@ pub async fn spawn_sandbox(spec: SandboxSpec) -> Result<(String, Vec<PortMapping
     let watch_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let watch_stop_inner = watch_stop.clone();
     let watch_handle = tokio::spawn(async move {
-        let home = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+        let home = std::env::var_os("HOME").map_or_else(|| std::path::PathBuf::from("/tmp"), std::path::PathBuf::from);
         let sandbox_dir = home.join(".microsandbox").join("sandboxes").join(&watch_name);
         let host_log = sandbox_dir.join("logs").join("host.log");
         let runtime_dir = sandbox_dir.join("runtime");
@@ -596,6 +598,7 @@ async fn run_bind_all_proxy(port: u16) -> anyhow::Result<()> {
 /// Returns an error if the sandbox is not registered or microsandbox's
 /// `exec` call fails (note: non-zero exit is reported in the return tuple,
 /// not as an error).
+#[allow(clippy::similar_names)] // `argv` (param) vs `args` (split tail)
 pub async fn exec_sandbox(name: &str, argv: &[String]) -> Result<(String, String, i32)> {
     let Some((cmd, args)) = argv.split_first() else {
         anyhow::bail!("exec_sandbox: argv is empty");
@@ -678,6 +681,7 @@ pub async fn destroy_sandbox(name: &str) -> Result<()> {
 /// # Errors
 ///
 /// Returns an error if the bind fails.
+#[allow(clippy::large_futures)] // per-connection handler future spawned on its own task
 pub async fn listen(addr: SocketAddr) -> Result<(SocketAddr, tokio::task::JoinHandle<()>)> {
     let listener = TcpListener::bind(addr).await.with_context(|| format!("bill: bind {addr}"))?;
     let local = listener.local_addr().context("bill: read local addr")?;
@@ -702,6 +706,7 @@ pub async fn listen(addr: SocketAddr) -> Result<(SocketAddr, tokio::task::JoinHa
     Ok((local, handle))
 }
 
+#[allow(clippy::large_futures)] // dispatch future is large but runs one-per-connection
 async fn handle_connection(stream: TcpStream) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -733,6 +738,7 @@ async fn write_response(stream: &mut tokio::net::tcp::OwnedWriteHalf, response: 
     Ok(())
 }
 
+#[allow(clippy::large_futures)] // spawn_sandbox future is large but awaited once per request
 async fn dispatch(request: BillRequest) -> BillResponse {
     match request {
         BillRequest::Ping => BillResponse::Pong {

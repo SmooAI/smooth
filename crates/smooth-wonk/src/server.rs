@@ -363,9 +363,7 @@ async fn check_network(State(state): State<Arc<AppState>>, Json(req): Json<Netwo
             // requests against the same glob skip the round trip.
             let glob = decision.add_to_allowlist_glob.clone().unwrap_or_else(|| req.domain.clone());
             let ttl = decision
-                .cache_ttl_seconds
-                .map(std::time::Duration::from_secs)
-                .unwrap_or_else(|| std::time::Duration::from_secs(3600));
+                .cache_ttl_seconds.map_or_else(|| std::time::Duration::from_secs(3600), std::time::Duration::from_secs);
             state.push_runtime_allow(glob, ttl);
             tracing::info!(
                 domain = %req.domain,
@@ -482,7 +480,7 @@ fn path_starts_with(path: &str, prefix: &str) -> bool {
     if path == p {
         return true;
     }
-    let with_slash = if p.ends_with('/') { p.clone() } else { format!("{p}/") };
+    let with_slash = if p.ends_with('/') { p } else { format!("{p}/") };
     path.starts_with(&with_slash)
 }
 
@@ -515,7 +513,7 @@ async fn check_write(State(state): State<Arc<AppState>>, Json(req): Json<WriteCh
         tracing::debug!(path = %req.path, canonical = %canonical, "write denied: outside any mounted writable region");
         return Json(CheckResponse {
             allowed: false,
-            reason: format!("path {} is outside the writable mounts (sandbox boundary)", canonical),
+            reason: format!("path {canonical} is outside the writable mounts (sandbox boundary)"),
         });
     }
 

@@ -23,7 +23,9 @@ use serde_json::{json, Value};
 
 use crate::tool::{Tool, ToolRegistry, ToolSchema};
 
-/// `Arc`-shareable handle to a `ToolRegistry`. The meta-tool needs
+/// `Arc`-shareable handle to a `ToolRegistry`.
+///
+/// The meta-tool needs
 /// a way to call `promote()` from within its `execute()` method —
 /// since `execute()` takes `&self` and the registry's `promote` is
 /// also `&self` (interior mut via `Arc<Mutex<…>>`), wrapping the
@@ -76,6 +78,7 @@ impl Tool for ToolSearch {
         true
     }
 
+    #[allow(clippy::items_after_statements)] // MAX_MATCHES const scoped to the search
     async fn execute(&self, arguments: Value) -> anyhow::Result<String> {
         let query = arguments
             .get("query")

@@ -36,9 +36,7 @@ async fn main() -> anyhow::Result<()> {
     // Pearl store: Dolt-backed. Use a per-session temp dir so each
     // Safehouse boot starts with a clean pearl database (no stale data
     // from previous runs). The Dolt DB is ephemeral to the VM session.
-    let dolt_dir = std::env::var("SMOOTH_DOLT_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/tmp/smooth-dolt"));
+    let dolt_dir = std::env::var("SMOOTH_DOLT_DIR").map_or_else(|_| PathBuf::from("/tmp/smooth-dolt"), PathBuf::from);
     let pearl_store = if dolt_dir.exists() {
         tracing::info!(dolt = %dolt_dir.display(), "safehouse: opening existing Dolt pearl store");
         smooth_pearls::PearlStore::open(&dolt_dir)?

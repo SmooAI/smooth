@@ -27,7 +27,7 @@ pub struct GradeToml {
     pub edits: EditsConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskMeta {
     /// Stable identifier — usually matches the directory name.
     pub id: String,
@@ -42,7 +42,7 @@ pub struct TaskMeta {
     pub human_baseline_lines: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VerifyConfig {
     /// Shell command run in the scratch dir AFTER the hidden-tests
     /// overlay is applied. Single string; the runner splits on

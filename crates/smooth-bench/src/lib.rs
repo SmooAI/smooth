@@ -810,6 +810,7 @@ async fn score_work_dir(lang: PolyglotLang, work_dir: &Path) -> anyhow::Result<(
 }
 
 /// Deterministic regex parse of the test-runner's own summary line.
+///
 /// Returns `None` when no summary line is found — caller falls back
 /// to the LLM judge. Returning `None` is a *signal* that the output
 /// doesn't have the canonical shape; `Some(passed: 0, failed: 0)`

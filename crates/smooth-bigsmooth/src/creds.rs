@@ -201,9 +201,9 @@ fn extract_host(url: &str) -> Option<&str> {
         return None;
     }
     // Strip the scheme if present.
-    let without_scheme = trimmed.split_once("://").map(|(_, rest)| rest).unwrap_or(trimmed);
+    let without_scheme = trimmed.split_once("://").map_or(trimmed, |(_, rest)| rest);
     // Strip userinfo (rare but possible).
-    let after_userinfo = without_scheme.rsplit_once('@').map(|(_, rest)| rest).unwrap_or(without_scheme);
+    let after_userinfo = without_scheme.rsplit_once('@').map_or(without_scheme, |(_, rest)| rest);
     // Cut at the first `/`, `?`, or `#`.
     let host_with_port = after_userinfo.split(['/', '?', '#']).next()?;
     if host_with_port.is_empty() {
@@ -211,7 +211,7 @@ fn extract_host(url: &str) -> Option<&str> {
     }
     // Strip the port — for IPv6 this would need bracket handling,
     // but `:port` on a bracketless v4/hostname is fine.
-    let host = host_with_port.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_with_port);
+    let host = host_with_port.rsplit_once(':').map_or(host_with_port, |(h, _)| h);
     if host.is_empty() {
         None
     } else {

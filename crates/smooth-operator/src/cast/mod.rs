@@ -239,6 +239,7 @@ fn scout_tools() -> Vec<String> {
     ]
 }
 
+#[allow(clippy::too_many_lines)] // static table of built-in role definitions
 fn builtin_roles() -> Vec<OperatorRole> {
     vec![
         OperatorRole {
@@ -446,8 +447,9 @@ fn builtin_roles() -> Vec<OperatorRole> {
 // explicit "agent '{name}' is not permitted to call '{tool}'"
 // message that the LLM sees and can reason about.
 
-/// Tool-dispatch hook that enforces an [`OperatorRole`]'s
-/// [`Clearance`]. Install this on a [`ToolRegistry`] BEFORE any
+/// Tool-dispatch hook that enforces an [`OperatorRole`]'s [`Clearance`].
+///
+/// Install this on a [`ToolRegistry`] BEFORE any
 /// tool call happens — the hook chain runs in registration order,
 /// so a role permission check should be first to fail fast on
 /// denied calls and avoid wasting downstream hooks.

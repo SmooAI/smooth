@@ -232,9 +232,7 @@ impl Orchestrator {
                             .pearl_store
                             .get(bead_id)
                             .ok()
-                            .flatten()
-                            .map(|issue| format!("{}: {}", issue.title, issue.description))
-                            .unwrap_or_else(|| format!("Work on bead {bead_id}"));
+                            .flatten().map_or_else(|| format!("Work on bead {bead_id}"), |issue| format!("{}: {}", issue.title, issue.description));
 
                         match client.assign_task(bead_id, &message, None, "").await {
                             Ok(()) => {

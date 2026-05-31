@@ -23,9 +23,7 @@ async fn main() -> anyhow::Result<()> {
         .try_init()
         .ok();
 
-    let socket_path = std::env::var("SMOOTH_HOST_STUB_SOCKET")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/run/smooth/host.sock"));
+    let socket_path = std::env::var("SMOOTH_HOST_STUB_SOCKET").map_or_else(|_| PathBuf::from("/run/smooth/host.sock"), PathBuf::from);
 
     if let Some(parent) = socket_path.parent() {
         if !parent.exists() {

@@ -707,13 +707,10 @@ pub async fn start(mut state: AppState, addr: SocketAddr) -> anyhow::Result<()> 
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     if direct_mode {
-        match find_native_operator_runner_binary() {
-            Some(p) => tracing::info!(runner_bin = %p.display(), "direct dispatch: resolved native smooth-operator-runner"),
-            None => tracing::warn!(
-                env_var = ?std::env::var("SMOOTH_OPERATOR_RUNNER_NATIVE").ok(),
-                "direct dispatch: native smooth-operator-runner NOT FOUND — every dispatch will silently close its pearl with cost_usd=0 until this is fixed. Run `cargo build --release -p smooai-smooth-operator-runner` or set SMOOTH_OPERATOR_RUNNER_NATIVE=/absolute/path."
-            ),
-        }
+        if let Some(p) = find_native_operator_runner_binary() { tracing::info!(runner_bin = %p.display(), "direct dispatch: resolved native smooth-operator-runner") } else { tracing::warn!(
+            env_var = ?std::env::var("SMOOTH_OPERATOR_RUNNER_NATIVE").ok(),
+            "direct dispatch: native smooth-operator-runner NOT FOUND — every dispatch will silently close its pearl with cost_usd=0 until this is fixed. Run `cargo build --release -p smooai-smooth-operator-runner` or set SMOOTH_OPERATOR_RUNNER_NATIVE=/absolute/path."
+        ) }
     }
 
     axum::serve(listener, app).await?;
@@ -1245,16 +1242,15 @@ fn build_runner_diag_wrapper_argv(runner_in_vm: &str) -> Vec<String> {
          ls -la /opt/smooth/ /opt/smooth/bin/ /opt/smooth/policy/ /workspace/ /var/log/smooth-runner/ \
              > /var/log/smooth-runner/02-listing.txt 2>&1; \
          env > /var/log/smooth-runner/03-env.txt 2>&1; \
-         if [ -x {runner} ]; then echo runner-exists-and-executable; else echo MISSING-RUNNER; ls -la {runner} 2>&1; fi \
+         if [ -x {runner_in_vm} ]; then echo runner-exists-and-executable; else echo MISSING-RUNNER; ls -la {runner_in_vm} 2>&1; fi \
              > /var/log/smooth-runner/04-runner-check.txt 2>&1; \
          rcfile=/var/log/smooth-runner/07-exit-code.txt; \
          rm -f \"$rcfile\" 2>/dev/null; \
-         {{ ( {runner}; echo $? > \"$rcfile\" ) 2>&1 1>&3 | tee -a /var/log/smooth-runner/06-stderr.log >&2; }} 3>&1 \
+         {{ ( {runner_in_vm}; echo $? > \"$rcfile\" ) 2>&1 1>&3 | tee -a /var/log/smooth-runner/06-stderr.log >&2; }} 3>&1 \
              | tee -a /var/log/smooth-runner/05-stdout.log; \
          rc=$(cat \"$rcfile\" 2>/dev/null); \
          [ -z \"$rc\" ] && rc=1; \
-         exit $rc",
-        runner = runner_in_vm
+         exit $rc"
     );
     vec!["/bin/sh".into(), "-c".into(), script]
 }
@@ -1351,9 +1347,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         let title = pearl_store
             .get(pid)
             .ok()
-            .flatten()
-            .map(|p| p.title)
-            .unwrap_or_else(|| truncate_str(&message, 60));
+            .flatten().map_or_else(|| truncate_str(&message, 60), |p| p.title);
         let teammate_name = crate::teammates::slug_from_pearl(pid);
         let now = chrono::Utc::now();
         state
@@ -1392,18 +1386,15 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
 
     // Resolve the runner binary and working directory upfront. Both are
     // needed as host paths to mount into the VM.
-    let runner_bin = match find_operator_runner_binary() {
-        Some(p) => p,
-        None => {
-            let err = "smooth-operator-runner binary not found. Run scripts/build-operator-runner.sh to cross-compile it, or set SMOOTH_OPERATOR_RUNNER=/absolute/path.";
-            let _ = event_tx.send(ServerEvent::TaskError {
-                task_id: task_id.clone(),
-                message: err.into(),
-            });
-            tracing::error!("sandboxed dispatch: {err}");
-            close_pearl_on_abort(err);
-            return;
-        }
+    let runner_bin = if let Some(p) = find_operator_runner_binary() { p } else {
+        let err = "smooth-operator-runner binary not found. Run scripts/build-operator-runner.sh to cross-compile it, or set SMOOTH_OPERATOR_RUNNER=/absolute/path.";
+        let _ = event_tx.send(ServerEvent::TaskError {
+            task_id: task_id.clone(),
+            message: err.into(),
+        });
+        tracing::error!("sandboxed dispatch: {err}");
+        close_pearl_on_abort(err);
+        return;
     };
 
     // Working dir on the host — the agent reads/writes here from inside the
@@ -1418,9 +1409,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
     //     it. Bill will bind-mount it on the host.
     let brokered = std::env::var("SMOOTH_BOOTSTRAP_BILL_URL").map(|v| !v.trim().is_empty()).unwrap_or(false);
     let host_workspace: std::path::PathBuf = working_dir
-        .as_ref()
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+        .as_ref().map_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")), std::path::PathBuf::from);
     if !brokered && !host_workspace.exists() {
         if let Err(e) = std::fs::create_dir_all(&host_workspace) {
             let msg = format!("failed to create host workspace {}: {e}", host_workspace.display());
@@ -1449,9 +1438,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
     let runner_dir_str = runner_dir.canonicalize().unwrap_or(runner_dir).to_string_lossy().to_string();
     let workspace_canon = host_workspace.canonicalize().unwrap_or(host_workspace.clone()).to_string_lossy().to_string();
     let runner_name = runner_bin
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "smooth-operator-runner".into());
+        .file_name().map_or_else(|| "smooth-operator-runner".into(), |s| s.to_string_lossy().to_string());
 
     let tid = task_id.clone();
 
@@ -1463,7 +1450,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         Err(e) => {
             let msg = format!("no LLM provider configured: {e}");
             let _ = event_tx.send(ServerEvent::TaskError {
-                task_id: tid.clone(),
+                task_id: tid,
                 message: msg.clone(),
             });
             close_pearl_on_abort(&msg);
@@ -1598,7 +1585,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
             match room.operator_facing_archivist_url() {
                 Some(archivist_url) => {
                     tracing::info!(task_id = tid, url = %archivist_url, "operator env: SMOOTH_ARCHIVIST_URL set");
-                    env.insert("SMOOTH_ARCHIVIST_URL".into(), archivist_url.clone());
+                    env.insert("SMOOTH_ARCHIVIST_URL".into(), archivist_url);
                     // Pearl tools: operators access .smooth/dolt/ directly in the
                     // workspace bind mount. No HTTP plumbing needed — the runner
                     // auto-detects the Dolt dir and registers local pearl tools.
@@ -1895,7 +1882,10 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
             }
         }
 
-        let policy_mount = if !in_safehouse {
+        let policy_mount = if in_safehouse {
+            tracing::info!(task_id = tid, "safehouse mode: skipping policy bind mount (runner will use default policy)");
+            None
+        } else {
             if let Some(ref dir) = policy_dir_guard {
                 let host = dir
                     .path()
@@ -1917,9 +1907,6 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
             } else {
                 None
             }
-        } else {
-            tracing::info!(task_id = tid, "safehouse mode: skipping policy bind mount (runner will use default policy)");
-            None
         };
 
         // Operator VMs need to reach Bill on host loopback so Big Smooth
@@ -2100,8 +2087,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
             // legacy bind-mount path (~/.smooth/project-cache/<key>).
             use_named_volume_for_cache: std::env::var("SMOOTH_USE_VOLUMES")
                 .ok()
-                .map(|v| !matches!(v.trim(), "0" | "false" | "FALSE" | "no" | "off"))
-                .unwrap_or(true),
+                .map_or(true, |v| !matches!(v.trim(), "0" | "false" | "FALSE" | "no" | "off")),
             ..SandboxConfig::default()
         };
 
@@ -2109,8 +2095,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
             .await
             .ok()
             .and_then(|l| l.local_addr().ok())
-            .map(|a| a.port())
-            .unwrap_or(0);
+            .map_or(0, |a| a.port());
 
         let handle = match sandbox::create_sandbox(&config, host_port).await {
             Ok(h) => h,
@@ -2626,18 +2611,15 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
     };
 
     // Resolve runner binary + workspace as host paths.
-    let runner_bin = match find_native_operator_runner_binary() {
-        Some(p) => p,
-        None => {
-            let err = "native smooth-operator-runner not found. Run `cargo build -p smooai-smooth-operator-runner` (debug) or `--release`, or set SMOOTH_OPERATOR_RUNNER_NATIVE=/absolute/path.";
-            let _ = event_tx.send(ServerEvent::TaskError {
-                task_id: task_id.clone(),
-                message: err.into(),
-            });
-            tracing::error!("direct dispatch: {err}");
-            close_pearl_on_abort(err);
-            return;
-        }
+    let runner_bin = if let Some(p) = find_native_operator_runner_binary() { p } else {
+        let err = "native smooth-operator-runner not found. Run `cargo build -p smooai-smooth-operator-runner` (debug) or `--release`, or set SMOOTH_OPERATOR_RUNNER_NATIVE=/absolute/path.";
+        let _ = event_tx.send(ServerEvent::TaskError {
+            task_id: task_id.clone(),
+            message: err.into(),
+        });
+        tracing::error!("direct dispatch: {err}");
+        close_pearl_on_abort(err);
+        return;
     };
 
     // Inside the Safehouse, the user's repo is bind-mounted at
@@ -2696,9 +2678,7 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
         }
     } else {
         working_dir
-            .as_ref()
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
+            .as_ref().map_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")), std::path::PathBuf::from)
     };
     if !host_workspace.exists() {
         if let Err(e) = std::fs::create_dir_all(&host_workspace) {
@@ -3336,7 +3316,7 @@ async fn run_task_handler(State(state): State<AppState>, Json(req): Json<TaskReq
     // Dispatch via the unified ws task path — sandboxed if SMOOTH_SANDBOXED is
     // set, in-process otherwise. Sandboxed is the security architecture path:
     // operator runs inside a microVM with Wonk/Goalie/Narc enforcement.
-    let state_clone = state.clone();
+    let state_clone = state;
     let opts = DispatchOptions {
         message: req.message.clone(),
         model: req.model.clone(),
@@ -3345,7 +3325,7 @@ async fn run_task_handler(State(state): State<AppState>, Json(req): Json<TaskReq
         image: req.image.clone(),
         keep_alive: req.keep_alive,
         memory_mb: req.memory_mb,
-        agent: req.agent.clone(),
+        agent: req.agent,
         pearl_id: None,
         prior_messages: Vec::new(),
     };
@@ -3560,22 +3540,19 @@ async fn list_projects_handler(State(state): State<AppState>) -> Json<ApiRespons
                 continue;
             }
 
-            let counts = match stores.get(&entry.path) {
-                Some(store) => store
-                    .stats()
-                    .map(|stats| ProjectPearlCounts {
-                        open: stats.open,
-                        in_progress: stats.in_progress,
-                        closed: stats.closed,
-                    })
-                    .unwrap_or_default(),
-                None => {
-                    // Project registered after startup, or its serve
-                    // child failed to spawn. Surface the entry with
-                    // zero counts so it still appears in the picker.
-                    tracing::debug!(path = %path_str, "project not in pre-spawned cache; restart service to populate");
-                    ProjectPearlCounts::default()
-                }
+            let counts = if let Some(store) = stores.get(&entry.path) { store
+            .stats()
+            .map(|stats| ProjectPearlCounts {
+                open: stats.open,
+                in_progress: stats.in_progress,
+                closed: stats.closed,
+            })
+            .unwrap_or_default() } else {
+                // Project registered after startup, or its serve
+                // child failed to spawn. Surface the entry with
+                // zero counts so it still appears in the picker.
+                tracing::debug!(path = %path_str, "project not in pre-spawned cache; restart service to populate");
+                ProjectPearlCounts::default()
             };
 
             projects.push(ProjectInfo {
@@ -3809,20 +3786,17 @@ async fn kill_worker_handler(State(state): State<AppState>, Path(id): Path<Strin
         let orch = state.orchestrator.lock().await;
         orch.active_workers.get(&id).map(|h| h.msb_name.clone())
     };
-    match msb_name {
-        Some(name) => {
-            if let Err(e) = crate::sandbox::destroy_sandbox(&name).await {
-                tracing::warn!(operator = %id, error = %e, "kill_worker: destroy_sandbox failed");
-            }
-            let mut orch = state.orchestrator.lock().await;
-            orch.active_workers.remove(&id);
-            tracing::info!(operator = %id, "kill_worker: VM destroyed and removed from active set");
-            Json(ApiResponse { data: (), ok: true })
+    if let Some(name) = msb_name {
+        if let Err(e) = crate::sandbox::destroy_sandbox(&name).await {
+            tracing::warn!(operator = %id, error = %e, "kill_worker: destroy_sandbox failed");
         }
-        None => {
-            tracing::warn!(operator = %id, "kill_worker: no active operator with that id");
-            Json(ApiResponse { data: (), ok: false })
-        }
+        let mut orch = state.orchestrator.lock().await;
+        orch.active_workers.remove(&id);
+        tracing::info!(operator = %id, "kill_worker: VM destroyed and removed from active set");
+        Json(ApiResponse { data: (), ok: true })
+    } else {
+        tracing::warn!(operator = %id, "kill_worker: no active operator with that id");
+        Json(ApiResponse { data: (), ok: false })
     }
 }
 
@@ -4275,7 +4249,7 @@ async fn post_chat_message_stream_handler(
     let user_content = body.content;
     let user_msg_id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
     let user_msg = crate::session::SessionMessage {
-        id: user_msg_id.clone(),
+        id: user_msg_id,
         session_id: id.clone(),
         from: "user".into(),
         to: "bigsmooth".into(),
@@ -4314,8 +4288,8 @@ async fn post_chat_message_stream_handler(
     // persisting the assistant message.
     let (sse_tx, sse_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
-    let state_for_agent = state.clone();
-    let session_id = id.clone();
+    let state_for_agent = state;
+    let session_id = id;
     tokio::spawn(async move {
         // Resolve provider config — fail fast with an Error event if
         // the user hasn't configured an LLM provider.
@@ -4408,16 +4382,14 @@ async fn post_chat_message_stream_handler(
         // Drain task closes when its sender is dropped (above).
         let _ = drain.await;
 
-        let tool_calls = std::sync::Arc::try_unwrap(captured_tools)
-            .map(tokio::sync::Mutex::into_inner)
-            .unwrap_or_else(|arc| arc.try_lock().map(|g| g.clone()).unwrap_or_default());
+        let tool_calls = std::sync::Arc::try_unwrap(captured_tools).map_or_else(|arc| arc.try_lock().map(|g| g.clone()).unwrap_or_default(), tokio::sync::Mutex::into_inner);
 
         match result {
             Ok(conversation) => {
                 let assistant_text = conversation.last_assistant_content().unwrap_or("(no response)").to_string();
                 let assistant_msg_id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
                 let assistant_msg = crate::session::SessionMessage {
-                    id: assistant_msg_id.clone(),
+                    id: assistant_msg_id,
                     session_id: session_id.clone(),
                     from: "bigsmooth".into(),
                     to: "user".into(),
@@ -4488,9 +4460,7 @@ fn chat_default_model() -> String {
     let providers_path = dirs_next::home_dir().unwrap_or_default().join(".smooth/providers.json");
     ProviderRegistry::load_from_file(&providers_path)
         .ok()
-        .and_then(|r| r.default_llm_config().ok())
-        .map(|c| c.model)
-        .unwrap_or_else(|| "default".to_string())
+        .and_then(|r| r.default_llm_config().ok()).map_or_else(|| "default".to_string(), |c| c.model)
 }
 
 /// Run an agentic chat turn for the session-bound endpoint
@@ -4960,10 +4930,10 @@ fn url_host(url: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    let without_scheme = trimmed.split_once("://").map(|(_, rest)| rest).unwrap_or(trimmed);
-    let after_userinfo = without_scheme.rsplit_once('@').map(|(_, rest)| rest).unwrap_or(without_scheme);
+    let without_scheme = trimmed.split_once("://").map_or(trimmed, |(_, rest)| rest);
+    let after_userinfo = without_scheme.rsplit_once('@').map_or(without_scheme, |(_, rest)| rest);
     let host_with_port = after_userinfo.split(['/', '?', '#']).next()?;
-    let host = host_with_port.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_with_port);
+    let host = host_with_port.rsplit_once(':').map_or(host_with_port, |(h, _)| h);
     if host.is_empty() {
         None
     } else {

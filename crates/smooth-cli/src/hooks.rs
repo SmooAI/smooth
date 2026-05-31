@@ -105,12 +105,9 @@ fn find_git_root(start_dir: &Path) -> Option<PathBuf> {
 /// Install `.githooks/` scripts and set `core.hooksPath`.
 /// Returns the hooks directory path on success.
 pub fn install(repo_root: Option<&Path>) -> Result<PathBuf> {
-    let root = match repo_root {
-        Some(r) => r.to_path_buf(),
-        None => {
-            let cwd = std::env::current_dir()?;
-            find_git_root(&cwd).context("not in a git repository")?
-        }
+    let root = if let Some(r) = repo_root { r.to_path_buf() } else {
+        let cwd = std::env::current_dir()?;
+        find_git_root(&cwd).context("not in a git repository")?
     };
 
     let hooks_dir = root.join(HOOKS_DIR);
@@ -261,7 +258,7 @@ fn run_prepare_commit_msg(args: &[String]) -> Result<()> {
     };
 
     // Don't touch merge/squash/amend messages
-    let source = args.get(1).map(String::as_str).unwrap_or("");
+    let source = args.get(1).map_or("", String::as_str);
     if matches!(source, "merge" | "squash" | "commit") {
         return Ok(());
     }

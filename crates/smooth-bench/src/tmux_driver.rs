@@ -58,6 +58,7 @@ pub const PANE_WIDTH: u32 = 200;
 pub const PANE_HEIGHT: u32 = 80;
 
 /// Maximum bytes returned from `capture` after pulling full scrollback.
+///
 /// When the captured text exceeds this budget we truncate from the
 /// FRONT (oldest pane content) and keep the recent tail, since the
 /// LLM-as-human driver primarily reasons about what the agent did

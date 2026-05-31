@@ -32,7 +32,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// A skill's effective scope. `Sandbox` (default) means the skill
+/// A skill's effective scope.
+///
+/// `Sandbox` (default) means the skill
 /// runs inside the microVM; `Host` means it bypasses the sandbox
 /// and runs in Big Smooth's process directly (for scp, Photos.app,
 /// AWS SSO interactive flows, etc.). Network alone is NEVER a
@@ -49,7 +51,9 @@ pub enum SkillScope {
     Host,
 }
 
-/// Where a skill was loaded from. Useful for the user when there
+/// Where a skill was loaded from.
+///
+/// Useful for the user when there
 /// are multiple skills with the same name (precedence) or when the
 /// user wants to know "where did this come from".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,6 +133,8 @@ fn default_source() -> SkillSource {
 ///
 /// Returns `Ok(None)` when the file is missing frontmatter
 /// entirely (the file might be a stub or notes, not a skill).
+///
+/// # Errors
 /// Returns `Err` only on real I/O or parse errors.
 pub fn parse_skill_file(path: &Path, source: SkillSource) -> anyhow::Result<Option<Skill>> {
     let raw = fs::read_to_string(path).with_context_path(path)?;
@@ -136,6 +142,9 @@ pub fn parse_skill_file(path: &Path, source: SkillSource) -> anyhow::Result<Opti
 }
 
 /// Parse a skill from an in-memory string. Public for tests.
+///
+/// # Errors
+/// Returns `Err` only on real I/O or parse errors.
 pub fn parse_skill_string(raw: &str, path: &Path, source: SkillSource) -> anyhow::Result<Option<Skill>> {
     // Frontmatter must start at byte 0 with `---\n` (or `---\r\n`).
     // Anything else means no frontmatter — return None.
@@ -180,7 +189,7 @@ pub fn parse_skill_string(raw: &str, path: &Path, source: SkillSource) -> anyhow
 /// convention is `~/.claude/skills/<name>/SKILL.md` so when the
 /// frontmatter omits `name`, the parent dir name IS the name.
 fn skill_name_from_path(path: &Path) -> Option<String> {
-    path.parent()?.file_name()?.to_str().map(|s| s.to_string())
+    path.parent()?.file_name()?.to_str().map(std::string::ToString::to_string)
 }
 
 /// Locate the closing `---` line in a frontmatter block (the input
@@ -274,6 +283,7 @@ fn builtin_skills() -> Vec<Skill> {
 /// Scan a single skills root directory and append every valid
 /// skill found. Silently skips malformed files (logs the error
 /// via `tracing`) so one broken file doesn't poison the rest.
+#[allow(clippy::needless_pass_by_value)] // `source` is cloned per discovered skill
 fn collect_from(root: &Path, source: SkillSource, out: &mut Vec<Skill>) {
     if !root.is_dir() {
         return;

@@ -12,7 +12,9 @@ use std::fs;
 use std::path::PathBuf;
 
 fn main() {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
+    // `env!` resolves CARGO_MANIFEST_DIR at compile time (infallible) — no
+    // runtime `expect()` for clippy::expect_used to flag.
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let dist = PathBuf::from(manifest_dir).join("web").join("dist");
     let index = dist.join("index.html");
 

@@ -287,7 +287,7 @@ fn slot_entries(registry: &ProviderRegistry) -> Vec<SlotEntry> {
                 label,
                 description,
                 current_provider: ms.provider.clone(),
-                current_model: ms.model.clone(),
+                current_model: ms.model,
             }
         })
         .collect()

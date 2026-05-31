@@ -156,7 +156,7 @@ impl WonkGrants {
     /// Merge `other` into `self` — every allow-list entry is unioned.
     /// The merged result has `schema_version = max(self, other)` so a
     /// future v2 reader knows it touched the more recent shape.
-    pub fn merge_with(&mut self, other: WonkGrants) {
+    pub fn merge_with(&mut self, other: Self) {
         self.schema_version = self.schema_version.max(other.schema_version);
         self.network.allow_hosts.extend(other.network.allow_hosts);
         self.tools.allow.extend(other.tools.allow);

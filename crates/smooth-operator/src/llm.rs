@@ -147,8 +147,9 @@ pub struct LlmResponse {
     pub reasoning_content: Option<String>,
 }
 
-/// Parse the gateway's authoritative cost from an HTTP response's
-/// headers. Checks a few header name variants so the same parser
+/// Parse the gateway's authoritative cost from an HTTP response's headers.
+///
+/// Checks a few header name variants so the same parser
 /// works across LiteLLM versions and other OpenAI-compat gateways
 /// that echo a cost header.
 pub fn parse_gateway_cost(headers: &reqwest::header::HeaderMap) -> Option<f64> {
@@ -635,6 +636,7 @@ impl LlmClient {
     ///
     /// # Errors
     /// Returns error if the API call fails after all retries or returns an invalid response.
+    #[allow(clippy::too_many_lines)]
     pub async fn chat(&self, messages: &[&Message], tools: &[ToolSchema]) -> anyhow::Result<LlmResponse> {
         match self.config.api_format {
             ApiFormat::Anthropic => return self.chat_anthropic(messages, tools).await,
@@ -736,7 +738,7 @@ impl LlmClient {
                     rate_limit: Some(rate_limit_info),
                     gateway_cost_usd,
                     resolved_model,
-                    reasoning_content: choice.message.reasoning_content.clone(),
+                    reasoning_content: choice.message.reasoning_content,
                 });
             }
 
@@ -776,6 +778,7 @@ impl LlmClient {
     /// # Errors
     /// Returns error if the API call fails. Individual stream items may also
     /// contain errors for malformed chunks.
+    #[allow(clippy::too_many_lines, clippy::items_after_statements)]
     pub async fn chat_stream(
         &self,
         messages: &[&Message],
@@ -786,7 +789,7 @@ impl LlmClient {
         // OpenAI-compat `/chat/completions` shim. The shim mangles
         // Claude's native tool_use blocks, which caused Claude to
         // score 0/6 in the bench matrix.
-        if let ApiFormat::Anthropic = self.config.api_format {
+        if self.config.api_format == ApiFormat::Anthropic {
             return self.chat_anthropic_stream(messages, tools).await;
         }
 
@@ -817,7 +820,7 @@ impl LlmClient {
         // are actually being attached to the request. Gated behind
         // SMOOTH_BENCH_TRACE_TOOLS so production runs aren't noisy.
         if std::env::var("SMOOTH_BENCH_TRACE_TOOLS").is_ok() {
-            let first_tool = chat_tools.first().map(|t| t.function.name.as_str()).unwrap_or("<none>");
+            let first_tool = chat_tools.first().map_or("<none>", |t| t.function.name.as_str());
             eprintln!(
                 "[SMOOTH_BENCH_TRACE] chat_stream: model={} tools={} first_tool={} msgs={}",
                 self.config.model, tool_count, first_tool, msg_count,
@@ -1089,6 +1092,7 @@ impl LlmClient {
     /// # Errors
     /// Returns error if the API call fails. Individual stream items may
     /// also contain errors for malformed event blocks.
+    #[allow(clippy::too_many_lines, clippy::items_after_statements)]
     async fn chat_anthropic_stream(
         &self,
         messages: &[&Message],
@@ -1374,8 +1378,9 @@ struct RawModerationResult {
     category_scores: Option<HashMap<String, f32>>,
 }
 
-/// The parsed moderation verdict, flattened from the OpenAI response
-/// shape. `flagged = true` means at least one category tripped the
+/// The parsed moderation verdict, flattened from the OpenAI response shape.
+///
+/// `flagged = true` means at least one category tripped the
 /// provider's safety threshold; `categories` and `category_scores` give
 /// callers the per-category detail for auditing and fine-grained
 /// policies.
@@ -1531,6 +1536,7 @@ enum AnthropicBlockKind {
 /// `Usage` event with the accumulated counts plus a `Done` event
 /// carrying the stop reason — symmetric to how the OpenAI SSE path
 /// emits `Done` at `[DONE]`.
+#[allow(clippy::too_many_lines, clippy::cast_possible_truncation, clippy::match_same_arms)]
 fn parse_anthropic_sse_block(
     block: &str,
     block_kinds: &mut std::collections::HashMap<usize, AnthropicBlockKind>,
@@ -2010,7 +2016,7 @@ fn parse_pseudo_tool_xml(content: &str) -> Vec<crate::tool::ToolCall> {
             let Some(name_end) = rest[1..].find('>') else {
                 break;
             };
-            let name = rest["<function=".len()..1 + name_end].trim().to_string();
+            let name = rest["<function=".len()..=name_end].trim().to_string();
             // Body runs from after this `>` to `</tool_call>` or, if
             // absent, to the next `<function=` (the model sometimes
             // omits the closer when chaining calls).
@@ -2026,7 +2032,7 @@ fn parse_pseudo_tool_xml(content: &str) -> Vec<crate::tool::ToolCall> {
                 let Some(k_end) = cursor[1..].find('>') else {
                     break;
                 };
-                let key = cursor["<parameter=".len()..1 + k_end].trim().to_string();
+                let key = cursor["<parameter=".len()..=k_end].trim().to_string();
                 let value_start = 1 + k_end + 1;
                 let after = &cursor[value_start..];
                 let value_end = after.find("<parameter=").unwrap_or(after.len());

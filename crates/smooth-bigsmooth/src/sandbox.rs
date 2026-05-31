@@ -253,7 +253,7 @@ impl SandboxClient for DirectSandboxClient {
                     guest_port: 4096,
                     bind_all: false,
                 }];
-                ports.extend(config.extra_ports.iter().cloned());
+                ports.extend(config.extra_ports.iter().copied());
                 ports
             },
             timeout_seconds: config.timeout_seconds,
@@ -364,7 +364,7 @@ impl SandboxClient for BillSandboxClient {
                     guest_port: 4096,
                     bind_all: false,
                 }];
-                ports.extend(config.extra_ports.iter().cloned());
+                ports.extend(config.extra_ports.iter().copied());
                 ports
             },
             timeout_seconds: config.timeout_seconds,

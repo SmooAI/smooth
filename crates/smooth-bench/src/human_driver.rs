@@ -310,6 +310,7 @@ pub trait DriverModel: Send + Sync {
 }
 
 /// Driver persona — controls the system prompt + per-turn template.
+///
 /// `User` is the original baseline ("non-technical end user"); `Coach`
 /// is the pair-programmer variant added in pearl th-e17b1a that
 /// actively probes the agent for test runs before accepting
@@ -604,16 +605,13 @@ pub async fn run_human_loop<D: DriverModel>(driver: &TmuxDriver, model: &D, task
         while pane_shows_agent_activity(&pane) {
             activity_polls += 1;
             std::thread::sleep(cfg.idle_dwell);
-            match driver.wait_for_idle(cfg.idle_dwell, cfg.idle_poll, cfg.per_turn_timeout) {
-                Ok(refreshed) => pane = refreshed,
-                Err(_) => {
-                    let last = driver.capture().unwrap_or_default();
-                    return Ok(LoopResult {
-                        turns,
-                        exit: LoopExit::IdleTimeout,
-                        final_pane: last,
-                    });
-                }
+            if let Ok(refreshed) = driver.wait_for_idle(cfg.idle_dwell, cfg.idle_poll, cfg.per_turn_timeout) { pane = refreshed } else {
+                let last = driver.capture().unwrap_or_default();
+                return Ok(LoopResult {
+                    turns,
+                    exit: LoopExit::IdleTimeout,
+                    final_pane: last,
+                });
             }
             // Hard cap: even with activity markers, after 5 reaps cut
             // the loop loose. Five `idle_dwell + per_turn_timeout`

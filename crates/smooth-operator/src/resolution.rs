@@ -63,7 +63,9 @@ pub async fn fetch_model_info(api_url: &str, api_key: &str) -> anyhow::Result<BT
 }
 
 /// Build the `/model/info` URL from a provider's OpenAI-compat
-/// `api_url` (e.g. `https://llm.smoo.ai/v1`). Stripping `/v1` is
+/// `api_url` (e.g. `https://llm.smoo.ai/v1`).
+///
+/// Stripping `/v1` is
 /// safe because `/model/info` lives at the gateway root in every
 /// LiteLLM deployment we've seen.
 pub fn build_model_info_url(api_url: &str) -> String {

@@ -82,10 +82,7 @@ fn load_dir(dir: &std::path::Path) -> Vec<ToolHint> {
         if path.extension().and_then(|s| s.to_str()) != Some("toml") {
             continue;
         }
-        match std::fs::read_to_string(&path).ok().and_then(|raw| toml::from_str::<HintsFile>(&raw).ok()) {
-            Some(f) => hints.extend(f.hints),
-            None => tracing::warn!(path = %path.display(), "tool_hints: failed to parse"),
-        }
+        if let Some(f) = std::fs::read_to_string(&path).ok().and_then(|raw| toml::from_str::<HintsFile>(&raw).ok()) { hints.extend(f.hints) } else { tracing::warn!(path = %path.display(), "tool_hints: failed to parse") }
     }
     hints
 }
@@ -165,7 +162,7 @@ impl Tool for ToolHintsTool {
 
     async fn execute(&self, arguments: serde_json::Value) -> anyhow::Result<String> {
         let intent = arguments["intent"].as_str().ok_or_else(|| anyhow::anyhow!("missing 'intent'"))?;
-        let limit = arguments.get("limit").and_then(|v| v.as_u64()).unwrap_or(3).clamp(1, 10) as usize;
+        let limit = arguments.get("limit").and_then(serde_json::Value::as_u64).unwrap_or(3).clamp(1, 10) as usize;
 
         let mut scored: Vec<(u32, &ToolHint)> = self.registry.iter().map(|h| (score(h, intent), h)).filter(|(s, _)| *s > 0).collect();
         scored.sort_by(|a, b| b.0.cmp(&a.0));

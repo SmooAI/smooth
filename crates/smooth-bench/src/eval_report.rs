@@ -256,9 +256,7 @@ fn render_index_html(items: &[(BenchResult, PathBuf)], date: &str) -> String {
                     eval_path
                         .parent()
                         .and_then(|p| p.file_name())
-                        .and_then(|s| s.to_str())
-                        .map(|d| format!("{d}/{n}"))
-                        .unwrap_or_else(|| n.to_string())
+                        .and_then(|s| s.to_str()).map_or_else(|| n.to_string(), |d| format!("{d}/{n}"))
                 })
                 .unwrap_or_else(|| eval_path.display().to_string());
             format!(

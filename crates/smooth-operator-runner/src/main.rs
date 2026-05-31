@@ -120,8 +120,8 @@ impl Tool for ReadFileTool {
 
         let content = tokio::fs::read_to_string(&path).await?;
         self.file_tracker.record(&path);
-        let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(1).max(1) as usize;
-        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(2000) as usize;
+        let offset = args.get("offset").and_then(serde_json::Value::as_u64).unwrap_or(1).max(1) as usize;
+        let limit = args.get("limit").and_then(serde_json::Value::as_u64).unwrap_or(2000) as usize;
 
         let lines: Vec<&str> = content.lines().collect();
         let total = lines.len();
@@ -551,8 +551,8 @@ impl Tool for LspTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("missing 'operation'"))?;
         let file = args.get("file").and_then(|v| v.as_str());
-        let line = args.get("line").and_then(|v| v.as_u64()).map(|l| (l.saturating_sub(1)) as u32);
-        let character = args.get("character").and_then(|v| v.as_u64()).map(|c| (c.saturating_sub(1)) as u32);
+        let line = args.get("line").and_then(serde_json::Value::as_u64).map(|l| (l.saturating_sub(1)) as u32);
+        let character = args.get("character").and_then(serde_json::Value::as_u64).map(|c| (c.saturating_sub(1)) as u32);
         let query = args.get("query").and_then(|v| v.as_str());
 
         // Lazily start the language server on first use.
@@ -752,7 +752,7 @@ impl Tool for BashTool {
         // Timeout is OPT-IN. No default cap — long-running builds and
         // tests need to be able to finish. For genuinely long-lived
         // processes (dev servers) the agent should use bg_run instead.
-        let timeout_secs = args.get("timeout").and_then(|v| v.as_u64());
+        let timeout_secs = args.get("timeout").and_then(serde_json::Value::as_u64);
 
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-c").arg(command).current_dir(&self.base);
@@ -942,7 +942,7 @@ impl Tool for BgLogsTool {
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {
         let handle = args.get("handle").and_then(|v| v.as_str()).ok_or_else(|| anyhow::anyhow!("missing 'handle'"))?;
-        let max_bytes = args.get("max_bytes").and_then(|v| v.as_u64()).unwrap_or(8192) as usize;
+        let max_bytes = args.get("max_bytes").and_then(serde_json::Value::as_u64).unwrap_or(8192) as usize;
         let (stdout, stderr) = self.registry.logs(handle, max_bytes)?;
         Ok(format!("--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"))
     }
@@ -1014,7 +1014,7 @@ impl Tool for HttpFetchTool {
         let url = args.get("url").and_then(|v| v.as_str()).ok_or_else(|| anyhow::anyhow!("missing 'url'"))?;
         let method = args.get("method").and_then(|v| v.as_str()).unwrap_or("GET").to_uppercase();
         let body = args.get("body").and_then(|v| v.as_str());
-        let timeout_secs = args.get("timeout").and_then(|v| v.as_u64()).unwrap_or(10);
+        let timeout_secs = args.get("timeout").and_then(serde_json::Value::as_u64).unwrap_or(10);
 
         let req_method = match method.as_str() {
             "GET" => reqwest::Method::GET,
@@ -1309,9 +1309,7 @@ impl RunnerConfig {
             model: std::env::var("SMOOTH_MODEL").unwrap_or_else(|_| "gpt-5.4-mini".into()),
             budget_usd: std::env::var("SMOOTH_BUDGET_USD").ok().and_then(|v| v.parse().ok()),
             max_iterations: std::env::var("SMOOTH_MAX_ITERATIONS").ok().and_then(|v| v.parse().ok()).unwrap_or(50),
-            workspace: std::env::var("SMOOTH_WORKSPACE")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from("/workspace")),
+            workspace: std::env::var("SMOOTH_WORKSPACE").map_or_else(|_| PathBuf::from("/workspace"), PathBuf::from),
             operator_id: std::env::var("SMOOTH_OPERATOR_ID").unwrap_or_else(|_| "operator".into()),
             // WriteGuard default is OFF in the runner: the microVM's workspace
             // is a dedicated, throwaway bind mount and the agent is *expected*
@@ -1972,15 +1970,12 @@ async fn main() {
     // resolution onto its TokenDelta stream so tests + human operators
     // can see exactly which role the sandbox is running under.
     let role_cast = std::sync::Arc::new(smooth_operator::Cast::builtin());
-    let active_role = match role_cast.get(&config.agent_name) {
-        Some(a) => a.clone(),
-        None => {
-            tracing::warn!(
-                requested = %config.agent_name,
-                "unknown SMOOTH_AGENT — falling back to 'fixer'"
-            );
-            role_cast.get("fixer").expect("'fixer' must always exist in Cast::builtin").clone()
-        }
+    let active_role = if let Some(a) = role_cast.get(&config.agent_name) { a.clone() } else {
+        tracing::warn!(
+            requested = %config.agent_name,
+            "unknown SMOOTH_AGENT — falling back to 'fixer'"
+        );
+        role_cast.get("fixer").expect("'fixer' must always exist in Cast::builtin").clone()
     };
 
     // Register the `send_sidekick` tool ONLY for roles that
@@ -2120,7 +2115,7 @@ async fn main() {
     // sessions don't set it so behavior is unchanged for users.
     let verify_tests = std::env::var("SMOOTH_VERIFY_TESTS")
         .ok()
-        .map_or(false, |v| v == "1" || v.eq_ignore_ascii_case("true"));
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
     let mut agent_config = AgentConfig::new(format!("op-{}", config.operator_id), &system_prompt, llm)
         .with_max_iterations(config.max_iterations)
         .with_verify_tests_before_done(verify_tests);

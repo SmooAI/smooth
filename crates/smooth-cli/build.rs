@@ -29,10 +29,7 @@ fn main() {
         })
         .filter(|s| !s.is_empty());
 
-    let version_string = match git_sha {
-        Some(sha) => format!("{pkg_version} ({sha})"),
-        None => pkg_version.to_string(),
-    };
+    let version_string = git_sha.map_or_else(|| pkg_version.to_string(), |sha| format!("{pkg_version} ({sha})"));
 
     println!("cargo:rustc-env=TH_VERSION={version_string}");
 

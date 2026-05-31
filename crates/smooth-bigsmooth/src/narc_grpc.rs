@@ -17,11 +17,11 @@ use crate::safehouse_narc::SafehouseNarc;
 #[async_trait]
 impl Judge for SafehouseNarc {
     async fn judge(&self, request: JudgeRequest) -> JudgeDecision {
-        SafehouseNarc::judge(self, request).await
+        Self::judge(self, request).await
     }
 
     fn cache_len(&self) -> usize {
-        SafehouseNarc::cache_len(self)
+        Self::cache_len(self)
     }
 }
 

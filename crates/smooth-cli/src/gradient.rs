@@ -41,7 +41,7 @@ fn gradient(text: &str, start: (u8, u8, u8), end: (u8, u8, u8)) -> String {
 fn lerp(a: u8, b: u8, t: f32) -> u8 {
     let af = f32::from(a);
     let bf = f32::from(b);
-    (af + (bf - af) * t).round().clamp(0.0, 255.0) as u8
+    (bf - af).mul_add(t, af).round().clamp(0.0, 255.0) as u8
 }
 
 /// Apply the "Smoo"-half gradient (orange → pink). Also correct for

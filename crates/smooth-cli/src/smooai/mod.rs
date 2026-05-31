@@ -321,7 +321,7 @@ pub async fn cmd_whoami() -> Result<()> {
     if let Ok(profile) = client.get("/profile").await {
         let email = profile.get("email").and_then(|v| v.as_str());
         let name = profile.get("fullName").and_then(|v| v.as_str());
-        let admin = profile.get("adminRoles").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+        let admin = profile.get("adminRoles").and_then(|v| v.as_array()).map_or(0, std::vec::Vec::len);
         if let Some(e) = email {
             println!("  {}  {}", "Email      ".dimmed(), e.cyan());
         }

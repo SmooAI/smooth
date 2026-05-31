@@ -57,7 +57,7 @@ impl Tool for ForwardPortTool {
     async fn execute(&self, arguments: serde_json::Value) -> Result<String> {
         let guest_port = arguments
             .get("guest_port")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .map(|v| v as u16)
             .ok_or_else(|| anyhow::anyhow!("guest_port is required and must be a number"))?;
 

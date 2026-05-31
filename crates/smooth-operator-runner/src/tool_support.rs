@@ -200,9 +200,7 @@ impl FileTimeTracker {
         };
         if current_mtime > *recorded {
             let rel = path
-                .file_name()
-                .map(|f| f.to_string_lossy().to_string())
-                .unwrap_or_else(|| path.display().to_string());
+                .file_name().map_or_else(|| path.display().to_string(), |f| f.to_string_lossy().to_string());
             Some(format!(
                 "WARNING: {rel} was modified externally since you last read it. \
                  Your edit may overwrite those changes. Read the file again to see \

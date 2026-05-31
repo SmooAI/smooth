@@ -211,7 +211,7 @@ impl ToolRegistry {
         if !self.deferred.contains_key(name) {
             return false;
         }
-        let mut promoted = self.promoted.lock().expect("promoted lock poisoned");
+        let mut promoted = self.promoted.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         promoted.insert(name.to_string())
     }
 
@@ -235,7 +235,7 @@ impl ToolRegistry {
 
     pub fn schemas(&self) -> Vec<ToolSchema> {
         let mut out: Vec<ToolSchema> = self.tools.values().map(|t| t.schema()).collect();
-        let promoted = self.promoted.lock().expect("promoted lock poisoned");
+        let promoted = self.promoted.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         for name in promoted.iter() {
             if let Some(t) = self.deferred.get(name) {
                 out.push(t.schema());
@@ -248,7 +248,7 @@ impl ToolRegistry {
         if self.tools.contains_key(name) {
             return true;
         }
-        let promoted = self.promoted.lock().expect("promoted lock poisoned");
+        let promoted = self.promoted.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         promoted.contains(name) && self.deferred.contains_key(name)
     }
 
@@ -270,7 +270,7 @@ impl ToolRegistry {
         if let Some(t) = self.tools.get(name).cloned() {
             return Some(t);
         }
-        let promoted = self.promoted.lock().expect("promoted lock poisoned");
+        let promoted = self.promoted.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if promoted.contains(name) {
             return self.deferred.get(name).cloned();
         }
@@ -472,7 +472,7 @@ impl ToolRegistry {
         // this view so lazy-loaded tools reach the dispatcher.
         let snapshot: HashMap<String, Arc<dyn Tool>> = {
             let mut map = self.tools.clone();
-            let promoted = self.promoted.lock().expect("promoted lock poisoned");
+            let promoted = self.promoted.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             for name in promoted.iter() {
                 if let Some(t) = self.deferred.get(name) {
                     map.insert(name.clone(), t.clone());

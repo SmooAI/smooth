@@ -570,9 +570,7 @@ fn render_status(frame: &mut Frame, state: &AppState, area: Rect) {
         // Idle: derive from the active role's slot. Fall back to the
         // role name if we can't resolve a slot (unknown role).
         smooth_operator::Cast::builtin()
-            .get(&state.agent_name)
-            .map(|role| format!("smooth-{:?}", role.slot).to_ascii_lowercase())
-            .unwrap_or_else(|| state.agent_name.clone())
+            .get(&state.agent_name).map_or_else(|| state.agent_name.clone(), |role| format!("smooth-{:?}", role.slot).to_ascii_lowercase())
     };
 
     let status_left = format!(

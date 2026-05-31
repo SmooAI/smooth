@@ -154,8 +154,7 @@ pub fn parse_ddg_html(html: &str, n: usize) -> Result<Vec<SearchResult>, SearchE
         let next_search_start = block_abs + 1;
         let block_end = html[next_search_start..]
             .find("<div class=\"result")
-            .map(|i| next_search_start + i)
-            .unwrap_or(html.len());
+            .map_or(html.len(), |i| next_search_start + i);
         let block = &html[block_abs..block_end];
         cursor = block_end;
 

@@ -176,19 +176,16 @@ fn print_table(value: &Value, opts: &TableOptions) {
 }
 
 fn print_object_array(items: &[Value], opts: &TableOptions) {
-    let columns: Vec<String> = match &opts.columns {
-        Some(cols) => cols.iter().map(|s| (*s).to_string()).collect(),
-        None => {
-            let mut keyset = std::collections::BTreeSet::new();
-            for item in items {
-                if let Some(map) = item.as_object() {
-                    for k in map.keys() {
-                        keyset.insert(k.clone());
-                    }
+    let columns: Vec<String> = if let Some(cols) = &opts.columns { cols.iter().map(|s| (*s).to_string()).collect() } else {
+        let mut keyset = std::collections::BTreeSet::new();
+        for item in items {
+            if let Some(map) = item.as_object() {
+                for k in map.keys() {
+                    keyset.insert(k.clone());
                 }
             }
-            keyset.into_iter().collect()
         }
+        keyset.into_iter().collect()
     };
 
     let mut builder = Builder::default();

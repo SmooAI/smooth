@@ -35,6 +35,7 @@ impl BillClient {
     /// Extract host + port from `self.url`, supporting `http://host:port`,
     /// `host:port`, or bare `host` (defaults to port 4444 — Bill's canonical
     /// port when unspecified).
+    #[allow(clippy::unnecessary_wraps)] // Result kept for future URL-parse failures
     fn authority(&self) -> Result<String> {
         let s = self.url.trim();
         let s = s.strip_prefix("http://").or_else(|| s.strip_prefix("https://")).unwrap_or(s);

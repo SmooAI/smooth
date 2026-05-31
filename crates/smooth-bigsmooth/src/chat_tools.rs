@@ -96,7 +96,7 @@ impl Tool for PearlsListTool {
     }
 
     async fn execute(&self, arguments: serde_json::Value) -> anyhow::Result<String> {
-        let limit = arguments.get("limit").and_then(|v| v.as_u64()).unwrap_or(50).clamp(1, 200) as usize;
+        let limit = arguments.get("limit").and_then(serde_json::Value::as_u64).unwrap_or(50).clamp(1, 200) as usize;
         let mut q = smooth_pearls::PearlQuery::new();
         q.limit = limit;
         if let Some(status_str) = arguments.get("status").and_then(|v| v.as_str()) {
@@ -207,7 +207,7 @@ impl Tool for PearlsCreateTool {
 
     async fn execute(&self, arguments: serde_json::Value) -> anyhow::Result<String> {
         let description = arguments["description"].as_str().ok_or_else(|| anyhow::anyhow!("missing 'description'"))?;
-        let priority_val = arguments.get("priority").and_then(|v| v.as_u64()).unwrap_or(2) as u8;
+        let priority_val = arguments.get("priority").and_then(serde_json::Value::as_u64).unwrap_or(2) as u8;
         let priority = smooth_pearls::Priority::from_u8(priority_val).unwrap_or(smooth_pearls::Priority::Medium);
 
         let title = generate_title(&self.registry, description).await.unwrap_or_else(|e| {
@@ -216,7 +216,7 @@ impl Tool for PearlsCreateTool {
         });
 
         let new = smooth_pearls::NewPearl {
-            title: title.clone(),
+            title: title,
             description: description.to_string(),
             pearl_type: smooth_pearls::PearlType::Task,
             priority,
@@ -309,7 +309,7 @@ impl Tool for TeammateSpawnTool {
             );
         }
         let extra = arguments.get("extra_prompt").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-        let budget = arguments.get("budget_usd").and_then(|v| v.as_f64());
+        let budget = arguments.get("budget_usd").and_then(serde_json::Value::as_f64);
         let working_dir = arguments.get("working_dir").and_then(|v| v.as_str()).map(String::from);
         let role = arguments.get("role").and_then(|v| v.as_str()).map(String::from);
         let model = arguments.get("model").and_then(|v| v.as_str()).map(String::from);
@@ -320,7 +320,7 @@ impl Tool for TeammateSpawnTool {
             .get(&pearl_id)?
             .ok_or_else(|| anyhow::anyhow!("pearl {pearl_id} not found"))?;
 
-        let mut message = pearl.description.clone();
+        let mut message = pearl.description;
         message.push_str("\n\n## Context from team lead\n\n");
         message.push_str(&context_brief);
         if !extra.is_empty() {
@@ -423,7 +423,7 @@ impl Tool for TeammateReadTool {
 
     async fn execute(&self, arguments: serde_json::Value) -> anyhow::Result<String> {
         let pearl_id = arguments["pearl_id"].as_str().ok_or_else(|| anyhow::anyhow!("missing 'pearl_id'"))?;
-        let max = arguments.get("max").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+        let max = arguments.get("max").and_then(serde_json::Value::as_u64).unwrap_or(20) as usize;
         let comments = self.state.pearl_store.get_comments(pearl_id).context("reading pearl comments")?;
         let teammate_only: Vec<_> = comments
             .into_iter()
@@ -480,7 +480,7 @@ impl Tool for TeammateWaitTool {
 
     async fn execute(&self, arguments: serde_json::Value) -> anyhow::Result<String> {
         let pearl_id = arguments["pearl_id"].as_str().ok_or_else(|| anyhow::anyhow!("missing 'pearl_id'"))?.to_string();
-        let max_wait = arguments.get("max_wait_seconds").and_then(|v| v.as_u64()).unwrap_or(60).clamp(5, 120);
+        let max_wait = arguments.get("max_wait_seconds").and_then(serde_json::Value::as_u64).unwrap_or(60).clamp(5, 120);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(max_wait);
 
         let baseline = self.state.pearl_store.get_comments(&pearl_id).context("reading pearl comments")?;
@@ -622,9 +622,7 @@ impl Tool for BashTool {
         }
         let cwd = arguments
             .get("cwd")
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()));
+            .and_then(|v| v.as_str()).map_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()), String::from);
 
         let mut child = tokio::process::Command::new("/bin/sh");
         child.arg("-c").arg(&cmd).current_dir(&cwd).kill_on_drop(true);

@@ -91,7 +91,7 @@ struct IssueBody<'a> {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    let command = args.get(1).map(String::as_str).unwrap_or("");
+    let command = args.get(1).map_or("", String::as_str);
     match command {
         "get" => match run_get() {
             Ok(()) => ExitCode::SUCCESS,

@@ -211,7 +211,7 @@ impl MessageBuffer {
     ///
     /// Panics if the internal mutex is poisoned.
     pub fn enqueue(&self, message: String) -> bool {
-        let mut q = self.queue.lock().expect("MessageBuffer lock poisoned");
+        let mut q = self.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if q.len() >= self.max_size {
             return false;
         }
@@ -225,7 +225,7 @@ impl MessageBuffer {
     ///
     /// Panics if the internal mutex is poisoned.
     pub fn drain(&self) -> Vec<String> {
-        let mut q = self.queue.lock().expect("MessageBuffer lock poisoned");
+        let mut q = self.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         q.drain(..).collect()
     }
 
@@ -235,7 +235,7 @@ impl MessageBuffer {
     ///
     /// Panics if the internal mutex is poisoned.
     pub fn len(&self) -> usize {
-        self.queue.lock().expect("MessageBuffer lock poisoned").len()
+        self.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len()
     }
 
     /// Whether the buffer is empty.
@@ -244,6 +244,9 @@ impl MessageBuffer {
     }
 }
 
+// Summarises the `queue` Mutex as its `len` rather than locking + dumping
+// every queued message, so the full field set is intentionally omitted.
+#[allow(clippy::missing_fields_in_debug)]
 impl std::fmt::Debug for MessageBuffer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MessageBuffer")

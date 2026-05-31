@@ -27,13 +27,16 @@ Do not start new tool chains. Respond with text only:\n\
 3. List any remaining tasks that were not completed.\n\
 4. Recommend what should be done next (a follow-up dispatch, a manual step, a question for the user).";
 
-/// Verify-tests-before-done system-prompt rule. Appended by
-/// [`AgentConfig::with_verify_tests_before_done`]. The anchor lets the
+/// Verify-tests-before-done system-prompt rule.
+///
+/// Appended by [`AgentConfig::with_verify_tests_before_done`]. The anchor lets the
 /// builder detect a prior append and avoid double-stacking the rule.
 /// Pearl th-operator-verify-rule (sub-pearl of th-VERIFY-PHASE).
 pub const VERIFY_TESTS_RULE_ANCHOR: &str = "[verify-tests-before-done:v1]";
 
-/// Body of the verify-tests rule. Kept narrow on purpose: don't try to
+/// Body of the verify-tests rule.
+///
+/// Kept narrow on purpose: don't try to
 /// override the agent's normal completion logic, just gate the
 /// terminal "I'm done" message on having actually seen passing tests.
 /// The agent is free to skip the test run if the task genuinely
@@ -86,6 +89,7 @@ pub struct AgentConfig {
 }
 
 /// A message injected into a running agent's conversation from outside the loop.
+///
 /// Carried over `AgentConfig::chat_rx`. The `kind` controls how the message
 /// is framed when pushed onto the conversation; `body` is the verbatim text.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -580,7 +584,7 @@ impl Agent {
     ///
     /// # Errors
     /// Returns error if the LLM call or tool execution fails fatally.
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::cast_possible_truncation)] // duration_ms = elapsed().as_millis() as u64
     pub async fn run(&self, user_message: impl Into<String>) -> anyhow::Result<Conversation> {
         let mut conversation = self.resume_or_new()?;
         let user_msg: String = user_message.into();
@@ -675,7 +679,7 @@ impl Agent {
                     if err_msg.contains("prompt_too_long") || err_msg.contains("context_length_exceeded") {
                         // Check circuit breaker before attempting reactive compaction
                         {
-                            let rc = self.reactive_compaction.lock().expect("lock reactive_compaction");
+                            let rc = self.reactive_compaction.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                             if rc.is_circuit_open() {
                                 return Err(anyhow::anyhow!(
                                     "reactive compaction circuit breaker open after {} consecutive failures: {err_msg}",
@@ -698,11 +702,11 @@ impl Agent {
                         let retry_refs: Vec<&Message> = retry_context.into_iter().collect();
                         match llm.chat(&retry_refs, &tool_schemas).await {
                             Ok(resp) => {
-                                self.reactive_compaction.lock().expect("lock reactive_compaction").record_success();
+                                self.reactive_compaction.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_success();
                                 resp
                             }
                             Err(retry_err) => {
-                                self.reactive_compaction.lock().expect("lock reactive_compaction").record_failure();
+                                self.reactive_compaction.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_failure();
                                 return Err(retry_err);
                             }
                         }
@@ -748,7 +752,7 @@ impl Agent {
             if response.tool_calls.is_empty() {
                 // No tool calls = agent is done thinking
                 let (cost, prompt_tokens, completion_tokens, cached_tokens) = {
-                    let tracker = self.cost_tracker.lock().expect("lock cost_tracker");
+                    let tracker = self.cost_tracker.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     (
                         tracker.total_cost_usd,
                         tracker.total_prompt_tokens,
@@ -861,7 +865,7 @@ impl Agent {
     ///
     /// # Errors
     /// Returns error if the LLM call or tool execution fails fatally.
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::cast_possible_truncation, clippy::items_after_statements)] // duration_ms casts + scoped timeout consts
     pub async fn run_with_channel(&self, user_message: impl Into<String>, tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>) -> anyhow::Result<Conversation> {
         let mut conversation = self.resume_or_new()?;
         let user_msg: String = user_message.into();
@@ -933,7 +937,7 @@ impl Agent {
                     let err_msg = e.to_string();
                     if err_msg.contains("prompt_too_long") || err_msg.contains("context_length_exceeded") {
                         {
-                            let rc = self.reactive_compaction.lock().expect("lock reactive_compaction");
+                            let rc = self.reactive_compaction.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                             if rc.is_circuit_open() {
                                 return Err(anyhow::anyhow!(
                                     "reactive compaction circuit breaker open after {} consecutive failures: {err_msg}",
@@ -954,11 +958,11 @@ impl Agent {
                         let retry_refs: Vec<&Message> = retry_context.into_iter().collect();
                         match llm.chat_stream(&retry_refs, &tool_schemas).await {
                             Ok(s) => {
-                                self.reactive_compaction.lock().expect("lock reactive_compaction").record_success();
+                                self.reactive_compaction.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_success();
                                 s
                             }
                             Err(retry_err) => {
-                                self.reactive_compaction.lock().expect("lock reactive_compaction").record_failure();
+                                self.reactive_compaction.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_failure();
                                 return Err(retry_err);
                             }
                         }
@@ -1021,8 +1025,8 @@ impl Agent {
             let accumulate_fut = accumulate_stream_events(Box::pin(rx_stream));
 
             // Run tap and accumulate concurrently, under a hard wall-clock cap.
-            let (_, accumulated) = match tokio::time::timeout(ITERATION_TIMEOUT, async {
-                let (_, acc) = tokio::join!(tap_loop, accumulate_fut);
+            let ((), accumulated) = match tokio::time::timeout(ITERATION_TIMEOUT, async {
+                let ((), acc) = tokio::join!(tap_loop, accumulate_fut);
                 acc
             })
             .await
@@ -1068,7 +1072,7 @@ impl Agent {
 
             if response.tool_calls.is_empty() {
                 let (cost, prompt_tokens, completion_tokens, cached_tokens) = {
-                    let tracker = self.cost_tracker.lock().expect("lock cost_tracker");
+                    let tracker = self.cost_tracker.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     (
                         tracker.total_cost_usd,
                         tracker.total_prompt_tokens,
@@ -1228,7 +1232,7 @@ impl Agent {
         let model = &self.config.llm.model;
 
         {
-            let mut tracker = self.cost_tracker.lock().expect("lock cost_tracker");
+            let mut tracker = self.cost_tracker.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(cost) = response.gateway_cost_usd {
                 tracker.record_with_cost(model, &response.usage, cost);
             } else {
@@ -1278,7 +1282,7 @@ impl Agent {
             // Concrete model selected directly — nothing to surface.
             return None;
         }
-        let mut last = self.last_resolved_model.lock().expect("lock last_resolved_model");
+        let mut last = self.last_resolved_model.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if last.as_deref() == Some(upstream) {
             // Already reported this exact upstream — suppress.
             return None;
@@ -1767,7 +1771,7 @@ mod tests {
         let events_clone = Arc::clone(&events);
 
         let parent = Arc::new(Agent::new(test_config(), ToolRegistry::new()).with_event_handler(move |event| {
-            events_clone.lock().expect("lock").push(event);
+            events_clone.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(event);
         }));
 
         let parent_id = parent.id.clone();
@@ -1775,7 +1779,7 @@ mod tests {
         let child_id = handle.agent_id.clone();
         handle.cancel();
 
-        let events = events.lock().expect("lock");
+        let events = events.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let started = events.iter().find(|e| matches!(e, AgentEvent::DelegationStarted { .. }));
         assert!(started.is_some(), "DelegationStarted event should be emitted");
 

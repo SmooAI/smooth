@@ -396,7 +396,7 @@ fn process_sse_line(line: &str, json_output: bool, content_buf: &mut String, too
         }
         "ToolCallComplete" => {
             if let Some(tool_name) = event.get("tool_name").and_then(|n| n.as_str()) {
-                let is_error = event.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false);
+                let is_error = event.get("is_error").and_then(serde_json::Value::as_bool).unwrap_or(false);
                 let status = if is_error { "error" } else { "ok" };
                 eprintln!("[tool] {tool_name} -> {status}");
                 tool_calls.push(HeadlessToolCall {
@@ -411,25 +411,25 @@ fn process_sse_line(line: &str, json_output: bool, content_buf: &mut String, too
             }
         }
         "Completed" => {
-            if let Some(iterations) = event.get("iterations").and_then(|i| i.as_u64()) {
+            if let Some(iterations) = event.get("iterations").and_then(serde_json::Value::as_u64) {
                 eprintln!("[done] completed in {iterations} iterations");
             }
-            if let Some(c) = event.get("cost").and_then(|c| c.as_f64()) {
+            if let Some(c) = event.get("cost").and_then(serde_json::Value::as_f64) {
                 *cost = c;
             }
         }
         "MaxIterationsReached" => {
-            if let Some(max) = event.get("max").and_then(|m| m.as_u64()) {
+            if let Some(max) = event.get("max").and_then(serde_json::Value::as_u64) {
                 eprintln!("[warn] hit max iterations ({max})");
             }
         }
         "BudgetExceeded" => {
-            let spent = event.get("spent_usd").and_then(|s| s.as_f64()).unwrap_or(0.0);
-            let limit = event.get("limit_usd").and_then(|l| l.as_f64()).unwrap_or(0.0);
+            let spent = event.get("spent_usd").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+            let limit = event.get("limit_usd").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
             eprintln!("[warn] budget exceeded: ${spent:.4} / ${limit:.4}");
         }
         "TaskCost" => {
-            if let Some(c) = event.get("cost").and_then(|c| c.as_f64()) {
+            if let Some(c) = event.get("cost").and_then(serde_json::Value::as_f64) {
                 *cost = c;
             }
         }

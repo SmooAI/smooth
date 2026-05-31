@@ -200,7 +200,7 @@ mod macos {
         // Escape minimal XML-unsafe chars. Paths with & < > in them are
         // vanishingly rare on macOS but may as well be correct.
         let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-        let home = dirs_next::home_dir().map(|h| h.display().to_string()).unwrap_or_else(|| "/tmp".to_string());
+        let home = dirs_next::home_dir().map_or_else(|| "/tmp".to_string(), |h| h.display().to_string());
         format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

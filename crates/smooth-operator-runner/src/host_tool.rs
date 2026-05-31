@@ -78,8 +78,8 @@ impl Tool for HostToolTool {
         // stays readable. Strip empty fields.
         let stdout = payload.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
         let stderr = payload.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
-        let exit = payload.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(-1);
-        let truncated = payload.get("truncated").and_then(|v| v.as_bool()).unwrap_or(false);
+        let exit = payload.get("exit_code").and_then(serde_json::Value::as_i64).unwrap_or(-1);
+        let truncated = payload.get("truncated").and_then(serde_json::Value::as_bool).unwrap_or(false);
         let mut out = String::new();
         if !stdout.is_empty() {
             out.push_str(stdout);

@@ -97,6 +97,9 @@ impl BigSmoothReporter {
     }
 
     /// Connect to Big Smooth's operator WebSocket endpoint.
+    ///
+    /// # Errors
+    /// Returns an error if the WebSocket handshake to `bigsmooth_url` fails.
     pub async fn connect(&mut self, bigsmooth_url: &str) -> anyhow::Result<()> {
         let ws_url = bigsmooth_url.replace("http://", "ws://").replace("https://", "wss://");
         let ws_url = format!("{}/ws/operator", ws_url.trim_end_matches('/'));
@@ -154,6 +157,7 @@ impl BigSmoothReporter {
     ///
     /// # Errors
     /// Returns error if not connected or send fails.
+    #[allow(clippy::unused_async)] // async kept for API symmetry with connect/recv
     pub async fn report(&self, event: ReporterEvent) -> anyhow::Result<()> {
         let tx = self.ws_tx.as_ref().ok_or_else(|| anyhow::anyhow!("Not connected to Big Smooth"))?;
         let json = serde_json::to_string(&event)?;
@@ -171,11 +175,7 @@ impl BigSmoothReporter {
 
     /// Try to receive a control event without blocking (returns immediately).
     pub fn try_recv_control(&mut self) -> Option<ControlEvent> {
-        if let Some(rx) = self.control_rx.as_mut() {
-            rx.try_recv().ok()
-        } else {
-            None
-        }
+        self.control_rx.as_mut().and_then(|rx| rx.try_recv().ok())
     }
 
     /// Returns `true` if the WebSocket is currently connected.

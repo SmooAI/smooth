@@ -160,6 +160,7 @@ fn parse_sts_json(stdout: &str) -> Result<StsCredentials, BackendError> {
     Ok(creds)
 }
 
+#[allow(clippy::needless_pass_by_value)] // owns the parsed-credential field passed straight in
 fn parse_expiration(raw: Option<String>) -> Option<DateTime<Utc>> {
     raw.as_deref()
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())

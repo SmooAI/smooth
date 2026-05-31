@@ -113,7 +113,7 @@ impl AccessResolutionFuture {
 
     /// Await with a timeout. Returns `None` on timeout or drop.
     pub async fn await_resolution_with_timeout(self, timeout: Duration) -> Option<AccessResolution> {
-        tokio::time::timeout(timeout, self.0).await.ok().and_then(|r| r.ok())
+        tokio::time::timeout(timeout, self.0).await.ok().and_then(std::result::Result::ok)
     }
 }
 
@@ -146,7 +146,7 @@ impl AccessStore {
         // store is purely in-memory state with no persistence boundary
         // to worry about.
         {
-            let mut pending = self.inner.pending.lock().unwrap_or_else(|e| e.into_inner());
+            let mut pending = self.inner.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             pending.insert(
                 id.clone(),
                 PendingState {
@@ -210,7 +210,7 @@ impl AccessStore {
     /// ascending (oldest first).
     #[must_use]
     pub fn list_pending(&self) -> Vec<PendingAccessRequest> {
-        let pending = self.inner.pending.lock().unwrap_or_else(|e| e.into_inner());
+        let pending = self.inner.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut requests: Vec<_> = pending.values().map(|s| s.request.clone()).collect();
         requests.sort_by_key(|r| r.created_at);
         requests
@@ -219,7 +219,7 @@ impl AccessStore {
     /// Number of pending requests. For diagnostics.
     #[must_use]
     pub fn pending_count(&self) -> usize {
-        let pending = self.inner.pending.lock().unwrap_or_else(|e| e.into_inner());
+        let pending = self.inner.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         pending.len()
     }
 

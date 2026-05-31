@@ -12,12 +12,12 @@ use crate::pb;
 impl From<JudgeKind> for pb::JudgeKind {
     fn from(k: JudgeKind) -> Self {
         match k {
-            JudgeKind::Network => pb::JudgeKind::Network,
-            JudgeKind::Tool => pb::JudgeKind::Tool,
-            JudgeKind::File => pb::JudgeKind::File,
-            JudgeKind::Cli => pb::JudgeKind::Cli,
-            JudgeKind::Mcp => pb::JudgeKind::Mcp,
-            JudgeKind::Port => pb::JudgeKind::Port,
+            JudgeKind::Network => Self::Network,
+            JudgeKind::Tool => Self::Tool,
+            JudgeKind::File => Self::File,
+            JudgeKind::Cli => Self::Cli,
+            JudgeKind::Mcp => Self::Mcp,
+            JudgeKind::Port => Self::Port,
         }
     }
 }
@@ -27,12 +27,12 @@ impl TryFrom<pb::JudgeKind> for JudgeKind {
     fn try_from(k: pb::JudgeKind) -> Result<Self, Self::Error> {
         match k {
             pb::JudgeKind::Unspecified => Err("JudgeKind::Unspecified"),
-            pb::JudgeKind::Network => Ok(JudgeKind::Network),
-            pb::JudgeKind::Tool => Ok(JudgeKind::Tool),
-            pb::JudgeKind::File => Ok(JudgeKind::File),
-            pb::JudgeKind::Cli => Ok(JudgeKind::Cli),
-            pb::JudgeKind::Mcp => Ok(JudgeKind::Mcp),
-            pb::JudgeKind::Port => Ok(JudgeKind::Port),
+            pb::JudgeKind::Network => Ok(Self::Network),
+            pb::JudgeKind::Tool => Ok(Self::Tool),
+            pb::JudgeKind::File => Ok(Self::File),
+            pb::JudgeKind::Cli => Ok(Self::Cli),
+            pb::JudgeKind::Mcp => Ok(Self::Mcp),
+            pb::JudgeKind::Port => Ok(Self::Port),
         }
     }
 }
@@ -42,10 +42,10 @@ impl TryFrom<pb::JudgeKind> for JudgeKind {
 impl From<Scope> for pb::Scope {
     fn from(s: Scope) -> Self {
         match s {
-            Scope::Once => pb::Scope::Once,
-            Scope::Session => pb::Scope::Session,
-            Scope::PearlProject => pb::Scope::PearlProject,
-            Scope::User => pb::Scope::User,
+            Scope::Once => Self::Once,
+            Scope::Session => Self::Session,
+            Scope::PearlProject => Self::PearlProject,
+            Scope::User => Self::User,
         }
     }
 }
@@ -55,10 +55,10 @@ impl TryFrom<pb::Scope> for Scope {
     fn try_from(s: pb::Scope) -> Result<Self, Self::Error> {
         match s {
             pb::Scope::Unspecified => Err("Scope::Unspecified"),
-            pb::Scope::Once => Ok(Scope::Once),
-            pb::Scope::Session => Ok(Scope::Session),
-            pb::Scope::PearlProject => Ok(Scope::PearlProject),
-            pb::Scope::User => Ok(Scope::User),
+            pb::Scope::Once => Ok(Self::Once),
+            pb::Scope::Session => Ok(Self::Session),
+            pb::Scope::PearlProject => Ok(Self::PearlProject),
+            pb::Scope::User => Ok(Self::User),
         }
     }
 }
@@ -68,10 +68,10 @@ impl TryFrom<pb::Scope> for Scope {
 impl From<Decision> for pb::Decision {
     fn from(d: Decision) -> Self {
         match d {
-            Decision::Approve => pb::Decision::Approve,
-            Decision::Deny => pb::Decision::Deny,
-            Decision::Ask => pb::Decision::Ask,
-            Decision::EscalateToHuman => pb::Decision::EscalateToHuman,
+            Decision::Approve => Self::Approve,
+            Decision::Deny => Self::Deny,
+            Decision::Ask => Self::Ask,
+            Decision::EscalateToHuman => Self::EscalateToHuman,
         }
     }
 }
@@ -81,10 +81,10 @@ impl TryFrom<pb::Decision> for Decision {
     fn try_from(d: pb::Decision) -> Result<Self, Self::Error> {
         match d {
             pb::Decision::Unspecified => Err("Decision::Unspecified"),
-            pb::Decision::Approve => Ok(Decision::Approve),
-            pb::Decision::Deny => Ok(Decision::Deny),
-            pb::Decision::Ask => Ok(Decision::Ask),
-            pb::Decision::EscalateToHuman => Ok(Decision::EscalateToHuman),
+            pb::Decision::Approve => Ok(Self::Approve),
+            pb::Decision::Deny => Ok(Self::Deny),
+            pb::Decision::Ask => Ok(Self::Ask),
+            pb::Decision::EscalateToHuman => Ok(Self::EscalateToHuman),
         }
     }
 }
@@ -94,7 +94,7 @@ impl TryFrom<pb::Decision> for Decision {
 impl From<JudgeRequest> for pb::JudgeRequest {
     fn from(r: JudgeRequest) -> Self {
         let kind: pb::JudgeKind = r.kind.into();
-        pb::JudgeRequest {
+        Self {
             kind: kind as i32,
             operator_id: r.operator_id,
             bead_id: r.bead_id,
@@ -114,7 +114,7 @@ impl TryFrom<pb::JudgeRequest> for JudgeRequest {
             .map_err(|_| format!("unknown JudgeKind enum value {}", r.kind))?
             .try_into()
             .map_err(|e: &str| e.to_string())?;
-        Ok(JudgeRequest {
+        Ok(Self {
             kind,
             operator_id: r.operator_id,
             bead_id: r.bead_id,
@@ -139,7 +139,7 @@ impl From<JudgeDecision> for pb::JudgeDecision {
         // JudgeDecision doesn't have one today — it lives implicitly
         // in the caller's resolution path. Default to UNSPECIFIED
         // (zero value); upgrade when we plumb resolved scope through.
-        pb::JudgeDecision {
+        Self {
             decision: decision as i32,
             confidence: d.confidence,
             reason: d.reason,
@@ -157,7 +157,7 @@ impl TryFrom<pb::JudgeDecision> for JudgeDecision {
             .map_err(|_| format!("unknown Decision enum value {}", d.decision))?
             .try_into()
             .map_err(|e: &str| e.to_string())?;
-        Ok(JudgeDecision {
+        Ok(Self {
             decision,
             confidence: d.confidence,
             reason: d.reason,

@@ -207,8 +207,7 @@ impl Supervisor {
         if run >= self.cfg.repeat_failure_threshold {
             let quoted: String = body.chars().take(240).collect();
             let hint = format!(
-                "[STEERING:GUIDANCE] You've reported the same failure {} times in a row:\n> {}\nStep back and look at the failure mode — re-read the relevant file, run a smaller scoped reproducer, or call teammate_message to ask for help if you're stuck.",
-                run, quoted
+                "[STEERING:GUIDANCE] You've reported the same failure {run} times in a row:\n> {quoted}\nStep back and look at the failure mode — re-read the relevant file, run a smaller scoped reproducer, or call teammate_message to ask for help if you're stuck."
             );
             Some((hint, run))
         } else {

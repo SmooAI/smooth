@@ -512,16 +512,13 @@ impl ConfigClient {
         } else {
             CredentialsStore::default_user().context("locate ~/.smooth/auth/smooai-user.json")?
         };
-        let creds = match store.load().context("read credentials")? {
-            Some(c) => c,
-            None => {
-                let hint = if m2m {
-                    "not logged in — run `th auth login --m2m` (or `th api login`) first"
-                } else {
-                    "not logged in as a user — run `th auth login` first, or pass --m2m to use the M2M session"
-                };
-                anyhow::bail!(hint);
-            }
+        let creds = if let Some(c) = store.load().context("read credentials")? { c } else {
+            let hint = if m2m {
+                "not logged in — run `th auth login --m2m` (or `th api login`) first"
+            } else {
+                "not logged in as a user — run `th auth login` first, or pass --m2m to use the M2M session"
+            };
+            anyhow::bail!(hint);
         };
 
         let http = reqwest::Client::builder()
@@ -815,40 +812,37 @@ async fn cmd_push(org_id: Option<String>, schema_name: Option<String>, descripti
         return Ok(());
     }
 
-    match picked {
-        Some(remote) => {
-            let schema_id = remote.get("id").and_then(|v| v.as_str()).context("remote schema entry has no id")?;
-            let body = serde_json::json!({
-                "jsonSchema": local_schema,
-                "changeDescription": description,
-            });
-            cfg.post(&format!("/organizations/{org}/config/schemas/{schema_id}/push"), &body)
-                .await
-                .context("POST /config/schemas/{id}/push")?;
-            println!(
-                "  {} pushed new version of {} from {}",
-                "✓".green().bold(),
-                resolved_name.as_deref().unwrap_or("(unnamed)").cyan().bold(),
-                local_path.display().to_string().dimmed()
-            );
-            println!();
-        }
-        None => {
-            let name = resolved_name
-                .context("no remote schema matched and no name to create one under. Pass `--schema-name <name>` or add `$smooaiName` to schema.json.")?;
-            let body = serde_json::json!({
-                "name": name,
-                "jsonSchema": local_schema,
-                "description": description,
-            });
-            let resp = cfg
-                .post(&format!("/organizations/{org}/config/schemas"), &body)
-                .await
-                .context("POST /config/schemas")?;
-            let id = resp.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-            println!("  {} created new schema {} ({})", "✓".green().bold(), name.cyan().bold(), id.dimmed());
-            println!();
-        }
+    if let Some(remote) = picked {
+        let schema_id = remote.get("id").and_then(|v| v.as_str()).context("remote schema entry has no id")?;
+        let body = serde_json::json!({
+            "jsonSchema": local_schema,
+            "changeDescription": description,
+        });
+        cfg.post(&format!("/organizations/{org}/config/schemas/{schema_id}/push"), &body)
+            .await
+            .context("POST /config/schemas/{id}/push")?;
+        println!(
+            "  {} pushed new version of {} from {}",
+            "✓".green().bold(),
+            resolved_name.as_deref().unwrap_or("(unnamed)").cyan().bold(),
+            local_path.display().to_string().dimmed()
+        );
+        println!();
+    } else {
+        let name = resolved_name
+            .context("no remote schema matched and no name to create one under. Pass `--schema-name <name>` or add `$smooaiName` to schema.json.")?;
+        let body = serde_json::json!({
+            "name": name,
+            "jsonSchema": local_schema,
+            "description": description,
+        });
+        let resp = cfg
+            .post(&format!("/organizations/{org}/config/schemas"), &body)
+            .await
+            .context("POST /config/schemas")?;
+        let id = resp.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+        println!("  {} created new schema {} ({})", "✓".green().bold(), name.cyan().bold(), id.dimmed());
+        println!();
     }
     Ok(())
 }
