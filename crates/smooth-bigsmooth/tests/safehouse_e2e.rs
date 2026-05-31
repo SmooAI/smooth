@@ -447,7 +447,6 @@ async fn safehouse_full_stack_rust_and_typescript_with_judge() {
     if let Ok(resp) = reqwest::get(&format!("http://127.0.0.1:{bigsmooth_host_port}/api/pearls")).await {
         if let Ok(body) = resp.json::<serde_json::Value>().await {
             if let Some(pearls) = body["data"].as_array() {
-                let mut total_messages = 0;
                 for p in pearls {
                     // The pearl's "session" is its task ID. Query messages for it.
                     // The dispatch path saves the task_id as session_id in messages.
@@ -463,7 +462,6 @@ async fn safehouse_full_stack_rust_and_typescript_with_judge() {
                 // The real proof: stats endpoint already showed pearls were created
                 // and closed. Session messages are the bonus.
                 eprintln!("  found {} pearls with potential sessions", pearls.len());
-                eprintln!("  total session messages found: {total_messages}");
             }
         }
     }

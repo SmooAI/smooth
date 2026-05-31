@@ -66,6 +66,14 @@ enum Commands {
         /// Big Smooth API port
         #[arg(long, default_value = "4400")]
         port: u16,
+        /// Interface to bind Big Smooth on. Defaults to `127.0.0.1`
+        /// (loopback only) — any other value opens the API + dashboard
+        /// to that interface. The API has no authentication today, so
+        /// `0.0.0.0` exposes every route (dispatch agents, mint creds,
+        /// read pearls/sessions) to anyone on the network. Pearl
+        /// `th-6db839`.
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
         /// Run in foreground (default: daemonize). Only honored in
         /// direct mode — sandboxed mode is foreground-by-microVM.
         #[arg(long)]
@@ -1103,10 +1111,11 @@ async fn main() -> Result<()> {
             mode,
             no_leader,
             port,
+            bind,
             foreground,
             max_operators,
             skip_test,
-        }) => cmd_up(mode, no_leader, port, foreground, max_operators, skip_test).await,
+        }) => cmd_up(mode, no_leader, port, bind, foreground, max_operators, skip_test).await,
         Some(Commands::Down) => cmd_down().await,
         Some(Commands::Status) => cmd_status().await,
         Some(Commands::Db { cmd }) => cmd_db(cmd),
@@ -1422,7 +1431,7 @@ async fn stop_sandboxed_vm() -> Result<bool> {
     Ok(true)
 }
 
-async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, foreground: bool, max_operators: Option<usize>, skip_test: bool) -> Result<()> {
+async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, foreground: bool, max_operators: Option<usize>, skip_test: bool) -> Result<()> {
     // CLI flag beats env; set env so AppState::new() (which only sees
     // env) picks the right value in both foreground + daemon paths.
     if let Some(n) = max_operators {
@@ -1539,7 +1548,14 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, foreground: bo
         // direct mode; sandboxed mode goes through the same daemon
         // path without it so start_sandboxed_vm holds the
         // AgentClient open in the child process.
-        let mut args = vec!["up".to_string(), "--foreground".to_string(), "--port".to_string(), port.to_string()];
+        let mut args = vec![
+            "up".to_string(),
+            "--foreground".to_string(),
+            "--port".to_string(),
+            port.to_string(),
+            "--bind".to_string(),
+            bind.clone(),
+        ];
         if no_leader {
             args.push("--no-leader".to_string());
         }
@@ -1730,7 +1746,22 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, foreground: bo
     // Start Big Smooth (API + embedded web UI on same port)
     let state = smooth_bigsmooth::server::AppState::new(pearl_store);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    // Pearl th-6db839: bind defaults to 127.0.0.1 (loopback only).
+    // The Big Smooth API has no authentication today — binding any
+    // non-loopback interface exposes every route (dispatch agents,
+    // mint creds, approve their own access requests, read pearls and
+    // sessions) to anyone reachable on that interface. Opt in to
+    // `0.0.0.0` (or a specific NIC IP) via `--bind`.
+    let ip: std::net::IpAddr = bind.parse().map_err(|e| {
+        anyhow::anyhow!("--bind '{bind}' is not a valid IP address: {e} (try `--bind 127.0.0.1` or `--bind 0.0.0.0` to opt in to LAN exposure)")
+    })?;
+    if !ip.is_loopback() {
+        eprintln!(
+            "  {} Big Smooth bound on {ip}:{port} (non-loopback). The API has no auth — anyone on the network can dispatch agents and read pearls. Pearl th-6db839.",
+            "\u{26A0}".yellow().bold()
+        );
+    }
+    let addr = SocketAddr::new(ip, port);
     println!(
         "  {} Big {} {}",
         "\u{2713}".green().bold(),

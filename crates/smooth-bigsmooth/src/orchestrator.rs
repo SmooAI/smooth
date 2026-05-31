@@ -586,7 +586,7 @@ mod tests {
             }
         };
         let (tx, mut rx) = broadcast::channel::<ServerEvent>(16);
-        let mut orch = Orchestrator::new(3, store).with_event_tx(tx);
+        let orch = Orchestrator::new(3, store).with_event_tx(tx);
 
         // Manually broadcast a token delta (simulating what monitor does)
         orch.broadcast(ServerEvent::TokenDelta {

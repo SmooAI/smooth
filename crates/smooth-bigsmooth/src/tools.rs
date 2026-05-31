@@ -216,17 +216,8 @@ mod tests {
     #[test]
     fn test_secret_detection_hook() {
         let registry = create_default_registry();
-        let ctx = ToolContext {
-            bead_id: "test".into(),
-            worker_id: "worker".into(),
-            run_id: "run".into(),
-            leader_url: "http://localhost".into(),
-            permissions: vec![],
-        };
 
-        // This should fail because "test_tool" isn't registered,
-        // but the hook check happens before tool lookup for registered tools
-        // Let's test the hook directly
+        // Hook fires on tool args directly, no ToolContext needed.
         let hook = &registry.hooks[0];
         let result = (hook.handler)("test", &serde_json::json!({"key": "AKIAIOSFODNN7EXAMPLE"}));
         assert!(result.is_err());

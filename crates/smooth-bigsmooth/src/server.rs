@@ -17,7 +17,6 @@ use serde::{Deserialize, Serialize};
 use smooth_operator::providers::ProviderRegistry;
 use smooth_operator::AgentEvent;
 use tokio::sync::broadcast;
-use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::events::{ClientEvent, ServerEvent};
@@ -178,12 +177,19 @@ impl AppState {
                     if is_invalid_project(&path_str) {
                         continue;
                     }
+                    // Canonicalize so /var/folders/... and
+                    // /private/var/folders/... (macOS) — and any
+                    // symlink / trailing-slash variant — resolve to
+                    // the same key for both insert and the
+                    // project_pearls_handler lookup. Pearl
+                    // th-6db839.
+                    let key = entry.path.canonicalize().unwrap_or_else(|_| entry.path.clone());
                     let dolt_dir = entry.path.join(".smooth").join("dolt");
                     if dolt_dir == caller_dolt_dir {
                         // Reuse caller's PearlStore for this entry —
                         // don't spawn a duplicate smooth-dolt.
                         tracing::debug!(path = %path_str, "reusing caller's pearl_store for matching registry entry");
-                        stores.insert(entry.path.clone(), pearl_store.clone());
+                        stores.insert(key, pearl_store.clone());
                         continue;
                     }
                     match smooth_pearls::SmoothDoltServer::spawn(&dolt_dir) {
@@ -192,8 +198,8 @@ impl AppState {
                             let dolt = smooth_pearls::SmoothDolt::from_server(server.clone(), &dolt_dir);
                             let store = smooth_pearls::PearlStore::from_dolt(dolt);
                             tracing::info!(path = %path_str, "spawned smooth-dolt serve for project");
-                            stores.insert(entry.path.clone(), store);
-                            servers.insert(entry.path.clone(), server);
+                            stores.insert(key.clone(), store);
+                            servers.insert(key, server);
                         }
                         Err(e) => {
                             tracing::warn!(path = %path_str, error = %e, "failed to spawn smooth-dolt serve; project unavailable until restart");
@@ -539,7 +545,17 @@ pub fn build_router(state: AppState) -> Router {
         // Embedded web UI (SPA fallback — must be last)
         .fallback_service(smooth_web::web_router())
         // Middleware
-        .layer(CorsLayer::permissive())
+        //
+        // CORS: same-origin only. The embedded web SPA is served by
+        // `smooth_web::web_router()` as the fallback on this same
+        // origin, so it never needs cross-origin headers. CLI clients
+        // (`th`, curl, reqwest) ignore CORS. `CorsLayer::permissive()`
+        // used to be here, but combined with `--bind 0.0.0.0` (now
+        // off by default per pearl `th-6db839`) it let any malicious
+        // website the user visited drive arbitrary API calls into
+        // their local Big Smooth via fetch(). Restricting to
+        // same-origin (default Axum behavior, no layer) closes the
+        // browser-side hole independently of the bind fix.
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -3560,7 +3576,10 @@ async fn list_projects_handler(State(state): State<AppState>) -> Json<ApiRespons
                 continue;
             }
 
-            let counts = match stores.get(&entry.path) {
+            // Same canonicalize-on-lookup as AppState::new's insert.
+            // Pearl th-6db839.
+            let lookup_key = entry.path.canonicalize().unwrap_or_else(|_| entry.path.clone());
+            let counts = match stores.get(&lookup_key) {
                 Some(store) => store
                     .stats()
                     .map(|stats| ProjectPearlCounts {
@@ -3608,7 +3627,12 @@ async fn project_pearls_handler(State(state): State<AppState>, Query(params): Qu
 
     // Use the pre-spawned (server-mode) store for this project. See
     // `AppState::project_pearl_stores` for why we don't open fresh.
-    let project_path = std::path::PathBuf::from(&params.path);
+    // Canonicalize so `?path=/var/folders/...` and
+    // `?path=/private/var/folders/...` resolve to the same map key
+    // we stored under in `AppState::new` (also canonicalized).
+    // Pearl th-6db839.
+    let raw_path = std::path::PathBuf::from(&params.path);
+    let project_path = raw_path.canonicalize().unwrap_or(raw_path);
     let stores = state.project_pearl_stores.clone();
     let limit = params.limit;
     let status = params.status.clone();
@@ -5338,7 +5362,6 @@ async fn jira_sync_handler(State(state): State<AppState>) -> Json<ApiResponse<cr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use tower::ServiceExt;
 
     #[test]
