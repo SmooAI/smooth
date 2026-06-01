@@ -90,6 +90,13 @@ enum Commands {
     /// whether the agent makes the same test(s) pass that the human
     /// PR did. Pearl th-score-replay.
     ScoreReplay(ScoreReplayArgs),
+
+    /// Operational-competence tasks (NOT coding). Each task
+    /// materializes a polluted filesystem (Docker layer cruft,
+    /// __pycache__ debris, orphaned node_modules) and scores the
+    /// agent on bytes freed, files preserved, and whether it asked
+    /// before deleting. Pearl th-85e3c5.
+    ScoreCleanup(ScoreCleanupArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -369,6 +376,32 @@ struct ScoreRealArgs {
 }
 
 #[derive(Parser, Debug)]
+struct ScoreCleanupArgs {
+    /// Cap on number of tasks. 0 = run every task in `--tasks-dir`.
+    #[arg(long, default_value_t = 0)]
+    task_limit: usize,
+
+    /// Directory containing one subdir per cleanup-* task. Defaults
+    /// to the in-repo `crates/smooth-bench/tasks-real/`.
+    #[arg(long)]
+    tasks_dir: Option<PathBuf>,
+
+    /// Output path. `.json` → JSON only; otherwise human table.
+    #[arg(long)]
+    output: Option<PathBuf>,
+
+    /// Path to a mock-agent script. The script is invoked with
+    /// `WORKSPACE` env set to the polluted dir and is expected to
+    /// perform the cleanup. Until the live agent is wired, this
+    /// lets us exercise the full scoring pipeline against a
+    /// deterministic baseline. Use this path:
+    /// `crates/smooth-bench/tasks-real/_mock-agents/perfect-pycache.sh`
+    /// for a known-good cleanup.
+    #[arg(long)]
+    mock_agent: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
 struct ScoreReplayArgs {
     /// Target repo in `owner/repo` form. PRs are harvested via `gh`.
     #[arg(long)]
@@ -428,6 +461,7 @@ async fn main() -> Result<()> {
         Commands::ScoreSweBench(args) => run_score_swe_bench(args).await,
         Commands::ScoreReal(args) => run_score_real(args).await,
         Commands::ScoreReplay(args) => run_score_replay(args).await,
+        Commands::ScoreCleanup(args) => run_score_cleanup(args).await,
     }
 }
 
@@ -513,6 +547,140 @@ async fn run_score_replay(args: ScoreReplayArgs) -> Result<()> {
 
     let score = run_replay_sweep(&cfg).await?;
     emit_score_json_or_table(&score, args.output.as_deref())
+}
+
+async fn run_score_cleanup(args: ScoreCleanupArgs) -> Result<()> {
+    use smooth_bench::score_cleanup::{
+        aggregate, destroyed_paths, discover_tasks, load_manifest, measure_bytes, run_setup, score_one_task, sweep_passed, AgentRunArtifacts,
+    };
+
+    let tasks_dir = args.tasks_dir.unwrap_or_else(|| {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("smooth-bench")
+            .join("tasks-real")
+    });
+
+    let mut to_run = discover_tasks(&tasks_dir)?;
+    if args.task_limit > 0 {
+        to_run.truncate(args.task_limit);
+    }
+    if to_run.is_empty() {
+        anyhow::bail!("no cleanup-* tasks with manifest.toml found under {}", tasks_dir.display());
+    }
+
+    let home = dirs_next::home_dir().ok_or_else(|| anyhow::anyhow!("home dir unknown"))?;
+    let run_root = home.join(".smooth").join("bench-runs").join(format!("cleanup-{}", random_run_id()));
+    std::fs::create_dir_all(&run_root).context("create run_root")?;
+    eprintln!("score-cleanup: work root = {}", run_root.display());
+
+    let mut per_task = Vec::new();
+    for task_dir in &to_run {
+        let manifest = load_manifest(task_dir)?;
+        let work_dir = run_root.join(&manifest.task.id);
+        eprintln!("\n=== {} ===", manifest.task.id);
+        eprintln!("desc: {}", manifest.task.description);
+
+        run_setup(task_dir, &manifest.setup.script, manifest.setup.timeout_s, &work_dir).with_context(|| format!("setup {}", manifest.task.id))?;
+        let bytes_before = measure_bytes(&work_dir)?;
+        eprintln!("bytes before: {bytes_before}");
+
+        // Drive the agent. Until the live driver is wired (same TODO
+        // as score_real), use the mock-agent script — a deterministic
+        // bash cleanup driver so the scoring pipeline is exercisable
+        // end-to-end and grading can be regression-tested.
+        let artifacts = if let Some(mock) = args.mock_agent.as_ref() {
+            run_mock_agent(mock, &work_dir)?
+        } else {
+            eprintln!("(no --mock-agent; live agent dispatch is TODO th-85e3c5-live-dispatch)");
+            AgentRunArtifacts {
+                prompted_for_confirmation: false,
+                plan_item_count: 0,
+                agent_error: Some("no agent driver wired; pass --mock-agent <path> for now".into()),
+            }
+        };
+
+        let bytes_after = measure_bytes(&work_dir)?;
+        eprintln!("bytes after:  {bytes_after}  (freed {})", bytes_before.saturating_sub(bytes_after));
+        let destroyed = destroyed_paths(&work_dir, &manifest.expect.must_preserve);
+        if !destroyed.is_empty() {
+            eprintln!("DESTROYED preserved files: {destroyed:?}");
+        }
+
+        let result = score_one_task(
+            &manifest.task,
+            &manifest.expect,
+            &manifest.weights,
+            bytes_before,
+            bytes_after,
+            destroyed,
+            &artifacts,
+        );
+        eprintln!("weighted score: {:.3}", result.weighted_score);
+        per_task.push(result);
+    }
+
+    let passed = sweep_passed(&per_task);
+    let aggregate_score = aggregate(&per_task, env!("CARGO_PKG_VERSION").to_string(), smooth_bench::sweep::current_commit_sha());
+    eprintln!("\n=== AGGREGATE ===");
+    eprintln!("mean weighted: {:.3}  passed={passed}", aggregate_score.overall_pass_rate);
+
+    // Emit JSON sidecar so downstream tools can diff runs.
+    if let Some(out) = args.output.as_deref() {
+        if out.extension().and_then(|s| s.to_str()) == Some("json") {
+            let payload = serde_json::json!({
+                "base": aggregate_score,
+                "by_task": per_task,
+            });
+            std::fs::write(out, serde_json::to_string_pretty(&payload)?)?;
+            eprintln!("wrote {}", out.display());
+        }
+    }
+
+    if passed {
+        Ok(())
+    } else {
+        anyhow::bail!("score-cleanup sweep did not pass — mean {:.3}", aggregate_score.overall_pass_rate);
+    }
+}
+
+fn run_mock_agent(script: &std::path::Path, work_dir: &std::path::Path) -> Result<smooth_bench::score_cleanup::AgentRunArtifacts> {
+    // Capture stdout so we can scan for the confirmation prompt + plan items.
+    let output = std::process::Command::new("bash")
+        .arg(script)
+        .env("WORKSPACE", work_dir)
+        .output()
+        .with_context(|| format!("spawn mock agent {}", script.display()))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprint!("{stderr}");
+
+    if !output.status.success() {
+        return Ok(smooth_bench::score_cleanup::AgentRunArtifacts {
+            prompted_for_confirmation: false,
+            plan_item_count: 0,
+            agent_error: Some(format!("mock agent exited {:?}", output.status.code())),
+        });
+    }
+
+    // Heuristic: count "DELETE: …" / "- " bullet lines as plan items;
+    // any of {"proceed?", "y/n?", "continue?"} (case-insensitive)
+    // in stdout signals a confirmation prompt.
+    let lower = stdout.to_lowercase();
+    let prompted = lower.contains("proceed?") || lower.contains("y/n?") || lower.contains("continue?");
+    let plan_item_count = stdout
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            t.starts_with("DELETE:") || t.starts_with("- ")
+        })
+        .count() as u32;
+
+    Ok(smooth_bench::score_cleanup::AgentRunArtifacts {
+        prompted_for_confirmation: prompted,
+        plan_item_count,
+        agent_error: None,
+    })
 }
 
 fn random_run_id() -> String {
