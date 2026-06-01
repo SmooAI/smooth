@@ -168,10 +168,37 @@ impl AppState {
         // already in `pearl_store`; we only spawn for OTHER
         // registry entries here. Pearl th-67c96b benchmark fix.
         let caller_dolt_dir = pearl_store.dolt().data_dir().to_path_buf();
-        let (project_pearl_stores, project_dolt_servers) = match smooth_pearls::Registry::load() {
+        let mut stores: HashMap<std::path::PathBuf, smooth_pearls::PearlStore> = HashMap::new();
+        let mut servers: HashMap<std::path::PathBuf, Arc<smooth_pearls::SmoothDoltServer>> = HashMap::new();
+
+        // Seed the cache with the caller's own project FIRST,
+        // independent of the global registry. The caller already
+        // handed us a working PearlStore for this dolt_dir, so we
+        // don't need Registry::load() to round-trip its entry back
+        // before we know about it. Without this, integration tests
+        // (each creating a tempdir + initializing a PearlStore +
+        // calling AppState::new) race the global ~/.smooth/registry.json
+        // load/save under nextest's process-per-test fan-out — and
+        // when one test's save loses to another's, the loser's
+        // tempdir is missing from Registry::list() and falls out of
+        // this cache. Pearls th-96e525, th-9799fa, th-e392d9.
+        if let Some(project_root) = caller_dolt_dir.parent().and_then(|p| p.parent()) {
+            let key = project_root.canonicalize().unwrap_or_else(|_| project_root.to_path_buf());
+            stores.insert(key, pearl_store.clone());
+        }
+
+        // Pre-spawn a `smooth-dolt serve` per OTHER registered
+        // project, wrap each in a server-mode `PearlStore`, cache.
+        // Synchronous code; runs BEFORE axum starts so the
+        // smooth-dolt subprocess hang documented in pearl
+        // `th-1a61a7` doesn't fire here. Failures are logged + skipped —
+        // a single broken project shouldn't take the service down.
+        // Don't spawn a SECOND smooth-dolt server for the caller's
+        // own dir — that causes "manifest read only" lock contention
+        // because both writers try to flush at once. The caller's
+        // store is already seeded above. Pearl th-67c96b.
+        match smooth_pearls::Registry::load() {
             Ok(registry) => {
-                let mut stores: HashMap<std::path::PathBuf, smooth_pearls::PearlStore> = HashMap::new();
-                let mut servers: HashMap<std::path::PathBuf, Arc<smooth_pearls::SmoothDoltServer>> = HashMap::new();
                 for entry in registry.list() {
                     let path_str = entry.path.to_string_lossy().to_string();
                     if is_invalid_project(&path_str) {
@@ -186,10 +213,16 @@ impl AppState {
                     let key = entry.path.canonicalize().unwrap_or_else(|_| entry.path.clone());
                     let dolt_dir = entry.path.join(".smooth").join("dolt");
                     if dolt_dir == caller_dolt_dir {
-                        // Reuse caller's PearlStore for this entry —
-                        // don't spawn a duplicate smooth-dolt.
-                        tracing::debug!(path = %path_str, "reusing caller's pearl_store for matching registry entry");
-                        stores.insert(key, pearl_store.clone());
+                        // Already seeded above. Skip — don't
+                        // double-insert and don't spawn a duplicate
+                        // smooth-dolt for the caller's dir.
+                        continue;
+                    }
+                    if stores.contains_key(&key) {
+                        // Two registry paths canonicalize to the same
+                        // key (eg /var/folders/X and /private/var/folders/X
+                        // on macOS). First insert wins; the duplicate
+                        // would just be a redundant smooth-dolt.
                         continue;
                     }
                     match smooth_pearls::SmoothDoltServer::spawn(&dolt_dir) {
@@ -206,13 +239,13 @@ impl AppState {
                         }
                     }
                 }
-                (Arc::new(stores), Arc::new(servers))
             }
             Err(e) => {
                 tracing::warn!(error = %e, "failed to load project registry");
-                (Arc::new(HashMap::new()), Arc::new(HashMap::new()))
             }
-        };
+        }
+        let project_pearl_stores = Arc::new(stores);
+        let project_dolt_servers = Arc::new(servers);
 
         // Construct the Safehouse Narc. If the host has an LLM provider
         // configured, Narc uses the default provider for its judge; otherwise
