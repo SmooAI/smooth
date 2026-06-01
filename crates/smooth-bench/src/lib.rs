@@ -39,6 +39,7 @@ pub mod lang_detect;
 pub mod pr_harvest;
 pub mod scenarios;
 pub mod score;
+pub mod score_cleanup;
 pub mod score_real;
 pub mod score_replay;
 pub mod score_swe_bench;
