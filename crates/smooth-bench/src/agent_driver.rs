@@ -778,11 +778,18 @@ fn drive_smooth_via_tmux(
         // the same 120s ceiling as `tui_score::TuiTaskConfig::default`.
         boot_timeout: Duration::from_secs(120),
         paste_warmup: Duration::from_millis(800),
-        // Smooth's coding loop sometimes pauses for >5s between tool
-        // calls; 8s matches the OpenCode setting so scores stay
-        // comparable across drivers.
-        first_idle_dwell: Duration::from_secs(8),
-        post_coach_dwell: Duration::from_secs(5),
+        // Smooth's `Thinking...` is static text (no animation), so an
+        // 8s idle dwell mis-fires on it before the model's first token
+        // arrives — especially on small workspaces where Big Smooth's
+        // cold-start tax can push first-token latency past 8s. Pearl
+        // `th-65a041`: bench impossible-task variability was traced to
+        // this. 20s gives the model room to think without breaking
+        // the warm-case fast path (warm runs still finish around the
+        // 60-second mark for typical fixtures). OpenCode keeps 8s
+        // because its TUI shows visible token-streaming as soon as
+        // the model starts emitting.
+        first_idle_dwell: Duration::from_secs(20),
+        post_coach_dwell: Duration::from_secs(10),
         task_id,
         workspace,
         prompt,
