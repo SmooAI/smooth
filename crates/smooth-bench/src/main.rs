@@ -606,11 +606,7 @@ async fn run_score_cleanup(args: ScoreCleanupArgs) -> Result<()> {
     // --driver=mock without --mock-agent) before we materialize any
     // task workspaces. `--mock-agent <path>` implies `--driver=mock`
     // for back-compat with the original CLI shape.
-    let driver_kind = if args.mock_agent.is_some() {
-        AgentDriverKind::Mock
-    } else {
-        args.driver
-    };
+    let driver_kind = if args.mock_agent.is_some() { AgentDriverKind::Mock } else { args.driver };
     let driver: Box<dyn AgentDriver> = match driver_kind {
         AgentDriverKind::Mock => {
             let script = args
