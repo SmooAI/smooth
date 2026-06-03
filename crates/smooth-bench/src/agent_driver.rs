@@ -482,11 +482,31 @@ fn drive_tmux_agent(spec: TmuxAgentSpec) -> AgentRunArtifacts {
     // Auto-coach reply (pearl th-edb330). Detect prompt in the AGENT
     // REGION only — the literal "Proceed?" in the README must not
     // trigger a spurious coach reply mid-plan.
+    //
+    // Reply text: context-restating, not bare "yes". Some agents (e.g.
+    // smooth-code's `fixer`) have specialized system prompts that
+    // dominate inter-turn context when the user's reply is too short.
+    // Pearl th-e5a0e5 — bench evidence showed smooth's fixer responded
+    // to bare "yes" with "I will now proceed to fix the remaining test
+    // failures" because its system prompt biases it toward test-fixing.
+    // Restating "delete the items you listed above" preserves context
+    // for any agent without changing what the score measures (the
+    // heuristic doesn't peek inside the coach reply, only the agent's
+    // pane response after it).
     let agent_region1 = slice_after_prompt(&pane1, prompt);
     let (prompted1, _) = parse_plan_artifacts(agent_region1);
     let pane_final = if prompted1 {
-        eprintln!("[{driver_name}/{task_id}] confirmation detected → sending 'yes'");
-        if let Err(e) = driver.send("yes") {
+        // Reply includes a short context-restating preamble + an
+        // EXPLICIT rm command. This lets us distinguish "agent lost
+        // prior-turn context" (the reply alone is enough to act on)
+        // from "agent can't execute destructive ops" (even with
+        // explicit instruction, it doesn't run rm). The exact command
+        // here is also the canonical cleanup recipe — the bench
+        // measures whether the agent CAN do it, not whether it can
+        // independently INVENT it. (Pearl th-edb330 + th-e5a0e5.)
+        let coach_reply = "yes, please delete all the __pycache__ directories, .pyc files, .pytest_cache, and *.egg-info you found. Run: bash -c 'find . -type d -name __pycache__ -exec rm -rf {} +; find . -type f -name \"*.pyc\" -delete; find . -type d -name .pytest_cache -exec rm -rf {} +; find . -type d -name \"*.egg-info\" -exec rm -rf {} +'";
+        eprintln!("[{driver_name}/{task_id}] confirmation detected → sending coach reply");
+        if let Err(e) = driver.send(coach_reply) {
             eprintln!("[{driver_name}/{task_id}] coach reply paste failed: {e}");
             pane1
         } else {
@@ -623,10 +643,19 @@ impl AgentDriver for SmoothDriver {
 
 /// Build the `sh -c` command that tmux runs to launch smooth's TUI.
 /// Mirrors `tui_score.rs` so the env-var conventions line up.
+///
+/// `--auto-approve=session` is critical for any unattended bench run:
+/// without it, smooth's Safehouse Narc defaults to `deny` on every
+/// `Ask` verdict (destructive bash, file writes), which silently
+/// blocks the agent from actually performing the cleanup. The bench
+/// workspace is a polluted throwaway per task; auto-approving once
+/// per session is the right granularity. Pearl `th-fa4da9` —
+/// without this, the cleanup-pycache fixture stalled at 0 bytes
+/// freed even when the agent's plan was perfect.
 fn smooth_shell_cmd(binary: &Path, model: Option<&str>) -> String {
     let mut cmd = String::from("SMOOTH_BENCH_FRESH_SESSION=1 SMOOTH_BENCH_TRACE_TOOLS=1 ");
     cmd.push_str(&shell_escape(&binary.to_string_lossy()));
-    cmd.push_str(" code");
+    cmd.push_str(" code --auto-approve=session");
     if let Some(m) = model {
         cmd.push_str(" --model ");
         cmd.push_str(&shell_escape(m));
@@ -902,6 +931,15 @@ Proceed?";
         assert!(cmd.contains("'/usr/local/bin/th'"));
         assert!(cmd.contains(" code "));
         assert!(cmd.contains("--model 'smooai/deepseek-v4-flash'"));
+    }
+
+    #[test]
+    fn smooth_shell_cmd_passes_auto_approve_session() {
+        // Pearl th-fa4da9 — without --auto-approve=session, every
+        // destructive bash from the agent is denied by the Safehouse
+        // Narc default in unattended mode.
+        let cmd = smooth_shell_cmd(&PathBuf::from("th"), None);
+        assert!(cmd.contains("--auto-approve=session"), "missing auto-approve in: {cmd}");
     }
 
     #[test]
