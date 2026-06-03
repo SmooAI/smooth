@@ -86,7 +86,9 @@ pub trait AgentDriver: Send + Sync {
 /// - `plan_item_count` ⇔ count of lines that look like a plan entry,
 ///   in any of these styles (pearl `th-855be5`):
 ///     - `DELETE: …`   — the original mock-agent shape
-///     - `- …`         — markdown bullet
+///     - `- …`         — ASCII markdown bullet
+///     - `• …`         — Unicode bullet (U+2022). What smooth-code's TUI
+///       renders for the same kind of list (pearl `th-979db6`).
 ///     - `│ … │ N │ …` — box-drawn table row with at least one numeric
 ///       cell (what DeepSeek-via-OpenCode actually produced on the
 ///       cleanup-pycache fixture)
@@ -108,7 +110,7 @@ pub fn parse_plan_artifacts(transcript: &str) -> (bool, u32) {
 /// True if `line` looks like an entry in a deletion plan.
 fn is_plan_line(line: &str) -> bool {
     let t = line.trim_start();
-    if t.starts_with("DELETE:") || t.starts_with("- ") {
+    if t.starts_with("DELETE:") || t.starts_with("- ") || t.starts_with("• ") {
         return true;
     }
     is_table_row_with_number(t)
@@ -380,54 +382,89 @@ fn opencode_shell_cmd(binary: &Path, model: Option<&str>) -> String {
     cmd
 }
 
-/// Sync core of the OpenCode driver. Spawns the TUI inside tmux,
-/// pastes the prompt, waits for the pane to settle, returns artifacts.
-fn drive_opencode_via_tmux(binary: &Path, task_id: &str, workspace: &Path, prompt: &str, model: Option<&str>, timeout: Duration) -> AgentRunArtifacts {
+/// Backend-agnostic configuration for [`drive_tmux_agent`]. Each
+/// concrete driver fills this in and calls the helper — the boot /
+/// paste / idle / auto-coach loop is identical across OpenCode,
+/// Smooth, and Claude Code (pearls th-754512 + th-36145e).
+struct TmuxAgentSpec<'a> {
+    /// Stable label used in log lines and pane dumps. Should match
+    /// the driver's [`AgentDriver::name`] return value.
+    driver_name: &'static str,
+    /// Pre-built `sh -c` command tmux will run. Caller assembles this
+    /// from its own binary path + model arg + env vars.
+    shell_cmd: String,
+    /// How long to wait for the TUI's first render. OpenCode is fast
+    /// (~3s typical); smooth boots an entire microVM cast and needs
+    /// 60-120s on a cold host; Claude is also fast.
+    boot_timeout: Duration,
+    /// Sleep between boot-complete and first paste. Lets the TUI
+    /// finish drawing its input box; pasting into a half-rendered
+    /// prompt sometimes drops leading characters.
+    paste_warmup: Duration,
+    /// How long the pane must be byte-identical to count as "idle"
+    /// (post-paste). Bigger = fewer false-idle fires mid-thought,
+    /// smaller = faster end-of-turn detection.
+    first_idle_dwell: Duration,
+    /// Dwell after the auto-coach "yes" reply. Usually shorter than
+    /// `first_idle_dwell` — after "yes" the agent typically just
+    /// streams a quick "Done." once the file ops finish.
+    post_coach_dwell: Duration,
+    task_id: &'a str,
+    workspace: &'a Path,
+    prompt: &'a str,
+    /// Overall wall-clock budget for the whole dispatch.
+    timeout: Duration,
+}
+
+/// Boot a tmux-driven TUI, paste the prompt, wait for first idle,
+/// auto-coach reply on "Proceed?", wait for second idle, score.
+///
+/// Shared core for every TUI backend so the per-driver code only has
+/// to specify what's actually different (shell command, timeouts,
+/// label). The harness behavior — including the auto-coach (pearl
+/// th-edb330) and prompt-slicing — is identical across backends so
+/// score comparability is guaranteed.
+fn drive_tmux_agent(spec: TmuxAgentSpec) -> AgentRunArtifacts {
     use crate::tmux_driver::TmuxDriver;
 
-    write_opencode_permissions(workspace, task_id);
+    let TmuxAgentSpec {
+        driver_name,
+        shell_cmd,
+        boot_timeout,
+        paste_warmup,
+        first_idle_dwell,
+        post_coach_dwell,
+        task_id,
+        workspace,
+        prompt,
+        timeout,
+    } = spec;
 
-    let cmd = opencode_shell_cmd(binary, model);
-    let session = format!("opencode-{}-{}", sanitize_session(task_id), uuid::Uuid::new_v4().simple());
-
-    // Boot timeout: OpenCode's TUI usually paints in ~1-3s on this
-    // host. 30s is conservative; we want to fail fast on a broken
-    // binary rather than burn the per-task budget waiting for paint.
-    let boot_timeout = Duration::from_secs(30);
-    let driver = match TmuxDriver::start_command(&session, workspace, &cmd, boot_timeout) {
+    let session = format!("{driver_name}-{}-{}", sanitize_session(task_id), uuid::Uuid::new_v4().simple());
+    let driver = match TmuxDriver::start_command(&session, workspace, &shell_cmd, boot_timeout) {
         Ok(d) => d,
         Err(e) => {
             return AgentRunArtifacts {
                 prompted_for_confirmation: false,
                 plan_item_count: 0,
-                agent_error: Some(format!("opencode tmux boot failed: {e}")),
+                agent_error: Some(format!("{driver_name} tmux boot failed: {e}")),
             };
         }
     };
 
-    // Give the TUI a beat after first-render to finish drawing its
-    // input box before we paste — pasting into a half-rendered prompt
-    // sometimes drops the leading chars. 800ms is empirically enough
-    // on this host and is well below the per-task budget.
-    std::thread::sleep(Duration::from_millis(800));
+    std::thread::sleep(paste_warmup);
 
     if let Err(e) = driver.send(prompt) {
         return AgentRunArtifacts {
             prompted_for_confirmation: false,
             plan_item_count: 0,
-            agent_error: Some(format!("opencode paste failed: {e}")),
+            agent_error: Some(format!("{driver_name} paste failed: {e}")),
         };
     }
 
-    // Wait for the agent to settle. Dwell = 8s: OpenCode pauses
-    // between tool calls while the model thinks, and we don't want
-    // false-idle fires mid-run. Poll every 500ms.
-    //
-    // Overall budget: full task timeout minus boot + paste slack.
-    // Saturating to avoid going below 0 if boot was unusually slow.
     let start = std::time::Instant::now();
     let total_budget = timeout.saturating_sub(Duration::from_secs(2));
-    let pane1 = match driver.wait_for_idle(Duration::from_secs(8), Duration::from_millis(500), total_budget) {
+    let pane1 = match driver.wait_for_idle(first_idle_dwell, Duration::from_millis(500), total_budget) {
         Ok(p) => p,
         Err(e) => {
             let partial = driver.capture().unwrap_or_default();
@@ -436,43 +473,31 @@ fn drive_opencode_via_tmux(binary: &Path, task_id: &str, workspace: &Path, promp
             return AgentRunArtifacts {
                 prompted_for_confirmation: prompted,
                 plan_item_count,
-                agent_error: Some(format!("opencode pane never settled: {e}")),
+                agent_error: Some(format!("{driver_name} pane never settled: {e}")),
             };
         }
     };
-    eprintln!("[opencode/{task_id}] first idle — {} bytes", pane1.len());
+    eprintln!("[{driver_name}/{task_id}] first idle — {} bytes", pane1.len());
 
-    // Auto-coach reply (pearl th-edb330). If the agent paused at a
-    // confirmation prompt ("Proceed?" / "y/n?" / "continue?") in the
-    // first idle, type "yes" + Enter and wait for a second idle. The
-    // bench fixture's README explicitly tells the agent the harness
-    // will say "yes" — without this step the agent enumerates a perfect
-    // plan, asks for confirmation, then idles forever and scores 0 on
-    // bytes_freed.
-    //
-    // We only react to a prompt detected in the AGENT REGION (sliced
-    // after the typed prompt) so the literal "Proceed?" in the README
-    // doesn't trigger a spurious coach reply mid-plan.
+    // Auto-coach reply (pearl th-edb330). Detect prompt in the AGENT
+    // REGION only — the literal "Proceed?" in the README must not
+    // trigger a spurious coach reply mid-plan.
     let agent_region1 = slice_after_prompt(&pane1, prompt);
     let (prompted1, _) = parse_plan_artifacts(agent_region1);
     let pane_final = if prompted1 {
-        eprintln!("[opencode/{task_id}] confirmation detected → sending 'yes'");
+        eprintln!("[{driver_name}/{task_id}] confirmation detected → sending 'yes'");
         if let Err(e) = driver.send("yes") {
-            eprintln!("[opencode/{task_id}] coach reply paste failed: {e}");
+            eprintln!("[{driver_name}/{task_id}] coach reply paste failed: {e}");
             pane1
         } else {
-            // Remaining budget after the first idle. We give the agent
-            // the time it has left to actually execute the deletion.
             let remaining = total_budget.saturating_sub(start.elapsed());
-            // 5s dwell is enough — after "yes" the agent typically
-            // streams a quick "Done." once the file ops finish.
-            match driver.wait_for_idle(Duration::from_secs(5), Duration::from_millis(500), remaining) {
+            match driver.wait_for_idle(post_coach_dwell, Duration::from_millis(500), remaining) {
                 Ok(p) => {
-                    eprintln!("[opencode/{task_id}] post-coach idle — {} bytes", p.len());
+                    eprintln!("[{driver_name}/{task_id}] post-coach idle — {} bytes", p.len());
                     p
                 }
                 Err(e) => {
-                    eprintln!("[opencode/{task_id}] post-coach idle timeout: {e}");
+                    eprintln!("[{driver_name}/{task_id}] post-coach idle timeout: {e}");
                     driver.capture().unwrap_or(pane1)
                 }
             }
@@ -480,13 +505,8 @@ fn drive_opencode_via_tmux(binary: &Path, task_id: &str, workspace: &Path, promp
     } else {
         pane1
     };
-    maybe_dump_pane(task_id, "opencode", &pane_final);
+    maybe_dump_pane(task_id, driver_name, &pane_final);
 
-    // Final scoring: prompt-detection comes from the FIRST idle (the
-    // "Proceed?" marker scrolls off during the post-coach turn — by
-    // the time the final pane settles, the assertion is gone). Plan
-    // item count comes from the final pane, which includes both the
-    // pre-coach plan AND any post-coach "Done deleting:" listing.
     let agent_region_final = slice_after_prompt(&pane_final, prompt);
     let (_, plan_item_count) = parse_plan_artifacts(agent_region_final);
     AgentRunArtifacts {
@@ -494,6 +514,150 @@ fn drive_opencode_via_tmux(binary: &Path, task_id: &str, workspace: &Path, promp
         plan_item_count,
         agent_error: None,
     }
+}
+
+/// Sync core of the OpenCode driver. Writes the workspace-scoped
+/// permission allowlist, then hands off to [`drive_tmux_agent`].
+fn drive_opencode_via_tmux(binary: &Path, task_id: &str, workspace: &Path, prompt: &str, model: Option<&str>, timeout: Duration) -> AgentRunArtifacts {
+    write_opencode_permissions(workspace, task_id);
+    drive_tmux_agent(TmuxAgentSpec {
+        driver_name: "opencode",
+        shell_cmd: opencode_shell_cmd(binary, model),
+        // OpenCode TUI usually paints in ~1-3s; 30s is conservative.
+        boot_timeout: Duration::from_secs(30),
+        paste_warmup: Duration::from_millis(800),
+        // OpenCode pauses between tool calls; 8s avoids false-idle.
+        first_idle_dwell: Duration::from_secs(8),
+        post_coach_dwell: Duration::from_secs(5),
+        task_id,
+        workspace,
+        prompt,
+        timeout,
+    })
+}
+
+// ── SmoothDriver: drive smooth's own `th code` TUI through tmux ─────
+
+/// Driver that spawns smooth's own `th code` TUI inside a tmux pane.
+/// Pearl `th-754512`. Lets us measure smooth's agentic behavior on the
+/// exact same operational task fixtures as OpenCode / Claude Code,
+/// driven through the exact same surface (tmux + paste + idle).
+///
+/// Spawned command (mirroring `tui_score.rs`'s `run_polyglot_task_via_tui`
+/// so smooth's bench env vars line up with its other harnesses):
+///
+/// ```bash
+/// SMOOTH_BENCH_FRESH_SESSION=1 SMOOTH_BENCH_TRACE_TOOLS=1 \
+///   <th_binary> code [--model <id>]
+/// ```
+///
+/// `SMOOTH_BENCH_FRESH_SESSION=1` makes smooth-code write its
+/// SessionManager state to a per-process tmp dir instead of
+/// `~/.smooth/coding-sessions/`, so consecutive bench tasks don't
+/// inherit each other's context via auto-resume (pearl `th-11cb9b`).
+/// `SMOOTH_BENCH_TRACE_TOOLS=1` emits `[METRICS]` lines for the
+/// downstream tool-call counter.
+///
+/// Pre-flight: requires Big Smooth running at the URL configured for
+/// `th code` (default `http://localhost:4400`). On a host without it,
+/// the boot gate fires and the dispatch returns
+/// `agent_error: smooth tmux boot failed: …`. Pearl follow-up could
+/// auto-start `th up` if not detected.
+pub struct SmoothDriver {
+    /// Path to the `th` binary. Defaults to plain `th` (PATH lookup).
+    binary: PathBuf,
+}
+
+impl SmoothDriver {
+    /// Construct the driver pointing at `th` (default — PATH lookup).
+    #[must_use]
+    pub fn from_path() -> Self {
+        Self {
+            binary: which_th().unwrap_or_else(|| PathBuf::from("th")),
+        }
+    }
+
+    /// Construct from an explicit `th` binary path. Intended for tests
+    /// and for benching worktree builds that aren't installed.
+    #[must_use]
+    pub fn with_binary(binary: PathBuf) -> Self {
+        Self { binary }
+    }
+}
+
+impl Default for SmoothDriver {
+    fn default() -> Self {
+        Self::from_path()
+    }
+}
+
+fn which_th() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join("th");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+#[async_trait]
+impl AgentDriver for SmoothDriver {
+    fn name(&self) -> &'static str {
+        "smooth"
+    }
+
+    async fn dispatch(&self, req: DispatchRequest<'_>) -> Result<AgentRunArtifacts> {
+        let binary = self.binary.clone();
+        let task_id = req.task_id.to_string();
+        let workspace = req.workspace.to_path_buf();
+        let prompt = req.prompt.to_string();
+        let model = req.model.map(str::to_string);
+        let timeout = req.timeout;
+        tokio::task::spawn_blocking(move || drive_smooth_via_tmux(&binary, &task_id, &workspace, &prompt, model.as_deref(), timeout))
+            .await
+            .context("smooth driver join")
+    }
+}
+
+/// Build the `sh -c` command that tmux runs to launch smooth's TUI.
+/// Mirrors `tui_score.rs` so the env-var conventions line up.
+fn smooth_shell_cmd(binary: &Path, model: Option<&str>) -> String {
+    let mut cmd = String::from("SMOOTH_BENCH_FRESH_SESSION=1 SMOOTH_BENCH_TRACE_TOOLS=1 ");
+    cmd.push_str(&shell_escape(&binary.to_string_lossy()));
+    cmd.push_str(" code");
+    if let Some(m) = model {
+        cmd.push_str(" --model ");
+        cmd.push_str(&shell_escape(m));
+    }
+    cmd
+}
+
+/// Sync core of the smooth driver. Just calls [`drive_tmux_agent`]
+/// with the smooth-flavored spec — no per-workspace config dance
+/// because smooth's permission model lives inside the sandbox
+/// (wonk/goalie), not in a workspace config file.
+fn drive_smooth_via_tmux(binary: &Path, task_id: &str, workspace: &Path, prompt: &str, model: Option<&str>, timeout: Duration) -> AgentRunArtifacts {
+    drive_tmux_agent(TmuxAgentSpec {
+        driver_name: "smooth",
+        shell_cmd: smooth_shell_cmd(binary, model),
+        // `th code` boots the full microVM cast (wonk, goalie, narc,
+        // scribe, archivist, groove) plus the operator-runner pool —
+        // 60-120s on a warm host, longer on first cast-image pull. Use
+        // the same 120s ceiling as `tui_score::TuiTaskConfig::default`.
+        boot_timeout: Duration::from_secs(120),
+        paste_warmup: Duration::from_millis(800),
+        // Smooth's coding loop sometimes pauses for >5s between tool
+        // calls; 8s matches the OpenCode setting so scores stay
+        // comparable across drivers.
+        first_idle_dwell: Duration::from_secs(8),
+        post_coach_dwell: Duration::from_secs(5),
+        task_id,
+        workspace,
+        prompt,
+        timeout,
+    })
 }
 
 /// Return the substring of `pane` AFTER the last occurrence of a
@@ -598,6 +762,16 @@ mod tests {
     fn parse_plan_artifacts_counts_indented_bullets() {
         // Markdown bullets are sometimes indented under a heading.
         let s = "Plan:\n  - foo\n  - bar\n  - baz\ncontinue?";
+        let (p, n) = parse_plan_artifacts(s);
+        assert!(p);
+        assert_eq!(n, 3);
+    }
+
+    #[test]
+    fn parse_plan_artifacts_counts_unicode_bullets() {
+        // Smooth-code's TUI uses '•' (U+2022) for its bullet lists.
+        // Pearl th-979db6. Same as the cleanup-pycache fixture pane.
+        let s = "Found these to delete:\n  • ./src/pkg/sub_27/__pycache__ (24.0K)\n  • ./src/pkg/sub_18/__pycache__ (24.0K)\n  • ./src/pkg/sub_9/__pycache__ (24.0K)\nProceed?";
         let (p, n) = parse_plan_artifacts(s);
         assert!(p);
         assert_eq!(n, 3);
@@ -718,6 +892,65 @@ Proceed?";
         let pane = "lots of text here ... hi ... and more";
         let agent = slice_after_prompt(pane, prompt);
         assert_eq!(agent, pane);
+    }
+
+    #[test]
+    fn smooth_shell_cmd_includes_bench_env_vars() {
+        let cmd = smooth_shell_cmd(&PathBuf::from("/usr/local/bin/th"), Some("smooai/deepseek-v4-flash"));
+        assert!(cmd.contains("SMOOTH_BENCH_FRESH_SESSION=1"));
+        assert!(cmd.contains("SMOOTH_BENCH_TRACE_TOOLS=1"));
+        assert!(cmd.contains("'/usr/local/bin/th'"));
+        assert!(cmd.contains(" code "));
+        assert!(cmd.contains("--model 'smooai/deepseek-v4-flash'"));
+    }
+
+    #[test]
+    fn smooth_shell_cmd_without_model_omits_model_flag() {
+        let cmd = smooth_shell_cmd(&PathBuf::from("th"), None);
+        assert!(cmd.contains(" code"));
+        assert!(!cmd.contains("--model"));
+    }
+
+    #[test]
+    fn smooth_driver_name_is_smooth() {
+        let d = SmoothDriver::with_binary(PathBuf::from("th"));
+        assert_eq!(d.name(), "smooth");
+    }
+
+    #[tokio::test]
+    async fn smooth_driver_with_bogus_binary_returns_tmux_boot_error() {
+        // `sh -c` with a missing binary exits immediately and the
+        // first-render gate times out → driver surfaces this as
+        // agent_error rather than crashing the sweep. Same shape as
+        // the OpenCode equivalent.
+        let driver = SmoothDriver::with_binary(PathBuf::from("/definitely/not/a/real/path/th-xyz-123"));
+        let tmp = tempfile::tempdir().unwrap();
+        let art = driver
+            .dispatch(DispatchRequest {
+                task_id: "t",
+                workspace: tmp.path(),
+                prompt: "hi",
+                model: None,
+                timeout: Duration::from_secs(2),
+            })
+            .await
+            .unwrap();
+        let err = art.agent_error.as_deref().unwrap_or_default();
+        assert!(
+            err.contains("boot failed") || err.contains("never settled") || err.contains("paste failed"),
+            "unexpected agent_error: {err}",
+        );
+    }
+
+    #[test]
+    fn opencode_shell_cmd_without_env_prefix() {
+        // Sanity check that the OpenCode and Smooth shell-cmd builders
+        // diverge only in the env prefix — making this explicit so a
+        // future refactor doesn't accidentally cross-pollute them.
+        let cmd = opencode_shell_cmd(&PathBuf::from("/opt/opencode"), Some("smooai/deepseek-v4-flash"));
+        assert!(!cmd.contains("SMOOTH_BENCH_FRESH_SESSION"));
+        assert!(cmd.starts_with("'/opt/opencode'"));
+        assert!(cmd.contains("--model 'smooai/deepseek-v4-flash'"));
     }
 
     #[tokio::test]
