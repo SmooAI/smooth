@@ -392,13 +392,40 @@ struct ScoreCleanupArgs {
 
     /// Path to a mock-agent script. The script is invoked with
     /// `WORKSPACE` env set to the polluted dir and is expected to
-    /// perform the cleanup. Until the live agent is wired, this
-    /// lets us exercise the full scoring pipeline against a
-    /// deterministic baseline. Use this path:
+    /// perform the cleanup. Provides a deterministic baseline for
+    /// the scoring pipeline. Use this path:
     /// `crates/smooth-bench/tasks-real/_mock-agents/perfect-pycache.sh`
-    /// for a known-good cleanup.
+    /// for a known-good cleanup. Implies `--driver=mock`.
     #[arg(long)]
     mock_agent: Option<PathBuf>,
+
+    /// Agent backend to dispatch each task against. Pearl th-e5b773
+    /// (multi-driver harness). `mock` requires `--mock-agent`;
+    /// `opencode` requires `opencode` on PATH; `smooth` and
+    /// `claude-code` are TODO (pearls th-754512, th-36145e).
+    #[arg(long, default_value_t = AgentDriverKind::Mock, value_enum)]
+    driver: AgentDriverKind,
+
+    /// Model id forwarded to the chosen driver. For `opencode` use the
+    /// model name as configured in your `~/.config/opencode/opencode.json`
+    /// (e.g. `deepseek-v4-flash` if that's the alias your llm.smoo.ai
+    /// provider exposes). Ignored by `mock`.
+    #[arg(long)]
+    model: Option<String>,
+
+    /// Per-task wall-clock timeout in seconds.
+    #[arg(long, default_value_t = 600)]
+    task_timeout_s: u64,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum AgentDriverKind {
+    Mock,
+    Opencode,
+    /// Smooth's own `th code`. Pearl th-754512 — not wired yet.
+    Smooth,
+    /// Claude Code's `claude -p`. Pearl th-36145e — not wired yet.
+    ClaudeCode,
 }
 
 #[derive(Parser, Debug)]
@@ -550,6 +577,7 @@ async fn run_score_replay(args: ScoreReplayArgs) -> Result<()> {
 }
 
 async fn run_score_cleanup(args: ScoreCleanupArgs) -> Result<()> {
+    use smooth_bench::agent_driver::{AgentDriver, DispatchRequest, MockAgentDriver, OpenCodeDriver};
     use smooth_bench::score_cleanup::{
         aggregate, destroyed_paths, discover_tasks, load_manifest, measure_bytes, run_setup, score_one_task, sweep_passed, AgentRunArtifacts,
     };
@@ -574,6 +602,32 @@ async fn run_score_cleanup(args: ScoreCleanupArgs) -> Result<()> {
     std::fs::create_dir_all(&run_root).context("create run_root")?;
     eprintln!("score-cleanup: work root = {}", run_root.display());
 
+    // Resolve the driver up-front so a misconfig fails fast (e.g.
+    // --driver=mock without --mock-agent) before we materialize any
+    // task workspaces. `--mock-agent <path>` implies `--driver=mock`
+    // for back-compat with the original CLI shape.
+    let driver_kind = if args.mock_agent.is_some() {
+        AgentDriverKind::Mock
+    } else {
+        args.driver
+    };
+    let driver: Box<dyn AgentDriver> = match driver_kind {
+        AgentDriverKind::Mock => {
+            let script = args
+                .mock_agent
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("--driver=mock requires --mock-agent <path>"))?;
+            Box::new(MockAgentDriver::new(script))
+        }
+        AgentDriverKind::Opencode => Box::new(OpenCodeDriver::from_path()),
+        AgentDriverKind::Smooth => anyhow::bail!("--driver=smooth not wired yet — pearl th-754512"),
+        AgentDriverKind::ClaudeCode => anyhow::bail!("--driver=claude-code not wired yet — pearl th-36145e"),
+    };
+    eprintln!("score-cleanup: driver = {}", driver.name());
+    if let Some(m) = args.model.as_deref() {
+        eprintln!("score-cleanup: model  = {m}");
+    }
+
     let mut per_task = Vec::new();
     for task_dir in &to_run {
         let manifest = load_manifest(task_dir)?;
@@ -585,20 +639,19 @@ async fn run_score_cleanup(args: ScoreCleanupArgs) -> Result<()> {
         let bytes_before = measure_bytes(&work_dir)?;
         eprintln!("bytes before: {bytes_before}");
 
-        // Drive the agent. Until the live driver is wired (same TODO
-        // as score_real), use the mock-agent script — a deterministic
-        // bash cleanup driver so the scoring pipeline is exercisable
-        // end-to-end and grading can be regression-tested.
-        let artifacts = if let Some(mock) = args.mock_agent.as_ref() {
-            run_mock_agent(mock, &work_dir)?
-        } else {
-            eprintln!("(no --mock-agent; live agent dispatch is TODO th-85e3c5-live-dispatch)");
-            AgentRunArtifacts {
-                prompted_for_confirmation: false,
-                plan_item_count: 0,
-                agent_error: Some("no agent driver wired; pass --mock-agent <path> for now".into()),
-            }
-        };
+        // Build the agent-facing prompt from the task's README. Mock
+        // drivers ignore it; live drivers feed it straight to the LLM.
+        let prompt = std::fs::read_to_string(task_dir.join("README.md")).unwrap_or_default();
+        let artifacts: AgentRunArtifacts = driver
+            .dispatch(DispatchRequest {
+                task_id: &manifest.task.id,
+                workspace: &work_dir,
+                prompt: &prompt,
+                model: args.model.as_deref(),
+                timeout: std::time::Duration::from_secs(args.task_timeout_s),
+            })
+            .await
+            .with_context(|| format!("dispatch {} via {}", manifest.task.id, driver.name()))?;
 
         let bytes_after = measure_bytes(&work_dir)?;
         eprintln!("bytes after:  {bytes_after}  (freed {})", bytes_before.saturating_sub(bytes_after));
@@ -642,45 +695,6 @@ async fn run_score_cleanup(args: ScoreCleanupArgs) -> Result<()> {
     } else {
         anyhow::bail!("score-cleanup sweep did not pass — mean {:.3}", aggregate_score.overall_pass_rate);
     }
-}
-
-fn run_mock_agent(script: &std::path::Path, work_dir: &std::path::Path) -> Result<smooth_bench::score_cleanup::AgentRunArtifacts> {
-    // Capture stdout so we can scan for the confirmation prompt + plan items.
-    let output = std::process::Command::new("bash")
-        .arg(script)
-        .env("WORKSPACE", work_dir)
-        .output()
-        .with_context(|| format!("spawn mock agent {}", script.display()))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    eprint!("{stderr}");
-
-    if !output.status.success() {
-        return Ok(smooth_bench::score_cleanup::AgentRunArtifacts {
-            prompted_for_confirmation: false,
-            plan_item_count: 0,
-            agent_error: Some(format!("mock agent exited {:?}", output.status.code())),
-        });
-    }
-
-    // Heuristic: count "DELETE: …" / "- " bullet lines as plan items;
-    // any of {"proceed?", "y/n?", "continue?"} (case-insensitive)
-    // in stdout signals a confirmation prompt.
-    let lower = stdout.to_lowercase();
-    let prompted = lower.contains("proceed?") || lower.contains("y/n?") || lower.contains("continue?");
-    let plan_item_count = stdout
-        .lines()
-        .filter(|l| {
-            let t = l.trim_start();
-            t.starts_with("DELETE:") || t.starts_with("- ")
-        })
-        .count() as u32;
-
-    Ok(smooth_bench::score_cleanup::AgentRunArtifacts {
-        prompted_for_confirmation: prompted,
-        plan_item_count,
-        agent_error: None,
-    })
 }
 
 fn random_run_id() -> String {

@@ -29,6 +29,7 @@ use std::time::Instant;
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
 
+pub mod agent_driver;
 pub mod auto_approve;
 pub mod chat_driver;
 pub mod curated;
