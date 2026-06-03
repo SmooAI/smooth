@@ -109,9 +109,106 @@ pub trait AgentDriver: Send + Sync {
 #[must_use]
 pub fn parse_plan_artifacts(transcript: &str) -> (bool, u32) {
     let lower = transcript.to_lowercase();
-    let prompted = lower.contains("proceed?") || lower.contains("y/n?") || lower.contains("continue?");
+    let prompted = is_asking_permission(&lower);
     let plan_items: usize = transcript.lines().filter(|l| is_plan_line(l)).count();
     (prompted, u32::try_from(plan_items).unwrap_or(u32::MAX))
+}
+
+/// True if the lowercased transcript contains a confirmation-question
+/// pattern from the agent. Two families:
+///
+/// 1. **Bare verb-question markers** — the original three (`proceed?`,
+///    `y/n?`, `continue?`) plus `go ahead?` and `confirm?`. Direct
+///    substring match; trailing `?` baked in so prose containing
+///    "proceed with caution" doesn't false-fire.
+///
+/// 2. **Permission-ask phrasings on the same line as a `?`** — e.g.
+///    "May I delete the 15 pipeline intermediate files?" (pearl
+///    `th-7a1c47` — OpenCode on cleanup-disk-bloat). We look for
+///    "may i", "shall i", "should i", "ok to", "okay to" AS A LINE-
+///    LOCAL signal: the phrase and the `?` must appear in the same
+///    line so a README mentioning "should I do X?" elsewhere doesn't
+///    pair with an unrelated `?` later.
+fn is_asking_permission(lower: &str) -> bool {
+    const BARE_MARKERS: &[&str] = &["proceed?", "y/n?", "continue?", "go ahead?", "confirm?"];
+    for m in BARE_MARKERS {
+        if lower.contains(m) {
+            return true;
+        }
+    }
+    // Line-local checks: phrase + `?` must appear on the same line.
+    // Avoids false-firing when the phrase is in prose and an unrelated
+    // `?` appears later in the transcript. Pearl `th-7a1c47`.
+    const PERMISSION_PHRASES: &[&str] = &["may i ", "shall i ", "should i ", "ok to ", "okay to "];
+    // Action verbs commonly used in continuation questions like
+    // "Proceed with deleting these 15 files?" — exact bare-marker
+    // match misses these because the verb is followed by other text
+    // before the `?`. We require a leading word boundary (start of
+    // line OR whitespace) to avoid "interprocedure?" style matches.
+    const VERB_QUESTION_STEMS: &[&str] = &["proceed", "delete ", "remove ", "clean ", "prune ", "run this", "execute"];
+    for line in lower.lines() {
+        if !line.contains('?') {
+            continue;
+        }
+        for p in PERMISSION_PHRASES {
+            if line.contains(p) {
+                return true;
+            }
+        }
+        for stem in VERB_QUESTION_STEMS {
+            if let Some(idx) = line.find(stem) {
+                // Must be a word boundary on the left side — start of
+                // line, or a non-alphabetic char.
+                if idx == 0 || !line.as_bytes()[idx - 1].is_ascii_alphabetic() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// True if the agent region shows a numbered-picker confirmation
+/// (OpenCode-style multi-option chooser). Pearl `th-c67169`.
+///
+/// Pattern: at least two `^\d\.\s` lines within the last ~30 lines
+/// of the region. We look near the bottom because the picker is
+/// always the most-recent thing on the screen when shown. The
+/// double-occurrence guard avoids false-firing on numbered plan
+/// items (`1. Find all files\n2. List them\n…` — a plan, not a
+/// picker) — pickers always pair an option label with a description
+/// line, so a real picker has `1.` and `2.` near each other.
+#[must_use]
+fn is_numbered_picker(agent_region: &str) -> bool {
+    let lines: Vec<&str> = agent_region.lines().collect();
+    let start = lines.len().saturating_sub(30);
+    let mut digits_seen: u8 = 0;
+    for line in &lines[start..] {
+        // Strip leading TUI chrome (`┃`, spaces) before checking for
+        // the leading digit. Use `trim_start_matches` over a charset
+        // since box-drawing chars + ASCII space + tab all need to go.
+        let stripped = line.trim_start_matches(|c: char| c == '┃' || c == '│' || c.is_whitespace());
+        let bytes = stripped.as_bytes();
+        if bytes.len() < 3 {
+            continue;
+        }
+        if !bytes[0].is_ascii_digit() {
+            continue;
+        }
+        if bytes[1] != b'.' {
+            continue;
+        }
+        if !(bytes[2] == b' ' || bytes[2] == b'\t') {
+            continue;
+        }
+        // Plan items often start with "1. " too — distinguish by also
+        // requiring a SECOND numbered option within a small window.
+        digits_seen = digits_seen.saturating_add(1);
+        if digits_seen >= 2 {
+            return true;
+        }
+    }
+    false
 }
 
 /// True if `line` looks like an entry in a deletion plan.
@@ -503,8 +600,20 @@ fn drive_tmux_agent(spec: TmuxAgentSpec) -> AgentRunArtifacts {
     let (prompted1, _) = parse_plan_artifacts(agent_region1);
     let pane_final = if prompted1 {
         if let Some(reply) = coach_reply_text(coach) {
-            eprintln!("[{driver_name}/{task_id}] confirmation detected → coach={coach:?} reply");
-            if let Err(e) = driver.send(reply) {
+            // Pearl th-c67169: when the agent (typically OpenCode) shows
+            // a numbered picker UI ("1. yes / 2. no / 3. type"), the
+            // bare-text reply paste lands in the type-your-own field
+            // instead of selecting option 1. Detect picker chrome in
+            // the agent region and switch to a numeric-select reply
+            // ("1" + Enter) for those cases.
+            let send_text = if is_numbered_picker(agent_region1) {
+                eprintln!("[{driver_name}/{task_id}] picker UI detected → sending '1' to select option");
+                "1"
+            } else {
+                eprintln!("[{driver_name}/{task_id}] confirmation detected → coach={coach:?} reply");
+                reply
+            };
+            if let Err(e) = driver.send(send_text) {
                 eprintln!("[{driver_name}/{task_id}] coach reply paste failed: {e}");
                 pane1
             } else {
@@ -888,6 +997,109 @@ mod tests {
         let (p, n) = parse_plan_artifacts("hello world");
         assert!(!p);
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn parse_plan_artifacts_detects_may_i_question() {
+        // Pearl th-7a1c47: OpenCode used this on cleanup-disk-bloat.
+        let s = "Delete (pipeline intermediates): ...\n\nMay I delete the 15 pipeline intermediate files?";
+        let (p, _) = parse_plan_artifacts(s);
+        assert!(p, "should catch 'May I delete X?'");
+    }
+
+    #[test]
+    fn parse_plan_artifacts_detects_shall_i_question() {
+        let s = "Plan:\n- foo\nShall I proceed with the deletion?";
+        let (p, _) = parse_plan_artifacts(s);
+        assert!(p);
+    }
+
+    #[test]
+    fn parse_plan_artifacts_detects_should_i_question() {
+        let s = "Plan:\n- foo\nShould I delete these now?";
+        let (p, _) = parse_plan_artifacts(s);
+        assert!(p);
+    }
+
+    #[test]
+    fn parse_plan_artifacts_detects_proceed_with_x_question() {
+        // Pearl th-7a1c47: OpenCode used this exact phrasing on
+        // cleanup-disk-bloat — "Proceed with deleting these 15
+        // pipeline files?" doesn't contain the bare "proceed?"
+        // substring but the verb-then-? heuristic catches it.
+        let s = "Plan:\n- foo\nProceed with deleting these 15 pipeline files?";
+        let (p, _) = parse_plan_artifacts(s);
+        assert!(p);
+    }
+
+    #[test]
+    fn parse_plan_artifacts_detects_delete_question() {
+        let s = "Found 5 files.\nDelete them now?";
+        let (p, _) = parse_plan_artifacts(s);
+        assert!(p);
+    }
+
+    #[test]
+    fn parse_plan_artifacts_verb_inside_word_does_not_fire() {
+        // "interprocedure" should NOT match "proceed".
+        // (Edge case for the word-boundary guard.)
+        let s = "the interprocedure routine ran successfully?";
+        let (p, _) = parse_plan_artifacts(s);
+        assert!(!p, "should require word-boundary on the verb stem");
+    }
+
+    #[test]
+    fn parse_plan_artifacts_detects_ok_to_question() {
+        let s = "Found 5 cache files. OK to remove them?";
+        let (p, _) = parse_plan_artifacts(s);
+        assert!(p);
+    }
+
+    #[test]
+    fn parse_plan_artifacts_detects_confirm_marker() {
+        let s = "Plan:\n- foo\nConfirm?";
+        let (p, _) = parse_plan_artifacts(s);
+        assert!(p);
+    }
+
+    #[test]
+    fn is_numbered_picker_catches_two_option_picker() {
+        // Pearl th-c67169: OpenCode's picker shape.
+        let s = "May I delete the 15 pipeline intermediate files?\n┃ 1. yes, proceed\n┃    Delete all 15 oversized pipeline files\n┃ 2. no, cancel\n┃    Keep all files";
+        assert!(is_numbered_picker(s));
+    }
+
+    #[test]
+    fn is_numbered_picker_does_not_fire_on_single_numbered_step() {
+        // A numbered plan with `1. step` but no `2. step` should
+        // NOT be detected as a picker.
+        let s = "Plan:\n1. Discover the files\nAll done? Proceed.";
+        assert!(!is_numbered_picker(s));
+    }
+
+    #[test]
+    fn is_numbered_picker_ignores_plan_in_earlier_region() {
+        // A numbered plan in the FIRST 30 lines but trailing prose at
+        // the bottom should not fire (we look at the BOTTOM 30 lines).
+        let mut s = String::from("1. step\n2. step\n");
+        for i in 0..40 {
+            s.push_str(&format!("paragraph line {i}\n"));
+        }
+        s.push_str("And that's the plan.");
+        assert!(!is_numbered_picker(&s));
+    }
+
+    #[test]
+    fn parse_plan_artifacts_permission_phrase_alone_does_not_fire() {
+        // "should I" without a question mark on the same line is just
+        // prose ("I think you should I assess this carefully later.") —
+        // even if a `?` appears elsewhere in the transcript on a
+        // different line. Pearl th-7a1c47 — avoiding false positives.
+        let s = "I think you should i.e. consider the options.\n\nWhat about that?";
+        // The first line has "should i" but no `?`; the second line
+        // has `?` but no permission phrase. Heuristic should NOT fire.
+        let (p, _) = parse_plan_artifacts(s);
+        assert!(!p, "should not fire when phrase + `?` are on different lines");
     }
 
     #[test]
