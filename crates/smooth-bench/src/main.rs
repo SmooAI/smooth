@@ -422,9 +422,12 @@ struct ScoreCleanupArgs {
 enum AgentDriverKind {
     Mock,
     Opencode,
-    /// Smooth's own `th code`. Pearl th-754512 — not wired yet.
+    /// Smooth's own `th code`. Pearl th-754512.
     Smooth,
-    /// Claude Code's `claude -p`. Pearl th-36145e — not wired yet.
+    /// Earendil's `pi` coding agent. Pearl th-491e0c.
+    Pi,
+    /// Claude Code's `claude -p`. Pearl th-36145e (canceled per user
+    /// directive 2026-06-03 — Pi takes its slot).
     ClaudeCode,
 }
 
@@ -577,7 +580,7 @@ async fn run_score_replay(args: ScoreReplayArgs) -> Result<()> {
 }
 
 async fn run_score_cleanup(args: ScoreCleanupArgs) -> Result<()> {
-    use smooth_bench::agent_driver::{AgentDriver, DispatchRequest, MockAgentDriver, OpenCodeDriver, SmoothDriver};
+    use smooth_bench::agent_driver::{AgentDriver, DispatchRequest, MockAgentDriver, OpenCodeDriver, PiDriver, SmoothDriver};
     use smooth_bench::score_cleanup::{
         aggregate, destroyed_paths, discover_tasks, load_manifest, measure_bytes, run_setup, score_one_task, sweep_passed, AgentRunArtifacts,
     };
@@ -617,7 +620,10 @@ async fn run_score_cleanup(args: ScoreCleanupArgs) -> Result<()> {
         }
         AgentDriverKind::Opencode => Box::new(OpenCodeDriver::from_path()),
         AgentDriverKind::Smooth => Box::new(SmoothDriver::from_path()),
-        AgentDriverKind::ClaudeCode => anyhow::bail!("--driver=claude-code not wired yet — pearl th-36145e"),
+        AgentDriverKind::Pi => Box::new(PiDriver::from_path()),
+        AgentDriverKind::ClaudeCode => {
+            anyhow::bail!("--driver=claude-code canceled per user direction 2026-06-03 (pearl th-36145e); use --driver=pi instead (th-491e0c)")
+        }
     };
     eprintln!("score-cleanup: driver = {}", driver.name());
     if let Some(m) = args.model.as_deref() {

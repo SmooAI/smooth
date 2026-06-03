@@ -907,6 +907,167 @@ fn drive_smooth_via_tmux(
     })
 }
 
+// ── PiDriver: drive `pi` (Earendil's coding agent) through tmux ─────
+
+/// Driver that spawns `pi` (`@earendil-works/pi-coding-agent`) inside a
+/// tmux pane. Pearl `th-491e0c`. Drives the interactive TUI for
+/// apples-to-apples parity with [`OpenCodeDriver`] + [`SmoothDriver`].
+///
+/// Pi has a native print mode (`pi -p "…"`) that would let us skip
+/// tmux entirely, but driving all three backends through the same
+/// surface (tmux + paste + idle) is what guarantees the scores stay
+/// comparable. Differences in agentic behavior shouldn't be
+/// confounded by surface-specific quirks.
+///
+/// Spawned command:
+///
+/// ```bash
+/// pi --no-session --provider smooai [--model <id>]
+/// ```
+///
+/// `--no-session` keeps the run ephemeral (no `~/.pi/agent/sessions/`
+/// pollution). `--provider smooai` selects the custom provider in
+/// `~/.pi/agent/models.json` that points at `llm.smoo.ai`. Model is
+/// passed through from the bench's `--model` flag verbatim; `pi`
+/// accepts either `provider/model` or `model` if the provider is
+/// pre-selected.
+///
+/// Pre-flight: requires `pi` on PATH and a `~/.pi/agent/models.json`
+/// declaring the `smooai` provider with credentials. If `pi` isn't
+/// installed the driver returns an `agent_error` rather than killing
+/// the sweep — same shape as `OpenCodeDriver`.
+pub struct PiDriver {
+    /// Path to the `pi` binary. Resolved via `which_pi()` at
+    /// construction; falls back to `pi` (bare name on PATH) when
+    /// resolution fails — the spawn step will surface the failure as
+    /// an agent_error per task.
+    binary: PathBuf,
+}
+
+impl PiDriver {
+    /// Construct from PATH. Falls back to bare `pi` if resolution
+    /// fails so the dispatch path can surface a clean error.
+    #[must_use]
+    pub fn from_path() -> Self {
+        Self {
+            binary: which_pi().unwrap_or_else(|| PathBuf::from("pi")),
+        }
+    }
+
+    /// Construct from an explicit `pi` binary path. Intended for
+    /// tests and for benching specific installs (e.g. an nvm-managed
+    /// version pinned at `~/.nvm/versions/node/v22.19.0/bin/pi`).
+    #[must_use]
+    pub fn with_binary(binary: PathBuf) -> Self {
+        Self { binary }
+    }
+}
+
+impl Default for PiDriver {
+    fn default() -> Self {
+        Self::from_path()
+    }
+}
+
+/// Walk PATH for the `pi` binary, falling back to known nvm install
+/// directories. We check nvm explicitly because nvm's shell-init
+/// hooks don't propagate cleanly across the bench's spawned `sh -c`
+/// invocations — even when `pi` is "on PATH" for the user's
+/// interactive shell, the bench's tmux subshell may not see it.
+fn which_pi() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let candidate = dir.join("pi");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    // Fallback: scan nvm's installed Node versions for a `bin/pi`.
+    if let Some(home) = dirs_next::home_dir() {
+        let nvm_node = home.join(".nvm").join("versions").join("node");
+        if let Ok(entries) = std::fs::read_dir(&nvm_node) {
+            for entry in entries.flatten() {
+                let candidate = entry.path().join("bin").join("pi");
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[async_trait]
+impl AgentDriver for PiDriver {
+    fn name(&self) -> &'static str {
+        "pi"
+    }
+
+    async fn dispatch(&self, req: DispatchRequest<'_>) -> Result<AgentRunArtifacts> {
+        let binary = self.binary.clone();
+        let task_id = req.task_id.to_string();
+        let workspace = req.workspace.to_path_buf();
+        let prompt = req.prompt.to_string();
+        let model = req.model.map(str::to_string);
+        let timeout = req.timeout;
+        let coach = req.coach;
+        tokio::task::spawn_blocking(move || drive_pi_via_tmux(&binary, &task_id, &workspace, &prompt, model.as_deref(), timeout, coach))
+            .await
+            .context("pi driver join")
+    }
+}
+
+/// Build the `sh -c` command tmux runs to launch pi's TUI.
+///
+/// We pin `--provider smooai` so the run goes through `llm.smoo.ai`
+/// (configured in `~/.pi/agent/models.json` — same auth path the user
+/// configures once interactively). `--no-session` keeps the run
+/// ephemeral.
+fn pi_shell_cmd(binary: &Path, model: Option<&str>) -> String {
+    let mut cmd = shell_escape(&binary.to_string_lossy());
+    cmd.push_str(" --no-session --provider smooai");
+    if let Some(m) = model {
+        cmd.push_str(" --model ");
+        cmd.push_str(&shell_escape(m));
+    }
+    cmd
+}
+
+/// Sync core of the pi driver. Hands off to [`drive_tmux_agent`] with
+/// the pi-flavored spec.
+fn drive_pi_via_tmux(
+    binary: &Path,
+    task_id: &str,
+    workspace: &Path,
+    prompt: &str,
+    model: Option<&str>,
+    timeout: Duration,
+    coach: CoachMode,
+) -> AgentRunArtifacts {
+    drive_tmux_agent(TmuxAgentSpec {
+        driver_name: "pi",
+        shell_cmd: pi_shell_cmd(binary, model),
+        // Pi's TUI is a Node.js process — boot is fast (~1-3s on a
+        // warm node_modules cache, longer on a cold one). 30s is the
+        // same conservative ceiling as OpenCode; we'd rather fail
+        // fast on a broken install than burn the per-task budget.
+        boot_timeout: Duration::from_secs(30),
+        paste_warmup: Duration::from_millis(800),
+        // Pi shows visible token-streaming when the model responds,
+        // so the 8s dwell that works for OpenCode should work here
+        // too. If pi turns out to have a static spinner state like
+        // smooth's `Thinking...`, bump to 15-20s.
+        first_idle_dwell: Duration::from_secs(8),
+        post_coach_dwell: Duration::from_secs(5),
+        task_id,
+        workspace,
+        prompt,
+        timeout,
+        coach,
+    })
+}
+
 /// Return the substring of `pane` AFTER the last occurrence of a
 /// stable prefix of `prompt`. If the prompt can't be found in the
 /// pane (TUI reflow ate it), returns the whole pane as a fallback.
