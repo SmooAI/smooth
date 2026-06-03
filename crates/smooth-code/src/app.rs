@@ -1169,12 +1169,33 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
                 .collect::<Vec<_>>()
                 .join("\n");
             let trimmed = cleaned.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
+            // Pearl th-91075b: do NOT drop the whole assistant turn when
+            // its cleaned content is empty (e.g. when the assistant
+            // turn was almost entirely [runner] tool prose). Dropping
+            // the turn here was breaking inter-turn context — the LLM
+            // on turn 2 would see system + turn-1-user + turn-2-user
+            // and respond "I don't see a plan above" because the
+            // assistant's turn-1 reply had been silently removed.
+            //
+            // Preserve the turn structure with a brief placeholder so
+            // the LLM at least knows "an assistant turn happened here,
+            // it consisted of tool ops." The tool calls themselves are
+            // already in the runner's structured tool-call channel —
+            // this prose path only needs to keep the turn ordering
+            // intact.
+            let content = if trimmed.is_empty() {
+                match msg.role {
+                    crate::state::ChatRole::Assistant => "(prior turn: ran tools; output omitted from prose history)".to_string(),
+                    // User turns that are empty are truly nothing —
+                    // skip those as before.
+                    _ => continue,
+                }
+            } else {
+                trimmed.to_string()
+            };
             out.push(crate::client::PriorMessage {
                 role: role.to_string(),
-                content: trimmed.to_string(),
+                content,
             });
         }
         out
