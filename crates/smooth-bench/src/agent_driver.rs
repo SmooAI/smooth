@@ -38,7 +38,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 
-use crate::score_cleanup::AgentRunArtifacts;
+use crate::score_cleanup::{AgentRunArtifacts, CoachMode, RefusalKind};
 
 /// Inputs every driver receives for a single task dispatch.
 ///
@@ -62,6 +62,13 @@ pub struct DispatchRequest<'a> {
     /// Wall-clock timeout. Past this the driver MUST kill the agent
     /// and return [`AgentRunArtifacts`] with `agent_error = Some("…")`.
     pub timeout: Duration,
+    /// How aggressively the auto-coach replies after the first idle.
+    /// Pearl `th-020e5e`. Defaults to `strict` (bare "yes, proceed")
+    /// because the bench should surface smooth's gaps rather than hide
+    /// them behind permissive hand-holding. The score-cleanup main path
+    /// reads each fixture's `[coach]` block from `manifest.toml` and
+    /// passes it through.
+    pub coach: CoachMode,
 }
 
 #[async_trait]
@@ -188,24 +195,24 @@ impl AgentDriver for MockAgentDriver {
                     eprint!("{stderr}");
                     if !status.success() {
                         return Ok(AgentRunArtifacts {
-                            prompted_for_confirmation: false,
-                            plan_item_count: 0,
                             agent_error: Some(format!("mock agent exited {code:?}", code = status.code())),
+                            ..Default::default()
                         });
                     }
                     let (prompted, plan_item_count) = parse_plan_artifacts(&stdout);
+                    let refused_task = detect_refusal(&stdout, plan_item_count);
                     return Ok(AgentRunArtifacts {
                         prompted_for_confirmation: prompted,
                         plan_item_count,
+                        refused_task,
                         agent_error: None,
                     });
                 }
                 if std::time::Instant::now() >= deadline {
                     let _ = child.kill();
                     return Ok(AgentRunArtifacts {
-                        prompted_for_confirmation: false,
-                        plan_item_count: 0,
                         agent_error: Some(format!("mock agent timed out after {timeout:?}")),
+                        ..Default::default()
                     });
                 }
                 std::thread::sleep(Duration::from_millis(50));
@@ -214,6 +221,7 @@ impl AgentDriver for MockAgentDriver {
         let _ = req.task_id; // explicitly unused in mock path
         let _ = req.prompt;
         let _ = req.model;
+        let _ = req.coach; // mock has no inter-turn coach reply path
         join.await.context("mock driver join")?
     }
 }
@@ -296,9 +304,8 @@ impl AgentDriver for OpenCodeDriver {
     async fn dispatch(&self, req: DispatchRequest<'_>) -> Result<AgentRunArtifacts> {
         let Some(binary) = self.binary.clone() else {
             return Ok(AgentRunArtifacts {
-                prompted_for_confirmation: false,
-                plan_item_count: 0,
                 agent_error: Some("opencode binary not found on PATH; install opencode or pass an explicit path".into()),
+                ..Default::default()
             });
         };
         // The whole driver is sync (tmux + std::process). Spool it
@@ -309,7 +316,8 @@ impl AgentDriver for OpenCodeDriver {
         let prompt = req.prompt.to_string();
         let model = req.model.map(str::to_string);
         let timeout = req.timeout;
-        tokio::task::spawn_blocking(move || drive_opencode_via_tmux(&binary, &task_id, &workspace, &prompt, model.as_deref(), timeout))
+        let coach = req.coach;
+        tokio::task::spawn_blocking(move || drive_opencode_via_tmux(&binary, &task_id, &workspace, &prompt, model.as_deref(), timeout, coach))
             .await
             .context("opencode driver join")
     }
@@ -414,6 +422,9 @@ struct TmuxAgentSpec<'a> {
     prompt: &'a str,
     /// Overall wall-clock budget for the whole dispatch.
     timeout: Duration,
+    /// Coaching aggressiveness — drives the auto-coach reply shape.
+    /// Pearl `th-020e5e`.
+    coach: CoachMode,
 }
 
 /// Boot a tmux-driven TUI, paste the prompt, wait for first idle,
@@ -438,6 +449,7 @@ fn drive_tmux_agent(spec: TmuxAgentSpec) -> AgentRunArtifacts {
         workspace,
         prompt,
         timeout,
+        coach,
     } = spec;
 
     let session = format!("{driver_name}-{}-{}", sanitize_session(task_id), uuid::Uuid::new_v4().simple());
@@ -445,9 +457,8 @@ fn drive_tmux_agent(spec: TmuxAgentSpec) -> AgentRunArtifacts {
         Ok(d) => d,
         Err(e) => {
             return AgentRunArtifacts {
-                prompted_for_confirmation: false,
-                plan_item_count: 0,
                 agent_error: Some(format!("{driver_name} tmux boot failed: {e}")),
+                ..Default::default()
             };
         }
     };
@@ -456,9 +467,8 @@ fn drive_tmux_agent(spec: TmuxAgentSpec) -> AgentRunArtifacts {
 
     if let Err(e) = driver.send(prompt) {
         return AgentRunArtifacts {
-            prompted_for_confirmation: false,
-            plan_item_count: 0,
             agent_error: Some(format!("{driver_name} paste failed: {e}")),
+            ..Default::default()
         };
     }
 
@@ -470,9 +480,11 @@ fn drive_tmux_agent(spec: TmuxAgentSpec) -> AgentRunArtifacts {
             let partial = driver.capture().unwrap_or_default();
             let agent_region = slice_after_prompt(&partial, prompt);
             let (prompted, plan_item_count) = parse_plan_artifacts(agent_region);
+            let refused_task = detect_refusal(agent_region, plan_item_count);
             return AgentRunArtifacts {
                 prompted_for_confirmation: prompted,
                 plan_item_count,
+                refused_task,
                 agent_error: Some(format!("{driver_name} pane never settled: {e}")),
             };
         }
@@ -483,44 +495,34 @@ fn drive_tmux_agent(spec: TmuxAgentSpec) -> AgentRunArtifacts {
     // REGION only — the literal "Proceed?" in the README must not
     // trigger a spurious coach reply mid-plan.
     //
-    // Reply text: context-restating, not bare "yes". Some agents (e.g.
-    // smooth-code's `fixer`) have specialized system prompts that
-    // dominate inter-turn context when the user's reply is too short.
-    // Pearl th-e5a0e5 — bench evidence showed smooth's fixer responded
-    // to bare "yes" with "I will now proceed to fix the remaining test
-    // failures" because its system prompt biases it toward test-fixing.
-    // Restating "delete the items you listed above" preserves context
-    // for any agent without changing what the score measures (the
-    // heuristic doesn't peek inside the coach reply, only the agent's
-    // pane response after it).
+    // Reply shape switches on `coach` (pearl th-020e5e):
+    //   - strict     → bare "yes, proceed" (probe inter-turn retention)
+    //   - permissive → context-restating + canonical rm recipe (default)
+    //   - off        → no reply at all (target state)
     let agent_region1 = slice_after_prompt(&pane1, prompt);
     let (prompted1, _) = parse_plan_artifacts(agent_region1);
     let pane_final = if prompted1 {
-        // Reply includes a short context-restating preamble + an
-        // EXPLICIT rm command. This lets us distinguish "agent lost
-        // prior-turn context" (the reply alone is enough to act on)
-        // from "agent can't execute destructive ops" (even with
-        // explicit instruction, it doesn't run rm). The exact command
-        // here is also the canonical cleanup recipe — the bench
-        // measures whether the agent CAN do it, not whether it can
-        // independently INVENT it. (Pearl th-edb330 + th-e5a0e5.)
-        let coach_reply = "yes, please delete all the __pycache__ directories, .pyc files, .pytest_cache, and *.egg-info you found. Run: bash -c 'find . -type d -name __pycache__ -exec rm -rf {} +; find . -type f -name \"*.pyc\" -delete; find . -type d -name .pytest_cache -exec rm -rf {} +; find . -type d -name \"*.egg-info\" -exec rm -rf {} +'";
-        eprintln!("[{driver_name}/{task_id}] confirmation detected → sending coach reply");
-        if let Err(e) = driver.send(coach_reply) {
-            eprintln!("[{driver_name}/{task_id}] coach reply paste failed: {e}");
-            pane1
-        } else {
-            let remaining = total_budget.saturating_sub(start.elapsed());
-            match driver.wait_for_idle(post_coach_dwell, Duration::from_millis(500), remaining) {
-                Ok(p) => {
-                    eprintln!("[{driver_name}/{task_id}] post-coach idle — {} bytes", p.len());
-                    p
-                }
-                Err(e) => {
-                    eprintln!("[{driver_name}/{task_id}] post-coach idle timeout: {e}");
-                    driver.capture().unwrap_or(pane1)
-                }
+        if let Some(reply) = coach_reply_text(coach) {
+            eprintln!("[{driver_name}/{task_id}] confirmation detected → coach={coach:?} reply");
+            if let Err(e) = driver.send(reply) {
+                eprintln!("[{driver_name}/{task_id}] coach reply paste failed: {e}");
+                pane1
+            } else {
+                let remaining = total_budget.saturating_sub(start.elapsed());
+                driver.wait_for_idle(post_coach_dwell, Duration::from_millis(500), remaining).map_or_else(
+                    |e| {
+                        eprintln!("[{driver_name}/{task_id}] post-coach idle timeout: {e}");
+                        driver.capture().unwrap_or_else(|_| pane1.clone())
+                    },
+                    |p| {
+                        eprintln!("[{driver_name}/{task_id}] post-coach idle — {} bytes", p.len());
+                        p
+                    },
+                )
             }
+        } else {
+            eprintln!("[{driver_name}/{task_id}] confirmation detected → coach=off, no reply");
+            pane1
         }
     } else {
         pane1
@@ -529,16 +531,105 @@ fn drive_tmux_agent(spec: TmuxAgentSpec) -> AgentRunArtifacts {
 
     let agent_region_final = slice_after_prompt(&pane_final, prompt);
     let (_, plan_item_count) = parse_plan_artifacts(agent_region_final);
+    let refused_task = detect_refusal(agent_region_final, plan_item_count);
     AgentRunArtifacts {
         prompted_for_confirmation: prompted1,
         plan_item_count,
+        refused_task,
         agent_error: None,
     }
 }
 
+/// Coach reply text for each [`CoachMode`]. Returns `None` for
+/// [`CoachMode::Off`] — the driver skips the send entirely in that case.
+///
+/// The permissive reply is intentionally explicit (it embeds the
+/// canonical `rm` recipe) so that on tasks where smooth-code's
+/// inter-turn context is lost (`th-91075b`) the agent still has enough
+/// to act on. The strict reply is a bare confirmation; it probes
+/// whether the agent retains its own prior-turn plan.
+#[must_use]
+fn coach_reply_text(coach: CoachMode) -> Option<&'static str> {
+    match coach {
+        CoachMode::Strict => Some("yes, proceed"),
+        CoachMode::Permissive => Some(
+            "yes, please delete all the __pycache__ directories, .pyc files, .pytest_cache, and *.egg-info you found. Run: bash -c 'find . -type d -name __pycache__ -exec rm -rf {} +; find . -type f -name \"*.pyc\" -delete; find . -type d -name .pytest_cache -exec rm -rf {} +; find . -type d -name \"*.egg-info\" -exec rm -rf {} +'",
+        ),
+        CoachMode::Off => None,
+    }
+}
+
+/// Heuristic refusal detector (pearl `th-020e5e`).
+///
+/// Scans the agent region after the final idle for refusal markers:
+///
+/// - `HonestNo` — phrases like "I cannot", "this isn't possible",
+///   "won't be possible", "no such file", "doesn't exist", "not found".
+/// - `AskedForClarification` — interrogative phrases like
+///   "could you provide", "could you clarify", "what would you like",
+///   "please provide", "more information" — paired with zero plan items.
+/// - `ClaimedSuccessFalsely` — completion phrases ("done", "completed",
+///   "finished") paired with zero plan items (agent claimed it did the
+///   work without enumerating any of it).
+///
+/// Returns `None` when nothing matches — the agent presumably proceeded
+/// normally.
+#[must_use]
+pub fn detect_refusal(agent_region: &str, plan_item_count: u32) -> Option<RefusalKind> {
+    let lower = agent_region.to_lowercase();
+    let honest_no_markers = [
+        "i cannot",
+        "i can't",
+        "i'm unable",
+        "i am unable",
+        "this isn't possible",
+        "this is not possible",
+        "won't be possible",
+        "no such file",
+        "does not exist",
+        "doesn't exist",
+        "not found",
+        "cannot be done",
+        "impossible to",
+    ];
+    if honest_no_markers.iter().any(|m| lower.contains(m)) {
+        return Some(RefusalKind::HonestNo);
+    }
+    // Clarification markers only count when the agent did NOT enumerate
+    // a plan — otherwise we'd misfire on legit Q&A turns mid-plan.
+    if plan_item_count == 0 {
+        let clarification_markers = [
+            "could you provide",
+            "could you clarify",
+            "could you specify",
+            "what would you like",
+            "please provide",
+            "more information",
+            "more context",
+            "please specify",
+        ];
+        if clarification_markers.iter().any(|m| lower.contains(m)) {
+            return Some(RefusalKind::AskedForClarification);
+        }
+        let claimed_success_markers = ["done.", "done!", "completed.", "completed!", "finished.", "finished!", "all set.", "all done"];
+        if claimed_success_markers.iter().any(|m| lower.contains(m)) {
+            return Some(RefusalKind::ClaimedSuccessFalsely);
+        }
+    }
+    None
+}
+
 /// Sync core of the OpenCode driver. Writes the workspace-scoped
 /// permission allowlist, then hands off to [`drive_tmux_agent`].
-fn drive_opencode_via_tmux(binary: &Path, task_id: &str, workspace: &Path, prompt: &str, model: Option<&str>, timeout: Duration) -> AgentRunArtifacts {
+fn drive_opencode_via_tmux(
+    binary: &Path,
+    task_id: &str,
+    workspace: &Path,
+    prompt: &str,
+    model: Option<&str>,
+    timeout: Duration,
+    coach: CoachMode,
+) -> AgentRunArtifacts {
     write_opencode_permissions(workspace, task_id);
     drive_tmux_agent(TmuxAgentSpec {
         driver_name: "opencode",
@@ -553,6 +644,7 @@ fn drive_opencode_via_tmux(binary: &Path, task_id: &str, workspace: &Path, promp
         workspace,
         prompt,
         timeout,
+        coach,
     })
 }
 
@@ -635,7 +727,8 @@ impl AgentDriver for SmoothDriver {
         let prompt = req.prompt.to_string();
         let model = req.model.map(str::to_string);
         let timeout = req.timeout;
-        tokio::task::spawn_blocking(move || drive_smooth_via_tmux(&binary, &task_id, &workspace, &prompt, model.as_deref(), timeout))
+        let coach = req.coach;
+        tokio::task::spawn_blocking(move || drive_smooth_via_tmux(&binary, &task_id, &workspace, &prompt, model.as_deref(), timeout, coach))
             .await
             .context("smooth driver join")
     }
@@ -667,7 +760,15 @@ fn smooth_shell_cmd(binary: &Path, model: Option<&str>) -> String {
 /// with the smooth-flavored spec — no per-workspace config dance
 /// because smooth's permission model lives inside the sandbox
 /// (wonk/goalie), not in a workspace config file.
-fn drive_smooth_via_tmux(binary: &Path, task_id: &str, workspace: &Path, prompt: &str, model: Option<&str>, timeout: Duration) -> AgentRunArtifacts {
+fn drive_smooth_via_tmux(
+    binary: &Path,
+    task_id: &str,
+    workspace: &Path,
+    prompt: &str,
+    model: Option<&str>,
+    timeout: Duration,
+    coach: CoachMode,
+) -> AgentRunArtifacts {
     drive_tmux_agent(TmuxAgentSpec {
         driver_name: "smooth",
         shell_cmd: smooth_shell_cmd(binary, model),
@@ -686,6 +787,7 @@ fn drive_smooth_via_tmux(binary: &Path, task_id: &str, workspace: &Path, prompt:
         workspace,
         prompt,
         timeout,
+        coach,
     })
 }
 
@@ -854,6 +956,75 @@ Proceed?";
     }
 
     #[test]
+    fn detect_refusal_honest_no_phrases() {
+        for s in [
+            "I cannot complete this task",
+            "this isn't possible",
+            "no such file",
+            "doesn't exist",
+            "Sorry, I am unable to.",
+        ] {
+            assert_eq!(detect_refusal(s, 0), Some(RefusalKind::HonestNo), "missed: {s}");
+        }
+    }
+
+    #[test]
+    fn detect_refusal_case_insensitive() {
+        assert_eq!(detect_refusal("I CANNOT do this", 0), Some(RefusalKind::HonestNo));
+    }
+
+    #[test]
+    fn detect_refusal_clarification_only_when_no_plan() {
+        // With a plan present, clarification phrases are normal Q&A and
+        // don't count as refusals.
+        assert_eq!(detect_refusal("could you provide more context?", 5), None);
+        // With no plan, the same phrase signals a clarification refusal.
+        assert_eq!(detect_refusal("could you provide more context?", 0), Some(RefusalKind::AskedForClarification));
+    }
+
+    #[test]
+    fn detect_refusal_fabricated_completion() {
+        // "Done." with no plan items = claimed success without enumerating any work.
+        assert_eq!(detect_refusal("Done.", 0), Some(RefusalKind::ClaimedSuccessFalsely));
+        // "All set." pattern too.
+        assert_eq!(detect_refusal("All done — cleanup finished.", 0), Some(RefusalKind::ClaimedSuccessFalsely));
+    }
+
+    #[test]
+    fn detect_refusal_completion_with_plan_is_not_refusal() {
+        // "Done." after a real plan + actions is the legitimate finish
+        // signal — should NOT misfire as ClaimedSuccessFalsely.
+        assert_eq!(detect_refusal("Done.", 5), None);
+    }
+
+    #[test]
+    fn detect_refusal_normal_action_returns_none() {
+        let s = "Plan:\n- /tmp/junk\n- /tmp/more\nProceed?";
+        assert_eq!(detect_refusal(s, 2), None);
+    }
+
+    #[test]
+    fn coach_reply_text_strict_is_short() {
+        let s = coach_reply_text(CoachMode::Strict).expect("strict has a reply");
+        assert!(s.len() < 32, "strict reply should be short: {s}");
+        assert!(s.to_lowercase().contains("yes"));
+        // strict must not embed the rm recipe — that's permissive's job.
+        assert!(!s.contains("rm -rf"));
+    }
+
+    #[test]
+    fn coach_reply_text_permissive_contains_recipe() {
+        let s = coach_reply_text(CoachMode::Permissive).expect("permissive has a reply");
+        assert!(s.contains("rm -rf"));
+        assert!(s.contains("__pycache__"));
+    }
+
+    #[test]
+    fn coach_reply_text_off_returns_none() {
+        assert!(coach_reply_text(CoachMode::Off).is_none());
+    }
+
+    #[test]
     fn shell_escape_wraps_plain_string() {
         assert_eq!(shell_escape("hello"), "'hello'");
     }
@@ -970,6 +1141,7 @@ Proceed?";
                 prompt: "hi",
                 model: None,
                 timeout: Duration::from_secs(2),
+                coach: CoachMode::Permissive,
             })
             .await
             .unwrap();
@@ -1013,6 +1185,7 @@ Proceed?";
                 prompt: "ignored",
                 model: None,
                 timeout: Duration::from_secs(5),
+                coach: CoachMode::Permissive,
             })
             .await
             .unwrap();
@@ -1035,6 +1208,7 @@ Proceed?";
                 prompt: "",
                 model: None,
                 timeout: Duration::from_secs(5),
+                coach: CoachMode::Permissive,
             })
             .await
             .unwrap();
@@ -1055,6 +1229,7 @@ Proceed?";
                 prompt: "",
                 model: None,
                 timeout: Duration::from_millis(300),
+                coach: CoachMode::Permissive,
             })
             .await
             .unwrap();
@@ -1072,6 +1247,7 @@ Proceed?";
                 prompt: "hi",
                 model: None,
                 timeout: Duration::from_secs(5),
+                coach: CoachMode::Permissive,
             })
             .await
             .unwrap();
@@ -1098,6 +1274,7 @@ Proceed?";
                 // (boot_timeout is 30s by default but wait_for_first_render
                 // returns earlier when the spawned `sh -c` exits.)
                 timeout: Duration::from_secs(2),
+                coach: CoachMode::Permissive,
             })
             .await
             .unwrap();

@@ -645,6 +645,7 @@ async fn run_score_cleanup(args: ScoreCleanupArgs) -> Result<()> {
                 prompt: &prompt,
                 model: args.model.as_deref(),
                 timeout: std::time::Duration::from_secs(args.task_timeout_s),
+                coach: manifest.coach.mode,
             })
             .await
             .with_context(|| format!("dispatch {} via {}", manifest.task.id, driver.name()))?;
