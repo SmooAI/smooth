@@ -78,6 +78,37 @@ impl PearlStore {
             }
         }
 
+        // Column-level heal: pearls gained a `jira_key` column + UNIQUE index
+        // so `th jira sync` matches by key instead of title-substring against a
+        // capped list, making duplicate Jira pearls impossible (th-5a18e6,
+        // th-df54c4). Dolt does NOT support `ALTER TABLE ... ADD COLUMN IF NOT
+        // EXISTS` (syntax error), so we gate the plain ADD on an
+        // information_schema existence check. `CREATE UNIQUE INDEX IF NOT
+        // EXISTS` *is* supported. The index is safe on existing data: jira_key
+        // is NULL for every pre-existing row, and NULLs are exempt from UNIQUE.
+        if present.contains("pearls") {
+            let has_column = dolt
+                .sql("SELECT COUNT(*) AS c FROM information_schema.columns WHERE table_name = 'pearls' AND column_name = 'jira_key'")
+                .ok()
+                .and_then(|rows| rows.first().and_then(|r| r["c"].as_u64()))
+                .is_some_and(|c| c > 0);
+
+            let mut changed = false;
+            if !has_column {
+                match dolt.exec("ALTER TABLE pearls ADD COLUMN jira_key VARCHAR(50) NULL") {
+                    Ok(_) => changed = true,
+                    Err(e) => tracing::debug!(error = %e, "migrate_schema: pearls.jira_key add failed"),
+                }
+            }
+            match dolt.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_pearls_jira_key ON pearls (jira_key)") {
+                Ok(_) => changed = true,
+                Err(e) => tracing::debug!(error = %e, "migrate_schema: pearls.jira_key index create returned error (likely already present)"),
+            }
+            if changed && dolt.commit("schema migration: add pearls.jira_key + unique index").is_err() {
+                tracing::debug!("migrate_schema: pearls.jira_key commit returned error (likely no-op)");
+            }
+        }
+
         if REQUIRED_TABLES.iter().all(|t| present.contains(*t)) {
             return Ok(());
         }
@@ -152,9 +183,18 @@ impl PearlStore {
                 assigned_to VARCHAR(100),
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                closed_at DATETIME
+                closed_at DATETIME,
+                jira_key VARCHAR(50) NULL
             )",
         )?;
+        // UNIQUE on jira_key makes duplicate Jira-linked pearls physically
+        // impossible — even a buggy sync can't create a second pearl for the
+        // same key (the insert/link fails instead). NULLs are exempt (MySQL/
+        // Dolt allow many NULLs in a UNIQUE index), so non-Jira pearls are
+        // unaffected. Best-effort: `IF NOT EXISTS` keeps re-runs idempotent.
+        if let Err(e) = dolt.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_pearls_jira_key ON pearls (jira_key)") {
+            tracing::debug!(error = %e, "ensure_schema: jira_key unique index create returned error (likely already present)");
+        }
         dolt.exec(
             "CREATE TABLE IF NOT EXISTS pearl_dependencies (
                 pearl_id VARCHAR(20) NOT NULL,
@@ -271,6 +311,9 @@ impl PearlStore {
         } else {
             Some(Self::parse_datetime(&row["closed_at"]))
         };
+        // `jira_key` is absent on stores not yet migrated and NULL for
+        // pearls with no Jira counterpart — both map to None.
+        let jira_key = row.get("jira_key").and_then(Value::as_str).map(String::from);
 
         Ok(Pearl {
             id,
@@ -285,6 +328,7 @@ impl PearlStore {
             created_at,
             updated_at,
             closed_at,
+            jira_key,
         })
     }
 
@@ -359,6 +403,42 @@ impl PearlStore {
         Ok(pearl)
     }
 
+    /// Create a pearl already linked to a Jira issue key, atomically.
+    ///
+    /// The `jira_key` is set in the same INSERT so the UNIQUE index guards
+    /// at creation time: a concurrent or repeated sync that races to create
+    /// the same key fails the insert rather than producing a duplicate.
+    /// Use this from `th jira sync` instead of `create` + `set_jira_key`.
+    pub fn create_for_jira(&self, new: &NewPearl, jira_key: &str) -> Result<Pearl> {
+        let id = generate_id();
+        let sql = format!(
+            "INSERT INTO pearls (id, title, description, status, priority, pearl_type, assigned_to, parent_id, jira_key, created_at, updated_at) \
+             VALUES ('{}', '{}', '{}', '{}', {}, '{}', {}, {}, '{}', NOW(), NOW())",
+            sql_escape(&id),
+            sql_escape(&new.title),
+            sql_escape(&new.description),
+            PearlStatus::Open.as_str(),
+            new.priority.as_u8(),
+            new.pearl_type.as_str(),
+            new.assigned_to.as_ref().map_or("NULL".to_string(), |a| format!("'{}'", sql_escape(a))),
+            new.parent_id.as_ref().map_or("NULL".to_string(), |p| format!("'{}'", sql_escape(p))),
+            sql_escape(jira_key),
+        );
+        self.dolt.exec(&sql)?;
+
+        for label in &new.labels {
+            self.dolt.exec(&format!(
+                "INSERT INTO pearl_labels (pearl_id, label) VALUES ('{}', '{}')",
+                sql_escape(&id),
+                sql_escape(label),
+            ))?;
+        }
+
+        let pearl = self.get(&id)?.ok_or_else(|| anyhow::anyhow!("pearl not found after create: {id}"))?;
+        self.dolt.commit(&format!("create pearl {id} ({jira_key}): {}", new.title))?;
+        Ok(pearl)
+    }
+
     /// Get a pearl by ID.
     pub fn get(&self, id: &str) -> Result<Option<Pearl>> {
         let rows = self.dolt.sql(&format!("SELECT * FROM pearls WHERE id = '{}'", sql_escape(id)))?;
@@ -369,6 +449,38 @@ impl PearlStore {
             }
             None => Ok(None),
         }
+    }
+
+    /// Get the pearl linked to a Jira issue key, if any.
+    ///
+    /// This is the idempotency primitive for `th jira sync`: an indexed
+    /// lookup on the UNIQUE `jira_key` column, so the pull phase decides
+    /// "create vs. skip" without scanning (a capped slice of) every title.
+    /// Returns `None` on stores not yet migrated (no `jira_key` column).
+    pub fn get_by_jira_key(&self, jira_key: &str) -> Result<Option<Pearl>> {
+        let rows = self.dolt.sql(&format!("SELECT * FROM pearls WHERE jira_key = '{}'", sql_escape(jira_key)))?;
+        match rows.first() {
+            Some(row) => {
+                let pearl = Self::parse_pearl(row)?;
+                Ok(Some(self.load_pearl_with_labels(pearl)?))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Link a pearl to a Jira issue key.
+    ///
+    /// Errors if `jira_key` is already taken by another pearl (the UNIQUE
+    /// index rejects the write) — that surfaces a real conflict loudly
+    /// instead of silently creating a duplicate. Commits on success.
+    pub fn set_jira_key(&self, id: &str, jira_key: &str) -> Result<()> {
+        self.dolt.exec(&format!(
+            "UPDATE pearls SET jira_key = '{}', updated_at = NOW() WHERE id = '{}'",
+            sql_escape(jira_key),
+            sql_escape(id),
+        ))?;
+        self.dolt.commit(&format!("link pearl {id} to {jira_key}"))?;
+        Ok(())
     }
 
     /// List pearls matching the given query.
@@ -1169,5 +1281,112 @@ mod tests {
         reopened.set_config("__health_check", "ok").expect("set_config after migration");
         let got = reopened.get_config("__health_check").expect("get_config succeeds").expect("value present");
         assert_eq!(got, "ok");
+    }
+
+    // ── jira_key hardening (th-df54c4) ──────────────────────────────────
+
+    #[test]
+    fn test_create_for_jira_links_and_is_findable_by_key() {
+        let Some(store) = test_store() else { return };
+        let pearl = store.create_for_jira(&new_task("SMOODEV-1: thing"), "SMOODEV-1").unwrap();
+        assert_eq!(pearl.jira_key.as_deref(), Some("SMOODEV-1"));
+
+        let found = store.get_by_jira_key("SMOODEV-1").unwrap().expect("pearl found by key");
+        assert_eq!(found.id, pearl.id);
+        assert_eq!(found.jira_key.as_deref(), Some("SMOODEV-1"));
+    }
+
+    #[test]
+    fn test_plain_create_has_no_jira_key() {
+        let Some(store) = test_store() else { return };
+        let pearl = store.create(&new_task("local only")).unwrap();
+        assert_eq!(pearl.jira_key, None);
+        // And re-fetching confirms NULL round-trips to None.
+        let got = store.get(&pearl.id).unwrap().expect("pearl exists");
+        assert_eq!(got.jira_key, None);
+    }
+
+    #[test]
+    fn test_get_by_unknown_jira_key_returns_none() {
+        let Some(store) = test_store() else { return };
+        assert!(store.get_by_jira_key("SMOODEV-404").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_set_jira_key_links_existing_pearl() {
+        let Some(store) = test_store() else { return };
+        let pearl = store.create(&new_task("push me")).unwrap();
+        store.set_jira_key(&pearl.id, "SMOODEV-42").unwrap();
+        let found = store.get_by_jira_key("SMOODEV-42").unwrap().expect("linked");
+        assert_eq!(found.id, pearl.id);
+    }
+
+    /// The core invariant: two pearls can never claim the same Jira key.
+    /// This is what makes a buggy/repeated sync unable to duplicate — the
+    /// second create fails instead of producing a second pearl (th-5a18e6).
+    #[test]
+    fn test_duplicate_jira_key_is_rejected() {
+        let Some(store) = test_store() else { return };
+        store.create_for_jira(&new_task("SMOODEV-7: first"), "SMOODEV-7").unwrap();
+
+        // create_for_jira with the same key must fail (UNIQUE index).
+        let dup = store.create_for_jira(&new_task("SMOODEV-7: dup"), "SMOODEV-7");
+        assert!(dup.is_err(), "second create_for_jira with same key must be rejected");
+
+        // set_jira_key onto another pearl with a taken key must also fail.
+        let other = store.create(&new_task("other")).unwrap();
+        let relink = store.set_jira_key(&other.id, "SMOODEV-7");
+        assert!(relink.is_err(), "set_jira_key to a taken key must be rejected");
+
+        // Exactly one pearl carries the key.
+        assert!(store.get_by_jira_key("SMOODEV-7").unwrap().is_some());
+    }
+
+    /// Re-running a "pull" is idempotent: the get_by_jira_key guard means a
+    /// second pass over the same tickets creates nothing new.
+    #[test]
+    fn test_pull_is_idempotent_via_jira_key() {
+        let Some(store) = test_store() else { return };
+        let keys = ["SMOODEV-100", "SMOODEV-101", "SMOODEV-102"];
+
+        let pull = |store: &PearlStore| {
+            let mut created = 0;
+            for k in keys {
+                if store.get_by_jira_key(k).unwrap().is_none() {
+                    store.create_for_jira(&new_task(&format!("{k}: t")), k).unwrap();
+                    created += 1;
+                }
+            }
+            created
+        };
+
+        assert_eq!(pull(&store), 3, "first pull creates all three");
+        assert_eq!(pull(&store), 0, "second pull creates nothing");
+        let total = store
+            .list(&PearlQuery::new().with_limit(0))
+            .unwrap()
+            .iter()
+            .filter(|p| p.jira_key.is_some())
+            .count();
+        assert_eq!(total, 3, "no duplicates accumulated");
+    }
+
+    /// A store created before jira_key existed must be healed on open:
+    /// the column + UNIQUE index get added so sync works.
+    #[test]
+    fn test_open_migrates_missing_jira_key_column() {
+        let Some(store) = test_store() else { return };
+        let dolt_dir = store.dolt_path().to_path_buf();
+
+        // Simulate a legacy store: drop the index then the column.
+        let _ = store.dolt.exec("DROP INDEX idx_pearls_jira_key ON pearls");
+        store.dolt.exec("ALTER TABLE pearls DROP COLUMN jira_key").expect("drop jira_key");
+        store.dolt.commit("simulate legacy store: remove jira_key").expect("commit drop");
+        drop(store);
+
+        // Re-open heals the schema; linking by key must then work.
+        let reopened = PearlStore::open(&dolt_dir).expect("open heals missing column");
+        let pearl = reopened.create_for_jira(&new_task("SMOODEV-9: x"), "SMOODEV-9").expect("create after heal");
+        assert_eq!(reopened.get_by_jira_key("SMOODEV-9").unwrap().unwrap().id, pearl.id);
     }
 }

@@ -150,6 +150,11 @@ pub struct Pearl {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub closed_at: Option<DateTime<Utc>>,
+    /// External Jira issue key this pearl is linked to (e.g. `SMOODEV-1234`).
+    /// `None` for pearls with no Jira counterpart. Enforced UNIQUE at the
+    /// storage layer so `th jira sync` can never create a second pearl for
+    /// the same key (the duplication root cause — see th-5a18e6, th-df54c4).
+    pub jira_key: Option<String>,
 }
 
 /// Parameters for creating a new pearl.
@@ -275,6 +280,7 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             closed_at: None,
+            jira_key: None,
         };
         let json = serde_json::to_string(&pearl).expect("serialize");
         let parsed: Pearl = serde_json::from_str(&json).expect("deserialize");
