@@ -3974,23 +3974,39 @@ async fn cmd_jira_sync() -> Result<()> {
         next_page = body["nextPageToken"].as_str().map(String::from);
     }
 
-    // Get all open pearls
-    let open_pearls = store.list(&smooth_pearls::PearlQuery::new())?;
+    // Get all open pearls (limit 0 = no cap; the default PearlQuery::new()
+    // caps at 100, which silently broke pull idempotency — any ticket beyond
+    // the first 100 was never recognized as tracked and got recreated every
+    // run. See th-5a18e6.).
+    let open_pearls = store.list(&smooth_pearls::PearlQuery::new().with_limit(0))?;
 
-    // Find Jira tickets not yet tracked as pearls (by title prefix match)
+    // Count of tickets/pearls that failed to sync. Sync exits non-zero when
+    // this is > 0 so partial failures (e.g. Dolt lock contention, th-ce1d85)
+    // are loud instead of hiding behind a clean "N pulled" summary + exit 0.
+    let mut failures = 0u32;
+
+    // Pull: create a pearl for every Jira ticket not already linked. The
+    // "already linked?" check is an indexed lookup on the UNIQUE jira_key
+    // column (store.get_by_jira_key), not a title-substring scan of a capped
+    // list — so it's idempotent and immune to key-prefix collisions
+    // (SMOODEV-132 vs SMOODEV-1320).
     let mut pulled = 0u32;
     for issue in &jira_issues {
         let key = issue["key"].as_str().unwrap_or("");
         let summary = issue["fields"]["summary"].as_str().unwrap_or("");
 
-        // Check if any pearl already has this Jira key in its title
-        let already_tracked = open_pearls.iter().any(|p| p.title.contains(key));
-        if already_tracked {
-            continue;
+        match store.get_by_jira_key(key) {
+            Ok(Some(_)) => continue, // already linked — idempotent skip
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("  {} {} lookup failed: {e}", "✗".red(), key);
+                failures += 1;
+                continue;
+            }
         }
 
-        // Create a pearl for this Jira ticket
-        let title = format!("{key}: {summary}");
+        // Create a pearl for this Jira ticket, linked by key in one atomic
+        // INSERT (the UNIQUE index is the backstop against a racing dup).
         let desc = issue["fields"]["description"]
             .as_object()
             .and_then(|d| d["content"].as_array())
@@ -4002,7 +4018,7 @@ async fn cmd_jira_sync() -> Result<()> {
             .to_string();
 
         let new = smooth_pearls::NewPearl {
-            title,
+            title: format!("{key}: {summary}"),
             description: desc,
             pearl_type: smooth_pearls::PearlType::Task,
             priority: smooth_pearls::Priority::Medium,
@@ -4010,65 +4026,78 @@ async fn cmd_jira_sync() -> Result<()> {
             parent_id: None,
             labels: vec!["jira".to_string()],
         };
-        match store.create(&new) {
+        match store.create_for_jira(&new, key) {
             Ok(pearl) => {
                 println!("  {} {} → {}", "↓".cyan(), key, pearl.id);
                 pulled += 1;
             }
             Err(e) => {
                 eprintln!("  {} {} failed: {e}", "✗".red(), key);
+                failures += 1;
             }
         }
     }
 
-    // --- Push: Pearls → Jira (create Jira tickets for pearls without SMOODEV prefix) ---
+    // Push: create a Jira ticket for every open pearl not already linked,
+    // then record the key via set_jira_key. We do NOT rewrite the pearl
+    // title with a "SMOODEV-XXXX: " prefix anymore — that polluted titles and
+    // had to be unwound by hand after the duplication incident. The link
+    // lives in the jira_key column instead. Legacy pearls (pulled by the old
+    // sync) carry the key only in their title, so skip those by prefix too.
     let mut pushed = 0u32;
     for pearl in &open_pearls {
-        // Skip if already has a Jira key in title
-        if pearl.title.starts_with("SMOODEV-") {
+        if pearl.jira_key.is_some() || pearl.title.starts_with("SMOODEV-") {
             continue;
         }
 
         match client.create_ticket(&pearl.title, &pearl.description).await {
             Ok(ticket) => {
-                // Update pearl title with Jira key
-                let new_title = format!("{}: {}", ticket.key, pearl.title);
-                let update = smooth_pearls::PearlUpdate {
-                    title: Some(new_title),
-                    ..Default::default()
-                };
-                let _ = store.update(&pearl.id, &update);
+                if let Err(e) = store.set_jira_key(&pearl.id, &ticket.key) {
+                    eprintln!("  {} {} pushed to {} but link failed: {e}", "✗".red(), pearl.id, ticket.key);
+                    failures += 1;
+                    continue;
+                }
                 println!("  {} {} → {}", "↑".green(), pearl.id, ticket.key);
                 pushed += 1;
             }
             Err(e) => {
                 eprintln!("  {} {} failed: {e}", "✗".red(), pearl.id);
+                failures += 1;
             }
         }
     }
 
     // --- Close: Transition Jira tickets to Done for closed pearls ---
-    let closed_pearls = store.list(&smooth_pearls::PearlQuery::new().with_status(smooth_pearls::PearlStatus::Closed))?;
+    let closed_pearls = store.list(&smooth_pearls::PearlQuery::new().with_status(smooth_pearls::PearlStatus::Closed).with_limit(0))?;
     let mut transitioned = 0u32;
     for pearl in &closed_pearls {
-        // Extract SMOODEV-XXX from title
-        let jira_key = pearl.title.split(':').next().filter(|k| k.starts_with("SMOODEV-")).map(str::trim);
+        // Prefer the linked jira_key; fall back to the legacy "SMOODEV-XXX:"
+        // title prefix for pearls created by the pre-jira_key sync.
+        let key = pearl.jira_key.clone().or_else(|| {
+            pearl
+                .title
+                .split(':')
+                .next()
+                .filter(|k| k.starts_with("SMOODEV-"))
+                .map(|k| k.trim().to_string())
+        });
 
-        let Some(key) = jira_key else { continue };
+        let Some(key) = key else { continue };
 
         // Check if Jira ticket is still open
-        let is_open = jira_issues.iter().any(|i| i["key"].as_str() == Some(key));
+        let is_open = jira_issues.iter().any(|i| i["key"].as_str() == Some(key.as_str()));
         if !is_open {
             continue;
         }
 
-        match client.transition_ticket(key, "done").await {
+        match client.transition_ticket(&key, "done").await {
             Ok(()) => {
                 println!("  {} {} → Done", "✓".green(), key);
                 transitioned += 1;
             }
             Err(e) => {
                 eprintln!("  {} {} transition failed: {e}", "✗".red(), key);
+                failures += 1;
             }
         }
     }
@@ -4080,6 +4109,13 @@ async fn cmd_jira_sync() -> Result<()> {
         pushed.to_string().green(),
         transitioned.to_string().green()
     );
+
+    // Fail loud: a non-zero exit makes partial failures impossible to miss
+    // (and stops callers from cheerfully re-running a sync that's silently
+    // dropping tickets — which is how 26 lock failures became ~1400 dups).
+    if failures > 0 {
+        anyhow::bail!("{failures} ticket(s) failed to sync — see ✗ lines above");
+    }
 
     Ok(())
 }

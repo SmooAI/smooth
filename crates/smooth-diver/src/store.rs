@@ -186,6 +186,7 @@ impl DiverStore {
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
                 closed_at: Some(Utc::now()),
+                jira_key: None,
             }
         });
 
