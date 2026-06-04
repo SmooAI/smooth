@@ -11,6 +11,7 @@
 
 pub mod agents;
 pub mod config;
+pub mod crm;
 pub mod jobs;
 pub mod keys;
 pub mod knowledge;
@@ -19,6 +20,7 @@ pub mod observability;
 pub mod products;
 pub mod profile;
 pub mod testing;
+pub mod user_client;
 
 use anyhow::{Context, Result};
 use dialoguer::{theme::ColorfulTheme, Input, Password};
