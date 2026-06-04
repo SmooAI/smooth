@@ -3190,7 +3190,11 @@ async fn cmd_code(
     // the classifier per-message.
     let working_dir = std::env::current_dir()?;
     let _ = agent_name; // keep the typo-validation call; value isn't used in TUI mode
-    smooth_code::app::run_with_session(working_dir, resumed_session, agent).await
+    // Pearl th-20574a: thread the user's --model flag into the TUI
+    // path. Before this, `model` was parsed by clap then silently
+    // dropped here — every TaskStart picked the default smooth-coding
+    // alias regardless of what the user asked for.
+    smooth_code::app::run_with_session(working_dir, resumed_session, agent, model).await
 }
 
 fn cmd_hooks(cmd: HooksCommands) -> Result<()> {
