@@ -40,6 +40,18 @@ use async_trait::async_trait;
 
 use crate::score_cleanup::{AgentRunArtifacts, CoachMode, RefusalKind};
 
+/// Poll interval for `wait_for_idle` calls. Deliberately chosen to be
+/// **coprime** with smooth-code's 500ms spinner cycle (10 braille
+/// frames × 50ms TUI tick). Pearl `th-2e6693` — at 500ms the bench
+/// poll phase-locked with the spinner: every poll caught the exact
+/// same frame, the captured pane bytes were identical, and idle
+/// fired before the agent actually finished responding. 383ms is a
+/// prime that has no GCD > 1 with 500 or any multiple of 50, so
+/// consecutive captures genuinely see different spinner frames
+/// when the TUI is mid-thought, and idle only fires when the agent
+/// is actually quiet.
+const POLL_INTERVAL_MS: u64 = 383;
+
 /// Inputs every driver receives for a single task dispatch.
 ///
 /// Borrowed because the caller holds the task fixture for the whole
@@ -571,7 +583,7 @@ fn drive_tmux_agent(spec: TmuxAgentSpec) -> AgentRunArtifacts {
 
     let start = std::time::Instant::now();
     let total_budget = timeout.saturating_sub(Duration::from_secs(2));
-    let pane1 = match driver.wait_for_idle(first_idle_dwell, Duration::from_millis(500), total_budget) {
+    let pane1 = match driver.wait_for_idle(first_idle_dwell, Duration::from_millis(POLL_INTERVAL_MS), total_budget) {
         Ok(p) => p,
         Err(e) => {
             let partial = driver.capture().unwrap_or_default();
@@ -618,7 +630,7 @@ fn drive_tmux_agent(spec: TmuxAgentSpec) -> AgentRunArtifacts {
                 pane1
             } else {
                 let remaining = total_budget.saturating_sub(start.elapsed());
-                driver.wait_for_idle(post_coach_dwell, Duration::from_millis(500), remaining).map_or_else(
+                driver.wait_for_idle(post_coach_dwell, Duration::from_millis(POLL_INTERVAL_MS), remaining).map_or_else(
                     |e| {
                         eprintln!("[{driver_name}/{task_id}] post-coach idle timeout: {e}");
                         driver.capture().unwrap_or_else(|_| pane1.clone())
@@ -887,18 +899,19 @@ fn drive_smooth_via_tmux(
         // the same 120s ceiling as `tui_score::TuiTaskConfig::default`.
         boot_timeout: Duration::from_secs(120),
         paste_warmup: Duration::from_millis(800),
-        // Smooth's `Thinking...` is static text (no animation), so an
-        // 8s idle dwell mis-fires on it before the model's first token
-        // arrives — especially on small workspaces where Big Smooth's
-        // cold-start tax can push first-token latency past 8s. Pearl
-        // `th-65a041`: bench impossible-task variability was traced to
-        // this. 20s gives the model room to think without breaking
-        // the warm-case fast path (warm runs still finish around the
-        // 60-second mark for typical fixtures). OpenCode keeps 8s
-        // because its TUI shows visible token-streaming as soon as
-        // the model starts emitting.
-        first_idle_dwell: Duration::from_secs(20),
-        post_coach_dwell: Duration::from_secs(10),
+        // Was 20s under pearl `th-65a041` because smooth's `Thinking...`
+        // was static text and the idle detector false-fired on it.
+        // Pearl `th-2e6693` made the spinner animate every ~100ms +
+        // POLL_INTERVAL_MS is coprime with the spinner cycle, so 8s
+        // of byte-stable dwell now genuinely means "no agent
+        // activity" on the first idle.
+        first_idle_dwell: Duration::from_secs(8),
+        // Post-coach is different — smooth's tool-call chain after
+        // "yes, proceed" can include multiple `list_files` /
+        // `bash rm -rf` rounds. 5s sometimes catches the agent
+        // mid-tool-call. 15s gives the chain time to finish without
+        // pushing wallclock budget excessively.
+        post_coach_dwell: Duration::from_secs(15),
         task_id,
         workspace,
         prompt,

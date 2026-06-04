@@ -457,6 +457,21 @@ const CLOSE_TO_GREEN_THRESHOLD: u32 = 3;
 /// cost of confusing the model on non-test-driven tasks.
 fn build_user_prompt(task: &str, iteration: u32, prior_output: Option<&str>) -> String {
     if iteration == 1 {
+        // Pearl `th-e93cba` round 2: when the user's prompt looks like
+        // a filesystem cleanup task, prepend an explicit context-setter.
+        // Without it, the model — even with the workflow-level
+        // intent-detection gate — would pattern-match on fixer.txt's
+        // heavy test-related guidance and fabricate a test-fix
+        // narrative ("I added a test file src/pkg/test_util.py and
+        // the tests passed") on a cleanup ask. The bare prompt isn't
+        // strong enough counter-pressure; this directly tells the
+        // model what kind of task this is and which fixer guidance
+        // doesn't apply.
+        if is_cleanup_intent(task) {
+            return format!(
+                "[bench/workflow note: this is a FILESYSTEM CLEANUP task, not a code-fix or test-fix task. Do NOT write source files. Do NOT create test files. Do NOT run tests. The fixer system prompt's test-related guidance does NOT apply here. Just discover the targets, enumerate them in your text response, ask for confirmation, then delete them via `bash` once approved.]\n\n{task}"
+            );
+        }
         return task.to_string();
     }
     let prior = prior_output.unwrap_or("(no prior output)");
