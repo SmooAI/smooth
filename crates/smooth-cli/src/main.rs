@@ -524,6 +524,13 @@ enum ApiCommands {
         #[command(subcommand)]
         cmd: smooai::members::Cmd,
     },
+    /// Smoo AI CRM — contacts (list / get / create / update / import).
+    /// Authenticates as the logged-in user (`th auth login`), so writes
+    /// are attributed to a real person rather than an M2M client.
+    Crm {
+        #[command(subcommand)]
+        cmd: smooai::crm::Cmd,
+    },
     /// Smoo AI configuration — schemas, environments, values, feature
     /// flags.
     Config {
@@ -1130,6 +1137,7 @@ async fn main() -> Result<()> {
             ApiCommands::Agents { cmd } => smooai::agents::cmd(cmd).await,
             ApiCommands::Keys { cmd } => smooai::keys::cmd(cmd).await,
             ApiCommands::Members { cmd } => smooai::members::cmd(cmd).await,
+            ApiCommands::Crm { cmd } => smooai::crm::cmd(cmd).await,
             ApiCommands::Config { cmd } => smooai::config::cmd(cmd).await,
             ApiCommands::Knowledge { cmd } => smooai::knowledge::cmd(cmd).await,
             ApiCommands::Jobs { cmd } => smooai::jobs::cmd(cmd).await,
