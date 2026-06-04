@@ -68,6 +68,12 @@ pub enum ContactsCmd {
         org: Option<String>,
         #[arg(long)]
         dry_run: bool,
+        /// Minimum delay between API writes, in ms. The contacts API rate
+        /// limits at 100 requests / 60s per auth token, so the default
+        /// (700ms ≈ 85/min) stays safely under it. On a rate-limit error the
+        /// import also waits 61s and retries.
+        #[arg(long, default_value = "700")]
+        rate_ms: u64,
     },
 }
 
@@ -121,9 +127,9 @@ async fn contacts(cmd: ContactsCmd) -> Result<()> {
                     .context("PATCH contact")?,
             );
         }
-        ContactsCmd::Import { file, org, dry_run } => {
+        ContactsCmd::Import { file, org, dry_run, rate_ms } => {
             let org = resolve_org(org)?;
-            import(&client, &org, &file, dry_run).await?;
+            import(&client, &org, &file, dry_run, rate_ms).await?;
         }
     }
     Ok(())
@@ -150,8 +156,9 @@ fn norm_phone(v: &Value) -> Option<String> {
     }
 }
 
-/// Fetch every contact in the org, paging in blocks of 200.
-async fn fetch_all(client: &UserClient, org: &str) -> Result<Vec<Value>> {
+/// Fetch every contact in the org, paging in blocks of 200. Paces between
+/// pages so the existing-contacts scan doesn't itself trip the rate limit.
+async fn fetch_all(client: &UserClient, org: &str, rate: std::time::Duration) -> Result<Vec<Value>> {
     let mut all = Vec::new();
     let mut offset = 0u32;
     loop {
@@ -164,11 +171,43 @@ async fn fetch_all(client: &UserClient, org: &str) -> Result<Vec<Value>> {
             break;
         }
         offset += 200;
+        tokio::time::sleep(rate).await;
     }
     Ok(all)
 }
 
-async fn import(client: &UserClient, org: &str, file: &str, dry_run: bool) -> Result<()> {
+/// A single write to perform.
+#[derive(Clone, Copy)]
+enum Op<'a> {
+    Create,
+    Update(&'a str),
+}
+
+/// Execute one write, pacing first and retrying once-per-minute on the
+/// contacts API's "100 requests / 60s" rate-limit error (HTTP 400 whose body
+/// mentions "rate limit"). Up to 6 retries (~6 min of backoff) before giving up.
+async fn exec(client: &UserClient, org: &str, op: Op<'_>, body: &Value, rate: std::time::Duration) -> Result<Value> {
+    let mut attempt = 0u32;
+    loop {
+        tokio::time::sleep(rate).await;
+        let res = match op {
+            Op::Create => client.post(&format!("/organizations/{org}/crm/contacts"), body).await,
+            Op::Update(id) => client.patch(&format!("/organizations/{org}/crm/contacts/{id}"), body).await,
+        };
+        match res {
+            Ok(v) => return Ok(v),
+            Err(e) if e.to_string().contains("rate limit") && attempt < 6 => {
+                attempt += 1;
+                eprintln!("    rate limited — waiting 61s then retrying (attempt {attempt})");
+                tokio::time::sleep(std::time::Duration::from_secs(61)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+async fn import(client: &UserClient, org: &str, file: &str, dry_run: bool, rate_ms: u64) -> Result<()> {
+    let rate = std::time::Duration::from_millis(rate_ms);
     let parsed = read_body(file)?;
     let items = parsed.as_array().context("import file must contain a JSON array of contact objects")?;
 
@@ -185,7 +224,7 @@ async fn import(client: &UserClient, org: &str, file: &str, dry_run: bool) -> Re
     }
 
     // Build lookup maps from the existing contacts.
-    let existing = fetch_all(client, org).await?;
+    let existing = fetch_all(client, org, rate).await?;
     let mut email_to_id: HashMap<String, String> = HashMap::new();
     let mut phone_to_id: HashMap<String, String> = HashMap::new();
     for c in &existing {
@@ -229,10 +268,7 @@ async fn import(client: &UserClient, org: &str, file: &str, dry_run: bool) -> Re
             if dry_run {
                 println!("  {} would update {} {}", "↻".yellow(), id.dimmed(), label.dimmed());
             } else {
-                client
-                    .patch(&format!("/organizations/{org}/crm/contacts/{id}"), item)
-                    .await
-                    .with_context(|| format!("update {label}"))?;
+                exec(client, org, Op::Update(&id), item, rate).await.with_context(|| format!("update {label}"))?;
                 println!("  {} updated {} {}", "↻".yellow(), id.dimmed(), label.dimmed());
             }
             updated += 1;
@@ -242,10 +278,7 @@ async fn import(client: &UserClient, org: &str, file: &str, dry_run: bool) -> Re
             // Reserve the key so a duplicate later in the file dedups in dry-run too.
             remember(&mut email_to_id, &mut phone_to_id, &email, &phone, "(dry-run)");
         } else {
-            let resp = client
-                .post(&format!("/organizations/{org}/crm/contacts"), item)
-                .await
-                .with_context(|| format!("create {label}"))?;
+            let resp = exec(client, org, Op::Create, item, rate).await.with_context(|| format!("create {label}"))?;
             let new_id = resp.get("id").and_then(|v| v.as_str()).unwrap_or("?").to_string();
             println!("  {} created {} {}", "✚".green(), new_id.dimmed(), label.bold());
             created += 1;
