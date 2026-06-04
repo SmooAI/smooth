@@ -110,12 +110,22 @@ async fn contacts(cmd: ContactsCmd) -> Result<()> {
         }
         ContactsCmd::Get { contact_id, org } => {
             let org = resolve_org(org)?;
-            print_json(&client.get(&format!("/organizations/{org}/crm/contacts/{contact_id}")).await.context("GET contact")?);
+            print_json(
+                &client
+                    .get(&format!("/organizations/{org}/crm/contacts/{contact_id}"))
+                    .await
+                    .context("GET contact")?,
+            );
         }
         ContactsCmd::Create { body, org } => {
             let org = resolve_org(org)?;
             let body = read_body(&body)?;
-            print_json(&client.post(&format!("/organizations/{org}/crm/contacts"), &body).await.context("POST contact")?);
+            print_json(
+                &client
+                    .post(&format!("/organizations/{org}/crm/contacts"), &body)
+                    .await
+                    .context("POST contact")?,
+            );
         }
         ContactsCmd::Update { contact_id, body, org } => {
             let org = resolve_org(org)?;
@@ -268,7 +278,9 @@ async fn import(client: &UserClient, org: &str, file: &str, dry_run: bool, rate_
             if dry_run {
                 println!("  {} would update {} {}", "↻".yellow(), id.dimmed(), label.dimmed());
             } else {
-                exec(client, org, Op::Update(&id), item, rate).await.with_context(|| format!("update {label}"))?;
+                exec(client, org, Op::Update(&id), item, rate)
+                    .await
+                    .with_context(|| format!("update {label}"))?;
                 println!("  {} updated {} {}", "↻".yellow(), id.dimmed(), label.dimmed());
             }
             updated += 1;

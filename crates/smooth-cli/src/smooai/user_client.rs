@@ -58,7 +58,13 @@ impl UserClient {
 
     pub async fn get(&self, path: &str) -> Result<Value> {
         let url = format!("{}{path}", self.base);
-        let resp = self.http.get(&url).bearer_auth(&self.bearer).send().await.with_context(|| format!("GET {url}"))?;
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(&self.bearer)
+            .send()
+            .await
+            .with_context(|| format!("GET {url}"))?;
         Self::body(resp, "GET", &url).await
     }
 
