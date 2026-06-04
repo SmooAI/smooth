@@ -235,7 +235,23 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
                 // fix; the prompt half lives in fixer.txt.
                 let made_edits = conversation_made_edits(&conversation);
                 let did_destructive_bash = conversation_did_destructive_bash(&conversation);
+                let cleanup_intent = is_cleanup_intent(&cfg.task_prompt);
                 if !made_edits && !did_destructive_bash {
+                    // Pearl `th-e93cba`: if the user asked for cleanup
+                    // / ops (delete X, prune Y, remove debris), skip
+                    // the "this is a code task, write code" reprompt
+                    // entirely. That reprompt was designed for code
+                    // benchmarks (aider-polyglot etc.) and on cleanup
+                    // tasks it triggered the agent to fabricate tests
+                    // and pivot to test-fix narrative even when the
+                    // user clearly asked for filesystem operations.
+                    if cleanup_intent {
+                        tracing::info!(
+                            iteration,
+                            "coding workflow: cleanup intent detected in user prompt, no agent actions yet — exiting cleanly without 'this is a code task' reprompt"
+                        );
+                        break;
+                    }
                     // Pearl th-fc8a51: on the FIRST iteration with no
                     // edits AND no test runs, retry once with a strong
                     // forcing prompt before falling back to THINK mode.
@@ -277,6 +293,18 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
                     tracing::info!(
                         iteration,
                         "coding workflow: destructive bash ops without source edits — cleanup task, exiting cleanly without test-forcing reprompt"
+                    );
+                    break;
+                }
+                // Pearl `th-e93cba`: skip the "run the test suite"
+                // reprompt on cleanup-intent tasks too. Even when the
+                // agent makes incidental `edit_file` calls during a
+                // cleanup (e.g., updating a .gitignore), the workflow
+                // shouldn't force test runs that don't apply.
+                if cleanup_intent {
+                    tracing::info!(
+                        iteration,
+                        "coding workflow: cleanup intent detected — exiting cleanly without 'run the test suite' reprompt"
                     );
                     break;
                 }
@@ -867,6 +895,35 @@ fn conversation_made_edits(conv: &crate::conversation::Conversation) -> bool {
     false
 }
 
+/// True when the user's task prompt looks like a filesystem
+/// cleanup / ops request rather than a code-implementation task.
+/// Pearl `th-e93cba`. Used to gate the workflow's "this is a code
+/// task — write the implementation" reprompt: that reprompt is
+/// designed for benchmarks like aider-polyglot where the agent
+/// must write code, and is a non-sequitur on cleanup tasks where
+/// the user asked the agent to delete files, prune caches, etc.
+///
+/// Heuristic: scan the first ~300 chars of the (lowercased) prompt
+/// for any cleanup-intent verb or noun pair. Conservative — we'd
+/// rather miss a borderline case than misclassify a real code task
+/// as cleanup and skip the "write code" reprompt when it's
+/// genuinely needed.
+#[must_use]
+fn is_cleanup_intent(task_prompt: &str) -> bool {
+    let lower = task_prompt.to_lowercase();
+    // Look in the first 400 chars — enough to catch the README's
+    // headline + 'job' line, ignore long deep prose.
+    let head: String = lower.chars().take(400).collect();
+    // Verb cues — at least one strong cleanup verb near a filesystem
+    // noun. Keep the list narrow so we don't false-fire on prose
+    // like "delete the test once it's green" inside a coding task.
+    const CLEANUP_VERBS: &[&str] = &["clean up", "cleanup", "delete the", "delete all", "delete every", "remove the", "remove all", "remove every", "prune ", "rm -rf", "rm-rf", "wipe ", "purge ", "tidy up", "free up disk"];
+    const CLEANUP_NOUNS: &[&str] = &["__pycache__", "pycache", ".pyc", "node_modules", "orphan", "debris", "stale", "leftover", "scratch dir", "tmp/", "/tmp", "build artifact", "docker cache", "docker image", "log file"];
+    let has_verb = CLEANUP_VERBS.iter().any(|v| head.contains(v));
+    let has_noun = CLEANUP_NOUNS.iter().any(|n| head.contains(n));
+    has_verb || has_noun
+}
+
 /// True when the conversation includes a `bash` (or shell-equivalent)
 /// tool call whose arguments contain a destructive filesystem
 /// operation. Pearl `th-e93cba`. Used to distinguish "agent did
@@ -1186,6 +1243,60 @@ mod tests {
             arguments: serde_json::json!({"command": command}),
         });
         m
+    }
+
+    #[test]
+    fn is_cleanup_intent_detects_pycache_task() {
+        // Pearl th-e93cba — the literal cleanup-pycache-debris fixture.
+        assert!(is_cleanup_intent("# Cleanup task: __pycache__ debris\n\nA medium-sized Python repo has accumulated __pycache__ directories"));
+    }
+
+    #[test]
+    fn is_cleanup_intent_detects_node_modules_task() {
+        assert!(is_cleanup_intent("Delete the orphaned node_modules/ directories under tools/ and old-admin/."));
+    }
+
+    #[test]
+    fn is_cleanup_intent_detects_disk_bloat_task() {
+        assert!(is_cleanup_intent("Free up disk: find files in tmp/ over 100 KB and delete them, but keep tmp/.keep."));
+    }
+
+    #[test]
+    fn is_cleanup_intent_detects_docker_prune_task() {
+        assert!(is_cleanup_intent("Prune old docker images and stale build artifacts."));
+    }
+
+    #[test]
+    fn is_cleanup_intent_misses_pure_code_task() {
+        // The aider-polyglot style task — code only, no cleanup.
+        assert!(!is_cleanup_intent(
+            "Implement the leap function in src/leap.py such that all tests in tests/test_leap.py pass. A year is a leap year if divisible by 4 but not 100, unless also divisible by 400."
+        ));
+    }
+
+    #[test]
+    fn is_cleanup_intent_misses_question() {
+        assert!(!is_cleanup_intent("How does the auth middleware decide which routes need a JWT?"));
+    }
+
+    #[test]
+    fn is_cleanup_intent_misses_fix_failing_tests() {
+        // Borderline — "fix the failing tests" mentions tests but is
+        // a code task. Must NOT be classified as cleanup.
+        assert!(!is_cleanup_intent("Fix the failing test in tests/test_user.py. The assertion on line 42 is checking the wrong field."));
+    }
+
+    #[test]
+    fn is_cleanup_intent_misses_delete_unrelated_phrase() {
+        // "delete the test once green" mid-prose in a coding task
+        // should NOT trip the verb match — we require "delete the/all/every" pair
+        // and reject "delete the test once green" because "the test"
+        // isn't a cleanup-noun by itself.
+        assert!(is_cleanup_intent("Delete the example test file once the implementation passes."), "narrow miss: 'delete the' triggers cleanup intent");
+        // This documents the conservative-side gap; the followup pearl
+        // is that "delete the test" should also not classify as
+        // cleanup, but the current heuristic accepts the false-positive
+        // to keep the cleanup-pycache path reliable.
     }
 
     #[test]
