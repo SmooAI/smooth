@@ -24,6 +24,8 @@ use clap::Subcommand;
 
 pub mod login;
 pub mod logout;
+pub mod paths;
+pub mod profile;
 pub mod whoami;
 
 /// Default prod Smoo Supabase project URL. Override with
@@ -84,6 +86,30 @@ pub enum AuthCommands {
     },
     /// Show currently-logged-in sessions (user + M2M).
     Whoami,
+    /// Manage named auth profiles. Each profile bundles a user + M2M
+    /// session so one host can hold several identities at once. Select a
+    /// profile per command with `--profile <name>` / `SMOOAI_PROFILE`, or
+    /// set a persistent default with `th auth profile use <name>`.
+    Profile {
+        #[command(subcommand)]
+        cmd: ProfileCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProfileCommands {
+    /// List profiles and show which is active.
+    List,
+    /// Set the active profile (persisted in `<auth>/active`).
+    Use {
+        /// Profile name.
+        name: String,
+    },
+    /// Delete a profile's stored sessions.
+    Rm {
+        /// Profile name.
+        name: String,
+    },
 }
 
 pub async fn dispatch(cmd: AuthCommands) -> Result<()> {
@@ -106,6 +132,7 @@ pub async fn dispatch(cmd: AuthCommands) -> Result<()> {
         }
         AuthCommands::Logout { m2m, all } => logout::cmd_logout(m2m, all),
         AuthCommands::Whoami => whoami::cmd_whoami(),
+        AuthCommands::Profile { cmd } => profile::dispatch(cmd),
     }
 }
 
