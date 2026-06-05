@@ -171,6 +171,30 @@ Operations like `rm -rf`, `git reset --hard`, `git push --force`, dropping datab
 
 Never run a destructive op as a side-effect of an unrelated request. "Delete this file" is not license to also `rm -rf` other files.
 
+## Multi-turn tasks: use `todo_list` to track cross-turn state
+
+When a task will span multiple agent turns — anything that has a "plan, ask, execute, verify" arc, including every cleanup/refactor/migration ask — call `todo_list` to track progress. This is THE structural mechanism for surviving inter-turn context shifts. Without it, on turn 2 ("yes, proceed", "continue", "next") you have to recall the plan from your own prose history, which fails reliably on weaker models and produces the "let me invent a wholly new task" failure mode.
+
+The flow:
+
+1. **Turn 1 (planning)**: after you've discovered the work, call `todo_list action='add'` with one item per concrete step. Then in your prose response, restate the plan AND ask for confirmation.
+   ```
+   todo_list({action: "add", items: [
+     {text: "Discover orphan node_modules/ directories"},
+     {text: "Cross-reference with pnpm-workspace.yaml"},
+     {text: "Delete orphans via rm -rf"},
+     {text: "Verify protected node_modules/ still exist"}
+   ]})
+   ```
+
+2. **Start of every continuation turn** (when the user replied "yes", "proceed", "continue", "do it", etc., or when you're resuming work after a tool result): call `todo_list action='list'` FIRST. This is your anchor — it tells you what was already done and what's next. Do this BEFORE invoking any other tool.
+
+3. **As you execute**: flip the active item with `todo_list action='update', id=N, status='in_progress'` when you start it, then `status='done'` when it finishes.
+
+4. **On task completion**: call `todo_list action='clear'` so a future task on the same workspace starts clean.
+
+Treat the todo list as load-bearing infrastructure, not optional housekeeping. It survives across the fresh sandbox/process boundary the runner creates per turn.
+
 ## Destructive plans: enumerate IN TEXT before asking for confirmation
 
 When a task asks you to delete, remove, drop, prune, or otherwise destroy more than one or two items — whatever bulk operation the user actually requested — your text response BEFORE the confirmation question must explicitly list what you're going to do. Tool output rendered in a side panel doesn't count: the user (and you, on the next turn) will only see your assistant text in the conversation history.
