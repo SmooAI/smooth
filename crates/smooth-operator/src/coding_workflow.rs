@@ -76,6 +76,15 @@ pub struct CodingWorkflowConfig {
     /// teammate without needing to restart the workflow. `None` keeps
     /// the agent isolated (current behaviour for non-pearl-attached runs).
     pub chat_rx: Option<Arc<tokio::sync::Mutex<UnboundedReceiver<InjectedMessage>>>>,
+    /// Pearl th-e182bc: when the runner's caller detected cleanup
+    /// intent in the prior conversation (the README that started
+    /// the task), this carries that hint through to the workflow.
+    /// `build_user_prompt` uses it to apply the cleanup preamble
+    /// on CONTINUATION turns where the current `task_prompt` is a
+    /// bare confirmation ("yes, proceed") and would otherwise miss
+    /// the cleanup-intent detection. Pure additive: defaults false,
+    /// no behavior change for non-runner callers.
+    pub cleanup_intent_hint: bool,
 }
 
 /// Run the workflow end-to-end. Returns the accumulated cost.
@@ -124,7 +133,7 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
             iteration,
         });
 
-        let user_prompt = build_user_prompt(&cfg.task_prompt, iteration, last_verify_output.as_deref());
+        let user_prompt = build_user_prompt_with_hint(&cfg.task_prompt, iteration, last_verify_output.as_deref(), cfg.cleanup_intent_hint);
 
         // Inner iteration cap. Agent can take a lot of tool-call turns
         // internally; default is 80 but `SMOOTH_WORKFLOW_AGENT_MAX_ITERATIONS`
@@ -456,7 +465,25 @@ const CLOSE_TO_GREEN_THRESHOLD: u32 = 3;
 /// summary" discipline; we don't need to re-state it per turn at the
 /// cost of confusing the model on non-test-driven tasks.
 fn build_user_prompt(task: &str, iteration: u32, prior_output: Option<&str>) -> String {
+    build_user_prompt_with_hint(task, iteration, prior_output, false)
+}
+
+#[allow(clippy::fn_params_excessive_bools)] // 1 bool + 1 u32 + 2 strs is fine
+fn build_user_prompt_with_hint(task: &str, iteration: u32, prior_output: Option<&str>, cleanup_intent_hint: bool) -> String {
     if iteration == 1 {
+        // Pearl th-e182bc: continuation-turn confirmation on a task
+        // the runner's caller flagged as cleanup-intent. Re-applies
+        // the (known-good) cleanup preamble so the agent doesn't
+        // pivot to test-fix or fabricate a wholly new task on
+        // turn 2. Cross-fixture confabulation root cause
+        // (e.g. `find -size +150k -delete` misfired on a
+        // node-modules orphan task) is the SAME failure mode
+        // [`is_cleanup_intent`] addresses on the planning turn.
+        if cleanup_intent_hint && is_confirmation_reply(task) {
+            return format!(
+                "[bench/workflow note: this is a FILESYSTEM CLEANUP task, not a code-fix or test-fix task. Do NOT write source files. Do NOT create test files. Do NOT run tests. The fixer system prompt's test-related guidance does NOT apply here.\n\nIgnore any source files (`*.py`, `*.rs`, `*.ts`, `main.*`, `lib.*`, etc.) you see in the workspace unless the user's request below explicitly mentions them — they are PROBABLY scope-discipline traps (files you must NOT delete), not invitations to start coding or running tests. Treat the user's request text as the sole source of truth for what to do.\n\nThe user is confirming a plan you enumerated in a PRIOR assistant turn — find that plan in the conversation history and execute it via `bash`. Pearl `th-e182bc`.]\n\n{task}"
+            );
+        }
         // Pearl `th-e93cba` round 2: when the user's prompt looks like
         // a filesystem cleanup task, prepend an explicit context-setter.
         // Without it, the model — even with the workflow-level
@@ -923,6 +950,65 @@ fn conversation_made_edits(conv: &crate::conversation::Conversation) -> bool {
 /// rather miss a borderline case than misclassify a real code task
 /// as cleanup and skip the "write code" reprompt when it's
 /// genuinely needed.
+/// Pearl th-e182bc: bare confirmation reply ("yes", "proceed",
+/// "go", etc.). Strict: trimmed length ≤ 60 chars and the
+/// normalized form matches a small fixed set. False negatives
+/// fine; false positives bad (would apply the cleanup preamble
+/// on a real new code task).
+#[must_use]
+pub fn is_confirmation_reply(task_prompt: &str) -> bool {
+    let trimmed = task_prompt.trim();
+    if trimmed.len() > 60 {
+        return false;
+    }
+    let normalized: String = trimmed
+        .to_lowercase()
+        .chars()
+        .filter(|c| !matches!(c, '.' | '!' | '?' | ',' | ';' | ':'))
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    const CONFIRMATIONS: &[&str] = &[
+        "yes",
+        "y",
+        "yes proceed",
+        "yes please",
+        "yes please proceed",
+        "yes go ahead",
+        "yes do it",
+        "proceed",
+        "please proceed",
+        "go",
+        "go ahead",
+        "do it",
+        "do that",
+        "confirmed",
+        "approved",
+        "ok",
+        "okay",
+        "sure",
+        "sounds good",
+        "looks good",
+        "lgtm",
+        "ack",
+        "affirmative",
+        "yep",
+        "yup",
+    ];
+    CONFIRMATIONS.iter().any(|c| normalized == *c)
+}
+
+/// Public helper for callers that have prior conversation text and
+/// want to know whether the workflow should be invoked with the
+/// `cleanup_intent_hint` set. Same heuristic as `is_cleanup_intent`
+/// but exported so the runner can scan prior_messages before
+/// constructing the workflow config. Pearl th-e182bc.
+#[must_use]
+pub fn task_text_has_cleanup_intent(task_text: &str) -> bool {
+    is_cleanup_intent(task_text)
+}
+
 #[must_use]
 fn is_cleanup_intent(task_prompt: &str) -> bool {
     let lower = task_prompt.to_lowercase();
@@ -1258,6 +1344,60 @@ mod tests {
             arguments: serde_json::json!({"command": command}),
         });
         m
+    }
+
+    #[test]
+    fn is_confirmation_reply_matches_common_phrases_th_e182bc() {
+        for phrase in &["yes, proceed", "yes", "proceed", "go", "do it", "ok", "okay", "sure", "lgtm", "Yes, proceed.", "  yes please  ", "GO AHEAD", "yes please proceed", "yep", "yup"] {
+            assert!(is_confirmation_reply(phrase), "should match: {phrase:?}");
+        }
+    }
+
+    #[test]
+    fn is_confirmation_reply_rejects_non_confirmations_th_e182bc() {
+        for phrase in &[
+            "delete the orphaned node_modules/",
+            "no, wait",
+            "yes, but skip the ui package",
+            "proceed with caution and tell me what's happening",
+            "do it but only for the apps/ subdirectory",
+            "yes, but also delete the .pyc files",
+            "yes — actually I changed my mind, list them again first",
+        ] {
+            assert!(!is_confirmation_reply(phrase), "should not match: {phrase:?}");
+        }
+    }
+
+    #[test]
+    fn build_user_prompt_with_hint_fires_cleanup_preamble_on_yes_th_e182bc() {
+        let task = "yes, proceed";
+        let out = build_user_prompt_with_hint(task, 1, None, true);
+        assert!(out.contains("FILESYSTEM CLEANUP task"), "preamble missing: {out}");
+        assert!(out.contains("Do NOT create test files"), "test-file ban missing: {out}");
+        assert!(out.contains("Pearl `th-e182bc`"), "pearl ref missing: {out}");
+        assert!(out.ends_with("yes, proceed"), "original task preserved at end: {out}");
+    }
+
+    #[test]
+    fn build_user_prompt_with_hint_no_hint_no_preamble_on_yes_th_e182bc() {
+        let task = "yes, proceed";
+        let out = build_user_prompt_with_hint(task, 1, None, false);
+        assert_eq!(out, "yes, proceed", "no hint → bare task: got {out}");
+    }
+
+    #[test]
+    fn build_user_prompt_with_hint_real_cleanup_task_still_fires_preamble_th_e182bc() {
+        // Original cleanup-intent path: task itself looks like cleanup.
+        // Verify the existing behavior didn't regress.
+        let task = "Delete the orphan node_modules/ directories under tools/ and old-admin/.";
+        let out = build_user_prompt_with_hint(task, 1, None, false);
+        assert!(out.contains("FILESYSTEM CLEANUP task"));
+    }
+
+    #[test]
+    fn task_text_has_cleanup_intent_matches_readme_th_e182bc() {
+        let readme = "# Cleanup task: orphaned `node_modules/` directories\n\nThis is a pnpm workspace.";
+        assert!(task_text_has_cleanup_intent(readme));
     }
 
     #[test]

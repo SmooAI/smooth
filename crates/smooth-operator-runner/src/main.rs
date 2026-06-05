@@ -2507,6 +2507,20 @@ async fn main() {
                         std::env::var("SMOOTH_WORKSPACE").unwrap_or_else(|_| "/workspace".into()),
                     )),
                     chat_rx: mailbox_chat_rx.clone(),
+                    // Pearl th-e182bc: scan the prior conversation
+                    // for cleanup-intent verbs/nouns. On bench
+                    // continuation turns the current task is
+                    // "yes, proceed" which loses the cleanup
+                    // signal; the README that started the task
+                    // still sits in prior_messages and carries it.
+                    // When set, build_user_prompt re-applies the
+                    // cleanup preamble on confirmation replies to
+                    // suppress the test-fix bias + cross-fixture
+                    // pattern confabulation observed in the bench.
+                    cleanup_intent_hint: agent_config
+                        .prior_messages
+                        .iter()
+                        .any(|m| matches!(m.role, smooth_operator::conversation::Role::User) && smooth_operator::coding_workflow::task_text_has_cleanup_intent(&m.content)),
                 };
                 match run_coding_workflow(cfg).await {
                     // Workflow emits its own Completed event — return
