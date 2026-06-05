@@ -47,6 +47,12 @@ struct Cli {
     /// scout / heckler). Same as `th code --agent <name>`.
     #[arg(long, value_name = "NAME")]
     agent: Option<String>,
+
+    /// Auth profile to use for this command (overrides the active profile
+    /// and `SMOOAI_PROFILE`). Profiles bundle a user + M2M session under
+    /// `~/.config/smooth/auth/profiles/<name>/`. See `th auth profile`.
+    #[arg(long, global = true, value_name = "NAME")]
+    profile: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -1014,6 +1020,12 @@ fn resolve_primary_agent(name: Option<&str>) -> Result<String> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // SMOODEV-1739: resolve the active auth profile (--profile flag →
+    // SMOOAI_PROFILE → active-profile file) and export SMOOAI_USER_AUTH_FILE /
+    // SMOOAI_AUTH_FILE so every credential-store call reads the right files.
+    // Also migrates legacy ~/.smooth/auth → ~/.config/smooth/auth on first run.
+    auth::paths::init(cli.profile.clone());
 
     // Pearl th-bench-loop iter 23 / user observation 2026-05-10:
     // tracing-to-stderr trampled the ratatui TUI render whenever
