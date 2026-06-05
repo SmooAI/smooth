@@ -3,6 +3,14 @@ name: PR Checks
 on:
     pull_request:
         branches: [main]
+    # Also fire on direct push to main so the branch carries a
+    # completed-check-run history. Required by branch-protection's
+    # "require status checks" rule — without push triggering these,
+    # an admin-bypass hotfix lands with no check history. Pearl
+    # th-e392d9.
+    push:
+        branches: [main]
+    merge_group:
 
 env:
     FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
@@ -11,7 +19,7 @@ jobs:
     rust:
         name: Rust checks
         runs-on: ubuntu-latest
-        timeout-minutes: 15
+        timeout-minutes: 30
         steps:
             - uses: actions/checkout@v4
 
