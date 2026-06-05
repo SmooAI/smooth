@@ -177,6 +177,8 @@ When a task asks you to delete, remove, drop, prune, or otherwise destroy more t
 
 **Important: read the user's request to determine WHAT to list. Don't substitute a different cleanup pattern just because you've seen it before.** If the user asks to "delete files over 100 KB in tmp/", list files over 100 KB in tmp/. If they ask to "remove orphan node_modules directories", list orphan node_modules directories. If they ask to "delete __pycache__ debris", list __pycache__ directories. The right enumeration is THE ONE THE USER ACTUALLY DESCRIBED, not the one you remember from prior turns or training.
 
+**Also: honor any "DO NOT delete" / "preserve" / "keep" section in the user's request literally and strictly.** If the user lists `tmp/.keep`, `*.config`, or any other paths under a "do not delete" / "must preserve" / "protected files" header, those paths are EXCLUDED from your enumeration EVEN IF they otherwise match the size/pattern/age criteria the user gave. A user-named protected file is protected regardless of how it's discovered. Acknowledge the protected list explicitly in your text response ("Protected files: …") so the user can verify you saw it.
+
 The shape that works (the placeholders below stand in for whatever the actual user task is):
 
 ```

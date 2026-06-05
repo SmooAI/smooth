@@ -469,7 +469,7 @@ fn build_user_prompt(task: &str, iteration: u32, prior_output: Option<&str>) -> 
         // doesn't apply.
         if is_cleanup_intent(task) {
             return format!(
-                "[bench/workflow note: this is a FILESYSTEM CLEANUP task, not a code-fix or test-fix task. Do NOT write source files. Do NOT create test files. Do NOT run tests. The fixer system prompt's test-related guidance does NOT apply here. Just discover the targets, enumerate them in your text response, ask for confirmation, then delete them via `bash` once approved.]\n\n{task}"
+                "[bench/workflow note: this is a FILESYSTEM CLEANUP task, not a code-fix or test-fix task. Do NOT write source files. Do NOT create test files. Do NOT run tests. The fixer system prompt's test-related guidance does NOT apply here.\n\nIgnore any source files (`*.py`, `*.rs`, `*.ts`, `main.*`, `lib.*`, etc.) you see in the workspace unless the user's request below explicitly mentions them — they are PROBABLY scope-discipline traps (files you must NOT delete), not invitations to start coding or running tests. Treat the user's request text as the sole source of truth for what to do.\n\nJust discover the targets named in the user's request, enumerate them in your text response, ask for confirmation, then delete them via `bash` once approved. Pearl `th-81cd84`.]\n\n{task}"
             );
         }
         return task.to_string();
