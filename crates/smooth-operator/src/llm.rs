@@ -27,7 +27,13 @@ impl Default for RetryPolicy {
             max_retries: 3,
             base_delay_ms: 1000,
             max_delay_ms: 60_000,
-            retry_on_status: vec![429, 500, 502, 503],
+            // Cloudflare 5xx codes (520-527) are transient and benefit
+            // from retry — bench observed an LLM API error 524 (origin
+            // timeout) wreck a mid-conversation turn on
+            // cleanup-node-modules-orphans. Adding 504 (gateway
+            // timeout) too — that's a Cloudflare-class timeout from
+            // any upstream proxy. Pearl `th-80a39e` follow-up.
+            retry_on_status: vec![429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 527],
         }
     }
 }
