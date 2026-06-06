@@ -26,6 +26,7 @@ pub mod login;
 pub mod logout;
 pub mod paths;
 pub mod profile;
+pub mod refresh;
 pub mod whoami;
 
 /// Default prod Smoo Supabase project URL. Override with
@@ -131,7 +132,7 @@ pub async fn dispatch(cmd: AuthCommands) -> Result<()> {
             }
         }
         AuthCommands::Logout { m2m, all } => logout::cmd_logout(m2m, all),
-        AuthCommands::Whoami => whoami::cmd_whoami(),
+        AuthCommands::Whoami => whoami::cmd_whoami().await,
         AuthCommands::Profile { cmd } => profile::dispatch(cmd),
     }
 }
