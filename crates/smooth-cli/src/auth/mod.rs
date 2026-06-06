@@ -22,9 +22,11 @@
 use anyhow::Result;
 use clap::Subcommand;
 
+pub mod browser_login;
 pub mod login;
 pub mod logout;
 pub mod paths;
+pub mod pkce;
 pub mod profile;
 pub mod whoami;
 
