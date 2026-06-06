@@ -54,12 +54,28 @@ urlencoding = "2"
 # for theming, 10+ built-in styles.
 tabled = "0.18"
 
+# Pearl th-fcb579: browser-based `th auth login`.
+# - `tiny_http`: minimal blocking HTTP listener for the OAuth
+#   localhost callback. One endpoint, no async — avoids pulling
+#   axum/hyper into the binary just for this.
+# - `open`: cross-platform "open this URL in the default browser".
+# - `sha2`/`rand`: PKCE (RFC 7636) code_verifier + S256
+#   code_challenge generation, plus the CSRF state token.
+#   (`base64` is already listed below in dev-dependencies; we lift
+#   it to a runtime dep for PKCE encoding.)
+tiny_http = "0.12"
+open = "5"
+sha2 = "0.10"
+rand = "0.8"
+base64 = "0.22"
+
 [dev-dependencies]
 tempfile = "3"
 # Pearl th-abc4e2: admin::tests verify the baked-in Supabase anon
 # key really IS the anon key (not service_role) by base64-decoding
-# its JWT payload and checking the role claim.
-base64 = "0.22"
+# its JWT payload and checking the role claim. (Lifted to a
+# runtime dep above by th-fcb579 — kept here as a comment for
+# context.)
 
 [lints]
 workspace = true
