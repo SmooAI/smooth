@@ -22,6 +22,7 @@
 use anyhow::Result;
 use clap::Subcommand;
 
+pub mod active_org;
 pub mod browser_login;
 pub mod login;
 pub mod logout;
@@ -63,6 +64,23 @@ pub enum AuthCommands {
         /// line in interactive shells — it lands in shell history.
         #[arg(long, conflicts_with = "client_id", conflicts_with = "client_secret")]
         password: Option<String>,
+        /// Open the browser for the OAuth2 + PKCE flow against
+        /// `auth.smoo.ai/cli-login`. Pearl th-fcb579. Default is the
+        /// prompt-based password flow until smooai-side `/cli-login`
+        /// (pearl th-62e710) ships and `SMOOTH_AUTH_BROWSER=1` is
+        /// removed as a gate.
+        #[arg(
+            long,
+            conflicts_with = "no_browser",
+            conflicts_with = "m2m",
+            conflicts_with = "email",
+            conflicts_with = "password"
+        )]
+        browser: bool,
+        /// Force the prompt-based password flow even when the env
+        /// gate (`SMOOTH_AUTH_BROWSER=1`) is set.
+        #[arg(long = "no-browser", conflicts_with = "browser")]
+        no_browser: bool,
 
         // ── M2M flow ─────────────────────────────────
         /// Service-account client_id (M2M flow only — implies --m2m).
@@ -120,6 +138,8 @@ pub async fn dispatch(cmd: AuthCommands) -> Result<()> {
             m2m,
             email,
             password,
+            browser,
+            no_browser,
             client_id,
             client_secret,
         } => {
@@ -129,7 +149,17 @@ pub async fn dispatch(cmd: AuthCommands) -> Result<()> {
             if m2m {
                 login::cmd_login_m2m(client_id, client_secret).await
             } else {
-                login::cmd_login_user(email, password).await
+                // clap's `conflicts_with` guarantees `browser` and
+                // `no_browser` aren't both set. Collapse the pair
+                // into a single tri-state.
+                let browser_choice = if browser {
+                    Some(true)
+                } else if no_browser {
+                    Some(false)
+                } else {
+                    None
+                };
+                login::cmd_login_user(email, password, browser_choice).await
             }
         }
         AuthCommands::Logout { m2m, all } => logout::cmd_logout(m2m, all),
