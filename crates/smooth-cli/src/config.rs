@@ -425,64 +425,6 @@ fn display_value(v: &Value, tier: &str) -> String {
     }
 }
 
-/// Inline mirror of `smooai-client-shared::auth::refresh::refresh_session`
-/// (the upstream module exists at `client-shared/rust/src/auth/refresh.rs`
-/// but isn't re-exported via `pub mod refresh` in that crate's
-/// `mod.rs`, so we can't import it). Exchanges the stored Supabase
-/// refresh_token for a fresh access_token + new refresh_token, keeping
-/// the user/org display fields intact.
-async fn refresh_user_session(http: &reqwest::Client, previous: &Credentials) -> Result<Credentials> {
-    use chrono::Utc;
-    use smooai_client_shared::auth::storage::CredentialKind;
-
-    let refresh_token = previous
-        .refresh_token
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("session has no refresh_token — re-run `th auth login`"))?;
-    let supabase_url = std::env::var("SMOOAI_SUPABASE_URL").unwrap_or_else(|_| "https://db.smoo.ai".to_string());
-    let anon_key = std::env::var("SMOOAI_SUPABASE_ANON_KEY").unwrap_or_else(|_| crate::auth::PROD_SUPABASE_ANON_KEY.to_string());
-
-    let url = format!("{}/auth/v1/token?grant_type=refresh_token", supabase_url.trim_end_matches('/'));
-    let resp = http
-        .post(&url)
-        .header("apikey", &anon_key)
-        .header("Content-Type", "application/json")
-        .json(&serde_json::json!({ "refresh_token": refresh_token }))
-        .send()
-        .await
-        .with_context(|| format!("POST {url}"))?;
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        anyhow::bail!("refresh_token grant returned HTTP {status}: {text} (re-run `th auth login`)");
-    }
-    let body: Value = serde_json::from_str(&text).with_context(|| format!("parse refresh response: {text}"))?;
-    let access_token = body
-        .get("access_token")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("refresh response missing access_token: {text}"))?
-        .to_string();
-    let new_refresh = body.get("refresh_token").and_then(|v| v.as_str()).map(str::to_string);
-    let expires_in = body.get("expires_in").and_then(serde_json::Value::as_u64);
-    let expires_at = expires_in.map(|s| Utc::now() + chrono::Duration::seconds(i64::try_from(s).unwrap_or(3600)));
-    let user_display = body
-        .get("user")
-        .and_then(|u| u.get("email").and_then(|e| e.as_str()).or_else(|| u.get("id").and_then(|i| i.as_str())))
-        .map(str::to_string)
-        .or_else(|| previous.user.clone());
-    Ok(Credentials {
-        access_token,
-        refresh_token: new_refresh.or_else(|| previous.refresh_token.clone()),
-        expires_at,
-        user: user_display,
-        active_org_id: previous.active_org_id.clone(),
-        client_id: None,
-        client_secret: None,
-        kind: CredentialKind::User,
-        created_at: previous.created_at,
-    })
-}
-
 /// Mask all but the last 4 characters of a secret for log/display use.
 fn mask_secret(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
@@ -539,25 +481,17 @@ impl ConfigClient {
         //   `auth::refresh` module but isn't `pub`-exported, so we
         //   inline a minimal version here.
         let creds = if creds.is_expired() {
-            if m2m {
-                if let (Some(cid), Some(csecret)) = (creds.client_id.clone(), creds.client_secret.clone()) {
-                    use smooai_client_shared::auth::m2m::client_credentials_grant;
-                    let mut refreshed = client_credentials_grant(&http, &cid, &csecret)
-                        .await
-                        .context("auto-refresh M2M client_credentials grant")?;
-                    refreshed.active_org_id = creds.active_org_id;
-                    store.save(&refreshed).context("persist refreshed credentials")?;
-                    refreshed
-                } else {
-                    anyhow::bail!("session expired — re-run `th auth login --m2m`");
-                }
+            let refreshed = if m2m {
+                crate::auth::refresh::refresh_m2m_session(&http, &creds)
+                    .await
+                    .context("auto-refresh M2M client_credentials grant")?
             } else if creds.refresh_token.is_some() {
-                let refreshed = refresh_user_session(&http, &creds).await.context("auto-refresh user session")?;
-                store.save(&refreshed).context("persist refreshed credentials")?;
-                refreshed
+                crate::auth::refresh::refresh_user_session(&http, &creds).await.context("auto-refresh user session")?
             } else {
                 anyhow::bail!("session expired — re-run `th auth login`");
-            }
+            };
+            store.save(&refreshed).context("persist refreshed credentials")?;
+            refreshed
         } else {
             creds
         };
