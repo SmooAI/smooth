@@ -21,8 +21,30 @@ use tower_http::trace::TraceLayer;
 
 use crate::events::{ClientEvent, ServerEvent};
 
-/// Default idle timeout: 30 minutes.
-const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 30 * 60;
+/// Default idle timeout: 24 hours.
+///
+/// Was 30 minutes. Bumped under pearl `th-1b9b3e` after bench evidence
+/// showed Big Smooth was silently shutting itself down mid-session —
+/// pi + opencode (the bench's reference backends) have no daemon and
+/// therefore no auto-shutdown, so smooth's 30-min cliff was a
+/// competitive-parity loss masquerading as a "crashes unprompted"
+/// symptom.
+///
+/// 24h keeps a safety net for forgotten-running dev sessions but
+/// doesn't fire during a single work session. Override at boot via
+/// `SMOOTH_BIGSMOOTH_IDLE_TIMEOUT_SECS=<seconds>` (set to `0` to
+/// disable entirely; only honored when set in the daemon process's
+/// own environment, which in sandboxed mode is the safehouse VM —
+/// see project memory on env propagation).
+const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 24 * 60 * 60;
+
+/// Read the idle-timeout env override. `None` = use default. `Some(0)`
+/// = disabled (timeout never fires).
+fn idle_timeout_from_env() -> Option<Duration> {
+    let raw = std::env::var("SMOOTH_BIGSMOOTH_IDLE_TIMEOUT_SECS").ok()?;
+    let secs: u64 = raw.parse().ok()?;
+    Some(Duration::from_secs(secs))
+}
 
 /// Default broadcast channel capacity.
 const BROADCAST_CHANNEL_CAPACITY: usize = 256;
@@ -322,7 +344,7 @@ impl AppState {
             session_store,
             start_time: Instant::now(),
             last_activity: Arc::new(Mutex::new(Instant::now())),
-            idle_timeout: Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS),
+            idle_timeout: idle_timeout_from_env().unwrap_or_else(|| Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS)),
             event_tx,
             safehouse: None,
             diver: None,
@@ -630,23 +652,33 @@ pub async fn start(mut state: AppState, addr: SocketAddr) -> anyhow::Result<()> 
         }
     }
 
-    // Spawn idle timeout checker
-    let idle_state = state.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_secs(60)).await;
-            let elapsed = {
-                let Ok(last) = idle_state.last_activity.lock() else {
-                    continue;
+    // Spawn idle timeout checker (pearl th-1b9b3e). Skip entirely when
+    // the timeout is zero — bench harness + long-running dev sessions
+    // set `SMOOTH_BIGSMOOTH_IDLE_TIMEOUT_SECS=0` to opt out of the
+    // 30-min auto-shutdown. Pi + OpenCode (the bench's reference
+    // backends) have no daemon timeout because they have no daemon —
+    // smooth's daemon model means every loop pause auto-killed the
+    // process before this knob existed.
+    if state.idle_timeout.is_zero() {
+        tracing::info!("Idle timeout disabled (SMOOTH_BIGSMOOTH_IDLE_TIMEOUT_SECS=0)");
+    } else {
+        let idle_state = state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                let elapsed = {
+                    let Ok(last) = idle_state.last_activity.lock() else {
+                        continue;
+                    };
+                    last.elapsed()
                 };
-                last.elapsed()
-            };
-            if elapsed > idle_state.idle_timeout {
-                tracing::info!("Idle timeout reached ({:.0}s), shutting down", idle_state.idle_timeout.as_secs_f64());
-                std::process::exit(0);
+                if elapsed > idle_state.idle_timeout {
+                    tracing::info!("Idle timeout reached ({:.0}s), shutting down", idle_state.idle_timeout.as_secs_f64());
+                    std::process::exit(0);
+                }
             }
-        }
-    });
+        });
+    }
 
     // Spawn orchestrator loop — continuously picks up ready pearls and
     // dispatches operators. Skipped in direct mode: the orchestrator

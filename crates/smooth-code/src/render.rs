@@ -37,6 +37,18 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         // — same behavior the user expects from a terminal that's
         // mid-output.
         let scroll = total_lines.saturating_sub(visible);
+        // Pearl th-eeb00d: force a full clear of the preview region
+        // BEFORE rendering the streaming paragraph. Ratatui's incremental
+        // diff was leaking fragments of prior frames into the new frame
+        // when streaming content grew row-by-row — manifested as
+        // mid-line interleaving like `sub_17/__py_10/__pycache__/helper`
+        // (the `_10/__pycache__/helper` is a tail-fragment from the
+        // previous bullet that didn't get overwritten because the diff
+        // logic concluded only the new last row needed repainting).
+        // Clear + render gives a clean repaint each frame; tiny perf
+        // cost (one extra buffer wipe per tick on a small region) and
+        // no observable flicker.
+        frame.render_widget(Clear, preview_rect);
         let paragraph = Paragraph::new(lines)
             .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0))
             .wrap(Wrap { trim: false });

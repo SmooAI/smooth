@@ -379,7 +379,17 @@ pub fn viewport_preview_lines(state: &AppState) -> Vec<Line<'static>> {
         }
     }
     if state.thinking && state.messages.last().is_none_or(|m| !m.streaming) {
-        lines.push(Line::from(Span::styled("Thinking...", theme::muted())));
+        // Pearl `th-2e6693`: prefix with the animated spinner glyph
+        // so the byte-stream actually changes every ~100 ms. Without
+        // this, the bench's `wait_for_idle` (which polls capture-pane
+        // and declares idle when the byte content is stable for the
+        // dwell window) would false-fire on long-thinking responses —
+        // smooth had to bump the dwell from 8s → 20s to compensate
+        // (pearl th-65a041), at the cost of an extra 12s per bench
+        // task. Pi + opencode don't need this because their TUIs
+        // either stream tokens visibly or animate a spinner natively.
+        let spinner = state.spinner_char();
+        lines.push(Line::from(Span::styled(format!("{spinner} Thinking..."), theme::muted())));
     }
     lines
 }

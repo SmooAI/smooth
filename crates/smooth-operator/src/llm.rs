@@ -27,7 +27,13 @@ impl Default for RetryPolicy {
             max_retries: 3,
             base_delay_ms: 1000,
             max_delay_ms: 60_000,
-            retry_on_status: vec![429, 500, 502, 503],
+            // Cloudflare 5xx codes (520-527) are transient and benefit
+            // from retry — bench observed an LLM API error 524 (origin
+            // timeout) wreck a mid-conversation turn on
+            // cleanup-node-modules-orphans. Adding 504 (gateway
+            // timeout) too — that's a Cloudflare-class timeout from
+            // any upstream proxy. Pearl `th-80a39e` follow-up.
+            retry_on_status: vec![429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 527],
         }
     }
 }
@@ -842,23 +848,63 @@ impl LlmClient {
             .ok_or_else(|| anyhow::anyhow!("serialized request is not a JSON object"))?
             .insert("stream".into(), serde_json::Value::Bool(true));
 
-        let resp = self
-            .client
-            .post(&url)
-            .bearer_auth(&self.config.api_key)
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| {
-                // Walk the error chain to get the root cause
-                let mut chain = vec![format!("{e}")];
-                let mut source: &dyn std::error::Error = &e;
-                while let Some(s) = source.source() {
-                    chain.push(format!("{s}"));
-                    source = s;
+        // Pearl `th-3b30b0` (was th-b30b00 in earlier filing — id
+        // truncated): retry transient reqwest errors at the request-
+        // send level. The bench observed "error sending request for
+        // url … → connection closed before message completed" on
+        // llm.smoo.ai mid-session. That's a reqwest::Error::request()
+        // / is_timeout() / is_connect() failure that the original
+        // code propagated immediately via `?`. With retry, the same
+        // call survives a brief upstream blip.
+        //
+        // Streaming requests are NOT idempotent in general (a partial
+        // response could have been emitted). We retry only when the
+        // initial `.send().await` itself fails — i.e. before any
+        // bytes have been read from the stream. Once the response
+        // headers are in (status known), we drop into the existing
+        // status-code retry path.
+        let resp = {
+            const MAX_SEND_RETRIES: u32 = 3;
+            let mut last_err: Option<anyhow::Error> = None;
+            let mut sent_resp = None;
+            for attempt in 0..=MAX_SEND_RETRIES {
+                match self.client.post(&url).bearer_auth(&self.config.api_key).json(&request_body).send().await {
+                    Ok(r) => {
+                        sent_resp = Some(r);
+                        break;
+                    }
+                    Err(e) => {
+                        let is_transient = e.is_timeout() || e.is_connect() || e.is_request();
+                        let chain = {
+                            let mut chain = vec![format!("{e}")];
+                            let mut source: &dyn std::error::Error = &e;
+                            while let Some(s) = source.source() {
+                                chain.push(format!("{s}"));
+                                source = s;
+                            }
+                            chain.join(" → ")
+                        };
+                        last_err = Some(anyhow::anyhow!("HTTP request failed: {chain}"));
+                        if !is_transient || attempt == MAX_SEND_RETRIES {
+                            break;
+                        }
+                        let backoff_ms = 200_u64 * (1_u64 << attempt); // 200, 400, 800
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            max = MAX_SEND_RETRIES + 1,
+                            backoff_ms,
+                            error = %chain,
+                            "chat_stream send failed transient — retrying"
+                        );
+                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                    }
                 }
-                anyhow::anyhow!("HTTP request failed: {}", chain.join(" → "))
-            })?;
+            }
+            match sent_resp {
+                Some(r) => r,
+                None => return Err(last_err.unwrap_or_else(|| anyhow::anyhow!("HTTP request failed: no error captured"))),
+            }
+        };
 
         if !resp.status().is_success() {
             let status = resp.status();

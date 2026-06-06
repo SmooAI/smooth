@@ -297,6 +297,17 @@ pub struct AppState {
     pub user_scrolled: bool,
     /// Display name of the current LLM model.
     pub model_name: String,
+    /// User-supplied model override from `th code --model <X>`. When
+    /// `Some(_)`, every `TaskStart` dispatched to Big Smooth carries
+    /// this value verbatim in its `model` field; Big Smooth's routing
+    /// then resolves it against the configured providers (a smooth-*
+    /// alias OR a concrete model id like `deepseek-v4-flash`). Pearl
+    /// `th-20574a` — before this field existed, the CLI's `--model`
+    /// flag was silently dropped on the TUI path and every run used
+    /// the default smooth-coding alias regardless of what the user
+    /// asked for. `None` (the default) preserves the legacy behavior
+    /// of letting Big Smooth pick.
+    pub model_override: Option<String>,
     /// Active lead role name (`fixer` / `mapper` / `oracle` / `heckler`).
     /// Flows into every `TaskStart` so the runner applies the right
     /// clearance set; rendered on the status bar so the user can see
@@ -385,6 +396,7 @@ impl AppState {
             scroll_offset: 0,
             user_scrolled: false,
             model_name: "claude-sonnet-4".to_string(),
+            model_override: None,
             agent_name: "fixer".to_string(),
             agent_pinned: false,
             verbose: false,

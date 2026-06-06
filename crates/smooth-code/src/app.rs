@@ -102,7 +102,7 @@ fn write_bench_cost_sidecar_to(path: &std::path::Path, total_cost_usd: f64, iter
 /// thread holding the lock).
 #[allow(clippy::unused_async)] // async required for caller ergonomics and tokio::spawn inside
 pub async fn run(working_dir: PathBuf) -> anyhow::Result<()> {
-    run_with_session(working_dir, None, None).await
+    run_with_session(working_dir, None, None, None).await
 }
 
 /// Run the TUI, optionally preloading a persisted session.
@@ -118,7 +118,12 @@ pub async fn run(working_dir: PathBuf) -> anyhow::Result<()> {
 /// # Errors
 /// Same as [`run`].
 #[allow(clippy::unused_async)]
-pub async fn run_with_session(working_dir: PathBuf, resume: Option<crate::session::Session>, agent: Option<String>) -> anyhow::Result<()> {
+pub async fn run_with_session(
+    working_dir: PathBuf,
+    resume: Option<crate::session::Session>,
+    agent: Option<String>,
+    model: Option<String>,
+) -> anyhow::Result<()> {
     tui_debug(format!("app::run start, cwd={}", working_dir.display()));
 
     // TTY pre-flight. If stdin or stdout isn't a TTY, the TUI will enter
@@ -212,6 +217,13 @@ pub async fn run_with_session(working_dir: PathBuf, resume: Option<crate::sessio
         // Explicit --agent on the CLI is a pin — don't let the intent
         // classifier override the operator's deliberate choice.
         initial_state.agent_pinned = true;
+    }
+    // Pearl th-20574a: thread the CLI's `--model` flag through to
+    // every TaskStart so bench harnesses (and any user who passes
+    // --model) actually get the requested model instead of silently
+    // falling back to smooth-coding's default alias.
+    if let Some(m) = model {
+        initial_state.model_override = Some(m);
     }
 
     let state = Arc::new(Mutex::new(initial_state));
@@ -1169,18 +1181,49 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
                 .collect::<Vec<_>>()
                 .join("\n");
             let trimmed = cleaned.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
+            // Pearl th-91075b: do NOT drop the whole assistant turn when
+            // its cleaned content is empty (e.g. when the assistant
+            // turn was almost entirely [runner] tool prose). Dropping
+            // the turn here was breaking inter-turn context — the LLM
+            // on turn 2 would see system + turn-1-user + turn-2-user
+            // and respond "I don't see a plan above" because the
+            // assistant's turn-1 reply had been silently removed.
+            //
+            // Preserve the turn structure with a brief placeholder so
+            // the LLM at least knows "an assistant turn happened here,
+            // it consisted of tool ops." The tool calls themselves are
+            // already in the runner's structured tool-call channel —
+            // this prose path only needs to keep the turn ordering
+            // intact.
+            let content = if trimmed.is_empty() {
+                match msg.role {
+                    crate::state::ChatRole::Assistant => "(prior turn: ran tools; output omitted from prose history)".to_string(),
+                    // User turns that are empty are truly nothing —
+                    // skip those as before.
+                    _ => continue,
+                }
+            } else {
+                trimmed.to_string()
+            };
             out.push(crate::client::PriorMessage {
                 role: role.to_string(),
-                content: trimmed.to_string(),
+                content,
             });
         }
         out
     };
 
-    let mut events = client.run_task(message, None, None, cwd.as_deref(), agent.as_deref(), prior_messages).await?;
+    // Pearl th-20574a: read the user's --model override from AppState
+    // so it actually reaches Big Smooth's routing layer. Was a literal
+    // `None` here; every TaskStart fell back to the smooth-coding alias
+    // regardless of CLI flag.
+    let model_override = {
+        let s = state.lock().unwrap_or_else(|e| e.into_inner());
+        s.model_override.clone()
+    };
+    let mut events = client
+        .run_task(message, model_override.as_deref(), None, cwd.as_deref(), agent.as_deref(), prior_messages)
+        .await?;
 
     // Per-tool-name queues of (id, started_at, args). The runner emits
     // a ToolCallStart, then the tool runs, then a ToolCallComplete —

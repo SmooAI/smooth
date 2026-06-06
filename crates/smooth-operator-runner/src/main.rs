@@ -410,6 +410,187 @@ impl Tool for ApplyPatchTool {
 // ---------------------------------------------------------------------------
 
 const MEMORY_REL_PATH: &str = ".smooth/MEMORY.md";
+const TODOS_REL_PATH: &str = ".smooth/todos.json";
+
+// ---------------------------------------------------------------------------
+// TodoListTool — opencode-parity cross-turn task state. Pearl th-1d6699.
+//
+// Opencode's '# Todos' checkbox list is the structural reason it stays
+// reliable on multi-turn cleanup tasks at weak model tiers: the agent
+// emits a todo when planning, marks items in_progress / done as they
+// execute, and on turn 2 ('yes, proceed') reads the pending todo to
+// know what to do — instead of confabulating a wholly new task. Smooth
+// had no equivalent; closing that gap is the highest-ROI fix in pearl
+// th-e182bc's investigation.
+//
+// State model:
+//   - List of items, each { id (auto), text, status (pending |
+//     in_progress | done | cancelled) }
+//   - Persisted to .smooth/todos.json in the workspace — survives
+//     across turns within a session, but git-ignored so it's truly
+//     transient. Persistence is the point: on turn 2, the runner
+//     spins up a fresh process tree and the tool must still surface
+//     the prior turn's plan.
+//   - Pure JSON file, atomic write via rename-from-tmp.
+//
+// Operations (single `action` arg; keeps schema simple for weak models):
+//   - list:      no other args. Returns current items as a checklist.
+//   - add:       items: [{text}]. Append items, each gets sequential id.
+//   - update:    id, status. Flip status of one item.
+//   - clear:     no other args. Wipe the list (use on task completion
+//                or pivot — keeps the file from growing across tasks).
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+struct TodoItem {
+    id: u64,
+    text: String,
+    status: String, // pending | in_progress | done | cancelled
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default, Debug)]
+struct TodoStore {
+    next_id: u64,
+    items: Vec<TodoItem>,
+}
+
+impl TodoStore {
+    async fn load(path: &std::path::Path) -> Self {
+        match tokio::fs::read_to_string(path).await {
+            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+            Err(_) => Self::default(),
+        }
+    }
+
+    async fn save(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let body = serde_json::to_string_pretty(self)?;
+        let mut tmp = path.as_os_str().to_os_string();
+        tmp.push(".tmp");
+        let tmp_path = std::path::PathBuf::from(tmp);
+        tokio::fs::write(&tmp_path, body.as_bytes()).await?;
+        tokio::fs::rename(&tmp_path, path).await?;
+        Ok(())
+    }
+
+    fn render(&self) -> String {
+        if self.items.is_empty() {
+            return "(no todos)".to_string();
+        }
+        let mut out = String::from("# Todos\n\n");
+        for item in &self.items {
+            let marker = match item.status.as_str() {
+                "done" => "[x]",
+                "in_progress" => "[•]",
+                "cancelled" => "[~]",
+                _ => "[ ]",
+            };
+            out.push_str(&format!("{marker} #{} {}\n", item.id, item.text));
+        }
+        out
+    }
+}
+
+struct TodoListTool {
+    base: PathBuf,
+}
+
+#[async_trait]
+impl Tool for TodoListTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "todo_list".into(),
+            description:
+                "Manage a structured todo list that persists across turns of this task. Use this when planning multi-step work (cleanup, refactors, multi-file edits) so you can track progress and — critically — so the NEXT turn's response has a concrete pending item to act on instead of having to recall from prose. \n\nActions:\n  - action='list' — show the current todos. Cheap; call at the START of any turn that's a continuation (e.g. user said 'yes, proceed' or 'continue') to find what you were doing.\n  - action='add', items=[{text}, ...] — append one or more todos. Each gets an auto-incremented id. Use this in your planning turn.\n  - action='update', id=N, status='pending'|'in_progress'|'done'|'cancelled' — flip one item's status. Call as you execute each step.\n  - action='clear' — wipe the list. Call when the WHOLE task is complete, or when the user pivots to a new task.\n\nReturns the current list as a checklist after every action. Pearl th-1d6699 (opencode parity)."
+                    .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["list", "add", "update", "clear"], "description": "Operation to perform" },
+                    "items":  {
+                        "type": "array",
+                        "description": "For action='add': items to append. Each item is { text }.",
+                        "items": {
+                            "type": "object",
+                            "properties": { "text": { "type": "string" } },
+                            "required": ["text"]
+                        }
+                    },
+                    "id":     { "type": "integer", "description": "For action='update': id of the item to flip." },
+                    "status": { "type": "string", "enum": ["pending", "in_progress", "done", "cancelled"], "description": "For action='update': new status." }
+                },
+                "required": ["action"]
+            }),
+        }
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {
+        let action = args.get("action").and_then(|v| v.as_str()).ok_or_else(|| anyhow::anyhow!("missing 'action'"))?;
+        let path = self.base.join(TODOS_REL_PATH);
+        let mut store = TodoStore::load(&path).await;
+        match action {
+            "list" => Ok(store.render()),
+            "add" => {
+                let items = args
+                    .get("items")
+                    .and_then(|v| v.as_array())
+                    .ok_or_else(|| anyhow::anyhow!("action='add' requires 'items' array"))?;
+                if items.is_empty() {
+                    return Err(anyhow::anyhow!("action='add' requires at least one item"));
+                }
+                for item in items {
+                    let text = item
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| anyhow::anyhow!("each item must have 'text'"))?;
+                    if text.trim().is_empty() {
+                        return Err(anyhow::anyhow!("todo text must not be empty"));
+                    }
+                    store.next_id += 1;
+                    store.items.push(TodoItem {
+                        id: store.next_id,
+                        text: text.trim().to_string(),
+                        status: "pending".to_string(),
+                    });
+                }
+                store.save(&path).await?;
+                Ok(store.render())
+            }
+            "update" => {
+                let id = args
+                    .get("id")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| anyhow::anyhow!("action='update' requires integer 'id'"))?;
+                let status = args
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("action='update' requires 'status'"))?;
+                if !matches!(status, "pending" | "in_progress" | "done" | "cancelled") {
+                    return Err(anyhow::anyhow!("status must be one of: pending, in_progress, done, cancelled"));
+                }
+                let found = store.items.iter_mut().find(|it| it.id == id);
+                let item = found.ok_or_else(|| anyhow::anyhow!("no todo with id={id} (use action='list' to see ids)"))?;
+                item.status = status.to_string();
+                store.save(&path).await?;
+                Ok(store.render())
+            }
+            "clear" => {
+                let removed = store.items.len();
+                store.items.clear();
+                store.next_id = 0;
+                store.save(&path).await?;
+                Ok(format!("cleared {removed} todos"))
+            }
+            other => Err(anyhow::anyhow!("unknown action '{other}' (expected list, add, update, or clear)")),
+        }
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+}
 
 struct ReadMemoryTool {
     base: PathBuf,
@@ -1811,6 +1992,12 @@ async fn main() {
     tools.register(WriteMemoryTool {
         base: config.workspace.clone(),
     });
+    // Pearl th-1d6699: cross-turn task state, opencode-parity. The
+    // tool persists to .smooth/todos.json so on turn 2 the agent can
+    // `todo_list action='list'` and find what it was doing.
+    tools.register(TodoListTool {
+        base: config.workspace.clone(),
+    });
     tools.register(GrepTool {
         base: config.workspace.clone(),
     });
@@ -2332,6 +2519,20 @@ async fn main() {
                         std::env::var("SMOOTH_WORKSPACE").unwrap_or_else(|_| "/workspace".into()),
                     )),
                     chat_rx: mailbox_chat_rx.clone(),
+                    // Pearl th-e182bc: scan the prior conversation
+                    // for cleanup-intent verbs/nouns. On bench
+                    // continuation turns the current task is
+                    // "yes, proceed" which loses the cleanup
+                    // signal; the README that started the task
+                    // still sits in prior_messages and carries it.
+                    // When set, build_user_prompt re-applies the
+                    // cleanup preamble on confirmation replies to
+                    // suppress the test-fix bias + cross-fixture
+                    // pattern confabulation observed in the bench.
+                    cleanup_intent_hint: agent_config.prior_messages.iter().any(|m| {
+                        matches!(m.role, smooth_operator::conversation::Role::User)
+                            && smooth_operator::coding_workflow::task_text_has_cleanup_intent(&m.content)
+                    }),
                 };
                 match run_coding_workflow(cfg).await {
                     // Workflow emits its own Completed event — return
@@ -2601,5 +2802,102 @@ mod sanitize_tests {
         assert!(out.contains("curl"), "structured note must echo the args: got {out}");
         assert!(!out.contains("<function="), "raw XML must be removed");
         assert!(out.starts_with("Sure, let me try."), "surrounding prose preserved");
+    }
+}
+
+#[cfg(test)]
+mod todo_list_tests {
+    use super::{TodoListTool, Tool};
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    fn tool() -> (TodoListTool, TempDir) {
+        let dir = TempDir::new().expect("tempdir");
+        let t = TodoListTool {
+            base: dir.path().to_path_buf(),
+        };
+        (t, dir)
+    }
+
+    #[tokio::test]
+    async fn list_empty_on_fresh_workspace() {
+        let (t, _dir) = tool();
+        let out = t.execute(json!({"action": "list"})).await.expect("list");
+        assert!(out.contains("(no todos)"), "expected '(no todos)', got: {out}");
+    }
+
+    #[tokio::test]
+    async fn add_then_list_renders_checklist() {
+        let (t, _dir) = tool();
+        t.execute(json!({"action": "add", "items": [{"text": "Discover orphan node_modules/"}, {"text": "Delete them"}]}))
+            .await
+            .expect("add");
+        let out = t.execute(json!({"action": "list"})).await.expect("list");
+        assert!(out.contains("# Todos"));
+        assert!(out.contains("[ ] #1 Discover orphan node_modules/"));
+        assert!(out.contains("[ ] #2 Delete them"));
+    }
+
+    #[tokio::test]
+    async fn update_flips_status() {
+        let (t, _dir) = tool();
+        t.execute(json!({"action": "add", "items": [{"text": "x"}]})).await.expect("add");
+        t.execute(json!({"action": "update", "id": 1, "status": "in_progress"})).await.expect("update");
+        let out = t.execute(json!({"action": "list"})).await.expect("list");
+        assert!(out.contains("[•] #1 x"), "in_progress marker missing: {out}");
+        t.execute(json!({"action": "update", "id": 1, "status": "done"})).await.expect("done");
+        let out = t.execute(json!({"action": "list"})).await.expect("list");
+        assert!(out.contains("[x] #1 x"));
+    }
+
+    #[tokio::test]
+    async fn persists_across_tool_instances() {
+        // Pearl th-1d6699 core requirement: across turns the runner is
+        // a fresh process; the tool MUST surface the prior turn's
+        // todos from the JSON file on disk. Simulate by constructing
+        // a second TodoListTool with the same base path.
+        let dir = TempDir::new().unwrap();
+        let t1 = TodoListTool {
+            base: dir.path().to_path_buf(),
+        };
+        t1.execute(json!({"action": "add", "items": [{"text": "Survives across turns"}]}))
+            .await
+            .expect("add");
+        let t2 = TodoListTool {
+            base: dir.path().to_path_buf(),
+        };
+        let out = t2.execute(json!({"action": "list"})).await.expect("list");
+        assert!(out.contains("[ ] #1 Survives across turns"));
+    }
+
+    #[tokio::test]
+    async fn clear_wipes_all() {
+        let (t, _dir) = tool();
+        t.execute(json!({"action": "add", "items": [{"text": "a"}, {"text": "b"}]})).await.expect("add");
+        let out = t.execute(json!({"action": "clear"})).await.expect("clear");
+        assert!(out.contains("cleared 2 todos"));
+        let out = t.execute(json!({"action": "list"})).await.expect("list");
+        assert!(out.contains("(no todos)"));
+    }
+
+    #[tokio::test]
+    async fn update_with_unknown_id_errors() {
+        let (t, _dir) = tool();
+        let err = t.execute(json!({"action": "update", "id": 99, "status": "done"})).await.unwrap_err();
+        assert!(err.to_string().contains("no todo with id=99"));
+    }
+
+    #[tokio::test]
+    async fn add_with_empty_text_errors() {
+        let (t, _dir) = tool();
+        let err = t.execute(json!({"action": "add", "items": [{"text": "  "}]})).await.unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[tokio::test]
+    async fn unknown_action_errors() {
+        let (t, _dir) = tool();
+        let err = t.execute(json!({"action": "delete-everything"})).await.unwrap_err();
+        assert!(err.to_string().contains("unknown action"));
     }
 }

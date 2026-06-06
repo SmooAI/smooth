@@ -572,6 +572,11 @@ fn registered_tool_names() -> Vec<String> {
         "list_files".into(),
         "read_memory".into(),
         "write_memory".into(),
+        // Pearl th-1d6699: cross-turn task state, opencode-parity.
+        // Without this entry Wonk denies every call and the agent
+        // logs "I cannot use the todo_list tool as it is not in
+        // the allowlist" then proceeds without it.
+        "todo_list".into(),
         "grep".into(),
         "glob".into(),
         "lsp".into(),
@@ -610,6 +615,11 @@ fn read_only_tool_names() -> Vec<String> {
         "project_inspect".into(),
         "read_memory".into(),
         "write_memory".into(),
+        // Pearl th-1d6699: read-only roles (oracle, mapper, heckler)
+        // also need to track their own plan across turns. Cheap call
+        // — the tool only writes to .smooth/todos.json which is
+        // already covered by the workspace write allowlist.
+        "todo_list".into(),
     ]
 }
 
