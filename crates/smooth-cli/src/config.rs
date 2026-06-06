@@ -570,13 +570,17 @@ impl ConfigClient {
     }
 
     fn resolve_org(&self, override_org: Option<String>) -> Result<String> {
-        if let Some(o) = override_org.filter(|s| !s.trim().is_empty()) {
+        // Prefer the shared resolver so an `active_org_id` set via
+        // `th api orgs switch` on the legacy or M2M store is visible
+        // here too. Falls back to `self.creds.active_org_id` only when
+        // the shared resolver fails — that fallback covers the test
+        // path where stores aren't on disk but a synthetic
+        // `Credentials` is held in memory.
+        if let Some(o) = override_org.clone().filter(|s| !s.trim().is_empty()) {
             return Ok(o);
         }
-        if let Ok(o) = std::env::var("SMOOAI_ORG_ID") {
-            if !o.trim().is_empty() {
-                return Ok(o);
-            }
+        if let Ok(org) = crate::active_org::resolve(override_org) {
+            return Ok(org);
         }
         self.creds
             .active_org_id

@@ -51,23 +51,21 @@ pub async fn require_authed() -> Result<SmoothApiClient> {
     Ok(client)
 }
 
-/// Resolve the active org id. Order:
+/// Resolve the active org id. Delegates to
+/// [`crate::active_org::resolve`] so every `th api` subcommand reads
+/// from the same source `th config` and `th auth whoami` do.
+///
+/// The `_client` parameter is retained for API stability (callers
+/// across this crate pass it through), but is unused — the shared
+/// helper reads directly from the credential stores on disk.
+///
+/// Order:
 ///   1. `--org` flag (the `override_org` argument)
 ///   2. `SMOOAI_ORG_ID` env (handy for CI scripts)
-///   3. `active_org_id` from `~/.smooth/auth/smooai.json`
-pub fn require_active_org(client: &SmoothApiClient, override_org: Option<String>) -> Result<String> {
-    if let Some(o) = override_org.filter(|s| !s.trim().is_empty()) {
-        return Ok(o);
-    }
-    if let Ok(o) = std::env::var("SMOOAI_ORG_ID") {
-        if !o.trim().is_empty() {
-            return Ok(o);
-        }
-    }
-    client
-        .credentials()
-        .and_then(|c| c.active_org_id)
-        .context("no active org set — pass `--org <id>`, set SMOOAI_ORG_ID, or run `th api orgs switch <id>`")
+///   3. `active_org_id` from any of: legacy `smooth-api-client`
+///      store, client-shared M2M store, client-shared User store
+pub fn require_active_org(_client: &SmoothApiClient, override_org: Option<String>) -> Result<String> {
+    crate::active_org::resolve(override_org)
 }
 
 /// Read a JSON body from `path` (or stdin when `path == "-"`).
@@ -403,17 +401,24 @@ pub async fn cmd_orgs(cmd: super::OrgsCommands) -> Result<()> {
             print_orgs_list(&body);
         }
         super::OrgsCommands::Show { org_id } => {
-            let resolved = org_id
-                .or_else(|| client.credentials().and_then(|c| c.active_org_id))
-                .context("no org id specified and no active org set — pass <org_id> or run `th api orgs switch <id>`")?;
+            // Use the shared resolver so `th api orgs show` honors
+            // the same active-org contract as the rest of the CLI.
+            let resolved =
+                crate::active_org::resolve(org_id).context("no org id specified and no active org set — pass <org_id> or run `th api orgs switch <id>`")?;
             print_json(&client.get(&format!("/organizations/{resolved}")).await.context("GET /organizations/{org_id}")?);
         }
         super::OrgsCommands::Switch { org_id } => {
-            let mut creds = client.credentials().context("no credentials loaded")?;
-            creds.active_org_id = Some(org_id.clone());
-            client.set_credentials(creds).context("save credentials")?;
+            // Persist to every credential store we know about so the
+            // active org is visible to `th config`, `th auth whoami`,
+            // and any other subcommand that reads a different store.
+            // See `crates/smooth-cli/src/active_org.rs` for the
+            // cross-subcommand contract this enforces.
+            let updated = crate::active_org::set(&org_id).context("save active org")?;
             println!();
             println!("  {} Active org set to {}", "✓".green().bold(), org_id.cyan().bold());
+            if updated > 1 {
+                println!("    {} updated {} credential stores", "●".dimmed(), updated.to_string().dimmed());
+            }
             println!();
         }
     }
