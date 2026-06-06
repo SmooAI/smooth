@@ -14,7 +14,7 @@ use chrono::Utc;
 use serde_json::Value;
 use smooai_client_shared::auth::storage::{CredentialKind, Credentials};
 
-use crate::auth::{PROD_SUPABASE_ANON_KEY, supabase_url};
+use crate::auth::{supabase_url, PROD_SUPABASE_ANON_KEY};
 
 /// Exchange the stored Supabase `refresh_token` for a fresh
 /// `access_token` + new `refresh_token`. Preserves the user-display
@@ -87,9 +87,7 @@ pub async fn refresh_m2m_session(http: &reqwest::Client, previous: &Credentials)
         anyhow::bail!("M2M session has no stored client_id / client_secret — re-run `th auth login --m2m`");
     };
     use smooai_client_shared::auth::m2m::client_credentials_grant;
-    let mut refreshed = client_credentials_grant(http, cid, csecret)
-        .await
-        .context("client_credentials grant")?;
+    let mut refreshed = client_credentials_grant(http, cid, csecret).await.context("client_credentials grant")?;
     refreshed.active_org_id = previous.active_org_id.clone();
     Ok(refreshed)
 }

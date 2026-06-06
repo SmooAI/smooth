@@ -486,7 +486,9 @@ impl ConfigClient {
                     .await
                     .context("auto-refresh M2M client_credentials grant")?
             } else if creds.refresh_token.is_some() {
-                crate::auth::refresh::refresh_user_session(&http, &creds).await.context("auto-refresh user session")?
+                crate::auth::refresh::refresh_user_session(&http, &creds)
+                    .await
+                    .context("auto-refresh user session")?
             } else {
                 anyhow::bail!("session expired — re-run `th auth login`");
             };
