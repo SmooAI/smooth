@@ -5,7 +5,7 @@
 //! microsandbox-spawn-a-VM-and-curl-an-attacker tests from
 //! th-9dcc40's description are still the gold standard, but they
 //! require platform-specific fixtures (macOS HVF, the built
-//! operator-runner binary, network setup). This file proves the
+//! operative binary, network setup). This file proves the
 //! decision pipeline + AccessStore semantics + persistent-grants
 //! interaction at a layer where no VM is needed.
 //!

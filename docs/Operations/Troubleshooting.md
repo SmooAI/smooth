@@ -13,20 +13,20 @@ Fix: wait. First pull of `ghcr.io/smooai/safehouse:latest` can take a minute. Af
 
 Check progress with `microsandbox` SDK logs (look at the launching `th` process's stderr).
 
-## `smooth-operator-runner binary not found`
+## `smooth-operative binary not found`
 
 Cause: the cross-compiled runner hasn't been built, or it's not where Big Smooth expects.
 
 Fix:
 
 ```bash
-bash scripts/build-operator-runner.sh
+bash scripts/build-operative.sh
 pnpm install:th                # mirrors the runner into ~/.smooth/runner-bin/
 ```
 
-Or set `SMOOTH_OPERATOR_RUNNER=/absolute/path/to/smooth-operator-runner` to point Big Smooth at a specific binary.
+Or set `SMOOTH_OPERATIVE=/absolute/path/to/smooth-operative` to point Big Smooth at a specific binary.
 
-For direct mode: the dispatch path uses the **native** runner instead. Build with `cargo build -p smooth-operator-runner --release`, or set `SMOOTH_OPERATOR_RUNNER_NATIVE=/path`.
+For direct mode: the dispatch path uses the **native** runner instead. Build with `cargo build -p smooth-operative --release`, or set `SMOOTH_OPERATIVE_NATIVE=/path`.
 
 ## "Smooth is already running (pid N)" — but it isn't
 
@@ -83,7 +83,7 @@ The build produces `target/release/smooth-dolt`; `pnpm install:th` mirrors it to
 Most common: the bench harness depends on the native runner in `target/release/`. CI must build it explicitly:
 
 ```bash
-cargo build -p smooth-operator-runner --release
+cargo build -p smooth-operative --release
 ```
 
 before `cargo test -p smooth-bench`.

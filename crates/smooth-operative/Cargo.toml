@@ -1,14 +1,14 @@
 [package]
-name = "smooai-smooth-operator-runner"
+name = "smooai-smooth-operative"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "Smooth Operator runner — the binary that runs inside each microVM. Hosts the agent loop, Narc tool surveillance, and (optionally) Wonk policy checks, streaming JSON-lines AgentEvents on stdout."
+description = "Smooth operative — the sandboxed-worker binary that runs inside each microVM. Hosts the agent loop (running the smooth-operator engine), Narc tool surveillance, and (optionally) Wonk policy checks, streaming JSON-lines AgentEvents on stdout."
 
 [[bin]]
-name = "smooth-operator-runner"
+name = "smooth-operative"
 path = "src/main.rs"
 
 [dependencies]

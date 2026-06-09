@@ -31,7 +31,7 @@
         │  │     └────────────┘  └──────────────────┘   │  │
         │  │                                            │  │
         │  │   ┌──────────────────────────────────┐     │  │
-        │  │   │  Operator runner(s) — one per    │     │  │
+        │  │   │  Operative(s) — one per    │     │  │
         │  │   │  dispatched pearl. Agent loop,   │     │  │
         │  │   │  file/bash tools, NarcHook,      │     │  │
         │  │   │  WonkHook on every tool call.    │     │  │
@@ -51,7 +51,7 @@
         │                                                  │
         │   ┌──────────────────────────────────────────┐   │
         │   │             Host process (`th`)          │   │
-        │   │  same cast + operator runner, no VM      │   │
+        │   │  same cast + operative, no VM      │   │
         │   │  daemonised, PID file at ~/.smooth/      │   │
         │   └──────────────────────────────────────────┘   │
         │                                                  │
@@ -81,7 +81,7 @@
 | `smooth-archivist`           | Central log aggregator. HTTP `:4401` + SSE `/events`. Backs the dashboard. |
 | `smooth-diver`               | Pearl lifecycle manager + Jira sync.                                 |
 | `smooth-operator`            | Agent framework: LLM client, tools, conversation, checkpoints (Groove). |
-| `smooth-operator-runner`     | Binary the dispatcher exec's per task. Hosts the agent loop.         |
+| `smooth-operative`     | Binary the dispatcher exec's per task. Hosts the agent loop.         |
 | `smooth-pearls`              | Pearl store. Dolt-backed.                                            |
 | `smooth-policy`              | Policy types + TOML.                                                 |
 | `smooth-code`                | Ratatui TUI dashboard.                                               |
@@ -94,7 +94,7 @@
 - [[The-Cast]] — every named role, definitively
 - [[Transport]] — gRPC over UDS topology, .proto files, what's wired where
 - [[Dispatch]] — how tasks get from chat to operator
-- [[Operators]] — the agent runtime
+- [[Operatives]] — the agent runtime
 - [[Data-Storage]] — Dolt, named volumes, sessions
 
 ## Related

@@ -1,31 +1,31 @@
 #!/usr/bin/env bash
-# Build (and optionally push) the Smooth Operator OCI image.
+# Build (and optionally push) the Smooth operative OCI image.
 #
-# One unified Smooth Operator image with mise baked in — the agent
+# One unified Smooth operative image with mise baked in — the agent
 # handles its own toolchain install at runtime (node, python, rust,
 # go, …) and persists installs into /opt/smooth/cache/mise via the
 # project-scoped bind mount.
 #
-# Default publishing target: ghcr.io/smooai/smooth-operator (public).
+# Default publishing target: ghcr.io/smooai/smooth-operative (public).
 # Microsandbox pulls directly from this registry — no Docker Hub
 # hop, no local-only image gotchas.
 #
 # Steps:
-#   1. Cross-compile smooth-operator-runner to aarch64-unknown-linux-musl
-#      (delegates to build-operator-runner.sh — incremental).
-#   2. docker/podman build docker/Dockerfile.smooth-operator tagged
+#   1. Cross-compile smooth-operative to aarch64-unknown-linux-musl
+#      (delegates to build-operative.sh — incremental).
+#   2. docker/podman build docker/Dockerfile.smooth-operative tagged
 #      with the workspace version and `latest`.
 #   3. If --push is passed, push both tags to the registry.
 #
 # Usage:
-#   scripts/build-smooth-operator-image.sh                  # build only, tag with workspace version
-#   scripts/build-smooth-operator-image.sh v1.2.3           # explicit tag, build only
-#   scripts/build-smooth-operator-image.sh --push           # build + push version + latest
-#   scripts/build-smooth-operator-image.sh v1.2.3 --push    # build v1.2.3 + push
+#   scripts/build-smooth-operative-image.sh                  # build only, tag with workspace version
+#   scripts/build-smooth-operative-image.sh v1.2.3           # explicit tag, build only
+#   scripts/build-smooth-operative-image.sh --push           # build + push version + latest
+#   scripts/build-smooth-operative-image.sh v1.2.3 --push    # build v1.2.3 + push
 #
 # Environment:
 #   SMOOTH_IMAGE_TOOL   `docker` (default) or `podman`
-#   SMOOTH_IMAGE_REPO   image repository (default: ghcr.io/smooai/smooth-operator)
+#   SMOOTH_IMAGE_REPO   image repository (default: ghcr.io/smooai/smooth-operative)
 #
 # Pushing to ghcr.io requires a token with `write:packages` scope:
 #     gh auth refresh -h github.com -s write:packages,read:packages
@@ -36,7 +36,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 TOOL="${SMOOTH_IMAGE_TOOL:-docker}"
-REPO="${SMOOTH_IMAGE_REPO:-ghcr.io/smooai/smooth-operator}"
+REPO="${SMOOTH_IMAGE_REPO:-ghcr.io/smooai/smooth-operative}"
 
 if ! command -v "$TOOL" >/dev/null 2>&1; then
     echo "error: $TOOL not found on PATH (override with SMOOTH_IMAGE_TOOL)" >&2
@@ -64,10 +64,10 @@ if [ -z "$VERSION" ]; then
     fi
 fi
 
-echo "==> Cross-compiling smooth-operator-runner"
-bash scripts/build-operator-runner.sh
+echo "==> Cross-compiling smooth-operative"
+bash scripts/build-operative.sh
 
-RUNNER_BIN="target/aarch64-unknown-linux-musl/release/smooth-operator-runner"
+RUNNER_BIN="target/aarch64-unknown-linux-musl/release/smooth-operative"
 if [ ! -f "$RUNNER_BIN" ]; then
     echo "error: expected $RUNNER_BIN but build did not produce it" >&2
     exit 1
@@ -75,7 +75,7 @@ fi
 
 echo "==> Building $REPO:$VERSION"
 $TOOL build \
-    --file docker/Dockerfile.smooth-operator \
+    --file docker/Dockerfile.smooth-operative \
     --tag "$REPO:$VERSION" \
     --tag "$REPO:latest" \
     --build-arg "VERSION=$VERSION" \

@@ -19,7 +19,7 @@
 //! * `bigsmooth.sock` — `smooth_bigsmooth::grpc::Orchestrator`
 //!   over the live `AccessStore` (iter-3d wiring).
 //!
-//! Iter-3f rewires the operator-runner's HTTP clients to dial
+//! Iter-3f rewires the operative's HTTP clients to dial
 //! these UDS sockets when the flag is set. Until then this
 //! module just brings the listeners up so the smoke test can
 //! confirm the bootstrap path works.

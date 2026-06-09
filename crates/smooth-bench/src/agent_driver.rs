@@ -896,7 +896,7 @@ fn drive_smooth_via_tmux(
         driver_name: "smooth",
         shell_cmd: smooth_shell_cmd(binary, model),
         // `th code` boots the full microVM cast (wonk, goalie, narc,
-        // scribe, archivist, groove) plus the operator-runner pool —
+        // scribe, archivist, groove) plus the operative pool —
         // 60-120s on a warm host, longer on first cast-image pull. Use
         // the same 120s ceiling as `tui_score::TuiTaskConfig::default`.
         boot_timeout: Duration::from_secs(120),

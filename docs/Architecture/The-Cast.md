@@ -5,7 +5,7 @@
 > [!arch] One process or one VM, eight roles — two transports between them
 > Every cast member runs as a tokio task or in-process service alongside Big Smooth. There are no per-actor VMs. In sandboxed mode they share the Safehouse microVM; in direct mode they share the `th` host process. Crate boundaries are preserved so each role keeps its own state, hooks, and tests.
 >
-> Within Big Smooth's process they talk over **`Arc`-shared state** (no wire, no serialization). Across the operator-runner subprocess boundary — which exists in both modes — they talk over **tonic gRPC on UDS**. See [[Transport]] for the full topology.
+> Within Big Smooth's process they talk over **`Arc`-shared state** (no wire, no serialization). Across the operative subprocess boundary — which exists in both modes — they talk over **tonic gRPC on UDS**. See [[Transport]] for the full topology.
 
 ## Cast at a glance
 
@@ -18,9 +18,9 @@
 | Scribe          | `smooth-scribe`    | Per-actor structured logging                       | Archivist               | gRPC `scribe.sock`                         |
 | Archivist       | `smooth-archivist` | Central log + event aggregator                     | Scribes, dashboard      | HTTP `:4401`; SSE `/events`                |
 | Diver           | `smooth-diver`     | Pearl lifecycle + Jira sync                        | Pearl store, Jira       | In-process to Big Smooth                   |
-| Groove          | `smooth-operator`  | LLM checkpointing + resume                         | Operator runner only    | In-process to the operator-runner          |
+| Groove          | `smooth-operator`  | LLM checkpointing + resume                         | Operative only    | In-process to the operative          |
 
-The `.sock` files live in `$SMOOTH_SINGLE_PROCESS_SOCKET_DIR` (defaults to `$XDG_RUNTIME_DIR/smooth/` in-VM, a tempdir on the host in direct mode). `single_process::bootstrap_from_app_state` binds all four servers at startup; the operator-runner subprocess dials them with `NarcGrpcUds::connect`, `WonkClient`, etc. See `crates/smooth-bigsmooth/src/single_process.rs` and `proto/{narc,wonk,scribe,bigsmooth}.proto`.
+The `.sock` files live in `$SMOOTH_SINGLE_PROCESS_SOCKET_DIR` (defaults to `$XDG_RUNTIME_DIR/smooth/` in-VM, a tempdir on the host in direct mode). `single_process::bootstrap_from_app_state` binds all four servers at startup; the operative subprocess dials them with `NarcGrpcUds::connect`, `WonkClient`, etc. See `crates/smooth-bigsmooth/src/single_process.rs` and `proto/{narc,wonk,scribe,bigsmooth}.proto`.
 
 ---
 
@@ -75,7 +75,7 @@ Tool surveillance. Two layers:
 
 Narc is wired as a `ToolHook` in `smooth-operator`. Every tool call passes through `pre_call` (block before exec) and `post_call` (block before result is handed back to LLM). Severity-tagged alerts are forwarded to Scribe.
 
-**How operator-runner subprocesses reach Narc.** Each runner dials the local UDS at `$SMOOTH_SINGLE_PROCESS_SOCKET_DIR/narc.sock` (or the safehouse default `$XDG_RUNTIME_DIR/smooth/narc.sock`) via `smooth_wonk::NarcGrpcUds::connect` — see `crates/smooth-operator-runner/src/main.rs` ≈ line 1546. The wire is `tonic 0.12` + `prost 0.13` speaking the `smooth.narc.v1.Judge` service defined in `proto/narc.proto`. The legacy `SMOOTH_NARC_URL` HTTP fallback is only kept for old dispatch paths that haven't been ported to UDS.
+**How operative subprocesses reach Narc.** Each operative dials the local UDS at `$SMOOTH_SINGLE_PROCESS_SOCKET_DIR/narc.sock` (or the safehouse default `$XDG_RUNTIME_DIR/smooth/narc.sock`) via `smooth_wonk::NarcGrpcUds::connect` — see `crates/smooth-operative/src/main.rs` ≈ line 1546. The wire is `tonic 0.12` + `prost 0.13` speaking the `smooth.narc.v1.Judge` service defined in `proto/narc.proto`. The legacy `SMOOTH_NARC_URL` HTTP fallback is only kept for old dispatch paths that haven't been ported to UDS.
 
 ---
 
@@ -130,7 +130,7 @@ Not a cast member in the security sense — it's an [external MCP server](https:
 ## How they wire together
 
 ```
-   Operator runner ─► tool call
+   Operative ─► tool call
                         │
                         ├──► NarcHook (pre-call) ─────► narc.sock ──► Narc ─► wonk.sock ─► Wonk
                         │                                              │                   │
@@ -155,5 +155,5 @@ The agent loop sees one tool surface. The hooks transparently fan out to the cas
 - [[Sandboxed-Mode]]
 - [[Direct-Mode]]
 - [[Dispatch]]
-- [[Operators]]
+- [[Operatives]]
 - [[Transport]] — the gRPC + UDS topology in detail

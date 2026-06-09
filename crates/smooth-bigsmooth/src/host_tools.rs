@@ -28,7 +28,7 @@
 //!   tool's defaults.
 //!
 //! The teammate consumes this through a `host_tool(tool, args)` tool
-//! registered in `smooth-operator-runner` (see `host_tool.rs`).
+//! registered in `smooth-operative` (see `host_tool.rs`).
 
 use std::time::Duration;
 

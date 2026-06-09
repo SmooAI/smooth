@@ -31,9 +31,9 @@
 //!
 //! ```text
 //! cargo run --release -p smooai-smooth-bootstrap-bill --example bisect_spawn -- \
-//!   --bill 127.0.0.1:4444 --variant mounts-collide --image ghcr.io/smooai/smooth-operator:latest
+//!   --bill 127.0.0.1:4444 --variant mounts-collide --image ghcr.io/smooai/smooth-operative:latest
 //! cargo run --release -p smooai-smooth-bootstrap-bill --example bisect_spawn -- \
-//!   --bill 127.0.0.1:4444 --variant mounts-fresh   --image ghcr.io/smooai/smooth-operator:latest
+//!   --bill 127.0.0.1:4444 --variant mounts-fresh   --image ghcr.io/smooai/smooth-operative:latest
 //! ```
 //!
 //! After each spawn, exec `mount | grep virtiofs` inside the sandbox and
@@ -69,7 +69,7 @@ struct Args {
     timeout: u64,
 
     /// Image to use. Default `alpine` for fast iteration.
-    /// Use `ghcr.io/smooai/smooth-operator:latest` for the production image.
+    /// Use `ghcr.io/smooai/smooth-operative:latest` for the production image.
     #[arg(long, default_value = "alpine")]
     image: String,
 
@@ -214,7 +214,7 @@ fn build_spec(variant: &str, image: &str, name: &str) -> SandboxSpec {
             spec.env.insert("SMOOTH_API_URL".into(), "https://llm.smoo.ai/v1".into());
         }
         // ── Pearl th-dd0cef: image-collision hypothesis ────────
-        // Mount-targets that already exist in the smooth-operator OCI
+        // Mount-targets that already exist in the smooth-operative OCI
         // rootfs. If virtio drops these silently, this variant should
         // exhibit the symptom (host bind-source dirs stay empty after
         // dispatch).

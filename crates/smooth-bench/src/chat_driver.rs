@@ -206,7 +206,7 @@ The moment teammate_spawn returns, end your turn with ONLY the pearl id on its o
 
 /// Pull `cost_usd=X` out of a `[METRICS] cost_usd=X iterations=Y` comment.
 ///
-/// `dispatch_ws_task_sandboxed` posts that comment when an operator-runner
+/// `dispatch_ws_task_sandboxed` posts that comment when an operative
 /// finishes successfully, so any pearl with a Completed run carries the
 /// dispatch's actual LLM spend in its history. Returns `0.0` when no
 /// `[METRICS]` line is present (pre-fix runs, errored runs, etc.).

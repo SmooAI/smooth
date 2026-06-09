@@ -88,7 +88,7 @@ impl Default for TuiTaskConfig {
             tmux_session_prefix: "smooth-bench-tui".into(),
             // `th code` boots an entire microVM cast (wonk, goalie,
             // narc, scribe, archivist, diver, groove) plus the
-            // operator-runner pool before reaching the input prompt.
+            // operative pool before reaching the input prompt.
             // Empirically this takes 30-60s on a warm machine; 15s
             // (the old default) was way under, which is what made the
             // first-render gate fire prematurely on every PR run. 120s

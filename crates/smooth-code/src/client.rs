@@ -288,7 +288,7 @@ impl BigSmoothClient {
     /// pearl th-461ab9 (Mode B fix): Try to connect with bounded
     /// exponential backoff for the INITIAL connection.
     ///
-    /// Mirrors `OperatorClient::connect_with_retry` for the bench / headless
+    /// Mirrors `OperativeClient::connect_with_retry` for the bench / headless
     /// path. `connect()` is one-shot and does a 5s wait for the
     /// `ServerEvent::Connected` handshake. When Big Smooth was just (re)started
     /// — e.g. by the LaunchAgent KeepAlive cycle, or because the bench
@@ -563,7 +563,7 @@ mod tests {
 
     #[tokio::test]
     async fn connect_with_retry_max_attempts_zero_falls_back_to_single_shot() {
-        // pearl th-461ab9: bench-side mirror of OperatorClient's
+        // pearl th-461ab9: bench-side mirror of OperativeClient's
         // connect_with_retry tests. Use a tight ResiliencyConfig so the test
         // doesn't pause the full default backoff (base 1s, max 30s).
         let cfg = ResiliencyConfig {

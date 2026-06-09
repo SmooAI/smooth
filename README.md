@@ -101,13 +101,13 @@ for the most recent microsandbox bump + Docker-backend removal.
 
 Smooth is the central CLI and orchestration platform for [Smoo AI](https://smoo.ai). It does two things:
 
-1. **Agent Orchestration** — Dispatch Smooth Operators (AI agents) to work on real projects inside hardware-isolated Microsandbox microVMs, with adversarial surveillance and policy-gated access control.
+1. **Agent Orchestration** — Dispatch Smooth operatives (sandboxed AI agents) to work on real projects inside hardware-isolated Microsandbox microVMs, with adversarial surveillance and policy-gated access control.
 
 2. **Smoo AI Platform CLI** — Manage config schemas, interact with the Smoo AI API, sync with Jira, and control your infrastructure from one command.
 
 ### How the agent loop works
 
-Inside each operator VM, a **single agent** handles its own inner iteration
+Inside each operative VM, a **single agent** handles its own inner iteration
 (LLM → tool → LLM → …) via `smooth-operator`'s agent loop. A thin outer
 governor wraps it with three jobs: feed last run's test output back in,
 snapshot the workspace when failing tests drop, and stop on the first
@@ -216,10 +216,10 @@ graph TB
         SC["Scribe<br/><small>structured logging</small>"]
         GR["Groove<br/><small>checkpoint + resume</small>"]
 
-        subgraph Ops["Smooth Operators (subprocesses)"]
-            OP1["operator-runner #1"]
-            OP2["operator-runner #2"]
-            OP3["operator-runner #N"]
+        subgraph Ops["Smooth operatives (subprocesses)"]
+            OP1["operative #1"]
+            OP2["operative #2"]
+            OP3["operative #N"]
         end
     end
 
@@ -247,7 +247,7 @@ not there.
 **Wire transport.** The cast services bind four tonic-gRPC servers on
 Unix-domain sockets at startup (`narc.sock`, `wonk.sock`, `scribe.sock`,
 `bigsmooth.sock` under `$SMOOTH_SINGLE_PROCESS_SOCKET_DIR`). Each
-operator-runner subprocess dials those sockets for every tool check,
+operative subprocess dials those sockets for every tool check,
 policy decision, and log entry — see `proto/{narc,wonk,scribe,bigsmooth}.proto`
 and `crates/smooth-bigsmooth/src/single_process.rs::bootstrap_from_app_state`.
 Inside Big Smooth's own process the same services are reached via
@@ -259,7 +259,7 @@ speaks HTTP+WebSocket to Big Smooth on `:4400`. Full topology lives in
 
 Big Smooth, Archivist, Wonk, Goalie, Narc, Scribe, and Groove all live
 in the same microVM (sandboxed mode) or the same process tree (direct
-mode). Smooth Operators are subprocesses spawned inside that same
+mode). Smooth operatives are subprocesses spawned inside that same
 boundary, one per dispatched pearl.
 
 | Service | Role |
@@ -270,13 +270,13 @@ boundary, one per dispatched pearl.
 | **Goalie** | Network + filesystem proxy. Dumb pipe — forwards or blocks based on Wonk's answer. iptables + FUSE enforced at the kernel level inside the VM. |
 | **Narc** | Tool surveillance + prompt-injection guard. Two-tier detection: fast regex pre-filters + LLM-as-a-judge for ambiguous cases. |
 | **Scribe** | Structured logging service. All services log through Scribe, which writes to in-memory SQLite and feeds Archivist. |
-| **Groove** | LLM checkpointing + session resume. Captures conversation state after tool calls so an interrupted operator picks up at the last checkpoint. |
+| **Groove** | LLM checkpointing + session resume. Captures conversation state after tool calls so an interrupted operative picks up at the last checkpoint. |
 
 **The Board** = Big Smooth + Archivist (leadership). **The Safehouse**
 is the microVM (or, in direct mode, the host process tree) where The
 Board operates alongside the rest of the cast.
 
-**Smooth Operators** = the AI agents. The only ones who write code.
+**Smooth operatives** = the AI agents (the sandboxed workers). The only ones who write code. (They run the `smooth-operator` engine; don't confuse the worker with the engine.)
 
 ### Inside each MicroVM
 
@@ -284,7 +284,7 @@ Board operates alongside the rest of the cast.
 %%{init: {"flowchart": {"defaultRenderer": "elk"}, "themeVariables": {"lineColor": "#f49f0a"}}}%%
 graph LR
     subgraph VM["MicroVM (--scope none)"]
-        Operator["Operator / Big Smooth"]
+        Operator["Operative / Big Smooth"]
         Wonk["Wonk<br/><small>:8400</small>"]
         Goalie["Goalie<br/><small>:8480 proxy</small>"]
         Narc["Narc"]
@@ -306,7 +306,7 @@ graph LR
 - **Wonk** reads `/etc/smooth/policy.toml`, listens on `127.0.0.1:8400`, hot-reloads on file change
 - **Goalie** listens on `127.0.0.1:8480` as HTTP proxy. iptables rejects all outbound TCP except from the Goalie UID. FUSE mount at `/workspace` for filesystem access control.
 - **Narc** intercepts tool calls and incoming prompts. Regex fast path catches obvious secrets and write violations. Ambiguous cases go to a small/fast LLM (Haiku, Flash, GPT-4o-mini) for a yes/no verdict.
-- **Scribe** listens on `127.0.0.1:8401`, writes to on-pod SQLite and JSON-lines, feeds events to Archivist. Bridges `tracing` spans to OpenTelemetry via `tracing-opentelemetry`, generating trace hierarchies for operator lifecycles, prompts, tool calls, and network requests. Exports OTLP traces to Archivist with W3C traceparent propagation across VM boundaries.
+- **Scribe** listens on `127.0.0.1:8401`, writes to on-pod SQLite and JSON-lines, feeds events to Archivist. Bridges `tracing` spans to OpenTelemetry via `tracing-opentelemetry`, generating trace hierarchies for operative lifecycles, prompts, tool calls, and network requests. Exports OTLP traces to Archivist with W3C traceparent propagation across VM boundaries.
 
 ### Security Model
 
@@ -319,11 +319,11 @@ graph TD
     end
 
     subgraph Policy["Policy-Driven Access Control"]
-        TOML["policy.toml<br/><small>generated by Big Smooth per operator</small>"]
+        TOML["policy.toml<br/><small>generated by Big Smooth per operative</small>"]
         NET["Network allowlist<br/><small>domain + path matching</small>"]
         FS["Filesystem deny patterns<br/><small>*.env, *.pem, .ssh/*</small>"]
-        TOOL["Tool allowlist<br/><small>per-operator tool access</small>"]
-        BEAD["Pearl scoping<br/><small>operator sees only assigned pearls + deps</small>"]
+        TOOL["Tool allowlist<br/><small>per-operative tool access</small>"]
+        BEAD["Pearl scoping<br/><small>operative sees only assigned pearls + deps</small>"]
         MCP["MCP server allowlist<br/><small>deny unknown servers by default</small>"]
     end
 
@@ -344,16 +344,16 @@ graph TD
 **Key invariants:**
 - Big Smooth **never writes**. Narc enforces this in-VM — any write attempt is instantly blocked.
 - Archivist **can write**, but only to log paths. Writes to any other path are blocked.
-- Operators can only see their assigned pearls and dependencies (scoped by auth token).
+- Operatives can only see their assigned pearls and dependencies (scoped by auth token).
 - All outbound traffic goes through Goalie. No process can bypass the proxy — enforced at the kernel level.
 
 ### Continuous Access Negotiation
 
-Operators can request expanded access at runtime. The flow:
+Operatives can request expanded access at runtime. The flow:
 
 ```mermaid
 sequenceDiagram
-    participant Op as Operator
+    participant Op as Operative
     participant G as Goalie
     participant W as Wonk
     participant BS as Big Smooth
@@ -377,7 +377,7 @@ sequenceDiagram
 
 ### Default access envelope
 
-Each operator VM boots with a minimal envelope:
+Each operative VM boots with a minimal envelope:
 
 - **Network**: the configured LLM gateway (`llm.smoo.ai` by default),
   relevant package registries (crates.io, npm, PyPI), and GitHub. Any
@@ -442,8 +442,8 @@ via `th code`'s model picker or by editing `~/.smooth/providers.json`.
 
 ```bash
 th run <pearl-id>                # Trigger work on a pearl
-th operators                     # List active Smooth Operators
-th pause/resume/steer/cancel     # Control operators mid-task
+th operatives                    # List active Smooth operatives
+th pause/resume/steer/cancel     # Control operatives mid-task
 th approve <pearl-id>            # Approve a review
 th inbox                         # Messages needing attention
 ```
@@ -483,7 +483,7 @@ See [`docs/extending.md`](docs/extending.md) for the full guide.
 
 ### Run a pearl in a sandbox (`th run`)
 
-Dispatch a pearl (or ad-hoc prompt) to a Smooth Operator running in a
+Dispatch a pearl (or ad-hoc prompt) to a Smooth operative running in a
 microVM. The agent has bind-mount access to your workspace, a
 project-scoped cache at `/opt/smooth/cache`, and (with `--keep-alive`)
 forwarded ports so you can review dev servers live.
@@ -499,11 +499,11 @@ th run th-abcdef --keep-alive --memory-mb 6144
 th run "add a /health route that returns {\"ok\":true}" --keep-alive
 
 # Inspect + tear down
-th operators list
-th operators kill <operator-id>
+th operatives list
+th operatives kill <operator-id>
 ```
 
-**One image for every stack.** `smooai/smooth-operator` ships with
+**One image for every stack.** `smooai/smooth-operative` ships with
 alpine + `mise` baked in. The agent reads the workspace
 (`package.json`, `Cargo.toml`, `pyproject.toml`, `go.mod`) and
 installs whatever toolchain it needs at runtime — node + pnpm,
@@ -514,17 +514,17 @@ host project cache so second-run starts are offline-fast.
 Build locally:
 
 ```bash
-scripts/build-smooth-operator-image.sh
+scripts/build-smooth-operative-image.sh
 ```
 
-Override via `--image` or `SMOOTH_OPERATOR_IMAGE` env if you want a
+Override via `--image` or `SMOOTH_OPERATIVE_IMAGE` env if you want a
 custom variant (e.g. a version pinned for CI reproducibility).
 
 **Microsandbox image resolution.** Locally-built images live in
 your Docker Desktop image store; `microsandbox` pulls from registries
 by default, so if its pull can't see your local build, push it
-first (`docker push smooai/smooth-operator:0.2.0`) or set
-`SMOOTH_WORKER_IMAGE` to something microsandbox can reach.
+first (`docker push smooai/smooth-operative:0.2.0`) or set
+`SMOOTH_OPERATIVE_IMAGE` to something microsandbox can reach.
 
 **Project cache.** Each workspace path hashes to its own cache,
 mounted at `/opt/smooth/cache` inside the VM. Subsequent runs on the
@@ -577,7 +577,7 @@ Two extension points add tools without rebuilding the binary:
   [`budget-aware-mcp`](https://github.com/Doorman11991/budget-aware-mcp)
   — token-budgeted code-graph queries (`graph_walk`, `search_graph`,
   `check_scope`, `explain_symbol`, `find_dead_code`, …) so the
-  operator can pull just the structurally-relevant code instead of
+  operative can pull just the structurally-relevant code instead of
   ripgrep-then-read-file dumping entire files. Registered on first
   `th up`; opt out with `SMOOTH_SKIP_DEFAULT_MCP=1` or remove via
   `th mcp remove budget-aware-mcp`.
@@ -627,7 +627,7 @@ smooth/
 │   ├── smooth-bigsmooth/         # Library — orchestrator, policy gen, session mgmt
 │   ├── smooth-bootstrap-bill/    # Library + binary — host-side microsandbox broker ("Bill")
 │   ├── smooth-operator/          # Library — Rust-native AI agent framework
-│   ├── smooth-operator-runner/   # Binary — agent loop inside each operator VM
+│   ├── smooth-operative/   # Binary — agent loop inside each operative VM
 │   ├── smooth-policy/            # Library — shared policy types, TOML parsing
 │   ├── smooth-wonk/              # Binary — in-VM access control authority
 │   ├── smooth-goalie/            # Binary — in-VM network + filesystem proxy

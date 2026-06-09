@@ -93,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
     // Pearl th-893801 iter-3e: when SMOOTH_SINGLE_PROCESS=1,
     // spawn the cast as in-process gRPC servers on UDS at known
     // paths alongside (not replacing) the existing HTTP cast.
-    // Iter-3f flips the operator-runner over to dial the UDS
+    // Iter-3f flips the operative over to dial the UDS
     // sockets; until then this is co-resident.
     let _grpc_cast = if smooth_bigsmooth::single_process::is_enabled() {
         match smooth_bigsmooth::single_process::bootstrap_from_app_state(&state) {

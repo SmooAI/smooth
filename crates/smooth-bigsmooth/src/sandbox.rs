@@ -100,9 +100,9 @@ pub struct SandboxConfig {
     /// Additional port mappings beyond the default operator WebSocket (guest:4096).
     /// Each entry maps a guest port to a host port (0 = kernel-assigned).
     pub extra_ports: Vec<PortMapping>,
-    /// OCI image to boot the VM from. Overrides the `SMOOTH_WORKER_IMAGE`
+    /// OCI image to boot the VM from. Overrides the `SMOOTH_OPERATIVE_IMAGE`
     /// env default when set. Usual value is
-    /// `smooai/smooth-operator:latest` — a unified image where the
+    /// `smooai/smooth-operative:latest` — a unified image where the
     /// agent installs toolchains at runtime via mise, persisted to
     /// the project cache bind mount.
     pub image: Option<String>,
@@ -236,13 +236,13 @@ pub struct DirectSandboxClient;
 #[async_trait]
 impl SandboxClient for DirectSandboxClient {
     async fn create(&self, config: &SandboxConfig, host_port: u16) -> Result<SandboxHandle> {
-        let name = format!("smooth-operator-{}", config.operator_id);
+        let name = format!("smooth-operative-{}", config.operator_id);
         let spec = SandboxSpec {
             name: name.clone(),
             image: config
                 .image
                 .clone()
-                .unwrap_or_else(|| std::env::var("SMOOTH_WORKER_IMAGE").unwrap_or_else(|_| "ghcr.io/smooai/smooth-operator:latest".into())),
+                .unwrap_or_else(|| std::env::var("SMOOTH_OPERATIVE_IMAGE").unwrap_or_else(|_| "ghcr.io/smooai/smooth-operative:latest".into())),
             cpus: config.cpus,
             memory_mb: config.memory_mb,
             env: config.env.clone(),
@@ -347,13 +347,13 @@ impl BillSandboxClient {
 #[async_trait]
 impl SandboxClient for BillSandboxClient {
     async fn create(&self, config: &SandboxConfig, host_port: u16) -> Result<SandboxHandle> {
-        let name = format!("smooth-operator-{}", config.operator_id);
+        let name = format!("smooth-operative-{}", config.operator_id);
         let spec = SandboxSpec {
             name: name.clone(),
             image: config
                 .image
                 .clone()
-                .unwrap_or_else(|| std::env::var("SMOOTH_WORKER_IMAGE").unwrap_or_else(|_| "ghcr.io/smooai/smooth-operator:latest".into())),
+                .unwrap_or_else(|| std::env::var("SMOOTH_OPERATIVE_IMAGE").unwrap_or_else(|_| "ghcr.io/smooai/smooth-operative:latest".into())),
             cpus: config.cpus,
             memory_mb: config.memory_mb,
             env: config.env.clone(),

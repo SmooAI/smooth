@@ -126,7 +126,7 @@ async fn single_process_cast_round_trips_a_narc_then_resolve_flow() {
                 seconds: 2_000_000 + n,
                 nanos: 0,
             }),
-            source: "operator-runner".into(),
+            source: "operative".into(),
             operator_id: "op-1".into(),
             bead_id: "pearl-1".into(),
             level: smooth_scribe::pb::Level::Info as i32,

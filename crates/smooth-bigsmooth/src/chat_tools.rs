@@ -527,7 +527,7 @@ impl Tool for TeammateWaitTool {
                 return Ok(out.trim_end().to_string());
             }
 
-            // 1.5s poll: matches the operator runner's mailbox-poll
+            // 1.5s poll: matches the operative's mailbox-poll
             // cadence so the chat agent picks up [IDLE]/[CHAT:TEAMMATE]
             // within one round-trip of the teammate posting it. The old
             // 5s cadence added noticeable latency on quick teammates.

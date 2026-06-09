@@ -67,7 +67,7 @@ fn max_sandbox_concurrency() -> usize {
 
 /// Detect a routable host IP — the address the kernel would use to
 /// reach a public destination. Used to populate `SMOOTH_NARC_URL` so
-/// the operator runner inside a microsandbox VM has a destination
+/// the operative inside a microsandbox VM has a destination
 /// the host's TCP proxy can actually `TcpStream::connect()` against.
 ///
 /// Trick: bind a UDP socket to `0.0.0.0:0`, `connect()` it to a
@@ -140,7 +140,7 @@ pub struct AppState {
     /// Registry of live teammates (operators) — populated on dispatch,
     /// idled when the comment-tap sees `[IDLE]`. Powers `/api/teammates`
     /// and the chat-agent's `teammate_list` tool. See `crate::teammates`.
-    pub teammates: Arc<crate::teammates::OperatorRegistry>,
+    pub teammates: Arc<crate::teammates::OperativeRegistry>,
     /// Pending access-request queue + event bus. When Safehouse Narc
     /// returns [`smooth_narc::judge::Decision::Ask`], the originating
     /// tool call is held open here while a human resolves it via the
@@ -350,7 +350,7 @@ impl AppState {
             diver: None,
             orchestrator: Arc::new(tokio::sync::Mutex::new(orchestrator)),
             safehouse_narc,
-            teammates: Arc::new(crate::teammates::OperatorRegistry::new()),
+            teammates: Arc::new(crate::teammates::OperativeRegistry::new()),
             access,
             wonk_grants,
         }
@@ -487,8 +487,8 @@ pub struct TaskRequest {
     pub budget: Option<f64>,
     pub working_dir: Option<String>,
     /// OCI image for the operator VM. Overrides the server's
-    /// `SMOOTH_WORKER_IMAGE` env default. Usual value is
-    /// `smooai/smooth-operator:latest` (unified image; agent
+    /// `SMOOTH_OPERATIVE_IMAGE` env default. Usual value is
+    /// `smooai/smooth-operative:latest` (unified image; agent
     /// installs toolchains at runtime via mise).
     #[serde(default)]
     pub image: Option<String>,
@@ -777,22 +777,22 @@ pub async fn start(mut state: AppState, addr: SocketAddr) -> anyhow::Result<()> 
     );
 
     // Preflight the direct-dispatch runner binary so a missing /
-    // moved smooth-operator-runner shows up as a loud startup warn,
+    // moved smooth-operative shows up as a loud startup warn,
     // not as silently-failed pearls. Pearl from the post-loop sweep
     // diagnostic: the entire shared-target/release dir got nuked
     // between build and sweep, every dispatch hit the
-    // "native smooth-operator-runner not found" error path, and
+    // "native smooth-operative not found" error path, and
     // the pearls closed in milliseconds with no METRICS. Hard to
     // spot without grepping the daemon log.
     let direct_mode = std::env::var("SMOOTH_WORKFLOW_DIRECT")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     if direct_mode {
-        match find_native_operator_runner_binary() {
-            Some(p) => tracing::info!(runner_bin = %p.display(), "direct dispatch: resolved native smooth-operator-runner"),
+        match find_native_operative_binary() {
+            Some(p) => tracing::info!(runner_bin = %p.display(), "direct dispatch: resolved native smooth-operative"),
             None => tracing::warn!(
-                env_var = ?std::env::var("SMOOTH_OPERATOR_RUNNER_NATIVE").ok(),
-                "direct dispatch: native smooth-operator-runner NOT FOUND — every dispatch will silently close its pearl with cost_usd=0 until this is fixed. Run `cargo build --release -p smooai-smooth-operator-runner` or set SMOOTH_OPERATOR_RUNNER_NATIVE=/absolute/path."
+                env_var = ?std::env::var("SMOOTH_OPERATIVE_NATIVE").ok(),
+                "direct dispatch: native smooth-operative NOT FOUND — every dispatch will silently close its pearl with cost_usd=0 until this is fixed. Run `cargo build --release -p smooai-smooth-operative` or set SMOOTH_OPERATIVE_NATIVE=/absolute/path."
             ),
         }
     }
@@ -1005,7 +1005,7 @@ async fn handle_client_event(state: &AppState, event: ClientEvent) {
 /// [`ServerEvent`]s as the agent progresses.
 ///
 /// ALL dispatch goes through the sandboxed path — Big Smooth stays
-/// READ-ONLY. The operator runner inside the microVM hosts the real tools
+/// READ-ONLY. The operative inside the microVM hosts the real tools
 /// (read_file, write_file, edit_file, grep, bash, etc.) with the full
 /// security cast (Wonk/Goalie/Narc/Scribe) watching every call.
 /// Options for dispatching an agent task. Bundled so the dispatch
@@ -1078,7 +1078,7 @@ pub async fn dispatch_ws_task(state: &AppState, opts: DispatchOptions) {
 // stderr unconditionally (it's never model content), so the ANSI
 // matcher is obsolete and was removed.
 
-/// Outcome of inspecting a single line from the operator-runner's
+/// Outcome of inspecting a single line from the operative's
 /// stdout stream. Stdout is contractually the JSON `AgentEvent`
 /// transport; anything else is a contract violation and must NOT be
 /// forwarded to the chat-token stream (where it would be persisted
@@ -1111,19 +1111,19 @@ pub(crate) fn classify_runner_stdout_line(line: &str) -> RunnerStdoutLine {
     }
 }
 
-/// Find the NATIVE operator-runner binary (built for the host
+/// Find the NATIVE operative binary (built for the host
 /// triple, not cross-compiled to `aarch64-unknown-linux-musl`).
 /// Used by the direct-dispatch path where we exec the runner as
 /// a regular subprocess rather than inside a microVM.
 ///
 /// Resolution order:
-/// 1. `SMOOTH_OPERATOR_RUNNER_NATIVE` env var (explicit override).
+/// 1. `SMOOTH_OPERATIVE_NATIVE` env var (explicit override).
 /// 2. Walk up from `CARGO_MANIFEST_DIR` looking for
-///    `target/release/smooth-operator-runner`, then
-///    `target/debug/smooth-operator-runner`.
+///    `target/release/smooth-operative`, then
+///    `target/debug/smooth-operative`.
 /// 3. Same walk from `std::env::current_dir`.
-fn find_native_operator_runner_binary() -> Option<std::path::PathBuf> {
-    if let Ok(explicit) = std::env::var("SMOOTH_OPERATOR_RUNNER_NATIVE") {
+fn find_native_operative_binary() -> Option<std::path::PathBuf> {
+    if let Ok(explicit) = std::env::var("SMOOTH_OPERATIVE_NATIVE") {
         let p = std::path::PathBuf::from(explicit);
         if p.is_file() {
             return Some(p);
@@ -1131,7 +1131,7 @@ fn find_native_operator_runner_binary() -> Option<std::path::PathBuf> {
     }
     let check = |base: &std::path::Path| -> Option<std::path::PathBuf> {
         for profile in ["release", "debug"] {
-            let candidate = base.join("target").join(profile).join("smooth-operator-runner");
+            let candidate = base.join("target").join(profile).join("smooth-operative");
             if candidate.is_file() {
                 return Some(candidate);
             }
@@ -1195,22 +1195,22 @@ fn build_resumption_context(store: &crate::session::DoltSessionStore, pearl_id: 
     ctx
 }
 
-fn find_operator_runner_binary() -> Option<std::path::PathBuf> {
-    if let Ok(host_path) = std::env::var("SMOOTH_OPERATOR_RUNNER_HOST_PATH") {
+fn find_operative_binary() -> Option<std::path::PathBuf> {
+    if let Ok(host_path) = std::env::var("SMOOTH_OPERATIVE_HOST_PATH") {
         return Some(std::path::PathBuf::from(host_path));
     }
-    if let Ok(explicit) = std::env::var("SMOOTH_OPERATOR_RUNNER") {
+    if let Ok(explicit) = std::env::var("SMOOTH_OPERATIVE") {
         let p = std::path::PathBuf::from(explicit);
         if p.is_file() {
             return Some(p);
         }
     }
-    // ~/.smooth/runner-bin/smooth-operator-runner — the canonical sync
-    // location written by `scripts/build-operator-runner.sh`. Checked
+    // ~/.smooth/runner-bin/smooth-operative — the canonical sync
+    // location written by `scripts/build-operative.sh`. Checked
     // first so a release `th` (running outside any workspace) still
     // discovers the cross-compiled runner the dev built.
     if let Some(home) = dirs_next::home_dir() {
-        let synced = home.join(".smooth").join("runner-bin").join("smooth-operator-runner");
+        let synced = home.join(".smooth").join("runner-bin").join("smooth-operative");
         if synced.is_file() {
             return Some(synced);
         }
@@ -1218,11 +1218,7 @@ fn find_operator_runner_binary() -> Option<std::path::PathBuf> {
     let manifest = env!("CARGO_MANIFEST_DIR");
     let mut dir = std::path::PathBuf::from(manifest);
     for _ in 0..5 {
-        let candidate = dir
-            .join("target")
-            .join("aarch64-unknown-linux-musl")
-            .join("release")
-            .join("smooth-operator-runner");
+        let candidate = dir.join("target").join("aarch64-unknown-linux-musl").join("release").join("smooth-operative");
         if candidate.is_file() {
             return Some(candidate);
         }
@@ -1235,7 +1231,7 @@ fn find_operator_runner_binary() -> Option<std::path::PathBuf> {
         .join("target")
         .join("aarch64-unknown-linux-musl")
         .join("release")
-        .join("smooth-operator-runner");
+        .join("smooth-operative");
     if cwd_candidate.is_file() {
         return Some(cwd_candidate);
     }
@@ -1473,10 +1469,10 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
 
     // Resolve the runner binary and working directory upfront. Both are
     // needed as host paths to mount into the VM.
-    let runner_bin = match find_operator_runner_binary() {
+    let runner_bin = match find_operative_binary() {
         Some(p) => p,
         None => {
-            let err = "smooth-operator-runner binary not found. Run scripts/build-operator-runner.sh to cross-compile it, or set SMOOTH_OPERATOR_RUNNER=/absolute/path.";
+            let err = "smooth-operative binary not found. Run scripts/build-operative.sh to cross-compile it, or set SMOOTH_OPERATIVE=/absolute/path.";
             let _ = event_tx.send(ServerEvent::TaskError {
                 task_id: task_id.clone(),
                 message: err.into(),
@@ -1516,11 +1512,11 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
 
     // Resolve the binary's parent directory so we can mount the whole folder
     // (virtiofs prefers directory mounts). The binary will end up at
-    // /opt/smooth/bin/smooth-operator-runner inside the VM.
+    // /opt/smooth/bin/smooth-operative inside the VM.
     let Some(runner_dir) = runner_bin.parent().map(std::path::Path::to_path_buf) else {
         let _ = event_tx.send(ServerEvent::TaskError {
             task_id: task_id.clone(),
-            message: "smooth-operator-runner binary has no parent directory".into(),
+            message: "smooth-operative binary has no parent directory".into(),
         });
         close_pearl_on_abort("runner has no parent dir");
         return;
@@ -1532,7 +1528,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
     let runner_name = runner_bin
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "smooth-operator-runner".into());
+        .unwrap_or_else(|| "smooth-operative".into());
 
     let tid = task_id.clone();
 
@@ -1647,7 +1643,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         //
         // `SMOOTH_WORKFLOW=0` is kept as an opt-OUT for debugging
         // and regression bisects — it falls back to the classic
-        // single-Agent loop in `smooth-operator-runner`. Anything
+        // single-Agent loop in `smooth-operative`. Anything
         // else (unset, "1", "true") turns it on.
         let workflow_disabled = std::env::var("SMOOTH_WORKFLOW")
             .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
@@ -1769,7 +1765,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
         // CRITICAL: the tempdir lives under `~/.smooth/control/`, NOT
         // the system `$TMPDIR`. On macOS `$TMPDIR` resolves to
         // `/var/folders/…/T` which is SIP-protected — microsandbox silently
-        // drops bind-mounts rooted there, and the operator-runner boots to
+        // drops bind-mounts rooted there, and the operative boots to
         // find `/opt/smooth/policy` empty. The project-cache bind-mount
         // uses user-home paths for the same reason. See th-b1f040 for the
         // full debugging trail.
@@ -2613,7 +2609,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
     });
 }
 
-/// Spawn the operator runner as a direct subprocess against the
+/// Spawn the operative as a direct subprocess against the
 /// host workspace. No microVM, no bind mounts, no Narc/Wonk/Goalie
 /// enforcement — the agent has host-level tool access. Intended
 /// for bench runs and fast dev loops. Opt-in via
@@ -2707,10 +2703,10 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
     };
 
     // Resolve runner binary + workspace as host paths.
-    let runner_bin = match find_native_operator_runner_binary() {
+    let runner_bin = match find_native_operative_binary() {
         Some(p) => p,
         None => {
-            let err = "native smooth-operator-runner not found. Run `cargo build -p smooai-smooth-operator-runner` (debug) or `--release`, or set SMOOTH_OPERATOR_RUNNER_NATIVE=/absolute/path.";
+            let err = "native smooth-operative not found. Run `cargo build -p smooai-smooth-operative` (debug) or `--release`, or set SMOOTH_OPERATIVE_NATIVE=/absolute/path.";
             let _ = event_tx.send(ServerEvent::TaskError {
                 task_id: task_id.clone(),
                 message: err.into(),
@@ -3086,7 +3082,7 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
                                 // Use max for iterations, cost, AND tokens so
                                 // a later "fallback" Completed event (the
                                 // runner emits one with zeros at exit as
-                                // belt-and-suspenders, see operator-runner
+                                // belt-and-suspenders, see operative
                                 // main.rs) can't clobber the real numbers the
                                 // workflow/agent posted earlier. Pearl
                                 // th-46bc94 (iterations + cost), pearl
@@ -5475,19 +5471,19 @@ mod tests {
     }
 
     #[test]
-    fn find_native_operator_runner_finds_debug_or_release_build() {
+    fn find_native_operative_finds_debug_or_release_build() {
         // The direct-dispatch path needs a runner binary built for
         // the host triple. We don't assert which profile — CI or
         // dev boxes could have either — but at least one must
-        // exist after a normal `cargo build -p smooai-smooth-operator-runner`.
+        // exist after a normal `cargo build -p smooai-smooth-operative`.
         //
         // This test runs inside cargo, which means the workspace
         // has been built; skip gracefully if the binary happens to
         // be missing (e.g. running on an alternate target dir).
-        if let Some(p) = find_native_operator_runner_binary() {
+        if let Some(p) = find_native_operative_binary() {
             assert!(p.is_file(), "returned path must point at a real file: {}", p.display());
             let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            assert_eq!(name, "smooth-operator-runner", "must be the runner binary, got: {name}");
+            assert_eq!(name, "smooth-operative", "must be the runner binary, got: {name}");
             // Must be under target/<profile>/, not the
             // aarch64-unknown-linux-musl cross-compile output
             // (that one is for sandboxed dispatch).
@@ -5621,17 +5617,14 @@ mod tests {
 
     #[test]
     fn build_runner_diag_wrapper_argv_returns_three_elem_sh_invocation() {
-        let argv = build_runner_diag_wrapper_argv("/opt/smooth/bin/smooth-operator-runner");
+        let argv = build_runner_diag_wrapper_argv("/opt/smooth/bin/smooth-operative");
         assert_eq!(argv.len(), 3, "expected /bin/sh -c <script>, got: {argv:?}");
         assert_eq!(argv[0], "/bin/sh");
         assert_eq!(argv[1], "-c");
         let script = &argv[2];
         // The script must include the runner path verbatim (not template
         // syntax) and reference the host-readable log dir.
-        assert!(
-            script.contains("/opt/smooth/bin/smooth-operator-runner"),
-            "runner path not interpolated: {script}"
-        );
+        assert!(script.contains("/opt/smooth/bin/smooth-operative"), "runner path not interpolated: {script}");
         assert!(script.contains("/var/log/smooth-runner"), "log dir missing: {script}");
         // The 8 expected diagnostic files must each be addressed.
         for name in [
@@ -5665,8 +5658,8 @@ mod tests {
     fn build_runner_diag_wrapper_argv_handles_runner_with_special_chars() {
         // Path may contain hyphens/underscores; just make sure the
         // template doesn't do anything unsafe with them.
-        let argv = build_runner_diag_wrapper_argv("/opt/smooth/bin/smooth-operator-runner_v2");
-        assert!(argv[2].contains("smooth-operator-runner_v2"));
+        let argv = build_runner_diag_wrapper_argv("/opt/smooth/bin/smooth-operative_v2");
+        assert!(argv[2].contains("smooth-operative_v2"));
         // Note: we deliberately do NOT shell-quote runner_in_vm because
         // it's controlled by Big Smooth (always a fixed
         // /opt/smooth/bin/<binary> path resolved from a host-side build

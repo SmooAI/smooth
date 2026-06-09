@@ -559,9 +559,9 @@ fn filesystem_policy(phase: &str) -> FilesystemPolicy {
     }
 }
 
-/// The static allowlist of tools the operator-runner registers for every
+/// The static allowlist of tools the operative registers for every
 /// role. Must stay in sync with `tools.register(...)` calls in
-/// `crates/smooth-operator-runner/src/main.rs`. Pearl/MCP/access-request
+/// `crates/smooth-operative/src/main.rs`. Pearl/MCP/access-request
 /// tools are layered on dynamically and not included here.
 fn registered_tool_names() -> Vec<String> {
     vec![

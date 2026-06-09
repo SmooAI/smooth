@@ -24,7 +24,7 @@ Engine: the `smooth-dolt` Go binary (built from `scripts/build-smooth-dolt.sh`).
 | `smooth.pid`             | Direct-mode daemon pid                                          |
 | `smooth.log`             | Direct-mode daemon stdout+stderr                                |
 | `sandboxed.vm`           | microsandbox VM name from the last `th up` (so `th down` finds it) |
-| `runner-bin/`            | Mirror of the cross-compiled `smooth-operator-runner` + `smooth-dolt` |
+| `runner-bin/`            | Mirror of the cross-compiled `smooth-operative` + `smooth-dolt` |
 | `smooth.db`              | Legacy SQLite (no longer read after migration; safe to delete after `pearls migrate-from-sqlite`) |
 
 ## Project: `<repo>/.smooth/`

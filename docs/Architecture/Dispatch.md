@@ -3,7 +3,7 @@
 #architecture
 
 > [!arch] Chat → pearl → operator → events → done
-> A task enters Big Smooth over WebSocket, becomes a pearl via [[The-Cast#Diver|Diver]], gets handed to an operator runner, and streams `AgentEvent`s back as `ServerEvent`s. The fork between direct and sandboxed dispatch is invisible above the WebSocket.
+> A task enters Big Smooth over WebSocket, becomes a pearl via [[The-Cast#Diver|Diver]], gets handed to an operative, and streams `AgentEvent`s back as `ServerEvent`s. The fork between direct and sandboxed dispatch is invisible above the WebSocket.
 
 ## End-to-end flow
 
@@ -23,7 +23,7 @@
      ├── SMOOTH_WORKFLOW_DIRECT=1 ─► dispatch_ws_task_direct
      │                                  │
      │                                  ▼
-     │                          spawn smooth-operator-runner
+     │                          spawn smooth-operative
      │                          as a host subprocess
      │
      └── otherwise              ─► dispatch_ws_task_sandboxed
@@ -33,7 +33,7 @@
                                workspace, create_sandbox, exec runner
                                in VM
 
-   Operator runner
+   Operative
      │
      │  agent loop: observe → think → act
      │  each tool call hits NarcHook → WonkHook
@@ -132,5 +132,5 @@ For each dispatched pearl, Big Smooth spawns a `comment_tap` tokio task that wat
 
 - [[Architecture-Overview]]
 - [[The-Cast]]
-- [[Operators]]
+- [[Operatives]]
 - [[Pearls]]

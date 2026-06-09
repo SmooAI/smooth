@@ -73,7 +73,7 @@ pub struct AgentConfig {
     /// Optional injection channel — out-of-band messages (mailbox: `[CHAT:USER]`,
     /// `[STEERING:GUIDANCE]`, `[ANSWER:*]`) drained at the top of each iteration
     /// and pushed into the conversation as user-turns. Wired by
-    /// `smooth-operator-runner` when `SMOOTH_PEARL_ID` is set so the lead
+    /// `smooth-operative` when `SMOOTH_PEARL_ID` is set so the lead
     /// (Big Smooth) can talk to a running teammate without restarting the agent.
     pub chat_rx: Option<Arc<tokio::sync::Mutex<UnboundedReceiver<InjectedMessage>>>>,
     /// Pre-existing conversation messages to seed the agent's

@@ -8,7 +8,7 @@ Big Smooth runs in one of two modes. Choose at `th up` time.
 | **Isolation** | Strong — agent runs inside a microVM, safehouse mediates filesystem/network | None — agent is a host subprocess; tools execute against the host filesystem |
 | **When to use** | Untrusted code, agent dispatches you don't fully control, CI runners that need defense in depth | Pre-trusted environments — dedicated devbox, CI runner you own, bench harnesses |
 | **Idle timeout default** | 24 h (was 30 min — pearl `th-1b9b3e`) | 24 h |
-| **Native runner needed?** | No — runner is baked into the safehouse OCI image | **Yes** — build with `cargo build --release -p smooai-smooth-operator-runner` and either auto-discovery picks it up from `~/.cargo/shared-target/release/smooth-operator-runner`, or you set `SMOOTH_OPERATOR_RUNNER_NATIVE=/abs/path/to/runner` before `th up direct` |
+| **Native runner needed?** | No — runner is baked into the safehouse OCI image | **Yes** — build with `cargo build --release -p smooai-smooth-operative` and either auto-discovery picks it up from `~/.cargo/shared-target/release/smooth-operative`, or you set `SMOOTH_OPERATIVE_NATIVE=/abs/path/to/runner` before `th up direct` |
 
 ## Why this matters for parity with pi + opencode
 
@@ -22,11 +22,11 @@ pre-trusted use cases (dev machines, bench harnesses).
 
 ```bash
 # Build the native runner once per checkout.
-cargo build --release -p smooai-smooth-operator-runner
+cargo build --release -p smooai-smooth-operative
 
 # Start in direct mode.
 th down
-SMOOTH_OPERATOR_RUNNER_NATIVE=~/.cargo/shared-target/release/smooth-operator-runner \
+SMOOTH_OPERATIVE_NATIVE=~/.cargo/shared-target/release/smooth-operative \
   th up direct
 
 # Confirm: th status should report healthy in under a second.
@@ -52,7 +52,7 @@ cargo run -p smooai-smooth-bench -- score-cleanup --driver=smooth …
 
 # Direct mode (fast boot, host trust)
 th down
-SMOOTH_OPERATOR_RUNNER_NATIVE=~/.cargo/shared-target/release/smooth-operator-runner th up direct
+SMOOTH_OPERATIVE_NATIVE=~/.cargo/shared-target/release/smooth-operative th up direct
 cargo run -p smooai-smooth-bench -- score-cleanup --driver=smooth …
 ```
 

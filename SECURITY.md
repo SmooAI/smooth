@@ -155,7 +155,7 @@ registry mirror you control. Smooth can enforce "only domain X" but
 can't verify "package Y from domain X is legitimate".
 
 ### Supply chain compromise of the runner itself
-`smooth-operator-runner` is a binary built and shipped as part of your
+`smooth-operative` is a binary built and shipped as part of your
 Smooth install. If your dev machine is compromised and the attacker
 modifies the runner before it's mounted into each VM, every VM inherits
 the backdoor.
