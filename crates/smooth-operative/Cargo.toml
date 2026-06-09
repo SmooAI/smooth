@@ -12,7 +12,7 @@ name = "smooth-operative"
 path = "src/main.rs"
 
 [dependencies]
-smooth-operator = { path = "../smooth-operator", package = "smooai-smooth-operator" }
+smooth-operator.workspace = true
 smooth-narc = { path = "../smooth-narc", package = "smooai-smooth-narc" }
 smooth-scribe = { path = "../smooth-scribe", package = "smooai-smooth-scribe" }
 smooth-wonk = { path = "../smooth-wonk", package = "smooai-smooth-wonk" }
