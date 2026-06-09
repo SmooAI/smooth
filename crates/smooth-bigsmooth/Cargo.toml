@@ -23,7 +23,7 @@ direct-sandbox = ["smooth-bootstrap-bill/server"]
 [dependencies]
 smooth-pearls.workspace = true
 smooth-bootstrap-bill = { workspace = true, default-features = false }
-smooth-operator = { path = "../smooth-operator", package = "smooai-smooth-operator" }
+smooth-operator.workspace = true
 smooth-code = { path = "../smooth-code", package = "smooai-smooth-code" }
 smooth-policy.workspace = true
 smooth-web = { path = "../smooth-web", package = "smooai-smooth-web" }
