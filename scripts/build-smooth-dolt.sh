@@ -16,7 +16,33 @@
 
 set -euo pipefail
 
+# Pearl th-a49716: support --if-stale for the install:th fast path.
+# When passed, skip the build entirely if target/release/smooth-dolt
+# already exists AND every *.go / go.mod / go.sum under
+# go/smooth-dolt/ is older than the binary. Lets `pnpm install:th`
+# always invoke this script without paying the ~30s Go build cost
+# on a hot install; `pnpm install:th:full` skips the flag to force
+# an unconditional rebuild.
+IF_STALE=0
+for arg in "$@"; do
+    case "$arg" in
+        --if-stale) IF_STALE=1 ;;
+        *) echo "unknown arg: $arg" >&2; exit 2 ;;
+    esac
+done
+
 cd "$(dirname "$0")/../go/smooth-dolt"
+
+BIN_REL="../../target/release/smooth-dolt"
+if [ "$IF_STALE" = "1" ] && [ -f "$BIN_REL" ]; then
+    # Compare mtimes: if every Go source is older than the binary,
+    # there's nothing to do. `find -newer` lists files strictly
+    # newer than the reference; empty output → cache hit.
+    if [ -z "$(find . \( -name '*.go' -o -name 'go.mod' -o -name 'go.sum' \) -newer "$BIN_REL" -print -quit)" ]; then
+        echo "==> smooth-dolt is up-to-date (no source changes since last build)"
+        exit 0
+    fi
+fi
 
 # Detect ICU (required by Dolt's gozstd CGO dependency).
 # On macOS, Homebrew installs ICU as keg-only; we need to point CGO at it.
