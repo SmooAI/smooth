@@ -559,7 +559,7 @@ async fn chat_stream_endpoint_returns_event_stream() {
     // Create a chat session so the messages route has something to bind to.
     use smooth_bigsmooth::session::DoltSessionStore;
     let session_store = DoltSessionStore::new(&store);
-    let session = session_store.create_chat_session("Stream test", "smooth-coding").expect("create session");
+    let session = session_store.create_chat_session("Stream test", "deepseek-v4-flash").expect("create session");
 
     let body_json = serde_json::json!({"content": "ping"});
     let resp = app

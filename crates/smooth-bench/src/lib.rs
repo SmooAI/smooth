@@ -997,14 +997,15 @@ fn write_score_forensic(
 /// Returns an error only when the registry can't be loaded at all.
 /// LLM failures are converted into zero counts, not propagated.
 pub async fn judge_test_output(combined_stdout: &str) -> anyhow::Result<TestCounts> {
+    use smooth_cast::provider_migration::load_providers_with_migration;
     use smooth_operator::conversation::Message;
     use smooth_operator::llm::LlmClient;
-    use smooth_operator::providers::{Activity, ProviderRegistry};
+    use smooth_operator::providers::Activity;
 
     let providers_path = dirs_next::home_dir()
         .map(|h| h.join(".smooth/providers.json"))
         .ok_or_else(|| anyhow!("no home dir"))?;
-    let registry = ProviderRegistry::load_from_file(&providers_path).context("loading providers.json")?;
+    let registry = load_providers_with_migration(&providers_path).context("loading providers.json")?;
     let config = registry.llm_config_for(Activity::Judge).context("no `judge` routing slot configured")?;
     let llm = LlmClient::new(config);
 

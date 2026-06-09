@@ -1977,7 +1977,7 @@ async fn cmd_model(cmd: ModelCommands) -> Result<()> {
             // Check providers.json for configured providers
             if let Some(ref path) = providers_path {
                 if path.exists() {
-                    match smooth_operator::providers::ProviderRegistry::load_from_file(path) {
+                    match smooth_cast::provider_migration::load_providers_with_migration(path) {
                         Ok(registry) => {
                             let providers = registry.list_providers();
                             if providers.is_empty() {
@@ -2049,14 +2049,17 @@ async fn cmd_model(cmd: ModelCommands) -> Result<()> {
                 (
                     "smooai-gateway",
                     smoo_ai_gateway_name,
+                    // Concrete model names — the legacy `smooth-*` slot
+                    // aliases were removed at the gateway under
+                    // SMOODEV-1793. `smooth_policy::smooth_alias`
+                    // holds the canonical mapping; see also the
+                    // catalog in smooth-code/src/model_picker.rs.
                     vec![
-                        "smooth-coding",
-                        "smooth-reasoning",
-                        "smooth-reviewing",
-                        "smooth-judge",
-                        "smooth-summarize",
-                        "smooth-fast",
-                        "smooth-default",
+                        "deepseek-v4-flash",     // coding + default
+                        "deepseek-v4-pro",       // reasoning
+                        "minimax-m2.7-direct",   // reviewing
+                        "gemini-2.5-flash",      // judge + summarize
+                        "gemini-2.5-flash-lite", // fast
                     ],
                     true,
                 ),
@@ -2292,7 +2295,7 @@ async fn cmd_model(cmd: ModelCommands) -> Result<()> {
 
             // Step 5: Save
             let mut registry = if path.exists() {
-                smooth_operator::providers::ProviderRegistry::load_from_file(path).unwrap_or_default()
+                smooth_cast::provider_migration::load_providers_with_migration(path).unwrap_or_default()
             } else {
                 smooth_operator::providers::ProviderRegistry::default()
             };
@@ -2314,7 +2317,7 @@ async fn cmd_model(cmd: ModelCommands) -> Result<()> {
         ModelCommands::Providers => {
             if let Some(ref path) = providers_path {
                 if path.exists() {
-                    match smooth_operator::providers::ProviderRegistry::load_from_file(path) {
+                    match smooth_cast::provider_migration::load_providers_with_migration(path) {
                         Ok(registry) => {
                             let providers = registry.list_providers();
                             if providers.is_empty() {
@@ -2341,7 +2344,7 @@ async fn cmd_model(cmd: ModelCommands) -> Result<()> {
                     println!("No providers configured. Run: th auth login {p} --api-key YOUR_KEY");
                     return Ok(());
                 }
-                let mut registry = smooth_operator::providers::ProviderRegistry::load_from_file(path)?;
+                let mut registry = smooth_cast::provider_migration::load_providers_with_migration(path)?;
                 if registry.get_provider(&p).is_none() {
                     println!("Provider {p} not configured. Run: th auth login {p} --api-key YOUR_KEY");
                     return Ok(());
@@ -2350,7 +2353,7 @@ async fn cmd_model(cmd: ModelCommands) -> Result<()> {
                 registry.save_to_file(path)?;
                 println!("Default provider set to: {}", p.green().bold());
             } else if path.exists() {
-                let registry = smooth_operator::providers::ProviderRegistry::load_from_file(path)?;
+                let registry = smooth_cast::provider_migration::load_providers_with_migration(path)?;
                 match registry.default_llm_config() {
                     Ok(config) => println!("Default: {} ({})", config.model, config.api_url),
                     Err(_) => println!("No default configured"),
@@ -2365,7 +2368,7 @@ async fn cmd_model(cmd: ModelCommands) -> Result<()> {
                 println!("No providers configured.");
                 return Ok(());
             }
-            let mut registry = smooth_operator::providers::ProviderRegistry::load_from_file(path)?;
+            let mut registry = smooth_cast::provider_migration::load_providers_with_migration(path)?;
             registry.remove_provider(&provider);
             registry.save_to_file(path)?;
             println!("Removed: {}", provider.red().bold());
@@ -5159,7 +5162,7 @@ async fn cmd_routing(cmd: RoutingCommands) -> Result<()> {
                 println!("  {} No providers configured. Run: th auth login", "✗".red().bold());
                 return Ok(());
             }
-            let registry = smooth_operator::providers::ProviderRegistry::load_from_file(&providers_path)?;
+            let registry = smooth_cast::provider_migration::load_providers_with_migration(&providers_path)?;
 
             println!("\n  {}\n", "Model Routing".cyan().bold());
 
@@ -5191,7 +5194,7 @@ async fn cmd_routing(cmd: RoutingCommands) -> Result<()> {
                 println!("  {} No providers configured. Run: th auth login", "✗".red().bold());
                 return Ok(());
             }
-            let registry = smooth_operator::providers::ProviderRegistry::load_from_file(&providers_path)?;
+            let registry = smooth_cast::provider_migration::load_providers_with_migration(&providers_path)?;
 
             println!("\n  {}\n", "Resolved Model Routing".cyan().bold());
 
@@ -5304,7 +5307,7 @@ async fn cmd_routing(cmd: RoutingCommands) -> Result<()> {
 
             // Try to get key from existing config
             let api_key = if providers_path.exists() {
-                let registry = smooth_operator::providers::ProviderRegistry::load_from_file(&providers_path)?;
+                let registry = smooth_cast::provider_migration::load_providers_with_migration(&providers_path)?;
                 registry.get_provider(required_provider).map(|p| p.api_key.clone())
             } else {
                 None
@@ -5333,7 +5336,7 @@ async fn cmd_routing(cmd: RoutingCommands) -> Result<()> {
                 return Ok(());
             }
 
-            let mut registry = smooth_operator::providers::ProviderRegistry::load_from_file(&providers_path)?;
+            let mut registry = smooth_cast::provider_migration::load_providers_with_migration(&providers_path)?;
 
             // Parse model as "provider/model" or just "model" (uses first provider)
             let (provider_id, model_name) = if let Some(slash_pos) = model.find('/') {
@@ -5509,7 +5512,7 @@ fn cmd_cast_models(provider_override: Option<&str>, json_out: bool, filter: Opti
         std::process::exit(2);
     }
 
-    let registry = smooth_operator::providers::ProviderRegistry::load_from_file(&providers_path)?;
+    let registry = smooth_cast::provider_migration::load_providers_with_migration(&providers_path)?;
 
     // Resolve provider id: explicit --provider wins, else the default
     // routing slot's provider, else the first registered provider.
