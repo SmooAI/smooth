@@ -3319,8 +3319,7 @@ fn load_llm_config_for_runner(model_override: &Option<String>) -> anyhow::Result
     let providers_path = dirs_next::home_dir()
         .ok_or_else(|| anyhow::anyhow!("no home directory"))?
         .join(".smooth/providers.json");
-    let registry = load_providers_with_migration(&providers_path)
-        .map_err(|e| anyhow::anyhow!("reading {}: {e}", providers_path.display()))?;
+    let registry = load_providers_with_migration(&providers_path).map_err(|e| anyhow::anyhow!("reading {}: {e}", providers_path.display()))?;
     let llm = registry.default_llm_config().map_err(|e| anyhow::anyhow!("default provider: {e}"))?;
     let model = model_override.clone().unwrap_or(llm.model);
     Ok((llm.api_url, llm.api_key, model))

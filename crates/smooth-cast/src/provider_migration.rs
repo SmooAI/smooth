@@ -108,14 +108,23 @@ fn rewrite_fallback(slot_name: &'static str, slot: Option<&mut smooth_operator::
     }
 }
 
-/// Drop-in replacement for `ProviderRegistry::load_from_file` that
-/// runs the [`migrate_provider_registry`] shim and saves the file back
-/// if anything changed. Logs each rewrite at `info` level so users see
-/// the migration once and can audit it in their session log.
+/// Drop-in replacement for `ProviderRegistry::load_from_file`.
+///
+/// Loads the registry, runs the [`migrate_provider_registry`] shim,
+/// and saves the file back if anything changed. Logs each rewrite at
+/// `info` level so users see the migration once and can audit it in
+/// their session log.
 ///
 /// A save failure is logged but does not propagate: the returned
 /// registry still reflects the migration, so the running process
 /// keeps working against the gateway's new model names.
+///
+/// # Errors
+///
+/// Propagates any error from
+/// [`smooth_operator::providers::ProviderRegistry::load_from_file`] —
+/// typically a missing file, malformed JSON, or an unreadable path. A
+/// save failure during the on-disk rewrite is logged but not returned.
 pub fn load_providers_with_migration(path: &Path) -> anyhow::Result<ProviderRegistry> {
     let mut registry = ProviderRegistry::load_from_file(path)?;
     let rewrites = migrate_provider_registry(&mut registry);
