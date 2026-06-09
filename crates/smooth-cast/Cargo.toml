@@ -1,0 +1,31 @@
+[package]
+name = "smooai-smooth-cast"
+version = "0.13.7"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Smooth coding-harness extensions to the smooth-operator engine — the th-code coding workflow, skill discovery, and the harness-specific cast roles (fixer/oracle/chief/intent_classifier) that the published generic engine no longer ships."
+
+[lib]
+name = "smooth_cast"
+path = "src/lib.rs"
+
+[dependencies]
+# The published generic engine. smooth-cast re-homes the coding-harness
+# bits the engine dropped at 0.14.0 and builds the custom cast roles on
+# the engine's generic Cast/OperatorRole/Clearance public API.
+smooth-operator.workspace = true
+
+anyhow.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+serde_yml.workspace = true
+dirs-next.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

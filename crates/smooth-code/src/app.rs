@@ -604,18 +604,18 @@ fn refresh_autocomplete(state: &mut AppState, command_registry: &CommandRegistry
             // first (alphabetical), skills appended after.
             let mut commands = command_registry.list_commands();
             let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-            for skill in smooth_operator::skills::discover(&workspace) {
+            for skill in smooth_cast::skills::discover(&workspace) {
                 // Skip if a built-in command already has the same
                 // name (precedence: built-ins win).
                 if commands.iter().any(|(n, _)| n == &skill.name) {
                     continue;
                 }
                 let source_label = match skill.source {
-                    smooth_operator::skills::SkillSource::Project => "project",
-                    smooth_operator::skills::SkillSource::UserSmooth => "user-smooth",
-                    smooth_operator::skills::SkillSource::ClaudeCode => "claude-code",
-                    smooth_operator::skills::SkillSource::OpenCode => "opencode",
-                    smooth_operator::skills::SkillSource::Builtin => "builtin",
+                    smooth_cast::skills::SkillSource::Project => "project",
+                    smooth_cast::skills::SkillSource::UserSmooth => "user-smooth",
+                    smooth_cast::skills::SkillSource::ClaudeCode => "claude-code",
+                    smooth_cast::skills::SkillSource::OpenCode => "opencode",
+                    smooth_cast::skills::SkillSource::Builtin => "builtin",
                 };
                 commands.push((skill.name.clone(), format!("[skill:{source_label}] {}", skill.description)));
             }
@@ -791,14 +791,14 @@ fn handle_input_mode(
                             // user-supplied args and dispatch through
                             // the normal agent path.
                             let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                            let skills = smooth_operator::skills::discover(&workspace);
+                            let skills = smooth_cast::skills::discover(&workspace);
                             if let Some(skill) = skills.into_iter().find(|s| s.name == name) {
                                 let source_label = match skill.source {
-                                    smooth_operator::skills::SkillSource::Project => "project",
-                                    smooth_operator::skills::SkillSource::UserSmooth => "user-smooth",
-                                    smooth_operator::skills::SkillSource::ClaudeCode => "claude-code",
-                                    smooth_operator::skills::SkillSource::OpenCode => "opencode",
-                                    smooth_operator::skills::SkillSource::Builtin => "builtin",
+                                    smooth_cast::skills::SkillSource::Project => "project",
+                                    smooth_cast::skills::SkillSource::UserSmooth => "user-smooth",
+                                    smooth_cast::skills::SkillSource::ClaudeCode => "claude-code",
+                                    smooth_cast::skills::SkillSource::OpenCode => "opencode",
+                                    smooth_cast::skills::SkillSource::Builtin => "builtin",
                                 };
                                 state.add_message(ChatMessage::system(format!("✦ Invoking skill: {} (from {})", skill.name, source_label)));
                                 let user_request = if args.trim().is_empty() {
@@ -914,14 +914,14 @@ fn handle_input_mode(
                             }
                             let composed = if let Some(name) = skill_name {
                                 let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                                let skills = smooth_operator::skills::discover(&workspace);
+                                let skills = smooth_cast::skills::discover(&workspace);
                                 if let Some(skill) = skills.iter().find(|s| s.name == name) {
                                     let source_label = match skill.source {
-                                        smooth_operator::skills::SkillSource::Project => "project",
-                                        smooth_operator::skills::SkillSource::UserSmooth => "user-smooth",
-                                        smooth_operator::skills::SkillSource::ClaudeCode => "claude-code",
-                                        smooth_operator::skills::SkillSource::OpenCode => "opencode",
-                                        smooth_operator::skills::SkillSource::Builtin => "builtin",
+                                        smooth_cast::skills::SkillSource::Project => "project",
+                                        smooth_cast::skills::SkillSource::UserSmooth => "user-smooth",
+                                        smooth_cast::skills::SkillSource::ClaudeCode => "claude-code",
+                                        smooth_cast::skills::SkillSource::OpenCode => "opencode",
+                                        smooth_cast::skills::SkillSource::Builtin => "builtin",
                                     };
                                     // Pearl th-e0f812 (user observation 2026-05-12):
                                     // surface the chosen skill in the chat so the
@@ -1087,12 +1087,12 @@ fn load_pearls_for_autocomplete() -> Vec<crate::autocomplete::PearlSuggestion> {
 /// rules produce consistent titles across the web chat and the
 /// `th` TUI.
 async fn auto_name_session(user_prompt: &str) -> Option<String> {
-    use smooth_operator::cast::Cast;
+    use smooth_cast::cast::builtin as cast_builtin;
     use smooth_operator::providers::ProviderRegistry;
 
     let providers_path = dirs_next::home_dir()?.join(".smooth/providers.json");
     let registry = ProviderRegistry::load_from_file(&providers_path).ok()?;
-    let cast = Cast::builtin();
+    let cast = cast_builtin();
     let agent = cast.get("tagger")?;
     let config = registry.llm_config_for(agent.slot).ok()?;
     let llm = smooth_operator::llm::LlmClient::new(config);

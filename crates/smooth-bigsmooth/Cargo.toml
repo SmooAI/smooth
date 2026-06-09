@@ -24,6 +24,8 @@ direct-sandbox = ["smooth-bootstrap-bill/server"]
 smooth-pearls.workspace = true
 smooth-bootstrap-bill = { workspace = true, default-features = false }
 smooth-operator.workspace = true
+# skills discovery + the smooth cast roles (re-homed from the engine at 0.14.0)
+smooth-cast.workspace = true
 smooth-code = { path = "../smooth-code", package = "smooai-smooth-code" }
 smooth-policy.workspace = true
 smooth-web = { path = "../smooth-web", package = "smooai-smooth-web" }
