@@ -1153,7 +1153,33 @@ fn find_native_operative_binary() -> Option<std::path::PathBuf> {
             return Some(p);
         }
     }
-    None
+    // Pearl th-92dac3: `pnpm install:th` now runs
+    // `cargo install --path crates/smooth-operative`, which drops
+    // the native binary at $CARGO_HOME/bin/smooth-operative (or
+    // ~/.cargo/bin by default). This lookup must succeed when
+    // `th up` is invoked from outside the smooth repo (e.g. from
+    // ~/dev/smooai/smooai/) — neither the CARGO_MANIFEST_DIR
+    // walk-up nor the cwd check finds it there.
+    cargo_bin_native_operative(
+        std::env::var("CARGO_INSTALL_ROOT").ok().as_deref(),
+        std::env::var("CARGO_HOME").ok().as_deref(),
+        dirs_next::home_dir().as_deref(),
+    )
+}
+
+/// Pure helper for `find_native_operative_binary`'s ~/.cargo/bin
+/// lookup. Split out for testing without touching process env.
+/// Pearl th-92dac3.
+fn cargo_bin_native_operative(cargo_install_root: Option<&str>, cargo_home: Option<&str>, home_dir: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    let bin_dir = if let Some(root) = cargo_install_root {
+        std::path::PathBuf::from(root).join("bin")
+    } else if let Some(home) = cargo_home {
+        std::path::PathBuf::from(home).join("bin")
+    } else {
+        home_dir?.join(".cargo").join("bin")
+    };
+    let candidate = bin_dir.join("smooth-operative");
+    candidate.is_file().then_some(candidate)
 }
 
 /// Build a human-readable resumption context block from prior session
@@ -5424,6 +5450,64 @@ async fn jira_sync_handler(State(state): State<AppState>) -> Json<ApiResponse<cr
 mod tests {
     use super::*;
     use tower::ServiceExt;
+
+    #[test]
+    fn cargo_bin_native_operative_prefers_install_root_th_92dac3() {
+        // Pearl th-92dac3: `pnpm install:th`'s new
+        // `cargo install --path crates/smooth-operative` step
+        // drops the native binary at $CARGO_INSTALL_ROOT/bin
+        // (or $CARGO_HOME/bin, or ~/.cargo/bin). The cwd-walk
+        // lookup misses it when `th up` runs from outside the
+        // smooth repo. This pure helper covers that path.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bin_dir = tmp.path().join("bin");
+        std::fs::create_dir(&bin_dir).unwrap();
+        let bin = bin_dir.join("smooth-operative");
+        std::fs::write(&bin, b"x").unwrap();
+
+        let install_root = tmp.path().to_str().unwrap();
+        let found = cargo_bin_native_operative(Some(install_root), None, None);
+        assert_eq!(found.as_deref(), Some(bin.as_path()));
+    }
+
+    #[test]
+    fn cargo_bin_native_operative_falls_back_through_cargo_home_then_home_th_92dac3() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bin_dir = tmp.path().join("bin");
+        std::fs::create_dir(&bin_dir).unwrap();
+        let bin = bin_dir.join("smooth-operative");
+        std::fs::write(&bin, b"x").unwrap();
+
+        // CARGO_INSTALL_ROOT unset → use CARGO_HOME
+        let cargo_home = tmp.path().to_str().unwrap();
+        let found = cargo_bin_native_operative(None, Some(cargo_home), None);
+        assert_eq!(found.as_deref(), Some(bin.as_path()));
+
+        // Both env vars unset → use home + ".cargo/bin"
+        let tmp2 = tempfile::tempdir().expect("tempdir");
+        let cargo_bin_dir = tmp2.path().join(".cargo").join("bin");
+        std::fs::create_dir_all(&cargo_bin_dir).unwrap();
+        let bin2 = cargo_bin_dir.join("smooth-operative");
+        std::fs::write(&bin2, b"x").unwrap();
+
+        let found = cargo_bin_native_operative(None, None, Some(tmp2.path()));
+        assert_eq!(found.as_deref(), Some(bin2.as_path()));
+    }
+
+    #[test]
+    fn cargo_bin_native_operative_none_when_binary_missing_th_92dac3() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(tmp.path().join("bin")).unwrap();
+        // bin dir exists but no smooth-operative binary inside it
+
+        let install_root = tmp.path().to_str().unwrap();
+        assert_eq!(cargo_bin_native_operative(Some(install_root), None, None), None);
+    }
+
+    #[test]
+    fn cargo_bin_native_operative_none_when_all_inputs_none_th_92dac3() {
+        assert_eq!(cargo_bin_native_operative(None, None, None), None);
+    }
 
     #[test]
     fn resolve_direct_dispatch_narc_url_prefers_explicit_narc() {
