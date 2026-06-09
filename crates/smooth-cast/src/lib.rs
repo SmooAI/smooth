@@ -21,4 +21,5 @@
 
 pub mod cast;
 pub mod coding_workflow;
+pub mod provider_migration;
 pub mod skills;
