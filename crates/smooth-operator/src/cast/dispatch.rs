@@ -16,7 +16,7 @@
 //! The dispatch tool needs access to [`Agent`], [`ToolRegistry`],
 //! [`LlmConfig`], and [`Cast`], which all live in
 //! `smooth-operator`. Keeping the tool here — instead of in
-//! `smooth-operator-runner` — means the runner just registers it
+//! `smooth-operative` — means the runner just registers it
 //! alongside any other tool when the active lead role is
 //! dispatchable (`fixer` or `runner`), and other callers
 //! (benchmarks, the coding workflow, host-side eval harnesses) can

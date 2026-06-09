@@ -313,10 +313,10 @@ mod tests {
 
     #[test]
     fn real_runner_stderr_sample() {
-        let s = "[2m2026-05-07T13:43:52.300628Z[0m [32m INFO[0m [2msmooth_operator_runner[0m[2m:[0m starting";
+        let s = "[2m2026-05-07T13:43:52.300628Z[0m [32m INFO[0m [2msmooth_operative[0m[2m:[0m starting";
         let spans = parse_line_to_spans(s);
         let text = span_text(&spans);
-        assert_eq!(text, "2026-05-07T13:43:52.300628Z  INFO smooth_operator_runner: starting");
+        assert_eq!(text, "2026-05-07T13:43:52.300628Z  INFO smooth_operative: starting");
         assert!(spans[0].style.add_modifier.contains(Modifier::DIM));
         assert!(spans.iter().any(|s| s.style.fg == Some(Color::Green) && s.content.contains("INFO")));
     }

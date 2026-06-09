@@ -567,11 +567,11 @@ mod tests {
     fn strip_ansi_handles_realworld_runner_stderr() {
         // Excerpt from /tmp/smooth-bench-run/repo-overview/run-2.txt
         // where the runner-stderr block lands in --json content.
-        let raw = "\x1b[2m2026-05-10T16:17:58.369275Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2msmooth_operator_runner\x1b[0m\x1b[2m:\x1b[0m smooth-operator-runner starting";
+        let raw = "\x1b[2m2026-05-10T16:17:58.369275Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2msmooth_operative\x1b[0m\x1b[2m:\x1b[0m smooth-operative starting";
         let clean = strip_ansi_codes(raw);
         // No more ESC sequences anywhere.
         assert!(!clean.contains('\x1b'), "ESC byte still present: {clean:?}");
-        assert!(clean.contains("smooth-operator-runner starting"));
+        assert!(clean.contains("smooth-operative starting"));
     }
 
     #[test]

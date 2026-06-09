@@ -31,7 +31,7 @@
 ## Work model
 
 - **Pearl** — A single work item. Dolt-backed. Has status, dependencies, comments, history. See [[Architecture/Pearls]].
-- **Operator** — An agent instance running `smooth-operator-runner` against one pearl.
+- **Operative** — An agent instance (the sandboxed worker) running `smooth-operative` against one pearl. It runs the `smooth-operator` *engine*; don't confuse the two.
 - **Teammate** — A registered operator the UI knows about. One per active dispatch.
 - **Dispatch** — The act of handing a pearl to an operator and running the agent loop.
 - **Workflow** — Multi-phase loop (plan → execute → test → review) the runner uses when `SMOOTH_WORKFLOW=1` (default).

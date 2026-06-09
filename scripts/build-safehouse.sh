@@ -6,7 +6,7 @@
 # Bill spawns the Safehouse VM on the host, bind-mounts this binary in,
 # and execs it on boot.
 #
-# One-time dev setup (share with build-operator-runner.sh):
+# One-time dev setup (share with build-operative.sh):
 #   rustup target add aarch64-unknown-linux-musl
 #   cargo install --locked cargo-zigbuild
 #   pip3 install ziglang

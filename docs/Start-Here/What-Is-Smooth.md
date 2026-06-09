@@ -3,7 +3,7 @@
 #start-here
 
 > [!arch] One sentence
-> Smooth is a Rust binary (`th`) that boots an AI agent stack — orchestrator, security cast, operator runners — either inside a microsandbox microVM (default) or directly on the host (escape hatch).
+> Smooth is a Rust binary (`th`) that boots an AI agent stack — orchestrator, security cast, operatives — either inside a microsandbox microVM (default) or directly on the host (escape hatch).
 
 ## What `th up` actually does
 
@@ -25,9 +25,9 @@ See [[Architecture/Sandboxed-Mode]] and [[Architecture/Direct-Mode]] for the ful
 
 Once Smooth is up, you talk to it via the embedded web UI at `http://localhost:4400`, the `th code` TUI, or the WebSocket API. You ask for work. Big Smooth turns the request into one or more pearls (work items) and dispatches **operators** to do them.
 
-An operator is the [`smooth-operator-runner`](../../crates/smooth-operator-runner/) binary running an agent loop with a scoped tool surface. The operator's tools (read, write, bash, etc.) are wrapped in hooks that call out to [[Architecture/The-Cast#Wonk|Wonk]] for policy decisions, [[Architecture/The-Cast#Narc|Narc]] for surveillance, and [[Architecture/The-Cast#Scribe|Scribe]] for structured logging — all of which live in the same VM (sandboxed mode) or process (direct mode).
+An operative is the [`smooth-operative`](../../crates/smooth-operative/) binary running an agent loop with a scoped tool surface. The operative's tools (read, write, bash, etc.) are wrapped in hooks that call out to [[Architecture/The-Cast#Wonk|Wonk]] for policy decisions, [[Architecture/The-Cast#Narc|Narc]] for surveillance, and [[Architecture/The-Cast#Scribe|Scribe]] for structured logging — all of which live in the same VM (sandboxed mode) or process (direct mode).
 
-See [[Architecture/Dispatch]] for the dispatch flow, [[Architecture/Operators]] for the runner.
+See [[Architecture/Dispatch]] for the dispatch flow, [[Architecture/Operatives]] for the operative.
 
 ## What it's for
 

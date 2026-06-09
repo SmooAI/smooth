@@ -6733,38 +6733,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "smooai-smooth-operator"
-version = "0.13.7"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "chrono",
- "dirs-next",
- "futures-core",
- "futures-util",
- "postgres",
- "r2d2",
- "r2d2_postgres",
- "reqwest 0.12.28",
- "rusqlite",
- "serde",
- "serde_json",
- "serde_yml",
- "smooai-smooth-narc",
- "tempfile",
- "testcontainers",
- "testcontainers-modules",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tokio-tungstenite 0.26.2",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "smooai-smooth-operator-runner"
+name = "smooai-smooth-operative"
 version = "0.13.7"
 dependencies = [
  "anyhow",
@@ -6794,6 +6763,37 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "smooai-smooth-operator"
+version = "0.13.7"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "dirs-next",
+ "futures-core",
+ "futures-util",
+ "postgres",
+ "r2d2",
+ "r2d2_postgres",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "serde_yml",
+ "smooai-smooth-narc",
+ "tempfile",
+ "testcontainers",
+ "testcontainers-modules",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite 0.26.2",
+ "tracing",
  "uuid",
 ]
 

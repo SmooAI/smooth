@@ -42,7 +42,7 @@ smooth/
 - **smooth-wonk** (`crates/smooth-wonk/`): in-VM access control authority, policy hot-reload via notify+ArcSwap, access negotiation with Big Smooth
 - **smooth-goalie** (`crates/smooth-goalie/`): in-VM HTTP/HTTPS forward proxy, delegates all decisions to Wonk, JSON-lines audit logging
 - **smooth-narc** (`crates/smooth-narc/`): tool surveillance via ToolHook, secret detection (10 patterns), prompt injection guard (6 patterns), write guard, severity-based alerts
-- **smooth-operator-runner** (`crates/smooth-operator-runner/`): Binary that runs *inside* each microVM. Hosts the agent loop + file/bash tools + NarcHook, streams JSON-lines `AgentEvent`s on stdout. Cross-compiled to `aarch64-unknown-linux-musl`; Big Smooth mounts it into the sandbox at runtime. Build with `scripts/build-operator-runner.sh`.
+- **smooth-operative** (`crates/smooth-operative/`): the sandboxed-worker binary that runs *inside* each microVM (one operative per dispatched pearl). Runs the `smooth-operator` engine's agent loop + file/bash tools + NarcHook, streams JSON-lines `AgentEvent`s on stdout. Cross-compiled to `aarch64-unknown-linux-musl`; Big Smooth mounts it into the sandbox at runtime. Build with `scripts/build-operative.sh`. (Distinct from the `smooth-operator` engine crate above, and from the public `smooth-operator` service.)
 - **smooth-scribe** (`crates/smooth-scribe/`): per-VM structured logging service, LogEntry with trace context, query/filter support
 - **smooth-archivist** (`crates/smooth-archivist/`): central log aggregator, batch ingest from all Scribes, cross-VM query, stats, SSE event stream
 - **smooth-code** (`crates/smooth-code/`): ratatui AI coding TUI — streaming chat, tool calls, file browser, git, sessions, model picker, extensions
@@ -160,7 +160,7 @@ cargo clippy                 # Lint (pedantic + nursery)
 cargo build --release -p smooth-cli  # Release binary (~10MB)
 pnpm install:th              # Build web bundle + cross-compile sandbox runner + install th
 pnpm build:web               # Just rebuild the embedded web SPA
-pnpm build:runner            # Just cross-compile the sandbox operator-runner (mirrors to ~/.smooth/runner-bin/)
+pnpm build:runner            # Just cross-compile the sandbox operative (mirrors to ~/.smooth/runner-bin/)
 ```
 
 ### Web UI (crates/smooth-web/web/)
@@ -217,7 +217,7 @@ Big Smooth's WebSocket `TaskStart` handler can dispatch tasks one of two ways:
   special setup, but Big Smooth is NOT read-only on this path.
 - **Sandboxed** (`SMOOTH_SANDBOXED=1`): Big Smooth spawns a real microVM via
   the embedded `microsandbox` crate, mounts the cross-compiled
-  `smooth-operator-runner` binary at `/opt/smooth/bin`, bind-mounts the
+  `smooth-operative` binary at `/opt/smooth/bin`, bind-mounts the
   user's working directory at `/workspace`, and execs the runner inside the
   VM. The runner hosts the agent loop, NarcHook tool surveillance, and file
   tools; it streams `AgentEvent`s as JSON-lines on stdout, which Big Smooth
@@ -232,11 +232,11 @@ binary for the sandbox's target triple. On a fresh clone:
 rustup target add aarch64-unknown-linux-musl
 cargo install --locked cargo-zigbuild
 pip3 install ziglang                          # provides python-zig for cargo-zigbuild
-bash scripts/build-operator-runner.sh         # produces target/aarch64-unknown-linux-musl/release/smooth-operator-runner
+bash scripts/build-operative.sh         # produces target/aarch64-unknown-linux-musl/release/smooth-operative
 ```
 
-Re-run `scripts/build-operator-runner.sh` after changing anything under
-`crates/smooth-operator-runner/` or its transitive deps.
+Re-run `scripts/build-operative.sh` after changing anything under
+`crates/smooth-operative/` or its transitive deps.
 
 The in-process path is kept for backwards compatibility and for the existing
 headless E2E tests. New features should target the sandboxed path.

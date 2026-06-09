@@ -1,8 +1,8 @@
-//! MCP server config — TOML schema shared with `smooth-operator-runner`.
+//! MCP server config — TOML schema shared with `smooth-operative`.
 //!
 //! The runner is the consumer; this module exists so `th mcp` commands can
 //! manage `~/.smooth/mcp.toml` without pulling rmcp into the CLI binary.
-//! Keep the schema in lockstep with `crates/smooth-operator-runner/src/mcp.rs`
+//! Keep the schema in lockstep with `crates/smooth-operative/src/mcp.rs`
 //! (`McpConfig` / `McpServerConfig`) — they round-trip through the same file.
 //!
 //! ## Shipped defaults

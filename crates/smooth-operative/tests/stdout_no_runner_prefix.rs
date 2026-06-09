@@ -1,4 +1,4 @@
-//! Pearl th-7b95ef regression test: the operator-runner's stdout MUST
+//! Pearl th-7b95ef regression test: the operative's stdout MUST
 //! contain only JSON `AgentEvent` lines. Any `[runner]` substring on
 //! stdout is a contract violation — bigsmooth treats stdout as the
 //! chat-token stream, and any non-JSON or `[runner]`-prefixed text
@@ -24,11 +24,11 @@
 
 use std::process::{Command, Stdio};
 
-/// Locate the freshly-built `smooth-operator-runner` binary. Cargo
+/// Locate the freshly-built `smooth-operative` binary. Cargo
 /// sets `CARGO_BIN_EXE_<name>` for integration tests to point at the
 /// in-workspace binary, so we don't have to guess at target paths.
 fn runner_binary() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_smooth-operator-runner"))
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_smooth-operative"))
 }
 
 #[test]
@@ -48,7 +48,7 @@ fn stdout_contains_only_json_events_and_no_runner_prefix() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .expect("failed to spawn smooth-operator-runner");
+        .expect("failed to spawn smooth-operative");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

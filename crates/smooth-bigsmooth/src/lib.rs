@@ -95,7 +95,7 @@ pub mod teammates;
 pub mod diver_client;
 pub mod events;
 pub mod jira;
-pub mod operator_client;
+pub mod operative_client;
 pub mod orchestrator;
 pub mod pearls;
 pub mod policy;

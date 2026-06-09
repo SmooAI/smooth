@@ -11,7 +11,7 @@
 //! ✻ Smooth booting
 //!   ⠋ starting Safehouse microVM…
 //!   ⠋ cast online (wonk · goalie · narc · scribe · archivist · diver · groove)…
-//!   ⠋ operator-runner pool warm…
+//!   ⠋ operative pool warm…
 //!   ⠋ health check…
 //! ```
 //!
@@ -181,7 +181,7 @@ mod tests {
         let ind = BootIndicator::new();
         let s1 = ind.step("starting Safehouse microVM");
         let s2 = ind.step("cast online (wonk · goalie · narc · scribe · archivist · diver · groove)");
-        let s3 = ind.step("operator-runner pool warm");
+        let s3 = ind.step("operative pool warm");
         let s4 = ind.step("health check");
 
         // Finalize out of order to confirm the API doesn't require

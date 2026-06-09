@@ -1,4 +1,4 @@
-//! Pearl-comment mailbox poller for the operator runner.
+//! Pearl-comment mailbox poller for the operative.
 //!
 //! Operators inside a sandbox don't have a direct WebSocket to Big Smooth — by
 //! design, the only authoritative durable channel between the lead and a

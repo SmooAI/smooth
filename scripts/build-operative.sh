@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cross-compile smooth-operator-runner for aarch64-unknown-linux-musl.
+# Cross-compile smooth-operative for aarch64-unknown-linux-musl.
 #
 # This is the binary that runs *inside* each Smooth Operator microVM. Big
 # Smooth mounts it into the sandbox and execs it with a task + LLM config
@@ -11,7 +11,7 @@
 #   cargo install cargo-zigbuild
 #   pip3 install ziglang          # cargo-zigbuild looks up zig via `python-zig`
 #
-# After that, run this script whenever `crates/smooth-operator-runner/` or
+# After that, run this script whenever `crates/smooth-operative/` or
 # any of its transitive deps change. The build is incremental.
 
 set -euo pipefail
@@ -41,8 +41,8 @@ if ! command -v python-zig >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "==> Cross-compiling smooth-operator-runner for aarch64-unknown-linux-musl"
-cargo zigbuild --target aarch64-unknown-linux-musl --release -p smooai-smooth-operator-runner
+echo "==> Cross-compiling smooth-operative for aarch64-unknown-linux-musl"
+cargo zigbuild --target aarch64-unknown-linux-musl --release -p smooai-smooth-operative
 
 # Resolve cargo's target dir dynamically — pearl th-target-bloat
 # (2026-05-12) moved the workspace to a shared dir at
@@ -55,7 +55,7 @@ if [ -z "$TARGET_DIR" ]; then
     TARGET_DIR="target"
 fi
 
-BIN="$TARGET_DIR/aarch64-unknown-linux-musl/release/smooth-operator-runner"
+BIN="$TARGET_DIR/aarch64-unknown-linux-musl/release/smooth-operative"
 if [ ! -f "$BIN" ]; then
     echo "error: expected binary at $BIN but it wasn't produced" >&2
     exit 1
@@ -65,17 +65,17 @@ SIZE=$(wc -c < "$BIN" | tr -d ' ')
 echo "==> Built $BIN ($(( SIZE / 1024 / 1024 )) MiB, statically linked aarch64 ELF)"
 
 # Mirror the freshly-built binary into ~/.smooth/runner-bin/ as well.
-# Big Smooth's find_operator_runner_binary walks up from
+# Big Smooth's find_operative_binary walks up from
 # CARGO_MANIFEST_DIR looking for `target/aarch64-unknown-linux-musl/
-# release/smooth-operator-runner`. A long-running `th up` daemon
+# release/smooth-operative`. A long-running `th up` daemon
 # compiled in a worktree whose target/ no longer holds the binary
 # can silently fall back to a stale `~/.smooth/runner-bin/` copy
 # left by an earlier setup, which means new runner code (e.g. the
 # coding_workflow role gate) never reaches the sandbox even after
-# `bash scripts/build-operator-runner.sh`. Keeping both paths in
+# `bash scripts/build-operative.sh`. Keeping both paths in
 # lockstep removes that footgun.
 RUNNER_BIN_DIR="$HOME/.smooth/runner-bin"
 mkdir -p "$RUNNER_BIN_DIR"
-cp "$BIN" "$RUNNER_BIN_DIR/smooth-operator-runner"
-echo "==> Synced $RUNNER_BIN_DIR/smooth-operator-runner"
+cp "$BIN" "$RUNNER_BIN_DIR/smooth-operative"
+echo "==> Synced $RUNNER_BIN_DIR/smooth-operative"
 echo "    Big Smooth will mount this binary into each sandbox at runtime."

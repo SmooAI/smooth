@@ -290,8 +290,8 @@ mod tests {
 
         let mut client = build_client(sock).await;
         let entries = vec![
-            make_pb_entry("operator-runner", pb::Level::Info, "hello"),
-            make_pb_entry("operator-runner", pb::Level::Warn, "warning"),
+            make_pb_entry("operative", pb::Level::Info, "hello"),
+            make_pb_entry("operative", pb::Level::Warn, "warning"),
         ];
         let stream = tokio_stream::iter(entries);
         let resp = client.log(tonic::Request::new(stream)).await.unwrap().into_inner();

@@ -1,6 +1,6 @@
 //! Tonic UDS client adapters for the in-VM cast.
 //!
-//! Pearl th-893801 iter-3f. The operator-runner (and any other
+//! Pearl th-893801 iter-3f. The operative (and any other
 //! in-VM consumer) needs HTTP-compatible client surfaces that
 //! happen to speak gRPC-over-UDS when
 //! `SMOOTH_SINGLE_PROCESS=1` is set. Rather than rewrite every
@@ -58,7 +58,7 @@ pub async fn dial_uds(path: PathBuf) -> Result<tonic::transport::Channel> {
 /// Re-export of `smooth_wonk::NarcGrpcUds`. Pearl th-893801
 /// Phase 4 iter-6c moved the canonical impl to `smooth-wonk`
 /// alongside the `NarcEscalator` trait it now satisfies, so
-/// the operator-runner (which depends on wonk but not
+/// the operative (which depends on wonk but not
 /// bigsmooth) can dial Narc directly. This re-export keeps
 /// the iter-3f import path `tonic_clients::NarcGrpcUds`
 /// working.
@@ -259,7 +259,7 @@ enabled = true
                     seconds: 1_000_000 + n,
                     nanos: 0,
                 }),
-                source: "operator-runner".into(),
+                source: "operative".into(),
                 operator_id: "op-1".into(),
                 bead_id: "pearl".into(),
                 level: smooth_scribe::pb::Level::Info as i32,

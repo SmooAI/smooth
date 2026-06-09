@@ -37,7 +37,7 @@ HOST                                          SANDBOX VM
 │  - gh                │  /run/smooth/        │  ├── Goalie        (HTTP proxy + UDS)   │
 │  - aws               │  host.sock           │  ├── Scribe        (UDS)                │
 │  - tailscaled        │  ↔──────────────────→│  │                                      │
-│  - ssh-agent         │  IssueCredential     │  └── operator-runner subprocesses       │
+│  - ssh-agent         │  IssueCredential     │  └── operative subprocesses       │
 │                      │                      │     (one per dispatched pearl)          │
 │  Docker daemon       │  /var/run/docker.sock│                                         │
 │  (or Colima/OrbStack)│  ↔──────────────────→│  in-sandbox CLIs:                       │
@@ -103,6 +103,6 @@ Total: ~5 weeks. The endpoint is a system that's *materially* simpler than today
 - `detect_routable_host_ip()` in dispatch.
 - `SMOOTH_NARC_URL` discovery.
 - `dispatch_ws_task_sandboxed` vs `dispatch_ws_task_direct` branching — one dispatch path.
-- The per-VM `spawn_cast()` function in operator-runner. Cast members are sandbox-singleton processes.
+- The per-VM `spawn_cast()` function in operative. Cast members are sandbox-singleton processes.
 - The per-bead microsandbox pool.
 - The `host_tool` agent-visible tool. Internal tools (gh_*, aws_*, etc.) call IssueCredential as needed; the agent sees them as normal tools.

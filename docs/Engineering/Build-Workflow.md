@@ -3,7 +3,7 @@
 #engineering
 
 > [!info] Two builds matter
-> Native `cargo build` for the host `th` binary, and a cross-compile of `smooth-operator-runner` to `aarch64-unknown-linux-musl` so it can run inside the microsandbox guest. `pnpm install:th` does both, plus the web bundle.
+> Native `cargo build` for the host `th` binary, and a cross-compile of `smooth-operative` to `aarch64-unknown-linux-musl` so it can run inside the microsandbox guest. `pnpm install:th` does both, plus the web bundle.
 
 ## Commands
 
@@ -16,7 +16,7 @@ cargo clippy                         # Lint (pedantic + nursery)
 
 pnpm install:th                      # Build web SPA + cross-compile runner + install th
 pnpm build:web                       # Just rebuild the embedded Vite SPA
-pnpm build:runner                    # Just cross-compile operator-runner (mirrors to ~/.smooth/runner-bin/)
+pnpm build:runner                    # Just cross-compile operative (mirrors to ~/.smooth/runner-bin/)
 ```
 
 ## One-time dev setup
@@ -28,14 +28,14 @@ cargo install --locked cargo-zigbuild
 pip3 install ziglang                         # provides python-zig for cargo-zigbuild
 
 # Build the in-VM runner
-bash scripts/build-operator-runner.sh        # → target/aarch64-unknown-linux-musl/release/smooth-operator-runner
+bash scripts/build-operative.sh        # → target/aarch64-unknown-linux-musl/release/smooth-operative
 
 # Build smooth-dolt (Go binary; embedded Dolt engine)
 brew install icu4c                           # macOS; required by the Dolt link
 bash scripts/build-smooth-dolt.sh            # → target/release/smooth-dolt (~145MB)
 ```
 
-Re-run `scripts/build-operator-runner.sh` after changing anything under `crates/smooth-operator-runner/` or its transitive deps. Re-run `build-smooth-dolt.sh` after changing the Go shim.
+Re-run `scripts/build-operative.sh` after changing anything under `crates/smooth-operative/` or its transitive deps. Re-run `build-smooth-dolt.sh` after changing the Go shim.
 
 ## The web SPA
 
@@ -76,5 +76,5 @@ pnpm changeset
 ## Related
 
 - [[Architecture-Overview]]
-- [[Operators]]
+- [[Operatives]]
 - [[Bench-Harness]]

@@ -47,7 +47,7 @@ pub struct PortMapping {
 pub struct SandboxSpec {
     /// Name used as the registry key and the microsandbox name (must be
     /// unique per-host while the sandbox is alive). Typical format:
-    /// `smooth-operator-<short-uuid>` or `smooth-safehouse-<short-uuid>`.
+    /// `smooth-operative-<short-uuid>` or `smooth-safehouse-<short-uuid>`.
     pub name: String,
     /// OCI image reference (e.g. `alpine`, or a custom safehouse image tag).
     pub image: String,

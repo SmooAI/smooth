@@ -3,7 +3,7 @@
 //! Pearl th-893801 iter-3b. Lets the existing Wonk AppState serve the
 //! gRPC Checker trait — same decision logic the HTTP `/check/*`
 //! handlers run, but exposed over UDS gRPC for callers inside the
-//! single sandbox VM (operator-runner's WonkHook in iter-3f).
+//! single sandbox VM (operative's WonkHook in iter-3f).
 //!
 //! ## Duplication note
 //!

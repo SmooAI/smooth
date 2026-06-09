@@ -85,7 +85,7 @@ enum Commands {
         /// direct mode — sandboxed mode is foreground-by-microVM.
         #[arg(long)]
         foreground: bool,
-        /// Max concurrent Smooth Operators (each is a microVM). Defaults
+        /// Max concurrent Smooth operatives (each is a microVM). Defaults
         /// to 3. Can also be set via SMOOTH_SANDBOX_MAX_CONCURRENCY.
         #[arg(long)]
         max_operators: Option<usize>,
@@ -151,24 +151,24 @@ enum Commands {
         #[command(subcommand)]
         cmd: config::Cmd,
     },
-    /// Run a pearl through a Smooth Operator in a microVM — streams
+    /// Run a pearl through a Smooth operative in a microVM — streams
     /// agent events to stdout. With --keep-alive, the VM stays up
     /// after the agent completes so you can poke at dev servers,
-    /// REPLs, etc.; stop with `th operators kill <id>`.
+    /// REPLs, etc.; stop with `th operatives kill <id>`.
     Run {
         /// Pearl id, or a task description prefixed with a space
         /// (e.g. `th run "refactor x to y"`). If empty, picks the
         /// first ready pearl.
         pearl_id: Option<String>,
         /// OCI image for the operator VM. Defaults to
-        /// smooai/smooth-operator:latest (single unified image —
+        /// smooai/smooth-operative:latest (single unified image —
         /// the agent installs toolchains at runtime via mise).
-        /// Override via SMOOTH_OPERATOR_IMAGE env or this flag.
+        /// Override via SMOOTH_OPERATIVE_IMAGE env or this flag.
         #[arg(long)]
         image: Option<String>,
         /// Keep the sandbox alive after the agent completes (for
         /// dev servers, interactive review). Must explicitly stop
-        /// via `th operators kill <id>`.
+        /// via `th operatives kill <id>`.
         #[arg(long)]
         keep_alive: bool,
         /// Override the default model for this run
@@ -186,22 +186,22 @@ enum Commands {
         #[arg(long)]
         agent: Option<String>,
     },
-    /// Pause a running Smooth Operator
+    /// Pause a running Smooth operative
     Pause { bead_id: String },
-    /// Resume a paused Smooth Operator
+    /// Resume a paused Smooth operative
     Resume { bead_id: String },
-    /// Send guidance to a running Smooth Operator
+    /// Send guidance to a running Smooth operative
     Steer { bead_id: String, message: String },
-    /// Cancel a running Smooth Operator
+    /// Cancel a running Smooth operative
     Cancel { bead_id: String },
     /// Approve a pending review
     Approve { bead_id: String },
     /// Show messages requiring attention
     Inbox,
-    /// Smooth Operator management
-    Operators {
+    /// Smooth operative management
+    Operatives {
         #[command(subcommand)]
-        cmd: Option<OperatorsCommands>,
+        cmd: Option<OperativesCommands>,
     },
     /// Project management
     Project {
@@ -235,7 +235,7 @@ enum Commands {
         #[command(subcommand)]
         cmd: TailscaleCommands,
     },
-    /// Operator access control
+    /// Operative access control
     Access {
         #[command(subcommand)]
         cmd: AccessCommands,
@@ -429,10 +429,10 @@ enum BenchCommands {
 }
 
 #[derive(Subcommand)]
-enum OperatorsCommands {
-    /// List running operator VMs
+enum OperativesCommands {
+    /// List running operative VMs
     List,
-    /// Tear down a running operator VM
+    /// Tear down a running operative VM
     Kill { operator_id: String },
 }
 
@@ -1160,7 +1160,7 @@ async fn main() -> Result<()> {
             ApiCommands::Observability { cmd } => smooai::observability::cmd(cmd).await,
         },
         Some(Commands::Config { cmd }) => config::cmd(cmd).await,
-        Some(Commands::Operators { cmd }) => cmd_operators(cmd).await,
+        Some(Commands::Operatives { cmd }) => cmd_operatives(cmd).await,
         Some(Commands::Inbox) => cmd_inbox().await,
         Some(Commands::Run {
             pearl_id,
@@ -1255,7 +1255,7 @@ async fn start_sandboxed_vm(port: u16) -> Result<()> {
 
     // Bind-mount the host's ~/.smooth providers + registry into the
     // VM (RO) so the safehouse can read LLM credentials, the project
-    // registry, and the cross-compiled operator-runner sync dir.
+    // registry, and the cross-compiled operative sync dir.
     // Without this, an in-VM `dirs_next::home_dir().join(".smooth/
     // providers.json")` lookup returns either nothing or an empty
     // path, and dispatch fails with "no LLM providers configured".
@@ -1287,21 +1287,21 @@ async fn start_sandboxed_vm(port: u16) -> Result<()> {
             // contents — usually the smooth repo, never the task fixture.
             env.insert("SMOOTH_HOME_HOST_PATH".into(), host_smooth.to_string_lossy().into_owned());
         }
-        // Also mount the cross-compiled operator-runner into the
+        // Also mount the cross-compiled operative into the
         // safehouse so Big Smooth dispatch (running inside the
         // safehouse) can exec it as a subprocess per pearl. Mount
         // the runner-bin dir at /opt/smooth/runner-bin — NOT
         // /opt/smooth/bin, because the OCI image ships the
         // safehouse binary at /opt/smooth/bin/safehouse and a
         // bind-mount over that path would shadow the entrypoint.
-        let runner = home.join(".smooth").join("runner-bin").join("smooth-operator-runner");
+        let runner = home.join(".smooth").join("runner-bin").join("smooth-operative");
         if runner.is_file() {
             mounts.push(smooth_bigsmooth::sandbox::BindMount {
                 host_path: runner.parent().unwrap().to_string_lossy().into_owned(),
                 guest_path: "/opt/smooth/runner-bin".into(),
                 readonly: true,
             });
-            env.insert("SMOOTH_OPERATOR_RUNNER_NATIVE".into(), "/opt/smooth/runner-bin/smooth-operator-runner".into());
+            env.insert("SMOOTH_OPERATIVE_NATIVE".into(), "/opt/smooth/runner-bin/smooth-operative".into());
         }
         // If a freshly cross-compiled safehouse binary is sitting
         // alongside the runner, prefer it over the one baked into
@@ -1321,7 +1321,7 @@ async fn start_sandboxed_vm(port: u16) -> Result<()> {
     }
 
     // Bind-mount the user's working directory at /workspace (RW) so
-    // operator-runners dispatched from inside the Safehouse can read
+    // operatives dispatched from inside the Safehouse can read
     // and write the user's repo. Without this the in-VM runner sees
     // only the safehouse rootfs (essentially empty) and the agent
     // reports "this workspace is empty" on its first list_files.
@@ -1609,7 +1609,7 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, 
         let indicator = boot_ui::BootIndicator::new();
         let step_vm = indicator.step("starting Safehouse microVM");
         let step_cast = indicator.step("cast online (wonk · goalie · narc · scribe · archivist · diver · groove)");
-        let step_runner = indicator.step("operator-runner pool warm");
+        let step_runner = indicator.step("operative pool warm");
         let step_health = indicator.step("health check");
 
         const TIMEOUT_PER_STEP: std::time::Duration = std::time::Duration::from_secs(30);
@@ -1874,10 +1874,10 @@ async fn cmd_status() -> Result<()> {
             }
             println!();
 
-            // Align every label to 16 chars so "Smooth Operators" fits cleanly.
+            // Align every label to 16 chars so "Smooth operatives" fits cleanly.
             // The gradient wordmark carries ANSI escapes that inflate byte
             // length, so we hand-pad off the visible width ("Big Smooth" = 10,
-            // "Smooth Operators" = 16) instead of using `{:<16}`.
+            // "Smooth operatives" = 17) instead of using `{:<16}`.
             // Big Smooth
             let leader_status = body["leader"].as_str().or_else(|| body["status"].as_str()).unwrap_or("healthy");
             let (icon, label) = status_indicator(leader_status);
@@ -1888,13 +1888,13 @@ async fn cmd_status() -> Result<()> {
             let (icon, label) = status_indicator(db_status);
             println!("  {icon} {:<16} {} {}", "Dolt store", label, "(pearls + config)".dimmed());
 
-            // Smooth Operators (sandboxed AI agents in microVMs)
+            // Smooth operatives (sandboxed AI agents in microVMs)
             let sandbox_status = body["sandbox"].as_str().or_else(|| body["sandboxes"].as_str()).unwrap_or("healthy");
             let active = body["sandbox_active"].as_u64().or_else(|| body["sandboxes_active"].as_u64()).unwrap_or(0);
             let max = body["sandbox_max"].as_u64().or_else(|| body["sandboxes_max"].as_u64()).unwrap_or(3);
             let (icon, label) = status_indicator(sandbox_status);
             println!(
-                "  {icon} {} Operators {} {}",
+                "  {icon} {} operatives {} {}",
                 gradient::smooth(),
                 label,
                 format!("({active}/{max} active)").dimmed()
@@ -2374,10 +2374,10 @@ async fn cmd_model(cmd: ModelCommands) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_operators(cmd: Option<OperatorsCommands>) -> Result<()> {
+async fn cmd_operatives(cmd: Option<OperativesCommands>) -> Result<()> {
     let client = reqwest::Client::new();
-    match cmd.unwrap_or(OperatorsCommands::List) {
-        OperatorsCommands::List => {
+    match cmd.unwrap_or(OperativesCommands::List) {
+        OperativesCommands::List => {
             let resp = client.get("http://localhost:4400/api/workers").send().await;
             let json: serde_json::Value = match resp {
                 Ok(r) => r.json().await.unwrap_or(serde_json::json!({"data": []})),
@@ -2389,10 +2389,10 @@ async fn cmd_operators(cmd: Option<OperatorsCommands>) -> Result<()> {
             let empty = vec![];
             let workers = json["data"].as_array().unwrap_or(&empty);
             if workers.is_empty() {
-                println!("\n  {} No active {} Operators.\n", "ℹ".cyan(), gradient::smooth());
+                println!("\n  {} No active {} operatives.\n", "ℹ".cyan(), gradient::smooth());
                 return Ok(());
             }
-            println!("\n  {} {} {}\n", "Active".cyan().bold(), gradient::smooth(), "Operators".cyan().bold());
+            println!("\n  {} {} {}\n", "Active".cyan().bold(), gradient::smooth(), "operatives".cyan().bold());
             for w in workers {
                 let id = w.get("operator_id").and_then(|v| v.as_str()).unwrap_or("?");
                 let bead = w.get("bead_id").and_then(|v| v.as_str()).unwrap_or("");
@@ -2414,7 +2414,7 @@ async fn cmd_operators(cmd: Option<OperatorsCommands>) -> Result<()> {
             println!();
             Ok(())
         }
-        OperatorsCommands::Kill { operator_id } => {
+        OperativesCommands::Kill { operator_id } => {
             let url = format!("http://localhost:4400/api/workers/{operator_id}");
             let resp = client.delete(&url).send().await;
             match resp {
@@ -2455,8 +2455,8 @@ async fn cmd_inbox() -> Result<()> {
 /// stack — the agent installs whatever toolchain the task needs at
 /// runtime via mise, and the installs persist in the project cache.
 /// Kept as a helper so it's easy to swap the tag via env if needed.
-fn default_smooth_operator_image() -> String {
-    std::env::var("SMOOTH_OPERATOR_IMAGE").unwrap_or_else(|_| "ghcr.io/smooai/smooth-operator:latest".to_string())
+fn default_smooth_operative_image() -> String {
+    std::env::var("SMOOTH_OPERATIVE_IMAGE").unwrap_or_else(|_| "ghcr.io/smooai/smooth-operative:latest".to_string())
 }
 
 async fn cmd_run(
@@ -2507,9 +2507,9 @@ async fn cmd_run(
 
     let cwd = std::env::current_dir()?;
 
-    // Default image is always smooai/smooth-operator (agent installs
+    // Default image is always smooai/smooth-operative (agent installs
     // its own toolchain via mise). --image overrides for special cases.
-    let resolved_image: String = image.map(String::from).unwrap_or_else(default_smooth_operator_image);
+    let resolved_image: String = image.map(String::from).unwrap_or_else(default_smooth_operative_image);
 
     if let Some(ref id) = pearl_id {
         println!("\n  {} {} {}", "▶".cyan().bold(), "Running pearl".bold(), id.bold());
@@ -2659,7 +2659,7 @@ async fn cmd_run(
             }
         }
 
-        println!("  {} stop with: {}", "→".dimmed(), format!("th operators kill {id}").cyan());
+        println!("  {} stop with: {}", "→".dimmed(), format!("th operatives kill {id}").cyan());
         println!();
     }
 
@@ -3087,7 +3087,7 @@ async fn cmd_code(
         let indicator = boot_ui::BootIndicator::new();
         let step_vm = indicator.step("starting Safehouse microVM");
         let step_cast = indicator.step("cast online (wonk · goalie · narc · scribe · archivist · diver · groove)");
-        let step_runner = indicator.step("operator-runner pool warm");
+        let step_runner = indicator.step("operative pool warm");
         let step_health = indicator.step("health check");
 
         // Re-exec ourselves as `th up` so the Safehouse daemonizes

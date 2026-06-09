@@ -23,7 +23,7 @@ cssclasses:
         │   isolated)            │          │    trusted envs)     │
         │                        │          │                      │
         │   Big Smooth + Cast    │          │   Big Smooth + Cast  │
-        │   + Operator runners   │          │   + Operator runners │
+        │   + Operatives   │          │   + Operatives │
         └────────────────────────┘          └──────────────────────┘
 ```
 
@@ -51,7 +51,7 @@ One VM. Same cast. Same dispatch path. Direct mode is the escape hatch when you 
 | [[Architecture/Direct-Mode]]                      | Host runtime. When to reach for it                           |
 | [[Architecture/Transport]]                        | gRPC over UDS, in-process Arc, HTTP at the edge — the wire story |
 | [[Architecture/Dispatch]]                         | How a task flows from `th up` chat to an operator and back  |
-| [[Architecture/Operators]]                        | The agent runtime, the operator-runner binary, tool surface  |
+| [[Architecture/Operatives]]                        | The agent runtime, the operative binary, tool surface  |
 | [[Architecture/Pearls]]                           | The work-item tracker (Dolt-backed)                          |
 | [[Architecture/Data-Storage]]                     | Dolt, smooth-dolt, named volumes, sessions, audit            |
 

@@ -1,4 +1,4 @@
-//! Smooth Operator runner — the binary that actually runs inside each
+//! Smooth Operative — the binary that actually runs inside each
 //! microVM sandbox.
 //!
 //! Big Smooth (the READ-ONLY orchestrator) spawns a microVM via the embedded
@@ -1832,7 +1832,7 @@ async fn main() {
         model = %config.model,
         workspace = %config.workspace.display(),
         narc_write_guard = config.narc_write_guard,
-        "smooth-operator-runner starting"
+        "smooth-operative starting"
     );
 
     // Pearl env cache: if /opt/smooth/cache is mounted (bind from host),
@@ -2620,12 +2620,12 @@ async fn main() {
                 completion_tokens: 0,
                 cached_tokens: 0,
             });
-            tracing::info!("smooth-operator-runner completed successfully");
+            tracing::info!("smooth-operative completed successfully");
             std::process::exit(0);
         }
         Err(e) => {
             emit_event(&AgentEvent::Error { message: e.to_string() });
-            tracing::error!(error = %e, "smooth-operator-runner failed");
+            tracing::error!(error = %e, "smooth-operative failed");
             std::process::exit(1);
         }
     }

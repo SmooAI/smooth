@@ -1,13 +1,15 @@
-# Operators
+# Operatives
 
 #architecture
 
 > [!arch] The agents that actually do the work
-> An operator is a `smooth-operator-runner` process running the `smooth-operator` agent loop with a scoped tool surface, hooked into the cast. One operator per dispatched pearl. Streams `AgentEvent`s as JSON-lines to its parent.
+> An operative is a `smooth-operative` process running the `smooth-operator` agent engine with a scoped tool surface, hooked into the cast. One operative per dispatched pearl. Streams `AgentEvent`s as JSON-lines to its parent.
+>
+> **Naming:** the *operative* is the sandboxed worker (the microVM-resident binary that runs a pearl). The *`smooth-operator` engine* (crate `smooai-smooth-operator`, being extracted to `smooth-operator-core`) is the agent framework the operative runs. Don't conflate them — and don't confuse either with the public `smooth-operator` service.
 
-## The runner binary
+## The operative binary
 
-`crates/smooth-operator-runner/` is a standalone Rust binary. It is the only crate that runs the agent loop in production.
+`crates/smooth-operative/` is a standalone Rust binary. It is the only crate that runs the agent loop in production.
 
 - **Sandboxed mode:** cross-compiled to `aarch64-unknown-linux-musl`, baked into the Safehouse image at `/opt/smooth/bin/`, and exec'd inside the microVM.
 - **Direct mode:** the native build (host triple) from `target/release/` or `target/debug/`.
@@ -15,8 +17,8 @@
 Build it with:
 
 ```bash
-scripts/build-operator-runner.sh    # cross-compile to musl (sandboxed)
-cargo build -p smooth-operator-runner --release    # native (direct)
+scripts/build-operative.sh    # cross-compile to musl (sandboxed)
+cargo build -p smooai-smooth-operative --release    # native (direct)
 ```
 
 A one-time dev setup is required for the cross-compile:
@@ -27,7 +29,7 @@ cargo install --locked cargo-zigbuild
 pip3 install ziglang
 ```
 
-## What the runner does on boot
+## What the operative does on boot
 
 1. Reads its config from env vars in a single pass. No file I/O for config.
 2. Loads the task message from `SMOOTH_TASK_FILE` (bind-mounted) or `SMOOTH_TASK` (env).
@@ -53,7 +55,7 @@ pip3 install ziglang
 
 ## The built-in tool surface
 
-The runner registers:
+The operative registers:
 
 - `read_file(path, offset?, limit?)` — read under workspace, line ranges allowed
 - `write_file(path, content)` — write under workspace; NarcHook secret + write-guard filters
@@ -63,16 +65,16 @@ The runner registers:
 - `bash(command, timeout_secs?)` — shell exec; output bounded
 - `ask_smooth` — escalate a clarifying question to Big Smooth (sandbox-only IPC)
 - `host_tool(name, args)` — proxy a whitelisted host CLI (gh, git, kubectl, …) via `SMOOTH_HOST_TOKEN`
-- `delegate(pearl_title, message)` — spawn a sub-pearl, kicks off a child operator
+- `delegate(pearl_title, message)` — spawn a sub-pearl, kicks off a child operative
 - `reply_to_chat(message)` — write a message back to the user's chat
 - `pearls_*` — read and write pearls in the project Dolt store
-- `mailbox_*` — read steering / chat messages addressed to this operator
+- `mailbox_*` — read steering / chat messages addressed to this operative
 
 Plus any [MCP servers](../../docs/extending.md) configured via `mcp.toml` and any [plugins](../../docs/extending.md) declared via `plugin.toml`.
 
 ## Workflow (multi-phase)
 
-When `SMOOTH_WORKFLOW=1` (the default), the runner runs a multi-phase loop:
+When `SMOOTH_WORKFLOW=1` (the default), the operative runs a multi-phase loop:
 
 ```
    plan → execute → test → review
@@ -82,24 +84,24 @@ Each phase is a separate `Agent::run` call with a different system prompt and to
 
 ## Mailbox + steering
 
-While a runner is live, the user can push messages to it via the WebSocket:
+While an operative is live, the user can push messages to it via the WebSocket:
 
 - `th steer <pearl_id> "message"` → posts a comment of type `steer` on the pearl
 - `th pause <pearl_id>` / `th resume <pearl_id>` / `th cancel <pearl_id>` similarly
 
-The runner's mailbox poller reads new comments at the start of each iteration and surfaces them to the agent through a tool result. The agent decides what to do.
+The operative's mailbox poller reads new comments at the start of each iteration and surfaces them to the agent through a tool result. The agent decides what to do.
 
 ## Lifecycle
 
-- **Spawn:** Big Smooth's dispatch path exec's the runner (subprocess in direct mode, microsandbox exec in sandboxed mode).
-- **Run:** runner streams events; Big Smooth re-emits as WebSocket `ServerEvent`s; teammate registry tracks status.
-- **Complete:** runner emits `Completed`; Big Smooth marks pearl done via Diver (or directly), closes the comment tap.
-- **Error:** runner emits `Error`; Big Smooth closes the pearl and sends `TaskError` to subscribers.
-- **Cancel:** user sends cancel; Big Smooth tears down the runner (subprocess kill in direct mode, sandbox destroy in sandboxed mode).
+- **Spawn:** Big Smooth's dispatch path exec's the operative (subprocess in direct mode, microsandbox exec in sandboxed mode).
+- **Run:** operative streams events; Big Smooth re-emits as WebSocket `ServerEvent`s; teammate registry tracks status.
+- **Complete:** operative emits `Completed`; Big Smooth marks pearl done via Diver (or directly), closes the comment tap.
+- **Error:** operative emits `Error`; Big Smooth closes the pearl and sends `TaskError` to subscribers.
+- **Cancel:** user sends cancel; Big Smooth tears down the operative (subprocess kill in direct mode, sandbox destroy in sandboxed mode).
 
 ## Related
 
 - [[Dispatch]]
 - [[The-Cast]]
 - [[Pearls]]
-- [[../crates/smooth-operator-runner]]
+- [[../crates/smooth-operative]]

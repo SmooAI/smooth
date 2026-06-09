@@ -11,7 +11,7 @@ use smooth_pearls::{PearlStatus, PearlStore, PearlUpdate};
 use tokio::sync::broadcast;
 
 use crate::events::ServerEvent;
-use crate::operator_client::{OperatorClient, OperatorEvent};
+use crate::operative_client::{OperativeClient, OperatorEvent};
 use crate::pool::SandboxPool;
 use crate::sandbox::SandboxHandle;
 
@@ -86,7 +86,7 @@ pub struct Orchestrator {
     pub active_workers: HashMap<String, SandboxHandle>,
     pub completed_beads: Vec<String>,
     /// WebSocket clients for communicating with each operator (keyed by bead_id).
-    pub operator_clients: HashMap<String, OperatorClient>,
+    pub operative_clients: HashMap<String, OperativeClient>,
     /// Broadcast sender for forwarding events to TUI/web clients.
     pub event_tx: Option<broadcast::Sender<ServerEvent>>,
 }
@@ -100,7 +100,7 @@ impl Orchestrator {
             pearl_store,
             active_workers: HashMap::new(),
             completed_beads: Vec::new(),
-            operator_clients: HashMap::new(),
+            operative_clients: HashMap::new(),
             event_tx: None,
         }
     }
@@ -210,7 +210,7 @@ impl Orchestrator {
                         },
                     );
 
-                    // pearl th-461ab9 (Mode B fix): Create OperatorClient and connect
+                    // pearl th-461ab9 (Mode B fix): Create OperativeClient and connect
                     // with bounded retry. The freshly-spawned operator VM may not yet
                     // have its WS server bound when we race out of pool.create_operator,
                     // so a single-shot connect() reliably hits "Handshake not finished"
@@ -225,7 +225,7 @@ impl Orchestrator {
                     // next ready-bead scan picks it up. Without this, the orchestrator
                     // used to leak the bead in InProgress with no live worker for
                     // 30 min until the VM idle-timed-out.
-                    let mut client = OperatorClient::new(&operator_id, &ws_url);
+                    let mut client = OperativeClient::new(&operator_id, &ws_url);
                     let mut succeeded = false;
                     if client.connect_with_retry(5).await.is_ok() {
                         let message = self
@@ -238,7 +238,7 @@ impl Orchestrator {
 
                         match client.assign_task(bead_id, &message, None, "").await {
                             Ok(()) => {
-                                self.operator_clients.insert(bead_id.clone(), client);
+                                self.operative_clients.insert(bead_id.clone(), client);
                                 self.active_workers.insert(bead_id.clone(), handle.clone());
                                 assignments.insert(bead_id.clone(), operator_id.clone());
                                 succeeded = true;
@@ -280,9 +280,9 @@ impl Orchestrator {
         let mut failed = Vec::new();
 
         // Poll each operator client for events (non-blocking via try_recv)
-        let bead_ids: Vec<String> = self.operator_clients.keys().cloned().collect();
+        let bead_ids: Vec<String> = self.operative_clients.keys().cloned().collect();
         for bead_id in &bead_ids {
-            if let Some(client) = self.operator_clients.get_mut(bead_id) {
+            if let Some(client) = self.operative_clients.get_mut(bead_id) {
                 // Use tokio::time::timeout for a near-instant non-blocking poll
                 let poll_result = tokio::time::timeout(std::time::Duration::from_millis(10), client.recv()).await;
 
@@ -390,7 +390,7 @@ impl Orchestrator {
         tracing::info!("Reviewing bead {bead_id}");
 
         // Disconnect and clean up the operator client
-        if let Some(mut client) = self.operator_clients.remove(&bead_id) {
+        if let Some(mut client) = self.operative_clients.remove(&bead_id) {
             client.disconnect();
         }
 
@@ -464,7 +464,7 @@ mod tests {
         let orch = Orchestrator::new(3, store);
         assert_eq!(orch.state_name(), "idle");
         assert!(orch.active_workers.is_empty());
-        assert!(orch.operator_clients.is_empty());
+        assert!(orch.operative_clients.is_empty());
     }
 
     #[tokio::test]
@@ -488,8 +488,8 @@ mod tests {
     }
 
     #[test]
-    fn test_orchestrator_dispatch_creates_operator_client_map() {
-        // Verify that the orchestrator has an operator_clients map ready for dispatch.
+    fn test_orchestrator_dispatch_creates_operative_client_map() {
+        // Verify that the orchestrator has an operative_clients map ready for dispatch.
         // Actual sandbox creation requires msb, so we test the data structure setup.
         let store = {
             let tmp = tempfile::tempdir().unwrap();
@@ -504,7 +504,7 @@ mod tests {
         };
         let orch = Orchestrator::new(3, store);
 
-        assert!(orch.operator_clients.is_empty());
+        assert!(orch.operative_clients.is_empty());
         assert_eq!(orch.pool.active_count(), 0);
         assert!(orch.pool.has_capacity());
     }
@@ -620,7 +620,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_orchestrator_review_cleans_up_operator_client() {
+    async fn test_orchestrator_review_cleans_up_operative_client() {
         let store = {
             let tmp = tempfile::tempdir().unwrap();
             let dolt_dir = tmp.path().join("dolt");
@@ -635,8 +635,8 @@ mod tests {
         let mut orch = Orchestrator::new(3, store);
 
         // Insert a mock (disconnected) operator client
-        let client = OperatorClient::new("op-1", "ws://localhost:9999/ws");
-        orch.operator_clients.insert("bead-1".into(), client);
+        let client = OperativeClient::new("op-1", "ws://localhost:9999/ws");
+        orch.operative_clients.insert("bead-1".into(), client);
 
         // Put in reviewing state
         orch.state = OrchestratorState::Reviewing { bead_id: "bead-1".into() };
@@ -644,6 +644,6 @@ mod tests {
         // Review should clean up
         let result = orch.review().await;
         assert!(result.is_ok());
-        assert!(orch.operator_clients.is_empty());
+        assert!(orch.operative_clients.is_empty());
     }
 }

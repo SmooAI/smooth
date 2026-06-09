@@ -3,11 +3,11 @@
 #architecture #grpc #transport
 
 > [!arch] Two boundaries, three transports
-> Smooth has **two** real process boundaries: the host vs. the safehouse microVM (sandboxed mode) and Big Smooth vs. each operator-runner subprocess (both modes). Cross-boundary calls inside the same VM (or host process tree) are **tonic gRPC over UDS**. Calls within Big Smooth's own process are **in-process `Arc`-shared state** — no wire, no serialization. The outer world (TUI, web UI, bench harness) speaks **HTTP + WebSocket** to Big Smooth on `:4400`.
+> Smooth has **two** real process boundaries: the host vs. the safehouse microVM (sandboxed mode) and Big Smooth vs. each operative subprocess (both modes). Cross-boundary calls inside the same VM (or host process tree) are **tonic gRPC over UDS**. Calls within Big Smooth's own process are **in-process `Arc`-shared state** — no wire, no serialization. The outer world (TUI, web UI, bench harness) speaks **HTTP + WebSocket** to Big Smooth on `:4400`.
 
 ## Why this matters
 
-The marketing line "in-process services alongside Big Smooth" is true for the cast members co-located in Big Smooth's own address space — but every dispatched **operator runs as a separate subprocess** (`smooth-operator-runner`), even in single-VM mode. Every tool the operator calls fires through `NarcHook → narc.sock` over gRPC; every policy check fires through Goalie → `wonk.sock` over gRPC; every structured log entry fires through `scribe.sock` over gRPC. The wire is real, it's load-bearing, and it's what makes "one VM, many operators" possible without giving each operator its own kernel boundary.
+The marketing line "in-process services alongside Big Smooth" is true for the cast members co-located in Big Smooth's own address space — but every dispatched **operative runs as a separate subprocess** (`smooth-operative`), even in single-VM mode. Every tool the operative calls fires through `NarcHook → narc.sock` over gRPC; every policy check fires through Goalie → `wonk.sock` over gRPC; every structured log entry fires through `scribe.sock` over gRPC. The wire is real, it's load-bearing, and it's what makes "one VM, many operatives" possible without giving each operative its own kernel boundary.
 
 ## The four UDS gRPC servers
 
@@ -28,10 +28,10 @@ The runtime location is controlled by `$SMOOTH_SINGLE_PROCESS_SOCKET_DIR`:
 - **Direct mode (host):** the safehouse is the host process, so the socket dir is a per-launch tempdir under `~/.smooth/run/` (see `cmd_up` for the exact construction).
 - **Tests:** override with `SMOOTH_SINGLE_PROCESS_SOCKET_DIR=/tmp/whatever` — `single_process::tests::bootstrap_spawns_all_four_sockets` does exactly this.
 
-The operator-runner subprocess discovers them the same way:
+The operative subprocess discovers them the same way:
 
 ```rust
-// crates/smooth-operator-runner/src/main.rs ≈ 1540
+// crates/smooth-operative/src/main.rs ≈ 1540
 let socket_dir = std::env::var("SMOOTH_SINGLE_PROCESS_SOCKET_DIR")
     .map(PathBuf::from)
     .unwrap_or_else(|_| PathBuf::from("/run/user/0/smooth"));
@@ -97,7 +97,7 @@ smooth.narc.v1.Judge.CheckTool
 verdict returned
         │
         ▼
-operator-runner runs tool (or returns 403)
+operative runs tool (or returns 403)
         │
         ▼  (gRPC over scribe.sock)
 smooth.scribe.v1.Logger.Log
@@ -142,7 +142,7 @@ The single_process integration tests bind the full four-server set, round-trip a
 1. Edit the relevant `.proto` under `proto/`.
 2. The crate's `build.rs` re-runs `tonic-build` on the next `cargo build`; new types appear in `pb`.
 3. Add the server impl in that crate's `grpc.rs` (the `Service` trait method).
-4. Add the client wrapper in the consuming crate (typically `crates/smooth-operator-runner/src/main.rs` for runner-side, or in the cast crate that wants to call out).
+4. Add the client wrapper in the consuming crate (typically `crates/smooth-operative/src/main.rs` for runner-side, or in the cast crate that wants to call out).
 5. Wire it into `single_process::bootstrap_from_app_state` if it's a new server socket.
 6. Add a unit test in `grpc.rs::tests` and an integration test in `single_process::tests`.
 
@@ -151,4 +151,4 @@ The single_process integration tests bind the full four-server set, round-trip a
 - [[The-Cast]] — what each service owns
 - [[Sandboxed-Mode]] — where the sockets live in the microVM
 - [[Direct-Mode]] — same sockets, host tempdir instead
-- [[Dispatch]] — how the operator-runner is spawned and given the socket dir
+- [[Dispatch]] — how the operative is spawned and given the socket dir

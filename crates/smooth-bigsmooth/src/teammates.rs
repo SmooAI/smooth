@@ -28,11 +28,11 @@ pub struct TeammateView {
 }
 
 #[derive(Default)]
-pub struct OperatorRegistry {
+pub struct OperativeRegistry {
     by_name: RwLock<HashMap<String, TeammateView>>,
 }
 
-impl OperatorRegistry {
+impl OperativeRegistry {
     pub fn new() -> Self {
         Self::default()
     }
@@ -78,7 +78,7 @@ pub async fn spawn_comment_tap(
     pearl_id: String,
     teammate_name: String,
     event_tx: broadcast::Sender<ServerEvent>,
-    registry: Arc<OperatorRegistry>,
+    registry: Arc<OperativeRegistry>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -174,7 +174,7 @@ mod tests {
 
     #[tokio::test]
     async fn registry_insert_list_get() {
-        let reg = OperatorRegistry::new();
+        let reg = OperativeRegistry::new();
         let v = TeammateView {
             name: "backend-refactorer".into(),
             pearl_id: "th-abc123".into(),
@@ -192,7 +192,7 @@ mod tests {
 
     #[tokio::test]
     async fn registry_get_by_pearl() {
-        let reg = OperatorRegistry::new();
+        let reg = OperativeRegistry::new();
         reg.insert(TeammateView {
             name: "backend-refactorer".into(),
             pearl_id: "th-abc123".into(),
@@ -209,7 +209,7 @@ mod tests {
 
     #[tokio::test]
     async fn registry_mark_status() {
-        let reg = OperatorRegistry::new();
+        let reg = OperativeRegistry::new();
         reg.insert(TeammateView {
             name: "x".into(),
             pearl_id: "th-1".into(),

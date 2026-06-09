@@ -78,7 +78,7 @@ pub fn for_model(model: &str) -> Option<&'static str> {
 
 /// True when the model identifier indicates a Claude / Anthropic backing.
 ///
-/// Used by the operator-runner to set `LlmConfig::api_format =
+/// Used by the operative to set `LlmConfig::api_format =
 /// Anthropic` so the LLM client targets `<api_url>/messages` (LiteLLM's
 /// native Anthropic-shape route, which resolves smooth-* aliases AND
 /// preserves multi-turn tool_use / tool_result pairing). The OpenAI-compat

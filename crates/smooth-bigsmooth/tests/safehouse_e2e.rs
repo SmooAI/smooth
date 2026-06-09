@@ -17,13 +17,13 @@
 //!         │     └── Safehouse cast: Wonk, Goalie, Narc, Scribe (all tokio tasks)
 //!         │
 //!         ├── Operator VM #1 (Rust)
-//!         │     └── smooth-operator-runner + per-VM cast
+//!         │     └── smooth-operative + per-VM cast
 //!         │         → LLM reads task_api_spec/tests/spec_test.rs
 //!         │         → writes src/lib.rs into bind-mounted host workspace
 //!         │         → Scribe forwards logs to Safehouse Archivist
 //!         │
 //!         └── Operator VM #2 (TypeScript)
-//!               └── smooth-operator-runner + per-VM cast
+//!               └── smooth-operative + per-VM cast
 //!                   → LLM reads hono_api_spec/tests/spec.test.ts
 //!                   → writes src/server.ts into bind-mounted host workspace
 //!                   → Scribe forwards logs to Safehouse Archivist
@@ -91,11 +91,11 @@ async fn safehouse_full_stack_rust_and_typescript_with_judge() {
     let registry = smooth_operator::providers::ProviderRegistry::load_from_file(&providers_path).expect("load providers.json");
     let llm = registry.default_llm_config().expect("default llm");
 
-    let operator_runner_host_path = find_workspace_target("aarch64-unknown-linux-musl/release/smooth-operator-runner")
-        .expect("operator runner binary missing — run scripts/build-operator-runner.sh")
+    let operative_host_path = find_workspace_target("aarch64-unknown-linux-musl/release/smooth-operative")
+        .expect("operative binary missing — run scripts/build-operative.sh")
         .canonicalize()
         .expect("canon");
-    let _operator_runner_host_dir = operator_runner_host_path.parent().expect("runner has parent").to_path_buf();
+    let _operative_host_dir = operative_host_path.parent().expect("runner has parent").to_path_buf();
     let safehouse_bin_path = find_workspace_target("aarch64-unknown-linux-musl/release/safehouse")
         .expect("safehouse binary missing — run scripts/build-safehouse.sh")
         .canonicalize()
@@ -161,10 +161,7 @@ async fn safehouse_full_stack_rust_and_typescript_with_judge() {
     let host_ip = detect_host_ip();
     eprintln!("host IP for VM→host connectivity: {host_ip}");
     safehouse_env.insert("SMOOTH_BOOTSTRAP_BILL_URL".into(), format!("http://{host_ip}:{bill_host_port}"));
-    safehouse_env.insert(
-        "SMOOTH_OPERATOR_RUNNER_HOST_PATH".into(),
-        operator_runner_host_path.to_string_lossy().to_string(),
-    );
+    safehouse_env.insert("SMOOTH_OPERATIVE_HOST_PATH".into(), operative_host_path.to_string_lossy().to_string());
     safehouse_env.insert("SMOOTH_ARCHIVIST_HOST_PORT".into(), archivist_host_port.to_string());
     safehouse_env.insert("SMOOTH_SAFEHOUSE_DB".into(), "/root/.smooth/smooth.db".into());
     safehouse_env.insert("SMOOTH_SAFEHOUSE_PORT".into(), "4400".into());

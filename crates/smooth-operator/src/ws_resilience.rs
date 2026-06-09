@@ -1,5 +1,5 @@
 //! WebSocket connection resiliency — shared logic for `BigSmoothClient` and
-//! `OperatorClient`.
+//! `OperativeClient`.
 //!
 //! Provides exponential backoff with jitter, connection state tracking, and an
 //! outbound message buffer for messages sent while disconnected.

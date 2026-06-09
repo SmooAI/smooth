@@ -20,7 +20,7 @@
         "prepare": "husky",
         "pre-commit-check": "cargo fmt -- --check && cargo clippy --workspace --all-targets",
         "build:web": "pnpm -C crates/smooth-web/web install --silent && pnpm -C crates/smooth-web/web build",
-        "build:runner": "bash scripts/build-operator-runner.sh",
+        "build:runner": "bash scripts/build-operative.sh",
         "install:th": "pnpm build:web && pnpm build:runner && cargo install --path crates/smooth-cli --force",
         "dev:service": "pnpm install:th && th service restart",
         "dev:service:install": "pnpm install:th && th service install && th service start",

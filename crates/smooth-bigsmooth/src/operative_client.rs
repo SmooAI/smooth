@@ -1,4 +1,4 @@
-//! OperatorClient — WebSocket client for Big Smooth to talk to operators
+//! OperativeClient — WebSocket client for Big Smooth to talk to operators
 //! running inside sandboxes.
 //!
 //! Each operator runs its own WebSocket server; Big Smooth connects to it
@@ -71,7 +71,7 @@ pub enum OperatorEvent {
 }
 
 // ---------------------------------------------------------------------------
-// OperatorClient
+// OperativeClient
 // ---------------------------------------------------------------------------
 
 /// WebSocket client for Big Smooth to communicate with a single operator
@@ -80,7 +80,7 @@ pub enum OperatorEvent {
 /// Includes connection resiliency: automatic reconnection with exponential
 /// backoff, heartbeat keep-alive, and an outbound message buffer for commands
 /// sent while disconnected.
-pub struct OperatorClient {
+pub struct OperativeClient {
     operator_id: String,
     url: String,
     ws_tx: Option<mpsc::UnboundedSender<String>>,
@@ -90,7 +90,7 @@ pub struct OperatorClient {
     msg_buffer: Arc<MessageBuffer>,
 }
 
-impl OperatorClient {
+impl OperativeClient {
     /// Create a new client for the given operator.
     ///
     /// `url` should be the full WebSocket URL, e.g.
@@ -348,9 +348,9 @@ impl OperatorClient {
     }
 }
 
-impl std::fmt::Debug for OperatorClient {
+impl std::fmt::Debug for OperativeClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OperatorClient")
+        f.debug_struct("OperativeClient")
             .field("operator_id", &self.operator_id)
             .field("url", &self.url)
             .field("connected", &self.is_connected())
@@ -412,14 +412,14 @@ mod tests {
 
     #[test]
     fn new_sets_operator_id() {
-        let client = OperatorClient::new("op-42", "ws://sandbox:9090/ws");
+        let client = OperativeClient::new("op-42", "ws://sandbox:9090/ws");
         assert_eq!(client.operator_id(), "op-42");
         assert_eq!(client.url, "ws://sandbox:9090/ws");
     }
 
     #[test]
     fn is_connected_returns_false_before_connect() {
-        let client = OperatorClient::new("op-1", "ws://localhost:9090/ws");
+        let client = OperativeClient::new("op-1", "ws://localhost:9090/ws");
         assert!(!client.is_connected());
     }
 
@@ -435,7 +435,7 @@ mod tests {
         };
         // Picks a port nothing is listening on. tungstenite returns
         // ConnectionRefused which connect() wraps as anyhow.
-        let mut client = OperatorClient::with_config("op-x", "ws://127.0.0.1:1/ws", cfg);
+        let mut client = OperativeClient::with_config("op-x", "ws://127.0.0.1:1/ws", cfg);
         let result = client.connect_with_retry(0).await;
         assert!(result.is_err(), "max_attempts=0 must surface the same error as single-shot connect()");
     }
@@ -447,7 +447,7 @@ mod tests {
             max_backoff: std::time::Duration::from_millis(2),
             ..ResiliencyConfig::default()
         };
-        let mut client = OperatorClient::with_config("op-y", "ws://127.0.0.1:1/ws", cfg);
+        let mut client = OperativeClient::with_config("op-y", "ws://127.0.0.1:1/ws", cfg);
         let started = std::time::Instant::now();
         let result = client.connect_with_retry(3).await;
         let elapsed = started.elapsed();
