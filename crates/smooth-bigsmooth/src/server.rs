@@ -3550,7 +3550,7 @@ fn extract_skill_allowed_hosts(message: &str, workspace: &str) -> Vec<String> {
         return Vec::new();
     }
     let workspace_path = std::path::PathBuf::from(workspace);
-    let skills = smooth_operator::skills::discover(&workspace_path);
+    let skills = smooth_cast::skills::discover(&workspace_path);
     let Some(skill) = skills.into_iter().find(|s| s.name == name) else {
         tracing::warn!(skill_name = name, "skill named in message header but not found in discovery — no pre-grant");
         return Vec::new();
@@ -4570,7 +4570,7 @@ async fn post_chat_message_stream_handler(
 async fn auto_name_session(user_prompt: &str) -> Option<String> {
     let providers_path = dirs_next::home_dir()?.join(".smooth/providers.json");
     let registry = ProviderRegistry::load_from_file(&providers_path).ok()?;
-    let cast = smooth_operator::cast::Cast::builtin();
+    let cast = smooth_cast::cast::builtin();
     let agent = cast.get("tagger")?;
     let config = registry.llm_config_for(agent.slot).ok()?;
     let llm = smooth_operator::llm::LlmClient::new(config);

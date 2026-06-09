@@ -12,6 +12,9 @@ name = "smooth_code"
 
 [dependencies]
 smooth-operator.workspace = true
+# skills discovery + the chief/intent_classifier cast roles (re-homed from the
+# engine at 0.14.0)
+smooth-cast.workspace = true
 # Direct dep so the TUI can consume the auto-mode wire types
 # (PendingAccessRequest, AccessEvent, …) without taking a dep on
 # smooth-bigsmooth — keeps the dep graph from forming a TUI → server

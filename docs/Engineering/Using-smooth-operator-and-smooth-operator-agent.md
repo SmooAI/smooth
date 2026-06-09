@@ -4,17 +4,31 @@ This guide explains how the **smooth** monorepo should get maximum leverage from
 
 | Project | What it is | Repo |
 | --- | --- | --- |
-| **smooth-operator** | The Rust agent-orchestration **engine** — `Agent`, `Workflow`, `Tool`, `CheckpointStore`, `LlmProvider`, `Memory`, `KnowledgeBase`, HITL, cost. | [SmooAI/smooth-operator](https://github.com/SmooAI/smooth-operator) (extracted from `crates/smooth-operator`) |
+| **smooth-operator** (engine) | The Rust agent-orchestration **engine** — `Agent`, `Workflow`, `Tool`, `CheckpointStore`, `LlmProvider`, `Memory`, `KnowledgeBase`, HITL, cost. Published as `smooai-smooth-operator-core` on crates.io; smooth consumes it as `smooth-operator` (package-aliased). | [SmooAI/smooth-operator-core](https://github.com/SmooAI/smooth-operator-core) (extracted from the former in-tree `crates/smooth-operator`) |
 | **smooth-operator-agent** | The productized, polyglot knowledge-chat + tools + conversations **service** built on the engine. Serverless (SST/AWS) or k8s. | [SmooAI/smooth-operator-agent](https://github.com/SmooAI/smooth-operator-agent) |
 
 > TL;DR: smooth **already runs on** smooth-operator (the `th` TUI, Big Smooth, coding workflows, the cast/role system). The upside is to (1) consume it as the **extracted public crate** instead of vendoring, (2) wire the **real backends** behind its trait seams, and (3) dogfood **smooth-operator-agent** as smooth's own hosted knowledge assistant.
 
-## 1. Consume the extracted crate (stop vendoring)
+## 1. Consume the extracted crate (done — published on crates.io)
 
-smooth-operator is being fully extracted out of this monorepo into `SmooAI/smooth-operator` as the single source of truth (it builds standalone — 408 tests green, internal `bigsmooth` coupling feature-gated, secrets redacted). Once published:
+The engine extraction is **complete**. smooth no longer vendors the engine: the in-tree `crates/smooth-operator` copy was deleted and smooth depends on the published **`smooai-smooth-operator-core`** crate (repo [SmooAI/smooth-operator-core](https://github.com/SmooAI/smooth-operator-core)). The dep key stays `smooth-operator` (package-aliased back to `smooth_operator`) so every `use smooth_operator::…` import for the generic engine API is unchanged.
 
-- Replace the in-tree `crates/smooth-operator` dependency in the ~20 dependent crates with the published `smooai-smooth-operator` (crates.io or git). Enable the `bigsmooth` feature where Big Smooth reporting is needed; leave it off elsewhere.
-- This makes smooth a **consumer** of the public engine — the same artifact the rest of the world uses — so our dogfooding pressure improves the OSS product directly.
+The cutover landed in two steps:
+
+1. **SMOODEV-1787 (PR 1/4)** — replace the in-tree copy with a rev-pinned git dep on the engine repo.
+2. **SMOODEV-1788 (PR 4/4, the final cutover)** — switch from the git rev to the **published crates.io release `smooai-smooth-operator-core = "0.14.0"`**, the clean *generic* engine. Root `Cargo.toml` now reads `smooth-operator = { version = "0.14.0", package = "smooai-smooth-operator-core" }`; `Cargo.lock` resolves it from the crates.io registry (checksum-pinned), not a git source.
+
+This makes smooth a **consumer** of the public engine — the same artifact the rest of the world uses — so our dogfooding pressure improves the OSS product directly.
+
+### Where the th-code harness lives now (`crates/smooth-cast`)
+
+The published `0.14.0` engine is **generic** — it deliberately dropped the `th code` coding-harness specifics that only smooth used. Those bits were re-homed into the smooth-owned **`smooth-cast`** crate (`smooai-smooth-cast`), built on the engine's generic public `Cast`/`OperatorRole`/`Clearance` API:
+
+- **`smooth_cast::coding_workflow`** — the `th code` single-agent outer loop (`run_coding_workflow`, `task_text_has_cleanup_intent`, …).
+- **`smooth_cast::skills`** — skill discovery (`discover`, `SkillScope`, `SkillSource`, `Skill`) + the built-in `create-skill` skill.
+- **`smooth_cast::cast`** — the four coding-harness cast roles the generic engine no longer ships (`fixer`, `oracle`, `chief`, `intent_classifier`), and a `cast::builtin()` that registers them on top of the engine's generic built-in roles (`tagger`/`presser`/`recapper`/`mapper`/`heckler`/`scout`/`runner`).
+
+Consumers (`smooth-operative`, `smooth-code`, `smooth-cli`, `smooth-bigsmooth`) call `smooth_cast::cast::builtin()` wherever they need a harness role — the engine's own `smooth_operator::Cast::builtin()` only has the generic roles. The Big-Smooth reporter hooks the engine also dropped stay deleted (no smooth consumers).
 
 See the parity epic (SMOODEV-1466) and the extraction punch-list.
 

@@ -6123,6 +6123,7 @@ dependencies = [
  "serde_json",
  "smooai-smooth-archivist",
  "smooai-smooth-bootstrap-bill",
+ "smooai-smooth-cast",
  "smooai-smooth-code",
  "smooai-smooth-diver",
  "smooai-smooth-goalie",
@@ -6169,6 +6170,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "smooai-smooth-cast"
+version = "0.13.7"
+dependencies = [
+ "anyhow",
+ "dirs-next",
+ "serde",
+ "serde_json",
+ "serde_yml",
+ "smooai-smooth-operator-core",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "smooai-smooth-cli"
 version = "0.13.7"
 dependencies = [
@@ -6194,6 +6210,7 @@ dependencies = [
  "smooai-smooth-bench",
  "smooai-smooth-bigsmooth",
  "smooai-smooth-bootstrap-bill",
+ "smooai-smooth-cast",
  "smooai-smooth-code",
  "smooai-smooth-diver",
  "smooai-smooth-operator-core",
@@ -6232,6 +6249,7 @@ dependencies = [
  "serde_json",
  "similar",
  "smooai-smooth-bigsmooth",
+ "smooai-smooth-cast",
  "smooai-smooth-narc",
  "smooai-smooth-operator-core",
  "smooai-smooth-pearls",
@@ -6364,6 +6382,7 @@ dependencies = [
  "serde",
  "serde_json",
  "similar",
+ "smooai-smooth-cast",
  "smooai-smooth-goalie",
  "smooai-smooth-narc",
  "smooai-smooth-operator-core",
@@ -6381,8 +6400,9 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-core"
-version = "0.13.7"
-source = "git+https://github.com/SmooAI/smooth-operator-core.git?rev=bb9a2565f0187fbd860240868c5775bd1205764d#bb9a2565f0187fbd860240868c5775bd1205764d"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60cac82deb3b84139783af4c3494717d184e1f9c5372945462191053c37dea39"
 dependencies = [
  "anyhow",
  "async-trait",

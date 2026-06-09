@@ -13,6 +13,8 @@ path = "src/main.rs"
 
 [dependencies]
 smooth-operator.workspace = true
+# coding_workflow + the fixer cast role (re-homed from the engine at 0.14.0)
+smooth-cast.workspace = true
 smooth-narc = { path = "../smooth-narc", package = "smooai-smooth-narc" }
 smooth-scribe = { path = "../smooth-scribe", package = "smooai-smooth-scribe" }
 smooth-wonk = { path = "../smooth-wonk", package = "smooai-smooth-wonk" }

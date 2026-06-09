@@ -178,18 +178,25 @@ prost-types = "0.13"
 # relevant to the bind-mount silent drop tracked in th-dd0cef).
 microsandbox = "0.4"
 
-# Published agent engine (github.com/SmooAI/smooth-operator-core).
+# Published agent engine (crates.io: smooai-smooth-operator-core).
 # SMOODEV-1787 (PR 1/4, dual-engine collapse): smooth consumes the public
 # `smooai-smooth-operator-core` engine instead of an in-tree copy. The in-tree
 # `crates/smooth-operator` copy was deleted. The dep KEY stays `smooth-operator`
 # and the lib is package-aliased back to `smooth_operator`, so the ~12 consumers'
-# `use smooth_operator::…` imports keep working unchanged.
+# `use smooth_operator::…` imports for the GENERIC engine API keep working
+# unchanged.
 #
-# Rev-pinned git dep (NOT a sibling path dep): a `path = "../smooth-operator-core/…"`
-# form only resolves on a dev laptop and breaks every CI `cargo metadata` run —
-# the exact failure SMOODEV-1464 hit with client-shared (see that dep below).
-# Bump the rev when the engine changes.
-smooth-operator = { git = "https://github.com/SmooAI/smooth-operator-core.git", rev = "bb9a2565f0187fbd860240868c5775bd1205764d", package = "smooai-smooth-operator-core" }
+# SMOODEV-1790 (PR 4/4, final cutover): switched from the rev-pinned git dep on
+# the OLD engine (rev bb9a256, which still carried the th-code harness) to the
+# published crates.io release `0.14.0` — a clean GENERIC engine with the harness
+# REMOVED. The harness bits the engine dropped (the coding workflow, skill
+# discovery, and the fixer/oracle/chief/intent_classifier cast roles) now live
+# in the smooth-owned `smooth-cast` crate below, built on the engine's generic
+# public API.
+smooth-operator = { version = "0.14.0", package = "smooai-smooth-operator-core" }
+# smooth-owned coding-harness extensions to the generic engine (re-homed from
+# the engine when it went generic at 0.14.0). See crates/smooth-cast.
+smooth-cast = { version = "0.13.7", path = "crates/smooth-cast", package = "smooai-smooth-cast" }
 smooth-bigsmooth = { version = "0.13.7", path = "crates/smooth-bigsmooth", package = "smooai-smooth-bigsmooth" }
 smooth-policy = { path = "crates/smooth-policy", version = "0.13.7", package = "smooai-smooth-policy" }
 smooth-web = { version = "0.13.7", path = "crates/smooth-web", package = "smooai-smooth-web" }

@@ -603,8 +603,9 @@ fn registered_tool_names() -> Vec<String> {
 }
 
 /// Read-only subset — what reasoning roles (oracle, mapper, heckler) get.
-/// Must stay in sync with `read_only_tools()` in
-/// `crates/smooth-operator/src/cast/mod.rs`.
+/// Must stay in sync with `read_only_tools()` in the engine's
+/// `cast/mod.rs` (mapper/heckler) and the smooth re-homed copy in
+/// `crates/smooth-cast/src/cast.rs` (oracle).
 fn read_only_tool_names() -> Vec<String> {
     vec![
         "read_file".into(),

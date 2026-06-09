@@ -19,6 +19,8 @@ smooth-code.workspace = true
 smooth-diver.workspace = true
 smooth-pearls.workspace = true
 smooth-operator.workspace = true
+# skills discovery + the smooth cast roles (re-homed from the engine at 0.14.0)
+smooth-cast.workspace = true
 smooth-tunnel.workspace = true
 smooth-api-client.workspace = true
 # Pearl th-abc4e2: `th admin login` uses the Supabase OAuth flow

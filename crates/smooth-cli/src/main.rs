@@ -1010,7 +1010,7 @@ enum RemoteCommands {
 ///   visible roles, so a typo at the CLI fails loudly before a
 ///   runner spins up with the wrong clearance set.
 fn resolve_primary_agent(name: Option<&str>) -> Result<String> {
-    let cast = smooth_operator::Cast::builtin();
+    let cast = smooth_cast::cast::builtin();
     let available: Vec<String> = {
         let mut v: Vec<String> = cast.list_visible().map(|a| a.name.clone()).collect();
         v.sort();
@@ -3011,14 +3011,14 @@ async fn cmd_code(
             let role = intent.role().to_string();
             let composed = if let Some(name) = skill_name {
                 let workspace = working_dir.clone();
-                let skills = smooth_operator::skills::discover(&workspace);
+                let skills = smooth_cast::skills::discover(&workspace);
                 if let Some(skill) = skills.iter().find(|s| s.name == name) {
                     let source_label = match skill.source {
-                        smooth_operator::skills::SkillSource::Project => "project",
-                        smooth_operator::skills::SkillSource::UserSmooth => "user-smooth",
-                        smooth_operator::skills::SkillSource::ClaudeCode => "claude-code",
-                        smooth_operator::skills::SkillSource::OpenCode => "opencode",
-                        smooth_operator::skills::SkillSource::Builtin => "builtin",
+                        smooth_cast::skills::SkillSource::Project => "project",
+                        smooth_cast::skills::SkillSource::UserSmooth => "user-smooth",
+                        smooth_cast::skills::SkillSource::ClaudeCode => "claude-code",
+                        smooth_cast::skills::SkillSource::OpenCode => "opencode",
+                        smooth_cast::skills::SkillSource::Builtin => "builtin",
                     };
                     // Pearl th-e0f812: tell the headless caller a skill
                     // was picked. stderr so `--json` consumers parsing
@@ -6379,7 +6379,7 @@ fn cmd_bench(cmd: BenchCommands) -> Result<()> {
 /// then the user-level Smooth / Claude Code / opencode skill dirs.
 fn cmd_skills(cmd: SkillsCommands) -> Result<()> {
     use owo_colors::OwoColorize;
-    use smooth_operator::skills::{discover, discover_with_overrides, Skill, SkillSource};
+    use smooth_cast::skills::{discover, discover_with_overrides, Skill, SkillSource};
 
     let workspace = std::env::current_dir().context("current directory")?;
 
@@ -6418,8 +6418,8 @@ fn cmd_skills(cmd: SkillsCommands) -> Result<()> {
                     String::new()
                 };
                 let scope_label = match skill.scope {
-                    smooth_operator::skills::SkillScope::Sandbox => "sandbox".green().to_string(),
-                    smooth_operator::skills::SkillScope::Host => "host".yellow().to_string(),
+                    smooth_cast::skills::SkillScope::Sandbox => "sandbox".green().to_string(),
+                    smooth_cast::skills::SkillScope::Host => "host".yellow().to_string(),
                 };
                 println!(
                     "  {} {:<28} {:>12}  {}{}",
@@ -6462,8 +6462,8 @@ fn cmd_skills(cmd: SkillsCommands) -> Result<()> {
                     "  {}  {}",
                     "scope:".dimmed(),
                     match skill.scope {
-                        smooth_operator::skills::SkillScope::Sandbox => "sandbox",
-                        smooth_operator::skills::SkillScope::Host => "host",
+                        smooth_cast::skills::SkillScope::Sandbox => "sandbox",
+                        smooth_cast::skills::SkillScope::Host => "host",
                     }
                 );
                 println!("  {}  {}", "description:".dimmed(), skill.description);

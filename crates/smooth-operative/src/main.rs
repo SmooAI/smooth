@@ -1452,7 +1452,7 @@ struct RunnerConfig {
     operator_id: String,
     narc_write_guard: bool,
     /// Name of the lead role to run under. Resolved against
-    /// [`smooth_operator::Cast::builtin`]. Defaults to
+    /// [`smooth_cast::cast::builtin`]. Defaults to
     /// `"fixer"` when `SMOOTH_AGENT` is unset or empty. Controls the
     /// system prompt AND the tool-clearance set via a
     /// [`smooth_operator::PermissionHook`] installed on the registry.
@@ -2151,14 +2151,16 @@ async fn main() {
         }
     }
 
-    // Resolve the active role from `Cast::builtin`. Invalid
-    // names fall back to `fixer` with a loud warning — we don't want a
+    // Resolve the active role from the smooth cast (`smooth_cast::cast::builtin`,
+    // which adds the harness roles `fixer`/`oracle`/`chief`/`intent_classifier`
+    // on top of the generic engine roles the published 0.14.0 engine ships).
+    // Invalid names fall back to `fixer` with a loud warning — we don't want a
     // typo in the dispatcher to silently run under an unexpected
     // clearance set, but we also don't want to hard-crash the sandbox
     // since `fixer` is always a safe default. The runner emits the
     // resolution onto its TokenDelta stream so tests + human operators
     // can see exactly which role the sandbox is running under.
-    let role_cast = std::sync::Arc::new(smooth_operator::Cast::builtin());
+    let role_cast = std::sync::Arc::new(smooth_cast::cast::builtin());
     let active_role = match role_cast.get(&config.agent_name) {
         Some(a) => a.clone(),
         None => {
@@ -2166,7 +2168,7 @@ async fn main() {
                 requested = %config.agent_name,
                 "unknown SMOOTH_AGENT — falling back to 'fixer'"
             );
-            role_cast.get("fixer").expect("'fixer' must always exist in Cast::builtin").clone()
+            role_cast.get("fixer").expect("'fixer' must always exist in smooth_cast::cast::builtin").clone()
         }
     };
 
@@ -2482,7 +2484,7 @@ async fn main() {
     }
 
     let result = if let (true, true, Some(raw)) = (workflow_opt_in, role_supports_coding_workflow, routing_json) {
-        use smooth_operator::coding_workflow::{run_coding_workflow, CodingWorkflowConfig};
+        use smooth_cast::coding_workflow::{run_coding_workflow, CodingWorkflowConfig};
         use smooth_operator::providers::ProviderRegistry;
         use std::sync::Arc;
 
@@ -2530,8 +2532,7 @@ async fn main() {
                     // suppress the test-fix bias + cross-fixture
                     // pattern confabulation observed in the bench.
                     cleanup_intent_hint: agent_config.prior_messages.iter().any(|m| {
-                        matches!(m.role, smooth_operator::conversation::Role::User)
-                            && smooth_operator::coding_workflow::task_text_has_cleanup_intent(&m.content)
+                        matches!(m.role, smooth_operator::conversation::Role::User) && smooth_cast::coding_workflow::task_text_has_cleanup_intent(&m.content)
                     }),
                 };
                 match run_coding_workflow(cfg).await {

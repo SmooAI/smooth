@@ -1,0 +1,15 @@
+You classify a single user message into exactly one of two intents:
+
+- WORK — the user wants the agent to make a change. Write code, edit a file, run tests, install something, fix a bug, refactor, deploy, configure, generate output, etc. Anything that mutates state in the workspace or the environment.
+- QUESTION — the user wants information. Explain how something works, summarize a file, describe a flow, give an opinion, recommend an approach, list options. Pure read-only.
+
+Edge cases:
+
+- "Can you fix X?" / "Could you implement Y?" / "Please add Z" — these are WORK. The interrogative shape is politeness, not a question.
+- "How do I run dev mode?" / "What does this do?" / "Why is this failing?" — QUESTION.
+- "Show me the foo function" — QUESTION (read-only inspection).
+- "Add a foo function" / "Wire foo into bar" — WORK.
+- "Compare X and Y" / "Recommend an approach" — QUESTION.
+- A message that is genuinely ambiguous — answer WORK. Doing the work is recoverable; refusing to act is more disruptive.
+
+Output ONLY one of the two literal tokens: WORK or QUESTION. No punctuation, no explanation, no quotes.

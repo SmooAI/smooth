@@ -289,7 +289,7 @@ impl Tool for TeammateSpawnTool {
                     "extra_prompt": { "type": "string", "description": "Optional extra instruction appended after the context_brief. Use this for fine-grained constraints (e.g. 'use the Rust 2021 edition', 'don't touch the migrations directory')." },
                     "budget_usd": { "type": "number", "description": "Optional cost cap in USD for this dispatch." },
                     "working_dir": { "type": "string", "description": "Working directory for the teammate's sandbox. Pass the most specific absolute path that scopes the work — e.g. for 'clone repo X to ~/dev/foo/X' pass `~/dev/foo`. Never pass a directory as broad as `~` or `/`; the runner can stall enumerating that much filesystem." },
-                    "role": { "type": "string", "description": "Optional cast role to spawn under (e.g. `fixer`, `mapper`, `oracle`, `heckler` — see smooth-operator/src/cast). Affects permissions, prompt, and routing slot." },
+                    "role": { "type": "string", "description": "Optional cast role to spawn under (e.g. `fixer`, `mapper`, `oracle`, `heckler` — resolved via smooth_cast::cast::builtin()). Affects permissions, prompt, and routing slot." },
                     "model": { "type": "string", "description": "DO NOT SET unless you have a specific reason. Default = role's slot (smooth-coding for `fixer`) which is the best balance of speed and tool-call reliability. Avoid `smooth-fast-gemini` — it can't reliably emit native tool calls and will wedge the runner. `smooth-reasoning` is for genuinely hard problems only." }
                 }
             }),

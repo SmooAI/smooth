@@ -26,7 +26,8 @@ use std::sync::{
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::post, Json, Router};
 use serde_json::{json, Value};
-use smooth_operator::cast::{Cast, DispatchSubagentTool};
+use smooth_cast::cast::builtin as cast_builtin;
+use smooth_operator::cast::DispatchSubagentTool;
 use smooth_operator::conversation::Role;
 use smooth_operator::llm::{ApiFormat, LlmConfig, RetryPolicy};
 use smooth_operator::providers::Activity;
@@ -233,7 +234,7 @@ fn mock_llm_config(api_url: &str) -> LlmConfig {
 #[tokio::test]
 async fn fixer_role_dispatches_scout_and_only_final_summary_leaks() {
     let (api_url, state) = spawn_mock().await;
-    let cast = Arc::new(Cast::builtin());
+    let cast = Arc::new(cast_builtin());
     let fixer = cast.get("fixer").expect("'fixer' role registered").clone();
 
     let api_for_factory = api_url.clone();
@@ -345,7 +346,7 @@ async fn fixer_role_dispatches_scout_and_only_final_summary_leaks() {
 #[tokio::test]
 async fn dispatch_unknown_agent_returns_clean_tool_error() {
     // No LLM calls in this test — we invoke the tool directly.
-    let cast = Arc::new(Cast::builtin());
+    let cast = Arc::new(cast_builtin());
     let llm_factory: smooth_operator::LlmConfigFactory = Arc::new(|_a: Activity| -> anyhow::Result<LlmConfig> { Ok(mock_llm_config("http://127.0.0.1:1")) });
     let dispatch = DispatchSubagentTool::new(Arc::clone(&cast), ToolRegistry::new(), llm_factory);
 
@@ -377,7 +378,7 @@ async fn dispatch_lead_role_name_returns_clean_tool_error() {
     // Dispatching to 'fixer' (a lead, not a sidekick) must fail
     // with the same clean error — not fall through to spawning a
     // fixer role loop.
-    let cast = Arc::new(Cast::builtin());
+    let cast = Arc::new(cast_builtin());
     let llm_factory: smooth_operator::LlmConfigFactory = Arc::new(|_a: Activity| -> anyhow::Result<LlmConfig> { Ok(mock_llm_config("http://127.0.0.1:1")) });
     let dispatch = DispatchSubagentTool::new(Arc::clone(&cast), ToolRegistry::new(), llm_factory);
 

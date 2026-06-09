@@ -10,7 +10,7 @@
 
 use async_trait::async_trait;
 use serde_json::json;
-use smooth_operator::cast::Cast;
+use smooth_cast::cast::builtin as cast_builtin;
 use smooth_operator::tool::{Tool, ToolCall, ToolRegistry, ToolSchema};
 use smooth_operator::PermissionHook;
 
@@ -55,7 +55,7 @@ impl Tool for EchoReadTool {
 
 #[tokio::test]
 async fn mapper_role_blocks_edit_file_at_dispatch() {
-    let cast = Cast::builtin();
+    let cast = cast_builtin();
     let mapper = cast.get("mapper").expect("'mapper' must be registered");
 
     let mut tools = ToolRegistry::new();
@@ -84,7 +84,7 @@ async fn mapper_role_blocks_edit_file_at_dispatch() {
 
 #[tokio::test]
 async fn mapper_role_allows_read_file_at_dispatch() {
-    let cast = Cast::builtin();
+    let cast = cast_builtin();
     let mapper = cast.get("mapper").expect("'mapper' must be registered");
 
     let mut tools = ToolRegistry::new();
@@ -122,7 +122,7 @@ async fn fixer_role_allows_edit_file_at_dispatch() {
         }
     }
 
-    let cast = Cast::builtin();
+    let cast = cast_builtin();
     let fixer = cast.get("fixer").expect("'fixer' must be registered");
 
     let mut tools = ToolRegistry::new();
@@ -157,7 +157,7 @@ async fn oracle_role_blocks_bash_at_dispatch() {
         }
     }
 
-    let cast = Cast::builtin();
+    let cast = cast_builtin();
     let oracle = cast.get("oracle").expect("'oracle' must be registered");
 
     let mut tools = ToolRegistry::new();
