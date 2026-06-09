@@ -138,11 +138,11 @@ async fn classify_via_chief(message: &str) -> Option<Intent> {
 /// the role use [`classify_via_chief`].
 async fn classify_via_chief_full(message: &str) -> Option<(Intent, Option<String>)> {
     use smooth_cast::cast::builtin as cast_builtin;
+    use smooth_cast::provider_migration::load_providers_with_migration;
     use smooth_cast::skills;
-    use smooth_operator::providers::ProviderRegistry;
 
     let providers_path = dirs_next::home_dir()?.join(".smooth/providers.json");
-    let registry = ProviderRegistry::load_from_file(&providers_path).ok()?;
+    let registry = load_providers_with_migration(&providers_path).ok()?;
     let cast = cast_builtin();
     let role = cast.get("chief")?;
     let config = registry.llm_config_for(role.slot).ok()?;
@@ -467,10 +467,10 @@ pub fn looks_like_factual_shell_query(message: &str) -> bool {
 
 async fn classify_via_llm(message: &str) -> Option<Intent> {
     use smooth_cast::cast::builtin as cast_builtin;
-    use smooth_operator::providers::ProviderRegistry;
+    use smooth_cast::provider_migration::load_providers_with_migration;
 
     let providers_path = dirs_next::home_dir()?.join(".smooth/providers.json");
-    let registry = ProviderRegistry::load_from_file(&providers_path).ok()?;
+    let registry = load_providers_with_migration(&providers_path).ok()?;
     let cast = cast_builtin();
     let role = cast.get("intent_classifier")?;
     let config = registry.llm_config_for(role.slot).ok()?;
