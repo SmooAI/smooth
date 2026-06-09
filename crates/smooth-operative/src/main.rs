@@ -2216,21 +2216,26 @@ async fn main() {
         .or_else(|| std::env::var("SMOOTH_ROUTING_JSON").ok());
     let llm = if let Some(raw) = routing_json_for_slot.as_deref() {
         match smooth_operator::providers::ProviderRegistry::from_json(raw) {
-            Ok(registry) => match registry.llm_config_for(active_role.slot) {
-                Ok(slot_cfg) => {
-                    tracing::info!(
-                        role = %active_role.name,
-                        slot = ?active_role.slot,
-                        model = %slot_cfg.model,
-                        "single-agent path: using slot-resolved LlmConfig (overrides SMOOTH_MODEL default)"
-                    );
-                    slot_cfg
+            Ok(mut registry) => {
+                // SMOODEV-1793: rewrite stale `smooth-*` aliases the
+                // sender side may still emit on this routing JSON.
+                let _ = smooth_cast::provider_migration::migrate_in_memory(&mut registry);
+                match registry.llm_config_for(active_role.slot) {
+                    Ok(slot_cfg) => {
+                        tracing::info!(
+                            role = %active_role.name,
+                            slot = ?active_role.slot,
+                            model = %slot_cfg.model,
+                            "single-agent path: using slot-resolved LlmConfig (overrides SMOOTH_MODEL default)"
+                        );
+                        slot_cfg
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, slot = ?active_role.slot, "slot-resolve failed; falling back to env-var default model");
+                        llm
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, slot = ?active_role.slot, "slot-resolve failed; falling back to env-var default model");
-                    llm
-                }
-            },
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "routing JSON unparseable for slot resolve; using env-var default");
                 llm
@@ -2485,11 +2490,16 @@ async fn main() {
 
     let result = if let (true, true, Some(raw)) = (workflow_opt_in, role_supports_coding_workflow, routing_json) {
         use smooth_cast::coding_workflow::{run_coding_workflow, CodingWorkflowConfig};
+        use smooth_cast::provider_migration::migrate_in_memory;
         use smooth_operator::providers::ProviderRegistry;
         use std::sync::Arc;
 
         match ProviderRegistry::from_json(&raw) {
-            Ok(registry) => {
+            Ok(mut registry) => {
+                // SMOODEV-1793: rewrite any legacy `smooth-*` aliases
+                // baked into the routing JSON Big Smooth sent us.
+                // Older Big Smooth builds still emit them.
+                let _ = migrate_in_memory(&mut registry);
                 let cfg = CodingWorkflowConfig {
                     operator_id: config.operator_id.clone(),
                     task_prompt: config.task.clone(),

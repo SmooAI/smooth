@@ -14,7 +14,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
-use smooth_operator::providers::ProviderRegistry;
+use smooth_cast::provider_migration::load_providers_with_migration;
 use smooth_operator::AgentEvent;
 use tokio::sync::broadcast;
 use tower_http::trace::TraceLayer;
@@ -279,7 +279,7 @@ impl AppState {
             if !providers_path.exists() {
                 return None;
             }
-            match smooth_operator::providers::ProviderRegistry::load_from_file(&providers_path) {
+            match load_providers_with_migration(&providers_path) {
                 // Route the Narc arbiter through the `Judge` slot (smooth-judge).
                 // This is what the slot was named for — a cheap, fast
                 // judge-class model. Falls back to the Default slot when the
@@ -1961,7 +1961,7 @@ async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
             if let Some(ref dir) = policy_dir_guard {
                 if let Some(home) = dirs_next::home_dir() {
                     let providers_path = home.join(".smooth/providers.json");
-                    match smooth_operator::providers::ProviderRegistry::load_from_file(&providers_path) {
+                    match load_providers_with_migration(&providers_path) {
                         Ok(mut registry) => {
                             // See dispatch_ws_task_direct for why: the workflow uses
                             // routing.coding to resolve the LLM, so opts.model only
@@ -2902,7 +2902,7 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
     let routing_path = control_dir.path().join("routing.json");
     if let Some(home) = dirs_next::home_dir() {
         let providers_path = home.join(".smooth/providers.json");
-        match smooth_operator::providers::ProviderRegistry::load_from_file(&providers_path) {
+        match load_providers_with_migration(&providers_path) {
             Ok(mut registry) => {
                 if let Some(ref m) = model {
                     registry.routing.coding.model = m.clone();
@@ -3319,8 +3319,7 @@ fn load_llm_config_for_runner(model_override: &Option<String>) -> anyhow::Result
     let providers_path = dirs_next::home_dir()
         .ok_or_else(|| anyhow::anyhow!("no home directory"))?
         .join(".smooth/providers.json");
-    let registry = smooth_operator::providers::ProviderRegistry::load_from_file(&providers_path)
-        .map_err(|e| anyhow::anyhow!("reading {}: {e}", providers_path.display()))?;
+    let registry = load_providers_with_migration(&providers_path).map_err(|e| anyhow::anyhow!("reading {}: {e}", providers_path.display()))?;
     let llm = registry.default_llm_config().map_err(|e| anyhow::anyhow!("default provider: {e}"))?;
     let model = model_override.clone().unwrap_or(llm.model);
     Ok((llm.api_url, llm.api_key, model))
@@ -4012,7 +4011,7 @@ async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>)
         use smooth_operator::cost::CostBudget;
 
         let providers_path = dirs_next::home_dir().unwrap_or_default().join(".smooth/providers.json");
-        let registry = ProviderRegistry::load_from_file(&providers_path).map_err(|e| anyhow::anyhow!("no LLM providers configured: {e}"))?;
+        let registry = load_providers_with_migration(&providers_path).map_err(|e| anyhow::anyhow!("no LLM providers configured: {e}"))?;
 
         // Resolve the chat agent's LLM. Default is the CODING slot
         // (MiniMax via smooth-coding) — fast AND tool-call-capable.
@@ -4431,7 +4430,7 @@ async fn post_chat_message_stream_handler(
         // Resolve provider config — fail fast with an Error event if
         // the user hasn't configured an LLM provider.
         let providers_path = dirs_next::home_dir().unwrap_or_default().join(".smooth/providers.json");
-        let registry = match ProviderRegistry::load_from_file(&providers_path) {
+        let registry = match load_providers_with_migration(&providers_path) {
             Ok(r) => r,
             Err(e) => {
                 let _ = sse_tx.send(AgentEvent::Error {
@@ -4569,7 +4568,7 @@ async fn post_chat_message_stream_handler(
 /// chatty model can't silently fill the UI with a paragraph.
 async fn auto_name_session(user_prompt: &str) -> Option<String> {
     let providers_path = dirs_next::home_dir()?.join(".smooth/providers.json");
-    let registry = ProviderRegistry::load_from_file(&providers_path).ok()?;
+    let registry = load_providers_with_migration(&providers_path).ok()?;
     let cast = smooth_cast::cast::builtin();
     let agent = cast.get("tagger")?;
     let config = registry.llm_config_for(agent.slot).ok()?;
@@ -4597,7 +4596,7 @@ async fn auto_name_session(user_prompt: &str) -> Option<String> {
 
 fn chat_default_model() -> String {
     let providers_path = dirs_next::home_dir().unwrap_or_default().join(".smooth/providers.json");
-    ProviderRegistry::load_from_file(&providers_path)
+    load_providers_with_migration(&providers_path)
         .ok()
         .and_then(|r| r.default_llm_config().ok())
         .map(|c| c.model)
@@ -4626,7 +4625,7 @@ async fn run_chat_with_history(
     use smooth_operator::agent::{Agent, AgentConfig, AgentEvent};
 
     let providers_path = dirs_next::home_dir().unwrap_or_default().join(".smooth/providers.json");
-    let registry = ProviderRegistry::load_from_file(&providers_path).map_err(|e| anyhow::anyhow!("no LLM providers configured: {e}"))?;
+    let registry = load_providers_with_migration(&providers_path).map_err(|e| anyhow::anyhow!("no LLM providers configured: {e}"))?;
 
     // Coding slot (MiniMax) — fast AND tool-call-capable. See the
     // chat_handler comment for why we pick coding over fast/reasoning.

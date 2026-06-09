@@ -359,7 +359,7 @@ impl LlmDriverModel {
     /// As [`from_activity`](Self::from_activity).
     pub fn from_activity_with_persona(slot: smooth_operator::providers::Activity, persona: DriverPersona) -> Result<Self> {
         let providers_path = dirs_next::home_dir().map(|h| h.join(".smooth/providers.json")).context("no home dir")?;
-        let registry = smooth_operator::providers::ProviderRegistry::load_from_file(&providers_path).context("loading providers.json")?;
+        let registry = smooth_cast::provider_migration::load_providers_with_migration(&providers_path).context("loading providers.json")?;
         let config = registry
             .llm_config_for(slot)
             .with_context(|| format!("no routing slot configured for {slot:?}"))?;

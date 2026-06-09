@@ -686,16 +686,23 @@ fn render_model_picker(frame: &mut Frame, state: &AppState, area: Rect) {
     let picker = &state.model_picker;
 
     // Wider popup than the old list-only view so slot label + model +
-    // description fit on one line.
-    let popup_width = 72.min(area.width.saturating_sub(4));
+    // description fit on one line. The Models view is a catalog, so
+    // it needs more horizontal room — widen up to 100 cols when the
+    // terminal can spare them (SMOODEV-1793 / th-7ee88e).
+    let max_w = match picker.view {
+        PickerView::Slots => 72,
+        PickerView::Models { .. } => 100,
+    };
+    let popup_width = max_w.min(area.width.saturating_sub(4));
     let row_count = match picker.view {
         PickerView::Slots => picker.slots.len(),
         PickerView::Models { .. } => picker.models.len(),
     };
     #[allow(clippy::cast_possible_truncation)]
     let body_rows = row_count.min(usize::from(u16::MAX) - 6) as u16;
-    // +2 for outer border, +1 header, +1 footer
-    let popup_height = (body_rows + 4).min(area.height.saturating_sub(2));
+    // +2 for outer border, +1 footer, +1 caveat (Models view only).
+    let extra: u16 = if matches!(picker.view, PickerView::Models { .. }) { 4 } else { 3 };
+    let popup_height = (body_rows + extra).min(area.height.saturating_sub(2));
 
     let [popup_y] = Layout::vertical([Constraint::Length(popup_height)]).flex(Flex::Center).areas(area);
     let [popup_area] = Layout::horizontal([Constraint::Length(popup_width)]).flex(Flex::Center).areas(popup_y);
@@ -714,17 +721,40 @@ fn render_model_picker(frame: &mut Frame, state: &AppState, area: Rect) {
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
 
-    // Layout inside the border: [body][footer]
-    let [body_area, footer_area] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+    // Layout inside the border. Models view gets an extra
+    // single-line caveat above the keyboard-hint footer so the
+    // benchmark-disclaimer shows once per render (not per row).
+    let caveat_h: u16 = if matches!(picker.view, PickerView::Models { .. }) { 1 } else { 0 };
+    let constraints = if caveat_h == 0 {
+        vec![Constraint::Min(1), Constraint::Length(1)]
+    } else {
+        vec![Constraint::Min(1), Constraint::Length(caveat_h), Constraint::Length(1)]
+    };
+    let chunks = Layout::vertical(constraints).split(inner);
+    let body_area = chunks[0];
 
     match picker.view {
         PickerView::Slots => render_slots_view(frame, picker, body_area),
         PickerView::Models { .. } => render_models_view(frame, picker, body_area),
     }
 
+    if caveat_h == 1 {
+        frame.render_widget(
+            ratatui::widgets::Paragraph::new(crate::model_picker::BENCHMARK_CAVEAT).style(theme::muted()),
+            chunks[1],
+        );
+    }
+    let footer_area = chunks[chunks.len() - 1];
+
     let footer = match picker.view {
         PickerView::Slots => "↑/↓ navigate  Enter pick slot  Esc close".to_string(),
-        PickerView::Models { .. } => "↑/↓ navigate  Enter apply  Esc back".to_string(),
+        PickerView::Models { .. } => {
+            if picker.show_all {
+                "↑/↓ navigate  Enter apply  Tab refilter  Esc back".to_string()
+            } else {
+                "↑/↓ navigate  Enter apply  Tab show-all  Esc back".to_string()
+            }
+        }
     };
     let footer_line = if let Some(err) = picker.error.as_ref() {
         format!("⚠ {err}")
@@ -758,6 +788,18 @@ fn render_slots_view(frame: &mut Frame, picker: &crate::model_picker::ModelPicke
 }
 
 fn render_models_view(frame: &mut Frame, picker: &crate::model_picker::ModelPickerState, area: Rect) {
+    use crate::model_picker::{format_catalog_row, PickerSlot, PickerView};
+
+    // Slot is needed for benchmark column alignment + sort context.
+    let slot = match picker.view {
+        PickerView::Models { slot } => slot,
+        PickerView::Slots => PickerSlot::Default, // shouldn't happen — guard.
+    };
+
+    // Truncate row to popup width (border + 2 pad chars). Multi-byte
+    // safe: collect chars then take.
+    let max_chars = usize::from(area.width).saturating_sub(1);
+
     let items: Vec<ListItem<'_>> = picker
         .models
         .iter()
@@ -765,7 +807,13 @@ fn render_models_view(frame: &mut Frame, picker: &crate::model_picker::ModelPick
         .map(|(i, m)| {
             let selected = i == picker.selected;
             let prefix = if selected { "▸ " } else { "  " };
-            let text = format!("{prefix}{}", m.display());
+            let raw = format_catalog_row(prefix, m, slot);
+            let text: String = if raw.chars().count() > max_chars && max_chars > 1 {
+                let cut: String = raw.chars().take(max_chars.saturating_sub(1)).collect();
+                format!("{cut}…")
+            } else {
+                raw
+            };
             if selected {
                 ListItem::new(Span::styled(
                     text,

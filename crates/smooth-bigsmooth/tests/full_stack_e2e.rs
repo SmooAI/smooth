@@ -615,7 +615,7 @@ async fn run_single_phase(kind: PhaseKind) {
         eprintln!("SKIP: ~/.smooth/providers.json not found");
         return;
     }
-    let registry = smooth_operator::providers::ProviderRegistry::load_from_file(&providers_path).expect("load providers.json");
+    let registry = smooth_cast::provider_migration::load_providers_with_migration(&providers_path).expect("load providers.json");
     let llm = registry.default_llm_config().expect("default provider");
 
     let Some(bs) = spawn_bigsmooth().await else {
@@ -652,7 +652,7 @@ async fn smooth_code_builds_full_stack_across_languages() {
         eprintln!("SKIP: ~/.smooth/providers.json not found");
         return;
     }
-    let registry = smooth_operator::providers::ProviderRegistry::load_from_file(&providers_path).expect("load providers.json");
+    let registry = smooth_cast::provider_migration::load_providers_with_migration(&providers_path).expect("load providers.json");
     let llm = registry.default_llm_config().expect("default provider");
 
     let Some(bs) = spawn_bigsmooth().await else {

@@ -333,7 +333,7 @@ mod tests {
             task: name.to_string(),
             lang: "python".to_string(),
             timestamp: "2026-05-10T12:00:00Z".to_string(),
-            model: Some("smooth-coding".to_string()),
+            model: Some("deepseek-v4-flash".to_string()),
             budget_usd: Some(5.0),
             counts: TestCounts {
                 passed: if solved { 12 } else { 8 },

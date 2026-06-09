@@ -16,6 +16,7 @@ name = "smooth_bench"
 path = "src/lib.rs"
 
 [dependencies]
+smooth-cast.workspace = true
 smooth-code.workspace = true
 smooth-operator.workspace = true
 smooth-pearls = { path = "../smooth-pearls", package = "smooai-smooth-pearls" }

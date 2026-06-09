@@ -78,7 +78,7 @@ impl Default for RealConfig {
     fn default() -> Self {
         Self {
             task_limit: None,
-            under_test_model: "smooth-coding".into(),
+            under_test_model: "deepseek-v4-flash".into(),
             driver_persona: DriverPersona::default(),
             tasks_dir: PathBuf::from("crates/smooth-bench/tasks-real"),
             smooth_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -806,7 +806,7 @@ penalty_per_extra_100_lines = 0.05
         let cfg = RealConfig {
             tasks_dir: tasks_dir.clone(),
             task_limit: None,
-            under_test_model: "smooth-coding".into(),
+            under_test_model: "deepseek-v4-flash".into(),
             driver_persona: DriverPersona::default(),
             smooth_version: "0.0.0-test".into(),
             commit_sha: "test".into(),

@@ -687,6 +687,10 @@ fn handle_input_mode(
         match key.code {
             KeyCode::Up => state.model_picker.select_up(),
             KeyCode::Down => state.model_picker.select_down(),
+            // Tab toggles the slot's use-case filter in the Models
+            // sub-view so users can override the picker (SMOODEV-1793
+            // / th-7ee88e). No-op in Slots view.
+            KeyCode::Tab => state.model_picker.toggle_show_all(),
             KeyCode::Enter => match state.model_picker.view {
                 crate::model_picker::PickerView::Slots => state.model_picker.open_models_for_selected(),
                 crate::model_picker::PickerView::Models { .. } => {
@@ -1088,10 +1092,10 @@ fn load_pearls_for_autocomplete() -> Vec<crate::autocomplete::PearlSuggestion> {
 /// `th` TUI.
 async fn auto_name_session(user_prompt: &str) -> Option<String> {
     use smooth_cast::cast::builtin as cast_builtin;
-    use smooth_operator::providers::ProviderRegistry;
+    use smooth_cast::provider_migration::load_providers_with_migration;
 
     let providers_path = dirs_next::home_dir()?.join(".smooth/providers.json");
-    let registry = ProviderRegistry::load_from_file(&providers_path).ok()?;
+    let registry = load_providers_with_migration(&providers_path).ok()?;
     let cast = cast_builtin();
     let agent = cast.get("tagger")?;
     let config = registry.llm_config_for(agent.slot).ok()?;

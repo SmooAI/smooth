@@ -88,7 +88,7 @@ async fn safehouse_full_stack_rust_and_typescript_with_judge() {
         eprintln!("SKIP: ~/.smooth/providers.json missing — need real LLM credentials");
         return;
     }
-    let registry = smooth_operator::providers::ProviderRegistry::load_from_file(&providers_path).expect("load providers.json");
+    let registry = smooth_cast::provider_migration::load_providers_with_migration(&providers_path).expect("load providers.json");
     let llm = registry.default_llm_config().expect("default llm");
 
     let operative_host_path = find_workspace_target("aarch64-unknown-linux-musl/release/smooth-operative")
