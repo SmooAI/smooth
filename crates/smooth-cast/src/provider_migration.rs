@@ -191,10 +191,10 @@ mod tests {
         assert_eq!(r.routing.coding.model, "deepseek-v4-flash");
         assert_eq!(r.routing.reasoning.as_ref().unwrap().model, "deepseek-v4-pro");
         assert_eq!(r.routing.reviewing.model, "minimax-m2.7-direct");
-        assert_eq!(r.routing.judge.model, "gemini-2.5-flash");
+        assert_eq!(r.routing.judge.model, "groq-llama-3.3-70b");
         assert_eq!(r.routing.summarize.model, "gemini-2.5-flash");
         assert_eq!(r.routing.default.model, "deepseek-v4-flash");
-        assert_eq!(r.routing.fast.as_ref().unwrap().model, "gemini-2.5-flash-lite");
+        assert_eq!(r.routing.fast.as_ref().unwrap().model, "groq-llama-3.1-8b");
     }
 
     #[test]
@@ -269,14 +269,14 @@ mod tests {
         // Load via the wrapper: should rewrite + save back.
         let loaded = load_providers_with_migration(&path).expect("load");
         assert_eq!(loaded.routing.coding.model, "deepseek-v4-flash");
-        assert_eq!(loaded.routing.fast.as_ref().unwrap().model, "gemini-2.5-flash-lite");
+        assert_eq!(loaded.routing.fast.as_ref().unwrap().model, "groq-llama-3.1-8b");
 
         // Read again with raw load_from_file — the file on disk must
         // now hold the concrete names too.
         let raw_reloaded = ProviderRegistry::load_from_file(&path).expect("reload");
         assert_eq!(raw_reloaded.routing.coding.model, "deepseek-v4-flash");
         assert_eq!(raw_reloaded.routing.reasoning.as_ref().unwrap().model, "deepseek-v4-pro");
-        assert_eq!(raw_reloaded.routing.judge.model, "gemini-2.5-flash");
+        assert_eq!(raw_reloaded.routing.judge.model, "groq-llama-3.3-70b");
     }
 
     #[test]
@@ -303,6 +303,6 @@ mod tests {
         assert_eq!(coding.new, "deepseek-v4-flash");
         let fast = rewrites.iter().find(|r| r.slot == "fast").expect("fast rewrite");
         assert_eq!(fast.old, "smooth-fast");
-        assert_eq!(fast.new, "gemini-2.5-flash-lite");
+        assert_eq!(fast.new, "groq-llama-3.1-8b");
     }
 }

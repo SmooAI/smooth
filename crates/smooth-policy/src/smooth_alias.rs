@@ -60,8 +60,19 @@ impl SmoothSlot {
             Self::Coding | Self::Default => "deepseek-v4-flash",
             Self::Reasoning => "deepseek-v4-pro",
             Self::Reviewing => "minimax-m2.7-direct",
-            Self::Judge | Self::Summarize => "gemini-2.5-flash",
-            Self::Fast => "gemini-2.5-flash-lite",
+            // Pearl th-3468bd: judge runs once per dispatch and gates
+            // tool execution; an 8B's miss on adversarial paraphrase
+            // attacks costs more than the few hundred extra ms.
+            // Llama 3.3-70B on Groq is still sub-second p95 and well
+            // under Gemini Flash on cost, with substantially better
+            // refusal/jailbreak detection.
+            Self::Judge => "groq-llama-3.3-70b",
+            // Summarize needs the 1M context window — gemini-2.5-flash
+            // stays.
+            Self::Summarize => "gemini-2.5-flash",
+            // Fast is utility (titles, autocomplete) — sub-300ms first
+            // token and ~10x cheaper than Gemini Flash Lite.
+            Self::Fast => "groq-llama-3.1-8b",
         }
     }
 
@@ -174,9 +185,9 @@ mod tests {
         assert_eq!(migrate_alias("smooth-coding"), Some("deepseek-v4-flash"));
         assert_eq!(migrate_alias("smooth-reasoning"), Some("deepseek-v4-pro"));
         assert_eq!(migrate_alias("smooth-reviewing"), Some("minimax-m2.7-direct"));
-        assert_eq!(migrate_alias("smooth-judge"), Some("gemini-2.5-flash"));
+        assert_eq!(migrate_alias("smooth-judge"), Some("groq-llama-3.3-70b"));
         assert_eq!(migrate_alias("smooth-summarize"), Some("gemini-2.5-flash"));
-        assert_eq!(migrate_alias("smooth-fast"), Some("gemini-2.5-flash-lite"));
+        assert_eq!(migrate_alias("smooth-fast"), Some("groq-llama-3.1-8b"));
         assert_eq!(migrate_alias("smooth-default"), Some("deepseek-v4-flash"));
     }
 
@@ -189,12 +200,12 @@ mod tests {
 
     #[test]
     fn sub_aliases_map_to_slot_concrete_default() {
-        assert_eq!(migrate_alias("smooth-fast-gemini"), Some("gemini-2.5-flash-lite"));
-        assert_eq!(migrate_alias("smooth-fast-haiku"), Some("gemini-2.5-flash-lite"));
-        assert_eq!(migrate_alias("smooth-fast-gpt"), Some("gemini-2.5-flash-lite"));
-        assert_eq!(migrate_alias("smooth-judge-gemini"), Some("gemini-2.5-flash"));
-        assert_eq!(migrate_alias("smooth-judge-haiku"), Some("gemini-2.5-flash"));
-        assert_eq!(migrate_alias("smooth-judge-gpt"), Some("gemini-2.5-flash"));
+        assert_eq!(migrate_alias("smooth-fast-gemini"), Some("groq-llama-3.1-8b"));
+        assert_eq!(migrate_alias("smooth-fast-haiku"), Some("groq-llama-3.1-8b"));
+        assert_eq!(migrate_alias("smooth-fast-gpt"), Some("groq-llama-3.1-8b"));
+        assert_eq!(migrate_alias("smooth-judge-gemini"), Some("groq-llama-3.3-70b"));
+        assert_eq!(migrate_alias("smooth-judge-haiku"), Some("groq-llama-3.3-70b"));
+        assert_eq!(migrate_alias("smooth-judge-gpt"), Some("groq-llama-3.3-70b"));
         assert_eq!(migrate_alias("smooth-summarize-gemini"), Some("gemini-2.5-flash"));
         assert_eq!(migrate_alias("smooth-summarize-gpt"), Some("gemini-2.5-flash"));
         assert_eq!(migrate_alias("smooth-summarize-qwen"), Some("gemini-2.5-flash"));
