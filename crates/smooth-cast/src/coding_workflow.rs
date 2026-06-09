@@ -448,9 +448,9 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
 /// iteration is more likely to regress than close the gap.
 const CLOSE_TO_GREEN_THRESHOLD: u32 = 3;
 
-// The coding system prompt lives in `crates/smooth-operator/src/cast/prompts/fixer.txt`
-// and is loaded by `Cast::builtin()` via `include_str!`. The
-// workflow resolves it at the top of `run_coding_workflow` so adding a
+// The coding system prompt lives in `crates/smooth-cast/src/prompts/fixer.txt`
+// and is loaded by the smooth cast (`crate::cast::builtin()`) via `include_str!`.
+// The workflow resolves it at the top of `run_coding_workflow` so adding a
 // new prompt-aware role there gives all call sites the same text.
 
 /// Build the user-message prompt for a given outer iteration.

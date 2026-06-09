@@ -515,7 +515,7 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
             state.phrase_idx = 0;
             // Surface the iteration boundary inline. The 7-phase
             // decomposition is gone (single CODING phase remains;
-            // see crates/smooth-operator/src/coding_workflow.rs:15)
+            // see crates/smooth-cast/src/coding_workflow.rs)
             // so the only useful per-iteration signal is "we just
             // started iteration N", optionally with the routing
             // alias when known.
