@@ -718,6 +718,20 @@ pub fn phase_network_defaults(phase: &str) -> Vec<NetworkRule> {
             path: None,
             methods: None,
         },
+        // WebSearch MCP providers — Exa (primary) and Parallel (fallback).
+        // Pearl th-bf3f6e. Both return LLM-ready extracted text so the
+        // agent doesn't need a follow-up fetch to read snippets. Only the
+        // hosts themselves; no wildcard / subdomain widening.
+        NetworkRule {
+            domain: "mcp.exa.ai".into(),
+            path: None,
+            methods: None,
+        },
+        NetworkRule {
+            domain: "search.parallel.ai".into(),
+            path: None,
+            methods: None,
+        },
     ];
 
     match phase {
@@ -915,13 +929,15 @@ auto_approve_tools = ["lint_fix", "test_run"]
     fn phase_defaults() {
         // Baseline = 6 LLM providers + 3 language registries (npm/pypi/crates)
         // + static/index.crates.io + dl-cdn.alpinelinux.org + static.rust-lang.org
-        // + sh.rustup.rs = 13 rules at `assess`.
+        // + sh.rustup.rs + mcp.exa.ai + search.parallel.ai = 15 rules at `assess`.
         let assess_rules = phase_network_defaults("assess");
         let assess_domains: Vec<&str> = assess_rules.iter().map(|r| r.domain.as_str()).collect();
         assert!(assess_domains.contains(&"api.openai.com"), "missing openai: {assess_domains:?}");
         assert!(assess_domains.contains(&"crates.io"), "missing crates.io: {assess_domains:?}");
         assert!(assess_domains.contains(&"dl-cdn.alpinelinux.org"), "missing alpine: {assess_domains:?}");
         assert!(assess_domains.contains(&"static.rust-lang.org"), "missing rust-lang: {assess_domains:?}");
+        assert!(assess_domains.contains(&"mcp.exa.ai"), "missing exa: {assess_domains:?}");
+        assert!(assess_domains.contains(&"search.parallel.ai"), "missing parallel: {assess_domains:?}");
         assert!(
             !assess_domains.contains(&"api.github.com"),
             "github should be execute/finalize only: {assess_domains:?}"
