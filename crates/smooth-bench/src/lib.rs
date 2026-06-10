@@ -43,6 +43,7 @@ pub mod score;
 pub mod score_cleanup;
 pub mod score_real;
 pub mod score_replay;
+pub mod score_research;
 pub mod score_swe_bench;
 pub mod supervisor;
 pub mod swe_bench_dataset;
