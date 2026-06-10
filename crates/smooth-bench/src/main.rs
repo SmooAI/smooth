@@ -97,6 +97,14 @@ enum Commands {
     /// agent on bytes freed, files preserved, and whether it asked
     /// before deleting. Pearl th-85e3c5.
     ScoreCleanup(ScoreCleanupArgs),
+
+    /// Agentic web-research tasks. Each task poses a question that
+    /// requires `web_search` + `web_fetch` to answer; the agent
+    /// writes its answer to a known file (default `.smooth/answer.txt`)
+    /// and the scorer matches against an expected-keyword list.
+    /// Probes the new MCP-backed WebSearch tool (pearl th-2cc3f1).
+    /// Pearl th-f4ac64.
+    ScoreResearch(ScoreResearchArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -418,6 +426,39 @@ struct ScoreCleanupArgs {
     task_timeout_s: u64,
 }
 
+#[derive(Parser, Debug)]
+struct ScoreResearchArgs {
+    /// Cap on number of tasks. 0 = run every task in `--tasks-dir`.
+    #[arg(long, default_value_t = 0)]
+    task_limit: usize,
+
+    /// Directory containing one subdir per research-* task. Defaults
+    /// to the in-repo `crates/smooth-bench/tasks-real/`.
+    #[arg(long)]
+    tasks_dir: Option<PathBuf>,
+
+    /// Output path. `.json` → JSON only; otherwise human table.
+    #[arg(long)]
+    output: Option<PathBuf>,
+
+    /// Path to a mock-agent script. Implies `--driver=mock`. Useful for
+    /// CI scoring-pipeline smoke tests that don't burn real API tokens.
+    #[arg(long)]
+    mock_agent: Option<PathBuf>,
+
+    /// Agent backend to dispatch each task against.
+    #[arg(long, default_value_t = AgentDriverKind::Mock, value_enum)]
+    driver: AgentDriverKind,
+
+    /// Model id forwarded to the chosen driver.
+    #[arg(long)]
+    model: Option<String>,
+
+    /// Per-task wall-clock timeout in seconds.
+    #[arg(long, default_value_t = 600)]
+    task_timeout_s: u64,
+}
+
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 enum AgentDriverKind {
     Mock,
@@ -492,6 +533,7 @@ async fn main() -> Result<()> {
         Commands::ScoreReal(args) => run_score_real(args).await,
         Commands::ScoreReplay(args) => run_score_replay(args).await,
         Commands::ScoreCleanup(args) => run_score_cleanup(args).await,
+        Commands::ScoreResearch(args) => run_score_research(args).await,
     }
 }
 
@@ -697,6 +739,119 @@ async fn run_score_cleanup(args: ScoreCleanupArgs) -> Result<()> {
         Ok(())
     } else {
         anyhow::bail!("score-cleanup sweep did not pass — mean {:.3}", aggregate_score.overall_pass_rate);
+    }
+}
+
+async fn run_score_research(args: ScoreResearchArgs) -> Result<()> {
+    use smooth_bench::agent_driver::{AgentDriver, DispatchRequest, MockAgentDriver, OpenCodeDriver, PiDriver, SmoothDriver};
+    use smooth_bench::score_research::{aggregate, discover_tasks, load_manifest, read_answer, run_setup, score_one_task, sweep_passed, AgentRunArtifacts};
+
+    let tasks_dir = args.tasks_dir.unwrap_or_else(|| {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("smooth-bench")
+            .join("tasks-real")
+    });
+
+    let mut to_run = discover_tasks(&tasks_dir)?;
+    if args.task_limit > 0 {
+        to_run.truncate(args.task_limit);
+    }
+    if to_run.is_empty() {
+        anyhow::bail!("no research-* tasks with manifest.toml found under {}", tasks_dir.display());
+    }
+
+    let home = dirs_next::home_dir().ok_or_else(|| anyhow::anyhow!("home dir unknown"))?;
+    let run_root = home.join(".smooth").join("bench-runs").join(format!("research-{}", random_run_id()));
+    std::fs::create_dir_all(&run_root).context("create run_root")?;
+    eprintln!("score-research: work root = {}", run_root.display());
+
+    let driver_kind = if args.mock_agent.is_some() { AgentDriverKind::Mock } else { args.driver };
+    let driver: Box<dyn AgentDriver> = match driver_kind {
+        AgentDriverKind::Mock => {
+            let script = args
+                .mock_agent
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("--driver=mock requires --mock-agent <path>"))?;
+            Box::new(MockAgentDriver::new(script))
+        }
+        AgentDriverKind::Opencode => Box::new(OpenCodeDriver::from_path()),
+        AgentDriverKind::Smooth => Box::new(SmoothDriver::from_path()),
+        AgentDriverKind::Pi => Box::new(PiDriver::from_path()),
+        AgentDriverKind::ClaudeCode => {
+            anyhow::bail!("--driver=claude-code canceled per user direction 2026-06-03 (pearl th-36145e); use --driver=pi instead (th-491e0c)")
+        }
+    };
+    eprintln!("score-research: driver = {}", driver.name());
+    if let Some(m) = args.model.as_deref() {
+        eprintln!("score-research: model  = {m}");
+    }
+
+    let mut per_task = Vec::new();
+    for task_dir in &to_run {
+        let manifest = load_manifest(task_dir)?;
+        let work_dir = run_root.join(&manifest.task.id);
+        eprintln!("\n=== {} ===", manifest.task.id);
+        eprintln!("desc: {}", manifest.task.description);
+
+        run_setup(task_dir, manifest.setup.as_ref(), &work_dir).with_context(|| format!("setup {}", manifest.task.id))?;
+
+        let prompt = std::fs::read_to_string(task_dir.join("README.md")).unwrap_or_default();
+        // smooth_bench::score_cleanup::AgentRunArtifacts is what the
+        // dispatch returns; we ignore it for research because scoring
+        // reads the answer file from disk. The dispatch's `agent_error`
+        // still flows into our artifact so partial runs are reported.
+        let cleanup_artifacts = driver
+            .dispatch(DispatchRequest {
+                task_id: &manifest.task.id,
+                workspace: &work_dir,
+                prompt: &prompt,
+                model: args.model.as_deref(),
+                timeout: std::time::Duration::from_secs(args.task_timeout_s),
+                coach: manifest.coach.mode,
+            })
+            .await
+            .with_context(|| format!("dispatch {} via {}", manifest.task.id, driver.name()))?;
+        let artifacts = AgentRunArtifacts {
+            agent_error: cleanup_artifacts.agent_error,
+        };
+
+        let answer = read_answer(&work_dir, &manifest.expect.answer_path)?;
+        if let Some(a) = answer.as_deref() {
+            let preview: String = a.chars().take(200).collect();
+            eprintln!("answer preview: {preview}");
+        } else {
+            eprintln!("answer file not present at {}", manifest.expect.answer_path);
+        }
+
+        let result = score_one_task(&manifest.task, &manifest.expect, &manifest.weights, answer.as_deref(), &artifacts);
+        eprintln!(
+            "weighted score: {:.3}  (correctness {:.2}, cited {})",
+            result.weighted_score, result.answer_correctness, result.cited_source
+        );
+        per_task.push(result);
+    }
+
+    let passed = sweep_passed(&per_task);
+    let aggregate_score = aggregate(&per_task, env!("CARGO_PKG_VERSION").to_string(), smooth_bench::sweep::current_commit_sha());
+    eprintln!("\n=== AGGREGATE ===");
+    eprintln!("mean weighted: {:.3}  passed={passed}", aggregate_score.overall_pass_rate);
+
+    if let Some(out) = args.output.as_deref() {
+        if out.extension().and_then(|s| s.to_str()) == Some("json") {
+            let payload = serde_json::json!({
+                "base": aggregate_score,
+                "by_task": per_task,
+            });
+            std::fs::write(out, serde_json::to_string_pretty(&payload)?)?;
+            eprintln!("wrote {}", out.display());
+        }
+    }
+
+    if passed {
+        Ok(())
+    } else {
+        anyhow::bail!("score-research sweep did not pass — mean {:.3}", aggregate_score.overall_pass_rate);
     }
 }
 

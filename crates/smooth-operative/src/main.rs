@@ -49,6 +49,7 @@ mod port_forward;
 mod provider_overlay;
 mod reply_to_chat_tool;
 mod tool_hints;
+mod web_search_tool;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -2034,7 +2035,14 @@ async fn main() {
     // HTTP probe — structured fetch for checking on servers the agent
     // started via bg_run.
     let http_client = reqwest::Client::builder().build().unwrap_or_else(|_| reqwest::Client::new());
-    tools.register(HttpFetchTool { client: http_client });
+    tools.register(HttpFetchTool { client: http_client.clone() });
+
+    // WebSearch — Exa MCP (with Parallel fallback). Registers only when a
+    // provider API key is wired in via env; otherwise the tool would always
+    // error on first call and just clutter the schema list.
+    if std::env::var("SMOOTH_EXA_API_KEY").is_ok_and(|v| !v.trim().is_empty()) || std::env::var("SMOOTH_PARALLEL_API_KEY").is_ok_and(|v| !v.trim().is_empty()) {
+        tools.register(web_search_tool::WebSearchTool { client: http_client });
+    }
 
     tools.register(port_forward::ForwardPortTool);
 
