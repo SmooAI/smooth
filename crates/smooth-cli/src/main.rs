@@ -126,27 +126,27 @@ enum Commands {
         #[command(subcommand)]
         cmd: admin::AdminCommands,
     },
-    /// Smoo AI platform API — everything backed by `api.smoo.ai`.
-    /// Login + orgs + agents + keys + members + config + knowledge,
-    /// jobs + products + profile + testing all live under here so
-    /// resource names like `config` / `jobs` / `agents` don't
-    /// collide with Smooth's local subcommands.
+    /// Smoo AI platform API — REST-style verbs backed by `api.smoo.ai`.
+    /// Login + orgs + agents + keys + members + knowledge + jobs +
+    /// products + profile + testing live under here. Config has its
+    /// own top-level subcommand (`th config`) for the daily surface,
+    /// `th admin config` for the platform-admin surface.
     Api {
         #[command(subcommand)]
         cmd: ApiCommands,
     },
-    /// Smoo AI `@smooai/config` — ergonomic shortcuts over the
-    /// `/config/*` endpoints on `api.smoo.ai`. Reads + writes a single
-    /// value (`get` / `set` / `list`); syncs the full schema document
-    /// between `.smooai-config/schema.json` and the org's remote
-    /// schema (`push` / `pull` / `diff`); scaffolds a fresh local
-    /// schema package (`init`).
+    /// Smoo AI `@smooai/config` — the daily-developer config surface.
+    /// `get` / `set` / `list` for single values; `feature-flag` to
+    /// evaluate a flag; `push` / `pull` / `diff` to sync the
+    /// `.smooai-config/schema.json` document with the org's remote
+    /// schema; `init` to scaffold a fresh local schema package;
+    /// `delete` to remove a value record.
     ///
     /// Prefers the user JWT at `~/.smooth/auth/smooai-user.json`;
     /// pass `--m2m` to use the M2M session instead.
     ///
-    /// The full schemas + environments surface lives under
-    /// `th api config`.
+    /// Platform-admin verbs (schemas CRUD, environments CRUD,
+    /// bulk-set) live under `th admin config`. Pearl `th-9c0c34`.
     Config {
         #[command(subcommand)]
         cmd: config::Cmd,
@@ -537,12 +537,6 @@ enum ApiCommands {
     Crm {
         #[command(subcommand)]
         cmd: smooai::crm::Cmd,
-    },
-    /// Smoo AI configuration — schemas, environments, values, feature
-    /// flags.
-    Config {
-        #[command(subcommand)]
-        cmd: smooai::config::Cmd,
     },
     /// Smoo AI knowledge documents (text, websites, files).
     Knowledge {
@@ -1151,7 +1145,6 @@ async fn main() -> Result<()> {
             ApiCommands::Keys { cmd } => smooai::keys::cmd(cmd).await,
             ApiCommands::Members { cmd } => smooai::members::cmd(cmd).await,
             ApiCommands::Crm { cmd } => smooai::crm::cmd(cmd).await,
-            ApiCommands::Config { cmd } => smooai::config::cmd(cmd).await,
             ApiCommands::Knowledge { cmd } => smooai::knowledge::cmd(cmd).await,
             ApiCommands::Jobs { cmd } => smooai::jobs::cmd(cmd).await,
             ApiCommands::Products { cmd } => smooai::products::cmd(cmd).await,

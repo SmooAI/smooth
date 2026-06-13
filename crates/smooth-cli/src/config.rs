@@ -124,7 +124,7 @@ pub enum Cmd {
         /// The config key name (e.g. `databaseUrl`).
         key: String,
         /// Environment name. Defaults to `development`.
-        #[arg(long, default_value = DEFAULT_ENVIRONMENT)]
+        #[arg(long, alias = "env", default_value = DEFAULT_ENVIRONMENT)]
         environment: String,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` env
         /// then the credentials file's `active_org_id`.
@@ -152,7 +152,7 @@ pub enum Cmd {
         #[arg(value_parser = parse_non_empty_value)]
         value: String,
         /// Environment name. Defaults to `development`.
-        #[arg(long, default_value = DEFAULT_ENVIRONMENT)]
+        #[arg(long, alias = "env", default_value = DEFAULT_ENVIRONMENT)]
         environment: String,
         /// Override the active org.
         #[arg(long)]
@@ -182,7 +182,7 @@ pub enum Cmd {
     /// List all config values for an environment as a key→value map.
     List {
         /// Environment name. Defaults to `development`.
-        #[arg(long, default_value = DEFAULT_ENVIRONMENT)]
+        #[arg(long, alias = "env", default_value = DEFAULT_ENVIRONMENT)]
         environment: String,
         /// Override the active org.
         #[arg(long)]
@@ -268,6 +268,57 @@ pub enum Cmd {
         #[arg(long)]
         force: bool,
     },
+    /// Evaluate a feature flag for the active org + environment.
+    /// Prints the resolved value on its own line (`true` / `false` /
+    /// string) — pipe-friendly for shell gates. `--json` returns the
+    /// full evaluation envelope (variant id, default-flag, etc.).
+    /// Pearl `th-9c0c34`.
+    #[command(name = "feature-flag", alias = "ff")]
+    FeatureFlag {
+        /// The feature-flag key.
+        key: String,
+        /// Environment name. Defaults to `development`.
+        #[arg(long, alias = "env", default_value = DEFAULT_ENVIRONMENT)]
+        environment: String,
+        /// Override the active org.
+        #[arg(long)]
+        org_id: Option<String>,
+        /// JSON evaluation context: a file path, `-` for stdin, or an
+        /// inline JSON object. Used by context-aware flag rules
+        /// (e.g. user-id-percentage rollouts). Omitted = empty `{}`.
+        #[arg(long)]
+        context: Option<String>,
+        /// Emit the full evaluation envelope as JSON instead of the
+        /// resolved value alone.
+        #[arg(long)]
+        json: bool,
+        /// Use the M2M session at `~/.smooth/auth/smooai.json`
+        /// instead of the user JWT.
+        #[arg(long)]
+        m2m: bool,
+    },
+    /// Delete a config value for the given (key, environment) pair.
+    /// Removes the row entirely — distinct from `set FOO null` which
+    /// stores an explicit null. Refuses to delete without `--force`
+    /// when the value is in the `secret` tier. Pearl `th-9c0c34`.
+    Delete {
+        /// The config key name.
+        key: String,
+        /// Environment name. Defaults to `development`.
+        #[arg(long, alias = "env", default_value = DEFAULT_ENVIRONMENT)]
+        environment: String,
+        /// Override the active org.
+        #[arg(long)]
+        org_id: Option<String>,
+        /// Required to delete a secret-tier value — the server returns
+        /// 409 without it. Prevents accidental loss of credentials.
+        #[arg(long)]
+        force: bool,
+        /// Use the M2M session at `~/.smooth/auth/smooai.json`
+        /// instead of the user JWT.
+        #[arg(long)]
+        m2m: bool,
+    },
 }
 
 /// Dispatch a `th config <sub>` invocation.
@@ -324,6 +375,21 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             m2m,
         } => cmd_diff(org_id, schema_name, json, m2m).await,
         Cmd::Init { directory, force } => cmd_init(directory, force),
+        Cmd::FeatureFlag {
+            key,
+            environment,
+            org_id,
+            context,
+            json,
+            m2m,
+        } => cmd_feature_flag(key, environment, org_id, context, json, m2m).await,
+        Cmd::Delete {
+            key,
+            environment,
+            org_id,
+            force,
+            m2m,
+        } => cmd_delete(key, environment, org_id, force, m2m).await,
     }
 }
 
@@ -490,6 +556,85 @@ async fn cmd_set(
     Ok(())
 }
 
+async fn cmd_feature_flag(key: String, environment: String, org_id: Option<String>, context: Option<String>, json: bool, m2m: bool) -> Result<()> {
+    let cfg = ConfigClient::load(m2m).await?;
+    let org = cfg.resolve_org(org_id)?;
+
+    // Context resolution: file path / `-` for stdin / inline JSON / empty.
+    // The "inline JSON" path lets callers do `--context '{"userId":"x"}'`
+    // without an intermediate file when the context is tiny.
+    let ctx_value: Value = match context {
+        None => serde_json::json!({}),
+        Some(raw) if raw == "-" => {
+            use std::io::Read;
+            let mut s = String::new();
+            std::io::stdin().read_to_string(&mut s).context("read stdin context")?;
+            serde_json::from_str(&s).context("parse stdin JSON context")?
+        }
+        Some(raw) if raw.trim().starts_with('{') => serde_json::from_str(&raw).context("parse inline JSON context")?,
+        Some(path) => {
+            let s = std::fs::read_to_string(&path).with_context(|| format!("read context file {path}"))?;
+            serde_json::from_str(&s).with_context(|| format!("parse JSON from {path}"))?
+        }
+    };
+
+    let body = serde_json::json!({
+        "key": &key,
+        "environment": &environment,
+        "context": ctx_value,
+    });
+    let path = format!("/organizations/{org}/config/feature-flags/{}/evaluate", urlencoding::encode(&key));
+    let resp = cfg.post(&path, &body).await.with_context(|| format!("POST evaluate flag {key}"))?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+        return Ok(());
+    }
+
+    // Pretty path: just print the resolved value on its own line — the
+    // pipe-friendly contract. Backends vary on the envelope shape; try a
+    // few keys before falling back to the whole response.
+    let value = resp
+        .get("value")
+        .or_else(|| resp.get("result"))
+        .or_else(|| resp.get("enabled"))
+        .cloned()
+        .unwrap_or(resp.clone());
+    match value {
+        Value::Bool(b) => println!("{b}"),
+        Value::String(s) => println!("{s}"),
+        Value::Null => println!("null"),
+        other => println!("{}", serde_json::to_string(&other).unwrap_or_default()),
+    }
+    Ok(())
+}
+
+async fn cmd_delete(key: String, environment: String, org_id: Option<String>, force: bool, m2m: bool) -> Result<()> {
+    let cfg = ConfigClient::load(m2m).await?;
+    let org = cfg.resolve_org(org_id)?;
+    let mut path = format!(
+        "/organizations/{org}/config/values/{}?environment={}",
+        urlencoding::encode(&key),
+        urlencoding::encode(&environment)
+    );
+    if force {
+        // Server inspects this query param to allow secret-tier
+        // deletes. Without it, the server returns 409 on secret-tier
+        // keys — matching `sst-secret-list --reveal` ergonomics
+        // (CLAUDE.md §13).
+        path.push_str("&force=true");
+    }
+    let resp = cfg.delete(&path).await.with_context(|| format!("DELETE {key}"))?;
+
+    println!();
+    println!("  {} Deleted {} from {}", "✓".green().bold(), key.cyan().bold(), environment.cyan());
+    if let Some(deleted_id) = resp.get("id").and_then(|v| v.as_str()) {
+        println!("    {}  {}", "id".dimmed(), deleted_id.dimmed());
+    }
+    println!();
+    Ok(())
+}
+
 /// Render a value for human-friendly display. Masks by default to the
 /// last 4 chars regardless of tier — public-tier keys can still be
 /// sensitive (CDN tokens, allowlist entries, anything an attacker
@@ -615,6 +760,10 @@ impl ConfigClient {
 
     async fn put(&self, path: &str, body: &Value) -> Result<Value> {
         self.send(reqwest::Method::PUT, path, Some(body)).await
+    }
+
+    async fn delete(&self, path: &str) -> Result<Value> {
+        self.send(reqwest::Method::DELETE, path, None).await
     }
 
     async fn send(&self, method: reqwest::Method, path: &str, body: Option<&Value>) -> Result<Value> {
