@@ -70,14 +70,51 @@ use owo_colors::OwoColorize;
 use serde_json::Value;
 use smooai_client_shared::auth::storage::{Credentials, CredentialsStore};
 
-/// Default tier for `th config set` when `--tier` isn't passed. Matches
-/// the `smooai-config set` CLI's default.
-const DEFAULT_TIER: &str = "public";
-
 /// Default environment when `--environment` isn't passed. Matches the
 /// `smooai-config` CLI's default — the dev laptop case is the common
 /// case, so this saves a keystroke.
 const DEFAULT_ENVIRONMENT: &str = "development";
+
+/// Config value tiers as understood by api.smoo.ai. `public` is the
+/// default because most keys are non-secrets (URLs, flags, IDs); using
+/// a clap `ValueEnum` here means typos like `--tier=secrets` fail at
+/// parse time with a list of valid options, not later inside cmd_set
+/// after we've already PUT a half-built request to the API.
+#[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq, Default)]
+#[clap(rename_all = "snake_case")]
+pub enum Tier {
+    /// Non-sensitive config (URLs, public IDs, feature flag values).
+    /// Default when `--tier` is omitted.
+    #[default]
+    Public,
+    /// Sensitive config — API keys, DB URLs with credentials, OAuth
+    /// secrets. Stored encrypted server-side.
+    Secret,
+    /// Boolean / string flags consumed via `featureFlag.get(...)`.
+    FeatureFlag,
+}
+
+impl Tier {
+    /// Wire-format string the API expects in PUT bodies. Snake_case.
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Secret => "secret",
+            Self::FeatureFlag => "feature_flag",
+        }
+    }
+}
+
+/// Parse-time guard: `th config set FOO ""` previously turned into a
+/// no-op-with-fully-masked echo. Reject empty / whitespace-only values
+/// with a clear message before clap dispatches.
+fn parse_non_empty_value(s: &str) -> std::result::Result<String, String> {
+    if s.trim().is_empty() {
+        Err("value cannot be empty or whitespace-only".into())
+    } else {
+        Ok(s.to_string())
+    }
+}
 
 #[derive(Subcommand, Debug)]
 pub enum Cmd {
@@ -109,6 +146,10 @@ pub enum Cmd {
         /// The config key name.
         key: String,
         /// The new value. Parsed as JSON when valid; raw string otherwise.
+        /// Empty / whitespace-only values are rejected at parse time —
+        /// use `th config delete` (or PUT a null via API) if you mean
+        /// to clear a key.
+        #[arg(value_parser = parse_non_empty_value)]
         value: String,
         /// Environment name. Defaults to `development`.
         #[arg(long, default_value = DEFAULT_ENVIRONMENT)]
@@ -116,13 +157,23 @@ pub enum Cmd {
         /// Override the active org.
         #[arg(long)]
         org_id: Option<String>,
-        /// Tier: `public`, `secret`, or `feature_flag`. Defaults to `public`.
-        #[arg(long, default_value = DEFAULT_TIER)]
-        tier: String,
+        /// Tier. Defaults to `public`. Validated at parse-time.
+        #[arg(long, value_enum, default_value_t = Tier::Public)]
+        tier: Tier,
         /// Schema name to write under. Defaults to the first schema
         /// returned by the API (matches `smooai-config set` behavior).
         #[arg(long)]
         schema_name: Option<String>,
+        /// Emit the API response as JSON instead of the pretty echo
+        /// (mirrors `get --json`). Useful for scripting + CI gates.
+        #[arg(long)]
+        json: bool,
+        /// Show the value in plaintext on the echo line instead of
+        /// last-4 mask. Defaults to masked — pearls th-4ebbf7 +
+        /// th-9cc412. Mirrors `scripts/secret-helpers/sst-secret-list
+        /// --reveal` (CLAUDE.md §13).
+        #[arg(long)]
+        reveal: bool,
         /// Use the M2M session at `~/.smooth/auth/smooai.json`
         /// instead of the user JWT.
         #[arg(long)]
@@ -137,8 +188,13 @@ pub enum Cmd {
         #[arg(long)]
         org_id: Option<String>,
         /// Emit the response as JSON instead of a key/value listing.
+        /// JSON output is NEVER masked — assumes script consumer.
         #[arg(long)]
         json: bool,
+        /// Show values in plaintext instead of last-4 mask in pretty
+        /// output. Defaults to masked. Has no effect with `--json`.
+        #[arg(long)]
+        reveal: bool,
         /// Use the M2M session at `~/.smooth/auth/smooai.json`
         /// instead of the user JWT.
         #[arg(long)]
@@ -237,14 +293,17 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             org_id,
             tier,
             schema_name,
+            json,
+            reveal,
             m2m,
-        } => cmd_set(key, value, environment, org_id, tier, schema_name, m2m).await,
+        } => cmd_set(key, value, environment, org_id, tier, schema_name, json, reveal, m2m).await,
         Cmd::List {
             environment,
             org_id,
             json,
+            reveal,
             m2m,
-        } => cmd_list(environment, org_id, json, m2m).await,
+        } => cmd_list(environment, org_id, json, reveal, m2m).await,
         Cmd::Push {
             org_id,
             schema_name,
@@ -291,7 +350,7 @@ async fn cmd_get(key: String, environment: String, org_id: Option<String>, json:
     Ok(())
 }
 
-async fn cmd_list(environment: String, org_id: Option<String>, json: bool, m2m: bool) -> Result<()> {
+async fn cmd_list(environment: String, org_id: Option<String>, json: bool, reveal: bool, m2m: bool) -> Result<()> {
     let cfg = ConfigClient::load(m2m).await?;
     let org = cfg.resolve_org(org_id)?;
     let path = format!("/organizations/{org}/config/values?environment={}", urlencoding::encode(&environment));
@@ -317,8 +376,9 @@ async fn cmd_list(environment: String, org_id: Option<String>, json: bool, m2m: 
         // Pearl th-9cc412. List endpoint returns no per-key tier so we
         // can't be selective — mask everything to last-4 the same way
         // `display_value` does for cmd_set. Echo discipline applies
-        // identically to both surfaces.
-        let rendered = display_value(&values[k], "");
+        // identically to both surfaces. `--reveal` opts in to
+        // plaintext (pearl th-7ea946; mirrors sst-secret-list --reveal).
+        let rendered = display_value_for(&values[k], reveal);
         println!("  {:<width$}  {}", k.cyan(), rendered.dimmed(), width = max_key_len);
     }
     println!();
@@ -326,7 +386,17 @@ async fn cmd_list(environment: String, org_id: Option<String>, json: bool, m2m: 
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn cmd_set(key: String, value: String, environment: String, org_id: Option<String>, tier: String, schema_name: Option<String>, m2m: bool) -> Result<()> {
+async fn cmd_set(
+    key: String,
+    value: String,
+    environment: String,
+    org_id: Option<String>,
+    tier: Tier,
+    schema_name: Option<String>,
+    json: bool,
+    reveal: bool,
+    m2m: bool,
+) -> Result<()> {
     let cfg = ConfigClient::load(m2m).await?;
     let org = cfg.resolve_org(org_id)?;
 
@@ -383,51 +453,61 @@ async fn cmd_set(key: String, value: String, environment: String, org_id: Option
     // Parse value as JSON, fall back to string. Matches smooai-config.
     let parsed_value = serde_json::from_str::<Value>(&value).unwrap_or_else(|_| Value::String(value.clone()));
 
+    let tier_wire = tier.as_wire();
     let body = serde_json::json!({
         "schemaId": schema_id,
         "environmentId": env_id,
         "key": key,
         "value": parsed_value,
-        "tier": tier,
+        "tier": tier_wire,
     });
     let resp = cfg
         .put(&format!("/organizations/{org}/config/values"), &body)
         .await
         .context("PUT /config/values")?;
 
+    if json {
+        // Mirror `get --json`'s contract: emit the raw API response so
+        // scripts can pipe into `jq`. Never masks — caller asked for the
+        // wire shape verbatim.
+        println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+        return Ok(());
+    }
+
     println!();
     println!(
         "  {} Set {} = {} in {}",
         "✓".green().bold(),
         key.cyan().bold(),
-        display_value(&parsed_value, &tier).dimmed(),
+        display_value_for(&parsed_value, reveal).dimmed(),
         environment.cyan()
     );
     if let Some(id) = resp.get("id").and_then(|v| v.as_str()) {
         println!("    {}  {}", "id".dimmed(), id.dimmed());
     }
-    println!("    {}  {}", "tier".dimmed(), tier.dimmed());
+    println!("    {}  {}", "tier".dimmed(), tier_wire.dimmed());
     println!();
     Ok(())
 }
 
-/// Render a value for human-friendly display. ALL values are masked
-/// to the last 4 chars regardless of tier — public-tier keys can still
-/// be sensitive (CDN tokens, allowlist entries, anything an attacker
+/// Render a value for human-friendly display. Masks by default to the
+/// last 4 chars regardless of tier — public-tier keys can still be
+/// sensitive (CDN tokens, allowlist entries, anything an attacker
 /// could correlate) and we'd rather take a tiny UX hit than train
 /// users that console echo is a safe place for value confirmation.
-/// Pearls th-4ebbf7 + th-9cc412.
-///
-/// The `_tier` param is kept so future per-tier policy (e.g. wider
-/// disclosure for feature_flag booleans, or full hiding for
-/// HSM-backed secrets) can layer in without a signature churn across
-/// call sites.
-fn display_value(v: &Value, _tier: &str) -> String {
+/// `reveal=true` opts in to plaintext, mirroring `scripts/secret-helpers/
+/// sst-secret-list --reveal` (CLAUDE.md §13). Pearls th-4ebbf7 +
+/// th-9cc412 + th-7ea946.
+fn display_value_for(v: &Value, reveal: bool) -> String {
     let raw = match v {
         Value::String(s) => s.clone(),
         other => serde_json::to_string(other).unwrap_or_default(),
     };
-    mask_secret(&raw)
+    if reveal {
+        raw
+    } else {
+        mask_secret(&raw)
+    }
 }
 
 /// Mask all but the last 4 characters of a secret for log/display use.
@@ -965,24 +1045,21 @@ mod tests {
     }
 
     #[test]
-    fn display_value_masks_public_string() {
-        // Pearls th-4ebbf7 + th-9cc412: public values now mask too —
-        // tier no longer affects display. Echo discipline is universal.
-        let masked = display_value(&Value::String("hello-public-token".to_string()), "public");
+    fn display_value_masks_string_by_default() {
+        let masked = display_value_for(&Value::String("hello-public-token".to_string()), false);
         assert_eq!(masked, "**************oken");
     }
 
     #[test]
-    fn display_value_masks_secret_string() {
-        let masked = display_value(&Value::String("abcdefgh".to_string()), "secret");
+    fn display_value_masks_secret_short_string() {
+        let masked = display_value_for(&Value::String("abcdefgh".to_string()), false);
         assert_eq!(masked, "****efgh");
     }
 
     #[test]
     fn display_value_masks_object_after_serialization() {
         let v = serde_json::json!({"api_key": "abcdefgh"});
-        let masked = display_value(&v, "public");
-        // {"api_key":"abcdefgh"} → last 4 = `gh"}` revealed, rest stars.
+        let masked = display_value_for(&v, false);
         assert!(masked.ends_with("gh\"}"));
         assert!(masked.starts_with("***"));
         assert_eq!(masked.len(), r#"{"api_key":"abcdefgh"}"#.len());
@@ -990,22 +1067,63 @@ mod tests {
 
     #[test]
     fn display_value_masks_number() {
-        // Numbers are tiny — last-4 mask gives `**42`. Still consistent,
-        // and a number config value isn't a secret anyway. Just no
-        // tier-specific code path; one rule, no surprises.
-        assert_eq!(display_value(&Value::from(42), "public"), "**");
-        assert_eq!(display_value(&Value::from(12_345), "public"), "*2345");
-        assert_eq!(display_value(&Value::Bool(true), "public"), "****");
+        // Numbers and bools serialize compactly; masking still applies
+        // for consistency even though they're rarely "secret".
+        assert_eq!(display_value_for(&Value::from(42), false), "**");
+        assert_eq!(display_value_for(&Value::from(12_345), false), "*2345");
+        assert_eq!(display_value_for(&Value::Bool(true), false), "****");
     }
 
     #[test]
-    fn display_value_tier_param_is_currently_ignored() {
-        // Lock the universal-mask invariant — if a future PR re-introduces
-        // a tier-conditional branch it should make a deliberate choice
-        // here, not regress accidentally.
-        let s = Value::String("0123456789".to_string());
-        assert_eq!(display_value(&s, "public"), display_value(&s, "secret"));
-        assert_eq!(display_value(&s, "feature_flag"), display_value(&s, ""));
+    fn display_value_reveal_returns_plaintext_for_string() {
+        let s = Value::String("supersecret".to_string());
+        assert_eq!(display_value_for(&s, true), "supersecret");
+    }
+
+    #[test]
+    fn display_value_reveal_returns_compact_json_for_other() {
+        let obj = serde_json::json!({"k": 1, "v": "x"});
+        let revealed = display_value_for(&obj, true);
+        // serde_json compact form — exact byte order matches the parsed shape.
+        assert!(revealed.contains("\"k\":1") && revealed.contains("\"v\":\"x\""));
+        assert!(!revealed.contains("*"));
+    }
+
+    #[test]
+    fn parse_non_empty_value_rejects_empty_and_whitespace() {
+        // Pearl th-7ea946: ban `th config set FOO ""` at parse time
+        // rather than later inside cmd_set where the API would have
+        // accepted an empty string.
+        assert!(parse_non_empty_value("").is_err());
+        assert!(parse_non_empty_value("   ").is_err());
+        assert!(parse_non_empty_value("\t\n").is_err());
+    }
+
+    #[test]
+    fn parse_non_empty_value_accepts_valid() {
+        assert_eq!(parse_non_empty_value("hello").unwrap(), "hello");
+        // Leading/trailing whitespace allowed when there's real content —
+        // value might be a Bearer-prefixed string the user intentionally
+        // padded; we don't second-guess the wire format.
+        assert_eq!(parse_non_empty_value("  hello  ").unwrap(), "  hello  ");
+    }
+
+    #[test]
+    fn tier_wire_format_matches_api_contract() {
+        // Locks the snake_case wire-format strings — if a future PR
+        // changes them the API silently rejects with a 4xx, which is
+        // hard to debug. Better to fail here.
+        assert_eq!(Tier::Public.as_wire(), "public");
+        assert_eq!(Tier::Secret.as_wire(), "secret");
+        assert_eq!(Tier::FeatureFlag.as_wire(), "feature_flag");
+    }
+
+    #[test]
+    fn tier_default_is_public() {
+        // Mirrors the prior `DEFAULT_TIER` constant. Keep it explicit so
+        // a downstream change to clap's default_value_t doesn't silently
+        // shift the default.
+        assert_eq!(Tier::default(), Tier::Public);
     }
 
     fn fixture_creds(expired: bool) -> Credentials {
