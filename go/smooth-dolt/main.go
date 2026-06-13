@@ -108,14 +108,20 @@ func main() {
 		cmdLog(dataDir, n)
 	case "push":
 		if len(os.Args) < 3 {
-			fatal("usage: smooth-dolt push <data-dir>")
+			fatal("usage: smooth-dolt push <data-dir> [-u origin <branch>] [-f]")
 		}
-		cmdDoltCmd(os.Args[2], "push")
+		// Pearl th-9eb6a0: forward trailing args (-u, -f) into the
+		// CALL DOLT_PUSH(...) so the Rust CLI's first-push retry
+		// (`set_upstream = true`) actually reaches Dolt. Previously
+		// `cmdDoltCmd` took no args and dropped flags silently — first
+		// push to a fresh remote errored with "no upstream branch" and
+		// stayed errored even after the auto-retry.
+		cmdDoltCmdWithArgs(os.Args[2], "push", os.Args[3:])
 	case "pull":
 		if len(os.Args) < 3 {
-			fatal("usage: smooth-dolt pull <data-dir>")
+			fatal("usage: smooth-dolt pull <data-dir> [<remote>] [<branch>]")
 		}
-		cmdDoltCmd(os.Args[2], "pull")
+		cmdDoltCmdWithArgs(os.Args[2], "pull", os.Args[3:])
 	case "clone":
 		if len(os.Args) < 4 {
 			fatal("usage: smooth-dolt clone <remote-url> <data-dir>")
@@ -387,11 +393,40 @@ func cmdRemote(dataDir string, args []string) {
 }
 
 func cmdDoltCmd(dataDir string, doltCmd string) {
+	cmdDoltCmdWithArgs(dataDir, doltCmd, nil)
+}
+
+// cmdDoltCmdWithArgs forwards trailing CLI args into the Dolt stored
+// procedure call. Pearl th-9eb6a0.
+//
+// SQL shape: `CALL DOLT_PUSH(?, ?, ?)` with one `?` per arg + the same
+// arg list bound positionally. Arg values are passed as strings; Dolt
+// interprets `-u`, `--set-upstream`, `-f`, `--force`, `origin`, `main`,
+// etc. the same way the dolt CLI does.
+//
+// Empty args == legacy behavior == `CALL DOLT_PUSH()` (no parens-with-
+// holes form). Keeps zero-arg pull/gc/status callers unchanged.
+func cmdDoltCmdWithArgs(dataDir string, doltCmd string, args []string) {
 	db := openDB(dataDir)
 	defer db.Close()
 
-	callSQL := fmt.Sprintf("CALL DOLT_%s()", strings.ToUpper(doltCmd))
-	if _, err := db.Exec(callSQL); err != nil {
+	if len(args) == 0 {
+		callSQL := fmt.Sprintf("CALL DOLT_%s()", strings.ToUpper(doltCmd))
+		if _, err := db.Exec(callSQL); err != nil {
+			fatal(doltCmd + ": " + err.Error())
+		}
+		fmt.Println(doltCmd + ": ok")
+		return
+	}
+
+	placeholders := make([]string, len(args))
+	sqlArgs := make([]interface{}, len(args))
+	for i, a := range args {
+		placeholders[i] = "?"
+		sqlArgs[i] = a
+	}
+	callSQL := fmt.Sprintf("CALL DOLT_%s(%s)", strings.ToUpper(doltCmd), strings.Join(placeholders, ", "))
+	if _, err := db.Exec(callSQL, sqlArgs...); err != nil {
 		fatal(doltCmd + ": " + err.Error())
 	}
 	fmt.Println(doltCmd + ": ok")
