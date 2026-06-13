@@ -4150,7 +4150,36 @@ fn open_pearl_store_with_path() -> Result<(smooth_pearls::PearlStore, std::path:
 /// - the global `~/.smooth/dolt` store is used (no enclosing repo
 ///   expected; sessions/memories don't need cross-machine sync),
 /// - the project isn't a git repo,
+/// - **`.smooth/dolt/` is git-ignored** (pearl `th-975dfe` beads model
+///   — sync moved to `refs/dolt/data` via `th pearls push`, no git
+///   commit needed; pearl `th-016296` made this a quiet no-op
+///   instead of erroring on the `use -f` hint),
+/// - the call is from a linked worktree (SMOODEV-1836 — see below),
 /// - nothing under `.smooth/dolt/` actually changed (idempotent).
+/// True when `dolt_dir` (relative to `repo_root`) matches a
+/// `.gitignore` rule. Implements pearl th-016296's beads-model skip:
+/// when the user has untracked `.smooth/dolt/`, auto-committing it
+/// back into the index errors with "use -f to force-add ignored files"
+/// on every pearl mutation.
+///
+/// `git check-ignore -q <path>` exits 0 when the path is ignored, 1
+/// when it's not, 128 on error (bad invocation, not a git repo). We
+/// treat anything other than 0 as "not ignored / unknown" so the
+/// caller falls through to the legacy auto-commit path — safer than
+/// silently skipping if git is unhappy.
+fn is_dolt_gitignored(repo_root: &std::path::Path, dolt_dir: &std::path::Path) -> bool {
+    let Ok(output) = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["check-ignore", "-q", "--"])
+        .arg(dolt_dir)
+        .output()
+    else {
+        return false;
+    };
+    output.status.code() == Some(0)
+}
+
 fn auto_commit_pearl_state(dolt_dir: &std::path::Path, action: &str) -> Result<()> {
     if is_global_pearl_store(dolt_dir) {
         return Ok(());
@@ -4174,6 +4203,17 @@ fn auto_commit_pearl_state(dolt_dir: &std::path::Path, action: &str) -> Result<(
              worktree. Run pearl mutations from the primary worktree so the dolt \
              store stays on one lineage; sync with `th pearls push`."
         );
+        return Ok(());
+    }
+
+    // Pearl th-016296. Beads-model repos gitignore `.smooth/dolt/`; the
+    // git add below would otherwise fail with "use -f to force-add ignored
+    // files" on every pearl mutation. Check ahead of time with
+    // `git check-ignore -q .smooth/dolt/` (exit 0 = ignored, 1 = not
+    // ignored, 128 = error). Silent skip on the ignored case is correct:
+    // sync happens via `th pearls push` to refs/dolt/data, not via git
+    // commits of the on-disk files.
+    if is_dolt_gitignored(&repo_root, dolt_dir) {
         return Ok(());
     }
 
@@ -4469,7 +4509,8 @@ mod pearl_autocommit_tests {
         .unwrap();
         assert!(status.contains("?? src.rs"), "expected src.rs to remain untracked, got: {status:?}");
 
-        // The pearl commit landed and only contains `.smooth/dolt/` paths.
+        // Verify the pearl commit landed by name-pattern (the legacy
+        // tracked-binary model). Continued below.
         let files = String::from_utf8(
             Command::new("git")
                 .arg("-C")
@@ -4483,6 +4524,78 @@ mod pearl_autocommit_tests {
         for line in files.lines().filter(|l| !l.is_empty()) {
             assert!(line.starts_with(".smooth/dolt/"), "auto-commit included non-pearl path: {line}");
         }
+    }
+
+    /// Pearl th-016296: when `.smooth/dolt/` is gitignored (the
+    /// beads-model repos after pearl `th-975dfe`), auto-commit must
+    /// silently no-op. Previously the function ran `git add
+    /// .smooth/dolt/` unconditionally and errored with "use -f to
+    /// force-add ignored files" on every pearl mutation.
+    #[test]
+    fn auto_commit_silent_noop_when_dolt_gitignored() {
+        let dir = init_repo();
+        let dolt = dir.path().join(".smooth/dolt");
+        // Add the gitignore entry the way pearl th-975dfe writes it.
+        std::fs::write(dir.path().join(".gitignore"), ".smooth/dolt/\n").unwrap();
+        git(&["add", ".gitignore"], dir.path());
+        git(&["commit", "--no-verify", "-m", "gitignore"], dir.path());
+
+        let head_before = String::from_utf8(
+            Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+
+        // Touch the dolt store like a pearl mutation would.
+        std::fs::write(dolt.join("noms_file"), "pearl state changed").unwrap();
+
+        // Must not error, must not create a new commit.
+        auto_commit_pearl_state(&dolt, "mutation that should not commit").expect("noop");
+
+        let head_after = String::from_utf8(
+            Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        assert_eq!(head_before, head_after, "beads-model repo must NOT create a pearl auto-commit");
+    }
+
+    #[test]
+    fn is_dolt_gitignored_returns_true_when_ignored() {
+        let dir = init_repo();
+        let dolt = dir.path().join(".smooth/dolt");
+        std::fs::write(dir.path().join(".gitignore"), ".smooth/dolt/\n").unwrap();
+        git(&["add", ".gitignore"], dir.path());
+        git(&["commit", "--no-verify", "-m", "gitignore"], dir.path());
+        assert!(is_dolt_gitignored(dir.path(), &dolt));
+    }
+
+    #[test]
+    fn is_dolt_gitignored_returns_false_when_not_ignored() {
+        let dir = init_repo();
+        let dolt = dir.path().join(".smooth/dolt");
+        assert!(!is_dolt_gitignored(dir.path(), &dolt));
+    }
+
+    #[test]
+    fn is_dolt_gitignored_returns_false_on_non_git_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let dolt = dir.path().join(".smooth/dolt");
+        std::fs::create_dir_all(&dolt).unwrap();
+        // git check-ignore returns 128 outside a repo; helper treats
+        // that as "not ignored / unknown" so callers fall through to
+        // the legacy auto-commit path.
+        assert!(!is_dolt_gitignored(dir.path(), &dolt));
     }
 }
 

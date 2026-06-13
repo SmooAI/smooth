@@ -141,7 +141,11 @@ func main() {
 		if len(os.Args) < 3 {
 			fatal("usage: smooth-dolt status <data-dir>")
 		}
-		cmdDoltCmd(os.Args[2], "status")
+		// Pearl th-f6c50c: DOLT_STATUS is a TABLE function, not a
+		// stored procedure — the legacy `CALL DOLT_STATUS()` errored
+		// with "stored procedure does not exist". Route to a dedicated
+		// handler that does `SELECT * FROM DOLT_STATUS()`.
+		cmdStatus(os.Args[2])
 	case "serve":
 		if len(os.Args) < 3 {
 			fatal("usage: smooth-dolt serve <data-dir> --socket <path>")
@@ -432,6 +436,49 @@ func cmdDoltCmdWithArgs(dataDir string, doltCmd string, args []string) {
 	fmt.Println(doltCmd + ": ok")
 }
 
+// cmdStatus prints the working-set status of `dataDir`'s pearl DB.
+//
+// `DOLT_STATUS()` is a TABLE function returning `(table_name, staged,
+// status)` rows — one per modified/added/renamed table in the working
+// set. `CALL DOLT_STATUS()` (the procedure shape we wrongly used pre-
+// th-f6c50c) doesn't exist and errors loudly.
+//
+// Output contract — important for the pre-commit hook
+// (`run_pre_commit` in smooth-cli/src/hooks.rs:223) which checks
+// `dolt.status()?.trim().is_empty()`:
+//   - clean working set  → no output (Rust sees empty → skip auto-commit)
+//   - any changes        → one line per row, "<status>\t<table>" pairs
+//                          plus a "staged"/"unstaged" hint. Non-empty
+//                          string trips the pre-commit's auto-commit.
+//
+// Pearl th-f6c50c.
+func cmdStatus(dataDir string) {
+	db := openDB(dataDir)
+	defer db.Close()
+
+	rows, err := db.Query("SELECT table_name, staged, status FROM dolt_status")
+	if err != nil {
+		fatal("status: " + err.Error())
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var table, status string
+		var staged bool
+		if err := rows.Scan(&table, &staged, &status); err != nil {
+			fatal("status scan: " + err.Error())
+		}
+		stage := "unstaged"
+		if staged {
+			stage = "staged"
+		}
+		fmt.Printf("%s\t%s\t%s\n", status, stage, table)
+	}
+	if err := rows.Err(); err != nil {
+		fatal("status iter: " + err.Error())
+	}
+}
+
 func findFlag(args []string, flag string) string {
 	for i, a := range args {
 		if a == flag && i+1 < len(args) {
@@ -691,15 +738,41 @@ func doDoltCmd(db *sql.DB, dbMu *sync.Mutex, id, cmd string) serveResponse {
 	defer dbMu.Unlock()
 
 	switch cmd {
-	case "push", "pull", "gc", "status":
-		// Allowed; fall through.
+	case "push", "pull", "gc":
+		// Procedure form is correct here.
+		callSQL := fmt.Sprintf("CALL DOLT_%s()", strings.ToUpper(cmd))
+		if _, err := db.Exec(callSQL); err != nil {
+			return serveResponse{ID: id, OK: false, Error: cmd + ": " + err.Error()}
+		}
+		return serveResponse{ID: id, OK: true, Out: cmd + ": ok"}
+	case "status":
+		// Pearl th-f6c50c: DOLT_STATUS is a table function, not a
+		// procedure. Empty result set → clean working set (Out is
+		// empty so the pre-commit hook's `.trim().is_empty()` check
+		// fires correctly); non-empty rows → status lines.
+		rows, err := db.Query("SELECT table_name, staged, status FROM dolt_status")
+		if err != nil {
+			return serveResponse{ID: id, OK: false, Error: "status: " + err.Error()}
+		}
+		defer rows.Close()
+		var out strings.Builder
+		for rows.Next() {
+			var table, status string
+			var staged bool
+			if err := rows.Scan(&table, &staged, &status); err != nil {
+				return serveResponse{ID: id, OK: false, Error: "status scan: " + err.Error()}
+			}
+			stage := "unstaged"
+			if staged {
+				stage = "staged"
+			}
+			fmt.Fprintf(&out, "%s\t%s\t%s\n", status, stage, table)
+		}
+		if err := rows.Err(); err != nil {
+			return serveResponse{ID: id, OK: false, Error: "status iter: " + err.Error()}
+		}
+		return serveResponse{ID: id, OK: true, Out: out.String()}
 	default:
 		return serveResponse{ID: id, OK: false, Error: "unsupported dolt cmd: " + cmd}
 	}
-
-	callSQL := fmt.Sprintf("CALL DOLT_%s()", strings.ToUpper(cmd))
-	if _, err := db.Exec(callSQL); err != nil {
-		return serveResponse{ID: id, OK: false, Error: cmd + ": " + err.Error()}
-	}
-	return serveResponse{ID: id, OK: true, Out: cmd + ": ok"}
 }
