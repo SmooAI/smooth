@@ -1,32 +1,33 @@
-<div align="center">
+<p align="center">
+  <img src="images/logo.png" alt="Smooth" width="420" />
+</p>
 
-<img src="images/logo.png" alt="Smooth" width="420" />
+<h1 align="center">Smooth</h1>
 
-# Smooth
+<p align="center">
+  <strong>The Smoo AI CLI. Coordinate teams of AI agents to build, research, analyze, and ship — one binary, zero runtime dependencies.</strong>
+</p>
 
-**The Smoo AI CLI — Agent Orchestration & Platform Tools**
+<p align="center">
+  <a href="docs/bench-history.md"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/SmooAI/smooth/main/docs/bench-badge.json&style=flat-square" alt="The Line"></a>
+  <img src="https://img.shields.io/badge/Smoo_AI-platform-00A6A6?style=flat-square" alt="Smoo AI">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-F49F0A?style=flat-square" alt="license"></a>
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-2021-00A6A6?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
+  <a href="https://github.com/SmooAI/smooth/releases"><img src="https://img.shields.io/github/v/release/SmooAI/smooth?style=flat-square&color=FF6B6C&label=latest" alt="latest release"></a>
+</p>
 
-Coordinate teams of AI agents to build, research, analyze, and ship.
-One binary for everything Smoo AI.
-
-[![The Line](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/SmooAI/smooth/main/docs/bench-badge.json)](docs/bench-history.md)
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-2021-000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Release](https://img.shields.io/github/v/release/SmooAI/smooth?label=latest)](https://github.com/SmooAI/smooth/releases)
-
-</div>
+<p align="center">
+  <a href="#install">Install</a> ·
+  <a href="#quick-start">Quick Start</a> ·
+  <a href="#what-is-smooth">What is Smooth</a> ·
+  <a href="#architecture">Architecture</a> ·
+  <a href="#the-th-cli">CLI</a> ·
+  <a href="#-part-of-smoo-ai">Platform</a>
+</p>
 
 ---
 
-## About Smoo AI
-
-**[Smoo AI](https://smoo.ai)** is an AI platform that helps businesses multiply their customer, employee, and developer experience — conversational AI for support and sales, paired with the production-grade developer tooling we use to build it.
-
-Smooth is part of a small family of open-source packages we maintain to keep our own stack honest: contextual logging, typed HTTP, file storage, and agent orchestration. Use them in your stack, or take them as a reference for how we build.
-
-- 🌐 [smoo.ai](https://smoo.ai) — the product
-- 📦 [smoo.ai/open-source](https://smoo.ai/open-source) — every open-source package we ship
-- 🐙 [github.com/SmooAI](https://github.com/SmooAI) — the source
+> Smooth is the central CLI and orchestration platform for Smoo AI. It dispatches teams of AI agents — Smooth operatives — to work on real projects inside hardware-isolated microVMs, with adversarial surveillance and policy-gated access control. No Docker. No Node.js. No runtime dependencies. One 10MB binary.
 
 ---
 
@@ -670,6 +671,27 @@ cargo build --release -p smooth-cli
 ls -lh target/release/th
 ```
 
-## License
+## 🧩 Part of Smoo AI {#part-of-smoo-ai}
 
-MIT - [Smoo AI](https://smoo.ai)
+Smooth is part of the [Smoo AI](https://smoo.ai) platform — an AI-powered business platform with AI built into every product. It's one of a small family of open-source packages we maintain to keep our own stack honest:
+
+- [smooth-operator](https://github.com/SmooAI/smooth-operator) — the Rust-native agent engine Smooth runs
+- [@smooai/deploy](https://github.com/SmooAI/deploy) — SST + Helm deploy primitives for smooth-operator agents
+- [@smooai/logger](https://github.com/SmooAI/logger) — structured, context-aware logging
+- [@smooai/config](https://github.com/SmooAI/config) — typed configuration and secrets
+
+See [smoo.ai/open-source](https://smoo.ai/open-source) for every package we ship, and [github.com/SmooAI](https://github.com/SmooAI) for the source.
+
+## 🤝 Contributing
+
+Issues and PRs welcome. All feature work happens in a git worktree (`th worktree create`) — see [CLAUDE.md](CLAUDE.md) for build, test, and workflow conventions, and [SECURITY.md](SECURITY.md) for the security model.
+
+## 📄 License
+
+MIT © [Smoo AI](https://smoo.ai). See [LICENSE](LICENSE).
+
+---
+
+<p align="center">
+  Built by <a href="https://smoo.ai"><strong>Smoo AI</strong></a> — AI built into every product.
+</p>
