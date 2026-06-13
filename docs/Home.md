@@ -3,12 +3,18 @@ cssclasses:
     - home-page
 ---
 
+<p align="center">
+  <a href="https://smoo.ai"><img src="https://smoo.ai/images/logo/logo.svg" alt="Smoo AI" width="200" /></a>
+</p>
+
 # Smooth Documentation
 
 #moc
 
 > [!arch] About Smooth
 > A single Rust binary (`th`) that runs an AI agent stack on your machine. Boots in two modes, has one VM in sandboxed mode, talks to LLMs through a policy-aware proxy, and writes through a deterministic tool surface. No Docker. No nested virtualization. No cloud.
+
+Smooth is part of the [Smoo AI](https://smoo.ai) platform — AI built into every product. This vault is the canonical source of truth for Smooth's architecture, operations, and decisions. Start with [[Start-Here/What-Is-Smooth]], then follow the map below.
 
 ---
 
@@ -94,3 +100,9 @@ One VM. Same cast. Same dispatch path. Direct mode is the escape hatch when you 
 - [[Start-Here/What-Is-Smooth]]
 - [[Architecture/Architecture-Overview]]
 - [[_meta/How-to-Update-These-Docs]]
+
+---
+
+<p align="center">
+  Built by <a href="https://smoo.ai"><strong>Smoo AI</strong></a> — AI built into every product.
+</p>
