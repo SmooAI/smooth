@@ -314,11 +314,11 @@ async fn cmd_list(environment: String, org_id: Option<String>, json: bool, m2m: 
     keys.sort();
     let max_key_len = keys.iter().map(|k| k.len()).max().unwrap_or(0);
     for k in keys {
-        let v = &values[k];
-        let rendered = match v {
-            Value::String(s) => s.clone(),
-            other => serde_json::to_string(other).unwrap_or_default(),
-        };
+        // Pearl th-9cc412. List endpoint returns no per-key tier so we
+        // can't be selective — mask everything to last-4 the same way
+        // `display_value` does for cmd_set. Echo discipline applies
+        // identically to both surfaces.
+        let rendered = display_value(&values[k], "");
         println!("  {:<width$}  {}", k.cyan(), rendered.dimmed(), width = max_key_len);
     }
     println!();
@@ -411,18 +411,23 @@ async fn cmd_set(key: String, value: String, environment: String, org_id: Option
     Ok(())
 }
 
-/// Render a value for human-friendly display. Strings shown raw,
-/// secrets masked, other JSON values compact-serialized.
-fn display_value(v: &Value, tier: &str) -> String {
+/// Render a value for human-friendly display. ALL values are masked
+/// to the last 4 chars regardless of tier — public-tier keys can still
+/// be sensitive (CDN tokens, allowlist entries, anything an attacker
+/// could correlate) and we'd rather take a tiny UX hit than train
+/// users that console echo is a safe place for value confirmation.
+/// Pearls th-4ebbf7 + th-9cc412.
+///
+/// The `_tier` param is kept so future per-tier policy (e.g. wider
+/// disclosure for feature_flag booleans, or full hiding for
+/// HSM-backed secrets) can layer in without a signature churn across
+/// call sites.
+fn display_value(v: &Value, _tier: &str) -> String {
     let raw = match v {
         Value::String(s) => s.clone(),
         other => serde_json::to_string(other).unwrap_or_default(),
     };
-    if tier == "secret" {
-        mask_secret(&raw)
-    } else {
-        raw
-    }
+    mask_secret(&raw)
 }
 
 /// Mask all but the last 4 characters of a secret for log/display use.
@@ -960,26 +965,47 @@ mod tests {
     }
 
     #[test]
-    fn display_value_string_public() {
-        assert_eq!(display_value(&Value::String("hello".to_string()), "public"), "hello");
+    fn display_value_masks_public_string() {
+        // Pearls th-4ebbf7 + th-9cc412: public values now mask too —
+        // tier no longer affects display. Echo discipline is universal.
+        let masked = display_value(&Value::String("hello-public-token".to_string()), "public");
+        assert_eq!(masked, "**************oken");
     }
 
     #[test]
-    fn display_value_string_secret_is_masked() {
+    fn display_value_masks_secret_string() {
         let masked = display_value(&Value::String("abcdefgh".to_string()), "secret");
         assert_eq!(masked, "****efgh");
     }
 
     #[test]
-    fn display_value_object_serializes_to_json() {
-        let v = serde_json::json!({"a": 1});
-        assert_eq!(display_value(&v, "public"), "{\"a\":1}");
+    fn display_value_masks_object_after_serialization() {
+        let v = serde_json::json!({"api_key": "abcdefgh"});
+        let masked = display_value(&v, "public");
+        // {"api_key":"abcdefgh"} → last 4 = `gh"}` revealed, rest stars.
+        assert!(masked.ends_with("gh\"}"));
+        assert!(masked.starts_with("***"));
+        assert_eq!(masked.len(), r#"{"api_key":"abcdefgh"}"#.len());
     }
 
     #[test]
-    fn display_value_number_serializes() {
-        assert_eq!(display_value(&Value::from(42), "public"), "42");
-        assert_eq!(display_value(&Value::Bool(true), "public"), "true");
+    fn display_value_masks_number() {
+        // Numbers are tiny — last-4 mask gives `**42`. Still consistent,
+        // and a number config value isn't a secret anyway. Just no
+        // tier-specific code path; one rule, no surprises.
+        assert_eq!(display_value(&Value::from(42), "public"), "**");
+        assert_eq!(display_value(&Value::from(12_345), "public"), "*2345");
+        assert_eq!(display_value(&Value::Bool(true), "public"), "****");
+    }
+
+    #[test]
+    fn display_value_tier_param_is_currently_ignored() {
+        // Lock the universal-mask invariant — if a future PR re-introduces
+        // a tier-conditional branch it should make a deliberate choice
+        // here, not regress accidentally.
+        let s = Value::String("0123456789".to_string());
+        assert_eq!(display_value(&s, "public"), display_value(&s, "secret"));
+        assert_eq!(display_value(&s, "feature_flag"), display_value(&s, ""));
     }
 
     fn fixture_creds(expired: bool) -> Credentials {
