@@ -4160,6 +4160,23 @@ fn auto_commit_pearl_state(dolt_dir: &std::path::Path, action: &str) -> Result<(
         return Ok(());
     };
 
+    // SMOODEV-1836: never auto-commit the dolt store from a linked worktree.
+    // Each worktree checks out its own copy of `.smooth/dolt/`, and Dolt
+    // rewrites mutable pointer files (journal.idx, manifest, the journal
+    // chunk) on every open — committing those onto a feature branch produces
+    // binary pointer divergence that can't be merged back to main. Pearl
+    // state belongs on the primary worktree's lineage; from a linked worktree
+    // we skip the git commit (the dolt mutation + `th pearls push` to
+    // refs/dolt/data still capture the change) and tell the user where to run.
+    if is_linked_worktree(&repo_root) {
+        tracing::warn!(
+            "th pearls: skipping git auto-commit of pearl state — this is a linked \
+             worktree. Run pearl mutations from the primary worktree so the dolt \
+             store stays on one lineage; sync with `th pearls push`."
+        );
+        return Ok(());
+    }
+
     let canonical_repo = repo_root.canonicalize().unwrap_or_else(|_| repo_root.clone());
     let canonical_dolt = dolt_dir.canonicalize().unwrap_or_else(|_| dolt_dir.to_path_buf());
     let Ok(relative) = canonical_dolt.strip_prefix(&canonical_repo) else {
@@ -4224,6 +4241,43 @@ fn git_toplevel(start: &std::path::Path) -> Option<std::path::PathBuf> {
         return None;
     }
     Some(std::path::PathBuf::from(trimmed))
+}
+
+/// True if `repo_root` is a *linked* git worktree (created by
+/// `git worktree add`) rather than the repository's primary worktree.
+///
+/// Detection: in a linked worktree `git rev-parse --git-dir` resolves to
+/// `<common>/.git/worktrees/<name>`, which differs from
+/// `--git-common-dir` (`<common>/.git`). In the primary worktree the two
+/// resolve to the same path. We canonicalize both before comparing so
+/// relative-vs-absolute output doesn't produce a false positive. On any
+/// git error we return `false` (fail toward the existing behaviour rather
+/// than silently dropping a primary-worktree commit).
+fn is_linked_worktree(repo_root: &std::path::Path) -> bool {
+    let rev = |flag: &str| -> Option<std::path::PathBuf> {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_root)
+            .args(["rev-parse", flag])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let s = String::from_utf8(out.stdout).ok()?;
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        // git prints paths relative to repo_root unless they're absolute.
+        let p = std::path::Path::new(trimmed);
+        let abs = if p.is_absolute() { p.to_path_buf() } else { repo_root.join(p) };
+        Some(abs.canonicalize().unwrap_or(abs))
+    };
+    match (rev("--git-dir"), rev("--git-common-dir")) {
+        (Some(git_dir), Some(common_dir)) => git_dir != common_dir,
+        _ => false,
+    }
 }
 
 /// Trim a pearl title down to a length that fits comfortably in a
@@ -6628,5 +6682,56 @@ mod bench_tests {
         // document the contract and catch a regression where someone
         // removes the println! from build.rs.
         let _ = env!("BENCH_SCORE_JSON");
+    }
+}
+
+#[cfg(test)]
+mod worktree_guard_tests {
+    use super::is_linked_worktree;
+    use std::process::Command;
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let ok = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("git launches")
+            .status
+            .success();
+        assert!(ok, "git {args:?} failed in {dir:?}");
+    }
+
+    /// SMOODEV-1836: the primary worktree must NOT be treated as linked
+    /// (so pearl auto-commit keeps working there), while a worktree created
+    /// by `git worktree add` MUST be (so it's skipped).
+    #[test]
+    fn distinguishes_primary_from_linked_worktree() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let primary = tmp.path().join("primary");
+        std::fs::create_dir(&primary).unwrap();
+
+        git(&primary, &["init", "-q", "-b", "main"]);
+        git(&primary, &["config", "user.email", "t@t.test"]);
+        git(&primary, &["config", "user.name", "Test"]);
+        std::fs::write(primary.join("f.txt"), "x").unwrap();
+        git(&primary, &["add", "."]);
+        git(&primary, &["commit", "-q", "-m", "init"]);
+
+        // Primary worktree: not linked.
+        assert!(!is_linked_worktree(&primary), "primary worktree should not be detected as linked");
+
+        // Linked worktree via `git worktree add`.
+        let linked = tmp.path().join("linked");
+        git(&primary, &["worktree", "add", "-q", linked.to_str().unwrap(), "-b", "feat"]);
+        assert!(is_linked_worktree(&linked), "git-worktree-add tree should be detected as linked");
+    }
+
+    /// A non-git directory must fail toward `false` (preserve existing
+    /// behaviour rather than silently dropping a commit).
+    #[test]
+    fn non_git_dir_is_not_linked() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(!is_linked_worktree(tmp.path()));
     }
 }
