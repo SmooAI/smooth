@@ -1,28 +1,20 @@
 <p align="center">
-  <img src="images/logo.png" alt="Smooth" width="420" />
-</p>
-
-<h1 align="center">Smooth</h1>
-
-<p align="center">
-  <strong>The Smoo AI CLI. Coordinate teams of AI agents to build, research, analyze, and ship — one binary, zero runtime dependencies.</strong>
+  <a href="https://smoo.ai"><img src=".github/banner.png" alt="smooth — Coordinate teams of AI agents. One binary." width="100%" /></a>
 </p>
 
 <p align="center">
-  <a href="docs/bench-history.md"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/SmooAI/smooth/main/docs/bench-badge.json&style=flat-square" alt="The Line"></a>
-  <img src="https://img.shields.io/badge/Smoo_AI-platform-00A6A6?style=flat-square" alt="Smoo AI">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-F49F0A?style=flat-square" alt="license"></a>
+  <a href="docs/bench-history.md"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/SmooAI/smooth/main/docs/bench-badge.json&style=for-the-badge&labelColor=020618" alt="The Line"></a>
+  <a href="https://smoo.ai"><img src="https://img.shields.io/badge/Smoo_AI-platform-00A6A6?style=for-the-badge&labelColor=020618" alt="Smoo AI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-F49F0A?style=for-the-badge&labelColor=020618" alt="license"></a>
+</p>
+
+<p align="center">
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-2021-00A6A6?style=flat-square&logo=rust&logoColor=white" alt="Rust"></a>
   <a href="https://github.com/SmooAI/smooth/releases"><img src="https://img.shields.io/github/v/release/SmooAI/smooth?style=flat-square&color=FF6B6C&label=latest" alt="latest release"></a>
 </p>
 
 <p align="center">
-  <a href="#install">Install</a> ·
-  <a href="#quick-start">Quick Start</a> ·
-  <a href="#what-is-smooth">What is Smooth</a> ·
-  <a href="#architecture">Architecture</a> ·
-  <a href="#the-th-cli">CLI</a> ·
-  <a href="#-part-of-smoo-ai">Platform</a>
+  <a href="#install"><b>Install</b></a> &nbsp;·&nbsp; <a href="#quick-start"><b>Quick Start</b></a> &nbsp;·&nbsp; <a href="#what-is-smooth"><b>What is Smooth</b></a> &nbsp;·&nbsp; <a href="#architecture"><b>Architecture</b></a> &nbsp;·&nbsp; <a href="#the-th-cli"><b>CLI</b></a> &nbsp;·&nbsp; <a href="#-part-of-smoo-ai"><b>Platform</b></a>
 </p>
 
 ---
@@ -115,32 +107,23 @@ snapshot the workspace when failing tests drop, and stop on the first
 convincing signal.
 
 ```mermaid
-%%{init: {"flowchart": {"defaultRenderer": "elk"}, "themeVariables": {"lineColor": "#f49f0a"}}}%%
+%%{init: {'theme':'base','themeVariables':{
+  'background':'#020618','primaryColor':'#0b1426','primaryTextColor':'#e6edf6','primaryBorderColor':'#2b3a52',
+  'lineColor':'#7c8aa0','secondaryColor':'#0b1426','tertiaryColor':'#0b1426','fontFamily':'ui-sans-serif, system-ui, sans-serif',
+  'clusterBkg':'#0b1426','clusterBorder':'#22304a'}}}%%
 flowchart LR
-    START["Task prompt"]
-    TURN["Coding turn<br/><small>smooth-coding · agent runs tools internally</small>"]
-    GREEN{"Tests green?"}
-    SNAP["Snapshot workspace<br/><small>if failing count dropped</small>"]
-    STOP{"Stop signal?<br/><small>close-to-green · budget · iter cap</small>"}
-    DONE["Done"]
-    RESTORE["Restore best-seen state"]
-
-    START --> TURN
-    TURN --> GREEN
-    GREEN -- yes --> DONE
-    GREEN -- no --> SNAP
-    SNAP --> STOP
+    START["Task prompt"] --> TURN
+    TURN["Coding turn<br/>agent runs tools"] --> GREEN{"Tests green?"}
+    GREEN -- yes --> DONE["Done"]
+    GREEN -- no --> SNAP["Snapshot<br/>if failures dropped"]
+    SNAP --> STOP{"Stop signal?<br/>close-to-green · budget · cap"}
     STOP -- no --> TURN
-    STOP -- yes --> RESTORE
-    RESTORE --> DONE
+    STOP -- yes --> RESTORE["Restore best state"] --> DONE
 
-    style START fill:#0a1f7a,stroke:#18387a,color:#f8fafc
-    style TURN fill:#040d30,stroke:#22c55e,color:#f8fafc
-    style SNAP fill:#040d30,stroke:#f49f0a,color:#f8fafc
-    style GREEN fill:#0a1f7a,stroke:#18387a,color:#f8fafc
-    style STOP fill:#0a1f7a,stroke:#18387a,color:#f8fafc
-    style RESTORE fill:#040d30,stroke:#f49f0a,color:#f8fafc
-    style DONE fill:#14532d,stroke:#22c55e,color:#f8fafc
+    classDef warm fill:#f49f0a,stroke:#ff6b6c,color:#1a0f00;
+    classDef teal fill:#00a6a6,stroke:#00c2c2,color:#011;
+    class TURN warm
+    class DONE teal
 ```
 
 Implemented in [`smooth-operator::coding_workflow`](crates/smooth-operator/src/coding_workflow.rs).
@@ -199,45 +182,33 @@ per-project, git-syncable).
 ## Architecture
 
 ```mermaid
-%%{init: {"flowchart": {"defaultRenderer": "elk"}, "themeVariables": {"lineColor": "#f49f0a"}}}%%
-graph TB
-    subgraph Host["Host Machine"]
-        TH["th binary<br/><small>embedded microsandbox SDK</small>"]
-        HS["smooth-host-stub<br/><small>credential broker on UDS</small>"]
-        DOCK["Docker / OrbStack / Colima<br/><small>optional, reachable from inside</small>"]
-        CACHE["~/.smooth/project-cache/<br/><small>pnpm · cargo · mise toolchains</small>"]
-    end
+%%{init: {'theme':'base','themeVariables':{
+  'background':'#020618','primaryColor':'#0b1426','primaryTextColor':'#e6edf6','primaryBorderColor':'#2b3a52',
+  'lineColor':'#7c8aa0','secondaryColor':'#0b1426','tertiaryColor':'#0b1426','fontFamily':'ui-sans-serif, system-ui, sans-serif',
+  'clusterBkg':'#0b1426','clusterBorder':'#22304a'}}}%%
+flowchart TB
+    TH["th binary<br/>+ host credential broker"]
 
-    subgraph VM["The microVM (microsandbox — libkrun / HVF)"]
-        BS["Big Smooth<br/><small>orchestrator, READ-ONLY</small>"]
-        AR["Archivist<br/><small>central log aggregator</small>"]
-        W["Wonk<br/><small>access control</small>"]
-        G["Goalie<br/><small>network + fs proxy</small>"]
-        N["Narc<br/><small>tool surveillance</small>"]
-        SC["Scribe<br/><small>structured logging</small>"]
-        GR["Groove<br/><small>checkpoint + resume</small>"]
-
-        subgraph Ops["Smooth operatives (subprocesses)"]
-            OP1["operative #1"]
-            OP2["operative #2"]
-            OP3["operative #N"]
-        end
+    subgraph VM["The microVM · microsandbox"]
+        BS["Big Smooth<br/>orchestrator · READ-ONLY"]
+        W["Wonk · access control"]
+        G["Goalie · net + fs proxy"]
+        N["Narc · surveillance"]
+        SC["Scribe → Archivist · logging"]
+        OPS["Smooth operatives<br/>the workers"]
     end
 
     TH -->|spawns| VM
-    HS -.->|creds UDS| VM
-    DOCK -.->|docker.sock| VM
-    CACHE -.->|bind-mount| VM
-    BS -->|orchestrates| Ops
-    Ops -->|HTTP_PROXY| G
-    G -->|"is this allowed?"| W
-    N -->|intercepts| Ops
-    Ops --> SC
-    SC -->|events| AR
+    BS -->|orchestrates| OPS
+    OPS -->|HTTP_PROXY| G
+    G -->|"allowed?"| W
+    N -->|intercepts| OPS
+    OPS --> SC
 
-    style Host fill:#020618,stroke:#30363d,color:#f8fafc
-    style VM fill:#040d30,stroke:#f49f0a,color:#f8fafc
-    style Ops fill:#0a1f7a,stroke:#22c55e,color:#f8fafc
+    classDef warm fill:#f49f0a,stroke:#ff6b6c,color:#1a0f00;
+    classDef teal fill:#00a6a6,stroke:#00c2c2,color:#011;
+    class OPS warm
+    class W teal
 ```
 
 `th up direct` runs the exact same cast as host processes — same gRPC
@@ -282,26 +253,31 @@ Board operates alongside the rest of the cast.
 ### Inside each MicroVM
 
 ```mermaid
-%%{init: {"flowchart": {"defaultRenderer": "elk"}, "themeVariables": {"lineColor": "#f49f0a"}}}%%
-graph LR
-    subgraph VM["MicroVM (--scope none)"]
+%%{init: {'theme':'base','themeVariables':{
+  'background':'#020618','primaryColor':'#0b1426','primaryTextColor':'#e6edf6','primaryBorderColor':'#2b3a52',
+  'lineColor':'#7c8aa0','secondaryColor':'#0b1426','tertiaryColor':'#0b1426','fontFamily':'ui-sans-serif, system-ui, sans-serif',
+  'clusterBkg':'#0b1426','clusterBorder':'#22304a'}}}%%
+flowchart LR
+    subgraph VM["MicroVM · --scope none"]
         Operator["Operative / Big Smooth"]
-        Wonk["Wonk<br/><small>:8400</small>"]
-        Goalie["Goalie<br/><small>:8480 proxy</small>"]
+        Wonk["Wonk · :8400"]
+        Goalie["Goalie · :8480"]
         Narc["Narc"]
-        Scribe["Scribe<br/><small>:8401</small>"]
+        Scribe["Scribe · :8401"]
     end
 
     Operator -->|HTTP_PROXY| Goalie
-    Goalie -->|"is this allowed?"| Wonk
-    Narc -->|intercepts| Operator
-    Narc -->|"check tool"| Wonk
+    Goalie -->|"allowed?"| Wonk
+    Narc -->|"intercepts · checks tool"| Operator
     Operator --> Scribe
     Wonk --> Scribe
     Goalie --> Scribe
     Narc --> Scribe
 
-    style VM fill:#040d30,stroke:#0a1f7a,color:#f8fafc
+    classDef warm fill:#f49f0a,stroke:#ff6b6c,color:#1a0f00;
+    classDef teal fill:#00a6a6,stroke:#00c2c2,color:#011;
+    class Operator warm
+    class Scribe teal
 ```
 
 - **Wonk** reads `/etc/smooth/policy.toml`, listens on `127.0.0.1:8400`, hot-reloads on file change
@@ -312,34 +288,36 @@ graph LR
 ### Security Model
 
 ```mermaid
-graph TD
-    subgraph Enforcement["Kernel-Level Enforcement"]
-        IPT["iptables<br/><small>only Goalie UID can make outbound connections</small>"]
-        FUSE["FUSE mount<br/><small>all file I/O goes through Goalie</small>"]
-        SCOPE["--scope none<br/><small>microsandbox blocks direct internet</small>"]
+%%{init: {'theme':'base','themeVariables':{
+  'background':'#020618','primaryColor':'#0b1426','primaryTextColor':'#e6edf6','primaryBorderColor':'#2b3a52',
+  'lineColor':'#7c8aa0','secondaryColor':'#0b1426','tertiaryColor':'#0b1426','fontFamily':'ui-sans-serif, system-ui, sans-serif',
+  'clusterBkg':'#0b1426','clusterBorder':'#22304a'}}}%%
+flowchart TD
+    subgraph Enforcement["Kernel-level enforcement"]
+        IPT["iptables · only Goalie UID egress"]
+        FUSE["FUSE mount · all file I/O via Goalie"]
     end
 
-    subgraph Policy["Policy-Driven Access Control"]
-        TOML["policy.toml<br/><small>generated by Big Smooth per operative</small>"]
-        NET["Network allowlist<br/><small>domain + path matching</small>"]
-        FS["Filesystem deny patterns<br/><small>*.env, *.pem, .ssh/*</small>"]
-        TOOL["Tool allowlist<br/><small>per-operative tool access</small>"]
-        BEAD["Pearl scoping<br/><small>operative sees only assigned pearls + deps</small>"]
-        MCP["MCP server allowlist<br/><small>deny unknown servers by default</small>"]
+    subgraph Policy["Policy-driven access control"]
+        TOML["policy.toml<br/>generated per operative"]
+        NET["Network allowlist"]
+        FS["Filesystem deny<br/>*.env · *.pem · .ssh/*"]
+        REST["Tools · pearls · MCP allowlists"]
     end
 
-    subgraph Detection["Two-Tier Threat Detection (Narc)"]
-        REGEX["Regex fast path<br/><small>secrets, write guard, known patterns</small>"]
-        LLM["LLM judge<br/><small>Haiku/Flash for ambiguous cases</small>"]
+    subgraph Detection["Narc · two-tier detection"]
+        REGEX["Regex fast path"]
+        LLM["LLM judge · ambiguous cases"]
     end
 
-    TOML --> NET & FS & TOOL & BEAD & MCP
+    TOML --> NET & FS & REST
     IPT --> NET
     FUSE --> FS
 
-    style Enforcement fill:#14532d,stroke:#22c55e,color:#f8fafc
-    style Policy fill:#040d30,stroke:#0a1f7a,color:#f8fafc
-    style Detection fill:#422006,stroke:#f49f0a,color:#f8fafc
+    classDef warm fill:#f49f0a,stroke:#ff6b6c,color:#1a0f00;
+    classDef teal fill:#00a6a6,stroke:#00c2c2,color:#011;
+    class TOML warm
+    class LLM teal
 ```
 
 **Key invariants:**
@@ -353,6 +331,11 @@ graph TD
 Operatives can request expanded access at runtime. The flow:
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{
+  'background':'#020618','primaryColor':'#0b1426','primaryTextColor':'#e6edf6','primaryBorderColor':'#2b3a52',
+  'lineColor':'#7c8aa0','actorBkg':'#0b1426','actorBorder':'#2b3a52','actorTextColor':'#e6edf6',
+  'signalColor':'#7c8aa0','signalTextColor':'#e6edf6','noteBkgColor':'#f49f0a','noteTextColor':'#1a0f00','noteBorderColor':'#ff6b6c',
+  'fontFamily':'ui-sans-serif, system-ui, sans-serif'}}}%%
 sequenceDiagram
     participant Op as Operative
     participant G as Goalie
@@ -372,7 +355,7 @@ sequenceDiagram
         Note over Op,G: retry succeeds
     else needs human
         BS->>BS: send to inbox
-        Note over BS: th access approve <pearl> <domain>
+        Note over BS: th access approve &lt;pearl&gt; &lt;domain&gt;
     end
 ```
 
@@ -673,14 +656,11 @@ ls -lh target/release/th
 
 ## 🧩 Part of Smoo AI {#part-of-smoo-ai}
 
-Smooth is part of the [Smoo AI](https://smoo.ai) platform — an AI-powered business platform with AI built into every product. It's one of a small family of open-source packages we maintain to keep our own stack honest:
+Smooth is built and open-sourced by **[Smoo AI](https://smoo.ai)** — the AI-powered business platform with AI built into every product: CRM, customer support, campaigns, field service, observability, and developer tools.
 
-- [smooth-operator](https://github.com/SmooAI/smooth-operator) — the Rust-native agent engine Smooth runs
-- [@smooai/deploy](https://github.com/SmooAI/deploy) — SST + Helm deploy primitives for smooth-operator agents
-- [@smooai/logger](https://github.com/SmooAI/logger) — structured, context-aware logging
-- [@smooai/config](https://github.com/SmooAI/config) — typed configuration and secrets
-
-See [smoo.ai/open-source](https://smoo.ai/open-source) for every package we ship, and [github.com/SmooAI](https://github.com/SmooAI) for the source.
+- 🚀 **Smooth on the platform** — [smoo.ai/th](https://smoo.ai/th)
+- 🧰 **More open source from Smoo AI** — [smoo.ai/open-source](https://smoo.ai/open-source)
+- 🧩 **Sibling packages** — [smooth-operator](https://github.com/SmooAI/smooth-operator) (the agent engine Smooth runs), [@smooai/deploy](https://github.com/SmooAI/deploy), [@smooai/logger](https://github.com/SmooAI/logger), [@smooai/config](https://github.com/SmooAI/config)
 
 ## 🤝 Contributing
 
