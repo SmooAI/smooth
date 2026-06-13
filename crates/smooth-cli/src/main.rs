@@ -5021,25 +5021,69 @@ fn find_dolt_dir() -> Result<std::path::PathBuf> {
     smooth_pearls::dolt::find_repo_dolt_dir(&cwd).ok_or_else(|| anyhow::anyhow!("no .smooth/dolt/ found. Run: th pearls init"))
 }
 
-/// `th pearls init` — create `.smooth/dolt/` in cwd if missing, then
-/// auto-commit the freshly-initialized store to the enclosing git
-/// repo (if any). Bootstrapping a pearl board should land in git the
-/// same way a normal pearl mutation does.
+/// `th pearls init` — set up a pearl board in the cwd repo.
+///
+/// **Beads model** (pearl `th-975dfe`, 2026-06-13): `.smooth/dolt/` is
+/// **not git-tracked**. Sync happens via dolt's own `refs/dolt/data`
+/// ref pushed alongside normal git refs, the same way beads uses
+/// `.beads/embeddeddolt/` + `bd dolt push/pull`. Eliminates the
+/// merge-conflict class we were paying down with PR #94 + smooai
+/// #1513.
+///
+/// Logic:
+/// 1. Ensure `.gitignore` has `.smooth/dolt/` so future mutations don't
+///    sweep the noms binaries back into git.
+/// 2. If `.smooth/dolt/` already exists, no-op (existing local store).
+/// 3. If missing AND the enclosing git repo has an `origin` URL
+///    AND `refs/dolt/data` exists on that remote, clone from it.
+///    This is the post-`git clone` bootstrap path: a contributor
+///    checks out the repo fresh, runs `th pearls init`, and gets the
+///    project's pearl history without any prior setup.
+/// 4. If missing AND no origin / no remote ref, create a fresh empty
+///    store. Caller can wire a remote later with `th pearls remote add`.
 async fn cmd_pearls_init() -> Result<()> {
     let cwd = std::env::current_dir()?;
     let dolt_dir = cwd.join(".smooth").join("dolt");
+
+    // Step 1: .gitignore protection. Idempotent.
+    let repo_root = hooks::find_git_root(&cwd);
+    if let Some(root) = repo_root.as_ref() {
+        match ensure_dolt_gitignored(root) {
+            Ok(true) => println!("{} Added `.smooth/dolt/` to {}/.gitignore", "✓".green().bold(), root.display()),
+            Ok(false) => {} // already ignored, quiet
+            Err(e) => eprintln!("  Could not update .gitignore: {e}"),
+        }
+    }
+
     if dolt_dir.exists() {
         println!("Pearl database already initialized at {}", dolt_dir.display());
+    } else if let Some(remote_url) = repo_root.as_ref().and_then(|r| read_git_origin_url(r).ok().flatten()) {
+        // Step 3: post-`git clone` bootstrap. The clone subprocess
+        // succeeds even when the ref doesn't exist on the remote, but
+        // produces an empty store — so we accept "empty" as a valid
+        // outcome rather than treating it as failure.
+        println!("Bootstrapping pearl database from {remote_url} (refs/dolt/data) …");
+        match smooth_pearls::dolt::clone_from(&remote_url, &dolt_dir) {
+            Ok(()) => {
+                println!("{} Pearl database cloned to {}", "✓".green().bold(), dolt_dir.display());
+            }
+            Err(e) => {
+                eprintln!("  smooth-dolt clone failed: {e}");
+                eprintln!("  Falling back to fresh empty store.");
+                smooth_pearls::PearlStore::init(&dolt_dir)?;
+                println!("{} Pearl database initialized empty at {}", "✓".green().bold(), dolt_dir.display());
+            }
+        }
     } else {
+        // Step 4: no remote to bootstrap from — create empty.
         smooth_pearls::PearlStore::init(&dolt_dir)?;
         println!("{} Pearl database initialized at {}", "✓".green().bold(), dolt_dir.display());
         println!("  Tables: pearls, pearl_dependencies, pearl_labels, pearl_comments, pearl_history, sessions, memories");
         println!("  Run: th pearls remote add origin <git-remote-url>");
         println!("  Then: th pearls push");
-        auto_commit_pearl_state(&dolt_dir, "init pearl board")?;
     }
 
-    // Install git hooks if not already present
+    // Install git hooks if not already present.
     let hooks_status = hooks::check(None);
     if !hooks_status.is_ok() {
         println!();
@@ -5049,6 +5093,57 @@ async fn cmd_pearls_init() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Append `.smooth/dolt/` to `.gitignore` at `repo_root` if not already
+/// present. Returns Ok(true) when the file was modified, Ok(false) when
+/// the entry already existed.
+///
+/// Match is line-prefix based against `.smooth/dolt` so variants like
+/// `.smooth/dolt/`, `.smooth/dolt/**`, or `/.smooth/dolt/` all count
+/// as "already ignored." Avoids duplicating entries when init is
+/// re-run.
+fn ensure_dolt_gitignored(repo_root: &std::path::Path) -> Result<bool> {
+    let path = repo_root.join(".gitignore");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    for line in existing.lines() {
+        let trimmed = line.trim().trim_start_matches('/');
+        if trimmed.starts_with(".smooth/dolt") {
+            return Ok(false);
+        }
+    }
+    let mut out = existing;
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("\n# Pearl Dolt store — beads model: synced via refs/dolt/data, not tracked.\n");
+    out.push_str(".smooth/dolt/\n");
+    std::fs::write(&path, out).with_context(|| format!("write {}", path.display()))?;
+    Ok(true)
+}
+
+/// Read `git remote get-url origin` for the given repo root. Returns
+/// Ok(None) when there is no `origin` remote configured. Used by
+/// `cmd_pearls_init` to decide whether to bootstrap from a remote
+/// (beads-model post-clone path) or initialize empty.
+fn read_git_origin_url(repo_root: &std::path::Path) -> Result<Option<String>> {
+    let output = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo_root)
+        .output()
+        .context("exec git remote get-url origin")?;
+    if !output.status.success() {
+        // git prints "error: No such remote 'origin'" with exit 2 when
+        // the remote isn't configured — that's a normal case, not an
+        // error to bubble up.
+        return Ok(None);
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if url.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(url))
+    }
 }
 
 /// True if `dolt_dir` resolves to the global `~/.smooth/dolt` store.
@@ -6733,5 +6828,104 @@ mod worktree_guard_tests {
     fn non_git_dir_is_not_linked() {
         let tmp = tempfile::tempdir().expect("tempdir");
         assert!(!is_linked_worktree(tmp.path()));
+    }
+}
+
+#[cfg(test)]
+mod beads_model_tests {
+    //! Pearl th-975dfe: `.smooth/dolt/` is gitignored under the beads
+    //! model; `cmd_pearls_init` ensures the entry exists and (on fresh
+    //! clones) bootstraps from `refs/dolt/data` via the git origin URL.
+
+    use super::{ensure_dolt_gitignored, read_git_origin_url};
+    use std::process::Command;
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let ok = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("git launches")
+            .status
+            .success();
+        assert!(ok, "git {args:?} failed in {dir:?}");
+    }
+
+    #[test]
+    fn ensure_dolt_gitignored_creates_file_when_absent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let added = ensure_dolt_gitignored(tmp.path()).expect("ensure ok");
+        assert!(added, "should report change when file did not exist");
+        let contents = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        assert!(contents.contains(".smooth/dolt/"), "missing entry: {contents}");
+    }
+
+    #[test]
+    fn ensure_dolt_gitignored_appends_when_unrelated_entries_present() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join(".gitignore"), "target/\nnode_modules/\n").unwrap();
+        let added = ensure_dolt_gitignored(tmp.path()).expect("ensure ok");
+        assert!(added);
+        let contents = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        assert!(contents.contains("target/"));
+        assert!(contents.contains("node_modules/"));
+        assert!(contents.contains(".smooth/dolt/"));
+    }
+
+    #[test]
+    fn ensure_dolt_gitignored_is_idempotent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join(".gitignore"), "foo/\n.smooth/dolt/\nbar/\n").unwrap();
+        let added = ensure_dolt_gitignored(tmp.path()).expect("ensure ok");
+        assert!(!added, "should report no change when entry already present");
+        let contents = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        // Count exactly one occurrence of `.smooth/dolt` — no duplicates.
+        let occurrences = contents.matches(".smooth/dolt").count();
+        assert_eq!(occurrences, 1, "got {occurrences} occurrences: {contents}");
+    }
+
+    #[test]
+    fn ensure_dolt_gitignored_recognizes_wildcard_variant() {
+        // smooai uses `.smooth/dolt/**/.dolt/noms/manifest` style entries;
+        // a more permissive variant like `.smooth/dolt/**` should also
+        // count as "already ignored" so init doesn't add a duplicate.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join(".gitignore"), ".smooth/dolt/**\n").unwrap();
+        let added = ensure_dolt_gitignored(tmp.path()).expect("ensure ok");
+        assert!(!added);
+    }
+
+    #[test]
+    fn ensure_dolt_gitignored_recognizes_leading_slash_variant() {
+        // `/.smooth/dolt/` (anchored) — same semantic as ours.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join(".gitignore"), "/.smooth/dolt/\n").unwrap();
+        let added = ensure_dolt_gitignored(tmp.path()).expect("ensure ok");
+        assert!(!added);
+    }
+
+    #[test]
+    fn read_git_origin_url_returns_none_when_no_origin() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        git(tmp.path(), &["init", "-q", "-b", "main"]);
+        assert!(read_git_origin_url(tmp.path()).unwrap().is_none());
+    }
+
+    #[test]
+    fn read_git_origin_url_returns_origin_when_configured() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        git(tmp.path(), &["init", "-q", "-b", "main"]);
+        git(tmp.path(), &["remote", "add", "origin", "https://example.com/team/repo.git"]);
+        assert_eq!(read_git_origin_url(tmp.path()).unwrap().as_deref(), Some("https://example.com/team/repo.git"));
+    }
+
+    #[test]
+    fn read_git_origin_url_non_git_dir_returns_none() {
+        // Outside a git repo `git remote get-url` exits non-zero; the
+        // helper must swallow that as "no origin" rather than bubbling
+        // up — caller treats None as "no remote to bootstrap from."
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(read_git_origin_url(tmp.path()).unwrap().is_none());
     }
 }

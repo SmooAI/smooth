@@ -271,17 +271,42 @@ See README.md for full architecture diagrams and the plan file for implementatio
 
 ### Per-project (Dolt)
 Pearl data lives in `.smooth/dolt/` per project, backed by an embedded
-Dolt database (via the `smooth-dolt` Go binary). This gives full version
-control, git-syncable data, and push/pull to remotes.
+Dolt database (via the `smooth-dolt` Go binary). Full version control,
+sync via dolt's own `refs/dolt/data` git ref + push/pull to remotes.
 
 ```
-.smooth/dolt/          # Dolt database (content-addressed, git-friendly)
+.smooth/dolt/          # Dolt database (content-addressed)
   └── pearls/          # Dolt "pearls" database
 ```
 
 Tables: `pearls`, `pearl_dependencies`, `pearl_labels`, `pearl_comments`,
 `pearl_history`, `sessions`, `session_messages`, `orchestrator_snapshots`,
 `memories`.
+
+> **Beads model — `.smooth/dolt/` is NOT git-tracked.** Pearl
+> th-975dfe (2026-06-13) flipped this repo to match how beads stores
+> its DB at `.beads/embeddeddolt/`: the on-disk store is gitignored
+> and sync happens via dolt's custom `refs/dolt/data` ref pushed
+> alongside normal git refs. Reason: noms files are mutable binary
+> pointers Dolt rewrites on every open; tracking them in git produced
+> recurring merge conflicts when main moved forward while a feature
+> worktree was open, even when the worktree never touched dolt. The
+> ref-based sync was always available; we just don't materialize the
+> files in git anymore.
+>
+> **Implications:**
+> - `git clone` of a fresh checkout has no `.smooth/dolt/` on disk.
+>   `th pearls init` detects the missing dir + the `origin` remote
+>   and runs `smooth-dolt clone` to bootstrap from `refs/dolt/data`
+>   automatically. No manual `th pearls pull` needed for first-time
+>   setup.
+> - `.gitignore` carries the entry — `th pearls init` adds it
+>   idempotently if missing, so existing repos onboard with one
+>   command.
+> - PR #94 (linked-worktree auto-commit guard) becomes
+>   belt-and-suspenders. Same with smooai's
+>   `.gitattributes merge=binary` lines on noms files (any repo
+>   that still tracks dolt should keep those as a transitional fix).
 
 ### Global (`~/.smooth/`)
 - `registry.json` — Multi-project registry (auto-updated on pearl store open)
