@@ -10,7 +10,6 @@
 //! and call this helper.
 
 pub mod agents;
-pub mod config;
 pub mod crm;
 pub mod jobs;
 pub mod keys;
