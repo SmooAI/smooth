@@ -90,7 +90,7 @@ const HOOK_TEMPLATES: &[(&str, &str)] = &[
 // ── Install ───────────────────────────────────────────────────────
 
 /// Find the git repo root from `start_dir` by walking up.
-fn find_git_root(start_dir: &Path) -> Option<PathBuf> {
+pub fn find_git_root(start_dir: &Path) -> Option<PathBuf> {
     let mut dir = start_dir.to_path_buf();
     loop {
         if dir.join(".git").exists() {

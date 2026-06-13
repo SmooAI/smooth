@@ -42,13 +42,16 @@ Thumbs.db
 .claude/worktree-bypass
 
 # Beads / Dolt files
-# .dolt/ used to be globally ignored, but the project pearl board
-# lives at .smooth/dolt/.dolt/ and we WANT that committed — git
-# is how pearls sync between machines for project repos. Anchor
-# the ignore to the repo root so legacy top-level .dolt/ stores
-# (beads layout) stay out, and let `.smooth/dolt/.gitignore`
-# scope the runtime files (LOCK, temptf/) inside the pearl store.
+# Pearl Dolt stores live at .smooth/dolt/ and are NOT git-tracked.
+# Sync is via dolt's own `refs/dolt/data` ref (push/pull) — the same
+# pattern beads uses (`.beads/embeddeddolt/` ignored, sync via
+# `bd dolt push`/`pull`). Pearl th-975dfe (2026-06-13) flipped this
+# repo off the old "track noms binaries in git" model that produced
+# recurring merge conflicts when main moved forward while a feature
+# worktree was open. Fresh clones bootstrap their store via
+# `th pearls init` which clones from origin's refs/dolt/data.
 /.dolt/
+.smooth/dolt/
 .beads-credential-key
 .smooth/pearls.db
 .smooth/pearls.db-wal

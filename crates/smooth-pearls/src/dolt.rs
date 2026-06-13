@@ -985,6 +985,42 @@ impl SmoothDolt {
     }
 }
 
+/// Clone a dolt store from a remote URL into `target_dir`. Used by
+/// `th pearls init` for post-`git clone` bootstrap — when a fresh
+/// checkout has no `.smooth/dolt/` on disk (it's gitignored under the
+/// beads model) but the git remote has `refs/dolt/data` carrying the
+/// pearl history.
+///
+/// Wraps `smooth-dolt clone <remote_url> <target_dir>` with stdin
+/// detached so the subprocess can't block waiting on a TTY.
+///
+/// # Errors
+/// - smooth-dolt binary not findable
+/// - clone subprocess returns non-zero (network failure, ref not found,
+///   etc.) — stderr is captured + first 400 chars included
+pub fn clone_from(remote_url: &str, target_dir: &std::path::Path) -> Result<()> {
+    let bin = find_smooth_dolt_binary().context("smooth-dolt binary not found for clone — Run: scripts/build-smooth-dolt.sh")?;
+    if let Some(parent) = target_dir.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create parent of {}", target_dir.display()))?;
+    }
+    let output = Command::new(&bin)
+        .args(["clone", remote_url, &target_dir.to_string_lossy()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .context("exec smooth-dolt clone")?;
+    if !output.status.success() {
+        let stderr: String = String::from_utf8_lossy(&output.stderr).trim().chars().take(400).collect();
+        anyhow::bail!(
+            "smooth-dolt clone from {remote_url} failed (exit {}): {}",
+            output.status.code().unwrap_or(-1),
+            stderr
+        );
+    }
+    Ok(())
+}
+
 /// Read the `origin` remote URL from `<data_dir>/.dolt/repo_state.json`.
 fn read_origin_url(data_dir: &std::path::Path) -> Result<String> {
     let path = data_dir.join(".dolt").join("repo_state.json");
