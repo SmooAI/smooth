@@ -193,6 +193,14 @@ jobs:
                   # capability management in the VM host shim.
                   sudo apt-get install -y pkg-config libdbus-1-dev libcap-ng-dev protobuf-compiler
 
+            - name: Install macOS build deps
+              if: runner.os == 'macOS'
+              # protobuf: smooth-narc's prost build.rs needs `protoc` (the
+              # Linux step above installs it via apt; macOS runners have
+              # neither protoc nor it on PATH, so the cross-platform binary
+              # build failed with "Could not find protoc"). Pearl th-14bddf.
+              run: brew install protobuf
+
             - name: Install pnpm
               uses: pnpm/action-setup@v4
 
