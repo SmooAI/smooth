@@ -1,6 +1,6 @@
 [package]
 name = "smooai-smooth-cast"
-version = "0.13.7"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
