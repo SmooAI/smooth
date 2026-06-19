@@ -65,11 +65,10 @@ pub enum AuthCommands {
         /// line in interactive shells — it lands in shell history.
         #[arg(long, conflicts_with = "client_id", conflicts_with = "client_secret")]
         password: Option<String>,
-        /// Open the browser for the OAuth2 + PKCE flow against
-        /// `auth.smoo.ai/cli-login`. Pearl th-fcb579. Default is the
-        /// prompt-based password flow until smooai-side `/cli-login`
-        /// (pearl th-62e710) ships and `SMOOTH_AUTH_BROWSER=1` is
-        /// removed as a gate.
+        /// Open the browser for the OAuth2 + PKCE user/org flow against
+        /// `smoo.ai/cli-login` (Supabase session). This is the **default**
+        /// on a TTY; pass `--no-browser` for the password prompt or `--m2m`
+        /// for a service account. Pearls th-fcb579 / th-a93734.
         #[arg(
             long,
             conflicts_with = "no_browser",
@@ -78,8 +77,8 @@ pub enum AuthCommands {
             conflicts_with = "password"
         )]
         browser: bool,
-        /// Force the prompt-based password flow even when the env
-        /// gate (`SMOOTH_AUTH_BROWSER=1`) is set.
+        /// Force the prompt-based Supabase password flow instead of the
+        /// default browser flow (also via `SMOOTH_AUTH_BROWSER=0`).
         #[arg(long = "no-browser", conflicts_with = "browser")]
         no_browser: bool,
 
