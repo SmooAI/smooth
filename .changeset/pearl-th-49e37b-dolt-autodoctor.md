@@ -1,5 +1,5 @@
 ---
-"smooth": patch
+"@smooai/smooth": patch
 ---
 
 `th pearls` auto-doctor for the orphaned-`smooth-dolt serve` lock wedge. Repro shape: an earlier `th up` spawned `smooth-dolt serve <data-dir> --socket /tmp/smooth-dolt-shared/<hash>.sock` as a child. Parent died (`th down`, crash, agent worktree teardown), the serve child got reparented to init, and the socket file was cleaned up — leaving the serve process running with no way to reach it but still holding the `noms/LOCK` file. `try_attach_handle` (does `socket.exists()`) returns None, `SmoothDolt::new` falls back to CLI mode, `smooth-dolt exec` tries to grab the lock, fails with `Error 1105: cannot update manifest: database is read only`. Every `th pearls create / update / close / commit` wedges until the user manually kills the orphan. Now: on the read-only error, `run_cli` invokes `auto_doctor_clear_orphan_server` which uses `lsof -t` to find LOCK file holders, verifies via `ps -o command=` that each holder is actually `smooth-dolt serve` (refuses to kill debuggers / backup tools / IDEs that happened to open the file), `SIGTERM`s the orphan, waits 500 ms for the kernel to release the lock, retries once. Best-effort: failures inside the doctor itself fall through to the original error rather than masking it. Pearl th-49e37b.

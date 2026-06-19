@@ -1,5 +1,5 @@
 ---
-"smooai-smooth": minor
+"@smooai/smooth": minor
 ---
 
 SMOODEV-1793: migrate Smooth off gateway `smooth-*` slot aliases

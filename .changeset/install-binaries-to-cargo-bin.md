@@ -1,5 +1,5 @@
 ---
-"smooai-smooth": patch
+"@smooai/smooth": patch
 ---
 
 install:th now drops smooth-dolt and native smooth-operative into ~/.cargo/bin (pearl th-92dac3)

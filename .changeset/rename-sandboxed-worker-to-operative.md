@@ -1,5 +1,5 @@
 ---
-"smooai-smooth": minor
+"@smooai/smooth": minor
 ---
 
 rename the sandboxed-worker concept from "smooth-operator"/"operator" to "operative"

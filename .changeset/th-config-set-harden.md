@@ -1,5 +1,5 @@
 ---
-"smooai-smooth": patch
+"@smooai/smooth": patch
 ---
 
 th config set: consistency + hardening (pearl th-7ea946)

@@ -1,5 +1,5 @@
 ---
-"smooai-smooth": patch
+"@smooai/smooth": patch
 ---
 
 th pearls: quiet auto-commit under beads model + fix smooth-dolt status

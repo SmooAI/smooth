@@ -1,5 +1,5 @@
 ---
-"smooai-smooth": patch
+"@smooai/smooth": patch
 ---
 
 th config: mask all echoed values (last-4 disclosure) regardless of tier

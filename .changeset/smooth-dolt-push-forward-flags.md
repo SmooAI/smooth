@@ -1,5 +1,5 @@
 ---
-"smooai-smooth": patch
+"@smooai/smooth": patch
 ---
 
 smooth-dolt: forward push/pull args into CALL DOLT_*() (pearl th-9eb6a0)

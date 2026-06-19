@@ -1,5 +1,5 @@
 ---
-"smooai-smooth": minor
+"@smooai/smooth": minor
 ---
 
 WebSearch tool (Exa MCP primary, Parallel fallback) + Wonk allowlist + score-research bench dimension

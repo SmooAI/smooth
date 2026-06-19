@@ -1,5 +1,5 @@
 ---
-"smooai-smooth": minor
+"@smooai/smooth": minor
 ---
 
 runner: add `todo_list` tool for cross-turn task state (opencode parity)

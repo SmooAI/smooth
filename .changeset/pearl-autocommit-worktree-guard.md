@@ -1,5 +1,5 @@
 ---
-"smooai-smooth": patch
+"@smooai/smooth": patch
 ---
 
 th pearls: skip the git auto-commit of pearl state when run from a linked worktree

@@ -1,5 +1,5 @@
 ---
-"smooth": minor
+"@smooai/smooth": minor
 ---
 
 Three new `smooth-bench` subcommands for measuring agentic coding quality (the real `smooth-coding` decision data):

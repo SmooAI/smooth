@@ -1,5 +1,5 @@
 ---
-"smooai-smooth": patch
+"@smooai/smooth": patch
 ---
 
 test: make `auth::active_org` tests hermetic so they stop flaking the Release run
