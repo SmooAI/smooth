@@ -91,14 +91,21 @@ jobs:
                   commit: "🦋 New version release"
                   title: "🦋 New version release"
                   # Override the default `changeset version` so the version
-                  # PR carries Cargo.toml + Cargo.lock bumps too (otherwise
-                  # the Rust side drifts and `cargo publish` fails).
+                  # PR carries Cargo.toml + Cargo.lock bumps too.
                   version: pnpm ci:version
-                  publish: pnpm ci:publish
-                  createGithubReleases: true
+                  # No `publish:` / `createGithubReleases:` — we intentionally
+                  # do NOT publish the workspace crates to crates.io. They are
+                  # internal pieces of the `th` binary (all marked
+                  # `publish = false`), with no external consumers; the product
+                  # ships as a GitHub binary release (the build matrix below),
+                  # and the one genuinely-public crate
+                  # (smooai-smooth-operator-core) is published from its own
+                  # repo. The version PR + binary release are gated on the
+                  # "🦋 New version release" merge commit (see "Check if release
+                  # needed"), so dropping publish doesn't break the release.
+                  # Pearl th-607f69.
               env:
                   GITHUB_TOKEN: ${{ secrets.GH_PAT }}
-                  CARGO_REGISTRY_TOKEN: ${{ secrets.SMOOAI_CARGO_REGISTRY_TOKEN }}
 
             - name: Check if release needed
               id: check_release

@@ -1,5 +1,9 @@
 [package]
 name = "smooai-smooth-wonk"
+# Internal crate — part of the `th` binary, not a public library.
+# `th` ships as a GitHub binary release; only smooai-smooth-operator-core
+# is published to crates.io (separately, as its own crate). Pearl th-607f69.
+publish = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
