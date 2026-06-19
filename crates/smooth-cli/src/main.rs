@@ -479,9 +479,14 @@ enum OrgsCommands {
     },
     /// Switch the active org persisted in `~/.smooth/auth/smooai.json`.
     /// Subsequent commands default to this org unless `--org` is set.
+    ///
+    /// Omit the argument on a TTY to pick interactively from the orgs you
+    /// belong to. A value is matched as a UUID first, then case-insensitively
+    /// against org name / slug (substring) — so `th api orgs switch ats`
+    /// works without copying a UUID.
     Switch {
-        /// Org id to make active.
-        org_id: String,
+        /// Org id (UUID) or a name/slug substring. Omit to pick from a list.
+        org_id: Option<String>,
     },
 }
 

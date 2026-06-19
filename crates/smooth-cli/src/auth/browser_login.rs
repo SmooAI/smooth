@@ -4,20 +4,21 @@
 //! 1. Generate PKCE pair + CSRF state token.
 //! 2. Bind a localhost HTTP listener on `127.0.0.1:0` (OS-assigned
 //!    high port).
-//! 3. Open `https://auth.smoo.ai/cli-login?redirect_uri=…&state=…
+//! 3. Open `https://smoo.ai/cli-login?redirect_uri=…&state=…
 //!    &code_challenge=…&code_challenge_method=S256` in the user's
-//!    default browser.
+//!    default browser (Supabase user/org session — the dashboard domain,
+//!    NOT the M2M `auth.smoo.ai` issuer).
 //! 4. Block on the listener (5-minute timeout) for the callback at
 //!    `/callback?code=…&state=…&org_id=…` (success) or `?error=…&state=…`
 //!    (denied).
-//! 5. POST `https://auth.smoo.ai/token` with `grant_type=authorization_code`,
+//! 5. POST `https://smoo.ai/api/token` with `grant_type=authorization_code`,
 //!    the `code`, the original `code_verifier`, and the same
 //!    `redirect_uri` we registered for the auth request.
 //! 6. Hand the resulting `{access_token, refresh_token, expires_in,
 //!    org_id}` back to the caller, which persists it via the shared
 //!    active-org writer (pearl th-3217db).
 //!
-//! Pearl th-fcb579.
+//! Pearls th-fcb579 / th-a93734 (SMOODEV-1918).
 
 use std::io::Cursor;
 use std::net::TcpListener;

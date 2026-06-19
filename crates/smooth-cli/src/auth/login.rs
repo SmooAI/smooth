@@ -13,55 +13,74 @@ use smooai_client_shared::auth::storage::{CredentialKind, Credentials, Credentia
 use super::active_org;
 use super::browser_login;
 
-/// Default `auth.smoo.ai/cli-login` page (the browser-facing endpoint
-/// the smooai-side pearl th-62e710 is shipping). Override with
-/// `SMOOAI_CLI_LOGIN_URL` for staging / local dev.
-const DEFAULT_CLI_LOGIN_URL: &str = "https://auth.smoo.ai/cli-login";
+/// Default `smoo.ai/cli-login` page — the browser-facing endpoint of the
+/// **user/org** flow. This lives on the dashboard domain (`smoo.ai`), not
+/// `auth.smoo.ai`, because it authenticates the person through their
+/// **Supabase** dashboard session and lets them pick an org. The M2M
+/// (`--m2m`) flow is the one that talks to `auth.smoo.ai` (client_credentials).
+/// Override with `SMOOAI_CLI_LOGIN_URL` for staging / local dev.
+/// Pearl th-a93734 / SMOODEV-1918.
+const DEFAULT_CLI_LOGIN_URL: &str = "https://smoo.ai/cli-login";
+
+/// Default token-exchange endpoint for the **browser/user** flow. This is a
+/// distinct endpoint from the M2M `auth.smoo.ai/token` (openauthjs
+/// client_credentials issuer): `smoo.ai/api/token` is the Next.js route that
+/// redeems the PKCE `authorization_code` minted at `/cli-login` and signs the
+/// Supabase-compatible user JWT. Keep these two separate — they are different
+/// services. Override with `SMOOAI_CLI_TOKEN_URL` for staging / local dev.
+const DEFAULT_CLI_TOKEN_URL: &str = "https://smoo.ai/api/token";
 
 fn cli_login_url() -> String {
     std::env::var("SMOOAI_CLI_LOGIN_URL").unwrap_or_else(|_| DEFAULT_CLI_LOGIN_URL.to_string())
 }
 
-fn token_url() -> String {
-    // Same env var the M2M flow already honors (`SMOOAI_AUTH_URL`),
-    // and the same default endpoint — `/token` accepts both
-    // `grant_type=client_credentials` and `grant_type=authorization_code`
-    // (the pearl th-62e710 contract).
-    std::env::var("SMOOAI_AUTH_URL").unwrap_or_else(|_| "https://auth.smoo.ai/token".to_string())
+/// Token-exchange URL for the browser/user (Supabase) flow. Deliberately NOT
+/// the M2M `SMOOAI_AUTH_URL` / `auth.smoo.ai/token` — that endpoint only
+/// serves `client_credentials`. See [`DEFAULT_CLI_TOKEN_URL`].
+fn cli_token_url() -> String {
+    std::env::var("SMOOAI_CLI_TOKEN_URL").unwrap_or_else(|_| DEFAULT_CLI_TOKEN_URL.to_string())
 }
 
-/// Decide whether the browser flow should run. Three inputs, in order:
+/// Pure env/flag preference for the browser flow, with NO TTY gate — split
+/// out from [`should_use_browser_flow`] so it can be unit-tested without a
+/// PTY. Inputs, in order:
 ///   1. Explicit `--browser` / `--no-browser` flag (highest priority).
-///   2. `SMOOTH_AUTH_BROWSER` env var: `0` / `false` opts out, `1` /
-///      `true` opts in. Default for now is **off** so this ships behind
-///      a feature flag until smooai-side `/cli-login` is live (DESIGN.md
-///      ship order step 5).
-///   3. Stdout-is-a-TTY check — required regardless. CI/SSH/pipe →
-///      prompt flow only.
+///   2. `SMOOTH_AUTH_BROWSER` env var: `0` / `false` opts out, `1` / `true`
+///      opts in.
+///   3. Default: **on**. The smooai-side `/cli-login` + `/api/token`
+///      (Supabase user/org flow) shipped (pearl th-62e710 / SMOODEV-1918),
+///      so the browser flow is now the default user login.
+fn browser_flow_preference(explicit: Option<bool>) -> bool {
+    if let Some(b) = explicit {
+        return b;
+    }
+    match std::env::var("SMOOTH_AUTH_BROWSER").ok().as_deref() {
+        Some("0") | Some("false") | Some("FALSE") => false,
+        // "1"/"true" and the unset default both opt in.
+        _ => true,
+    }
+}
+
+/// Decide whether the browser flow should run. Layers a hard TTY gate over
+/// [`browser_flow_preference`]: no TTY = prompt/password flow regardless, so
+/// CI / SSH / piped invocations never hang waiting on a browser callback.
 fn should_use_browser_flow(explicit: Option<bool>) -> bool {
     // Hard gate: no TTY = no browser. Even an explicit `--browser`
     // is ignored on a headless host so we don't silently hang.
     if !std::io::stdout().is_terminal() {
         return false;
     }
-    if let Some(b) = explicit {
-        return b;
-    }
-    // Feature-flagged default. Once smooai-side /cli-login ships
-    // (pearl th-62e710), flip the default-on logic here.
-    match std::env::var("SMOOTH_AUTH_BROWSER").ok().as_deref() {
-        Some("1") | Some("true") | Some("TRUE") => true,
-        Some("0") | Some("false") | Some("FALSE") => false,
-        _ => false,
-    }
+    browser_flow_preference(explicit)
 }
 
 /// User flow: prompt for email + password, Supabase password grant,
 /// persist to `~/.smooth/auth/smooai-user.json`.
 ///
-/// When the browser flow is enabled (per `should_use_browser_flow`),
-/// run the PKCE OAuth handshake against `auth.smoo.ai/cli-login`
-/// instead. Both paths persist via the same `CredentialsStore` and the
+/// When the browser flow is enabled (per `should_use_browser_flow`, the
+/// default on a TTY), run the PKCE OAuth handshake against
+/// `smoo.ai/cli-login` (Supabase user/org session) instead. Both paths
+/// authenticate the **person** via Supabase and persist via the same
+/// `CredentialsStore` and the
 /// same `active_org::set` integration so downstream commands behave
 /// identically.
 pub async fn cmd_login_user(email: Option<String>, password: Option<String>, browser: Option<bool>) -> Result<()> {
@@ -104,14 +123,14 @@ pub async fn cmd_login_user(email: Option<String>, password: Option<String>, bro
 }
 
 /// Browser/PKCE flow: open the user's default browser at
-/// `auth.smoo.ai/cli-login`, capture the code on a localhost listener,
-/// exchange for tokens via PKCE, persist credentials, and write the
-/// chosen org through [`active_org::set`].
+/// `smoo.ai/cli-login` (Supabase user/org auth), capture the code on a
+/// localhost listener, exchange it for tokens via PKCE at `smoo.ai/api/token`,
+/// persist credentials, and write the chosen org through [`active_org::set`].
 ///
 /// See [`browser_login`] for the underlying flow + tests.
 async fn cmd_login_user_browser() -> Result<()> {
     let authorize_base = cli_login_url();
-    let tok = token_url();
+    let tok = cli_token_url();
     println!("{} Signing in to Smoo AI via browser...", "→".cyan().bold());
     let http = reqwest::Client::new();
     let outcome = browser_login::run_browser_login(&http, &authorize_base, &tok)
@@ -254,16 +273,24 @@ mod tests {
         }
     }
 
+    // Preference logic is tested via the pure `browser_flow_preference`
+    // (no TTY gate), so the assertions hold under `cargo test` (captured,
+    // non-TTY stdout). The TTY hard-gate itself is covered separately.
+
     #[test]
     fn explicit_no_browser_overrides_env_opt_in() {
         let _l = ENV_LOCK.lock().unwrap();
         let _g = EnvGuard::set("SMOOTH_AUTH_BROWSER", "1");
-        // Even with the env opt-in, `--no-browser` takes precedence —
-        // but only when stdout is a TTY (Some(_) means an explicit
-        // flag was passed). Test harness usually has no TTY, in which
-        // case the function returns false unconditionally — that's
-        // still a valid result for `--no-browser`.
-        assert!(!should_use_browser_flow(Some(false)));
+        // Even with the env opt-in, an explicit `--no-browser` wins.
+        assert!(!browser_flow_preference(Some(false)));
+    }
+
+    #[test]
+    fn explicit_browser_overrides_env_opt_out() {
+        let _l = ENV_LOCK.lock().unwrap();
+        let _g = EnvGuard::set("SMOOTH_AUTH_BROWSER", "0");
+        // And an explicit `--browser` wins over the env opt-out.
+        assert!(browser_flow_preference(Some(true)));
     }
 
     #[test]
@@ -271,7 +298,7 @@ mod tests {
         let _l = ENV_LOCK.lock().unwrap();
         // Under `cargo test`, stdout is captured (not a TTY), so even
         // an explicit `--browser` should not flip the flow. This
-        // exercises the hard-gate at the top of the function.
+        // exercises the hard-gate in `should_use_browser_flow`.
         // (If a future test harness pipes a PTY in, this assertion
         // becomes vacuous; it still documents intent.)
         if !std::io::stdout().is_terminal() {
@@ -283,16 +310,16 @@ mod tests {
     fn env_opt_out_takes_precedence_over_default() {
         let _l = ENV_LOCK.lock().unwrap();
         let _g = EnvGuard::set("SMOOTH_AUTH_BROWSER", "0");
-        assert!(!should_use_browser_flow(None));
+        assert!(!browser_flow_preference(None));
     }
 
     #[test]
-    fn default_is_prompt_flow_when_env_unset() {
+    fn default_is_browser_flow_when_env_unset() {
         let _l = ENV_LOCK.lock().unwrap();
         let _g = EnvGuard::unset("SMOOTH_AUTH_BROWSER");
-        // Feature flag default-off until smooai-side /cli-login ships
-        // (DESIGN.md ship order step 5).
-        assert!(!should_use_browser_flow(None));
+        // Default-on now that the smooai-side /cli-login + /api/token
+        // (Supabase user/org flow) shipped — pearl th-a93734 / SMOODEV-1918.
+        assert!(browser_flow_preference(None));
     }
 
     #[test]
@@ -303,16 +330,27 @@ mod tests {
     }
 
     #[test]
-    fn cli_login_url_default_is_prod() {
+    fn cli_login_url_default_is_smoo_ai() {
         let _l = ENV_LOCK.lock().unwrap();
         let _g = EnvGuard::unset("SMOOAI_CLI_LOGIN_URL");
+        // The user/org browser flow lives on the dashboard domain.
+        assert_eq!(cli_login_url(), "https://smoo.ai/cli-login");
         assert_eq!(cli_login_url(), DEFAULT_CLI_LOGIN_URL);
     }
 
     #[test]
-    fn token_url_honors_smooai_auth_url() {
+    fn cli_token_url_honors_override() {
         let _l = ENV_LOCK.lock().unwrap();
-        let _g = EnvGuard::set("SMOOAI_AUTH_URL", "http://127.0.0.1:9000/token");
-        assert_eq!(token_url(), "http://127.0.0.1:9000/token");
+        let _g = EnvGuard::set("SMOOAI_CLI_TOKEN_URL", "http://127.0.0.1:9000/api/token");
+        assert_eq!(cli_token_url(), "http://127.0.0.1:9000/api/token");
+    }
+
+    #[test]
+    fn cli_token_url_default_is_smoo_ai_api_token() {
+        let _l = ENV_LOCK.lock().unwrap();
+        let _g = EnvGuard::unset("SMOOAI_CLI_TOKEN_URL");
+        // Distinct from the M2M auth.smoo.ai/token issuer.
+        assert_eq!(cli_token_url(), "https://smoo.ai/api/token");
+        assert_eq!(cli_token_url(), DEFAULT_CLI_TOKEN_URL);
     }
 }
