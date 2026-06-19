@@ -37,8 +37,8 @@ pub enum AdminCommands {
         #[command(subcommand)]
         cmd: user::UserCommands,
     },
-    /// Organization operations: list / show / create / members /
-    /// products.
+    /// Organization operations: list / show / create / members / products /
+    /// mint-client / scc-tier.
     Org {
         #[command(subcommand)]
         cmd: org::OrgCommands,

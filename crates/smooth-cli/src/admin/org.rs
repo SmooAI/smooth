@@ -110,6 +110,37 @@ pub enum OrgCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Mint an auth client (API key) for an org. The secret/public key is
+    /// returned ONCE — capture it immediately (the server stores only a hash).
+    /// SMOODEV-1950.
+    MintClient {
+        /// Org UUID.
+        org_id: String,
+        /// `m2m` (server-to-server secretKey) or `b2m` (browser-to-machine,
+        /// CORS-locked publicKey safe to embed in browser JS).
+        #[arg(long, value_parser = ["m2m", "b2m"])]
+        kind: String,
+        /// B2M only: a CORS-allowed origin (e.g. `https://customer.com`).
+        /// Repeatable; at least one is required for `--kind b2m`.
+        #[arg(long = "allowed-origin")]
+        allowed_origin: Vec<String>,
+        /// Optional ISO-8601 expiry (must be in the future; defaults to +1 year).
+        #[arg(long)]
+        expires_at: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Get or set an org's Social Command Center (SCC) tier. Omit `--set` to
+    /// read the current tier. SMOODEV-1950.
+    SccTier {
+        /// Org UUID.
+        org_id: String,
+        /// Set the tier: none | pilot | standard | enterprise. Omit to read.
+        #[arg(long, value_parser = ["none", "pilot", "standard", "enterprise"])]
+        set: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub async fn dispatch(cmd: OrgCommands) -> Result<()> {
@@ -221,6 +252,47 @@ pub async fn dispatch(cmd: OrgCommands) -> Result<()> {
                 .await?;
             print_ok(format!("extended trial on {product_id} ({org_id}) by {days} days"));
             render(&body, Format::from_flag(json), &TableOptions::default());
+        }
+        OrgCommands::MintClient {
+            org_id,
+            kind,
+            allowed_origin,
+            expires_at,
+            json,
+        } => {
+            let mut payload = serde_json::Map::new();
+            if let Some(exp) = expires_at {
+                payload.insert("expiresAt".into(), json!(exp));
+            }
+            if kind == "b2m" {
+                if allowed_origin.is_empty() {
+                    anyhow::bail!("`--allowed-origin` is required for `--kind b2m` (pass one or more CORS-allowed origins)");
+                }
+                payload.insert("allowedOrigins".into(), json!(allowed_origin));
+            } else if !allowed_origin.is_empty() {
+                // m2m has no origin allowlist — flag the misuse rather than silently dropping it.
+                anyhow::bail!("`--allowed-origin` only applies to `--kind b2m`");
+            }
+            let body = client
+                .post(&format!("/admin/organizations/{org_id}/clients/{kind}"), &serde_json::Value::Object(payload))
+                .await?;
+            // The secret/public key is in the response and is shown ONCE — render
+            // the full JSON (never a truncating table) so it can be captured.
+            eprintln!("{}", "⚠  The secret is returned ONCE and cannot be recovered — capture it now.".yellow());
+            print_ok(format!("minted {kind} client for {org_id}"));
+            render(&body, Format::Json, &TableOptions::default());
+            let _ = json; // output is always full JSON for safety
+        }
+        OrgCommands::SccTier { org_id, set, json } => {
+            let path = format!("/admin/organizations/{org_id}/billing/scc-tier");
+            let body = if let Some(tier) = set {
+                let body = client.post(&path, &json!({ "tier": tier })).await?;
+                print_ok(format!("set SCC tier = {tier} on {org_id}"));
+                body
+            } else {
+                client.get(&path).await?
+            };
+            render(&body, Format::from_flag(json), &TableOptions::default().with_columns(&["orgId", "tier"]));
         }
     }
     Ok(())
