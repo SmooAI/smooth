@@ -885,6 +885,34 @@ impl SmoothDolt {
             return DoctorDiagnosis::ConflictMarkers { candidates };
         }
 
+        // Missing core pointer files. When `.dolt/` exists but its
+        // `noms/manifest` (chunk-store root) or `repo_state.json`
+        // (branch/HEAD + remotes) is gone, the store is unreadable —
+        // the signature of an interrupted GC/archive or a half-written
+        // clone (e.g. SMOODEV pearl store, 2026-06-18). Classify as
+        // Corrupt (recoverable by re-clone) rather than letting the
+        // cold `log` probe below fall through to NotInitialized, which
+        // is a dead-end the doctor/auto-heal won't act on. Pearl
+        // th-03cdb8.
+        let dolt_meta = data_dir.join(".dolt");
+        if dolt_meta.is_dir() {
+            let mut missing: Vec<&str> = Vec::new();
+            if !manifest.exists() {
+                missing.push("noms/manifest");
+            }
+            if !dolt_meta.join("repo_state.json").exists() {
+                missing.push("repo_state.json");
+            }
+            if !missing.is_empty() {
+                return DoctorDiagnosis::Corrupt {
+                    detail: format!(
+                        "missing core dolt file(s): {} — interrupted GC/archive or half-written clone; re-clone from remote",
+                        missing.join(", ")
+                    ),
+                };
+            }
+        }
+
         let cli = match Self::new_cli_only(data_dir) {
             Ok(c) => c,
             Err(e) => {
@@ -956,32 +984,46 @@ impl SmoothDolt {
     /// otherwise. The CLI dispatcher handles this by refusing without
     /// `--force` when a server is attached.
     pub fn recover_from_remote(&self) -> Result<PathBuf> {
-        let data_dir = &self.data_dir;
-        let remote_url = read_origin_url(data_dir).context("no `origin` remote in repo_state.json — manual `dolt clone <url> <dir>` required")?;
-        let parent = data_dir.parent().context("data_dir has no parent")?;
-        let leaf = data_dir.file_name().and_then(|n| n.to_str()).context("data_dir has no leaf name")?;
+        // The clone must target the multi-db ROOT (e.g. `.smooth/dolt`)
+        // because `smooth-dolt clone <root>` recreates the `pearls`
+        // database at `<root>/pearls`. Callers hand us either the root
+        // or the `pearls` repo subdir (the doctor probes per-subdir),
+        // so normalize: if we were given the `pearls` repo dir, step up
+        // to its parent root before cloning. Pearl th-03cdb8.
+        let root: PathBuf = if self.data_dir.file_name().and_then(|n| n.to_str()) == Some("pearls") {
+            self.data_dir.parent().context("pearls dir has no parent root")?.to_path_buf()
+        } else {
+            self.data_dir.clone()
+        };
+        let pearls_dir = root.join("pearls");
+
+        // Resolve the origin URL. Prefer the dolt repo's own
+        // repo_state.json; fall back to the enclosing git repo's
+        // `origin` when that file is gone — which is the exact failure
+        // mode we recover from, since an interrupted op can wipe
+        // repo_state.json. The raw git URL is what `smooth-dolt clone`
+        // already consumes.
+        let remote_url = read_origin_url(&pearls_dir)
+            .or_else(|_| read_git_origin_url(&root))
+            .context("no origin remote found (repo_state.json missing AND no git `origin`) — manual `smooth-dolt clone <url> <dir>` required")?;
+
+        let parent = root.parent().context("data_dir has no parent")?;
+        let leaf = root.file_name().and_then(|n| n.to_str()).context("data_dir has no leaf name")?;
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let broken_path = parent.join(format!("{leaf}.broken-{ts}"));
-        std::fs::rename(data_dir, &broken_path).with_context(|| format!("snapshot corrupt dir → {}", broken_path.display()))?;
+        std::fs::rename(&root, &broken_path).with_context(|| format!("snapshot corrupt dir → {}", broken_path.display()))?;
 
-        let bin = find_smooth_dolt_binary().context("smooth-dolt binary not found for clone — Run: scripts/build-smooth-dolt.sh")?;
-        let output = Command::new(&bin)
-            .args(["clone", &remote_url, &data_dir.to_string_lossy()])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .context("exec smooth-dolt clone")?;
-        if !output.status.success() {
-            // Restore the broken dir so the user isn't stranded.
-            let _ = std::fs::rename(&broken_path, data_dir);
-            let stderr: String = String::from_utf8_lossy(&output.stderr).trim().chars().take(400).collect();
-            anyhow::bail!("smooth-dolt clone failed (exit {}): {}", output.status.code().unwrap_or(-1), stderr);
+        match clone_from(&remote_url, &root) {
+            Ok(()) => Ok(broken_path),
+            Err(e) => {
+                // Restore the broken dir so the user isn't stranded.
+                let _ = std::fs::rename(&broken_path, &root);
+                Err(e).context("re-clone during recovery failed")
+            }
         }
-        Ok(broken_path)
     }
 }
 
@@ -1033,4 +1075,109 @@ fn read_origin_url(data_dir: &std::path::Path) -> Result<String> {
         .and_then(|u| u.as_str())
         .context("repo_state.json: missing remotes.origin.url")?;
     Ok(url.to_string())
+}
+
+/// Read the enclosing git repository's `origin` URL via
+/// `git -C <start> remote get-url origin`. Recovery fallback for when
+/// the dolt `repo_state.json` (which normally records the remote) has
+/// been wiped by an interrupted operation. The raw git URL (e.g.
+/// `git@github.com:Org/repo.git`) is exactly what `smooth-dolt clone`
+/// already consumes, so it's returned verbatim.
+fn read_git_origin_url(start: &std::path::Path) -> Result<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(start)
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .context("exec git remote get-url origin")?;
+    if !output.status.success() {
+        anyhow::bail!("git remote get-url origin failed in {} (no origin remote?)", start.display());
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if url.is_empty() {
+        anyhow::bail!("git origin url is empty");
+    }
+    Ok(url)
+}
+
+#[cfg(test)]
+mod auto_heal_tests {
+    use super::{read_git_origin_url, DoctorDiagnosis, SmoothDolt};
+    use std::process::Command;
+
+    /// `.dolt/` present but `noms/manifest` + `repo_state.json` gone =
+    /// the interrupted-GC/half-clone signature → recoverable Corrupt,
+    /// not a dead-end NotInitialized. This must classify before the cold
+    /// `log` probe so it never depends on the smooth-dolt binary. Pearl
+    /// th-03cdb8 / the 2026-06-18 incident.
+    #[test]
+    fn diagnose_missing_core_files_is_corrupt() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        std::fs::create_dir_all(dir.join(".dolt").join("noms")).unwrap();
+        // Deliberately write neither manifest nor repo_state.json.
+
+        match SmoothDolt::diagnose(dir) {
+            DoctorDiagnosis::Corrupt { detail } => {
+                assert!(detail.contains("noms/manifest"), "detail names manifest: {detail}");
+                assert!(detail.contains("repo_state.json"), "detail names repo_state: {detail}");
+            }
+            other => panic!("expected Corrupt, got {other:?}"),
+        }
+    }
+
+    /// Only the manifest is missing (repo_state present) — still Corrupt.
+    #[test]
+    fn diagnose_missing_manifest_only_is_corrupt() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        std::fs::create_dir_all(dir.join(".dolt").join("noms")).unwrap();
+        std::fs::write(dir.join(".dolt").join("repo_state.json"), "{}").unwrap();
+
+        match SmoothDolt::diagnose(dir) {
+            DoctorDiagnosis::Corrupt { detail } => {
+                assert!(detail.contains("noms/manifest"), "detail: {detail}");
+                assert!(!detail.contains("repo_state.json"), "repo_state present, should not be listed: {detail}");
+            }
+            other => panic!("expected Corrupt, got {other:?}"),
+        }
+    }
+
+    /// A git-conflict-marker manifest is reported as ConflictMarkers
+    /// (hand-resolvable) and takes priority over the missing-files check.
+    #[test]
+    fn diagnose_conflict_markers_take_priority() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        std::fs::create_dir_all(dir.join(".dolt").join("noms")).unwrap();
+        std::fs::write(
+            dir.join(".dolt").join("noms").join("manifest"),
+            "<<<<<<< HEAD\n5:__DOLT__:aaa:bbb\n=======\n5:__DOLT__:ccc:ddd\n>>>>>>> other\n",
+        )
+        .unwrap();
+        match SmoothDolt::diagnose(dir) {
+            DoctorDiagnosis::ConflictMarkers { candidates } => {
+                assert_eq!(candidates.len(), 2, "two non-marker candidate lines");
+            }
+            other => panic!("expected ConflictMarkers, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_git_origin_url_reads_configured_origin() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        let git = |args: &[&str]| Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+        git(&["init", "-q"]);
+        git(&["remote", "add", "origin", "git@github.com:SmooAI/smooth.git"]);
+        assert_eq!(read_git_origin_url(dir).unwrap(), "git@github.com:SmooAI/smooth.git");
+    }
+
+    #[test]
+    fn read_git_origin_url_errors_without_origin() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        Command::new("git").arg("-C").arg(dir).args(["init", "-q"]).output().unwrap();
+        assert!(read_git_origin_url(dir).is_err());
+    }
 }

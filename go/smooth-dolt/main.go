@@ -351,6 +351,29 @@ func cmdClone(remoteURL, dataDir string) {
 	if _, err := db.Exec("CALL DOLT_PULL('origin', 'main')"); err != nil {
 		fatal("dolt_pull: " + err.Error())
 	}
+
+	// After the pull, local `main` can still point at the fresh init
+	// commit cmdInit just made. DOLT_PULL fetches the remote chunks into
+	// remotes/origin/main but refuses to merge unrelated histories — and
+	// the init root is always unrelated to the remote's root — so `main`
+	// silently keeps the empty init commit while the data sits in the
+	// remote-tracking branch. Every fresh bootstrap clone hits this:
+	// the store looks empty ("table not found: pearls") despite holding
+	// the full pulled history on disk. Force `main` onto the pulled
+	// remote head so the clone actually reflects the remote. No-op when
+	// the remote branch is absent (a genuinely empty remote). Pearl
+	// th-3f6657.
+	var remoteHead sql.NullString
+	row := db.QueryRow("SELECT hash FROM dolt_remote_branches WHERE name = 'remotes/origin/main' LIMIT 1")
+	if err := row.Scan(&remoteHead); err != nil && err != sql.ErrNoRows {
+		fatal("dolt clone: read remote head: " + err.Error())
+	}
+	if remoteHead.Valid && remoteHead.String != "" {
+		if _, err := db.Exec("CALL DOLT_RESET('--hard', ?)", remoteHead.String); err != nil {
+			fatal("dolt clone: reset main to remote head: " + err.Error())
+		}
+	}
+
 	fmt.Println("cloned from", remoteURL, "to", dataDir)
 }
 
