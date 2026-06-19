@@ -42,12 +42,97 @@ impl PearlStore {
     /// a later table (e.g. `config`, added in the retire-sqlite change)
     /// get the missing table(s) created and committed. On an up-to-date
     /// store this costs a single `SHOW TABLES` round-trip.
+    ///
+    /// **Auto-heal** (pearl th-03cdb8): if the first store touch fails
+    /// because the on-disk dolt state is corrupt (missing
+    /// `noms/manifest` / `repo_state.json`, torn manifest, git-conflict
+    /// markers), and the store is reachable from a remote, recover
+    /// in-place (snapshot the broken dir + re-clone from origin) and
+    /// re-open — instead of surfacing a raw smooth-dolt error to every
+    /// `th pearls` command. Only fires in CLI mode; never yanks a store
+    /// out from under a live `smooth-dolt serve` (Big Smooth).
     pub fn open(dolt_dir: &Path) -> Result<Self> {
         let dolt = SmoothDolt::new(dolt_dir)?;
-        Self::migrate_schema(&dolt)?;
+        match Self::migrate_schema(&dolt) {
+            Ok(()) => {}
+            Err(e) => {
+                if Self::try_auto_heal(dolt_dir, &dolt) {
+                    // Recovered — re-open fresh (CLI mode) and migrate.
+                    let healed = SmoothDolt::new(dolt_dir)?;
+                    Self::migrate_schema(&healed)?;
+                    Self::auto_register_project(dolt_dir);
+                    return Ok(Self { dolt: healed });
+                }
+                return Err(e);
+            }
+        }
         // Auto-register in global registry (best-effort)
         Self::auto_register_project(dolt_dir);
         Ok(Self { dolt })
+    }
+
+    /// Attempt in-place recovery of a store that failed to open. Returns
+    /// `true` if a recovery was performed (caller should re-open), `false`
+    /// if no recovery was appropriate (caller should surface the original
+    /// error). Best-effort and loud: prints what it did to stderr so the
+    /// user understands why their command paused. Pearl th-03cdb8.
+    fn try_auto_heal(dolt_dir: &Path, dolt: &SmoothDolt) -> bool {
+        use crate::dolt::DoctorDiagnosis;
+
+        // Never re-clone out from under a live server (Big Smooth holds
+        // the dir; the rename would fail and could yank the store from a
+        // running daemon). Let those callers surface the error and run
+        // `th pearls doctor --force` deliberately.
+        if dolt.server().is_some() {
+            return false;
+        }
+
+        // The dolt repo lives in the `pearls` subdir of the multi-db root.
+        let pearls_dir = dolt_dir.join("pearls");
+        match SmoothDolt::diagnose(&pearls_dir) {
+            // Healthy probe means the open failure was something else
+            // (transient, permissions, a genuine SQL error) — don't
+            // re-clone over a working store. Surface the original error.
+            DoctorDiagnosis::Healthy | DoctorDiagnosis::NotInitialized { .. } => false,
+            DoctorDiagnosis::ConflictMarkers { candidates } => match SmoothDolt::repair_manifest_conflict(&pearls_dir, &candidates) {
+                Ok(chosen) => {
+                    eprintln!(
+                        "th pearls: auto-healed noms manifest git-conflict markers (chose {}-char candidate)",
+                        chosen.len()
+                    );
+                    true
+                }
+                Err(e) => {
+                    eprintln!("th pearls: could not auto-repair manifest conflict ({e:#}); run `th pearls doctor`");
+                    false
+                }
+            },
+            DoctorDiagnosis::Corrupt { detail } => {
+                eprintln!("th pearls: store unreadable ({detail})");
+                eprintln!("th pearls: recovering — snapshotting the broken store and re-cloning from origin…");
+                let cli = match SmoothDolt::new_cli_only(dolt_dir) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("th pearls: auto-heal aborted ({e:#}); run `th pearls doctor`");
+                        return false;
+                    }
+                };
+                match cli.recover_from_remote() {
+                    Ok(broken) => {
+                        eprintln!("th pearls: re-cloned from origin. Broken store snapshotted at {}", broken.display());
+                        eprintln!(
+                            "th pearls: delete it with `rm -rf {}` once you've confirmed everything's intact.",
+                            broken.display()
+                        );
+                        true
+                    }
+                    Err(e) => {
+                        eprintln!("th pearls: auto-heal could not re-clone ({e:#}); run `th pearls doctor`");
+                        false
+                    }
+                }
+            }
+        }
     }
 
     /// Cheap migration: list tables; if any required table added after

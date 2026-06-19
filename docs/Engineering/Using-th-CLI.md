@@ -258,6 +258,8 @@ If you hit one of these workarounds and there's no `th admin` for it yet, **file
 
 See the dedicated [Pearls Workflow Context](../../README.md) — `th pearls create / list / ready / show / update / close`. Dolt-backed per project at `<repo>/.smooth/dolt/`, syncable via `th pearls push / pull`. Always prefer this over `TodoWrite` or ad-hoc markdown.
 
+**Self-healing store (pearl th-03cdb8).** The on-disk Dolt store can get wedged independently of your work — an interrupted GC/archive wipes `noms/manifest` + `repo_state.json`, or a cross-branch git op leaves conflict markers in the binary manifest. Under the beads model the canonical data lives on the remote's `refs/dolt/data`, so any `th pearls` command now **auto-recovers on open**: it diagnoses the corruption, snapshots the broken store aside as `.smooth/dolt.broken-<ts>`, re-clones from `origin`, and continues — printing what it did to stderr. It resolves the origin from the enclosing git repo when `repo_state.json` is the missing file, and never re-clones out from under a running Big Smooth (`smooth-dolt serve`) — those cases tell you to run `th pearls doctor --force` deliberately. For a manual sweep across every db under the root, `th pearls doctor [--auto-repair] [--force]`.
+
 ### Jira sync
 
 ```bash
