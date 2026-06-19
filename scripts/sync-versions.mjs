@@ -45,12 +45,27 @@ const updates = [
             next = next.replace(workspacePattern, `$1${version}$3`);
 
             // 2. workspace.dependencies smooth-X = { ... version = "...", ... }
-            //    Only rewrites the `version = "..."` occurrence on the same
-            //    line as a smooth-X entry. Lines without a version key are
-            //    left alone — we add them in step 3.
-            const depVersionPattern =
-                /^(smooth-[a-z-]+\s*=\s*\{[^}\n]*\bversion\s*=\s*")([^"]+)(")/gm;
-            next = next.replace(depVersionPattern, `$1${version}$3`);
+            //    Bump the version requirement on INTERNAL smooth-X deps so the
+            //    crates carry matching requirements. Lines without a version
+            //    key are left alone — we add them in step 3.
+            //
+            //    EXCEPTION: `smooth-operator` is the EXTERNAL engine crate
+            //    (`smooai-smooth-operator-core`), published from its own repo at
+            //    its own cadence — NOT a workspace member. Bumping its
+            //    requirement to the workspace version points at a release that
+            //    doesn't exist (e.g. workspace 0.14.1 vs operator-core 0.14.0)
+            //    and breaks `cargo` resolution. Skip any dep line pinning it.
+            //    Pearl th-1ee32b.
+            const depLinePattern = /^(smooth-[a-z-]+\s*=\s*\{[^}\n]*\})$/gm;
+            next = next.replace(depLinePattern, (line) => {
+                if (line.includes("smooai-smooth-operator-core")) {
+                    return line;
+                }
+                return line.replace(
+                    /(\bversion\s*=\s*")([^"]+)(")/,
+                    `$1${version}$3`,
+                );
+            });
 
             // 3. Add version to any smooth-X workspace dep that doesn't have
             //    one yet. Match "smooth-X = { path = "crates/smooth-X", ... }"
