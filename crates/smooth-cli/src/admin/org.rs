@@ -3,7 +3,7 @@
 //! Every subcommand accepts `--json` for raw JSON; default is a
 //! pretty table.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Subcommand;
 use owo_colors::OwoColorize;
 use serde_json::json;
@@ -155,7 +155,10 @@ pub async fn dispatch(cmd: OrgCommands) -> Result<()> {
             }
         }
         OrgCommands::Create { name, json } => {
-            let body = client.post("/admin/organizations", &json!({ "name": name })).await?;
+            // SMOODEV-1937: the endpoint requires `createdBy` as well as `name`.
+            // It's the calling user (the DB trigger adds them as an admin member).
+            let created_by = client.user_id().context("derive createdBy from session")?;
+            let body = client.post("/admin/organizations", &json!({ "name": name, "createdBy": created_by })).await?;
             print_ok(format!("created org \"{name}\""));
             render(&body, Format::from_flag(json), &TableOptions::default());
         }
@@ -170,8 +173,9 @@ pub async fn dispatch(cmd: OrgCommands) -> Result<()> {
             );
         }
         OrgCommands::AddMember { org_id, user_id, json } => {
+            // SMOODEV-1937: endpoint expects camelCase `userId`, not `user_id`.
             let body = client
-                .post(&format!("/admin/organizations/{org_id}/members"), &json!({ "user_id": user_id }))
+                .post(&format!("/admin/organizations/{org_id}/members"), &json!({ "userId": user_id }))
                 .await?;
             print_ok(format!("added {user_id} to {org_id}"));
             render(&body, Format::from_flag(json), &TableOptions::default());
@@ -193,7 +197,7 @@ pub async fn dispatch(cmd: OrgCommands) -> Result<()> {
         }
         OrgCommands::ActivateProduct { org_id, product, json } => {
             let body = client
-                .post(&format!("/admin/organizations/{org_id}/products"), &json!({ "product_name": product }))
+                .post(&format!("/admin/organizations/{org_id}/products"), &json!({ "productName": product }))
                 .await?;
             print_ok(format!("activated \"{product}\" on {org_id}"));
             render(&body, Format::from_flag(json), &TableOptions::default());

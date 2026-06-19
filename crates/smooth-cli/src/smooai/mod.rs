@@ -396,8 +396,12 @@ pub async fn cmd_whoami() -> Result<()> {
 }
 
 /// `th orgs *` dispatch — list / show / switch.
+///
+/// SMOODEV-1937: `/organizations*` are user-kind routes — they 401 under an
+/// M2M token ("auth kind does not satisfy route requirement"). Use the user
+/// session (`th auth login`) via [`UserClient`], same as the CRM commands.
 pub async fn cmd_orgs(cmd: super::OrgsCommands) -> Result<()> {
-    let client = require_authed().await?;
+    let client = user_client::UserClient::from_user_session()?;
     match cmd {
         super::OrgsCommands::List => {
             let body = client.get("/organizations").await.context("GET /organizations")?;
@@ -462,7 +466,7 @@ fn looks_like_uuid(s: &str) -> bool {
 }
 
 /// Fetch the orgs the logged-in user belongs to.
-async fn fetch_user_orgs(client: &SmoothApiClient) -> Result<Vec<OrgRef>> {
+async fn fetch_user_orgs(client: &user_client::UserClient) -> Result<Vec<OrgRef>> {
     let body = client.get("/organizations").await.context("GET /organizations")?;
     let items = body
         .get("data")
@@ -484,7 +488,7 @@ async fn fetch_user_orgs(client: &SmoothApiClient) -> Result<Vec<OrgRef>> {
 /// Resolve a `th api orgs switch` target. See the enum doc for the contract:
 /// UUID → direct; name/slug substring → matched against your orgs; omitted →
 /// interactive picker on a TTY.
-async fn resolve_switch_org(client: &SmoothApiClient, arg: Option<String>) -> Result<OrgRef> {
+async fn resolve_switch_org(client: &user_client::UserClient, arg: Option<String>) -> Result<OrgRef> {
     let orgs = fetch_user_orgs(client).await?;
 
     let Some(query) = arg else {

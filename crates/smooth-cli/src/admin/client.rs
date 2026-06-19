@@ -11,10 +11,27 @@
 //! that grant. The two flows have different refresh semantics, so
 //! they don't share an HTTP layer.
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
+use base64::Engine as _;
 use owo_colors::OwoColorize;
 use serde::Serialize;
 use smooai_client_shared::auth::storage::CredentialsStore;
+
+/// Decode the `sub` (user id) claim out of a JWT without verifying the
+/// signature — we already trust the locally-stored session. SMOODEV-1937:
+/// some `/admin/*` endpoints want the caller's id in the body (`createdBy`).
+fn jwt_sub(token: &str) -> Result<String> {
+    let payload_b64 = token.split('.').nth(1).ok_or_else(|| anyhow!("malformed JWT (no payload segment)"))?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .context("base64url-decode JWT payload")?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).context("parse JWT claims")?;
+    claims
+        .get("sub")
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string)
+        .ok_or_else(|| anyhow!("JWT has no `sub` claim"))
+}
 
 /// `https://api.smoo.ai` by default; override with `SMOOAI_API_URL`.
 pub const DEFAULT_API_URL: &str = "https://api.smoo.ai";
@@ -50,6 +67,12 @@ impl AdminClient {
             bearer: creds.access_token,
             http: reqwest::Client::builder().user_agent(format!("th/{}", env!("CARGO_PKG_VERSION"))).build()?,
         })
+    }
+
+    /// The caller's user id (`sub`) from the loaded session JWT. Used where
+    /// an `/admin/*` endpoint requires the creator id explicitly.
+    pub fn user_id(&self) -> Result<String> {
+        jwt_sub(&self.bearer)
     }
 
     /// Send a GET and return the parsed JSON body.
