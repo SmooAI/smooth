@@ -42,6 +42,16 @@ use smooai_client_shared::auth::storage::CredentialsStore;
 /// signature stays the same.
 pub fn set(org_id: &str) -> Result<()> {
     let store = CredentialsStore::default_user().context("locate user credentials store")?;
+    set_in(&store, org_id)
+}
+
+/// Store-injected core of [`set`]. Lets tests pass an explicit
+/// `CredentialsStore::at(<tempfile>)` instead of mutating the
+/// process-global `SMOOAI_USER_AUTH_FILE` env var — which made these
+/// tests race against the cross-store `active_org` module's tests
+/// (separate locks, same env var) and flake the Release run. Pearl
+/// th-2944e5.
+fn set_in(store: &CredentialsStore, org_id: &str) -> Result<()> {
     let Some(mut creds) = store.load().context("load user credentials")? else {
         // No user credentials = no active-org slot to write to. The
         // browser-login caller always saves credentials first; if we
@@ -64,46 +74,34 @@ pub fn set(org_id: &str) -> Result<()> {
 /// - Locating or reading the credentials store fails
 pub fn resolve() -> Result<Option<String>> {
     let store = CredentialsStore::default_user().context("locate user credentials store")?;
+    resolve_in(&store)
+}
+
+/// Store-injected core of [`resolve`] (see [`set_in`] for why).
+fn resolve_in(store: &CredentialsStore) -> Result<Option<String>> {
     let creds = store.load().context("load user credentials")?;
     Ok(creds.and_then(|c| c.active_org_id))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use chrono::Utc;
     use smooai_client_shared::auth::storage::{CredentialKind, Credentials, CredentialsStore};
     use tempfile::TempDir;
 
     use super::*;
 
-    /// Tests in this module flip the `SMOOAI_AUTH_FILE` env var so they
-    /// hit a tempdir instead of the user's real `~/.smooth/auth/`.
-    /// They mutate process-global state, so run them under a mutex.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    /// Stash + restore an env var across a test.
-    struct EnvGuard {
-        key: &'static str,
-        prev: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn set(key: &'static str, val: &str) -> Self {
-            let prev = std::env::var(key).ok();
-            std::env::set_var(key, val);
-            Self { key, prev }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match self.prev.take() {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
-            }
-        }
+    /// Hermetic store backed by a tempfile — `CredentialsStore::at` takes
+    /// an explicit path, so these tests never touch the process-global
+    /// `SMOOAI_USER_AUTH_FILE` env var or the user's real
+    /// `~/.smooth/auth/`. That's the fix for pearl th-2944e5: the old
+    /// env-var approach raced against the cross-store `active_org`
+    /// module's tests (separate locks, same global var), flaking the
+    /// Release run. No env mutation → no lock needed → parallel-safe.
+    fn tmp_store() -> (TempDir, CredentialsStore) {
+        let dir = TempDir::new().expect("tempdir");
+        let store = CredentialsStore::at(dir.path().join("smooai-user.json"));
+        (dir, store)
     }
 
     fn fixture_creds() -> Credentials {
@@ -122,67 +120,57 @@ mod tests {
 
     #[test]
     fn set_persists_active_org_id_on_user_store() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let dir = TempDir::new().expect("tempdir");
-        let path = dir.path().join("smooai-user.json");
-        let _g = EnvGuard::set("SMOOAI_USER_AUTH_FILE", path.to_str().unwrap());
-
+        let (_dir, store) = tmp_store();
         // Save a baseline user session with no active org.
-        let store = CredentialsStore::default_user().expect("locate store");
         store.save(&fixture_creds()).expect("save baseline");
 
-        set("org_42").expect("set active org");
+        set_in(&store, "org_42").expect("set active org");
 
-        let loaded = resolve().expect("resolve").expect("some org");
+        let loaded = resolve_in(&store).expect("resolve").expect("some org");
         assert_eq!(loaded, "org_42");
     }
 
     #[test]
     fn set_overwrites_existing_active_org_id() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let dir = TempDir::new().expect("tempdir");
-        let path = dir.path().join("smooai-user.json");
-        let _g = EnvGuard::set("SMOOAI_USER_AUTH_FILE", path.to_str().unwrap());
-
+        let (_dir, store) = tmp_store();
         let mut creds = fixture_creds();
         creds.active_org_id = Some("org_old".into());
-        CredentialsStore::default_user().expect("store").save(&creds).expect("save");
+        store.save(&creds).expect("save");
 
-        set("org_new").expect("set");
-        assert_eq!(resolve().expect("resolve").as_deref(), Some("org_new"));
+        set_in(&store, "org_new").expect("set");
+        assert_eq!(resolve_in(&store).expect("resolve").as_deref(), Some("org_new"));
     }
 
     #[test]
     fn set_errors_when_no_user_session_present() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let dir = TempDir::new().expect("tempdir");
-        let path = dir.path().join("smooai-user.json");
-        let _g = EnvGuard::set("SMOOAI_USER_AUTH_FILE", path.to_str().unwrap());
-
+        let (_dir, store) = tmp_store();
         // No credentials saved → cannot persist active org.
-        let err = set("org_x").expect_err("expected bail");
+        let err = set_in(&store, "org_x").expect_err("expected bail");
         let msg = format!("{err:#}");
         assert!(msg.contains("no user credentials loaded"), "got: {msg}");
     }
 
     #[test]
     fn resolve_returns_none_when_store_is_empty() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let dir = TempDir::new().expect("tempdir");
-        let path = dir.path().join("smooai-user.json");
-        let _g = EnvGuard::set("SMOOAI_USER_AUTH_FILE", path.to_str().unwrap());
-
-        assert!(resolve().expect("resolve").is_none());
+        let (_dir, store) = tmp_store();
+        assert!(resolve_in(&store).expect("resolve").is_none());
     }
 
     #[test]
     fn resolve_returns_none_when_active_org_unset() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let dir = TempDir::new().expect("tempdir");
-        let path = dir.path().join("smooai-user.json");
-        let _g = EnvGuard::set("SMOOAI_USER_AUTH_FILE", path.to_str().unwrap());
+        let (_dir, store) = tmp_store();
+        store.save(&fixture_creds()).expect("save");
+        assert!(resolve_in(&store).expect("resolve").is_none());
+    }
 
-        CredentialsStore::default_user().expect("store").save(&fixture_creds()).expect("save");
-        assert!(resolve().expect("resolve").is_none());
+    /// The public `set`/`resolve` wrappers still compile + wire through
+    /// `default_user()`; covered indirectly by the store-injected tests
+    /// above plus the cross-store contract tests in `crate::active_org`.
+    #[test]
+    fn public_wrappers_exist() {
+        // Reference the items so the wrappers can't be dead-code-eliminated
+        // away without a compile error here.
+        let _set: fn(&str) -> Result<()> = set;
+        let _resolve: fn() -> Result<Option<String>> = resolve;
     }
 }
