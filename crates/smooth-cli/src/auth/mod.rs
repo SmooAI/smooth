@@ -46,9 +46,10 @@ pub const PROD_SUPABASE_ANON_KEY: &str =
 
 #[derive(Debug, Subcommand)]
 pub enum AuthCommands {
-    /// Log in to Smoo AI. Defaults to user (email + password); pass
-    /// `--m2m` to authenticate as a service account via
-    /// `client_credentials` grant.
+    /// Log in to Smoo AI. Defaults to the user/org browser flow
+    /// (`smoo.ai/cli-login`, Supabase session) on a TTY; pass
+    /// `--no-browser` for the email + password prompt, or `--m2m` to
+    /// authenticate as a service account via `client_credentials`.
     Login {
         /// Switch to M2M `client_credentials` (service account)
         /// instead of the user email+password flow.
