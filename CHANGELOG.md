@@ -1,5 +1,47 @@
 # @smooai/smooth
 
+## 0.14.1
+
+### Patch Changes
+
+- 0645853: release: stop publishing internal crates to crates.io; ship `th` as a binary only
+
+  The release workflow was wired to `cargo publish` the entire workspace to
+  crates.io, but those crates are internal pieces of the `th` binary — every
+  cross-crate dependency is a workspace `path` dep, so nothing consumes them
+  from the registry. The product is the `th` binary (GitHub release assets), and
+  the only genuinely-public crate, `smooai-smooth-operator-core`, is published
+  from its own repo. The first real publish run had already pushed one internal
+  crate (`smooai-smooth-policy@0.14.0`) before aborting on a stale publish list.
+
+  Changes: mark all 13 publishable workspace crates `publish = false`; drop the
+  `publish:` / `createGithubReleases:` wiring from the Release workflow (the
+  version PR + binary build matrix are gated on the version-bump merge commit, so
+  the binary release is unaffected); and empty `ci-publish.mjs`'s crate list to a
+  no-op. `smooth-policy@0.14.0` is yanked from crates.io out-of-band. Pearl
+  th-607f69.
+
+- 106594a: build: `sync-versions.mjs` also skips the external `operator-core` in Cargo.lock
+
+  Follow-up to the Cargo.toml skip (th-1ee32b): the Cargo.lock updater matched
+  `name = "smooai-smooth-operator-core"` too and bumped its locked version to the
+  workspace version (0.14.1), so even with the dependency requirement corrected
+  to `^0.14.0`, cargo failed with "locked to 0.14.1 … candidate 0.14.0". The lock
+  updater now skips `smooai-smooth-operator-core`, leaving it pinned to its real
+  published release. Pearl th-1ee32b.
+
+- 3ae4112: build: `sync-versions.mjs` no longer bumps the external `operator-core` dep
+
+  `scripts/sync-versions.mjs` rewrote the `version = "…"` on every
+  `smooth-X = { … }` workspace.dependencies line to the workspace version —
+  including `smooth-operator = { …, package = "smooai-smooth-operator-core" }`,
+  the **external** agent engine published from its own repo. When the version PR
+  bumped the workspace to 0.14.1, it rewrote the operator-core requirement to
+  `^0.14.1`, which doesn't exist on crates.io (latest is 0.14.0), breaking
+  `cargo build --examples --workspace` and the version PR's checks. The script
+  now skips any workspace-dependency line that pins `smooai-smooth-operator-core`,
+  leaving its requirement at the real published version. Pearl th-1ee32b.
+
 ## 0.14.0
 
 ### Minor Changes
@@ -1159,7 +1201,7 @@ directory`), independent of any pearl work.
 
   **Pearl `th-f6c50c`**: `smooth-dolt status` previously called
   `CALL DOLT_STATUS()` which errored with "stored procedure does not
-  exist". DOLT_STATUS is a _system table_ in Dolt, not a procedure or
+  exist". DOLT*STATUS is a \_system table* in Dolt, not a procedure or
   table function. Fix: `SELECT table_name, staged, status FROM
 dolt_status` in both the CLI handler (`cmdStatus`) and the
   socket-mode handler (`doDoltCmd`). Clean working set → empty output
