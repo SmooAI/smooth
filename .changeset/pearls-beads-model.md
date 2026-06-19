@@ -1,5 +1,5 @@
 ---
-"smooai-smooth": minor
+"@smooai/smooth": minor
 ---
 
 Pearls: migrate to beads model — `.smooth/dolt/` no longer git-tracked

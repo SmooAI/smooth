@@ -1,5 +1,5 @@
 ---
-'@smooai/smooth-cli': minor
+'@smooai/smooth': minor
 ---
 
 Rename "The Boardroom" to "The Safehouse" everywhere.

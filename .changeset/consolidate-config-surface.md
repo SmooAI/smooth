@@ -1,5 +1,5 @@
 ---
-"smooai-smooth": minor
+"@smooai/smooth": minor
 ---
 
 th config + th admin config: consolidate config surface, delete th api config (pearl th-9c0c34)

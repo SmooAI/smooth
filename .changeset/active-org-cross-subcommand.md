@@ -1,5 +1,5 @@
 ---
-"smooai-smooth": patch
+"@smooai/smooth": patch
 ---
 
 th: unify active-org resolution across `th api`, `th config`, `th auth`

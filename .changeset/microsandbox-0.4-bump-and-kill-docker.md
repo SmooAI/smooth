@@ -1,5 +1,5 @@
 ---
-'@smooai/smooth-cli': minor
+'@smooai/smooth': minor
 ---
 
 Bump microsandbox 0.3.14 → 0.4.6 and rip out the Docker sandbox backend.

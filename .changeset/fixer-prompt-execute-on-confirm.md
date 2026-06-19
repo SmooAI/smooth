@@ -1,5 +1,5 @@
 ---
-"smooai-smooth": patch
+"@smooai/smooth": patch
 ---
 
 fixer prompt: add explicit "When the user confirms: EXECUTE" rule

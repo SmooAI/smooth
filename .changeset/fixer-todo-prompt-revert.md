@@ -1,5 +1,5 @@
 ---
-"smooai-smooth": patch
+"@smooai/smooth": patch
 ---
 
 fixer.txt: revert todo_list teaching section (regressed v4-pro 3/3 → 0/3)

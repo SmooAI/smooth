@@ -1,5 +1,5 @@
 ---
-"smooai-smooth": minor
+"@smooai/smooth": minor
 ---
 
 coding_workflow: cleanup-intent hint plumbing for continuation turns

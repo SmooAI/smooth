@@ -1,5 +1,5 @@
 ---
-"smooai-smooth": patch
+"@smooai/smooth": patch
 ---
 
 install:th now builds smooth-dolt automatically (pearl th-a49716)

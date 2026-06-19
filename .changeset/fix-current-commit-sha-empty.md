@@ -1,5 +1,5 @@
 ---
-"smooai-smooth": patch
+"@smooai/smooth": patch
 ---
 
 bench: stop `current_commit_sha()` returning empty under the pre-push hook / CI

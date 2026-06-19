@@ -1,5 +1,5 @@
 ---
-"smooth": minor
+"@smooai/smooth": minor
 ---
 
 Two surgical bench-quality fixes triggered by the 2026-05-29 coach matrix root-cause analysis (see `docs/bench-sessions/2026-05-29-coach-vs-user.md`):

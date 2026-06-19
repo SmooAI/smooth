@@ -1,5 +1,5 @@
 ---
-"smooth": patch
+"@smooai/smooth": patch
 ---
 
 Pearl th-fcb579 — browser-based `th auth login` (smooth side). Lays the

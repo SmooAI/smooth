@@ -1,5 +1,5 @@
 ---
-"smooai-smooth": patch
+"@smooai/smooth": patch
 ---
 
 pearls: auto-heal a corrupt/unreadable Dolt store + fix the clone that left `main` empty
