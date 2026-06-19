@@ -21,8 +21,10 @@ pub mod profile;
 pub mod testing;
 pub mod user_client;
 
-use anyhow::{Context, Result};
-use dialoguer::{theme::ColorfulTheme, Input, Password};
+use std::io::IsTerminal;
+
+use anyhow::{bail, Context, Result};
+use dialoguer::{theme::ColorfulTheme, Input, Password, Select};
 use owo_colors::OwoColorize;
 use smooth_api_client::auth::{client_credentials_grant, token_url};
 use smooth_api_client::{CredentialsStore, SmoothApiClient};
@@ -409,14 +411,23 @@ pub async fn cmd_orgs(cmd: super::OrgsCommands) -> Result<()> {
             print_json(&client.get(&format!("/organizations/{resolved}")).await.context("GET /organizations/{org_id}")?);
         }
         super::OrgsCommands::Switch { org_id } => {
+            // Resolve the target org: a UUID is used directly; a name/slug
+            // substring is matched against the orgs you belong to; an omitted
+            // arg opens an interactive picker on a TTY.
+            let target = resolve_switch_org(&client, org_id).await?;
             // Persist to every credential store we know about so the
             // active org is visible to `th config`, `th auth whoami`,
             // and any other subcommand that reads a different store.
             // See `crates/smooth-cli/src/active_org.rs` for the
             // cross-subcommand contract this enforces.
-            let updated = crate::active_org::set(&org_id).context("save active org")?;
+            let updated = crate::active_org::set(&target.id).context("save active org")?;
             println!();
-            println!("  {} Active org set to {}", "✓".green().bold(), org_id.cyan().bold());
+            let label = if target.name.is_empty() || target.name == target.id {
+                target.id.cyan().bold().to_string()
+            } else {
+                format!("{} {}", target.name.bold(), format!("({})", target.id).dimmed())
+            };
+            println!("  {} Active org set to {label}", "✓".green().bold());
             if updated > 1 {
                 println!("    {} updated {} credential stores", "●".dimmed(), updated.to_string().dimmed());
             }
@@ -424,6 +435,126 @@ pub async fn cmd_orgs(cmd: super::OrgsCommands) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// A single org as far as the switcher cares.
+#[derive(Debug)]
+struct OrgRef {
+    id: String,
+    name: String,
+    slug: String,
+}
+
+/// True for a 36-char `8-4-4-4-12` hyphenated UUID. Loose on purpose — we
+/// only need to tell "looks like an id" from "looks like a name" so we know
+/// whether to allow a direct set (e.g. a managed child org the caller isn't a
+/// direct member of) vs. a name/slug match.
+fn looks_like_uuid(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    bytes.len() == 36
+        && bytes.iter().enumerate().all(|(i, &b)| {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                b == b'-'
+            } else {
+                (b as char).is_ascii_hexdigit()
+            }
+        })
+}
+
+/// Fetch the orgs the logged-in user belongs to.
+async fn fetch_user_orgs(client: &SmoothApiClient) -> Result<Vec<OrgRef>> {
+    let body = client.get("/organizations").await.context("GET /organizations")?;
+    let items = body
+        .get("data")
+        .and_then(|v| v.as_array())
+        .or_else(|| body.as_array())
+        .cloned()
+        .unwrap_or_default();
+    Ok(items
+        .iter()
+        .filter_map(|org| {
+            let id = org.get("id").and_then(|v| v.as_str())?.to_string();
+            let name = org.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let slug = org.get("slug").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            Some(OrgRef { id, name, slug })
+        })
+        .collect())
+}
+
+/// Resolve a `th api orgs switch` target. See the enum doc for the contract:
+/// UUID → direct; name/slug substring → matched against your orgs; omitted →
+/// interactive picker on a TTY.
+async fn resolve_switch_org(client: &SmoothApiClient, arg: Option<String>) -> Result<OrgRef> {
+    let orgs = fetch_user_orgs(client).await?;
+
+    let Some(query) = arg else {
+        // Interactive picker.
+        if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+            bail!("no org id given and no TTY for the interactive picker — pass a UUID or a name/slug substring");
+        }
+        if orgs.is_empty() {
+            bail!("you don't belong to any organizations");
+        }
+        let labels: Vec<String> = orgs
+            .iter()
+            .map(|o| {
+                let slug = if o.slug.is_empty() { String::new() } else { format!(" ({})", o.slug) };
+                let name = if o.name.is_empty() { "(unnamed)" } else { &o.name };
+                format!("{name}{slug}  —  {}", o.id)
+            })
+            .collect();
+        let picked = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Select an organization")
+            .items(&labels)
+            .default(0)
+            .interact()
+            .context("org picker")?;
+        // `picked` is a valid index into `orgs` by construction.
+        return Ok(orgs.into_iter().nth(picked).expect("picker index in range"));
+    };
+
+    resolve_org_query(&orgs, &query)
+}
+
+/// Pure resolution of a non-empty switch query against the caller's orgs.
+/// Order: exact id → bare UUID (allow direct set for a managed child org the
+/// caller isn't a direct member of) → case-insensitive name/slug substring.
+/// Split out from [`resolve_switch_org`] so it's unit-testable without a client.
+fn resolve_org_query(orgs: &[OrgRef], query: &str) -> Result<OrgRef> {
+    let clone = |o: &OrgRef| OrgRef {
+        id: o.id.clone(),
+        name: o.name.clone(),
+        slug: o.slug.clone(),
+    };
+
+    // Exact id match against the list (preferred — gives us the display name).
+    if let Some(found) = orgs.iter().find(|o| o.id == query) {
+        return Ok(clone(found));
+    }
+
+    // A UUID we don't belong to (e.g. a managed child org) — allow direct set.
+    if looks_like_uuid(query) {
+        return Ok(OrgRef {
+            id: query.to_string(),
+            name: String::new(),
+            slug: String::new(),
+        });
+    }
+
+    // Otherwise treat it as a case-insensitive name/slug substring.
+    let needle = query.to_lowercase();
+    let matches: Vec<&OrgRef> = orgs
+        .iter()
+        .filter(|o| o.name.to_lowercase().contains(&needle) || o.slug.to_lowercase().contains(&needle))
+        .collect();
+    match matches.as_slice() {
+        [one] => Ok(clone(one)),
+        [] => bail!("no organization matches \"{query}\" — run `th api orgs list` to see your orgs"),
+        many => {
+            let names: Vec<String> = many.iter().map(|o| format!("{} ({})", o.name, o.id)).collect();
+            bail!("\"{query}\" matches {} orgs — be more specific:\n  {}", many.len(), names.join("\n  "))
+        }
+    }
 }
 
 /// Pretty-print the org-list response. Accepts both the
@@ -445,5 +576,75 @@ fn print_orgs_list(body: &serde_json::Value) {
         let slug = org.get("slug").and_then(|v| v.as_str()).unwrap_or("");
         let slug_part = if slug.is_empty() { String::new() } else { format!(" ({slug})") };
         println!("  {} {} {}{}", "○".dimmed(), id.cyan(), name.bold(), slug_part.dimmed());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn org(id: &str, name: &str, slug: &str) -> OrgRef {
+        OrgRef {
+            id: id.to_string(),
+            name: name.to_string(),
+            slug: slug.to_string(),
+        }
+    }
+
+    fn sample() -> Vec<OrgRef> {
+        vec![
+            org("8be5f5fd-cf71-43ba-9df9-01e15acdaf8e", "Smoo AI", "smoo-ai"),
+            org("11111111-1111-4111-8111-111111111111", "ATS", "ats"),
+            org("22222222-2222-4222-8222-222222222222", "Amplified Tech Solutions", "amplified"),
+        ]
+    }
+
+    #[test]
+    fn uuid_shape_detection() {
+        assert!(looks_like_uuid("8be5f5fd-cf71-43ba-9df9-01e15acdaf8e"));
+        assert!(!looks_like_uuid("ats"));
+        assert!(!looks_like_uuid("8be5f5fd-cf71-43ba-9df9-01e15acdaf8")); // 35 chars
+        assert!(!looks_like_uuid("8be5f5fdXcf71X43baX9df9X01e15acdaf8e")); // no hyphens
+        assert!(!looks_like_uuid("zzzzzzzz-cf71-43ba-9df9-01e15acdaf8e")); // non-hex
+    }
+
+    #[test]
+    fn exact_id_match_returns_with_display_name() {
+        let got = resolve_org_query(&sample(), "11111111-1111-4111-8111-111111111111").expect("match");
+        assert_eq!(got.id, "11111111-1111-4111-8111-111111111111");
+        assert_eq!(got.name, "ATS");
+    }
+
+    #[test]
+    fn unknown_uuid_is_allowed_as_direct_set() {
+        // A managed child org the caller isn't a direct member of.
+        let got = resolve_org_query(&sample(), "99999999-9999-4999-8999-999999999999").expect("direct");
+        assert_eq!(got.id, "99999999-9999-4999-8999-999999999999");
+        assert!(got.name.is_empty());
+    }
+
+    #[test]
+    fn name_substring_is_case_insensitive() {
+        let got = resolve_org_query(&sample(), "ATS").expect("match");
+        assert_eq!(got.name, "ATS");
+        // slug match, different case
+        let got2 = resolve_org_query(&sample(), "SMOO").expect("match");
+        assert_eq!(got2.name, "Smoo AI");
+    }
+
+    #[test]
+    fn no_match_errors() {
+        let err = resolve_org_query(&sample(), "nope").expect_err("should fail");
+        assert!(format!("{err}").contains("no organization matches"), "{err}");
+    }
+
+    #[test]
+    fn ambiguous_name_lists_candidates() {
+        // "a" is a substring of "Smoo AI"? no — but "ats"/"amplified"/"ATS" all
+        // contain 'a'. Use a needle that hits more than one: "a".
+        let err = resolve_org_query(&sample(), "a").expect_err("ambiguous");
+        let msg = format!("{err}");
+        assert!(msg.contains("matches"), "{msg}");
+        assert!(msg.contains("be more specific"), "{msg}");
     }
 }
