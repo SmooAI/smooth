@@ -91,9 +91,22 @@ const updates = [
             // (see the `package = "smooai-smooth-<name>"` rename in commit
             // 933b927). The old regex matched `smooth-*` only and silently
             // missed every crate.
+            //
+            // EXCEPTION: `smooai-smooth-operator-core` is the EXTERNAL engine
+            // crate (published from its own repo); its locked version must
+            // track its real crates.io release, NOT the workspace version.
+            // Bumping its lock entry to a workspace version that was never
+            // published breaks `cargo` resolution ("locked to 0.14.1 …
+            // candidate 0.14.0"). Skip it — same root cause as the Cargo.toml
+            // dep skip above. Pearl th-1ee32b.
             const pattern =
                 /(name = "smooai-smooth-[^"]+"\nversion = ")([^"]+)(")/g;
-            return content.replace(pattern, `$1${version}$3`);
+            return content.replace(pattern, (match, pre, _ver, post) => {
+                if (pre.includes("smooai-smooth-operator-core")) {
+                    return match;
+                }
+                return `${pre}${version}${post}`;
+            });
         },
     },
 ];
