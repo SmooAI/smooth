@@ -1,5 +1,0 @@
----
-"@smooai/smooth": minor
----
-
-bench: `--driver-persona=coach` for score-tui. The historical LLM-as-human driver is prompted as a NON-TECHNICAL end user — no shell, no file access, can't run tests, can't tell whether the agent's output is plausible. When an agent declares done with wrong output (e.g. affine-cipher decode keeping the encoder's 5-char grouping — pearl th-6a8064), the driver politely accepts and fires `TASK_COMPLETE`; the scoring phase only then runs pytest and gets FAIL. The agent never gets the feedback signal that would have let it fix the bug. New `coach` persona is a senior pair-programmer: still no tools (driver doesn't compute, doesn't run, doesn't read files), but DOES probe for an actual test run before firing `TASK_COMPLETE` and suggests concrete debugging steps without giving the answer. Default stays `user` for baseline comparability — flip via `--driver-persona=coach`. Same driver model (`smooth-summarize`) — only the system prompt + per-turn template change. Pearl th-e17b1a.
