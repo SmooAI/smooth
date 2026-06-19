@@ -20,38 +20,24 @@ import process from "node:process";
 
 const root = process.cwd();
 
-// Topological order derived from `cargo metadata` (normal deps only).
-// Regenerate with:
+// Intentionally empty — we do NOT publish the workspace crates to
+// crates.io (pearl th-607f69). They are internal pieces of the `th`
+// binary (all marked `publish = false` in their Cargo.toml) with no
+// external consumers: every cross-crate dependency is a workspace `path`
+// dep, so nothing needs them on the registry. `th` ships as a GitHub
+// binary release (the build matrix in release.yml), and the one
+// genuinely-public crate — `smooai-smooth-operator-core` — is published
+// from its own repo, not here.
+//
+// release.yml no longer wires `publish: pnpm ci:publish`, so this script
+// isn't run in CI; it's kept as an idempotent no-op (and a single place
+// to re-enable selective publishing if a crate ever becomes a real public
+// library). If you re-populate this list, re-derive the topological order:
 //   cargo metadata --format-version 1 --no-deps \
 //     | jq -r '.packages[] | select(.name | startswith("smooai-smooth-")) | .name'
-// …then topo-sort. Update this list when you add a new crate.
-//
-// Crates marked `publish = false` in their Cargo.toml are intentionally
-// omitted. The first-round excludes are:
-//   - smooai-smooth-web           (embedded Vite SPA — `web/dist/` is
-//                                  gitignored, so the published crate would
-//                                  be empty without an `include` fix)
-//   - smooai-smooth-bigsmooth     (depends on smooth-web)
-//   - smooai-smooth-code          (TUI; hold until smooth-web lands)
-//   - smooai-smooth-cli           (binary; distribute via the release
-//                                  tarball + `cargo install --git` for now)
-//   - smooai-smooth-operator-runner (guest-only binary, not useful on host)
-const PUBLISH_ORDER = [
-    // Layer 0 — no internal deps
-    "smooai-smooth-policy",
-    "smooai-smooth-operator",
-    "smooai-smooth-bootstrap-bill",
-    // Layer 1 — depend on Layer 0
-    "smooai-smooth-pearls",
-    "smooai-smooth-narc",
-    "smooai-smooth-scribe",
-    "smooai-smooth-plugin",
-    "smooai-smooth-goalie",
-    // Layer 2 — depend on Layer 1
-    "smooai-smooth-diver",
-    "smooai-smooth-archivist",
-    "smooai-smooth-wonk",
-];
+// …then topo-sort (deps before dependents) and flip `publish = false` off
+// for exactly the crates you list here.
+const PUBLISH_ORDER = [];
 
 const pkg = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
 const version = pkg.version;
