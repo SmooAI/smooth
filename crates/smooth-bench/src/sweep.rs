@@ -341,13 +341,32 @@ fn aggregate(per_task: &[(PolyglotLang, String, TaskOutcome)], inputs: Aggregate
 /// publish a Score tagged `unknown` than abort the release.
 #[must_use]
 pub fn current_commit_sha() -> String {
-    let Ok(out) = std::process::Command::new("git").args(["rev-parse", "HEAD"]).output() else {
+    // Clear inherited git env. Under the git pre-push hook (and some CI
+    // checkouts) GIT_DIR / GIT_INDEX_FILE / GIT_WORK_TREE / GIT_PREFIX /
+    // GIT_COMMON_DIR point at the hook's context, which makes a child
+    // `git rev-parse HEAD` print nothing (exit 0, empty stdout) instead
+    // of the real sha — failing the non-empty assertion below and, more
+    // importantly, tagging release Scores with "". Stripping them lets
+    // git rediscover the repo from cwd. Pearl th-e2cbc9.
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["rev-parse", "HEAD"]);
+    for var in ["GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_PREFIX", "GIT_COMMON_DIR"] {
+        cmd.env_remove(var);
+    }
+    let Ok(out) = cmd.output() else {
         return "unknown".to_string();
     };
     if !out.status.success() {
         return "unknown".to_string();
     }
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // Never return empty — callers and the release pipeline expect a
+    // tag, and "" silently corrupts Score provenance. Fall back to the
+    // same sentinel used for the git-failure path.
+    if sha.is_empty() {
+        return "unknown".to_string();
+    }
+    sha
 }
 
 #[cfg(test)]
