@@ -1,5 +1,1895 @@
 # @smooai/smooth
 
+## 0.14.0
+
+### Minor Changes
+
+- 61a0b81: SMOODEV-1164: `th observability sourcemaps upload <dir>` — bulk source map upload.
+
+  New CLI surface for the Error Tracking dashboard's symbolication path.
+  Walks a build directory (`.next/`, `dist/`, `.open-next/`, etc.), finds
+  every `.js{,mjs,cjs}` paired with a `.map`, registers each map against
+  a (release, environment) pair via the Smoo Observability API, then
+  PUTs the bytes to the presigned S3 URL the API returns.
+
+  Companion `th observability sourcemaps list` prints currently
+  registered maps for a release.
+
+  Backend half ships as SMOODEV-1164 in the smooai monorepo.
+
+- 06800c1: coding_workflow: cleanup-intent hint plumbing for continuation turns
+
+  The fixer's test-fix bias + cross-fixture pattern confabulation made
+  `cleanup-node-modules-orphans` chronically unreliable on v4-pro
+  (1/6 perfect in pane-captured samples — agents fabricating
+  `packages/db/db.test.js` on cleanup tasks; running
+  `find . -type f -size +150k -delete` on a node-modules orphan
+  task). The existing `is_cleanup_intent(task)` preamble in
+  `build_user_prompt` suppresses both failure modes — but it only
+  fires when the CURRENT user message matches cleanup verbs/nouns,
+  which the bench's "yes, proceed" coach reply does not.
+
+  This change plumbs a `cleanup_intent_hint: bool` through
+  `CodingWorkflowConfig`. The runner sets it by scanning
+  `agent_config.prior_messages` for cleanup intent — so when the
+  prior turn was a cleanup README, the workflow re-applies the
+  preamble on the confirmation turn via a new `is_confirmation_reply`
+  helper.
+
+  Net result at deepseek-v4-pro:
+
+  - `cleanup-node-modules-orphans`: prior 1/6 perfect (3/5 + 1 no-action
+    - 1 catastrophic 7.2MB protected-dir delete) → **5/5 perfect,
+      zero-variance identical 3,559,394 bytes**. Matches opencode's
+      3/3 identical-bytes baseline on the same fixture.
+  - `cleanup-disk-bloat`: 3/3 → ~2/3 (~67% pass rate; one cross-fixture
+    hallucination remained). Net regression on this fixture.
+  - `cleanup-impossible-task`: 3/3 → variance not yet characterized,
+    early sample 1/2.
+  - `cleanup-pycache-debris`: 3/3 strong → 2/2 stable.
+
+  Trade-off worth shipping: eliminating the chronic
+  catastrophic-delete failure mode on node-modules (a fixture where
+  v4-pro previously had a 17% catastrophic + 50% no-action rate)
+  outweighs the marginal disk-bloat slip. Pearl th-e182bc.
+
+- a9ac28c: th config + th admin config: consolidate config surface, delete th api config (pearl th-9c0c34)
+
+  Three surfaces collapsed into two:
+
+  - **`th config`** — daily-developer surface. Gains `feature-flag <key>`
+    (evaluate a flag for the active org + env; pipe-friendly stdout —
+    prints just `true`/`false`/string, or `--json` for the full envelope)
+    and `delete <key>` (remove a value record; `--force` required for
+    secret-tier). `--env` is now a long alias for `--environment` on
+    every subcommand to save a keystroke.
+  - **`th admin config`** — platform-admin surface. New. Holds the
+    infrequent verbs: `schemas` (list / show / create / update / delete
+    / push / values), `environments` (list / create / update / delete /
+    values), and `values bulk-set` + `values delete`. Same auth as
+    `th config` (no `requireSuperAdmin` gate); the "admin" naming
+    captures cadence + audience, not authorization level.
+  - **`th api config`** — **deleted entirely**. Nobody uses `th` yet so
+    no aliases needed (per user direction 2026-06-13). The old
+    `th api config values` overlapping `th config get/set/list` is gone;
+    the old `th api config schemas`/`environments` lives at
+    `th admin config`; `th api config feature-flag` lives at
+    `th config feature-flag`.
+
+  Net: one daily surface, one admin surface, zero duplicate paths.
+
+- d702663: Consolidate `th up` and `th vm` into a single mode story. `th up`
+  now boots Smooth inside a microsandbox microVM by default — no
+  Docker container, no persistent named volume, no `th vm` subcommand.
+  `th up direct` is the new escape hatch for running Smooth on the
+  host without a sandbox (only safe inside an already-trusted
+  environment such as a CI runner or a dedicated devbox).
+
+  The previous `th vm up` workflow (Docker container + named volume +
+  host-stub credential broker) is removed entirely:
+
+  - `th vm up`, `th vm down`, `th vm shell`, `th vm prune`, `th vm status` → gone
+  - `docker/Dockerfile.smooth-vm` and `scripts/build-smooth-vm-image.sh` → deleted
+  - `--sandboxed` and `--sandbox-backend` flags on `th up` → gone (sandbox is the default)
+
+  **If you used `th vm up`, you now want `th up` instead.**
+
+  **The persistent named volume `smooth-vm-root` is now orphaned.**
+  Delete it with `docker volume rm smooth-vm-root` if you don't need
+  the accumulated `~/.smooth` state from your old Docker VM.
+
+  Outbound reachability to Docker / OrbStack / Kalima from inside the
+  microsandbox VM is still supported via the existing
+  `allow_host_loopback` config (which exposes `host.docker.internal`
+  inside the sandbox). No nested virtualization required — Smooth
+  talks to whichever container runtime is on your host over the
+  network.
+
+- 87526a0: Bump microsandbox 0.3.14 → 0.4.6 and rip out the Docker sandbox backend.
+
+  **microsandbox 0.4.6** brings:
+
+  - PR #673 — bounded relay handshake reads + `boot-error.json` on timeout. Failed boots now surface a structured error instead of the opaque "sandbox process exited before sending startup info" that hid the real cause on the previous 0.4.5 attempt.
+  - PR #650 — `exec.log` capture + typed `ExecFailed`.
+  - PR #697 — SIGKILL on `replace`-grace overruns, relevant to the bind-mount silent drop tracked in pearl th-dd0cef.
+
+  Verified end-to-end on macOS HVF: `th up` boots the boardroom microVM, `:4400` returns HTTP 200, `th down` cleans up with no leaked `msb`/`krun` processes.
+
+  **Docker backend removed.** `DockerSandboxClient`, `SMOOTH_SANDBOX_BACKEND=docker`, and `SMOOTH_DOCKER_BIN` are gone. Smooth has exactly two modes now — `th up` (sandboxed via microsandbox) and `th up direct` (host process, only safe in a pre-trusted environment). Docker is still callable from inside the sandbox when reaching out to host Docker / OrbStack / Colima for nested-virt-free workloads; it's just not a sandbox runtime for Smooth itself.
+
+- 5d2039e: Three new `smooth-bench` subcommands for measuring agentic coding quality (the real `smooth-coding` decision data):
+
+  - **`score-swe-bench --variant verified|lite`** — SWE-bench Verified / Lite (Princeton). 500 real GitHub issues from popular Python repos with held-out FAIL_TO_PASS + PASS_TO_PASS test suites. HuggingFace dataset fetch + atomic JSONL cache at `~/.smooth/bench-data/`. Score-compatible output bucketed under `"python"` for compare with the polyglot path. Industry-comparable headline number.
+  - **`score-real --tasks-dir ...`** — Multi-axis benchmark on curated mini-projects in our stack (Rust + Python + TS). Each task ships a `workspace/`, hidden-tests/, and a `grade.toml` declaring weights for pass / edits / verify / tools / cost. Scorer combines them into a weighted-mean per task. First task shipped: `rust-ttl-cache` (TTL-cache wrapper around an HTTP client). Four more proposed in `tasks-real/README.md` as TODOs.
+  - **`score-replay --repo owner/repo --since YYYY-MM-DD`** — Auto-harvest tasks from real merged PRs via `gh pr list --json`. For each PR ≥3 files + ≥1 test file: clone the parent commit, feed the PR title + body as prompt, score by whether the agent makes the same tests pass that the human PR did. Trait-injected (`GhCli` / `RepoFetcher` / `ReplayDriver`) so the unit tests use a `SeedFetcher` instead of real `gh` calls.
+
+  All three reuse the existing `tui_score` dispatch (driving `th code` via tmux with the coach driver + VERIFY rule). 277 lib tests pass (86 new). Built via parallel agent workflow (`wf_31decba4-b81`) — three isolated worktrees, then merged + CLI wired by hand. Live `th code` dispatch wiring for each is left as TODO in the agents' notes — the scoring + dataset + harvest + grading infrastructure is what landed here.
+
+- b573386: `th admin` + `th auth` (pearl th-abc4e2). New `th auth` for user identity (Supabase OAuth browser flow, M2M client_credentials, `whoami`, `logout`) stored at `~/.smooth/auth/smooai.json` — separate from the existing provider-credential management which is renamed to `th model` (Anthropic, Smoo AI Gateway, OpenRouter, OpenAI). New `th admin` for superadmin operations against `api.smoo.ai/admin/*` — currently 14 verbs across `user` (list / search / roles / magic-link) and `org` (list / show / create / members / products). All admin commands require a `th auth login` session whose account has `requireSuperAdmin` (403 otherwise). Pretty table rendering via `tabled` (heavy styling, opt-out via `--json`). Foundation for pearl th-feebd2 (`th admin onboard-customer`).
+- bae137f: Two surgical bench-quality fixes triggered by the 2026-05-29 coach matrix root-cause analysis (see `docs/bench-sessions/2026-05-29-coach-vs-user.md`):
+
+  1. **`smooth-operator`: new `AgentConfig::with_verify_tests_before_done(bool)` builder** that appends a stopgap system-prompt rule forbidding the agent from declaring done until it has run the project's test command (pytest / cargo test / npm test / go test) and seen passing tests. Targets the failure mode where deepseek/kimi/claude bail at 2-3 iterations with partial solutions (11/16, 18/20, 8/10) — the coach driver's "did you run the tests?" demand fires too late because the agent has already emitted `Completed`. This rule applies the same intent INSIDE the agent loop where it can stop early termination. Opt-in (default off) so general `th code` sessions stay snappy. Idempotent. Architectural follow-up: th-VERIFY-PHASE (full automatic test-runner invocation post-`done`).
+
+  2. **`smooth-bench` coach persona: new BACK-OFF RULE** — if the assistant has already shown a passing test run (`N passed in X.XXs` / `test result: ok. N passed; 0 failed` / `Tests: N passed`), the coach must fire `TASK_COMPLETE` this turn instead of re-probing. Targets claude-sonnet-4-6's coach-persona regression (3/5 → 2/5) where the coach kept asking for more verification after claude had already shown passing pytest output. Should restore claude's user-persona pass rate without affecting glm-5.1's coach-driven 5/5.
+
+- 56c5a25: bench: `--driver-persona=coach` for score-tui. The historical LLM-as-human driver is prompted as a NON-TECHNICAL end user — no shell, no file access, can't run tests, can't tell whether the agent's output is plausible. When an agent declares done with wrong output (e.g. affine-cipher decode keeping the encoder's 5-char grouping — pearl th-6a8064), the driver politely accepts and fires `TASK_COMPLETE`; the scoring phase only then runs pytest and gets FAIL. The agent never gets the feedback signal that would have let it fix the bug. New `coach` persona is a senior pair-programmer: still no tools (driver doesn't compute, doesn't run, doesn't read files), but DOES probe for an actual test run before firing `TASK_COMPLETE` and suggests concrete debugging steps without giving the answer. Default stays `user` for baseline comparability — flip via `--driver-persona=coach`. Same driver model (`smooth-summarize`) — only the system prompt + per-turn template change. Pearl th-e17b1a.
+- 160eb0f: `brew install SmooAI/tools/th` — smooblue-parity install story (pearl th-e32f60). New `update-homebrew-tap` job in `release.yml` regenerates `Formula/th.rb` in [SmooAI/homebrew-tools](https://github.com/SmooAI/homebrew-tools) on every tagged release: fetches the three Unix asset tarballs, computes sha256, writes the formula with macOS arm64 + Linux x86_64 + Linux arm64 URLs, commits + pushes via SSH deploy key. Bootstrapped at v0.13.7 so the tap works today; subsequent releases will switch asset naming to `th-{macos-arm64,linux-x86_64,linux-arm64}.tar.gz` for parity with smooblue's convention. Windows target is filed as follow-up pearl th-a165b4 — needs workspace-wide Cargo feature gating (`default = ["desktop"]` / `cli-windows = []`) so the binary excludes microsandbox + ratatui on Windows.
+- 19c4d00: Pearls: migrate to beads model — `.smooth/dolt/` no longer git-tracked
+
+  Pearl `th-975dfe`. Reverses an early decision (called out explicitly in
+  the prior `.gitignore` comment: "we WANT [.smooth/dolt/.dolt/]
+  committed — git is how pearls sync between machines") that produced a
+  recurring class of merge conflicts: Dolt rewrites the noms mutable
+  pointer files (`manifest`, `journal.idx`, `*.darc`, journal-chunk) on
+  every store open; git can't 3-way-merge binaries; main moving forward
+  while a feature worktree was open meant the conflict-on-merge-back
+  pattern recurred constantly. PR #94 (linked-worktree auto-commit
+  guard) and smooai #1513 (pre-commit `git add -A` exclusion) addressed
+  the worktree-as-author side but not the main-moves-forward side.
+
+  Beads precedent: `.beads/embeddeddolt/` is gitignored; sync happens
+  via dolt's custom `refs/dolt/data` ref pushed alongside normal git
+  refs (`bd dolt push`/`pull`). The ref-based sync was always available
+  in `th pearls`; this PR just stops materializing the on-disk noms
+  files in git's tracked set.
+
+  **Changes**:
+
+  - `.gitignore`: add `.smooth/dolt/`. Old comment that said "we WANT
+    this committed" replaced with the beads-model rationale.
+  - `git rm -r --cached .smooth/dolt/`: untrack the 7 currently-tracked
+    files from the index. History is preserved (history isn't rewritten);
+    new commits no longer sweep noms churn into git.
+  - `th pearls init`:
+    - Ensures `.smooth/dolt/` is in `.gitignore` (idempotent — matches
+      against `.smooth/dolt`, `/.smooth/dolt/`, `.smooth/dolt/**`).
+    - On post-`git clone` bootstrap (no local store + git origin URL
+      available), runs `smooth-dolt clone <origin> .smooth/dolt/` to
+      populate from `refs/dolt/data`. Falls back to empty init if the
+      clone fails. No manual `th pearls pull` needed.
+  - `smooth-pearls`: new `dolt::clone_from(remote_url, target_dir)`
+    public helper. Mirrors `recover_from_remote`'s subprocess shape but
+    takes the URL as an argument instead of reading it from
+    `repo_state.json` (which doesn't exist yet on a fresh bootstrap).
+  - `CLAUDE.md` §5: documents the new model + implications.
+  - 8 new tests covering `ensure_dolt_gitignored` (idempotency,
+    wildcard variant detection, anchored leading-slash variant) and
+    `read_git_origin_url` (none / present / non-git dir).
+
+  **Other repos** (smooai, smooblue) get their own follow-up migration
+  PRs (pearls `th-482e14`, `th-ad1f41`). After all three, the
+  `pearls-dolt-git-conflicts` memory's "How to apply" workarounds drop
+  entirely.
+
+- 5353a1e: smooth-operator: add a `PostgresCheckpointStore` behind a new `postgres` feature (SMOODEV-1468).
+
+  Durable, Postgres-backed implementation of the existing `CheckpointStore` trait — parity with LangGraph's `PostgresSaver`, so per-`agent_id` thread state survives process restarts. Uses an r2d2 pool of synchronous `postgres` clients (the trait is sync, mirroring `SqliteCheckpointStore`/rusqlite — not async sqlx). `connect(conn_str)` builds the pool + migrates the `checkpoints` schema; `from_pool(..)` reuses a shared app pool. SQLite/in-memory stores remain the zero-dep defaults. Covered by a testcontainers integration test that spins up a throwaway Postgres and exercises the full save/load_latest/load/list/prune + upsert + agent-scoping contract.
+
+- c32e71c: Rename "The Boardroom" to "The Safehouse" everywhere.
+
+  Pre-[[ADR-001]] there were multiple microVMs and "Boardroom" named the one Big Smooth + the cast lived in. After consolidation there's just one VM, and the corporate-coded name jarred against the rest of the heist/mob naming family (Big Smooth, Narc, Bootstrap Bill, Wonk, Goalie, Scribe, Smooth Operators). The Safehouse fits the metaphor: a sealed place the family runs jobs from. See `docs/Decisions/ADR-003-rename-boardroom-to-safehouse.md`.
+
+  Code identifiers, env vars (`SMOOTH_SAFEHOUSE_MODE` / `_PORT` / `_IMAGE`), file names, tracing fields, OCI image (`ghcr.io/smooai/safehouse:latest` with entrypoint `/opt/smooth/bin/safehouse`), and docs all flip. No backwards-compat fallbacks — this is dev tooling, not a release artifact.
+
+- 82554c4: rename the sandboxed-worker concept from "smooth-operator"/"operator" to "operative"
+
+  Disambiguates the microVM-per-pearl sandboxed worker (which RUNS the agent
+  engine) from the `smooth-operator` agent **engine** crate it consumes (being
+  extracted to `smooth-operator-core`) and the public `smooth-operator`
+  **service**.
+
+  Renamed worker identifiers (engine crate `smooth-operator` / `OperatorRole` /
+  all `proto/*.proto` `operator_id` wire fields are intentionally LEFT
+  UNTOUCHED):
+
+  - Runner crate/binary `crates/smooth-operator-runner` (pkg
+    `smooai-smooth-operator-runner`, bin `smooth-operator-runner`) →
+    `crates/smooth-operative` (pkg `smooai-smooth-operative`, bin
+    `smooth-operative`). Engine dep `smooth-operator` kept as-is.
+  - Container image `ghcr.io/smooai/smooth-operator` →
+    `ghcr.io/smooai/smooth-operative`; `docker/Dockerfile.smooth-operator` →
+    `Dockerfile.smooth-operative`; `scripts/build-smooth-operator-image.sh` →
+    `build-smooth-operative-image.sh`; `scripts/build-operator-runner.sh` →
+    `build-operative.sh`.
+  - Env vars `SMOOTH_OPERATOR_IMAGE` → `SMOOTH_OPERATIVE_IMAGE`,
+    `SMOOTH_OPERATOR_RUNNER` → `SMOOTH_OPERATIVE`,
+    `SMOOTH_OPERATOR_RUNNER_NATIVE` → `SMOOTH_OPERATIVE_NATIVE`.
+  - System prompt: "You are Smooth Operator…" → "You are a Smooth operative…".
+  - CLI: `th operators list/kill` → `th operatives list/kill`
+    (`OperatorsCommands` → `OperativesCommands`).
+  - bigsmooth worker types: `OperatorClient` → `OperativeClient`,
+    `OperatorRegistry` → `OperativeRegistry`, `operator_client.rs` →
+    `operative_client.rs`.
+  - Docs: `docs/Architecture/Operators.md` → `Operatives.md` (+ cross-links).
+
+  The `operator_id` value/proto field name is kept (scoped value, not the
+  colliding `smooth-operator` string) — no wire change. The sandbox VM name
+  format moved to `smooth-operative-<id>`.
+
+- a45fd19: SMOODEV-1409: Add top-level `th config` command with `get`, `set`,
+  and `list` subcommands for day-to-day `@smooai/config` value
+  management. Auths via the user JWT at
+  `~/.smooth/auth/smooai-user.json` by default (with auto-refresh via
+  the stored Supabase refresh_token); pass `--m2m` to use the
+  service-account session at `~/.smooth/auth/smooai.json` instead.
+
+  ```
+  th config get apiUrl --environment=production
+  th config set apiUrl https://api.smoo.ai --environment=production
+  th config list --environment=production --json
+  ```
+
+  Org id resolves from `--org-id` flag → `SMOOAI_ORG_ID` env →
+  `active_org_id` in the credentials file. The full schemas +
+  environments surface still lives under `th api config` — this
+  top-level command is just the muscle-memory "read or write a single
+  value" wrapper that mirrors the `smooai-config` CLI's `get` / `set`
+  / `list` ergonomics.
+
+- 17b727a: SMOODEV-1793: migrate Smooth off gateway `smooth-*` slot aliases
+
+  The Smoo AI LLM gateway is removing the `smooth-*` semantic-slot
+  aliases (`smooth-coding`, `smooth-reasoning`, `smooth-reviewing`,
+  `smooth-judge`, `smooth-summarize`, `smooth-fast`, `smooth-default`,
+  plus deprecated `smooth-planning` / `smooth-thinking` and the various
+  `smooth-<slot>-<vendor>` sub-aliases). After cutover, any request for
+  those model names returns HTTP 400 `Invalid model name` from the
+  gateway.
+
+  What changes:
+
+  - **New mapping table** in `smooth_policy::smooth_alias` is the single
+    source of truth for legacy → concrete model rewrites:
+
+    | Old slot                                 | Concrete model_name     |
+    | ---------------------------------------- | ----------------------- |
+    | `smooth-coding` / `smooth-default`       | `deepseek-v4-flash`     |
+    | `smooth-reasoning` (+ planning/thinking) | `deepseek-v4-pro`       |
+    | `smooth-reviewing`                       | `minimax-m2.7-direct`   |
+    | `smooth-judge` / `smooth-summarize`      | `gemini-2.5-flash`      |
+    | `smooth-fast`                            | `gemini-2.5-flash-lite` |
+
+  - **Migration shim** in `smooth_cast::provider_migration` walks every
+    routing slot on a loaded `ProviderRegistry` and rewrites legacy
+    aliases in place. `load_providers_with_migration(path)` is a drop-in
+    replacement for `ProviderRegistry::load_from_file` that loads,
+    migrates, **saves the file back if anything changed**, and emits one
+    `tracing::info!` per rewrite so users see the migration once.
+
+  - **Every `providers.json` loader** in the workspace funnels through
+    the migration loader (smooth-cli, smooth-bigsmooth, smooth-code,
+    smooth-bench, smooth-operative — 31 call sites total). Existing
+    users' on-disk configs are rewritten on first load; the in-memory
+    migration also covers routing JSON shipped to operatives so older
+    Big Smooth builds can still drive a freshly-built operative.
+
+  - **The TUI model picker** drops the hardcoded `SMOOTH_ALIASES` array
+    and now offers the concrete catalog defaults. The picker also
+    surfaces metadata (use-case tags, tier, cost, benchmark) sourced
+    from the gateway's `/v1/model/info` schema (offline fallback
+    catalog colocated in `smooth-code/src/model_picker.rs`).
+
+  - **`th model login`** no longer offers the dead `smooth-*` aliases
+    for the SmooAI Gateway provider.
+
+  Coordination: the SmooAI-side gateway change (LiteLLM config) can roll
+  out once this branch lands on Smooth `main`, is rebuilt, and reinstalled
+  via `pnpm install:th`.
+
+- 9267296: smooth-operator: add an `LlmProvider` trait + `MockLlmClient` test harness (SMOODEV-1467).
+
+  `LlmProvider` abstracts the LLM call (`chat` + `chat_stream`); the real `LlmClient` implements it by delegating to its inherent methods. `MockLlmClient` is a deterministic, scriptable test double (text / tool-call / error / streaming-event responses) that records every request for assertions and is cheap to clone (shared state). This is Phase 0 of the LangGraph-parity work (epic SMOODEV-1466) — the seam every later phase (durable checkpointing, HITL pause/resume, persistent memory, vector RAG, structured output, OTel gen_ai spans) is unit-tested against. 10 unit tests + a doctest; clippy/fmt clean.
+
+- 80b6fbc: LiteLLM prompt-caching client support. The operator-runner now sends
+  Anthropic-shaped `cache_control: {type: ephemeral}` markers on Claude
+  routes (model id contains `claude` / `sonnet` / `opus` / `haiku`, or one
+  of the Smooth LiteLLM aliases like `smooth-coding-claude`) when the
+  api_base looks like LiteLLM or anthropic.\*. We mark three breakpoints:
+  the system prompt, the last tool definition (caches the entire tool
+  block plus system), and the last message in history (extends the cache
+  turn-by-turn). Non-Claude / OpenAI / Gemini routes still send a plain
+  string `content` — no cache_control on the wire.
+
+  Cache-hit numbers (`usage.prompt_tokens_details.cached_tokens`) are
+  read back from the response, aggregated in `CostTracker.
+total_cached_tokens`, plumbed through `AgentEvent::Completed.
+cached_tokens`, and surfaced on Big Smooth's `[METRICS]` pearl-comment
+  line so a session's cache-hit ratio is observable. Requires the smooai
+  LiteLLM gateway to have `cache_control_injection_points` configured —
+  without that, this code is a no-op.
+
+- 2f903ee: Two TUI polish pearls landed together (`th-91d8af` + `th-a10c2d`):
+
+  **Pearl th-91d8af — bare `th` shows a friendly explainer.**
+  Running `th` with no subcommand used to drop new users straight
+  into the smooth-code TUI cold. Now it prints a one-screen
+  explainer covering what `th` is for, what the main subcommand
+  families do (`th code`, `th up`, `th pearls`, `th api`,
+  `th cast`, `th mcp`), and the most useful starter commands.
+  `th code` (and the existing top-level shortcuts `th --resume`,
+  `th --list`, `th --agent <name>` from pearl
+  `th-resume-top-level`) continue to launch the TUI directly —
+  the explainer only triggers when no subcommand and no code-mode
+  flags are present.
+
+  **Pearl th-a10c2d — TUI shows the upstream model behind a smooth-\* alias.**
+  When the user routes through an alias like `smooth-coding`, the
+  gateway resolves it to a concrete upstream (e.g.
+  `qwen3-coder-flash`). Previously the TUI only ever showed the
+  alias. The agent loop now captures the `model` field from chat
+  completion / Anthropic responses (and from streaming chunks)
+  into a new `LlmResponse.resolved_model` field, emits a one-shot
+  `AgentEvent::ModelResolved { alias, upstream }` per session when
+  the alias differs (idempotent — only re-emits if the upstream
+  changes mid-run), and the smooth-code status bar renders
+  `smooth-coding → qwen3-coder-flash`. Concrete-model selections
+  where alias == upstream stay quiet so the status bar doesn't
+  clutter.
+
+  Both behaviours are forward-compatible: the new
+  `AgentEvent::ModelResolved` variant slots into the existing
+  `#[serde(tag = "type")]` enum, so old clients silently skip it
+  and new clients connected to old runners just don't see it.
+
+- 864e834: runner: add `todo_list` tool for cross-turn task state (opencode parity)
+
+  Adds a `todo_list` tool to smooth-operator-runner. Operates on a small
+  JSON file at `.smooth/todos.json` with four actions:
+  `add` / `list` / `update` / `clear`. Persists across the runner's
+  fresh-per-turn process boundary so on turn 2 the agent can
+  `todo_list action='list'` to find what it was doing — the structural
+  anchor opencode uses and smooth was missing.
+
+  Pearl `th-1d6699`. Diagnosed by side-by-side pane capture of opencode
+  vs smooth on `cleanup-node-modules-orphans`: opencode emits a
+  `# Todos` checkbox list as part of its plan, marks items in_progress
+  as it executes, and on `"yes, proceed"` reads the pending todo and
+  issues ONE concrete `rm -rf <paths>` command. Smooth had no equivalent
+  tool — every other registered tool (read_file, write_file, edit_file,
+  apply_patch, list_files, grep, lsp, bash, bg_run, http_fetch,
+  project_inspect, read_memory, write_memory) is single-shot or
+  project-scoped, none track per-task state.
+
+  Wired through:
+
+  - `crates/smooth-operator-runner/src/main.rs` — `TodoListTool` impl
+    - `TodoStore` (JSON-file-backed, atomic rename-from-tmp write) +
+      8 unit tests including cross-process persistence.
+  - `crates/smooth-bigsmooth/src/policy.rs` — added `todo_list` to both
+    `registered_tool_names()` and `read_only_tool_names()`. Without
+    this entry Wonk denies every call and the agent logs the
+    "I cannot use the todo_list tool" excuse.
+  - `crates/smooth-operator/src/cast/prompts/fixer.txt` — new section
+    teaching the agent the planning → executing → completion lifecycle
+    for the tool. Anchored on "call `list` at the start of every
+    continuation turn — it tells you what was already done and what's
+    next."
+
+  Bench impact at `deepseek-v4-flash`: not measurable — the weak model
+  hallucinates "tool not in allowlist" rather than calling it (no
+  allowlist gate exists in direct mode; the LLM is making up an
+  excuse). The tool is structurally in place for stronger models
+  (v4-pro, claude-sonnet) where the multi-turn discipline pays off.
+  Filed as architectural parity, not a single-fixture lift.
+
+- e8fb9e4: WebSearch tool (Exa MCP primary, Parallel fallback) + Wonk allowlist + score-research bench dimension
+
+  **New tool — `web_search`** (pearl th-2cc3f1). Mirrors OpenCode's
+  `tool/websearch.ts` + `tool/mcp-websearch.ts`: posts an MCP JSON-RPC
+  `tools/call` to a hosted LLM-tuned search provider that returns
+  extracted, LLM-ready text (no separate fetch step needed for the
+  snippets). Two providers behind the same surface so smooth-vs-opencode
+  head-to-head benches stay on the same backend:
+
+  - **Exa** (`mcp.exa.ai`) — primary. Tool name `web_search_exa`, knobs
+    `type` / `numResults` / `livecrawl` / `contextMaxCharacters`.
+  - **Parallel** (`search.parallel.ai`) — fallback. Tool name `web_search`.
+
+  Provider picked from `SMOOTH_EXA_API_KEY` / `SMOOTH_PARALLEL_API_KEY`;
+  `SMOOTH_WEBSEARCH_PROVIDER=exa|parallel` overrides. Registers only when
+  a provider key is configured — otherwise the tool would always error
+  on first call and just clutter the schema.
+
+  **Wonk policy** (pearl th-bf3f6e). Adds `mcp.exa.ai` + `search.parallel.ai`
+  to `phase_network_defaults()` baseline. Single-purpose, easy to audit,
+  no wildcards.
+
+  **`score-research` bench dimension** (pearl th-f4ac64). Sibling to
+  `score-cleanup`. Grades the agent's ability to answer questions that
+  REQUIRE web search — fact lookups, identifying a title from a fuzzy
+  description, etc. Two axes: `answer_correctness` (case-insensitive
+  keyword matching, `min_correctness` default 1.0 hard-kills below
+  threshold) and `cited_source` (URL detection — anti-hallucination
+  probe). First fixture `research-hijack-year` probes the chain
+  end-to-end (find "Hijack" series → year + service → cite).
+
+  Reuses `CoachCfg` + `AgentDriver` trait so mock/opencode/smooth/pi
+  all work out of the box. Mock agent `perfect-research-hijack.sh`
+  makes the pipeline runnable in CI without API spend.
+
+### Patch Changes
+
+- aed48d2: th: unify active-org resolution across `th api`, `th config`, `th auth`
+
+  `th api orgs switch <id>` wrote the active org only to the legacy
+  `smooth-api-client` store at `~/.smooth/auth/smooai.json`, but
+  `th config list` (and any other subcommand that uses
+  `smooai-client-shared`'s `default_user()` store) read from a different
+  file (`~/.smooth/auth/smooai-user.json`). Net effect: switch reported
+  success, then `th config list` immediately failed with
+  "no active org set — pass `--org-id <id>`, set SMOOAI_ORG_ID, or run
+  `th api orgs switch <id>`" — the same command the user just ran.
+
+  Adds a shared `crate::active_org` module with two functions:
+
+  - `resolve(override_org)` — consults `--org` flag → `$SMOOAI_ORG_ID` →
+    every credential store on disk (legacy api-client + client-shared
+    M2M + client-shared User), returning the first non-empty
+    `active_org_id`.
+  - `set(org_id)` — fans the write out to every credential store whose
+    file already exists. Won't fabricate a stub User session for an
+    M2M-only user.
+
+  Wires `th api orgs switch`, `th api orgs show`, the `th api`
+  `require_active_org` helper, and `th config`'s `resolve_org` through
+  the shared module. Covered by ten new cross-subcommand contract
+  tests in `crates/smooth-cli/src/active_org.rs`.
+
+- a740746: test: make `auth::active_org` tests hermetic so they stop flaking the Release run
+
+  `auth::active_org`'s tests pointed `default_user()` at a tempfile by mutating
+  the process-global `SMOOAI_USER_AUTH_FILE` env var under a module-local
+  `ENV_LOCK`. The cross-store `active_org` module's tests mutate the _same_ env
+  vars under a _separate_ lock, so the two modules raced when cargo ran them in
+  parallel in the `th` test binary: one clobbered the other's env mid-test, the
+  read hit the wrong file, the assert failed, and the failure poisoned the mutex
+  — cascading. It passed in PR Checks but lost the race in the Release
+  (Changesets) workflow, keeping Release red (and blocking changeset versioning).
+
+  Fix: drop the env entirely. `set`/`resolve` now delegate to private
+  `set_in(&store, …)` / `resolve_in(&store)`, and the tests construct
+  `CredentialsStore::at(<tempfile>)` directly — no global env, no lock, no
+  cross-module race. Verified passing under `--test-threads=16`. Pearl th-2944e5.
+
+- 0dfa72b: SMOODEV-1787 (PR 1/4, dual-engine collapse): consume the published
+  `smooai-smooth-operator-core` engine instead of the in-tree copy, and
+  delete the in-tree `crates/smooth-operator/`.
+
+  The in-tree engine and the public `smooth-operator-core` were the same
+  engine but had diverged. The only differences were (a) the public core
+  gates its BigSmooth control-plane reporter behind a `bigsmooth` cargo
+  feature (with a no-op stub when disabled) and (b) cosmetic
+  public-sanitization edits (doc rewording, neutralized example hosts in
+  tests, `smooth_operator` → `smooth_operator_core` in doc examples, a
+  provider-agnostic `ModelRouting::default()`, a redacting `Debug` for
+  `ProviderConfig`/`LlmConfig`, and a wider retry-status set). smooth never
+  enables the `bigsmooth` feature and never sets a reporter, so the gated
+  reporter calls were dormant no-ops — the cutover loses nothing.
+
+  Wiring: the workspace dep KEY stays `smooth-operator` and is package-aliased
+  to `smooai-smooth-operator-core`, so all ~12 consumers' `use smooth_operator::…`
+  imports compile unchanged. Pinned as a rev-locked git dep (not a sibling
+  path dep) to avoid the CI `cargo metadata` failure that SMOODEV-1464 hit
+  with a `../`-style path dep. No functional change, no module removal — that
+  lands in later PRs.
+
+- c6cca91: Cut smooth over to the published `smooai-smooth-operator-core` v0.14.0 (crates.io); re-home the th-code harness into smooth's own crates
+
+  This is the final PR of the engine-decouple program (SMOODEV-1790, PR 4/4). The
+  engine `smooai-smooth-operator-core` is now published on crates.io at `0.14.0` —
+  a clean, GENERIC agent engine with the `th code` coding harness REMOVED.
+  Previously smooth depended on the engine via a git rev (`bb9a256`) that still
+  carried the harness, which is why it kept building.
+
+  - **Engine dep switched to crates.io 0.14.0.** Root `Cargo.toml`:
+    `smooth-operator = { git = …, rev = "bb9a256…" }` →
+    `smooth-operator = { version = "0.14.0", package = "smooai-smooth-operator-core" }`.
+    The dep KEY stays `smooth-operator` so the `use smooth_operator::…` imports for
+    the generic engine API are unchanged. `Cargo.lock` now resolves the engine from
+    `registry+https://github.com/rust-lang/crates.io-index` (checksum-pinned), not a
+    git source — the git-rev bridge is gone.
+
+  - **New `smooth-cast` crate** re-homes the bits the engine dropped, built on the
+    engine's generic public API (`Agent`/`ProviderRegistry`/`ToolRegistry`/generic
+    `Cast`/`OperatorRole`/`Clearance`):
+
+    - `coding_workflow` — the `th code` single-agent outer loop
+      (`run_coding_workflow`, `task_text_has_cleanup_intent`, …).
+    - `skills` — skill discovery (`discover`, `SkillScope`, `SkillSource`, `Skill`)
+      plus the built-in `create-skill` skill.
+    - `cast` — the four coding-harness cast roles the generic engine no longer ships
+      (`fixer`, `oracle`, `chief`, `intent_classifier`), and a `cast::builtin()` that
+      returns them on top of the engine's generic built-in roles. All moved tests came
+      with the code.
+
+  - **Consumers repointed** to `smooth-cast`: `smooth-operative` (coding_workflow +
+    `fixer` role resolution), `smooth-code` (skills + `chief`/`intent_classifier`
+    routing), `smooth-cli` (skills + `--agent` role resolution), `smooth-bigsmooth`
+    (skills + session auto-naming). Every site that did `Cast::builtin().get("fixer"|
+"oracle"|"chief"|"intent_classifier")` now uses `smooth_cast::cast::builtin()`.
+
+  - The Big-Smooth reporter hooks the engine also dropped stay deleted — verified
+    zero smooth consumers (`with_reporter`/`BigSmoothReporter`/`ReporterEvent`/
+    `report_to_bigsmooth`/the `bigsmooth` engine feature). smooth's own
+    `smooth-bigsmooth` gRPC crate is unrelated and untouched.
+
+- a7ba717: release: align all changeset package names to `@smooai/smooth`
+
+  `pnpm changeset version` (the Release workflow's Version Update step) was
+  failing repo-wide with "Found changeset … for package X which is not in the
+  workspace": 35 accumulated changeset files declared the package under three
+  wrong spellings — `smooai-smooth` (21), bare `smooth` (12), and
+  `@smooai/smooth-cli` (2) — none of which exist in the workspace. The only
+  package is the root `@smooai/smooth` (per `package.json`). Renamed every
+  changeset to `@smooai/smooth` so versioning can run and the backlog of
+  pending changesets (including the pearls auto-heal + test-hygiene fixes)
+  finally gets a version bump + changelog entry. Pearl th-645e54.
+
+- 74890e8: bench: stop `current_commit_sha()` returning empty under the pre-push hook / CI
+
+  `current_commit_sha()` shelled out to `git rev-parse HEAD` while inheriting
+  the caller's git environment. Under the git pre-push hook (and some CI
+  checkouts) `GIT_DIR` / `GIT_INDEX_FILE` / `GIT_WORK_TREE` / `GIT_PREFIX` /
+  `GIT_COMMON_DIR` are exported, which made the child git print nothing (exit 0,
+  empty stdout) instead of the real sha. That empty string failed the
+  `current_commit_sha_returns_something_non_empty` test in the full `cargo test`
+  run — blocking every direct push (pre-push hook) and the Release (Changesets)
+  workflow, while passing in isolation and in PR Checks.
+
+  Fix: strip the inherited `GIT_*` vars before invoking git so it rediscovers the
+  repo from cwd, and treat empty stdout as the `"unknown"` sentinel (same as the
+  git-failure path) so the function never returns `""` — which also stops release
+  Scores from being tagged with an empty provenance string. Pearl th-e2cbc9.
+
+- d9d2422: release: install `protoc` on macOS runners in the binary-build matrix
+
+  The Release workflow's cross-platform binary-build matrix installed
+  `protobuf-compiler` only on Linux (`if: runner.os == 'Linux'`), so the
+  `aarch64-apple-darwin` / `x86_64-apple-darwin` targets had no `protoc` and
+  `smooai-smooth-narc`'s prost `build.rs` failed with "Could not find protoc".
+  This job had never run to completion before (the Version Update step always
+  failed first on the changeset package-name bug, th-645e54), so the gap was
+  never exposed. Added a macOS-gated `brew install protobuf` step. Pearl
+  th-14bddf.
+
+- ae10d6b: fixer prompt: add explicit "When the user confirms: EXECUTE" rule
+
+  When the prior assistant turn enumerated a destructive plan ending in
+  "Proceed?" and the user's next message is "yes" / "proceed" / "go" /
+  "do it" etc., the agent must invoke the destructive command directly,
+  not re-enumerate or re-ask for confirmation, and not pivot to a
+  different task.
+
+  Lifts `cleanup-node-modules-orphans` pass rate from 0/5 to 3/5 under
+  strict-coach mode (minimal "yes, proceed" reply). The old prompt
+  implied the meaning of "yes" but never explicitly told the agent what
+  behavior to perform on receipt — the model was free to interpret
+  "yes" as a context-restate cue, which the bench's idle detector then
+  mistook for a fresh first-idle and pasted the coach reply again,
+  producing the score-0.55 zero-bytes-freed failure shape.
+
+  Pearl: th-e182bc (re-scoped — was misdiagnosed as inter-turn context
+  loss; instrumentation confirmed prior_messages flow is intact through
+  all 3 hops, the failure is in agent action policy)
+
+- f5abcd3: fixer.txt: revert todo_list teaching section (regressed v4-pro 3/3 → 0/3)
+
+  The "Multi-turn tasks: use `todo_list`" section added in
+  th-1d6699's commit hurt every model tier tested:
+
+  - deepseek-v4-pro: 3/3 perfect → 1/3 partial (0.8) + 2/3 must_preserve
+    violations (0.35)
+  - deepseek-v4-flash: agent hallucinated "tool not in allowlist"
+    excuses, didn't actually call the tool
+
+  Post-revert v4-pro is back to 3/3 perfect (3,559,751 / 3,559,751 /
+  3,557,724 bytes freed). The TodoListTool itself stays — it's
+  architecturally correct and ready for stronger models to pick up
+  organically. The prompt-injection approach was too prescriptive
+  and conflicted with the existing destructive-plan discipline. Pearl
+  th-1d6699 remains in_progress for a re-attempt that demonstrates
+  the tool via a concrete example rather than a 24-line procedural
+  sermon.
+
+- 8e21cf1: model defaults: judge → groq-llama-3.3-70b, fast → groq-llama-3.1-8b (pearl th-3468bd)
+
+  Post SMOODEV-1793 the concrete slot defaults in `SmoothSlot::concrete_default`
+  routed `judge` to `gemini-2.5-flash` and `fast` to `gemini-2.5-flash-lite`.
+  Update both to Groq Llama models matching the gateway's previous
+  `smooth-*` primaries:
+
+  - **`fast`** → `groq-llama-3.1-8b`. Sub-300ms first token, ~10× cheaper than
+    Gemini Flash Lite. Matches the gateway's old `smooth-fast` primary
+    (Groq Llama 3.1-8B-Instant).
+  - **`judge`** → `groq-llama-3.3-70b`. An 8B is too small for adversarial
+    prompt-injection detection — the 70B catches paraphrase attacks the
+    8B misses, while still landing under 1s on Groq and well under
+    Gemini Flash on cost. Judge gates tool execution; refusal quality
+    beats latency at this slot.
+  - `summarize` stays on `gemini-2.5-flash` — its 1M context window is the
+    load-bearing feature for context compaction.
+  - Coding / reasoning / reviewing / default unchanged.
+
+  Catalog entries for both Groq models added to `fallback_catalog()` so
+  the picker has metadata (use_cases, tier, cost, description, AA index)
+  in offline mode. Migration and policy tests updated.
+
+- 4b186d4: install:th now drops smooth-dolt and native smooth-operative into ~/.cargo/bin (pearl th-92dac3)
+
+  `th code` invoked from outside the smooth repo (e.g. `~/dev/smooai/smooai/`)
+  warned "smooth-dolt binary not found" and hard-errored on the
+  first dispatch with "native smooth-operative not found". Root cause
+  in both: the discovery code walks from `CARGO_MANIFEST_DIR` and the
+  process cwd looking for `target/release/<binary>` — neither finds
+  the binary when the cwd is a different repo.
+
+  Fix: `pnpm install:th` now also:
+
+  - Runs `cargo install --path crates/smooth-operative --force`, which
+    drops the native binary at `$CARGO_INSTALL_ROOT/bin/smooth-operative`
+    (typically `~/.cargo/bin/`) alongside `th`.
+  - Runs `scripts/install-smooth-dolt-to-cargo-bin.sh`, which copies
+    `target/release/smooth-dolt` to the same dir. The copy is skipped
+    when the destination is already byte-identical (cheap hot
+    reinstalls; safe against a running `th up`).
+  - `find_native_operative_binary()` in `smooth-bigsmooth` is
+    extended with a `$CARGO_INSTALL_ROOT/bin` → `$CARGO_HOME/bin` →
+    `~/.cargo/bin` fallback, refactored into a pure helper
+    (`cargo_bin_native_operative`) with 4 unit tests covering all
+    three precedence rungs and the missing-binary case.
+
+  `install:th:full` carries the same install steps (and bumps the
+  unconditional smooth-dolt rebuild). `th code` from anywhere now
+  finds both binaries without further setup.
+
+- f9d751e: install:th now builds smooth-dolt automatically (pearl th-a49716)
+
+  Previously `pnpm install:th` ran `build:web` + `build:runner` + `cargo
+install`, but never built the `smooth-dolt` Go binary that
+  `th pearls` needs. Fresh installs (and post-rebase ones) hit the
+  "⚠ smooth-dolt binary not found. Pearl sync may not work." warning
+  on every `th code` launch and the user had to read the warning and
+  run `scripts/build-smooth-dolt.sh` by hand.
+
+  Now:
+
+  - `pnpm install:th` — adds `build:smooth-dolt:if-stale`. The build
+    script accepts a new `--if-stale` flag that skips the Go build
+    entirely when `target/release/smooth-dolt` already exists AND
+    every `*.go` / `go.mod` / `go.sum` under `go/smooth-dolt/` is
+    older than the binary. Hot installs pay zero cost; cold installs
+    and source bumps trigger a real build.
+  - `pnpm install:th:full` — NEW. Same shape as `install:th` but
+    invokes `build:smooth-dolt` unconditionally. Use after a Go
+    toolchain change, a Dolt upstream bump, or when you suspect a
+    stale binary.
+
+  No behavior change to the standalone `bash scripts/build-smooth-dolt.sh`
+  invocation — without `--if-stale` it always builds, same as before.
+
+- ab5a455: th pearls: skip the git auto-commit of pearl state when run from a linked worktree
+
+  `th pearls` mutations auto-commit the `.smooth/dolt/` store to git so pearl
+  state syncs across machines. Dolt rewrites its mutable pointer files
+  (`journal.idx`, `manifest`, the journal chunk) on every store open, and each
+  linked worktree checks out its own copy — so committing those onto a feature
+  branch produced binary pointer divergence that couldn't be merged back to
+  main (recurring `.smooth/dolt` conflicts).
+
+  `auto_commit_pearl_state` now detects a linked worktree (`git rev-parse
+--git-dir` ≠ `--git-common-dir`) and skips the git commit there, logging a
+  hint to run pearl mutations from the primary worktree. The dolt mutation and
+  `th pearls push` (refs/dolt/data) still capture the change, so nothing is
+  lost — pearl state simply stays on one lineage. Primary-worktree behaviour is
+  unchanged.
+
+- d937223: Pearl th-01c714: stop multi-line task prompts from fragmenting into
+  N `You:` submissions in the `smooth-code` TUI when driven by the
+  bench harness.
+
+  After pearl th-7fdfa9 fixed the `j`-for-newline bug in
+  `tmux_driver::send`, newlines now correctly survive into the TUI's
+  input box — but the TUI's input handler treats every `\n` as Enter
+  (submit). So a 13-line task prompt arrived as 13 separate `You:`
+  submissions instead of one, fragmenting the conversation. Evidence:
+  `~/.smooth/bench-runs/80c092b0/python-affine-cipher.pane.log`.
+
+  Two-pronged fix (belt-and-suspenders):
+
+  1. **Bracketed paste in `tmux_driver::send`.** Added `-p` to the
+     `tmux paste-buffer` invocation so the content is wrapped in
+     `\e[200~ ... \e[201~` markers. Bracketed-paste-aware TUIs use
+     these markers to keep embedded newlines as soft newlines rather
+     than treating each as Enter. If the receiving application has not
+     enabled `\e[?2004h`, tmux strips the markers and behaviour is
+     identical to the prior non-`-p` path — so `-p` is a safe upgrade.
+
+  2. **Flatten multi-line prompts before sending.** Reformatted
+     `lib::build_prompt` to produce a single line (semicolon-joined
+     clauses). Added `human_driver::flatten_for_tui` which collapses
+     newlines to `|` and is applied to the initial task prompt seed
+     and every driver-model follow-up before `driver.send`. Even if
+     the TUI never honors bracketed paste, the flattened form is
+     guaranteed to land as one `You:` block. Cheap insurance against
+     future TUI input-handler changes.
+
+  Tests added:
+
+  - `lib::build_prompt_is_single_line` — asserts no `\n`/`\r` in the
+    bench task prompt.
+  - `human_driver::flatten_for_tui_*` (5 cases) — covers passthrough,
+    trimming, empty input, blank-line dropping, and the multi-line
+    → pipe-separated transformation.
+
+  Verified with `score-tui --pr --task-limit 1 --debug` against a
+  running Big Smooth: the new pane log shows the seeded prompt
+  landing as a single `You:` block containing the full text, instead
+  of one `You:` block per line as before. The task itself still
+  fails (affine-cipher under single-shot constraints is hard), but
+  the harness now sends what we intend it to send.
+
+- 73e0748: bench: deterministic test-result regex scorer + forensic dump. Adds `parse_native_test_summary` with per-language parsers (cargo's `test result:`, pytest's `N passed, N failed`, jest summary) that run **before** the LLM judge — the judge gets a 4 KB trimmed window and routinely returns 0/0/0 when the canonical summary line falls outside that window, scoring real passes as FAIL. Verified on rust-acronym across all 4 models in the last matrix: saved `src/lib.rs` passed 10/10 against `cargo test` on the host but scored FAIL. Also writes `~/.smooth/bench-runs/<id>/<task>/.smooth-score-forensic/{combined.txt,summary.json}` on every score attempt so failures are forensically diagnosable. Pearl th-086f0f.
+- a9668dc: Pearl th-2b5f63: add `th cast models` — list live model groups
+  exposed by the configured LiteLLM provider (e.g. llm.smoo.ai) via
+  `GET /v1/models`.
+
+  Useful for confirming deploys, debugging routing, and copying
+  alias names. The default provider is the one backing the `default`
+  routing slot (what `th routing show` highlights); pass
+  `--provider NAME` to override on multi-provider setups.
+
+  Flags:
+
+  - `--provider NAME` — override the provider id (default: the
+    provider backing the `default` routing slot).
+  - `--filter PATTERN` — case-insensitive substring filter on
+    model ids.
+  - `--json` — emit `{"data":[{"id":"..."}]}` for scripting.
+
+  The parser is tolerant of LiteLLM responses with embedded ASCII
+  control bytes (we strip 0x00-0x1F before strict JSON parsing) and
+  of truncated responses (a byte-scan fallback recovers any
+  complete `"id":"NAME"` entries). When the strict and lossy
+  counts disagree, the footer surfaces a `!` warning so deploys
+  returning partial bodies don't fail silently.
+
+  Exits 2 if no provider is configured (`run th auth login`), and
+  prints the status code + first 200 chars of the body when the
+  provider responds non-200.
+
+- 20a76be: Wire `AgentConfig::with_verify_tests_before_done` into the operator-runner dispatch path (pearl th-393aed). The builder landed earlier today but no caller was using it, so the "no final response until tests pass" rule wasn't actually firing in any bench run. Now: `smooth-operator-runner` reads `SMOOTH_VERIFY_TESTS` from its env and calls the builder with the parsed boolean (`1` / `true` → on, anything else / unset → off). Big Smooth's per-task operator-runner spawn (`server.rs`'s minimal env*clear + whitelist) now also passes the var through, alongside the other `SMOOTH_WORKFLOW*\*`knobs. Default off — general`th code`sessions still see no behavior change; bench runs flip it on by booting Big Smooth with`SMOOTH_VERIFY_TESTS=1 th up direct …` so all in-bench operator runs see the rule.
+- 9800b16: Pearl th-399196: `smooth-bench score-tui` — drive `th code` via tmux + LLM-as-human loop.
+
+  Adds a new `smooth-bench score-tui` subcommand that runs the curated
+  aider-polyglot sweep against the real `th code` TUI instead of the
+  WebSocket chat-agent path, so the bench exercises what a human user
+  actually touches: the TUI's prompt parsing, the model alias→upstream
+  display, tool-call surfacing, and session lifecycle.
+
+  How it works:
+
+  - A new `TmuxDriver` (`crates/smooth-bench/src/tmux_driver.rs`)
+    spawns `th code` inside a detached tmux session, types into it
+    via `send-keys`, and reads visible output via `capture-pane`.
+  - A new LLM-as-human loop (`crates/smooth-bench/src/human_driver.rs`)
+    asks a cheap driver model (default `Activity::Summarize`) to play
+    the role of a user testing the assistant: it reads the current
+    pane snapshot each turn and decides what to type next, or fires
+    the `TASK_COMPLETE` / `TASK_STUCK` sentinels.
+  - The new orchestrator (`crates/smooth-bench/src/tui_score.rs`)
+    ties it together: per task it preps the scratch dir via the
+    newly-extracted `prepare_task` helper, drives the human loop,
+    then scores via the shared `finalize_and_score` helper.
+  - Emits the same `Score` shape as `score --pr` / `score --release`,
+    plus a `via: "tui"` marker on the `TuiSweepRun` for downstream
+    analysis.
+
+  Flag surface mirrors `score`: `--pr`, `--release`, `--budget-usd`,
+  `--output`, `--url`. New TUI-specific flags: `--tmux-session`
+  (default `smooth-bench-tui`), `--th-binary` (default `th`),
+  `--driver-model` (default `summarize`), `--max-turns` (default 15),
+  `--task-timeout-s` (default 900).
+
+  The existing WebSocket `score` path is unchanged — `chat_driver.rs`
+  and `sweep.rs` are untouched aside from shared helpers extracted up
+  into `lib.rs` (`prepare_task`, `finalize_and_score`) which the
+  WebSocket path now also uses for zero-drift task setup.
+
+  Tests:
+
+  - `tmux_driver` exercised against `echo`, `cat`, and `sleep` shell
+    fixtures (no `th` needed for unit tests).
+  - `human_driver` decision parsing + prompt assembly tested with a
+    hand-rolled `FakeDriver` (no live LLM).
+  - `tui_score` aggregation + shell-escape + tool-call counting
+    tested without spawning real microVMs.
+
+  Heavier integration tests against a real Safehouse + dataset are
+  left to the operator to invoke via `smooth-bench score-tui --pr`.
+
+- 35b2cb1: Pearl th-3c0b13: route every CLI "Smooth" / "Smoo AI" through the
+  gradient wordmark helpers.
+
+  The `crates/smooth-cli/src/gradient.rs` helpers (`smooth()`,
+  `smoo_ai()`) already existed but were only used in a handful of
+  places. Every other user-facing `println!` printed the brand name
+  as plain bold/colored text, so the same word read three different
+  ways depending on which command was running. This patch swaps the
+  literal "Smooth" / "Smoo AI" / "Big Smooth" / "Smoo AI Gateway" /
+  "Smoo AI platform" / "Smooth Operators" / "Smooth home" mentions
+  in `th`'s console output for calls to the existing gradient helpers
+  so the wordmark renders consistently with the logo (Smoo
+  orange→pink, th teal→blue).
+
+  Touches the bare-`th` explainer, `th up`, `th down`, `th status`,
+  `th auth status`, `th auth login` picker, `th operators`, `th
+inbox`, `th doctor`, and `boot_ui.rs`'s `✻ Smooth booting` header.
+  Status / auth columns lose their `{:<N}` width formatting (which
+  would have been confused by the ANSI escapes) in favour of hand-
+  padded spacing so the visible columns still line up.
+
+  Tracing logs, error messages, identifier names, doc strings, and
+  the systemd unit file's `Description=` line are deliberately left
+  plain — those either land in log files or get piped/grep'd and
+  shouldn't carry ANSI.
+
+- d38e87c: `th pearls` auto-doctor for the orphaned-`smooth-dolt serve` lock wedge. Repro shape: an earlier `th up` spawned `smooth-dolt serve <data-dir> --socket /tmp/smooth-dolt-shared/<hash>.sock` as a child. Parent died (`th down`, crash, agent worktree teardown), the serve child got reparented to init, and the socket file was cleaned up — leaving the serve process running with no way to reach it but still holding the `noms/LOCK` file. `try_attach_handle` (does `socket.exists()`) returns None, `SmoothDolt::new` falls back to CLI mode, `smooth-dolt exec` tries to grab the lock, fails with `Error 1105: cannot update manifest: database is read only`. Every `th pearls create / update / close / commit` wedges until the user manually kills the orphan. Now: on the read-only error, `run_cli` invokes `auto_doctor_clear_orphan_server` which uses `lsof -t` to find LOCK file holders, verifies via `ps -o command=` that each holder is actually `smooth-dolt serve` (refuses to kill debuggers / backup tools / IDEs that happened to open the file), `SIGTERM`s the orphan, waits 500 ms for the kernel to release the lock, retries once. Best-effort: failures inside the doctor itself fall through to the original error rather than masking it. Pearl th-49e37b.
+- 1ead328: docs: add `docs/Engineering/Using-th-CLI.md` covering the full `th api` / `th admin` (planned) / `auth.smoo.ai` OAuth2 client_credentials flow, plus a `.claude/hooks/th-curl-hint.sh` PreToolUse hook that nudges Bash commands toward `th` whenever they're about to raw-curl `api.smoo.ai`, `auth.smoo.ai/token`, or `atlassian.net/rest/api`. Hook also covers the `gh secret set --body -` newline footgun (SMOODEV-879) and raw `pnpm sst secret list` leakage (SMOODEV-908). Mirrored in the smooai monorepo so the same hints fire in both repos. Pearl th-500495.
+- b826a0d: Pearl th-7840d8: animated boot UX for `th` cold start + `th up`.
+
+  Replaces the bare `Starting Smooth...` line (and the silent gap
+  during `th up`'s daemon spawn) with a per-step indicatif spinner
+  cascade so the user can see what's happening while the Safehouse
+  microVM and the in-VM cast services come up.
+
+  Steps shown in both entry points:
+
+  ```text
+  ✻ Smooth booting
+      ✓ starting Safehouse microVM
+      ✓ cast online (wonk · goalie · narc · scribe · archivist · diver · groove)
+      ✓ operator-runner pool warm
+      ✓ health check
+  ```
+
+  Spinners turn into a green `✓` on success or a red `✗ — <reason>`
+  on timeout / failure. The boot transcript stays in the terminal
+  after `th up` returns. v1 drives the steps off observable TCP +
+  HTTP probes against `localhost:4400`; no daemon-side IPC needed.
+
+  New module `crates/smooth-cli/src/boot_ui.rs` with a tested
+  `BootIndicator` / `BootStep` state machine. Adds `indicatif` to
+  the workspace deps.
+
+- 23eb7df: Pearl th-7b95ef: stop operator-runner stderr from being persisted as assistant chat content. The runner's diagnostic output now goes only through `tracing` to stderr (debug for repeated bootstrap noise, info for actionable events); bigsmooth's stdout reader now classifies lines via a new `classify_runner_stdout_line` helper and drops anything that isn't valid JSON. Both stdout-non-JSON and stderr forwarding to `ServerEvent::TokenDelta` are removed, so session JSONs are no longer poisoned with `[runner] SMOOTH_POLICY_FILE env var not set` blobs. New regression test asserts the runner binary's stdout contains zero `[runner]` substrings.
+- 484ee20: Pearl th-7fdfa9: fix two harness bugs in `smooth-bench score-tui`
+  that produced the same false-pass smell as th-f46efa.
+
+  1. **`tmux send-keys -l` mangles newlines into `j`.** Every `\n` in a
+     multi-line task prompt was being interpreted as the `C-j` keysym
+     and, in literal mode, degraded to the bare letter `j`. The pearl
+     debug log showed task prompts rendering as
+     `affine-cipher (python).jjWorking directory: …jFiles present:j  -
+INSTRUCTIONS.mdj…`. Switched `TmuxDriver::send` to
+     `load-buffer` + `paste-buffer`, which inserts the payload as raw
+     bytes — newlines, tabs, and Unicode all preserved verbatim. Added
+     a regression test that pipes a 3-line message through `cat >
+tmpfile` and asserts the file contains exactly 3 lines with no
+     stray `j`s.
+
+  2. **Driver LLM uses Claude-Code-style slash commands.** The
+     default driver model (`smooth-summarize`) was emitting `/open`,
+     `/read`, `/help` instead of plain English, which the TUI
+     rejected as "Unknown command" and in two cases accidentally
+     fired skills (`/add-show`, `/create-skill`). Hardened the system
+     prompt + user prompt with explicit "no slash commands; you have
+     no file/shell access — ask the assistant in plain English"
+     directives, and added a slash-command guard in `run_human_loop`
+     that drops `/`-prefixed turns, logs the violation to the
+     pane-debug log, and re-asks the model with a reinforcement
+     prompt. After 3 consecutive slash turns the loop bails with
+     `LoopExit::Stuck` instead of burning the full turn cap.
+
+  Tests added: `tmux_driver::send_preserves_newlines_no_j_leakage`,
+  `human_driver::run_human_loop_marks_stuck_after_three_slash_commands`,
+  `human_driver::run_human_loop_accepts_plain_english_message`, plus
+  prompt-construction unit tests asserting the no-slash-commands
+  language is present.
+
+  Verified with a single-task `score-tui --pr --task-limit 1 --debug`
+  smoke run: the new pane log shows the initial task prompt rendering
+  with real newlines (zero `j` artifacts) and the driver's follow-ups
+  all plain English (zero `/`-prefixed turns). The task itself failed
+  (affine-cipher is a hard single-attempt task), but the harness is
+  now healthy.
+
+- d2483bc: bench: deterministic cost extraction via JSON sidecar. `score-tui` was reporting $0.00 across every task whenever the TUI pane-scrape regressed (status-bar format drift, ratatui repaint race against `tmux capture-pane`, ANSI bleed, in-flight `Completed` event). Now: `smooth-code` writes a `{cost_usd, iterations, ts_unix_ms}` JSON sidecar on `AgentEvent::Completed` when `SMOOTH_BENCH_COST_SIDECAR` is set, atomically (tmp→rename) and best-effort. `smooth-bench/tui_score` sets the env var to a per-task path under the run dir before spawning `th code`, then prefers the sidecar over the legacy pane-scrape. Falls back to scrape for older `th` binaries; falls back to $0.00 + a loud warning if both miss. Opt-in via env so plain `th code` sessions never drop a sidecar in the user's cwd. Pearl th-a08fa3.
+- eac9b55: Pearl th-a5ca18: fix five score-tui bench harness bugs so a `--pr`
+  sweep produces honest pass-rates with real cost numbers.
+
+  The previous score-tui run reported 2/18 pass with $0.00 cost
+  across all tasks, and tasks 15-18 errored at 0ms with `no server
+running on /private/tmp/tmux-501/default`. Five independent bugs:
+
+  **Bug 1 — tmux server dies mid-sweep.** The harness shared the
+  default tmux socket across all tasks. When task N's `Drop` killed
+  the last surviving session on that socket, tmux server-exited and
+  every subsequent task got "no server running". Fix: per-task
+  socket isolation via `tmux -L <socket>`. Each `TmuxDriver` gets a
+  unique socket name; every `tmux …` invocation passes `-L`; `Drop`
+  runs `kill-server` on its own socket only. New regression test
+  `per_socket_isolation_survives_sibling_drop` verifies dropping one
+  driver does not affect another's server.
+
+  **Bug 2 — cost reported as $0.00 across all tasks.** The TUI's
+  status line shows `spend: $X.XXX`, but the harness never scraped
+  it. Fix: at task end, grab a visible-only capture (the status
+  line is always in the visible region by definition), regex-extract
+  the spend, and thread the value into the `TuiTaskOutcome::cost_usd`
+  field. Falls back to 0.0 + warning when the pattern isn't found —
+  never fabricates.
+
+  **Bug 3 — Rust false-positive passes.** Both prior runs reported
+  2/3 Rust passes on workspaces where `src/lib.rs` still held the
+  dataset's `todo!()` macro. Root cause: the user's
+  `~/.cargo/config.toml` sets `target-dir = ~/.cargo/shared-target`,
+  so `cargo test` reused a previously-compiled test binary from an
+  earlier successful run (verified by hand: running cargo test with
+  the shared target dir → 10 passed; with `CARGO_TARGET_DIR` pointed
+  at a per-task `<work_dir>/target` → 10 failed via todo!() panic).
+  Two defences: (a) `score_work_dir` now sets `CARGO_TARGET_DIR` to
+  a per-task isolated path so the shared cache can't leak across
+  runs; (b) the harness hashes every editable file before the agent
+  runs, re-hashes after, and refuses to mark a task solved=true when
+  the agent made zero changes (`--allow-no-edit-passes` opts out for
+  debugging).
+
+  **Bug 4 — agents do real work but tasks still fail.** Investigation
+  across five failed-task pane logs found this is tied to Bug 5
+  (below): the agent IS writing code and spending money, but the
+  LLM-as-human driver only sees the bottom slice of the pane via
+  `tmux capture-pane -p`, so the driver keeps re-asking questions
+  the agent has already answered. The agent's tool calls and edited
+  content scroll off the visible region and the driver has no idea
+  work happened. Fix follows directly from Bug 5.
+
+  **Bug 5 — `capture-pane` blind to scrollback.** Confirmed by
+  end-to-end read of
+  `~/.smooth/bench-runs/e219203e/python-book-store.pane.log`: every
+  `[idle]` capture shows the same bottom-of-pane slice (~50 rows of
+  the input box + status line + last few wrapped lines of the most
+  recent LLM response). The chat history, tool calls, and diffs are
+  all in tmux's scrollback, invisible to the driver. Fix:
+  `capture()` now passes `-S -` (start of scrollback) and `-J` (join
+  wrapped lines), returning the full pane history. A
+  `DEFAULT_CAPTURE_MAX_BYTES` (64 KiB) budget caps memory by
+  truncating from the FRONT (dropping the oldest, keeping the
+  freshest) with a marker prepended so the driver knows the very
+  start was clipped. Added `capture_visible()` for the
+  specific case (Bug 2) where we only want the bottom status line.
+
+  Tests added (151 lib tests passing): per-socket isolation, full-
+  scrollback capture, front-truncation budget + newline snapping,
+  cost-extraction (real status line + repeated repaints + zero
+  dollars + no-dollar-sign + malformed + dot-only forms), and
+  hash-based editable-file detection across all five languages.
+
+- f29eba3: Pearl th-cb3c2a: fix streaming buffer duplication (first-char doubling
+  and whole-paragraph re-emit) in `smooth-operator`'s `chat_stream`.
+
+  The OpenAI-compatible streaming path always treated `delta.content`
+  chunks as incremental deltas and `push_str`'d them onto the running
+  buffer. Some upstreams behind LiteLLM (and a few OpenRouter providers
+  in certain modes) actually emit **cumulative** content per chunk —
+  each chunk contains everything-so-far instead of the new tail. Treating
+  those as deltas produced the quadratic blowup seen in
+  `~/.smooth/coding-sessions/*.json`:
+
+  - First-character doubling/tripling — `"I'll help you"` arriving as
+    `"III'll help you"` because chunks `"I"`, `"I"`, `"I'll help you"`
+    were all appended.
+  - Word-level doubling — `"Let Let me me first first read read"` from
+    `"Let"`, `"Let me"`, `"Let me first"`, `"Let me first read"` all
+    appended verbatim.
+  - Entire paragraphs repeated 3-4× within a single assistant message.
+
+  The corruption then fed into the next turn's `prior_messages`, so the
+  LLM saw its own garbled prior turn and tended to bail with "I don't
+  have context" instead of calling tools — which is why the agent in
+  the smoking-gun session emitted zero successful tool calls over 12
+  turns.
+
+  Fix: a per-stream `StreamContentNormalizer` between `parse_sse_line`
+  and the consumer. For each chunk, if the chunk is exactly the
+  accumulator (cumulative-restart), drop it; if it strictly extends the
+  accumulator, emit only the new tail; otherwise treat as a normal
+  delta. A separate per-tool-call-index normalizer applies the same fix
+  to `ToolCallArgumentsDelta` chunks so cumulative argument streams
+  can't produce double-encoded JSON. The normalizer is a no-op on
+  well-behaved delta-emitting providers (every OpenAI/Anthropic stream
+  we already ship through). Covered by seven new unit tests in
+  `crates/smooth-operator/src/llm.rs`.
+
+- 544e494: Pearl th-f46efa: fix `smooth-bench score-tui` tmux harness so it
+  actually exercises `th code` instead of false-passing.
+
+  PR #55's first `--pr` run finished 18 tasks in 12 minutes with
+  2/18 pass and $0.00 cost — strong evidence the harness was broken,
+  not Smooth. The score-tui-pr.log showed "no server running on
+  /private/tmp/tmux-501/default" twice before every task and a
+  median task wall-clock of 38s, far below the 900s per-task cap.
+  The two Rust passes were false positives: aider-polyglot fixtures
+  should not pass un-edited, so the harness was scoring workspaces
+  the agent never touched.
+
+  Root causes addressed:
+
+  1. **Empty-pane false-idle in `wait_for_idle`**: the old heuristic
+     ("byte-identical for 2s") declared a blank pane idle, so the
+     LLM-as-human loop sent its first turn before `th code` had
+     finished booting. `wait_for_idle` now takes a `min_bytes` floor
+     (default 200 non-whitespace chars) — below the floor the pane is
+     treated as still-rendering and we keep polling. New
+     `wait_for_idle_with_floor` exposes the floor explicitly for
+     tests.
+  2. **Stale-state false-render in `wait_for_first_render`**: the gate
+     accepted a single printable char as "rendered". Now requires
+     the same 200-char floor before returning, so a brief artifact
+     doesn't count.
+  3. **`th code` boot timeout too short**: bumped default
+     `TuiTaskConfig::boot_timeout` from 15s → 120s. `th code` brings
+     up the Safehouse microVM + cast (wonk · goalie · narc · scribe
+     · archivist · diver · groove) + operator-runner pool before the
+     input prompt; empirically 30-60s on a warm machine. 15s was
+     under, so the boot gate fired prematurely.
+  4. **Tmux stderr noise**: `tmux has-session`, `tmux -V`, and the
+     Drop's `kill-session` all printed "no server running" to stderr
+     in the no-server-yet case (normal during probing). All probes
+     now redirect stderr to `/dev/null`; real failures still surface
+     the error text through `capture-pane`'s embedded stderr-in-error.
+  5. **Stuck tasks were scored as passes**: aider-polyglot fixtures
+     should not pass un-edited. New `stuck_means_failed` knob (on by
+     default; bypass with `--allow-stuck-passes`) forces
+     `solved=false` when the LLM-as-human driver bailed on turn 1
+     without a `TASK_COMPLETE` sentinel — kills the silent
+     corruption where un-edited Rust workspaces reported as solved.
+  6. **$0 cost across the board is now a loud warning**: the harness
+     prints a warning at the end of a sweep when every task reports
+     $0.00, so future-us can't mistake an un-wired cost surface for
+     "the run was meaningful but cheap".
+
+  Diagnostics (`--debug`):
+
+  - New `PaneDebugLog` type writes per-task `<lang>-<task>.pane.log`
+    to the run dir with timestamped records at every `send`, every
+    `wait_for_idle` boundary, AND the boot screen frames.
+    `capture-pane` failures dump the last good capture so the op can
+    see what the user saw before the session died.
+  - New `--task-limit N` flag caps the sweep at N tasks (default 0 =
+    no cap). Use `--task-limit 1 --debug` to exercise a single task
+    end-to-end with full pane logging.
+
+  Tested: existing tmux integration tests updated for the new
+  boot-floor + 200-char idle threshold; new tests cover the floor
+  rejecting empty panes, the debug log recording send/idle events,
+  and the duplicate-session / drop-kills-session paths still pass
+  with longer payloads.
+
+- 50cac77: Pearl th-fcb579 — browser-based `th auth login` (smooth side). Lays the
+  OAuth2 + PKCE plumbing for `th auth login` to open the user's default
+  browser, capture the authorization code on a localhost listener, and
+  exchange it for tokens — matching the `gh auth login` / `gcloud auth
+login` UX. Behind the `SMOOTH_AUTH_BROWSER=1` env gate while the
+  smooai-side `/cli-login` endpoint (pearl th-62e710) is in flight; new
+  `--browser` / `--no-browser` flags let callers override the gate
+  explicitly. Pairs with a single-store `active_org::set` writer that
+  will swap to the cross-store writer from pearl th-3217db once that
+  lands. New modules: `crates/smooth-cli/src/auth/pkce.rs` (RFC 7636
+  code verifier + S256 challenge generator), `auth/browser_login.rs`
+  (tiny_http listener, PKCE flow, token exchange), `auth/active_org.rs`
+  (active-org-id persistence helper). Headless / SSH / CI paths
+  unchanged — no TTY = no browser, ever. M2M (`--m2m`) unchanged.
+- a061e67: GitHub release notes now lead with copy-pasteable install + upgrade commands instead of just the bare changelog. New `scripts/build-release-notes.sh` renders an Install section (Homebrew first, then `curl | sh`, then `cargo install`), an Upgrade section (one-liner per channel), the version's CHANGELOG.md extract, a Downloads table populated from the live release assets (with a fallback to the workflow's expected names when run before the release is created), and a footer linking the source / README / tap. Wired into `release.yml`'s `Create Release` job via `body_path`. v0.13.7 retroactively re-rendered with this format. Pearl th-release-notes.
+- 26f7618: pearls: auto-heal a corrupt/unreadable Dolt store + fix the clone that left `main` empty
+
+  Two linked fixes for the pearl-store corruption class that left the smooai
+  monorepo's store unreadable (`open .../.dolt/repo_state.json: no such file or
+directory`), independent of any pearl work.
+
+  **Root cause (th-3f6657) — `smooth-dolt clone` left `main` at the empty init
+  commit.** `cmdClone` did init + remote-add + `DOLT_PULL origin main`. The init
+  root is always unrelated to the remote's history, so `DOLT_PULL` fetched all
+  chunks into `remotes/origin/main` but refused to merge unrelated histories,
+  silently leaving `main` on the empty init commit. Every fresh bootstrap clone
+  came up "empty" (`table not found: pearls`) while physically holding the full
+  pulled data. `cmdClone` now force-resets `main` onto the pulled remote head
+  after the pull (no-op when the remote branch is absent).
+
+  **Auto-heal (th-03cdb8) — wire recovery into the `th pearls` open path.** Any
+  `th pearls` command now recovers on open instead of surfacing a raw smooth-dolt
+  error:
+
+  - `SmoothDolt::diagnose` now classifies a `.dolt/` dir that's missing
+    `noms/manifest` or `repo_state.json` as recoverable `Corrupt` (the
+    interrupted-GC/half-clone signature) rather than dead-end `NotInitialized`.
+  - `recover_from_remote` resolves the origin from the enclosing git repo's
+    `origin` when `repo_state.json` itself is the missing file, and normalizes
+    the root/`pearls`-subdir layout so the re-clone lands correctly. It reuses
+    `clone_from` (so it inherits the clone-reset fix above).
+  - `PearlStore::open` runs the recovery on first-touch failure (snapshot the
+    broken store aside, re-clone from origin, re-open), loudly to stderr.
+    CLI-mode only — it never re-clones out from under a live `smooth-dolt serve`
+    (Big Smooth); those cases point to `th pearls doctor --force`.
+
+  Canonical pearl data lives on the remote's `refs/dolt/data` under the beads
+  model, so the re-clone is non-destructive. Covered by new unit tests for the
+  diagnose classification and the git-origin fallback.
+
+- 10c82aa: th pearls: quiet auto-commit under beads model + fix smooth-dolt status
+
+  Two follow-ups to pearl `th-975dfe` (beads-model migration):
+
+  **Pearl `th-016296`**: `auto_commit_pearl_state` now detects that
+  `.smooth/dolt/` is git-ignored (via `git check-ignore -q`) and
+  silent-noops instead of erroring on `git add .smooth/dolt/` with
+  "use -f to force-add ignored files". Sync stays via `th pearls push`
+  to `refs/dolt/data`; no git commits are needed for the on-disk store
+  under the beads model. Repos that haven't migrated yet (still track
+  `.smooth/dolt/`) keep the legacy auto-commit path.
+
+  **Pearl `th-f6c50c`**: `smooth-dolt status` previously called
+  `CALL DOLT_STATUS()` which errored with "stored procedure does not
+  exist". DOLT_STATUS is a _system table_ in Dolt, not a procedure or
+  table function. Fix: `SELECT table_name, staged, status FROM
+dolt_status` in both the CLI handler (`cmdStatus`) and the
+  socket-mode handler (`doDoltCmd`). Clean working set → empty output
+  (preserves the pre-commit hook's `.trim().is_empty()` contract);
+  changed tables → one line per row.
+
+  4 new tests covering `is_dolt_gitignored` (true / false / non-git)
+  and `auto_commit_silent_noop_when_dolt_gitignored`.
+
+- 8c801ff: Pearl th-893801 Phase 1 iter-1 (spike). Wires tonic + prost +
+  tonic-build into the workspace and proves the gRPC machinery
+  works end-to-end with the smallest possible slice: the Narc
+  service compiled from `proto/narc.proto`, served over a UDS, and
+  exercised by a tokio test that round-trips Judge calls.
+
+  The smooth-narc crate now exposes `pb` (generated proto types),
+  `convert` (TryFrom/From between proto types and the existing
+  in-crate `judge::*` types), and `grpc` (a tonic server adapter
+  that wraps a `Judge` trait — implemented by the test stub here;
+  production impl in smooth-bigsmooth's BoardroomNarc lands in
+  iter-2). 13 new tests across conversions + UDS round-trips.
+
+  Iter-2 picks up the rest of Phase 1: wonk + scribe + bigsmooth
+  proto servers, then operator-runner client switch, then the
+  SMOOTH_SINGLE_PROCESS feature flag.
+
+- 5d9b675: Pearl th-893801 Phase 1 iter-2. Applies iter-1's tonic-over-UDS
+  pattern to the three remaining cast crates: Wonk, Scribe, and
+  Big Smooth. Each gets a `pb` module (tonic-generated types), a
+  `grpc` module (server adapter wrapping a small per-service
+  trait), and `serve_uds` for spawning the server on a Unix socket.
+
+  - **smooth-wonk** — Wonk service over UDS. `Checker` trait
+    abstracts CheckNetwork/Tool/Cli/File + ReloadPolicy/Summary.
+    Verdicts carry `was_escalated` + `resolved_scope` so callers
+    can distinguish policy-decided from human-resolved approvals.
+    Wonk's proto imports narc.proto for `Scope`; tonic-build
+    routes through smooth-narc's existing `pb` module via
+    `extern_path`.
+  - **smooth-scribe** — client-streaming Log + server-streaming
+    Query. `Logger` trait abstracts append/query/stats. mpsc
+    channel back-pressures the store walker on slow consumers.
+  - **smooth-bigsmooth** — Dispatch + Cancel + AccessStore
+    CRUD + AccessEvents/OperatorEvents server-streams. The
+    `Orchestrator` trait is wide (10 methods) but each method
+    maps 1:1 to a proto RPC. Production wiring (into the
+    existing AppState + AccessStore) lands in iter-3.
+
+  Proto-include change: both wonk.proto and bigsmooth.proto now
+  import `"narc.proto"` (relative within the workspace proto/
+  root) instead of the full `"smooth/narc/v1/narc.proto"` package
+  path. Cleaner with our flat proto/ layout.
+
+  17 new tests across the three crates:
+
+  - wonk (5): network allowed/denied, tool round-trip, file
+    Unspecified→InvalidArgument, resolved_scope flow-through.
+  - scribe (4): Log client-streaming, Query server-streaming,
+    GetStats, back-pressure drop.
+  - bigsmooth (4): Dispatch, AccessStore CRUD round-trip,
+    AccessEvents stream, OperatorEvents stream.
+
+  Iter-3 picks up: the production trait impls (BoardroomNarc as
+  Judge, AppState as Wonk Checker + Scribe Logger + BigSmooth
+  Orchestrator), the operator-runner client switch, and the
+  SMOOTH_SINGLE_PROCESS feature flag that selects the new path.
+
+- f413174: Pearl th-893801 Phase 1 iter-3a. Production wiring: BoardroomNarc
+  implements smooth_narc::grpc::Judge so the existing decision flow
+  serves the new gRPC Narc surface unchanged. The trait's signature
+  already matched BoardroomNarc::judge — this is mostly the impl
+  declaration plus a `narc_grpc::serve_uds` wrapper for the BS
+  startup glue (iter-3e).
+
+  7 new tests in smooth-bigsmooth — drive the real BoardroomNarc
+  over UDS gRPC end-to-end: rule-engine approve for npmjs.org,
+  rule-engine deny for pastebin.com, EscalateToHuman for unknown
+  domains without an LLM, persistent-grant short-circuit, cache-len
+  round trip through GetCacheStats, sanity check that the trait
+  routes to the inherent method.
+
+- febb88f: Pearl th-893801 Phase 1 iter-3b. Production wiring: Wonk's
+  existing `AppState` implements `smooth_wonk::grpc::Checker`, so
+  the same policy + Narc-escalation logic that drives the
+  `/check/*` HTTP handlers now drives the gRPC `CheckNetwork`,
+  `CheckTool`, `CheckCli`, `CheckFile`, `ReloadPolicy`, and
+  `PolicySummary` RPCs. Iter-3e will spawn this in-process over a
+  UDS when `SMOOTH_SINGLE_PROCESS=1` is set.
+
+  Decision logic intentionally mirrors the HTTP handlers in
+  `server.rs` for this iter — the dedup happens in Phase 4
+  cleanup once the HTTP surface is retired. The Checker still
+  escalates to Narc via the existing HTTP `NarcClient` (option
+  (a) in the plan); iter-3f swaps that for the gRPC client.
+
+  10 new tests in `smooth-wonk` exercise the trait end-to-end:
+  static-allowlist approve, auto-approve-domain approve,
+  unknown-domain deny, tool allow/deny/unknown, file inside-mount
+  allow + outside-mount + traversal deny, dangerous-CLI flag, the
+  PolicySummary RPC, and a sanity check that the trait routes
+  into AppState's policy holder.
+
+- d365bdf: Pearl th-893801 Phase 1 iter-3c. Production wiring:
+  `GrpcLogStoreAdapter` implements `smooth_scribe::grpc::Logger`
+  on top of any `LogStore`, including the existing
+  `MemoryLogStore`. The proto Scribe surface (Log /
+  Query / GetStats) now drives the same in-memory ring the legacy
+  `/log` HTTP endpoint feeds.
+
+  The domain `LogEntry` predates the proto contract by a wide
+  margin, so this module owns the proto<->domain conversion.
+  Lossy in two well-defined ways:
+
+  - `pb::Level::Trace` and `pb::Level::Unspecified` fold to
+    domain `Debug` / `Info` (domain has no Trace).
+  - Domain `id` (uuid) has no proto equivalent — generated on
+    append, dropped on emit. Queries match on the rest.
+
+  The proto QueryRequest is richer than the in-store `Query`
+  (since/until/operator_id/bead_id/trace_id/message_contains
+  on top of source/min_level/limit). The cheap subset is pushed
+  to the store; the rest is applied in-process during the walk.
+
+  9 new tests in `smooth-scribe` cover level/entry round-trips,
+  client-streaming append, server-streaming query with source +
+  min-level + case-insensitive message filters, GetStats's
+  total_entries counter, and the `adapter_for_memory_store()`
+  convenience.
+
+  Tech-debt: forwarder.rs + hook.rs + log_entry.rs + server.rs +
+  store.rs have narrow `#![allow(clippy::expect_used)]` annotations
+  for pre-existing `.expect()` calls so iter-3c's quality gate
+  runs cleanly. The forwarder + HTTP server retire in Phase 4
+  once the gRPC Scribe is the only ingest path; cleanup happens
+  then rather than in this iter.
+
+- 365eb0c: Pearl th-893801 Phase 1 iter-3d. Production wiring of the
+  `BigSmooth` gRPC `Orchestrator` trait via the new
+  `OrchestratorAdapter` over the existing `AccessStore`.
+
+  Fully wired RPCs (same semantics as the `/api/access/*` HTTP
+  routes):
+
+  - `FilePendingAccess` — files into the AccessStore, returns
+    the freshly-stamped id + timestamp. Surfaces invalid
+    `JudgeKind` as an empty id (the trait signature is
+    infallible by design — clients detect via the empty id).
+  - `ResolveAccess` — drives `AccessStore::resolve`, mapping
+    proto Verdict/Scope into the domain enums and surfacing
+    `NotFound` / `InvalidArgument` via `tonic::Status`.
+  - `ListPendingAccess` — snapshot of currently-pending
+    requests as proto `PendingAccess` messages.
+  - `SubscribeAccessEvents` — server-streams every
+    Pending/Resolved/Expired event from the AccessStore's
+    broadcast channel; recovers cleanly from `Lagged` and ends
+    on client cancel.
+
+  Stubbed RPCs (land in Phase 2 / pearl th-ea2aa5 once `th up`
+  exists):
+
+  - `Dispatch`, `Cancel` — return `Unimplemented` with a clear
+    pointer to the pearl.
+  - `ListOperators` — returns an empty list (bench harness
+    probe needs this to not error).
+  - `SubscribeOperatorEvents` — returns immediately, ending the
+    stream gracefully.
+
+  11 new tests in `smooth-bigsmooth` cover end-to-end round trips
+  over UDS for file/resolve/list/subscribe, plus the kind +
+  scope round-trip helpers, the unspecified-kind error path, the
+  not-found resolve path, and the dispatch/list-operators stubs.
+
+- edb24bb: Pearl th-893801 Phase 1 iter-3e. New
+  `smooth_bigsmooth::single_process` module brings the four cast
+  gRPC servers (Narc/Wonk/Scribe/BigSmooth) up on UDS sockets in
+  one shot when `SMOOTH_SINGLE_PROCESS=1` is set.
+
+  Socket layout under `socket_dir()`:
+
+  - `$SMOOTH_SINGLE_PROCESS_SOCKET_DIR/{narc,wonk,scribe,bigsmooth}.sock` — explicit override (tests).
+  - `$XDG_RUNTIME_DIR/smooth/` — XDG-compliant default.
+  - `/tmp/smooth-<pid>/` — last-resort fallback.
+
+  `bootstrap_grpc_cast` returns a `GrpcCastHandles` owning the
+  four `JoinHandle`s + socket paths + the fresh `MemoryLogStore`
+  the Scribe gRPC writes into. `shutdown()` aborts the tasks
+  and removes the socket files.
+
+  `bootstrap_from_app_state` is the BS-specific helper that
+  pulls `BoardroomNarc` + `AccessStore` straight from the
+  existing `AppState` and seeds a fresh Wonk `AppState` with a
+  permissive default policy (mirrors the legacy boardroom
+  spawn). The boardroom binary now invokes this after
+  `AppState::new` so the gRPC cast comes up co-resident with
+  the legacy HTTP cast — iter-3f will rewire the operator-runner
+  to dial the UDS sockets instead.
+
+  4 new tests: env-var contract, all-four-sockets-exist after
+  bootstrap, end-to-end gRPC round-trip per socket (Narc
+  GetCacheStats / Wonk PolicySummary / Scribe GetStats /
+  BigSmooth ListPendingAccess including a freshly-filed
+  request), and shutdown removes the socket files.
+
+- cadedba: Pearl th-893801 Phase 1 iter-3f. New
+  `smooth_bigsmooth::tonic_clients` module providing UDS-dialing
+  client adapters for the in-VM cast. Method signatures mirror
+  the legacy HTTP clients so runner call sites can swap them in
+  without a rewrite:
+
+  - `NarcGrpcUds::judge(&JudgeRequest) -> JudgeDecision` — drop-in
+    for `smooth_wonk::NarcClient`. Folds any transport / proto
+    error into `EscalateToHuman` so Wonk fails closed.
+  - `ScribeGrpcUds::append(pb::LogEntry) -> bool` — replaces the
+    HTTP Archivist forwarder with a client-streaming gRPC Log
+    RPC. Entries are queued through a bounded mpsc and the
+    background task owns the stream.
+  - `BigSmoothGrpcUds` — wraps the generated `BigSmoothClient` so
+    callers can dial a UDS path instead of a hostname; exposed
+    via `.client()` since the AccessStore RPC surface is large
+    enough that callers want the full generated client.
+  - `GrpcCastClients::connect_all(socket_dir)` — convenience
+    bundle resolving the three sockets against the standard
+    `single_process::bootstrap_grpc_cast` layout.
+
+  Wiring into the operator-runner is deliberately deferred — the
+  adapters land first so iter-3g's smoke test can exercise them
+  end-to-end against `bootstrap_grpc_cast`. Phase 2 will replace
+  the runner's own cast-spawn path with these adapters when the
+  runner is co-resident with BS in the single VM.
+
+  5 new tests: Narc round-trip approves a safe domain over UDS,
+  Narc folds a dead socket to EscalateToHuman with the expected
+  reason, Scribe streams 3 entries that land in the gRPC-backed
+  MemoryLogStore, BigSmooth lists a freshly-filed pending
+  request, and `connect_all` resolves the standard socket
+  layout.
+
+  Also: moved `hyper-util` from dev-deps to deps on the
+  bigsmooth crate so the UDS connector code compiles outside
+  the test cfg.
+
+- 1f80fde: Pearl th-893801 Phase 1 iter-3g. End-to-end smoke test for the
+  single-VM gRPC cast — confirms iter-3a..3f wire together as a
+  system. Lives in `crates/smooth-bigsmooth/tests/` so it doesn't
+  share a socket-dir namespace with the parallel unit tests.
+
+  Coverage:
+
+  - `single_process_cast_round_trips_a_narc_then_resolve_flow` —
+    bootstrap → connect_all → Narc.judge auto-approves a known
+    safe domain → BigSmooth.file_pending_access seeds the store
+    → list shows the pending entry → Scribe streams five entries
+    that land in the gRPC-backed MemoryLogStore → AccessStore
+    resolution clears the pending list. All five RPCs cross UDS.
+  - `bootstrap_shutdown_rebootstrap_cycle_works` — exercises the
+    shutdown path's socket-unlink contract by re-bootstrapping
+    against the same directory.
+
+  Closes the gRPC-collapse arc for Phase 1: each cast member has
+  its wire surface (iter-2), each is production-wired (iter-3a..d),
+  BS spawns them on UDS under the flag (iter-3e), client adapters
+  exist for the runner (iter-3f), and the smoke confirms it
+  holds together (iter-3g). Phase 2 (pearl th-ea2aa5) flips the
+  sandbox topology to put the runner in the same VM as BS so it
+  actually dials these sockets.
+
+- 2b7978b: Pearl th-893801 Phase 2 iter-4a. New `smooth-host-stub` crate
+  — the credential broker that runs on the macOS host and
+  bridges the single sandbox VM to host-resident CLIs.
+
+  The sandbox sees a UDS bind-mounted at
+  `/run/smooth/host.sock` and dials this server when an in-VM
+  tool needs a credential for a known server (GitHub, AWS, GCR,
+  ECR, …). The stub matches the `server_url` against registered
+  backends' globs, validates readiness, and shells the matched
+  backend out for a fresh credential.
+
+  Surface shipped in this iter:
+
+  - `Backend` trait + `BackendInfo` / `CredentialRequest` /
+    `IssuedCredential` / `BackendError` domain types.
+  - `BackendRegistry` — registration order matters (first
+    matching glob wins); routes `issue` by `server_url`.
+  - `glob_matches` — handles exact hostnames, `*.foo.com`
+    subdomain wildcards, and falls back to full glob semantics.
+  - `HostStubServer` — tonic adapter mapping `IssueCredential`
+    and `GetCredentialBackends` onto the registry. Backend
+    errors map to the right gRPC `Status` codes
+    (`NotFound` / `FailedPrecondition` / `InvalidArgument` /
+    `Internal`).
+  - `serve_uds` — bind-and-spawn helper.
+  - `smooth-host-stub` binary that reads
+    `SMOOTH_HOST_STUB_SOCKET` (default `/run/smooth/host.sock`)
+    and serves an empty registry. Concrete backends (gh,
+    aws-sts, gcloud, az-acr) land in follow-up iters once the
+    shellout audits are reviewed.
+
+  15 new tests: glob matching across exact/subdomain/path
+  strips; registry routing including unknown-server,
+  not-ready, empty-URL, and overlap-resolution paths;
+  end-to-end gRPC round trips for issue/list/empty/unknown
+  over UDS; trait + enum coverage.
+
+- b517990: Pearl th-893801 Phase 2 iter-4b. First concrete host-stub
+  backend: `GitHubBackend` wraps `gh auth token`.
+
+  Default globs cover `github.com`, `*.github.com`, `ghcr.io`,
+  and `npm.pkg.github.com`. `with_globs(...)` lets users
+  override for GitHub Enterprise installs.
+
+  Per-issue flow:
+
+  1. Run `gh auth status` first to surface a clean
+     `NotReady` (with the user-facing "not logged in" message)
+     instead of an opaque mint failure when the user has
+     logged out.
+  2. Run `gh auth token` and trim the stdout. Empty output
+     maps to `Mint` so the sandbox sees a concrete error
+     rather than an empty secret.
+
+  `info().ready` stays `true` — we don't want `info()` to
+  shell out on every list call. The TUI's readiness pane gets
+  a dedicated probe in a follow-up iter.
+
+  `CommandRunner` trait abstracts the shellout so tests
+  inject a `StubRunner` with canned `gh` outputs (no need for
+  a real `gh` binary on the test host).
+
+  6 new tests: default-globs check, custom-globs override,
+  happy-path issue, logged-out → NotReady, empty token →
+  Mint, `gh auth token` failure → Mint.
+
+- cbd27a3: Pearl th-893801 Phase 2 iter-4c. `AwsStsBackend` wraps
+  `aws sts get-session-token` and `aws sts assume-role`.
+
+  Design decisions resolved in this iter:
+
+  - **session_token packaging**: added `session_token` (proto field 5)
+    to `IssueCredentialResponse`. Additive — older clients ignore
+    it. The alternative of JSON-packing into `secret` would have
+    broken the Docker credential-helper-shaped contract the proto
+    is built around.
+  - **scope_hint mapping**:
+    - `Read` / `Unspecified` → `sts get-session-token`
+    - `Write` with `SMOOTH_AWS_WRITE_ROLE_ARN` set →
+      `sts assume-role --role-arn … --role-session-name smooth-<op>`
+    - `Write` without the env var → falls back to
+      `get-session-token` and logs a warning.
+  - **env var racing**: the role-ARN env is read once at
+    construction (`AwsStsBackend::with_runner` / `::new`); tests
+    override via `with_write_role_arn(...)` rather than mutating
+    the process env, so parallel test runs can't race.
+
+  Domain `IssuedCredential` gains a `session_token: Option<String>`
+  field; existing backends (`GitHubBackend`, test fakes) set it to
+  `None`. The HostStubServer adapter threads it onto the wire,
+  defaulting to an empty string when `None`.
+
+  10 new tests: default-glob check; `Read`/`Unspecified` →
+  get-session-token; `Write` with role-arn → assume-role; `Write`
+  without role-arn → get-session-token fallback; STS CLI failure
+  → Mint; malformed JSON → Mint; missing session_token → Mint;
+  RFC3339 expiration parses; garbage expiration → None.
+
+- a376d87: Pearl th-893801 Phase 2 iter-4d. `GcloudBackend` wraps
+  `gcloud auth print-access-token` to mint OAuth access tokens
+  for in-sandbox GCP calls.
+
+  Default globs:
+
+  - `gcr.io`, `*.gcr.io` — Container Registry
+  - `*.pkg.dev` — Artifact Registry (regional hosts like
+    `us-central1-docker.pkg.dev`)
+  - `*.googleapis.com` — every Google Cloud API
+
+  `ScopeHint` is ignored — the token's IAM permissions decide
+  read vs write. Output is the raw token; we use the literal
+  `oauth2accesstoken` as the username (matches Google's
+  container-registry credential helper convention).
+
+  Error mapping:
+
+  - stderr containing "credentials" + "not" →
+    `NotReady` ("gcloud CLI not logged in: …").
+  - empty stdout → `Mint`.
+  - other CLI failures → `Mint` with the trimmed stderr.
+
+  6 new tests: default globs, override, happy-path token,
+  logged-out → NotReady, empty token → Mint, generic failure
+  → Mint.
+
+- cfb7bd5: Pearl th-893801 Phase 2 iter-4e. `smooth_host_stub::docker_socket`
+  auto-detects the host's Docker-compatible socket so `th up`
+  can bind-mount it into the sandbox transparently regardless
+  of which container runtime the user installed.
+
+  Probe order (first match wins):
+
+  1. `DOCKER_HOST` env (`unix://` scheme only — `tcp://` is
+     rejected with a clear error since it can't be bind-mounted).
+  2. Colima: `$HOME/.colima/default/docker.sock`.
+  3. OrbStack: `$HOME/.orbstack/run/docker.sock`.
+  4. Rancher Desktop: `$HOME/.rd/docker.sock`.
+  5. Podman (rootless): `$XDG_RUNTIME_DIR/podman/podman.sock`.
+  6. Docker Desktop default: `/var/run/docker.sock`.
+
+  The probe is filesystem-only (no `docker ps` shellout) so it
+  runs synchronously at startup. Returns a `DetectedSocket`
+  with the resolved path and a `DockerRuntime` label `th up`
+  surfaces ("using Colima at …").
+
+  `FsProbe` trait abstracts filesystem + env access; tests
+  inject a `StubProbe` with canned `exists` / `env_var` /
+  `home_dir` answers, no /tmp scribbling needed.
+
+  11 new tests cover every probe branch: DOCKER_HOST happy
+  path / tcp rejection / unix-missing error; each runtime path
+  in isolation; ordering preference between Colima and
+  OrbStack; Podman via XDG_RUNTIME_DIR; Docker Desktop last
+  resort; total miss → `NotFound`; label rendering.
+
+- 317a2ad: Pearl th-893801 Phase 2 iter-4f. New
+  `docker/Dockerfile.smooth-vm` + `scripts/build-smooth-vm-image.sh`
+  build the long-lived sandbox image `th up` boots
+  (iter-4g lands the lifecycle command).
+
+  Design choices:
+
+  - **Base**: `debian:bookworm-slim`. Cloud CLIs (gcloud, az)
+    install cleanly without the glibc/musl friction that
+    blocks them on the alpine boardroom base. ~80MB before
+    layering CLIs.
+  - **Cloud CLIs bundled via vendor scripts**, each pinned via
+    build ARG so rebuilds are reproducible: `gh@2.62.0`,
+    `awscli v2` (latest), `gcloud@494.0.0`, `az@2.66.0`,
+    `kubectl@1.31.4`, `docker CLI@27.4.1` (CLI only — the
+    host's daemon socket is bind-mounted at `/var/run/docker.sock`).
+  - **mise** (pinned to `2024.12.13`) for language toolchains.
+    Seeded `~/.config/mise/config.toml` ships node 22 / python
+    3.13 / go 1.23; users `mise install <other>` after the VM
+    is up and state persists in `/root` (volume).
+  - **Smooth binaries** copied from
+    `target/aarch64-unknown-linux-musl/release/`: `boardroom`,
+    `smooth-operator-runner`, `smooth-dolt`.
+  - **Long-lived state**: `/workspace` is the bind-mounted
+    user repo; `/root` is a named volume carrying mise state,
+    pearl DB, SSH config, gh/aws/gcloud credentials. `th down`
+    stops the container without touching the volume; `th prune`
+    (iter-4g) removes the volume.
+  - **Env defaults**: `SMOOTH_SINGLE_PROCESS=1`,
+    `SMOOTH_BOARDROOM_MODE=1`,
+    `SMOOTH_HOST_STUB_SOCKET=/run/smooth/host.sock`. The
+    in-process gRPC cast comes up on UDS sockets under
+    `$XDG_RUNTIME_DIR/smooth/` by default.
+
+  `scripts/build-smooth-vm-image.sh` mirrors the existing
+  `build-boardroom-image.sh` ergonomics (`--push`, explicit
+  version arg, `SMOOTH_IMAGE_REPO`/`SMOOTH_IMAGE_TOOL` env
+  overrides) and cross-compiles the three required binaries
+  before invoking `docker build`. Default repo:
+  `ghcr.io/smooai/smooth-vm`.
+
+  iter-4g wires the `th up` / `th down` / `th prune` lifecycle
+  on top of this image.
+
+- 2911c39: Pearl th-893801 Phase 3 iter-5a. New
+  `smooth_pearls::memory` module providing CRUD over the
+  `memories` table that's existed in the pearl Dolt schema
+  since day one but had no API.
+
+  `MemoryStore::new(SmoothDolt)` constructor; methods:
+
+  - `append(content, source)` — insert with a fresh
+    `mem-XXXXXX` id; rejects empty content.
+  - `list_recent(limit)` — newest-first, capped.
+  - `list_by_source(source, limit)` — filter to a specific
+    origin tag (a pearl id, an operator id, `"manual"`, …).
+  - `count()` / `clear_by_source(source)` / `clear_older_than(cutoff)`.
+
+  The `source` field is the join key that lets us recall
+  "everything the agent learned working on `th-abc123`" or
+  "everything written by operator-7". Append-only API on
+  purpose; pruning is bulk-by-source or bulk-by-age.
+
+  SQL quoting via single-quote doubling (Dolt's CLI doesn't
+  expose prepared statements). 8 new tests cover round-trips,
+  filter-by-source, limit honoring, both clear paths, the
+  empty-content guard, and a single-quote-in-content insert.
+
+  Dolt's `DATETIME` column has 1-second resolution so two
+  inserts within the same second tie on ordering; documented
+  in the API + tests cover both the ≥1s-apart case (strict
+  ordering) and the same-second case (every row retrievable
+  but order unspecified). Production callers write seconds /
+  minutes apart so this isn't a real constraint — long-term
+  we'd switch to TIMESTAMP(3) or a sortable insert sequence.
+
+  iter-5b will wire this into the dispatch path so the agent
+  sees recent notes on task start and can write new ones on
+  completion.
+
+- 94ec744: Pearl th-893801 Phase 3 iter-5b. Agent-callable tools backed
+  by the iter-5a `MemoryStore`. Lets the agent decide when to
+  write learned-context notes and read them back without
+  touching the dispatch path.
+
+  Three tools registered via
+  `smooth_pearls::register_memory_tools(registry, store)`:
+
+  - `remember(content, source?)` — append a note. `source`
+    defaults to `"manual"`; agents typically tag with their
+    current pearl id.
+  - `recall_recent(limit?)` — newest-first list; default 20,
+    clamped to [1, 100]. Returns "no remembered notes yet"
+    when empty.
+  - `recall_by_source(source, limit?)` — filter to a specific
+    origin (a pearl id, an operator id). Useful for "pick up
+    where I left off on `th-abc123`".
+
+  Read-only flags are wired so callers that gate writes can
+  distinguish — `recall_*` are read-only; `remember` is not.
+
+  Tool descriptions emphasize concrete short notes — the agent
+  should remember facts, gotchas, commands, paths, not full
+  sentences of narrative. The system prompt is what teaches
+  the agent when to invoke these (top of task = `recall_recent`,
+  end of task = `remember`).
+
+  7 new tests cover the happy round-trip, empty-store friendly
+  message, source-filter behavior, default-source fallback,
+  missing-content error, limit clamping at both ends, and the
+  read-only-flag advertisements.
+
+  iter-5b is the last Phase 3 deliverable. The agent-side
+  system-prompt nudges to actually call these can land
+  incrementally without another iter — that's a prompt edit,
+  not architecture.
+
+- 579cef9: Pearl th-893801 Phase 4 iter-6a. First cleanup slice — drops
+  the "boardroom" framing from the user-facing surfaces while
+  keeping the legacy names alive for back-compat during the
+  transition.
+
+  Changes:
+
+  - New `smooth_bigsmooth::Narc` re-export — alias for
+    `BoardroomNarc`. New code in single-VM-mode paths should
+    reference `Narc`; the struct itself stays at its current
+    module path so existing imports keep working.
+  - New env var `SMOOTH_VM_MODE` — preferred over
+    `SMOOTH_BOARDROOM_MODE`. `server::start` honors either
+    during the transition (new wins when both set).
+  - `boardroom` binary now sets both `SMOOTH_VM_MODE=1` and
+    `SMOOTH_BOARDROOM_MODE=1` on startup so the binary works
+    with both old and new flag readers.
+  - `Dockerfile.smooth-vm` exports both env vars so a container
+    built before Phase 4 lands fully still satisfies any
+    legacy check.
+  - Log message in `server::start` rephrased: "Big Smooth
+    running with in-process cast" — drops the
+    "Boardroom mode" framing.
+
+  No type renames yet — `BoardroomNarc`, `BoardroomHandles`,
+  `crate::boardroom::*` all stay where they are. Renaming the
+  types is iter-6b once we're confident the aliases haven't
+  broken anything.
+
+  271 bigsmooth tests still pass.
+
+- a29677a: Pearl th-893801 Phase 4 iter-6b. Host-tool gate. In single-VM
+  mode the bundled CLIs (gh, aws, gcloud, az, kubectl, docker)
+  are right there in the VM and the host-stub mints credentials
+  over UDS — the legacy `host_tool` indirection through Big
+  Smooth's `/api/host/exec` endpoint is unnecessary.
+
+  operator-runner now skips `host_tool` registration when
+  `SMOOTH_SINGLE_PROCESS=1`. The agent falls through to
+  `BashTool` for the same CLIs, still mediated by Wonk's
+  `check_cli` + Narc audit just like every other shell call.
+  Logs the skip ("CLIs run directly in-VM") so the path is
+  visible from the runner output.
+
+  Legacy multi-VM dispatch (no `SMOOTH_SINGLE_PROCESS`) is
+  unchanged — the existing host_tool path stays live.
+
+  No new tests — single behavioral gate, exercised end-to-end
+  by the iter-3g smoke test once the runner is co-resident
+  with BS in Phase 2. Will retire `host_tool` entirely in a
+  later iter once the legacy path is gone.
+
+- e8d662c: Pearl th-893801 Phase 4 iter-6c. Finishes the runner-side
+  gRPC Narc wiring iter-3f left as a TODO. Wonk's escalation
+  slot now accepts either HTTP or UDS transport, and the
+  operator-runner picks the right one at startup.
+
+  Shape of the change:
+
+  - New `smooth_wonk::NarcEscalator` trait —
+    `async fn judge(&self, request: &JudgeRequest) -> JudgeDecision`.
+    Implementors must fail closed on any transport error so the
+    contract matches the legacy HTTP client.
+  - The legacy `NarcClient` (HTTP) impls the trait.
+  - New `smooth_wonk::NarcGrpcUds` — UDS-dialing gRPC client
+    implementing the same trait. Moved from
+    `smooth_bigsmooth::tonic_clients::NarcGrpcUds` so wonk is
+    the canonical home (it's the crate that needs to USE a
+    Narc client). `smooth_bigsmooth::tonic_clients::NarcGrpcUds`
+    is now a re-export for back-compat with iter-3f imports.
+  - `AppState::with_narc` now takes any `NarcEscalator` impl —
+    HTTP `NarcClient`, the new UDS client, or a test stub. The
+    internal field is `Option<Arc<dyn NarcEscalator>>`. A new
+    `with_narc_arc` accepts a pre-Arc'd value for callers
+    hot-swapping clients.
+  - operator-runner's `spawn_cast` now branches on
+    `SMOOTH_SINGLE_PROCESS=1`: when set, dial Narc via UDS at
+    `$XDG_RUNTIME_DIR/smooth/narc.sock` (override via
+    `SMOOTH_SINGLE_PROCESS_SOCKET_DIR`). Else keeps the legacy
+    `SMOOTH_NARC_URL` HTTP path. UDS connect failure logs and
+    proceeds with no arbiter (Wonk hard-denies non-allowlisted
+    requests, same fail-closed shape).
+  - `Cargo.toml`: `tower` + `hyper-util` move from wonk
+    dev-deps to deps so the UDS client compiles outside test
+    cfg.
+
+  3 new tests in `smooth-wonk::narc_grpc_uds`: round-trip
+  approve over UDS via a stub Judge server; dead-socket-after-
+  connect folds to EscalateToHuman; missing-socket connect
+  errors with a clear message. The two equivalent tests in
+  `smooth-bigsmooth::tonic_clients` are dropped (they
+  exercised the same paths from a duplicate impl).
+
+  75 wonk tests pass; 269 bigsmooth lib tests pass; iter-3g
+  smoke test passes after a single `use smooth_wonk::NarcEscalator`
+  import (the trait must be in scope to call `.judge` through
+  the trait object).
+
+- 2cb433e: Pearl th-893801 Phase 4 iter-6d. Naming aliases — extends
+  iter-6a's `Narc` alias to the rest of the boardroom surface.
+  Existing call sites keep working unchanged; new code prefers
+  the cleaner names.
+
+  New aliases in `smooth_bigsmooth`:
+
+  - `vm_cast` — module alias for `boardroom`.
+    `crate::vm_cast::*` and `crate::boardroom::*` resolve to
+    the same items.
+  - `VmCastHandles` — type alias for `boardroom::BoardroomHandles`.
+  - `spawn_vm_cast` — fn alias for `boardroom::spawn_boardroom_cast`.
+
+  No `#[deprecated]` attrs yet — those would emit warnings on
+  the 91 existing call sites and trip the workspace
+  `-D warnings` gate. Removal of the legacy names happens in a
+  dedicated rename PR once new code consistently uses the new
+  ones.
+
+  2 new smoke tests confirm both name paths resolve to the
+  same items. Existing 269 bigsmooth tests still pass.
+
+  This effectively closes the "drop boardroom term" item from
+  Phase 4's checklist — the term is now optional everywhere
+  user-facing, kept as legacy compatibility under the hood.
+
+- 5234b72: build: make `smooth-cast` track the workspace version (`version.workspace = true`)
+
+  `crates/smooth-cast/Cargo.toml` hardcoded `version = "0.13.7"` while every
+  other workspace crate uses `version.workspace = true`. When the changeset
+  Version PR bumped the workspace to `0.14.0`, all siblings followed but
+  `smooth-cast` stayed `0.13.7`, so `cargo build --examples --workspace` failed
+  with "failed to select a version for `smooai-smooth-cast = ^0.14.0` … candidate
+  0.13.7 … required by smooai-smooth-bench v0.14.0", blocking the version PR's
+  Rust checks (and thus the publish). Only exposed once `changeset version`
+  finally ran end-to-end. Pearl th-d050a3.
+
+- b7fd3ee: smooth-dolt: forward push/pull args into CALL DOLT\_\*() (pearl th-9eb6a0)
+
+  `smooth-dolt push <dir>` previously called `CALL DOLT_PUSH()` with no
+  args, silently dropping any trailing `-u origin <branch>` / `-f` flags
+  that the Rust CLI appends for first-push auto-retry. First push to a
+  fresh remote (smooblue today, any new project tomorrow) returned
+  `fatal: The current branch main has no upstream branch.` and stayed
+  errored even though the Rust matcher detected the case and called
+  `push --set-upstream origin main`.
+
+  Fix: parse `os.Args[3:]` and bind each as a positional SQL arg to
+  `CALL DOLT_PUSH(?, ?, ?)` / `CALL DOLT_PULL(?, ?, ?)`. Zero-arg
+  callers stay on the no-parens form so behavior is unchanged for them.
+
+- 6d90c6a: th config set: consistency + hardening (pearl th-7ea946)
+
+  Brings `set` in line with `get`'s flag surface, plus four hardenings:
+
+  - **`--json`**: emits the API response as JSON, mirrors `get --json`.
+    JSON output is never masked — caller asked for the wire shape.
+  - **`--reveal`**: opt-in plaintext echo on `set` and `list`. Mask is
+    the default (pearls th-4ebbf7 + th-9cc412); `--reveal` mirrors
+    `scripts/secret-helpers/sst-secret-list --reveal` (CLAUDE.md §13).
+  - **`--tier` as `ValueEnum`**: `public` / `secret` / `feature_flag`
+    validated at parse-time. Typos like `--tier=secrets` now error
+    with a list of valid options instead of round-tripping to the API
+    and failing with a less-actionable 4xx.
+  - **Empty-value reject**: `th config set FOO ""` (or whitespace-only)
+    fails at parse-time with `value cannot be empty or whitespace-only`,
+    not silently after the API call.
+
+  Drops the `DEFAULT_TIER` `&str` constant in favor of `Tier::default()`
+  so the default tier and its wire format are colocated. Tier wire
+  format is locked by a test so a snake_case → camelCase regression
+  can't sneak past.
+
+- a7aa46f: th config: mask all echoed values (last-4 disclosure) regardless of tier
+
+  `th config set` previously echoed public-tier values raw and secret-tier
+  values masked to the last 4 characters. `th config list` echoed
+  everything raw with no tier-awareness at all — same class of footgun
+  as raw `pnpm sst secret list` (CLAUDE.md §13, SMOODEV-908).
+
+  Tier no longer affects the echo. Both `set` and `list` mask every
+  value to its last 4 characters. Public-tier keys can still be
+  sensitive (CDN tokens, allowlist entries, anything an attacker could
+  correlate) and the UX cost of `***wert` over `password-qwert` is
+  trivial vs the cost of training users that console echo is a safe
+  confirmation surface.
+
+  `th config get` is unchanged — it's an explicit retrieval, not a
+  side-effect echo, and reveal-on-demand is the right contract there.
+  A future `--reveal` flag for explicit unmasking on `set` / `list`
+  remains open as a follow-up if the UX hurts.
+
+  Pearls th-4ebbf7 + th-9cc412.
+
 ## 0.13.7
 
 ### Patch Changes
