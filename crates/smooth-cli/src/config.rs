@@ -833,22 +833,63 @@ impl SchemaDiff {
     }
 }
 
-/// Flatten a schema-manifest JSON document (the shape emitted by Lane B
-/// into `.smooai-config/schema.json`) into a `key → tier` map. Tiers
-/// are the three top-level array properties: `public`, `secret`,
-/// `featureFlag`. Unknown shapes return an empty map — caller decides
-/// how to surface that.
-fn flatten_schema(schema: &Value) -> std::collections::BTreeMap<String, String> {
+/// Canonicalize a config key for cross-serialization comparison: lowercase and
+/// drop every non-alphanumeric char. So the local manifest's `ANTHROPIC_API_KEY`
+/// and the remote JSON-Schema's `anthropicApiKey` both collapse to
+/// `anthropicapikey` — letting the diff see them as the SAME key rather than an
+/// add + remove. Robust to any separator/case convention.
+fn canonical_key(s: &str) -> String {
+    s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+
+/// Flatten either schema serialization into a `canonical_key → TieredKey` map,
+/// where the `TieredKey` keeps the original (display) name + its tier. Handles:
+///
+///   * **local manifest** (`.smooai-config/schema.json`, emitted by Lane B) —
+///     top-level tier arrays of names: `{ public: [..], secret: [..], featureFlag: [..] }`.
+///   * **remote JSON-Schema** (what the config server stores + returns under
+///     `jsonSchema`) — `properties.<tier>ConfigSchema.properties.<key>`, also
+///     tolerated without the outer `properties` wrapper.
+///
+/// Keys are compared canonically (see [`canonical_key`]) so the manifest's
+/// `SCREAMING_SNAKE` and the JSON-Schema's `camelCase` forms of the same key
+/// match. Unknown shapes contribute nothing. The first form seen wins the
+/// display name (manifest before JSON-Schema), which keeps local-side output in
+/// the convention the user authored.
+fn flatten_schema(schema: &Value) -> std::collections::BTreeMap<String, TieredKey> {
     let mut out = std::collections::BTreeMap::new();
+
+    // Shape 1 — local manifest: top-level tier arrays of names.
     for tier in ["public", "secret", "featureFlag"] {
         if let Some(arr) = schema.get(tier).and_then(|v| v.as_array()) {
-            for k in arr {
-                if let Some(s) = k.as_str() {
-                    out.insert(s.to_string(), tier.to_string());
+            for s in arr.iter().filter_map(|k| k.as_str()) {
+                out.entry(canonical_key(s)).or_insert_with(|| TieredKey {
+                    key: s.to_string(),
+                    tier: tier.to_string(),
+                });
+            }
+        }
+    }
+
+    // Shape 2 — remote JSON-Schema: properties.<tier>ConfigSchema.properties.<key>
+    // (tolerate the doc with or without the outer `properties` wrapper).
+    for root in [Some(schema), schema.get("properties")].into_iter().flatten() {
+        for (prop, tier) in [
+            ("publicConfigSchema", "public"),
+            ("secretConfigSchema", "secret"),
+            ("featureFlagSchema", "featureFlag"),
+        ] {
+            if let Some(keys) = root.get(prop).and_then(|v| v.get("properties")).and_then(|v| v.as_object()) {
+                for k in keys.keys() {
+                    out.entry(canonical_key(k)).or_insert_with(|| TieredKey {
+                        key: k.clone(),
+                        tier: tier.to_string(),
+                    });
                 }
             }
         }
     }
+
     out
 }
 
@@ -862,26 +903,21 @@ fn compute_diff(local: &Value, remote: &Value) -> SchemaDiff {
     let mut removed = Vec::new();
     let mut tier_changed = Vec::new();
 
-    for (k, tier) in &local_map {
-        match remote_map.get(k) {
-            None => added.push(TieredKey {
-                key: k.clone(),
-                tier: tier.clone(),
-            }),
-            Some(rt) if rt != tier => tier_changed.push(TierChange {
-                key: k.clone(),
-                from: rt.clone(),
-                to: tier.clone(),
+    // Compare on canonical keys (the map keys); report with the original display name.
+    for (ck, local) in &local_map {
+        match remote_map.get(ck) {
+            None => added.push(local.clone()),
+            Some(remote) if remote.tier != local.tier => tier_changed.push(TierChange {
+                key: local.key.clone(),
+                from: remote.tier.clone(),
+                to: local.tier.clone(),
             }),
             Some(_) => {}
         }
     }
-    for (k, tier) in &remote_map {
-        if !local_map.contains_key(k) {
-            removed.push(TieredKey {
-                key: k.clone(),
-                tier: tier.clone(),
-            });
+    for (ck, remote) in &remote_map {
+        if !local_map.contains_key(ck) {
+            removed.push(remote.clone());
         }
     }
 
@@ -1348,11 +1384,67 @@ mod tests {
             "featureFlag": ["F"],
         });
         let m = flatten_schema(&s);
-        assert_eq!(m.get("A").map(String::as_str), Some("public"));
-        assert_eq!(m.get("B").map(String::as_str), Some("public"));
-        assert_eq!(m.get("C").map(String::as_str), Some("secret"));
-        assert_eq!(m.get("F").map(String::as_str), Some("featureFlag"));
+        // Map keys are canonical (lowercased); each value keeps its display name + tier.
+        assert_eq!(m.get("a").map(|t| t.tier.as_str()), Some("public"));
+        assert_eq!(m.get("a").map(|t| t.key.as_str()), Some("A"));
+        assert_eq!(m.get("b").map(|t| t.tier.as_str()), Some("public"));
+        assert_eq!(m.get("c").map(|t| t.tier.as_str()), Some("secret"));
+        assert_eq!(m.get("f").map(|t| t.tier.as_str()), Some("featureFlag"));
         assert_eq!(m.len(), 4);
+    }
+
+    #[test]
+    fn flatten_schema_handles_remote_json_schema_shape() {
+        // The shape the config server stores + returns under `jsonSchema`.
+        let s = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "publicConfigSchema": { "properties": { "apiUrl": { "type": "string" } } },
+                "secretConfigSchema": { "properties": { "anthropicApiKey": {}, "smooaiLlmKey": {} } },
+                "featureFlagSchema": { "properties": { "customerService": {} } },
+            },
+        });
+        let m = flatten_schema(&s);
+        assert_eq!(m.get("apiurl").map(|t| t.tier.as_str()), Some("public"));
+        assert_eq!(m.get("anthropicapikey").map(|t| t.tier.as_str()), Some("secret"));
+        assert_eq!(m.get("smooaillmkey").map(|t| t.tier.as_str()), Some("secret"));
+        assert_eq!(m.get("customerservice").map(|t| t.tier.as_str()), Some("featureFlag"));
+        assert_eq!(m.len(), 4);
+    }
+
+    #[test]
+    fn compute_diff_empty_across_serializations() {
+        // THE bug regression: the local manifest (SCREAMING_SNAKE arrays) and the
+        // remote JSON-Schema (camelCase) describing the SAME keys must diff to
+        // nothing — not 150 false "added". This is what made push unsafe.
+        let local = serde_json::json!({
+            "public": ["API_URL"],
+            "secret": ["ANTHROPIC_API_KEY", "SMOOAI_LLM_KEY"],
+            "featureFlag": ["CUSTOMER_SERVICE"],
+        });
+        let remote = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "publicConfigSchema": { "properties": { "apiUrl": {} } },
+                "secretConfigSchema": { "properties": { "anthropicApiKey": {}, "smooaiLlmKey": {} } },
+                "featureFlagSchema": { "properties": { "customerService": {} } },
+            },
+        });
+        let d = compute_diff(&local, &remote);
+        assert!(d.is_empty(), "identical schemas across serializations should diff empty, got {d:?}");
+    }
+
+    #[test]
+    fn compute_diff_detects_real_rename_across_serializations() {
+        // smooaiOrgBackendKey → smooaiLlmKey, local manifest vs remote JSON-Schema.
+        let local = serde_json::json!({ "secret": ["SMOOAI_LLM_KEY"] });
+        let remote = serde_json::json!({
+            "properties": { "secretConfigSchema": { "properties": { "smooaiOrgBackendKey": {} } } },
+        });
+        let d = compute_diff(&local, &remote);
+        assert_eq!(d.added.iter().map(|t| t.key.as_str()).collect::<Vec<_>>(), vec!["SMOOAI_LLM_KEY"]);
+        assert_eq!(d.removed.iter().map(|t| t.key.as_str()).collect::<Vec<_>>(), vec!["smooaiOrgBackendKey"]);
+        assert!(d.tier_changed.is_empty());
     }
 
     #[test]
