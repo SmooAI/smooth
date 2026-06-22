@@ -1031,6 +1031,10 @@ enum AgentCommands {
         /// to $SMOOTH_HARNESS, then "unknown".
         #[arg(long)]
         harness: Option<String>,
+        /// Don't push to the repo's remote after registering (default
+        /// pushes so other clones' `th agent list` sees you).
+        #[arg(long)]
+        no_push: bool,
     },
     /// List registered agents (most recently seen first).
     List {
@@ -1061,12 +1065,20 @@ enum MsgCommands {
         /// the thread).
         #[arg(long)]
         re: Option<String>,
+        /// Don't push to the repo's remote after sending (default pushes
+        /// so other clones/machines on the same repo receive it).
+        #[arg(long)]
+        no_push: bool,
     },
     /// Show messages addressed to me (and broadcasts).
     Inbox {
         /// Whose inbox (defaults to $SMOOTH_AGENT / `user@host`).
         #[arg(long)]
         agent: Option<String>,
+        /// Pull from the repo's remote first, so messages sent from other
+        /// clones/machines show up.
+        #[arg(long)]
+        pull: bool,
         /// Only unread messages.
         #[arg(long)]
         unread: bool,
@@ -1101,10 +1113,11 @@ enum MsgCommands {
         /// Seconds between polls.
         #[arg(long, default_value = "5")]
         interval: u64,
-        /// Pull from the remote each poll so cross-machine messages arrive
-        /// (otherwise only local-store messages are seen).
+        /// Don't pull from the repo's remote each poll (default pulls so
+        /// messages from other clones/machines arrive). Use for a purely
+        /// local mailbox or when offline.
         #[arg(long)]
-        pull: bool,
+        no_pull: bool,
     },
 }
 
@@ -2579,6 +2592,7 @@ async fn cmd_operatives(cmd: Option<OperativesCommands>) -> Result<()> {
 async fn cmd_inbox() -> Result<()> {
     cmd_msg(MsgCommands::Inbox {
         agent: None,
+        pull: false,
         unread: false,
         mark_read: false,
         limit: 50,
@@ -4313,6 +4327,43 @@ fn commit_messaging_state(store: &smooth_pearls::PearlStore, dolt_dir: &std::pat
     }
 }
 
+/// Best-effort push of the messaging/pearl state to the repo's
+/// `refs/dolt/data` remote so other clones/machines on the same repo see
+/// it. Messages live in the pearl store, which syncs over the repo's git
+/// origin — so a `send`/`register` that only commits locally won't reach a
+/// teammate's clone until a push. Quiet by design: a missing remote (the
+/// global `~/.smooth/dolt`, or a project with no origin) or being offline
+/// is a silent no-op — never an error, and never a stray `fatal:` on
+/// stderr (we drive only `dolt push`, which captures its own output; the
+/// git-side `git_push_pearl_state` inherits git's stderr and is only for
+/// the legacy tracked-store model, so it's not used here). Pearl th-bdaaa7.
+fn sync_push_messaging(dolt_dir: &std::path::Path) {
+    let Ok(dolt) = smooth_pearls::SmoothDolt::new(dolt_dir) else { return };
+    match dolt.push_with(smooth_pearls::PushOpts {
+        force: false,
+        set_upstream: false,
+    }) {
+        Ok(_) => {}
+        Err(e) if is_no_upstream_error(&e) => {
+            // First push to a fresh remote — retry establishing upstream.
+            let _ = dolt.push_with(smooth_pearls::PushOpts {
+                force: false,
+                set_upstream: true,
+            });
+        }
+        Err(e) => tracing::debug!(error = %e, "messaging push skipped (no remote / offline)"),
+    }
+}
+
+/// Best-effort pull so the local store reflects messages sent from other
+/// clones/machines on the same repo. Quiet on no-remote/offline (drives
+/// only `dolt pull`, which captures its own output).
+fn sync_pull_messaging(dolt_dir: &std::path::Path) {
+    if let Ok(dolt) = smooth_pearls::SmoothDolt::new(dolt_dir) {
+        let _ = dolt.pull();
+    }
+}
+
 fn print_message(m: &smooth_pearls::Message) {
     let when = m.created_at.format("%Y-%m-%d %H:%M").to_string();
     let unread = if m.read_at.is_none() {
@@ -4337,12 +4388,15 @@ async fn cmd_agent(cmd: AgentCommands) -> Result<()> {
     let (store, dolt_dir) = open_pearl_store_with_path()?;
     let reg = smooth_pearls::AgentRegistry::new(store.dolt().clone());
     match cmd {
-        AgentCommands::Register { name, harness } => {
+        AgentCommands::Register { name, harness, no_push } => {
             let name = name.unwrap_or_else(default_agent_name);
             let harness = harness.unwrap_or_else(default_harness);
             let pid = i64::from(std::process::id());
             reg.register(&name, &harness, Some(pid))?;
             commit_messaging_state(&store, &dolt_dir, &format!("agent register {name}"));
+            if !no_push {
+                sync_push_messaging(&dolt_dir);
+            }
             println!("{} registered as {} ({})", "✓".green().bold(), name.green().bold(), harness.dimmed());
             println!("  {} continuously check: {}", "→".dimmed(), format!("th msg watch --agent {name}").cyan());
         }
@@ -4374,6 +4428,7 @@ async fn cmd_agent(cmd: AgentCommands) -> Result<()> {
             let name = name.unwrap_or_else(default_agent_name);
             reg.set_status(&name, "offline")?;
             commit_messaging_state(&store, &dolt_dir, &format!("agent offline {name}"));
+            sync_push_messaging(&dolt_dir);
             println!("{} {} marked offline", "✓".green().bold(), name);
         }
     }
@@ -4385,7 +4440,7 @@ async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
     let mb = smooth_pearls::Mailbox::new(store.dolt().clone());
     let reg = smooth_pearls::AgentRegistry::new(store.dolt().clone());
     match cmd {
-        MsgCommands::Send { to, body, from, re } => {
+        MsgCommands::Send { to, body, from, re, no_push } => {
             let from = from.unwrap_or_else(default_agent_name);
             // Reply threads inherit the original message's thread root.
             let thread_id = match re {
@@ -4394,16 +4449,23 @@ async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
             };
             let id = mb.send(&from, &to, &body, thread_id.as_deref())?;
             commit_messaging_state(&store, &dolt_dir, &format!("msg {id} {from}->{to}"));
+            if !no_push {
+                sync_push_messaging(&dolt_dir);
+            }
             println!("{} sent {} to {}", "✓".green().bold(), id.dimmed(), to.green());
         }
         MsgCommands::Inbox {
             agent,
+            pull,
             unread,
             mark_read,
             limit,
             json,
         } => {
             let who = agent.unwrap_or_else(default_agent_name);
+            if pull {
+                sync_pull_messaging(&dolt_dir);
+            }
             let _ = reg.touch(&who); // heartbeat (best-effort)
             let msgs = mb.inbox(&who, unread, limit)?;
             if json {
@@ -4437,6 +4499,7 @@ async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
             let to = orig.from_agent.clone();
             let new_id = mb.send(&from, &to, &body, Some(&root))?;
             commit_messaging_state(&store, &dolt_dir, &format!("msg reply {new_id} -> {to}"));
+            sync_push_messaging(&dolt_dir);
             println!("{} replied {} to {}", "✓".green().bold(), new_id.dimmed(), to.green());
         }
         MsgCommands::Thread { id } => {
@@ -4449,17 +4512,17 @@ async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
                 print_message(msg);
             }
         }
-        MsgCommands::Watch { agent, interval, pull } => {
+        MsgCommands::Watch { agent, interval, no_pull } => {
             let who = agent.unwrap_or_else(default_agent_name);
             println!(
                 "👀 watching inbox for {} (every {interval}s{}). Ctrl-C to stop.",
                 who.green().bold(),
-                if pull { ", pulling remote" } else { "" }
+                if no_pull { ", local only" } else { ", pulling remote" }
             );
             let interval = std::time::Duration::from_secs(interval.max(1));
             loop {
-                if pull {
-                    let _ = store.dolt().pull();
+                if !no_pull {
+                    sync_pull_messaging(&dolt_dir);
                 }
                 let _ = reg.touch(&who);
                 match mb.inbox(&who, true, 200) {
@@ -5673,8 +5736,10 @@ th msg thread <message-id>      # read a whole conversation\n\
 ```\n\
 \n\
 Identity defaults to `$SMOOTH_AGENT` (else `user@host`); set `$SMOOTH_HARNESS`\n\
-so others can see what tool you are. Messages sync via `th pearls push` /\n\
-`pull` (use `th msg watch --pull` to pull each poll for cross-machine agents).\n\
+so others can see what tool you are. Sync is automatic over the repo's git\n\
+remote: `send`/`register` push and `watch` pulls each poll, so agents in\n\
+different clones/machines of the same repo see each other. Pass `--no-push` /\n\
+`--no-pull` for a purely local, offline mailbox.\n\
 {AGENTS_MSG_END}\n"
     )
 }
