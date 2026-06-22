@@ -45,7 +45,7 @@ pub mod wire;
 pub use coordinator::{SessionRunCoordinator, StartError};
 pub use event::{DaemonEvent, EventKind, EventStore, InMemoryEventLog, Seq};
 pub use runner::{run_task, TaskSpec};
-pub use server::{build_router, serve, AppState};
+pub use server::{build_router, serve, serve_on, serve_with_shutdown, AppState};
 pub use session::{InMemorySessionStore, Session, SessionStatus, SessionStore};
 pub use wire::{map_agent_event, ClientEvent, PriorMessage, ServerEvent};
 

@@ -18,6 +18,7 @@
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -90,15 +91,67 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Bind `addr` and serve until the process is stopped.
+/// Bind `addr` and serve until a shutdown signal (Ctrl-C / SIGTERM).
 ///
 /// # Errors
 /// Returns an error if the address cannot be bound or the server exits abnormally.
 pub async fn serve(state: AppState, addr: SocketAddr) -> anyhow::Result<()> {
+    serve_with_shutdown(state, addr, shutdown_signal()).await
+}
+
+/// Bind `addr` and serve until `shutdown` resolves.
+///
+/// # Errors
+/// Returns an error if the address cannot be bound or the server exits abnormally.
+pub async fn serve_with_shutdown<F>(state: AppState, addr: SocketAddr, shutdown: F) -> anyhow::Result<()>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!(%addr, version = crate::version(), "smooth-daemon listening");
-    axum::serve(listener, build_router(state)).await?;
+    serve_on(listener, state, shutdown).await
+}
+
+/// Serve on an already-bound `listener` until `shutdown` resolves. Useful for
+/// tests (bind to an ephemeral port, then assert clean shutdown).
+///
+/// # Errors
+/// Returns an error if the server exits abnormally.
+pub async fn serve_on<F>(listener: tokio::net::TcpListener, state: AppState, shutdown: F) -> anyhow::Result<()>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    if let Ok(addr) = listener.local_addr() {
+        tracing::info!(%addr, version = crate::version(), "smooth-daemon listening");
+    }
+    axum::serve(listener, build_router(state)).with_graceful_shutdown(shutdown).await?;
+    tracing::info!("smooth-daemon stopped");
     Ok(())
+}
+
+/// Resolve when the process receives Ctrl-C or (on Unix) SIGTERM.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(e) => tracing::warn!(error = %e, "could not install SIGTERM handler"),
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => {},
+        () = terminate => {},
+    }
+    tracing::info!("shutdown signal received");
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -395,6 +448,16 @@ mod tests {
             ServerEvent::TaskError { message, .. } => assert!(message.contains("config"), "got: {message}"),
             other => panic!("expected TaskError, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn serve_on_returns_when_shutdown_fires() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        // Shutdown future already resolved → graceful shutdown triggers at once;
+        // with no live connections, serve returns promptly.
+        let res = tokio::time::timeout(Duration::from_secs(5), serve_on(listener, AppState::new(), async {})).await;
+        assert!(res.is_ok(), "serve_on should return on shutdown, not hang");
+        assert!(res.unwrap().is_ok());
     }
 
     #[tokio::test]

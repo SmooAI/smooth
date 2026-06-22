@@ -10,6 +10,12 @@ description = "Big Smooth, reborn — the always-on, single-tenant personal-agen
 [lib]
 name = "smooth_daemon"
 
+# The always-on daemon binary. Runnable standalone (`smooth-daemon`); later
+# wired behind `th up` / `th service` (a separate, cross-crate pearl).
+[[bin]]
+name = "smooth-daemon"
+path = "src/main.rs"
+
 # th-f30175: Phase 0 scaffold. The always-on daemon is a clean rewrite of
 # smooth-bigsmooth on the smooth-operator engine, dropping the microsandbox
 # substrate in favour of a kernel OS-sandbox + egress proxy + auto-mode
@@ -28,6 +34,7 @@ serde_json.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 async-trait.workspace = true
