@@ -1,37 +1,51 @@
 //! The always-on daemon's HTTP/WebSocket surface.
 //!
-//! Phase 1 implements the two endpoints the frontends need to connect and run
-//! a task:
+//! Phase 1 implements the endpoints the frontends need to connect, run a task,
+//! and resume state after a reconnect:
 //! - `GET /health` — liveness + version (the TUI probes this before auto-start).
 //! - `GET /ws` — the WebSocket the TUI and SPA already speak ([`crate::wire`]).
+//! - `GET /api/event` — the durable Server-Sent-Events stream, replayed from a
+//!   `?cursor=` seq so a frontend (or the daemon, post-restart) catches up with
+//!   zero loss. This closes the resume gap opencode left stubbed.
 //!
-//! On connect the daemon sends [`ServerEvent::Connected`] immediately, then a
+//! On connect the WS sends [`ServerEvent::Connected`] immediately, then a
 //! [`ServerEvent::Pong`] heartbeat every 30s (legacy behaviour). Each
 //! `TaskStart` runs through the [`SessionRunCoordinator`] so a session has at
 //! most one in-flight turn, and events stream back over the same socket.
 //!
-//! Not yet here (later Phase 1 work): the durable `/api/event` SSE endpoint
-//! with cursor resume, the `/api/session` REST surface, loopback+tailnet bind
-//! hardening, and bearer-token auth.
+//! Not yet here (later Phase 1 work): the `/api/session` REST surface,
+//! loopback+tailnet bind hardening, and bearer-token auth.
 
+use std::collections::VecDeque;
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{Query, State};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::Response;
 use axum::routing::get;
 use axum::{Json, Router};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{SinkExt, Stream, StreamExt};
+use serde::Deserialize;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::coordinator::{SessionRunCoordinator, StartError};
-use crate::event::{EventStore, InMemoryEventLog};
+use crate::event::{DaemonEvent, EventStore, InMemoryEventLog, Seq};
 use crate::runner::{self, TaskSpec};
 use crate::wire::{ClientEvent, ServerEvent};
 
 const HEARTBEAT: Duration = Duration::from_secs(30);
+
+/// How long the SSE refill loop waits before re-polling the event log when it's
+/// caught up. Keeps live latency low without busy-spinning; the durable log +
+/// cursor means nothing is missed between polls.
+const SSE_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Max events pulled from the log per refill.
+const SSE_BATCH: usize = 256;
 
 /// Shared daemon state handed to every request. Cheap to clone (all `Arc`s).
 #[derive(Clone)]
@@ -62,7 +76,11 @@ impl Default for AppState {
 
 /// Build the axum router for the daemon.
 pub fn build_router(state: AppState) -> Router {
-    Router::new().route("/health", get(health)).route("/ws", get(ws_handler)).with_state(state)
+    Router::new()
+        .route("/health", get(health))
+        .route("/ws", get(ws_handler))
+        .route("/api/event", get(event_stream_handler))
+        .with_state(state)
 }
 
 /// Bind `addr` and serve until the process is stopped.
@@ -82,6 +100,72 @@ async fn health() -> Json<serde_json::Value> {
         "service": "smooth-daemon",
         "version": crate::version(),
     }))
+}
+
+/// Query parameters for [`event_stream_handler`].
+#[derive(Debug, Deserialize)]
+struct EventQuery {
+    /// Resume from events with seq strictly greater than this (default 0 = from
+    /// the beginning). A frontend persists the last seq it saw and passes it
+    /// here on reconnect.
+    #[serde(default)]
+    cursor: Seq,
+    /// Optional: restrict to one session's events (default = the global stream).
+    #[serde(default)]
+    session: Option<String>,
+}
+
+/// `GET /api/event` — durable, cursor-resumable SSE stream of [`DaemonEvent`]s.
+///
+/// Each SSE message carries the event seq as its `id`, so a client reconnecting
+/// with `Last-Event-ID` / `?cursor=` resumes exactly where it left off with no
+/// gaps and no duplicates.
+async fn event_stream_handler(Query(q): Query<EventQuery>, State(state): State<AppState>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    Sse::new(event_stream(state.events, q.cursor, q.session)).keep_alive(KeepAlive::default())
+}
+
+/// Build the SSE event stream: replay everything after `cursor`, then live-tail.
+///
+/// Implemented as a poll loop over the durable [`EventStore`] (not a broadcast
+/// subscription) so resume is trivially correct — the cursor is the only state,
+/// and a restarted daemon with a durable log resumes identically. Phase 2's
+/// Dolt-backed store slots in behind the same trait with no change here.
+fn event_stream(events: Arc<dyn EventStore>, cursor: Seq, session: Option<String>) -> impl Stream<Item = Result<Event, Infallible>> {
+    struct State {
+        events: Arc<dyn EventStore>,
+        cursor: Seq,
+        session: Option<String>,
+        buf: VecDeque<DaemonEvent>,
+    }
+
+    let init = State {
+        events,
+        cursor,
+        session,
+        buf: VecDeque::new(),
+    };
+
+    futures_util::stream::unfold(init, |mut st| async move {
+        loop {
+            if let Some(ev) = st.buf.pop_front() {
+                let data = serde_json::to_string(&ev).unwrap_or_default();
+                let sse = Event::default().id(ev.seq.to_string()).event("daemon").data(data);
+                return Some((Ok(sse), st));
+            }
+            match st.events.since(st.cursor, st.session.as_deref(), SSE_BATCH).await {
+                Ok(batch) if !batch.is_empty() => {
+                    if let Some(last) = batch.last() {
+                        st.cursor = last.seq;
+                    }
+                    st.buf.extend(batch);
+                }
+                // Caught up (or a transient read error): wait and re-poll. The
+                // KeepAlive layer emits SSE comments meanwhile so the
+                // connection stays warm.
+                _ => tokio::time::sleep(SSE_POLL_INTERVAL).await,
+            }
+        }
+    })
 }
 
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
@@ -190,7 +274,7 @@ fn handle_client_event(ev: ClientEvent, session_id: &str, state: &AppState, out_
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "unwrap is the idiom for test assertions")]
+#[allow(clippy::unwrap_used, clippy::expect_used, reason = "unwrap/expect are the idiom for test assertions")]
 mod tests {
     use super::*;
     use tokio_tungstenite::tungstenite::Message as TMessage;
@@ -264,5 +348,40 @@ mod tests {
             ServerEvent::TaskError { message, .. } => assert!(message.contains("config"), "got: {message}"),
             other => panic!("expected TaskError, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn sse_stream_resumes_from_cursor_then_live_tails() {
+        use crate::event::{EventKind, InMemoryEventLog};
+
+        let events: Arc<dyn EventStore> = Arc::new(InMemoryEventLog::new());
+        for i in 0..3u8 {
+            events.append("s1", EventKind::TokenDelta { text: format!("c{i}") }).await.unwrap();
+            // seqs 1,2,3
+        }
+
+        // Resume from seq 1 → only seqs 2 and 3 should replay, then the stream
+        // live-tails (blocks) because it has caught up.
+        let stream = event_stream(Arc::clone(&events), 1, None);
+        tokio::pin!(stream);
+
+        for _ in 0..2 {
+            let item = tokio::time::timeout(Duration::from_secs(1), stream.next())
+                .await
+                .expect("replay should not block")
+                .expect("stream yields an item");
+            assert!(item.is_ok());
+        }
+
+        // No more historical events after the cursor → the next pull blocks.
+        let caught_up = tokio::time::timeout(Duration::from_millis(400), stream.next()).await;
+        assert!(caught_up.is_err(), "stream live-tails once caught up (no replay of seq 1)");
+
+        // A newly appended event is delivered live.
+        events.append("s1", EventKind::TokenDelta { text: "live".into() }).await.unwrap();
+        let live = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("live event should arrive");
+        assert!(live.is_some());
     }
 }
