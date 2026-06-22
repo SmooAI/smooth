@@ -23,7 +23,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::Response;
 use axum::routing::get;
@@ -35,6 +36,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::coordinator::{SessionRunCoordinator, StartError};
 use crate::event::{DaemonEvent, EventStore, InMemoryEventLog, Seq};
 use crate::runner::{self, TaskSpec};
+use crate::session::{InMemorySessionStore, Session, SessionStatus, SessionStore};
 use crate::wire::{ClientEvent, ServerEvent};
 
 const HEARTBEAT: Duration = Duration::from_secs(30);
@@ -52,18 +54,21 @@ const SSE_BATCH: usize = 256;
 pub struct AppState {
     /// Per-session run serialization.
     pub coordinator: Arc<SessionRunCoordinator>,
-    /// Durable event log backing the (future) SSE resume endpoint.
+    /// Durable event log backing the SSE resume endpoint.
     pub events: Arc<dyn EventStore>,
+    /// Session registry backing the `/api/session` surface.
+    pub sessions: Arc<dyn SessionStore>,
 }
 
 impl AppState {
-    /// Build daemon state with the in-memory event log (Phase 1 default).
-    /// Phase 2 swaps in the Dolt-backed [`EventStore`].
+    /// Build daemon state with the in-memory backends (Phase 1 default).
+    /// Phase 2 swaps in the Dolt-backed [`EventStore`] + [`SessionStore`].
     #[must_use]
     pub fn new() -> Self {
         Self {
             coordinator: SessionRunCoordinator::new(),
             events: Arc::new(InMemoryEventLog::new()),
+            sessions: Arc::new(InMemorySessionStore::new()),
         }
     }
 }
@@ -80,6 +85,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/ws", get(ws_handler))
         .route("/api/event", get(event_stream_handler))
+        .route("/api/session", get(list_sessions).post(create_session))
+        .route("/api/session/{id}", get(get_session))
         .with_state(state)
 }
 
@@ -100,6 +107,36 @@ async fn health() -> Json<serde_json::Value> {
         "service": "smooth-daemon",
         "version": crate::version(),
     }))
+}
+
+/// Body for `POST /api/session`.
+#[derive(Debug, Default, Deserialize)]
+struct CreateSessionBody {
+    /// Optional human label for the new session.
+    #[serde(default)]
+    title: Option<String>,
+}
+
+/// `GET /api/session` — list sessions, newest activity first.
+async fn list_sessions(State(state): State<AppState>) -> Result<Json<Vec<Session>>, StatusCode> {
+    state.sessions.list().await.map(Json).map_err(internal_error)
+}
+
+/// `POST /api/session` — create a session.
+async fn create_session(State(state): State<AppState>, Json(body): Json<CreateSessionBody>) -> Result<Json<Session>, StatusCode> {
+    state.sessions.create(None, body.title).await.map(Json).map_err(internal_error)
+}
+
+/// `GET /api/session/{id}` — fetch one session (404 if unknown).
+async fn get_session(Path(id): Path<String>, State(state): State<AppState>) -> Result<Json<Session>, StatusCode> {
+    let session = state.sessions.get(&id).await.map_err(internal_error)?;
+    session.ok_or(StatusCode::NOT_FOUND).map(Json)
+}
+
+#[allow(clippy::needless_pass_by_value, reason = "used as a map_err fn-pointer, which passes the error by value")]
+fn internal_error(e: anyhow::Error) -> StatusCode {
+    tracing::error!(error = %e, "session store error");
+    StatusCode::INTERNAL_SERVER_ERROR
 }
 
 /// Query parameters for [`event_stream_handler`].
@@ -203,6 +240,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         })
     };
 
+    // Register the session so it shows up in /api/session.
+    let _ = state.sessions.create(Some(session_id.clone()), None).await;
+
     // Greet the client first — the TUI waits for this before considering the
     // connection live.
     let _ = out_tx.send(ServerEvent::Connected {
@@ -212,7 +252,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     while let Some(Ok(msg)) = stream.next().await {
         match msg {
             Message::Text(text) => match serde_json::from_str::<ClientEvent>(text.as_str()) {
-                Ok(ev) => handle_client_event(ev, &session_id, &state, &out_tx),
+                Ok(ev) => handle_client_event(ev, &session_id, &state, &out_tx).await,
                 Err(e) => {
                     let _ = out_tx.send(ServerEvent::Error {
                         message: format!("unparseable client message: {e}"),
@@ -224,16 +264,18 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     }
 
-    // Socket closed: stop any work tied to it.
+    // Socket closed: stop any work tied to it and mark the session idle.
     state.coordinator.cancel_session(&session_id);
+    let _ = state.sessions.set_status(&session_id, SessionStatus::Idle).await;
     heartbeat.abort();
     writer.abort();
 }
 
-/// Handle one decoded client message. Synchronous and non-blocking: a
-/// `TaskStart` hands the agent run to the coordinator (which spawns it) so the
-/// read loop stays responsive to `Steer`/`TaskCancel` mid-task.
-fn handle_client_event(ev: ClientEvent, session_id: &str, state: &AppState, out_tx: &UnboundedSender<ServerEvent>) {
+/// Handle one decoded client message. Non-blocking on the agent run: a
+/// `TaskStart` hands the run to the coordinator (which spawns it) so the read
+/// loop stays responsive to `Steer`/`TaskCancel` mid-task. Only the quick
+/// session-status writes are awaited.
+async fn handle_client_event(ev: ClientEvent, session_id: &str, state: &AppState, out_tx: &UnboundedSender<ServerEvent>) {
     match ev {
         ClientEvent::TaskStart {
             message,
@@ -255,11 +297,16 @@ fn handle_client_event(ev: ClientEvent, session_id: &str, state: &AppState, out_
             let events = Arc::clone(&state.events);
             let run = async move { runner::run_task(spec, out, events).await };
 
-            if let Err(StartError::Busy { task_id: running, .. }) = state.coordinator.try_start(session_id.to_owned(), task_id.clone(), run) {
-                let _ = out_tx.send(ServerEvent::TaskError {
-                    task_id,
-                    message: format!("session busy: task {running} is still running — cancel it or wait"),
-                });
+            match state.coordinator.try_start(session_id.to_owned(), task_id.clone(), run) {
+                Ok(()) => {
+                    let _ = state.sessions.set_status(session_id, SessionStatus::Active).await;
+                }
+                Err(StartError::Busy { task_id: running, .. }) => {
+                    let _ = out_tx.send(ServerEvent::TaskError {
+                        task_id,
+                        message: format!("session busy: task {running} is still running — cancel it or wait"),
+                    });
+                }
             }
         }
         ClientEvent::TaskCancel { task_id } => {
@@ -348,6 +395,26 @@ mod tests {
             ServerEvent::TaskError { message, .. } => assert!(message.contains("config"), "got: {message}"),
             other => panic!("expected TaskError, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn session_api_create_list_get_and_404() {
+        let state = AppState::new();
+
+        let Json(created) = create_session(State(state.clone()), Json(CreateSessionBody { title: Some("hack".into()) }))
+            .await
+            .expect("create ok");
+        assert_eq!(created.title.as_deref(), Some("hack"));
+        assert_eq!(created.status, SessionStatus::Idle);
+
+        let Json(list) = list_sessions(State(state.clone())).await.expect("list ok");
+        assert_eq!(list.len(), 1);
+
+        let Json(got) = get_session(Path(created.id.clone()), State(state.clone())).await.expect("get ok");
+        assert_eq!(got.id, created.id);
+
+        let missing = get_session(Path("nope".into()), State(state.clone())).await.unwrap_err();
+        assert_eq!(missing, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
