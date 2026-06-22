@@ -422,6 +422,7 @@ mod tests {
         // without needing a real model.
         std::env::remove_var("SMOOTH_API_URL");
         std::env::remove_var("SMOOTH_API_KEY");
+        std::env::set_var("SMOOTH_PROVIDERS_FILE", "/nonexistent/smooth-daemon/providers.json");
 
         let addr = spawn_test_server().await;
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws")).await.unwrap();

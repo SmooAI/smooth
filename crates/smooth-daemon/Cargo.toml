@@ -38,6 +38,7 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 async-trait.workspace = true
+dirs-next.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

@@ -178,9 +178,10 @@ mod tests {
     /// (no panic, no hang) — exercisable without a real model.
     #[tokio::test]
     async fn missing_llm_config_yields_terminal_task_error() {
-        // Ensure the env is clear for this resolution.
+        // Ensure no creds resolve: clear env + point providers.json at nothing.
         std::env::remove_var("SMOOTH_API_URL");
         std::env::remove_var("SMOOTH_API_KEY");
+        std::env::set_var("SMOOTH_PROVIDERS_FILE", "/nonexistent/smooth-daemon/providers.json");
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
         let events: Arc<dyn EventStore> = Arc::new(InMemoryEventLog::new());
