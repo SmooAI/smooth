@@ -34,9 +34,13 @@
 //! - Later phases: Dolt persistence, the auto-mode permission engine, the
 //!   reimagined React control surface, scheduling + messaging surfaces.
 
+pub mod coordinator;
 pub mod event;
+pub mod wire;
 
+pub use coordinator::{SessionRunCoordinator, StartError};
 pub use event::{DaemonEvent, EventKind, EventStore, InMemoryEventLog, Seq};
+pub use wire::{map_agent_event, ClientEvent, PriorMessage, ServerEvent};
 
 /// The crate version, surfaced by the daemon's health/status endpoint so
 /// frontends can detect a server upgrade across a reconnect.
