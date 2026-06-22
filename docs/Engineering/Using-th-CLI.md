@@ -264,18 +264,20 @@ See the dedicated [Pearls Workflow Context](../../README.md) — `th pearls crea
 
 ### Agent messaging — `th agent` / `th msg` (pearl th-70aaef)
 
-A harness-agnostic, Dolt-backed mailbox: **any** agent (Claude Code, opencode, pi, a shell loop) in **any** session — same machine or not — registers a name and messages other agents. It's all plain `th` calls layered on the pearl store, so it syncs via `refs/dolt/data` like everything else (instant for two sessions sharing one `.smooth/dolt`; `th pearls push`/`pull` — or `th msg watch --pull` — for cross-machine).
+A harness-agnostic, Dolt-backed mailbox: **any** agent (Claude Code, opencode, pi, a shell loop) in **any** session — same machine or not — registers a name and messages other agents. It's all plain `th` calls layered on the pearl store, so it rides the repo's `refs/dolt/data` git ref. Two sessions sharing one checkout's `.smooth/dolt` see each other instantly; **different clones/machines of the same repo sync automatically** — `send`/`register` push and `watch` pulls each poll (`--no-push`/`--no-pull` for a purely local, offline mailbox).
 
 ```bash
-th agent register --name <handle>          # idempotent; identity defaults to $SMOOTH_AGENT, else user@host
+th agent register --name <handle>          # idempotent; pushes so other clones see you. identity → $SMOOTH_AGENT, else user@host
 th agent list                              # who can I reach (online/last-seen)
-th msg send --to <name|all> --body "…"     # direct or broadcast
-th msg inbox [--unread] [--mark-read] [--json]
-th msg reply <id> --body "…"               # threads automatically
+th msg send --to <name|all> --body "…"     # direct or broadcast; pushes to the repo remote
+th msg inbox [--pull] [--unread] [--mark-read] [--json]   # --pull fetches remote first
+th msg reply <id> --body "…"               # threads automatically; pushes
 th msg thread <id>                         # whole conversation
-th msg watch [--interval 5] [--pull]       # blocking poll loop — the "continuously check" primitive
+th msg watch [--interval 5] [--no-pull]    # blocking poll loop, pulls each poll — the "continuously check" primitive
 th inbox                                   # alias for `th msg inbox` (default identity)
 ```
+
+For agents collaborating across **different clones/machines** of the same repo, that repo needs a git remote with `refs/dolt/data` (`th pearls push` once to seed it). For agents not tied to any repo, the fallback is the global `~/.smooth/dolt` store (single-machine).
 
 `th pearls init` injects an **Agent Messaging** section into the repo's `AGENTS.md` (idempotent, between `<!-- th:agent-messaging:* -->` markers) so any harness that reads `AGENTS.md` learns to register + poll without bespoke wiring. Set `$SMOOTH_HARNESS` so `th agent list` shows what tool each agent is. Read/unread is tracked per message via `read_at`; `to = all` broadcasts share read-state (MVP simplification).
 
