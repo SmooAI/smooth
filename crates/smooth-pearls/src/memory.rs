@@ -158,6 +158,29 @@ impl MemoryStore {
         Ok(before)
     }
 
+    /// Drop a single memory by id. Returns `true` if a row matched.
+    /// Backs `th pearls forget <id>`. Pearl th-202885.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the Dolt query/delete fails.
+    pub fn forget(&self, id: &str) -> Result<bool> {
+        let exists_sql = format!("SELECT COUNT(*) AS n FROM memories WHERE id = '{}'", sql_escape(id));
+        let n = self
+            .dolt
+            .sql(&exists_sql)
+            .context("forget existence check")?
+            .first()
+            .and_then(|r| r["n"].as_u64())
+            .unwrap_or(0);
+        if n == 0 {
+            return Ok(false);
+        }
+        let sql = format!("DELETE FROM memories WHERE id = '{}'", sql_escape(id));
+        self.dolt.exec(&sql).context("forget memory")?;
+        Ok(true)
+    }
+
     fn count_for_source(&self, source: &str) -> Result<usize> {
         let sql = format!("SELECT COUNT(*) AS n FROM memories WHERE source = '{}'", sql_escape(source));
         let rows = self.dolt.sql(&sql).context("count_for_source")?;

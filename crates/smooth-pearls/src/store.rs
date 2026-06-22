@@ -141,7 +141,7 @@ impl PearlStore {
     fn migrate_schema(dolt: &SmoothDolt) -> Result<()> {
         // Extend this list whenever a new table is added to ensure_schema
         // so pre-existing stores get healed on next open.
-        const REQUIRED_TABLES: &[&str] = &["config"];
+        const REQUIRED_TABLES: &[&str] = &["config", "agents", "messages"];
 
         let rows = dolt.sql("SHOW TABLES")?;
         let present: std::collections::HashSet<String> = rows
@@ -327,6 +327,36 @@ impl PearlStore {
                 k VARCHAR(255) PRIMARY KEY,
                 v TEXT NOT NULL,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+        )?;
+        // Agent messaging (pearl th-70aaef). `agents` is the persistent,
+        // harness-agnostic registry: any process that runs `th agent
+        // register` lands a row here keyed by its chosen name. `messages`
+        // is the Dolt-backed mailbox — recipient `to_agent` is an agent
+        // name or the literal `all` for a broadcast; `read_at IS NULL`
+        // means unread. Both sync via refs/dolt/data like everything else,
+        // so agents in otherwise-unconnected sessions/machines see each
+        // other after a push/pull.
+        dolt.exec(
+            "CREATE TABLE IF NOT EXISTS agents (
+                name VARCHAR(100) PRIMARY KEY,
+                harness VARCHAR(60),
+                pid INT,
+                registered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+                status VARCHAR(20) NOT NULL DEFAULT 'online'
+            )",
+        )?;
+        dolt.exec(
+            "CREATE TABLE IF NOT EXISTS messages (
+                id VARCHAR(40) PRIMARY KEY,
+                from_agent VARCHAR(100) NOT NULL,
+                to_agent VARCHAR(100) NOT NULL,
+                body TEXT NOT NULL,
+                thread_id VARCHAR(40),
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                read_at DATETIME,
+                seq BIGINT AUTO_INCREMENT UNIQUE
             )",
         )?;
         Ok(())
