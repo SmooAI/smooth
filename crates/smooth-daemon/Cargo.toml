@@ -19,7 +19,10 @@ name = "smooth_daemon"
 # store, and SessionRunCoordinator wiring.
 [dependencies]
 smooth-operator.workspace = true
+axum = { workspace = true, features = ["ws"] }
 tokio.workspace = true
+tokio-stream.workspace = true
+futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
@@ -31,6 +34,8 @@ async-trait.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+# Real end-to-end WebSocket smoke tests against the daemon's axum server.
+tokio-tungstenite.workspace = true
 
 [lints]
 workspace = true

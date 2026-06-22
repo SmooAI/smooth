@@ -91,7 +91,13 @@ impl SessionRunCoordinator {
             this.finish(&sid, &tid);
         });
 
-        map.insert(session_id, RunningHandle { task_id, abort: join.abort_handle() });
+        map.insert(
+            session_id,
+            RunningHandle {
+                task_id,
+                abort: join.abort_handle(),
+            },
+        );
         Ok(())
     }
 
@@ -181,7 +187,10 @@ mod tests {
         let err = coord.try_start("s1", "t2", async {}).unwrap_err();
         assert_eq!(
             err,
-            StartError::Busy { session_id: "s1".into(), task_id: "t1".into() },
+            StartError::Busy {
+                session_id: "s1".into(),
+                task_id: "t1".into()
+            },
             "second task on a busy session is rejected, not interleaved"
         );
 

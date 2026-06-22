@@ -191,8 +191,14 @@ pub fn map_agent_event(task_id: &str, event: &smooth_operator::AgentEvent) -> Op
     use smooth_operator::AgentEvent as E;
     let tid = || task_id.to_owned();
     Some(match event {
-        E::TokenDelta { content } => ServerEvent::TokenDelta { task_id: tid(), content: content.clone() },
-        E::LlmRequest { iteration, .. } => ServerEvent::LlmIteration { task_id: tid(), iteration: *iteration },
+        E::TokenDelta { content } => ServerEvent::TokenDelta {
+            task_id: tid(),
+            content: content.clone(),
+        },
+        E::LlmRequest { iteration, .. } => ServerEvent::LlmIteration {
+            task_id: tid(),
+            iteration: *iteration,
+        },
         E::ToolCallStart { tool_name, arguments, .. } => ServerEvent::ToolCallStart {
             task_id: tid(),
             tool_name: tool_name.clone(),
@@ -211,11 +217,7 @@ pub fn map_agent_event(task_id: &str, event: &smooth_operator::AgentEvent) -> Op
             is_error: *is_error,
             duration_ms: *duration_ms,
         },
-        E::Completed {
-            iterations,
-            cost_usd,
-            ..
-        } => ServerEvent::TaskComplete {
+        E::Completed { iterations, cost_usd, .. } => ServerEvent::TaskComplete {
             task_id: tid(),
             iterations: *iterations,
             cost_usd: *cost_usd,
@@ -225,7 +227,10 @@ pub fn map_agent_event(task_id: &str, event: &smooth_operator::AgentEvent) -> Op
             iterations: *max,
             cost_usd: 0.0,
         },
-        E::Error { message } => ServerEvent::TaskError { task_id: tid(), message: message.clone() },
+        E::Error { message } => ServerEvent::TaskError {
+            task_id: tid(),
+            message: message.clone(),
+        },
         E::BudgetExceeded { spent_usd, limit_usd } => ServerEvent::TaskError {
             task_id: tid(),
             message: format!("budget exceeded: spent ${spent_usd:.4} of ${limit_usd:.4} limit"),
@@ -284,7 +289,12 @@ mod tests {
         // it acts on it, or the socket read loop would choke.
         let raw = r#"{"type":"PearlClose","ids":["th-1","th-2"]}"#;
         let ev: ClientEvent = serde_json::from_str(raw).unwrap();
-        assert_eq!(ev, ClientEvent::PearlClose { ids: vec!["th-1".into(), "th-2".into()] });
+        assert_eq!(
+            ev,
+            ClientEvent::PearlClose {
+                ids: vec!["th-1".into(), "th-2".into()]
+            }
+        );
     }
 
     #[test]
@@ -295,7 +305,10 @@ mod tests {
 
     #[test]
     fn server_token_delta_shape_matches_legacy() {
-        let ev = ServerEvent::TokenDelta { task_id: "t1".into(), content: "hi".into() };
+        let ev = ServerEvent::TokenDelta {
+            task_id: "t1".into(),
+            content: "hi".into(),
+        };
         let json = serde_json::to_value(&ev).unwrap();
         assert_eq!(json["type"], "TokenDelta");
         assert_eq!(json["task_id"], "t1");
@@ -306,7 +319,13 @@ mod tests {
     fn maps_token_delta() {
         let ae = smooth_operator::AgentEvent::TokenDelta { content: "chunk".into() };
         let se = map_agent_event("t1", &ae).unwrap();
-        assert_eq!(se, ServerEvent::TokenDelta { task_id: "t1".into(), content: "chunk".into() });
+        assert_eq!(
+            se,
+            ServerEvent::TokenDelta {
+                task_id: "t1".into(),
+                content: "chunk".into()
+            }
+        );
     }
 
     #[test]
@@ -356,13 +375,20 @@ mod tests {
         };
         assert_eq!(
             map_agent_event("t1", &completed).unwrap(),
-            ServerEvent::TaskComplete { task_id: "t1".into(), iterations: 5, cost_usd: 0.01 }
+            ServerEvent::TaskComplete {
+                task_id: "t1".into(),
+                iterations: 5,
+                cost_usd: 0.01
+            }
         );
 
         let err = smooth_operator::AgentEvent::Error { message: "boom".into() };
         assert_eq!(
             map_agent_event("t1", &err).unwrap(),
-            ServerEvent::TaskError { task_id: "t1".into(), message: "boom".into() }
+            ServerEvent::TaskError {
+                task_id: "t1".into(),
+                message: "boom".into()
+            }
         );
     }
 

@@ -6280,12 +6280,16 @@ version = "0.14.1"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum 0.8.8",
  "chrono",
+ "futures-util",
  "serde",
  "serde_json",
  "smooai-smooth-operator-core",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
+ "tokio-tungstenite 0.26.2",
  "tracing",
  "uuid",
 ]
