@@ -260,6 +260,25 @@ See the dedicated [Pearls Workflow Context](../../README.md) — `th pearls crea
 
 **Self-healing store (pearl th-03cdb8).** The on-disk Dolt store can get wedged independently of your work — an interrupted GC/archive wipes `noms/manifest` + `repo_state.json`, or a cross-branch git op leaves conflict markers in the binary manifest. Under the beads model the canonical data lives on the remote's `refs/dolt/data`, so any `th pearls` command now **auto-recovers on open**: it diagnoses the corruption, snapshots the broken store aside as `.smooth/dolt.broken-<ts>`, re-clones from `origin`, and continues — printing what it did to stderr. It resolves the origin from the enclosing git repo when `repo_state.json` is the missing file, and never re-clones out from under a running Big Smooth (`smooth-dolt serve`) — those cases tell you to run `th pearls doctor --force` deliberately. For a manual sweep across every db under the root, `th pearls doctor [--auto-repair] [--force]`.
 
+**Session priming + memories (pearl th-202885).** `th pearls remember "insight"` records a durable project note; `th pearls memories` lists them; `th pearls forget <id>` drops one. `th pearls prime` prints a compact context block — in-progress + open pearls plus recent memories — for an agent to load at session start (`--json` for machine consumption).
+
+### Agent messaging — `th agent` / `th msg` (pearl th-70aaef)
+
+A harness-agnostic, Dolt-backed mailbox: **any** agent (Claude Code, opencode, pi, a shell loop) in **any** session — same machine or not — registers a name and messages other agents. It's all plain `th` calls layered on the pearl store, so it syncs via `refs/dolt/data` like everything else (instant for two sessions sharing one `.smooth/dolt`; `th pearls push`/`pull` — or `th msg watch --pull` — for cross-machine).
+
+```bash
+th agent register --name <handle>          # idempotent; identity defaults to $SMOOTH_AGENT, else user@host
+th agent list                              # who can I reach (online/last-seen)
+th msg send --to <name|all> --body "…"     # direct or broadcast
+th msg inbox [--unread] [--mark-read] [--json]
+th msg reply <id> --body "…"               # threads automatically
+th msg thread <id>                         # whole conversation
+th msg watch [--interval 5] [--pull]       # blocking poll loop — the "continuously check" primitive
+th inbox                                   # alias for `th msg inbox` (default identity)
+```
+
+`th pearls init` injects an **Agent Messaging** section into the repo's `AGENTS.md` (idempotent, between `<!-- th:agent-messaging:* -->` markers) so any harness that reads `AGENTS.md` learns to register + poll without bespoke wiring. Set `$SMOOTH_HARNESS` so `th agent list` shows what tool each agent is. Read/unread is tracked per message via `read_at`; `to = all` broadcasts share read-state (MVP simplification).
+
 ### Jira sync
 
 ```bash

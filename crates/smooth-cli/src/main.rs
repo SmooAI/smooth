@@ -297,6 +297,21 @@ enum Commands {
         #[command(subcommand)]
         cmd: PearlCommands,
     },
+    /// Agent registry — register this session as a named agent so other
+    /// agents (any harness: claude-code, opencode, pi, a shell loop) can
+    /// message it. Backed by the pearl Dolt store, synced via refs/dolt/data.
+    Agent {
+        #[command(subcommand)]
+        cmd: AgentCommands,
+    },
+    /// Agent messaging — send and receive messages between agents.
+    /// `th msg send --to <name|all>` to send, `th msg inbox` to read,
+    /// `th msg watch` to continuously poll. Harness-agnostic: any process
+    /// that can run `th` can participate.
+    Msg {
+        #[command(subcommand)]
+        cmd: MsgCommands,
+    },
     /// Configure per-activity model routing (which model for thinking, coding, etc.)
     Routing {
         #[command(subcommand)]
@@ -970,6 +985,127 @@ enum PearlCommands {
     MigrateFromBeads,
     /// List all registered pearl projects
     Projects,
+    /// Record a persistent project memory (an insight to recall later).
+    /// Surfaced by `th pearls prime`. Pearl th-202885.
+    Remember {
+        /// The note to store.
+        text: String,
+        /// Origin tag (a pearl id, "manual", an agent name, …).
+        #[arg(long, default_value = "manual")]
+        source: String,
+    },
+    /// List recent project memories.
+    Memories {
+        /// How many to show (newest first).
+        #[arg(long, default_value = "30")]
+        limit: usize,
+        /// Only memories from this source tag.
+        #[arg(long)]
+        source: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Forget a single memory by id.
+    Forget { id: String },
+    /// Print a compact session-priming context: open/in-progress pearls
+    /// plus recent memories. Agents load this at session start.
+    Prime {
+        /// Max memories to include.
+        #[arg(long, default_value = "20")]
+        memories: usize,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentCommands {
+    /// Register this session as a named agent (idempotent). Other agents
+    /// can then message it by name. Defaults: name from $SMOOTH_AGENT, else
+    /// `user@host`; harness from $SMOOTH_HARNESS.
+    Register {
+        /// Agent handle. Falls back to $SMOOTH_AGENT, then `user@host`.
+        #[arg(long)]
+        name: Option<String>,
+        /// Harness/tool tag (claude-code, opencode, pi, shell). Falls back
+        /// to $SMOOTH_HARNESS, then "unknown".
+        #[arg(long)]
+        harness: Option<String>,
+    },
+    /// List registered agents (most recently seen first).
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Mark this (or a named) agent offline.
+    Offline {
+        #[arg(long)]
+        name: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum MsgCommands {
+    /// Send a message to an agent (or `all` for a broadcast).
+    Send {
+        /// Recipient agent name, or `all` to broadcast.
+        #[arg(long)]
+        to: String,
+        /// Message body.
+        #[arg(long)]
+        body: String,
+        /// Sender name. Falls back to $SMOOTH_AGENT, then `user@host`.
+        #[arg(long)]
+        from: Option<String>,
+        /// Reply under an existing message's thread (its id or any id in
+        /// the thread).
+        #[arg(long)]
+        re: Option<String>,
+    },
+    /// Show messages addressed to me (and broadcasts).
+    Inbox {
+        /// Whose inbox (defaults to $SMOOTH_AGENT / `user@host`).
+        #[arg(long)]
+        agent: Option<String>,
+        /// Only unread messages.
+        #[arg(long)]
+        unread: bool,
+        /// Mark the listed messages read after showing them.
+        #[arg(long)]
+        mark_read: bool,
+        #[arg(long, default_value = "50")]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Mark a message read.
+    Read { id: String },
+    /// Reply to a message (threads automatically).
+    Reply {
+        /// Message id being replied to.
+        id: String,
+        #[arg(long)]
+        body: String,
+        #[arg(long)]
+        from: Option<String>,
+    },
+    /// Show a full thread (a root message + its replies).
+    Thread { id: String },
+    /// Continuously poll for new messages and print them as they arrive.
+    /// The "continuously check messages" primitive — run it in the
+    /// background of any agent session.
+    Watch {
+        /// Whose inbox (defaults to $SMOOTH_AGENT / `user@host`).
+        #[arg(long)]
+        agent: Option<String>,
+        /// Seconds between polls.
+        #[arg(long, default_value = "5")]
+        interval: u64,
+        /// Pull from the remote each poll so cross-machine messages arrive
+        /// (otherwise only local-store messages are seen).
+        #[arg(long)]
+        pull: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1175,6 +1311,8 @@ async fn main() -> Result<()> {
         Some(Commands::Cancel { bead_id }) => cmd_steer(&bead_id, "cancel", None).await,
         Some(Commands::Hooks { cmd }) => cmd_hooks(cmd),
         Some(Commands::Pearls { cmd }) => cmd_pearls(cmd).await,
+        Some(Commands::Agent { cmd }) => cmd_agent(cmd).await,
+        Some(Commands::Msg { cmd }) => cmd_msg(cmd).await,
         Some(Commands::Audit { cmd }) => cmd_audit(cmd),
         Some(Commands::Web) => {
             println!("Web UI: http://localhost:4400");
@@ -2434,22 +2572,19 @@ async fn cmd_operatives(cmd: Option<OperativesCommands>) -> Result<()> {
     }
 }
 
+/// `th inbox` — convenience alias for `th msg inbox` against the local
+/// pearl-store mailbox (pearl th-70aaef). Was a stub hitting Big Smooth's
+/// `/api/messages/inbox` (which always returned `[]`); now it shows the
+/// real agent mailbox for this session's default identity.
 async fn cmd_inbox() -> Result<()> {
-    match reqwest::get("http://localhost:4400/api/messages/inbox").await {
-        Ok(resp) => {
-            let json: serde_json::Value = resp.json().await?;
-            let msgs = json["data"].as_array();
-            if msgs.is_none_or(Vec::is_empty) {
-                println!("No messages.");
-            } else {
-                for m in msgs.unwrap_or(&vec![]) {
-                    println!("{}", serde_json::to_string_pretty(m)?);
-                }
-            }
-        }
-        Err(_) => println!("Cannot reach Big {}. Run: th up", gradient::smooth()),
-    }
-    Ok(())
+    cmd_msg(MsgCommands::Inbox {
+        agent: None,
+        unread: false,
+        mark_read: false,
+        limit: 50,
+        json: false,
+    })
+    .await
 }
 
 /// Default image for a sandboxed `th run`. One image covers every
@@ -4127,6 +4262,223 @@ fn open_pearl_store_with_path() -> Result<(smooth_pearls::PearlStore, std::path:
     Ok((store, dolt_dir))
 }
 
+// ── Agent messaging (th agent / th msg) ─────────────────────────────
+//
+// Pearl th-70aaef. A harness-agnostic mailbox on top of the pearl Dolt
+// store: any process that can run `th` registers an identity and polls
+// for messages. Writes are committed + git-synced like pearl mutations
+// so they reach other sessions/machines via refs/dolt/data.
+
+/// This session's default agent handle: `$SMOOTH_AGENT`, else `user@host`.
+fn default_agent_name() -> String {
+    if let Ok(n) = std::env::var("SMOOTH_AGENT") {
+        let n = n.trim();
+        if !n.is_empty() {
+            return n.to_string();
+        }
+    }
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "agent".to_string());
+    let host = std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "local".to_string());
+    // Keep the short hostname (strip any domain).
+    let host = host.split('.').next().unwrap_or(&host);
+    format!("{user}@{host}")
+}
+
+/// Harness tag: `$SMOOTH_HARNESS`, else `unknown`.
+fn default_harness() -> String {
+    std::env::var("SMOOTH_HARNESS")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Commit the messaging write to the Dolt store and git, best-effort,
+/// so it syncs via refs/dolt/data. Mirrors what pearl mutations do.
+fn commit_messaging_state(store: &smooth_pearls::PearlStore, dolt_dir: &std::path::Path, action: &str) {
+    if let Err(e) = store.dolt().commit(action) {
+        // "nothing to commit" is normal when the write was a no-op.
+        tracing::debug!(error = %e, "messaging commit returned error (likely no-op)");
+    }
+    if let Err(e) = auto_commit_pearl_state(dolt_dir, action) {
+        tracing::debug!(error = %e, "messaging git auto-commit skipped");
+    }
+}
+
+fn print_message(m: &smooth_pearls::Message) {
+    let when = m.created_at.format("%Y-%m-%d %H:%M").to_string();
+    let unread = if m.read_at.is_none() {
+        "●".yellow().to_string()
+    } else {
+        "○".dimmed().to_string()
+    };
+    let thread = m.thread_id.as_ref().map(|t| format!(" {}", format!("(re {t})").dimmed())).unwrap_or_default();
+    println!(
+        "{unread} {} {} → {}{thread}  {}",
+        m.id.dimmed(),
+        m.from_agent.cyan(),
+        m.to_agent.green(),
+        when.dimmed(),
+    );
+    for line in m.body.lines() {
+        println!("    {line}");
+    }
+}
+
+async fn cmd_agent(cmd: AgentCommands) -> Result<()> {
+    let (store, dolt_dir) = open_pearl_store_with_path()?;
+    let reg = smooth_pearls::AgentRegistry::new(store.dolt().clone());
+    match cmd {
+        AgentCommands::Register { name, harness } => {
+            let name = name.unwrap_or_else(default_agent_name);
+            let harness = harness.unwrap_or_else(default_harness);
+            let pid = i64::from(std::process::id());
+            reg.register(&name, &harness, Some(pid))?;
+            commit_messaging_state(&store, &dolt_dir, &format!("agent register {name}"));
+            println!("{} registered as {} ({})", "✓".green().bold(), name.green().bold(), harness.dimmed());
+            println!("  {} continuously check: {}", "→".dimmed(), format!("th msg watch --agent {name}").cyan());
+        }
+        AgentCommands::List { json } => {
+            let agents = reg.list()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&agents)?);
+            } else if agents.is_empty() {
+                println!("No agents registered. Run: {}", "th agent register".cyan());
+            } else {
+                println!("{}", format!("{} registered agent(s):", agents.len()).bold());
+                for a in &agents {
+                    let pid = a.pid.map(|p| format!(" pid={p}")).unwrap_or_default();
+                    println!(
+                        "  {} {}  {}{pid}  last-seen {}",
+                        if a.status == "online" {
+                            "●".green().to_string()
+                        } else {
+                            "○".dimmed().to_string()
+                        },
+                        a.name.bold(),
+                        a.harness.dimmed(),
+                        a.last_seen.format("%Y-%m-%d %H:%M").to_string().dimmed(),
+                    );
+                }
+            }
+        }
+        AgentCommands::Offline { name } => {
+            let name = name.unwrap_or_else(default_agent_name);
+            reg.set_status(&name, "offline")?;
+            commit_messaging_state(&store, &dolt_dir, &format!("agent offline {name}"));
+            println!("{} {} marked offline", "✓".green().bold(), name);
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
+    let (store, dolt_dir) = open_pearl_store_with_path()?;
+    let mb = smooth_pearls::Mailbox::new(store.dolt().clone());
+    let reg = smooth_pearls::AgentRegistry::new(store.dolt().clone());
+    match cmd {
+        MsgCommands::Send { to, body, from, re } => {
+            let from = from.unwrap_or_else(default_agent_name);
+            // Reply threads inherit the original message's thread root.
+            let thread_id = match re {
+                Some(ref rid) => mb.get(rid)?.map(|m| m.thread_root().to_string()),
+                None => None,
+            };
+            let id = mb.send(&from, &to, &body, thread_id.as_deref())?;
+            commit_messaging_state(&store, &dolt_dir, &format!("msg {id} {from}->{to}"));
+            println!("{} sent {} to {}", "✓".green().bold(), id.dimmed(), to.green());
+        }
+        MsgCommands::Inbox {
+            agent,
+            unread,
+            mark_read,
+            limit,
+            json,
+        } => {
+            let who = agent.unwrap_or_else(default_agent_name);
+            let _ = reg.touch(&who); // heartbeat (best-effort)
+            let msgs = mb.inbox(&who, unread, limit)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&msgs)?);
+            } else if msgs.is_empty() {
+                println!("{}", format!("Inbox for {who} is empty{}.", if unread { " (no unread)" } else { "" }).dimmed());
+            } else {
+                println!("{}", format!("{} message(s) for {who}:", msgs.len()).bold());
+                for m in &msgs {
+                    print_message(m);
+                }
+            }
+            if mark_read && !msgs.is_empty() {
+                for m in &msgs {
+                    mb.mark_read(&m.id)?;
+                }
+                commit_messaging_state(&store, &dolt_dir, &format!("msg mark-read inbox {who}"));
+            }
+        }
+        MsgCommands::Read { id } => {
+            mb.mark_read(&id)?;
+            commit_messaging_state(&store, &dolt_dir, &format!("msg read {id}"));
+            println!("{} {} marked read", "✓".green().bold(), id.dimmed());
+        }
+        MsgCommands::Reply { id, body, from } => {
+            let from = from.unwrap_or_else(default_agent_name);
+            let Some(orig) = mb.get(&id)? else {
+                anyhow::bail!("no message {id}");
+            };
+            let root = orig.thread_root().to_string();
+            let to = orig.from_agent.clone();
+            let new_id = mb.send(&from, &to, &body, Some(&root))?;
+            commit_messaging_state(&store, &dolt_dir, &format!("msg reply {new_id} -> {to}"));
+            println!("{} replied {} to {}", "✓".green().bold(), new_id.dimmed(), to.green());
+        }
+        MsgCommands::Thread { id } => {
+            let Some(m) = mb.get(&id)? else {
+                anyhow::bail!("no message {id}");
+            };
+            let thread = mb.thread(m.thread_root())?;
+            println!("{}", format!("Thread {} ({} message(s)):", m.thread_root(), thread.len()).bold());
+            for msg in &thread {
+                print_message(msg);
+            }
+        }
+        MsgCommands::Watch { agent, interval, pull } => {
+            let who = agent.unwrap_or_else(default_agent_name);
+            println!(
+                "👀 watching inbox for {} (every {interval}s{}). Ctrl-C to stop.",
+                who.green().bold(),
+                if pull { ", pulling remote" } else { "" }
+            );
+            let interval = std::time::Duration::from_secs(interval.max(1));
+            loop {
+                if pull {
+                    let _ = store.dolt().pull();
+                }
+                let _ = reg.touch(&who);
+                match mb.inbox(&who, true, 200) {
+                    Ok(msgs) => {
+                        for m in &msgs {
+                            print_message(m);
+                            // Consume: mark read locally so it doesn't repeat.
+                            let _ = mb.mark_read(&m.id);
+                        }
+                    }
+                    Err(e) => eprintln!("{} inbox poll failed: {e}", "!".yellow()),
+                }
+                std::thread::sleep(interval);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Auto-commit the on-disk pearl store state to the enclosing git
 /// repo, if there is one.
 ///
@@ -4864,6 +5216,73 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             }
         }
 
+        // ── Memory + prime (pearl th-202885) ─────────────────────────
+        PearlCommands::Remember { text, source } => {
+            let mem = smooth_pearls::MemoryStore::new(store.dolt().clone());
+            let id = mem.append(&text, &source)?;
+            commit_messaging_state(&store, &dolt_dir, &format!("remember {id}"));
+            println!("{} remembered {} ({})", "✓".green().bold(), id.green().bold(), source.dimmed());
+        }
+        PearlCommands::Memories { limit, source, json } => {
+            let mem = smooth_pearls::MemoryStore::new(store.dolt().clone());
+            let items = match &source {
+                Some(s) => mem.list_by_source(s, limit)?,
+                None => mem.list_recent(limit)?,
+            };
+            if json {
+                println!("{}", serde_json::to_string_pretty(&items)?);
+            } else if items.is_empty() {
+                println!("{}", "No memories yet. Record one: th pearls remember \"…\"".dimmed());
+            } else {
+                println!("{}", format!("{} memory(ies):", items.len()).bold());
+                for m in &items {
+                    println!(
+                        "  {} {}  {}",
+                        m.id.dimmed(),
+                        m.content,
+                        format!("[{}] {}", m.source, m.created_at.format("%Y-%m-%d")).dimmed()
+                    );
+                }
+            }
+        }
+        PearlCommands::Forget { id } => {
+            let mem = smooth_pearls::MemoryStore::new(store.dolt().clone());
+            if mem.forget(&id)? {
+                commit_messaging_state(&store, &dolt_dir, &format!("forget {id}"));
+                println!("{} forgot {id}", "✓".green().bold());
+            } else {
+                println!("{} no memory with id {id}", "✗".red());
+            }
+        }
+        PearlCommands::Prime { memories, json } => {
+            let mem = smooth_pearls::MemoryStore::new(store.dolt().clone());
+            let open = store.list(&smooth_pearls::PearlQuery::new().with_status(smooth_pearls::PearlStatus::Open))?;
+            let in_progress = store.list(&smooth_pearls::PearlQuery::new().with_status(smooth_pearls::PearlStatus::InProgress))?;
+            let notes = mem.list_recent(memories)?;
+            if json {
+                let payload = serde_json::json!({
+                    "in_progress": in_progress,
+                    "open": open,
+                    "memories": notes,
+                });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!("{}", "# Project priming context".bold());
+                println!("\n{}", format!("In progress ({}):", in_progress.len()).bold());
+                for p in in_progress.iter().take(20) {
+                    println!("  {}", format_pearl_line(p));
+                }
+                println!("\n{}", format!("Open / ready ({}):", open.len()).bold());
+                for p in open.iter().take(20) {
+                    println!("  {}", format_pearl_line(p));
+                }
+                println!("\n{}", format!("Recent memories ({}):", notes.len()).bold());
+                for m in &notes {
+                    println!("  • {} {}", m.content, format!("[{}]", m.source).dimmed());
+                }
+            }
+        }
+
         // ── Dolt commands ────────────────────────────────────────────
         // `Init` is handled before the match above (no store exists yet).
         PearlCommands::Init => unreachable!("Init is handled at the top of cmd_pearls"),
@@ -5194,6 +5613,17 @@ async fn cmd_pearls_init() -> Result<()> {
         println!("  Then: th pearls push");
     }
 
+    // Inject the agent-messaging protocol into AGENTS.md so any agent
+    // (any harness) that reads it learns to register + poll. Idempotent.
+    // Pearl th-70aaef.
+    if let Some(root) = repo_root.as_ref() {
+        match ensure_agents_md_messaging(root) {
+            Ok(true) => println!("{} Added the Agent Messaging section to {}/AGENTS.md", "✓".green().bold(), root.display()),
+            Ok(false) => {} // already present, quiet
+            Err(e) => eprintln!("  Could not update AGENTS.md: {e}"),
+        }
+    }
+
     // Install git hooks if not already present.
     let hooks_status = hooks::check(None);
     if !hooks_status.is_ok() {
@@ -5204,6 +5634,126 @@ async fn cmd_pearls_init() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Marker that bounds the injected messaging block so re-runs replace
+/// rather than duplicate it, and humans can see it's tool-managed.
+const AGENTS_MSG_BEGIN: &str = "<!-- th:agent-messaging:begin -->";
+const AGENTS_MSG_END: &str = "<!-- th:agent-messaging:end -->";
+
+/// The Agent Messaging protocol block injected into AGENTS.md. Harness-
+/// agnostic: every instruction is a plain `th` call.
+fn agents_md_messaging_block() -> String {
+    format!(
+        "{AGENTS_MSG_BEGIN}\n\
+## Agent Messaging (`th agent` / `th msg`)\n\
+\n\
+You can talk to other agents — in other sessions, other harnesses, even other\n\
+machines — through a shared Dolt-backed mailbox. It's all plain `th` calls, so\n\
+it works the same whether you're Claude Code, opencode, pi, or a shell loop.\n\
+\n\
+**On session start:**\n\
+```bash\n\
+th agent register --name <your-handle>     # idempotent; pick a stable name\n\
+```\n\
+\n\
+**Continuously check for messages** (do this every few turns, or run it in the\n\
+background of your session):\n\
+```bash\n\
+th msg inbox --unread           # what's waiting for me\n\
+th msg watch                    # blocking poll loop — prints messages as they land\n\
+```\n\
+\n\
+**Send / reply:**\n\
+```bash\n\
+th agent list                   # who can I reach\n\
+th msg send --to <name|all> --body \"…\"\n\
+th msg reply <message-id> --body \"…\"   # threads automatically\n\
+th msg thread <message-id>      # read a whole conversation\n\
+```\n\
+\n\
+Identity defaults to `$SMOOTH_AGENT` (else `user@host`); set `$SMOOTH_HARNESS`\n\
+so others can see what tool you are. Messages sync via `th pearls push` /\n\
+`pull` (use `th msg watch --pull` to pull each poll for cross-machine agents).\n\
+{AGENTS_MSG_END}\n"
+    )
+}
+
+/// Idempotently ensure the agent-messaging block is present in
+/// `<repo_root>/AGENTS.md`. Replaces an existing marked block (so the
+/// docs evolve with the tool); appends if absent; creates the file if
+/// missing. Returns `true` when the file changed.
+fn ensure_agents_md_messaging(repo_root: &std::path::Path) -> Result<bool> {
+    let path = repo_root.join("AGENTS.md");
+    let block = agents_md_messaging_block();
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+
+    let next = if let (Some(start), Some(end)) = (existing.find(AGENTS_MSG_BEGIN), existing.find(AGENTS_MSG_END)) {
+        // Replace the existing marked region (end..end+len) in place.
+        let end = end + AGENTS_MSG_END.len();
+        let mut s = String::with_capacity(existing.len());
+        s.push_str(&existing[..start]);
+        s.push_str(block.trim_end());
+        s.push_str(&existing[end..]);
+        s
+    } else if existing.trim().is_empty() {
+        format!("# AGENTS.md\n\n{block}")
+    } else {
+        let sep = if existing.ends_with('\n') { "\n" } else { "\n\n" };
+        format!("{existing}{sep}{block}")
+    };
+
+    if next == existing {
+        return Ok(false);
+    }
+    std::fs::write(&path, next).with_context(|| format!("write {}", path.display()))?;
+    Ok(true)
+}
+
+#[cfg(test)]
+mod agents_md_tests {
+    use super::*;
+
+    #[test]
+    fn injects_creates_file_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(ensure_agents_md_messaging(dir.path()).unwrap());
+        let body = std::fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
+        assert!(body.contains("## Agent Messaging"));
+        assert!(body.contains(AGENTS_MSG_BEGIN) && body.contains(AGENTS_MSG_END));
+    }
+
+    #[test]
+    fn injection_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(ensure_agents_md_messaging(dir.path()).unwrap(), "first run writes");
+        assert!(!ensure_agents_md_messaging(dir.path()).unwrap(), "second run is a no-op");
+        let body = std::fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
+        assert_eq!(body.matches(AGENTS_MSG_BEGIN).count(), 1, "exactly one block");
+    }
+
+    #[test]
+    fn preserves_existing_content_and_appends() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "# AGENTS.md\n\nExisting house rules.\n").unwrap();
+        assert!(ensure_agents_md_messaging(dir.path()).unwrap());
+        let body = std::fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
+        assert!(body.contains("Existing house rules."), "keeps prior content");
+        assert!(body.contains("## Agent Messaging"));
+    }
+
+    #[test]
+    fn replaces_marked_block_in_place_on_change() {
+        let dir = tempfile::tempdir().unwrap();
+        // Seed a stale marked block; ensure it's replaced, not duplicated.
+        let stale = format!("# AGENTS.md\n\n{AGENTS_MSG_BEGIN}\nOLD CONTENT\n{AGENTS_MSG_END}\n\ntail\n");
+        std::fs::write(dir.path().join("AGENTS.md"), stale).unwrap();
+        assert!(ensure_agents_md_messaging(dir.path()).unwrap());
+        let body = std::fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
+        assert!(!body.contains("OLD CONTENT"), "stale block replaced");
+        assert_eq!(body.matches(AGENTS_MSG_BEGIN).count(), 1);
+        assert!(body.contains("tail"), "content after the block preserved");
+    }
 }
 
 /// Append `.smooth/dolt/` to `.gitignore` at `repo_root` if not already

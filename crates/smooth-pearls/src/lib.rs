@@ -6,10 +6,12 @@
 //! Per-project data lives in `.smooth/dolt/` (synced via Dolt remotes
 //! or git refs). Global registry at `~/.smooth/` tracks all projects.
 
+pub mod agents;
 pub mod dolt;
 pub mod dolt_server;
 pub mod memory;
 pub mod memory_tools;
+pub mod messaging;
 pub mod query;
 pub mod registry;
 #[allow(clippy::missing_errors_doc)]
@@ -17,10 +19,12 @@ pub mod store;
 pub mod tools;
 pub mod types;
 
+pub use agents::{Agent, AgentRegistry};
 pub use dolt::{PushOpts, SmoothDolt};
 pub use dolt_server::{SmoothDoltClient, SmoothDoltServer};
 pub use memory::{Memory, MemoryStore};
 pub use memory_tools::register_memory_tools;
+pub use messaging::{Mailbox, Message};
 pub use query::PearlQuery;
 pub use registry::Registry;
 pub use store::PearlStore;
