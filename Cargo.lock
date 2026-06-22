@@ -6275,6 +6275,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "smooai-smooth-daemon"
+version = "0.14.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_json",
+ "smooai-smooth-operator-core",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "smooai-smooth-diver"
 version = "0.14.1"
 dependencies = [
@@ -6403,8 +6419,6 @@ dependencies = [
 [[package]]
 name = "smooai-smooth-operator-core"
 version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60cac82deb3b84139783af4c3494717d184e1f9c5372945462191053c37dea39"
 dependencies = [
  "anyhow",
  "async-trait",

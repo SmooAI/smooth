@@ -1,0 +1,36 @@
+[package]
+name = "smooai-smooth-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Big Smooth, reborn — the always-on, single-tenant personal-agent daemon on smooth-operator (EPIC th-c89c2a)"
+
+[lib]
+name = "smooth_daemon"
+
+# th-f30175: Phase 0 scaffold. The always-on daemon is a clean rewrite of
+# smooth-bigsmooth on the smooth-operator engine, dropping the microsandbox
+# substrate in favour of a kernel OS-sandbox + egress proxy + auto-mode
+# permission engine. It lives ALONGSIDE smooth-bigsmooth so `th up` keeps
+# working on the old path until the new daemon reaches parity. Dependencies are
+# intentionally lean here; Phase 1 (th-64fbe8) adds the axum server, session
+# store, and SessionRunCoordinator wiring.
+[dependencies]
+smooth-operator.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

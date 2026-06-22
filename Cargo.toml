@@ -193,7 +193,21 @@ microsandbox = "0.4"
 # discovery, and the fixer/oracle/chief/intent_classifier cast roles) now live
 # in the smooth-owned `smooth-cast` crate below, built on the engine's generic
 # public API.
-smooth-operator = { version = "0.14.0", package = "smooai-smooth-operator-core" }
+#
+# th-f30175 (EPIC th-c89c2a, smooth-daemon rewrite): VENDORED to a local path
+# dep on the sibling `smooth-operator-core` checkout so we can patch the engine
+# (configurable streaming timeouts, AUTO_CONTEXT_LIMIT, Context-Epoch prompt
+# stability, first-class Dolt Memory backend) during the always-on-daemon
+# rewrite. Relative path resolves across sibling worktrees (smooth-* and
+# smooth-operator-core both live under ~/dev/smooai/).
+#
+# ⚠️ CI CAVEAT (learned from the client-shared dep below, lines ~217–226): a
+# local `path =` dep ONLY resolves on a dev laptop and breaks every CI release
+# ("failed to load manifest for workspace member"). Before this branch merges to
+# main, this MUST be converted to a git-rev dep on smooth-operator-core (mirror
+# the smooai-client-shared pattern) — or the engine patches upstreamed and this
+# reverted to a crates.io version bump. Tracked under EPIC th-c89c2a.
+smooth-operator = { path = "../smooth-operator-core/rust/smooth-operator-core", package = "smooai-smooth-operator-core" }
 # smooth-owned coding-harness extensions to the generic engine (re-homed from
 # the engine when it went generic at 0.14.0). See crates/smooth-cast.
 smooth-cast = { version = "0.14.1", path = "crates/smooth-cast", package = "smooai-smooth-cast" }
