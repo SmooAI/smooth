@@ -8,7 +8,21 @@
 import { useEffect, useReducer, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 
-import { createSession, DaemonSocket, getHealth, getStatus, listMessages, listSessions, type Health, type ServerEvent, type Session, type Status } from './daemon';
+import {
+    createSession,
+    DaemonSocket,
+    getHealth,
+    getStatus,
+    listMessages,
+    listSessions,
+    PERMISSION_MODES,
+    setMode,
+    type Health,
+    type PermissionMode,
+    type ServerEvent,
+    type Session,
+    type Status,
+} from './daemon';
 
 type ChatItem =
     | { kind: 'user'; text: string }
@@ -148,6 +162,17 @@ export function ControlApp() {
         forceTick();
     };
 
+    // Switch the daemon's permission posture, then refresh status so the
+    // header reflects the resolved mode (and any concurrent change).
+    const changeMode = async (mode: PermissionMode) => {
+        setStatus((prev) => (prev ? { ...prev, permission_mode: mode } : prev));
+        try {
+            await setMode(mode);
+        } finally {
+            getStatus().then(setStatus).catch(() => {});
+        }
+    };
+
     const reply = (request_id: string, allow: boolean) => {
         socketRef.current?.send({ type: 'PermissionReply', request_id, allow });
         setPending((prev) => prev.filter((p) => p.request_id !== request_id));
@@ -175,9 +200,18 @@ export function ControlApp() {
                 </div>
                 <div className="flex items-center gap-3 text-xs">
                     {status && (
-                        <span className="rounded bg-white/5 px-2 py-0.5 font-mono text-foreground/60" title="permission mode">
-                            {status.permission_mode}
-                        </span>
+                        <select
+                            value={status.permission_mode}
+                            onChange={(e) => void changeMode(e.target.value as PermissionMode)}
+                            title="permission mode — takes effect on the next task"
+                            className="cursor-pointer rounded border border-white/10 bg-white/5 px-2 py-0.5 font-mono text-foreground/70 outline-none focus:border-primary/50"
+                        >
+                            {PERMISSION_MODES.map((m) => (
+                                <option key={m} value={m} className="bg-background text-foreground">
+                                    {m}
+                                </option>
+                            ))}
+                        </select>
                     )}
                     {status && status.active_tasks > 0 && <span className="text-foreground/50">{status.active_tasks} running</span>}
                     <span className="flex items-center gap-1">

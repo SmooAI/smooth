@@ -73,6 +73,60 @@ impl PermissionMode {
     }
 }
 
+/// A thread-safe, runtime-mutable holder for the active permission mode.
+///
+/// Lets the control surface switch posture (e.g. `default` → `auto`) without
+/// restarting the daemon; each new task reads the current value.
+#[derive(Debug, Clone)]
+pub struct SharedPermissionMode(std::sync::Arc<std::sync::atomic::AtomicU8>);
+
+impl SharedPermissionMode {
+    /// Wrap an initial `mode`.
+    #[must_use]
+    pub fn new(mode: PermissionMode) -> Self {
+        Self(std::sync::Arc::new(std::sync::atomic::AtomicU8::new(mode_to_u8(mode))))
+    }
+
+    /// The current mode.
+    #[must_use]
+    pub fn get(&self) -> PermissionMode {
+        mode_from_u8(self.0.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Replace the active mode (takes effect on the next task).
+    pub fn set(&self, mode: PermissionMode) {
+        self.0.store(mode_to_u8(mode), std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl Default for SharedPermissionMode {
+    fn default() -> Self {
+        Self::new(PermissionMode::default())
+    }
+}
+
+const fn mode_to_u8(mode: PermissionMode) -> u8 {
+    match mode {
+        PermissionMode::Default => 0,
+        PermissionMode::AcceptEdits => 1,
+        PermissionMode::Plan => 2,
+        PermissionMode::Auto => 3,
+        PermissionMode::DontAsk => 4,
+        PermissionMode::BypassPermissions => 5,
+    }
+}
+
+const fn mode_from_u8(v: u8) -> PermissionMode {
+    match v {
+        1 => PermissionMode::AcceptEdits,
+        2 => PermissionMode::Plan,
+        3 => PermissionMode::Auto,
+        4 => PermissionMode::DontAsk,
+        5 => PermissionMode::BypassPermissions,
+        _ => PermissionMode::Default,
+    }
+}
+
 /// The deterministic Gate-1 permission engine.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PermissionEngine {
@@ -342,5 +396,38 @@ mod tests {
         assert_eq!(PermissionMode::parse("acceptEdits"), Some(PermissionMode::AcceptEdits));
         assert_eq!(PermissionMode::parse("BYPASS"), Some(PermissionMode::BypassPermissions));
         assert_eq!(PermissionMode::parse("nonsense"), None);
+    }
+
+    #[test]
+    fn shared_mode_starts_at_initial_and_switches() {
+        let shared = SharedPermissionMode::new(PermissionMode::Default);
+        assert_eq!(shared.get(), PermissionMode::Default);
+        shared.set(PermissionMode::Auto);
+        assert_eq!(shared.get(), PermissionMode::Auto);
+    }
+
+    #[test]
+    fn shared_mode_clones_share_state() {
+        // The control surface and task dispatcher hold clones of one holder;
+        // a switch through either must be visible to the other.
+        let a = SharedPermissionMode::new(PermissionMode::Plan);
+        let b = a.clone();
+        a.set(PermissionMode::DontAsk);
+        assert_eq!(b.get(), PermissionMode::DontAsk);
+    }
+
+    #[test]
+    fn shared_mode_u8_round_trips_every_variant() {
+        for mode in [
+            PermissionMode::Default,
+            PermissionMode::AcceptEdits,
+            PermissionMode::Plan,
+            PermissionMode::Auto,
+            PermissionMode::DontAsk,
+            PermissionMode::BypassPermissions,
+        ] {
+            let shared = SharedPermissionMode::new(mode);
+            assert_eq!(shared.get(), mode);
+        }
     }
 }

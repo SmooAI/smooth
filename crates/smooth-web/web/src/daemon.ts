@@ -60,6 +60,21 @@ export async function getStatus(): Promise<Status> {
     return (await r.json()) as Status;
 }
 
+// The Gate-1 permission postures the daemon understands (PUT /api/mode).
+export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'] as const;
+export type PermissionMode = (typeof PERMISSION_MODES)[number];
+
+/** Switch the daemon's runtime permission posture; resolves to the new mode. */
+export async function setMode(mode: PermissionMode): Promise<string> {
+    const r = await fetch('/api/mode', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+    });
+    if (!r.ok) throw new Error(`set mode ${r.status}`);
+    return ((await r.json()) as { permission_mode: string }).permission_mode;
+}
+
 export async function listSessions(): Promise<Session[]> {
     const r = await fetch('/api/session');
     if (!r.ok) throw new Error(`sessions ${r.status}`);

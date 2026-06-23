@@ -32,7 +32,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::Response;
-use axum::routing::get;
+use axum::routing::{get, put};
 use axum::{Json, Router};
 use futures_util::{SinkExt, Stream, StreamExt};
 use serde::Deserialize;
@@ -42,7 +42,7 @@ use crate::approval::ApprovalCoordinator;
 use crate::coordinator::{SessionRunCoordinator, StartError};
 use crate::event::{DaemonEvent, EventStore, InMemoryEventLog, Seq};
 use crate::messages::MessageStore;
-use crate::permission::PermissionMode;
+use crate::permission::{PermissionMode, SharedPermissionMode};
 use crate::runner::{self, TaskSpec};
 use crate::session::{InMemorySessionStore, Session, SessionStatus, SessionStore};
 use crate::wire::{ClientEvent, PriorMessage, ServerEvent};
@@ -70,8 +70,8 @@ pub struct AppState {
     pub messages: Arc<dyn MessageStore>,
     /// Routes operator approval replies to waiting permission hooks.
     pub approvals: Arc<ApprovalCoordinator>,
-    /// Gate-1 permission posture for this daemon.
-    pub permission_mode: PermissionMode,
+    /// Gate-1 permission posture for this daemon (runtime-switchable).
+    pub permission_mode: SharedPermissionMode,
 }
 
 impl AppState {
@@ -84,7 +84,7 @@ impl AppState {
             sessions: Arc::new(InMemorySessionStore::new()),
             messages: Arc::new(crate::messages::InMemoryMessageStore::new()),
             approvals: ApprovalCoordinator::new(),
-            permission_mode: PermissionMode::default(),
+            permission_mode: SharedPermissionMode::default(),
         }
     }
 
@@ -102,7 +102,7 @@ impl AppState {
             sessions: stores.sessions,
             messages: stores.messages,
             approvals: ApprovalCoordinator::new(),
-            permission_mode: crate::config::resolve_permission_mode(),
+            permission_mode: SharedPermissionMode::new(crate::config::resolve_permission_mode()),
         })
     }
 
@@ -136,6 +136,7 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/api/status", get(status))
+        .route("/api/mode", put(set_mode))
         .route("/ws", get(ws_handler))
         .route("/api/event", get(event_stream_handler))
         .route("/api/session", get(list_sessions).post(create_session))
@@ -222,9 +223,26 @@ async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "service": "smooth-daemon",
         "version": crate::version(),
-        "permission_mode": state.permission_mode.as_str(),
+        "permission_mode": state.permission_mode.get().as_str(),
         "active_tasks": state.coordinator.active_count(),
     }))
+}
+
+/// Body for `PUT /api/mode`.
+#[derive(Debug, Deserialize)]
+struct SetModeBody {
+    /// One of `default | acceptEdits | plan | auto | dontAsk | bypassPermissions`.
+    mode: String,
+}
+
+/// `PUT /api/mode` — switch the daemon's Gate-1 permission posture at runtime.
+/// Takes effect on the next dispatched task; running tasks keep their mode.
+/// Returns the resolved mode, or 400 for an unrecognized value.
+async fn set_mode(State(state): State<AppState>, Json(body): Json<SetModeBody>) -> Result<Json<serde_json::Value>, StatusCode> {
+    let mode = PermissionMode::parse(&body.mode).ok_or(StatusCode::BAD_REQUEST)?;
+    state.permission_mode.set(mode);
+    tracing::info!(mode = mode.as_str(), "permission mode changed");
+    Ok(Json(serde_json::json!({ "permission_mode": mode.as_str() })))
 }
 
 /// Body for `POST /api/session`.
@@ -465,7 +483,7 @@ async fn handle_client_event(ev: ClientEvent, session_id: &str, state: &AppState
             let events = Arc::clone(&state.events);
             let messages = Arc::clone(&state.messages);
             let approvals = Arc::clone(&state.approvals);
-            let mode = state.permission_mode;
+            let mode = state.permission_mode.get();
             let run = async move { runner::run_task(spec, out, events, messages, approvals, mode).await };
 
             match state.coordinator.try_start(session_id.to_owned(), task_id.clone(), run) {
@@ -635,5 +653,35 @@ mod tests {
             .await
             .expect("live event should arrive");
         assert!(live.is_some());
+    }
+
+    #[tokio::test]
+    async fn set_mode_switches_runtime_posture_and_status_reflects_it() {
+        let state = AppState::new();
+        // Fresh daemon defaults to `default`.
+        let Json(before) = status(State(state.clone())).await;
+        assert_eq!(before["permission_mode"], "default");
+
+        // Switch to `auto` at runtime.
+        let Json(ok) = set_mode(State(state.clone()), Json(SetModeBody { mode: "auto".into() }))
+            .await
+            .expect("auto is a valid mode");
+        assert_eq!(ok["permission_mode"], "auto");
+
+        // The holder — and therefore the next task and /api/status — sees it.
+        assert_eq!(state.permission_mode.get(), PermissionMode::Auto);
+        let Json(after) = status(State(state)).await;
+        assert_eq!(after["permission_mode"], "auto");
+    }
+
+    #[tokio::test]
+    async fn set_mode_rejects_unknown_value() {
+        let state = AppState::new();
+        let err = set_mode(State(state.clone()), Json(SetModeBody { mode: "wide-open".into() }))
+            .await
+            .expect_err("unknown mode is rejected");
+        assert_eq!(err, StatusCode::BAD_REQUEST);
+        // Posture is unchanged after a rejected switch.
+        assert_eq!(state.permission_mode.get(), PermissionMode::Default);
     }
 }
