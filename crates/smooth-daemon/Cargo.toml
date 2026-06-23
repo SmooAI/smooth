@@ -54,6 +54,8 @@ tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite.workspace = true
 # Temp DBs for the SQLite persistence tests.
 tempfile.workspace = true
+# `ServiceExt::oneshot` for router-level auth-middleware tests.
+tower = { workspace = true, features = ["util"] }
 
 [lints]
 workspace = true

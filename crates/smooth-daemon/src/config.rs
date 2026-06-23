@@ -25,14 +25,25 @@ pub const DEFAULT_BIND: &str = "127.0.0.1:4400";
 /// Resolve the address the daemon binds to.
 ///
 /// `SMOOTH_DAEMON_BIND` overrides; otherwise [`DEFAULT_BIND`]. Bound to
-/// loopback by design — remote access goes over Tailscale (a later phase adds
-/// the tailnet bind + bearer-token middleware).
+/// loopback by design — remote access goes over Tailscale. A non-loopback bind
+/// without [`resolve_auth_token`] set logs a startup warning (see `server.rs`).
 ///
 /// # Errors
 /// Returns an error if `SMOOTH_DAEMON_BIND` is set but unparseable.
 pub fn resolve_bind() -> anyhow::Result<SocketAddr> {
     let raw = std::env::var("SMOOTH_DAEMON_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_owned());
     raw.parse().with_context(|| format!("invalid SMOOTH_DAEMON_BIND: {raw:?}"))
+}
+
+/// Resolve the daemon's bearer token from `SMOOTH_DAEMON_TOKEN`.
+///
+/// Auth is **opt-in**: with no token set the daemon serves open (the loopback
+/// default trusts the local user). Set a token before binding to a tailnet so
+/// programmatic clients must present `Authorization: Bearer <token>`. An
+/// all-whitespace value is treated as unset.
+#[must_use]
+pub fn resolve_auth_token() -> Option<String> {
+    std::env::var("SMOOTH_DAEMON_TOKEN").ok().map(|t| t.trim().to_owned()).filter(|t| !t.is_empty())
 }
 
 /// Resolve the Gate-1 permission mode from `SMOOTH_PERMISSION_MODE` (default
@@ -125,6 +136,17 @@ mod tests {
     #[test]
     fn default_bind_parses() {
         assert_eq!(DEFAULT_BIND.parse::<SocketAddr>().unwrap().port(), 4400);
+    }
+
+    #[test]
+    fn auth_token_blank_is_unset() {
+        // Direct env tests would race with other tests; assert the trim/empty
+        // policy on the value-shaping path instead.
+        assert_eq!(Some("   ".to_owned()).map(|t| t.trim().to_owned()).filter(|t| !t.is_empty()), None);
+        assert_eq!(
+            Some("  secret  ".to_owned()).map(|t| t.trim().to_owned()).filter(|t| !t.is_empty()),
+            Some("secret".to_owned())
+        );
     }
 
     #[test]

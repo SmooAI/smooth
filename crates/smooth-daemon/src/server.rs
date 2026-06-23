@@ -17,7 +17,10 @@
 //! [`SessionRunCoordinator`] so a session has at most one in-flight turn, and
 //! events stream back over the same socket.
 //!
-//! Not yet here: loopback+tailnet bind hardening, and bearer-token auth.
+//! Auth: every API + WS route is wrapped in [`require_auth`], which enforces an
+//! optional bearer token (`SMOOTH_DAEMON_TOKEN`); `/health` and the SPA stay
+//! open. With no token set the daemon serves open (loopback trusts the local
+//! user); a non-loopback bind without a token logs a startup warning.
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -28,10 +31,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, Request, State};
+use axum::http::header::AUTHORIZATION;
 use axum::http::StatusCode;
+use axum::middleware::{from_fn_with_state, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
 use axum::{Json, Router};
 use futures_util::{SinkExt, Stream, StreamExt};
@@ -72,6 +77,10 @@ pub struct AppState {
     pub approvals: Arc<ApprovalCoordinator>,
     /// Gate-1 permission posture for this daemon (runtime-switchable).
     pub permission_mode: SharedPermissionMode,
+    /// Optional bearer token. When set, every endpoint except `/health` and the
+    /// static SPA requires `Authorization: Bearer <token>` (or `?token=`).
+    /// `None` = open (the loopback-default trusts the local user).
+    pub auth_token: Option<Arc<String>>,
 }
 
 impl AppState {
@@ -85,6 +94,7 @@ impl AppState {
             messages: Arc::new(crate::messages::InMemoryMessageStore::new()),
             approvals: ApprovalCoordinator::new(),
             permission_mode: SharedPermissionMode::default(),
+            auth_token: None,
         }
     }
 
@@ -103,6 +113,7 @@ impl AppState {
             messages: stores.messages,
             approvals: ApprovalCoordinator::new(),
             permission_mode: SharedPermissionMode::new(crate::config::resolve_permission_mode()),
+            auth_token: crate::config::resolve_auth_token().map(Arc::new),
         })
     }
 
@@ -132,9 +143,13 @@ impl Default for AppState {
 }
 
 /// Build the axum router for the daemon.
+///
+/// `/health` (liveness) and the embedded SPA stay open; every API + WS route is
+/// wrapped in [`require_auth`], which enforces the bearer token only when one is
+/// configured (`AppState::auth_token`).
 pub fn build_router(state: AppState) -> Router {
-    Router::new()
-        .route("/health", get(health))
+    let auth = from_fn_with_state(state.auth_token.clone(), require_auth);
+    let protected = Router::new()
         .route("/api/status", get(status))
         .route("/api/mode", put(set_mode))
         .route("/ws", get(ws_handler))
@@ -142,9 +157,59 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/session", get(list_sessions).post(create_session))
         .route("/api/session/{id}", get(get_session))
         .route("/api/session/{id}/messages", get(list_session_messages))
+        .route_layer(auth);
+    Router::new()
+        .route("/health", get(health))
+        .merge(protected)
         .with_state(state)
         // The embedded control-surface SPA (fallback for non-API routes).
         .fallback_service(smooth_web::web_router())
+}
+
+/// Bearer-token gate for the API + WS surface. With no token configured it is a
+/// pass-through (the loopback default trusts the local user). With a token set,
+/// the request must carry `Authorization: Bearer <token>` or a `?token=<token>`
+/// query parameter (the latter for browser WebSockets, which can't set headers).
+async fn require_auth(State(token): State<Option<Arc<String>>>, request: Request, next: Next) -> Response {
+    let Some(expected) = token.as_deref() else {
+        return next.run(request).await;
+    };
+    if request_token(&request).is_some_and(|t| constant_time_eq(t.as_bytes(), expected.as_bytes())) {
+        next.run(request).await
+    } else {
+        (StatusCode::UNAUTHORIZED, "missing or invalid bearer token").into_response()
+    }
+}
+
+/// Extract the presented token from the `Authorization: Bearer …` header, else
+/// the `token` query parameter.
+fn request_token(request: &Request) -> Option<String> {
+    if let Some(bearer) = request
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+    {
+        return Some(bearer.trim().to_owned());
+    }
+    request
+        .uri()
+        .query()
+        .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("token=")))
+        .map(ToOwned::to_owned)
+}
+
+/// Length-aware constant-time byte comparison, so token checks don't leak length
+/// or content through timing.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// Bind `addr` and serve until a shutdown signal (Ctrl-C / SIGTERM).
@@ -177,7 +242,10 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     if let Ok(addr) = listener.local_addr() {
-        tracing::info!(%addr, version = crate::version(), "smooth-daemon listening");
+        if !addr.ip().is_loopback() && state.auth_token.is_none() {
+            tracing::warn!(%addr, "bound to a non-loopback address with no SMOOTH_DAEMON_TOKEN — anyone who can reach this port has full agent access; set a token before tailnet exposure");
+        }
+        tracing::info!(%addr, auth = state.auth_token.is_some(), version = crate::version(), "smooth-daemon listening");
     }
     axum::serve(listener, build_router(state)).with_graceful_shutdown(shutdown).await?;
     tracing::info!("smooth-daemon stopped");
@@ -731,5 +799,86 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         handle_client_event(ClientEvent::TaskCancel { task_id: "ghost".into() }, "s1", &state, &tx).await;
         assert!(rx.try_recv().is_err(), "no terminal event is emitted for an unknown task id");
+    }
+
+    // --- bearer-token auth (th-bd0def Phase 4 Slice 6) ---
+
+    use axum::body::Body;
+    use tower::ServiceExt; // for `oneshot`
+
+    fn state_with_token(tok: &str) -> AppState {
+        let mut s = AppState::new();
+        s.auth_token = Some(Arc::new(tok.to_owned()));
+        s
+    }
+
+    async fn get_status(router: Router, uri: &str, bearer: Option<&str>) -> StatusCode {
+        let mut req = Request::builder().uri(uri);
+        if let Some(b) = bearer {
+            req = req.header(AUTHORIZATION, format!("Bearer {b}"));
+        }
+        router.oneshot(req.body(Body::empty()).unwrap()).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn auth_disabled_serves_api_open() {
+        // No token configured → the API is reachable with no credential.
+        let router = build_router(AppState::new());
+        assert_eq!(get_status(router, "/api/session", None).await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn auth_required_rejects_missing_and_wrong_token() {
+        assert_eq!(
+            get_status(build_router(state_with_token("s3cret")), "/api/session", None).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            get_status(build_router(state_with_token("s3cret")), "/api/session", Some("nope")).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_accepts_correct_bearer_and_query_token() {
+        assert_eq!(
+            get_status(build_router(state_with_token("s3cret")), "/api/session", Some("s3cret")).await,
+            StatusCode::OK
+        );
+        // Browser WebSockets can't set headers → `?token=` is honored too.
+        assert_eq!(
+            get_status(build_router(state_with_token("s3cret")), "/api/session?token=s3cret", None).await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn health_stays_open_even_with_auth_enabled() {
+        // Liveness probes must never need a credential.
+        assert_eq!(get_status(build_router(state_with_token("s3cret")), "/health", None).await, StatusCode::OK);
+    }
+
+    #[test]
+    fn constant_time_eq_matches_only_identical_bytes() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"abcd"));
+        assert!(!constant_time_eq(b"", b"x"));
+    }
+
+    #[test]
+    fn request_token_prefers_header_then_query() {
+        let from_header = Request::builder()
+            .uri("/api/session?token=fromquery")
+            .header(AUTHORIZATION, "Bearer fromheader")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(request_token(&from_header).as_deref(), Some("fromheader"));
+
+        let from_query = Request::builder().uri("/ws?session=x&token=fromquery").body(Body::empty()).unwrap();
+        assert_eq!(request_token(&from_query).as_deref(), Some("fromquery"));
+
+        let none = Request::builder().uri("/api/session").body(Body::empty()).unwrap();
+        assert_eq!(request_token(&none), None);
     }
 }
