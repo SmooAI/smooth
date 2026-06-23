@@ -109,6 +109,9 @@ enum Commands {
         /// remote access is meant to go over Tailscale.
         #[arg(long, default_value = "127.0.0.1")]
         bind: String,
+        /// Optional subcommand; with none, runs the daemon in the foreground.
+        #[command(subcommand)]
+        cmd: Option<DaemonCommands>,
     },
     /// Stop Smooth platform
     Down,
@@ -404,6 +407,13 @@ enum Commands {
         #[command(subcommand)]
         cmd: CastCommands,
     },
+}
+
+#[derive(Subcommand)]
+enum DaemonCommands {
+    /// Show the running daemon's status (uptime, permission mode, egress,
+    /// active tasks) by querying its `/api/status`.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -1301,7 +1311,10 @@ async fn main() -> Result<()> {
             max_operators,
             skip_test,
         }) => cmd_up(mode, no_leader, port, bind, foreground, max_operators, skip_test).await,
-        Some(Commands::Daemon { port, bind }) => cmd_daemon(port, bind).await,
+        Some(Commands::Daemon { port, bind, cmd }) => match cmd {
+            None => cmd_daemon(port, bind).await,
+            Some(DaemonCommands::Status) => cmd_daemon_status(port).await,
+        },
         Some(Commands::Down) => cmd_down().await,
         Some(Commands::Status) => cmd_status().await,
         Some(Commands::Db { cmd }) => cmd_db(cmd),
@@ -1632,9 +1645,10 @@ async fn cmd_daemon(port: u16, bind: String) -> Result<()> {
         "\u{2713}".green().bold(),
         format!("http://localhost:{port}").cyan().bold()
     );
-    // Durable SQLite-backed state (~/.smooth/daemon.db) so events + sessions
-    // survive a restart.
-    smooth_daemon::serve(smooth_daemon::AppState::persistent_default()?, addr).await
+    // Durable SQLite-backed state (~/.smooth/daemon.db) + the egress boundary
+    // (if SMOOTH_EGRESS_ALLOWLIST is set) — the same canonical entry the
+    // standalone `smooth-daemon` binary uses, so egress starts either way.
+    smooth_daemon::serve_persistent(addr).await
 }
 
 async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, foreground: bool, max_operators: Option<usize>, skip_test: bool) -> Result<()> {
@@ -2025,6 +2039,45 @@ async fn cmd_down() -> Result<()> {
         (false, None) => {
             println!("  {} {}", gradient::smooth(), "is not running.".yellow());
         }
+    }
+    Ok(())
+}
+
+/// Format seconds into a compact `1d 2h` / `3h 4m` / `5m 6s` / `7s` string.
+fn format_daemon_uptime(secs: u64) -> String {
+    if secs >= 86_400 {
+        format!("{}d {}h", secs / 86_400, (secs % 86_400) / 3600)
+    } else if secs >= 3600 {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
+/// Render the daemon's `/api/status` JSON into a human-readable block. Pure, so
+/// it's unit-testable without a running daemon.
+fn format_daemon_status(body: &serde_json::Value) -> String {
+    let version = body["version"].as_str().unwrap_or("unknown");
+    let mode = body["permission_mode"].as_str().unwrap_or("?");
+    let active = body["active_tasks"].as_u64().unwrap_or(0);
+    let egress = body["egress_proxy"].as_str().map_or_else(|| "off".to_owned(), |p| format!("on ({p})"));
+    let uptime = body["uptime_seconds"].as_u64().map_or_else(|| "?".to_owned(), format_daemon_uptime);
+    format!("smooth-daemon v{version}\n  uptime:       {uptime}\n  mode:         {mode}\n  egress:       {egress}\n  active tasks: {active}")
+}
+
+/// `th daemon status` — query the running daemon's `/api/status` and print it.
+async fn cmd_daemon_status(port: u16) -> Result<()> {
+    let url = format!("http://127.0.0.1:{port}/api/status");
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(3)).build()?;
+    match client.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            let body: serde_json::Value = resp.json().await?;
+            println!("{}", format_daemon_status(&body));
+        }
+        Ok(resp) => println!("daemon returned HTTP {} at {url}", resp.status()),
+        Err(_) => println!("daemon not reachable at {url} — is `th daemon` running?"),
     }
     Ok(())
 }
@@ -7716,5 +7769,44 @@ mod beads_model_tests {
         // up — caller treats None as "no remote to bootstrap from."
         let tmp = tempfile::tempdir().expect("tempdir");
         assert!(read_git_origin_url(tmp.path()).unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod daemon_status_tests {
+    //! `th daemon status` formatting (pure; no running daemon needed).
+    use super::{format_daemon_status, format_daemon_uptime};
+
+    #[test]
+    fn uptime_formats_across_scales() {
+        assert_eq!(format_daemon_uptime(7), "7s");
+        assert_eq!(format_daemon_uptime(65), "1m 5s");
+        assert_eq!(format_daemon_uptime(3700), "1h 1m");
+        assert_eq!(format_daemon_uptime(90_000), "1d 1h");
+    }
+
+    #[test]
+    fn status_block_renders_fields() {
+        let body = serde_json::json!({
+            "version": "0.14.1",
+            "permission_mode": "auto",
+            "active_tasks": 2,
+            "egress_proxy": "127.0.0.1:4419",
+            "uptime_seconds": 3700
+        });
+        let out = format_daemon_status(&body);
+        assert!(out.contains("v0.14.1"));
+        assert!(out.contains("mode:         auto"));
+        assert!(out.contains("egress:       on (127.0.0.1:4419)"));
+        assert!(out.contains("uptime:       1h 1m"));
+        assert!(out.contains("active tasks: 2"));
+    }
+
+    #[test]
+    fn status_block_handles_egress_off_and_missing() {
+        let body = serde_json::json!({"version": "0.14.1", "egress_proxy": serde_json::Value::Null});
+        let out = format_daemon_status(&body);
+        assert!(out.contains("egress:       off"));
+        assert!(out.contains("uptime:       ?"), "missing uptime → '?': {out}");
     }
 }

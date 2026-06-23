@@ -58,6 +58,48 @@ pub use server::{build_router, serve, serve_on, serve_with_shutdown, AppState};
 pub use session::{InMemorySessionStore, Session, SessionStatus, SessionStore};
 pub use wire::{map_agent_event, ClientEvent, PriorMessage, ServerEvent};
 
+/// Build durable state, start the egress boundary if configured, and serve on
+/// `addr` until shutdown.
+///
+/// This is the canonical daemon entry — used by **both** the standalone
+/// `smooth-daemon` binary and `th daemon`, so the egress proxy starts the same
+/// way regardless of how the daemon is launched (the bug this consolidates: the
+/// `th daemon` path previously served without ever starting the proxy).
+///
+/// # Errors
+/// Returns an error if the durable DB or the socket cannot be opened.
+pub async fn serve_persistent(addr: std::net::SocketAddr) -> anyhow::Result<()> {
+    let mut state = AppState::persistent_default()?;
+    tracing::info!(db = %AppState::default_db_path().display(), "durable state");
+    start_egress_if_configured(&mut state);
+    serve(state, addr).await
+}
+
+/// Start the goalie egress proxy on a background task and point the bash tool at
+/// it, when `SMOOTH_EGRESS_ALLOWLIST` is configured. No-op otherwise.
+fn start_egress_if_configured(state: &mut AppState) {
+    let Some(setup) = config::resolve_egress() else { return };
+    let audit = match smooth_goalie::AuditLogger::new(&config::egress_audit_path().to_string_lossy()) {
+        Ok(audit) => audit,
+        Err(e) => {
+            tracing::error!(error = %e, "egress audit log could not be opened — egress boundary NOT started");
+            return;
+        }
+    };
+    if !setup.rejected.is_empty() {
+        tracing::warn!(rejected = ?setup.rejected, "egress allowlist dropped invalid entries");
+    }
+    tracing::info!(proxy = %setup.proxy_addr, hosts = setup.allowlist.len(), "egress boundary ON");
+    let proxy_addr = setup.proxy_addr.clone();
+    let allowlist = setup.allowlist;
+    tokio::spawn(async move {
+        if let Err(e) = smooth_goalie::run_proxy_local(&proxy_addr, allowlist, audit).await {
+            tracing::error!(error = %e, "egress proxy exited — sandboxed egress now fails closed");
+        }
+    });
+    state.egress_proxy = Some(setup.proxy_addr);
+}
+
 /// The crate version, surfaced by the daemon's health/status endpoint so
 /// frontends can detect a server upgrade across a reconnect.
 #[must_use]
