@@ -11,8 +11,8 @@
 //! is the kernel OS-sandbox added in Phase 3; this is the cheap first gate.)
 //!
 //! Build-out:
-//! - **Slice A (this):** read-only tools — `read_file`, `list_files`, `grep`.
-//! - Slice B: mutating tools — `write_file`, `edit_file`.
+//! - Slice A: read-only tools — `read_file`, `list_files`, `grep`.
+//! - **Slice B (this):** mutating tools — `write_file`, `edit_file`.
 //! - Slice C: `bash` (pre-sandbox; Phase 3 wraps it).
 
 use std::path::PathBuf;
@@ -23,19 +23,23 @@ pub mod grep;
 pub mod path;
 pub mod read;
 mod util;
+pub mod write;
 
 pub use grep::GrepTool;
 pub use path::resolve_workspace_path;
 pub use read::{ListFilesTool, ReadFileTool};
+pub use write::{EditFileTool, WriteFileTool};
 
 /// Register the default tool set on `registry`, all confined to `workspace`.
 ///
-/// Slice A registers the read-only tools; mutating + shell tools are added here
-/// as later slices land, so consumers keep calling this one function.
+/// One call installs the full set; later slices extend it (shell tools), so
+/// consumers keep calling this one function.
 pub fn register_default_tools(registry: &mut ToolRegistry, workspace: PathBuf) {
     registry.register(ReadFileTool { workspace: workspace.clone() });
     registry.register(ListFilesTool { workspace: workspace.clone() });
-    registry.register(GrepTool { workspace });
+    registry.register(GrepTool { workspace: workspace.clone() });
+    registry.register(WriteFileTool { workspace: workspace.clone() });
+    registry.register(EditFileTool { workspace });
 }
 
 #[cfg(test)]
@@ -48,7 +52,7 @@ mod tests {
         let mut registry = ToolRegistry::new();
         register_default_tools(&mut registry, PathBuf::from("/tmp"));
         let names: Vec<String> = registry.schemas().into_iter().map(|s| s.name).collect();
-        for expected in ["read_file", "list_files", "grep"] {
+        for expected in ["read_file", "list_files", "grep", "write_file", "edit_file"] {
             assert!(names.iter().any(|n| n == expected), "missing {expected} in {names:?}");
         }
     }
