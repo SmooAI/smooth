@@ -413,6 +413,20 @@ fn resolve_workspace(working_dir: Option<String>) -> PathBuf {
     std::fs::canonicalize(&raw).unwrap_or(raw)
 }
 
+/// Derive a short, readable session title from its first user message: the
+/// first non-empty line, trimmed to 60 chars (ellipsised if longer).
+fn derive_title(message: &str) -> String {
+    let line = message.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    if line.is_empty() {
+        return "New session".to_owned();
+    }
+    let mut title: String = line.chars().take(60).collect();
+    if line.chars().count() > 60 {
+        title.push('…');
+    }
+    title
+}
+
 /// Max prior turns replayed into a resumed session.
 const PRIOR_HISTORY_LIMIT: usize = 1000;
 
@@ -587,6 +601,9 @@ async fn handle_client_event(ev: ClientEvent, session_id: &str, state: &AppState
             ..
         } => {
             let task_id = uuid::Uuid::new_v4().to_string();
+            // Auto-title the session from its first message so the sessions list
+            // shows something readable instead of a raw id (no-op if titled).
+            let _ = state.sessions.set_title_if_unset(session_id, &derive_title(&message)).await;
             // The daemon owns the conversation: load this session's durable
             // history as prior_messages (ignoring any client-sent copy), so a
             // turn continues the conversation even across a daemon restart.
@@ -813,6 +830,16 @@ mod tests {
             hits.iter().any(|m| m.content.contains("GitHub Actions")),
             "durable memory recalled across restart"
         );
+    }
+
+    #[test]
+    fn derive_title_uses_first_line_and_truncates() {
+        assert_eq!(derive_title("fix the login bug"), "fix the login bug");
+        assert_eq!(derive_title("  \n  second line is real\nthird"), "second line is real");
+        assert_eq!(derive_title("   "), "New session");
+        let long = "x".repeat(80);
+        let title = derive_title(&long);
+        assert!(title.ends_with('…') && title.chars().count() == 61, "{title}");
     }
 
     #[tokio::test]

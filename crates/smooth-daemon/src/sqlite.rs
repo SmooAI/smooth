@@ -288,6 +288,15 @@ impl SessionStore for SqliteSessionStore {
         )?;
         Ok(())
     }
+
+    async fn set_title_if_unset(&self, id: &str, title: &str) -> anyhow::Result<()> {
+        let guard = lock(&self.conn);
+        guard.execute(
+            "UPDATE sessions SET title = ?1, updated_at = ?2 WHERE id = ?3 AND (title IS NULL OR title = '')",
+            params![title, Utc::now().to_rfc3339(), id],
+        )?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------

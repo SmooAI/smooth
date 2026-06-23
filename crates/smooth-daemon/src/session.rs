@@ -79,6 +79,14 @@ pub trait SessionStore: Send + Sync {
     /// # Errors
     /// Returns an error if the store cannot be written.
     async fn set_status(&self, id: &str, status: SessionStatus) -> anyhow::Result<()>;
+
+    /// Set a session's title **only if it currently has none** (no-op if unknown
+    /// or already titled). Used to auto-title a session from its first message
+    /// without clobbering a title the operator chose explicitly.
+    ///
+    /// # Errors
+    /// Returns an error if the store cannot be written.
+    async fn set_title_if_unset(&self, id: &str, title: &str) -> anyhow::Result<()>;
 }
 
 /// In-memory [`SessionStore`] — the dev/test backend (not durable).
@@ -143,6 +151,16 @@ impl SessionStore for InMemorySessionStore {
         }
         Ok(())
     }
+
+    async fn set_title_if_unset(&self, id: &str, title: &str) -> anyhow::Result<()> {
+        if let Some(s) = self.lock().get_mut(id) {
+            if s.title.as_deref().is_none_or(str::is_empty) {
+                s.title = Some(title.to_owned());
+                s.updated_at = Utc::now();
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -166,6 +184,22 @@ mod tests {
         let s = store.create(None, None).await.unwrap();
         assert!(!s.id.is_empty());
         assert_eq!(store.get(&s.id).await.unwrap(), Some(s));
+    }
+
+    #[tokio::test]
+    async fn set_title_if_unset_fills_blank_but_keeps_explicit() {
+        let store = InMemorySessionStore::new();
+        // Untitled session gets auto-titled.
+        store.create(Some("blank".into()), None).await.unwrap();
+        store.set_title_if_unset("blank", "auto title").await.unwrap();
+        assert_eq!(store.get("blank").await.unwrap().unwrap().title.as_deref(), Some("auto title"));
+        // A second call does not overwrite the now-set title.
+        store.set_title_if_unset("blank", "later").await.unwrap();
+        assert_eq!(store.get("blank").await.unwrap().unwrap().title.as_deref(), Some("auto title"));
+        // An explicitly-titled session is left alone.
+        store.create(Some("named".into()), Some("chosen".into())).await.unwrap();
+        store.set_title_if_unset("named", "auto").await.unwrap();
+        assert_eq!(store.get("named").await.unwrap().unwrap().title.as_deref(), Some("chosen"));
     }
 
     #[tokio::test]
