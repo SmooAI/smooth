@@ -299,6 +299,9 @@ async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
         "version": crate::version(),
         "permission_mode": state.permission_mode.get().as_str(),
         "active_tasks": state.coordinator.active_count(),
+        // The egress boundary's proxy address when enabled, else null — lets the
+        // control surface show whether agent shell egress is allowlist-confined.
+        "egress_proxy": state.egress_proxy,
     }))
 }
 
@@ -737,6 +740,20 @@ mod tests {
             .await
             .expect("live event should arrive");
         assert!(live.is_some());
+    }
+
+    #[tokio::test]
+    async fn status_reports_egress_proxy_when_set_else_null() {
+        // Off by default → null.
+        let state = AppState::new();
+        let Json(off) = status(State(state.clone())).await;
+        assert!(off["egress_proxy"].is_null(), "egress off → null: {off}");
+
+        // On → the proxy address.
+        let mut on_state = AppState::new();
+        on_state.egress_proxy = Some("127.0.0.1:4419".to_owned());
+        let Json(on) = status(State(on_state)).await;
+        assert_eq!(on["egress_proxy"], "127.0.0.1:4419");
     }
 
     #[tokio::test]

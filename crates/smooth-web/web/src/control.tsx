@@ -228,6 +228,14 @@ export function ControlApp() {
                             ))}
                         </select>
                     )}
+                    {status && (
+                        <span
+                            title={status.egress_proxy ? `egress confined via ${status.egress_proxy}` : 'egress unrestricted'}
+                            className={`rounded px-2 py-0.5 ${status.egress_proxy ? 'bg-primary/15 text-primary' : 'bg-white/5 text-foreground/40'}`}
+                        >
+                            egress {status.egress_proxy ? 'on' : 'off'}
+                        </span>
+                    )}
                     {status && status.active_tasks > 0 && <span className="text-foreground/50">{status.active_tasks} running</span>}
                     <span className="flex items-center gap-1">
                         <span className={`h-2 w-2 rounded-full ${connected ? 'bg-primary' : 'bg-red-500'}`} />

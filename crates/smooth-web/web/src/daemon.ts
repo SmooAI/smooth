@@ -16,6 +16,8 @@ export interface Status {
     version: string;
     permission_mode: string;
     active_tasks: number;
+    /** Egress-proxy address when the egress boundary is on, else null. */
+    egress_proxy: string | null;
 }
 
 export type SessionStatus = 'active' | 'idle' | 'completed';
