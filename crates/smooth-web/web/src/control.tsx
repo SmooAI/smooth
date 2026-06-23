@@ -46,6 +46,7 @@ export function ControlApp() {
     const [items, setItems] = useState<ChatItem[]>([]);
     const [pending, setPending] = useState<PendingApproval[]>([]);
     const [busy, setBusy] = useState(false);
+    const [taskId, setTaskId] = useState<string | null>(null);
     const [input, setInput] = useState('');
     const socketRef = useRef<DaemonSocket | null>(null);
     const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -64,6 +65,9 @@ export function ControlApp() {
     // the stable state setters.
     const handlerRef = useRef<(ev: ServerEvent) => void>(() => {});
     handlerRef.current = (ev: ServerEvent) => {
+        // Learn the running task's id from the first event that carries it, so
+        // we can cancel it.
+        if ('task_id' in ev && ev.task_id) setTaskId(ev.task_id);
         switch (ev.type) {
             case 'Connected':
                 setSessionId(ev.session_id);
@@ -96,11 +100,14 @@ export function ControlApp() {
             case 'TaskComplete':
                 setItems((prev) => [...prev, { kind: 'complete', iterations: ev.iterations, cost_usd: ev.cost_usd }]);
                 setBusy(false);
+                setTaskId(null);
                 refreshSessions();
                 break;
             case 'TaskError':
                 setItems((prev) => [...prev, { kind: 'error', text: ev.message }]);
                 setBusy(false);
+                setTaskId(null);
+                refreshSessions();
                 break;
             case 'PermissionRequest':
                 setPending((prev) => [...prev, { request_id: ev.request_id, tool_name: ev.tool_name, summary: ev.summary }]);
@@ -141,6 +148,7 @@ export function ControlApp() {
     const selectSession = async (id: string) => {
         if (id === sessionId) return;
         setBusy(false);
+        setTaskId(null);
         setPending([]);
         try {
             const history = await listMessages(id);
@@ -171,6 +179,13 @@ export function ControlApp() {
         } finally {
             getStatus().then(setStatus).catch(() => {});
         }
+    };
+
+    const cancel = () => {
+        if (taskId) socketRef.current?.send({ type: 'TaskCancel', task_id: taskId });
+        // The daemon emits a terminal TaskError back, which flips busy off; this
+        // is just an optimistic UI nudge in case the socket is mid-reconnect.
+        setBusy(false);
     };
 
     const reply = (request_id: string, allow: boolean) => {
@@ -284,9 +299,15 @@ export function ControlApp() {
                             disabled={busy}
                             className="flex-1 rounded border border-white/10 bg-white/5 px-3 py-2 text-sm outline-none focus:border-primary/50"
                         />
-                        <button onClick={send} disabled={busy || !input.trim()} className="rounded bg-primary px-4 py-2 text-sm font-medium text-background disabled:opacity-40">
-                            send
-                        </button>
+                        {busy ? (
+                            <button onClick={cancel} className="rounded bg-red-500/20 px-4 py-2 text-sm font-medium text-red-300 hover:bg-red-500/30">
+                                stop
+                            </button>
+                        ) : (
+                            <button onClick={send} disabled={!input.trim()} className="rounded bg-primary px-4 py-2 text-sm font-medium text-background disabled:opacity-40">
+                                send
+                            </button>
+                        )}
                     </div>
                 </main>
             </div>

@@ -499,7 +499,16 @@ async fn handle_client_event(ev: ClientEvent, session_id: &str, state: &AppState
             }
         }
         ClientEvent::TaskCancel { task_id } => {
-            state.coordinator.cancel_task(&task_id);
+            // The aborted fiber skips its own completion cleanup, so emit a
+            // terminal event and free the session here — otherwise the client
+            // stays "busy" forever with no signal the run ended.
+            if state.coordinator.cancel_task(&task_id) {
+                let _ = out_tx.send(ServerEvent::TaskError {
+                    task_id,
+                    message: "task cancelled".to_string(),
+                });
+                let _ = state.sessions.set_status(session_id, SessionStatus::Idle).await;
+            }
         }
         ClientEvent::Ping => {
             let _ = out_tx.send(ServerEvent::Pong);
@@ -683,5 +692,44 @@ mod tests {
         assert_eq!(err, StatusCode::BAD_REQUEST);
         // Posture is unchanged after a rejected switch.
         assert_eq!(state.permission_mode.get(), PermissionMode::Default);
+    }
+
+    #[tokio::test]
+    async fn task_cancel_emits_terminal_event_and_frees_session() {
+        let state = AppState::new();
+        let session = state.sessions.create(None, None).await.unwrap();
+        let sid = session.id.clone();
+
+        // A task that hangs until cancelled, registered with the coordinator.
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let g = Arc::clone(&gate);
+        state
+            .coordinator
+            .try_start(sid.clone(), "t1".to_string(), async move { g.notified().await })
+            .unwrap();
+        state.sessions.set_status(&sid, SessionStatus::Active).await.unwrap();
+        assert_eq!(state.coordinator.active_count(), 1);
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        handle_client_event(ClientEvent::TaskCancel { task_id: "t1".into() }, &sid, &state, &tx).await;
+
+        // The client gets a terminal event so it can drop "busy"…
+        let ev = rx.recv().await.unwrap();
+        assert!(
+            matches!(ev, ServerEvent::TaskError { ref message, .. } if message == "task cancelled"),
+            "expected a 'task cancelled' TaskError, got {ev:?}"
+        );
+        // …the fiber is gone and the session is idle again.
+        assert_eq!(state.coordinator.active_count(), 0);
+        let s = state.sessions.get(&sid).await.unwrap().unwrap();
+        assert_eq!(s.status, SessionStatus::Idle);
+    }
+
+    #[tokio::test]
+    async fn task_cancel_unknown_id_is_silent() {
+        let state = AppState::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        handle_client_event(ClientEvent::TaskCancel { task_id: "ghost".into() }, "s1", &state, &tx).await;
+        assert!(rx.try_recv().is_err(), "no terminal event is emitted for an unknown task id");
     }
 }
