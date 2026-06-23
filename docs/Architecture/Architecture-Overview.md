@@ -89,6 +89,7 @@
 
 ## Where to next
 
+- [[Daemon-Security-Model]] — the always-on daemon's three security layers (permission engine + kernel sandbox + egress boundary), EPIC th-c89c2a
 - [[Sandboxed-Mode]] — what's inside the microVM
 - [[Direct-Mode]] — what changes without it
 - [[The-Cast]] — every named role, definitively
