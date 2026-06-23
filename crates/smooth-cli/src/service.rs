@@ -20,7 +20,7 @@ use owo_colors::OwoColorize;
 
 pub const LABEL: &str = "com.smooai.smooth";
 
-pub fn install(system: bool) -> Result<()> {
+pub fn install(system: bool, daemon: bool) -> Result<()> {
     let exe = std::env::current_exe().context("resolving current `th` executable path")?;
     let home = dirs_next::home_dir().context("cannot determine home directory")?;
     let log_path = home.join(".smooth").join("service.log");
@@ -28,26 +28,26 @@ pub fn install(system: bool) -> Result<()> {
     std::fs::create_dir_all(home.join(".smooth"))?;
 
     if system {
-        print_system_artifact(&exe, &home, &log_path, &err_path);
+        print_system_artifact(&exe, &home, &log_path, &err_path, daemon);
         return Ok(());
     }
 
     #[cfg(target_os = "macos")]
     {
-        macos::install_user(&exe, &log_path, &err_path)
+        macos::install_user(&exe, &log_path, &err_path, daemon)
     }
     #[cfg(target_os = "linux")]
     {
-        linux::install_user(&exe, &log_path, &err_path, &home)
+        linux::install_user(&exe, &log_path, &err_path, &home, daemon)
     }
     #[cfg(target_os = "windows")]
     {
         let _ = (log_path, err_path);
-        windows::install_user(&exe)
+        windows::install_user(&exe, daemon)
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
-        let _ = (exe, home, log_path, err_path);
+        let _ = (exe, home, log_path, err_path, daemon);
         anyhow::bail!("th service is not implemented on this platform")
     }
 }
@@ -145,11 +145,11 @@ fn platform_control(action: &str) -> Result<()> {
     }
 }
 
-fn print_system_artifact(exe: &std::path::Path, home: &std::path::Path, log: &std::path::Path, err: &std::path::Path) {
+fn print_system_artifact(exe: &std::path::Path, home: &std::path::Path, log: &std::path::Path, err: &std::path::Path, daemon: bool) {
     println!("\n  {} System-level install prints the artifact; install it manually.\n", "ℹ".cyan());
     #[cfg(target_os = "macos")]
     {
-        let plist = macos::render_plist(exe, log, err);
+        let plist = macos::render_plist(exe, log, err, daemon);
         println!("  Save the following to {}:\n", "/Library/LaunchDaemons/com.smooai.smooth.plist".cyan());
         println!("{plist}");
         println!("\n  Then:\n");
@@ -162,7 +162,7 @@ fn print_system_artifact(exe: &std::path::Path, home: &std::path::Path, log: &st
     }
     #[cfg(target_os = "linux")]
     {
-        let unit = linux::render_unit(exe, log, err);
+        let unit = linux::render_unit(exe, log, err, daemon);
         println!("  Save the following to {}:\n", "/etc/systemd/system/smooth.service".cyan());
         println!("{unit}");
         println!("\n  Then:\n");
@@ -180,7 +180,7 @@ fn print_system_artifact(exe: &std::path::Path, home: &std::path::Path, log: &st
         );
         println!();
     }
-    let _ = home;
+    let _ = (home, daemon);
 }
 
 // ---------------------------------------------------------------------------
@@ -196,7 +196,12 @@ mod macos {
         Ok(home.join("Library").join("LaunchAgents").join(format!("{LABEL}.plist")))
     }
 
-    pub fn render_plist(exe: &std::path::Path, log: &std::path::Path, err: &std::path::Path) -> String {
+    pub fn render_plist(exe: &std::path::Path, log: &std::path::Path, err: &std::path::Path, daemon: bool) -> String {
+        let program_args = if daemon {
+            "        <string>daemon</string>".to_string()
+        } else {
+            "        <string>up</string>\n        <string>--foreground</string>".to_string()
+        };
         // Escape minimal XML-unsafe chars. Paths with & < > in them are
         // vanishingly rare on macOS but may as well be correct.
         let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
@@ -211,8 +216,7 @@ mod macos {
     <key>ProgramArguments</key>
     <array>
         <string>{exe}</string>
-        <string>up</string>
-        <string>--foreground</string>
+{program_args}
     </array>
     <key>WorkingDirectory</key>
     <string>{home}</string>
@@ -244,12 +248,12 @@ mod macos {
         )
     }
 
-    pub fn install_user(exe: &std::path::Path, log: &std::path::Path, err: &std::path::Path) -> Result<()> {
+    pub fn install_user(exe: &std::path::Path, log: &std::path::Path, err: &std::path::Path, daemon: bool) -> Result<()> {
         let path = plist_path()?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let body = render_plist(exe, log, err);
+        let body = render_plist(exe, log, err, daemon);
         std::fs::write(&path, body).with_context(|| format!("write {}", path.display()))?;
 
         // If there's a neighbor smooth-dolt (common for scp'd installs:
@@ -385,7 +389,12 @@ mod linux {
         home.join(".config").join("systemd").join("user").join(UNIT_NAME)
     }
 
-    pub fn render_unit(exe: &std::path::Path, log: &std::path::Path, err: &std::path::Path) -> String {
+    pub fn render_unit(exe: &std::path::Path, log: &std::path::Path, err: &std::path::Path, daemon: bool) -> String {
+        let exec_cmd = if daemon {
+            format!("{} daemon", exe.display())
+        } else {
+            format!("{} up --foreground", exe.display())
+        };
         format!(
             r#"[Unit]
 Description=Smooth (Smoo AI orchestration)
@@ -393,7 +402,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart={exe} up --foreground
+ExecStart={exec_cmd}
 WorkingDirectory=%h
 Restart=on-failure
 RestartSec=3s
@@ -403,18 +412,17 @@ StandardError=append:{err}
 [Install]
 WantedBy=default.target
 "#,
-            exe = exe.display(),
             log = log.display(),
             err = err.display(),
         )
     }
 
-    pub fn install_user(exe: &std::path::Path, log: &std::path::Path, err: &std::path::Path, home: &std::path::Path) -> Result<()> {
+    pub fn install_user(exe: &std::path::Path, log: &std::path::Path, err: &std::path::Path, home: &std::path::Path, daemon: bool) -> Result<()> {
         let path = unit_path(home);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&path, render_unit(exe, log, err)).with_context(|| format!("write {}", path.display()))?;
+        std::fs::write(&path, render_unit(exe, log, err, daemon)).with_context(|| format!("write {}", path.display()))?;
 
         run_systemctl(&["--user", "daemon-reload"])?;
         run_systemctl(&["--user", "enable", "--now", UNIT_NAME])?;
@@ -476,11 +484,15 @@ mod windows {
 
     pub const TASK_NAME: &str = "SmoothAI";
 
-    pub fn install_user(exe: &std::path::Path) -> Result<()> {
+    pub fn install_user(exe: &std::path::Path, daemon: bool) -> Result<()> {
         // Best-effort: delete an existing task so re-install is idempotent.
         let _ = std::process::Command::new("schtasks").args(["/Delete", "/TN", TASK_NAME, "/F"]).status();
 
-        let cmd = format!("\"{}\" up --foreground", exe.display());
+        let cmd = if daemon {
+            format!("\"{}\" daemon", exe.display())
+        } else {
+            format!("\"{}\" up --foreground", exe.display())
+        };
         let out = std::process::Command::new("schtasks")
             .args(["/Create", "/SC", "ONLOGON", "/TN", TASK_NAME, "/TR", &cmd, "/RL", "LIMITED", "/F"])
             .output()
@@ -542,11 +554,15 @@ mod tests {
         let exe = std::path::PathBuf::from("/opt/th");
         let log = std::path::PathBuf::from("/tmp/smooth.log");
         let err = std::path::PathBuf::from("/tmp/smooth.err");
-        let body = macos::render_plist(&exe, &log, &err);
+        let body = macos::render_plist(&exe, &log, &err, false);
         assert!(body.contains("<string>com.smooai.smooth</string>"));
         assert!(body.contains("<string>/opt/th</string>"));
         assert!(body.contains("<string>up</string>"));
         assert!(body.contains("<string>--foreground</string>"));
+        // Daemon variant runs `th daemon` instead of `up --foreground`.
+        let dbody = macos::render_plist(&exe, &log, &err, true);
+        assert!(dbody.contains("<string>daemon</string>"));
+        assert!(!dbody.contains("<string>up</string>"));
         assert!(body.contains("<key>KeepAlive</key>"));
         assert!(body.contains("<key>RunAtLoad</key>"));
         assert!(body.contains("<key>WorkingDirectory</key>"));
@@ -561,8 +577,11 @@ mod tests {
         let exe = std::path::PathBuf::from("/opt/th");
         let log = std::path::PathBuf::from("/tmp/smooth.log");
         let err = std::path::PathBuf::from("/tmp/smooth.err");
-        let unit = linux::render_unit(&exe, &log, &err);
+        let unit = linux::render_unit(&exe, &log, &err, false);
         assert!(unit.contains("ExecStart=/opt/th up --foreground"));
+        let dunit = linux::render_unit(&exe, &log, &err, true);
+        assert!(dunit.contains("ExecStart=/opt/th daemon"));
+        assert!(!dunit.contains("up --foreground"));
         assert!(unit.contains("WorkingDirectory=%h"));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("WantedBy=default.target"));

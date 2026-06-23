@@ -6214,6 +6214,7 @@ dependencies = [
  "smooai-smooth-bootstrap-bill",
  "smooai-smooth-cast",
  "smooai-smooth-code",
+ "smooai-smooth-daemon",
  "smooai-smooth-diver",
  "smooai-smooth-operator-core",
  "smooai-smooth-pearls",

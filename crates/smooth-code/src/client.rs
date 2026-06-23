@@ -437,14 +437,18 @@ impl BigSmoothClient {
             return Ok(());
         }
 
-        // Try to start Big Smooth
+        // Start the server: the always-on daemon (`th daemon`) when
+        // SMOOTH_USE_DAEMON is set, else legacy Big Smooth (`th up`). Both
+        // serve the same WS protocol on the same port, so the rest of the
+        // client is identical (EPIC th-c89c2a).
+        let subcommand = if std::env::var("SMOOTH_USE_DAEMON").is_ok() { "daemon" } else { "up" };
         let th_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("th"));
         let _child = tokio::process::Command::new(&th_bin)
-            .arg("up")
+            .arg(subcommand)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .map_err(|e| anyhow::anyhow!("Failed to spawn Big Smooth (th up): {e}"))?;
+            .map_err(|e| anyhow::anyhow!("Failed to spawn Smooth server (th {subcommand}): {e}"))?;
 
         // Wait up to 10s for health
         for _ in 0..100 {
@@ -454,7 +458,7 @@ impl BigSmoothClient {
             }
         }
 
-        anyhow::bail!("Big Smooth failed to start within 10 seconds")
+        anyhow::bail!("Smooth server (th {subcommand}) failed to start within 10 seconds")
     }
 }
 
