@@ -37,9 +37,21 @@ use smooth_api_client::{CredentialsStore, SmoothApiClient};
 /// session re-mints transparently — the user doesn't see the
 /// expiry unless their stored M2M credentials were rotated.
 pub async fn require_authed() -> Result<SmoothApiClient> {
+    // Prefer a valid USER session (`~/.smooth/auth/smooai-user.json`, written by
+    // `th auth login` and used by `th config`) so `th api`/`th admin` honor a
+    // logged-in user — the platform API accepts user JWTs
+    // (`assertMachineTokenAuthorizedForOrg` passes Supabase auth). Fall back to
+    // the M2M session (`smooai.json`) otherwise. `SmoothApiClient::from_disk`'s
+    // own store is hard-wired to the M2M file, hence the explicit user-store load
+    // here. (An EXPIRED user JWT isn't Supabase-refreshed here — it falls through
+    // to M2M / a re-login prompt.)
+    if let Some(client) = try_user_session().await {
+        return Ok(client);
+    }
+
     let client = SmoothApiClient::from_disk().context("load credentials")?;
     if client.credentials().is_none() {
-        anyhow::bail!("not logged in — run `th api login` first");
+        anyhow::bail!("not logged in — run `th auth login` (user) or `th api login` (M2M) first");
     }
     // Try to refresh if expired. ensure_fresh_token is a no-op when
     // the token is still valid or when no client_credentials are on
@@ -47,11 +59,28 @@ pub async fn require_authed() -> Result<SmoothApiClient> {
     client.ensure_fresh_token().await.ok();
     if !client.is_authenticated() {
         anyhow::bail!(
-            "session expired and no stored client credentials to auto-refresh — run `th api login` again \
+            "session expired and no stored client credentials to auto-refresh — run `th auth login` again \
              (or set SMOOAI_CONFIG_CLIENT_ID + SMOOAI_CONFIG_CLIENT_SECRET so the next call refreshes silently)"
         );
     }
     Ok(client)
+}
+
+/// Build an authed client from the user JWT at `~/.smooth/auth/smooai-user.json`,
+/// or `None` if it's absent/unreadable/expired so the caller falls back to M2M.
+async fn try_user_session() -> Option<SmoothApiClient> {
+    let home = std::env::var_os("HOME")?;
+    let path = std::path::Path::new(&home).join(".smooth").join("auth").join("smooai-user.json");
+    if !path.exists() {
+        return None;
+    }
+    let store = CredentialsStore::at(&path);
+    let creds = store.load().ok()??;
+    let client = SmoothApiClient::new(smooth_api_client::base_url(), Some(creds), store).ok()?;
+    // No-op for a user JWT (no client_secret to re-mint), but harmless.
+    client.ensure_fresh_token().await.ok();
+    // is_authenticated() is false for an expired session → fall back to M2M.
+    client.is_authenticated().then_some(client)
 }
 
 /// Resolve the active org id. Delegates to
