@@ -88,6 +88,8 @@ pub struct AppState {
     /// Durable cross-session agent memory; the engine auto-recalls from it each
     /// turn. SQLite-backed in `persistent`, in-memory for `new`.
     pub memory: Arc<dyn smooth_operator::Memory>,
+    /// When this daemon process started — surfaced as uptime in `/api/status`.
+    pub started_at: std::time::Instant,
 }
 
 impl AppState {
@@ -104,6 +106,7 @@ impl AppState {
             auth_token: None,
             egress_proxy: None,
             memory: Arc::new(smooth_operator::InMemoryMemory::new()),
+            started_at: std::time::Instant::now(),
         }
     }
 
@@ -125,6 +128,7 @@ impl AppState {
             permission_mode: SharedPermissionMode::new(crate::config::resolve_permission_mode()),
             auth_token: crate::config::resolve_auth_token().map(Arc::new),
             egress_proxy: None,
+            started_at: std::time::Instant::now(),
         })
     }
 
@@ -308,6 +312,8 @@ async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
         // The egress boundary's proxy address when enabled, else null — lets the
         // control surface show whether agent shell egress is allowlist-confined.
         "egress_proxy": state.egress_proxy,
+        // Seconds since this daemon process started.
+        "uptime_seconds": state.started_at.elapsed().as_secs(),
     }))
 }
 
@@ -876,6 +882,7 @@ mod tests {
         let state = AppState::new();
         let Json(off) = status(State(state.clone())).await;
         assert!(off["egress_proxy"].is_null(), "egress off → null: {off}");
+        assert!(off["uptime_seconds"].is_u64(), "status reports uptime: {off}");
 
         // On → the proxy address.
         let mut on_state = AppState::new();

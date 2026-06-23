@@ -18,6 +18,8 @@ export interface Status {
     active_tasks: number;
     /** Egress-proxy address when the egress boundary is on, else null. */
     egress_proxy: string | null;
+    /** Seconds since the daemon process started. */
+    uptime_seconds: number;
 }
 
 export type SessionStatus = 'active' | 'idle' | 'completed';

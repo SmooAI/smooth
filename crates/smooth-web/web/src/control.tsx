@@ -229,6 +229,7 @@ export function ControlApp() {
                 <div className="flex items-center gap-2">
                     <span className="text-lg font-semibold text-primary">Smooth</span>
                     <span className="text-xs text-foreground/50">daemon {health?.version ?? '—'}</span>
+                    {status && <span className="text-xs text-foreground/40">· up {formatUptime(status.uptime_seconds)}</span>}
                 </div>
                 <div className="flex items-center gap-3 text-xs">
                     {status && (
@@ -360,6 +361,15 @@ export function ControlApp() {
             </div>
         </div>
     );
+}
+
+function formatUptime(seconds: number): string {
+    if (seconds < 60) return `${seconds}s`;
+    const m = Math.floor(seconds / 60);
+    if (m < 60) return `${m}m`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h ${m % 60}m`;
+    return `${Math.floor(h / 24)}d ${h % 24}h`;
 }
 
 function ChatBubble({ item }: { item: ChatItem }) {
