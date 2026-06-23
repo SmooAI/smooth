@@ -8,7 +8,9 @@
 //! to `.git/hooks` and `.git/config` (either would re-enter execution outside
 //! the sandbox via a hook or `core.hooksPath`) — and **denies reads** of the
 //! operator's credential stores (`~/.ssh`, `~/.aws`, `~/.config/gh`,
-//! `~/.config/gcloud`, `~/.kube`, `~/.docker`, `~/.gnupg`, `~/.netrc`).
+//! `~/.config/gcloud`, `~/.kube`, `~/.docker`, `~/.gnupg`, `~/.netrc`) —
+//! including the daemon's *own* secrets in `~/.smooth` (`providers.json`'s
+//! LLM key, the `auth/` JWT), so a sandboxed tool can't exfil what drives it.
 //!
 //! **P0 — non-bypassable.** A [`SandboxedCommand`] is the *only* way `bash`
 //! builds its subprocess. There is no constructor that yields a plain
@@ -121,7 +123,9 @@ fn macos_profile(policy: &SandboxPolicy) -> String {
              \x20  (subpath \"{h}/.kube\")\n\
              \x20  (subpath \"{h}/.docker\")\n\
              \x20  (subpath \"{h}/.gnupg\")\n\
-             \x20  (literal \"{h}/.netrc\"))\n"
+             \x20  (literal \"{h}/.netrc\")\n\
+             \x20  (literal \"{h}/.smooth/providers.json\")\n\
+             \x20  (subpath \"{h}/.smooth/auth\"))\n"
         );
     }
     p
@@ -227,6 +231,36 @@ mod tests {
             // dirs that exist; absent ones simply have nothing to read).
             assert!(!out.contains("aws_secret_access_key"), "no AWS secret should leak: {out}");
             assert!(!out.contains("BEGIN PRIVATE KEY"), "no key material should leak: {out}");
+        }
+
+        #[tokio::test]
+        async fn reading_the_daemons_own_smooth_credentials_is_denied() {
+            // The lethal case: the agent's own LLM key + auth JWT live in
+            // ~/.smooth. A sandboxed tool reading them would exfil exactly what
+            // drives the daemon. Plant a sentinel we fully own under the denied
+            // `~/.smooth/auth` subpath and prove the sandbox can't read it.
+            let home = std::env::var("HOME").unwrap();
+            let auth_dir = std::path::Path::new(&home).join(".smooth").join("auth");
+            let created = !auth_dir.exists();
+            std::fs::create_dir_all(&auth_dir).unwrap();
+            let sentinel = auth_dir.join("smooth-sandbox-sentinel.json");
+            std::fs::write(&sentinel, "SMOOTH_SECRET_SENTINEL_4f3a").unwrap();
+
+            let dir = tempfile::tempdir().unwrap();
+            let policy = SandboxPolicy::for_workspace(dir.path().to_path_buf());
+            let (_c, out) = run(&policy, "cat ~/.smooth/auth/smooth-sandbox-sentinel.json 2>&1; echo DONE").await;
+
+            // Clean up our sentinel (and the dir only if we created it).
+            let _ = std::fs::remove_file(&sentinel);
+            if created {
+                let _ = std::fs::remove_dir(&auth_dir);
+            }
+
+            assert!(out.contains("DONE"));
+            assert!(
+                !out.contains("SMOOTH_SECRET_SENTINEL_4f3a"),
+                "the daemon's own creds under ~/.smooth/auth must not be readable in-sandbox: {out}"
+            );
         }
     }
 
