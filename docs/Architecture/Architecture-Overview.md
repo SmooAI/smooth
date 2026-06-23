@@ -89,6 +89,7 @@
 
 ## Where to next
 
+- [[Always-On-Daemon]] — the reimagined Big Smooth: single-tenant always-on daemon on smooth-operator (EPIC th-c89c2a), spine + frontends + durable state
 - [[Daemon-Security-Model]] — the always-on daemon's three security layers (permission engine + kernel sandbox + egress boundary), EPIC th-c89c2a
 - [[Sandboxed-Mode]] — what's inside the microVM
 - [[Direct-Mode]] — what changes without it
