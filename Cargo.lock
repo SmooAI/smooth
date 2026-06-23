@@ -6346,6 +6346,7 @@ dependencies = [
  "serde_json",
  "smooai-smooth-operator-core",
  "smooai-smooth-tools",
+ "smooai-smooth-web",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -6593,6 +6594,7 @@ dependencies = [
  "smooai-smooth-operator-core",
  "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

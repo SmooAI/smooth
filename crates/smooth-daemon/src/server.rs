@@ -140,6 +140,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/session", get(list_sessions).post(create_session))
         .route("/api/session/{id}", get(get_session))
         .with_state(state)
+        // The embedded control-surface SPA (fallback for non-API routes).
+        .fallback_service(smooth_web::web_router())
 }
 
 /// Bind `addr` and serve until a shutdown signal (Ctrl-C / SIGTERM).
