@@ -416,7 +416,7 @@ fn internal_error(e: anyhow::Error) -> StatusCode {
 /// Resolve the workspace root for a task: the `TaskStart.working_dir` if given,
 /// else the daemon's current directory. Canonicalized best-effort so the tools'
 /// path-confinement prefix check is reliable.
-fn resolve_workspace(working_dir: Option<String>) -> PathBuf {
+pub(crate) fn resolve_workspace(working_dir: Option<String>) -> PathBuf {
     let raw = working_dir
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
@@ -442,7 +442,7 @@ fn derive_title(message: &str) -> String {
 const PRIOR_HISTORY_LIMIT: usize = 1000;
 
 /// Load a session's durable conversation history as replayable prior messages.
-async fn load_prior(state: &AppState, session_id: &str) -> Vec<PriorMessage> {
+pub(crate) async fn load_prior(state: &AppState, session_id: &str) -> Vec<PriorMessage> {
     state
         .messages
         .load(session_id, PRIOR_HISTORY_LIMIT)

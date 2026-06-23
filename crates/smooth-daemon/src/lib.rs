@@ -43,6 +43,7 @@ pub mod messages;
 pub mod permission;
 pub mod runner;
 pub mod schedule;
+pub mod scheduler;
 pub mod server;
 pub mod session;
 pub mod sqlite;
@@ -74,6 +75,8 @@ pub async fn serve_persistent(addr: std::net::SocketAddr) -> anyhow::Result<()> 
     let mut state = AppState::persistent_default()?;
     tracing::info!(db = %AppState::default_db_path().display(), "durable state");
     start_egress_if_configured(&mut state);
+    // Fire due scheduled tasks on a cadence (the always-on agent's proactivity).
+    scheduler::spawn_scheduler(state.clone());
     serve(state, addr).await
 }
 
