@@ -1,12 +1,12 @@
-//! `bash` — run a shell command in the workspace.
+//! `bash` — run a shell command, kernel-sandboxed.
 //!
-//! ⚠️ **Pre-sandbox.** This runs `sh -c <command>` with the workspace as its
-//! working directory, but a shell can `cd` and touch anything the daemon user
-//! can — workspace confinement does NOT apply to bash. The kernel OS-sandbox
-//! that actually bounds shell execution is Phase 3 of EPIC th-c89c2a. Until
-//! then this is acceptable only because the daemon is single-trusted-user on
-//! loopback. When the sandbox lands, this spawn must go through the
-//! non-bypassable `SandboxedCommand` path (P0 hardening).
+//! The subprocess is built **only** through [`SandboxedCommand`] (P0: there is
+//! no unsandboxed spawn path). On macOS the command runs inside a Seatbelt
+//! profile that confines filesystem writes to the workspace + temp and denies
+//! reads of `~/.ssh` / `~/.aws` / etc. On Linux the kernel sandbox is not yet
+//! implemented (bubblewrap+Landlock is TODO) and the command falls back to an
+//! unsandboxed shell with a loud warning — acceptable only for the
+//! single-trusted-user loopback daemon. See [`crate::sandbox`].
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -52,10 +52,10 @@ impl Tool for BashTool {
         let command = req_str(&arguments, "command")?;
         let timeout_secs = arguments.get("timeout").and_then(Value::as_u64);
 
-        let mut cmd = tokio::process::Command::new("sh");
-        cmd.arg("-c")
-            .arg(&command)
-            .current_dir(&self.workspace)
+        // The ONLY shell-spawn path: through the kernel sandbox (P0).
+        let policy = crate::sandbox::SandboxPolicy::for_workspace(self.workspace.clone());
+        let mut cmd = crate::sandbox::SandboxedCommand::shell(&policy, &command).into_command();
+        cmd.current_dir(&self.workspace)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

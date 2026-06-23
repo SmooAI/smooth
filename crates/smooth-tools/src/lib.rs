@@ -23,6 +23,7 @@ pub mod bash;
 pub mod grep;
 pub mod path;
 pub mod read;
+pub mod sandbox;
 mod util;
 pub mod write;
 
@@ -30,6 +31,7 @@ pub use bash::BashTool;
 pub use grep::GrepTool;
 pub use path::resolve_workspace_path;
 pub use read::{ListFilesTool, ReadFileTool};
+pub use sandbox::{SandboxPolicy, SandboxedCommand};
 pub use write::{EditFileTool, WriteFileTool};
 
 /// Register the default tool set on `registry`, all confined to `workspace`.
