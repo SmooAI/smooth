@@ -5567,13 +5567,16 @@ mod tests {
             assert!(p.is_file(), "returned path must point at a real file: {}", p.display());
             let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
             assert_eq!(name, "smooth-operative", "must be the runner binary, got: {name}");
-            // Must be under target/<profile>/, not the
-            // aarch64-unknown-linux-musl cross-compile output
-            // (that one is for sandboxed dispatch).
+            // A native build: either a `target/<profile>/` build, or the
+            // `cargo install`ed binary in a `bin/` dir (th-92dac3 drops it at
+            // $CARGO_HOME/bin / ~/.cargo/bin so `th up` works from any cwd — and
+            // worktrees using a shared target dir resolve to it). What it must
+            // NOT be is the aarch64-unknown-linux-musl cross-compile output
+            // (that one is only for sandboxed dispatch).
             let path_str = p.to_string_lossy();
             assert!(
-                path_str.contains("/target/release/") || path_str.contains("/target/debug/"),
-                "native path should be target/release or target/debug, got: {path_str}"
+                path_str.contains("/target/release/") || path_str.contains("/target/debug/") || p.parent().is_some_and(|d| d.ends_with("bin")),
+                "native path should be a target/<profile> build or a cargo-bin install, got: {path_str}"
             );
             assert!(
                 !path_str.contains("aarch64-unknown-linux-musl"),
