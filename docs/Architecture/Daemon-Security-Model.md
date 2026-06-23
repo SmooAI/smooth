@@ -69,7 +69,9 @@ profile that:
 ## Layer 3 — egress boundary (network)
 
 The trifecta's exfil leg. When `SMOOTH_EGRESS_ALLOWLIST` is set (comma/space
-separated **exact hosts**), the daemon:
+separated **exact hosts** — the `defaults` token expands to a curated set of
+package registries + source hosts + the Smoo platform, and merges with any of
+your own hosts), the daemon:
 
 1. builds an [`EgressAllowlist`](../../crates/smooth-goalie/src/allowlist.rs)
    through a single strict hostname parser — rejecting, *before* the membership
@@ -105,7 +107,7 @@ For a daemon reachable over a tailnet:
 |---|---|---|
 | `SMOOTH_PERMISSION_MODE` | Gate-1 posture | `default` |
 | `SMOOTH_DAEMON_TOKEN` | bearer-token auth (opt-in) | unset (open on loopback) |
-| `SMOOTH_EGRESS_ALLOWLIST` | exact-host egress allowlist (opt-in) | unset (egress unrestricted) |
+| `SMOOTH_EGRESS_ALLOWLIST` | exact-host egress allowlist (opt-in); `defaults` expands the curated set | unset (egress unrestricted) |
 | `SMOOTH_EGRESS_PROXY_ADDR` | egress proxy bind | `127.0.0.1:4419` |
 | `SMOOTH_DAEMON_BIND` | daemon bind | `127.0.0.1:4400` |
 

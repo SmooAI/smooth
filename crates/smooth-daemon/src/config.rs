@@ -49,6 +49,33 @@ pub fn resolve_auth_token() -> Option<String> {
 /// Default loopback address the egress proxy binds to when the boundary is on.
 pub const DEFAULT_EGRESS_PROXY_ADDR: &str = "127.0.0.1:4419";
 
+/// A curated default egress allowlist.
+///
+/// The hosts an agent's shell legitimately reaches for routine dev work
+/// (package registries, source hosts, the Smoo platform). Opt in by putting the
+/// `defaults` token in `SMOOTH_EGRESS_ALLOWLIST` (alone, or alongside your own
+/// exact hosts). Exact hosts only, by design.
+pub const DEFAULT_EGRESS_HOSTS: &[&str] = &[
+    // package registries
+    "registry.npmjs.org",
+    "registry.yarnpkg.com",
+    "crates.io",
+    "static.crates.io",
+    "index.crates.io",
+    "pypi.org",
+    "files.pythonhosted.org",
+    // source hosts
+    "github.com",
+    "api.github.com",
+    "raw.githubusercontent.com",
+    "codeload.github.com",
+    "objects.githubusercontent.com",
+    // Smoo platform
+    "api.smoo.ai",
+    "llm.smoo.ai",
+    "auth.smoo.ai",
+];
+
 /// The egress boundary's resolved configuration.
 pub struct EgressSetup {
     /// The exact-host allowlist the proxy enforces.
@@ -64,11 +91,19 @@ pub struct EgressSetup {
 /// **Opt-in**: returns `Some` only when `SMOOTH_EGRESS_ALLOWLIST` is set (a
 /// comma/whitespace-separated list of exact hosts). With it unset, the bash
 /// tool's network is unrestricted (matching the auth/sandbox opt-in posture).
-/// `SMOOTH_EGRESS_PROXY_ADDR` overrides the proxy bind address.
+/// The `defaults` token expands to [`DEFAULT_EGRESS_HOSTS`] (mergeable with your
+/// own hosts). `SMOOTH_EGRESS_PROXY_ADDR` overrides the proxy bind address.
 #[must_use]
 pub fn resolve_egress() -> Option<EgressSetup> {
     let raw = std::env::var("SMOOTH_EGRESS_ALLOWLIST").ok()?;
-    let entries = raw.split([',', ' ', '\t', '\n']).filter(|s| !s.trim().is_empty());
+    let mut entries: Vec<String> = Vec::new();
+    for tok in raw.split([',', ' ', '\t', '\n']).map(str::trim).filter(|s| !s.is_empty()) {
+        if tok.eq_ignore_ascii_case("default") || tok.eq_ignore_ascii_case("defaults") {
+            entries.extend(DEFAULT_EGRESS_HOSTS.iter().map(|h| (*h).to_owned()));
+        } else {
+            entries.push(tok.to_owned());
+        }
+    }
     let (allowlist, rejected) = smooth_goalie::EgressAllowlist::from_entries(entries);
     let proxy_addr = std::env::var("SMOOTH_EGRESS_PROXY_ADDR").unwrap_or_else(|_| DEFAULT_EGRESS_PROXY_ADDR.to_owned());
     Some(EgressSetup {
@@ -195,6 +230,22 @@ mod tests {
         assert!(!setup.allowlist.is_allowed("evil.com"));
         assert_eq!(setup.rejected, vec!["*.bad.com".to_owned()], "wildcard entry rejected + surfaced");
         assert_eq!(setup.proxy_addr, DEFAULT_EGRESS_PROXY_ADDR);
+        std::env::remove_var("SMOOTH_EGRESS_ALLOWLIST");
+    }
+
+    #[test]
+    fn resolve_egress_defaults_token_expands_and_merges() {
+        std::env::set_var("SMOOTH_EGRESS_ALLOWLIST", "defaults, mycorp.internal");
+        let setup = resolve_egress().expect("set → Some");
+        // The curated defaults are present…
+        assert!(setup.allowlist.is_allowed("github.com"));
+        assert!(setup.allowlist.is_allowed("registry.npmjs.org"));
+        assert!(setup.allowlist.is_allowed("llm.smoo.ai"));
+        // …merged with the user's own host…
+        assert!(setup.allowlist.is_allowed("mycorp.internal"));
+        // …and the `defaults` sentinel is NOT treated as a (rejected) host.
+        assert!(setup.rejected.is_empty(), "sentinel must not surface as rejected: {:?}", setup.rejected);
+        assert!(setup.allowlist.len() > DEFAULT_EGRESS_HOSTS.len());
         std::env::remove_var("SMOOTH_EGRESS_ALLOWLIST");
     }
 
