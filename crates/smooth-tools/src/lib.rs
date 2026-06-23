@@ -12,19 +12,21 @@
 //!
 //! Build-out:
 //! - Slice A: read-only tools — `read_file`, `list_files`, `grep`.
-//! - **Slice B (this):** mutating tools — `write_file`, `edit_file`.
-//! - Slice C: `bash` (pre-sandbox; Phase 3 wraps it).
+//! - Slice B: mutating tools — `write_file`, `edit_file`.
+//! - **Slice C (this):** `bash` (pre-sandbox; Phase 3 wraps it).
 
 use std::path::PathBuf;
 
 use smooth_operator::ToolRegistry;
 
+pub mod bash;
 pub mod grep;
 pub mod path;
 pub mod read;
 mod util;
 pub mod write;
 
+pub use bash::BashTool;
 pub use grep::GrepTool;
 pub use path::resolve_workspace_path;
 pub use read::{ListFilesTool, ReadFileTool};
@@ -39,7 +41,8 @@ pub fn register_default_tools(registry: &mut ToolRegistry, workspace: PathBuf) {
     registry.register(ListFilesTool { workspace: workspace.clone() });
     registry.register(GrepTool { workspace: workspace.clone() });
     registry.register(WriteFileTool { workspace: workspace.clone() });
-    registry.register(EditFileTool { workspace });
+    registry.register(EditFileTool { workspace: workspace.clone() });
+    registry.register(BashTool { workspace });
 }
 
 #[cfg(test)]
@@ -52,7 +55,7 @@ mod tests {
         let mut registry = ToolRegistry::new();
         register_default_tools(&mut registry, PathBuf::from("/tmp"));
         let names: Vec<String> = registry.schemas().into_iter().map(|s| s.name).collect();
-        for expected in ["read_file", "list_files", "grep", "write_file", "edit_file"] {
+        for expected in ["read_file", "list_files", "grep", "write_file", "edit_file", "bash"] {
             assert!(names.iter().any(|n| n == expected), "missing {expected} in {names:?}");
         }
     }
