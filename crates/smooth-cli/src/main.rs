@@ -421,6 +421,34 @@ enum DaemonCommands {
         #[arg(long, default_value = "20")]
         lines: usize,
     },
+    /// Manage scheduled/proactive tasks (`/api/schedule`).
+    Schedule {
+        #[command(subcommand)]
+        cmd: ScheduleCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ScheduleCommands {
+    /// List scheduled tasks.
+    List,
+    /// Add a scheduled task (provide exactly one of --every-minutes / --daily).
+    Add {
+        /// The prompt to run on the cadence.
+        #[arg(long)]
+        prompt: String,
+        /// Fire every N minutes.
+        #[arg(long, conflicts_with = "daily")]
+        every_minutes: Option<u64>,
+        /// Fire daily at HH:MM (UTC).
+        #[arg(long, conflicts_with = "every_minutes")]
+        daily: Option<String>,
+    },
+    /// Remove a scheduled task by id.
+    Rm {
+        /// The schedule id (from `th daemon schedule list`).
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1322,6 +1350,7 @@ async fn main() -> Result<()> {
             None => cmd_daemon(port, bind).await,
             Some(DaemonCommands::Status) => cmd_daemon_status(port).await,
             Some(DaemonCommands::Audit { lines }) => cmd_daemon_audit(lines),
+            Some(DaemonCommands::Schedule { cmd }) => cmd_daemon_schedule(port, cmd).await,
         },
         Some(Commands::Down) => cmd_down().await,
         Some(Commands::Status) => cmd_status().await,
@@ -2106,6 +2135,89 @@ fn cmd_daemon_audit(lines: usize) -> Result<()> {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
             println!("{}", format_audit_line(&v));
         }
+    }
+    Ok(())
+}
+
+/// Build the `ScheduleKind` JSON for `POST /api/schedule` from the CLI flags.
+/// Exactly one of `every_minutes` / `daily` (HH:MM) must be given.
+fn build_schedule_kind(every_minutes: Option<u64>, daily: Option<&str>) -> Result<serde_json::Value> {
+    match (every_minutes, daily) {
+        (Some(m), None) => {
+            if m == 0 {
+                anyhow::bail!("--every-minutes must be at least 1");
+            }
+            Ok(serde_json::json!({ "kind": "every_n_seconds", "secs": m * 60 }))
+        }
+        (None, Some(hhmm)) => {
+            let (h, m) = hhmm.split_once(':').ok_or_else(|| anyhow::anyhow!("--daily must be HH:MM, got {hhmm:?}"))?;
+            let hour: u8 = h.parse().map_err(|_| anyhow::anyhow!("invalid hour in {hhmm:?}"))?;
+            let minute: u8 = m.parse().map_err(|_| anyhow::anyhow!("invalid minute in {hhmm:?}"))?;
+            if hour > 23 || minute > 59 {
+                anyhow::bail!("--daily out of range (00:00–23:59): {hhmm:?}");
+            }
+            Ok(serde_json::json!({ "kind": "daily_at", "hour": hour, "minute": minute }))
+        }
+        (None, None) => anyhow::bail!("provide --every-minutes N or --daily HH:MM"),
+        (Some(_), Some(_)) => anyhow::bail!("--every-minutes and --daily are mutually exclusive"),
+    }
+}
+
+/// Format one schedule JSON row for `th daemon schedule list`.
+fn format_schedule_line(s: &serde_json::Value) -> String {
+    let id = s["id"].as_str().unwrap_or("?");
+    let prompt = s["prompt"].as_str().unwrap_or("");
+    let next = s["next_due"].as_str().unwrap_or("");
+    let enabled = s["enabled"].as_bool().unwrap_or(true);
+    let cadence = match s["kind"]["kind"].as_str() {
+        Some("every_n_seconds") => format!("every {}m", s["kind"]["secs"].as_u64().unwrap_or(0) / 60),
+        Some("daily_at") => format!(
+            "daily {:02}:{:02}",
+            s["kind"]["hour"].as_u64().unwrap_or(0),
+            s["kind"]["minute"].as_u64().unwrap_or(0)
+        ),
+        _ => "?".to_owned(),
+    };
+    let disabled = if enabled { "" } else { " (disabled)" };
+    format!("{id}  {cadence:<11} next {next}{disabled}  {prompt}")
+}
+
+/// `th daemon schedule …` — list / add / remove scheduled tasks via the API.
+async fn cmd_daemon_schedule(port: u16, cmd: ScheduleCommands) -> Result<()> {
+    let base = format!("http://127.0.0.1:{port}/api/schedule");
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(3)).build()?;
+    let unreachable = || println!("daemon not reachable at {base} — is `th daemon` running?");
+    match cmd {
+        ScheduleCommands::List => match client.get(&base).send().await {
+            Ok(r) if r.status().is_success() => {
+                let list: Vec<serde_json::Value> = r.json().await?;
+                if list.is_empty() {
+                    println!("no schedules");
+                }
+                for s in &list {
+                    println!("{}", format_schedule_line(s));
+                }
+            }
+            Ok(r) => println!("list failed: HTTP {}", r.status()),
+            Err(_) => unreachable(),
+        },
+        ScheduleCommands::Add { prompt, every_minutes, daily } => {
+            let kind = build_schedule_kind(every_minutes, daily.as_deref())?;
+            let body = serde_json::json!({ "prompt": prompt, "schedule": kind });
+            match client.post(&base).json(&body).send().await {
+                Ok(r) if r.status().is_success() => {
+                    let s: serde_json::Value = r.json().await?;
+                    println!("added {}", format_schedule_line(&s));
+                }
+                Ok(r) => println!("add failed: HTTP {}", r.status()),
+                Err(_) => unreachable(),
+            }
+        }
+        ScheduleCommands::Rm { id } => match client.delete(format!("{base}/{id}")).send().await {
+            Ok(r) if r.status().is_success() => println!("removed schedule {id}"),
+            Ok(r) => println!("remove failed: HTTP {}", r.status()),
+            Err(_) => unreachable(),
+        },
     }
     Ok(())
 }
@@ -7818,7 +7930,7 @@ mod beads_model_tests {
 #[cfg(test)]
 mod daemon_status_tests {
     //! `th daemon status` formatting (pure; no running daemon needed).
-    use super::{format_audit_line, format_daemon_status, format_daemon_uptime};
+    use super::{build_schedule_kind, format_audit_line, format_daemon_status, format_daemon_uptime, format_schedule_line};
 
     #[test]
     fn uptime_formats_across_scales() {
@@ -7851,6 +7963,41 @@ mod daemon_status_tests {
         let out = format_daemon_status(&body);
         assert!(out.contains("egress:       off"));
         assert!(out.contains("uptime:       ?"), "missing uptime → '?': {out}");
+    }
+
+    #[test]
+    fn build_schedule_kind_from_flags() {
+        assert_eq!(
+            build_schedule_kind(Some(15), None).unwrap(),
+            serde_json::json!({"kind": "every_n_seconds", "secs": 900})
+        );
+        assert_eq!(
+            build_schedule_kind(None, Some("08:30")).unwrap(),
+            serde_json::json!({"kind": "daily_at", "hour": 8, "minute": 30})
+        );
+        // Errors: none, both, zero, bad time, out of range.
+        assert!(build_schedule_kind(None, None).is_err());
+        assert!(build_schedule_kind(Some(5), Some("08:00")).is_err());
+        assert!(build_schedule_kind(Some(0), None).is_err());
+        assert!(build_schedule_kind(None, Some("8h00")).is_err());
+        assert!(build_schedule_kind(None, Some("25:00")).is_err());
+    }
+
+    #[test]
+    fn schedule_line_renders_cadence() {
+        let daily = serde_json::json!({
+            "id": "abc", "prompt": "morning brief", "enabled": true,
+            "next_due": "2026-06-24T08:00:00Z", "kind": {"kind": "daily_at", "hour": 8, "minute": 0}
+        });
+        let line = format_schedule_line(&daily);
+        assert!(line.contains("abc") && line.contains("daily 08:00") && line.contains("morning brief"), "{line}");
+
+        let interval = serde_json::json!({
+            "id": "x", "prompt": "ping", "enabled": false,
+            "next_due": "2026-06-23T12:30:00Z", "kind": {"kind": "every_n_seconds", "secs": 1800}
+        });
+        let line = format_schedule_line(&interval);
+        assert!(line.contains("every 30m") && line.contains("(disabled)"), "{line}");
     }
 
     #[test]
