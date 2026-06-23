@@ -9,18 +9,23 @@ import { useEffect, useReducer, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 
 import {
+    createSchedule,
     createSession,
     DaemonSocket,
+    deleteSchedule,
     getHealth,
     getStatus,
     listMessages,
+    listSchedules,
     listSessions,
+    parseCadence,
     PERMISSION_MODES,
     searchMemory,
     setMode,
     type Health,
     type MemoryHit,
     type PermissionMode,
+    type Schedule,
     type ServerEvent,
     type Session,
     type Status,
@@ -52,6 +57,9 @@ export function ControlApp() {
     const [input, setInput] = useState('');
     const [memQuery, setMemQuery] = useState('');
     const [memHits, setMemHits] = useState<MemoryHit[] | null>(null);
+    const [schedules, setSchedules] = useState<Schedule[]>([]);
+    const [schedPrompt, setSchedPrompt] = useState('');
+    const [schedCadence, setSchedCadence] = useState('');
     const socketRef = useRef<DaemonSocket | null>(null);
     const scrollRef = useRef<HTMLDivElement | null>(null);
     const [, forceTick] = useReducer((n: number) => n + 1, 0);
@@ -133,6 +141,7 @@ export function ControlApp() {
     useEffect(() => {
         getHealth().then(setHealth).catch(() => {});
         refreshSessions();
+        refreshSchedules();
         connect();
         const poll = setInterval(refreshSessions, 5000);
         return () => {
@@ -202,6 +211,35 @@ export function ControlApp() {
             setMemHits(await searchMemory(q));
         } catch {
             setMemHits([]);
+        }
+    };
+
+    const refreshSchedules = () => {
+        listSchedules()
+            .then(setSchedules)
+            .catch(() => {});
+    };
+
+    const addSchedule = async () => {
+        const prompt = schedPrompt.trim();
+        const kind = parseCadence(schedCadence);
+        if (!prompt || !kind) return;
+        try {
+            await createSchedule(prompt, kind);
+            setSchedPrompt('');
+            setSchedCadence('');
+            refreshSchedules();
+        } catch {
+            /* ignore */
+        }
+    };
+
+    const removeSchedule = async (id: string) => {
+        try {
+            await deleteSchedule(id);
+            refreshSchedules();
+        } catch {
+            /* ignore */
         }
     };
 
@@ -307,6 +345,46 @@ export function ControlApp() {
                             </ul>
                         )}
                     </div>
+
+                    <div className="mt-4 border-t border-white/10 pt-3">
+                        <span className="text-xs uppercase tracking-wide text-foreground/40">Schedules</span>
+                        <ul className="mt-2 space-y-1">
+                            {schedules.length === 0 && <li className="text-xs text-foreground/30">none yet</li>}
+                            {schedules.map((s) => (
+                                <li key={s.id} className="flex items-start justify-between gap-1 rounded bg-white/5 px-2 py-1 text-xs">
+                                    <div className="min-w-0">
+                                        <span className="mr-1 text-[10px] text-primary">{describeCadence(s.kind)}</span>
+                                        <span className="text-foreground/70">{s.prompt}</span>
+                                    </div>
+                                    <button onClick={() => void removeSchedule(s.id)} title="remove" className="shrink-0 text-foreground/30 hover:text-red-400">
+                                        ×
+                                    </button>
+                                </li>
+                            ))}
+                        </ul>
+                        <input
+                            value={schedPrompt}
+                            onChange={(e) => setSchedPrompt(e.target.value)}
+                            placeholder="prompt"
+                            className="mt-2 w-full rounded border border-white/10 bg-white/5 px-2 py-1 text-xs outline-none focus:border-primary/50"
+                        />
+                        <div className="mt-1 flex gap-1">
+                            <input
+                                value={schedCadence}
+                                onChange={(e) => setSchedCadence(e.target.value)}
+                                onKeyDown={(e) => e.key === 'Enter' && void addSchedule()}
+                                placeholder="30m or 08:00"
+                                className="min-w-0 flex-1 rounded border border-white/10 bg-white/5 px-2 py-1 text-xs outline-none focus:border-primary/50"
+                            />
+                            <button
+                                onClick={() => void addSchedule()}
+                                disabled={!schedPrompt.trim() || parseCadence(schedCadence) === null}
+                                className="rounded bg-primary/20 px-2 py-1 text-xs text-primary hover:bg-primary/30 disabled:opacity-40"
+                            >
+                                add
+                            </button>
+                        </div>
+                    </div>
                 </aside>
 
                 <main className="flex min-w-0 flex-1 flex-col">
@@ -361,6 +439,11 @@ export function ControlApp() {
             </div>
         </div>
     );
+}
+
+function describeCadence(kind: Schedule['kind']): string {
+    if (kind.kind === 'daily_at') return `daily ${String(kind.hour).padStart(2, '0')}:${String(kind.minute).padStart(2, '0')}`;
+    return `every ${Math.round(kind.secs / 60)}m`;
 }
 
 function formatUptime(seconds: number): string {

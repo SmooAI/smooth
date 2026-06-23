@@ -94,6 +94,57 @@ export async function searchMemory(query: string, limit = 50): Promise<MemoryHit
     return (await r.json()) as MemoryHit[];
 }
 
+// GET/POST/DELETE /api/schedule — proactive scheduled tasks.
+export type ScheduleKind = { kind: 'every_n_seconds'; secs: number } | { kind: 'daily_at'; hour: number; minute: number };
+
+export interface Schedule {
+    id: string;
+    prompt: string;
+    kind: ScheduleKind;
+    enabled: boolean;
+    next_due: string;
+    last_run: string | null;
+}
+
+export async function listSchedules(): Promise<Schedule[]> {
+    const r = await fetch('/api/schedule');
+    if (!r.ok) throw new Error(`schedules ${r.status}`);
+    return (await r.json()) as Schedule[];
+}
+
+export async function createSchedule(prompt: string, kind: ScheduleKind): Promise<Schedule> {
+    const r = await fetch('/api/schedule', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt, schedule: kind }),
+    });
+    if (!r.ok) throw new Error(`create schedule ${r.status}`);
+    return (await r.json()) as Schedule;
+}
+
+export async function deleteSchedule(id: string): Promise<void> {
+    const r = await fetch(`/api/schedule/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (!r.ok) throw new Error(`delete schedule ${r.status}`);
+}
+
+/** Parse a compact cadence string: `30m` (every N min) or `08:00` (daily UTC). */
+export function parseCadence(input: string): ScheduleKind | null {
+    const s = input.trim();
+    const daily = /^(\d{1,2}):(\d{2})$/.exec(s);
+    if (daily) {
+        const hour = Number(daily[1]);
+        const minute = Number(daily[2]);
+        if (hour <= 23 && minute <= 59) return { kind: 'daily_at', hour, minute };
+        return null;
+    }
+    const mins = /^(\d+)\s*m$/.exec(s);
+    if (mins) {
+        const n = Number(mins[1]);
+        if (n >= 1) return { kind: 'every_n_seconds', secs: n * 60 };
+    }
+    return null;
+}
+
 export async function listSessions(): Promise<Session[]> {
     const r = await fetch('/api/session');
     if (!r.ok) throw new Error(`sessions ${r.status}`);
