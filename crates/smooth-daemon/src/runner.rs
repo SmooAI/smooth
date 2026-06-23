@@ -34,6 +34,7 @@ use crate::wire::{map_agent_event, PriorMessage, ServerEvent};
 const DEFAULT_SYSTEM_PROMPT: &str = "You are Smooth, an always-on personal coding agent running on the operator's own machine. \
 You have tools to read, search (grep), list, write, and edit files in the workspace, and to run shell commands (bash). \
 When a task asks you to inspect, create, modify, or run something, DO IT with your tools rather than guessing or just describing what to do — then briefly confirm what you did. \
+Use the `remember` tool to save durable facts worth recalling later — stable preferences about the operator, confirmed approaches, or current project state — and they'll be surfaced automatically in future turns. \
 Be concise and direct.";
 
 /// Everything needed to run one agent turn.
@@ -74,9 +75,10 @@ pub struct RunDeps {
     pub memory: Arc<dyn smooth_operator::Memory>,
 }
 
-/// Run one agent turn to completion, streaming `ServerEvent`s to `deps.out` and
-/// recording them to `deps.events`. Never panics; failures are surfaced as a
-/// terminal [`ServerEvent::TaskError`].
+/// Run one agent turn to completion.
+///
+/// Streams `ServerEvent`s to `deps.out` and records them to `deps.events`.
+/// Never panics; failures are surfaced as a terminal [`ServerEvent::TaskError`].
 pub async fn run_task(spec: TaskSpec, deps: RunDeps) {
     let RunDeps {
         out,
@@ -128,19 +130,11 @@ pub async fn run_task(spec: TaskSpec, deps: RunDeps) {
     }
     // Durable cross-session memory: the engine auto-recalls relevant entries for
     // the user message each turn and injects them (with a freshness nudge for
-    // Project/Reference types) ahead of the prompt.
-    cfg = cfg.with_memory(memory);
+    // Project/Reference types) ahead of the prompt. The `remember` tool (below)
+    // writes to the same backend, closing the recall+store loop.
+    cfg = cfg.with_memory(Arc::clone(&memory));
 
-    // Register the workspace-confined tool set (fs/grep/…) + the Gate-1
-    // permission hook (deny→ask→allow, with the operator-approval round-trip).
-    // Security note: tools enforce lexical path confinement and the hook gates
-    // intent; the kernel OS-sandbox enforcement boundary is Phase 3 Slice 2.
-    let mut tools = ToolRegistry::new();
-    // When an egress proxy is configured, the bash tool routes network through
-    // it (direct off-box egress kernel-denied) — the goalie exact-host allowlist
-    // becomes the only way out.
-    smooth_tools::register_default_tools_with_proxy(&mut tools, workspace, egress_proxy);
-    tools.add_hook(PermissionHook::new(PermissionEngine::new(mode), approvals, out.clone()));
+    let tools = build_tool_registry(workspace, egress_proxy, memory, mode, approvals, out.clone());
     let agent = Agent::new(cfg, tools);
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<smooth_operator::AgentEvent>();
@@ -206,6 +200,26 @@ pub async fn run_task(spec: TaskSpec, deps: RunDeps) {
         },
     };
     emit(&out, &events, &session_id, terminal).await;
+}
+
+/// Build the agent's tool registry: the workspace-confined tool set (with the
+/// `remember` memory tool and, when configured, egress routed through the
+/// proxy) plus the Gate-1 permission hook. Tools enforce lexical path
+/// confinement and the hook gates intent; the kernel OS-sandbox is the
+/// enforcement boundary (Phase 3 Slice 2).
+fn build_tool_registry(
+    workspace: PathBuf,
+    egress_proxy: Option<String>,
+    memory: Arc<dyn smooth_operator::Memory>,
+    mode: PermissionMode,
+    approvals: Arc<ApprovalCoordinator>,
+    out: UnboundedSender<ServerEvent>,
+) -> ToolRegistry {
+    let mut tools = ToolRegistry::new();
+    smooth_tools::register_default_tools_with_proxy(&mut tools, workspace, egress_proxy);
+    tools.register(smooth_tools::RememberTool { memory });
+    tools.add_hook(PermissionHook::new(PermissionEngine::new(mode), approvals, out));
+    tools
 }
 
 fn is_terminal(se: &ServerEvent) -> bool {
