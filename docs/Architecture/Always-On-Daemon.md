@@ -21,12 +21,14 @@ borrowing hermes's persistence shape and opencode's headless-server pattern.
 │     ├─ bash → SandboxedCommand (kernel OS-sandbox, P0)         │
 │     ├─ egress → goalie proxy (exact-host allowlist)            │
 │     ├─ SqliteMemory (durable cross-session recall) + remember  │
+│     ├─ scheduler tick (proactive: fire due schedules / cadence)│
 │     ├─ SessionRunCoordinator (one in-flight turn / session)    │
-│     └─ durable SQLite: events, sessions, messages, memories    │
+│     └─ durable SQLite: events, sessions, messages, memories,   │
+│        schedules                                               │
 │   HTTP/WS API ──┬─ /ws (token stream + commands)               │
 │                 ├─ /api/event (durable SSE, cursor resume)     │
 │                 └─ /api/session · /api/status · /api/mode ·     │
-│                    /api/memory · /health                       │
+│                    /api/memory · /api/schedule · /health       │
 └──────────┬──────────────────────┬────────────────────────────┘
      th code TUI (smooth-code)   React control surface (smooth-web)
 ```
@@ -42,17 +44,18 @@ borrowing hermes's persistence shape and opencode's headless-server pattern.
 | `GET /api/event` | durable Server-Sent-Events, replayed from `?cursor=<seq>` (zero-loss reconnect) |
 | `GET /api/session` | list / create sessions; `GET /api/session/{id}[/messages]` |
 | `GET /api/memory` | search durable agent memory (keyword recall) |
+| `GET/POST/DELETE /api/schedule` | manage proactive scheduled tasks |
 
 All API + WS routes are wrapped in an optional bearer-token gate; `/health` and
 the embedded SPA stay open. See [[Daemon-Security-Model]].
 
 ## Durable state (per-instance, SQLite — not Dolt)
 
-The daemon's events, sessions, conversation messages, and memories are
-**per-instance runtime state**, so they live in a local SQLite DB (WAL), not
+The daemon's events, sessions, conversation messages, memories, and schedules
+are **per-instance runtime state**, so they live in a local SQLite DB (WAL), not
 Dolt (which is for team-synced [[Pearls]]). This makes the SSE cursor-resume
-stream, the session list, conversation resume, and cross-session memory all
-survive a daemon restart.
+stream, the session list, conversation resume, cross-session memory, and
+scheduled tasks all survive a daemon restart.
 
 ## Memory (hermes-style)
 
@@ -61,6 +64,16 @@ preferences, confirmed approaches, current project state, references) into
 `SqliteMemory`; the engine auto-recalls the most relevant entries for each user
 message and injects them ahead of the prompt — with a freshness-check nudge for
 `Project`/`Reference` types. The control surface's Memory panel searches them.
+
+## Scheduler (proactive tasks)
+
+What makes the agent *proactive*. A background tick (every 30s) asks the
+`ScheduleStore` which schedules are due and fires each one's prompt into a
+per-schedule `schedule:{id}` session via the same coordinator + `run_task` path
+a live client uses, then advances `next_due`. Cadences: `EveryNSeconds` or
+`DailyAt` (UTC). Manage them three ways — `POST/GET/DELETE /api/schedule`, the
+`th daemon schedule add|list|rm` CLI, or the control surface's Schedules panel
+(`30m` / `08:00` cadence shorthand).
 
 ## Security
 
