@@ -11,30 +11,88 @@ use hyper::{Method, Request, Response, StatusCode, Uri};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 
+use crate::allowlist::EgressAllowlist;
 use crate::audit::{AuditEntry, AuditLogger};
 use crate::wonk::WonkClient;
 
+/// Where a per-request network decision comes from.
+///
+/// `Wonk` is the legacy per-VM design (a network round-trip to the in-VM Wonk
+/// authority). `Local` is the always-on daemon's in-process exact-host
+/// [`EgressAllowlist`] — no round-trip, fail-closed by construction.
+pub enum NetworkDecider {
+    /// Delegate to the in-VM Wonk authority.
+    Wonk(WonkClient),
+    /// Decide locally against an in-process exact-host allowlist.
+    Local(EgressAllowlist),
+}
+
+impl NetworkDecider {
+    /// Decide whether `domain` may be reached, returning `(allowed, reason)`.
+    /// Both arms fail closed: a Wonk error denies, and an empty/normalization-
+    /// failing host is simply not in the allowlist.
+    async fn decide(&self, domain: &str, path: &str, method: &str) -> (bool, String) {
+        match self {
+            Self::Wonk(wonk) => match wonk.check_network(domain, path, method).await {
+                Ok(d) => (d.allowed, d.reason),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Wonk unreachable, failing closed");
+                    (false, format!("Wonk error: {e}"))
+                }
+            },
+            Self::Local(allow) => {
+                if allow.is_allowed(domain) {
+                    (true, "allowed by egress allowlist".into())
+                } else {
+                    (false, format!("{domain} is not in the egress allowlist"))
+                }
+            }
+        }
+    }
+}
+
 struct ProxyState {
-    wonk: WonkClient,
+    decider: NetworkDecider,
     audit: AuditLogger,
     http_client: reqwest::Client,
 }
 
-/// Run the forward proxy server.
+/// Run the forward proxy server, delegating decisions to the in-VM Wonk.
 ///
 /// # Errors
 /// Returns error if the listener cannot bind or the server encounters a fatal error.
 pub async fn run_proxy(listen_addr: &str, wonk: WonkClient, audit: AuditLogger) -> anyhow::Result<()> {
+    run_proxy_with(listen_addr, NetworkDecider::Wonk(wonk), audit).await
+}
+
+/// Run the forward proxy server, deciding locally against an in-process exact-
+/// host [`EgressAllowlist`] (the always-on daemon's egress boundary — no Wonk
+/// round-trip).
+///
+/// # Errors
+/// Returns error if the listener cannot bind or the server encounters a fatal error.
+pub async fn run_proxy_local(listen_addr: &str, allowlist: EgressAllowlist, audit: AuditLogger) -> anyhow::Result<()> {
+    run_proxy_with(listen_addr, NetworkDecider::Local(allowlist), audit).await
+}
+
+/// Bind `listen_addr` and serve with the given [`NetworkDecider`].
+///
+/// # Errors
+/// Returns error if the listener cannot bind or the server encounters a fatal error.
+pub async fn run_proxy_with(listen_addr: &str, decider: NetworkDecider, audit: AuditLogger) -> anyhow::Result<()> {
     let addr: SocketAddr = listen_addr.parse()?;
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(%addr, "Goalie proxy listening");
-
     let state = Arc::new(ProxyState {
-        wonk,
+        decider,
         audit,
         http_client: reqwest::Client::new(),
     });
+    serve(listener, state).await
+}
 
+/// The accept loop, factored out so tests can drive it on a pre-bound listener.
+async fn serve(listener: TcpListener, state: Arc<ProxyState>) -> anyhow::Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
         let state = Arc::clone(&state);
@@ -71,15 +129,7 @@ async fn handle_request(req: Request<hyper::body::Incoming>, state: &ProxyState,
     let method = req.method().to_string();
     let (domain, path) = extract_host_path(&uri);
 
-    // Ask Wonk
-    let decision = state.wonk.check_network(&domain, &path, &method).await;
-    let (allowed, reason) = match decision {
-        Ok(d) => (d.allowed, d.reason),
-        Err(e) => {
-            tracing::warn!(error = %e, "Wonk unreachable, failing closed");
-            (false, format!("Wonk error: {e}"))
-        }
-    };
+    let (allowed, reason) = state.decider.decide(&domain, &path, &method).await;
 
     if !allowed {
         let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -111,7 +161,7 @@ async fn handle_request(req: Request<hyper::body::Incoming>, state: &ProxyState,
                 path,
                 method: method_str_from_status(status),
                 allowed: true,
-                reason: "allowed by Wonk".into(),
+                reason,
                 status_code: Some(status.as_u16()),
                 duration_ms,
             });
@@ -152,11 +202,7 @@ async fn handle_connect(
     let domain = authority.split(':').next().unwrap_or(&authority).to_string();
     let method = "CONNECT".to_string();
 
-    let decision = state.wonk.check_network(&domain, "/", &method).await;
-    let (allowed, reason) = match decision {
-        Ok(d) => (d.allowed, d.reason),
-        Err(e) => (false, format!("Wonk error: {e}")),
-    };
+    let (allowed, reason) = state.decider.decide(&domain, "/", &method).await;
 
     let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
@@ -182,7 +228,7 @@ async fn handle_connect(
         path: "/".into(),
         method,
         allowed: true,
-        reason: "allowed by Wonk".into(),
+        reason,
         status_code: Some(200),
         duration_ms,
     });
@@ -324,5 +370,45 @@ mod tests {
         let authority = "openrouter.ai";
         let domain = authority.split(':').next().unwrap_or(authority);
         assert_eq!(domain, "openrouter.ai");
+    }
+
+    #[tokio::test]
+    async fn local_decider_allows_listed_denies_everything_else() {
+        let (allow, _) = EgressAllowlist::from_entries(["github.com"]);
+        let decider = NetworkDecider::Local(allow);
+        assert!(decider.decide("github.com", "/", "GET").await.0, "listed host allowed");
+        assert!(decider.decide("GitHub.com.", "/", "GET").await.0, "normalized form of a listed host allowed");
+        assert!(!decider.decide("evil.com", "/", "GET").await.0, "unlisted host denied");
+        // Normalization-smuggling and sibling subdomains are denied.
+        assert!(!decider.decide("github.com\u{0}.evil.com", "/", "GET").await.0);
+        assert!(!decider.decide("api.github.com", "/", "GET").await.0, "exact-only: sibling not implied");
+    }
+
+    #[tokio::test]
+    async fn proxy_blocks_unlisted_http_host_with_403() {
+        // End-to-end: a real client through the proxy gets 403 for a host that
+        // isn't on the local allowlist — no upstream is contacted.
+        let (allow, _) = EgressAllowlist::from_entries(["github.com"]);
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let audit = AuditLogger::new(dir.path().join("audit.jsonl").to_str().expect("path")).expect("audit");
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let state = Arc::new(ProxyState {
+            decider: NetworkDecider::Local(allow),
+            audit,
+            http_client: reqwest::Client::new(),
+        });
+        tokio::spawn(async move {
+            let _ = serve(listener, state).await;
+        });
+
+        let client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::http(format!("http://{addr}")).expect("proxy"))
+            .build()
+            .expect("client");
+        let resp = client.get("http://denied.example/").send().await.expect("request");
+        assert_eq!(resp.status().as_u16(), 403, "unlisted host must be blocked by the proxy");
+        let body = resp.text().await.expect("body");
+        assert!(body.contains("denied.example"), "block message names the host: {body}");
     }
 }
