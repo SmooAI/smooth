@@ -25,6 +25,7 @@ path = "src/main.rs"
 # store, and SessionRunCoordinator wiring.
 [dependencies]
 smooth-operator.workspace = true
+smooth-tools.workspace = true
 axum = { workspace = true, features = ["ws"] }
 tokio.workspace = true
 tokio-stream.workspace = true

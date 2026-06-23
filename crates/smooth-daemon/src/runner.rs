@@ -13,6 +13,7 @@
 //! file/bash/grep tools into a reusable lib + the auto-mode permission hooks)
 //! is its own pearl and lands behind this same entry point.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -44,6 +45,8 @@ pub struct TaskSpec {
     pub budget: Option<f64>,
     /// Prior turns to replay before this one (session resume).
     pub prior_messages: Vec<PriorMessage>,
+    /// Workspace root the agent's filesystem/shell tools are confined to.
+    pub workspace: PathBuf,
 }
 
 /// Run one agent turn to completion, streaming `ServerEvent`s to `out` and
@@ -57,6 +60,7 @@ pub async fn run_task(spec: TaskSpec, out: UnboundedSender<ServerEvent>, events:
         model,
         budget,
         prior_messages,
+        workspace,
     } = spec;
 
     let llm = match resolve_llm(model.as_deref()) {
@@ -87,8 +91,12 @@ pub async fn run_task(spec: TaskSpec, out: UnboundedSender<ServerEvent>, events:
         });
     }
 
-    // Phase 1: no tools registered → the agent answers from the model only.
-    let agent = Agent::new(cfg, ToolRegistry::new());
+    // Register the workspace-confined tool set (fs/grep/…). Security note: the
+    // tools enforce lexical path confinement; the kernel OS-sandbox boundary
+    // arrives in Phase 3 (EPIC th-c89c2a).
+    let mut tools = ToolRegistry::new();
+    smooth_tools::register_default_tools(&mut tools, workspace);
+    let agent = Agent::new(cfg, tools);
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<smooth_operator::AgentEvent>();
 
@@ -194,6 +202,7 @@ mod tests {
                 model: Some("some-model".into()),
                 budget: None,
                 prior_messages: vec![],
+                workspace: std::env::temp_dir(),
             },
             tx,
             Arc::clone(&events),

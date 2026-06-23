@@ -6282,15 +6282,18 @@ dependencies = [
  "async-trait",
  "axum 0.8.8",
  "chrono",
+ "dirs-next",
  "futures-util",
  "serde",
  "serde_json",
  "smooai-smooth-operator-core",
+ "smooai-smooth-tools",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
  "tokio-tungstenite 0.26.2",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -6515,6 +6518,22 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "smooai-smooth-tools"
+version = "0.14.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "globset",
+ "grep-regex",
+ "grep-searcher",
+ "ignore",
+ "serde_json",
+ "smooai-smooth-operator-core",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

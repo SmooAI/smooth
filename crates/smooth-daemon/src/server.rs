@@ -20,6 +20,7 @@ use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -192,6 +193,17 @@ fn internal_error(e: anyhow::Error) -> StatusCode {
     StatusCode::INTERNAL_SERVER_ERROR
 }
 
+/// Resolve the workspace root for a task: the `TaskStart.working_dir` if given,
+/// else the daemon's current directory. Canonicalized best-effort so the tools'
+/// path-confinement prefix check is reliable.
+fn resolve_workspace(working_dir: Option<String>) -> PathBuf {
+    let raw = working_dir
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    std::fs::canonicalize(&raw).unwrap_or(raw)
+}
+
 /// Query parameters for [`event_stream_handler`].
 #[derive(Debug, Deserialize)]
 struct EventQuery {
@@ -335,6 +347,7 @@ async fn handle_client_event(ev: ClientEvent, session_id: &str, state: &AppState
             model,
             budget,
             prior_messages,
+            working_dir,
             ..
         } => {
             let task_id = uuid::Uuid::new_v4().to_string();
@@ -345,6 +358,7 @@ async fn handle_client_event(ev: ClientEvent, session_id: &str, state: &AppState
                 model,
                 budget,
                 prior_messages,
+                workspace: resolve_workspace(working_dir),
             };
             let out = out_tx.clone();
             let events = Arc::clone(&state.events);

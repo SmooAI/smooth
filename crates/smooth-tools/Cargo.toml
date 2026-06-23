@@ -1,0 +1,34 @@
+[package]
+name = "smooai-smooth-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Reusable agent tools (filesystem, grep, bash) with workspace-scoped paths, for the smooth-daemon (EPIC th-c89c2a)"
+
+[lib]
+name = "smooth_tools"
+
+# th-ed6604: clean reimplementations of the core agent tools the smooth-operative
+# binary defines inline, packaged as a lib the smooth-daemon (and, later,
+# smooth-operative) can register on a ToolRegistry. The workspace-path scoping
+# (path.rs) mirrors smooth-operative/src/tool_support.rs::resolve_workspace_path
+# exactly — it is security-critical and exhaustively tested here.
+[dependencies]
+smooth-operator.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+ignore.workspace = true
+globset.workspace = true
+grep-regex.workspace = true
+grep-searcher.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true
