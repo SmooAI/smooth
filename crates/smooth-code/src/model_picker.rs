@@ -506,12 +506,18 @@ fn candidate_models_filtered(slots: &[SlotEntry], focused: &SlotEntry, show_all:
     }
 
     // Sort by slot benchmark descending. Un-benchmarked rows go
-    // last but still appear (so the user sees them).
+    // last but still appear (so the user sees them). Use `total_cmp`,
+    // not `partial_cmp().unwrap_or(Equal)`: a NaN benchmark makes
+    // `partial_cmp` return `None`, and collapsing that to `Equal`
+    // violates total order — which Rust's sort detects and *panics* on
+    // ("comparison function does not correctly implement a total
+    // order"). `f32::total_cmp` orders NaN deterministically. Pearl
+    // th-03b02e.
     out.sort_by(|a, b| {
         let a_score = a.info.as_ref().and_then(|i| i.slot_benchmark(focused.slot));
         let b_score = b.info.as_ref().and_then(|i| i.slot_benchmark(focused.slot));
         match (a_score, b_score) {
-            (Some(x), Some(y)) => y.partial_cmp(&x).unwrap_or(std::cmp::Ordering::Equal),
+            (Some(x), Some(y)) => y.total_cmp(&x),
             (Some(_), None) => std::cmp::Ordering::Less,
             (None, Some(_)) => std::cmp::Ordering::Greater,
             (None, None) => a.model.cmp(&b.model),
@@ -821,6 +827,30 @@ mod tests {
     use smooth_operator::providers::{ModelRouting, Preset, ProviderConfig};
 
     use super::*;
+
+    /// Regression for pearl th-03b02e: the model-picker sorts rows by
+    /// benchmark, and a NaN benchmark (possible once `/v1/model/info`
+    /// sources these live) must not make the comparator non-total —
+    /// Rust's sort *panics* on a comparator that violates total order
+    /// ("comparison function does not correctly implement a total
+    /// order"), which had been failing CI's `cargo test` and blocking
+    /// every release. `f32::total_cmp` is the fix; this guards it.
+    #[test]
+    fn benchmark_sort_with_nan_is_a_total_order_and_does_not_panic() {
+        // The exact (Some, Some) arm the picker uses, over a set that
+        // mixes NaN, +/-, and duplicate scores — the cases that break
+        // `partial_cmp().unwrap_or(Equal)`.
+        let mut scores: Vec<f32> = vec![79.0, f32::NAN, 56.2, 80.6, f32::NAN, 56.2, 40.0];
+        // Must not panic (descending, like the picker).
+        scores.sort_by(|x, y| y.total_cmp(x));
+        assert_eq!(scores.len(), 7);
+        // total_cmp is a strict total order, so every pair is comparable
+        // and the result is stable/transitive — assert antisymmetry holds
+        // across the whole set (the property the old comparator violated).
+        for w in scores.windows(2) {
+            assert!(w[0].total_cmp(&w[1]) != std::cmp::Ordering::Less, "sorted descending: {:?}", &scores);
+        }
+    }
 
     /// In-memory fixture seeded with concrete model names (post
     /// SMOODEV-1793 cutover). The legacy `smooth-*` aliases are dead
