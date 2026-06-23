@@ -69,18 +69,61 @@ pub async fn require_authed() -> Result<SmoothApiClient> {
 /// Build an authed client from the user JWT at `~/.smooth/auth/smooai-user.json`,
 /// or `None` if it's absent/unreadable/expired so the caller falls back to M2M.
 async fn try_user_session() -> Option<SmoothApiClient> {
-    let home = std::env::var_os("HOME")?;
-    let path = std::path::Path::new(&home).join(".smooth").join("auth").join("smooai-user.json");
-    if !path.exists() {
-        return None;
+    for path in user_jwt_candidates() {
+        if !path.exists() {
+            continue;
+        }
+        let store = CredentialsStore::at(&path);
+        let Ok(Some(creds)) = store.load() else { continue };
+        let Ok(client) = SmoothApiClient::new(smooth_api_client::base_url(), Some(creds), store) else {
+            continue;
+        };
+        // No-op for a user JWT (no client_secret to re-mint), but harmless.
+        client.ensure_fresh_token().await.ok();
+        // is_authenticated() is false for an expired session → try the next candidate.
+        if client.is_authenticated() {
+            return Some(client);
+        }
     }
-    let store = CredentialsStore::at(&path);
-    let creds = store.load().ok()??;
-    let client = SmoothApiClient::new(smooth_api_client::base_url(), Some(creds), store).ok()?;
-    // No-op for a user JWT (no client_secret to re-mint), but harmless.
-    client.ensure_fresh_token().await.ok();
-    // is_authenticated() is false for an expired session → fall back to M2M.
-    client.is_authenticated().then_some(client)
+    None
+}
+
+/// Candidate paths for the user JWT, in priority order. `th auth login` writes the
+/// session under the active profile (`~/.config/smooth/auth/profiles/<name>/`),
+/// while older builds + `SMOOAI_USER_AUTH_FILE` use the flat legacy path — so we
+/// try them all and use the first that holds a valid session.
+///   1. `$SMOOAI_USER_AUTH_FILE` (explicit override)
+///   2. active profile: `$XDG_CONFIG_HOME|~/.config`/smooth/auth/profiles/<active>/smooai-user.json,
+///      where <active> = `$SMOOAI_PROFILE` or the name in `.../auth/active`
+///   3. legacy `~/.smooth/auth/smooai-user.json`
+fn user_jwt_candidates() -> Vec<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let mut paths = Vec::new();
+
+    if let Some(explicit) = std::env::var_os("SMOOAI_USER_AUTH_FILE") {
+        paths.push(PathBuf::from(explicit));
+    }
+
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
+    if let Some(cfg) = config_home {
+        let auth = cfg.join("smooth").join("auth");
+        let profile = std::env::var("SMOOAI_PROFILE")
+            .ok()
+            .or_else(|| std::fs::read_to_string(auth.join("active")).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if let Some(name) = profile {
+            paths.push(auth.join("profiles").join(name).join("smooai-user.json"));
+        }
+    }
+
+    if let Some(home) = std::env::var_os("HOME") {
+        paths.push(PathBuf::from(home).join(".smooth").join("auth").join("smooai-user.json"));
+    }
+
+    paths
 }
 
 /// Resolve the active org id. Delegates to
