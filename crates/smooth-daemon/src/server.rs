@@ -8,13 +8,16 @@
 //!   `?cursor=` seq so a frontend (or the daemon, post-restart) catches up with
 //!   zero loss. This closes the resume gap opencode left stubbed.
 //!
-//! On connect the WS sends [`ServerEvent::Connected`] immediately, then a
-//! [`ServerEvent::Pong`] heartbeat every 30s (legacy behaviour). Each
-//! `TaskStart` runs through the [`SessionRunCoordinator`] so a session has at
-//! most one in-flight turn, and events stream back over the same socket.
+//! - `GET /api/session` — list/create sessions; `GET /api/session/{id}` fetch.
 //!
-//! Not yet here (later Phase 1 work): the `/api/session` REST surface,
-//! loopback+tailnet bind hardening, and bearer-token auth.
+//! On connect the WS sends [`ServerEvent::Connected`] immediately, then a
+//! [`ServerEvent::Pong`] heartbeat every 30s (legacy behaviour). Connect with
+//! `/ws?session=<id>` to resume an existing session (its durable conversation
+//! history replays on the next `TaskStart`). Each `TaskStart` runs through the
+//! [`SessionRunCoordinator`] so a session has at most one in-flight turn, and
+//! events stream back over the same socket.
+//!
+//! Not yet here: loopback+tailnet bind hardening, and bearer-token auth.
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -37,9 +40,10 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::coordinator::{SessionRunCoordinator, StartError};
 use crate::event::{DaemonEvent, EventStore, InMemoryEventLog, Seq};
+use crate::messages::MessageStore;
 use crate::runner::{self, TaskSpec};
 use crate::session::{InMemorySessionStore, Session, SessionStatus, SessionStore};
-use crate::wire::{ClientEvent, ServerEvent};
+use crate::wire::{ClientEvent, PriorMessage, ServerEvent};
 
 const HEARTBEAT: Duration = Duration::from_secs(30);
 
@@ -60,6 +64,8 @@ pub struct AppState {
     pub events: Arc<dyn EventStore>,
     /// Session registry backing the `/api/session` surface.
     pub sessions: Arc<dyn SessionStore>,
+    /// Durable conversation history (for cross-restart resume).
+    pub messages: Arc<dyn MessageStore>,
 }
 
 impl AppState {
@@ -70,6 +76,7 @@ impl AppState {
             coordinator: SessionRunCoordinator::new(),
             events: Arc::new(InMemoryEventLog::new()),
             sessions: Arc::new(InMemorySessionStore::new()),
+            messages: Arc::new(crate::messages::InMemoryMessageStore::new()),
         }
     }
 
@@ -80,11 +87,12 @@ impl AppState {
     /// # Errors
     /// Returns an error if the database cannot be opened/initialized.
     pub fn persistent(db_path: &std::path::Path) -> anyhow::Result<Self> {
-        let (events, sessions) = crate::sqlite::open_stores(db_path)?;
+        let stores = crate::sqlite::open_stores(db_path)?;
         Ok(Self {
             coordinator: SessionRunCoordinator::new(),
-            events,
-            sessions,
+            events: stores.events,
+            sessions: stores.sessions,
+            messages: stores.messages,
         })
     }
 
@@ -236,6 +244,24 @@ fn resolve_workspace(working_dir: Option<String>) -> PathBuf {
     std::fs::canonicalize(&raw).unwrap_or(raw)
 }
 
+/// Max prior turns replayed into a resumed session.
+const PRIOR_HISTORY_LIMIT: usize = 1000;
+
+/// Load a session's durable conversation history as replayable prior messages.
+async fn load_prior(state: &AppState, session_id: &str) -> Vec<PriorMessage> {
+    state
+        .messages
+        .load(session_id, PRIOR_HISTORY_LIMIT)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|m| PriorMessage {
+            role: m.role,
+            content: m.content,
+        })
+        .collect()
+}
+
 /// Query parameters for [`event_stream_handler`].
 #[derive(Debug, Deserialize)]
 struct EventQuery {
@@ -302,12 +328,22 @@ fn event_stream(events: Arc<dyn EventStore>, cursor: Seq, session: Option<String
     })
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+/// WebSocket connect query: `?session=<id>` resumes an existing session (so its
+/// durable conversation history replays); omit it for a fresh session.
+#[derive(Debug, Deserialize)]
+struct WsConnectQuery {
+    #[serde(default)]
+    session: Option<String>,
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState) {
-    let session_id = uuid::Uuid::new_v4().to_string();
+async fn ws_handler(ws: WebSocketUpgrade, Query(q): Query<WsConnectQuery>, State(state): State<AppState>) -> Response {
+    ws.on_upgrade(move |socket| handle_socket(socket, state, q.session))
+}
+
+async fn handle_socket(socket: WebSocket, state: AppState, requested_session: Option<String>) {
+    // Resume the requested session (durable history replays on TaskStart) or
+    // mint a fresh one.
+    let session_id = requested_session.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let (mut sink, mut stream) = socket.split();
 
     // All outbound events funnel through one channel so the agent runner, the
@@ -378,11 +414,14 @@ async fn handle_client_event(ev: ClientEvent, session_id: &str, state: &AppState
             message,
             model,
             budget,
-            prior_messages,
             working_dir,
             ..
         } => {
             let task_id = uuid::Uuid::new_v4().to_string();
+            // The daemon owns the conversation: load this session's durable
+            // history as prior_messages (ignoring any client-sent copy), so a
+            // turn continues the conversation even across a daemon restart.
+            let prior_messages = load_prior(state, session_id).await;
             let spec = TaskSpec {
                 task_id: task_id.clone(),
                 session_id: session_id.to_owned(),
@@ -394,7 +433,8 @@ async fn handle_client_event(ev: ClientEvent, session_id: &str, state: &AppState
             };
             let out = out_tx.clone();
             let events = Arc::clone(&state.events);
-            let run = async move { runner::run_task(spec, out, events).await };
+            let messages = Arc::clone(&state.messages);
+            let run = async move { runner::run_task(spec, out, events, messages).await };
 
             match state.coordinator.try_start(session_id.to_owned(), task_id.clone(), run) {
                 Ok(()) => {

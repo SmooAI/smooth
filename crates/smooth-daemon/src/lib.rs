@@ -37,6 +37,7 @@
 pub mod config;
 pub mod coordinator;
 pub mod event;
+pub mod messages;
 pub mod runner;
 pub mod server;
 pub mod session;
@@ -45,6 +46,7 @@ pub mod wire;
 
 pub use coordinator::{SessionRunCoordinator, StartError};
 pub use event::{DaemonEvent, EventKind, EventStore, InMemoryEventLog, Seq};
+pub use messages::{InMemoryMessageStore, MessageStore, StoredMessage};
 pub use runner::{run_task, TaskSpec};
 pub use server::{build_router, serve, serve_on, serve_with_shutdown, AppState};
 pub use session::{InMemorySessionStore, Session, SessionStatus, SessionStore};

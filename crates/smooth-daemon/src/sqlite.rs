@@ -20,6 +20,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 
 use crate::event::{DaemonEvent, EventKind, EventStore, Seq};
+use crate::messages::{MessageStore, StoredMessage};
 use crate::session::{Session, SessionStatus, SessionStore};
 
 const SCHEMA: &str = "
@@ -38,6 +39,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     updated_at TEXT NOT NULL,
     status     TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS session_messages (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    role       TEXT NOT NULL,
+    content    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_msg_session ON session_messages(session_id, id);
 ";
 
 /// Open (creating if needed) the daemon database at `path` with WAL + schema.
@@ -55,18 +64,31 @@ pub fn open_db(path: &Path) -> anyhow::Result<Connection> {
     Ok(conn)
 }
 
-/// Open the durable event + session stores at `path`, sharing one connection.
+/// The durable stores, sharing one connection.
+pub struct Stores {
+    /// Event log.
+    pub events: Arc<dyn EventStore>,
+    /// Session registry.
+    pub sessions: Arc<dyn SessionStore>,
+    /// Conversation history.
+    pub messages: Arc<dyn MessageStore>,
+}
+
+/// Open the durable event + session + message stores at `path`, sharing one
+/// connection.
 ///
 /// A single serialized writer is plenty for a single-tenant daemon and avoids
 /// SQLite write contention.
 ///
 /// # Errors
 /// Returns an error if the database cannot be opened/initialized.
-pub fn open_stores(path: &Path) -> anyhow::Result<(Arc<dyn EventStore>, Arc<dyn SessionStore>)> {
+pub fn open_stores(path: &Path) -> anyhow::Result<Stores> {
     let conn = Arc::new(Mutex::new(open_db(path)?));
-    let events: Arc<dyn EventStore> = Arc::new(SqliteEventLog { conn: Arc::clone(&conn) });
-    let sessions: Arc<dyn SessionStore> = Arc::new(SqliteSessionStore { conn });
-    Ok((events, sessions))
+    Ok(Stores {
+        events: Arc::new(SqliteEventLog { conn: Arc::clone(&conn) }),
+        sessions: Arc::new(SqliteSessionStore { conn: Arc::clone(&conn) }),
+        messages: Arc::new(SqliteMessageStore { conn }),
+    })
 }
 
 fn lock(conn: &Mutex<Connection>) -> MutexGuard<'_, Connection> {
@@ -252,6 +274,43 @@ impl SessionStore for SqliteSessionStore {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Conversation messages
+// ---------------------------------------------------------------------------
+
+/// Durable [`MessageStore`] backed by the `session_messages` table.
+pub struct SqliteMessageStore {
+    conn: Arc<Mutex<Connection>>,
+}
+
+#[async_trait]
+impl MessageStore for SqliteMessageStore {
+    async fn append(&self, session_id: &str, role: &str, content: &str) -> anyhow::Result<()> {
+        let guard = lock(&self.conn);
+        guard.execute(
+            "INSERT INTO session_messages (session_id, role, content) VALUES (?1, ?2, ?3)",
+            params![session_id, role, content],
+        )?;
+        Ok(())
+    }
+
+    async fn load(&self, session_id: &str, limit: usize) -> anyhow::Result<Vec<StoredMessage>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let guard = lock(&self.conn);
+        let mut stmt = guard.prepare("SELECT role, content FROM session_messages WHERE session_id = ?1 ORDER BY id LIMIT ?2")?;
+        let mut out = Vec::new();
+        for row in stmt.query_map(params![session_id, limit], |r| {
+            Ok(StoredMessage {
+                role: r.get(0)?,
+                content: r.get(1)?,
+            })
+        })? {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "unwrap/expect are the idiom for test assertions")]
 mod tests {
@@ -266,13 +325,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = db_path(&dir);
         {
-            let (events, _sessions) = open_stores(&path).unwrap();
+            let events = open_stores(&path).unwrap().events;
             events.append("s1", EventKind::TokenDelta { text: "a".into() }).await.unwrap();
             events.append("s1", EventKind::TokenDelta { text: "b".into() }).await.unwrap();
             assert_eq!(events.latest_seq().await.unwrap(), 2);
         }
         // Reopen → durable.
-        let (events, _sessions) = open_stores(&path).unwrap();
+        let events = open_stores(&path).unwrap().events;
         assert_eq!(events.latest_seq().await.unwrap(), 2, "events survived reopen");
         let tail = events.since(1, None, 100).await.unwrap();
         assert_eq!(tail.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![2]);
@@ -281,7 +340,7 @@ mod tests {
     #[tokio::test]
     async fn events_since_filters_by_session_and_cursor() {
         let dir = tempfile::tempdir().unwrap();
-        let (events, _s) = open_stores(&db_path(&dir)).unwrap();
+        let events = open_stores(&db_path(&dir)).unwrap().events;
         events.append("s1", EventKind::TokenDelta { text: "a".into() }).await.unwrap(); // 1
         events.append("s2", EventKind::TokenDelta { text: "b".into() }).await.unwrap(); // 2
         events.append("s1", EventKind::TokenDelta { text: "c".into() }).await.unwrap(); // 3
@@ -292,12 +351,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn messages_persist_across_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = db_path(&dir);
+        {
+            let messages = open_stores(&path).unwrap().messages;
+            messages.append("s1", "user", "hi").await.unwrap();
+            messages.append("s1", "assistant", "hello there").await.unwrap();
+        }
+        let messages = open_stores(&path).unwrap().messages;
+        let history = messages.load("s1", 100).await.unwrap();
+        assert_eq!(history.len(), 2, "messages survived reopen");
+        assert_eq!(history[0].role, "user");
+        assert_eq!(history[1].content, "hello there");
+    }
+
+    #[tokio::test]
     async fn sessions_persist_and_update() {
         let dir = tempfile::tempdir().unwrap();
         let path = db_path(&dir);
         let created_id;
         {
-            let (_e, sessions) = open_stores(&path).unwrap();
+            let sessions = open_stores(&path).unwrap().sessions;
             let s = sessions.create(Some("s1".into()), Some("hack".into())).await.unwrap();
             created_id = s.id.clone();
             assert_eq!(s.status, SessionStatus::Idle);
@@ -306,7 +381,7 @@ mod tests {
             assert_eq!(again.title.as_deref(), Some("hack"));
             sessions.set_status("s1", SessionStatus::Active).await.unwrap();
         }
-        let (_e, sessions) = open_stores(&path).unwrap();
+        let sessions = open_stores(&path).unwrap().sessions;
         let got = sessions.get(&created_id).await.unwrap().expect("session survived reopen");
         assert_eq!(got.status, SessionStatus::Active);
         assert_eq!(sessions.list().await.unwrap().len(), 1);

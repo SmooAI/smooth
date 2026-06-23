@@ -15,13 +15,14 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use smooth_operator::{Agent, AgentConfig, CostBudget, Message, ToolRegistry};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::resolve_llm;
 use crate::event::{EventKind, EventStore};
+use crate::messages::MessageStore;
 use crate::wire::{map_agent_event, PriorMessage, ServerEvent};
 
 /// The daemon's baseline system prompt. Later phases layer project context
@@ -54,7 +55,7 @@ pub struct TaskSpec {
 /// Run one agent turn to completion, streaming `ServerEvent`s to `out` and
 /// recording them to `events`. Never panics; failures are surfaced as a
 /// terminal [`ServerEvent::TaskError`].
-pub async fn run_task(spec: TaskSpec, out: UnboundedSender<ServerEvent>, events: Arc<dyn EventStore>) {
+pub async fn run_task(spec: TaskSpec, out: UnboundedSender<ServerEvent>, events: Arc<dyn EventStore>, messages: Arc<dyn MessageStore>) {
     let TaskSpec {
         task_id,
         session_id,
@@ -64,6 +65,8 @@ pub async fn run_task(spec: TaskSpec, out: UnboundedSender<ServerEvent>, events:
         prior_messages,
         workspace,
     } = spec;
+    // Saved for durable history; `message` itself is moved into the engine.
+    let user_message = message.clone();
 
     let llm = match resolve_llm(model.as_deref()) {
         Ok(llm) => llm,
@@ -108,14 +111,20 @@ pub async fn run_task(spec: TaskSpec, out: UnboundedSender<ServerEvent>, events:
     // whether one was forwarded so we can synthesize a terminal for the rare
     // early-return path and for hard errors.
     let saw_terminal = Arc::new(AtomicBool::new(false));
+    // Accumulate streamed assistant text for durable conversation history.
+    let assistant = Arc::new(Mutex::new(String::new()));
     let consumer = {
         let task_id = task_id.clone();
         let session_id = session_id.clone();
         let out = out.clone();
         let events = Arc::clone(&events);
         let saw_terminal = Arc::clone(&saw_terminal);
+        let assistant = Arc::clone(&assistant);
         tokio::spawn(async move {
             while let Some(ev) = rx.recv().await {
+                if let smooth_operator::AgentEvent::TokenDelta { content } = &ev {
+                    assistant.lock().unwrap_or_else(PoisonError::into_inner).push_str(content);
+                }
                 if let Some(se) = map_agent_event(&task_id, &ev) {
                     if is_terminal(&se) {
                         saw_terminal.store(true, Ordering::SeqCst);
@@ -128,8 +137,19 @@ pub async fn run_task(spec: TaskSpec, out: UnboundedSender<ServerEvent>, events:
 
     let result = agent.run_with_channel(message, tx).await;
     // `tx` was moved into the loop and is dropped on return → `rx` closes →
-    // the consumer drains and exits. Wait for it before we synthesize.
+    // the consumer drains and exits. Wait for it before we read/synthesize.
     let _ = consumer.await;
+
+    // Persist this turn to durable history on success, so the conversation
+    // resumes after a daemon restart. `prior_messages` already held the
+    // earlier turns; we only append the current user + assistant pair.
+    if result.is_ok() {
+        let _ = messages.append(&session_id, "user", &user_message).await;
+        let text = assistant.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        if !text.trim().is_empty() {
+            let _ = messages.append(&session_id, "assistant", &text).await;
+        }
+    }
 
     if saw_terminal.load(Ordering::SeqCst) {
         return;
@@ -195,6 +215,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
         let events: Arc<dyn EventStore> = Arc::new(InMemoryEventLog::new());
+        let messages: Arc<dyn MessageStore> = Arc::new(crate::messages::InMemoryMessageStore::new());
 
         run_task(
             TaskSpec {
@@ -208,6 +229,7 @@ mod tests {
             },
             tx,
             Arc::clone(&events),
+            Arc::clone(&messages),
         )
         .await;
 
