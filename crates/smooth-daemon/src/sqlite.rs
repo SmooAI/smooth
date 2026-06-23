@@ -24,6 +24,7 @@ use smooth_operator::{Memory, MemoryEntry, MemoryType};
 
 use crate::event::{DaemonEvent, EventKind, EventStore, Seq};
 use crate::messages::{MessageStore, StoredMessage};
+use crate::schedule::{Schedule, ScheduleKind, ScheduleStore};
 use crate::session::{Session, SessionStatus, SessionStore};
 
 const SCHEMA: &str = "
@@ -60,6 +61,16 @@ CREATE TABLE IF NOT EXISTS memories (
     created_at    TEXT NOT NULL,
     last_accessed TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS schedules (
+    id        TEXT PRIMARY KEY,
+    prompt    TEXT NOT NULL,
+    kind      TEXT NOT NULL,
+    enabled   INTEGER NOT NULL,
+    next_due  TEXT NOT NULL,
+    last_run  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules(enabled, next_due);
 ";
 
 /// Open (creating if needed) the daemon database at `path` with WAL + schema.
@@ -87,6 +98,8 @@ pub struct Stores {
     pub messages: Arc<dyn MessageStore>,
     /// Cross-session agent memory (hermes-style persistent recall).
     pub memory: Arc<dyn Memory>,
+    /// Scheduled/proactive task definitions.
+    pub schedules: Arc<dyn ScheduleStore>,
 }
 
 /// Open the durable event + session + message stores at `path`, sharing one
@@ -103,7 +116,8 @@ pub fn open_stores(path: &Path) -> anyhow::Result<Stores> {
         events: Arc::new(SqliteEventLog { conn: Arc::clone(&conn) }),
         sessions: Arc::new(SqliteSessionStore { conn: Arc::clone(&conn) }),
         messages: Arc::new(SqliteMessageStore { conn: Arc::clone(&conn) }),
-        memory: Arc::new(SqliteMemory { conn }),
+        memory: Arc::new(SqliteMemory { conn: Arc::clone(&conn) }),
+        schedules: Arc::new(SqliteScheduleStore { conn }),
     })
 }
 
@@ -423,6 +437,85 @@ impl Memory for SqliteMemory {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Schedules (proactive tasks)
+// ---------------------------------------------------------------------------
+
+/// Durable [`ScheduleStore`] backed by the `schedules` table.
+pub struct SqliteScheduleStore {
+    conn: Arc<Mutex<Connection>>,
+}
+
+fn row_to_schedule(row: &rusqlite::Row) -> rusqlite::Result<Schedule> {
+    let id: String = row.get(0)?;
+    let prompt: String = row.get(1)?;
+    let kind: String = row.get(2)?;
+    let enabled: i64 = row.get(3)?;
+    let next_due: String = row.get(4)?;
+    let last_run: Option<String> = row.get(5)?;
+    let kind: ScheduleKind = serde_json::from_str(&kind).map_err(|e| rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e)))?;
+    Ok(Schedule {
+        id,
+        prompt,
+        kind,
+        enabled: enabled != 0,
+        next_due: rfc3339_to_utc(&next_due),
+        last_run: last_run.as_deref().map(rfc3339_to_utc),
+    })
+}
+
+#[async_trait]
+impl ScheduleStore for SqliteScheduleStore {
+    async fn upsert(&self, schedule: Schedule) -> anyhow::Result<()> {
+        let kind = serde_json::to_string(&schedule.kind)?;
+        let guard = lock(&self.conn);
+        guard.execute(
+            "INSERT OR REPLACE INTO schedules (id, prompt, kind, enabled, next_due, last_run) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                schedule.id,
+                schedule.prompt,
+                kind,
+                i64::from(schedule.enabled),
+                schedule.next_due.to_rfc3339(),
+                schedule.last_run.map(|t| t.to_rfc3339()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    async fn list(&self) -> anyhow::Result<Vec<Schedule>> {
+        let guard = lock(&self.conn);
+        let mut stmt = guard.prepare("SELECT id, prompt, kind, enabled, next_due, last_run FROM schedules ORDER BY next_due")?;
+        let mut out = Vec::new();
+        for row in stmt.query_map([], row_to_schedule)? {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    async fn due(&self, now: DateTime<Utc>) -> anyhow::Result<Vec<Schedule>> {
+        // SQL narrows to enabled rows; the precise due check uses `DateTime`
+        // comparison (via `is_due`) to avoid rfc3339 fractional-second string
+        // edge cases.
+        let guard = lock(&self.conn);
+        let mut stmt = guard.prepare("SELECT id, prompt, kind, enabled, next_due, last_run FROM schedules WHERE enabled = 1 ORDER BY next_due")?;
+        let mut out = Vec::new();
+        for row in stmt.query_map([], row_to_schedule)? {
+            let schedule = row?;
+            if schedule.is_due(now) {
+                out.push(schedule);
+            }
+        }
+        Ok(out)
+    }
+
+    async fn delete(&self, id: &str) -> anyhow::Result<()> {
+        let guard = lock(&self.conn);
+        guard.execute("DELETE FROM schedules WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "unwrap/expect are the idiom for test assertions")]
 mod tests {
@@ -508,6 +601,35 @@ mod tests {
         assert!(memory.recall("", 5).unwrap().is_empty());
         memory.forget(&forget_id).unwrap();
         assert!(memory.recall("ephemeral", 5).unwrap().is_empty(), "forgotten memory is gone");
+    }
+
+    #[tokio::test]
+    async fn schedules_persist_across_reopen_and_due_filters() {
+        use crate::schedule::{Schedule, ScheduleKind};
+        let dir = tempfile::tempdir().unwrap();
+        let path = db_path(&dir);
+        let now = chrono::DateTime::parse_from_rfc3339("2026-06-23T12:00:00Z").unwrap().with_timezone(&Utc);
+        {
+            let schedules = open_stores(&path).unwrap().schedules;
+            let mut due_one = Schedule::new("a", "morning brief", ScheduleKind::DailyAt { hour: 6, minute: 0 }, now);
+            due_one.next_due = chrono::DateTime::parse_from_rfc3339("2026-06-23T11:59:00Z").unwrap().with_timezone(&Utc);
+            schedules.upsert(due_one).await.unwrap();
+            schedules
+                .upsert(Schedule::new("b", "later", ScheduleKind::EveryNSeconds { secs: 3600 }, now))
+                .await
+                .unwrap();
+        }
+        // Reopen → durable; round-trips the kind + timestamps.
+        let schedules = open_stores(&path).unwrap().schedules;
+        assert_eq!(schedules.list().await.unwrap().len(), 2, "schedules survived reopen");
+        let due = schedules.due(now).await.unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].id, "a");
+        assert_eq!(due[0].kind, ScheduleKind::DailyAt { hour: 6, minute: 0 });
+
+        schedules.delete("a").await.unwrap();
+        assert!(schedules.due(now).await.unwrap().is_empty());
+        assert_eq!(schedules.list().await.unwrap().len(), 1);
     }
 
     #[tokio::test]

@@ -88,6 +88,9 @@ pub struct AppState {
     /// Durable cross-session agent memory; the engine auto-recalls from it each
     /// turn. SQLite-backed in `persistent`, in-memory for `new`.
     pub memory: Arc<dyn smooth_operator::Memory>,
+    /// Scheduled/proactive task definitions (Phase 5). The scheduler tick (a
+    /// later slice) fires due schedules back into the daemon.
+    pub schedules: Arc<dyn crate::schedule::ScheduleStore>,
     /// When this daemon process started — surfaced as uptime in `/api/status`.
     pub started_at: std::time::Instant,
 }
@@ -106,6 +109,7 @@ impl AppState {
             auth_token: None,
             egress_proxy: None,
             memory: Arc::new(smooth_operator::InMemoryMemory::new()),
+            schedules: Arc::new(crate::schedule::InMemoryScheduleStore::new()),
             started_at: std::time::Instant::now(),
         }
     }
@@ -124,6 +128,7 @@ impl AppState {
             sessions: stores.sessions,
             messages: stores.messages,
             memory: stores.memory,
+            schedules: stores.schedules,
             approvals: ApprovalCoordinator::new(),
             permission_mode: SharedPermissionMode::new(crate::config::resolve_permission_mode()),
             auth_token: crate::config::resolve_auth_token().map(Arc::new),

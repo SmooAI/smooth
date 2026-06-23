@@ -6,6 +6,10 @@
 //! tick loop (those land in following slices), so the timing logic is
 //! exhaustively unit-testable without a clock or a database.
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+use async_trait::async_trait;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -86,6 +90,77 @@ impl Schedule {
     }
 }
 
+/// Durable storage for [`Schedule`]s.
+#[async_trait]
+pub trait ScheduleStore: Send + Sync {
+    /// Persist a new (or replace an existing) schedule.
+    ///
+    /// # Errors
+    /// Returns an error if the store cannot be written.
+    async fn upsert(&self, schedule: Schedule) -> anyhow::Result<()>;
+
+    /// All schedules, newest-`next_due` last.
+    ///
+    /// # Errors
+    /// Returns an error if the store cannot be read.
+    async fn list(&self) -> anyhow::Result<Vec<Schedule>>;
+
+    /// Enabled schedules whose `next_due` is at or before `now`.
+    ///
+    /// # Errors
+    /// Returns an error if the store cannot be read.
+    async fn due(&self, now: DateTime<Utc>) -> anyhow::Result<Vec<Schedule>>;
+
+    /// Remove a schedule (no-op if unknown).
+    ///
+    /// # Errors
+    /// Returns an error if the store cannot be written.
+    async fn delete(&self, id: &str) -> anyhow::Result<()>;
+}
+
+/// In-memory [`ScheduleStore`] — the dev/test backend (not durable).
+#[derive(Debug, Default)]
+pub struct InMemoryScheduleStore {
+    inner: Mutex<HashMap<String, Schedule>>,
+}
+
+impl InMemoryScheduleStore {
+    /// Create an empty store.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Schedule>> {
+        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+#[async_trait]
+impl ScheduleStore for InMemoryScheduleStore {
+    async fn upsert(&self, schedule: Schedule) -> anyhow::Result<()> {
+        self.lock().insert(schedule.id.clone(), schedule);
+        Ok(())
+    }
+
+    async fn list(&self) -> anyhow::Result<Vec<Schedule>> {
+        let mut out: Vec<Schedule> = self.lock().values().cloned().collect();
+        out.sort_by_key(|s| s.next_due);
+        Ok(out)
+    }
+
+    async fn due(&self, now: DateTime<Utc>) -> anyhow::Result<Vec<Schedule>> {
+        let mut out: Vec<Schedule> = self.lock().values().filter(|s| s.is_due(now)).cloned().collect();
+        out.sort_by_key(|s| s.next_due);
+        Ok(out)
+    }
+
+    async fn delete(&self, id: &str) -> anyhow::Result<()> {
+        self.lock().remove(id);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "unwrap/expect are the idiom for test assertions")]
 mod tests {
@@ -144,5 +219,30 @@ mod tests {
             let json = serde_json::to_string(&k).unwrap();
             assert_eq!(serde_json::from_str::<ScheduleKind>(&json).unwrap(), k);
         }
+    }
+
+    #[tokio::test]
+    async fn in_memory_store_upsert_list_due_delete() {
+        let now = at("2026-06-23T12:00:00Z");
+        let store = InMemoryScheduleStore::new();
+        // Due now (next_due in the past) vs. not-yet-due.
+        let mut past = Schedule::new("a", "morning brief", ScheduleKind::DailyAt { hour: 6, minute: 0 }, now);
+        past.next_due = at("2026-06-23T11:59:00Z");
+        let future = Schedule::new("b", "nightly", ScheduleKind::EveryNSeconds { secs: 3600 }, now);
+        store.upsert(past.clone()).await.unwrap();
+        store.upsert(future).await.unwrap();
+
+        assert_eq!(store.list().await.unwrap().len(), 2);
+        let due = store.due(now).await.unwrap();
+        assert_eq!(due.len(), 1, "only the past-due one is due");
+        assert_eq!(due[0].id, "a");
+
+        // A disabled schedule, even if past-due, is not returned.
+        past.enabled = false;
+        store.upsert(past).await.unwrap();
+        assert!(store.due(now).await.unwrap().is_empty());
+
+        store.delete("a").await.unwrap();
+        assert_eq!(store.list().await.unwrap().len(), 1);
     }
 }
