@@ -63,8 +63,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Build daemon state with the in-memory backends (Phase 1 default).
-    /// Phase 2 swaps in the Dolt-backed [`EventStore`] + [`SessionStore`].
+    /// Build daemon state with the in-memory backends (dev/test).
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -72,6 +71,39 @@ impl AppState {
             events: Arc::new(InMemoryEventLog::new()),
             sessions: Arc::new(InMemorySessionStore::new()),
         }
+    }
+
+    /// Build daemon state with **durable** SQLite-backed events + sessions at
+    /// `db_path`, so the SSE event stream and session list survive a restart
+    /// (Phase 2, th-bd0e22).
+    ///
+    /// # Errors
+    /// Returns an error if the database cannot be opened/initialized.
+    pub fn persistent(db_path: &std::path::Path) -> anyhow::Result<Self> {
+        let (events, sessions) = crate::sqlite::open_stores(db_path)?;
+        Ok(Self {
+            coordinator: SessionRunCoordinator::new(),
+            events,
+            sessions,
+        })
+    }
+
+    /// The default daemon database path: `SMOOTH_DAEMON_DB` if set, else
+    /// `~/.smooth/daemon.db`.
+    #[must_use]
+    pub fn default_db_path() -> std::path::PathBuf {
+        if let Ok(p) = std::env::var("SMOOTH_DAEMON_DB") {
+            return std::path::PathBuf::from(p);
+        }
+        dirs_next::home_dir().map_or_else(|| std::path::PathBuf::from("daemon.db"), |h| h.join(".smooth").join("daemon.db"))
+    }
+
+    /// Build durable daemon state at the [`default_db_path`](Self::default_db_path).
+    ///
+    /// # Errors
+    /// Returns an error if the database cannot be opened/initialized.
+    pub fn persistent_default() -> anyhow::Result<Self> {
+        Self::persistent(&Self::default_db_path())
     }
 }
 

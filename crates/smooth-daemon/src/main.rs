@@ -27,7 +27,9 @@ async fn main() -> ExitCode {
 
 async fn run() -> anyhow::Result<()> {
     let addr = smooth_daemon::config::resolve_bind()?;
-    let state = smooth_daemon::AppState::new();
+    // Durable SQLite-backed state so events/sessions survive a restart.
+    let state = smooth_daemon::AppState::persistent_default()?;
+    tracing::info!(db = %smooth_daemon::AppState::default_db_path().display(), "durable state");
     smooth_daemon::serve(state, addr).await
 }
 

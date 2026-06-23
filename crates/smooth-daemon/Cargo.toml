@@ -26,6 +26,10 @@ path = "src/main.rs"
 [dependencies]
 smooth-operator.workspace = true
 smooth-tools.workspace = true
+# th-bd0e22 (EPIC th-c89c2a): durable persistence for the daemon's per-instance
+# runtime state (events, sessions). SQLite (not Dolt) — this is ephemeral local
+# state, not team-synced work items; rusqlite is bundled (no external binary).
+rusqlite.workspace = true
 axum = { workspace = true, features = ["ws"] }
 tokio.workspace = true
 tokio-stream.workspace = true
@@ -45,6 +49,8 @@ dirs-next.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 # Real end-to-end WebSocket smoke tests against the daemon's axum server.
 tokio-tungstenite.workspace = true
+# Temp DBs for the SQLite persistence tests.
+tempfile.workspace = true
 
 [lints]
 workspace = true

@@ -40,6 +40,7 @@ pub mod event;
 pub mod runner;
 pub mod server;
 pub mod session;
+pub mod sqlite;
 pub mod wire;
 
 pub use coordinator::{SessionRunCoordinator, StartError};

@@ -1632,7 +1632,9 @@ async fn cmd_daemon(port: u16, bind: String) -> Result<()> {
         "\u{2713}".green().bold(),
         format!("http://localhost:{port}").cyan().bold()
     );
-    smooth_daemon::serve(smooth_daemon::AppState::new(), addr).await
+    // Durable SQLite-backed state (~/.smooth/daemon.db) so events + sessions
+    // survive a restart.
+    smooth_daemon::serve(smooth_daemon::AppState::persistent_default()?, addr).await
 }
 
 async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, foreground: bool, max_operators: Option<usize>, skip_test: bool) -> Result<()> {

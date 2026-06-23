@@ -1,0 +1,314 @@
+//! SQLite-backed durable persistence for the daemon's runtime state.
+//!
+//! The daemon's events and sessions are **per-instance runtime state**, not
+//! team-synced work items — so they live in a local SQLite database (WAL mode),
+//! not Dolt. (Dolt's version-control + `refs/dolt/data` sync is for *pearls*.)
+//! rusqlite ships a bundled SQLite, so there is no external binary and tests
+//! run anywhere.
+//!
+//! These implement the same [`EventStore`](crate::event::EventStore) and
+//! [`SessionStore`](crate::session::SessionStore) traits as the in-memory
+//! backends, so swapping them in (via [`open_stores`]) makes the SSE
+//! cursor-resume stream and the `/api/session` list survive a daemon restart
+//! with zero changes above the trait — the headline Phase 2 capability.
+
+use std::path::Path;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use rusqlite::{params, Connection};
+
+use crate::event::{DaemonEvent, EventKind, EventStore, Seq};
+use crate::session::{Session, SessionStatus, SessionStore};
+
+const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS events (
+    seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    ts         TEXT NOT NULL,
+    kind       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_events_session_seq ON events(session_id, seq);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id         TEXT PRIMARY KEY,
+    title      TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    status     TEXT NOT NULL
+);
+";
+
+/// Open (creating if needed) the daemon database at `path` with WAL + schema.
+///
+/// # Errors
+/// Returns an error if the parent dir can't be created or the DB can't be opened.
+pub fn open_db(path: &Path) -> anyhow::Result<Connection> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let conn = Connection::open(path)?;
+    // WAL keeps reads non-blocking against the single writer.
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.execute_batch(SCHEMA)?;
+    Ok(conn)
+}
+
+/// Open the durable event + session stores at `path`, sharing one connection.
+///
+/// A single serialized writer is plenty for a single-tenant daemon and avoids
+/// SQLite write contention.
+///
+/// # Errors
+/// Returns an error if the database cannot be opened/initialized.
+pub fn open_stores(path: &Path) -> anyhow::Result<(Arc<dyn EventStore>, Arc<dyn SessionStore>)> {
+    let conn = Arc::new(Mutex::new(open_db(path)?));
+    let events: Arc<dyn EventStore> = Arc::new(SqliteEventLog { conn: Arc::clone(&conn) });
+    let sessions: Arc<dyn SessionStore> = Arc::new(SqliteSessionStore { conn });
+    Ok((events, sessions))
+}
+
+fn lock(conn: &Mutex<Connection>) -> MutexGuard<'_, Connection> {
+    conn.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn rfc3339_to_utc(s: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(s).map_or_else(|_| Utc::now(), |d| d.with_timezone(&Utc))
+}
+
+// ---------------------------------------------------------------------------
+// Events
+// ---------------------------------------------------------------------------
+
+/// Durable [`EventStore`] backed by the `events` table.
+pub struct SqliteEventLog {
+    conn: Arc<Mutex<Connection>>,
+}
+
+fn row_to_event(row: &rusqlite::Row) -> rusqlite::Result<DaemonEvent> {
+    let seq: i64 = row.get(0)?;
+    let session_id: String = row.get(1)?;
+    let ts: String = row.get(2)?;
+    let kind: String = row.get(3)?;
+    let kind: EventKind = serde_json::from_str(&kind).map_err(|e| rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e)))?;
+    Ok(DaemonEvent {
+        seq: u64::try_from(seq).unwrap_or(0),
+        session_id,
+        ts: rfc3339_to_utc(&ts),
+        kind,
+    })
+}
+
+#[async_trait]
+impl EventStore for SqliteEventLog {
+    async fn append(&self, session_id: &str, kind: EventKind) -> anyhow::Result<DaemonEvent> {
+        let ts = Utc::now();
+        let kind_json = serde_json::to_string(&kind)?;
+        let seq = {
+            let guard = lock(&self.conn);
+            guard.execute(
+                "INSERT INTO events (session_id, ts, kind) VALUES (?1, ?2, ?3)",
+                params![session_id, ts.to_rfc3339(), kind_json],
+            )?;
+            u64::try_from(guard.last_insert_rowid()).unwrap_or(0)
+        };
+        Ok(DaemonEvent {
+            seq,
+            session_id: session_id.to_owned(),
+            ts,
+            kind,
+        })
+    }
+
+    async fn since(&self, cursor: Seq, session_id: Option<&str>, limit: usize) -> anyhow::Result<Vec<DaemonEvent>> {
+        let cursor = i64::try_from(cursor).unwrap_or(i64::MAX);
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let guard = lock(&self.conn);
+        let mut out = Vec::new();
+        if let Some(sid) = session_id {
+            let mut stmt = guard.prepare("SELECT seq, session_id, ts, kind FROM events WHERE seq > ?1 AND session_id = ?2 ORDER BY seq LIMIT ?3")?;
+            for row in stmt.query_map(params![cursor, sid, limit], row_to_event)? {
+                out.push(row?);
+            }
+        } else {
+            let mut stmt = guard.prepare("SELECT seq, session_id, ts, kind FROM events WHERE seq > ?1 ORDER BY seq LIMIT ?2")?;
+            for row in stmt.query_map(params![cursor, limit], row_to_event)? {
+                out.push(row?);
+            }
+        }
+        Ok(out)
+    }
+
+    async fn latest_seq(&self) -> anyhow::Result<Seq> {
+        let guard = lock(&self.conn);
+        let seq: i64 = guard.query_row("SELECT COALESCE(MAX(seq), 0) FROM events", [], |r| r.get(0))?;
+        Ok(u64::try_from(seq).unwrap_or(0))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sessions
+// ---------------------------------------------------------------------------
+
+/// Durable [`SessionStore`] backed by the `sessions` table.
+pub struct SqliteSessionStore {
+    conn: Arc<Mutex<Connection>>,
+}
+
+fn status_to_str(s: SessionStatus) -> &'static str {
+    match s {
+        SessionStatus::Active => "active",
+        SessionStatus::Idle => "idle",
+        SessionStatus::Completed => "completed",
+    }
+}
+
+fn status_from_str(s: &str) -> SessionStatus {
+    match s {
+        "active" => SessionStatus::Active,
+        "completed" => SessionStatus::Completed,
+        _ => SessionStatus::Idle,
+    }
+}
+
+fn row_to_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
+    let id: String = row.get(0)?;
+    let title: Option<String> = row.get(1)?;
+    let created_at: String = row.get(2)?;
+    let updated_at: String = row.get(3)?;
+    let status: String = row.get(4)?;
+    Ok(Session {
+        id,
+        title,
+        created_at: rfc3339_to_utc(&created_at),
+        updated_at: rfc3339_to_utc(&updated_at),
+        status: status_from_str(&status),
+    })
+}
+
+#[async_trait]
+impl SessionStore for SqliteSessionStore {
+    async fn create(&self, id: Option<String>, title: Option<String>) -> anyhow::Result<Session> {
+        let now = Utc::now();
+        let id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let guard = lock(&self.conn);
+        if let Ok(existing) = guard.query_row(
+            "SELECT id, title, created_at, updated_at, status FROM sessions WHERE id = ?1",
+            params![id],
+            row_to_session,
+        ) {
+            return Ok(existing);
+        }
+        let session = Session {
+            id,
+            title,
+            created_at: now,
+            updated_at: now,
+            status: SessionStatus::Idle,
+        };
+        guard.execute(
+            "INSERT INTO sessions (id, title, created_at, updated_at, status) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![session.id, session.title, now.to_rfc3339(), now.to_rfc3339(), status_to_str(session.status)],
+        )?;
+        Ok(session)
+    }
+
+    async fn get(&self, id: &str) -> anyhow::Result<Option<Session>> {
+        let guard = lock(&self.conn);
+        let found = guard
+            .query_row(
+                "SELECT id, title, created_at, updated_at, status FROM sessions WHERE id = ?1",
+                params![id],
+                row_to_session,
+            )
+            .ok();
+        Ok(found)
+    }
+
+    async fn list(&self) -> anyhow::Result<Vec<Session>> {
+        let guard = lock(&self.conn);
+        let mut stmt = guard.prepare("SELECT id, title, created_at, updated_at, status FROM sessions ORDER BY updated_at DESC")?;
+        let mut out = Vec::new();
+        for row in stmt.query_map([], row_to_session)? {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    async fn touch(&self, id: &str) -> anyhow::Result<()> {
+        let guard = lock(&self.conn);
+        guard.execute("UPDATE sessions SET updated_at = ?1 WHERE id = ?2", params![Utc::now().to_rfc3339(), id])?;
+        Ok(())
+    }
+
+    async fn set_status(&self, id: &str, status: SessionStatus) -> anyhow::Result<()> {
+        let guard = lock(&self.conn);
+        guard.execute(
+            "UPDATE sessions SET status = ?1, updated_at = ?2 WHERE id = ?3",
+            params![status_to_str(status), Utc::now().to_rfc3339(), id],
+        )?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, reason = "unwrap/expect are the idiom for test assertions")]
+mod tests {
+    use super::*;
+
+    fn db_path(dir: &tempfile::TempDir) -> std::path::PathBuf {
+        dir.path().join("daemon.db")
+    }
+
+    #[tokio::test]
+    async fn events_persist_across_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = db_path(&dir);
+        {
+            let (events, _sessions) = open_stores(&path).unwrap();
+            events.append("s1", EventKind::TokenDelta { text: "a".into() }).await.unwrap();
+            events.append("s1", EventKind::TokenDelta { text: "b".into() }).await.unwrap();
+            assert_eq!(events.latest_seq().await.unwrap(), 2);
+        }
+        // Reopen → durable.
+        let (events, _sessions) = open_stores(&path).unwrap();
+        assert_eq!(events.latest_seq().await.unwrap(), 2, "events survived reopen");
+        let tail = events.since(1, None, 100).await.unwrap();
+        assert_eq!(tail.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![2]);
+    }
+
+    #[tokio::test]
+    async fn events_since_filters_by_session_and_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let (events, _s) = open_stores(&db_path(&dir)).unwrap();
+        events.append("s1", EventKind::TokenDelta { text: "a".into() }).await.unwrap(); // 1
+        events.append("s2", EventKind::TokenDelta { text: "b".into() }).await.unwrap(); // 2
+        events.append("s1", EventKind::TokenDelta { text: "c".into() }).await.unwrap(); // 3
+        let only_s1 = events.since(0, Some("s1"), 100).await.unwrap();
+        assert_eq!(only_s1.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![1, 3]);
+        let after_2 = events.since(2, None, 100).await.unwrap();
+        assert_eq!(after_2.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![3]);
+    }
+
+    #[tokio::test]
+    async fn sessions_persist_and_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = db_path(&dir);
+        let created_id;
+        {
+            let (_e, sessions) = open_stores(&path).unwrap();
+            let s = sessions.create(Some("s1".into()), Some("hack".into())).await.unwrap();
+            created_id = s.id.clone();
+            assert_eq!(s.status, SessionStatus::Idle);
+            // Idempotent create.
+            let again = sessions.create(Some("s1".into()), Some("ignored".into())).await.unwrap();
+            assert_eq!(again.title.as_deref(), Some("hack"));
+            sessions.set_status("s1", SessionStatus::Active).await.unwrap();
+        }
+        let (_e, sessions) = open_stores(&path).unwrap();
+        let got = sessions.get(&created_id).await.unwrap().expect("session survived reopen");
+        assert_eq!(got.status, SessionStatus::Active);
+        assert_eq!(sessions.list().await.unwrap().len(), 1);
+    }
+}
