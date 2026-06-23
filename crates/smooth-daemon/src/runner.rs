@@ -20,9 +20,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 use smooth_operator::{Agent, AgentConfig, CostBudget, Message, ToolRegistry};
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::approval::ApprovalCoordinator;
 use crate::config::resolve_llm;
 use crate::event::{EventKind, EventStore};
+use crate::hook::PermissionHook;
 use crate::messages::MessageStore;
+use crate::permission::{PermissionEngine, PermissionMode};
 use crate::wire::{map_agent_event, PriorMessage, ServerEvent};
 
 /// The daemon's baseline system prompt. Later phases layer project context
@@ -55,7 +58,14 @@ pub struct TaskSpec {
 /// Run one agent turn to completion, streaming `ServerEvent`s to `out` and
 /// recording them to `events`. Never panics; failures are surfaced as a
 /// terminal [`ServerEvent::TaskError`].
-pub async fn run_task(spec: TaskSpec, out: UnboundedSender<ServerEvent>, events: Arc<dyn EventStore>, messages: Arc<dyn MessageStore>) {
+pub async fn run_task(
+    spec: TaskSpec,
+    out: UnboundedSender<ServerEvent>,
+    events: Arc<dyn EventStore>,
+    messages: Arc<dyn MessageStore>,
+    approvals: Arc<ApprovalCoordinator>,
+    mode: PermissionMode,
+) {
     let TaskSpec {
         task_id,
         session_id,
@@ -96,11 +106,13 @@ pub async fn run_task(spec: TaskSpec, out: UnboundedSender<ServerEvent>, events:
         });
     }
 
-    // Register the workspace-confined tool set (fs/grep/…). Security note: the
-    // tools enforce lexical path confinement; the kernel OS-sandbox boundary
-    // arrives in Phase 3 (EPIC th-c89c2a).
+    // Register the workspace-confined tool set (fs/grep/…) + the Gate-1
+    // permission hook (deny→ask→allow, with the operator-approval round-trip).
+    // Security note: tools enforce lexical path confinement and the hook gates
+    // intent; the kernel OS-sandbox enforcement boundary is Phase 3 Slice 2.
     let mut tools = ToolRegistry::new();
     smooth_tools::register_default_tools(&mut tools, workspace);
+    tools.add_hook(PermissionHook::new(PermissionEngine::new(mode), approvals, out.clone()));
     let agent = Agent::new(cfg, tools);
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<smooth_operator::AgentEvent>();
@@ -230,6 +242,8 @@ mod tests {
             tx,
             Arc::clone(&events),
             Arc::clone(&messages),
+            crate::approval::ApprovalCoordinator::new(),
+            crate::permission::PermissionMode::default(),
         )
         .await;
 

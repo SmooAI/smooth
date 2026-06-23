@@ -34,9 +34,11 @@
 //! - Later phases: Dolt persistence, the auto-mode permission engine, the
 //!   reimagined React control surface, scheduling + messaging surfaces.
 
+pub mod approval;
 pub mod config;
 pub mod coordinator;
 pub mod event;
+pub mod hook;
 pub mod messages;
 pub mod permission;
 pub mod runner;
@@ -45,8 +47,10 @@ pub mod session;
 pub mod sqlite;
 pub mod wire;
 
+pub use approval::ApprovalCoordinator;
 pub use coordinator::{SessionRunCoordinator, StartError};
 pub use event::{DaemonEvent, EventKind, EventStore, InMemoryEventLog, Seq};
+pub use hook::PermissionHook;
 pub use messages::{InMemoryMessageStore, MessageStore, StoredMessage};
 pub use permission::{Decision, PermissionEngine, PermissionMode};
 pub use runner::{run_task, TaskSpec};

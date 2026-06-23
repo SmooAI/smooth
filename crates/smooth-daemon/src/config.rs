@@ -35,6 +35,17 @@ pub fn resolve_bind() -> anyhow::Result<SocketAddr> {
     raw.parse().with_context(|| format!("invalid SMOOTH_DAEMON_BIND: {raw:?}"))
 }
 
+/// Resolve the Gate-1 permission mode from `SMOOTH_PERMISSION_MODE` (default
+/// [`PermissionMode::Default`](crate::permission::PermissionMode::Default) —
+/// reads auto, mutations prompt).
+#[must_use]
+pub fn resolve_permission_mode() -> crate::permission::PermissionMode {
+    std::env::var("SMOOTH_PERMISSION_MODE")
+        .ok()
+        .and_then(|s| crate::permission::PermissionMode::parse(&s))
+        .unwrap_or_default()
+}
+
 /// Path to `providers.json` (`SMOOTH_PROVIDERS_FILE` override, else
 /// `~/.smooth/providers.json`).
 fn providers_path() -> Option<PathBuf> {

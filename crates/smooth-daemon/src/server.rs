@@ -38,9 +38,11 @@ use futures_util::{SinkExt, Stream, StreamExt};
 use serde::Deserialize;
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::approval::ApprovalCoordinator;
 use crate::coordinator::{SessionRunCoordinator, StartError};
 use crate::event::{DaemonEvent, EventStore, InMemoryEventLog, Seq};
 use crate::messages::MessageStore;
+use crate::permission::PermissionMode;
 use crate::runner::{self, TaskSpec};
 use crate::session::{InMemorySessionStore, Session, SessionStatus, SessionStore};
 use crate::wire::{ClientEvent, PriorMessage, ServerEvent};
@@ -66,6 +68,10 @@ pub struct AppState {
     pub sessions: Arc<dyn SessionStore>,
     /// Durable conversation history (for cross-restart resume).
     pub messages: Arc<dyn MessageStore>,
+    /// Routes operator approval replies to waiting permission hooks.
+    pub approvals: Arc<ApprovalCoordinator>,
+    /// Gate-1 permission posture for this daemon.
+    pub permission_mode: PermissionMode,
 }
 
 impl AppState {
@@ -77,6 +83,8 @@ impl AppState {
             events: Arc::new(InMemoryEventLog::new()),
             sessions: Arc::new(InMemorySessionStore::new()),
             messages: Arc::new(crate::messages::InMemoryMessageStore::new()),
+            approvals: ApprovalCoordinator::new(),
+            permission_mode: PermissionMode::default(),
         }
     }
 
@@ -93,6 +101,8 @@ impl AppState {
             events: stores.events,
             sessions: stores.sessions,
             messages: stores.messages,
+            approvals: ApprovalCoordinator::new(),
+            permission_mode: crate::config::resolve_permission_mode(),
         })
     }
 
@@ -434,7 +444,9 @@ async fn handle_client_event(ev: ClientEvent, session_id: &str, state: &AppState
             let out = out_tx.clone();
             let events = Arc::clone(&state.events);
             let messages = Arc::clone(&state.messages);
-            let run = async move { runner::run_task(spec, out, events, messages).await };
+            let approvals = Arc::clone(&state.approvals);
+            let mode = state.permission_mode;
+            let run = async move { runner::run_task(spec, out, events, messages, approvals, mode).await };
 
             match state.coordinator.try_start(session_id.to_owned(), task_id.clone(), run) {
                 Ok(()) => {
@@ -453,6 +465,9 @@ async fn handle_client_event(ev: ClientEvent, session_id: &str, state: &AppState
         }
         ClientEvent::Ping => {
             let _ = out_tx.send(ServerEvent::Pong);
+        }
+        ClientEvent::PermissionReply { request_id, allow } => {
+            state.approvals.resolve(&request_id, allow);
         }
         // Acknowledged but not yet acted on in the daemon (later phases).
         ClientEvent::Steer { .. } | ClientEvent::PearlCreate { .. } | ClientEvent::PearlUpdate { .. } | ClientEvent::PearlClose { .. } => {}

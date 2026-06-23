@@ -99,6 +99,13 @@ pub enum ClientEvent {
         /// Pearl ids to close.
         ids: Vec<String>,
     },
+    /// Reply to a [`ServerEvent::PermissionRequest`].
+    PermissionReply {
+        /// The request being answered.
+        request_id: String,
+        /// Whether the operator approved.
+        allow: bool,
+    },
     /// Heartbeat ping.
     Ping,
 }
@@ -175,6 +182,16 @@ pub enum ServerEvent {
         task_id: String,
         /// Failure reason.
         message: String,
+    },
+    /// The agent wants to run something that needs operator approval (Gate-1
+    /// `Ask`). The client replies with [`ClientEvent::PermissionReply`].
+    PermissionRequest {
+        /// Correlates the reply.
+        request_id: String,
+        /// Tool being gated (e.g. `bash`, `write_file`).
+        tool_name: String,
+        /// Human-readable description of the action.
+        summary: String,
     },
 }
 
