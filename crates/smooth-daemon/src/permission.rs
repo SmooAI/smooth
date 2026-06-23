@@ -45,6 +45,19 @@ pub enum PermissionMode {
 }
 
 impl PermissionMode {
+    /// Stable string identifier (matches the `parse` spellings / Claude Code).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::AcceptEdits => "acceptEdits",
+            Self::Plan => "plan",
+            Self::Auto => "auto",
+            Self::DontAsk => "dontAsk",
+            Self::BypassPermissions => "bypassPermissions",
+        }
+    }
+
     /// Parse from the `SMOOTH_PERMISSION_MODE` env value (case-insensitive).
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {

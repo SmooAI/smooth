@@ -135,6 +135,7 @@ impl Default for AppState {
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/api/status", get(status))
         .route("/ws", get(ws_handler))
         .route("/api/event", get(event_stream_handler))
         .route("/api/session", get(list_sessions).post(create_session))
@@ -213,6 +214,16 @@ async fn health() -> Json<serde_json::Value> {
         "status": "ok",
         "service": "smooth-daemon",
         "version": crate::version(),
+    }))
+}
+
+/// `GET /api/status` — daemon runtime status for the control surface.
+async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "service": "smooth-daemon",
+        "version": crate::version(),
+        "permission_mode": state.permission_mode.as_str(),
+        "active_tasks": state.coordinator.active_count(),
     }))
 }
 

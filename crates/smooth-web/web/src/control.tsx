@@ -6,13 +6,15 @@
 // Smooth app so the two don't entangle.
 
 import { useEffect, useReducer, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
 
-import { createSession, DaemonSocket, getHealth, listMessages, listSessions, type Health, type ServerEvent, type Session } from './daemon';
+import { createSession, DaemonSocket, getHealth, getStatus, listMessages, listSessions, type Health, type ServerEvent, type Session, type Status } from './daemon';
 
 type ChatItem =
     | { kind: 'user'; text: string }
     | { kind: 'assistant'; text: string }
     | { kind: 'tool'; name: string; args: string; result?: string; error?: boolean }
+    | { kind: 'complete'; iterations: number; cost_usd: number }
     | { kind: 'error'; text: string };
 
 interface PendingApproval {
@@ -23,6 +25,7 @@ interface PendingApproval {
 
 export function ControlApp() {
     const [health, setHealth] = useState<Health | null>(null);
+    const [status, setStatus] = useState<Status | null>(null);
     const [connected, setConnected] = useState(false);
     const [sessionId, setSessionId] = useState<string | null>(null);
     const [sessions, setSessions] = useState<Session[]>([]);
@@ -31,11 +34,15 @@ export function ControlApp() {
     const [busy, setBusy] = useState(false);
     const [input, setInput] = useState('');
     const socketRef = useRef<DaemonSocket | null>(null);
+    const scrollRef = useRef<HTMLDivElement | null>(null);
     const [, forceTick] = useReducer((n: number) => n + 1, 0);
 
     const refreshSessions = () => {
         listSessions()
             .then(setSessions)
+            .catch(() => {});
+        getStatus()
+            .then(setStatus)
             .catch(() => {});
     };
 
@@ -73,6 +80,7 @@ export function ControlApp() {
                 });
                 break;
             case 'TaskComplete':
+                setItems((prev) => [...prev, { kind: 'complete', iterations: ev.iterations, cost_usd: ev.cost_usd }]);
                 setBusy(false);
                 refreshSessions();
                 break;
@@ -108,6 +116,12 @@ export function ControlApp() {
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
+
+    // Keep the chat pinned to the newest item as tokens/tools stream in.
+    useEffect(() => {
+        const el = scrollRef.current;
+        if (el) el.scrollTop = el.scrollHeight;
+    }, [items]);
 
     // Switch to an existing session: load its conversation history and resume.
     const selectSession = async (id: string) => {
@@ -159,9 +173,17 @@ export function ControlApp() {
                     <span className="text-lg font-semibold text-primary">Smooth</span>
                     <span className="text-xs text-foreground/50">daemon {health?.version ?? '—'}</span>
                 </div>
-                <div className="flex items-center gap-2 text-xs">
-                    <span className={`h-2 w-2 rounded-full ${connected ? 'bg-primary' : 'bg-red-500'}`} />
-                    <span className="text-foreground/60">{connected ? 'connected' : 'reconnecting…'}</span>
+                <div className="flex items-center gap-3 text-xs">
+                    {status && (
+                        <span className="rounded bg-white/5 px-2 py-0.5 font-mono text-foreground/60" title="permission mode">
+                            {status.permission_mode}
+                        </span>
+                    )}
+                    {status && status.active_tasks > 0 && <span className="text-foreground/50">{status.active_tasks} running</span>}
+                    <span className="flex items-center gap-1">
+                        <span className={`h-2 w-2 rounded-full ${connected ? 'bg-primary' : 'bg-red-500'}`} />
+                        <span className="text-foreground/60">{connected ? 'connected' : 'reconnecting…'}</span>
+                    </span>
                 </div>
             </header>
 
@@ -191,7 +213,7 @@ export function ControlApp() {
                 </aside>
 
                 <main className="flex min-w-0 flex-1 flex-col">
-                    <div className="flex-1 space-y-3 overflow-y-auto p-4">
+                    <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto p-4">
                         {items.length === 0 && <div className="text-sm text-foreground/30">Ask the daemon to do something…</div>}
                         {items.map((it, i) => (
                             <ChatBubble key={i} item={it} />
@@ -243,7 +265,18 @@ function ChatBubble({ item }: { item: ChatItem }) {
         return <div className="ml-auto max-w-[80%] rounded-lg bg-primary/15 px-3 py-2 text-sm">{item.text}</div>;
     }
     if (item.kind === 'assistant') {
-        return <div className="max-w-[80%] whitespace-pre-wrap rounded-lg bg-white/5 px-3 py-2 text-sm">{item.text}</div>;
+        return (
+            <div className="max-w-[80%] space-y-2 rounded-lg bg-white/5 px-3 py-2 text-sm [&_a]:text-primary [&_a]:underline [&_code]:rounded [&_code]:bg-black/30 [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-xs [&_li]:ml-4 [&_li]:list-disc [&_ol_li]:list-decimal [&_pre]:overflow-x-auto [&_pre]:rounded [&_pre]:bg-black/30 [&_pre]:p-2 [&_pre_code]:bg-transparent [&_pre_code]:p-0">
+                <ReactMarkdown>{item.text}</ReactMarkdown>
+            </div>
+        );
+    }
+    if (item.kind === 'complete') {
+        return (
+            <div className="text-xs text-foreground/40">
+                done · {item.iterations} iteration{item.iterations === 1 ? '' : 's'} · ${item.cost_usd.toFixed(4)}
+            </div>
+        );
     }
     if (item.kind === 'error') {
         return <div className="max-w-[80%] rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-300">{item.text}</div>;

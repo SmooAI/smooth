@@ -10,6 +10,14 @@ export interface Health {
     status: string;
 }
 
+// GET /api/status — live daemon runtime state.
+export interface Status {
+    service: string;
+    version: string;
+    permission_mode: string;
+    active_tasks: number;
+}
+
 export type SessionStatus = 'active' | 'idle' | 'completed';
 
 export interface Session {
@@ -44,6 +52,12 @@ export async function getHealth(): Promise<Health> {
     const r = await fetch('/health');
     if (!r.ok) throw new Error(`health ${r.status}`);
     return (await r.json()) as Health;
+}
+
+export async function getStatus(): Promise<Status> {
+    const r = await fetch('/api/status');
+    if (!r.ok) throw new Error(`status ${r.status}`);
+    return (await r.json()) as Status;
 }
 
 export async function listSessions(): Promise<Session[]> {
