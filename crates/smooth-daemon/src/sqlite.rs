@@ -12,12 +12,15 @@
 //! cursor-resume stream and the `/api/session` list survive a daemon restart
 //! with zero changes above the trait — the headline Phase 2 capability.
 
+use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
+use smooth_operator::{Memory, MemoryEntry, MemoryType};
 
 use crate::event::{DaemonEvent, EventKind, EventStore, Seq};
 use crate::messages::{MessageStore, StoredMessage};
@@ -47,6 +50,16 @@ CREATE TABLE IF NOT EXISTS session_messages (
     content    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_msg_session ON session_messages(session_id, id);
+
+CREATE TABLE IF NOT EXISTS memories (
+    id            TEXT PRIMARY KEY,
+    content       TEXT NOT NULL,
+    memory_type   TEXT NOT NULL,
+    relevance     REAL NOT NULL,
+    metadata      TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    last_accessed TEXT NOT NULL
+);
 ";
 
 /// Open (creating if needed) the daemon database at `path` with WAL + schema.
@@ -72,6 +85,8 @@ pub struct Stores {
     pub sessions: Arc<dyn SessionStore>,
     /// Conversation history.
     pub messages: Arc<dyn MessageStore>,
+    /// Cross-session agent memory (hermes-style persistent recall).
+    pub memory: Arc<dyn Memory>,
 }
 
 /// Open the durable event + session + message stores at `path`, sharing one
@@ -87,7 +102,8 @@ pub fn open_stores(path: &Path) -> anyhow::Result<Stores> {
     Ok(Stores {
         events: Arc::new(SqliteEventLog { conn: Arc::clone(&conn) }),
         sessions: Arc::new(SqliteSessionStore { conn: Arc::clone(&conn) }),
-        messages: Arc::new(SqliteMessageStore { conn }),
+        messages: Arc::new(SqliteMessageStore { conn: Arc::clone(&conn) }),
+        memory: Arc::new(SqliteMemory { conn }),
     })
 }
 
@@ -311,6 +327,93 @@ impl MessageStore for SqliteMessageStore {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Memory (hermes-style cross-session recall)
+// ---------------------------------------------------------------------------
+
+/// Durable [`Memory`] backed by the `memories` table.
+///
+/// Implements the engine's synchronous `Memory` trait so an always-on agent's
+/// recall survives restarts. Recall mirrors `InMemoryMemory`: keyword scoring
+/// (fraction of query words found in the content), highest-scoring first.
+pub struct SqliteMemory {
+    conn: Arc<Mutex<Connection>>,
+}
+
+fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<MemoryEntry> {
+    let id: String = row.get(0)?;
+    let content: String = row.get(1)?;
+    let memory_type: String = row.get(2)?;
+    let relevance: f64 = row.get(3)?;
+    let metadata: String = row.get(4)?;
+    let created_at: String = row.get(5)?;
+    let last_accessed: String = row.get(6)?;
+    let memory_type: MemoryType =
+        serde_json::from_str(&memory_type).map_err(|e| rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e)))?;
+    let metadata: HashMap<String, String> =
+        serde_json::from_str(&metadata).map_err(|e| rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(e)))?;
+    #[allow(clippy::cast_possible_truncation)]
+    Ok(MemoryEntry {
+        id,
+        content,
+        memory_type,
+        relevance: relevance as f32,
+        metadata,
+        created_at: rfc3339_to_utc(&created_at),
+        last_accessed: rfc3339_to_utc(&last_accessed),
+    })
+}
+
+impl Memory for SqliteMemory {
+    fn store(&self, entry: MemoryEntry) -> anyhow::Result<()> {
+        let guard = lock(&self.conn);
+        guard.execute(
+            "INSERT OR REPLACE INTO memories (id, content, memory_type, relevance, metadata, created_at, last_accessed) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                entry.id,
+                entry.content,
+                serde_json::to_string(&entry.memory_type)?,
+                f64::from(entry.relevance),
+                serde_json::to_string(&entry.metadata)?,
+                entry.created_at.to_rfc3339(),
+                entry.last_accessed.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn recall(&self, query: &str, limit: usize) -> anyhow::Result<Vec<MemoryEntry>> {
+        let query_words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+        if query_words.is_empty() {
+            return Ok(Vec::new());
+        }
+        let guard = lock(&self.conn);
+        let mut stmt = guard.prepare("SELECT id, content, memory_type, relevance, metadata, created_at, last_accessed FROM memories")?;
+        let mut scored: Vec<(f32, MemoryEntry)> = Vec::new();
+        for row in stmt.query_map([], row_to_memory)? {
+            let entry = row?;
+            let content_lower = entry.content.to_lowercase();
+            let matching = query_words.iter().filter(|w| content_lower.contains(w.as_str())).count();
+            if matching > 0 {
+                #[allow(clippy::cast_precision_loss)]
+                let score = matching as f32 / query_words.len() as f32;
+                let mut recalled = entry;
+                recalled.relevance = score;
+                scored.push((score, recalled));
+            }
+        }
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
+        scored.truncate(limit);
+        Ok(scored.into_iter().map(|(_, entry)| entry).collect())
+    }
+
+    fn forget(&self, id: &str) -> anyhow::Result<()> {
+        let guard = lock(&self.conn);
+        guard.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "unwrap/expect are the idiom for test assertions")]
 mod tests {
@@ -364,6 +467,38 @@ mod tests {
         assert_eq!(history.len(), 2, "messages survived reopen");
         assert_eq!(history[0].role, "user");
         assert_eq!(history[1].content, "hello there");
+    }
+
+    #[tokio::test]
+    async fn memory_persists_recalls_by_keyword_and_forgets() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = db_path(&dir);
+        let forget_id;
+        {
+            let memory = open_stores(&path).unwrap().memory;
+            memory.store(MemoryEntry::new("The user prefers Rust over Go", MemoryType::User)).unwrap();
+            memory
+                .store(MemoryEntry::new("Deploys go through GitHub Actions, never locally", MemoryType::Project).with_metadata("k", "v"))
+                .unwrap();
+            let throwaway = MemoryEntry::new("ephemeral note", MemoryType::ShortTerm);
+            forget_id = throwaway.id.clone();
+            memory.store(throwaway).unwrap();
+        }
+        // Reopen → durable; recall scores by matching query words.
+        let memory = open_stores(&path).unwrap().memory;
+        let hits = memory.recall("rust preferences", 5).unwrap();
+        assert!(!hits.is_empty(), "keyword recall returns the matching memory");
+        assert!(hits[0].content.contains("Rust"), "best match first: {:?}", hits[0].content);
+        assert_eq!(hits[0].memory_type, MemoryType::User);
+
+        // Metadata round-trips.
+        let deploy = memory.recall("deploys github", 5).unwrap();
+        assert_eq!(deploy[0].metadata.get("k").map(String::as_str), Some("v"));
+
+        // Empty query recalls nothing; forget removes by id.
+        assert!(memory.recall("", 5).unwrap().is_empty());
+        memory.forget(&forget_id).unwrap();
+        assert!(memory.recall("ephemeral", 5).unwrap().is_empty(), "forgotten memory is gone");
     }
 
     #[tokio::test]
