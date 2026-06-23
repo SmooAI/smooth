@@ -414,6 +414,13 @@ enum DaemonCommands {
     /// Show the running daemon's status (uptime, permission mode, egress,
     /// active tasks) by querying its `/api/status`.
     Status,
+    /// Tail the egress proxy's audit log — the allowed/blocked off-box network
+    /// decisions made by the goalie exact-host allowlist.
+    Audit {
+        /// How many recent decisions to show.
+        #[arg(long, default_value = "20")]
+        lines: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1314,6 +1321,7 @@ async fn main() -> Result<()> {
         Some(Commands::Daemon { port, bind, cmd }) => match cmd {
             None => cmd_daemon(port, bind).await,
             Some(DaemonCommands::Status) => cmd_daemon_status(port).await,
+            Some(DaemonCommands::Audit { lines }) => cmd_daemon_audit(lines),
         },
         Some(Commands::Down) => cmd_down().await,
         Some(Commands::Status) => cmd_status().await,
@@ -2065,6 +2073,41 @@ fn format_daemon_status(body: &serde_json::Value) -> String {
     let egress = body["egress_proxy"].as_str().map_or_else(|| "off".to_owned(), |p| format!("on ({p})"));
     let uptime = body["uptime_seconds"].as_u64().map_or_else(|| "?".to_owned(), format_daemon_uptime);
     format!("smooth-daemon v{version}\n  uptime:       {uptime}\n  mode:         {mode}\n  egress:       {egress}\n  active tasks: {active}")
+}
+
+/// Format one egress audit JSON line into a compact `ts  ALLOW/BLOCK  METHOD host`
+/// row. Pure, so it's unit-testable.
+fn format_audit_line(v: &serde_json::Value) -> String {
+    let ts = v["timestamp"].as_str().unwrap_or("");
+    let allowed = v["allowed"].as_bool().unwrap_or(false);
+    let domain = v["domain"].as_str().unwrap_or("?");
+    let method = v["method"].as_str().unwrap_or("");
+    let mark = if allowed { "ALLOW" } else { "BLOCK" };
+    format!("{ts}  {mark}  {method:<7} {domain}")
+}
+
+/// `th daemon audit` — print the last `lines` egress decisions from the goalie
+/// proxy's JSON-lines audit log.
+fn cmd_daemon_audit(lines: usize) -> Result<()> {
+    let path = smooth_daemon::config::egress_audit_path();
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => {
+            println!("no egress audit log at {} — has the egress boundary handled any requests yet?", path.display());
+            return Ok(());
+        }
+    };
+    let all: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+    if all.is_empty() {
+        println!("egress audit log is empty");
+        return Ok(());
+    }
+    for line in &all[all.len().saturating_sub(lines)..] {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            println!("{}", format_audit_line(&v));
+        }
+    }
+    Ok(())
 }
 
 /// `th daemon status` — query the running daemon's `/api/status` and print it.
@@ -7775,7 +7818,7 @@ mod beads_model_tests {
 #[cfg(test)]
 mod daemon_status_tests {
     //! `th daemon status` formatting (pure; no running daemon needed).
-    use super::{format_daemon_status, format_daemon_uptime};
+    use super::{format_audit_line, format_daemon_status, format_daemon_uptime};
 
     #[test]
     fn uptime_formats_across_scales() {
@@ -7808,5 +7851,16 @@ mod daemon_status_tests {
         let out = format_daemon_status(&body);
         assert!(out.contains("egress:       off"));
         assert!(out.contains("uptime:       ?"), "missing uptime → '?': {out}");
+    }
+
+    #[test]
+    fn audit_line_marks_allow_and_block() {
+        let allowed = serde_json::json!({"timestamp": "2026-06-23T12:00:00Z", "allowed": true, "domain": "github.com", "method": "CONNECT"});
+        let a = format_audit_line(&allowed);
+        assert!(a.contains("ALLOW") && a.contains("github.com") && a.contains("CONNECT"), "{a}");
+
+        let blocked = serde_json::json!({"timestamp": "2026-06-23T12:00:01Z", "allowed": false, "domain": "evil.example", "method": "GET"});
+        let b = format_audit_line(&blocked);
+        assert!(b.contains("BLOCK") && b.contains("evil.example"), "{b}");
     }
 }
