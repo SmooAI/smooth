@@ -4,8 +4,11 @@
 //! The security architecture's load-bearing layer: a reasoning agent can talk
 //! its way past a userspace permission check, but it cannot talk its way past
 //! the kernel. So `bash` is run inside an OS sandbox that confines filesystem
-//! **writes** to the workspace (+ session temp) and **denies reads** of the
-//! operator's credential stores (`~/.ssh`, `~/.aws`, …).
+//! **writes** to the workspace (+ session temp) — additionally denying writes
+//! to `.git/hooks` and `.git/config` (either would re-enter execution outside
+//! the sandbox via a hook or `core.hooksPath`) — and **denies reads** of the
+//! operator's credential stores (`~/.ssh`, `~/.aws`, `~/.config/gh`,
+//! `~/.config/gcloud`, `~/.kube`, `~/.docker`, `~/.gnupg`, `~/.netrc`).
 //!
 //! **P0 — non-bypassable.** A [`SandboxedCommand`] is the *only* way `bash`
 //! builds its subprocess. There is no constructor that yields a plain
@@ -101,7 +104,8 @@ fn macos_profile(policy: &SandboxPolicy) -> String {
          \x20  (literal \"/dev/dtracehelper\")\n\
          \x20  (regex #\"^/dev/tty\")\n\
          \x20  (regex #\"^/dev/fd/\"))\n\
-         (deny file-write* (subpath \"{ws}/.git/hooks\"))\n"
+         (deny file-write* (subpath \"{ws}/.git/hooks\"))\n\
+         (deny file-write* (literal \"{ws}/.git/config\"))\n"
     );
     if let Some(home) = &policy.home {
         use std::fmt::Write as _;
@@ -113,7 +117,11 @@ fn macos_profile(policy: &SandboxPolicy) -> String {
              \x20  (subpath \"{h}/.ssh\")\n\
              \x20  (subpath \"{h}/.aws\")\n\
              \x20  (subpath \"{h}/.config/gh\")\n\
-             \x20  (subpath \"{h}/.gnupg\"))\n"
+             \x20  (subpath \"{h}/.config/gcloud\")\n\
+             \x20  (subpath \"{h}/.kube\")\n\
+             \x20  (subpath \"{h}/.docker\")\n\
+             \x20  (subpath \"{h}/.gnupg\")\n\
+             \x20  (literal \"{h}/.netrc\"))\n"
         );
     }
     p
@@ -184,6 +192,41 @@ mod tests {
             let (_code, out) = run(&policy, "cat ~/.ssh/id_rsa ~/.ssh/id_ed25519 2>&1; echo DONE").await;
             assert!(out.contains("DONE"));
             assert!(!out.contains("PRIVATE KEY"), "no private key material should leak: {out}");
+        }
+
+        #[tokio::test]
+        async fn writing_git_hooks_or_config_is_denied() {
+            let dir = tempfile::tempdir().unwrap();
+            let policy = SandboxPolicy::for_workspace(dir.path().to_path_buf());
+            // A postinstall script trying to plant a hook or repoint core.hooksPath
+            // must fail — both would later execute OUTSIDE the sandbox.
+            let (_c, out) = run(
+                &policy,
+                "mkdir -p .git/hooks 2>&1; echo evil > .git/hooks/post-checkout 2>&1; \
+                 mkdir -p .git 2>&1; echo '[core]' > .git/config 2>&1; echo DONE",
+            )
+            .await;
+            assert!(out.contains("DONE"));
+            assert!(!dir.path().join(".git/hooks/post-checkout").exists(), "planted hook must not exist: {out}");
+            assert!(!dir.path().join(".git/config").exists(), "git config must not be writable: {out}");
+        }
+
+        #[tokio::test]
+        async fn reading_cloud_and_registry_creds_is_denied() {
+            let dir = tempfile::tempdir().unwrap();
+            let policy = SandboxPolicy::for_workspace(dir.path().to_path_buf());
+            // The exfil targets beyond ~/.ssh: cloud + registry + netrc creds.
+            let (_c, out) = run(
+                &policy,
+                "cat ~/.aws/credentials ~/.config/gcloud/credentials.db ~/.kube/config \
+                 ~/.docker/config.json ~/.netrc 2>&1; echo DONE",
+            )
+            .await;
+            assert!(out.contains("DONE"));
+            // The invariant: no credential material leaks (denied reads on the
+            // dirs that exist; absent ones simply have nothing to read).
+            assert!(!out.contains("aws_secret_access_key"), "no AWS secret should leak: {out}");
+            assert!(!out.contains("BEGIN PRIVATE KEY"), "no key material should leak: {out}");
         }
     }
 
