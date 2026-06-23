@@ -61,9 +61,17 @@ pub struct SandboxedCommand(Command);
 
 impl SandboxedCommand {
     /// Build a sandboxed `sh -c <command>` under `policy`.
+    ///
+    /// As well as the kernel FS confinement, the child env is **scrubbed** of
+    /// secret-named variables (the daemon's own `SMOOTH_API_KEY` /
+    /// `SMOOTH_DAEMON_TOKEN`, provider `*_API_KEY`s, `*_TOKEN`/`*_SECRET`/…), so
+    /// a read-only-classified `env`/`printenv` can't dump what drives the agent.
+    /// Applied here at the single spawn point, so there is no unscrubbed path.
     #[must_use]
     pub fn shell(policy: &SandboxPolicy, command: &str) -> Self {
-        Self(build(policy, command))
+        let mut cmd = build(policy, command);
+        scrub_secret_env(&mut cmd);
+        Self(cmd)
     }
 
     /// Take the underlying command to configure stdio / cwd / spawn. The
@@ -138,6 +146,40 @@ fn build(policy: &SandboxPolicy, command: &str) -> Command {
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg(command);
     cmd
+}
+
+/// Remove secret-bearing variables from the child's inherited environment, so a
+/// tool can't read the daemon's own credentials out of its process env. This is
+/// platform-independent (it also matters on Linux, where the FS sandbox is not
+/// yet in place) and runs at the single [`SandboxedCommand::shell`] spawn point.
+fn scrub_secret_env(cmd: &mut Command) {
+    for (name, _) in std::env::vars_os() {
+        if let Some(name) = name.to_str() {
+            if is_secret_env_name(name) {
+                cmd.env_remove(name);
+            }
+        }
+    }
+}
+
+/// Whether an environment variable name looks like it carries a secret. Matched
+/// on the name only (case-insensitive) so values never need inspecting: anything
+/// `SMOOTH_*` (the daemon's own config), plus the usual credential markers. Kept
+/// deliberately broad — a stripped false positive only loses a non-secret var
+/// from the agent's shell, while a miss would leak a real credential.
+fn is_secret_env_name(name: &str) -> bool {
+    let u = name.to_ascii_uppercase();
+    u.starts_with("SMOOTH_")
+        || u.contains("SECRET")
+        || u.contains("TOKEN")
+        || u.contains("PASSWORD")
+        || u.contains("PASSWD")
+        || u.contains("CREDENTIAL")
+        || u.contains("API_KEY")
+        || u.contains("APIKEY")
+        || u.contains("ACCESS_KEY")
+        || u.ends_with("_KEY")
+        || u.ends_with("_PAT")
 }
 
 #[cfg(test)]
@@ -234,6 +276,25 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn env_does_not_leak_daemon_secrets_but_keeps_path() {
+            // A read-only `env` must not dump the daemon's own secrets: the child
+            // env is scrubbed of secret-named vars at the spawn point. Plant one
+            // on this process, then prove the sandboxed shell can't see it — while
+            // a benign var (PATH) survives so the shell still works.
+            std::env::set_var("SMOOTH_API_KEY", "LEAK_SENTINEL_a91c");
+            std::env::set_var("MY_SERVICE_TOKEN", "LEAK_SENTINEL_b22d");
+            let dir = tempfile::tempdir().unwrap();
+            let policy = SandboxPolicy::for_workspace(dir.path().to_path_buf());
+            let (_c, out) = run(&policy, "env; echo DONE").await;
+            std::env::remove_var("SMOOTH_API_KEY");
+            std::env::remove_var("MY_SERVICE_TOKEN");
+
+            assert!(out.contains("DONE"));
+            assert!(!out.contains("LEAK_SENTINEL"), "scrubbed secrets must not appear in `env`: {out}");
+            assert!(out.contains("PATH="), "non-secret env (PATH) should still be inherited: {out}");
+        }
+
+        #[tokio::test]
         async fn reading_the_daemons_own_smooth_credentials_is_denied() {
             // The lethal case: the agent's own LLM key + auth JWT live in
             // ~/.smooth. A sandboxed tool reading them would exfil exactly what
@@ -261,6 +322,27 @@ mod tests {
                 !out.contains("SMOOTH_SECRET_SENTINEL_4f3a"),
                 "the daemon's own creds under ~/.smooth/auth must not be readable in-sandbox: {out}"
             );
+        }
+    }
+
+    #[test]
+    fn secret_env_names_are_detected_broadly() {
+        for name in [
+            "SMOOTH_API_KEY",
+            "SMOOTH_DAEMON_TOKEN",
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_ACCESS_KEY_ID",
+            "GITHUB_TOKEN",
+            "DB_PASSWORD",
+            "STRIPE_SECRET",
+            "GH_PAT",
+        ] {
+            assert!(is_secret_env_name(name), "{name} should be treated as secret");
+        }
+        for name in ["PATH", "HOME", "USER", "SHELL", "TERM", "LANG", "PWD", "TMPDIR"] {
+            assert!(!is_secret_env_name(name), "{name} should NOT be treated as secret");
         }
     }
 
