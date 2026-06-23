@@ -85,6 +85,9 @@ pub struct AppState {
     /// egress boundary is enabled. Threaded into the bash tool so its network is
     /// forced through the proxy's exact-host allowlist. `None` = unrestricted.
     pub egress_proxy: Option<String>,
+    /// Durable cross-session agent memory; the engine auto-recalls from it each
+    /// turn. SQLite-backed in `persistent`, in-memory for `new`.
+    pub memory: Arc<dyn smooth_operator::Memory>,
 }
 
 impl AppState {
@@ -100,6 +103,7 @@ impl AppState {
             permission_mode: SharedPermissionMode::default(),
             auth_token: None,
             egress_proxy: None,
+            memory: Arc::new(smooth_operator::InMemoryMemory::new()),
         }
     }
 
@@ -116,6 +120,7 @@ impl AppState {
             events: stores.events,
             sessions: stores.sessions,
             messages: stores.messages,
+            memory: stores.memory,
             approvals: ApprovalCoordinator::new(),
             permission_mode: SharedPermissionMode::new(crate::config::resolve_permission_mode()),
             auth_token: crate::config::resolve_auth_token().map(Arc::new),
@@ -561,8 +566,16 @@ async fn handle_client_event(ev: ClientEvent, session_id: &str, state: &AppState
             let messages = Arc::clone(&state.messages);
             let approvals = Arc::clone(&state.approvals);
             let mode = state.permission_mode.get();
-            let egress_proxy = state.egress_proxy.clone();
-            let run = async move { runner::run_task(spec, out, events, messages, approvals, mode, egress_proxy).await };
+            let deps = runner::RunDeps {
+                out,
+                events,
+                messages,
+                approvals,
+                mode,
+                egress_proxy: state.egress_proxy.clone(),
+                memory: Arc::clone(&state.memory),
+            };
+            let run = async move { runner::run_task(spec, deps).await };
 
             match state.coordinator.try_start(session_id.to_owned(), task_id.clone(), run) {
                 Ok(()) => {
@@ -740,6 +753,27 @@ mod tests {
             .await
             .expect("live event should arrive");
         assert!(live.is_some());
+    }
+
+    #[tokio::test]
+    async fn persistent_state_carries_durable_recallable_memory() {
+        use smooth_operator::{MemoryEntry, MemoryType};
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("mem.db");
+        {
+            let state = AppState::persistent(&db).unwrap();
+            state
+                .memory
+                .store(MemoryEntry::new("the user ships via GitHub Actions", MemoryType::Project))
+                .unwrap();
+        }
+        // A fresh AppState on the same DB recalls it — memory survives restart.
+        let state = AppState::persistent(&db).unwrap();
+        let hits = state.memory.recall("github actions", 5).unwrap();
+        assert!(
+            hits.iter().any(|m| m.content.contains("GitHub Actions")),
+            "durable memory recalled across restart"
+        );
     }
 
     #[tokio::test]

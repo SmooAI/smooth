@@ -55,18 +55,38 @@ pub struct TaskSpec {
     pub workspace: PathBuf,
 }
 
-/// Run one agent turn to completion, streaming `ServerEvent`s to `out` and
-/// recording them to `events`. Never panics; failures are surfaced as a
+/// The daemon-wide durable dependencies a task run needs, bundled so
+/// [`run_task`]'s signature stays small as capabilities grow.
+pub struct RunDeps {
+    /// Streams `ServerEvent`s back to the connected client.
+    pub out: UnboundedSender<ServerEvent>,
+    /// Durable event log (SSE resume).
+    pub events: Arc<dyn EventStore>,
+    /// Durable conversation history.
+    pub messages: Arc<dyn MessageStore>,
+    /// Routes operator approval replies to the permission hook.
+    pub approvals: Arc<ApprovalCoordinator>,
+    /// Gate-1 permission posture for this run.
+    pub mode: PermissionMode,
+    /// Egress proxy `host:port` for the bash tool, if the boundary is on.
+    pub egress_proxy: Option<String>,
+    /// Cross-session memory the engine auto-recalls from.
+    pub memory: Arc<dyn smooth_operator::Memory>,
+}
+
+/// Run one agent turn to completion, streaming `ServerEvent`s to `deps.out` and
+/// recording them to `deps.events`. Never panics; failures are surfaced as a
 /// terminal [`ServerEvent::TaskError`].
-pub async fn run_task(
-    spec: TaskSpec,
-    out: UnboundedSender<ServerEvent>,
-    events: Arc<dyn EventStore>,
-    messages: Arc<dyn MessageStore>,
-    approvals: Arc<ApprovalCoordinator>,
-    mode: PermissionMode,
-    egress_proxy: Option<String>,
-) {
+pub async fn run_task(spec: TaskSpec, deps: RunDeps) {
+    let RunDeps {
+        out,
+        events,
+        messages,
+        approvals,
+        mode,
+        egress_proxy,
+        memory,
+    } = deps;
     let TaskSpec {
         task_id,
         session_id,
@@ -106,6 +126,10 @@ pub async fn run_task(
             max_tokens: None,
         });
     }
+    // Durable cross-session memory: the engine auto-recalls relevant entries for
+    // the user message each turn and injects them (with a freshness nudge for
+    // Project/Reference types) ahead of the prompt.
+    cfg = cfg.with_memory(memory);
 
     // Register the workspace-confined tool set (fs/grep/…) + the Gate-1
     // permission hook (deny→ask→allow, with the operator-approval round-trip).
@@ -243,12 +267,15 @@ mod tests {
                 prior_messages: vec![],
                 workspace: std::env::temp_dir(),
             },
-            tx,
-            Arc::clone(&events),
-            Arc::clone(&messages),
-            crate::approval::ApprovalCoordinator::new(),
-            crate::permission::PermissionMode::default(),
-            None,
+            RunDeps {
+                out: tx,
+                events: Arc::clone(&events),
+                messages: Arc::clone(&messages),
+                approvals: crate::approval::ApprovalCoordinator::new(),
+                mode: crate::permission::PermissionMode::default(),
+                egress_proxy: None,
+                memory: Arc::new(smooth_operator::InMemoryMemory::new()),
+            },
         )
         .await;
 
