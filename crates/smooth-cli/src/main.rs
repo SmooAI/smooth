@@ -954,7 +954,13 @@ enum PearlCommands {
         force: bool,
     },
     /// Pull pearl data from git remote
-    Pull,
+    Pull {
+        /// Pull even if local `main` has commits not yet on the remote
+        /// (which the pull could orphan). Without this, the pull refuses
+        /// and tells you to `th pearls push` first.
+        #[arg(short = 'f', long)]
+        force: bool,
+    },
     /// Manage Dolt remotes for pearl sync
     Remote {
         #[command(subcommand)]
@@ -4327,17 +4333,19 @@ fn commit_messaging_state(store: &smooth_pearls::PearlStore, dolt_dir: &std::pat
     }
 }
 
-/// Best-effort push of the messaging/pearl state to the repo's
+/// Best-effort push of the pearl/messaging state to the repo's
 /// `refs/dolt/data` remote so other clones/machines on the same repo see
-/// it. Messages live in the pearl store, which syncs over the repo's git
-/// origin — so a `send`/`register` that only commits locally won't reach a
-/// teammate's clone until a push. Quiet by design: a missing remote (the
-/// global `~/.smooth/dolt`, or a project with no origin) or being offline
-/// is a silent no-op — never an error, and never a stray `fatal:` on
-/// stderr (we drive only `dolt push`, which captures its own output; the
-/// git-side `git_push_pearl_state` inherits git's stderr and is only for
-/// the legacy tracked-store model, so it's not used here). Pearl th-bdaaa7.
-fn sync_push_messaging(dolt_dir: &std::path::Path) {
+/// it. Pearls and messages both live in the pearl store, which syncs over
+/// the repo's git origin via Dolt's own ref — so a mutation that only
+/// commits locally won't reach a teammate's clone until a push, and an
+/// un-pushed local commit is exactly what a later `th pearls pull` can
+/// orphan (pearl th-4a4559). Quiet by design: a missing remote (the global
+/// `~/.smooth/dolt`, or a project with no origin) or being offline is a
+/// silent no-op — never an error, and never a stray `fatal:` on stderr (we
+/// drive only `dolt push`, which captures its own output; the git-side
+/// `git_push_pearl_state` inherits git's stderr and is only for the legacy
+/// tracked-store model, so it's not used here). Pearls th-bdaaa7 / th-4a4559.
+fn sync_push_pearl_state(dolt_dir: &std::path::Path) {
     let Ok(dolt) = smooth_pearls::SmoothDolt::new(dolt_dir) else { return };
     match dolt.push_with(smooth_pearls::PushOpts {
         force: false,
@@ -4351,17 +4359,50 @@ fn sync_push_messaging(dolt_dir: &std::path::Path) {
                 set_upstream: true,
             });
         }
-        Err(e) => tracing::debug!(error = %e, "messaging push skipped (no remote / offline)"),
+        Err(e) => tracing::debug!(error = %e, "pearl push skipped (no remote / offline)"),
     }
+}
+
+/// Commit a pearl mutation to the on-disk store/git AND push it to the
+/// repo's `refs/dolt/data` remote, so the work is durable the moment it's
+/// made — closing the un-pushed window that a later pull/re-clone can drop
+/// (pearl th-4a4559). The git commit is propagated (callers `?` it); the
+/// push is best-effort + quiet (offline / no-remote is fine). Opt out of
+/// the push with `SMOOTH_PEARLS_NO_PUSH=1` (e.g. bulk/scripted creates that
+/// push once at the end).
+fn commit_and_push_pearl_state(dolt_dir: &std::path::Path, action: &str) -> Result<()> {
+    auto_commit_pearl_state(dolt_dir, action)?;
+    if std::env::var_os("SMOOTH_PEARLS_NO_PUSH").is_none() {
+        sync_push_pearl_state(dolt_dir);
+    }
+    Ok(())
 }
 
 /// Best-effort pull so the local store reflects messages sent from other
 /// clones/machines on the same repo. Quiet on no-remote/offline (drives
 /// only `dolt pull`, which captures its own output).
-fn sync_pull_messaging(dolt_dir: &std::path::Path) {
+fn sync_pull_pearl_state(dolt_dir: &std::path::Path) {
     if let Ok(dolt) = smooth_pearls::SmoothDolt::new(dolt_dir) {
         let _ = dolt.pull();
     }
+}
+
+/// How many commits local `main` is ahead of `remotes/origin/main` — i.e.
+/// committed locally but not yet on the remote's `refs/dolt/data`. These
+/// are exactly the commits a `th pearls pull` could orphan. Returns `None`
+/// when it can't be determined (no `origin`, fetch fails, or the remote
+/// branch was never fetched) so callers skip the guard rather than wrongly
+/// block. Pearl th-4a4559.
+fn pearl_local_ahead_count(dolt_dir: &std::path::Path) -> Option<usize> {
+    let dolt = smooth_pearls::SmoothDolt::new(dolt_dir).ok()?;
+    // Refresh the remote-tracking ref so the comparison is current.
+    // Best-effort — a missing/unreachable remote just leaves
+    // `remotes/origin/main` stale or absent, handled below.
+    let _ = dolt.sql("CALL DOLT_FETCH('origin', 'main')");
+    // Commits reachable from local `main` but not from the remote tip.
+    let rows = dolt.sql("SELECT COUNT(*) AS n FROM dolt_log('remotes/origin/main..main')").ok()?;
+    let n = rows.first().and_then(|r| r["n"].as_u64())?;
+    usize::try_from(n).ok()
 }
 
 fn print_message(m: &smooth_pearls::Message) {
@@ -4395,7 +4436,7 @@ async fn cmd_agent(cmd: AgentCommands) -> Result<()> {
             reg.register(&name, &harness, Some(pid))?;
             commit_messaging_state(&store, &dolt_dir, &format!("agent register {name}"));
             if !no_push {
-                sync_push_messaging(&dolt_dir);
+                sync_push_pearl_state(&dolt_dir);
             }
             println!("{} registered as {} ({})", "✓".green().bold(), name.green().bold(), harness.dimmed());
             println!("  {} continuously check: {}", "→".dimmed(), format!("th msg watch --agent {name}").cyan());
@@ -4428,7 +4469,7 @@ async fn cmd_agent(cmd: AgentCommands) -> Result<()> {
             let name = name.unwrap_or_else(default_agent_name);
             reg.set_status(&name, "offline")?;
             commit_messaging_state(&store, &dolt_dir, &format!("agent offline {name}"));
-            sync_push_messaging(&dolt_dir);
+            sync_push_pearl_state(&dolt_dir);
             println!("{} {} marked offline", "✓".green().bold(), name);
         }
     }
@@ -4450,7 +4491,7 @@ async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
             let id = mb.send(&from, &to, &body, thread_id.as_deref())?;
             commit_messaging_state(&store, &dolt_dir, &format!("msg {id} {from}->{to}"));
             if !no_push {
-                sync_push_messaging(&dolt_dir);
+                sync_push_pearl_state(&dolt_dir);
             }
             println!("{} sent {} to {}", "✓".green().bold(), id.dimmed(), to.green());
         }
@@ -4464,7 +4505,7 @@ async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
         } => {
             let who = agent.unwrap_or_else(default_agent_name);
             if pull {
-                sync_pull_messaging(&dolt_dir);
+                sync_pull_pearl_state(&dolt_dir);
             }
             let _ = reg.touch(&who); // heartbeat (best-effort)
             let msgs = mb.inbox(&who, unread, limit)?;
@@ -4499,7 +4540,7 @@ async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
             let to = orig.from_agent.clone();
             let new_id = mb.send(&from, &to, &body, Some(&root))?;
             commit_messaging_state(&store, &dolt_dir, &format!("msg reply {new_id} -> {to}"));
-            sync_push_messaging(&dolt_dir);
+            sync_push_pearl_state(&dolt_dir);
             println!("{} replied {} to {}", "✓".green().bold(), new_id.dimmed(), to.green());
         }
         MsgCommands::Thread { id } => {
@@ -4522,7 +4563,7 @@ async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
             let interval = std::time::Duration::from_secs(interval.max(1));
             loop {
                 if !no_pull {
-                    sync_pull_messaging(&dolt_dir);
+                    sync_pull_pearl_state(&dolt_dir);
                 }
                 let _ = reg.touch(&who);
                 match mb.inbox(&who, true, 200) {
@@ -5061,7 +5102,7 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             let issue = store.create(&new)?;
             println!("{} Created {}", "✓".green().bold(), issue.id.green().bold());
             println!("  {}", format_pearl_line(&issue));
-            auto_commit_pearl_state(&dolt_dir, &format!("create {} {}", issue.id, truncate_for_msg(&issue.title)))?;
+            commit_and_push_pearl_state(&dolt_dir, &format!("create {} {}", issue.id, truncate_for_msg(&issue.title)))?;
         }
 
         PearlCommands::List { status } => {
@@ -5151,40 +5192,40 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             let updated = store.update(&id, &updates)?;
             println!("{} Updated {}", "✓".green().bold(), updated.id);
             println!("  {}", format_pearl_line(&updated));
-            auto_commit_pearl_state(&dolt_dir, &format!("update {}", updated.id))?;
+            commit_and_push_pearl_state(&dolt_dir, &format!("update {}", updated.id))?;
         }
 
         PearlCommands::Close { ids } => {
             let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
             let count = store.close(&id_refs)?;
             println!("{} Closed {count} issue(s)", "✓".green().bold());
-            auto_commit_pearl_state(&dolt_dir, &format!("close {}", ids.join(", ")))?;
+            commit_and_push_pearl_state(&dolt_dir, &format!("close {}", ids.join(", ")))?;
         }
 
         PearlCommands::Reopen { id } => {
             let issue = store.reopen(&id)?;
             println!("{} Reopened {}", "✓".green().bold(), issue.id);
             println!("  {}", format_pearl_line(&issue));
-            auto_commit_pearl_state(&dolt_dir, &format!("reopen {}", issue.id))?;
+            commit_and_push_pearl_state(&dolt_dir, &format!("reopen {}", issue.id))?;
         }
 
         PearlCommands::Dep { cmd } => match cmd {
             DepCommands::Add { issue, depends_on } => {
                 store.add_dep(&issue, &depends_on)?;
                 println!("{} {issue} now depends on {depends_on}", "✓".green().bold());
-                auto_commit_pearl_state(&dolt_dir, &format!("dep add {issue} → {depends_on}"))?;
+                commit_and_push_pearl_state(&dolt_dir, &format!("dep add {issue} → {depends_on}"))?;
             }
             DepCommands::Remove { issue, depends_on } => {
                 store.remove_dep(&issue, &depends_on)?;
                 println!("{} Removed dependency {issue} → {depends_on}", "✓".green().bold());
-                auto_commit_pearl_state(&dolt_dir, &format!("dep remove {issue} → {depends_on}"))?;
+                commit_and_push_pearl_state(&dolt_dir, &format!("dep remove {issue} → {depends_on}"))?;
             }
         },
 
         PearlCommands::Comment { id, content } => {
             let comment = store.add_comment(&id, &content)?;
             println!("{} Comment added ({})", "✓".green().bold(), comment.id.dimmed());
-            auto_commit_pearl_state(&dolt_dir, &format!("comment on {id}"))?;
+            commit_and_push_pearl_state(&dolt_dir, &format!("comment on {id}"))?;
         }
 
         PearlCommands::Search { query } => {
@@ -5242,18 +5283,18 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             LabelCommands::Add { label } => {
                 store.add_label(&id, &label)?;
                 println!("{} Added label \"{label}\" to {id}", "✓".green().bold());
-                auto_commit_pearl_state(&dolt_dir, &format!("label add {id} +{label}"))?;
+                commit_and_push_pearl_state(&dolt_dir, &format!("label add {id} +{label}"))?;
             }
             LabelCommands::Remove { label } => {
                 store.remove_label(&id, &label)?;
                 println!("{} Removed label \"{label}\" from {id}", "✓".green().bold());
-                auto_commit_pearl_state(&dolt_dir, &format!("label remove {id} -{label}"))?;
+                commit_and_push_pearl_state(&dolt_dir, &format!("label remove {id} -{label}"))?;
             }
         },
 
         PearlCommands::MigrateFromBeads => {
             cmd_migrate_from_beads(&store)?;
-            auto_commit_pearl_state(&dolt_dir, "migrate from beads")?;
+            commit_and_push_pearl_state(&dolt_dir, "migrate from beads")?;
         }
 
         PearlCommands::Projects => {
@@ -5420,7 +5461,26 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             }
         }
 
-        PearlCommands::Pull => {
+        PearlCommands::Pull { force } => {
+            // Guard against the data-loss footgun: if local `main` carries
+            // commits the remote doesn't have, a pull can orphan them
+            // (the refs/dolt/data divergence). Refuse by default and tell
+            // the user to push first; `--force` opts into the old
+            // behaviour. Skipped silently when we can't determine ahead-ness
+            // (no remote / fetch fails) so a remote-less store still pulls.
+            // Pearl th-4a4559.
+            if !force {
+                if let Some(ahead) = pearl_local_ahead_count(&dolt_dir) {
+                    if ahead > 0 {
+                        anyhow::bail!(
+                            "Refusing to pull: {ahead} local pearl commit(s) aren't on the remote yet, and \
+                             pulling could orphan them.\n  • Recommended: `th pearls push` first, then pull.\n  \
+                             • Or `th pearls pull --force` to pull anyway (your local-only commits stay in the \
+                             Dolt history and can be recovered, but `main` will move to the remote)."
+                        );
+                    }
+                }
+            }
             // Pull git first so any auto-commits from teammates
             // (under `.smooth/dolt/`) land in the working tree before
             // the dolt layer reads it. Best-effort: failure to git
