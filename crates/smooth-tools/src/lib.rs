@@ -37,14 +37,24 @@ pub use write::{EditFileTool, WriteFileTool};
 /// Register the default tool set on `registry`, all confined to `workspace`.
 ///
 /// One call installs the full set; later slices extend it (shell tools), so
-/// consumers keep calling this one function.
+/// consumers keep calling this one function. `bash` egress is unrestricted —
+/// use [`register_default_tools_with_proxy`] to route it through a proxy.
 pub fn register_default_tools(registry: &mut ToolRegistry, workspace: PathBuf) {
+    register_default_tools_with_proxy(registry, workspace, None);
+}
+
+/// Like [`register_default_tools`], but routes the `bash` tool's egress.
+///
+/// With `proxy` set (`host:port`), the shell's network goes through that
+/// loopback proxy and direct off-box network is kernel-denied — so the proxy's
+/// exact-host allowlist is the only way out. `None` leaves egress unrestricted.
+pub fn register_default_tools_with_proxy(registry: &mut ToolRegistry, workspace: PathBuf, proxy: Option<String>) {
     registry.register(ReadFileTool { workspace: workspace.clone() });
     registry.register(ListFilesTool { workspace: workspace.clone() });
     registry.register(GrepTool { workspace: workspace.clone() });
     registry.register(WriteFileTool { workspace: workspace.clone() });
     registry.register(EditFileTool { workspace: workspace.clone() });
-    registry.register(BashTool { workspace });
+    registry.register(BashTool { workspace, proxy });
 }
 
 #[cfg(test)]

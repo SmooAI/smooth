@@ -25,6 +25,10 @@ const OUTPUT_CAP: usize = 50_000;
 pub struct BashTool {
     /// Working directory the command starts in.
     pub workspace: PathBuf,
+    /// When set (`host:port`), the shell's egress is forced through this
+    /// loopback proxy and direct off-box network is kernel-denied (see
+    /// [`crate::sandbox::SandboxPolicy::with_proxy`]). `None` = unrestricted.
+    pub proxy: Option<String>,
 }
 
 #[async_trait]
@@ -53,7 +57,10 @@ impl Tool for BashTool {
         let timeout_secs = arguments.get("timeout").and_then(Value::as_u64);
 
         // The ONLY shell-spawn path: through the kernel sandbox (P0).
-        let policy = crate::sandbox::SandboxPolicy::for_workspace(self.workspace.clone());
+        let mut policy = crate::sandbox::SandboxPolicy::for_workspace(self.workspace.clone());
+        if let Some(addr) = &self.proxy {
+            policy = policy.with_proxy(addr.clone());
+        }
         let mut cmd = crate::sandbox::SandboxedCommand::shell(&policy, &command).into_command();
         cmd.current_dir(&self.workspace)
             .stdin(Stdio::null())
@@ -99,6 +106,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tool = BashTool {
             workspace: dir.path().to_path_buf(),
+            proxy: None,
         };
         (dir, tool)
     }
@@ -132,5 +140,20 @@ mod tests {
         let (_dir, tool) = tool();
         let out = tool.execute(json!({"command": "sleep 5", "timeout": 1})).await.unwrap();
         assert!(out.contains("timed out"), "{out}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn proxy_bash_tool_routes_egress_through_the_proxy() {
+        // With a proxy configured, the tool's shell sees HTTP_PROXY pointing at
+        // it (the macos_profile also denies direct egress — see sandbox tests).
+        let dir = tempfile::tempdir().unwrap();
+        let tool = BashTool {
+            workspace: dir.path().to_path_buf(),
+            proxy: Some("127.0.0.1:3128".into()),
+        };
+        let out = tool.execute(json!({"command": "echo PROXY=$HTTP_PROXY"})).await.unwrap();
+        assert!(out.contains("exit code: 0"), "{out}");
+        assert!(out.contains("PROXY=http://127.0.0.1:3128"), "egress proxy env reaches the shell: {out}");
     }
 }
