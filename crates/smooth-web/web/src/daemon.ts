@@ -77,6 +77,21 @@ export async function setMode(mode: PermissionMode): Promise<string> {
     return ((await r.json()) as { permission_mode: string }).permission_mode;
 }
 
+// GET /api/memory — a recalled durable memory.
+export interface MemoryHit {
+    content: string;
+    memory_type: string;
+    relevance: number;
+    created_at: string;
+}
+
+/** Search the agent's durable memory (keyword recall). Empty query → []. */
+export async function searchMemory(query: string, limit = 50): Promise<MemoryHit[]> {
+    const r = await fetch(`/api/memory?q=${encodeURIComponent(query)}&limit=${limit}`);
+    if (!r.ok) throw new Error(`memory ${r.status}`);
+    return (await r.json()) as MemoryHit[];
+}
+
 export async function listSessions(): Promise<Session[]> {
     const r = await fetch('/api/session');
     if (!r.ok) throw new Error(`sessions ${r.status}`);

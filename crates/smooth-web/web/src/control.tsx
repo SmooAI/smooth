@@ -16,8 +16,10 @@ import {
     listMessages,
     listSessions,
     PERMISSION_MODES,
+    searchMemory,
     setMode,
     type Health,
+    type MemoryHit,
     type PermissionMode,
     type ServerEvent,
     type Session,
@@ -48,6 +50,8 @@ export function ControlApp() {
     const [busy, setBusy] = useState(false);
     const [taskId, setTaskId] = useState<string | null>(null);
     const [input, setInput] = useState('');
+    const [memQuery, setMemQuery] = useState('');
+    const [memHits, setMemHits] = useState<MemoryHit[] | null>(null);
     const socketRef = useRef<DaemonSocket | null>(null);
     const scrollRef = useRef<HTMLDivElement | null>(null);
     const [, forceTick] = useReducer((n: number) => n + 1, 0);
@@ -188,6 +192,19 @@ export function ControlApp() {
         setBusy(false);
     };
 
+    const runMemorySearch = async () => {
+        const q = memQuery.trim();
+        if (!q) {
+            setMemHits(null);
+            return;
+        }
+        try {
+            setMemHits(await searchMemory(q));
+        } catch {
+            setMemHits([]);
+        }
+    };
+
     const reply = (request_id: string, allow: boolean) => {
         socketRef.current?.send({ type: 'PermissionReply', request_id, allow });
         setPending((prev) => prev.filter((p) => p.request_id !== request_id));
@@ -267,6 +284,28 @@ export function ControlApp() {
                         ))}
                         {sessions.length === 0 && <li className="text-xs text-foreground/30">no sessions yet</li>}
                     </ul>
+
+                    <div className="mt-4 border-t border-white/10 pt-3">
+                        <span className="text-xs uppercase tracking-wide text-foreground/40">Memory</span>
+                        <input
+                            value={memQuery}
+                            onChange={(e) => setMemQuery(e.target.value)}
+                            onKeyDown={(e) => e.key === 'Enter' && void runMemorySearch()}
+                            placeholder="search memory…"
+                            className="mt-2 w-full rounded border border-white/10 bg-white/5 px-2 py-1 text-xs outline-none focus:border-primary/50"
+                        />
+                        {memHits !== null && (
+                            <ul className="mt-2 space-y-1">
+                                {memHits.length === 0 && <li className="text-xs text-foreground/30">no matches</li>}
+                                {memHits.map((m, i) => (
+                                    <li key={i} className="rounded bg-white/5 px-2 py-1 text-xs">
+                                        <span className="mr-1 rounded bg-primary/15 px-1 text-[10px] text-primary">{m.memory_type}</span>
+                                        <span className="text-foreground/70">{m.content}</span>
+                                    </li>
+                                ))}
+                            </ul>
+                        )}
+                    </div>
                 </aside>
 
                 <main className="flex min-w-0 flex-1 flex-col">

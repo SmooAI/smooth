@@ -40,7 +40,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
 use axum::{Json, Router};
 use futures_util::{SinkExt, Stream, StreamExt};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::approval::ApprovalCoordinator;
@@ -168,6 +168,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/session", get(list_sessions).post(create_session))
         .route("/api/session/{id}", get(get_session))
         .route("/api/session/{id}/messages", get(list_session_messages))
+        .route("/api/memory", get(search_memory))
         .route_layer(auth);
     Router::new()
         .route("/health", get(health))
@@ -308,6 +309,44 @@ async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
         // control surface show whether agent shell egress is allowlist-confined.
         "egress_proxy": state.egress_proxy,
     }))
+}
+
+/// Query for `GET /api/memory`.
+#[derive(Debug, Deserialize)]
+struct MemoryQuery {
+    /// Search terms; an empty/absent query returns nothing.
+    #[serde(default)]
+    q: Option<String>,
+    /// Max hits (capped at 200).
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// One recalled memory, projected for the browser.
+#[derive(Debug, Serialize)]
+struct MemoryHit {
+    content: String,
+    memory_type: String,
+    relevance: f32,
+    created_at: String,
+}
+
+/// `GET /api/memory?q=…` — search the agent's durable memory (keyword recall),
+/// for the control surface's memory browser. Read-only.
+async fn search_memory(State(state): State<AppState>, Query(params): Query<MemoryQuery>) -> Json<Vec<MemoryHit>> {
+    let query = params.q.unwrap_or_default();
+    let limit = params.limit.unwrap_or(50).min(200);
+    let hits = state.memory.recall(&query, limit).unwrap_or_default();
+    Json(
+        hits.into_iter()
+            .map(|m| MemoryHit {
+                content: m.content,
+                memory_type: format!("{:?}", m.memory_type),
+                relevance: m.relevance,
+                created_at: m.created_at.to_rfc3339(),
+            })
+            .collect(),
+    )
 }
 
 /// Body for `PUT /api/mode`.
@@ -774,6 +813,34 @@ mod tests {
             hits.iter().any(|m| m.content.contains("GitHub Actions")),
             "durable memory recalled across restart"
         );
+    }
+
+    #[tokio::test]
+    async fn search_memory_recalls_matching_entries() {
+        use smooth_operator::{MemoryEntry, MemoryType};
+        let state = AppState::new();
+        state.memory.store(MemoryEntry::new("the operator prefers Rust", MemoryType::User)).unwrap();
+        state
+            .memory
+            .store(MemoryEntry::new("deploys run in GitHub Actions", MemoryType::Project))
+            .unwrap();
+
+        // A matching query returns the projected hit.
+        let Json(hits) = search_memory(
+            State(state.clone()),
+            Query(MemoryQuery {
+                q: Some("rust".into()),
+                limit: None,
+            }),
+        )
+        .await;
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].content.contains("Rust"));
+        assert_eq!(hits[0].memory_type, "User");
+
+        // An empty query recalls nothing.
+        let Json(none) = search_memory(State(state), Query(MemoryQuery { q: None, limit: None })).await;
+        assert!(none.is_empty());
     }
 
     #[tokio::test]
