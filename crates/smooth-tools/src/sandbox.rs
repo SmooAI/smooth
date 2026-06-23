@@ -12,6 +12,12 @@
 //! including the daemon's *own* secrets in `~/.smooth` (`providers.json`'s
 //! LLM key, the `auth/` JWT), so a sandboxed tool can't exfil what drives it.
 //!
+//! With a proxy configured ([`SandboxPolicy::with_proxy`]), the sandbox also
+//! becomes the **egress boundary**: `HTTP(S)_PROXY` point at the loopback goalie
+//! proxy and direct outbound network is kernel-denied except to loopback, so
+//! off-box traffic must pass the proxy's exact-host allowlist — a tool that
+//! ignores the proxy vars simply can't connect out.
+//!
 //! **P0 — non-bypassable.** A [`SandboxedCommand`] is the *only* way `bash`
 //! builds its subprocess. There is no constructor that yields a plain
 //! `Command`, so no tool call / prompt can spawn an unsandboxed shell.
@@ -33,6 +39,11 @@ pub struct SandboxPolicy {
     pub workspace: PathBuf,
     /// The operator's home, whose credential dirs are read-denied.
     pub home: Option<PathBuf>,
+    /// When set (`host:port`), the shell's egress is forced through this
+    /// loopback proxy: `HTTP(S)_PROXY` point at it, and the kernel sandbox
+    /// **denies direct outbound network** except to loopback — so the proxy
+    /// (the goalie egress allowlist) is the only path off-box, not bypassable.
+    pub proxy: Option<String>,
 }
 
 impl SandboxPolicy {
@@ -43,7 +54,16 @@ impl SandboxPolicy {
         Self {
             workspace,
             home: std::env::var_os("HOME").map(PathBuf::from),
+            proxy: None,
         }
+    }
+
+    /// Route the shell's egress through the loopback proxy at `addr`
+    /// (`host:port`): sets `HTTP(S)_PROXY` and denies direct outbound network.
+    #[must_use]
+    pub fn with_proxy(mut self, addr: impl Into<String>) -> Self {
+        self.proxy = Some(addr.into());
+        self
     }
 
     /// Whether this build actually enforces a kernel sandbox for shell commands.
@@ -71,6 +91,19 @@ impl SandboxedCommand {
     pub fn shell(policy: &SandboxPolicy, command: &str) -> Self {
         let mut cmd = build(policy, command);
         scrub_secret_env(&mut cmd);
+        if let Some(addr) = &policy.proxy {
+            // Force HTTP(S) egress through the loopback proxy. The kernel
+            // network-deny (macos_profile) makes this non-optional: direct
+            // off-box connects fail, so a tool that ignores these vars simply
+            // can't reach the network at all.
+            let url = format!("http://{addr}");
+            for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"] {
+                cmd.env(key, &url);
+            }
+            // Never proxy loopback itself (the proxy, local dev servers).
+            cmd.env("NO_PROXY", "localhost,127.0.0.1,::1");
+            cmd.env("no_proxy", "localhost,127.0.0.1,::1");
+        }
         Self(cmd)
     }
 
@@ -134,6 +167,18 @@ fn macos_profile(policy: &SandboxPolicy) -> String {
              \x20  (literal \"{h}/.netrc\")\n\
              \x20  (literal \"{h}/.smooth/providers.json\")\n\
              \x20  (subpath \"{h}/.smooth/auth\"))\n"
+        );
+    }
+    if policy.proxy.is_some() {
+        // Egress boundary: deny direct outbound network, allowing only loopback
+        // (the goalie proxy + local dev servers). Off-box traffic must go
+        // through the proxy's exact-host allowlist; a tool ignoring HTTP_PROXY
+        // just can't connect out. SBPL is last-match-wins, so these override the
+        // opening `(allow default)`.
+        p.push_str(
+            "(deny network-outbound)\n\
+             (allow network-outbound (remote ip \"localhost:*\"))\n\
+             (allow network-outbound (remote unix-socket))\n",
         );
     }
     p
@@ -292,6 +337,30 @@ mod tests {
             assert!(out.contains("DONE"));
             assert!(!out.contains("LEAK_SENTINEL"), "scrubbed secrets must not appear in `env`: {out}");
             assert!(out.contains("PATH="), "non-secret env (PATH) should still be inherited: {out}");
+        }
+
+        #[tokio::test]
+        async fn proxy_policy_injects_http_proxy_env() {
+            let dir = tempfile::tempdir().unwrap();
+            let policy = SandboxPolicy::for_workspace(dir.path().to_path_buf()).with_proxy("127.0.0.1:3128");
+            let (code, out) = run(&policy, "echo P=$HTTP_PROXY,$HTTPS_PROXY,$NO_PROXY").await;
+            assert_eq!(code, 0, "command runs: {out}");
+            assert!(
+                out.contains("P=http://127.0.0.1:3128,http://127.0.0.1:3128,localhost"),
+                "proxy env injected: {out}"
+            );
+        }
+
+        #[tokio::test]
+        async fn proxy_policy_profile_parses_and_runs() {
+            // If the network-deny SBPL is malformed, sandbox-exec fails to parse
+            // the profile and nothing runs. A clean exit proves the generated
+            // profile (FS rules + network rules) is valid SBPL.
+            let dir = tempfile::tempdir().unwrap();
+            let policy = SandboxPolicy::for_workspace(dir.path().to_path_buf()).with_proxy("127.0.0.1:3128");
+            let (code, out) = run(&policy, "echo sandbox-ok").await;
+            assert_eq!(code, 0, "proxy-policy profile must be valid SBPL and run: {out}");
+            assert!(out.contains("sandbox-ok"), "{out}");
         }
 
         #[tokio::test]
