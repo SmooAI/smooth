@@ -1,5 +1,98 @@
 # @smooai/smooth
 
+## 0.15.0
+
+### Minor Changes
+
+- f960f40: feat: harness-agnostic agent messaging (`th agent` / `th msg`) + `th pearls prime`/memories
+
+  Any agent — Claude Code, opencode, pi, a shell loop, in any session on any
+  machine — can now register an identity and exchange messages with other agents,
+  all through plain `th` calls layered on the pearl Dolt store (so it syncs via
+  `refs/dolt/data` like everything else). Pearls th-70aaef + th-202885.
+
+  **Agent messaging:**
+
+  - New Dolt tables `agents` (persistent registry) and `messages` (mailbox;
+    `read_at IS NULL` = unread, `seq` for stable insertion order, `thread_id` for
+    flat threads).
+  - `smooth-pearls` gains `AgentRegistry` (register/touch/set_status/list/get) and
+    `Mailbox` (send/inbox/sent/get/thread/mark_read/mark_all_read/unread_count).
+  - New CLI: `th agent register/list/offline` and
+    `th msg send/inbox/read/reply/thread/watch`. `th msg watch` is the
+    "continuously check" poll loop (`--pull` for cross-machine). Identity defaults
+    to `$SMOOTH_AGENT`, else `user@host`; `$SMOOTH_HARNESS` tags the tool.
+  - `th inbox` (previously a stub that always returned `[]`) now aliases
+    `th msg inbox` against the real local mailbox.
+  - `th pearls init` injects an idempotent **Agent Messaging** section into
+    `AGENTS.md` (marker-bounded) so any harness that reads it learns the protocol.
+
+  **Prime + memories:** `th pearls remember/memories/forget` over the existing
+  `memories` table, plus `th pearls prime` which prints (or `--json`) a compact
+  session-priming context: in-progress + open pearls and recent memories.
+
+  Also fixes a smooth-dolt datetime-format quirk surfaced here: `NOW()` returns
+  RFC3339 while `CURRENT_TIMESTAMP` defaults are space-separated — the shared
+  `parse_dolt_datetime` now accepts both.
+
+- e8f9693: feat: harden pearls sync — auto-push mutations + fail-safe pull (no silent data loss)
+
+  Pearls could be lost to the `refs/dolt/data` divergence: a mutation committed
+  only to the local Dolt store, then a later `th pearls pull` moved `main` to the
+  remote tip and orphaned the un-pushed commits. Two guards close the gap
+  (pearl th-4a4559):
+
+  - **Auto-push on mutation.** `th pearls create/update/close/reopen/dep/comment/
+label/migrate` now push to the repo's `refs/dolt/data` immediately after the
+    local commit — best-effort and quiet when there's no remote/offline (drives
+    only `dolt push`, which captures its own output; no stray `fatal:` on stderr).
+    Pearls are durable the moment they're made, so no pull or re-clone can drop
+    them. `SMOOTH_PEARLS_NO_PUSH=1` opts out (bulk/scripted creates).
+  - **Fail-safe `th pearls pull`.** Refuses by default when local `main` is ahead
+    of `remotes/origin/main` (commits not yet on the remote), pointing you at
+    `th pearls push` first; `--force`/`-f` pulls anyway. Detection fetches the
+    remote and counts `dolt_log('remotes/origin/main..main')`; if it can't be
+    determined (no remote / fetch fails) the guard is skipped so remote-less
+    stores still pull.
+
+  Generalizes the messaging sync helpers (`sync_push_pearl_state` /
+  `sync_pull_pearl_state`, formerly `*_messaging`) since they push/pull the whole
+  pearl store. Verified live: a remote-less `create` is a clean no-op, and a
+  store that was 2 commits ahead correctly refused the pull.
+
+### Patch Changes
+
+- 641ffbf: fix: model-picker sort comparator is now a total order (unblocks releases)
+
+  `candidate_models_filtered` sorted models by slot benchmark with
+  `y.partial_cmp(&x).unwrap_or(Ordering::Equal)`. A NaN benchmark makes
+  `partial_cmp` return `None`, and collapsing that to `Equal` violates total
+  order — which Rust's sort (1.96+) detects and **panics** on ("comparison
+  function does not correctly implement a total order"). That panic failed the
+  Release workflow's `cargo test` step on CI (whose model data hit the NaN path),
+  so every Release run failed, the "New version release" changeset PR never
+  auto-merged, and the version sat at 0.14.1 while changesets piled up. Switched
+  to `f32::total_cmp`, a proper total order that sorts NaN deterministically.
+  Pearl th-03b02e.
+
+- 2710849: feat: `th msg`/`th agent` sync over `refs/dolt/data` (push-on-send, pull-on-watch)
+
+  Messages live in the pearl Dolt store, which syncs over the repo's git remote
+  via `refs/dolt/data` — but `th msg send` previously only committed locally, so
+  agents in different clones/machines of the same repo didn't see each other
+  until a manual `th pearls push`. Now the messaging commands sync automatically:
+
+  - `th msg send` / `th msg reply` / `th agent register` / `th agent offline`
+    **push** after committing (`--no-push` to skip).
+  - `th msg watch` **pulls** each poll by default (`--no-pull` for a local-only,
+    offline mailbox).
+  - `th msg inbox --pull` fetches the remote before listing.
+
+  Sync drives only `dolt push` / `dolt pull` (which capture their own output), so
+  a repo with no remote — or the global `~/.smooth/dolt` store, or being offline
+  — is a silent no-op: no error, no stray `fatal: No configured push destination`
+  on stderr. Pearl th-bdaaa7.
+
 ## 0.14.1
 
 ### Patch Changes
