@@ -13,5 +13,5 @@ pub mod wonk;
 
 pub use allowlist::{normalize_hostname, EgressAllowlist};
 pub use audit::{AuditEntry, AuditLogger};
-pub use proxy::run_proxy;
+pub use proxy::{run_proxy, run_proxy_local, run_proxy_with, NetworkDecider};
 pub use wonk::{NetworkCheckRequest, WonkClient, WonkDecision};

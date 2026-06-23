@@ -28,8 +28,28 @@ async fn main() -> ExitCode {
 async fn run() -> anyhow::Result<()> {
     let addr = smooth_daemon::config::resolve_bind()?;
     // Durable SQLite-backed state so events/sessions survive a restart.
-    let state = smooth_daemon::AppState::persistent_default()?;
+    let mut state = smooth_daemon::AppState::persistent_default()?;
     tracing::info!(db = %smooth_daemon::AppState::default_db_path().display(), "durable state");
+
+    // Egress boundary (opt-in via SMOOTH_EGRESS_ALLOWLIST): start the goalie
+    // forward proxy on loopback and point the bash tool at it, so agent shell
+    // commands can only reach the exact hosts on the allowlist.
+    if let Some(setup) = smooth_daemon::config::resolve_egress() {
+        let audit = smooth_goalie::AuditLogger::new(&smooth_daemon::config::egress_audit_path().to_string_lossy())?;
+        if !setup.rejected.is_empty() {
+            tracing::warn!(rejected = ?setup.rejected, "egress allowlist dropped invalid entries");
+        }
+        tracing::info!(proxy = %setup.proxy_addr, hosts = setup.allowlist.len(), "egress boundary ON");
+        let proxy_addr = setup.proxy_addr.clone();
+        let allowlist = setup.allowlist;
+        tokio::spawn(async move {
+            if let Err(e) = smooth_goalie::run_proxy_local(&proxy_addr, allowlist, audit).await {
+                tracing::error!(error = %e, "egress proxy exited — sandboxed egress now fails closed");
+            }
+        });
+        state.egress_proxy = Some(setup.proxy_addr);
+    }
+
     smooth_daemon::serve(state, addr).await
 }
 

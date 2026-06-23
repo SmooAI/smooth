@@ -46,6 +46,48 @@ pub fn resolve_auth_token() -> Option<String> {
     std::env::var("SMOOTH_DAEMON_TOKEN").ok().map(|t| t.trim().to_owned()).filter(|t| !t.is_empty())
 }
 
+/// Default loopback address the egress proxy binds to when the boundary is on.
+pub const DEFAULT_EGRESS_PROXY_ADDR: &str = "127.0.0.1:4419";
+
+/// The egress boundary's resolved configuration.
+pub struct EgressSetup {
+    /// The exact-host allowlist the proxy enforces.
+    pub allowlist: smooth_goalie::EgressAllowlist,
+    /// Entries that failed to parse (wildcards, ports, …) — logged on startup.
+    pub rejected: Vec<String>,
+    /// `host:port` the proxy binds to and the bash tool is pointed at.
+    pub proxy_addr: String,
+}
+
+/// Resolve the egress boundary from the environment.
+///
+/// **Opt-in**: returns `Some` only when `SMOOTH_EGRESS_ALLOWLIST` is set (a
+/// comma/whitespace-separated list of exact hosts). With it unset, the bash
+/// tool's network is unrestricted (matching the auth/sandbox opt-in posture).
+/// `SMOOTH_EGRESS_PROXY_ADDR` overrides the proxy bind address.
+#[must_use]
+pub fn resolve_egress() -> Option<EgressSetup> {
+    let raw = std::env::var("SMOOTH_EGRESS_ALLOWLIST").ok()?;
+    let entries = raw.split([',', ' ', '\t', '\n']).filter(|s| !s.trim().is_empty());
+    let (allowlist, rejected) = smooth_goalie::EgressAllowlist::from_entries(entries);
+    let proxy_addr = std::env::var("SMOOTH_EGRESS_PROXY_ADDR").unwrap_or_else(|_| DEFAULT_EGRESS_PROXY_ADDR.to_owned());
+    Some(EgressSetup {
+        allowlist,
+        rejected,
+        proxy_addr,
+    })
+}
+
+/// Where the egress proxy writes its JSON-lines audit (`~/.smooth/audit/
+/// egress-proxy.jsonl`, or `./egress-proxy.jsonl` if HOME is unavailable).
+#[must_use]
+pub fn egress_audit_path() -> PathBuf {
+    dirs_next::home_dir().map_or_else(
+        || PathBuf::from("egress-proxy.jsonl"),
+        |h| h.join(".smooth").join("audit").join("egress-proxy.jsonl"),
+    )
+}
+
 /// Resolve the Gate-1 permission mode from `SMOOTH_PERMISSION_MODE` (default
 /// [`PermissionMode::Default`](crate::permission::PermissionMode::Default) —
 /// reads auto, mutations prompt).
@@ -136,6 +178,24 @@ mod tests {
     #[test]
     fn default_bind_parses() {
         assert_eq!(DEFAULT_BIND.parse::<SocketAddr>().unwrap().port(), 4400);
+    }
+
+    #[test]
+    fn resolve_egress_is_opt_in_and_parses_hosts() {
+        // Only this test touches SMOOTH_EGRESS_ALLOWLIST, so the env mutation is
+        // race-free against the rest of the suite.
+        std::env::remove_var("SMOOTH_EGRESS_ALLOWLIST");
+        std::env::remove_var("SMOOTH_EGRESS_PROXY_ADDR");
+        assert!(resolve_egress().is_none(), "unset → egress boundary off (opt-in)");
+
+        std::env::set_var("SMOOTH_EGRESS_ALLOWLIST", "github.com, api.smoo.ai *.bad.com");
+        let setup = resolve_egress().expect("set → Some");
+        assert!(setup.allowlist.is_allowed("github.com"));
+        assert!(setup.allowlist.is_allowed("api.smoo.ai"));
+        assert!(!setup.allowlist.is_allowed("evil.com"));
+        assert_eq!(setup.rejected, vec!["*.bad.com".to_owned()], "wildcard entry rejected + surfaced");
+        assert_eq!(setup.proxy_addr, DEFAULT_EGRESS_PROXY_ADDR);
+        std::env::remove_var("SMOOTH_EGRESS_ALLOWLIST");
     }
 
     #[test]

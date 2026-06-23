@@ -65,6 +65,7 @@ pub async fn run_task(
     messages: Arc<dyn MessageStore>,
     approvals: Arc<ApprovalCoordinator>,
     mode: PermissionMode,
+    egress_proxy: Option<String>,
 ) {
     let TaskSpec {
         task_id,
@@ -111,7 +112,10 @@ pub async fn run_task(
     // Security note: tools enforce lexical path confinement and the hook gates
     // intent; the kernel OS-sandbox enforcement boundary is Phase 3 Slice 2.
     let mut tools = ToolRegistry::new();
-    smooth_tools::register_default_tools(&mut tools, workspace);
+    // When an egress proxy is configured, the bash tool routes network through
+    // it (direct off-box egress kernel-denied) — the goalie exact-host allowlist
+    // becomes the only way out.
+    smooth_tools::register_default_tools_with_proxy(&mut tools, workspace, egress_proxy);
     tools.add_hook(PermissionHook::new(PermissionEngine::new(mode), approvals, out.clone()));
     let agent = Agent::new(cfg, tools);
 
@@ -244,6 +248,7 @@ mod tests {
             Arc::clone(&messages),
             crate::approval::ApprovalCoordinator::new(),
             crate::permission::PermissionMode::default(),
+            None,
         )
         .await;
 

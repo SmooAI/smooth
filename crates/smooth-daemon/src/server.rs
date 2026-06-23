@@ -81,6 +81,10 @@ pub struct AppState {
     /// static SPA requires `Authorization: Bearer <token>` (or `?token=`).
     /// `None` = open (the loopback-default trusts the local user).
     pub auth_token: Option<Arc<String>>,
+    /// Loopback address of the running goalie egress proxy (`host:port`), if the
+    /// egress boundary is enabled. Threaded into the bash tool so its network is
+    /// forced through the proxy's exact-host allowlist. `None` = unrestricted.
+    pub egress_proxy: Option<String>,
 }
 
 impl AppState {
@@ -95,6 +99,7 @@ impl AppState {
             approvals: ApprovalCoordinator::new(),
             permission_mode: SharedPermissionMode::default(),
             auth_token: None,
+            egress_proxy: None,
         }
     }
 
@@ -114,6 +119,7 @@ impl AppState {
             approvals: ApprovalCoordinator::new(),
             permission_mode: SharedPermissionMode::new(crate::config::resolve_permission_mode()),
             auth_token: crate::config::resolve_auth_token().map(Arc::new),
+            egress_proxy: None,
         })
     }
 
@@ -552,7 +558,8 @@ async fn handle_client_event(ev: ClientEvent, session_id: &str, state: &AppState
             let messages = Arc::clone(&state.messages);
             let approvals = Arc::clone(&state.approvals);
             let mode = state.permission_mode.get();
-            let run = async move { runner::run_task(spec, out, events, messages, approvals, mode).await };
+            let egress_proxy = state.egress_proxy.clone();
+            let run = async move { runner::run_task(spec, out, events, messages, approvals, mode, egress_proxy).await };
 
             match state.coordinator.try_start(session_id.to_owned(), task_id.clone(), run) {
                 Ok(()) => {

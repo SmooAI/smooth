@@ -26,6 +26,10 @@ path = "src/main.rs"
 [dependencies]
 smooth-operator.workspace = true
 smooth-tools.workspace = true
+# th-08e05a (EPIC th-c89c2a): the egress boundary — the daemon starts goalie's
+# in-process forward proxy (exact-host allowlist) and routes the bash tool's
+# network through it.
+smooth-goalie.workspace = true
 # th-bd0def (EPIC th-c89c2a): the daemon serves the smooth-web SPA (control
 # surface) via rust-embed.
 smooth-web.workspace = true
