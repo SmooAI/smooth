@@ -37,7 +37,7 @@ use axum::http::StatusCode;
 use axum::middleware::{from_fn_with_state, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, put};
+use axum::routing::{delete, get, put};
 use axum::{Json, Router};
 use futures_util::{SinkExt, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -88,8 +88,8 @@ pub struct AppState {
     /// Durable cross-session agent memory; the engine auto-recalls from it each
     /// turn. SQLite-backed in `persistent`, in-memory for `new`.
     pub memory: Arc<dyn smooth_operator::Memory>,
-    /// Scheduled/proactive task definitions (Phase 5). The scheduler tick (a
-    /// later slice) fires due schedules back into the daemon.
+    /// Scheduled/proactive task definitions (Phase 5); the scheduler tick fires
+    /// due ones back into the daemon. Managed via `/api/schedule`.
     pub schedules: Arc<dyn crate::schedule::ScheduleStore>,
     /// When this daemon process started — surfaced as uptime in `/api/status`.
     pub started_at: std::time::Instant,
@@ -178,6 +178,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/session/{id}", get(get_session))
         .route("/api/session/{id}/messages", get(list_session_messages))
         .route("/api/memory", get(search_memory))
+        .route("/api/schedule", get(list_schedules).post(create_schedule))
+        .route("/api/schedule/{id}", delete(delete_schedule))
         .route_layer(auth);
     Router::new()
         .route("/health", get(health))
@@ -358,6 +360,38 @@ async fn search_memory(State(state): State<AppState>, Query(params): Query<Memor
             })
             .collect(),
     )
+}
+
+/// Body for `POST /api/schedule`.
+#[derive(Debug, Deserialize)]
+struct CreateScheduleBody {
+    /// The prompt fired on the cadence.
+    prompt: String,
+    /// The cadence (`{"kind":"every_n_seconds","secs":N}` or
+    /// `{"kind":"daily_at","hour":H,"minute":M}`).
+    schedule: crate::schedule::ScheduleKind,
+}
+
+/// `GET /api/schedule` — list scheduled/proactive tasks.
+async fn list_schedules(State(state): State<AppState>) -> Result<Json<Vec<crate::schedule::Schedule>>, StatusCode> {
+    state.schedules.list().await.map(Json).map_err(internal_error)
+}
+
+/// `POST /api/schedule` — create a scheduled task (first due at the next cadence
+/// point after now).
+async fn create_schedule(State(state): State<AppState>, Json(body): Json<CreateScheduleBody>) -> Result<Json<crate::schedule::Schedule>, StatusCode> {
+    if body.prompt.trim().is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let schedule = crate::schedule::Schedule::new(uuid::Uuid::new_v4().to_string(), body.prompt, body.schedule, chrono::Utc::now());
+    state.schedules.upsert(schedule.clone()).await.map_err(internal_error)?;
+    Ok(Json(schedule))
+}
+
+/// `DELETE /api/schedule/{id}` — remove a scheduled task.
+async fn delete_schedule(Path(id): Path<String>, State(state): State<AppState>) -> Result<StatusCode, StatusCode> {
+    state.schedules.delete(&id).await.map_err(internal_error)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Body for `PUT /api/mode`.
@@ -851,6 +885,47 @@ mod tests {
         let long = "x".repeat(80);
         let title = derive_title(&long);
         assert!(title.ends_with('…') && title.chars().count() == 61, "{title}");
+    }
+
+    #[tokio::test]
+    async fn schedule_api_create_list_delete() {
+        use crate::schedule::ScheduleKind;
+        let state = AppState::new();
+        // Create.
+        let Json(created) = create_schedule(
+            State(state.clone()),
+            Json(CreateScheduleBody {
+                prompt: "summarize overnight CI".into(),
+                schedule: ScheduleKind::DailyAt { hour: 8, minute: 0 },
+            }),
+        )
+        .await
+        .expect("create");
+        assert_eq!(created.kind, ScheduleKind::DailyAt { hour: 8, minute: 0 });
+        assert!(created.enabled);
+
+        // List shows it.
+        let Json(list) = list_schedules(State(state.clone())).await.expect("list");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, created.id);
+
+        // Empty prompt is rejected.
+        let err = create_schedule(
+            State(state.clone()),
+            Json(CreateScheduleBody {
+                prompt: "  ".into(),
+                schedule: ScheduleKind::EveryNSeconds { secs: 60 },
+            }),
+        )
+        .await
+        .expect_err("empty prompt rejected");
+        assert_eq!(err, StatusCode::BAD_REQUEST);
+
+        // Delete.
+        let code = delete_schedule(Path(created.id.clone()), State(state.clone())).await.expect("delete");
+        assert_eq!(code, StatusCode::NO_CONTENT);
+        let Json(after) = list_schedules(State(state)).await.expect("list after delete");
+        assert!(after.is_empty());
     }
 
     #[tokio::test]
