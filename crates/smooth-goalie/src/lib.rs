@@ -6,10 +6,12 @@
 //! in-process use of Goalie by Big Smooth for local-only agents) can spin up
 //! the proxy without going through the `smooth-goalie` binary.
 
+pub mod allowlist;
 pub mod audit;
 pub mod proxy;
 pub mod wonk;
 
+pub use allowlist::{normalize_hostname, EgressAllowlist};
 pub use audit::{AuditEntry, AuditLogger};
 pub use proxy::run_proxy;
 pub use wonk::{NetworkCheckRequest, WonkClient, WonkDecision};
