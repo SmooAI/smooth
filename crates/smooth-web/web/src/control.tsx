@@ -7,7 +7,7 @@
 
 import { useEffect, useReducer, useRef, useState } from 'react';
 
-import { createSession, DaemonSocket, getHealth, listSessions, type Health, type ServerEvent, type Session } from './daemon';
+import { createSession, DaemonSocket, getHealth, listMessages, listSessions, type Health, type ServerEvent, type Session } from './daemon';
 
 type ChatItem =
     | { kind: 'user'; text: string }
@@ -88,21 +88,41 @@ export function ControlApp() {
         }
     };
 
+    // (Re)connect the single socket, optionally resuming a session so its
+    // durable history replays on the next turn.
+    const connect = (resume?: string) => {
+        socketRef.current?.close();
+        const sock = new DaemonSocket((ev) => handlerRef.current(ev), setConnected, resume);
+        sock.connect();
+        socketRef.current = sock;
+    };
+
     useEffect(() => {
         getHealth().then(setHealth).catch(() => {});
         refreshSessions();
-        const sock = new DaemonSocket(
-            (ev) => handlerRef.current(ev),
-            setConnected,
-        );
-        sock.connect();
-        socketRef.current = sock;
+        connect();
         const poll = setInterval(refreshSessions, 5000);
         return () => {
             clearInterval(poll);
-            sock.close();
+            socketRef.current?.close();
         };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
+
+    // Switch to an existing session: load its conversation history and resume.
+    const selectSession = async (id: string) => {
+        if (id === sessionId) return;
+        setBusy(false);
+        setPending([]);
+        try {
+            const history = await listMessages(id);
+            setItems(history.map((m) => (m.role === 'user' ? { kind: 'user', text: m.content } : { kind: 'assistant', text: m.content })));
+        } catch {
+            setItems([]);
+        }
+        setSessionId(id);
+        connect(id);
+    };
 
     const send = () => {
         const message = input.trim();
@@ -121,7 +141,11 @@ export function ControlApp() {
 
     const newSession = async () => {
         try {
-            await createSession();
+            const s = await createSession();
+            setItems([]);
+            setPending([]);
+            setSessionId(s.id);
+            connect(s.id);
             refreshSessions();
         } catch {
             /* ignore */
@@ -151,13 +175,15 @@ export function ControlApp() {
                     </div>
                     <ul className="space-y-1">
                         {sessions.map((s) => (
-                            <li
-                                key={s.id}
-                                className={`truncate rounded px-2 py-1 text-xs ${s.id === sessionId ? 'bg-primary/15 text-foreground' : 'text-foreground/60'}`}
-                                title={s.id}
-                            >
-                                <span className={`mr-1 inline-block h-1.5 w-1.5 rounded-full ${s.status === 'active' ? 'bg-primary' : 'bg-foreground/30'}`} />
-                                {s.title ?? s.id.slice(0, 8)}
+                            <li key={s.id}>
+                                <button
+                                    onClick={() => void selectSession(s.id)}
+                                    title={s.id}
+                                    className={`flex w-full items-center rounded px-2 py-1 text-left text-xs hover:bg-white/5 ${s.id === sessionId ? 'bg-primary/15 text-foreground' : 'text-foreground/60'}`}
+                                >
+                                    <span className={`mr-1 inline-block h-1.5 w-1.5 shrink-0 rounded-full ${s.status === 'active' ? 'bg-primary' : 'bg-foreground/30'}`} />
+                                    <span className="truncate">{s.title ?? s.id.slice(0, 8)}</span>
+                                </button>
                             </li>
                         ))}
                         {sessions.length === 0 && <li className="text-xs text-foreground/30">no sessions yet</li>}

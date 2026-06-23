@@ -139,6 +139,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/event", get(event_stream_handler))
         .route("/api/session", get(list_sessions).post(create_session))
         .route("/api/session/{id}", get(get_session))
+        .route("/api/session/{id}/messages", get(list_session_messages))
         .with_state(state)
         // The embedded control-surface SPA (fallback for non-API routes).
         .fallback_service(smooth_web::web_router())
@@ -237,6 +238,12 @@ async fn create_session(State(state): State<AppState>, Json(body): Json<CreateSe
 async fn get_session(Path(id): Path<String>, State(state): State<AppState>) -> Result<Json<Session>, StatusCode> {
     let session = state.sessions.get(&id).await.map_err(internal_error)?;
     session.ok_or(StatusCode::NOT_FOUND).map(Json)
+}
+
+/// `GET /api/session/{id}/messages` — the session's durable conversation
+/// history (oldest first), for resuming a conversation in the UI.
+async fn list_session_messages(Path(id): Path<String>, State(state): State<AppState>) -> Result<Json<Vec<crate::messages::StoredMessage>>, StatusCode> {
+    state.messages.load(&id, PRIOR_HISTORY_LIMIT).await.map(Json).map_err(internal_error)
 }
 
 #[allow(clippy::needless_pass_by_value, reason = "used as a map_err fn-pointer, which passes the error by value")]

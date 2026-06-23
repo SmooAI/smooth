@@ -52,6 +52,17 @@ export async function listSessions(): Promise<Session[]> {
     return (await r.json()) as Session[];
 }
 
+export interface StoredMessage {
+    role: string;
+    content: string;
+}
+
+export async function listMessages(sessionId: string): Promise<StoredMessage[]> {
+    const r = await fetch(`/api/session/${encodeURIComponent(sessionId)}/messages`);
+    if (!r.ok) throw new Error(`messages ${r.status}`);
+    return (await r.json()) as StoredMessage[];
+}
+
 export async function createSession(title?: string): Promise<Session> {
     const r = await fetch('/api/session', {
         method: 'POST',

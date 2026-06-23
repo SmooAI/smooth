@@ -11,9 +11,10 @@ use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 /// A stored conversation message.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredMessage {
     /// `"user"` or `"assistant"`.
     pub role: String,
