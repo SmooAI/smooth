@@ -109,12 +109,34 @@ jobs:
 
             - name: Check if release needed
               id: check_release
+              # The PUSH payload's head commit — NOT `git log -1`. The
+              # changesets action above creates its own "🦋 New version
+              # release" commit on the local changeset-release/main side-
+              # branch and leaves HEAD pointed at it, so `git log -1` matched
+              # in the *version-PR* run too. That set should_release=true in
+              # the wrong run: build/release/update-homebrew-tap fired against
+              # a half-merged tree, and the tap job 404'd fetching an asset
+              # for a release that run never published (pearl th-891ccb). The
+              # push event's head_commit reflects what actually landed on
+              # main, immune to the side-branch commit.
+              env:
+                  HEAD_COMMIT_MSG: ${{ github.event.head_commit.message }}
               run: |
-                  # A release is needed when changesets says published OR when
-                  # the current commit is a changeset merge (version was just bumped).
+                  # A release is needed when changesets says published, OR when
+                  # the commit actually pushed to main is the changeset version
+                  # merge ("🦋 New version release"). For workflow_dispatch there
+                  # is no head_commit, so fall back to origin/main's real tip
+                  # (still NOT local HEAD, which the changesets side-branch moved).
+                  release_commit_subject() {
+                      if [[ -n "$HEAD_COMMIT_MSG" ]]; then
+                          printf '%s\n' "$HEAD_COMMIT_MSG" | head -1
+                      else
+                          git log -1 origin/main --pretty=%s
+                      fi
+                  }
                   if [[ "${{ steps.changesets.outputs.published }}" == "true" ]]; then
                     echo "should_release=true" >> $GITHUB_OUTPUT
-                  elif git log -1 --pretty=%s | grep -q "🦋 New version release"; then
+                  elif release_commit_subject | grep -q "🦋 New version release"; then
                     echo "should_release=true" >> $GITHUB_OUTPUT
                   else
                     echo "should_release=false" >> $GITHUB_OUTPUT
