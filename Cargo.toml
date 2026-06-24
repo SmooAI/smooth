@@ -4,7 +4,7 @@ members = ["crates/*"]
 exclude = ["crates/smooth-bigsmooth/tests/fixtures"]
 
 [workspace.package]
-version = "0.15.2"
+version = "0.15.3"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/SmooAI/smooth"
@@ -196,24 +196,24 @@ microsandbox = "0.4"
 smooth-operator = { version = "0.14.0", package = "smooai-smooth-operator-core" }
 # smooth-owned coding-harness extensions to the generic engine (re-homed from
 # the engine when it went generic at 0.14.0). See crates/smooth-cast.
-smooth-cast = { version = "0.15.2", path = "crates/smooth-cast", package = "smooai-smooth-cast" }
-smooth-bigsmooth = { version = "0.15.2", path = "crates/smooth-bigsmooth", package = "smooai-smooth-bigsmooth" }
-smooth-policy = { path = "crates/smooth-policy", version = "0.15.2", package = "smooai-smooth-policy" }
-smooth-web = { version = "0.15.2", path = "crates/smooth-web", package = "smooai-smooth-web" }
-smooth-scribe = { version = "0.15.2", path = "crates/smooth-scribe", package = "smooai-smooth-scribe" }
-smooth-wonk = { version = "0.15.2", path = "crates/smooth-wonk", package = "smooai-smooth-wonk" }
-smooth-goalie = { version = "0.15.2", path = "crates/smooth-goalie", package = "smooai-smooth-goalie" }
-smooth-narc = { version = "0.15.2", path = "crates/smooth-narc", package = "smooai-smooth-narc" }
-smooth-archivist = { version = "0.15.2", path = "crates/smooth-archivist", package = "smooai-smooth-archivist" }
-smooth-plugin = { version = "0.15.2", path = "crates/smooth-plugin", package = "smooai-smooth-plugin" }
-smooth-code = { version = "0.15.2", path = "crates/smooth-code", package = "smooai-smooth-code" }
-smooth-pearls = { path = "crates/smooth-pearls", version = "0.15.2", package = "smooai-smooth-pearls" }
-smooth-diver = { version = "0.15.2", path = "crates/smooth-diver", package = "smooai-smooth-diver" }
-smooth-bootstrap-bill = { version = "0.15.2", path = "crates/smooth-bootstrap-bill", default-features = false, package = "smooai-smooth-bootstrap-bill" }
-smooth-tunnel = { version = "0.15.2", path = "crates/smooth-tunnel", package = "smooai-smooth-tunnel" }
-smooth-host-stub = { version = "0.15.2", path = "crates/smooth-host-stub", package = "smooai-smooth-host-stub" }
-smooth-bench = { version = "0.15.2", path = "crates/smooth-bench", package = "smooai-smooth-bench" }
-smooth-api-client = { version = "0.15.2", path = "crates/smooth-api-client", package = "smooai-smooth-api-client" }
+smooth-cast = { version = "0.15.3", path = "crates/smooth-cast", package = "smooai-smooth-cast" }
+smooth-bigsmooth = { version = "0.15.3", path = "crates/smooth-bigsmooth", package = "smooai-smooth-bigsmooth" }
+smooth-policy = { path = "crates/smooth-policy", version = "0.15.3", package = "smooai-smooth-policy" }
+smooth-web = { version = "0.15.3", path = "crates/smooth-web", package = "smooai-smooth-web" }
+smooth-scribe = { version = "0.15.3", path = "crates/smooth-scribe", package = "smooai-smooth-scribe" }
+smooth-wonk = { version = "0.15.3", path = "crates/smooth-wonk", package = "smooai-smooth-wonk" }
+smooth-goalie = { version = "0.15.3", path = "crates/smooth-goalie", package = "smooai-smooth-goalie" }
+smooth-narc = { version = "0.15.3", path = "crates/smooth-narc", package = "smooai-smooth-narc" }
+smooth-archivist = { version = "0.15.3", path = "crates/smooth-archivist", package = "smooai-smooth-archivist" }
+smooth-plugin = { version = "0.15.3", path = "crates/smooth-plugin", package = "smooai-smooth-plugin" }
+smooth-code = { version = "0.15.3", path = "crates/smooth-code", package = "smooai-smooth-code" }
+smooth-pearls = { path = "crates/smooth-pearls", version = "0.15.3", package = "smooai-smooth-pearls" }
+smooth-diver = { version = "0.15.3", path = "crates/smooth-diver", package = "smooai-smooth-diver" }
+smooth-bootstrap-bill = { version = "0.15.3", path = "crates/smooth-bootstrap-bill", default-features = false, package = "smooai-smooth-bootstrap-bill" }
+smooth-tunnel = { version = "0.15.3", path = "crates/smooth-tunnel", package = "smooai-smooth-tunnel" }
+smooth-host-stub = { version = "0.15.3", path = "crates/smooth-host-stub", package = "smooai-smooth-host-stub" }
+smooth-bench = { version = "0.15.3", path = "crates/smooth-bench", package = "smooai-smooth-bench" }
+smooth-api-client = { version = "0.15.3", path = "crates/smooth-api-client", package = "smooai-smooth-api-client" }
 # Cross-runtime client shared library (github.com/SmooAI/client-shared).
 # SMOODEV-1464: switched from a local `path = "../client-shared/rust"` dep to
 # a rev-pinned git dep. The path form only resolved on a dev laptop, so every
