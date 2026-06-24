@@ -158,7 +158,8 @@ cargo test                   # Run all tests (200+ across 10 crates)
 cargo fmt                    # Format (rustfmt.toml: 160 width)
 cargo clippy                 # Lint (pedantic + nursery)
 cargo build --release -p smooth-cli  # Release binary (~10MB)
-pnpm install:th              # Build web bundle + cross-compile sandbox runner + install th
+pnpm install:th              # Build web bundle + cross-compile sandbox runner + install th FROM LOCAL SOURCE (the dev test loop)
+pnpm install:th:brew         # Install the latest RELEASED th via Homebrew (no source build; ignores local changes)
 pnpm build:web               # Just rebuild the embedded web SPA
 pnpm build:runner            # Just cross-compile the sandbox operative (mirrors to ~/.smooth/runner-bin/)
 ```
