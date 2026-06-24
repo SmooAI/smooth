@@ -199,11 +199,37 @@ th api observability sourcemaps-upload <dir> --release=<sha> --environment=produ
 th api observability sourcemaps-list --release=<sha> --environment=production
 ```
 
-### Profile / testing / products
+### Testing (report results + manage runs)
+
+Like `th config`, the testing surface is promoted to a top-level
+`th testing` command (the same subcommands also live under
+`th api testing`). The muscle-memory entry point is **`runs report`** —
+it creates a run and submits a CTRF report in one call, so CI never
+hand-rolls the create-run → post-results dance:
+
+```bash
+th testing runs report <ctrf.json> --environment=ci --tool=vitest --tags=unit,backend
+th testing runs report <junit.xml> --junit --tool=nextest --tags=unit,rust   # converts JUnit → CTRF first
+th testing runs report <file> --additional-org-ids=<id1>,<id2>               # also report to other orgs
+```
+
+`runs report` defaults `--name` to the file's base name, `--tool` to the
+CTRF report's own tool name, and `--build-name` / `--build-url` to the
+GitHub Actions env (`$GITHUB_SHA`, the Actions run URL) when present. The
+lower-level CRUD is there too:
+
+```bash
+th testing runs list|show|create|update|delete|results <id>
+th testing deployments|cases|environments <sub>
+```
+
+This replaces the old `npx @smooai/testing runs report` + `junit-to-ctrf`
+combo — one `th` invocation, authed the same way every other `th` command is.
+
+### Profile / products
 
 ```bash
 th api profile                                     # currently-logged-in user
-th api testing deployments|cases|environments|runs
 th api products list                               # billing plans
 ```
 
