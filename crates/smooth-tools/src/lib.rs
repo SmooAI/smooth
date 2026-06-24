@@ -16,8 +16,9 @@
 //! - **Slice C (this):** `bash` (pre-sandbox; Phase 3 wraps it).
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use smooth_operator::ToolRegistry;
+use smooth_operator::{Tool, ToolRegistry};
 
 pub mod bash;
 pub mod grep;
@@ -51,12 +52,27 @@ pub fn register_default_tools(registry: &mut ToolRegistry, workspace: PathBuf) {
 /// loopback proxy and direct off-box network is kernel-denied — so the proxy's
 /// exact-host allowlist is the only way out. `None` leaves egress unrestricted.
 pub fn register_default_tools_with_proxy(registry: &mut ToolRegistry, workspace: PathBuf, proxy: Option<String>) {
-    registry.register(ReadFileTool { workspace: workspace.clone() });
-    registry.register(ListFilesTool { workspace: workspace.clone() });
-    registry.register(GrepTool { workspace: workspace.clone() });
-    registry.register(WriteFileTool { workspace: workspace.clone() });
-    registry.register(EditFileTool { workspace: workspace.clone() });
-    registry.register(BashTool { workspace, proxy });
+    for tool in default_tools_with_proxy(workspace, proxy) {
+        registry.register_arc(tool);
+    }
+}
+
+/// Build the default tool set as `Vec<Arc<dyn Tool>>`, for hosts that register
+/// into *someone else's* registry rather than their own — e.g. the
+/// smooth-operator local flavor's `LocalServerBuilder::tools` seam, which takes
+/// pre-built `Arc<dyn Tool>`s and registers them into the agent it constructs
+/// per turn. Same set + same proxy wiring as
+/// [`register_default_tools_with_proxy`].
+#[must_use]
+pub fn default_tools_with_proxy(workspace: PathBuf, proxy: Option<String>) -> Vec<Arc<dyn Tool>> {
+    vec![
+        Arc::new(ReadFileTool { workspace: workspace.clone() }) as Arc<dyn Tool>,
+        Arc::new(ListFilesTool { workspace: workspace.clone() }),
+        Arc::new(GrepTool { workspace: workspace.clone() }),
+        Arc::new(WriteFileTool { workspace: workspace.clone() }),
+        Arc::new(EditFileTool { workspace: workspace.clone() }),
+        Arc::new(BashTool { workspace, proxy }),
+    ]
 }
 
 #[cfg(test)]
@@ -72,5 +88,20 @@ mod tests {
         for expected in ["read_file", "list_files", "grep", "write_file", "edit_file", "bash"] {
             assert!(names.iter().any(|n| n == expected), "missing {expected} in {names:?}");
         }
+    }
+
+    #[test]
+    fn default_tools_vec_has_the_full_set_with_proxy_wired() {
+        let tools = default_tools_with_proxy(PathBuf::from("/tmp"), Some("127.0.0.1:4419".into()));
+        let names: Vec<String> = tools.iter().map(|t| t.schema().name).collect();
+        for expected in ["read_file", "list_files", "grep", "write_file", "edit_file", "bash"] {
+            assert!(names.iter().any(|n| n == expected), "missing {expected} in {names:?}");
+        }
+        // The bash tool carries the proxy so its egress routes through goalie.
+        let bash = BashTool {
+            workspace: PathBuf::from("/tmp"),
+            proxy: Some("127.0.0.1:4419".into()),
+        };
+        assert_eq!(bash.proxy.as_deref(), Some("127.0.0.1:4419"));
     }
 }

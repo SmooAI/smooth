@@ -85,12 +85,21 @@ pub async fn serve_persistent(addr: std::net::SocketAddr) -> anyhow::Result<()> 
 /// Start the goalie egress proxy on a background task and point the bash tool at
 /// it, when `SMOOTH_EGRESS_ALLOWLIST` is configured. No-op otherwise.
 fn start_egress_if_configured(state: &mut AppState) {
-    let Some(setup) = config::resolve_egress() else { return };
+    state.egress_proxy = start_egress_proxy();
+}
+
+/// Resolve the egress config; if set, start the goalie proxy on a background
+/// task and return its loopback addr (for routing the bash tool's egress
+/// through it). Returns `None` when `SMOOTH_EGRESS_ALLOWLIST` is unset (egress
+/// unrestricted) or the audit log can't be opened. Shared by the bespoke
+/// daemon and the operator local flavor so both gate egress the same way.
+pub(crate) fn start_egress_proxy() -> Option<String> {
+    let setup = config::resolve_egress()?;
     let audit = match smooth_goalie::AuditLogger::new(&config::egress_audit_path().to_string_lossy()) {
         Ok(audit) => audit,
         Err(e) => {
             tracing::error!(error = %e, "egress audit log could not be opened — egress boundary NOT started");
-            return;
+            return None;
         }
     };
     if !setup.rejected.is_empty() {
@@ -104,7 +113,7 @@ fn start_egress_if_configured(state: &mut AppState) {
             tracing::error!(error = %e, "egress proxy exited — sandboxed egress now fails closed");
         }
     });
-    state.egress_proxy = Some(setup.proxy_addr);
+    Some(setup.proxy_addr)
 }
 
 /// The crate version, surfaced by the daemon's health/status endpoint so

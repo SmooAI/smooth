@@ -18,6 +18,15 @@ use anyhow::{Context, Result};
 use smooth_operator_server::local::LocalServer;
 use smooth_operator_svc::auth::LocalTokenVerifier;
 
+/// The workspace the local flavor's filesystem + shell tools are confined to:
+/// `SMOOTH_WORKSPACE` if set, else the daemon's current directory.
+fn workspace_dir() -> PathBuf {
+    std::env::var_os("SMOOTH_WORKSPACE")
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 /// Resolve the path to the local operator token (`~/.smooth/operator-token`).
 fn token_path() -> PathBuf {
     dirs_next::home_dir().map_or_else(|| PathBuf::from("operator-token"), |h| h.join(".smooth").join("operator-token"))
@@ -77,9 +86,23 @@ pub fn provision_local_token() -> Result<String> {
 /// Returns an error if the token can't be provisioned or the server can't bind.
 pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     let token = provision_local_token()?;
+    // The local flavor's tools: the workspace-confined fs/grep set + an
+    // OS-sandboxed `bash` whose egress is routed through the goalie proxy (when
+    // SMOOTH_EGRESS_ALLOWLIST is configured). This is where the daemon's
+    // kernel-enforced security re-homes onto the operator's tool registry.
+    let workspace = workspace_dir();
+    let egress_proxy = crate::start_egress_proxy();
+    let tools = smooth_tools::default_tools_with_proxy(workspace.clone(), egress_proxy.clone());
+    tracing::info!(
+        workspace = %workspace.display(),
+        tools = tools.len(),
+        egress = egress_proxy.as_deref().unwrap_or("unrestricted"),
+        "local-flavor tools wired",
+    );
     let server = LocalServer::builder()
         .addr(addr)
         .auth(Arc::new(LocalTokenVerifier::new(token)))
+        .tools(tools.into())
         .spawn()
         .await
         .context("spawning the local-flavor operator")?;
