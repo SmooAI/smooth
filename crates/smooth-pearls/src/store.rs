@@ -152,12 +152,22 @@ impl PearlStore {
         // Column-level heal: pearl_comments gained a `seq` AUTO_INCREMENT
         // column so get_comments can order by insertion sequence (created_at
         // alone ties when two comments land in the same NOW() tick — a flaky
-        // ordering bug; SMOODEV-1464). `IF NOT EXISTS` makes this a no-op on
-        // already-migrated stores. Best-effort: a Dolt without the column
-        // gets it; failures (already present / concurrent migrator) are logged.
-        if present.contains("pearl_comments") {
-            if let Err(e) = dolt.exec("ALTER TABLE pearl_comments ADD COLUMN IF NOT EXISTS seq BIGINT AUTO_INCREMENT UNIQUE") {
-                tracing::debug!(error = %e, "migrate_schema: pearl_comments.seq add returned error (likely already present)");
+        // ordering bug; SMOODEV-1464).
+        //
+        // Dolt has NO `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` (it errors
+        // with "syntax error near IF"). The original heal used exactly that
+        // form, so the ALTER failed on every open and the error was swallowed
+        // as a debug log — meaning the seq column was never actually added to
+        // any pre-messaging store, and `th pearls show` blew up with "column
+        // seq could not be found" on them (hit on the smooblue restore,
+        // 2026-06-23; pearl th-f89a3c). Probe information_schema first, then
+        // run the bare ALTER only when the column is genuinely absent —
+        // running it unconditionally would error "duplicate column" on every
+        // already-migrated store. Best-effort: concurrent-migrator failures
+        // are logged, not fatal.
+        if present.contains("pearl_comments") && !Self::column_exists(dolt, "pearl_comments", "seq")? {
+            if let Err(e) = dolt.exec("ALTER TABLE pearl_comments ADD COLUMN seq BIGINT AUTO_INCREMENT UNIQUE") {
+                tracing::debug!(error = %e, "migrate_schema: pearl_comments.seq add returned error");
             } else if let Err(e) = dolt.commit("schema migration: add pearl_comments.seq") {
                 tracing::debug!(error = %e, "migrate_schema: pearl_comments.seq commit returned error (likely no-op)");
             }
@@ -175,6 +185,18 @@ impl PearlStore {
             tracing::debug!(error = %e, "migrate_schema: commit returned error (likely no-op)");
         }
         Ok(())
+    }
+
+    /// True when `table.column` exists, per `information_schema.columns`.
+    /// Column-level heals in [`Self::migrate_schema`] must gate their
+    /// `ALTER TABLE ... ADD COLUMN` on this probe because Dolt has no
+    /// `ADD COLUMN IF NOT EXISTS` — the bare ALTER errors "duplicate
+    /// column" on an already-migrated store, and the `IF NOT EXISTS`
+    /// form is a hard syntax error. `table`/`column` are always trusted
+    /// schema literals here, never user input.
+    fn column_exists(dolt: &SmoothDolt, table: &str, column: &str) -> Result<bool> {
+        let q = format!("SELECT 1 AS present FROM information_schema.columns WHERE table_name = '{table}' AND column_name = '{column}' LIMIT 1");
+        Ok(!dolt.sql(&q)?.is_empty())
     }
 
     /// Create a store with an explicit `SmoothDolt` handle (for testing).
@@ -1284,5 +1306,46 @@ mod tests {
         reopened.set_config("__health_check", "ok").expect("set_config after migration");
         let got = reopened.get_config("__health_check").expect("get_config succeeds").expect("value present");
         assert_eq!(got, "ok");
+    }
+
+    /// `column_exists` reports presence/absence against the real schema.
+    #[test]
+    fn test_column_exists_probe() {
+        let Some(store) = test_store() else { return };
+        assert!(PearlStore::column_exists(&store.dolt, "pearls", "title").expect("probe existing"));
+        assert!(!PearlStore::column_exists(&store.dolt, "pearls", "no_such_column").expect("probe missing"));
+        assert!(!PearlStore::column_exists(&store.dolt, "no_such_table", "x").expect("probe missing table"));
+    }
+
+    /// Regression (pearl th-f89a3c): the `pearl_comments.seq` column-level
+    /// heal used `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, which Dolt
+    /// rejects as a syntax error. The failure was swallowed as a debug log,
+    /// so pre-messaging stores never got the column and `get_comments`
+    /// (ORDER BY ... seq) blew up with "column seq could not be found".
+    /// migrate_schema must re-add the column on such a store, and be
+    /// idempotent on an already-healed one.
+    #[test]
+    fn test_migrate_heals_missing_pearl_comments_seq() {
+        let Some(store) = test_store() else { return };
+
+        // Simulate a legacy store whose pearl_comments predates the seq
+        // column. Dolt has no DROP COLUMN IF EXISTS, so a bare DROP.
+        store.dolt.exec("ALTER TABLE pearl_comments DROP COLUMN seq").expect("drop seq to simulate legacy");
+        assert!(!PearlStore::column_exists(&store.dolt, "pearl_comments", "seq").expect("seq absent after drop"));
+
+        // Migration must re-add it (the old IF NOT EXISTS form silently no-op'd).
+        PearlStore::migrate_schema(&store.dolt).expect("migrate re-adds seq");
+        assert!(PearlStore::column_exists(&store.dolt, "pearl_comments", "seq").expect("seq present after migrate"));
+
+        // get_comments must work again — proves the ORDER BY seq query is valid.
+        let pearl = store.create(&new_task("has comments")).expect("create");
+        store.add_comment(&pearl.id, "first").expect("comment");
+        let comments = store.get_comments(&pearl.id).expect("get_comments after heal");
+        assert_eq!(comments.len(), 1);
+
+        // Idempotent: a second migration on the healed store is a no-op, not a
+        // "duplicate column" error.
+        PearlStore::migrate_schema(&store.dolt).expect("migrate idempotent on healed store");
+        assert!(PearlStore::column_exists(&store.dolt, "pearl_comments", "seq").expect("seq still present"));
     }
 }
