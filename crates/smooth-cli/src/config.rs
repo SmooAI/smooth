@@ -928,6 +928,75 @@ fn compute_diff(local: &Value, remote: &Value) -> SchemaDiff {
     SchemaDiff { added, removed, tier_changed }
 }
 
+/// Convert the local manifest (`{ public: [NAMES], secret: [...], featureFlag: [...],
+/// types: { camelKey: <typeSchema> } }`) into the **JSON-Schema** shape the config
+/// server stores and returns (`{ type: "object", properties: { <tier>ConfigSchema:
+/// { type: "object", properties: { <camelKey>: <typeSchema> } } } }`).
+///
+/// Without this, `push` POSTs the manifest doc verbatim and the server (which stores
+/// `jsonSchema` as-is) would overwrite the JSON-Schema form with the manifest form —
+/// changing the shape every consumer of the stored schema reads. We emit the form the
+/// server already uses so a push is a clean key-set update, not a format rewrite.
+///
+/// Property names come from `types` (camelCase, the developer-facing key); each tier
+/// is decided by matching a `types` entry's [`canonical_key`] against the manifest's
+/// tier arrays (which carry the same keys in `SCREAMING_SNAKE`). If the input already
+/// looks like JSON-Schema, it's returned unchanged.
+fn manifest_to_json_schema(manifest: &Value) -> Value {
+    // Already JSON-Schema? Pass through untouched.
+    if manifest
+        .get("properties")
+        .map(|p| {
+            p.get("secretConfigSchema")
+                .or_else(|| p.get("publicConfigSchema"))
+                .or_else(|| p.get("featureFlagSchema"))
+                .is_some()
+        })
+        .unwrap_or(false)
+    {
+        return manifest.clone();
+    }
+
+    // canonical_key -> tier, from the manifest's tier arrays.
+    let mut tier_by_canon: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
+    for tier in ["public", "secret", "featureFlag"] {
+        if let Some(arr) = manifest.get(tier).and_then(|v| v.as_array()) {
+            for name in arr.iter().filter_map(|v| v.as_str()) {
+                tier_by_canon.insert(canonical_key(name), tier);
+            }
+        }
+    }
+
+    let mut public_props = serde_json::Map::new();
+    let mut secret_props = serde_json::Map::new();
+    let mut feature_props = serde_json::Map::new();
+    if let Some(types) = manifest.get("types").and_then(|v| v.as_object()) {
+        for (camel_key, ty) in types {
+            // A bare type string (`"string"`) becomes `{ "type": "string" }`; an
+            // already-object type schema is used verbatim.
+            let prop = match ty {
+                Value::String(_) => serde_json::json!({ "type": ty }),
+                other => other.clone(),
+            };
+            match tier_by_canon.get(canonical_key(camel_key).as_str()).copied() {
+                Some("public") => public_props.insert(camel_key.clone(), prop),
+                Some("secret") => secret_props.insert(camel_key.clone(), prop),
+                Some("featureFlag") => feature_props.insert(camel_key.clone(), prop),
+                _ => None, // a typed key in no tier — skip
+            };
+        }
+    }
+
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "publicConfigSchema": { "type": "object", "properties": public_props },
+            "secretConfigSchema": { "type": "object", "properties": secret_props },
+            "featureFlagSchema": { "type": "object", "properties": feature_props },
+        }
+    })
+}
+
 /// Load `.smooai-config/schema.json` from the cwd. Errors loud on
 /// missing file (push/diff/pull can't proceed without it).
 fn load_local_schema_json() -> Result<(std::path::PathBuf, Value)> {
@@ -1025,11 +1094,16 @@ async fn cmd_push(org_id: Option<String>, schema_name: Option<String>, descripti
         return Ok(());
     }
 
+    // POST the schema in the JSON-Schema shape the server stores (it persists
+    // `jsonSchema` verbatim) — not the local manifest shape, which would rewrite
+    // the stored format. No-op if the local doc is already JSON-Schema.
+    let push_schema = manifest_to_json_schema(&local_schema);
+
     match picked {
         Some(remote) => {
             let schema_id = remote.get("id").and_then(|v| v.as_str()).context("remote schema entry has no id")?;
             let body = serde_json::json!({
-                "jsonSchema": local_schema,
+                "jsonSchema": push_schema.clone(),
                 "changeDescription": description,
             });
             cfg.post(&format!("/organizations/{org}/config/schemas/{schema_id}/push"), &body)
@@ -1048,7 +1122,7 @@ async fn cmd_push(org_id: Option<String>, schema_name: Option<String>, descripti
                 .context("no remote schema matched and no name to create one under. Pass `--schema-name <name>` or add `$smooaiName` to schema.json.")?;
             let body = serde_json::json!({
                 "name": name,
-                "jsonSchema": local_schema,
+                "jsonSchema": push_schema.clone(),
                 "description": description,
             });
             let resp = cfg
@@ -1451,6 +1525,48 @@ mod tests {
     fn flatten_schema_ignores_unknown_shape() {
         assert!(flatten_schema(&serde_json::json!({})).is_empty());
         assert!(flatten_schema(&serde_json::json!({"public": "not-an-array"})).is_empty());
+    }
+
+    #[test]
+    fn manifest_to_json_schema_produces_server_shape() {
+        let manifest = serde_json::json!({
+            "public": ["API_URL"],
+            "secret": ["ANTHROPIC_API_KEY"],
+            "featureFlag": ["CUSTOMER_SERVICE"],
+            "types": { "apiUrl": "string", "anthropicApiKey": "string", "customerService": "boolean" },
+        });
+        let js = manifest_to_json_schema(&manifest);
+        assert_eq!(js["type"], "object");
+        assert_eq!(js["properties"]["publicConfigSchema"]["properties"]["apiUrl"]["type"], "string");
+        assert_eq!(js["properties"]["secretConfigSchema"]["properties"]["anthropicApiKey"]["type"], "string");
+        assert_eq!(js["properties"]["featureFlagSchema"]["properties"]["customerService"]["type"], "boolean");
+    }
+
+    #[test]
+    fn manifest_to_json_schema_preserves_key_set() {
+        // The converted form must flatten to the SAME canonical key→tier map as the
+        // manifest — so a push is a key-set update, never a silent format change.
+        let manifest = serde_json::json!({
+            "public": ["API_URL", "AUTH_URL"],
+            "secret": ["ANTHROPIC_API_KEY", "SMOOAI_LLM_KEY"],
+            "featureFlag": ["CUSTOMER_SERVICE"],
+            "types": {
+                "apiUrl": "string", "authUrl": "string",
+                "anthropicApiKey": "string", "smooaiLlmKey": "string",
+                "customerService": "boolean",
+            },
+        });
+        let converted = manifest_to_json_schema(&manifest);
+        assert_eq!(compute_diff(&manifest, &converted), SchemaDiff::default(), "converted: {converted:#}");
+    }
+
+    #[test]
+    fn manifest_to_json_schema_passthrough_for_json_schema() {
+        let js = serde_json::json!({
+            "type": "object",
+            "properties": { "secretConfigSchema": { "properties": { "anthropicApiKey": {"type":"string"} } } },
+        });
+        assert_eq!(manifest_to_json_schema(&js), js);
     }
 
     #[test]
