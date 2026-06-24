@@ -29,9 +29,12 @@
 
 ```bash
 brew install SmooAI/tools/th
+
+# verify
+th --version
 ```
 
-That taps [SmooAI/homebrew-tools](https://github.com/SmooAI/homebrew-tools) and installs the `th` binary on first use; `brew upgrade th` picks up future releases automatically.
+That taps [SmooAI/homebrew-tools](https://github.com/SmooAI/homebrew-tools) and installs the `th` binary on first use; `brew upgrade th` picks up future releases automatically. Every `vX.Y.Z` release bumps the formula's `version` + `sha256` in the tap, so `brew` always tracks the latest published build.
 
 Platforms: Apple Silicon macOS, Linux x86_64, Linux arm64. Windows support is in flight (pearl `th-a165b4` — needs Cargo feature gating so the binary excludes microsandbox + the TUI on Windows; in the meantime, install via WSL).
 
