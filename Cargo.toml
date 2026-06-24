@@ -208,6 +208,18 @@ microsandbox = "0.4"
 # the smooai-client-shared pattern) — or the engine patches upstreamed and this
 # reverted to a crates.io version bump. Tracked under EPIC th-c89c2a.
 smooth-operator = { path = "../smooth-operator-core/rust/smooth-operator-core", package = "smooai-smooth-operator-core" }
+# The OPERATOR (the system on the engine), local deployment flavor — embedded
+# in-process by the daemon (EPIC th-c89c2a). `default-features = false` drops ALL
+# cloud adapters (AWS SDK / tokio-postgres / redis / nats); the local flavor runs
+# entirely on in-memory storage + backplane. Distinct dep keys because the
+# service lib's lib-name is also `smooth_operator` (would collide with the engine
+# alias above) — so it's imported here as `smooth_operator_svc`.
+# NOTE: pointed at the `smooth-local-flavor` worktree (not the main checkout)
+# while those local-flavor seams (LocalTokenVerifier, LocalServerBuilder::auth)
+# are pending upstream in smooth-operator. Repoint to the published/git-rev
+# operator once they land (same pre-merge caveat as the engine dep, th-d3537a).
+smooth-operator-server = { path = "../smooth-operator-local-flavor/rust/smooth-operator-server", package = "smooai-smooth-operator-server", default-features = false }
+smooth-operator-svc = { path = "../smooth-operator-local-flavor/rust/smooth-operator", package = "smooai-smooth-operator", default-features = false }
 # smooth-owned coding-harness extensions to the generic engine (re-homed from
 # the engine when it went generic at 0.14.0). See crates/smooth-cast.
 smooth-cast = { version = "0.14.1", path = "crates/smooth-cast", package = "smooai-smooth-cast" }

@@ -426,6 +426,15 @@ enum DaemonCommands {
         #[command(subcommand)]
         cmd: ScheduleCommands,
     },
+    /// Run the OPERATOR's local deployment flavor in the foreground (EPIC
+    /// th-c89c2a). Hosts smooth-operator's canonical schema-driven WS protocol —
+    /// the official widget and the polyglot SDK clients work natively — gated by
+    /// an auto-provisioned local token. Lean build (no cloud adapters).
+    Operator {
+        /// Address to bind the local-flavor operator on.
+        #[arg(long, default_value = "127.0.0.1:8787")]
+        addr: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1351,6 +1360,7 @@ async fn main() -> Result<()> {
             Some(DaemonCommands::Status) => cmd_daemon_status(port).await,
             Some(DaemonCommands::Audit { lines }) => cmd_daemon_audit(lines),
             Some(DaemonCommands::Schedule { cmd }) => cmd_daemon_schedule(port, cmd).await,
+            Some(DaemonCommands::Operator { addr }) => cmd_daemon_operator(addr).await,
         },
         Some(Commands::Down) => cmd_down().await,
         Some(Commands::Status) => cmd_status().await,
@@ -1686,6 +1696,20 @@ async fn cmd_daemon(port: u16, bind: String) -> Result<()> {
     // (if SMOOTH_EGRESS_ALLOWLIST is set) — the same canonical entry the
     // standalone `smooth-daemon` binary uses, so egress starts either way.
     smooth_daemon::serve_persistent(addr).await
+}
+
+/// Run the operator's local deployment flavor (EPIC th-c89c2a) — the canonical
+/// schema-driven WS protocol, gated by an auto-provisioned local token.
+async fn cmd_daemon_operator(addr: String) -> Result<()> {
+    let socket: SocketAddr = addr
+        .parse()
+        .map_err(|e| anyhow::anyhow!("--addr '{addr}' is not a valid socket address: {e}"))?;
+    println!(
+        "  {} Smooth local-flavor operator {}",
+        "\u{2713}".green().bold(),
+        format!("ws://{socket}/ws").cyan().bold()
+    );
+    smooth_daemon::serve_local_flavor(socket).await
 }
 
 async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, foreground: bool, max_operators: Option<usize>, skip_test: bool) -> Result<()> {

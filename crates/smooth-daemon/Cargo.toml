@@ -25,6 +25,11 @@ path = "src/main.rs"
 # store, and SessionRunCoordinator wiring.
 [dependencies]
 smooth-operator.workspace = true
+# EPIC th-c89c2a: the OPERATOR (local deployment flavor) embedded in-process —
+# the daemon hosts smooth-operator's LocalServer (canonical WS protocol +
+# official widget + SDK clients) instead of the bespoke /ws. Lean (no cloud).
+smooth-operator-server.workspace = true
+smooth-operator-svc.workspace = true
 smooth-tools.workspace = true
 # th-08e05a (EPIC th-c89c2a): the egress boundary — the daemon starts goalie's
 # in-process forward proxy (exact-host allowlist) and routes the bash tool's
