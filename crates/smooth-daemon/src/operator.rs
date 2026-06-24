@@ -101,12 +101,15 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     );
     let server = LocalServer::builder()
         .addr(addr)
-        .auth(Arc::new(LocalTokenVerifier::new(token)))
+        .auth(Arc::new(LocalTokenVerifier::new(token.clone())))
         .tools(tools.into())
+        // Serve the official widget at `/`, with the same token injected so the
+        // browser connects to `/ws?token=…` (validated by the verifier above).
+        .serve_widget(Some(token))
         .spawn()
         .await
         .context("spawning the local-flavor operator")?;
-    tracing::info!(addr = %server.addr(), "smooth local-flavor operator listening (canonical WS protocol)");
+    tracing::info!(addr = %server.addr(), url = %format!("http://{}/", server.addr()), "smooth local-flavor operator listening (widget + canonical WS protocol)");
     tokio::signal::ctrl_c().await.ok();
     tracing::info!("shutdown signal received");
     server.shutdown().await.context("shutting down local operator")?;
