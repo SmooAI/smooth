@@ -1264,8 +1264,14 @@ async fn main() -> Result<()> {
     //     they're CLI-only and the user is expecting structured output.
     //   - `SMOOTH_LOG=stderr` forces stderr regardless (useful for
     //     debugging the CLI itself).
+    // Daemon subcommands are long-running services: log to stderr so the output
+    // is visible in the foreground and captured by the service supervisor
+    // (launchd/systemd via `th service`), instead of buried in the TUI's th.log.
     let log_to_stderr = std::env::var("SMOOTH_LOG").as_deref() == Ok("stderr")
-        || matches!(&cli.command, Some(Commands::Code { headless: true, .. }) | Some(Commands::Doctor { .. }));
+        || matches!(
+            &cli.command,
+            Some(Commands::Code { headless: true, .. }) | Some(Commands::Doctor { .. }) | Some(Commands::Daemon { .. })
+        );
     let env_filter = tracing_subscriber::EnvFilter::from_default_env().add_directive("smooth=info".parse()?);
     if log_to_stderr {
         tracing_subscriber::fmt().with_env_filter(env_filter).init();
