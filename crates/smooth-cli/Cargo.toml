@@ -50,6 +50,10 @@ futures-util.workspace = true
 # and url-encode query params for the list endpoint.
 walkdir = "2"
 urlencoding = "2"
+# SMOODEV-2090: `th testing runs report` converts a JUnit XML report (e.g.
+# cargo-nextest output) into CTRF before submitting, so CI never needs a
+# separate junit-to-ctrf step. quick-xml is the de-facto Rust XML parser.
+quick-xml = { version = "0.37", features = ["serialize"] }
 # Pretty tables for `th admin` default output (with --json opt-out).
 # `tabled` is what nushell uses — best-of-class in the Rust table-
 # rendering space. Builder API for dynamic JSON, rich modifier chain

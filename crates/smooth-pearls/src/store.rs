@@ -1330,7 +1330,10 @@ mod tests {
 
         // Simulate a legacy store whose pearl_comments predates the seq
         // column. Dolt has no DROP COLUMN IF EXISTS, so a bare DROP.
-        store.dolt.exec("ALTER TABLE pearl_comments DROP COLUMN seq").expect("drop seq to simulate legacy");
+        store
+            .dolt
+            .exec("ALTER TABLE pearl_comments DROP COLUMN seq")
+            .expect("drop seq to simulate legacy");
         assert!(!PearlStore::column_exists(&store.dolt, "pearl_comments", "seq").expect("seq absent after drop"));
 
         // Migration must re-add it (the old IF NOT EXISTS form silently no-op'd).

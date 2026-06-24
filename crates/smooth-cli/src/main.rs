@@ -151,6 +151,16 @@ enum Commands {
         #[command(subcommand)]
         cmd: config::Cmd,
     },
+    /// Smoo AI testing platform — the daily-developer surface for
+    /// reporting test results and managing runs / cases / environments /
+    /// deployments. `runs report <file>` is the high-level entry point:
+    /// it creates a run and submits a CTRF (or, with `--junit`, a
+    /// converted JUnit) report in one call. Same commands as
+    /// `th api testing`, promoted to the top level alongside `th config`.
+    Testing {
+        #[command(subcommand)]
+        cmd: smooai::testing::Cmd,
+    },
     /// Run a pearl through a Smooth operative in a microVM — streams
     /// agent events to stdout. With --keep-alive, the VM stays up
     /// after the agent completes so you can poke at dev servers,
@@ -1313,6 +1323,7 @@ async fn main() -> Result<()> {
             ApiCommands::Observability { cmd } => smooai::observability::cmd(cmd).await,
         },
         Some(Commands::Config { cmd }) => config::cmd(cmd).await,
+        Some(Commands::Testing { cmd }) => smooai::testing::cmd(cmd).await,
         Some(Commands::Operatives { cmd }) => cmd_operatives(cmd).await,
         Some(Commands::Inbox) => cmd_inbox().await,
         Some(Commands::Run {
