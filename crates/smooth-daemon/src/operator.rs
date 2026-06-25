@@ -9,6 +9,24 @@
 //!
 //! This is additive: it runs alongside the bespoke `serve_persistent` path
 //! while the embed is validated; the bespoke surface retires once parity lands.
+//!
+//! # Configuration (env)
+//!
+//! - `SMOOTH_LOCAL_TOKEN` — the auth token (else auto-generated at
+//!   `~/.smooth/operator-token`).
+//! - `SMOOTH_WORKSPACE` — the dir the sandboxed fs/shell tools are confined to
+//!   (else the daemon's cwd).
+//! - `SMOOTH_AGENT_CONFIRM_TOOLS` — **inherited from the operator**:
+//!   comma-separated tool-name substrings that require human confirmation
+//!   (write-confirmation HITL). Because the daemon *runs the operator*, setting
+//!   e.g. `SMOOTH_AGENT_CONFIRM_TOOLS=bash` makes every `bash` call park and emit
+//!   `write_confirmation_required`, which the served widget renders as an
+//!   approve/deny prompt — the "ask" half of the permission model, for free. The
+//!   kernel sandbox + egress allowlist remain the load-bearing boundary; this is
+//!   defense-in-depth. (Content-aware hard-deny circuit-breakers — `rm -rf /` and
+//!   friends — need a host `ToolHook` seam in the operator; see pearl th-1f694a.)
+//! - `SMOOAI_GATEWAY_URL` / `SMOOAI_GATEWAY_KEY` — the LLM gateway (read by the
+//!   operator); with no key the server boots and `send_message` errors cleanly.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
