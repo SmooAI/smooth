@@ -58,46 +58,46 @@ pub enum ConfigCommands {
 pub enum SchemasCmd {
     /// List all schemas for the active org.
     List {
-        #[arg(long)]
+        #[arg(long, visible_alias = "org-id")]
         org: Option<String>,
     },
     /// Show a schema by id.
     Show {
         schema_id: String,
-        #[arg(long)]
+        #[arg(long, visible_alias = "org-id")]
         org: Option<String>,
     },
     /// Create a schema. Body is a JSON document or `-` for stdin.
     Create {
         body: String,
-        #[arg(long)]
+        #[arg(long, visible_alias = "org-id")]
         org: Option<String>,
     },
     /// Update a schema. Body is a JSON patch document.
     Update {
         schema_id: String,
         body: String,
-        #[arg(long)]
+        #[arg(long, visible_alias = "org-id")]
         org: Option<String>,
     },
     /// Delete a schema. Irreversible.
     Delete {
         schema_id: String,
-        #[arg(long)]
+        #[arg(long, visible_alias = "org-id")]
         org: Option<String>,
     },
     /// Push a new schema version. Body is the full new schema doc.
     Push {
         schema_id: String,
         body: String,
-        #[arg(long)]
+        #[arg(long, visible_alias = "org-id")]
         org: Option<String>,
     },
     /// Dump every value under a (schema, environment) pair.
     Values {
         schema_id: String,
         env_id: String,
-        #[arg(long)]
+        #[arg(long, visible_alias = "org-id")]
         org: Option<String>,
     },
 }
@@ -106,33 +106,33 @@ pub enum SchemasCmd {
 pub enum EnvironmentsCmd {
     /// List all environments for the active org.
     List {
-        #[arg(long)]
+        #[arg(long, visible_alias = "org-id")]
         org: Option<String>,
     },
     /// Create an environment. Body is a JSON document or `-` for stdin.
     Create {
         body: String,
-        #[arg(long)]
+        #[arg(long, visible_alias = "org-id")]
         org: Option<String>,
     },
     /// Update an environment. Body is a JSON patch.
     Update {
         env_id: String,
         body: String,
-        #[arg(long)]
+        #[arg(long, visible_alias = "org-id")]
         org: Option<String>,
     },
     /// Delete an environment. Irreversible — every value under it goes
     /// with it.
     Delete {
         env_id: String,
-        #[arg(long)]
+        #[arg(long, visible_alias = "org-id")]
         org: Option<String>,
     },
     /// Dump every value in this environment, across all schemas.
     Values {
         env_id: String,
-        #[arg(long)]
+        #[arg(long, visible_alias = "org-id")]
         org: Option<String>,
     },
 }
@@ -143,7 +143,7 @@ pub enum ValuesCmd {
     /// describing the writes (or `-` for stdin).
     BulkSet {
         body: String,
-        #[arg(long)]
+        #[arg(long, visible_alias = "org-id")]
         org: Option<String>,
     },
     /// Delete a value record by id. Removes the row entirely — for
@@ -151,7 +151,7 @@ pub enum ValuesCmd {
     /// value through the API.
     Delete {
         value_id: String,
-        #[arg(long)]
+        #[arg(long, visible_alias = "org-id")]
         org: Option<String>,
     },
 }

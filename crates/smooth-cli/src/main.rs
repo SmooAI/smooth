@@ -135,6 +135,20 @@ enum Commands {
         #[command(subcommand)]
         cmd: ApiCommands,
     },
+    /// Smoo AI organizations — `list` the orgs you belong to, `switch`
+    /// the active org (persisted across all credential stores), or
+    /// `show` one. Top-level alias for `th api orgs`, promoted for
+    /// discoverability alongside `th config` / `th testing`.
+    ///
+    /// Note: `switch` flips the *active org* that user-JWT commands
+    /// default to. The user JWT can act cross-org (a master admin is
+    /// authorized over child orgs) — pass `--org`/`--org-id` per call,
+    /// or `switch` to change the default. M2M tokens are org-locked
+    /// server-side, so `switch` is cosmetic for the `--m2m` surface.
+    Org {
+        #[command(subcommand)]
+        cmd: OrgsCommands,
+    },
     /// Smoo AI `@smooai/config` — the daily-developer config surface.
     /// `get` / `set` / `list` for single values; `feature-flag` to
     /// evaluate a flag; `push` / `pull` / `diff` to sync the
@@ -1322,6 +1336,7 @@ async fn main() -> Result<()> {
             ApiCommands::Testing { cmd } => smooai::testing::cmd(cmd).await,
             ApiCommands::Observability { cmd } => smooai::observability::cmd(cmd).await,
         },
+        Some(Commands::Org { cmd }) => cmd_orgs(cmd).await,
         Some(Commands::Config { cmd }) => config::cmd(cmd).await,
         Some(Commands::Testing { cmd }) => smooai::testing::cmd(cmd).await,
         Some(Commands::Operatives { cmd }) => cmd_operatives(cmd).await,
@@ -7724,5 +7739,61 @@ mod beads_model_tests {
         // up — caller treats None as "no remote to bootstrap from."
         let tmp = tempfile::tempdir().expect("tempdir");
         assert!(read_git_origin_url(tmp.path()).unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod org_cli_tests {
+    use super::*;
+    use clap::Parser;
+
+    /// clap's own structural lint — catches alias collisions, duplicate
+    /// flags, and other config errors at test time.
+    #[test]
+    fn cli_definition_is_valid() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+    }
+
+    /// `th org` is the top-level alias for `th api orgs` — list / show /
+    /// switch must all parse into the same OrgsCommands as the api path.
+    #[test]
+    fn th_org_top_level_alias_parses() {
+        let cli = Cli::try_parse_from(["th", "org", "list"]).expect("th org list parses");
+        assert!(matches!(cli.command, Some(Commands::Org { cmd: OrgsCommands::List })));
+
+        let cli = Cli::try_parse_from(["th", "org", "switch", "ats"]).expect("th org switch parses");
+        match cli.command {
+            Some(Commands::Org {
+                cmd: OrgsCommands::Switch { org_id },
+            }) => assert_eq!(org_id.as_deref(), Some("ats")),
+            _ => panic!("expected Org/Switch"),
+        }
+
+        let cli = Cli::try_parse_from(["th", "org", "show"]).expect("th org show parses");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Org {
+                cmd: OrgsCommands::Show { org_id: None }
+            })
+        ));
+    }
+
+    /// The whole point of this pearl: `--org` and `--org-id` are
+    /// interchangeable on the config surface (`th config` declares
+    /// `org_id`, `th admin config` declares `org`).
+    #[test]
+    fn config_accepts_both_org_and_org_id() {
+        let canonical = Cli::try_parse_from(["th", "config", "get", "databaseUrl", "--org-id", "X"]).expect("--org-id parses");
+        let aliased = Cli::try_parse_from(["th", "config", "get", "databaseUrl", "--org", "X"]).expect("--org alias parses");
+        // Both must land on the same Config/Get with org_id = "X".
+        for cli in [canonical, aliased] {
+            match cli.command {
+                Some(Commands::Config {
+                    cmd: config::Cmd::Get { org_id, .. },
+                }) => assert_eq!(org_id.as_deref(), Some("X")),
+                _ => panic!("expected Config/Get"),
+            }
+        }
     }
 }

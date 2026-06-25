@@ -91,10 +91,29 @@ If you see `super_admin` in `Admin roles` you have *cross-org* powers — every 
 ### Switching orgs
 
 ```bash
-th api orgs list                          # see what you have access to
-th api orgs switch <org-id>               # persist active org in ~/.smooth/auth/smooai.json
-th api agents list --org <other-org-id>   # one-off override
+th org list                               # see what you have access to (alias of `th api orgs list`)
+th org switch <id|name>                   # persist active org across every credential store
+th org show                               # details of the active org
+th api agents list --org <other-org-id>   # one-off override (no switch)
 ```
+
+`th org` is the top-level alias for `th api orgs` — `list` / `switch` / `show`. `th auth whoami` prints a reminder of these.
+
+#### Cross-org behavior depends on which session you're using
+
+This is the part that trips people up. "Switching" and `--org`/`--org-id` mean different things for the two session types:
+
+| Session | Active org | Cross-org via `--org` / `--org-id`? |
+|---|---|---|
+| **User JWT** (`th config` default, `th api` user session) | set by `th org switch` | ✅ **Yes** — a master/super-admin is authorized over child orgs. Read/write child config with `--org-id <child>` and no switch. |
+| **M2M** (`--m2m`, and the whole `th admin config` surface) | baked into the token | ❌ **No** — the token is org-locked **server-side**. `--org <child>` → `403 Not authorized for this organization`, and `th org switch` is **cosmetic** for it (it changes local state the server ignores). |
+
+Practical consequences:
+
+- **Setting config values on a child org needs no switch** — `th config set KEY VALUE --org-id <child>` works on the user JWT (master admin authorized over children).
+- **Creating a config *environment* on an unwired child org** hits the M2M org-lock (`th admin config environments` is M2M / admin-scoped → 403 cross-org). Bootstrap a brand-new child env via the **deploy path** (`prepareSmooConfig` creates the env at deploy) rather than an admin env-create call.
+- **To genuinely act *as* another org's M2M identity**, use named profiles — `th auth profile` bundles a user + M2M identity per org; select with `--profile <name>` / `SMOOAI_PROFILE`.
+- **Flag spelling**: `--org-id` and `--org` are interchangeable on both `th config` and `th admin config` (each accepts the other as an alias).
 
 ### Logout
 
