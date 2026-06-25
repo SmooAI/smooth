@@ -80,6 +80,19 @@ pub async fn cmd_whoami() -> Result<()> {
         }
         print_session("M2M", creds, m2m.path());
     }
+    // Discoverability nudge: the active org is switchable. Only worth
+    // showing for the user JWT — M2M tokens are org-locked server-side,
+    // so switching is cosmetic there. `th org` is the top-level alias
+    // for `th api orgs`.
+    if user_creds.is_some() {
+        println!();
+        println!(
+            "  {} {} to list orgs, {} to change the active org (user JWT acts cross-org; M2M is org-locked).",
+            "→".dimmed(),
+            "th org list".bold(),
+            "th org switch <id|name>".bold(),
+        );
+    }
     Ok(())
 }
 

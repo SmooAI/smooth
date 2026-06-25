@@ -128,7 +128,7 @@ pub enum Cmd {
         environment: String,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` env
         /// then the credentials file's `active_org_id`.
-        #[arg(long)]
+        #[arg(long, visible_alias = "org")]
         org_id: Option<String>,
         /// Emit the response as JSON instead of the raw value.
         #[arg(long)]
@@ -155,7 +155,7 @@ pub enum Cmd {
         #[arg(long, alias = "env", default_value = DEFAULT_ENVIRONMENT)]
         environment: String,
         /// Override the active org.
-        #[arg(long)]
+        #[arg(long, visible_alias = "org")]
         org_id: Option<String>,
         /// Tier. Defaults to `public`. Validated at parse-time.
         #[arg(long, value_enum, default_value_t = Tier::Public)]
@@ -185,7 +185,7 @@ pub enum Cmd {
         #[arg(long, alias = "env", default_value = DEFAULT_ENVIRONMENT)]
         environment: String,
         /// Override the active org.
-        #[arg(long)]
+        #[arg(long, visible_alias = "org")]
         org_id: Option<String>,
         /// Emit the response as JSON instead of a key/value listing.
         /// JSON output is NEVER masked — assumes script consumer.
@@ -205,7 +205,7 @@ pub enum Cmd {
     /// after printing. Creates a new remote schema if none matches.
     Push {
         /// Override the active org.
-        #[arg(long)]
+        #[arg(long, visible_alias = "org")]
         org_id: Option<String>,
         /// Schema name to push under. Defaults to `$smooaiName` from
         /// schema.json, falling back to the first remote schema.
@@ -227,7 +227,7 @@ pub enum Cmd {
     /// existing file unless `--force`.
     Pull {
         /// Override the active org.
-        #[arg(long)]
+        #[arg(long, visible_alias = "org")]
         org_id: Option<String>,
         /// Schema name to pull. Defaults to the first remote schema.
         #[arg(long)]
@@ -244,7 +244,7 @@ pub enum Cmd {
     /// for the org. Prints added / removed / tier-changed keys.
     Diff {
         /// Override the active org.
-        #[arg(long)]
+        #[arg(long, visible_alias = "org")]
         org_id: Option<String>,
         /// Schema name to compare against. Defaults to the first
         /// remote schema.
@@ -281,7 +281,7 @@ pub enum Cmd {
         #[arg(long, alias = "env", default_value = DEFAULT_ENVIRONMENT)]
         environment: String,
         /// Override the active org.
-        #[arg(long)]
+        #[arg(long, visible_alias = "org")]
         org_id: Option<String>,
         /// JSON evaluation context: a file path, `-` for stdin, or an
         /// inline JSON object. Used by context-aware flag rules
@@ -308,7 +308,7 @@ pub enum Cmd {
         #[arg(long, alias = "env", default_value = DEFAULT_ENVIRONMENT)]
         environment: String,
         /// Override the active org.
-        #[arg(long)]
+        #[arg(long, visible_alias = "org")]
         org_id: Option<String>,
         /// Required to delete a secret-tier value — the server returns
         /// 409 without it. Prevents accidental loss of credentials.
