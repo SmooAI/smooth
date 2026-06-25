@@ -15,8 +15,28 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
+use smooth_operator::Tool;
 use smooth_operator_server::local::LocalServer;
 use smooth_operator_svc::auth::LocalTokenVerifier;
+use smooth_operator_svc::{ToolProvider, ToolProviderContext};
+
+/// A [`ToolProvider`] that hands the operator the daemon's kernel-sandboxed tool
+/// set on every turn (the operator's `#68` injection seam): the
+/// workspace-confined fs/grep set + an OS-sandboxed `bash` whose egress routes
+/// through the goalie proxy. This is where the daemon's kernel-enforced security
+/// re-homes onto the operator's per-turn registry.
+struct SandboxedToolProvider {
+    workspace: PathBuf,
+    proxy: Option<String>,
+}
+
+#[async_trait]
+impl ToolProvider for SandboxedToolProvider {
+    async fn tools_for(&self, _ctx: &ToolProviderContext) -> Vec<Arc<dyn Tool>> {
+        smooth_tools::default_tools_with_proxy(self.workspace.clone(), self.proxy.clone())
+    }
+}
 
 /// The workspace the local flavor's filesystem + shell tools are confined to:
 /// `SMOOTH_WORKSPACE` if set, else the daemon's current directory.
@@ -92,17 +112,19 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     // kernel-enforced security re-homes onto the operator's tool registry.
     let workspace = workspace_dir();
     let egress_proxy = crate::start_egress_proxy();
-    let tools = smooth_tools::default_tools_with_proxy(workspace.clone(), egress_proxy.clone());
     tracing::info!(
         workspace = %workspace.display(),
-        tools = tools.len(),
         egress = egress_proxy.as_deref().unwrap_or("unrestricted"),
-        "local-flavor tools wired",
+        "local-flavor sandboxed tools wired (per-turn via ToolProvider)",
     );
+    let provider = Arc::new(SandboxedToolProvider {
+        workspace,
+        proxy: egress_proxy,
+    });
     let server = LocalServer::builder()
         .addr(addr)
         .auth(Arc::new(LocalTokenVerifier::new(token.clone())))
-        .tools(tools.into())
+        .tools(provider)
         // Serve the official widget at `/`, with the same token injected so the
         // browser connects to `/ws?token=…` (validated by the verifier above).
         .serve_widget(Some(token))
