@@ -6889,7 +6889,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator"
-version = "1.2.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6917,7 +6917,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-adapter-memory"
-version = "1.2.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6951,7 +6951,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-ingestion"
-version = "1.2.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6971,7 +6971,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-server"
-version = "1.2.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6985,6 +6985,7 @@ dependencies = [
  "smooai-smooth-operator-core",
  "smooai-smooth-operator-ingestion",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "uuid",

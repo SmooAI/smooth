@@ -214,12 +214,14 @@ smooth-operator = { path = "../smooth-operator-core/rust/smooth-operator-core", 
 # entirely on in-memory storage + backplane. Distinct dep keys because the
 # service lib's lib-name is also `smooth_operator` (would collide with the engine
 # alias above) — so it's imported here as `smooth_operator_svc`.
-# NOTE: pointed at the `smooth-local-flavor` worktree (not the main checkout)
-# while those local-flavor seams (LocalTokenVerifier, LocalServerBuilder::auth)
-# are pending upstream in smooth-operator. Repoint to the published/git-rev
-# operator once they land (same pre-merge caveat as the engine dep, th-d3537a).
-smooth-operator-server = { path = "../smooth-operator-local-flavor/rust/smooth-operator-server", package = "smooai-smooth-operator-server", default-features = false }
-smooth-operator-svc = { path = "../smooth-operator-local-flavor/rust/smooth-operator", package = "smooai-smooth-operator", default-features = false }
+# The local-flavor seams (LocalTokenVerifier, LocalServerBuilder::auth/tools/
+# serve_widget, widget serving) landed on smooth-operator `main` (#108), so this
+# now path-deps the canonical `../smooth-operator` checkout — same local-dev
+# two-repo path pattern as the engine dep above. Full CI-mergeability still needs
+# git-rev/published deps for BOTH the engine and the operator (none are published
+# yet); tracked under th-d3537a.
+smooth-operator-server = { path = "../smooth-operator/rust/smooth-operator-server", package = "smooai-smooth-operator-server", default-features = false }
+smooth-operator-svc = { path = "../smooth-operator/rust/smooth-operator", package = "smooai-smooth-operator", default-features = false }
 # smooth-owned coding-harness extensions to the generic engine (re-homed from
 # the engine when it went generic at 0.14.0). See crates/smooth-cast.
 smooth-cast = { version = "0.14.1", path = "crates/smooth-cast", package = "smooai-smooth-cast" }
