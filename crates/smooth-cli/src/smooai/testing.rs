@@ -12,18 +12,22 @@ use super::{print_json, print_list_envelope, read_body, require_active_org, requ
 
 #[derive(Subcommand)]
 pub enum Cmd {
+    /// Manage deployments — the release targets test runs are associated with.
     Deployments {
         #[command(subcommand)]
         cmd: DeploymentsCmd,
     },
+    /// Manage test cases — the individual checks runs report results against.
     Cases {
         #[command(subcommand)]
         cmd: CasesCmd,
     },
+    /// Manage test environments — the named contexts (e.g. staging) runs target.
     Environments {
         #[command(subcommand)]
         cmd: EnvironmentsCmd,
     },
+    /// Manage test runs — execute, report results, and submit CTRF/JUnit reports.
     Runs {
         #[command(subcommand)]
         cmd: RunsCmd,
@@ -32,127 +36,187 @@ pub enum Cmd {
 
 #[derive(Subcommand)]
 pub enum DeploymentsCmd {
+    /// List deployments for the org.
     List {
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Show a single deployment by id.
     Show {
+        /// The deployment id from `th testing deployments list`.
         deployment_id: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Create a deployment from an optional JSON body.
     Create {
+        /// Optional JSON body (file path, or `-` for stdin) with the deployment fields.
         #[arg(long)]
         body: Option<String>,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Update a deployment from an optional JSON body.
     Update {
+        /// The deployment id from `th testing deployments list`.
         deployment_id: String,
+        /// Optional JSON body (file path, or `-` for stdin) with the fields to patch.
         #[arg(long)]
         body: Option<String>,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Delete a deployment by id.
     Delete {
+        /// The deployment id from `th testing deployments list`.
         deployment_id: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
 }
 
 #[derive(Subcommand)]
 pub enum CasesCmd {
+    /// List test cases for the org.
     List {
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Show a single test case by id.
     Show {
+        /// The case id from `th testing cases list`.
         case_id: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Create a test case from an optional JSON body.
     Create {
+        /// Optional JSON body (file path, or `-` for stdin) with the case fields.
         #[arg(long)]
         body: Option<String>,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Update a test case from an optional JSON body.
     Update {
+        /// The case id from `th testing cases list`.
         case_id: String,
+        /// Optional JSON body (file path, or `-` for stdin) with the fields to patch.
         #[arg(long)]
         body: Option<String>,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Delete a test case by id.
     Delete {
+        /// The case id from `th testing cases list`.
         case_id: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
 }
 
 #[derive(Subcommand)]
 pub enum EnvironmentsCmd {
+    /// List test environments for the org.
     List {
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Create a test environment from an optional JSON body.
     Create {
+        /// Optional JSON body (file path, or `-` for stdin) with the environment fields.
         #[arg(long)]
         body: Option<String>,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Update a test environment from an optional JSON body.
     Update {
+        /// The environment id from `th testing environments list`.
         env_id: String,
+        /// Optional JSON body (file path, or `-` for stdin) with the fields to patch.
         #[arg(long)]
         body: Option<String>,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Delete a test environment by id.
     Delete {
+        /// The environment id from `th testing environments list`.
         env_id: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
 }
 
 #[derive(Subcommand)]
 pub enum RunsCmd {
+    /// List test runs for the org.
     List {
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Show a single test run by id.
     Show {
+        /// The run id from `th testing runs list`.
         run_id: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Create a test run from an optional JSON body.
     Create {
+        /// Optional JSON body (file path, or `-` for stdin) with the run fields.
         #[arg(long)]
         body: Option<String>,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Update a test run from an optional JSON body.
     Update {
+        /// The run id from `th testing runs list`.
         run_id: String,
+        /// Optional JSON body (file path, or `-` for stdin) with the fields to patch.
         #[arg(long)]
         body: Option<String>,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Delete a test run by id.
     Delete {
+        /// The run id from `th testing runs list`.
         run_id: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
     /// Submit results for a run. Body is optional JSON.
     Results {
+        /// The run id from `th testing runs list`.
         run_id: String,
+        /// Optional JSON body (file path, or `-` for stdin) with the results payload.
         #[arg(long)]
         body: Option<String>,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
     /// High-level: create a run, submit a CTRF (or JUnit) report, and
@@ -190,7 +254,8 @@ pub enum RunsCmd {
         /// Also report to these orgs (comma-separated) in addition to the active org.
         #[arg(long)]
         additional_org_ids: Option<String>,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
 }

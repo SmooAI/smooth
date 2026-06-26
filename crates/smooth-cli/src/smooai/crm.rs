@@ -32,30 +32,40 @@ pub enum Cmd {
 pub enum ContactsCmd {
     /// List contacts for the org.
     List {
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Filter to contacts matching this search term.
         #[arg(long)]
         search: Option<String>,
+        /// Maximum number of contacts to return.
         #[arg(long, default_value = "50")]
         limit: u32,
     },
     /// Get a single contact by id.
     Get {
+        /// The contact id from `th api crm contacts list`.
         contact_id: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
     /// Create a contact from a JSON body (file path, or `-` for stdin).
     Create {
+        /// JSON body (file path, or `-` for stdin) with the new contact's fields.
         body: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
     /// Update a contact from a JSON body (file path, or `-` for stdin).
     Update {
+        /// The contact id from `th api crm contacts list`.
         contact_id: String,
+        /// JSON body (file path, or `-` for stdin) with the fields to patch.
         body: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
     /// Idempotent bulk upsert from a JSON array file. Dedup key:
@@ -64,8 +74,10 @@ pub enum ContactsCmd {
     Import {
         /// Path to a JSON file containing an array of contact objects.
         file: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Preview what would be created/updated without writing.
         #[arg(long)]
         dry_run: bool,
         /// Minimum delay between API writes, in ms. The contacts API rate
