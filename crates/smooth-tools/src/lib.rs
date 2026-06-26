@@ -22,6 +22,7 @@ use smooth_operator::{Tool, ToolRegistry};
 
 pub mod bash;
 pub mod grep;
+pub mod guard;
 pub mod path;
 pub mod read;
 pub mod remember;
@@ -31,6 +32,7 @@ pub mod write;
 
 pub use bash::BashTool;
 pub use grep::GrepTool;
+pub use guard::is_circuit_breaker;
 pub use path::resolve_workspace_path;
 pub use read::{ListFilesTool, ReadFileTool};
 pub use remember::RememberTool;

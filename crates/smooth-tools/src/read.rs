@@ -138,7 +138,7 @@ fn list_files_blocking(base: &std::path::Path, pattern: &str) -> anyhow::Result<
         matches.push((rel.to_path_buf(), mtime));
     }
 
-    matches.sort_by(|a, b| b.1.cmp(&a.1));
+    matches.sort_by_key(|m| std::cmp::Reverse(m.1));
     let total = matches.len();
     if total == 0 {
         return Ok(format!("no files match `{pattern}`"));

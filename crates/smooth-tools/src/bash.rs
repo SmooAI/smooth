@@ -56,6 +56,16 @@ impl Tool for BashTool {
         let command = req_str(&arguments, "command")?;
         let timeout_secs = arguments.get("timeout").and_then(Value::as_u64);
 
+        // Hard-deny circuit-breakers (rm -rf /, fork bombs, curl|sh, …) before we
+        // ever spawn. The kernel sandbox is still the load-bearing boundary; this
+        // is cheap defense-in-depth, and the only deny gate on the operator
+        // local-flavor path (which doesn't install the bespoke permission engine).
+        if crate::guard::is_circuit_breaker(&command) {
+            return Ok(format!(
+                "BLOCKED: refused to run a circuit-breaker command (catastrophic — e.g. `rm -rf /`, fork bomb, `curl … | sh`): {command}"
+            ));
+        }
+
         // The ONLY shell-spawn path: through the kernel sandbox (P0).
         let mut policy = crate::sandbox::SandboxPolicy::for_workspace(self.workspace.clone());
         if let Some(addr) = &self.proxy {
