@@ -6040,7 +6040,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-api-client"
-version = "0.15.5"
+version = "0.15.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6068,7 +6068,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-archivist"
-version = "0.15.5"
+version = "0.15.6"
 dependencies = [
  "anyhow",
  "axum 0.8.8",
@@ -6088,7 +6088,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-bench"
-version = "0.15.5"
+version = "0.15.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6112,7 +6112,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-bigsmooth"
-version = "0.15.5"
+version = "0.15.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6164,7 +6164,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-bootstrap-bill"
-version = "0.15.5"
+version = "0.15.6"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6182,7 +6182,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-cast"
-version = "0.15.5"
+version = "0.15.6"
 dependencies = [
  "anyhow",
  "dirs-next",
@@ -6198,7 +6198,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-cli"
-version = "0.15.5"
+version = "0.15.6"
 dependencies = [
  "anyhow",
  "atty",
@@ -6244,7 +6244,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-code"
-version = "0.15.5"
+version = "0.15.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6276,7 +6276,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-credential-helper"
-version = "0.15.5"
+version = "0.15.6"
 dependencies = [
  "anyhow",
  "reqwest 0.12.28",
@@ -6287,7 +6287,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-diver"
-version = "0.15.5"
+version = "0.15.6"
 dependencies = [
  "anyhow",
  "axum 0.8.8",
@@ -6307,7 +6307,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-goalie"
-version = "0.15.5"
+version = "0.15.6"
 dependencies = [
  "anyhow",
  "bytes",
@@ -6328,7 +6328,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-host-stub"
-version = "0.15.5"
+version = "0.15.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6353,7 +6353,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-narc"
-version = "0.15.5"
+version = "0.15.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6378,7 +6378,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operative"
-version = "0.15.5"
+version = "0.15.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6438,7 +6438,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-pearls"
-version = "0.15.5"
+version = "0.15.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6457,7 +6457,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-plugin"
-version = "0.15.5"
+version = "0.15.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6471,7 +6471,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-policy"
-version = "0.15.5"
+version = "0.15.6"
 dependencies = [
  "chrono",
  "globset",
@@ -6483,7 +6483,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-scribe"
-version = "0.15.5"
+version = "0.15.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6512,7 +6512,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-tunnel"
-version = "0.15.5"
+version = "0.15.6"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -6528,7 +6528,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-web"
-version = "0.15.5"
+version = "0.15.6"
 dependencies = [
  "axum 0.8.8",
  "axum-extra",
@@ -6539,7 +6539,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-wonk"
-version = "0.15.5"
+version = "0.15.6"
 dependencies = [
  "anyhow",
  "arc-swap",
