@@ -6,13 +6,12 @@
 //! widget and the polyglot SDK clients work natively. Lean build (no cloud
 //! adapters — in-memory storage + backplane).
 //!
-//! **Auth caveat (verified by e2e):** the operator's `/ws` **degrades a
-//! missing/invalid token to an *anonymous* connection rather than rejecting it**
-//! (`resolve_ws_access`), so the installed [`LocalTokenVerifier`] does NOT gate
-//! connections — it only scopes ACL'd knowledge, which is moot for the
-//! single-org local flavor. **The real gate today is the loopback bind.** Gating
-//! stray local processes by token needs a strict-auth mode in the operator
-//! (reject on invalid token); tracked separately.
+//! **Auth:** the local flavor enables the operator's **strict-auth** mode, so a
+//! `/ws` connection with a missing/invalid token is **rejected** (HTTP 401),
+//! not degraded to anonymous. So the [`LocalTokenVerifier`] genuinely gates
+//! connections — a stray local process or tailnet peer can't drive the agent.
+//! (Default operator behavior is still lenient/anonymous for the embeddable
+//! widget's public flow; the local flavor opts into strict.)
 //!
 //! This is additive: it runs alongside the bespoke `serve_persistent` path
 //! while the embed is validated; the bespoke surface retires once parity lands.
@@ -155,6 +154,10 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     let server = LocalServer::builder()
         .addr(addr)
         .auth(Arc::new(LocalTokenVerifier::new(token.clone())))
+        // Reject (don't degrade to anonymous) any `/ws` connection without a
+        // valid token — so a stray local process / tailnet peer can't drive the
+        // agent. The widget + SDK clients carry the token, so they're unaffected.
+        .strict_auth(true)
         .tools(provider)
         // Serve the official widget at `/`, with the same token injected so the
         // browser connects to `/ws?token=…` (validated by the verifier above).

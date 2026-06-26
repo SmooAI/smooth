@@ -6889,7 +6889,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator"
-version = "1.7.1"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6917,7 +6917,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-adapter-memory"
-version = "1.7.1"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6951,7 +6951,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-ingestion"
-version = "1.7.1"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6971,7 +6971,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-server"
-version = "1.7.1"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "async-trait",

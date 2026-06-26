@@ -89,6 +89,8 @@ async fn boot_local_flavor(gateway: Option<(String, String)>) -> LocalServer {
     let mut builder = LocalServer::builder()
         .addr("127.0.0.1:0".parse().unwrap())
         .auth(std::sync::Arc::new(LocalTokenVerifier::new("e2e-tok")))
+        // Match the daemon: strict auth rejects tokenless connections.
+        .strict_auth(true)
         .tools(provider);
     if let Some((url, key)) = gateway {
         let mut cfg = ServerConfig::from_env();
@@ -120,18 +122,21 @@ async fn create_session(client: &mut Client) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn local_flavor_tokenless_connection_is_anonymous() {
+async fn strict_auth_rejects_tokenless_and_accepts_with_token() {
     // No gateway needed — `ping` doesn't run a turn.
     let server = boot_local_flavor(None).await;
-    // Connect WITHOUT a ?token= — the LocalTokenVerifier is installed, but the
-    // operator's connect path degrades a missing token to anonymous instead of
-    // rejecting. So this connection SUCCEEDS (the documented reality).
-    let (mut client, _) = connect_async(server.ws_url())
-        .await
-        .expect("tokenless connect should succeed (degrades to anonymous)");
+    // No ?token= → strict auth REJECTS the upgrade (the fix: LocalTokenVerifier
+    // now genuinely gates connections; previously this degraded to anonymous and
+    // succeeded — the security gap e2e testing surfaced).
+    assert!(
+        connect_async(server.ws_url()).await.is_err(),
+        "strict auth must reject a tokenless /ws connection (not degrade to anonymous)"
+    );
+    // With the right token → connects + serves.
+    let url = format!("{}?token=e2e-tok", server.ws_url());
+    let (mut client, _) = connect_async(&url).await.expect("connect with valid token");
     send_json(&mut client, &json!({"action": "ping", "requestId": "p1"})).await;
-    let ev = recv_json(&mut client).await;
-    assert_eq!(ev["type"], "pong", "tokenless connection is anonymous and still served: {ev}");
+    assert_eq!(recv_json(&mut client).await["type"], "pong", "valid-token connection is served");
     server.shutdown().await.ok();
 }
 

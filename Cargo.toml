@@ -220,8 +220,8 @@ smooth-operator = { path = "../smooth-operator-core/rust/smooth-operator-core", 
 # two-repo path pattern as the engine dep above. Full CI-mergeability still needs
 # git-rev/published deps for BOTH the engine and the operator (none are published
 # yet); tracked under th-d3537a.
-smooth-operator-server = { path = "../smooth-operator/rust/smooth-operator-server", package = "smooai-smooth-operator-server", default-features = false }
-smooth-operator-svc = { path = "../smooth-operator/rust/smooth-operator", package = "smooai-smooth-operator", default-features = false }
+smooth-operator-server = { path = "../smooth-operator-hardening/rust/smooth-operator-server", package = "smooai-smooth-operator-server", default-features = false }
+smooth-operator-svc = { path = "../smooth-operator-hardening/rust/smooth-operator", package = "smooai-smooth-operator", default-features = false }
 # smooth-owned coding-harness extensions to the generic engine (re-homed from
 # the engine when it went generic at 0.14.0). See crates/smooth-cast.
 smooth-cast = { version = "0.14.1", path = "crates/smooth-cast", package = "smooai-smooth-cast" }
