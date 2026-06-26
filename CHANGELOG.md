@@ -1,5 +1,12 @@
 # @smooai/smooth
 
+## 0.15.6
+
+### Patch Changes
+
+- 2dbd1d6: Make `th api keys` first-class for both auth-client types. `create` now takes structured `--type m2m|b2m` and repeatable `--allowed-origin` flags (B2M requires ≥1 origin, validated client-side) instead of a hand-written raw JSON body; `update <id> --allowed-origin …` replaces a B2M client's origin allowlist (PATCH, B2M-only); a new `rotate <id>` mints a replacement of the same type/origins then revokes the old one (the API has no in-place rotation, so the replacement is created first and the new client id + key are shown once). Adds accurate help (M2M secret vs B2M publishable, both shown once), `--json` on reads, and `--org-id [aliases: --org]`. The raw `--body` escape hatch stays. Fixes a latent bug: these routes require a dashboard user session (`auth.provider === 'supabase'`, 403 under M2M), so the surface now uses the user-JWT `UserClient` rather than the M2M-capable client. (pearl th-8d2a41)
+- a1326b1: `th` CLI audit quick-wins (non-breaking). Standardized the org-override flag to `--org-id` with `--org` as a visible alias across every `th api *` leaf (agents, members, knowledge, jobs, products, observability, crm, testing — ~41 args), retiring the `--org` and `--organization-id` spellings. Filled ~100 previously-blank `--help` doc strings on subcommand variants and args (the whole `th api *` and `th testing *` CRUD surface, including `th testing`'s runs/cases/environments/deployments groups). Gave the operative-control commands (`th pause/resume/steer/cancel/approve`) a proper `<OPERATIVE_ID>` metavar + arg help (was the stale `<BEAD_ID>`), clarified `th inbox` vs `th msg inbox`, fixed the lowercase `th api jobs list --type` metavar, wrote accurate descriptions for `th db`/`th project`/`th jira`/`th web`/`th tailscale`, and scrubbed stale `th api orgs switch`/`--org` references from `th org switch` help. No behavior or signature changes. (pearls th-c153ec follow-up; from the th-CLI audit)
+
 ## 0.15.5
 
 ### Patch Changes
