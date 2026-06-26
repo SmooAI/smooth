@@ -14,8 +14,10 @@ path = "src/main.rs"
 [dependencies]
 smooth-bench.workspace = true
 smooth-bigsmooth.workspace = true
-# th-64fbe8 (EPIC th-c89c2a): the always-on daemon, launched by `th daemon`.
-smooth-daemon.workspace = true
+# EPIC th-c89c2a: `th daemon …` is a passthrough launcher (src/daemon_launcher.rs)
+# that resolves/downloads + spawns the standalone `smooth-daemon` binary, so `th`
+# does NOT statically link the operator runtime (axum + engine + adapters +
+# widget) — keeping the official CLI lean and decoupled from the operator deps.
 smooth-bootstrap-bill = { workspace = true, default-features = false, features = ["server"] }
 smooth-code.workspace = true
 smooth-diver.workspace = true

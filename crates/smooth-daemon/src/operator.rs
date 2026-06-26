@@ -62,8 +62,9 @@ impl ToolProvider for SandboxedToolProvider {
     }
 }
 
-/// The local flavor's tool provider — the daemon's kernel-sandboxed tool set
-/// (workspace-confined fs/grep + an OS-sandboxed `bash` routed through `proxy`).
+/// The local flavor's tool provider — the daemon's kernel-sandboxed tool set.
+///
+/// Workspace-confined fs/grep + an OS-sandboxed `bash` routed through `proxy`.
 /// Exposed so an integration/e2e test can install it on a `LocalServer` exactly
 /// the way [`serve_local_flavor`] does.
 #[must_use]

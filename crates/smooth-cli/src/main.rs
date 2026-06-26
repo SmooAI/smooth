@@ -7,6 +7,7 @@ mod admin;
 mod auth;
 mod boot_ui;
 mod config;
+mod daemon_launcher;
 mod gradient;
 mod hooks;
 mod mcp_config;
@@ -96,22 +97,17 @@ enum Commands {
         #[arg(long)]
         skip_test: bool,
     },
-    /// Start the always-on Smooth daemon (EPIC th-c89c2a) — the clean
-    /// rewrite of Big Smooth on the smooth-operator engine, with no
-    /// microVM. Single-tenant, runs in the foreground (the service
-    /// installer / `ensure_server` handle backgrounding). Wire-compatible
-    /// with the `th code` TUI; serves on the same port as `th up` (4400).
+    /// Run / control the always-on Smooth daemon (EPIC th-c89c2a).
+    ///
+    /// A thin **passthrough** to the standalone `smooth-daemon` binary —
+    /// resolved locally or downloaded on first use, so `th` itself doesn't
+    /// statically link the operator runtime. `th daemon --help` shows the full
+    /// daemon CLI: `run` (foreground) / `operator` / `status` / `audit` /
+    /// `schedule`.
     Daemon {
-        /// Daemon API port.
-        #[arg(long, default_value = "4400")]
-        port: u16,
-        /// Interface to bind on. Defaults to `127.0.0.1` (loopback only);
-        /// remote access is meant to go over Tailscale.
-        #[arg(long, default_value = "127.0.0.1")]
-        bind: String,
-        /// Optional subcommand; with none, runs the daemon in the foreground.
-        #[command(subcommand)]
-        cmd: Option<DaemonCommands>,
+        /// Args forwarded verbatim to the `smooth-daemon` binary.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Stop Smooth platform
     Down,
@@ -406,57 +402,6 @@ enum Commands {
     Cast {
         #[command(subcommand)]
         cmd: CastCommands,
-    },
-}
-
-#[derive(Subcommand)]
-enum DaemonCommands {
-    /// Show the running daemon's status (uptime, permission mode, egress,
-    /// active tasks) by querying its `/api/status`.
-    Status,
-    /// Tail the egress proxy's audit log — the allowed/blocked off-box network
-    /// decisions made by the goalie exact-host allowlist.
-    Audit {
-        /// How many recent decisions to show.
-        #[arg(long, default_value = "20")]
-        lines: usize,
-    },
-    /// Manage scheduled/proactive tasks (`/api/schedule`).
-    Schedule {
-        #[command(subcommand)]
-        cmd: ScheduleCommands,
-    },
-    /// Run the OPERATOR's local deployment flavor in the foreground (EPIC
-    /// th-c89c2a). Hosts smooth-operator's canonical schema-driven WS protocol —
-    /// the official widget and the polyglot SDK clients work natively — gated by
-    /// an auto-provisioned local token. Lean build (no cloud adapters).
-    Operator {
-        /// Address to bind the local-flavor operator on.
-        #[arg(long, default_value = "127.0.0.1:8787")]
-        addr: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum ScheduleCommands {
-    /// List scheduled tasks.
-    List,
-    /// Add a scheduled task (provide exactly one of --every-minutes / --daily).
-    Add {
-        /// The prompt to run on the cadence.
-        #[arg(long)]
-        prompt: String,
-        /// Fire every N minutes.
-        #[arg(long, conflicts_with = "daily")]
-        every_minutes: Option<u64>,
-        /// Fire daily at HH:MM (UTC).
-        #[arg(long, conflicts_with = "every_minutes")]
-        daily: Option<String>,
-    },
-    /// Remove a scheduled task by id.
-    Rm {
-        /// The schedule id (from `th daemon schedule list`).
-        id: String,
     },
 }
 
@@ -1361,13 +1306,7 @@ async fn main() -> Result<()> {
             max_operators,
             skip_test,
         }) => cmd_up(mode, no_leader, port, bind, foreground, max_operators, skip_test).await,
-        Some(Commands::Daemon { port, bind, cmd }) => match cmd {
-            None => cmd_daemon(port, bind).await,
-            Some(DaemonCommands::Status) => cmd_daemon_status(port).await,
-            Some(DaemonCommands::Audit { lines }) => cmd_daemon_audit(lines),
-            Some(DaemonCommands::Schedule { cmd }) => cmd_daemon_schedule(port, cmd).await,
-            Some(DaemonCommands::Operator { addr }) => cmd_daemon_operator(addr).await,
-        },
+        Some(Commands::Daemon { args }) => daemon_launcher::run(args).await,
         Some(Commands::Down) => cmd_down().await,
         Some(Commands::Status) => cmd_status().await,
         Some(Commands::Db { cmd }) => cmd_db(cmd),
@@ -1683,39 +1622,6 @@ async fn stop_sandboxed_vm() -> Result<bool> {
     }
     let _ = std::fs::remove_file(&state_path);
     Ok(true)
-}
-
-/// Run the always-on Smooth daemon (EPIC th-c89c2a) in the foreground.
-///
-/// The clean rewrite of Big Smooth on the smooth-operator engine — no microVM,
-/// single-tenant, wire-compatible with the `th code` TUI. Serves until
-/// Ctrl-C/SIGTERM (graceful shutdown).
-async fn cmd_daemon(port: u16, bind: String) -> Result<()> {
-    let ip: std::net::IpAddr = bind.parse().map_err(|e| anyhow::anyhow!("--bind '{bind}' is not a valid IP address: {e}"))?;
-    let addr = SocketAddr::new(ip, port);
-    println!(
-        "  {} Smooth daemon {}",
-        "\u{2713}".green().bold(),
-        format!("http://localhost:{port}").cyan().bold()
-    );
-    // Durable SQLite-backed state (~/.smooth/daemon.db) + the egress boundary
-    // (if SMOOTH_EGRESS_ALLOWLIST is set) — the same canonical entry the
-    // standalone `smooth-daemon` binary uses, so egress starts either way.
-    smooth_daemon::serve_persistent(addr).await
-}
-
-/// Run the operator's local deployment flavor (EPIC th-c89c2a) — the canonical
-/// schema-driven WS protocol, gated by an auto-provisioned local token.
-async fn cmd_daemon_operator(addr: String) -> Result<()> {
-    let socket: SocketAddr = addr
-        .parse()
-        .map_err(|e| anyhow::anyhow!("--addr '{addr}' is not a valid socket address: {e}"))?;
-    println!(
-        "  {} Smooth local-flavor operator {}",
-        "\u{2713}".green().bold(),
-        format!("ws://{socket}/ws").cyan().bold()
-    );
-    smooth_daemon::serve_local_flavor(socket).await
 }
 
 async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, foreground: bool, max_operators: Option<usize>, skip_test: bool) -> Result<()> {
@@ -2106,163 +2012,6 @@ async fn cmd_down() -> Result<()> {
         (false, None) => {
             println!("  {} {}", gradient::smooth(), "is not running.".yellow());
         }
-    }
-    Ok(())
-}
-
-/// Format seconds into a compact `1d 2h` / `3h 4m` / `5m 6s` / `7s` string.
-fn format_daemon_uptime(secs: u64) -> String {
-    if secs >= 86_400 {
-        format!("{}d {}h", secs / 86_400, (secs % 86_400) / 3600)
-    } else if secs >= 3600 {
-        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
-    } else if secs >= 60 {
-        format!("{}m {}s", secs / 60, secs % 60)
-    } else {
-        format!("{secs}s")
-    }
-}
-
-/// Render the daemon's `/api/status` JSON into a human-readable block. Pure, so
-/// it's unit-testable without a running daemon.
-fn format_daemon_status(body: &serde_json::Value) -> String {
-    let version = body["version"].as_str().unwrap_or("unknown");
-    let mode = body["permission_mode"].as_str().unwrap_or("?");
-    let active = body["active_tasks"].as_u64().unwrap_or(0);
-    let egress = body["egress_proxy"].as_str().map_or_else(|| "off".to_owned(), |p| format!("on ({p})"));
-    let uptime = body["uptime_seconds"].as_u64().map_or_else(|| "?".to_owned(), format_daemon_uptime);
-    format!("smooth-daemon v{version}\n  uptime:       {uptime}\n  mode:         {mode}\n  egress:       {egress}\n  active tasks: {active}")
-}
-
-/// Format one egress audit JSON line into a compact `ts  ALLOW/BLOCK  METHOD host`
-/// row. Pure, so it's unit-testable.
-fn format_audit_line(v: &serde_json::Value) -> String {
-    let ts = v["timestamp"].as_str().unwrap_or("");
-    let allowed = v["allowed"].as_bool().unwrap_or(false);
-    let domain = v["domain"].as_str().unwrap_or("?");
-    let method = v["method"].as_str().unwrap_or("");
-    let mark = if allowed { "ALLOW" } else { "BLOCK" };
-    format!("{ts}  {mark}  {method:<7} {domain}")
-}
-
-/// `th daemon audit` — print the last `lines` egress decisions from the goalie
-/// proxy's JSON-lines audit log.
-fn cmd_daemon_audit(lines: usize) -> Result<()> {
-    let path = smooth_daemon::config::egress_audit_path();
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => {
-            println!("no egress audit log at {} — has the egress boundary handled any requests yet?", path.display());
-            return Ok(());
-        }
-    };
-    let all: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
-    if all.is_empty() {
-        println!("egress audit log is empty");
-        return Ok(());
-    }
-    for line in &all[all.len().saturating_sub(lines)..] {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-            println!("{}", format_audit_line(&v));
-        }
-    }
-    Ok(())
-}
-
-/// Build the `ScheduleKind` JSON for `POST /api/schedule` from the CLI flags.
-/// Exactly one of `every_minutes` / `daily` (HH:MM) must be given.
-fn build_schedule_kind(every_minutes: Option<u64>, daily: Option<&str>) -> Result<serde_json::Value> {
-    match (every_minutes, daily) {
-        (Some(m), None) => {
-            if m == 0 {
-                anyhow::bail!("--every-minutes must be at least 1");
-            }
-            Ok(serde_json::json!({ "kind": "every_n_seconds", "secs": m * 60 }))
-        }
-        (None, Some(hhmm)) => {
-            let (h, m) = hhmm.split_once(':').ok_or_else(|| anyhow::anyhow!("--daily must be HH:MM, got {hhmm:?}"))?;
-            let hour: u8 = h.parse().map_err(|_| anyhow::anyhow!("invalid hour in {hhmm:?}"))?;
-            let minute: u8 = m.parse().map_err(|_| anyhow::anyhow!("invalid minute in {hhmm:?}"))?;
-            if hour > 23 || minute > 59 {
-                anyhow::bail!("--daily out of range (00:00–23:59): {hhmm:?}");
-            }
-            Ok(serde_json::json!({ "kind": "daily_at", "hour": hour, "minute": minute }))
-        }
-        (None, None) => anyhow::bail!("provide --every-minutes N or --daily HH:MM"),
-        (Some(_), Some(_)) => anyhow::bail!("--every-minutes and --daily are mutually exclusive"),
-    }
-}
-
-/// Format one schedule JSON row for `th daemon schedule list`.
-fn format_schedule_line(s: &serde_json::Value) -> String {
-    let id = s["id"].as_str().unwrap_or("?");
-    let prompt = s["prompt"].as_str().unwrap_or("");
-    let next = s["next_due"].as_str().unwrap_or("");
-    let enabled = s["enabled"].as_bool().unwrap_or(true);
-    let cadence = match s["kind"]["kind"].as_str() {
-        Some("every_n_seconds") => format!("every {}m", s["kind"]["secs"].as_u64().unwrap_or(0) / 60),
-        Some("daily_at") => format!(
-            "daily {:02}:{:02}",
-            s["kind"]["hour"].as_u64().unwrap_or(0),
-            s["kind"]["minute"].as_u64().unwrap_or(0)
-        ),
-        _ => "?".to_owned(),
-    };
-    let disabled = if enabled { "" } else { " (disabled)" };
-    format!("{id}  {cadence:<11} next {next}{disabled}  {prompt}")
-}
-
-/// `th daemon schedule …` — list / add / remove scheduled tasks via the API.
-async fn cmd_daemon_schedule(port: u16, cmd: ScheduleCommands) -> Result<()> {
-    let base = format!("http://127.0.0.1:{port}/api/schedule");
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(3)).build()?;
-    let unreachable = || println!("daemon not reachable at {base} — is `th daemon` running?");
-    match cmd {
-        ScheduleCommands::List => match client.get(&base).send().await {
-            Ok(r) if r.status().is_success() => {
-                let list: Vec<serde_json::Value> = r.json().await?;
-                if list.is_empty() {
-                    println!("no schedules");
-                }
-                for s in &list {
-                    println!("{}", format_schedule_line(s));
-                }
-            }
-            Ok(r) => println!("list failed: HTTP {}", r.status()),
-            Err(_) => unreachable(),
-        },
-        ScheduleCommands::Add { prompt, every_minutes, daily } => {
-            let kind = build_schedule_kind(every_minutes, daily.as_deref())?;
-            let body = serde_json::json!({ "prompt": prompt, "schedule": kind });
-            match client.post(&base).json(&body).send().await {
-                Ok(r) if r.status().is_success() => {
-                    let s: serde_json::Value = r.json().await?;
-                    println!("added {}", format_schedule_line(&s));
-                }
-                Ok(r) => println!("add failed: HTTP {}", r.status()),
-                Err(_) => unreachable(),
-            }
-        }
-        ScheduleCommands::Rm { id } => match client.delete(format!("{base}/{id}")).send().await {
-            Ok(r) if r.status().is_success() => println!("removed schedule {id}"),
-            Ok(r) => println!("remove failed: HTTP {}", r.status()),
-            Err(_) => unreachable(),
-        },
-    }
-    Ok(())
-}
-
-/// `th daemon status` — query the running daemon's `/api/status` and print it.
-async fn cmd_daemon_status(port: u16) -> Result<()> {
-    let url = format!("http://127.0.0.1:{port}/api/status");
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(3)).build()?;
-    match client.get(&url).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            let body: serde_json::Value = resp.json().await?;
-            println!("{}", format_daemon_status(&body));
-        }
-        Ok(resp) => println!("daemon returned HTTP {} at {url}", resp.status()),
-        Err(_) => println!("daemon not reachable at {url} — is `th daemon` running?"),
     }
     Ok(())
 }
@@ -7954,90 +7703,5 @@ mod beads_model_tests {
         // up — caller treats None as "no remote to bootstrap from."
         let tmp = tempfile::tempdir().expect("tempdir");
         assert!(read_git_origin_url(tmp.path()).unwrap().is_none());
-    }
-}
-
-#[cfg(test)]
-mod daemon_status_tests {
-    //! `th daemon status` formatting (pure; no running daemon needed).
-    use super::{build_schedule_kind, format_audit_line, format_daemon_status, format_daemon_uptime, format_schedule_line};
-
-    #[test]
-    fn uptime_formats_across_scales() {
-        assert_eq!(format_daemon_uptime(7), "7s");
-        assert_eq!(format_daemon_uptime(65), "1m 5s");
-        assert_eq!(format_daemon_uptime(3700), "1h 1m");
-        assert_eq!(format_daemon_uptime(90_000), "1d 1h");
-    }
-
-    #[test]
-    fn status_block_renders_fields() {
-        let body = serde_json::json!({
-            "version": "0.14.1",
-            "permission_mode": "auto",
-            "active_tasks": 2,
-            "egress_proxy": "127.0.0.1:4419",
-            "uptime_seconds": 3700
-        });
-        let out = format_daemon_status(&body);
-        assert!(out.contains("v0.14.1"));
-        assert!(out.contains("mode:         auto"));
-        assert!(out.contains("egress:       on (127.0.0.1:4419)"));
-        assert!(out.contains("uptime:       1h 1m"));
-        assert!(out.contains("active tasks: 2"));
-    }
-
-    #[test]
-    fn status_block_handles_egress_off_and_missing() {
-        let body = serde_json::json!({"version": "0.14.1", "egress_proxy": serde_json::Value::Null});
-        let out = format_daemon_status(&body);
-        assert!(out.contains("egress:       off"));
-        assert!(out.contains("uptime:       ?"), "missing uptime → '?': {out}");
-    }
-
-    #[test]
-    fn build_schedule_kind_from_flags() {
-        assert_eq!(
-            build_schedule_kind(Some(15), None).unwrap(),
-            serde_json::json!({"kind": "every_n_seconds", "secs": 900})
-        );
-        assert_eq!(
-            build_schedule_kind(None, Some("08:30")).unwrap(),
-            serde_json::json!({"kind": "daily_at", "hour": 8, "minute": 30})
-        );
-        // Errors: none, both, zero, bad time, out of range.
-        assert!(build_schedule_kind(None, None).is_err());
-        assert!(build_schedule_kind(Some(5), Some("08:00")).is_err());
-        assert!(build_schedule_kind(Some(0), None).is_err());
-        assert!(build_schedule_kind(None, Some("8h00")).is_err());
-        assert!(build_schedule_kind(None, Some("25:00")).is_err());
-    }
-
-    #[test]
-    fn schedule_line_renders_cadence() {
-        let daily = serde_json::json!({
-            "id": "abc", "prompt": "morning brief", "enabled": true,
-            "next_due": "2026-06-24T08:00:00Z", "kind": {"kind": "daily_at", "hour": 8, "minute": 0}
-        });
-        let line = format_schedule_line(&daily);
-        assert!(line.contains("abc") && line.contains("daily 08:00") && line.contains("morning brief"), "{line}");
-
-        let interval = serde_json::json!({
-            "id": "x", "prompt": "ping", "enabled": false,
-            "next_due": "2026-06-23T12:30:00Z", "kind": {"kind": "every_n_seconds", "secs": 1800}
-        });
-        let line = format_schedule_line(&interval);
-        assert!(line.contains("every 30m") && line.contains("(disabled)"), "{line}");
-    }
-
-    #[test]
-    fn audit_line_marks_allow_and_block() {
-        let allowed = serde_json::json!({"timestamp": "2026-06-23T12:00:00Z", "allowed": true, "domain": "github.com", "method": "CONNECT"});
-        let a = format_audit_line(&allowed);
-        assert!(a.contains("ALLOW") && a.contains("github.com") && a.contains("CONNECT"), "{a}");
-
-        let blocked = serde_json::json!({"timestamp": "2026-06-23T12:00:01Z", "allowed": false, "domain": "evil.example", "method": "GET"});
-        let b = format_audit_line(&blocked);
-        assert!(b.contains("BLOCK") && b.contains("evil.example"), "{b}");
     }
 }

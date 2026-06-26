@@ -427,7 +427,7 @@ pub async fn spawn_sandbox(spec: SandboxSpec) -> Result<(String, Vec<PortMapping
         let cfg = sandbox.config();
         let entrypoint: Vec<String> = cfg.entrypoint.clone().unwrap_or_default();
         let cmd: Vec<String> = cfg.cmd.clone().unwrap_or_default();
-        let argv: Vec<String> = entrypoint.into_iter().chain(cmd.into_iter()).collect();
+        let argv: Vec<String> = entrypoint.into_iter().chain(cmd).collect();
         if argv.is_empty() {
             diag!("no entrypoint/cmd in image config — skipping startup exec (caller will exec on demand)");
         } else {

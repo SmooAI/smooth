@@ -56,6 +56,11 @@ uuid.workspace = true
 chrono.workspace = true
 async-trait.workspace = true
 dirs-next.workspace = true
+# The standalone `smooth-daemon` binary owns the full daemon CLI (run / operator
+# / status / audit / schedule), so the `th` CLI can stay lean and just
+# spawn this binary rather than statically linking the operator runtime.
+clap = { workspace = true, features = ["derive"] }
+reqwest = { workspace = true, features = ["json"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

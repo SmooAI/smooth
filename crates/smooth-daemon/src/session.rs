@@ -133,7 +133,7 @@ impl SessionStore for InMemorySessionStore {
 
     async fn list(&self) -> anyhow::Result<Vec<Session>> {
         let mut sessions: Vec<Session> = self.lock().values().cloned().collect();
-        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
         Ok(sessions)
     }
 
