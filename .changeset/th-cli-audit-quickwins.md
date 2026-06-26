@@ -1,0 +1,5 @@
+---
+'@smooai/smooth': patch
+---
+
+`th` CLI audit quick-wins (non-breaking). Standardized the org-override flag to `--org-id` with `--org` as a visible alias across every `th api *` leaf (agents, members, knowledge, jobs, products, observability, crm, testing — ~41 args), retiring the `--org` and `--organization-id` spellings. Filled ~100 previously-blank `--help` doc strings on subcommand variants and args (the whole `th api *` and `th testing *` CRUD surface, including `th testing`'s runs/cases/environments/deployments groups). Gave the operative-control commands (`th pause/resume/steer/cancel/approve`) a proper `<OPERATIVE_ID>` metavar + arg help (was the stale `<BEAD_ID>`), clarified `th inbox` vs `th msg inbox`, fixed the lowercase `th api jobs list --type` metavar, wrote accurate descriptions for `th db`/`th project`/`th jira`/`th web`/`th tailscale`, and scrubbed stale `th api orgs switch`/`--org` references from `th org switch` help. No behavior or signature changes. (pearls th-c153ec follow-up; from the th-CLI audit)

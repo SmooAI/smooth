@@ -222,34 +222,61 @@ enum Commands {
         #[arg(long)]
         agent: Option<String>,
     },
-    /// Pause a running Smooth operative
-    Pause { bead_id: String },
-    /// Resume a paused Smooth operative
-    Resume { bead_id: String },
-    /// Send guidance to a running Smooth operative
-    Steer { bead_id: String, message: String },
-    /// Cancel a running Smooth operative
-    Cancel { bead_id: String },
-    /// Approve a pending review
-    Approve { bead_id: String },
-    /// Show messages requiring attention
+    /// Pause a running operative — its agent loop halts until `resume`.
+    Pause {
+        /// The operative id from `th operatives list`.
+        #[arg(value_name = "OPERATIVE_ID")]
+        bead_id: String,
+    },
+    /// Resume a paused operative.
+    Resume {
+        /// The operative id from `th operatives list`.
+        #[arg(value_name = "OPERATIVE_ID")]
+        bead_id: String,
+    },
+    /// Send mid-run guidance to a running operative.
+    Steer {
+        /// The operative id from `th operatives list`.
+        #[arg(value_name = "OPERATIVE_ID")]
+        bead_id: String,
+        /// The guidance message to inject into the run.
+        message: String,
+    },
+    /// Cancel a running operative (stops the run; see also `operatives kill`).
+    Cancel {
+        /// The operative id from `th operatives list`.
+        #[arg(value_name = "OPERATIVE_ID")]
+        bead_id: String,
+    },
+    /// Approve a pending operative review gate.
+    Approve {
+        /// The operative id from `th operatives list`.
+        #[arg(value_name = "OPERATIVE_ID")]
+        bead_id: String,
+    },
+    /// Show operative reviews + notifications needing your attention
+    /// (distinct from `th msg inbox`, which is agent-to-agent mail).
     Inbox,
     /// Smooth operative management
     Operatives {
         #[command(subcommand)]
         cmd: Option<OperativesCommands>,
     },
-    /// Project management
+    /// Pearl projects in the global registry (`~/.smooth/registry.json`)
+    /// — `create` to register one, `list` to see all tracked projects.
+    /// For per-pearl work use `th pearls`.
     Project {
         #[command(subcommand)]
         cmd: ProjectCommands,
     },
-    /// Database management
+    /// Local pearl Dolt database — `status` (health), `backup`, and
+    /// on-disk `path` of this project's `.smooth/dolt/` store.
     Db {
         #[command(subcommand)]
         cmd: DbCommands,
     },
-    /// Jira integration
+    /// Jira sync — `sync` pushes/pulls SMOODEV issues against pearls,
+    /// `status` shows the current sync state.
     Jira {
         #[command(subcommand)]
         cmd: JiraCommands,
@@ -259,14 +286,14 @@ enum Commands {
         #[command(subcommand)]
         cmd: AuditCommands,
     },
-    /// Open web interface
+    /// Open the Smooth web dashboard in your browser.
     Web,
     /// Git worktree management
     Worktree {
         #[command(subcommand)]
         cmd: WorktreeCommands,
     },
-    /// Tailscale integration
+    /// Tailscale status — show the tailnet devices Smooth can see.
     Tailscale {
         #[command(subcommand)]
         cmd: TailscaleCommands,
@@ -528,12 +555,12 @@ enum OrgsCommands {
         /// `~/.smooth/auth/smooai.json`.
         org_id: Option<String>,
     },
-    /// Switch the active org persisted in `~/.smooth/auth/smooai.json`.
-    /// Subsequent commands default to this org unless `--org` is set.
+    /// Switch the active org, persisted across the credential stores.
+    /// Subsequent commands default to it unless `--org-id` is passed.
     ///
     /// Omit the argument on a TTY to pick interactively from the orgs you
     /// belong to. A value is matched as a UUID first, then case-insensitively
-    /// against org name / slug (substring) — so `th api orgs switch ats`
+    /// against org name / slug (substring) — so `th org switch ats`
     /// works without copying a UUID.
     Switch {
         /// Org id (UUID) or a name/slug substring. Omit to pick from a list.
