@@ -576,8 +576,15 @@ enum ApiCommands {
         #[command(subcommand)]
         cmd: smooai::agents::Cmd,
     },
-    /// Smoo AI M2M auth clients ("API keys") — list / create /
-    /// rotate / revoke.
+    /// Smoo AI auth clients ("API keys") — mint and manage both
+    /// machine-to-machine (M2M, server/CI secret) and browser-to-machine
+    /// (B2M, origin-restricted publishable key) clients: list, create
+    /// (`--type m2m|b2m`, `--allowed-origin` for B2M), update a B2M
+    /// client's origins, rotate, and revoke.
+    ///
+    /// These routes require a dashboard **user** session (`th auth
+    /// login`) — they 403 under M2M. A master admin can target a child
+    /// org with `--org-id`.
     Keys {
         #[command(subcommand)]
         cmd: smooai::keys::Cmd,
@@ -7839,6 +7846,59 @@ mod org_cli_tests {
                 assert_eq!(org_id.as_deref(), Some("org-x"));
             }
             _ => panic!("expected Llm/Keys/Create"),
+        }
+    }
+
+    /// `th api keys create` exposes structured --type + repeatable
+    /// --allowed-origin flags (the first-class B2M/M2M surface).
+    #[test]
+    fn th_api_keys_create_flags_parse() {
+        use smooai::keys::{ClientType, Cmd as KeysCmd};
+
+        let cli = Cli::try_parse_from([
+            "th",
+            "api",
+            "keys",
+            "create",
+            "--type",
+            "b2m",
+            "--allowed-origin",
+            "https://a.example.com",
+            "--allowed-origin",
+            "https://b.example.com",
+            "--org",
+            "org-x",
+        ])
+        .expect("th api keys create --type b2m parses");
+        match cli.command {
+            Some(Commands::Api {
+                cmd:
+                    ApiCommands::Keys {
+                        cmd:
+                            KeysCmd::Create {
+                                client_type,
+                                allowed_origins,
+                                org_id,
+                                ..
+                            },
+                    },
+            }) => {
+                assert_eq!(client_type, ClientType::B2m);
+                assert_eq!(allowed_origins, vec!["https://a.example.com", "https://b.example.com"]);
+                assert_eq!(org_id.as_deref(), Some("org-x"));
+            }
+            _ => panic!("expected Api/Keys/Create"),
+        }
+
+        // Default type is m2m when --type is omitted.
+        let cli = Cli::try_parse_from(["th", "api", "keys", "create"]).expect("default create parses");
+        match cli.command {
+            Some(Commands::Api {
+                cmd: ApiCommands::Keys {
+                    cmd: KeysCmd::Create { client_type, .. },
+                },
+            }) => assert_eq!(client_type, ClientType::M2m),
+            _ => panic!("expected Api/Keys/Create"),
         }
     }
 }

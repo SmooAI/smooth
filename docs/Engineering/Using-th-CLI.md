@@ -193,6 +193,45 @@ th api config feature-flag <flag-key>              # evaluate against active org
 th api config feature-flag <flag-key> --context=- < ctx.json
 ```
 
+### Auth clients — M2M + B2M keys (`th api keys`)
+
+Mint and manage an org's API auth clients. Two types, both first-class:
+
+- **M2M** (`--type m2m`, default) — a server/CI secret (`client_id` +
+  **secret key**). Used for `client_credentials` grants at
+  `auth.smoo.ai` (the same kind `th auth login --m2m` consumes).
+- **B2M** (`--type b2m`) — a browser/frontend **publishable key**
+  restricted to an allowlist of origins. The key is exposed to the
+  page, so the origin pin is the security boundary — at least one
+  `--allowed-origin` is required.
+
+These routes require a dashboard **user** session (`th auth login`) and
+403 under M2M. A master admin can target a child org with `--org-id`.
+
+```bash
+th api keys list                                  # M2M + B2M, with origins (--json for raw)
+
+th api keys create                                # M2M (default) — prints secret key ONCE
+th api keys create --type b2m \
+  --allowed-origin https://app.example.com \
+  --allowed-origin https://example.com            # B2M — prints publishable key ONCE
+
+th api keys update <client_id> \
+  --allowed-origin https://new.example.com        # replace a B2M client's origins (B2M only)
+
+th api keys rotate <client_id>                     # mint replacement (same type/origins), revoke old
+th api keys revoke <client_id>                     # delete a client
+
+th api keys create --type b2m --allowed-origin … --org-id <child>   # master admin, child org
+```
+
+The key value is shown exactly once — store it immediately. `--type`
+accepts the short `m2m`/`b2m` or the long `machine-to-machine`/
+`browser-to-machine`. `rotate` exists because the API has **no in-place
+rotation**: it creates a fresh client (new `client_id` + key) of the
+same type/origins, then revokes the old one — so update every consumer.
+A raw `--body '<json>'` escape hatch is still accepted.
+
 ### LLM gateway keys (`th llm`)
 
 Mint and manage an org's `llm.smoo.ai` keys — the LiteLLM virtual keys
