@@ -165,6 +165,18 @@ enum Commands {
         #[command(subcommand)]
         cmd: config::Cmd,
     },
+    /// Smoo AI LLM gateway keys — mint / rotate / list the org's
+    /// `llm.smoo.ai` keys and inspect spend. `th llm create-key`
+    /// provisions the org's persistent key (a LiteLLM virtual key
+    /// scoped to the org budget) and prints it once.
+    ///
+    /// Authenticates as the user (Supabase JWT) and is org-admin-gated
+    /// — a master admin can mint for a child org with `--org-id`.
+    /// Wraps `api.smoo.ai/organizations/{org_id}/llm-gateway/*`.
+    Llm {
+        #[command(subcommand)]
+        cmd: smooai::llm_gateway::Cmd,
+    },
     /// Smoo AI testing platform — the daily-developer surface for
     /// reporting test results and managing runs / cases / environments /
     /// deployments. `runs report <file>` is the high-level entry point:
@@ -1338,6 +1350,7 @@ async fn main() -> Result<()> {
         },
         Some(Commands::Org { cmd }) => cmd_orgs(cmd).await,
         Some(Commands::Config { cmd }) => config::cmd(cmd).await,
+        Some(Commands::Llm { cmd }) => smooai::llm_gateway::cmd(cmd).await,
         Some(Commands::Testing { cmd }) => smooai::testing::cmd(cmd).await,
         Some(Commands::Operatives { cmd }) => cmd_operatives(cmd).await,
         Some(Commands::Inbox) => cmd_inbox().await,
@@ -7794,6 +7807,38 @@ mod org_cli_tests {
                 }) => assert_eq!(org_id.as_deref(), Some("X")),
                 _ => panic!("expected Config/Get"),
             }
+        }
+    }
+
+    /// `th llm` wraps the org llm-gateway API. create-key takes the org
+    /// override (with the --org alias) and the keys subgroup parses.
+    #[test]
+    fn th_llm_parses() {
+        use smooai::llm_gateway::{Cmd as LlmCmd, KeysCmd};
+
+        // create-key with both flag spellings lands on the same variant.
+        for flag in ["--org-id", "--org"] {
+            let cli = Cli::try_parse_from(["th", "llm", "create-key", flag, "org-x"]).expect("th llm create-key parses");
+            match cli.command {
+                Some(Commands::Llm {
+                    cmd: LlmCmd::CreateKey { org_id, .. },
+                }) => assert_eq!(org_id.as_deref(), Some("org-x")),
+                _ => panic!("expected Llm/CreateKey"),
+            }
+        }
+
+        // Nested keys create carries the positional name + org override.
+        let cli = Cli::try_parse_from(["th", "llm", "keys", "create", "ci", "--org", "org-x"]).expect("th llm keys create parses");
+        match cli.command {
+            Some(Commands::Llm {
+                cmd: LlmCmd::Keys {
+                    cmd: KeysCmd::Create { name, org_id, .. },
+                },
+            }) => {
+                assert_eq!(name, "ci");
+                assert_eq!(org_id.as_deref(), Some("org-x"));
+            }
+            _ => panic!("expected Llm/Keys/Create"),
         }
     }
 }

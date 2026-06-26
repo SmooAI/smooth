@@ -94,6 +94,18 @@ impl UserClient {
         Self::body(resp, "PATCH", &url).await
     }
 
+    pub async fn delete(&self, path: &str) -> Result<Value> {
+        let url = format!("{}{path}", self.base);
+        let resp = self
+            .http
+            .delete(&url)
+            .bearer_auth(&self.bearer)
+            .send()
+            .await
+            .with_context(|| format!("DELETE {url}"))?;
+        Self::body(resp, "DELETE", &url).await
+    }
+
     async fn body(resp: reqwest::Response, method: &str, url: &str) -> Result<Value> {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();

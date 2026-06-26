@@ -193,6 +193,38 @@ th api config feature-flag <flag-key>              # evaluate against active org
 th api config feature-flag <flag-key> --context=- < ctx.json
 ```
 
+### LLM gateway keys (`th llm`)
+
+Mint and manage an org's `llm.smoo.ai` keys — the LiteLLM virtual keys
+scoped to the org's team/budget. `th llm` is the top-level surface over
+`api.smoo.ai/organizations/{org_id}/llm-gateway/*`. It authenticates as
+the **user** (Supabase JWT) and is org-admin-gated, so it 401s under an
+M2M token — run `th auth login` (user flow) first. A master/super admin
+can mint for a child org with `--org-id <child>` (the user JWT acts
+cross-org).
+
+```bash
+th llm overview                       # masked key + month-to-date spend (--json for raw)
+th llm create-key                     # mint the org's persistent key — prints the value ONCE
+th llm rotate-key                     # invalidate + reissue the persistent key (prints once)
+th llm usage --days 30                # spend by model + by day (JSON timeseries)
+
+# additional named keys (e.g. per service / environment)
+th llm keys list                      # masked list (--json for raw)
+th llm keys create ci                 # mint a named key — prints the value ONCE
+th llm keys rotate ci                 # reissue a named key
+th llm keys delete ci                 # revoke (soft-delete; name reusable later)
+
+th llm create-key --org-id <child>    # master admin minting for a child org
+```
+
+The minted key value is shown exactly once — store it immediately, then
+wire it into the gateway provider with `th model login smooai-gateway`.
+`create-key` 409s if the org already has a key (rotate instead). Note
+this is the **static-key** model: a persistent virtual key, not the
+ephemeral JWT→session exchange originally sketched in pearl `th-f7b20f`
+(the backend shipped static keys, so `th llm` wraps that).
+
 ### Jobs (async queue)
 
 ```bash

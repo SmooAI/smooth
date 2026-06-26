@@ -14,6 +14,7 @@ pub mod crm;
 pub mod jobs;
 pub mod keys;
 pub mod knowledge;
+pub mod llm_gateway;
 pub mod members;
 pub mod observability;
 pub mod products;
