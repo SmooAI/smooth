@@ -9,61 +9,90 @@ use super::{print_json, print_list_envelope, read_body, require_active_org, requ
 
 #[derive(Subcommand)]
 pub enum Cmd {
-    /// List agents in the active (or `--org`) organization.
+    /// List agents in the active (or `--org-id`) organization.
     List {
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Show one agent's full record (config, status, metadata).
     Show {
+        /// The agent id from `th api agents list`.
         agent_id: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Fetch the agent's generated summary blurb.
     Summary {
+        /// The agent id from `th api agents list`.
         agent_id: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
     /// Create an agent. Body is JSON (`CreateAgentRequest`); use `-`
     /// for stdin.
     Create {
+        /// JSON request body, or `-` to read from stdin.
         body: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Patch an existing agent with a partial JSON body.
     Update {
+        /// The agent id from `th api agents list`.
         agent_id: String,
+        /// JSON patch body, or `-` to read from stdin.
         body: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Delete an agent permanently.
     Delete {
+        /// The agent id from `th api agents list`.
         agent_id: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
     /// Re-run one of the agent's generators.
     Regenerate {
+        /// The agent id from `th api agents list`.
         agent_id: String,
+        /// Which generator slot to re-run.
         #[arg(value_enum)]
         slot: RegenerateSlot,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// List the knowledge documents attached to an agent.
     ListKnowledge {
+        /// The agent id from `th api agents list`.
         agent_id: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Replace the agent's attached knowledge set (JSON body).
     SetKnowledge {
+        /// The agent id from `th api agents list`.
         agent_id: String,
+        /// JSON body listing the knowledge to attach, or `-` for stdin.
         body: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Generate an agent config from a JSON prompt without persisting it.
     GenerateConfig {
+        /// JSON generation request body, or `-` to read from stdin.
         body: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
 }

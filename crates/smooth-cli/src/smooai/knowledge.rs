@@ -7,53 +7,79 @@ use super::{print_json, print_list_envelope, read_body, require_active_org, requ
 
 #[derive(Subcommand)]
 pub enum Cmd {
+    /// List the knowledge documents in the active (or `--org-id`) organization.
     List {
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Show one knowledge document's metadata.
     Show {
+        /// The document id from `th api knowledge list`.
         doc_id: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Fetch the document's stored content.
     Content {
+        /// The document id from `th api knowledge list`.
         doc_id: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
     /// Upload a text knowledge document (JSON body — file uploads
     /// use a separate multipart endpoint the CLI doesn't wrap yet).
     Upload {
+        /// JSON document body, or `-` to read from stdin.
         body: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
     /// Register a website as a knowledge source.
     Website {
+        /// JSON body describing the website to crawl, or `-` for stdin.
         body: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Kick off (re)processing of a knowledge source (JSON body).
     Process {
+        /// JSON processing request body, or `-` to read from stdin.
         body: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Patch a knowledge document's metadata (JSON body).
     Update {
+        /// The document id from `th api knowledge list`.
         doc_id: String,
+        /// JSON patch body, or `-` to read from stdin.
         body: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Replace a knowledge document's content (JSON body).
     UpdateContent {
+        /// The document id from `th api knowledge list`.
         doc_id: String,
+        /// JSON content body, or `-` to read from stdin.
         body: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Delete a knowledge document permanently.
     Delete {
+        /// The document id from `th api knowledge list`.
         doc_id: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
 }

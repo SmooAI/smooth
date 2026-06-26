@@ -7,42 +7,62 @@ use super::{print_json, print_list_envelope, read_body, require_active_org, requ
 
 #[derive(Subcommand)]
 pub enum Cmd {
+    /// List the members of the active (or `--org-id`) organization.
     List {
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// List the roles a member can be assigned.
     Roles {
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// List pending member invitations.
     Invitations {
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
     /// Invite a user (JSON body — typically `{"email": "...", "role": "..."}`).
     Invite {
+        /// JSON invitation body, or `-` to read from stdin.
         body: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Revoke (delete) a pending invitation.
     Revoke {
+        /// The invitation id from `th api members invitations`.
         invitation_id: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Resend the email for a pending invitation.
     Resend {
+        /// The invitation id from `th api members invitations`.
         invitation_id: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Accept an invitation on the invitee's behalf.
     Accept {
+        /// The invitation id from `th api members invitations`.
         invitation_id: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Reject an invitation on the invitee's behalf.
     Reject {
+        /// The invitation id from `th api members invitations`.
         invitation_id: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
 }
