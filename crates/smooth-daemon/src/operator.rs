@@ -4,8 +4,15 @@
 //! Instead of the daemon's bespoke `/ws`, the daemon hosts the **operator's
 //! local flavor**: the canonical schema-driven WS protocol, so the official
 //! widget and the polyglot SDK clients work natively. Lean build (no cloud
-//! adapters — in-memory storage + backplane), gated by an auto-provisioned
-//! local token (stops stray local processes connecting).
+//! adapters — in-memory storage + backplane).
+//!
+//! **Auth caveat (verified by e2e):** the operator's `/ws` **degrades a
+//! missing/invalid token to an *anonymous* connection rather than rejecting it**
+//! (`resolve_ws_access`), so the installed [`LocalTokenVerifier`] does NOT gate
+//! connections — it only scopes ACL'd knowledge, which is moot for the
+//! single-org local flavor. **The real gate today is the loopback bind.** Gating
+//! stray local processes by token needs a strict-auth mode in the operator
+//! (reject on invalid token); tracked separately.
 //!
 //! This is additive: it runs alongside the bespoke `serve_persistent` path
 //! while the embed is validated; the bespoke surface retires once parity lands.
@@ -54,6 +61,15 @@ impl ToolProvider for SandboxedToolProvider {
     async fn tools_for(&self, _ctx: &ToolProviderContext) -> Vec<Arc<dyn Tool>> {
         smooth_tools::default_tools_with_proxy(self.workspace.clone(), self.proxy.clone())
     }
+}
+
+/// The local flavor's tool provider — the daemon's kernel-sandboxed tool set
+/// (workspace-confined fs/grep + an OS-sandboxed `bash` routed through `proxy`).
+/// Exposed so an integration/e2e test can install it on a `LocalServer` exactly
+/// the way [`serve_local_flavor`] does.
+#[must_use]
+pub fn local_tool_provider(workspace: PathBuf, proxy: Option<String>) -> Arc<dyn ToolProvider> {
+    Arc::new(SandboxedToolProvider { workspace, proxy })
 }
 
 /// The workspace the local flavor's filesystem + shell tools are confined to:
@@ -135,10 +151,7 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         egress = egress_proxy.as_deref().unwrap_or("unrestricted"),
         "local-flavor sandboxed tools wired (per-turn via ToolProvider)",
     );
-    let provider = Arc::new(SandboxedToolProvider {
-        workspace,
-        proxy: egress_proxy,
-    });
+    let provider = local_tool_provider(workspace, egress_proxy);
     let server = LocalServer::builder()
         .addr(addr)
         .auth(Arc::new(LocalTokenVerifier::new(token.clone())))

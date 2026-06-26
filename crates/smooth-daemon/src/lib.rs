@@ -55,7 +55,7 @@ pub use coordinator::{SessionRunCoordinator, StartError};
 pub use event::{DaemonEvent, EventKind, EventStore, InMemoryEventLog, Seq};
 pub use hook::PermissionHook;
 pub use messages::{InMemoryMessageStore, MessageStore, StoredMessage};
-pub use operator::serve_local_flavor;
+pub use operator::{local_tool_provider, serve_local_flavor};
 pub use permission::{Decision, PermissionEngine, PermissionMode};
 pub use runner::{run_task, TaskSpec};
 pub use schedule::{Schedule, ScheduleKind};

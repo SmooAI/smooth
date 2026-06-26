@@ -61,6 +61,7 @@ dirs-next.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 # Real end-to-end WebSocket smoke tests against the daemon's axum server.
 tokio-tungstenite.workspace = true
+futures-util.workspace = true
 # Temp DBs for the SQLite persistence tests.
 tempfile.workspace = true
 # `ServiceExt::oneshot` for router-level auth-middleware tests.
