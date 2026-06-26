@@ -43,16 +43,20 @@ pub enum Cmd {
         /// Don't upload — just print the file list + computed paths.
         #[arg(long)]
         dry_run: bool,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
     /// List sourcemaps registered for a (release, environment).
     SourcemapsList {
+        /// Release identifier to list sourcemaps for (matches `service.version`).
         #[arg(long)]
         release: String,
+        /// Deployment environment (`production`, `staging`, `development`).
         #[arg(long)]
         environment: String,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
 }

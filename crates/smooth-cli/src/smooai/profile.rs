@@ -10,7 +10,9 @@ use super::{print_json, read_body, require_authed};
 pub enum Cmd {
     /// Show the logged-in user's profile.
     Show,
+    /// Update the logged-in user's profile from a JSON body.
     Update {
+        /// JSON body (file path, or `-` for stdin) with the profile fields to patch.
         body: String,
     },
     /// List pending org-member invitations addressed to this user.
