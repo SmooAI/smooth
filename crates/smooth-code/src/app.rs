@@ -1013,24 +1013,18 @@ fn handle_normal_mode(key: event::KeyEvent, state: &mut AppState) {
 
 /// Run startup health checks and return the status plus any warning messages.
 ///
-/// Checks:
-/// 1. Big Smooth API reachability (`http://localhost:4400/health`)
-/// 2. LLM providers config (`~/.smooth/providers.json`)
-/// 3. Database existence (`~/.smooth/smooth.db`)
+/// Checks (local only — the operator backend starts lazily, so it's not probed):
+/// 1. LLM providers config (`~/.smooth/providers.json`)
+/// 2. Database existence (`~/.smooth/smooth.db`)
 async fn run_startup_health_checks() -> (HealthStatus, Vec<String>) {
     let mut warnings: Vec<String> = Vec::new();
 
-    // 1. Check Big Smooth API
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(2)).build().ok();
+    // No backend probe at startup: `th code` talks to the operator (:8787),
+    // which OperatorClient starts lazily on the first message (EPIC th-c89c2a).
+    // A startup health check would always warn "not running" and is pure noise;
+    // a real connection failure surfaces at turn time.
 
-    if let Some(client) = &client {
-        match client.get("http://localhost:4400/health").send().await {
-            Ok(r) if r.status().is_success() => {}
-            _ => warnings.push("Big Smooth API not running. Starting...".into()),
-        }
-    }
-
-    // 2. Check providers
+    // Check providers
     let providers_path = dirs_next::home_dir().map(|h| h.join(".smooth/providers.json"));
     if providers_path.as_ref().is_none_or(|p| !p.exists()) {
         warnings.push("No LLM providers configured. Run: /model to select one, or th auth login <provider>".into());
