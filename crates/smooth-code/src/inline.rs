@@ -58,15 +58,23 @@ pub fn message_lines_with_verbose(msg: &ChatMessage, verbose: bool) -> Vec<Line<
     // labels stay flat-styled since they're not brand surfaces.
     match msg.role {
         ChatRole::User => {
-            lines.push(Line::from(Span::styled("You:", theme::user_label())));
+            lines.push(Line::from(vec![
+                Span::styled(format!("{} ", theme::GLYPH_USER), theme::user_label()),
+                Span::styled("You", theme::user_label()),
+            ]));
         }
         ChatRole::Assistant => {
-            let mut spans: Vec<Span<'static>> = theme::smooth_wordmark();
-            spans.push(Span::styled(":", theme::assistant_label()));
+            // The cool spark, then the brand wordmark — the agent is the one
+            // place "Smooth" gets to read like the logo.
+            let mut spans: Vec<Span<'static>> = vec![theme::assistant_glyph(), Span::raw(" ")];
+            spans.extend(theme::smooth_wordmark());
             lines.push(Line::from(spans));
         }
         ChatRole::System => {
-            lines.push(Line::from(Span::styled("System:", theme::muted())));
+            lines.push(Line::from(vec![
+                Span::styled(format!("{} ", theme::GLYPH_SYSTEM), theme::muted()),
+                Span::styled("System", theme::muted()),
+            ]));
         }
     }
 
@@ -134,7 +142,7 @@ pub fn message_lines_with_verbose(msg: &ChatMessage, verbose: bool) -> Vec<Line<
     };
     if msg.streaming && !msg.content.is_empty() {
         if let Some(last) = content_lines.last_mut() {
-            last.spans.push(Span::styled("█", theme::assistant_label()));
+            last.spans.push(Span::styled(theme::GLYPH_CURSOR, theme::assistant_label()));
         }
     }
 
@@ -148,10 +156,10 @@ pub fn message_lines_with_verbose(msg: &ChatMessage, verbose: bool) -> Vec<Line<
     // its post-tool answer.
     for tc in &msg.tool_calls {
         let (icon, icon_style) = match tc.status {
-            ToolStatus::Pending => ("⏳", theme::muted()),
-            ToolStatus::Running => ("⚙", theme::user_label()),
-            ToolStatus::Done => ("✓", theme::success()),
-            ToolStatus::Error => ("✗", theme::error()),
+            ToolStatus::Pending => (theme::GLYPH_SYSTEM, theme::muted()),
+            ToolStatus::Running => (theme::GLYPH_TOOL, theme::user_label()),
+            ToolStatus::Done => (theme::GLYPH_OK, theme::success()),
+            ToolStatus::Error => (theme::GLYPH_ERR, theme::error()),
         };
         #[allow(clippy::cast_precision_loss)]
         let duration_str = tc.duration_ms.map_or_else(String::new, |ms| {

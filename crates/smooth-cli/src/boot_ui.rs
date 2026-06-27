@@ -66,6 +66,7 @@ impl BootIndicator {
         // the first spinner.
         println!();
         println!("  {} {} {}", "✻".cyan().bold(), gradient::smooth(), "booting".bold());
+        println!("  {}", gradient::flow_rule(32, '─'));
         Self { mp: MultiProgress::new() }
     }
 

@@ -272,6 +272,70 @@ fn lerp_u8(a: u8, b: u8, t: f64) -> u8 {
     result.round().clamp(0.0, 255.0) as u8
 }
 
+// ── Flow signature + glyph vocabulary (the glow-up) ──────────────
+//
+// "Smooth" is a color that flows warm → cool. That flow is the brand's
+// signature; the chrome here makes it literal.
+
+/// The four brand stops, warm → cool: orange → pink → teal → blue — the
+/// wordmark's colors in logo order.
+const FLOW_STOPS: [(u8, u8, u8); 4] = [(0xf4, 0x9f, 0x0a), (0xff, 0x6b, 0x6c), (0x00, 0xa6, 0xa6), (0x12, 0x38, 0xdd)];
+
+/// Interpolate the full warm→cool brand gradient at `t` ∈ [0,1] (three even
+/// segments across the four [`FLOW_STOPS`]).
+#[must_use]
+pub fn flow_color(t: f64) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    let segs = (FLOW_STOPS.len() - 1) as f64;
+    let scaled = t * segs;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let i = (scaled.floor() as usize).min(FLOW_STOPS.len() - 2);
+    let local = scaled - i as f64;
+    let (a, b) = (FLOW_STOPS[i], FLOW_STOPS[i + 1]);
+    Color::Rgb(lerp_u8(a.0, b.0, local), lerp_u8(a.1, b.1, local), lerp_u8(a.2, b.2, local))
+}
+
+/// **The signature chrome.** A `width`-cell horizontal rule whose every cell
+/// steps along the full Smooth gradient (warm→cool) — the brand flowing across
+/// the divider. Reserve it for the header underline so it reads as special.
+/// `ch` is the rule glyph (e.g. `'─'`).
+#[must_use]
+pub fn flow_rule(width: usize, ch: char) -> Vec<Span<'static>> {
+    (0..width)
+        .map(|cell| {
+            let t = if width <= 1 { 0.0 } else { cell as f64 / (width - 1) as f64 };
+            Span::styled(ch.to_string(), Style::default().fg(flow_color(t)))
+        })
+        .collect()
+}
+
+// ── Glyph vocabulary — one curated set, used everywhere ──────────
+
+/// Prompt chevron — the user's turn (warm accent).
+pub const GLYPH_USER: &str = "❯";
+/// The spark — the agent's turn (cool accent).
+pub const GLYPH_ASSISTANT: &str = "✦";
+/// A tool invocation (mist).
+pub const GLYPH_TOOL: &str = "▸";
+/// A tool/step succeeded (cool).
+pub const GLYPH_OK: &str = "✓";
+/// A tool/step failed or was blocked (warm-end / pink).
+pub const GLYPH_ERR: &str = "✗";
+/// A system / meta line (mist).
+pub const GLYPH_SYSTEM: &str = "·";
+/// The streaming-output cursor.
+pub const GLYPH_CURSOR: &str = "▌";
+
+/// The agent label glyph + its cool accent, ready to drop into a line.
+pub fn assistant_glyph() -> Span<'static> {
+    Span::styled(GLYPH_ASSISTANT, assistant_label())
+}
+
+/// The user prompt glyph + its warm accent.
+pub fn user_glyph() -> Span<'static> {
+    Span::styled(GLYPH_USER, user_label())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,6 +369,21 @@ mod tests {
     fn test_branded_title() {
         let spans = branded_title();
         assert_eq!(spans.len(), 7); // t, h, " ", s, m, o, o
+    }
+
+    #[test]
+    fn flow_color_runs_warm_to_cool() {
+        assert_eq!(flow_color(0.0), Color::Rgb(0xf4, 0x9f, 0x0a)); // warm orange
+        assert_eq!(flow_color(1.0), Color::Rgb(0x12, 0x38, 0xdd)); // cool blue
+                                                                   // The midpoint sits in the pink→teal segment (a blend, not a stop).
+        let Color::Rgb(r, _, b) = flow_color(0.5) else { panic!("rgb") };
+        assert!(r < 0xff && b > 0x00, "midpoint blends warm→cool: {r},{b}");
+    }
+
+    #[test]
+    fn flow_rule_has_one_span_per_cell() {
+        assert_eq!(flow_rule(40, '─').len(), 40);
+        assert!(flow_rule(0, '─').is_empty());
     }
 
     #[test]

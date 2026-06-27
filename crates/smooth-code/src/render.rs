@@ -299,14 +299,17 @@ fn render_chat(frame: &mut Frame, state: &AppState, area: Rect) {
     }
 
     for msg in &state.messages {
-        let (label, label_style) = match msg.role {
-            ChatRole::User => ("You", theme::user_label()),
-            ChatRole::Assistant => ("Smooth", theme::assistant_label()),
-            ChatRole::System => ("System", theme::muted()),
+        let (glyph, label, label_style) = match msg.role {
+            ChatRole::User => (theme::GLYPH_USER, "You", theme::user_label()),
+            ChatRole::Assistant => (theme::GLYPH_ASSISTANT, "Smooth", theme::assistant_label()),
+            ChatRole::System => (theme::GLYPH_SYSTEM, "System", theme::muted()),
         };
 
-        // Role label line
-        lines.push(Line::from(Span::styled(format!("{label}:"), label_style)));
+        // Role label line — the curated role glyph + name in the role's accent.
+        lines.push(Line::from(vec![
+            Span::styled(format!("{glyph} "), label_style),
+            Span::styled(label.to_string(), label_style),
+        ]));
 
         // Content lines. Assistant content is markdown — bold, italic,
         // inline code, fenced code, headings, lists. User and system
@@ -327,7 +330,7 @@ fn render_chat(frame: &mut Frame, state: &AppState, area: Rect) {
             // arriving. Owned spans only — append to the last line in
             // place.
             if let Some(last) = content_lines.last_mut() {
-                last.spans.push(Span::styled("█", theme::assistant_label()));
+                last.spans.push(Span::styled(theme::GLYPH_CURSOR, theme::assistant_label()));
             }
         }
         lines.append(&mut content_lines);
@@ -335,10 +338,10 @@ fn render_chat(frame: &mut Frame, state: &AppState, area: Rect) {
         // Tool call blocks (only rendered for assistant messages with tool calls)
         for tc in &msg.tool_calls {
             let (icon, icon_style) = match tc.status {
-                ToolStatus::Pending => ("⏳", theme::muted()),
-                ToolStatus::Running => ("⚙", theme::user_label()),
-                ToolStatus::Done => ("✓", theme::success()),
-                ToolStatus::Error => ("✗", theme::error()),
+                ToolStatus::Pending => (theme::GLYPH_SYSTEM, theme::muted()),
+                ToolStatus::Running => (theme::GLYPH_TOOL, theme::user_label()),
+                ToolStatus::Done => (theme::GLYPH_OK, theme::success()),
+                ToolStatus::Error => (theme::GLYPH_ERR, theme::error()),
             };
 
             #[allow(clippy::cast_precision_loss)]
