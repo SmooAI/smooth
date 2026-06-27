@@ -588,28 +588,25 @@ fn render_status(frame: &mut Frame, state: &AppState, area: Rect) {
         })
         .unwrap_or_default();
 
-    // Display the model the runner is *actually* using rather than
-    // the stale `state.model_name` default ("claude-sonnet-4"). When
-    // a turn is in flight the runner emits PhaseStart with both the
-    // routing alias (e.g. "smooth-reasoning") and the resolved
-    // upstream model (e.g. "claude-opus-4-5"); show alias plus
-    // upstream when known. When idle we don't have the upstream
-    // name yet, so we synthesize the alias from the active role's
-    // slot ("smooth-{slot lowercase}") which matches the convention
-    // in `~/.smooth/providers.json`.
-    let model_label = if let Some(alias) = state.current_phase_alias.as_deref().filter(|s| !s.is_empty()) {
-        match state.current_phase_upstream.as_deref() {
-            Some(upstream) if !upstream.is_empty() => format!("{alias} → {upstream}"),
-            _ => alias.to_string(),
-        }
-    } else {
-        // Idle: derive from the active role's slot. Fall back to the
-        // role name if we can't resolve a slot (unknown role).
-        smooth_cast::cast::builtin()
-            .get(&state.agent_name)
-            .map(|role| format!("smooth-{:?}", role.slot).to_ascii_lowercase())
-            .unwrap_or_else(|| state.agent_name.clone())
-    };
+    // Show the concrete model — never a `smooth-*` slot alias (SMOODEV-1793).
+    // During a turn the runner reports the resolved upstream (e.g.
+    // `claude-opus-4-5`); show it verbatim. Idle, the operator flavor uses one
+    // configured model (`SMOOTH_AGENT_MODEL`, default `claude-haiku-4-5`) and
+    // ignores per-turn overrides, so we surface that — not the old role-slot
+    // alias. (The operator doesn't yet report its model on session-create; see
+    // th-c89c2a follow-up. Until it does, env + the documented default is the
+    // accurate answer.)
+    let model_label = state
+        .current_phase_upstream
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| {
+            std::env::var("SMOOTH_AGENT_MODEL")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "claude-haiku-4-5".to_string())
+        });
 
     // Colored segments: agent name warm, model cool, everything else mist,
     // separated by a dim middot. Cleaner + on-brand vs the old flat pipes.
