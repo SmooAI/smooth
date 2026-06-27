@@ -272,14 +272,11 @@ pub async fn run_with_session(
     // Add welcome / resume message. For fresh sessions this is just
     // the "type a message" hint; for resumed sessions it announces
     // which session is back.
-    if resume.is_none() {
-        let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
-        s.add_message(ChatMessage::system("Type a message to get started. /help for commands."));
-    } else {
-        let title_display = resume
-            .as_ref()
-            .and_then(|s| s.title.clone())
-            .unwrap_or_else(|| resume.as_ref().map(|s| s.id.clone()).unwrap_or_default());
+    // Fresh sessions need no hint message — the welcome banner already
+    // invites ("Type a message to begin"). Resumed sessions announce
+    // which session is back.
+    if let Some(resumed) = resume.as_ref() {
+        let title_display = resumed.title.clone().unwrap_or_else(|| resumed.id.clone());
         let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
         s.add_message(ChatMessage::system(format!("Resumed session: {title_display}")));
     }

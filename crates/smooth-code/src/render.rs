@@ -250,10 +250,20 @@ fn welcome_banner_into(lines: &mut Vec<Line<'static>>) {
         lines.push(Line::from(spans).alignment(Alignment::Center));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled("AI Agent Orchestration Platform", theme::muted())).alignment(Alignment::Center));
-    lines.push(Line::from(Span::styled("smoo.ai", Style::default().fg(theme::SMOO_GRAY_500))).alignment(Alignment::Center));
+    // The signature flow rule under the wordmark ties the hero to the
+    // chrome; the tagline says plainly what this is (no SaaS filler).
+    lines.push(Line::from(theme::flow_rule(46, '─')).alignment(Alignment::Center));
+    lines.push(Line::from(Span::styled("an always-on coding agent in your terminal", theme::muted())).alignment(Alignment::Center));
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled("Type a message to get started. /help for commands.", theme::muted())).alignment(Alignment::Center));
+    lines.push(
+        Line::from(vec![
+            Span::styled("Type a message to begin", theme::muted()),
+            Span::styled("  ·  ", Style::default().fg(theme::SMOO_GRAY_700)),
+            Span::styled("/help", theme::user_label()),
+            Span::styled(" for commands", theme::muted()),
+        ])
+        .alignment(Alignment::Center),
+    );
     lines.push(Line::from(""));
 }
 
