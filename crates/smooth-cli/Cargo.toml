@@ -11,6 +11,14 @@ description = "Smoo AI CLI — agent orchestration, config management, and platf
 name = "th"
 path = "src/main.rs"
 
+[features]
+# `admin` gates the `th admin` superadmin/cross-org command tree. It is
+# NOT in `default`, so the public release/brew binary excludes it. Local
+# and internal builds opt in via `cargo install … --features admin`
+# (see the root package.json `install:th` / `install:th:full` scripts).
+default = []
+admin = []
+
 [dependencies]
 smooth-bench.workspace = true
 smooth-bigsmooth.workspace = true
