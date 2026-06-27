@@ -513,26 +513,37 @@ fn render_permission_prompt_into(lines: &mut Vec<Line<'static>>, prompt: &crate:
 
 /// Render the text input area.
 fn render_input(frame: &mut Frame, state: &AppState, area: Rect) {
-    // Orange-bold "▶ Message" title + orange border so it's the
-    // obvious place to type. Stays orange even when the chat panel
-    // is focused — there's only one thing to do in this surface
-    // (type) and we want it findable at a glance.
-    let title_line = Line::from(vec![Span::styled(" ▶ ", theme::title()), Span::styled("Message ", theme::title())]);
-    let block = Block::default()
-        .title(title_line)
-        .borders(Borders::ALL)
-        .border_style(theme::input_border(state.mode));
+    // No box. The signature flow rule is the top edge; below it a warm
+    // ❯ prompt. The gradient divider is the brand mark that's always on
+    // screen — it reads as "smooth" every time you go to type.
+    let rule = Line::from(theme::flow_rule(usize::from(area.width), '─'));
+    frame.render_widget(
+        Paragraph::new(rule),
+        Rect {
+            height: 1.min(area.height),
+            ..area
+        },
+    );
 
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let prompt_style = match state.mode {
+        crate::state::Mode::Input => theme::user_label(), // warm + bold when typing
+        crate::state::Mode::Normal => theme::muted(),
+    };
+    let prompt_rect = Rect {
+        y: area.y.saturating_add(1),
+        height: area.height.saturating_sub(1),
+        ..area
+    };
+    let input_line = Line::from(vec![
+        Span::styled(format!("{} ", theme::GLYPH_USER), prompt_style),
+        Span::styled(state.input.clone(), theme::input_style()),
+    ]);
+    frame.render_widget(Paragraph::new(input_line), prompt_rect);
 
-    let input_text = Paragraph::new(state.input.as_str()).style(theme::input_style());
-    frame.render_widget(input_text, inner);
-
-    // Position cursor
-    let cursor_x = inner.x + u16::try_from(state.input_cursor).unwrap_or(0);
-    let cursor_y = inner.y;
-    if cursor_x < inner.x + inner.width {
+    // Cursor sits just past the "❯ " prefix (2 columns).
+    let cursor_x = area.x + 2 + u16::try_from(state.input_cursor).unwrap_or(0);
+    let cursor_y = area.y.saturating_add(1);
+    if cursor_x < area.x + area.width {
         frame.set_cursor_position((cursor_x, cursor_y));
     }
 }
@@ -590,20 +601,31 @@ fn render_status(frame: &mut Frame, state: &AppState, area: Rect) {
             .unwrap_or_else(|| state.agent_name.clone())
     };
 
-    let status_left = format!(
-        "{phase_prefix} {branch_indicator}agent: {} | {} | tokens: {} | spend: {} | ",
-        state.agent_name,
-        model_label,
-        state.total_tokens,
-        format_spend(state.total_cost_usd),
-    );
-    let status_right = " | Ctrl+C quit ";
-
-    let line = Line::from(vec![
-        Span::styled(status_left, theme::status_style()),
-        Span::styled(health_dot, health_style),
-        Span::styled(status_right, theme::status_style()),
-    ]);
+    // Colored segments: agent name warm, model cool, everything else mist,
+    // separated by a dim middot. Cleaner + on-brand vs the old flat pipes.
+    let dot = || Span::styled(" · ", theme::muted());
+    let mut spans: Vec<Span> = vec![Span::raw(" ")];
+    let phase_prefix = phase_prefix.trim();
+    if !phase_prefix.is_empty() {
+        spans.push(Span::styled(phase_prefix.trim_end_matches('|').trim().to_string(), theme::assistant_label()));
+        spans.push(dot());
+    }
+    let branch = branch_indicator.trim_end_matches("| ").trim();
+    if !branch.is_empty() {
+        spans.push(Span::styled(branch.to_string(), theme::muted()));
+        spans.push(dot());
+    }
+    spans.push(Span::styled(state.agent_name.clone(), theme::user_label())); // warm
+    spans.push(dot());
+    spans.push(Span::styled(model_label, theme::assistant_label())); // cool
+    spans.push(dot());
+    spans.push(Span::styled(format!("{} tok", state.total_tokens), theme::muted()));
+    spans.push(dot());
+    spans.push(Span::styled(format_spend(state.total_cost_usd), theme::muted()));
+    spans.push(dot());
+    spans.push(Span::styled(health_dot, health_style));
+    spans.push(Span::styled("  ⌃c quit ", theme::muted()));
+    let line = Line::from(spans);
 
     let paragraph = Paragraph::new(line).alignment(Alignment::Left);
 

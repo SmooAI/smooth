@@ -44,7 +44,14 @@ pub fn map_event(v: &Value) -> Option<ServerEvent> {
             let state = v.pointer("/data/state")?;
             if let Some(tc) = state.get("rawResponse").and_then(|r| r.get("toolCall")) {
                 let tool_name = tc.get("name").and_then(Value::as_str).unwrap_or("").to_string();
-                let arguments = tc.get("arguments").map_or_else(String::new, ToString::to_string);
+                // The runner sends `arguments` as a JSON *string* — pass its
+                // inner content straight through (don't re-stringify, which
+                // would double-encode it into escaped `{\"command\":…}` litter).
+                let arguments = match tc.get("arguments") {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(other) => other.to_string(),
+                    None => String::new(),
+                };
                 return Some(ServerEvent::ToolCallStart { task_id, tool_name, arguments });
             }
             if let Some(tr) = state.get("toolResult") {
