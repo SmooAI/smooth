@@ -27,6 +27,7 @@
         "install:th": "pnpm build:web && pnpm build:runner && pnpm build:smooth-dolt:if-stale && pnpm install:smooth-dolt && cargo install --path crates/smooth-cli --features admin --force && cargo install --path crates/smooth-operative --force",
         "install:th:full": "pnpm build:web && pnpm build:runner && pnpm build:smooth-dolt && pnpm install:smooth-dolt && cargo install --path crates/smooth-cli --features admin --force && cargo install --path crates/smooth-operative --force",
         "install:th:brew": "brew upgrade SmooAI/tools/th || brew install SmooAI/tools/th",
+        "install:skills": "bash scripts/install-skills.sh",
         "dev:service": "pnpm install:th && th service restart",
         "dev:service:install": "pnpm install:th && th service install && th service start",
         "version:sync": "node scripts/sync-versions.mjs",
