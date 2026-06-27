@@ -7,11 +7,48 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::dolt_server::SmoothDoltServer;
+
+/// Default wallclock bound on a remote sync (`smooth-dolt push` /
+/// `pull`). The Dolt remote sync shells out to git to move
+/// `refs/dolt/data`; that git child holds the noms `LOCK` for the whole
+/// transfer. If the network to the remote stalls, the lock is held
+/// indefinitely and EVERY other writer of this store gets `Error 1105:
+/// cannot update manifest: database is read only` (reads still work).
+/// Bounding the sync means a network stall can NEVER wedge local writes
+/// — on timeout we kill the child, the OS releases the lock, and the
+/// caller sees a retryable "sync timed out" error instead of a wedge.
+///
+/// Override with `SMOOTH_DOLT_SYNC_TIMEOUT_SECS`. A value of `0`
+/// disables the bound (restores the old unbounded behavior) for callers
+/// that genuinely want to block on a slow-but-progressing transfer.
+const DEFAULT_SYNC_TIMEOUT_SECS: u64 = 30;
+
+/// Resolve the remote-sync timeout from the environment, falling back to
+/// [`DEFAULT_SYNC_TIMEOUT_SECS`]. `None` means "no bound" (env set to
+/// `0` or a value that doesn't parse as a positive integer where the
+/// caller explicitly passed `0`).
+fn sync_timeout() -> Option<Duration> {
+    std::env::var("SMOOTH_DOLT_SYNC_TIMEOUT_SECS").map_or_else(|_| Some(Duration::from_secs(DEFAULT_SYNC_TIMEOUT_SECS)), |raw| parse_sync_timeout(&raw))
+}
+
+/// Pure parser for the `SMOOTH_DOLT_SYNC_TIMEOUT_SECS` value. Factored
+/// out so the env-parsing logic is unit-testable without touching real
+/// process env. `0` → `None` (unbounded). A non-numeric / negative
+/// value → fall back to the default bound (fail safe: we never silently
+/// drop the protection because someone typo'd the env var).
+fn parse_sync_timeout(raw: &str) -> Option<Duration> {
+    match raw.trim().parse::<u64>() {
+        Ok(0) => None,
+        Ok(secs) => Some(Duration::from_secs(secs)),
+        Err(_) => Some(Duration::from_secs(DEFAULT_SYNC_TIMEOUT_SECS)),
+    }
+}
 
 /// Flags for [`SmoothDolt::push_with`].
 ///
@@ -266,7 +303,9 @@ impl SmoothDolt {
             args.push("origin");
             args.push("main");
         }
-        self.run_cli(&args)
+        // Bound the remote sync so a network stall can't hold the noms
+        // LOCK forever and wedge local writes into read-only.
+        self.run_cli_timed(&args, sync_timeout())
     }
 
     /// Pull from the configured Dolt remote.
@@ -274,7 +313,8 @@ impl SmoothDolt {
         if let Some(server) = &self.server {
             return Self::run_with_self_heal(server, |s| s.with_client(|c| c.dolt("pull")));
         }
-        self.run_cli(&["pull", &self.data_dir_str()])
+        // Bounded like push — a stalled pull holds the same LOCK.
+        self.run_cli_timed(&["pull", &self.data_dir_str()], sync_timeout())
     }
 
     /// Add a Dolt remote. CLI-only; the server protocol doesn't expose
@@ -394,6 +434,176 @@ impl SmoothDolt {
             );
         }
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    /// Run a smooth-dolt command (CLI mode) with a wallclock bound,
+    /// killing the child if it exceeds `timeout`. Used for remote-sync
+    /// commands (`push` / `pull`) where a network stall would otherwise
+    /// hold the noms `LOCK` forever and wedge every other writer into
+    /// read-only (Pearl: dolt-sync-timeout-selfheal).
+    ///
+    /// `timeout = None` means "no bound" — falls straight through to the
+    /// ordinary blocking [`Self::run_cli_once`].
+    ///
+    /// On timeout the child is SIGKILLed (it's a stuck git transfer; a
+    /// graceful term would just have us wait longer for a process that's
+    /// blocked on a dead socket), reaped to avoid a zombie, and a
+    /// **retryable** error is returned — see [`is_sync_timeout_err`].
+    /// Killing the child releases its hold on the noms LOCK, so local
+    /// writes recover immediately; the sync itself can be retried later.
+    fn run_cli_timed(&self, args: &[&str], timeout: Option<Duration>) -> Result<String> {
+        let Some(timeout) = timeout else {
+            return self.run_cli_once(args);
+        };
+
+        let mut child = Command::new(&self.bin)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("spawn smooth-dolt {}: {}", args.join(" "), self.bin.display()))?;
+
+        // Poll for completion up to `timeout`. A short poll interval keeps
+        // latency low for fast syncs while not busy-spinning.
+        let deadline = std::time::Instant::now() + timeout;
+        let poll = Duration::from_millis(50);
+        loop {
+            match child.try_wait().context("poll smooth-dolt child")? {
+                Some(_status) => {
+                    // Completed within the bound — collect output the same
+                    // way run_cli_once does.
+                    let output = child.wait_with_output().context("collect smooth-dolt output")?;
+                    if !output.status.success() {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        let stderr_clip: String = stderr.trim().chars().take(300).collect();
+                        anyhow::bail!(
+                            "smooth-dolt {} failed (exit {}): {}",
+                            args.first().unwrap_or(&""),
+                            output.status.code().unwrap_or(-1),
+                            if stderr_clip.is_empty() { "(no stderr)" } else { stderr_clip.as_str() }
+                        );
+                    }
+                    return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+                }
+                None => {
+                    if std::time::Instant::now() >= deadline {
+                        // Stalled. Kill the child to release the noms LOCK,
+                        // reap it, and surface a retryable timeout error.
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        anyhow::bail!(
+                            "smooth-dolt {} timed out after {}s (remote sync stalled; killed child to release lock — retryable)",
+                            args.first().unwrap_or(&""),
+                            timeout.as_secs()
+                        );
+                    }
+                    std::thread::sleep(poll);
+                }
+            }
+        }
+    }
+}
+
+/// Heuristic: a remote sync (`push`/`pull`) that we aborted on the
+/// wallclock bound.
+///
+/// Distinct from a transport or lock-wedge error because the remediation
+/// is "retry the sync later" — the local store is healthy (we killed the
+/// child precisely to keep it that way), so callers can treat the local
+/// write as durable and the sync as best-effort / deferrable rather than
+/// fatal.
+pub fn is_sync_timeout_err(e: &anyhow::Error) -> bool {
+    let s = format!("{e:#}").to_lowercase();
+    s.contains("timed out after") && s.contains("remote sync stalled")
+}
+
+#[cfg(test)]
+mod sync_timeout_tests {
+    use super::{is_sync_timeout_err, parse_sync_timeout};
+    use std::time::Duration;
+
+    #[test]
+    fn parse_default_when_unset_via_caller() {
+        // The env-read wrapper falls back to the default; here we test the
+        // pure parser's branches directly.
+        assert_eq!(parse_sync_timeout("30"), Some(Duration::from_secs(30)));
+        assert_eq!(parse_sync_timeout("  5 "), Some(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn parse_zero_disables_bound() {
+        assert_eq!(parse_sync_timeout("0"), None);
+    }
+
+    #[test]
+    fn parse_garbage_falls_back_to_default_not_unbounded() {
+        // Fail-safe: a typo must not silently drop the protection.
+        assert_eq!(parse_sync_timeout("banana"), Some(Duration::from_secs(30)));
+        assert_eq!(parse_sync_timeout("-5"), Some(Duration::from_secs(30)));
+        assert_eq!(parse_sync_timeout(""), Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn classifies_sync_timeout_error() {
+        let e = anyhow::anyhow!("smooth-dolt push timed out after 30s (remote sync stalled; killed child to release lock — retryable)");
+        assert!(is_sync_timeout_err(&e));
+    }
+
+    #[test]
+    fn does_not_classify_unrelated_timeouts() {
+        // A generic transport "timed out" is NOT a sync-timeout — it
+        // lacks the "remote sync stalled" marker.
+        assert!(!is_sync_timeout_err(&anyhow::anyhow!("read response: timed out")));
+        assert!(!is_sync_timeout_err(&anyhow::anyhow!("syntax error")));
+    }
+}
+
+#[cfg(test)]
+mod run_cli_timed_tests {
+    use super::SmoothDolt;
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    /// Build a SmoothDolt whose "binary" is `/bin/sh` so we can drive
+    /// arbitrary child behavior through the args. `data_dir` is unused by
+    /// these tests.
+    fn sh_handle() -> SmoothDolt {
+        SmoothDolt::with_bin(PathBuf::from("/bin/sh"), PathBuf::from("/tmp/unused"))
+    }
+
+    #[test]
+    fn fast_command_completes_within_bound() {
+        let h = sh_handle();
+        // `sh -c 'printf hi'` exits immediately with stdout "hi".
+        let out = h
+            .run_cli_timed(&["-c", "printf hi"], Some(Duration::from_secs(5)))
+            .expect("fast command should succeed");
+        assert_eq!(out, "hi");
+    }
+
+    #[test]
+    fn stalled_command_is_aborted_and_returns_retryable_error() {
+        let h = sh_handle();
+        let start = Instant::now();
+        // `sh -c 'sleep 30'` blocks far past the 1s bound — simulates a
+        // hung git transfer holding the lock.
+        let err = h
+            .run_cli_timed(&["-c", "sleep 30"], Some(Duration::from_secs(1)))
+            .expect_err("stalled command must time out");
+        let elapsed = start.elapsed();
+        // We should have aborted at ~1s, nowhere near the 30s sleep.
+        assert!(elapsed < Duration::from_secs(5), "aborted promptly, elapsed={elapsed:?}");
+        assert!(super::is_sync_timeout_err(&err), "error must be classified retryable: {err:#}");
+    }
+
+    #[test]
+    fn none_timeout_runs_unbounded_path() {
+        // With no bound, a fast command still completes normally (we don't
+        // exercise the unbounded-hang case for obvious reasons).
+        let h = sh_handle();
+        let out = h.run_cli_timed(&["-c", "printf ok"], None).expect("unbounded fast command");
+        assert_eq!(out, "ok");
     }
 }
 
@@ -558,26 +768,119 @@ fn is_lock_wedge_err(e: &anyhow::Error) -> bool {
     .any(|needle| s.contains(needle))
 }
 
-/// Auto-doctor — find `smooth-dolt serve` processes holding the LOCK
-/// file under `data_dir/.dolt/noms/LOCK` and kill them. Returns the
-/// number of orphan PIDs cleared (0 if none found, which is the
-/// normal happy-path case where the read-only error came from a
-/// different cause and we should propagate it).
+/// Decision for a single process found holding the noms LOCK. The
+/// classification is a PURE function of the holder's own command line
+/// and (when relevant) its parent's command line, so it's exhaustively
+/// unit-testable without spawning real processes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockHolderAction {
+    /// Holder is an orphaned `smooth-dolt serve` — clear it (original
+    /// Pearl th-49e37b behavior).
+    ClearOrphanServer,
+    /// Holder is a `git` (or `git-remote-*`) process whose PARENT is
+    /// `smooth-dolt` — a stalled dolt-sync child pinning the LOCK during
+    /// a hung remote push/pull. Clear it (Pearl: dolt-sync-timeout-
+    /// selfheal). This is the recovery safety net for a sync that
+    /// stalled before the wallclock timeout could kill it (e.g. the
+    /// sync ran in server mode, or in an older build without the bound).
+    ClearStalledSyncChild,
+    /// Anything else — a debugger, a backup tool, an unrelated git, an
+    /// editor. NEVER kill: refuse and propagate the original error.
+    Refuse,
+}
+
+/// Pure classifier: given the holder's command line and its parent's
+/// command line (both as raw `ps -o command=` output, may be empty if
+/// the lookup failed), decide what to do.
 ///
-/// Pearl th-49e37b. The shape of the bug we're fixing: an earlier
-/// `th up` spawned `smooth-dolt serve <data-dir> --socket <path>` as
-/// a child. The parent died (e.g. `th down`) but the serve child got
-/// reparented to init and the socket file got cleaned up, leaving the
-/// serve process running with no way to reach it. It still holds the
-/// noms LOCK file. `try_attach_handle` does `socket.exists()` →
-/// returns None (file gone) → `SmoothDolt::new` falls back to CLI
-/// mode → CLI `smooth-dolt exec` tries to grab the lock → fails with
-/// `Error 1105: cannot update manifest: database is read only`.
+/// Safety invariant — the ONLY things we ever clear:
+///   1. `smooth-dolt serve` (the holder itself), or
+///   2. a `git` holder whose PARENT command line names `smooth-dolt`.
 ///
-/// SIGTERM the orphan; the OS releases its file locks on death; the
-/// retry succeeds. Best-effort: any errors in the doctor itself (e.g.
-/// `lsof` not on PATH) silently return 0 so we fall through to the
-/// original read-only error rather than masking a real bug.
+/// A `git` whose parent is NOT smooth-dolt (e.g. the user's own
+/// `git push` in a shell, or a git invoked by an IDE) is REFUSED — we
+/// must not reach outside this store's own sync machinery. An unrelated
+/// non-git, non-serve holder is likewise refused.
+fn classify_lock_holder(holder_cmd: &str, parent_cmd: &str) -> LockHolderAction {
+    let holder = holder_cmd.to_lowercase();
+    let parent = parent_cmd.to_lowercase();
+
+    // Case 1: the original orphaned `smooth-dolt serve`.
+    if holder.contains("smooth-dolt") && holder.contains("serve") {
+        return LockHolderAction::ClearOrphanServer;
+    }
+
+    // Case 2: a stalled dolt-sync git child. The holder must be a git
+    // process AND its parent must be smooth-dolt. Both conditions are
+    // required — this is what keeps us from killing an unrelated git.
+    if holder_is_git(&holder) && parent.contains("smooth-dolt") {
+        return LockHolderAction::ClearStalledSyncChild;
+    }
+
+    LockHolderAction::Refuse
+}
+
+/// Does this command line look like a git remote-transfer process?
+/// Matches the `git` driver itself and the `git-remote-*` /
+/// `git-upload-pack` / `git-receive-pack` helpers Dolt's sync spawns.
+fn holder_is_git(cmd_lower: &str) -> bool {
+    // Match on a `git` token boundary so we don't false-match e.g.
+    // "digital" or a path component. Cheap heuristic: the basename or an
+    // arg starts with "git".
+    cmd_lower.split_whitespace().any(|tok| {
+        let base = tok.rsplit('/').next().unwrap_or(tok);
+        base == "git" || base.starts_with("git-remote") || base.starts_with("git-upload") || base.starts_with("git-receive")
+    })
+}
+
+/// Look up a PID's command line via `ps -p <pid> -o command=`. Returns
+/// an empty string on any failure (process gone, ps missing) — callers
+/// treat empty as "unknown", which classifies as Refuse (fail safe).
+fn ps_command(pid: u32) -> String {
+    Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Look up a PID's parent PID via `ps -p <pid> -o ppid=`. Returns `None`
+/// on any failure.
+fn ps_parent_pid(pid: u32) -> Option<u32> {
+    let out = Command::new("ps").args(["-p", &pid.to_string(), "-o", "ppid="]).output().ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse::<u32>().ok()
+}
+
+/// Auto-doctor — find processes holding the LOCK file under
+/// `data_dir/.dolt/noms/LOCK` and clear the ones that are safe to clear.
+/// Returns the number of PIDs cleared (0 if none found / none eligible,
+/// which is the normal happy-path case where the read-only error came
+/// from a different cause and we should propagate it).
+///
+/// Two clearable shapes (see [`classify_lock_holder`]):
+///
+/// 1. **Orphaned `smooth-dolt serve`** (Pearl th-49e37b): an earlier
+///    `th up` spawned `smooth-dolt serve <dir> --socket <path>`. The
+///    parent died but the serve child got reparented to init and the
+///    socket file got cleaned up, leaving the serve process holding the
+///    noms LOCK with no way to reach it. CLI calls then fall back to CLI
+///    mode and hit `Error 1105: cannot update manifest: database is read
+///    only`.
+///
+/// 2. **Stalled dolt-sync git child** (Pearl: dolt-sync-timeout-
+///    selfheal): a `smooth-dolt push`/`pull` shelled out to `git` to
+///    move `refs/dolt/data`; the network stalled; the git child still
+///    holds the noms LOCK. The wallclock timeout normally kills this,
+///    but this is the recovery net for paths the timeout doesn't cover
+///    (server-mode sync, older builds). We clear it ONLY when the git
+///    holder's parent is `smooth-dolt` — never an unrelated git.
+///
+/// Escalation: SIGTERM, brief wait, SIGKILL if still alive. The OS
+/// releases file locks on death; the retry succeeds. Best-effort: any
+/// errors in the doctor itself (e.g. `lsof`/`ps` not on PATH) silently
+/// return 0 so we fall through to the original read-only error rather
+/// than masking a real bug.
 fn auto_doctor_clear_orphan_server(data_dir: &Path) -> Result<u32> {
     let lock_path = data_dir.join("pearls").join(".dolt").join("noms").join("LOCK");
     if !lock_path.exists() {
@@ -609,32 +912,39 @@ fn auto_doctor_clear_orphan_server(data_dir: &Path) -> Result<u32> {
 
     let mut cleared = 0u32;
     for pid in pids {
-        // Verify the holder is actually `smooth-dolt serve` BEFORE
-        // killing — we don't want to accidentally kill a debugger or
-        // a backup tool that happened to open the file. `ps -p <pid>
-        // -o command=` prints the command line.
-        let ps_out = Command::new("ps").args(["-p", &pid.to_string(), "-o", "command="]).output();
-        let Ok(ps_out) = ps_out else {
-            continue;
+        let holder_cmd = ps_command(pid);
+        // Only look up the parent when the holder is a git process —
+        // saves a `ps` call on the common serve case and makes the
+        // intent explicit.
+        let parent_cmd = if holder_is_git(&holder_cmd.to_lowercase()) {
+            ps_parent_pid(pid).map(ps_command).unwrap_or_default()
+        } else {
+            String::new()
         };
-        let cmdline = String::from_utf8_lossy(&ps_out.stdout);
-        if !cmdline.contains("smooth-dolt") || !cmdline.contains("serve") {
-            tracing::warn!(
-                pid,
-                cmdline = %cmdline.trim(),
-                "auto_doctor: process holds the dolt LOCK file but is not `smooth-dolt serve` — refusing to kill"
-            );
-            continue;
-        }
 
-        // SIGTERM is the right escalation: gives the server's
-        // graceful-shutdown path a chance to fire if it's running,
-        // and releases file locks when the process dies. If we ever
-        // need a SIGKILL fallback (process truly stuck and ignoring
-        // SIGTERM), add a poll-then-escalate here.
-        tracing::warn!(pid, "auto_doctor: SIGTERM orphaned `smooth-dolt serve` holding noms LOCK");
-        let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
-        cleared += 1;
+        match classify_lock_holder(&holder_cmd, &parent_cmd) {
+            LockHolderAction::Refuse => {
+                tracing::warn!(
+                    pid,
+                    cmdline = %holder_cmd,
+                    "auto_doctor: process holds the dolt LOCK file but is neither an orphaned `smooth-dolt serve` nor a stalled smooth-dolt sync child — refusing to kill"
+                );
+            }
+            LockHolderAction::ClearOrphanServer => {
+                tracing::warn!(pid, "auto_doctor: clearing orphaned `smooth-dolt serve` holding noms LOCK");
+                kill_with_escalation(pid);
+                cleared += 1;
+            }
+            LockHolderAction::ClearStalledSyncChild => {
+                tracing::warn!(
+                    pid,
+                    cmdline = %holder_cmd,
+                    "auto_doctor: clearing stalled smooth-dolt sync child (git) holding noms LOCK"
+                );
+                kill_with_escalation(pid);
+                cleared += 1;
+            }
+        }
     }
 
     if cleared > 0 {
@@ -645,6 +955,104 @@ fn auto_doctor_clear_orphan_server(data_dir: &Path) -> Result<u32> {
     }
 
     Ok(cleared)
+}
+
+/// SIGTERM a PID, briefly wait, then SIGKILL if it's still alive.
+/// SIGTERM gives a `smooth-dolt serve` its graceful-shutdown path and a
+/// git child a chance to unwind; the SIGKILL fallback handles a process
+/// truly wedged on a dead socket (the stalled-sync case) that ignores
+/// SIGTERM. Either way the OS releases the file lock when the process
+/// finally dies.
+fn kill_with_escalation(pid: u32) {
+    let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+    // Poll briefly for the process to exit. `kill -0` succeeds while the
+    // process is alive (or a zombie we can still signal).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let alive = Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !alive {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            tracing::warn!(pid, "auto_doctor: process survived SIGTERM, escalating to SIGKILL");
+            let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).status();
+            return;
+        }
+    }
+}
+
+#[cfg(test)]
+mod classify_lock_holder_tests {
+    use super::{classify_lock_holder, holder_is_git, LockHolderAction};
+
+    #[test]
+    fn orphan_serve_is_cleared() {
+        assert_eq!(
+            classify_lock_holder("/usr/local/bin/smooth-dolt serve /repo/.smooth/dolt --socket /tmp/x.sock", ""),
+            LockHolderAction::ClearOrphanServer
+        );
+    }
+
+    #[test]
+    fn git_child_of_smooth_dolt_is_cleared() {
+        // The stalled-sync case: a git transfer whose parent is the
+        // smooth-dolt push process pinning the LOCK.
+        assert_eq!(
+            classify_lock_holder(
+                "git-remote-https origin https://github.com/SmooAI/smooth.git",
+                "smooth-dolt push /repo/.smooth/dolt"
+            ),
+            LockHolderAction::ClearStalledSyncChild
+        );
+        assert_eq!(
+            classify_lock_holder("/usr/bin/git push origin", "/usr/local/bin/smooth-dolt pull /repo/.smooth/dolt"),
+            LockHolderAction::ClearStalledSyncChild
+        );
+    }
+
+    #[test]
+    fn unrelated_git_is_refused() {
+        // SAFETY GUARD: a git whose parent is NOT smooth-dolt (the user's
+        // own shell, an IDE, a CI runner) must never be touched.
+        assert_eq!(classify_lock_holder("git push origin main", "/bin/zsh"), LockHolderAction::Refuse);
+        assert_eq!(classify_lock_holder("git fetch", "node /path/to/vscode"), LockHolderAction::Refuse);
+        // Even with an empty (unknown) parent — fail safe.
+        assert_eq!(classify_lock_holder("git push", ""), LockHolderAction::Refuse);
+    }
+
+    #[test]
+    fn unrelated_nongit_holder_is_refused() {
+        // A debugger / backup tool / editor that happened to open the
+        // LOCK file. Never kill.
+        assert_eq!(classify_lock_holder("/usr/bin/lldb", "smooth-dolt push"), LockHolderAction::Refuse);
+        assert_eq!(classify_lock_holder("vim LOCK", ""), LockHolderAction::Refuse);
+        assert_eq!(classify_lock_holder("rsync -a .dolt backup:/", "smooth-dolt"), LockHolderAction::Refuse);
+    }
+
+    #[test]
+    fn smooth_dolt_non_serve_holder_is_refused() {
+        // A `smooth-dolt push` itself (not `serve`, not a git child)
+        // holding the lock is its own legitimate writer — don't kill the
+        // sync process directly here; the wallclock timeout owns that.
+        assert_eq!(classify_lock_holder("smooth-dolt push /repo/.smooth/dolt", ""), LockHolderAction::Refuse);
+    }
+
+    #[test]
+    fn holder_is_git_token_boundary() {
+        assert!(holder_is_git("git push"));
+        assert!(holder_is_git("/usr/bin/git fetch"));
+        assert!(holder_is_git("git-remote-https origin url"));
+        assert!(holder_is_git("git-upload-pack /repo"));
+        // Must not false-match substrings.
+        assert!(!holder_is_git("digital-ocean-agent"));
+        assert!(!holder_is_git("/opt/legit/server"));
+        assert!(!holder_is_git("smooth-dolt serve"));
+    }
 }
 
 #[cfg(test)]
