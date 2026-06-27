@@ -58,15 +58,14 @@ pub async fn run_headless(
         anyhow::bail!("message must not be empty");
     }
 
-    let mut client = BigSmoothClient::new("http://localhost:4400");
-
-    match client.connect().await {
-        Ok(()) => run_headless_client(client, working_dir, message, model, budget, json_output, agent).await,
-        Err(e) => {
-            tracing::debug!(error = %e, "BigSmoothClient connection failed, falling back to SSE");
-            run_headless_sse(working_dir, message, model, budget, json_output, agent).await
-        }
-    }
+    // Talk to the operator's canonical WS protocol (`th daemon operator`, :8787).
+    let url = std::env::var("SMOOTH_URL").unwrap_or_else(|_| "http://localhost:8787".into());
+    let mut client = crate::operator_client::OperatorClient::new(&url);
+    client
+        .connect()
+        .await
+        .map_err(|e| anyhow::anyhow!("connect to the Smooth operator at {url}: {e}. Run: th daemon operator"))?;
+    run_headless_client(client, working_dir, message, model, budget, json_output, agent).await
 }
 
 /// Run smooth-code headless against a specific Big Smooth URL, returning
@@ -138,9 +137,9 @@ pub async fn run_headless_capture(
     })
 }
 
-/// Run headless via [`BigSmoothClient`].
+/// Run headless via the operator [`OperatorClient`](crate::operator_client::OperatorClient).
 async fn run_headless_client(
-    mut client: BigSmoothClient,
+    mut client: crate::operator_client::OperatorClient,
     working_dir: PathBuf,
     message: String,
     model: Option<String>,
@@ -292,6 +291,10 @@ fn strip_ansi_codes(s: &str) -> String {
 }
 
 /// Fallback: run headless via SSE (legacy `/api/tasks` endpoint).
+///
+/// Dead now that headless speaks the operator protocol; retained (with its
+/// tests) until the bespoke surface is removed wholesale. See th-c89c2a cleanup.
+#[allow(dead_code)]
 async fn run_headless_sse(
     working_dir: PathBuf,
     message: String,
@@ -365,6 +368,7 @@ async fn run_headless_sse(
 }
 
 /// Process a single SSE line, dispatching based on event type.
+#[allow(dead_code)]
 fn process_sse_line(line: &str, json_output: bool, content_buf: &mut String, tool_calls: &mut Vec<HeadlessToolCall>, cost: &mut f64) {
     // SSE format: "data: {...json...}"
     let data = if let Some(d) = line.strip_prefix("data: ") {

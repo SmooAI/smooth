@@ -1128,15 +1128,25 @@ async fn auto_name_session(user_prompt: &str) -> Option<String> {
 async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent>, agent: Option<String>, state: Arc<Mutex<AppState>>) -> anyhow::Result<()> {
     use std::collections::{HashMap, VecDeque};
 
-    use crate::client::{BigSmoothClient, ServerEvent};
+    use crate::client::ServerEvent;
+    use crate::operator_client::{remember_session, remembered_session, OperatorClient};
     use crate::state::{ChatRole, ToolCallState, ToolStatus};
 
-    let url = std::env::var("SMOOTH_URL").unwrap_or_else(|_| "http://localhost:4400".into());
-    let mut client = BigSmoothClient::new(&url);
+    // Talk to the operator's canonical WS protocol (`th daemon operator`, :8787),
+    // not the legacy bespoke `/ws` (:4400). Reuse the session across turns so the
+    // operator keeps multi-turn history server-side.
+    let url = std::env::var("SMOOTH_URL").unwrap_or_else(|_| "http://localhost:8787".into());
+    let mut client = OperatorClient::new(&url);
+    if let Some(sid) = remembered_session() {
+        client.set_session(sid);
+    }
     client
         .connect()
         .await
-        .map_err(|e| anyhow::anyhow!("Cannot connect to Big Smooth at {url}: {e}. Run: th up"))?;
+        .map_err(|e| anyhow::anyhow!("Cannot connect to the Smooth operator at {url}: {e}. Run: th daemon operator"))?;
+    if let Some(sid) = client.session_id() {
+        remember_session(sid);
+    }
 
     // Create the streaming assistant message synchronously so tool
     // calls that arrive before the main event loop has a chance to
