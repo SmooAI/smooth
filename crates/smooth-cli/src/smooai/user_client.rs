@@ -20,7 +20,14 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use smooai_client_shared::auth::storage::CredentialsStore;
 
-use crate::admin::client::api_url;
+/// `https://api.smoo.ai` by default; override with `SMOOAI_API_URL`.
+///
+/// Inlined here (rather than reused from the admin module) so this
+/// user-JWT client compiles in builds that exclude the `admin`
+/// feature. Both helpers read the same `SMOOAI_API_URL` env var.
+fn api_url() -> String {
+    std::env::var("SMOOAI_API_URL").unwrap_or_else(|_| "https://api.smoo.ai".to_string())
+}
 
 /// Authenticated client for user-bearer API calls.
 pub struct UserClient {

@@ -3,6 +3,7 @@
 //! Single binary for agent orchestration, config management, and platform tools.
 
 mod active_org;
+#[cfg(feature = "admin")]
 mod admin;
 mod auth;
 mod boot_ui;
@@ -122,6 +123,7 @@ enum Commands {
     /// Smoo AI superadmin operations against the /admin/* endpoints
     /// on api.smoo.ai. Requires a `th auth login` user session whose
     /// account has the requireSuperAdmin role (403 otherwise).
+    #[cfg(feature = "admin")]
     Admin {
         #[command(subcommand)]
         cmd: admin::AdminCommands,
@@ -1365,6 +1367,7 @@ async fn main() -> Result<()> {
         Some(Commands::Db { cmd }) => cmd_db(cmd),
         Some(Commands::Model { cmd }) => cmd_model(cmd).await,
         Some(Commands::Auth { cmd }) => auth::dispatch(cmd).await,
+        #[cfg(feature = "admin")]
         Some(Commands::Admin { cmd }) => admin::dispatch(cmd).await,
         Some(Commands::Api { cmd }) => match cmd {
             ApiCommands::Login { client_id, client_secret } => cmd_login(client_id, client_secret).await,
