@@ -7,7 +7,6 @@
 
 pub mod ansi;
 pub mod app;
-pub mod auto_mode;
 pub mod autocomplete;
 pub mod client;
 pub mod commands;
