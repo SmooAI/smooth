@@ -12,20 +12,16 @@ name = "th"
 path = "src/main.rs"
 
 [dependencies]
-smooth-bench.workspace = true
-smooth-bigsmooth.workspace = true
 # EPIC th-c89c2a: `th daemon …` is a passthrough launcher (src/daemon_launcher.rs)
-# that resolves/downloads + spawns the standalone `smooth-daemon` binary, so `th`
-# does NOT statically link the operator runtime (axum + engine + adapters +
-# widget) — keeping the official CLI lean and decoupled from the operator deps.
-smooth-bootstrap-bill = { workspace = true, default-features = false, features = ["server"] }
+# that spawns the standalone `smooth-daemon` binary; the bespoke :4400 microVM
+# surface (smooth-bigsmooth / -bootstrap-bill / -tunnel + the smooth-bench
+# harness) was deleted in the :4400 nuke.
 smooth-code.workspace = true
 smooth-diver.workspace = true
 smooth-pearls.workspace = true
 smooth-operator.workspace = true
 # skills discovery + the smooth cast roles (re-homed from the engine at 0.14.0)
 smooth-cast.workspace = true
-smooth-tunnel.workspace = true
 smooth-api-client.workspace = true
 # Pearl th-abc4e2: `th admin login` uses the Supabase OAuth flow
 # from client-shared. The `auth` feature pulls in the oauth + m2m +
