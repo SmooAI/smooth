@@ -58,44 +58,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start Smooth platform — defaults to sandboxed mode (Smooth
-    /// runs inside a microsandbox microVM). Use `th up direct` to
-    /// run on the host without a sandbox (only safe in a pre-trusted
-    /// environment).
-    Up {
-        /// Opt out of sandboxed mode. `th up direct` runs the cast
-        /// on the host with no microsandbox VM in front of it.
-        #[command(subcommand)]
-        mode: Option<UpMode>,
-        /// Skip starting Big Smooth (API + web UI)
-        #[arg(long)]
-        no_leader: bool,
-        /// Big Smooth API port
-        #[arg(long, default_value = "4400")]
-        port: u16,
-        /// Interface to bind Big Smooth on. Defaults to `127.0.0.1`
-        /// (loopback only) — any other value opens the API + dashboard
-        /// to that interface. The API has no authentication today, so
-        /// `0.0.0.0` exposes every route (dispatch agents, mint creds,
-        /// read pearls/sessions) to anyone on the network. Pearl
-        /// `th-6db839`.
-        #[arg(long, default_value = "127.0.0.1")]
-        bind: String,
-        /// Run in foreground (default: daemonize). Only honored in
-        /// direct mode — sandboxed mode is foreground-by-microVM.
-        #[arg(long)]
-        foreground: bool,
-        /// Max concurrent Smooth operatives (each is a microVM). Defaults
-        /// to 3. Can also be set via SMOOTH_SANDBOX_MAX_CONCURRENCY.
-        #[arg(long)]
-        max_operators: Option<usize>,
-        /// Skip the workflow's post-implementation TEST phase
-        /// (adversarial test augmentation). Benchmark runs want
-        /// this so added tests don't change the score. Equivalent
-        /// to `SMOOTH_WORKFLOW_SKIP_TEST=1`.
-        #[arg(long)]
-        skip_test: bool,
-    },
     /// Run / control the always-on Smooth daemon (EPIC th-c89c2a).
     ///
     /// A thin **passthrough** to the standalone `smooth-daemon` binary —
@@ -108,10 +70,6 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Stop Smooth platform
-    Down,
-    /// Show system health
-    Status,
     /// LLM provider credential management (Anthropic, Smoo AI Gateway,
     /// OpenRouter, OpenAI, …). Edits `~/.smooth/providers.json`.
     ///
@@ -163,58 +121,8 @@ enum Commands {
         #[command(subcommand)]
         cmd: config::Cmd,
     },
-    /// Run a pearl through a Smooth operative in a microVM — streams
-    /// agent events to stdout. With --keep-alive, the VM stays up
-    /// after the agent completes so you can poke at dev servers,
-    /// REPLs, etc.; stop with `th operatives kill <id>`.
-    Run {
-        /// Pearl id, or a task description prefixed with a space
-        /// (e.g. `th run "refactor x to y"`). If empty, picks the
-        /// first ready pearl.
-        pearl_id: Option<String>,
-        /// OCI image for the operator VM. Defaults to
-        /// smooai/smooth-operative:latest (single unified image —
-        /// the agent installs toolchains at runtime via mise).
-        /// Override via SMOOTH_OPERATIVE_IMAGE env or this flag.
-        #[arg(long)]
-        image: Option<String>,
-        /// Keep the sandbox alive after the agent completes (for
-        /// dev servers, interactive review). Must explicitly stop
-        /// via `th operatives kill <id>`.
-        #[arg(long)]
-        keep_alive: bool,
-        /// Override the default model for this run
-        #[arg(long)]
-        model: Option<String>,
-        /// Override the sandbox's memory allocation in MB
-        /// (default 4096 — bump to 6144/8192 for big Next.js / turbo
-        /// monorepos running dev servers).
-        #[arg(long)]
-        memory_mb: Option<u32>,
-        /// Lead role to run under: `fixer` (default, full tools),
-        /// `mapper` (read-only, decomposes), `oracle` (read-only, reasons),
-        /// or `heckler` (read-only, critiques). Unknown names error
-        /// out with the list above.
-        #[arg(long)]
-        agent: Option<String>,
-    },
-    /// Pause a running Smooth operative
-    Pause { bead_id: String },
-    /// Resume a paused Smooth operative
-    Resume { bead_id: String },
-    /// Send guidance to a running Smooth operative
-    Steer { bead_id: String, message: String },
-    /// Cancel a running Smooth operative
-    Cancel { bead_id: String },
-    /// Approve a pending review
-    Approve { bead_id: String },
     /// Show messages requiring attention
     Inbox,
-    /// Smooth operative management
-    Operatives {
-        #[command(subcommand)]
-        cmd: Option<OperativesCommands>,
-    },
     /// Project management
     Project {
         #[command(subcommand)]
@@ -235,8 +143,6 @@ enum Commands {
         #[command(subcommand)]
         cmd: AuditCommands,
     },
-    /// Open web interface
-    Web,
     /// Git worktree management
     Worktree {
         #[command(subcommand)]
@@ -354,33 +260,6 @@ enum Commands {
         #[arg(long)]
         remote: Option<String>,
     },
-    /// Manage the project-scoped sandbox cache.
-    ///
-    /// Two backends: legacy bind-mount under `~/.smooth/project-cache/`
-    /// and microsandbox named volumes under `~/.microsandbox/volumes/`
-    /// (opt-in via `SMOOTH_USE_VOLUMES=1`). List shows both; prune and
-    /// clear operate on both.
-    Cache {
-        #[command(subcommand)]
-        cmd: CacheCommands,
-    },
-    /// Hosted remote-control sessions via th.smoo.ai (reverse-tunnel).
-    ///
-    /// Opens an outbound connection to th.smoo.ai which gives back a
-    /// publicly reachable URL proxying HTTP + WebSocket requests to
-    /// your local Big Smooth (127.0.0.1:4400). Share a pearl, join a
-    /// teammate's session, or drive Smooth from a phone without VPN.
-    Tunnel {
-        #[command(subcommand)]
-        cmd: TunnelCommands,
-    },
-    /// The Line — the aider-polyglot benchmark score baked into this
-    /// binary at build time (from `docs/bench-latest.json`, which the
-    /// release workflow commits on every tag).
-    Bench {
-        #[command(subcommand)]
-        cmd: BenchCommands,
-    },
     /// List skills available in the current workspace. Reads
     /// `.smooth/skills/`, `~/.smooth/skills/`, `~/.claude/skills/`,
     /// and `~/.opencode/skills/` — first hit wins on name. Pearl
@@ -419,14 +298,6 @@ enum CastCommands {
     },
 }
 
-#[derive(Subcommand)]
-enum UpMode {
-    /// Run Smooth directly on the host without a microsandbox VM.
-    /// Only safe inside an already-trusted environment (a CI runner,
-    /// a dedicated devbox, etc.). The default `th up` boots inside
-    /// microsandbox; this opts out.
-    Direct,
-}
 
 #[derive(Subcommand)]
 enum SkillsCommands {
@@ -439,53 +310,8 @@ enum SkillsCommands {
     },
 }
 
-#[derive(Subcommand)]
-enum BenchCommands {
-    /// Print The Line — the aider-polyglot pass rate baked into this
-    /// binary. Reads the `docs/bench-latest.json` that was present at
-    /// build time; if no release has been cut, prints a note
-    /// explaining how to produce one locally.
-    Score,
-}
 
-#[derive(Subcommand)]
-enum OperativesCommands {
-    /// List running operative VMs
-    List,
-    /// Tear down a running operative VM
-    Kill { operator_id: String },
-}
 
-#[derive(Subcommand)]
-enum TunnelCommands {
-    /// Start a tunnel session. Opens a persistent connection to
-    /// th.smoo.ai and prints the public URL once the handshake
-    /// completes.
-    Start {
-        /// Preferred slug (`scratch-abcd` → `scratch-abcd.th.smoo.ai`).
-        /// Default: a fresh ephemeral slug chosen by the server.
-        #[arg(long)]
-        slug: Option<String>,
-
-        /// Override the rendezvous endpoint. Default: `wss://th.smoo.ai/tunnel`.
-        /// Useful for dev/staging.
-        #[arg(long)]
-        service_url: Option<String>,
-
-        /// Override the local target. Default: `http://127.0.0.1:4400`.
-        #[arg(long)]
-        local_target: Option<String>,
-
-        /// Auth token. If omitted, read from `SMOOTH_TUNNEL_TOKEN`.
-        /// (`th auth login` will mint this in a future change — for
-        /// now, paste one explicitly.)
-        #[arg(long)]
-        token: Option<String>,
-    },
-    /// Show the configured endpoints and a previewed ephemeral slug.
-    /// Runs entirely client-side; does not hit the network.
-    Status,
-}
 
 #[derive(Subcommand)]
 enum OrgsCommands {
@@ -597,24 +423,6 @@ enum ApiCommands {
     },
 }
 
-#[derive(Subcommand)]
-enum CacheCommands {
-    /// List cached projects with size and last-used time
-    List,
-    /// Print the cache directory (optionally for a specific project root)
-    Path { project: Option<String> },
-    /// Remove project caches older than N days (default 30)
-    Prune {
-        /// Evict entries whose mtime is older than this many days
-        #[arg(long, default_value = "30")]
-        older_than: u32,
-        /// Show what would be removed without deleting
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// Remove the cache entry for a single project by canonical path
-    Clear { project: String },
-}
 
 #[derive(Subcommand)]
 enum ServiceCommands {
@@ -1296,18 +1104,12 @@ async fn main() -> Result<()> {
             ApiCommands::Observability { cmd } => smooai::observability::cmd(cmd).await,
         },
         Some(Commands::Config { cmd }) => config::cmd(cmd).await,
-        Some(Commands::Operatives { cmd }) => cmd_operatives(cmd).await,
         Some(Commands::Inbox) => cmd_inbox().await,
         Some(Commands::Hooks { cmd }) => cmd_hooks(cmd),
         Some(Commands::Pearls { cmd }) => cmd_pearls(cmd).await,
         Some(Commands::Agent { cmd }) => cmd_agent(cmd).await,
         Some(Commands::Msg { cmd }) => cmd_msg(cmd).await,
         Some(Commands::Audit { cmd }) => cmd_audit(cmd),
-        Some(Commands::Web) => {
-            println!("Web UI: http://localhost:4400");
-            println!("Start with: th up");
-            Ok(())
-        }
         Some(Commands::Worktree { cmd }) => cmd_worktree(cmd),
         Some(Commands::Tailscale { cmd }) => cmd_tailscale(cmd),
         Some(Commands::Access { cmd }) => cmd_access(cmd).await,
@@ -1771,64 +1573,6 @@ async fn cmd_model(cmd: ModelCommands) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_operatives(cmd: Option<OperativesCommands>) -> Result<()> {
-    let client = reqwest::Client::new();
-    match cmd.unwrap_or(OperativesCommands::List) {
-        OperativesCommands::List => {
-            let resp = client.get("http://localhost:4400/api/workers").send().await;
-            let json: serde_json::Value = match resp {
-                Ok(r) => r.json().await.unwrap_or(serde_json::json!({"data": []})),
-                Err(_) => {
-                    println!("Cannot reach Big {}. Run: th up", gradient::smooth());
-                    return Ok(());
-                }
-            };
-            let empty = vec![];
-            let workers = json["data"].as_array().unwrap_or(&empty);
-            if workers.is_empty() {
-                println!("\n  {} No active {} operatives.\n", "ℹ".cyan(), gradient::smooth());
-                return Ok(());
-            }
-            println!("\n  {} {} {}\n", "Active".cyan().bold(), gradient::smooth(), "operatives".cyan().bold());
-            for w in workers {
-                let id = w.get("operator_id").and_then(|v| v.as_str()).unwrap_or("?");
-                let bead = w.get("bead_id").and_then(|v| v.as_str()).unwrap_or("");
-                let host_port = w.get("host_port").and_then(serde_json::Value::as_u64).unwrap_or(0);
-                let ports = w.get("port_mappings").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-                println!("  {} {} {}", "●".green().bold(), id.bold(), format!("(pearl {bead})").dimmed());
-                if host_port > 0 {
-                    println!("    {} {}", "runner ws".dimmed(), format!("ws://localhost:{host_port}").cyan());
-                }
-                for p in ports {
-                    if let (Some(guest), Some(host)) = (p.get(0).and_then(serde_json::Value::as_u64), p.get(1).and_then(serde_json::Value::as_u64)) {
-                        if guest != 4096 {
-                            // Skip the runner's own control port; show user-useful forwards.
-                            println!("    {} guest:{guest} → {}", "port".dimmed(), format!("http://localhost:{host}").cyan());
-                        }
-                    }
-                }
-            }
-            println!();
-            Ok(())
-        }
-        OperativesCommands::Kill { operator_id } => {
-            let url = format!("http://localhost:4400/api/workers/{operator_id}");
-            let resp = client.delete(&url).send().await;
-            match resp {
-                Ok(r) => {
-                    let body: serde_json::Value = r.json().await.unwrap_or(serde_json::json!({"ok": false}));
-                    if body.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(false) {
-                        println!("\n  {} Operator {} stopped.\n", "✓".green().bold(), operator_id.bold());
-                    } else {
-                        println!("\n  {} No active operator with id {}\n", "✗".red().bold(), operator_id.bold());
-                    }
-                }
-                Err(_) => println!("Cannot reach Big {}. Run: th up", gradient::smooth()),
-            }
-            Ok(())
-        }
-    }
-}
 
 /// `th inbox` — convenience alias for `th msg inbox` against the local
 /// pearl-store mailbox (pearl th-70aaef). Was a stub hitting Big Smooth's
