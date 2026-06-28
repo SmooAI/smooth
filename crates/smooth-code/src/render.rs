@@ -9,6 +9,41 @@ use ratatui::Frame;
 use crate::state::{AppState, ChatRole, FocusPanel, HealthStatus, ToolStatus};
 use crate::theme;
 
+/// The model the operator actually runs, for the status bar — resolved the same
+/// way the daemon resolves its gateway model so the two never disagree:
+/// `SMOOTH_AGENT_MODEL` env → the `coding` route in `~/.smooth/providers.json` →
+/// the documented default. Cached (read once) so it's not re-read every frame.
+fn configured_model() -> String {
+    use std::sync::OnceLock;
+    static MODEL: OnceLock<String> = OnceLock::new();
+    MODEL
+        .get_or_init(|| {
+            std::env::var("SMOOTH_AGENT_MODEL")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .or_else(model_from_providers)
+                .unwrap_or_else(|| "claude-haiku-4-5".to_string())
+        })
+        .clone()
+}
+
+/// The configured coding model from `~/.smooth/providers.json` (the `coding`
+/// route, else the `smooth` provider's `default_model`). `None` if absent.
+fn model_from_providers() -> Option<String> {
+    let path = dirs_next::home_dir()?.join(".smooth").join("providers.json");
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    v.pointer("/routing/coding/model")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            v.get("providers")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|ps| ps.iter().find(|p| p.get("id").and_then(serde_json::Value::as_str) == Some("smooth")))
+                .and_then(|p| p.get("default_model"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .map(str::to_owned)
+}
+
 /// Render the full TUI frame from the current application state.
 ///
 /// Inline-viewport mode: the frame area is just the small bottom
@@ -600,13 +635,7 @@ fn render_status(frame: &mut Frame, state: &AppState, area: Rect) {
         .current_phase_upstream
         .as_deref()
         .filter(|s| !s.is_empty())
-        .map(ToString::to_string)
-        .unwrap_or_else(|| {
-            std::env::var("SMOOTH_AGENT_MODEL")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "claude-haiku-4-5".to_string())
-        });
+        .map_or_else(configured_model, ToString::to_string);
 
     // Colored segments: agent name warm, model cool, everything else mist,
     // separated by a dim middot. Cleaner + on-brand vs the old flat pipes.

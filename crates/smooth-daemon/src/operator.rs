@@ -42,6 +42,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use smooth_operator::Tool;
 use smooth_operator_server::local::LocalServer;
+use smooth_operator_server::ServerConfig;
 use smooth_operator_svc::auth::LocalTokenVerifier;
 use smooth_operator_svc::{ToolProvider, ToolProviderContext};
 
@@ -129,6 +130,54 @@ pub fn provision_local_token() -> Result<String> {
     Ok(token)
 }
 
+/// Read the `smooth` provider (the llm.smoo.ai gateway) from
+/// `~/.smooth/providers.json` — the credentials `th auth login smooth` writes.
+/// Returns `(api_url, api_key, model)`; `None` if the file/provider/key is
+/// absent. The model prefers the `coding` route, else the provider default.
+fn gateway_from_providers() -> Option<(String, String, String)> {
+    gateway_from_providers_at(&dirs_next::home_dir()?.join(".smooth").join("providers.json"))
+}
+
+/// [`gateway_from_providers`] against an explicit path — the testable core.
+fn gateway_from_providers_at(path: &Path) -> Option<(String, String, String)> {
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let smooth = v
+        .get("providers")?
+        .as_array()?
+        .iter()
+        .find(|p| p.get("id").and_then(serde_json::Value::as_str) == Some("smooth"))?;
+    let url = smooth.get("api_url")?.as_str()?.to_owned();
+    let key = smooth.get("api_key")?.as_str().filter(|k| !k.trim().is_empty())?.to_owned();
+    let model = v
+        .pointer("/routing/coding/model")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| smooth.get("default_model").and_then(serde_json::Value::as_str))
+        .unwrap_or("claude-haiku-4-5")
+        .to_owned();
+    Some((url, key, model))
+}
+
+/// The LLM gateway config for the local flavor: the operator's env-based config
+/// first (`SMOOAI_GATEWAY_*`), and when no key is set, the user's
+/// `th auth login smooth` credentials from `providers.json` — so `th code` works
+/// in a plain terminal with no env exports. (Proper JWT→org-session: th-f7b20f.)
+fn resolve_gateway_config() -> ServerConfig {
+    let mut config = smooth_operator_server::local::local_config();
+    let env_has_key = config.gateway_key.as_deref().is_some_and(|k| !k.trim().is_empty());
+    if !env_has_key {
+        if let Some((url, key, model)) = gateway_from_providers() {
+            tracing::info!(gateway = %url, model = %model, "gateway key sourced from ~/.smooth/providers.json (smooth provider)");
+            config.gateway_url = url;
+            config.gateway_key = Some(key);
+            // Only override the model when the env didn't pin one.
+            if std::env::var("SMOOTH_AGENT_MODEL").is_err() {
+                config.model = model;
+            }
+        }
+    }
+    config
+}
+
 /// Boot the operator's local deployment flavor on `addr`, gated by an
 /// auto-provisioned [`LocalTokenVerifier`], and serve until Ctrl-C.
 ///
@@ -154,6 +203,10 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     let provider = local_tool_provider(workspace, egress_proxy);
     let server = LocalServer::builder()
         .addr(addr)
+        // LLM gateway: env (`SMOOAI_GATEWAY_*`) first, else the user's
+        // `th auth login smooth` creds from providers.json — so `th code` works
+        // in a plain terminal without exporting a key.
+        .config(resolve_gateway_config())
         .auth(Arc::new(LocalTokenVerifier::new(token.clone())))
         // Reject (don't degrade to anonymous) any `/ws` connection without a
         // valid token — so a stray local process / tailnet peer can't drive the
@@ -177,6 +230,39 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "unwrap/expect are the idiom for test assertions")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gateway_from_providers_reads_smooth_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.json");
+        std::fs::write(
+            &path,
+            r#"{"providers":[
+                {"id":"anthropic","api_url":"https://api.anthropic.com","api_key":"sk-ant"},
+                {"id":"smooth","api_url":"https://llm.smoo.ai/v1","api_key":"sk-smooth","default_model":"m-default"}
+            ],"routing":{"coding":{"provider":"smooth","model":"m-coding"}}}"#,
+        )
+        .unwrap();
+        let (url, key, model) = gateway_from_providers_at(&path).expect("smooth provider resolves");
+        assert_eq!(url, "https://llm.smoo.ai/v1");
+        assert_eq!(key, "sk-smooth");
+        assert_eq!(model, "m-coding", "the coding route wins over default_model");
+    }
+
+    #[test]
+    fn gateway_from_providers_none_when_no_key_or_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        // No `smooth` provider.
+        let p1 = dir.path().join("a.json");
+        std::fs::write(&p1, r#"{"providers":[{"id":"anthropic","api_url":"x","api_key":"k"}]}"#).unwrap();
+        assert!(gateway_from_providers_at(&p1).is_none());
+        // `smooth` present but key empty.
+        let p2 = dir.path().join("b.json");
+        std::fs::write(&p2, r#"{"providers":[{"id":"smooth","api_url":"x","api_key":""}]}"#).unwrap();
+        assert!(gateway_from_providers_at(&p2).is_none());
+        // Missing file.
+        assert!(gateway_from_providers_at(&dir.path().join("nope.json")).is_none());
+    }
 
     #[test]
     fn provision_prefers_env_token() {
