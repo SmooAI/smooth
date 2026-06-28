@@ -319,6 +319,102 @@ pub enum Cmd {
         #[arg(long)]
         m2m: bool,
     },
+    /// Manage an org's config environments (e.g. `production`,
+    /// `staging`). Creating an environment is how a new org's config is
+    /// activated. Authorized by your **user** session — so a parent-org
+    /// admin can create/manage one on a CHILD org with `--org-id`,
+    /// without `th admin`.
+    #[command(visible_alias = "env")]
+    Environments {
+        #[command(subcommand)]
+        cmd: EnvironmentsCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EnvironmentsCmd {
+    /// List the org's config environments.
+    List {
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then
+        /// the credentials file's `active_org_id`.
+        #[arg(long, visible_alias = "org")]
+        org_id: Option<String>,
+        /// Emit the raw JSON response instead of the pretty list.
+        #[arg(long)]
+        json: bool,
+        /// Use the M2M session instead of the user JWT (M2M is
+        /// org-locked, so this won't work cross-org).
+        #[arg(long)]
+        m2m: bool,
+    },
+    /// Create a config environment (e.g. `production`) — how you
+    /// activate a new org's config. A parent-org admin can create one
+    /// on a child org via `--org-id`.
+    Create {
+        /// Environment name (e.g. `production`).
+        name: String,
+        /// Override the active org (see `list` for the fallback chain).
+        #[arg(long, visible_alias = "org")]
+        org_id: Option<String>,
+        /// Raw JSON body escape hatch (file, `-` for stdin, or inline
+        /// JSON). Overrides `name` when given.
+        #[arg(long)]
+        body: Option<String>,
+        /// Emit the raw JSON response.
+        #[arg(long)]
+        json: bool,
+        /// Use the M2M session instead of the user JWT.
+        #[arg(long)]
+        m2m: bool,
+    },
+    /// Update an environment (e.g. rename). Pass `--name` or `--body`.
+    Update {
+        /// The environment id (from `list`).
+        env_id: String,
+        /// New environment name.
+        #[arg(long)]
+        name: Option<String>,
+        /// Override the active org (see `list` for the fallback chain).
+        #[arg(long, visible_alias = "org")]
+        org_id: Option<String>,
+        /// Raw JSON body escape hatch — overrides `--name` when given.
+        #[arg(long)]
+        body: Option<String>,
+        /// Emit the raw JSON response.
+        #[arg(long)]
+        json: bool,
+        /// Use the M2M session instead of the user JWT.
+        #[arg(long)]
+        m2m: bool,
+    },
+    /// Delete a config environment.
+    Delete {
+        /// The environment id (from `list`).
+        env_id: String,
+        /// Override the active org (see `list` for the fallback chain).
+        #[arg(long, visible_alias = "org")]
+        org_id: Option<String>,
+        /// Emit the raw JSON response.
+        #[arg(long)]
+        json: bool,
+        /// Use the M2M session instead of the user JWT.
+        #[arg(long)]
+        m2m: bool,
+    },
+    /// List all config values set in an environment (across schemas).
+    Values {
+        /// The environment id (from `list`).
+        env_id: String,
+        /// Override the active org (see `list` for the fallback chain).
+        #[arg(long, visible_alias = "org")]
+        org_id: Option<String>,
+        /// Emit the raw JSON response.
+        #[arg(long)]
+        json: bool,
+        /// Use the M2M session instead of the user JWT.
+        #[arg(long)]
+        m2m: bool,
+    },
 }
 
 /// Dispatch a `th config <sub>` invocation.
@@ -390,7 +486,135 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             force,
             m2m,
         } => cmd_delete(key, environment, org_id, force, m2m).await,
+        Cmd::Environments { cmd } => cmd_environments(cmd).await,
     }
+}
+
+/// `th config environments …` — manage an org's config environments over
+/// the user-JWT surface. Authorized by the SMOODEV-695 path-org guard
+/// (super-admin OR org member OR active-parent-org admin), so a master-
+/// org admin can create/manage a child org's environments with
+/// `--org-id` — no `th admin` (internal) required.
+async fn cmd_environments(cmd: EnvironmentsCmd) -> Result<()> {
+    match cmd {
+        EnvironmentsCmd::List { org_id, json, m2m } => {
+            let cfg = ConfigClient::load(m2m).await?;
+            let org = cfg.resolve_org(org_id)?;
+            let resp = cfg
+                .get(&format!("/organizations/{org}/config/environments"))
+                .await
+                .context("GET environments")?;
+            print_environments(&resp, json);
+        }
+        EnvironmentsCmd::Create {
+            name,
+            org_id,
+            body,
+            json: _,
+            m2m,
+        } => {
+            let cfg = ConfigClient::load(m2m).await?;
+            let org = cfg.resolve_org(org_id)?;
+            let payload = match body {
+                Some(b) => parse_body(&b)?,
+                None => serde_json::json!({ "name": name }),
+            };
+            let resp = cfg
+                .post(&format!("/organizations/{org}/config/environments"), &payload)
+                .await
+                .context("POST environment")?;
+            println!();
+            println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+            println!();
+        }
+        EnvironmentsCmd::Update {
+            env_id,
+            name,
+            org_id,
+            body,
+            json: _,
+            m2m,
+        } => {
+            let cfg = ConfigClient::load(m2m).await?;
+            let org = cfg.resolve_org(org_id)?;
+            let payload = match body {
+                Some(b) => parse_body(&b)?,
+                None => {
+                    let n = name.context("pass --name <new-name> or --body <json>")?;
+                    serde_json::json!({ "name": n })
+                }
+            };
+            let resp = cfg
+                .patch(&format!("/organizations/{org}/config/environments/{env_id}"), &payload)
+                .await
+                .context("PATCH environment")?;
+            println!();
+            println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+            println!();
+        }
+        EnvironmentsCmd::Delete { env_id, org_id, json: _, m2m } => {
+            let cfg = ConfigClient::load(m2m).await?;
+            let org = cfg.resolve_org(org_id)?;
+            let resp = cfg
+                .delete(&format!("/organizations/{org}/config/environments/{env_id}"))
+                .await
+                .context("DELETE environment")?;
+            println!();
+            println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+            println!();
+        }
+        EnvironmentsCmd::Values { env_id, org_id, json: _, m2m } => {
+            let cfg = ConfigClient::load(m2m).await?;
+            let org = cfg.resolve_org(org_id)?;
+            let resp = cfg
+                .get(&format!("/organizations/{org}/config/environments/{env_id}/values"))
+                .await
+                .context("GET environment values")?;
+            println!();
+            println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+            println!();
+        }
+    }
+    Ok(())
+}
+
+/// Parse a `--body` argument: a file path, `-` for stdin, or inline JSON.
+fn parse_body(arg: &str) -> Result<Value> {
+    let raw = if arg == "-" {
+        use std::io::Read;
+        let mut s = String::new();
+        std::io::stdin().read_to_string(&mut s).context("read stdin")?;
+        s
+    } else if std::path::Path::new(arg).is_file() {
+        std::fs::read_to_string(arg).with_context(|| format!("read {arg}"))?
+    } else {
+        arg.to_string()
+    };
+    serde_json::from_str(&raw).with_context(|| format!("parse JSON body: {raw}"))
+}
+
+/// Pretty-print the environments list (`[{ id, name, ... }]`), or fall
+/// back to raw JSON.
+fn print_environments(resp: &Value, json: bool) {
+    if json {
+        println!();
+        println!("{}", serde_json::to_string_pretty(resp).unwrap_or_default());
+        println!();
+        return;
+    }
+    let items = resp.get("data").and_then(Value::as_array).or_else(|| resp.as_array());
+    println!();
+    match items {
+        Some(arr) if !arr.is_empty() => {
+            for e in arr {
+                let id = e.get("id").and_then(Value::as_str).unwrap_or("?");
+                let name = e.get("name").and_then(Value::as_str).unwrap_or("?");
+                println!("  {name}  {id}");
+            }
+        }
+        _ => println!("  no environments"),
+    }
+    println!();
 }
 
 async fn cmd_get(key: String, environment: String, org_id: Option<String>, json: bool, m2m: bool) -> Result<()> {
@@ -760,6 +984,10 @@ impl ConfigClient {
 
     async fn put(&self, path: &str, body: &Value) -> Result<Value> {
         self.send(reqwest::Method::PUT, path, Some(body)).await
+    }
+
+    async fn patch(&self, path: &str, body: &Value) -> Result<Value> {
+        self.send(reqwest::Method::PATCH, path, Some(body)).await
     }
 
     async fn delete(&self, path: &str) -> Result<Value> {
@@ -1227,6 +1455,17 @@ mod tests {
     fn mask_secret_long() {
         assert_eq!(mask_secret("abcdef"), "**cdef");
         assert_eq!(mask_secret("very-secret-value"), "*************alue");
+    }
+
+    #[test]
+    fn parse_body_accepts_inline_json() {
+        let v = parse_body(r#"{"name":"production"}"#).expect("inline JSON parses");
+        assert_eq!(v["name"], "production");
+    }
+
+    #[test]
+    fn parse_body_rejects_garbage() {
+        assert!(parse_body("not json at all").is_err());
     }
 
     #[test]
