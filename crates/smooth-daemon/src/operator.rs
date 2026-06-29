@@ -87,6 +87,18 @@ fn token_path() -> PathBuf {
     dirs_next::home_dir().map_or_else(|| PathBuf::from("operator-token"), |h| h.join(".smooth").join("operator-token"))
 }
 
+/// Resolve the path to the operator's durable storage db
+/// (`~/.smooth/operator-storage.db`). `SMOOTH_OPERATOR_DB` overrides.
+fn operator_storage_path() -> PathBuf {
+    if let Ok(p) = std::env::var("SMOOTH_OPERATOR_DB") {
+        let p = p.trim();
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    dirs_next::home_dir().map_or_else(|| PathBuf::from("operator-storage.db"), |h| h.join(".smooth").join("operator-storage.db"))
+}
+
 /// Tighten a file to owner-only (mode 600) on Unix; no-op elsewhere.
 #[cfg(unix)]
 fn restrict_permissions(path: &Path) {
@@ -201,12 +213,21 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         "local-flavor sandboxed tools wired (per-turn via ToolProvider)",
     );
     let provider = local_tool_provider(workspace, egress_proxy);
+    // Durable local storage: the operator local flavor is in-memory by default,
+    // which loses every conversation/session on restart. Inject a sqlite-backed
+    // adapter (via the operator's `storage()` seam) so the always-on daemon
+    // persists across restarts — no Postgres (EPIC th-c89c2a, th-558df1).
+    let storage_path = operator_storage_path();
+    let storage = Arc::new(crate::operator_storage::SqliteStorageAdapter::open(&storage_path)?);
+    tracing::info!(db = %storage_path.display(), "operator durable storage");
+
     let server = LocalServer::builder()
         .addr(addr)
         // LLM gateway: env (`SMOOAI_GATEWAY_*`) first, else the user's
         // `th auth login smooth` creds from providers.json — so `th code` works
         // in a plain terminal without exporting a key.
         .config(resolve_gateway_config())
+        .storage(storage)
         .auth(Arc::new(LocalTokenVerifier::new(token.clone())))
         // Reject (don't degrade to anonymous) any `/ws` connection without a
         // valid token — so a stray local process / tailnet peer can't drive the

@@ -41,6 +41,7 @@ pub mod event;
 pub mod hook;
 pub mod messages;
 pub mod operator;
+mod operator_storage;
 pub mod permission;
 pub mod runner;
 pub mod schedule;
