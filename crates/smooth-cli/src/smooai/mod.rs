@@ -466,16 +466,15 @@ fn looks_like_uuid(s: &str) -> bool {
         })
 }
 
-/// Fetch the orgs the logged-in user belongs to.
-async fn fetch_user_orgs(client: &user_client::UserClient) -> Result<Vec<OrgRef>> {
-    let body = client.get("/organizations").await.context("GET /organizations")?;
+/// Parse a `{data:[...]}` or bare-array orgs payload into `OrgRef`s.
+fn org_refs_from_body(body: &serde_json::Value) -> Vec<OrgRef> {
     let items = body
         .get("data")
         .and_then(|v| v.as_array())
         .or_else(|| body.as_array())
         .cloned()
         .unwrap_or_default();
-    Ok(items
+    items
         .iter()
         .filter_map(|org| {
             let id = org.get("id").and_then(|v| v.as_str())?.to_string();
@@ -483,7 +482,53 @@ async fn fetch_user_orgs(client: &user_client::UserClient) -> Result<Vec<OrgRef>
             let slug = org.get("slug").and_then(|v| v.as_str()).unwrap_or("").to_string();
             Some(OrgRef { id, name, slug })
         })
-        .collect())
+        .collect()
+}
+
+/// Fetch the orgs the logged-in user belongs to.
+async fn fetch_user_orgs(client: &user_client::UserClient) -> Result<Vec<OrgRef>> {
+    let body = client.get("/organizations").await.context("GET /organizations")?;
+    Ok(org_refs_from_body(&body))
+}
+
+/// For each org the user belongs to, fetch its ACTIVE child orgs (where
+/// that org is the *parent*) via the relationships API — these are the
+/// child orgs the caller can act on as a parent-org admin. Best-effort:
+/// a failing relationships call for one parent is skipped, not fatal
+/// (so `th org list` never breaks just because one org has no
+/// relationships endpoint access). Deduped against the parent set.
+/// Returns `(child, parent_name)`.
+async fn fetch_child_orgs(client: &user_client::UserClient, parents: &[OrgRef]) -> Vec<(OrgRef, String)> {
+    use std::collections::HashSet;
+    let mut seen: HashSet<String> = parents.iter().map(|p| p.id.clone()).collect();
+    let mut out: Vec<(OrgRef, String)> = Vec::new();
+    for p in parents {
+        let Ok(body) = client.get(&format!("/organizations/{}/relationships", p.id)).await else {
+            continue;
+        };
+        let rels = body.as_array().cloned().unwrap_or_default();
+        for r in rels {
+            let is_parent_side = r.get("parentOrgId").and_then(|v| v.as_str()) == Some(p.id.as_str());
+            let active = r.get("status").and_then(|v| v.as_str()) == Some("active");
+            if !is_parent_side || !active {
+                continue;
+            }
+            let Some(child) = r.get("childOrganization") else { continue };
+            let Some(id) = child.get("id").and_then(|v| v.as_str()) else { continue };
+            if !seen.insert(id.to_string()) {
+                continue;
+            }
+            out.push((
+                OrgRef {
+                    id: id.to_string(),
+                    name: child.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    slug: child.get("slug").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                },
+                p.name.clone(),
+            ));
+        }
+    }
+    out
 }
 
 /// Resolve a `th api orgs switch` target. See the enum doc for the contract:
@@ -518,7 +563,20 @@ async fn resolve_switch_org(client: &user_client::UserClient, arg: Option<String
         return Ok(orgs.into_iter().nth(picked).expect("picker index in range"));
     };
 
-    resolve_org_query(&orgs, &query)
+    // Members first (fast). A UUID is handled directly by resolve_org_query.
+    match resolve_org_query(&orgs, &query) {
+        Ok(found) => Ok(found),
+        // Name miss (non-UUID): fall back to child orgs you manage as a
+        // parent-org admin — fetched ONLY on a miss so the common path
+        // (member match, or a UUID) never pays for the relationships scan.
+        Err(_) if !looks_like_uuid(&query) => {
+            let children: Vec<OrgRef> = fetch_child_orgs(client, &orgs).await.into_iter().map(|(c, _)| c).collect();
+            resolve_org_query(&children, &query).map_err(|_| {
+                anyhow::anyhow!("no organization (member or managed child) matches \"{query}\" — run `th org list`, or pass the child org's UUID directly")
+            })
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Pure resolution of a non-empty switch query against the caller's orgs.
