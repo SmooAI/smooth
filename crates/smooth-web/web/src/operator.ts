@@ -24,6 +24,9 @@ export interface ChatMessage {
     id: string;
     role: 'user' | 'assistant' | 'system';
     content: string;
+    /** Reasoning-model "thinking" — captured on its own channel and shown
+     * collapsed, never folded into `content` (the answer). */
+    reasoning: string;
     tools: ToolCall[];
     streaming: boolean;
 }
@@ -108,7 +111,7 @@ export function useOperator(): OperatorApi {
         setMessages((prev) => {
             const hasOpen = prev.some((m) => m.role === 'assistant' && m.streaming);
             if (hasOpen) return prev;
-            return [...prev, { id: nextId('a'), role: 'assistant', content: '', tools: [], streaming: true }];
+            return [...prev, { id: nextId('a'), role: 'assistant', content: '', reasoning: '', tools: [], streaming: true }];
         });
     }, []);
 
@@ -126,6 +129,14 @@ export function useOperator(): OperatorApi {
                     ensureStreamingMessage();
                     setStreaming(true);
                     patchStreaming((m) => ({ ...m, content: m.content + (v.token ?? '') }));
+                    break;
+                case 'stream_reasoning':
+                    // Reasoning rides its own channel — accumulate it separately
+                    // so it shows as "thinking", never as the answer (th-4d8682).
+                    // Don't flip `streaming` (that means "speaking the answer");
+                    // reasoning-only keeps him in the `thinking` state.
+                    ensureStreamingMessage();
+                    patchStreaming((m) => ({ ...m, reasoning: m.reasoning + (v.token ?? '') }));
                     break;
                 case 'stream_chunk': {
                     const st = v?.data?.state;
@@ -172,7 +183,7 @@ export function useOperator(): OperatorApi {
                     setTurnActive(false);
                     setStreaming(false);
                     patchStreaming((m) => ({ ...m, streaming: false }));
-                    setMessages((prev) => [...prev, { id: nextId('e'), role: 'system', content: v.message ?? v?.data?.message ?? 'operator error', tools: [], streaming: false }]);
+                    setMessages((prev) => [...prev, { id: nextId('e'), role: 'system', content: v.message ?? v?.data?.message ?? 'operator error', reasoning: '', tools: [], streaming: false }]);
                     break;
                 default:
                     break;
@@ -226,7 +237,7 @@ export function useOperator(): OperatorApi {
         (text: string) => {
             const body = text.trim();
             if (!body || !sessionRef.current) return;
-            setMessages((prev) => [...prev, { id: nextId('u'), role: 'user', content: body, tools: [], streaming: false }]);
+            setMessages((prev) => [...prev, { id: nextId('u'), role: 'user', content: body, reasoning: '', tools: [], streaming: false }]);
             setTurnActive(true);
             send({ action: 'send_message', requestId: nextId('turn'), sessionId: sessionRef.current, message: body });
         },

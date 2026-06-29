@@ -8,7 +8,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { ArrowUp, Check, X, Terminal, FileText, Search, Folder, Pencil } from 'lucide-react';
+import { ArrowUp, Check, X, Terminal, FileText, Search, Folder, Pencil, Brain } from 'lucide-react';
 
 import { BigSmoothFace, type FaceState } from './components/BigSmoothFace';
 import { useOperator, type AgentState, type ChatMessage, type ToolCall, type Approval, type Status } from './operator';
@@ -204,6 +204,7 @@ function MessageRow({ m, awaiting }: { m: ChatMessage; awaiting: Set<string> }) 
         <div className="flex gap-3">
             <span className="mt-1 size-2 shrink-0 rounded-full bg-gradient-to-b from-(--color-th-teal) to-(--color-th-blue)" />
             <div className="min-w-0 flex-1">
+                {m.reasoning && <Thinking text={m.reasoning} active={m.streaming && !m.content} />}
                 {m.tools.map((t) => (
                     <ToolChip key={t.id} t={t} awaiting={awaiting.has(t.name)} />
                 ))}
@@ -215,6 +216,23 @@ function MessageRow({ m, awaiting }: { m: ChatMessage; awaiting: Set<string> }) 
                 {m.streaming && !m.content && !m.tools.length && <span className="caret text-(--color-muted-foreground)" />}
             </div>
         </div>
+    );
+}
+
+// His thinking — captured on the reasoning channel, shown as a quiet,
+// collapsible aside so it never competes with the answer. Open while he's
+// still thinking, auto-collapses once the answer starts.
+function Thinking({ text, active }: { text: string; active: boolean }) {
+    return (
+        <details open={active} className="mb-1.5">
+            <summary className="inline-flex cursor-pointer list-none items-center gap-1.5 text-xs text-(--color-muted-foreground) transition select-none hover:text-foreground/70">
+                <Brain size={12} className="shrink-0 text-(--color-th-teal)/70" />
+                {active ? 'thinking…' : 'thought for a moment'}
+            </summary>
+            <div className="mt-1.5 border-l-2 border-(--color-th-teal)/25 pl-3 text-[0.82rem] leading-relaxed whitespace-pre-wrap text-(--color-muted-foreground) italic">
+                {text}
+            </div>
+        </details>
     );
 }
 
