@@ -24,6 +24,7 @@ pub mod bash;
 pub mod grep;
 pub mod guard;
 pub mod path;
+pub mod permission;
 pub mod read;
 pub mod remember;
 pub mod sandbox;

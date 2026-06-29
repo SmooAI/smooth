@@ -17,6 +17,8 @@ name = "smooth_tools"
 # exactly — it is security-critical and exhaustively tested here.
 [dependencies]
 smooth-operator.workspace = true
+smooth-policy.workspace = true
+dirs-next.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true

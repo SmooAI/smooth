@@ -66,6 +66,13 @@ impl Tool for BashTool {
             ));
         }
 
+        // Gate 1: a configurable deny rule (`~/.smooth/permissions.toml`) blocks
+        // the command deterministically before spawn — every subcommand of a
+        // compound command is judged, so `ls && rm -rf ~` is caught on the `rm`.
+        if crate::permission::bash_denied(&command) {
+            return Ok(format!("BLOCKED: a permission policy (deny) rule refused this command: {command}"));
+        }
+
         // The ONLY shell-spawn path: through the kernel sandbox (P0).
         let mut policy = crate::sandbox::SandboxPolicy::for_workspace(self.workspace.clone());
         if let Some(addr) = &self.proxy {
