@@ -35,9 +35,7 @@ smooth-tools.workspace = true
 # in-process forward proxy (exact-host allowlist) and routes the bash tool's
 # network through it.
 smooth-goalie.workspace = true
-# th-bd0def (EPIC th-c89c2a): the daemon serves the smooth-web SPA (control
 # surface) via rust-embed.
-smooth-web.workspace = true
 # th-bd0e22 (EPIC th-c89c2a): durable persistence for the daemon's per-instance
 # runtime state (events, sessions). SQLite (not Dolt) — this is ephemeral local
 # state, not team-synced work items; rusqlite is bundled (no external binary).
