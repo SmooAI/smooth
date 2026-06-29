@@ -6228,6 +6228,7 @@ dependencies = [
  "smooai-smooth-diver",
  "smooai-smooth-operator-core",
  "smooai-smooth-pearls",
+ "smooai-smooth-tmux",
  "smooai-smooth-tunnel",
  "smooai-smooth-web",
  "tabled",
@@ -6507,6 +6508,15 @@ dependencies = [
  "tower 0.5.3",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "smooai-smooth-tmux"
+version = "0.15.7"
+dependencies = [
+ "anyhow",
+ "tempfile",
  "uuid",
 ]
 

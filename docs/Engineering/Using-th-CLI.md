@@ -472,6 +472,44 @@ th access pending / approve / deny / policy        # access-control review queue
 th inbox                                           # messages requiring attention
 ```
 
+### Claude session supervision (`th claude`)
+
+Drive a Claude Code TUI inside an isolated tmux session and keep it alive
+through the account-wide rate-limit throttle ("Server is temporarily limiting
+requests · Rate limited"). When that throttle fires, the supervisor backs off
+with **full jitter** and **resends the last message** until it lands — instead
+of leaving the turn dead on the screen.
+
+```bash
+th claude run                                      # launch + supervise an interactive session (attach to drive it)
+th claude run "fix the flaky test" --label fixer   # launch with an initial prompt
+th claude run --cwd ../some-worktree               # supervise a session rooted elsewhere
+th claude ls                                        # list live supervised sessions (prunes dead ones)
+th claude ls --json
+th claude attach <id>                               # hand your terminal to a session (tmux attach; Ctrl-b d to detach)
+```
+
+How it decides what to do, per poll of the **visible** pane:
+
+- **`temporarily limiting requests` / `Rate limited`** → back off via the shared
+  governor and resend the last message (the one it sent, or — if it's babysitting
+  a session it didn't launch — the last user turn scraped from scrollback).
+- **real `usage limit` / quota** → stop and hand the session back; backing off
+  won't help until reset.
+- **`esc to interrupt` (working)** → the model is streaming; do nothing (this
+  live signal wins over a stale throttle line still on screen).
+
+The session lives as long as the supervisor runs; `Ctrl-C` stops it cleanly.
+The rate-limit governor is **pool-aware**: it's the same primitive the planned
+1→N farm (one Big Smooth leading N sessions) and N→1 supervisors share, so a 429
+on any session backs off the whole pool rather than thundering the herd. Pearls
+th-49de8d (driver) / th-a43375 (attach picker). Requires `tmux` on `PATH`.
+
+> **Subscription/ToS note:** this drives your own Claude Code subscription auth.
+> Backoff-and-resume that *honors* the limit is fine; running a large unattended
+> fleet to maximize a flat-rate plan is the gray zone — keep concurrency
+> tasteful, and use the metered API + smooth-operator for true fleet scale.
+
 ### Worktree helpers
 
 ```bash

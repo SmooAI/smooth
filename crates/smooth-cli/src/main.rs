@@ -7,6 +7,7 @@ mod active_org;
 mod admin;
 mod auth;
 mod boot_ui;
+mod claude;
 mod config;
 mod gradient;
 mod hooks;
@@ -290,6 +291,13 @@ enum Commands {
     },
     /// Open the Smooth web dashboard in your browser.
     Web,
+    /// Supervise Claude Code sessions running inside tmux. On the
+    /// account-wide rate-limit throttle, back off with jitter and resend
+    /// the last message until it lands. `run` / `ls` / `attach`.
+    Claude {
+        #[command(subcommand)]
+        cmd: claude::ClaudeCommands,
+    },
     /// Git worktree management
     Worktree {
         #[command(subcommand)]
@@ -1414,6 +1422,7 @@ async fn main() -> Result<()> {
             println!("Start with: th up");
             Ok(())
         }
+        Some(Commands::Claude { cmd }) => claude::cmd_claude(cmd).await,
         Some(Commands::Worktree { cmd }) => cmd_worktree(cmd),
         Some(Commands::Tailscale { cmd }) => cmd_tailscale(cmd),
         Some(Commands::Access { cmd }) => cmd_access(cmd).await,

@@ -213,6 +213,7 @@ smooth-bootstrap-bill = { version = "0.15.7", path = "crates/smooth-bootstrap-bi
 smooth-tunnel = { version = "0.15.7", path = "crates/smooth-tunnel", package = "smooai-smooth-tunnel" }
 smooth-host-stub = { version = "0.15.7", path = "crates/smooth-host-stub", package = "smooai-smooth-host-stub" }
 smooth-bench = { version = "0.15.7", path = "crates/smooth-bench", package = "smooai-smooth-bench" }
+smooth-tmux = { version = "0.15.7", path = "crates/smooth-tmux", package = "smooai-smooth-tmux" }
 smooth-api-client = { version = "0.15.7", path = "crates/smooth-api-client", package = "smooai-smooth-api-client" }
 # Cross-runtime client shared library (github.com/SmooAI/client-shared).
 # SMOODEV-1464: switched from a local `path = "../client-shared/rust"` dep to
