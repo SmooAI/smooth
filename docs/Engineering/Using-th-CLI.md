@@ -193,6 +193,53 @@ th api config feature-flag <flag-key>              # evaluate against active org
 th api config feature-flag <flag-key> --context=- < ctx.json
 ```
 
+#### Local config layout + the `schema.json` wire format
+
+Each consumer keeps a `.smooai-config/` directory: `config.ts` (the
+`@smooai/config` schema definitions — `publicConfigSchema`,
+`secretConfigSchema`, `featureFlagSchema`), `default.ts` (defaults),
+`package.json`, and **`schema.json`** — the wire format that
+`th config push`/`pull` sync with the org's remote schema.
+
+> **Library vs CLI:** `@smooai/config` (the TypeScript runtime —
+> `await secretConfig.get(...)`) is unchanged. Only the operator CLI
+> moved from the deprecated `smooai-config` to `th config`.
+
+`schema.json` shape:
+
+```jsonc
+{
+  "$schema": "...",
+  "public":     ["CLOUD_PROVIDER", "REGION", ...],   // UPPER_SNAKE env-var names
+  "secret":     ["ANTHROPIC_API_KEY", "CLOUDFLARE_API_TOKEN", ...],
+  "featureFlag":["SOME_FLAG", ...],
+  "types":      { "cloudProvider": "string", "isLocal": "boolean", ... } // camelCase props
+}
+```
+
+The tier **arrays** use UPPER_SNAKE env-var names; **`types`** uses the
+camelCase config-property names mapped to `"string"`/`"boolean"`. They
+are two representations of the same keys, so an unmodified `pull` →
+`push` is a clean no-op. To add a secret string key `fooBar`: append
+`FOO_BAR` to `secret` **and** `"fooBar": "string"` to `types`.
+
+> **Generating `schema.json`:** there is currently no generator from
+> `config.ts` (`withSmooConfig` is only a webpack DefinePlugin). Get a
+> `schema.json` via `th config init` (scaffold) or `th config pull`
+> (fetch a remote one). A `th config build` generator is tracked in
+> pearl `th-4d1d6c`.
+
+> **Picking a schema:** on an org with **more than one** remote schema,
+> `th config pull` refuses to guess — pass `--schema-name <name>` (it
+> lists the available names). `--schema-name` on `push` selects an
+> **existing** schema to update; to **create** a new one, omit the flag
+> and set `"$smooaiName": "<name>"` in `schema.json`.
+
+> **Managing environments without `th admin`:** `th config environments
+> list|create|update|delete <…> --org-id <org>` works on the public
+> user-JWT surface — a parent-org admin can create a child org's
+> `production` environment with it (no internal `th admin`).
+
 ### Auth clients — M2M + B2M keys (`th api keys`)
 
 Mint and manage an org's API auth clients. Two types, both first-class:
