@@ -60,6 +60,29 @@ body {
     letter-spacing: -0.02em;
 }
 
+/* ── The presence halo ───────────────────────────────────────────────────────
+ * The signature. A soft aura breathing behind Big Smooth's face so he reads as a
+ * presence in the room, not an avatar. Colour is handed in per state (--halo):
+ * blue at rest, teal when he's working, amber when he needs you. */
+.halo {
+    position: absolute;
+    inset: -34%;
+    border-radius: 50%;
+    background: radial-gradient(circle at 50% 46%, color-mix(in oklch, var(--halo, var(--color-th-blue)) 42%, transparent), transparent 66%);
+    filter: blur(16px);
+    z-index: 0;
+    pointer-events: none;
+    animation: halo-breathe 4.8s ease-in-out infinite;
+    transition: background 360ms ease;
+}
+.halo-strong { inset: -42%; }
+@keyframes halo-breathe {
+    0%, 100% { transform: scale(0.94); opacity: 0.55; }
+    50%      { transform: scale(1.07); opacity: 0.92; }
+}
+.face-stage { position: relative; display: grid; place-items: center; isolation: isolate; }
+.face-stage > :not(.halo) { position: relative; z-index: 1; }
+
 /* The blinking caret on a streaming reply. */
 .caret::after {
     content: "▌";
@@ -113,6 +136,26 @@ body {
     border-radius: 0.4rem;
 }
 .prose-msg a { color: var(--color-th-teal); text-decoration: underline; }
+
+/* The greeting headline on the empty state — his voice, set in the display face. */
+.greeting {
+    font-family: var(--font-display);
+    font-weight: 600;
+    letter-spacing: -0.02em;
+}
+
+/* A hairline that fades, separating the sticky presence from the conversation. */
+.presence-rule {
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--color-border) 18%, var(--color-border) 82%, transparent);
+}
+
+/* Respect reduced-motion: keep the presence alive but calm — no breathing,
+ * no bobbing, just the colour shifts that carry meaning. */
+@media (prefers-reduced-motion: reduce) {
+    .halo, .needs-you, .bs-dot, .caret::after { animation: none; }
+    .halo { opacity: 0.7; }
+}
 
 /* Thin, warm scrollbars. */
 *::-webkit-scrollbar { width: 10px; height: 10px; }

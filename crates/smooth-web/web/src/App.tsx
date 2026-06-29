@@ -1,7 +1,9 @@
 // The Presence control surface — Big Smooth as a character you cohabit with.
-// A reactive face anchors the room; the amber "needs you" deck is the hero; the
-// live conversation flows below. A thin client on the operator's canonical
-// protocol (EPIC th-c89c2a, th-f1a1f0).
+// His face is the room: he greets you large and centred, then settles into a
+// persistent presence bar once you're talking. A halo breathes behind him and
+// shifts colour with his state, so the "needs you" moment emanates from him
+// rather than a detached banner. A thin client on the operator's canonical
+// protocol (EPIC th-c89c2a, th-f1a1f0, th-833b5f).
 
 import { useEffect, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
@@ -9,7 +11,7 @@ import remarkGfm from 'remark-gfm';
 import { ArrowUp, Check, X, Terminal, FileText, Search, Folder, Pencil } from 'lucide-react';
 
 import { BigSmoothFace, type FaceState } from './components/BigSmoothFace';
-import { useOperator, type AgentState, type ChatMessage, type ToolCall, type Approval } from './operator';
+import { useOperator, type AgentState, type ChatMessage, type ToolCall, type Approval, type Status } from './operator';
 
 const STATUS_CAPTION: Record<AgentState, string> = {
     connecting: 'waking up',
@@ -20,14 +22,6 @@ const STATUS_CAPTION: Record<AgentState, string> = {
     awaiting: 'needs your okay',
 };
 
-function uptime(since: number): string {
-    const s = Math.max(0, Math.floor((Date.now() - since) / 1000));
-    if (s < 60) return `${s}s`;
-    if (s < 3600) return `${Math.floor(s / 60)}m`;
-    if (s < 86400) return `${Math.floor(s / 3600)}h`;
-    return `${Math.floor(s / 86400)}d`;
-}
-
 const TOOL_ICON: Record<string, typeof Terminal> = {
     bash: Terminal,
     read_file: FileText,
@@ -37,45 +31,104 @@ const TOOL_ICON: Record<string, typeof Terminal> = {
     list_files: Folder,
 };
 
+function uptime(since: number): string {
+    const s = Math.max(0, Math.floor((Date.now() - since) / 1000));
+    if (s < 60) return `${s}s`;
+    if (s < 3600) return `${Math.floor(s / 60)}m`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h`;
+    return `${Math.floor(s / 86400)}d`;
+}
+
+/** The halo colour reads his mood: blue at rest, teal working, amber when he needs you. */
+function haloColor(s: FaceState): string {
+    if (s === 'awaiting') return 'var(--color-amber)';
+    if (s === 'thinking' || s === 'speaking') return 'var(--color-th-teal)';
+    return 'var(--color-th-blue)';
+}
+
 export default function App() {
     const { state, messages, approvals, status, sendMessage, respond } = useOperator();
     const faceState: FaceState = state === 'connecting' || state === 'offline' ? 'idle' : (state as FaceState);
+    const inConversation = messages.length > 0 || approvals.length > 0;
 
     return (
-        <div className="mx-auto flex h-full max-w-3xl flex-col px-4">
-            <Header state={state} status={status} faceState={faceState} />
-            <main className="flex min-h-0 flex-1 flex-col">
-                <ApprovalDeck approvals={approvals} respond={respond} />
-                <Conversation messages={messages} state={state} approvals={approvals} />
-            </main>
+        <div className="mx-auto flex h-full max-w-3xl flex-col px-5">
+            {inConversation ? (
+                <>
+                    <PresenceBar state={state} status={status} faceState={faceState} />
+                    <div className="presence-rule shrink-0" />
+                    <main className="flex min-h-0 flex-1 flex-col">
+                        <ApprovalDeck approvals={approvals} respond={respond} />
+                        <Conversation messages={messages} approvals={approvals} />
+                    </main>
+                </>
+            ) : (
+                <Greeting state={state} status={status} faceState={faceState} />
+            )}
             <Composer onSend={sendMessage} disabled={state === 'connecting' || state === 'offline'} />
         </div>
     );
 }
 
-function Header({ state, status, faceState }: { state: AgentState; status: ReturnType<typeof useOperator>['status']; faceState: FaceState }) {
+/** The face + its breathing halo, sized for the moment. */
+function FaceStage({ state, size, strong }: { state: FaceState; size: number; strong?: boolean }) {
+    return (
+        <div className="face-stage" style={{ width: size, height: size }}>
+            <div className={`halo${strong ? ' halo-strong' : ''}`} style={{ '--halo': haloColor(state) } as React.CSSProperties} />
+            <BigSmoothFace state={state} size={size} />
+        </div>
+    );
+}
+
+function StatusLine({ state, status, center }: { state: AgentState; status: Status; center?: boolean }) {
+    const dot = !status.connected ? 'bg-(--color-muted-foreground)' : state === 'awaiting' ? 'bg-amber' : 'bg-(--color-online)';
+    return (
+        <div className={`flex items-center gap-2 text-sm text-(--color-muted-foreground) ${center ? 'justify-center' : ''}`}>
+            <span className={`size-1.5 rounded-full ${dot}`} />
+            <span className={state === 'awaiting' ? 'font-semibold text-amber' : ''}>{STATUS_CAPTION[state]}</span>
+            {(state === 'thinking' || state === 'speaking') && (
+                <span aria-hidden>
+                    <span className="bs-dot">.</span>
+                    <span className="bs-dot">.</span>
+                    <span className="bs-dot">.</span>
+                </span>
+            )}
+        </div>
+    );
+}
+
+/** The empty-state greeting — he looks up when you walk in. */
+function Greeting({ state, status, faceState }: { state: AgentState; status: Status; faceState: FaceState }) {
+    return (
+        <main className="flex min-h-0 flex-1 flex-col items-center justify-center gap-7 pb-6 text-center">
+            <FaceStage state={faceState} size={150} strong />
+            <div className="flex flex-col items-center gap-3">
+                <div className="wordmark text-4xl leading-none sm:text-[2.75rem]">Big Smooth</div>
+                <StatusLine state={state} status={status} center />
+            </div>
+            <p className="max-w-sm text-balance text-[0.97rem] leading-relaxed text-(--color-muted-foreground)">
+                {state === 'offline'
+                    ? 'Reconnecting to your operator…'
+                    : 'Your always-on operator. Ask him anything — or let his scheduled work bring things to you.'}
+            </p>
+        </main>
+    );
+}
+
+/** The sticky presence once the conversation is underway. */
+function PresenceBar({ state, status, faceState }: { state: AgentState; status: Status; faceState: FaceState }) {
     const [, force] = useState(0);
     useEffect(() => {
         const id = setInterval(() => force((n) => n + 1), 30_000);
         return () => clearInterval(id);
     }, []);
-    // Green = alive & awake; amber = needs you; dim = offline.
-    const dot = !status.connected ? 'bg-(--color-muted-foreground)' : state === 'awaiting' ? 'bg-amber' : 'bg-(--color-online)';
     return (
-        <header className="flex items-center gap-4 pt-6 pb-4">
-            <BigSmoothFace state={faceState} size={72} />
+        <header className="flex items-center gap-3.5 pt-5 pb-3">
+            <FaceStage state={faceState} size={76} />
             <div className="min-w-0">
-                <div className="wordmark text-2xl leading-none">Big Smooth</div>
-                <div className="mt-1.5 flex items-center gap-2 text-sm text-(--color-muted-foreground)">
-                    <span className={`size-1.5 rounded-full ${dot}`} />
-                    <span className={state === 'awaiting' ? 'font-semibold text-amber' : ''}>{STATUS_CAPTION[state]}</span>
-                    {(state === 'thinking' || state === 'speaking') && (
-                        <span aria-hidden>
-                            <span className="bs-dot">.</span>
-                            <span className="bs-dot">.</span>
-                            <span className="bs-dot">.</span>
-                        </span>
-                    )}
+                <div className="wordmark text-[1.7rem] leading-none">Big Smooth</div>
+                <div className="mt-1.5">
+                    <StatusLine state={state} status={status} />
                 </div>
             </div>
             <div className="ml-auto hidden text-right text-xs text-(--color-muted-foreground) sm:block">
@@ -89,7 +142,7 @@ function Header({ state, status, faceState }: { state: AgentState; status: Retur
 function ApprovalDeck({ approvals, respond }: { approvals: Approval[]; respond: (id: string, ok: boolean) => void }) {
     if (!approvals.length) return null;
     return (
-        <div className="mb-3 space-y-2">
+        <div className="mb-3 space-y-2 pt-3">
             {approvals.map((a) => (
                 <div key={a.requestId} className="needs-you rounded-2xl bg-panel/90 p-4 backdrop-blur">
                     <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-amber">
@@ -119,7 +172,7 @@ function ApprovalDeck({ approvals, respond }: { approvals: Approval[]; respond: 
     );
 }
 
-function Conversation({ messages, state, approvals }: { messages: ChatMessage[]; state: AgentState; approvals: Approval[] }) {
+function Conversation({ messages, approvals }: { messages: ChatMessage[]; approvals: Approval[] }) {
     const ref = useRef<HTMLDivElement>(null);
     // Tools whose name has a pending approval are parked, not running.
     const awaiting = new Set(approvals.map((a) => a.tool));
@@ -127,16 +180,8 @@ function Conversation({ messages, state, approvals }: { messages: ChatMessage[];
         ref.current?.scrollTo({ top: ref.current.scrollHeight, behavior: 'smooth' });
     }, [messages]);
 
-    if (!messages.length) {
-        return (
-            <div ref={ref} className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 text-center text-(--color-muted-foreground)">
-                <p className="text-lg text-foreground/70">{state === 'offline' ? 'Reconnecting to your operator…' : 'Big Smooth is awake.'}</p>
-                <p className="text-sm">Ask him anything, or let his scheduled tasks bring things to you.</p>
-            </div>
-        );
-    }
     return (
-        <div ref={ref} className="min-h-0 flex-1 space-y-4 overflow-y-auto pb-4">
+        <div ref={ref} className="min-h-0 flex-1 space-y-4 overflow-y-auto py-2">
             {messages.map((m) => (
                 <MessageRow key={m.id} m={m} awaiting={awaiting} />
             ))}
