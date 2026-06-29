@@ -8,7 +8,7 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 ## Project Overview
 
-Smooth is the Smoo AI CLI and orchestration platform — a **single Rust binary** (`th`) that coordinates Smooth Operators (AI agents in Microsandbox microVMs). Zero runtime dependencies.
+Smooth is the Smoo AI CLI and orchestration platform — a **single Rust binary** (`th`) plus a companion `smooth-daemon`: an always-on, single-tenant personal AI agent built on the **smooth-operator** engine. `th daemon` hosts the operator (canonical WS protocol + widget, durable, kernel-sandboxed tools, proactive scheduler); every surface (`th code` TUI, the web widget) is a thin client on that one protocol. Zero runtime dependencies. (The original microVM substrate was collapsed onto the operator in EPIC th-c89c2a.)
 
 ---
 
