@@ -369,6 +369,24 @@ pub struct AppState {
     pub model_picker: ModelPickerState,
     /// Startup health check status.
     pub health_status: HealthStatus,
+    /// An in-flight write-tool approval the operator parked the turn on
+    /// (`write_confirmation_required`). When `Some`, the TUI shows an approve/deny
+    /// prompt; the dispatch loop polls `decision` and resumes the turn via
+    /// `OperatorClient::confirm` (th-1ea4f6).
+    pub pending_confirmation: Option<PendingConfirmation>,
+}
+
+/// A parked write-tool approval awaiting the user's verdict.
+#[derive(Debug, Clone)]
+pub struct PendingConfirmation {
+    /// The parked turn's request id (echoed back in `confirm_tool_action`).
+    pub request_id: String,
+    /// The tool the agent wants to run (e.g. `bash`).
+    pub tool: String,
+    /// Human-readable description of the action to approve.
+    pub description: String,
+    /// `None` until the user decides; `Some(true)` = approve, `Some(false)` = deny.
+    pub decision: Option<bool>,
 }
 
 impl AppState {
@@ -408,6 +426,7 @@ impl AppState {
             git_state: None,
             model_picker: ModelPickerState::new(),
             health_status: HealthStatus::default(),
+            pending_confirmation: None,
         }
     }
 

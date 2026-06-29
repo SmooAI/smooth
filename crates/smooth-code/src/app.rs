@@ -653,9 +653,25 @@ fn handle_input_mode(
     event_tx: mpsc::UnboundedSender<AgentEvent>,
     command_registry: &CommandRegistry,
 ) {
-    // (The bespoke auto-mode permission prompts — the o/s/p/u/d/D keys wired to
-    // the :4400 `/api/access` flow — were removed with the :4400 nuke. The
-    // operator's `write_confirmation_required` HITL replaces them: th-1ea4f6.)
+    // Operator HITL: when the agent has parked a turn on a write-tool approval
+    // (`write_confirmation_required`), `y`/`n` resolve it. The dispatch loop
+    // polls `decision` and replies with `confirm_tool_action` (th-1ea4f6). Only
+    // acts on an open prompt (decision still unset) so a stray key is inert.
+    if let Some(pending) = state.pending_confirmation.as_mut() {
+        if pending.decision.is_none() {
+            match key.code {
+                KeyCode::Char('y' | 'Y') => {
+                    pending.decision = Some(true);
+                    return;
+                }
+                KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                    pending.decision = Some(false);
+                    return;
+                }
+                _ => {}
+            }
+        }
+    }
 
     // Model picker owns the keyboard while it's visible. Up/Down
     // navigates, Enter drills in or applies, Esc backs out (Models →
@@ -1340,6 +1356,47 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
             ServerEvent::Error { message } => {
                 let _ = tx.send(AgentEvent::Error { message });
                 break;
+            }
+            // The operator parked the turn on a write-tool needing approval.
+            // Surface a prompt, poll the shared state for the user's y/n verdict
+            // (set by the key handler), then resume the turn via `confirm`. The
+            // operator sends no events while parked, so polling here is safe.
+            ServerEvent::ConfirmationRequired { task_id, tool, description } => {
+                {
+                    let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+                    s.add_message(crate::state::ChatMessage::system(format!("⚠ Approve {tool}? {description}  —  [y]es / [n]o")));
+                    s.pending_confirmation = Some(crate::state::PendingConfirmation {
+                        request_id: task_id.clone(),
+                        tool: tool.clone(),
+                        description,
+                        decision: None,
+                    });
+                }
+                let approved = loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                    let decision = {
+                        let s = state.lock().unwrap_or_else(|e| e.into_inner());
+                        match &s.pending_confirmation {
+                            Some(p) if p.request_id == task_id => p.decision,
+                            _ => Some(false), // prompt cleared/replaced → treat as deny
+                        }
+                    };
+                    if let Some(d) = decision {
+                        break d;
+                    }
+                };
+                let _ = client.confirm(&task_id, approved);
+                {
+                    let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+                    s.pending_confirmation = None;
+                    let line = if approved {
+                        format!("✓ approved {tool}")
+                    } else {
+                        format!("✗ denied {tool}")
+                    };
+                    s.add_message(crate::state::ChatMessage::system(line));
+                }
+                None
             }
             _ => None,
         };
