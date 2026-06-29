@@ -1,93 +1,36 @@
 //! Big Smooth, reborn — the always-on, single-tenant personal-agent daemon.
 //!
-//! `smooth-daemon` is a clean rewrite of `smooth-bigsmooth` on top of the
-//! [`smooth_operator`] agent engine. It targets a **single trusted operator**
+//! `smooth-daemon` runs **smooth-operator's local deployment flavor** as its
+//! one and only agent runtime. It targets a **single trusted operator**
 //! self-hosting their own instance (hermes-style) on a personal machine
-//! reachable over SSH/Tailscale — NOT a multi-tenant service. Because there is
-//! no untrusted tenant, the microsandbox microVM substrate is dropped; security
-//! becomes a kernel-enforced OS sandbox on tool subprocesses + an egress proxy
-//! + a Claude-Code-style auto-mode permission engine (see EPIC th-c89c2a).
+//! reachable over SSH/Tailscale — NOT a multi-tenant service. The microsandbox
+//! microVM substrate is gone; security is a kernel-enforced OS sandbox on tool
+//! subprocesses + an egress allowlist proxy (EPIC th-c89c2a).
 //!
-//! # Shape (borrowed from hermes + opencode)
+//! # Shape — one operator, one protocol (the north star)
 //!
-//! One always-on daemon owns the durable state and the agent runtime; every UI
-//! (the `th code` ratatui TUI, the `smooth-web` React SPA, and — later —
-//! messaging-platform adapters) is a thin event consumer over a durable
-//! event stream + WebSocket token path.
+//! `th daemon` *is* the operator. There is **no bespoke server, no bespoke WS
+//! protocol, no second agent loop** — the daemon hosts the operator's
+//! [`LocalServer`](smooth_operator_server::local::LocalServer), and every
+//! surface (the `th code` TUI, the official widget / `smooth-web`, and — later —
+//! messaging adapters) is a thin client on the **canonical operator protocol**.
 //!
 //! ```text
-//! daemon (axum, loopback + tailnet)
-//!   ├─ smooth-operator engine (Agent::run_with_channel per session)
-//!   ├─ durable event log  → /api/event  (SSE, monotonic seq, cursor resume)
-//!   ├─ token stream       → /ws         (TaskStart/Steer/Cancel)
-//!   ├─ SessionRunCoordinator (one fiber/session, concurrent across keys)
-//!   └─ Dolt-backed session/checkpoint/memory + approval/completion queues
+//! th daemon  →  smooth-operator LocalServer (:8787, canonical WS + widget)
+//!   ├─ kernel-sandboxed tools (per-turn ToolProvider; egress via goalie)
+//!   └─ durable local storage  (sqlite StorageAdapter — survives restart, no Postgres)
 //! ```
 //!
-//! # Build-out status
-//!
-//! - **Phase 0 (th-f30175, this crate's scaffold):** the durable-event core
-//!   ([`event`]) — the monotonic-seq envelope + cursor-resume contract that the
-//!   `/api/event` SSE endpoint and the Dolt event table are both built on.
-//! - **Phase 1 (th-64fbe8):** axum server, session store, coordinator, frontend
-//!   reconnect.
-//! - Later phases: Dolt persistence, the auto-mode permission engine, the
-//!   reimagined React control surface, scheduling + messaging surfaces.
+//! This module exposes [`serve_local_flavor`] (the entry the binary calls) and
+//! [`start_egress_proxy`] (the shared egress boundary). The bespoke
+//! `serve_persistent` agent loop + its server/wire/runner/coordinator/scheduler/
+//! permission/sqlite modules were deleted once the operator path reached parity.
 
-pub mod approval;
 pub mod config;
-pub mod coordinator;
-pub mod event;
-pub mod hook;
-pub mod messages;
 pub mod operator;
 mod operator_storage;
-pub mod permission;
-pub mod runner;
-pub mod schedule;
-pub mod scheduler;
-pub mod server;
-pub mod session;
-pub mod sqlite;
-pub mod wire;
 
-pub use approval::ApprovalCoordinator;
-pub use coordinator::{SessionRunCoordinator, StartError};
-pub use event::{DaemonEvent, EventKind, EventStore, InMemoryEventLog, Seq};
-pub use hook::PermissionHook;
-pub use messages::{InMemoryMessageStore, MessageStore, StoredMessage};
 pub use operator::{local_tool_provider, serve_local_flavor};
-pub use permission::{Decision, PermissionEngine, PermissionMode};
-pub use runner::{run_task, TaskSpec};
-pub use schedule::{Schedule, ScheduleKind};
-pub use server::{build_router, serve, serve_on, serve_with_shutdown, AppState};
-pub use session::{InMemorySessionStore, Session, SessionStatus, SessionStore};
-pub use wire::{map_agent_event, ClientEvent, PriorMessage, ServerEvent};
-
-/// Build durable state, start the egress boundary if configured, and serve on
-/// `addr` until shutdown.
-///
-/// This is the canonical daemon entry — used by **both** the standalone
-/// `smooth-daemon` binary and `th daemon`, so the egress proxy starts the same
-/// way regardless of how the daemon is launched (the bug this consolidates: the
-/// `th daemon` path previously served without ever starting the proxy).
-///
-/// # Errors
-/// Returns an error if the durable DB or the socket cannot be opened.
-pub async fn serve_persistent(addr: std::net::SocketAddr) -> anyhow::Result<()> {
-    let mut state = AppState::persistent_default()?;
-    tracing::info!(db = %AppState::default_db_path().display(), "durable state");
-    start_egress_if_configured(&mut state);
-    // Fire due scheduled tasks on a cadence (the always-on agent's proactivity).
-    scheduler::spawn_scheduler(state.clone());
-    serve(state, addr).await
-}
-
-/// Start the goalie egress proxy on a background task and point the bash tool at
-/// it, when `SMOOTH_EGRESS_ALLOWLIST` is configured. No-op otherwise.
-fn start_egress_if_configured(state: &mut AppState) {
-    state.egress_proxy = start_egress_proxy();
-}
 
 /// Resolve the egress config; if set, start the goalie proxy on a background
 /// task and return its loopback addr (for routing the bash tool's egress

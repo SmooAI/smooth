@@ -11,29 +11,11 @@
 //!
 //! If neither is present the daemon errors with an actionable message.
 
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use smooth_operator::providers::{Activity, ProviderRegistry};
 use smooth_operator::LlmConfig;
-
-/// The default loopback bind address — matches the legacy Big Smooth port so
-/// existing frontends (`th code`, `smooth-web`) connect with no change.
-pub const DEFAULT_BIND: &str = "127.0.0.1:4400";
-
-/// Resolve the address the daemon binds to.
-///
-/// `SMOOTH_DAEMON_BIND` overrides; otherwise [`DEFAULT_BIND`]. Bound to
-/// loopback by design — remote access goes over Tailscale. A non-loopback bind
-/// without [`resolve_auth_token`] set logs a startup warning (see `server.rs`).
-///
-/// # Errors
-/// Returns an error if `SMOOTH_DAEMON_BIND` is set but unparseable.
-pub fn resolve_bind() -> anyhow::Result<SocketAddr> {
-    let raw = std::env::var("SMOOTH_DAEMON_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_owned());
-    raw.parse().with_context(|| format!("invalid SMOOTH_DAEMON_BIND: {raw:?}"))
-}
 
 /// Resolve the daemon's bearer token from `SMOOTH_DAEMON_TOKEN`.
 ///
@@ -129,17 +111,6 @@ pub fn egress_audit_path() -> PathBuf {
     )
 }
 
-/// Resolve the Gate-1 permission mode from `SMOOTH_PERMISSION_MODE` (default
-/// [`PermissionMode::Default`](crate::permission::PermissionMode::Default) —
-/// reads auto, mutations prompt).
-#[must_use]
-pub fn resolve_permission_mode() -> crate::permission::PermissionMode {
-    std::env::var("SMOOTH_PERMISSION_MODE")
-        .ok()
-        .and_then(|s| crate::permission::PermissionMode::parse(&s))
-        .unwrap_or_default()
-}
-
 /// Path to `providers.json` (`SMOOTH_PROVIDERS_FILE` override, else
 /// `~/.smooth/providers.json`).
 fn providers_path() -> Option<PathBuf> {
@@ -215,11 +186,6 @@ fn resolve_llm_inner(
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "unwrap/expect are the idiom for test assertions")]
 mod tests {
     use super::*;
-
-    #[test]
-    fn default_bind_parses() {
-        assert_eq!(DEFAULT_BIND.parse::<SocketAddr>().unwrap().port(), 4400);
-    }
 
     #[test]
     fn resolve_egress_is_opt_in_and_parses_hosts() {
