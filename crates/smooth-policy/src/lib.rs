@@ -166,12 +166,6 @@ pub struct PolicyMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
     pub token: String,
-    #[serde(default = "default_leader_url")]
-    pub leader_url: String,
-}
-
-fn default_leader_url() -> String {
-    "http://host.containers.internal:4400".into()
 }
 
 // ---------------------------------------------------------------------------
@@ -784,7 +778,6 @@ generated_at = "2026-04-03T19:00:00Z"
 
 [auth]
 token = "smth_op_a3f8c2d1_7kJ9xM2"
-leader_url = "http://host.containers.internal:4400"
 
 [network]
 max_response_bytes = 52428800
