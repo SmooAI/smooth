@@ -191,10 +191,10 @@ mod tests {
         assert_eq!(r.routing.coding.model, "deepseek-v4-flash");
         assert_eq!(r.routing.reasoning.as_ref().unwrap().model, "deepseek-v4-pro");
         assert_eq!(r.routing.reviewing.model, "minimax-m2.7-direct");
-        assert_eq!(r.routing.judge.model, "groq-llama-3.3-70b");
+        assert_eq!(r.routing.judge.model, "groq-gpt-oss-120b");
         assert_eq!(r.routing.summarize.model, "gemini-2.5-flash");
         assert_eq!(r.routing.default.model, "deepseek-v4-flash");
-        assert_eq!(r.routing.fast.as_ref().unwrap().model, "groq-llama-3.1-8b");
+        assert_eq!(r.routing.fast.as_ref().unwrap().model, "groq-gpt-oss-20b");
     }
 
     #[test]
@@ -269,14 +269,14 @@ mod tests {
         // Load via the wrapper: should rewrite + save back.
         let loaded = load_providers_with_migration(&path).expect("load");
         assert_eq!(loaded.routing.coding.model, "deepseek-v4-flash");
-        assert_eq!(loaded.routing.fast.as_ref().unwrap().model, "groq-llama-3.1-8b");
+        assert_eq!(loaded.routing.fast.as_ref().unwrap().model, "groq-gpt-oss-20b");
 
         // Read again with raw load_from_file — the file on disk must
         // now hold the concrete names too.
         let raw_reloaded = ProviderRegistry::load_from_file(&path).expect("reload");
         assert_eq!(raw_reloaded.routing.coding.model, "deepseek-v4-flash");
         assert_eq!(raw_reloaded.routing.reasoning.as_ref().unwrap().model, "deepseek-v4-pro");
-        assert_eq!(raw_reloaded.routing.judge.model, "groq-llama-3.3-70b");
+        assert_eq!(raw_reloaded.routing.judge.model, "groq-gpt-oss-120b");
     }
 
     #[test]
@@ -303,6 +303,35 @@ mod tests {
         assert_eq!(coding.new, "deepseek-v4-flash");
         let fast = rewrites.iter().find(|r| r.slot == "fast").expect("fast rewrite");
         assert_eq!(fast.old, "smooth-fast");
-        assert_eq!(fast.new, "groq-llama-3.1-8b");
+        assert_eq!(fast.new, "groq-gpt-oss-20b");
+    }
+
+    /// SMOODEV-2097: a config that already ran the smooth-* migration is
+    /// pinned to the *concrete* Groq Llama names. The gateway then
+    /// removed those models, so the second migration step must bump them
+    /// to gpt-oss — even though they carry no `smooth-` prefix.
+    #[test]
+    fn migrate_bumps_already_migrated_groq_llama_to_gpt_oss() {
+        let mut r = ProviderRegistry::new().with_routing(ModelRouting {
+            coding: ModelSlot::new("smooai-gateway", "deepseek-v4-flash"),
+            reasoning: Some(ModelSlot::new("smooai-gateway", "deepseek-v4-pro")),
+            reviewing: ModelSlot::new("smooai-gateway", "minimax-m2.7-direct"),
+            judge: ModelSlot::new("smooai-gateway", "groq-llama-3.3-70b"),
+            summarize: ModelSlot::new("smooai-gateway", "gemini-2.5-flash"),
+            default: ModelSlot::new("smooai-gateway", "deepseek-v4-flash"),
+            fast: Some(ModelSlot::new("smooai-gateway", "groq-llama-3.1-8b")),
+            planning: None,
+        });
+        let rewrites = migrate_provider_registry(&mut r);
+        // Only judge + fast change; the rest were already live concrete
+        // names.
+        assert_eq!(rewrites.len(), 2, "rewrites = {rewrites:?}");
+        assert_eq!(r.routing.judge.model, "groq-gpt-oss-120b");
+        assert_eq!(r.routing.fast.as_ref().unwrap().model, "groq-gpt-oss-20b");
+        let judge = rewrites.iter().find(|r| r.slot == "judge").expect("judge rewrite");
+        assert_eq!(judge.old, "groq-llama-3.3-70b");
+        assert_eq!(judge.new, "groq-gpt-oss-120b");
+        // Idempotent: a second pass makes no further changes.
+        assert!(migrate_provider_registry(&mut r).is_empty());
     }
 }

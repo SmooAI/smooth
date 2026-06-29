@@ -668,16 +668,16 @@ pub fn fallback_catalog() -> &'static [(&'static str, ModelInfo)] {
                     },
                 },
             ),
-            // Pearl th-3468bd: judge + fast defaults now route to
-            // Groq Llama. Embedding the catalog entries here so the
-            // picker shows them with the right metadata even in
-            // offline mode.
+            // Pearl th-3468bd / SMOODEV-2097: judge + fast defaults route
+            // to Groq gpt-oss (the Llama aliases were removed at the
+            // gateway). Embedding the catalog entries here so the picker
+            // shows them with the right metadata even in offline mode.
             (
-                "groq-llama-3.3-70b",
+                "groq-gpt-oss-120b",
                 ModelInfo {
                     use_cases: svec(&["judge", "guardrails", "reasoning", "fast"]),
                     tier: Tier::Fast,
-                    description: "Llama 3.3-70B on Groq — strong judge, sub-second p95.".into(),
+                    description: "gpt-oss-120B on Groq — strong judge, sub-second p95.".into(),
                     input_cost_per_token: 0.00000059,
                     output_cost_per_token: 0.00000079,
                     benchmarks: Benchmarks {
@@ -688,11 +688,11 @@ pub fn fallback_catalog() -> &'static [(&'static str, ModelInfo)] {
                 },
             ),
             (
-                "groq-llama-3.1-8b",
+                "groq-gpt-oss-20b",
                 ModelInfo {
                     use_cases: svec(&["fast", "utility", "cheap"]),
                     tier: Tier::Utility,
-                    description: "Llama 3.1-8B on Groq — sub-300ms utility, ~10x cheaper than Gemini Flash Lite.".into(),
+                    description: "gpt-oss-20B on Groq — sub-300ms utility, cheap.".into(),
                     input_cost_per_token: 0.00000005,
                     output_cost_per_token: 0.00000008,
                     benchmarks: Benchmarks {
@@ -1386,7 +1386,7 @@ mod tests {
         let coding = p.slots.iter().find(|s| s.slot == PickerSlot::Coding).expect("coding");
         assert_eq!(coding.current_model, "deepseek-v4-flash", "coding slot post-migration");
         let fast = p.slots.iter().find(|s| s.slot == PickerSlot::Fast).expect("fast");
-        assert_eq!(fast.current_model, "groq-llama-3.1-8b", "fast slot post-migration");
+        assert_eq!(fast.current_model, "groq-gpt-oss-20b", "fast slot post-migration");
 
         // The on-disk file must also be rewritten so the migration
         // only runs once per user.
@@ -1407,9 +1407,9 @@ mod tests {
             "minimax-m2.7-direct",
             "gemini-2.5-flash",
             "gemini-2.5-flash-lite",
-            // Pearl th-3468bd: judge + fast slot defaults
-            "groq-llama-3.3-70b",
-            "groq-llama-3.1-8b",
+            // Pearl th-3468bd / SMOODEV-2097: judge + fast slot defaults
+            "groq-gpt-oss-120b",
+            "groq-gpt-oss-20b",
         ] {
             assert!(names.contains(&required), "fallback catalog missing {required}");
         }
