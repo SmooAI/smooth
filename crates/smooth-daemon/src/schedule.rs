@@ -1,16 +1,19 @@
 //! Scheduled (proactive) tasks for the always-on agent.
 //!
 //! A [`Schedule`] re-enters a prompt into the daemon on a cadence — the
-//! hermes-style "do this every morning / every N minutes" capability. This
-//! module is the **pure model + next-fire-time computation**: no storage, no
-//! tick loop (those land in following slices), so the timing logic is
-//! exhaustively unit-testable without a clock or a database.
+//! hermes-style "do this every morning / every N minutes" capability. The
+//! always-on agent's schedules **survive restart** via [`SqliteScheduleStore`];
+//! [`InMemoryScheduleStore`] is the dev/test backend. The tick loop that fires
+//! due schedules into the operator lands in a following slice.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Mutex;
 
+use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, TimeZone, Utc};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 /// How often a scheduled task fires.
@@ -161,6 +164,73 @@ impl ScheduleStore for InMemoryScheduleStore {
     }
 }
 
+/// Durable [`ScheduleStore`] backed by a local sqlite file — the always-on
+/// agent's proactive schedules survive a daemon restart, with no external
+/// service (mirrors the operator's local sqlite storage). Each schedule is one
+/// JSON row keyed by id; the row set is small (one per scheduled task), so reads
+/// load all rows and filter/sort in memory.
+pub struct SqliteScheduleStore {
+    db: Mutex<Connection>,
+}
+
+impl SqliteScheduleStore {
+    /// Open (or create) the schedule store at `path`.
+    ///
+    /// # Errors
+    /// Returns an error if the sqlite file can't be opened or the schema can't
+    /// be created.
+    pub fn open(path: &Path) -> Result<Self> {
+        let db = Connection::open(path)?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS schedules (id TEXT PRIMARY KEY, json TEXT NOT NULL);")?;
+        Ok(Self { db: Mutex::new(db) })
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.db.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Load every stored schedule (unordered).
+    fn all(&self) -> Result<Vec<Schedule>> {
+        let db = self.lock();
+        let mut stmt = db.prepare("SELECT json FROM schedules")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(serde_json::from_str::<Schedule>(&row?)?);
+        }
+        Ok(out)
+    }
+}
+
+#[async_trait]
+impl ScheduleStore for SqliteScheduleStore {
+    async fn upsert(&self, schedule: Schedule) -> Result<()> {
+        let json = serde_json::to_string(&schedule)?;
+        self.lock().execute(
+            "INSERT OR REPLACE INTO schedules (id, json) VALUES (?1, ?2)",
+            rusqlite::params![schedule.id, json],
+        )?;
+        Ok(())
+    }
+
+    async fn list(&self) -> Result<Vec<Schedule>> {
+        let mut out = self.all()?;
+        out.sort_by_key(|s| s.next_due);
+        Ok(out)
+    }
+
+    async fn due(&self, now: DateTime<Utc>) -> Result<Vec<Schedule>> {
+        let mut out: Vec<Schedule> = self.all()?.into_iter().filter(|s| s.is_due(now)).collect();
+        out.sort_by_key(|s| s.next_due);
+        Ok(out)
+    }
+
+    async fn delete(&self, id: &str) -> Result<()> {
+        self.lock().execute("DELETE FROM schedules WHERE id = ?1", rusqlite::params![id])?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "unwrap/expect are the idiom for test assertions")]
 mod tests {
@@ -244,5 +314,41 @@ mod tests {
 
         store.delete("a").await.unwrap();
         assert_eq!(store.list().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn sqlite_store_persists_across_reopen() {
+        let now = at("2026-06-23T12:00:00Z");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("schedules.db");
+
+        {
+            let store = SqliteScheduleStore::open(&path).unwrap();
+            let mut past = Schedule::new("a", "morning brief", ScheduleKind::DailyAt { hour: 6, minute: 0 }, now);
+            past.next_due = at("2026-06-23T11:59:00Z");
+            store.upsert(past).await.unwrap();
+            store
+                .upsert(Schedule::new("b", "nightly", ScheduleKind::EveryNSeconds { secs: 3600 }, now))
+                .await
+                .unwrap();
+        }
+
+        // Reopen — the schedules survive the "restart".
+        let store = SqliteScheduleStore::open(&path).unwrap();
+        assert_eq!(store.list().await.unwrap().len(), 2, "both schedules persisted");
+        let due = store.due(now).await.unwrap();
+        assert_eq!(due.len(), 1, "only the past-due one is due");
+        assert_eq!(due[0].id, "a");
+        assert_eq!(due[0].prompt, "morning brief");
+
+        store.delete("a").await.unwrap();
+        assert_eq!(store.list().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn sqlite_store_fresh_db_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteScheduleStore::open(&dir.path().join("s.db")).unwrap();
+        assert!(store.list().await.unwrap().is_empty());
     }
 }
