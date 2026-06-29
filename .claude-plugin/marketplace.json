@@ -1,0 +1,25 @@
+{
+    "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+    "name": "smooth",
+    "owner": {
+        "name": "SmooAI",
+        "email": "brent@smoo.ai"
+    },
+    "metadata": {
+        "description": "SmooAI team Claude Code plugins — Big Smooth orchestration (th claude), agent comms (th-mail), and pearls work tracking.",
+        "pluginRoot": "./claude-plugins"
+    },
+    "plugins": [
+        {
+            "name": "smooth-agent",
+            "source": "smooth-agent",
+            "description": "Run a Big Smooth that drives Claude Code worker sessions over tmux (rate-limit-resilient), coordinate agents over th-mail, and track work in pearls. Provides the /smooth command.",
+            "version": "0.1.0",
+            "category": "orchestration",
+            "keywords": ["orchestration", "tmux", "multi-agent", "th-mail", "pearls", "rate-limit"],
+            "author": {
+                "name": "SmooAI"
+            }
+        }
+    ]
+}
