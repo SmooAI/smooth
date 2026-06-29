@@ -5,7 +5,6 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use globset::{Glob, GlobSetBuilder};
-use ignore::WalkBuilder;
 use serde_json::{json, Value};
 use smooth_operator::{Tool, ToolSchema};
 
@@ -16,6 +15,11 @@ use crate::util::req_str;
 const READ_DEFAULT_LIMIT: usize = 2000;
 /// Max entries returned by `list_files`.
 const LIST_CAP: usize = 200;
+/// Max filesystem entries `list_files` will *examine* before stopping. A
+/// backstop so a glob over a real project tree stays bounded even after the
+/// heavy dirs are pruned — the walk can't run away. (`.git`/`node_modules`/
+/// `target` are already pruned by [`crate::walk::pruned_walk`].)
+const LIST_WALK_BUDGET: usize = 50_000;
 
 /// `read_file` — read a workspace file, optionally a line window, `cat -n` style.
 pub struct ReadFileTool {
@@ -130,7 +134,14 @@ fn list_files_blocking(base: &std::path::Path, pattern: &str) -> anyhow::Result<
     let set = gsb.build().map_err(|e| anyhow::anyhow!("invalid glob set: {e}"))?;
 
     let mut matches: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
-    for entry in WalkBuilder::new(base).hidden(false).build().flatten() {
+    let mut examined = 0usize;
+    let mut budget_hit = false;
+    for entry in crate::walk::pruned_walk(base).flatten() {
+        examined += 1;
+        if examined > LIST_WALK_BUDGET {
+            budget_hit = true;
+            break;
+        }
         let Some(ft) = entry.file_type() else { continue };
         if !ft.is_file() {
             continue;
@@ -147,14 +158,24 @@ fn list_files_blocking(base: &std::path::Path, pattern: &str) -> anyhow::Result<
     matches.sort_by_key(|m| std::cmp::Reverse(m.1));
     let total = matches.len();
     if total == 0 {
-        return Ok(format!("no files match `{pattern}`"));
+        let hint = if budget_hit {
+            " (walk budget reached — narrow the pattern or pick a subdirectory)"
+        } else {
+            ""
+        };
+        return Ok(format!("no files match `{pattern}`{hint}"));
     }
     let mut out = String::new();
     for (p, _) in matches.iter().take(LIST_CAP) {
         out.push_str(&p.display().to_string());
         out.push('\n');
     }
-    if total > LIST_CAP {
+    if budget_hit {
+        let _ = writeln!(
+            out,
+            "... (walk budget reached; results may be incomplete — narrow the pattern or pick a subdirectory)"
+        );
+    } else if total > LIST_CAP {
         let _ = writeln!(out, "... ({total} total, showing {LIST_CAP})");
     }
     Ok(out)

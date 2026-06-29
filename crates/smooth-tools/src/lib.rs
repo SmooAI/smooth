@@ -29,6 +29,7 @@ pub mod read;
 pub mod remember;
 pub mod sandbox;
 mod util;
+pub mod walk;
 pub mod write;
 
 pub use bash::BashTool;

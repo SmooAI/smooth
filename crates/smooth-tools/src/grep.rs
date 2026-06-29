@@ -8,7 +8,6 @@ use globset::{Glob, GlobSetBuilder};
 use grep_regex::RegexMatcher;
 use grep_searcher::sinks::UTF8;
 use grep_searcher::Searcher;
-use ignore::WalkBuilder;
 use serde_json::{json, Value};
 use smooth_operator::{Tool, ToolSchema};
 
@@ -78,7 +77,7 @@ fn grep_blocking(base: &std::path::Path, root: &std::path::Path, pattern: &str, 
     let mut results: Vec<String> = Vec::new();
     let mut capped = false;
 
-    'walk: for entry in WalkBuilder::new(root).hidden(false).build().flatten() {
+    'walk: for entry in crate::walk::pruned_walk(root).flatten() {
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
         }
