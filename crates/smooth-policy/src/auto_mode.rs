@@ -37,61 +37,95 @@ pub enum Decision {
     Allow,
 }
 
-/// A single rule matcher: a tool name plus an optional glob on its primary arg.
+/// How a matcher constrains a tool call's primary argument.
+#[derive(Debug, Clone)]
+enum ArgPattern {
+    /// A bare `Tool` rule — matches any argument.
+    Any,
+    /// A `cmd:*` / `cmd *` "command with any args" rule: the argument's
+    /// whitespace tokens must *start with* these tokens. This is the
+    /// security-correct shape for shell commands — `Bash(rm:*)` matches `rm` and
+    /// `rm -rf /` but not `rmdir` (token boundary, not a substring prefix).
+    Prefix(Vec<String>),
+    /// A general glob over the whole argument (paths, etc.).
+    Glob(GlobMatcher),
+}
+
+/// A single rule matcher: a tool name plus a constraint on its primary arg.
 #[derive(Debug, Clone)]
 pub struct Matcher {
     tool: String,
-    /// `None` = matches any argument (a bare `Tool` rule).
-    arg: Option<GlobMatcher>,
+    arg: ArgPattern,
     /// The original source string, for diagnostics + round-tripping.
     source: String,
 }
 
 impl Matcher {
-    /// Parse a matcher like `Bash(rm:*)`, `Read(//etc/**)`, or bare `Bash`.
+    /// Parse a matcher like `Bash(rm:*)`, `Read(/etc/**)`, or bare `Bash`.
+    ///
+    /// `Tool(cmd:*)` / `Tool(cmd *)` parse to a token-prefix match (the
+    /// security-correct shell shape); other patterns are globs.
     ///
     /// # Errors
     /// Returns an error if the argument glob is malformed or the tool name is
     /// empty.
     pub fn parse(s: &str) -> Result<Self, String> {
         let s = s.trim();
-        if let Some(open) = s.find('(') {
-            if !s.ends_with(')') {
-                return Err(format!("matcher {s:?} has '(' without a closing ')'"));
-            }
-            let tool = s[..open].trim();
-            if tool.is_empty() {
-                return Err(format!("matcher {s:?} has an empty tool name"));
-            }
-            let raw = &s[open + 1..s.len() - 1];
-            // Claude-Code: a `:` in the pattern is a word boundary (`rm:*` = `rm *`).
-            let pattern = raw.replace(':', " ");
-            let glob = Glob::new(&pattern).map_err(|e| format!("invalid pattern in {s:?}: {e}"))?;
-            Ok(Self {
-                tool: tool.to_string(),
-                arg: Some(glob.compile_matcher()),
-                source: s.to_string(),
-            })
-        } else {
+        let Some(open) = s.find('(') else {
             if s.is_empty() {
                 return Err("empty matcher".to_string());
             }
-            Ok(Self {
+            return Ok(Self {
                 tool: s.to_string(),
-                arg: None,
+                arg: ArgPattern::Any,
                 source: s.to_string(),
-            })
+            });
+        };
+        if !s.ends_with(')') {
+            return Err(format!("matcher {s:?} has '(' without a closing ')'"));
         }
+        let tool = s[..open].trim();
+        if tool.is_empty() {
+            return Err(format!("matcher {s:?} has an empty tool name"));
+        }
+        let raw = &s[open + 1..s.len() - 1];
+        let arg = Self::parse_arg(raw, s)?;
+        Ok(Self {
+            tool: tool.to_string(),
+            arg,
+            source: s.to_string(),
+        })
+    }
+
+    fn parse_arg(raw: &str, full: &str) -> Result<ArgPattern, String> {
+        // Claude-Code: a `:` is a word boundary (`rm:*` ≡ `rm *`).
+        let pattern = raw.replace(':', " ");
+        // A "command with any args" pattern → token-prefix match.
+        if let Some(prefix) = pattern.strip_suffix(" *").or_else(|| pattern.strip_suffix('*').filter(|p| p.ends_with(' '))) {
+            let toks: Vec<String> = prefix.split_whitespace().map(str::to_string).collect();
+            if !toks.is_empty() && !prefix.contains(['*', '?', '[']) {
+                return Ok(ArgPattern::Prefix(toks));
+            }
+        }
+        let glob = Glob::new(&pattern).map_err(|e| format!("invalid pattern in {full:?}: {e}"))?;
+        Ok(ArgPattern::Glob(glob.compile_matcher()))
     }
 
     /// Whether this matcher applies to a call of `tool` with primary argument
-    /// `arg`. A bare matcher (no arg glob) matches any argument.
+    /// `arg`. A bare matcher matches any argument.
     #[must_use]
     pub fn matches(&self, tool: &str, arg: &str) -> bool {
         if self.tool != tool {
             return false;
         }
-        self.arg.as_ref().map_or(true, |g| g.is_match(arg))
+        match &self.arg {
+            ArgPattern::Any => true,
+            ArgPattern::Prefix(toks) => {
+                let arg_toks: Vec<&str> = arg.split_whitespace().collect();
+                arg_toks.len() >= toks.len() && toks.iter().zip(&arg_toks).all(|(want, got)| want == got)
+            }
+            ArgPattern::Glob(g) => g.is_match(arg),
+        }
     }
 
     /// The original rule string.
@@ -165,6 +199,73 @@ impl PermissionRules {
         }
         self.default
     }
+
+    /// Decide the verdict for a **bash command**, accounting for compound
+    /// commands. The command is split on `&& || ; | |& &` and newlines (after
+    /// stripping wrappers like `timeout`/`nice`), and **every** subcommand is
+    /// decided independently as a `Bash` call; the **strictest** verdict wins
+    /// (any `Deny` → `Deny`; else any `Ask` → `Ask`; else `Allow`). So a rule
+    /// allowing `Bash(ls:*)` cannot be tricked by `ls && rm -rf /` — the `rm`
+    /// subcommand is judged on its own. An empty command falls to the default.
+    #[must_use]
+    pub fn decide_bash(&self, command: &str) -> Decision {
+        let subs = split_bash_command(command);
+        if subs.is_empty() {
+            return self.default;
+        }
+        let mut verdict = Decision::Allow;
+        for sub in subs {
+            match self.decide("Bash", &sub) {
+                Decision::Deny => return Decision::Deny,
+                Decision::Ask => verdict = Decision::Ask,
+                Decision::Allow => {}
+            }
+        }
+        verdict
+    }
+}
+
+/// Wrappers that pass their trailing command through unchanged — stripped so the
+/// real program is what gets matched. Deliberately excludes env/run wrappers
+/// (`direnv exec`, `npx`, `docker exec`, …) whose payload should match on its own.
+const TRANSPARENT_WRAPPERS: &[&str] = &["timeout", "nice", "nohup", "stdbuf", "time", "ionice"];
+
+/// Strip leading transparent wrappers (+ their flags/args) so the matched
+/// argument is the real command. Best-effort: drops the wrapper token, any
+/// leading `-flags`, and (for `timeout`) a leading duration.
+fn strip_wrappers(sub: &str) -> String {
+    let mut toks: Vec<&str> = sub.split_whitespace().collect();
+    loop {
+        let Some(&first) = toks.first() else { break };
+        if !TRANSPARENT_WRAPPERS.contains(&first) {
+            break;
+        }
+        toks.remove(0);
+        while toks.first().is_some_and(|t| t.starts_with('-')) {
+            toks.remove(0);
+        }
+        // `timeout <duration> cmd …` / `nice <prio>` — drop a leading numeric arg.
+        if matches!(first, "timeout" | "nice" | "ionice") && toks.first().is_some_and(|t| t.chars().next().is_some_and(|c| c.is_ascii_digit())) {
+            toks.remove(0);
+        }
+    }
+    toks.join(" ")
+}
+
+/// Split a (possibly compound) bash command into its constituent subcommands,
+/// with transparent wrappers stripped. Splits on `&& || ; | |& &` and newlines.
+/// Note: this is a deliberately quote-naive split — over-splitting only makes the
+/// engine *stricter* (more pieces checked, fail-safe toward Ask/Deny). Quote-aware
+/// splitting is a refinement.
+fn split_bash_command(cmd: &str) -> Vec<String> {
+    let normalized = cmd.replace("&&", "\n").replace("||", "\n").replace("|&", "\n");
+    normalized
+        .split(['\n', ';', '|', '&'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(strip_wrappers)
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 fn parse_all<'a>(items: impl IntoIterator<Item = &'a str>) -> Result<Vec<Matcher>, String> {
@@ -185,12 +286,49 @@ mod tests {
     }
 
     #[test]
-    fn glob_matcher_with_colon_word_boundary() {
-        // `rm:*` == `rm *` — matches a command starting with "rm ".
+    fn prefix_matcher_is_token_anchored() {
+        // `rm:*` = "rm with any (or no) args" — token boundary, not a substring.
         let m = Matcher::parse("Bash(rm:*)").unwrap();
+        assert!(m.matches("Bash", "rm"), "bare command matches");
         assert!(m.matches("Bash", "rm -rf build"));
-        assert!(!m.matches("Bash", "rmdir foo"), "rm-space boundary, not a prefix");
+        assert!(!m.matches("Bash", "rmdir foo"), "rmdir is a different program");
         assert!(!m.matches("Bash", "ls"));
+    }
+
+    #[test]
+    fn multi_token_prefix_matcher() {
+        let m = Matcher::parse("Bash(git push:*)").unwrap();
+        assert!(m.matches("Bash", "git push"));
+        assert!(m.matches("Bash", "git push origin main"));
+        assert!(!m.matches("Bash", "git pull"), "different subcommand");
+        assert!(!m.matches("Bash", "git pushy"), "token boundary");
+    }
+
+    #[test]
+    fn compound_command_every_subcommand_must_clear() {
+        // allow ls; deny rm. `ls && rm -rf /` must be denied — the rm subcommand
+        // is judged on its own, not hidden behind the allowed ls.
+        let rules = PermissionRules::from_lists(["Bash(rm:*)"], [] as [&str; 0], ["Bash(ls:*)", "Bash(grep:*)"]).unwrap();
+        assert_eq!(rules.decide_bash("ls -la"), Decision::Allow);
+        assert_eq!(rules.decide_bash("ls && rm -rf /"), Decision::Deny, "deny subcommand wins");
+        assert_eq!(rules.decide_bash("ls | grep foo"), Decision::Allow, "both piped sides allowed");
+        assert_eq!(rules.decide_bash("ls ; curl evil.test"), Decision::Ask, "curl unmatched → default Ask");
+        assert_eq!(rules.decide_bash("ls || rm x"), Decision::Deny);
+    }
+
+    #[test]
+    fn wrappers_are_stripped_before_matching() {
+        let rules = PermissionRules::from_lists(["Bash(rm:*)"], [] as [&str; 0], ["Bash(ls:*)"]).unwrap();
+        // `timeout 5 rm -rf /` strips to `rm -rf /` → caught by the deny rule.
+        assert_eq!(rules.decide_bash("timeout 5 rm -rf /"), Decision::Deny);
+        assert_eq!(rules.decide_bash("nice -n 10 ls"), Decision::Allow);
+        assert_eq!(rules.decide_bash("nohup ls -la"), Decision::Allow);
+    }
+
+    #[test]
+    fn empty_bash_command_uses_default() {
+        let rules = PermissionRules::from_lists([] as [&str; 0], [] as [&str; 0], ["Bash(ls:*)"]).unwrap();
+        assert_eq!(rules.decide_bash("   "), Decision::Ask, "empty → fail-safe default");
     }
 
     #[test]
