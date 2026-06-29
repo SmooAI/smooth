@@ -17,36 +17,48 @@ Smooth is the Smoo AI CLI and orchestration platform — a **single Rust binary*
 ```
 smooth/
 ├── crates/
-│   ├── smooth-cli/          # Binary — clap CLI (23 commands)
-│   ├── smooth-bigsmooth/    # Library — orchestrator, policy generation, sandbox
-│   ├── smooth-policy/       # Library — shared policy types, TOML parsing
-│   ├── smooth-wonk/         # Binary — in-VM access control authority
-│   ├── smooth-goalie/       # Binary — in-VM network + filesystem proxy
-│   ├── smooth-narc/         # Binary — in-VM tool surveillance + LLM judge
-│   ├── smooth-code/         # Library — ratatui terminal dashboard
+│   ├── smooth-cli/          # Binary — the `th` clap CLI
+│   ├── smooth-daemon/       # Binary — the always-on personal-agent daemon (hosts the operator)
+│   ├── smooth-tools/        # Library — workspace-scoped agent tools (fs/grep/bash) + Gate-1 deny
+│   ├── smooth-policy/       # Library — shared policy types + the Gate-1 auto-mode rule engine
+│   ├── smooth-goalie/       # Library — egress allowlist proxy (the network boundary)
+│   ├── smooth-cast/         # Library — coding-harness extensions to the operator (fixer/oracle/… roles)
+│   ├── smooth-pearls/       # Library — built-in pearl tracker (Dolt-backed)
+│   ├── smooth-diver/        # Library — pearl lifecycle + project-management service
+│   ├── smooth-plugin/       # Library — trait-based plugin system (CLI/API/TUI/tool extensions)
+│   ├── smooth-api-client/   # Library — typed api.smoo.ai bindings + auth wrapper
+│   ├── smooth-code/         # Library — ratatui AI coding TUI (an operator client)
 │   └── smooth-web/          # Library — embedded Vite SPA via rust-embed
 │       └── web/             # React + Vite source (TypeScript)
-├── Cargo.toml               # Workspace root
+├── Cargo.toml               # Workspace root (engine is a path-dep to ../smooth-operator)
 ├── rustfmt.toml             # Format: 160 width, field init shorthand
 ├── install.sh               # Curl installer
 └── .claude/hooks/           # Worktree enforcement
 ```
 
+> **EPIC th-c89c2a collapsed the microVM substrate onto the operator.** The
+> per-VM crates (`smooth-bigsmooth`, `smooth-wonk`, `smooth-narc`,
+> `smooth-operative`, `smooth-scribe`, `smooth-archivist`) and the local
+> `smooth-operator` engine crate are **gone**: `th daemon` now hosts
+> smooth-operator's `LocalServer` directly (engine consumed as a path-dep to the
+> `../smooth-operator` checkout), with security re-homed onto a kernel sandbox +
+> the `smooth-goalie` egress proxy + the `smooth-policy` Gate-1 rule engine.
+
 ### Key Crates
 
-- **smooth-cli** (`crates/smooth-cli/`): clap entry point, 27 commands including `th access` for policy control
-- **smooth-bigsmooth** (`crates/smooth-bigsmooth/`): axum server, 20+ routes, orchestrator, sandbox pool, policy generation, session management, pearls/jira/tailscale
-- **smooth-operator** (`crates/smooth-operator/`): Rust-native AI agent framework — LLM client, tool system with hooks, agent loop, conversation management, built-in checkpointing (Groove)
-- **smooth-policy** (`crates/smooth-policy/`): shared policy types (network, filesystem, pearls, tools, MCP), TOML parsing, glob matching, phase defaults
-- **smooth-pearls** (`crates/smooth-pearls/`): built-in pearl tracker (dependency-graph work items). Dolt-backed via `smooth-dolt` Go binary for version control and git sync. Types: `Pearl`, `PearlStore`, `PearlStatus`, `PearlUpdate`, `PearlQuery`, `SmoothDolt`, `Registry`. Also stores session messages, orchestrator snapshots, and memories.
-- **smooth-wonk** (`crates/smooth-wonk/`): in-VM access control authority, policy hot-reload via notify+ArcSwap, access negotiation with Big Smooth
-- **smooth-goalie** (`crates/smooth-goalie/`): in-VM HTTP/HTTPS forward proxy, delegates all decisions to Wonk, JSON-lines audit logging
-- **smooth-narc** (`crates/smooth-narc/`): tool surveillance via ToolHook, secret detection (10 patterns), prompt injection guard (6 patterns), write guard, severity-based alerts
-- **smooth-operative** (`crates/smooth-operative/`): the sandboxed-worker binary that runs *inside* each microVM (one operative per dispatched pearl). Runs the `smooth-operator` engine's agent loop + file/bash tools + NarcHook, streams JSON-lines `AgentEvent`s on stdout. Cross-compiled to `aarch64-unknown-linux-musl`; Big Smooth mounts it into the sandbox at runtime. Build with `scripts/build-operative.sh`. (Distinct from the `smooth-operator` engine crate above, and from the public `smooth-operator` service.)
-- **smooth-scribe** (`crates/smooth-scribe/`): per-VM structured logging service, LogEntry with trace context, query/filter support
-- **smooth-archivist** (`crates/smooth-archivist/`): central log aggregator, batch ingest from all Scribes, cross-VM query, stats, SSE event stream
-- **smooth-code** (`crates/smooth-code/`): ratatui AI coding TUI — streaming chat, tool calls, file browser, git, sessions, model picker, extensions
-- **smooth-web** (`crates/smooth-web/`): rust-embed serves compiled Vite SPA
+- **smooth-cli** (`crates/smooth-cli/`): clap entry point — the `th` binary. `th daemon …` passes through to the `smooth-daemon` binary.
+- **smooth-daemon** (`crates/smooth-daemon/`): the always-on personal-agent daemon. Hosts smooth-operator's `LocalServer` (canonical WS protocol + official widget on `:8787`) made durable by a sqlite `StorageAdapter`; runs the **proactive scheduler** (`schedule.rs`/`scheduler.rs` — fires due tasks into the operator as a loopback WS client) and resolves the LLM gateway. `th daemon` / `th daemon schedule …` / `th daemon permissions …`.
+- **smooth-tools** (`crates/smooth-tools/`): the workspace-scoped agent tools (`read_file`/`write_file`/`edit_file`/`grep`/`list_files`/`bash`) the daemon provides per-turn via the operator's `ToolProvider` seam. Path scoping (`path.rs`), the bash circuit-breaker (`guard.rs`), and **Gate-1 deny enforcement** (`permission.rs`, loaded from `~/.smooth/permissions.toml`).
+- **smooth-policy** (`crates/smooth-policy/`): shared policy types **and the Gate-1 auto-mode rule engine** (`auto_mode.rs`): `Decision` (deny/ask/allow), `Matcher` (Claude-Code `Tool(pattern)` syntax), `PermissionRules` with deny>ask>allow precedence, bash compound-split, `from_toml`.
+- **smooth-goalie** (`crates/smooth-goalie/`): the egress allowlist proxy — the daemon's network boundary (exact-host allowlist, JSON-lines audit). Formerly delegated to the in-VM Wonk; now standalone.
+- **smooth-cast** (`crates/smooth-cast/`): coding-harness extensions to the operator engine — the `th code` coding workflow, skill discovery, and harness roles (fixer/oracle/chief/intent_classifier) the published generic engine no longer ships.
+- **smooth-pearls** (`crates/smooth-pearls/`): built-in pearl tracker (dependency-graph work items). Dolt-backed via `smooth-dolt` Go binary. Types: `Pearl`, `PearlStore`, `PearlStatus`, `PearlUpdate`, `PearlQuery`, `SmoothDolt`, `Registry`. Also stores session messages + memories.
+- **smooth-diver** (`crates/smooth-diver/`): pearl lifecycle manager + project-management service.
+- **smooth-plugin** (`crates/smooth-plugin/`): trait-based plugin system for extending Smooth with CLI commands, API routes, TUI views, and operator tools.
+- **smooth-api-client** (`crates/smooth-api-client/`): typed `api.smoo.ai` bindings generated from its `openapi.json`, plus an auth wrapper (token store, bearer middleware, refresh-on-401).
+- **smooth-code** (`crates/smooth-code/`): ratatui AI coding TUI — an **operator client** (`OperatorClient` speaks the canonical WS protocol to `th daemon`). Streaming chat, tool calls, the HITL approve/deny prompt, file browser, git, sessions, model picker.
+- **smooth-web** (`crates/smooth-web/`): rust-embed serves a compiled Vite SPA (the operator's web surface).
+- **The engine** is consumed as a **path-dep** to the `../smooth-operator` checkout (crates `smooth-operator` / `-server` / `-svc`), not a local crate — so the daemon embeds the operator's `LocalServer`, tool `ToolProvider` seam, durable `StorageAdapter` seam, and HITL `ConfirmationHook`.
 
 ---
 
