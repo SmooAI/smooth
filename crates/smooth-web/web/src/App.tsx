@@ -59,7 +59,8 @@ function Header({ state, status, faceState }: { state: AgentState; status: Retur
         const id = setInterval(() => force((n) => n + 1), 30_000);
         return () => clearInterval(id);
     }, []);
-    const dot = status.connected ? 'bg-coral' : 'bg-amber';
+    // Green = alive & awake; amber = needs you; dim = offline.
+    const dot = !status.connected ? 'bg-(--color-muted-foreground)' : state === 'awaiting' ? 'bg-amber' : 'bg-(--color-online)';
     return (
         <header className="flex items-center gap-4 pt-6 pb-4">
             <BigSmoothFace state={faceState} size={72} />

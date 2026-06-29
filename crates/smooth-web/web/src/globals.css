@@ -17,6 +17,7 @@
     --color-coral-ink: oklch(0.2 0.04 32);
     --color-amber: oklch(0.79 0.15 72);          /* "needs you" only */
     --color-amber-ink: oklch(0.24 0.06 72);
+    --color-online: oklch(0.74 0.17 152);        /* "awake / alive" status */
 
     --color-th-teal: #00a6a6;                    /* the face — presence */
     --color-th-blue: #1238dd;
