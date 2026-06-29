@@ -31,6 +31,11 @@ smooth-operator.workspace = true
 smooth-operator-server.workspace = true
 smooth-operator-svc.workspace = true
 smooth-tools.workspace = true
+# EPIC th-c89c2a (th-a28904): the daemon serves the smooth-web SPA same-origin at
+# its own `http://127.0.0.1:8787/` (token injected into index.html) instead of the
+# operator's stock widget — so the control surface is reachable with no
+# `?api`/`?token` query string.
+smooth-web.workspace = true
 smooth-policy.workspace = true
 # th-08e05a (EPIC th-c89c2a): the egress boundary — the daemon starts goalie's
 # in-process forward proxy (exact-host allowlist) and routes the bash tool's

@@ -38,6 +38,31 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// The local flavor's agent persona — "Big Smooth", the user's own always-on
+/// personal AI. Installed as the operator's default system prompt (via
+/// [`LocalServerBuilder::persona`]) so every turn runs as Big Smooth instead of
+/// the operator's stock customer-support agent (th-5f059b).
+///
+/// Two things it MUST get right, both observed broken on the stock prompt:
+///   1. **Personal assistant, not support.** It must never act like
+///      customer-support or volunteer "the organization's knowledge base / the
+///      org's docs" unless the user explicitly asks about org knowledge.
+///   2. **No reasoning narration.** The local model (deepseek-v4-flash) inlines
+///      its chain-of-thought into the reply ("The user is asking a general
+///      knowledge question… so I can answer directly…The song 'Let It Go'…").
+///      The directive below is firm and explicit so the model replies with only
+///      the answer. (The operator's engine already drops a *separate*
+///      reasoning-channel from the final reply; this handles the inline case.)
+const BIG_SMOOTH_PERSONA: &str = "You are Big Smooth, the user's own always-on personal AI assistant. \
+You are warm, smooth, and carry a little swagger — confident and easygoing, never stuffy — and you keep it concise: \
+say what matters and stop.\n\n\
+You are a PERSONAL assistant, not customer support. Never describe yourself as a support agent, and never mention \
+\"the organization\", \"the org's docs\", or \"the knowledge base\" unless the user explicitly asks about organization \
+knowledge. When a question is general knowledge, just answer it directly from what you know.\n\n\
+Answer the user DIRECTLY. Reply with only your answer — never show your reasoning, planning, or chain of thought, and \
+never restate or summarize the user's question before answering. No \"The user is asking…\", no \"I searched and found \
+nothing…\", no meta-narration of any kind. Just the answer, in your own smooth voice.";
+
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use smooth_operator::Tool;
@@ -248,13 +273,31 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         // agent. The widget + SDK clients carry the token, so they're unaffected.
         .strict_auth(true)
         .tools(provider)
-        // Serve the official widget at `/`, with the same token injected so the
-        // browser connects to `/ws?token=…` (validated by the verifier above).
-        .serve_widget(Some(token.clone()))
+        // The agent's personality: "Big Smooth", the user's personal assistant —
+        // NOT the operator's stock customer-support persona, and no reasoning
+        // narration (th-5f059b).
+        .persona(BIG_SMOOTH_PERSONA)
+        // Serve the smooth-web SPA same-origin at `/`, with the auth token injected
+        // into its index.html so the browser connects to `/ws?token=…` (validated
+        // by the verifier above) — no `?api`/`?token` query string needed
+        // (th-a28904). Replaces the operator's stock widget.
+        .serve_spa(smooth_web::web_router_with_token(Some(&token)))
         .spawn()
         .await
         .context("spawning the local-flavor operator")?;
-    tracing::info!(addr = %server.addr(), url = %format!("http://{}/", server.addr()), "smooth local-flavor operator listening (widget + canonical WS protocol)");
+    tracing::info!(addr = %server.addr(), url = %format!("http://{}/", server.addr()), "smooth local-flavor operator listening (smooth-web SPA same-origin + canonical WS protocol)");
+
+    // Reachability: if Tailscale is present and the node is up, expose the daemon
+    // over the user's *tailnet* via `tailscale serve` (never funnel — tailnet-
+    // private) so other devices reach it at https://<host>.<tailnet>.ts.net with
+    // no query string. Best-effort: a missing/down tailscale leaves the daemon on
+    // loopback. The guard lives to shutdown so its Drop tears the serve config
+    // down and nothing leaks across restarts (th-ce286d).
+    // Held to shutdown: its Drop tears the `tailscale serve` config back down.
+    let tailscale_guard = crate::tailscale::TailscaleServe::start(server.addr().port());
+    if let Some(url) = tailscale_guard.as_ref().and_then(crate::tailscale::TailscaleServe::url) {
+        tracing::info!(%url, "tailnet reachability armed via `tailscale serve` (tailnet-private, not funnel)");
+    }
 
     // Proactivity: the always-on agent fires due schedules into its *own*
     // operator as a loopback WS client (canonical send_message) — "just another
@@ -284,6 +327,20 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "unwrap/expect are the idiom for test assertions")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn big_smooth_persona_is_personal_and_no_reasoning() {
+        let p = BIG_SMOOTH_PERSONA;
+        // Identity: a personal assistant named Big Smooth, NOT customer support.
+        assert!(p.contains("Big Smooth"), "names the persona");
+        assert!(p.contains("personal"), "frames as a personal assistant");
+        assert!(p.to_lowercase().contains("not customer support"), "explicitly not support");
+        // The firm no-reasoning-narration directive (the core of th-5f059b).
+        assert!(p.contains("never show your reasoning"), "forbids reasoning narration");
+        assert!(p.contains("never restate"), "forbids restating the question");
+        // Does not gratuitously volunteer the org knowledge base.
+        assert!(p.contains("unless the user explicitly asks about organization"), "org-knowledge is opt-in");
+    }
 
     #[test]
     fn gateway_from_providers_reads_smooth_provider() {

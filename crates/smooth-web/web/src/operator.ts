@@ -51,13 +51,26 @@ interface OperatorApi {
     respond: (requestId: string, approved: boolean) => void;
 }
 
+/** Globals the daemon injects into `index.html` when it serves this SPA
+ * same-origin (see smooth-web's `web_router_with_token`): the auth token (and,
+ * optionally, an explicit API base). These take priority over the `?api`/`?token`
+ * dev query params so the same-origin endpoint is just `http://127.0.0.1:8787/`. */
+declare global {
+    interface Window {
+        __SMOOTH_TOKEN__?: string;
+        __SMOOTH_API__?: string;
+    }
+}
+
 /** Resolve the operator's HTTP base + auth token. When the daemon serves this
- * SPA they're same-origin + the token is injected; in dev, pass them as
- * `?api=http://127.0.0.1:8787&token=…` (persisted to localStorage thereafter). */
+ * SPA same-origin it injects `window.__SMOOTH_TOKEN__` (highest priority), so the
+ * endpoint is simply `http://127.0.0.1:8787/`. In dev (Vite at :3100) pass them
+ * as `?api=http://127.0.0.1:8787&token=…` (persisted to localStorage thereafter);
+ * the API base otherwise defaults to the page origin. */
 function resolveTarget(): { http: string; token: string } {
     const params = new URLSearchParams(window.location.search);
-    const api = params.get('api') ?? localStorage.getItem('smooth.api') ?? window.location.origin;
-    const token = params.get('token') ?? localStorage.getItem('smooth.token') ?? '';
+    const api = window.__SMOOTH_API__ ?? params.get('api') ?? localStorage.getItem('smooth.api') ?? window.location.origin;
+    const token = window.__SMOOTH_TOKEN__ ?? params.get('token') ?? localStorage.getItem('smooth.token') ?? '';
     if (params.get('api')) localStorage.setItem('smooth.api', api);
     if (params.get('token')) localStorage.setItem('smooth.token', token);
     return { http: api.replace(/\/$/, ''), token };

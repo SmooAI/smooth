@@ -4099,6 +4099,7 @@ dependencies = [
  "smooai-smooth-operator-server",
  "smooai-smooth-policy",
  "smooai-smooth-tools",
+ "smooai-smooth-web",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -4250,6 +4251,7 @@ dependencies = [
  "smooai-smooth-operator-ingestion",
  "tokio",
  "tokio-util",
+ "tower-http",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -4326,8 +4328,11 @@ version = "0.14.1"
 dependencies = [
  "axum 0.8.8",
  "axum-extra",
+ "http-body-util",
  "mime_guess",
  "rust-embed",
+ "serde_json",
+ "tokio",
  "tower",
 ]
 
