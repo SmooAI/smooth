@@ -484,10 +484,22 @@ of leaving the turn dead on the screen.
 th claude run                                      # launch + supervise an interactive session (attach to drive it)
 th claude run "fix the flaky test" --label fixer   # launch with an initial prompt
 th claude run --cwd ../some-worktree               # supervise a session rooted elsewhere
-th claude ls                                        # list live supervised sessions (prunes dead ones)
+th claude ls                                        # list live supervised sessions (id, mode, label)
 th claude ls --json
 th claude attach <id>                               # hand your terminal to a session (tmux attach; Ctrl-b d to detach)
+th claude mode <id> driving|manual|paused           # who drives: Big Smooth | you | nobody
+th claude tui                                        # live control dashboard (toggle mode + attach across sessions)
 ```
+
+`th claude tui` is the **control dashboard**: a live list of supervised sessions
+with each one's pane, plus single-key control — `d`/`m`/`p` flip
+driving/manual/paused, `a`/`enter` attach, `r` refresh, `q` quit. It's the
+"switch between Big Smooth driving and the session itself" surface. The same
+control is scriptable via `th claude mode`:
+
+- `driving` — Big Smooth sends input + rescues rate-limits.
+- `manual` — you drive (attach); the supervisor only rescues *your* throttled turn.
+- `paused` — the supervisor stands down.
 
 How it decides what to do, per poll of the **visible** pane:
 

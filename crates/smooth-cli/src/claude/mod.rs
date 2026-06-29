@@ -13,6 +13,7 @@ pub mod detect;
 pub mod governor;
 pub mod registry;
 pub mod supervisor;
+pub mod tui;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -73,6 +74,11 @@ pub enum ClaudeCommands {
         /// `driving` | `manual` | `paused`.
         mode: String,
     },
+    /// Interactive control dashboard: live list of supervised sessions
+    /// with their pane, plus keys to flip driving/manual/paused and
+    /// attach. The "switch between Big Smooth driving and the session
+    /// itself" surface.
+    Tui,
 }
 
 /// Dispatch a `th claude` subcommand.
@@ -105,6 +111,7 @@ pub async fn cmd_claude(cmd: ClaudeCommands) -> Result<()> {
         ClaudeCommands::Ls { json } => ls(json),
         ClaudeCommands::Attach { id } => attach(&id),
         ClaudeCommands::Mode { id, mode } => set_mode(&id, &mode),
+        ClaudeCommands::Tui => tui::run_tui(),
     }
 }
 

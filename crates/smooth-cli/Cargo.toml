@@ -22,6 +22,8 @@ admin = []
 [dependencies]
 smooth-bench.workspace = true
 smooth-tmux.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
 smooth-bigsmooth.workspace = true
 smooth-bootstrap-bill = { workspace = true, default-features = false, features = ["server"] }
 smooth-code.workspace = true
