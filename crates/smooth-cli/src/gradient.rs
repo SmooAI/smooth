@@ -72,9 +72,6 @@ pub fn smoo_ai() -> String {
     format!("{} AI", smoo("Smoo"))
 }
 
-
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,6 +110,4 @@ mod tests {
         assert_eq!(lerp(0, 100, 1.0), 100);
         assert_eq!(lerp(0, 100, 0.5), 50);
     }
-
-
 }

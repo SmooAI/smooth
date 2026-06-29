@@ -35,11 +35,21 @@ pub fn get_status() -> TailscaleStatus {
     let output = Command::new(tailscale_bin()).args(["status", "--json"]).output();
 
     let Ok(output) = output else {
-        return TailscaleStatus { connected: false, hostname: None, tailnet: None, ip: None };
+        return TailscaleStatus {
+            connected: false,
+            hostname: None,
+            tailnet: None,
+            ip: None,
+        };
     };
 
     if !output.status.success() {
-        return TailscaleStatus { connected: false, hostname: None, tailnet: None, ip: None };
+        return TailscaleStatus {
+            connected: false,
+            hostname: None,
+            tailnet: None,
+            ip: None,
+        };
     }
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_default();
@@ -49,7 +59,12 @@ pub fn get_status() -> TailscaleStatus {
     let tailnet = json.get("MagicDNSSuffix").and_then(|v| v.as_str()).map(String::from);
     let ip = json.pointer("/TailscaleIPs/0").and_then(|v| v.as_str()).map(String::from);
 
-    TailscaleStatus { connected, hostname, tailnet, ip }
+    TailscaleStatus {
+        connected,
+        hostname,
+        tailnet,
+        ip,
+    }
 }
 
 #[cfg(test)]
@@ -58,7 +73,12 @@ mod tests {
 
     #[test]
     fn status_struct_round_trips() {
-        let s = TailscaleStatus { connected: true, hostname: Some("h".into()), tailnet: Some("t".into()), ip: Some("1.2.3.4".into()) };
+        let s = TailscaleStatus {
+            connected: true,
+            hostname: Some("h".into()),
+            tailnet: Some("t".into()),
+            ip: Some("1.2.3.4".into()),
+        };
         let json = serde_json::to_string(&s).expect("serialize");
         let back: TailscaleStatus = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.connected, s.connected);

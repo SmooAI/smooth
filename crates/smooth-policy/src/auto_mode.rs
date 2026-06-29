@@ -274,8 +274,7 @@ const TRANSPARENT_WRAPPERS: &[&str] = &["timeout", "nice", "nohup", "stdbuf", "t
 /// leading `-flags`, and (for `timeout`) a leading duration.
 fn strip_wrappers(sub: &str) -> String {
     let mut toks: Vec<&str> = sub.split_whitespace().collect();
-    loop {
-        let Some(&first) = toks.first() else { break };
+    while let Some(&first) = toks.first() {
         if !TRANSPARENT_WRAPPERS.contains(&first) {
             break;
         }

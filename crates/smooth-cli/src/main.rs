@@ -16,7 +16,6 @@ mod tailscale;
 
 use smooai::{cmd_login, cmd_logout, cmd_orgs, cmd_whoami};
 
-
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use dialoguer::{theme::ColorfulTheme, Input, Password, Select};
@@ -293,7 +292,6 @@ enum CastCommands {
     },
 }
 
-
 #[derive(Subcommand)]
 enum SkillsCommands {
     /// List all skills discovered from every source.
@@ -304,9 +302,6 @@ enum SkillsCommands {
         name: String,
     },
 }
-
-
-
 
 #[derive(Subcommand)]
 enum OrgsCommands {
@@ -417,7 +412,6 @@ enum ApiCommands {
         cmd: smooai::observability::Cmd,
     },
 }
-
 
 #[derive(Subcommand)]
 enum ServiceCommands {
@@ -633,7 +627,6 @@ enum TailscaleCommands {
     /// Show Tailscale status
     Status,
 }
-
 
 #[derive(Subcommand)]
 enum HooksCommands {
@@ -1088,15 +1081,6 @@ async fn main() -> Result<()> {
 
 // ── Command implementations ────────────────────────────────
 
-
-
-
-
-
-
-
-
-
 fn cmd_db(cmd: DbCommands) -> Result<()> {
     // Smooth retired SQLite; all durable state (pearls, sessions,
     // memories, config) now lives in the Dolt store at
@@ -1531,7 +1515,6 @@ async fn cmd_model(cmd: ModelCommands) -> Result<()> {
     Ok(())
 }
 
-
 /// `th inbox` — convenience alias for `th msg inbox` against the local
 /// pearl-store mailbox (pearl th-70aaef). Was a stub hitting Big Smooth's
 /// `/api/messages/inbox` (which always returned `[]`); now it shows the
@@ -1547,10 +1530,6 @@ async fn cmd_inbox() -> Result<()> {
     })
     .await
 }
-
-
-
-
 
 fn cmd_audit(cmd: AuditCommands) -> Result<()> {
     let dir = dirs_next::home_dir().unwrap_or_default().join(".smooth").join("audit");
@@ -1611,7 +1590,6 @@ fn cmd_worktree(cmd: WorktreeCommands) -> Result<()> {
     }
     Ok(())
 }
-
 
 /// Read all bytes from stdin if data is available (piped input).
 fn read_stdin() -> Option<String> {
@@ -2047,18 +2025,6 @@ async fn cmd_doctor() -> Result<()> {
 
     Ok(())
 }
-
-
-
-
-
-
-
-
-
-
-
-
 
 fn cmd_doctor_init_home_repo(remote: Option<&str>) -> Result<()> {
     let home = dirs_next::home_dir().context("cannot determine home directory")?;
@@ -5401,7 +5367,6 @@ fn cmd_prime() -> Result<()> {
     Ok(())
 }
 
-
 /// `th skills` — list / show skills discovered from every source.
 /// Pearl th-e0f812. Walks the project's `.smooth/skills/` first,
 /// then the user-level Smooth / Claude Code / opencode skill dirs.
@@ -5512,7 +5477,6 @@ fn cmd_skills(cmd: SkillsCommands) -> Result<()> {
     }
 }
 
-
 fn cmd_service(cmd: ServiceCommands) -> Result<()> {
     match cmd {
         ServiceCommands::Install { system, daemon } => service::install(system, daemon),
@@ -5537,7 +5501,6 @@ mod plugin_tests {
         assert_eq!(extract_placeholders("dangle {{ unterminated"), Vec::<String>::new());
     }
 }
-
 
 #[cfg(test)]
 mod worktree_guard_tests {

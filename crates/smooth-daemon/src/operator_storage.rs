@@ -157,7 +157,7 @@ impl StorageAdapter for SqliteStorageAdapter {
     async fn list_conversations_by_org(&self, organization_id: &str) -> Result<Vec<Conversation>> {
         let t = self.tables.read().map_err(|e| anyhow!("lock poisoned: {e}"))?;
         let mut out: Vec<Conversation> = t.conversations.values().filter(|c| c.organization_id == organization_id).cloned().collect();
-        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        out.sort_by_key(|a| std::cmp::Reverse(a.created_at));
         Ok(out)
     }
 
@@ -196,7 +196,7 @@ impl StorageAdapter for SqliteStorageAdapter {
     async fn list_participants_by_conversation(&self, conversation_id: &str) -> Result<Vec<Participant>> {
         let t = self.tables.read().map_err(|e| anyhow!("lock poisoned: {e}"))?;
         let mut out: Vec<Participant> = t.participants.values().filter(|p| p.conversation_id == conversation_id).cloned().collect();
-        out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        out.sort_by_key(|a| a.created_at);
         Ok(out)
     }
 
@@ -283,7 +283,7 @@ impl StorageAdapter for SqliteStorageAdapter {
     async fn list_sessions_by_conversation(&self, conversation_id: &str) -> Result<Vec<Session>> {
         let t = self.tables.read().map_err(|e| anyhow!("lock poisoned: {e}"))?;
         let mut out: Vec<Session> = t.sessions.values().filter(|s| s.conversation_id == conversation_id).cloned().collect();
-        out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        out.sort_by_key(|a| a.created_at);
         Ok(out)
     }
 
