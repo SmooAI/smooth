@@ -46,7 +46,7 @@ export default function App() {
             <Header state={state} status={status} faceState={faceState} />
             <main className="flex min-h-0 flex-1 flex-col">
                 <ApprovalDeck approvals={approvals} respond={respond} />
-                <Conversation messages={messages} state={state} />
+                <Conversation messages={messages} state={state} approvals={approvals} />
             </main>
             <Composer onSend={sendMessage} disabled={state === 'connecting' || state === 'offline'} />
         </div>
@@ -118,8 +118,10 @@ function ApprovalDeck({ approvals, respond }: { approvals: Approval[]; respond: 
     );
 }
 
-function Conversation({ messages, state }: { messages: ChatMessage[]; state: AgentState }) {
+function Conversation({ messages, state, approvals }: { messages: ChatMessage[]; state: AgentState; approvals: Approval[] }) {
     const ref = useRef<HTMLDivElement>(null);
+    // Tools whose name has a pending approval are parked, not running.
+    const awaiting = new Set(approvals.map((a) => a.tool));
     useEffect(() => {
         ref.current?.scrollTo({ top: ref.current.scrollHeight, behavior: 'smooth' });
     }, [messages]);
@@ -135,13 +137,13 @@ function Conversation({ messages, state }: { messages: ChatMessage[]; state: Age
     return (
         <div ref={ref} className="min-h-0 flex-1 space-y-4 overflow-y-auto pb-4">
             {messages.map((m) => (
-                <MessageRow key={m.id} m={m} />
+                <MessageRow key={m.id} m={m} awaiting={awaiting} />
             ))}
         </div>
     );
 }
 
-function MessageRow({ m }: { m: ChatMessage }) {
+function MessageRow({ m, awaiting }: { m: ChatMessage; awaiting: Set<string> }) {
     if (m.role === 'system') {
         return <div className="rounded-xl border border-amber/30 bg-amber/5 px-3 py-2 text-sm text-amber/90">{m.content}</div>;
     }
@@ -157,7 +159,7 @@ function MessageRow({ m }: { m: ChatMessage }) {
             <span className="mt-1 size-2 shrink-0 rounded-full bg-gradient-to-b from-(--color-th-teal) to-(--color-th-blue)" />
             <div className="min-w-0 flex-1">
                 {m.tools.map((t) => (
-                    <ToolChip key={t.id} t={t} />
+                    <ToolChip key={t.id} t={t} awaiting={awaiting.has(t.name)} />
                 ))}
                 {m.content && (
                     <div className={`prose-msg text-[0.95rem] leading-relaxed text-foreground/95 ${m.streaming ? 'caret' : ''}`}>
@@ -170,7 +172,7 @@ function MessageRow({ m }: { m: ChatMessage }) {
     );
 }
 
-function ToolChip({ t }: { t: ToolCall }) {
+function ToolChip({ t, awaiting }: { t: ToolCall; awaiting: boolean }) {
     const Icon = TOOL_ICON[t.name] ?? Terminal;
     const arg = t.args.length > 80 ? `${t.args.slice(0, 80)}…` : t.args;
     return (
@@ -181,7 +183,11 @@ function ToolChip({ t }: { t: ToolCall }) {
                 <span className="truncate font-mono text-(--color-muted-foreground)">{arg}</span>
                 <span className="ml-auto shrink-0">
                     {!t.done ? (
-                        <span className="text-(--color-muted-foreground)">running…</span>
+                        awaiting ? (
+                            <span className="font-medium text-amber">awaiting your okay</span>
+                        ) : (
+                            <span className="text-(--color-muted-foreground)">running…</span>
+                        )
                     ) : t.isError ? (
                         <X size={13} className="text-amber" />
                     ) : (
