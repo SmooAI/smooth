@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 
+pub mod auto_mode;
 pub mod smooth_alias;
 
 // ---------------------------------------------------------------------------
