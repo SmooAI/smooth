@@ -47,6 +47,21 @@ fn rules() -> &'static PermissionRules {
     RULES.get_or_init(|| permissions_path().map_or_else(PermissionRules::default, |p| load_rules_from(&p)))
 }
 
+/// The resolved permissions-file path (`SMOOTH_PERMISSIONS_FILE` or
+/// `~/.smooth/permissions.toml`) — for diagnostics + the `permissions` CLI.
+#[must_use]
+pub fn config_path() -> Option<PathBuf> {
+    permissions_path()
+}
+
+/// Load the current rule set fresh from disk (re-reads the file; the CLI uses
+/// this rather than the cached process-global so edits are reflected). Empty
+/// rule set if no file or it's malformed.
+#[must_use]
+pub fn load() -> PermissionRules {
+    permissions_path().map_or_else(PermissionRules::default, |p| load_rules_from(&p))
+}
+
 /// Whether the configured Gate-1 rules **deny** this bash command (accounting for
 /// compound commands + wrappers via [`PermissionRules::decide_bash`]).
 #[must_use]

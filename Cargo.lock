@@ -4097,6 +4097,7 @@ dependencies = [
  "smooai-smooth-operator",
  "smooai-smooth-operator-core",
  "smooai-smooth-operator-server",
+ "smooai-smooth-policy",
  "smooai-smooth-tools",
  "tempfile",
  "thiserror 2.0.18",

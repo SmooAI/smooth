@@ -52,6 +52,25 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ScheduleCmd,
     },
+    /// Inspect the Gate-1 permission rules (`~/.smooth/permissions.toml`).
+    Permissions {
+        #[command(subcommand)]
+        cmd: PermissionsCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum PermissionsCmd {
+    /// Show what verdict (deny/ask/allow) the rules give a command or write.
+    Check {
+        /// The command (or, with `--write`, the workspace-relative path).
+        input: String,
+        /// Check a `write_file`/`edit_file` to this path instead of a bash command.
+        #[arg(long)]
+        write: bool,
+    },
+    /// Print the resolved permissions-file path.
+    Path,
 }
 
 #[derive(Subcommand)]
@@ -109,6 +128,33 @@ async fn run() -> Result<()> {
         }
         Cmd::Audit { lines } => cmd_audit(lines),
         Cmd::Schedule { cmd } => cmd_schedule(cmd).await,
+        Cmd::Permissions { cmd } => cmd_permissions(&cmd),
+    }
+}
+
+fn cmd_permissions(cmd: &PermissionsCmd) -> Result<()> {
+    use smooth_policy::auto_mode::Decision;
+
+    match cmd {
+        PermissionsCmd::Path => {
+            match smooth_tools::permission::config_path() {
+                Some(p) => println!("{}", p.display()),
+                None => println!("(could not resolve a home directory)"),
+            }
+            Ok(())
+        }
+        PermissionsCmd::Check { input, write } => {
+            let rules = smooth_tools::permission::load();
+            let verdict = if *write { rules.decide("Write", input) } else { rules.decide_bash(input) };
+            let label = match verdict {
+                Decision::Deny => "DENY",
+                Decision::Ask => "ASK",
+                Decision::Allow => "ALLOW",
+            };
+            let kind = if *write { "write" } else { "bash" };
+            println!("{label}  ({kind}) {input}");
+            Ok(())
+        }
     }
 }
 
