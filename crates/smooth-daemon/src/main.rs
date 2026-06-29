@@ -29,7 +29,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Run the bespoke daemon in the foreground (durable state + egress). Default.
+    /// Run the operator (default). `smooth-daemon` with no subcommand is the
+    /// operator's local flavor on `:8787` — canonical WS protocol + widget,
+    /// durable, egress-gated. Same as `operator` without `--addr`.
     Run,
     /// Run the operator's local deployment flavor (canonical WS protocol + widget).
     /// Same as the default `Run` — kept as an explicit form that takes `--addr`.
