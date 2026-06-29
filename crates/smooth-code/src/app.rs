@@ -1353,7 +1353,6 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
     Ok(())
 }
 
-
 #[cfg(test)]
 mod bench_cost_sidecar_tests {
     use super::write_bench_cost_sidecar_to;

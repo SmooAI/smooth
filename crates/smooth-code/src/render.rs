@@ -463,7 +463,6 @@ fn render_chat(frame: &mut Frame, state: &AppState, area: Rect) {
     frame.render_widget(paragraph, inner);
 }
 
-
 /// Render the text input area.
 fn render_input(frame: &mut Frame, state: &AppState, area: Rect) {
     // No box. The signature flow rule is the top edge; below it a warm
