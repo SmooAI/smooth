@@ -29,8 +29,10 @@
 pub mod config;
 pub mod operator;
 mod operator_storage;
+pub mod schedule;
 
 pub use operator::{local_tool_provider, serve_local_flavor};
+pub use schedule::{InMemoryScheduleStore, Schedule, ScheduleKind, ScheduleStore};
 
 /// Resolve the egress config; if set, start the goalie proxy on a background
 /// task and return its loopback addr (for routing the bash tool's egress
