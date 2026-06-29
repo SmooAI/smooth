@@ -1,10 +1,10 @@
 //! Mutating filesystem tools: `write_file`, `edit_file`.
 //!
-//! Both confine paths via [`resolve_workspace_path`]. They are NOT yet gated by
-//! a permission/approval model — that is Phase 3 (the auto-mode engine + kernel
-//! sandbox) of EPIC th-c89c2a. For the single-trusted-user daemon on loopback
-//! this is acceptable for now; the confinement keeps writes inside the
-//! workspace.
+//! Both confine paths via [`resolve_workspace_path`] (the kernel sandbox is the
+//! load-bearing boundary) **and** consult Gate 1: a configurable deny rule under
+//! the `Write` label (e.g. `Write(.git/hooks/**)` in `~/.smooth/permissions.toml`)
+//! blocks modifying a protected in-workspace path before any write — see
+//! [`crate::permission`] (EPIC th-c89c2a, th-515a13).
 
 use std::path::PathBuf;
 
@@ -42,6 +42,12 @@ impl Tool for WriteFileTool {
         let rel = req_str(&arguments, "path")?;
         let content = req_str(&arguments, "content")?;
         let path = resolve_workspace_path(&self.workspace, &rel)?;
+
+        // Gate 1: a configurable deny rule (e.g. `Write(.git/hooks/**)`) blocks
+        // modifying a protected in-workspace path before any write happens.
+        if crate::permission::write_denied(&self.workspace, &path) {
+            return Ok(format!("BLOCKED: a permission policy (deny) rule refused writing {rel}"));
+        }
 
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
@@ -91,6 +97,12 @@ impl Tool for EditFileTool {
         }
 
         let path = resolve_workspace_path(&self.workspace, &rel)?;
+
+        // Gate 1: same deny gate as write_file (the `Write` label covers both).
+        if crate::permission::write_denied(&self.workspace, &path) {
+            return Ok(format!("BLOCKED: a permission policy (deny) rule refused editing {rel}"));
+        }
+
         let content = tokio::fs::read_to_string(&path)
             .await
             .map_err(|e| anyhow::anyhow!("cannot read `{rel}` for editing: {e}"))?;

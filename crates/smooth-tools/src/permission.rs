@@ -54,6 +54,22 @@ pub fn bash_denied(command: &str) -> bool {
     rules().decide_bash(command) == Decision::Deny
 }
 
+/// The path a `Write`/`Edit` rule matches against: the file's path relative to
+/// the workspace root (so rules read like `Write(.git/hooks/**)` regardless of
+/// where the workspace lives on disk). Falls back to the absolute path if it
+/// isn't under the workspace (shouldn't happen — the tools confine writes).
+fn write_target(workspace: &Path, resolved: &Path) -> String {
+    resolved.strip_prefix(workspace).unwrap_or(resolved).to_string_lossy().into_owned()
+}
+
+/// Whether the configured Gate-1 rules **deny** modifying the file at `resolved`
+/// (both `write_file` and `edit_file` gate under the `Write` label, so one rule
+/// protects a path from all modification).
+#[must_use]
+pub fn write_denied(workspace: &Path, resolved: &Path) -> bool {
+    rules().decide("Write", &write_target(workspace, resolved)) == Decision::Deny
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "unwrap is the idiom for test assertions")]
 mod tests {
@@ -68,6 +84,18 @@ mod tests {
         assert_eq!(rules.decide_bash("rm -rf /"), Decision::Deny);
         assert_eq!(rules.decide_bash("ls && rm x"), Decision::Deny, "compound: rm subcommand denied");
         assert_ne!(rules.decide_bash("ls -la"), Decision::Deny);
+    }
+
+    #[test]
+    fn write_target_is_workspace_relative_and_denies() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("permissions.toml");
+        std::fs::write(&path, "deny = [\"Write(.git/**)\"]\n").unwrap();
+        let rules = load_rules_from(&path);
+        let ws = Path::new("/home/me/project");
+        assert_eq!(write_target(ws, &ws.join(".git/hooks/pre-commit")), ".git/hooks/pre-commit");
+        assert_eq!(rules.decide("Write", ".git/hooks/pre-commit"), Decision::Deny);
+        assert_ne!(rules.decide("Write", "src/main.rs"), Decision::Deny);
     }
 
     #[test]
