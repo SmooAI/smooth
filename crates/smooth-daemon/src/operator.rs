@@ -100,8 +100,10 @@ fn operator_storage_path() -> PathBuf {
 }
 
 /// Resolve the path to the durable schedule store (`~/.smooth/schedules.db`).
-/// `SMOOTH_SCHEDULE_DB` overrides.
-fn schedule_store_path() -> PathBuf {
+/// `SMOOTH_SCHEDULE_DB` overrides. Shared by the daemon's scheduler loop and the
+/// `schedule` CLI so both read/write the same store.
+#[must_use]
+pub fn schedule_store_path() -> PathBuf {
     if let Ok(p) = std::env::var("SMOOTH_SCHEDULE_DB") {
         let p = p.trim();
         if !p.is_empty() {
