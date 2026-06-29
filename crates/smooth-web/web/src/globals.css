@@ -1,99 +1,123 @@
 @import "tailwindcss";
 
+/* ── Presence theme ──────────────────────────────────────────────────────────
+ * A warm ink palette for a personal agent you cohabit with — not a corporate
+ * dashboard. Warm near-black, warm off-white type, a soft coral for "yes", and
+ * an amber that only ever means "Big Smooth needs you". The teal→blue brand
+ * gradient (the face) is reserved for his presence, never chrome. (th-f1a1f0) */
 @theme {
-    --color-background: oklch(0.145 0.015 260);
-    --color-foreground: oklch(0.95 0.01 260);
-    --color-card: oklch(0.17 0.02 260);
-    --color-card-foreground: oklch(0.95 0.01 260);
-    --color-primary: oklch(0.72 0.19 155);
-    --color-primary-foreground: oklch(0.15 0.02 260);
-    --color-secondary: oklch(0.25 0.02 260);
-    --color-secondary-foreground: oklch(0.95 0.01 260);
-    --color-muted: oklch(0.25 0.02 260);
-    --color-muted-foreground: oklch(0.6 0.02 260);
-    --color-accent: oklch(0.25 0.02 260);
-    --color-accent-foreground: oklch(0.95 0.01 260);
-    --color-destructive: oklch(0.55 0.2 25);
-    --color-destructive-foreground: oklch(0.95 0.01 260);
-    --color-border: oklch(0.3 0.02 260);
-    --color-input: oklch(0.3 0.02 260);
-    --color-ring: oklch(0.72 0.19 155);
-    --radius: 0.625rem;
+    --color-background: oklch(0.165 0.012 55);   /* warm near-black */
+    --color-foreground: oklch(0.93 0.014 70);    /* warm off-white */
+    --color-panel: oklch(0.205 0.014 58);        /* raised surfaces */
+    --color-panel-2: oklch(0.235 0.015 58);
+    --color-muted-foreground: oklch(0.66 0.02 65);
+    --color-border: oklch(0.30 0.014 60);
 
-    /* Smoo brand */
-    --color-smoo-green: oklch(0.72 0.19 155);
-    --color-smoo-dark: oklch(0.12 0.015 260);
+    --color-coral: oklch(0.74 0.15 32);          /* primary / "yes" */
+    --color-coral-ink: oklch(0.2 0.04 32);
+    --color-amber: oklch(0.79 0.15 72);          /* "needs you" only */
+    --color-amber-ink: oklch(0.24 0.06 72);
 
-    /* Sidebar */
-    --color-sidebar: oklch(0.13 0.015 260);
-    --color-sidebar-foreground: oklch(0.9 0.01 260);
-    --color-sidebar-border: oklch(0.25 0.02 260);
-    --color-sidebar-accent: oklch(0.2 0.02 260);
+    --color-th-teal: #00a6a6;                    /* the face — presence */
+    --color-th-blue: #1238dd;
+
+    --radius: 1rem;
+    --font-display: "Bricolage Grotesque", ui-rounded, "Segoe UI", system-ui, sans-serif;
+    --font-sans: ui-rounded, "SF Pro Rounded", "Segoe UI", system-ui, sans-serif;
+}
+
+* {
+    border-color: var(--color-border);
+}
+
+html,
+body,
+#root {
+    height: 100%;
 }
 
 body {
-    background: var(--color-background);
+    margin: 0;
+    background:
+        radial-gradient(1100px 700px at 78% -8%, color-mix(in oklch, var(--color-th-teal) 11%, transparent), transparent 60%),
+        radial-gradient(900px 600px at 12% 108%, color-mix(in oklch, var(--color-th-blue) 13%, transparent), transparent 62%),
+        var(--color-background);
     color: var(--color-foreground);
-    font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
 }
 
-/* Aliases used by chat.tsx and operators.tsx — these were referenced
- * everywhere but never defined, so any element styled with
- * `var(--border)` etc. was rendering with no border / no background.
- * Mapping them onto the `--color-*` tokens defined in @theme above. */
-:root {
-    --border: var(--color-border);
-    --muted: var(--color-muted-foreground);
-    --smoo-green: var(--color-smoo-green);
-    --smoo-green-alpha: color-mix(in oklch, var(--color-smoo-green) 22%, transparent);
-    --smoo-orange: oklch(0.78 0.18 65);
-    --smoo-dark-blue-850: oklch(0.18 0.02 260);
+/* The Smooth wordmark — the teal→blue gradient, his colors. */
+.wordmark {
+    background: linear-gradient(105deg, var(--color-th-teal), var(--color-th-blue));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    font-family: var(--font-display);
+    font-weight: 800;
+    letter-spacing: -0.02em;
 }
 
-@keyframes bs-thought-in {
-    0% {
-        transform: translateY(6px) scale(0.92);
-        opacity: 0;
-    }
-    100% {
-        transform: translateY(0) scale(1);
-        opacity: var(--bs-thought-opacity, 1);
-    }
+/* The blinking caret on a streaming reply. */
+.caret::after {
+    content: "▌";
+    margin-left: 1px;
+    color: var(--color-th-teal);
+    animation: caret 1s steps(1) infinite;
+}
+@keyframes caret {
+    50% { opacity: 0; }
 }
 
+/* "Needs you" — the approval card breathes amber so it can't be missed. */
+.needs-you {
+    border: 1px solid color-mix(in oklch, var(--color-amber) 55%, transparent);
+    box-shadow: 0 0 0 1px color-mix(in oklch, var(--color-amber) 22%, transparent);
+    animation: needs-you 2.4s ease-in-out infinite;
+}
+@keyframes needs-you {
+    0%, 100% { box-shadow: 0 0 0 1px color-mix(in oklch, var(--color-amber) 18%, transparent), 0 8px 30px -12px color-mix(in oklch, var(--color-amber) 30%, transparent); }
+    50%      { box-shadow: 0 0 0 1px color-mix(in oklch, var(--color-amber) 40%, transparent), 0 10px 40px -10px color-mix(in oklch, var(--color-amber) 55%, transparent); }
+}
+
+/* The thinking dots under his status line. */
 .bs-dot {
     display: inline-block;
-    animation: bs-dot-pulse 1.05s ease-in-out infinite;
+    animation: bs-dot 1.05s ease-in-out infinite;
     font-weight: 700;
 }
-
-@keyframes bs-dot-pulse {
-    0%, 80%, 100% {
-        opacity: 0.25;
-        transform: translateY(0);
-    }
-    40% {
-        opacity: 1;
-        transform: translateY(-2px);
-    }
+.bs-dot:nth-child(2) { animation-delay: 0.14s; }
+.bs-dot:nth-child(3) { animation-delay: 0.28s; }
+@keyframes bs-dot {
+    0%, 80%, 100% { opacity: 0.25; transform: translateY(0); }
+    40%           { opacity: 1; transform: translateY(-2px); }
 }
 
-/* Big Smooth flies down from his header perch to a spot under the
-   user's most recent question while he's thinking. The header avatar
-   fades + drops at the same time (inline transition above) so the
-   pair reads as a single continuous motion. Slight overshoot at 65%
-   gives him a bit of personality on the landing. */
-@keyframes bs-face-fly-in {
-    0% {
-        opacity: 0;
-        transform: translateY(-48px) scale(0.7);
-    }
-    65% {
-        opacity: 1;
-        transform: translateY(6px) scale(1.04);
-    }
-    100% {
-        opacity: 1;
-        transform: translateY(0) scale(1);
-    }
+/* Markdown bubbles read as prose, not a form. */
+.prose-msg p { margin: 0 0 0.6em; }
+.prose-msg p:last-child { margin-bottom: 0; }
+.prose-msg pre {
+    background: var(--color-background);
+    border: 1px solid var(--color-border);
+    border-radius: 0.7rem;
+    padding: 0.7rem 0.85rem;
+    overflow-x: auto;
+    font-size: 0.85em;
+}
+.prose-msg code { font-family: ui-monospace, "SF Mono", monospace; font-size: 0.88em; }
+.prose-msg :not(pre) > code {
+    background: color-mix(in oklch, var(--color-th-teal) 14%, transparent);
+    padding: 0.1em 0.35em;
+    border-radius: 0.4rem;
+}
+.prose-msg a { color: var(--color-th-teal); text-decoration: underline; }
+
+/* Thin, warm scrollbars. */
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb {
+    background: color-mix(in oklch, var(--color-foreground) 14%, transparent);
+    border-radius: 999px;
+    border: 3px solid transparent;
+    background-clip: content-box;
 }

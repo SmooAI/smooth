@@ -6,7 +6,9 @@ import * as THREE from 'three';
 const TH_TOP = '#00a6a6';
 const TH_BOTTOM = '#1238dd';
 
-type FaceState = 'idle' | 'thinking';
+// `awake`/`idle` = calm; `thinking`/`speaking` = energetic (speaking works the
+// mouth); `awaiting` = an alert "wait — I need you" attention pose + amber glow.
+export type FaceState = 'idle' | 'awake' | 'thinking' | 'speaking' | 'awaiting';
 
 interface BigSmoothFaceProps {
     state: FaceState;
@@ -183,41 +185,39 @@ export function BigSmoothFace({ state, size = 96 }: BigSmoothFaceProps) {
         const tick = () => {
             const now = performance.now();
             const t = (now - start) / 1000;
-            const isThinking = stateRef.current === 'thinking';
+            const s = stateRef.current;
+            const energetic = s === 'thinking' || s === 'speaking';
+            const alert = s === 'awaiting';
 
-            // Cool tilt is a small persistent z-roll when idle; thinking
-            // straightens up and bobs forward more.
-            const yawSpeed = isThinking ? 1.4 : 0.55;
-            const yaw = Math.sin(t * yawSpeed) * (isThinking ? 0.55 : 0.28);
-            const pitch = isThinking ? Math.sin(t * 2.6) * 0.14 : Math.sin(t * 0.9) * 0.06;
-            const tilt = isThinking ? Math.sin(t * 0.9) * 0.04 : 0.12;
+            // Pose: idle keeps a cool z-roll; energetic straightens + bobs;
+            // alert snaps upright and leans in — a "wait, look at me" attention.
+            const yawSpeed = energetic ? 1.4 : 0.55;
+            const yaw = alert ? Math.sin(t * 5.0) * 0.1 : Math.sin(t * yawSpeed) * (energetic ? 0.55 : 0.28);
+            const pitch = alert ? -0.12 + Math.sin(t * 3.4) * 0.05 : energetic ? Math.sin(t * 2.6) * 0.14 : Math.sin(t * 0.9) * 0.06;
+            const tilt = energetic ? Math.sin(t * 0.9) * 0.04 : alert ? 0.0 : 0.12;
             faceGroup.rotation.set(pitch, yaw, tilt);
 
-            // Bob — gentle when idle, more energetic when thinking.
-            faceGroup.position.y = isThinking ? Math.sin(t * 4.2) * 0.05 : Math.sin(t * 1.4) * 0.03;
+            // Bob — gentle idle, energetic talking, a sharp alert nod.
+            faceGroup.position.y = alert ? Math.abs(Math.sin(t * 5.0)) * 0.06 : energetic ? Math.sin(t * 4.2) * 0.05 : Math.sin(t * 1.4) * 0.03;
 
-            // Lens flash — quickly brighten the glints to imply a
-            // reflective sheen sliding across the shades.
+            // Lens flash — a reflective sheen sliding across the shades; quicker
+            // and brighter the more keyed-up he is.
             if (now > nextFlashAt && flashUntil === 0) {
                 flashUntil = now + 260;
-                const cadence = isThinking ? 1400 : 2800;
-                nextFlashAt = now + cadence + Math.random() * 1600;
+                const cadence = alert ? 700 : energetic ? 1400 : 2800;
+                nextFlashAt = now + cadence + Math.random() * (alert ? 500 : 1600);
             }
             const flashing = flashUntil > 0 && now < flashUntil;
             if (!flashing && flashUntil > 0 && now >= flashUntil) flashUntil = 0;
-            const flashAmt = flashing ? 1.0 : 0.55;
-            glintMat.opacity = flashAmt;
+            glintMat.opacity = flashing ? 1.0 : 0.55;
 
-            // Pulse the head shader.
-            headMat.uniforms.uPulse.value = isThinking
-                ? 0.45 + 0.55 * Math.sin(t * 4.2)
-                : 0.18 * Math.sin(t * 1.3);
+            // Head pulse — calm idle, strong energetic, urgent alert.
+            headMat.uniforms.uPulse.value = alert ? 0.6 + 0.4 * Math.sin(t * 7.0) : energetic ? 0.45 + 0.55 * Math.sin(t * 4.2) : 0.18 * Math.sin(t * 1.3);
             headMat.uniforms.uTime.value = t;
 
-            // While thinking, mouth opens slightly and bobs — feels
-            // like he's mid-sentence.
-            const mouthScale = isThinking ? 1.0 + Math.sin(t * 6) * 0.10 : 1.0;
-            mouth.scale.set(mouthScale, mouthScale, 1);
+            // Mouth — speaking opens + bobs (mid-sentence); alert presses flat.
+            const mouthScale = s === 'speaking' ? 1.0 + Math.sin(t * 6) * 0.12 : energetic ? 1.0 + Math.sin(t * 6) * 0.06 : 1.0;
+            mouth.scale.set(mouthScale, alert ? 0.8 : mouthScale, 1);
 
             renderer.render(scene, camera);
             raf = requestAnimationFrame(tick);
@@ -255,10 +255,15 @@ export function BigSmoothFace({ state, size = 96 }: BigSmoothFaceProps) {
                 width: size,
                 height: size,
                 lineHeight: 0,
-                filter: state === 'thinking' ? 'drop-shadow(0 0 12px rgba(0,166,166,0.55))' : 'drop-shadow(0 0 6px rgba(18,56,221,0.35))',
+                filter:
+                    state === 'awaiting'
+                        ? 'drop-shadow(0 0 18px rgba(245,158,11,0.8))'
+                        : state === 'thinking' || state === 'speaking'
+                          ? 'drop-shadow(0 0 12px rgba(0,166,166,0.55))'
+                          : 'drop-shadow(0 0 6px rgba(18,56,221,0.35))',
                 transition: 'filter 280ms ease',
             }}
-            aria-label={state === 'thinking' ? 'Big Smooth is thinking' : 'Big Smooth'}
+            aria-label={`Big Smooth — ${state}`}
         />
     );
 }
