@@ -13,6 +13,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use futures_util::{SinkExt, StreamExt};
+use serde_json::{json, Value};
+use tokio_tungstenite::tungstenite::Message;
 
 use crate::schedule::ScheduleStore;
 
@@ -75,6 +78,121 @@ pub fn spawn_scheduler(store: Arc<dyn ScheduleStore>, driver: Arc<dyn TurnDriver
             }
         }
     })
+}
+
+/// The production [`TurnDriver`]: fires a scheduled prompt into the daemon's own
+/// operator as a **loopback WS client**, speaking the canonical protocol
+/// (`create_conversation_session` → `send_message` → drain to `eventual_response`).
+/// Proactivity is "just another client on the protocol" — no operator-side change.
+/// A fresh connection per firing keeps it stateless (the scheduler fires rarely).
+pub struct OperatorTurnDriver {
+    /// Operator base URL, e.g. `http://127.0.0.1:8787`.
+    url: String,
+    /// Local auth token (the operator runs strict-auth).
+    token: String,
+    /// Per-firing ceiling — a wedged turn can't block the loop forever.
+    timeout: Duration,
+}
+
+impl OperatorTurnDriver {
+    /// A driver targeting `url` with `token`, defaulting to a 10-minute per-turn
+    /// ceiling.
+    #[must_use]
+    pub fn new(url: impl Into<String>, token: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            token: token.into(),
+            timeout: Duration::from_secs(600),
+        }
+    }
+
+    /// One connect → create-session → send → drain cycle.
+    async fn drive_once(&self, prompt: &str) -> anyhow::Result<()> {
+        let ws_base = self.url.replace("https://", "wss://").replace("http://", "ws://");
+        let ws_url = format!("{ws_base}/ws?token={}", urlencode(&self.token));
+        let (stream, _) = tokio_tungstenite::connect_async(&ws_url)
+            .await
+            .map_err(|e| anyhow::anyhow!("operator WS connect failed: {e}"))?;
+        let (mut sink, mut source) = stream.split();
+
+        // 1. Open a session.
+        sink.send(Message::Text(
+            json!({
+                "action": "create_conversation_session",
+                "requestId": "sched-cs",
+                "agentId": uuid::Uuid::new_v4().to_string(),
+                "userName": "scheduler",
+            })
+            .to_string()
+            .into(),
+        ))
+        .await?;
+        let mut session_id = None;
+        while let Some(Ok(msg)) = source.next().await {
+            let Message::Text(text) = msg else { continue };
+            let v: Value = serde_json::from_str(&text)?;
+            match v.get("type").and_then(Value::as_str) {
+                Some("immediate_response") => {
+                    session_id = v.pointer("/data/sessionId").and_then(Value::as_str).map(str::to_string);
+                    break;
+                }
+                Some("error") => anyhow::bail!("operator error creating session: {text}"),
+                _ => {}
+            }
+        }
+        let sid = session_id.ok_or_else(|| anyhow::anyhow!("operator closed before a session was created"))?;
+
+        // 2. Fire the scheduled prompt.
+        sink.send(Message::Text(
+            json!({
+                "action": "send_message",
+                "requestId": "sched-turn",
+                "sessionId": sid,
+                "message": prompt,
+            })
+            .to_string()
+            .into(),
+        ))
+        .await?;
+
+        // 3. Drain until the turn completes (or errors).
+        while let Some(Ok(msg)) = source.next().await {
+            let Message::Text(text) = msg else {
+                if matches!(msg, Message::Close(_)) {
+                    break;
+                }
+                continue;
+            };
+            let v: Value = serde_json::from_str(&text)?;
+            match v.get("type").and_then(Value::as_str) {
+                Some("eventual_response") => break,
+                Some("error") => anyhow::bail!("operator error on scheduled turn: {text}"),
+                _ => {}
+            }
+        }
+        let _ = sink.send(Message::Close(None)).await;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl TurnDriver for OperatorTurnDriver {
+    async fn drive(&self, prompt: &str) -> anyhow::Result<()> {
+        tokio::time::timeout(self.timeout, self.drive_once(prompt))
+            .await
+            .map_err(|_| anyhow::anyhow!("scheduled turn timed out after {:?}", self.timeout))?
+    }
+}
+
+/// Percent-encode a token for a `?token=` query param (RFC 3986 unreserved set
+/// passes through; everything else is `%XX`).
+fn urlencode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -147,5 +265,13 @@ mod tests {
 
         assert_eq!(fired, 0, "the failed firing doesn't count");
         assert_eq!(store.due(now).await.unwrap().len(), 1, "still due — retried next tick");
+    }
+
+    #[test]
+    fn urlencode_passes_unreserved_and_escapes_the_rest() {
+        assert_eq!(urlencode("abcXYZ09-_.~"), "abcXYZ09-_.~");
+        assert_eq!(urlencode("a b/c?d"), "a%20b%2Fc%3Fd");
+        // A typical uuid-simple token is all-unreserved → unchanged.
+        assert_eq!(urlencode("0a1b2c3d4e5f"), "0a1b2c3d4e5f");
     }
 }

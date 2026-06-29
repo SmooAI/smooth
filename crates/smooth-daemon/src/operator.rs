@@ -99,6 +99,18 @@ fn operator_storage_path() -> PathBuf {
     dirs_next::home_dir().map_or_else(|| PathBuf::from("operator-storage.db"), |h| h.join(".smooth").join("operator-storage.db"))
 }
 
+/// Resolve the path to the durable schedule store (`~/.smooth/schedules.db`).
+/// `SMOOTH_SCHEDULE_DB` overrides.
+fn schedule_store_path() -> PathBuf {
+    if let Ok(p) = std::env::var("SMOOTH_SCHEDULE_DB") {
+        let p = p.trim();
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    dirs_next::home_dir().map_or_else(|| PathBuf::from("schedules.db"), |h| h.join(".smooth").join("schedules.db"))
+}
+
 /// Tighten a file to owner-only (mode 600) on Unix; no-op elsewhere.
 #[cfg(unix)]
 fn restrict_permissions(path: &Path) {
@@ -236,11 +248,30 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         .tools(provider)
         // Serve the official widget at `/`, with the same token injected so the
         // browser connects to `/ws?token=…` (validated by the verifier above).
-        .serve_widget(Some(token))
+        .serve_widget(Some(token.clone()))
         .spawn()
         .await
         .context("spawning the local-flavor operator")?;
     tracing::info!(addr = %server.addr(), url = %format!("http://{}/", server.addr()), "smooth local-flavor operator listening (widget + canonical WS protocol)");
+
+    // Proactivity: the always-on agent fires due schedules into its *own*
+    // operator as a loopback WS client (canonical send_message) — "just another
+    // client on the protocol" (EPIC th-c89c2a, th-2ff975). Durable across
+    // restarts via the sqlite schedule store; a missing/unwritable store disables
+    // the loop without taking the daemon down.
+    let _scheduler = match crate::schedule::SqliteScheduleStore::open(&schedule_store_path()) {
+        Ok(store) => {
+            let driver = crate::scheduler::OperatorTurnDriver::new(format!("http://{}", server.addr()), token.clone());
+            let handle = crate::scheduler::spawn_scheduler(Arc::new(store), Arc::new(driver), std::time::Duration::from_secs(30));
+            tracing::info!("scheduler armed (30s tick) — proactive schedules fire into the operator");
+            Some(handle)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "scheduler disabled — could not open the schedule store");
+            None
+        }
+    };
+
     tokio::signal::ctrl_c().await.ok();
     tracing::info!("shutdown signal received");
     server.shutdown().await.context("shutting down local operator")?;

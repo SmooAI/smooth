@@ -34,7 +34,7 @@ pub mod scheduler;
 
 pub use operator::{local_tool_provider, serve_local_flavor};
 pub use schedule::{InMemoryScheduleStore, Schedule, ScheduleKind, ScheduleStore, SqliteScheduleStore};
-pub use scheduler::{spawn_scheduler, tick, TurnDriver};
+pub use scheduler::{spawn_scheduler, tick, OperatorTurnDriver, TurnDriver};
 
 /// Resolve the egress config; if set, start the goalie proxy on a background
 /// task and return its loopback addr (for routing the bash tool's egress
