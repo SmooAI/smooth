@@ -63,6 +63,14 @@ Answer the user DIRECTLY. Reply with only your answer — never show your reason
 never restate or summarize the user's question before answering. No \"The user is asking…\", no \"I searched and found \
 nothing…\", no meta-narration of any kind. Just the answer, in your own smooth voice.";
 
+/// Fast mode's model. `SMOOTH_FAST_MODE=1` points Big Smooth at this snappy Groq
+/// model instead of the `coding`-route default. Chosen (groq-gpt-oss-120b) for
+/// Groq speed + capability; it's non-deprecated and reasons on the harmony
+/// channel, so its thinking renders as a clean "thinking" aside (th-4d8682).
+/// The gateway's own `fast` routing slot is intentionally NOT used — it's stale
+/// (deprecated llama). `SMOOTH_AGENT_MODEL` overrides this.
+const FAST_MODEL: &str = "groq-gpt-oss-120b";
+
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use smooth_operator::Tool;
@@ -181,16 +189,31 @@ pub fn provision_local_token() -> Result<String> {
     Ok(token)
 }
 
+/// Explicit model override (`SMOOTH_AGENT_MODEL`) — the highest-priority model
+/// selector. Wins over fast-mode and the providers routing. `None`/empty falls
+/// through to the routing default.
+fn model_override() -> Option<String> {
+    std::env::var("SMOOTH_AGENT_MODEL").ok().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
+}
+
+/// Whether **fast mode** is on (`SMOOTH_FAST_MODE`). Fast mode points Big Smooth
+/// at the gateway's `fast` routing slot (a snappy model) instead of `coding`.
+/// Treats unset / `0` / `false` / `no` / `off` as disabled.
+fn fast_mode_enabled() -> bool {
+    matches!(std::env::var("SMOOTH_FAST_MODE"), Ok(v) if !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off"))
+}
+
 /// Read the `smooth` provider (the llm.smoo.ai gateway) from
 /// `~/.smooth/providers.json` — the credentials `th auth login smooth` writes.
 /// Returns `(api_url, api_key, model)`; `None` if the file/provider/key is
-/// absent. The model prefers the `coding` route, else the provider default.
-fn gateway_from_providers() -> Option<(String, String, String)> {
-    gateway_from_providers_at(&dirs_next::home_dir()?.join(".smooth").join("providers.json"))
+/// absent. The model is taken from the given `route` slot (`coding`/`fast`/…),
+/// else the provider default.
+fn gateway_from_providers(route: &str) -> Option<(String, String, String)> {
+    gateway_from_providers_at(&dirs_next::home_dir()?.join(".smooth").join("providers.json"), route)
 }
 
 /// [`gateway_from_providers`] against an explicit path — the testable core.
-fn gateway_from_providers_at(path: &Path) -> Option<(String, String, String)> {
+fn gateway_from_providers_at(path: &Path, route: &str) -> Option<(String, String, String)> {
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
     let smooth = v
         .get("providers")?
@@ -200,8 +223,10 @@ fn gateway_from_providers_at(path: &Path) -> Option<(String, String, String)> {
     let url = smooth.get("api_url")?.as_str()?.to_owned();
     let key = smooth.get("api_key")?.as_str().filter(|k| !k.trim().is_empty())?.to_owned();
     let model = v
-        .pointer("/routing/coding/model")
+        .pointer(&format!("/routing/{route}/model"))
         .and_then(serde_json::Value::as_str)
+        // Fall back to the `coding` slot, then the provider default, then a sane const.
+        .or_else(|| v.pointer("/routing/coding/model").and_then(serde_json::Value::as_str))
         .or_else(|| smooth.get("default_model").and_then(serde_json::Value::as_str))
         .unwrap_or("claude-haiku-4-5")
         .to_owned();
@@ -215,17 +240,23 @@ fn gateway_from_providers_at(path: &Path) -> Option<(String, String, String)> {
 fn resolve_gateway_config() -> ServerConfig {
     let mut config = smooth_operator_server::local::local_config();
     let env_has_key = config.gateway_key.as_deref().is_some_and(|k| !k.trim().is_empty());
+    // Model selection, highest priority first: explicit SMOOTH_AGENT_MODEL →
+    // fast-mode's `fast` routing slot → the `coding` slot.
+    let fast = fast_mode_enabled();
     if !env_has_key {
-        if let Some((url, key, model)) = gateway_from_providers() {
-            tracing::info!(gateway = %url, model = %model, "gateway key sourced from ~/.smooth/providers.json (smooth provider)");
+        if let Some((url, key, coding_model)) = gateway_from_providers("coding") {
             config.gateway_url = url;
             config.gateway_key = Some(key);
-            // Only override the model when the env didn't pin one.
-            if std::env::var("SMOOTH_AGENT_MODEL").is_err() {
-                config.model = model;
-            }
+            // Fast mode pins a current Groq model (the gateway's own `fast` slot is
+            // stale). Explicit SMOOTH_AGENT_MODEL always wins.
+            let default_model = if fast { FAST_MODEL.to_owned() } else { coding_model };
+            config.model = model_override().unwrap_or(default_model);
         }
+    } else if let Some(m) = model_override() {
+        // Env-gateway path: still honor an explicit model pin.
+        config.model = m;
     }
+    tracing::info!(gateway = %config.gateway_url, model = %config.model, fast_mode = fast, "gateway + model resolved");
     config
 }
 
@@ -351,13 +382,48 @@ mod tests {
             r#"{"providers":[
                 {"id":"anthropic","api_url":"https://api.anthropic.com","api_key":"sk-ant"},
                 {"id":"smooth","api_url":"https://llm.smoo.ai/v1","api_key":"sk-smooth","default_model":"m-default"}
-            ],"routing":{"coding":{"provider":"smooth","model":"m-coding"}}}"#,
+            ],"routing":{"coding":{"provider":"smooth","model":"m-coding"},"fast":{"provider":"smooth","model":"m-fast"}}}"#,
         )
         .unwrap();
-        let (url, key, model) = gateway_from_providers_at(&path).expect("smooth provider resolves");
+        let (url, key, model) = gateway_from_providers_at(&path, "coding").expect("smooth provider resolves");
         assert_eq!(url, "https://llm.smoo.ai/v1");
         assert_eq!(key, "sk-smooth");
         assert_eq!(model, "m-coding", "the coding route wins over default_model");
+        // Fast mode picks the `fast` slot.
+        let (_, _, fast_model) = gateway_from_providers_at(&path, "fast").expect("fast route resolves");
+        assert_eq!(fast_model, "m-fast", "the fast route selects the fast model");
+        // An unknown route falls back to the coding slot, then default.
+        let (_, _, fallback) = gateway_from_providers_at(&path, "nonexistent").expect("falls back");
+        assert_eq!(fallback, "m-coding", "unknown route falls back to coding");
+    }
+
+    #[test]
+    fn fast_mode_enabled_parses_truthiness() {
+        for (val, want) in [
+            ("1", true),
+            ("true", true),
+            ("on", true),
+            ("yes", true),
+            ("0", false),
+            ("false", false),
+            ("off", false),
+            ("", false),
+        ] {
+            std::env::set_var("SMOOTH_FAST_MODE", val);
+            assert_eq!(fast_mode_enabled(), want, "SMOOTH_FAST_MODE={val:?}");
+        }
+        std::env::remove_var("SMOOTH_FAST_MODE");
+        assert!(!fast_mode_enabled(), "unset is disabled");
+    }
+
+    #[test]
+    fn model_override_trims_and_filters_empty() {
+        std::env::set_var("SMOOTH_AGENT_MODEL", "  groq-gpt-oss-20b  ");
+        assert_eq!(model_override().as_deref(), Some("groq-gpt-oss-20b"));
+        std::env::set_var("SMOOTH_AGENT_MODEL", "   ");
+        assert_eq!(model_override(), None, "blank override is ignored");
+        std::env::remove_var("SMOOTH_AGENT_MODEL");
+        assert_eq!(model_override(), None);
     }
 
     #[test]
@@ -366,13 +432,13 @@ mod tests {
         // No `smooth` provider.
         let p1 = dir.path().join("a.json");
         std::fs::write(&p1, r#"{"providers":[{"id":"anthropic","api_url":"x","api_key":"k"}]}"#).unwrap();
-        assert!(gateway_from_providers_at(&p1).is_none());
+        assert!(gateway_from_providers_at(&p1, "coding").is_none());
         // `smooth` present but key empty.
         let p2 = dir.path().join("b.json");
         std::fs::write(&p2, r#"{"providers":[{"id":"smooth","api_url":"x","api_key":""}]}"#).unwrap();
-        assert!(gateway_from_providers_at(&p2).is_none());
+        assert!(gateway_from_providers_at(&p2, "coding").is_none());
         // Missing file.
-        assert!(gateway_from_providers_at(&dir.path().join("nope.json")).is_none());
+        assert!(gateway_from_providers_at(&dir.path().join("nope.json"), "coding").is_none());
     }
 
     #[test]
