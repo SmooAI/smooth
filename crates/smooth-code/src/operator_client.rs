@@ -72,6 +72,13 @@ pub fn map_event(v: &Value) -> Option<ServerEvent> {
             }
             None
         }
+        // The agent parked on a write-tool needing approval; the turn stays open
+        // until the client replies with `confirm_tool_action`.
+        "write_confirmation_required" => {
+            let tool = v.pointer("/data/data/toolId").and_then(Value::as_str).unwrap_or("").to_string();
+            let description = v.pointer("/data/data/actionDescription").and_then(Value::as_str).unwrap_or("").to_string();
+            Some(ServerEvent::ConfirmationRequired { task_id, tool, description })
+        }
         // The final text was already streamed via `stream_token`, so the terminal
         // event just signals completion.
         "eventual_response" => Some(ServerEvent::TaskComplete {
@@ -296,6 +303,23 @@ impl OperatorClient {
         Ok(rx)
     }
 
+    /// Resume a turn parked on a [`ServerEvent::ConfirmationRequired`] write-tool
+    /// approval. `request_id` is the parked turn's id (carried on the event);
+    /// `approved` lets the tool run (`true`) or denies it (`false`). The operator
+    /// then continues streaming the turn's events to its existing receiver.
+    ///
+    /// # Errors
+    /// Returns an error if no session is open or the reply can't be sent.
+    pub fn confirm(&self, request_id: &str, approved: bool) -> anyhow::Result<()> {
+        let sid = self.session_id.clone().ok_or_else(|| anyhow::anyhow!("no operator session"))?;
+        self.send(&json!({
+            "action": "confirm_tool_action",
+            "requestId": request_id,
+            "sessionId": sid,
+            "approved": approved,
+        }))
+    }
+
     /// Start `th daemon operator` if the operator isn't already reachable.
     async fn ensure_server(&self) -> anyhow::Result<()> {
         let health = format!("{}/health", self.url);
@@ -326,9 +350,10 @@ fn route_turn_event(pending: &Pending, v: &Value) {
     let Some(event) = map_event(v) else { return };
     let (task_id, terminal) = match &event {
         ServerEvent::TaskComplete { task_id, .. } | ServerEvent::TaskError { task_id, .. } => (task_id.clone(), true),
-        ServerEvent::TokenDelta { task_id, .. } | ServerEvent::ToolCallStart { task_id, .. } | ServerEvent::ToolCallComplete { task_id, .. } => {
-            (task_id.clone(), false)
-        }
+        ServerEvent::TokenDelta { task_id, .. }
+        | ServerEvent::ToolCallStart { task_id, .. }
+        | ServerEvent::ToolCallComplete { task_id, .. }
+        | ServerEvent::ConfirmationRequired { task_id, .. } => (task_id.clone(), false),
         _ => return,
     };
     let mut map = pending.lock().expect("pending lock");
@@ -379,6 +404,17 @@ mod tests {
         }))
         .unwrap();
         assert!(matches!(done, ServerEvent::ToolCallComplete { result, is_error: false, .. } if result == "ok"));
+    }
+
+    #[test]
+    fn maps_write_confirmation_required() {
+        let ev = map_event(&json!({
+            "type":"write_confirmation_required","requestId":"turn-9",
+            "data":{"data":{"toolId":"bash","actionDescription":"rm -rf build/"}}
+        }))
+        .unwrap();
+        assert!(matches!(ev, ServerEvent::ConfirmationRequired { task_id, tool, description }
+            if task_id == "turn-9" && tool == "bash" && description.contains("rm -rf")));
     }
 
     #[test]

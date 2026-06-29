@@ -56,6 +56,15 @@ pub enum ServerEvent {
         task_id: String,
         message: String,
     },
+    /// The operator parked the turn on a write-tool that needs human approval
+    /// (`write_confirmation_required`). The TUI surfaces a prompt; an approve/deny
+    /// reply resumes the turn via `OperatorClient::confirm` (EPIC th-c89c2a,
+    /// th-1ea4f6 — the "ask" half of the permission model).
+    ConfirmationRequired {
+        task_id: String,
+        tool: String,
+        description: String,
+    },
     PearlCreated {
         id: String,
         title: String,
