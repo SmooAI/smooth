@@ -183,6 +183,45 @@ impl PermissionRules {
         self
     }
 
+    /// Parse a rule set from TOML:
+    ///
+    /// ```toml
+    /// deny  = ["Bash(rm:*)", "Write(/etc/**)"]
+    /// ask   = ["Bash(git push:*)"]
+    /// allow = ["Read", "Grep", "Bash(ls:*)"]
+    /// default = "ask"            # optional: deny | ask | allow
+    /// ```
+    ///
+    /// # Errors
+    /// Returns an error if the TOML is malformed or any matcher is invalid.
+    pub fn from_toml(s: &str) -> Result<Self, String> {
+        let cfg: PermissionConfig = toml::from_str(s).map_err(|e| format!("parsing permission TOML: {e}"))?;
+        let mut rules = Self::from_lists(
+            cfg.deny.iter().map(String::as_str),
+            cfg.ask.iter().map(String::as_str),
+            cfg.allow.iter().map(String::as_str),
+        )?;
+        if let Some(d) = cfg.default {
+            rules = rules.with_default(d);
+        }
+        Ok(rules)
+    }
+}
+
+/// The on-disk shape of a permission rule set (`~/.smooth/permissions.toml`).
+#[derive(Debug, Default, Deserialize)]
+struct PermissionConfig {
+    #[serde(default)]
+    deny: Vec<String>,
+    #[serde(default)]
+    ask: Vec<String>,
+    #[serde(default)]
+    allow: Vec<String>,
+    #[serde(default)]
+    default: Option<Decision>,
+}
+
+impl PermissionRules {
     /// Decide the verdict for a tool call. Precedence is **deny > ask > allow**
     /// (a deny is never overridden); within a tier, first match wins; no match
     /// falls through to the default.
@@ -374,6 +413,35 @@ mod tests {
         assert!(Matcher::parse("(rm)").is_err(), "empty tool");
         assert!(Matcher::parse("").is_err(), "empty matcher");
         assert!(Matcher::parse("Bash([)").is_err(), "malformed glob");
+    }
+
+    #[test]
+    fn from_toml_parses_rules_and_default() {
+        let rules = PermissionRules::from_toml(
+            r#"
+            deny  = ["Bash(rm:*)"]
+            ask   = ["Bash(git push:*)"]
+            allow = ["Read", "Bash(ls:*)"]
+            default = "deny"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(rules.decide_bash("rm -rf /"), Decision::Deny);
+        assert_eq!(rules.decide_bash("git push origin"), Decision::Ask);
+        assert_eq!(rules.decide_bash("ls -la"), Decision::Allow);
+        assert_eq!(rules.decide("Read", "/x"), Decision::Allow);
+        assert_eq!(rules.decide("Whatever", "x"), Decision::Deny, "default applied");
+    }
+
+    #[test]
+    fn from_toml_empty_is_all_ask() {
+        let rules = PermissionRules::from_toml("").unwrap();
+        assert_eq!(rules.decide("Bash", "ls"), Decision::Ask);
+    }
+
+    #[test]
+    fn from_toml_rejects_bad_matcher() {
+        assert!(PermissionRules::from_toml(r#"deny = ["Bash("]"#).is_err());
     }
 
     #[test]
