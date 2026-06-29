@@ -201,81 +201,60 @@ pnpm dev                     # Vite dev server at :3100
 
 ---
 
-## 4. Key Modules (smooth-bigsmooth)
+## 4. Key Modules (smooth-daemon)
 
 | Module | Purpose |
 |---|---|
-| `server.rs` | axum router, all API routes (20+), access control routes |
-| `orchestrator.rs` | State machine: Idle → Scheduling → Dispatching → Monitoring → Reviewing |
-| `sandbox.rs` | Embedded [`microsandbox`] Rust SDK: create, destroy, exec, status. No external `msb` CLI — hardware-isolated microVMs boot directly from the binary. |
-| `pool.rs` | Sandbox capacity (max 3), port allocation |
-| `tools.rs` | Tool registry + hooks (secret detection, prompt injection) |
-| `policy.rs` | Policy generation, phase defaults, access request handling |
-| `pearls.rs` | `PearlStore` wrapper (list, create, update, close, comment) |
-| `search.rs` | @ autocomplete (pearls + globwalk files + path expansion) |
-| `audit.rs` | Rotating file appender at ~/.smooth/audit/ |
-| `db.rs` | rusqlite: memories, worker_runs, config tables |
-| `jira.rs` | Jira REST client + bidirectional sync |
-| `tailscale.rs` | tailscale CLI status wrapper |
-| `session.rs` | Session persistence, message history, orchestrator snapshots, inbox |
-| `ws.rs` | WebSocket message types |
+| `operator.rs` | `serve_local_flavor` — boots the operator's `LocalServer` (gateway resolution, the sandboxed `ToolProvider`, durable storage, the scheduler) and serves the canonical WS protocol + widget on `:8787` |
+| `operator_storage.rs` | `SqliteStorageAdapter` — durable conversations/participants/messages/sessions over the operator's `.storage()` seam (survives restart, no Postgres) |
+| `schedule.rs` | The proactive-task model: `ScheduleKind` (EveryNSeconds/DailyAt), `Schedule`, `ScheduleStore` trait, `SqliteScheduleStore` (durable) + `InMemoryScheduleStore` |
+| `scheduler.rs` | The tick loop (`tick`/`spawn_scheduler`) + the `TurnDriver` trait; `OperatorTurnDriver` fires due schedules into the operator as a **loopback WS client** |
+| `config.rs` | Egress allowlist resolution + LLM gateway/credential resolution (env → `providers.json`) |
+| `main.rs` | the `smooth-daemon` CLI: `run`/`operator`/`audit`/`schedule …`/`permissions …` |
 
-### Dispatch modes
+### Dispatch
 
-Big Smooth's WebSocket `TaskStart` handler can dispatch tasks one of two ways:
-
-- **In-process** (default): the agent loop runs inside Big Smooth's own process
-  with tools executing against the host filesystem. Fast, works without any
-  special setup, but Big Smooth is NOT read-only on this path.
-- **Sandboxed** (`SMOOTH_SANDBOXED=1`): Big Smooth spawns a real microVM via
-  the embedded `microsandbox` crate, mounts the cross-compiled
-  `smooth-operative` binary at `/opt/smooth/bin`, bind-mounts the
-  user's working directory at `/workspace`, and execs the runner inside the
-  VM. The runner hosts the agent loop, NarcHook tool surveillance, and file
-  tools; it streams `AgentEvent`s as JSON-lines on stdout, which Big Smooth
-  parses and forwards to WebSocket clients. Big Smooth performs zero writes,
-  zero tool execution, and zero LLM calls — it is strictly the READ-ONLY
-  orchestrator the security architecture promises.
-
-The sandboxed path requires a one-time dev setup to build the runner
-binary for the sandbox's target triple. On a fresh clone:
-
-```bash
-rustup target add aarch64-unknown-linux-musl
-cargo install --locked cargo-zigbuild
-pip3 install ziglang                          # provides python-zig for cargo-zigbuild
-bash scripts/build-operative.sh         # produces target/aarch64-unknown-linux-musl/release/smooth-operative
-```
-
-Re-run `scripts/build-operative.sh` after changing anything under
-`crates/smooth-operative/` or its transitive deps.
-
-The in-process path is kept for backwards compatibility and for the existing
-headless E2E tests. New features should target the sandboxed path.
+There is **one agent loop** — the operator's. `th daemon` hosts smooth-operator's
+`LocalServer` in-process; tool calls run through the `smooth-tools` `ToolProvider`
+(workspace-confined fs/grep + an OS-sandboxed `bash` whose egress routes through
+the goalie proxy). No microVM, no second loop, no `SMOOTH_SANDBOXED` branch — the
+microVM dispatch path and the cross-compiled `smooth-operative` runner were
+deleted in EPIC th-c89c2a. The TUI, the widget, and the scheduler are all just
+**clients on the canonical protocol**.
 
 ### Security Architecture
 
-The sandbox access control system uses named services running inside each microVM:
+Single trusted operator, no untrusted tenant — so the boundary is the **kernel**,
+not a VM. Layers (cheap → load-bearing):
 
-- **Big Smooth** — READ-ONLY orchestrator in "The Safehouse" VM
-- **Archivist** — central log aggregator (can write only to log paths)
-- **Wonk** — per-VM access control authority (rule engine, no LLM)
-- **Goalie** — per-VM network + FUSE filesystem proxy (iptables enforced)
-- **Narc** — per-VM tool surveillance + prompt injection guard (regex + LLM judge)
-- **Scribe** — per-VM structured logging, feeds Archivist
-- **Groove** — LLM checkpointing + session resume (built into smooth-operator)
+- **Gate 1 — deterministic rule engine** (`smooth-policy::auto_mode` +
+  `smooth-tools::permission`): a Claude-Code-style **deny/ask/allow** rule set
+  from `~/.smooth/permissions.toml`. **Deny is enforced at the tool boundary**
+  (bash/write/edit/read), with bash compound-split so `ls && rm -rf ~` is caught
+  on the `rm`. `Ask`→HITL per-call awaits an operator host-hook seam (th-01ec60).
+  Inspect with `th daemon permissions check "<cmd>"`.
+- **Bash circuit-breaker** (`smooth-tools::guard`): hardcoded hard-deny of
+  catastrophic commands (`rm -rf /`, fork bombs, `curl … | sh`) — never run.
+- **HITL** (the operator's `write_confirmation_required` + `th code`'s approve/deny
+  prompt): opt-in via `SMOOTH_AGENT_CONFIRM_TOOLS`; the "ask" affordance (th-1ea4f6).
+- **Kernel OS-sandbox** (`smooth-tools::sandbox`): confines tool subprocesses to
+  the workspace — **the load-bearing boundary**.
+- **Egress proxy** (`smooth-goalie`): an exact-host allowlist outside the sandbox;
+  off-box network is kernel-denied unless routed through it. `th daemon audit`.
+- **Groove** — LLM checkpointing + session resume (built into smooth-operator).
 
-See README.md for full architecture diagrams and the plan file for implementation details.
+### smooth-operator (Agent Framework — path-dep, `../smooth-operator`)
 
-### smooth-operator (Agent Framework)
+The engine is consumed as a path-dep, not a local crate. Key seams the daemon uses:
 
 | Module | Purpose |
 |---|---|
 | `agent.rs` | Observe → think → act loop, event emission, checkpoint integration |
 | `llm.rs` | OpenAI-compatible chat completion client, streaming-ready |
-| `tool.rs` | Tool trait + ToolRegistry with pre/post hooks (Narc integration) |
+| `tool.rs` | `Tool` trait + `ToolRegistry` with pre/post hooks (`ToolRegistry::add_hook` — where `ConfirmationHook` and a future Gate-1 host hook install) |
 | `conversation.rs` | Message history, context window management, token estimation |
 | `checkpoint.rs` | Checkpoint + CheckpointStore trait, configurable strategies |
+| `server` / `svc` | `LocalServer` + builder (`.storage()`/`.tools()`/`.auth()`/`.serve_widget()`), the canonical WS protocol, `StorageAdapter`/`ToolProvider` seams |
 
 ---
 
