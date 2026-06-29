@@ -41,6 +41,13 @@ pub enum ConfigCommands {
     },
     /// Environments — `development` / `staging` / `production` etc.
     /// Each value is set per (schema, environment) pair.
+    ///
+    /// NOTE: prefer the public `th config environments …` path for most
+    /// work — e.g. `th config environments create production --org-id <child>`.
+    /// It is the parent-org-admin-friendly surface and works for a parent
+    /// admin acting on a child org. This `th admin config environments …`
+    /// surface is org-locked (M2M / direct org authority only) and 403s on
+    /// child orgs even for a parent-org admin.
     Environments {
         #[command(subcommand)]
         cmd: EnvironmentsCmd,
@@ -110,6 +117,8 @@ pub enum EnvironmentsCmd {
         org: Option<String>,
     },
     /// Create an environment. Body is a JSON document or `-` for stdin.
+    /// For child orgs as a parent admin, use the public path instead:
+    /// `th config environments create production --org-id <child>`.
     Create {
         body: String,
         #[arg(long, visible_alias = "org-id")]

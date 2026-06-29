@@ -202,13 +202,17 @@ pub enum Cmd {
     },
     /// Push the local `.smooai-config/schema.json` to the org's remote
     /// schema. Prints a per-tier diff first; with `--dry-run`, stops
-    /// after printing. Creates a new remote schema if none matches.
+    /// after printing. To create a NEW remote schema, omit `--schema-name`
+    /// and set `"$smooaiName": "<name>"` in schema.json.
     Push {
         /// Override the active org.
         #[arg(long, visible_alias = "org")]
         org_id: Option<String>,
-        /// Schema name to push under. Defaults to `$smooaiName` from
-        /// schema.json, falling back to the first remote schema.
+        /// Select an EXISTING remote schema to update (must match a
+        /// schema already on the org). To CREATE a new schema instead,
+        /// drop this flag and set `"$smooaiName": "<name>"` in
+        /// schema.json. Defaults to `$smooaiName`, falling back to the
+        /// first remote schema.
         #[arg(long)]
         schema_name: Option<String>,
         /// Optional change description recorded with the new version.
@@ -229,7 +233,9 @@ pub enum Cmd {
         /// Override the active org.
         #[arg(long, visible_alias = "org")]
         org_id: Option<String>,
-        /// Schema name to pull. Defaults to the first remote schema.
+        /// Schema name to pull. Optional when the org has exactly one
+        /// remote schema (auto-selected); REQUIRED when it has more than
+        /// one — pull refuses to guess and lists the available names.
         #[arg(long)]
         schema_name: Option<String>,
         /// Overwrite an existing `.smooai-config/schema.json`.
@@ -717,7 +723,7 @@ async fn cmd_set(
     let schema_id = match (schema_arr, &schema_name) {
         (None, _) => anyhow::bail!("no schemas returned from /config/schemas"),
         (Some(arr), _) if arr.is_empty() => {
-            anyhow::bail!("org has no config schemas — push one first via the smooai-config CLI or `th api config schemas create`");
+            anyhow::bail!("org has no config schemas — push one first via `th config push` or `th api config schemas create`");
         }
         (Some(arr), Some(name)) => arr
             .iter()
@@ -1164,8 +1170,8 @@ fn load_local_schema_json() -> Result<(std::path::PathBuf, Value)> {
     if !path.exists() {
         anyhow::bail!(
             "no `.smooai-config/schema.json` in {}.\n\
-             Build the schema first (the @smooai/config build step writes it from config.ts), \
-             or scaffold a new package with `th config init`.",
+             Scaffold one with `th config init`, or fetch an existing remote schema with `th config pull`. \
+             (A generator from config.ts is tracked in pearl th-4d1d6c.)",
             cwd.display()
         );
     }
@@ -1186,7 +1192,11 @@ fn pick_remote_schema<'a>(remote_schemas: &'a [Value], flag: Option<&str>, local
                 .iter()
                 .filter_map(|s| s.get("name").and_then(|v| v.as_str()).map(str::to_string))
                 .collect();
-            format!("schema `{name}` not found. Available: {}", available.join(", "))
+            format!(
+                "schema `{name}` not found. Available: {}.\n\
+                 To create a new schema named `{name}`, omit `--schema-name` and set \"$smooaiName\": \"{name}\" in schema.json.",
+                available.join(", ")
+            )
         })?));
     }
     if let Some(local) = local_schema {
@@ -1199,6 +1209,34 @@ fn pick_remote_schema<'a>(remote_schemas: &'a [Value], flag: Option<&str>, local
         }
     }
     Ok(remote_schemas.first())
+}
+
+/// Decide which remote schema `pull` should write, given the remote
+/// schema names and an optional `--schema-name` flag. Pure so it can
+/// be unit-tested without a live API.
+///
+/// - flag set + match  → `Ok(index)`
+/// - flag set + no match → `Err(...)` listing available names
+/// - no flag, 0 remote → `Err("no remote schemas …")`
+/// - no flag, 1 remote → `Ok(0)` (auto-select the only one)
+/// - no flag, >1 remote → `Err(...)` — never silently pick; the user
+///   must disambiguate with `--schema-name`
+fn resolve_pull_schema(names: &[&str], flag: Option<&str>) -> std::result::Result<usize, String> {
+    if let Some(name) = flag {
+        return names
+            .iter()
+            .position(|n| *n == name)
+            .ok_or_else(|| format!("schema `{name}` not found. Available: {}", names.join(", ")));
+    }
+    match names.len() {
+        0 => Err("no remote schemas found for this org".to_string()),
+        1 => Ok(0),
+        _ => Err(format!(
+            "org has {} config schemas — refusing to guess. Pass `--schema-name <name>` to pick one. Available: {}",
+            names.len(),
+            names.join(", ")
+        )),
+    }
 }
 
 /// List remote schemas for an org, normalising both `[...]` and
@@ -1306,7 +1344,11 @@ async fn cmd_pull(org_id: Option<String>, schema_name: Option<String>, force: bo
     let cfg = ConfigClient::load(m2m).await?;
     let org = cfg.resolve_org(org_id)?;
     let remote_schemas = list_schemas(&cfg, &org).await?;
-    let picked = pick_remote_schema(&remote_schemas, schema_name.as_deref(), None)?.context("no remote schemas found for this org")?;
+    // Keep positions aligned with `remote_schemas` (unnamed entries map
+    // to "" so the returned index stays valid as a slice index).
+    let names: Vec<&str> = remote_schemas.iter().map(|s| s.get("name").and_then(|v| v.as_str()).unwrap_or("")).collect();
+    let idx = resolve_pull_schema(&names, schema_name.as_deref()).map_err(|e| anyhow::anyhow!(e))?;
+    let picked = &remote_schemas[idx];
 
     let json_schema = picked.get("jsonSchema").cloned().context("remote schema entry has no jsonSchema field")?;
 
@@ -1455,6 +1497,38 @@ mod tests {
     fn mask_secret_long() {
         assert_eq!(mask_secret("abcdef"), "**cdef");
         assert_eq!(mask_secret("very-secret-value"), "*************alue");
+    }
+
+    #[test]
+    fn resolve_pull_schema_single_auto_selects() {
+        assert_eq!(resolve_pull_schema(&["only"], None), Ok(0));
+    }
+
+    #[test]
+    fn resolve_pull_schema_empty_errors() {
+        let err = resolve_pull_schema(&[], None).expect_err("no schemas should error");
+        assert!(err.contains("no remote schemas"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_pull_schema_multi_without_flag_refuses() {
+        let err = resolve_pull_schema(&["alpha", "beta"], None).expect_err("ambiguous should error");
+        assert!(err.contains("refusing to guess"), "got: {err}");
+        assert!(err.contains("--schema-name"), "got: {err}");
+        // Lists the available names so the user can pick.
+        assert!(err.contains("alpha") && err.contains("beta"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_pull_schema_multi_with_matching_flag_picks() {
+        assert_eq!(resolve_pull_schema(&["alpha", "beta"], Some("beta")), Ok(1));
+    }
+
+    #[test]
+    fn resolve_pull_schema_flag_no_match_errors() {
+        let err = resolve_pull_schema(&["alpha", "beta"], Some("gamma")).expect_err("missing name should error");
+        assert!(err.contains("`gamma` not found"), "got: {err}");
+        assert!(err.contains("alpha") && err.contains("beta"), "got: {err}");
     }
 
     #[test]
