@@ -69,11 +69,11 @@ pub fn bash_denied(command: &str) -> bool {
     rules().decide_bash(command) == Decision::Deny
 }
 
-/// The path a `Write`/`Edit` rule matches against: the file's path relative to
-/// the workspace root (so rules read like `Write(.git/hooks/**)` regardless of
-/// where the workspace lives on disk). Falls back to the absolute path if it
-/// isn't under the workspace (shouldn't happen — the tools confine writes).
-fn write_target(workspace: &Path, resolved: &Path) -> String {
+/// The path a path-tool rule matches against: the file's path relative to the
+/// workspace root (so rules read like `Write(.git/hooks/**)` / `Read(**/.env)`
+/// regardless of where the workspace lives on disk). Falls back to the absolute
+/// path if it isn't under the workspace (shouldn't happen — the tools confine).
+fn workspace_relative(workspace: &Path, resolved: &Path) -> String {
     resolved.strip_prefix(workspace).unwrap_or(resolved).to_string_lossy().into_owned()
 }
 
@@ -82,7 +82,15 @@ fn write_target(workspace: &Path, resolved: &Path) -> String {
 /// protects a path from all modification).
 #[must_use]
 pub fn write_denied(workspace: &Path, resolved: &Path) -> bool {
-    rules().decide("Write", &write_target(workspace, resolved)) == Decision::Deny
+    rules().decide("Write", &workspace_relative(workspace, resolved)) == Decision::Deny
+}
+
+/// Whether the configured Gate-1 rules **deny** reading the file at `resolved`
+/// (the `Read` label — e.g. `Read(**/.env)` to keep secrets out of an
+/// exfiltration-prone turn). Opt-in: no rule means reads proceed as before.
+#[must_use]
+pub fn read_denied(workspace: &Path, resolved: &Path) -> bool {
+    rules().decide("Read", &workspace_relative(workspace, resolved)) == Decision::Deny
 }
 
 #[cfg(test)]
@@ -108,9 +116,19 @@ mod tests {
         std::fs::write(&path, "deny = [\"Write(.git/**)\"]\n").unwrap();
         let rules = load_rules_from(&path);
         let ws = Path::new("/home/me/project");
-        assert_eq!(write_target(ws, &ws.join(".git/hooks/pre-commit")), ".git/hooks/pre-commit");
+        assert_eq!(workspace_relative(ws, &ws.join(".git/hooks/pre-commit")), ".git/hooks/pre-commit");
         assert_eq!(rules.decide("Write", ".git/hooks/pre-commit"), Decision::Deny);
         assert_ne!(rules.decide("Write", "src/main.rs"), Decision::Deny);
+    }
+
+    #[test]
+    fn read_deny_rule_blocks_secret_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("permissions.toml");
+        std::fs::write(&path, "deny = [\"Read(**/.env)\"]\n").unwrap();
+        let rules = load_rules_from(&path);
+        assert_eq!(rules.decide("Read", "config/.env"), Decision::Deny);
+        assert_ne!(rules.decide("Read", "src/main.rs"), Decision::Deny, "ordinary reads proceed");
     }
 
     #[test]

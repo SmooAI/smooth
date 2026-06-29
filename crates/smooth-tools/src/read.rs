@@ -49,6 +49,12 @@ impl Tool for ReadFileTool {
         let rel = req_str(&arguments, "path")?;
         let path = resolve_workspace_path(&self.workspace, &rel)?;
 
+        // Gate 1: an opt-in deny rule (e.g. `Read(**/.env)`) keeps secrets out of
+        // an exfiltration-prone turn — blocked before the file is ever read.
+        if crate::permission::read_denied(&self.workspace, &path) {
+            return Ok(format!("BLOCKED: a permission policy (deny) rule refused reading {rel}"));
+        }
+
         let content = tokio::fs::read_to_string(&path)
             .await
             .map_err(|e| anyhow::anyhow!("cannot read `{rel}`: {e}"))?;
