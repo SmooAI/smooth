@@ -153,11 +153,6 @@ enum Commands {
         #[command(subcommand)]
         cmd: TailscaleCommands,
     },
-    /// Operative access control
-    Access {
-        #[command(subcommand)]
-        cmd: AccessCommands,
-    },
     /// Launch interactive coding assistant (same as running th with no args)
     Code {
         /// Run in headless mode (non-interactive)
@@ -639,42 +634,6 @@ enum TailscaleCommands {
     Status,
 }
 
-#[derive(Subcommand)]
-enum AccessCommands {
-    /// List pending access requests
-    Pending,
-    /// Approve a pending access request.
-    ///
-    /// `id` is the request id printed by `th access pending` (or surfaced
-    /// in the SSE stream). `--scope` controls how long the approval
-    /// sticks: `once` (this request only, default), `session` (VM
-    /// lifetime), `project` (<repo>/.smooth/wonk-allow.toml), `user`
-    /// (~/.smooth/wonk-allow.toml).
-    Approve {
-        /// Pending request id (UUID)
-        id: String,
-        /// Persistence scope (default: once)
-        #[arg(long, default_value = "once")]
-        scope: String,
-        /// Optional glob to bind the approval to instead of the exact
-        /// resource — e.g. `*.openai.com` for any openai.com subdomain.
-        #[arg(long)]
-        glob: Option<String>,
-    },
-    /// Deny a pending access request.
-    Deny {
-        /// Pending request id (UUID)
-        id: String,
-        /// Persistence scope (default: once)
-        #[arg(long, default_value = "once")]
-        scope: String,
-    },
-    /// Show current policy for an operator
-    Policy {
-        /// Operator ID
-        operator_id: String,
-    },
-}
 
 #[derive(Subcommand)]
 enum HooksCommands {
@@ -1112,7 +1071,6 @@ async fn main() -> Result<()> {
         Some(Commands::Audit { cmd }) => cmd_audit(cmd),
         Some(Commands::Worktree { cmd }) => cmd_worktree(cmd),
         Some(Commands::Tailscale { cmd }) => cmd_tailscale(cmd),
-        Some(Commands::Access { cmd }) => cmd_access(cmd).await,
         Some(Commands::Jira { cmd }) => cmd_jira(cmd).await,
         Some(Commands::Routing { cmd }) => cmd_routing(cmd).await,
         Some(Commands::Mcp { cmd }) => cmd_mcp(cmd),
@@ -1212,7 +1170,7 @@ async fn cmd_model(cmd: ModelCommands) -> Result<()> {
                 }
             }
 
-            let leader_up = reqwest::get("http://localhost:4400/health").await.is_ok();
+            let leader_up = reqwest::get("http://localhost:8787/health").await.is_ok();
             // "Big Smooth" visible width = 10; the original `{:<12} ` formatter
             // added two trailing spaces + one literal separator (= 3 spaces).
             // Reproduce that by hand since the gradient escapes inflate byte
@@ -1654,76 +1612,6 @@ fn cmd_worktree(cmd: WorktreeCommands) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_access(cmd: AccessCommands) -> Result<()> {
-    let client = reqwest::Client::new();
-    let base = "http://localhost:4400/api/access";
-
-    match cmd {
-        AccessCommands::Pending => {
-            let resp = client.get(format!("{base}/pending")).send().await?;
-            let body: serde_json::Value = resp.json().await?;
-            if let Some(requests) = body.as_array() {
-                if requests.is_empty() {
-                    println!("No pending access requests.");
-                } else {
-                    println!("{:<38} {:<10} {:<14} {:<30} Reason", "ID", "Kind", "Bead", "Resource");
-                    println!("{}", "-".repeat(120));
-                    for req in requests {
-                        println!(
-                            "{:<38} {:<10} {:<14} {:<30} {}",
-                            req["id"].as_str().unwrap_or("-"),
-                            req["kind"].as_str().unwrap_or("-"),
-                            req["bead_id"].as_str().unwrap_or("-"),
-                            req["resource"].as_str().unwrap_or("-"),
-                            req["reason"].as_str().unwrap_or("-"),
-                        );
-                    }
-                    println!();
-                    println!("Resolve with: th access approve <id> [--scope=session|project|user] [--glob=*.example.com]");
-                    println!("              th access deny <id> [--scope=user]");
-                }
-            }
-        }
-        AccessCommands::Approve { id, scope, glob } => {
-            let mut body = serde_json::Map::new();
-            body.insert("id".into(), serde_json::Value::String(id.clone()));
-            body.insert("scope".into(), serde_json::Value::String(scope.clone()));
-            if let Some(g) = glob {
-                body.insert("glob_override".into(), serde_json::Value::String(g));
-            }
-            let resp = client.post(format!("{base}/approve")).json(&serde_json::Value::Object(body)).send().await?;
-            if resp.status().is_success() {
-                println!("Approved {id} at scope {scope}");
-            } else {
-                let status = resp.status();
-                println!("Failed ({status}): {}", resp.text().await.unwrap_or_default());
-            }
-        }
-        AccessCommands::Deny { id, scope } => {
-            let resp = client
-                .post(format!("{base}/deny"))
-                .json(&serde_json::json!({"id": id, "scope": scope}))
-                .send()
-                .await?;
-            if resp.status().is_success() {
-                println!("Denied {id} at scope {scope}");
-            } else {
-                let status = resp.status();
-                println!("Failed ({status}): {}", resp.text().await.unwrap_or_default());
-            }
-        }
-        AccessCommands::Policy { operator_id } => {
-            let resp = client.get(format!("http://localhost:4400/api/operators/{operator_id}/policy")).send().await?;
-            if resp.status().is_success() {
-                let body: serde_json::Value = resp.json().await?;
-                println!("{}", serde_json::to_string_pretty(&body)?);
-            } else {
-                println!("Operator {operator_id} not found or no policy set");
-            }
-        }
-    }
-    Ok(())
-}
 
 /// Read all bytes from stdin if data is available (piped input).
 fn read_stdin() -> Option<String> {
@@ -2003,9 +1891,9 @@ async fn cmd_doctor() -> Result<()> {
 
     let mut issues = 0;
 
-    // 1. Check Big Smooth API
+    // 1. Check the operator daemon (`th daemon`, :8787).
     let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(2)).build()?;
-    match client.get("http://localhost:4400/health").send().await {
+    match client.get("http://localhost:8787/health").send().await {
         Ok(r) if r.status().is_success() => {
             println!("  {} Big {} API: {}", "✓".green().bold(), gradient::smooth(), "healthy".green());
         }
