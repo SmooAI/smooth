@@ -264,6 +264,68 @@ pub enum Cmd {
         #[arg(long)]
         m2m: bool,
     },
+    /// Reconcile the local `.smooai-config/schema.json` with the org's
+    /// remote schema. SAFE by design — direction is always explicit, never
+    /// a magic two-way merge:
+    ///
+    ///   - `th config sync`          → print the diff, then tell you which
+    ///                                 direction to apply. Changes nothing.
+    ///   - `th config sync --push`   → apply local → remote (same as `push`).
+    ///   - `th config sync --pull`   → apply remote → local (same as `pull`).
+    ///
+    /// `--push` and `--pull` are mutually exclusive. `--dry-run` forces the
+    /// diff-only behavior even when a direction is given.
+    Sync {
+        /// Apply local → remote (same as `th config push`). Mutually
+        /// exclusive with `--pull`.
+        #[arg(long, conflicts_with = "pull")]
+        push: bool,
+        /// Apply remote → local (same as `th config pull`). Mutually
+        /// exclusive with `--push`.
+        #[arg(long)]
+        pull: bool,
+        /// Override the active org.
+        #[arg(long, visible_alias = "org")]
+        org_id: Option<String>,
+        /// Schema name to reconcile against. On the push path, defaults to
+        /// `$smooaiName` then the first remote schema; on the pull path, it
+        /// is required when the org has more than one remote schema.
+        #[arg(long)]
+        schema_name: Option<String>,
+        /// Emit the diff (no-direction / dry-run) as structured JSON.
+        #[arg(long)]
+        json: bool,
+        /// Compute + print the diff but apply nothing, even with a
+        /// direction. Forces the same behavior as bare `th config sync`.
+        #[arg(long)]
+        dry_run: bool,
+        /// Use the M2M session at `~/.smooth/auth/smooai.json`
+        /// instead of the user JWT.
+        #[arg(long)]
+        m2m: bool,
+    },
+    /// Generate `.smooai-config/schema.json` from the consumer's
+    /// `.smooai-config/config.ts`. Shells out to `tsx` to import the
+    /// TypeScript config module, reads the schema fields the
+    /// `@smooai/config` runtime exposes (`PublicConfigKeys`,
+    /// `SecretConfigKeys`, `FeatureFlagKeys`,
+    /// `serializedAllConfigSchemaJsonSchema`), and emits the flat wire
+    /// format. Requires the consumer to have `@smooai/config` + `tsx`
+    /// available (installed alongside `config.ts`). Pearl th-4d1d6c.
+    Build {
+        /// Directory containing `.smooai-config/` (or the
+        /// `.smooai-config/` dir itself). Defaults to the cwd.
+        #[arg(long)]
+        directory: Option<String>,
+        /// Print the generated schema.json to stdout instead of writing
+        /// the file. Useful for piping into `th config diff`-style checks.
+        #[arg(long)]
+        stdout: bool,
+        /// CI parity: regenerate in memory and exit non-zero if the
+        /// committed `schema.json` differs. Writes nothing.
+        #[arg(long)]
+        check: bool,
+    },
     /// Scaffold a fresh `.smooai-config/` directory with TypeScript
     /// `config.ts`, `default.ts`, and `package.json` templates.
     Init {
@@ -476,6 +538,16 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             json,
             m2m,
         } => cmd_diff(org_id, schema_name, json, m2m).await,
+        Cmd::Sync {
+            push,
+            pull,
+            org_id,
+            schema_name,
+            json,
+            dry_run,
+            m2m,
+        } => cmd_sync(push, pull, org_id, schema_name, json, dry_run, m2m).await,
+        Cmd::Build { directory, stdout, check } => cmd_build(directory, stdout, check),
         Cmd::Init { directory, force } => cmd_init(directory, force),
         Cmd::FeatureFlag {
             key,
@@ -1170,8 +1242,8 @@ fn load_local_schema_json() -> Result<(std::path::PathBuf, Value)> {
     if !path.exists() {
         anyhow::bail!(
             "no `.smooai-config/schema.json` in {}.\n\
-             Scaffold one with `th config init`, or fetch an existing remote schema with `th config pull`. \
-             (A generator from config.ts is tracked in pearl th-4d1d6c.)",
+             Generate one from your `config.ts` with `th config build`, scaffold a fresh \
+             `.smooai-config/` with `th config init`, or fetch an existing remote schema with `th config pull`.",
             cwd.display()
         );
     }
@@ -1400,6 +1472,65 @@ async fn cmd_diff(org_id: Option<String>, schema_name: Option<String>, json: boo
     Ok(())
 }
 
+/// What `th config sync` should do, decided purely from its flags.
+/// Kept separate from the I/O so the direction logic is unit-testable
+/// without a live API. clap already guarantees `push` and `pull` are not
+/// both set (`conflicts_with`), but we treat that case defensively here
+/// too so the function is correct in isolation.
+#[derive(Debug, PartialEq, Eq)]
+enum SyncDirection {
+    /// No direction (or `--dry-run`): compute + print the diff, apply nothing.
+    DiffOnly,
+    /// `--push`: apply local → remote.
+    Push,
+    /// `--pull`: apply remote → local.
+    Pull,
+}
+
+/// Decide the sync direction from the `--push` / `--pull` / `--dry-run`
+/// flags. `--dry-run` always wins → `DiffOnly`, even with a direction.
+/// Bare `sync` (neither flag) → `DiffOnly`. Pure; see [`SyncDirection`].
+fn decide_sync_direction(push: bool, pull: bool, dry_run: bool) -> SyncDirection {
+    if dry_run || (!push && !pull) {
+        SyncDirection::DiffOnly
+    } else if push {
+        SyncDirection::Push
+    } else {
+        SyncDirection::Pull
+    }
+}
+
+/// `th config sync` — a thin, SAFE wrapper over `diff` / `push` / `pull`.
+/// Direction is explicit (never a two-way merge); the no-direction path
+/// only ever reads. Genuinely reuses the existing command paths — it
+/// delegates to `cmd_diff` / `cmd_push` / `cmd_pull` rather than
+/// re-implementing any HTTP logic.
+#[allow(clippy::too_many_arguments)]
+async fn cmd_sync(push: bool, pull: bool, org_id: Option<String>, schema_name: Option<String>, json: bool, dry_run: bool, m2m: bool) -> Result<()> {
+    match decide_sync_direction(push, pull, dry_run) {
+        SyncDirection::DiffOnly => {
+            // Reuse the read-only diff renderer (same comparison the
+            // dry-run side of `push` performs).
+            cmd_diff(org_id, schema_name, json, m2m).await?;
+            if !json {
+                println!("  {} {}", "sync:".dimmed(), "review the diff above, then choose a direction:".dimmed());
+                println!("      {}  apply local → remote", "th config sync --push".cyan());
+                println!("      {}  apply remote → local", "th config sync --pull".cyan());
+                println!();
+            }
+            Ok(())
+        }
+        // local → remote: identical to `th config push`. The `pull`-path
+        // multi-schema guard (`resolve_pull_schema`) lives inside
+        // `cmd_pull`; the push path uses `pick_remote_schema`.
+        SyncDirection::Push => cmd_push(org_id, schema_name, None, false, m2m).await,
+        // remote → local: identical to `th config pull`. `--force` is true
+        // here because sync's whole job is to reconcile an existing file;
+        // refusing on an existing schema.json would defeat the command.
+        SyncDirection::Pull => cmd_pull(org_id, schema_name, true, m2m).await,
+    }
+}
+
 /// Pretty-print a schema diff. When `is_new` is true (no remote
 /// matched), all keys are reported as "would create" rather than
 /// "added", which is the more accurate framing.
@@ -1475,6 +1606,236 @@ fn cmd_init(directory: Option<String>, force: bool) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// `th config build` (pearl th-4d1d6c) — generate `.smooai-config/schema.json`
+// from the consumer's `.smooai-config/config.ts`.
+//
+// The realistic, robust implementation (NOT fragile Zod runtime
+// introspection): shell out to `tsx` and dynamically `import()` the
+// consumer's `config.ts`. The `@smooai/config` `defineConfig(...)` output
+// exposes everything we need as plain, documented fields:
+//
+//   - `PublicConfigKeys` / `SecretConfigKeys` / `FeatureFlagKeys`
+//     — `{ WIRE_KEY: schemaKey }` maps; the UPPER_SNAKE wire names are the
+//       object keys.
+//   - `serializedAllConfigSchemaJsonSchema.properties.<tier>ConfigSchema
+//      .properties.<WIRE_KEY>.type` — `"string"` / `"boolean"`.
+//
+// We read those and emit the flat wire format byte-for-byte identically to
+// the monorepo's canonical generator (`scripts/build-smooai-config-schema.ts`):
+//
+//   { "$schema", "generatedFromVersion", "public":[…], "secret":[…],
+//     "featureFlag":[…], "types": { wireKey: "string"|"boolean" } }
+//
+// This is robust because it depends only on stable, exported runtime
+// fields — never on parsing TypeScript or introspecting Zod internals.
+// Requirement: the consumer must have `@smooai/config` + `tsx` installed
+// next to `config.ts` (documented in the help text).
+// ---------------------------------------------------------------------------
+
+/// Embedded Node/ESM generator run via `tsx`. Argument 1 is the absolute
+/// path to the consumer's `config.ts`. Prints the flat schema.json to
+/// stdout. Mirrors `scripts/build-smooai-config-schema.ts` in the smooai
+/// monorepo so output is byte-identical (incl. `generatedFromVersion` and
+/// 4-space indent + trailing newline).
+const BUILD_GENERATOR_JS: &str = r#"
+import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+
+const target = process.argv[2];
+const mod = await import(target);
+const cfg = (mod && mod.default) ? mod.default : mod;
+
+function extractKeys(map) {
+    return Object.keys(map ?? {}).sort();
+}
+
+function buildTypes(cfg) {
+    const out = {};
+    const tiers = cfg.serializedAllConfigSchemaJsonSchema?.properties ?? {};
+    for (const tier of Object.values(tiers)) {
+        const props = tier?.properties ?? {};
+        for (const [wireKey, def] of Object.entries(props)) {
+            if (typeof def?.type === 'string') out[wireKey] = def.type;
+        }
+    }
+    return Object.fromEntries(Object.entries(out).sort(([a], [b]) => a.localeCompare(b)));
+}
+
+function resolveVersion(target) {
+    try {
+        const require = createRequire(target);
+        const entry = require.resolve('@smooai/config');
+        const pkgRoot = dirname(dirname(entry));
+        const pkg = JSON.parse(readFileSync(join(pkgRoot, 'package.json'), 'utf8'));
+        return pkg.version ?? 'unknown';
+    } catch {
+        return 'unknown';
+    }
+}
+
+const payload = {
+    $schema: 'https://smoo.ai/schemas/smooai-config-schema-v1.json',
+    generatedFromVersion: `@smooai/config@${resolveVersion(target)}`,
+    public: extractKeys(cfg.PublicConfigKeys),
+    secret: extractKeys(cfg.SecretConfigKeys),
+    featureFlag: extractKeys(cfg.FeatureFlagKeys),
+    types: buildTypes(cfg),
+};
+process.stdout.write(JSON.stringify(payload, null, 4) + '\n');
+"#;
+
+/// Resolve the `.smooai-config` directory from an optional `--directory`
+/// argument. Accepts either the parent dir (we append `.smooai-config`) or
+/// the `.smooai-config` dir itself. Defaults to `cwd/.smooai-config`.
+fn resolve_config_dir(directory: Option<String>) -> Result<std::path::PathBuf> {
+    let base = match directory {
+        Some(d) => std::path::PathBuf::from(d),
+        None => std::env::current_dir().context("get current dir")?,
+    };
+    if base.file_name().and_then(|n| n.to_str()) == Some(".smooai-config") {
+        Ok(base)
+    } else {
+        Ok(base.join(".smooai-config"))
+    }
+}
+
+/// Find a `tsx` runner. Prefers the consumer's local
+/// `node_modules/.bin/tsx`, then a `tsx` on `PATH`, then `npx tsx`.
+/// Returns the command + leading args (without the script path).
+fn resolve_tsx_command(config_dir: &std::path::Path) -> Vec<String> {
+    // Walk up from the config dir looking for a local node_modules/.bin/tsx
+    // (covers both `<repo>/.smooai-config` and nested-package layouts).
+    let mut dir = config_dir.parent();
+    while let Some(d) = dir {
+        let candidate = d.join("node_modules").join(".bin").join("tsx");
+        if candidate.is_file() {
+            return vec![candidate.to_string_lossy().into_owned()];
+        }
+        dir = d.parent();
+    }
+    if which_on_path("tsx") {
+        vec!["tsx".to_string()]
+    } else {
+        vec!["npx".to_string(), "--yes".to_string(), "tsx".to_string()]
+    }
+}
+
+/// Cheap PATH lookup — avoids a dep on the `which` crate.
+fn which_on_path(bin: &str) -> bool {
+    let Ok(path) = std::env::var("PATH") else { return false };
+    std::env::split_paths(&path).any(|p| p.join(bin).is_file())
+}
+
+/// Generate the schema.json wire JSON from `config.ts` by running the
+/// embedded generator under `tsx`. Returns the raw stdout (already
+/// 4-space-indented + trailing newline, matching the canonical generator).
+fn generate_schema_json(config_dir: &std::path::Path) -> Result<String> {
+    let config_ts = config_dir.join("config.ts");
+    if !config_ts.is_file() {
+        anyhow::bail!(
+            "no `config.ts` in {}.\n\
+             Scaffold one with `th config init`, then add your keys before running `th config build`.",
+            config_dir.display()
+        );
+    }
+
+    // Write the embedded generator to a temp .mjs next to nowhere in
+    // particular — tsx imports the consumer's config.ts by absolute path,
+    // so the generator's own location doesn't matter for module resolution.
+    let tmp = tempfile::Builder::new()
+        .prefix("smooth-config-build-")
+        .suffix(".mjs")
+        .tempfile()
+        .context("create temp generator file")?;
+    std::fs::write(tmp.path(), BUILD_GENERATOR_JS).context("write temp generator")?;
+
+    let runner = resolve_tsx_command(config_dir);
+    let (cmd, lead_args) = runner.split_first().expect("resolve_tsx_command returns at least one element");
+
+    let mut command = std::process::Command::new(cmd);
+    command
+        .args(lead_args)
+        .arg(tmp.path())
+        .arg(&config_ts)
+        // Run from the config dir's parent so `@smooai/config` resolves
+        // against the consumer's node_modules.
+        .current_dir(config_dir.parent().unwrap_or(config_dir));
+
+    let output = command.output().with_context(|| {
+        format!(
+            "run `{}` — is `tsx` installed next to {}? \
+             `th config build` needs `@smooai/config` + `tsx` available (e.g. `pnpm add -D tsx`).",
+            runner.join(" "),
+            config_dir.display()
+        )
+    })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "schema generation failed (tsx exited {}).\n{}\n\
+             Common causes: `@smooai/config` not installed, or `config.ts` has a syntax/import error.",
+            output.status,
+            stderr.trim()
+        );
+    }
+
+    let stdout = String::from_utf8(output.stdout).context("generator stdout was not valid UTF-8")?;
+    // Validate it's the wire shape we expect before handing it back —
+    // catches a config.ts that exports the wrong thing.
+    let parsed: Value = serde_json::from_str(stdout.trim()).with_context(|| format!("parse generator output as JSON:\n{stdout}"))?;
+    if !parsed.get("public").map(Value::is_array).unwrap_or(false) {
+        anyhow::bail!("generator output is missing the `public` array — does config.ts export a `defineConfig(...)` default?");
+    }
+    Ok(stdout)
+}
+
+fn cmd_build(directory: Option<String>, stdout: bool, check: bool) -> Result<()> {
+    let config_dir = resolve_config_dir(directory)?;
+    let fresh = generate_schema_json(&config_dir)?;
+    let schema_path = config_dir.join("schema.json");
+
+    if stdout {
+        print!("{fresh}");
+        return Ok(());
+    }
+
+    if check {
+        if !schema_path.exists() {
+            anyhow::bail!("{} is missing. Run `th config build` to generate it.", schema_path.display());
+        }
+        let existing = std::fs::read_to_string(&schema_path).with_context(|| format!("read {}", schema_path.display()))?;
+        if existing != fresh {
+            anyhow::bail!("{} is OUT OF DATE. Run `th config build` and commit the result.", schema_path.display());
+        }
+        println!();
+        println!("  {} {} is up to date", "✓".green().bold(), schema_path.display().to_string().cyan());
+        println!();
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(&config_dir).with_context(|| format!("create {}", config_dir.display()))?;
+    std::fs::write(&schema_path, &fresh).with_context(|| format!("write {}", schema_path.display()))?;
+
+    let key_count = serde_json::from_str::<Value>(fresh.trim()).ok().map(|v| flatten_schema(&v).len()).unwrap_or(0);
+    println!();
+    println!(
+        "  {} generated {} ({} keys)",
+        "✓".green().bold(),
+        schema_path.display().to_string().cyan(),
+        key_count
+    );
+    println!(
+        "  {} {}",
+        "next:".dimmed(),
+        "`th config diff` to compare with remote, then `th config push`".dimmed()
+    );
+    println!();
+    Ok(())
+}
+
 // `ConfigClient::post` is added in Lane D — Lane C only needed GET/PUT.
 impl ConfigClient {
     async fn post(&self, path: &str, body: &Value) -> Result<Value> {
@@ -1540,6 +1901,24 @@ mod tests {
     #[test]
     fn parse_body_rejects_garbage() {
         assert!(parse_body("not json at all").is_err());
+    }
+
+    #[test]
+    fn sync_direction_bare_is_diff_only() {
+        assert_eq!(decide_sync_direction(false, false, false), SyncDirection::DiffOnly);
+    }
+
+    #[test]
+    fn sync_direction_push_and_pull_apply() {
+        assert_eq!(decide_sync_direction(true, false, false), SyncDirection::Push);
+        assert_eq!(decide_sync_direction(false, true, false), SyncDirection::Pull);
+    }
+
+    #[test]
+    fn sync_direction_dry_run_always_wins() {
+        // --dry-run forces diff-only even with an explicit direction.
+        assert_eq!(decide_sync_direction(true, false, true), SyncDirection::DiffOnly);
+        assert_eq!(decide_sync_direction(false, true, true), SyncDirection::DiffOnly);
     }
 
     #[test]
