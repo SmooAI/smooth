@@ -25,6 +25,7 @@ use chrono::Utc;
 use owo_colors::OwoColorize;
 use smooth_tmux::TmuxDriver;
 
+use super::control;
 use super::detect::{detect_state, extract_last_user_message, PaneState};
 use super::governor::RateLimitGovernor;
 use super::registry::{self, SessionEntry};
@@ -101,6 +102,7 @@ struct RegistryGuard(String);
 impl Drop for RegistryGuard {
     fn drop(&mut self) {
         registry::remove_entry(&self.0);
+        control::clear(&self.0);
     }
 }
 
@@ -113,7 +115,14 @@ pub fn supervise_blocking(opts: RunOpts, stop: Arc<AtomicBool>) -> Result<()> {
     let id = short_id();
     let session = format!("claude-{id}");
 
-    let mut driver = TmuxDriver::start(&session, &opts.cwd, &opts.command, opts.boot_timeout)?;
+    // Export the agent handle so the `smooth-agent` Claude Code plugin's
+    // SessionStart hook registers this session on the th-mail bus under a
+    // handle Big Smooth can address (`th msg send --to <handle>`). The
+    // command is wrapped in `sh -c` by the driver, so an inline
+    // assignment reaches the launched process's environment.
+    let launch_cmd = format!("SMOOTH_AGENT_HANDLE={id} SMOOTH_SESSION={id} {}", opts.command);
+
+    let mut driver = TmuxDriver::start(&session, &opts.cwd, &launch_cmd, opts.boot_timeout)?;
     driver.set_capture_max_bytes(128 * 1024);
 
     let entry = SessionEntry {
@@ -131,12 +140,15 @@ pub fn supervise_blocking(opts: RunOpts, stop: Arc<AtomicBool>) -> Result<()> {
     println!("{} session {} ({})", "▶".green(), id.bold(), session.dimmed());
     println!("  attach with: {}", format!("th claude attach {id}").cyan());
 
-    // Wait for the TUI to render, then send the initial prompt.
+    // Wait for the TUI to render, then send the initial prompt — but only
+    // if Big Smooth is driving. In Manual/Paused the human owns input.
     let mut last_message = opts.initial_prompt.clone();
     if let Some(prompt) = &opts.initial_prompt {
-        let _ = driver.wait_for_idle(Duration::from_secs(1), Duration::from_millis(300), Duration::from_secs(20));
-        driver.send(prompt)?;
-        println!("  {} sent initial prompt", "→".green());
+        if control::read_mode(&id).drives() {
+            let _ = driver.wait_for_idle(Duration::from_secs(1), Duration::from_millis(300), Duration::from_secs(20));
+            driver.send(prompt)?;
+            println!("  {} sent initial prompt", "→".green());
+        }
     }
 
     let governor = RateLimitGovernor::new();
@@ -151,8 +163,13 @@ pub fn supervise_blocking(opts: RunOpts, stop: Arc<AtomicBool>) -> Result<()> {
             break;
         }
 
+        let mode = control::read_mode(&id);
         let visible = driver.capture_visible().unwrap_or_default();
         match action_for(detect_state(&visible)) {
+            SuperviseAction::Rescue if !mode.rescues() => {
+                // Paused: the human asked us to stand down entirely — don't
+                // resend even on a rate-limit.
+            }
             SuperviseAction::Rescue => {
                 // Prefer the message we sent; fall back to scraping the
                 // last user turn out of full scrollback.

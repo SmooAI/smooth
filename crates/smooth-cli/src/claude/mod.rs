@@ -8,6 +8,7 @@
 //! sessions on a shared governor) and N:1 / mixed topologies are later
 //! wirings of the same `supervisor` + `governor` + `registry`.
 
+pub mod control;
 pub mod detect;
 pub mod governor;
 pub mod registry;
@@ -61,6 +62,17 @@ pub enum ClaudeCommands {
         /// Session id (or unique prefix) from `th claude ls`.
         id: String,
     },
+    /// Set who drives a session: `driving` (Big Smooth sends input +
+    /// rescues rate-limits), `manual` (you drive; the supervisor only
+    /// rescues your throttled turns), or `paused` (supervisor stands
+    /// down). Lets you hand control back and forth without killing the
+    /// session.
+    Mode {
+        /// Session id (or unique prefix) from `th claude ls`.
+        id: String,
+        /// `driving` | `manual` | `paused`.
+        mode: String,
+    },
 }
 
 /// Dispatch a `th claude` subcommand.
@@ -92,7 +104,21 @@ pub async fn cmd_claude(cmd: ClaudeCommands) -> Result<()> {
         }
         ClaudeCommands::Ls { json } => ls(json),
         ClaudeCommands::Attach { id } => attach(&id),
+        ClaudeCommands::Mode { id, mode } => set_mode(&id, &mode),
     }
+}
+
+fn set_mode(id: &str, mode: &str) -> Result<()> {
+    let parsed: control::Mode = mode.parse()?;
+    // Resolve the id against live sessions so a typo fails loudly instead
+    // of silently writing a control file no supervisor reads.
+    let entry = registry::read_live_and_prune()
+        .into_iter()
+        .find(|e| e.id == id || e.id.starts_with(id))
+        .ok_or_else(|| anyhow!("no live session matching `{id}` — try `th claude ls`"))?;
+    control::write_mode(&entry.id, parsed)?;
+    println!("{} session {} → {}", "⇄".cyan(), entry.id.bold(), parsed.to_string().bold());
+    Ok(())
 }
 
 async fn run(opts: RunOpts) -> Result<()> {
@@ -124,11 +150,19 @@ fn ls(json: bool) -> Result<()> {
         println!("No supervised Claude sessions. Start one with `{}`.", "th claude run".cyan());
         return Ok(());
     }
-    println!("{:<10} {:<12} {:<8} {}", "ID".bold(), "LABEL".bold(), "STARTED".bold(), "CWD".bold());
+    println!(
+        "{:<10} {:<8} {:<12} {:<8} {}",
+        "ID".bold(),
+        "MODE".bold(),
+        "LABEL".bold(),
+        "STARTED".bold(),
+        "CWD".bold()
+    );
     for e in &live {
         println!(
-            "{:<10} {:<12} {:<8} {}",
+            "{:<10} {:<8} {:<12} {:<8} {}",
             e.id.cyan(),
+            control::read_mode(&e.id).as_str(),
             e.label.as_deref().unwrap_or("-"),
             e.started_at.format("%H:%M").to_string(),
             e.cwd.dimmed()
@@ -202,5 +236,20 @@ mod tests {
         use clap::Parser;
         assert!(Harness::try_parse_from(["x", "attach"]).is_err());
         assert!(Harness::try_parse_from(["x", "attach", "abc"]).is_ok());
+    }
+
+    #[test]
+    fn mode_parses_id_and_mode() {
+        use clap::Parser;
+        let h = Harness::try_parse_from(["x", "mode", "ab12", "manual"]).unwrap();
+        match h.cmd {
+            super::ClaudeCommands::Mode { id, mode } => {
+                assert_eq!(id, "ab12");
+                assert_eq!(mode, "manual");
+            }
+            _ => panic!("expected Mode"),
+        }
+        // mode requires both args.
+        assert!(Harness::try_parse_from(["x", "mode", "ab12"]).is_err());
     }
 }
