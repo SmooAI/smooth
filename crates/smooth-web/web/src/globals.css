@@ -51,13 +51,24 @@ body {
 
 /* The Smooth wordmark — the teal→blue gradient, his colors. */
 .wordmark {
+    font-family: var(--font-display);
+    font-weight: 800;
+    letter-spacing: -0.02em;
+}
+/* The official Smooth lockup, applied to the wordmark: "Smoo" rides the Smoo
+   orange→red, "th" (and the "Big" qualifier) the th teal→blue — so "Smooth"
+   reads exactly like the brand mark. */
+.wm-th {
     background: linear-gradient(105deg, var(--color-th-teal), var(--color-th-blue));
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
-    font-family: var(--font-display);
-    font-weight: 800;
-    letter-spacing: -0.02em;
+}
+.wm-smoo {
+    background: linear-gradient(100deg, #f49f0a, #fb7a4d 52%, #ff6b6c);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
 }
 
 /* ── The presence halo ───────────────────────────────────────────────────────

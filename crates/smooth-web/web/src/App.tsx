@@ -149,6 +149,17 @@ export default function App() {
     );
 }
 
+/** "Big Smooth" in the official Smooth lockup — "Smoo" orange→red, "th"
+ * (and "Big") teal→blue, so "Smooth" reads exactly like the brand mark. */
+function Wordmark({ className }: { className?: string }) {
+    return (
+        <div className={`wordmark ${className ?? ''}`}>
+            <span className="wm-th">Big</span> <span className="wm-smoo">Smoo</span>
+            <span className="wm-th">th</span>
+        </div>
+    );
+}
+
 /** The face + its breathing halo, sized for the moment. */
 function FaceStage({ state, size, strong }: { state: FaceState; size: number; strong?: boolean }) {
     return (
@@ -196,7 +207,7 @@ function Greeting({
         <main className="flex min-h-0 flex-1 flex-col items-center justify-center gap-7 pb-6 text-center">
             <FaceStage state={faceState} size={150} strong />
             <div className="flex flex-col items-center gap-3">
-                <div className="wordmark text-4xl leading-none sm:text-[2.75rem]">Big Smooth</div>
+                <Wordmark className="text-4xl leading-none sm:text-[2.75rem]" />
                 <StatusLine state={state} status={status} center />
                 <CostBar mode={mode} costs={modelCosts} sessionCostUsd={sessionCostUsd} className="justify-center" />
             </div>
@@ -234,7 +245,7 @@ function PresenceBar({
         <header className="flex items-center gap-3.5 pt-5 pb-3">
             <FaceStage state={faceState} size={76} />
             <div className="min-w-0">
-                <div className="wordmark text-[1.7rem] leading-none">Big Smooth</div>
+                <Wordmark className="text-[1.7rem] leading-none" />
                 <div className="mt-1.5">
                     <StatusLine state={state} status={status} />
                 </div>
