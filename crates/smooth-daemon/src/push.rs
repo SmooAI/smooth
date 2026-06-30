@@ -50,7 +50,12 @@ impl PushState {
     pub fn from_env() -> Self {
         let public_key = std::env::var("SMOOTH_VAPID_PUBLIC").ok().filter(|s| !s.is_empty());
         let private_key = std::env::var("SMOOTH_VAPID_PRIVATE").ok().filter(|s| !s.is_empty());
-        Self { public_key, private_key, subs_path: subs_path(), lock: Arc::new(Mutex::new(())) }
+        Self {
+            public_key,
+            private_key,
+            subs_path: subs_path(),
+            lock: Arc::new(Mutex::new(())),
+        }
     }
 
     fn enabled(&self) -> bool {
@@ -58,7 +63,10 @@ impl PushState {
     }
 
     fn load_subs(&self) -> Vec<Subscription> {
-        std::fs::read(&self.subs_path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+        std::fs::read(&self.subs_path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
     }
 
     async fn save_subs(&self, subs: &[Subscription]) {
@@ -187,7 +195,13 @@ mod tests {
             subs_path: dir.join("subs.json"),
             lock: Arc::new(Mutex::new(())),
         };
-        let sub = Subscription { endpoint: "https://x/1".into(), keys: SubscriptionKeys { p256dh: "p".into(), auth: "a".into() } };
+        let sub = Subscription {
+            endpoint: "https://x/1".into(),
+            keys: SubscriptionKeys {
+                p256dh: "p".into(),
+                auth: "a".into(),
+            },
+        };
         state.save_subs(&[sub.clone()]).await;
         assert_eq!(state.load_subs(), vec![sub]);
         let _ = std::fs::remove_dir_all(&dir);
