@@ -423,6 +423,29 @@ enum ServiceCommands {
         /// Run the always-on `th daemon` (EPIC th-c89c2a) instead of `th up`.
         #[arg(long)]
         daemon: bool,
+        /// Extra env var to bake into the service (repeatable), e.g.
+        /// `--env SMOOTH_ADDR=127.0.0.1:8788 --env SMOOTH_TAILSCALE_HTTPS_PORT=8443`
+        /// to run on a free port + coexist with another tailscale serve.
+        #[arg(long = "env", value_name = "KEY=VALUE")]
+        env: Vec<String>,
+    },
+    /// Pull the latest source, rebuild + reinstall `th` + the daemon, and restart
+    /// the running service. The continuous-update primitive.
+    SelfUpdate {
+        /// The git checkout to update from (default: `~/dev/smooai/smooth`, or
+        /// `SMOOTH_UPDATE_REPO`).
+        #[arg(long)]
+        repo: Option<std::path::PathBuf>,
+    },
+    /// Install a timer that runs `th service self-update` on an interval, so a
+    /// self-hosted box (e.g. smoo-hub) stays current automatically.
+    InstallUpdater {
+        /// The git checkout to update from (default: `~/dev/smooai/smooth`).
+        #[arg(long)]
+        repo: Option<std::path::PathBuf>,
+        /// How often to update, in seconds (default: 3600 = hourly).
+        #[arg(long, default_value = "3600")]
+        interval: u64,
     },
     /// Disable and remove the user-level service
     Uninstall,
@@ -5479,7 +5502,12 @@ fn cmd_skills(cmd: SkillsCommands) -> Result<()> {
 
 fn cmd_service(cmd: ServiceCommands) -> Result<()> {
     match cmd {
-        ServiceCommands::Install { system, daemon } => service::install(system, daemon),
+        ServiceCommands::Install { system, daemon, env } => {
+            let env = service::parse_env(&env)?;
+            service::install(system, daemon, &env)
+        }
+        ServiceCommands::SelfUpdate { repo } => service::self_update(repo),
+        ServiceCommands::InstallUpdater { repo, interval } => service::install_updater(repo, interval),
         ServiceCommands::Uninstall => service::uninstall(),
         ServiceCommands::Start => service::start(),
         ServiceCommands::Stop => service::stop(),
