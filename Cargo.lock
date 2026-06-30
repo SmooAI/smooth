@@ -4089,6 +4089,7 @@ dependencies = [
  "clap",
  "dirs-next",
  "futures-util",
+ "http-body-util",
  "reqwest",
  "rusqlite",
  "serde",

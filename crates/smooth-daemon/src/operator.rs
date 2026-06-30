@@ -282,7 +282,7 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         egress = egress_proxy.as_deref().unwrap_or("unrestricted"),
         "local-flavor sandboxed tools wired (per-turn via ToolProvider)",
     );
-    let provider = local_tool_provider(workspace, egress_proxy);
+    let provider = local_tool_provider(workspace.clone(), egress_proxy);
     // Durable local storage: the operator local flavor is in-memory by default,
     // which loses every conversation/session on restart. Inject a sqlite-backed
     // adapter (via the operator's `storage()` seam) so the always-on daemon
@@ -313,6 +313,10 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         // by the verifier above) — no `?api`/`?token` query string needed
         // (th-a28904). Replaces the operator's stock widget.
         .serve_spa(smooth_web::web_router_with_token(Some(&token)))
+        // The `@`-mention backend: an ungated `GET /search` merged alongside the
+        // operator's routes (CORS-matched to `/admin` by the seam) so the web
+        // composer's autocomplete resolves files + paths in the workspace.
+        .serve_routes(crate::search::search_router(workspace))
         .spawn()
         .await
         .context("spawning the local-flavor operator")?;

@@ -80,7 +80,7 @@ declare global {
  * endpoint is simply `http://127.0.0.1:8787/`. In dev (Vite at :3100) pass them
  * as `?api=http://127.0.0.1:8787&token=…` (persisted to localStorage thereafter);
  * the API base otherwise defaults to the page origin. */
-function resolveTarget(): { http: string; token: string } {
+export function resolveTarget(): { http: string; token: string } {
     const params = new URLSearchParams(window.location.search);
     const api = window.__SMOOTH_API__ ?? params.get('api') ?? localStorage.getItem('smooth.api') ?? window.location.origin;
     const token = window.__SMOOTH_TOKEN__ ?? params.get('token') ?? localStorage.getItem('smooth.token') ?? '';

@@ -13,6 +13,7 @@ import remarkGfm from 'remark-gfm';
 import { BigSmoothFace, type FaceState } from './components/BigSmoothFace';
 import { MODES, costBadge, isExpensiveBadge, blendedPerMillion, type SmoothMode, type ModelCost, type ModelCosts } from './modes';
 import { useOperator, type AgentState, type ChatMessage, type ToolCall, type Approval, type Status } from './operator';
+import { useMentionSearch, activeMention, type MentionResult } from './useMentionSearch';
 
 const STATUS_CAPTION: Record<AgentState, string> = {
     connecting: 'waking up',
@@ -370,6 +371,18 @@ function ToolChip({ t, awaiting }: { t: ToolCall; awaiting: boolean }) {
 
 const SLASH_COMMANDS = [{ name: 'smooth-mode', hint: 'switch the active model' }];
 
+// ── @ mentions ───────────────────────────────────────────────────────────────
+// A twin of the slash popup, but mid-text: type `@`, get workspace files / paths
+// / pearls from Big Smooth's `/search` endpoint, arrow + enter to drop a
+// reference in. Mirrors the `th code` TUI's `@` picker. Only one popup (slash or
+// mention) is ever open — whichever token the caret sits in wins. (th-58b5fe)
+
+const MENTION_GLYPH: Record<MentionResult['kind'], string> = {
+    file: '📄',
+    path: '📁',
+    pearl: '◍',
+};
+
 type MenuItem = { kind: 'command'; name: string; hint: string } | { kind: 'preset'; mode: SmoothMode; badge: string | null };
 
 interface SlashMenu {
@@ -417,20 +430,55 @@ function Composer({
     modelCosts: ModelCosts;
 }) {
     const [text, setText] = useState('');
+    const [caret, setCaret] = useState(0);
     const [sel, setSel] = useState(0);
     const [dismissed, setDismissed] = useState(false);
     const taRef = useRef<HTMLTextAreaElement>(null);
 
-    const menu = useMemo(() => (dismissed ? null : buildSlashMenu(text, modelCosts)), [text, modelCosts, dismissed]);
+    // The `@` token under the caret (if any) drives the mention popup. When it's
+    // active we suppress the `/` slash menu — only the token the caret sits in wins.
+    const mention = useMemo(() => activeMention(text, caret), [text, caret]);
+    const mentionQuery = mention && !dismissed ? mention.query : null;
+    const mentionResults = useMentionSearch(mentionQuery);
+    const mentionVisible = !!mention && !dismissed && mentionResults.length > 0;
+    const mentionSel = Math.min(sel, Math.max(0, mentionResults.length - 1));
+
+    const menu = useMemo(() => (dismissed || mention ? null : buildSlashMenu(text, modelCosts)), [text, modelCosts, dismissed, mention]);
     const selItem = menu ? menu.items[Math.min(sel, menu.items.length - 1)] : null;
 
     const cost = modeCost(mode, modelCosts);
     const expensive = modeExpensive(mode, modelCosts);
 
+    // Reset the highlighted row whenever the mention query changes so a stale
+    // index from a previous result set never points past the new list.
+    useEffect(() => {
+        setSel(0);
+    }, [mentionQuery]);
+
     const update = (next: string) => {
         setText(next);
         setSel(0);
         setDismissed(false);
+    };
+
+    // Replace the whole `@<query>` token with the picked result's value, leaving
+    // a trailing space, and restore the caret just past it.
+    const insertMention = (result: MentionResult) => {
+        if (!mention) return;
+        const before = text.slice(0, mention.start);
+        const after = text.slice(mention.tokenEnd);
+        const insert = result.value + (after.startsWith(' ') ? '' : ' ');
+        const next = before + insert + after;
+        const pos = before.length + insert.length;
+        update(next);
+        setCaret(pos);
+        requestAnimationFrame(() => {
+            const ta = taRef.current;
+            if (ta) {
+                ta.focus();
+                ta.setSelectionRange(pos, pos);
+            }
+        });
     };
 
     const applyItem = (item: MenuItem) => {
@@ -457,6 +505,34 @@ function Composer({
 
     return (
         <div className="relative pb-5 pt-1">
+            {mentionVisible && (
+                <div className="absolute right-0 bottom-full left-0 mb-2 overflow-hidden rounded-2xl border border-border bg-panel/95 shadow-xl backdrop-blur">
+                    <ul className="max-h-72 overflow-y-auto py-1">
+                        {mentionResults.map((r, i) => {
+                            const active = i === mentionSel;
+                            return (
+                                <li key={`${r.kind}-${r.value}-${i}`}>
+                                    <button
+                                        type="button"
+                                        onMouseDown={(e) => {
+                                            e.preventDefault();
+                                            insertMention(r);
+                                        }}
+                                        onMouseEnter={() => setSel(i)}
+                                        className={`flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-sm transition ${active ? 'bg-panel-2' : ''}`}
+                                    >
+                                        <span aria-hidden className="w-5 shrink-0 text-center">
+                                            {MENTION_GLYPH[r.kind]}
+                                        </span>
+                                        <span className="truncate font-medium">{r.label}</span>
+                                        {r.detail && <span className="truncate font-mono text-xs text-(--color-muted-foreground)">{r.detail}</span>}
+                                    </button>
+                                </li>
+                            );
+                        })}
+                    </ul>
+                </div>
+            )}
             {menu && (
                 <div className="absolute right-0 bottom-full left-0 mb-2 overflow-hidden rounded-2xl border border-border bg-panel/95 shadow-xl backdrop-blur">
                     {menu.stage === 'preset' && (
@@ -512,9 +588,34 @@ function Composer({
                 <textarea
                     ref={taRef}
                     value={text}
-                    onChange={(e) => update(e.target.value)}
+                    onChange={(e) => {
+                        update(e.target.value);
+                        setCaret(e.target.selectionStart ?? e.target.value.length);
+                    }}
+                    onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
                     onKeyDown={(e) => {
-                        if (menu && menu.items.length) {
+                        if (mentionVisible) {
+                            if (e.key === 'ArrowDown') {
+                                e.preventDefault();
+                                setSel((s) => (s + 1) % mentionResults.length);
+                                return;
+                            }
+                            if (e.key === 'ArrowUp') {
+                                e.preventDefault();
+                                setSel((s) => (s - 1 + mentionResults.length) % mentionResults.length);
+                                return;
+                            }
+                            if (e.key === 'Enter' || e.key === 'Tab') {
+                                e.preventDefault();
+                                insertMention(mentionResults[mentionSel]);
+                                return;
+                            }
+                            if (e.key === 'Escape') {
+                                e.preventDefault();
+                                setDismissed(true);
+                                return;
+                            }
+                        } else if (menu && menu.items.length) {
                             if (e.key === 'ArrowDown') {
                                 e.preventDefault();
                                 setSel((s) => (s + 1) % menu.items.length);
@@ -542,7 +643,7 @@ function Composer({
                         }
                     }}
                     rows={1}
-                    placeholder={disabled ? 'Waiting for your operator…' : 'Talk to Big Smooth…  (/ for modes)'}
+                    placeholder={disabled ? 'Waiting for your operator…' : 'Talk to Big Smooth…  (/ for modes · @ to mention)'}
                     disabled={disabled}
                     className="max-h-40 flex-1 resize-none bg-transparent px-2 py-1.5 text-[0.95rem] outline-none placeholder:text-(--color-muted-foreground)"
                 />

@@ -31,6 +31,7 @@ pub mod operator;
 mod operator_storage;
 pub mod schedule;
 pub mod scheduler;
+pub mod search;
 pub mod tailscale;
 
 pub use operator::{local_tool_provider, serve_local_flavor};

@@ -76,6 +76,8 @@ futures-util.workspace = true
 tempfile.workspace = true
 # `ServiceExt::oneshot` for router-level auth-middleware tests.
 tower = { workspace = true, features = ["util"] }
+# Collect response bodies in the `/search` router tests.
+http-body-util.workspace = true
 
 [lints]
 workspace = true
