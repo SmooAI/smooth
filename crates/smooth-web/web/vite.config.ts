@@ -8,7 +8,10 @@ export default defineConfig({
         react(),
         tailwindcss(),
         VitePWA({
-            registerType: 'autoUpdate',
+            // `prompt`, not `autoUpdate`: a new service worker waits until the user
+            // accepts the forced-refresh modal (src/PWAUpdater.tsx), so we never
+            // swap code out from under a live session silently.
+            registerType: 'prompt',
             includeAssets: [
                 'favicon.ico',
                 'favicon.png',
@@ -18,12 +21,13 @@ export default defineConfig({
                 'apple-touch-icon-167.png',
                 'apple-touch-icon-152.png',
                 'apple-touch-icon-120.png',
+                'smooth-icon.svg',
                 'logo.svg',
             ],
             manifest: {
-                name: 'Smooth — Smoo AI Agent Orchestration',
-                short_name: 'Smooth',
-                description: 'Smoo AI agent orchestration dashboard',
+                name: 'Big Smooth — your always-on AI',
+                short_name: 'Big Smooth',
+                description: 'Your always-on personal AI operator.',
                 theme_color: '#0a0a0a',
                 background_color: '#0a0a0a',
                 display: 'standalone',
@@ -33,10 +37,13 @@ export default defineConfig({
                     { src: '/pwa-192x192.png', sizes: '192x192', type: 'image/png' },
                     { src: '/pwa-512x512.png', sizes: '512x512', type: 'image/png' },
                     { src: '/pwa-512x512.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' },
+                    { src: '/smooth-icon.svg', type: 'image/svg+xml', purpose: 'any' },
                 ],
             },
             workbox: {
-                navigateFallbackDenylist: [/^\/api/, /^\/health/, /^\/ws/],
+                // The daemon serves these — the SW must never shadow them with the
+                // SPA shell. (th-c89c2a: /admin/* and /search added alongside the API.)
+                navigateFallbackDenylist: [/^\/api/, /^\/admin/, /^\/search/, /^\/health/, /^\/ws/],
             },
             devOptions: {
                 enabled: false,

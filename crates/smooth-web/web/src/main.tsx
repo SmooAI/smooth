@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 
 import './globals.css';
 import App from './App';
+import { PWAUpdater } from './PWAUpdater';
 
 // smooth-web is the operator's control surface — a thin client on the canonical
 // WS protocol (EPIC th-c89c2a, th-f1a1f0). No more backend-detection split: the
@@ -10,5 +11,6 @@ import App from './App';
 createRoot(document.getElementById('root')!).render(
     <StrictMode>
         <App />
+        <PWAUpdater />
     </StrictMode>,
 );

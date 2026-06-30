@@ -112,27 +112,40 @@ export default function App() {
     );
 
     return (
-        <div className="mx-auto flex h-full max-w-3xl flex-col px-5">
-            {inConversation ? (
-                <>
-                    <PresenceBar state={state} status={status} faceState={faceState} mode={mode} modelCosts={modelCosts} sessionCostUsd={sessionCostUsd} />
-                    <div className="presence-rule shrink-0" />
-                    <main className="flex min-h-0 flex-1 flex-col">
-                        <ApprovalDeck approvals={approvals} respond={respond} />
-                        <Conversation messages={messages} approvals={approvals} />
-                    </main>
-                </>
-            ) : (
-                <Greeting state={state} status={status} faceState={faceState} mode={mode} modelCosts={modelCosts} sessionCostUsd={sessionCostUsd} />
-            )}
-            <Composer
-                onSend={sendMessage}
-                disabled={state === 'connecting' || state === 'offline'}
-                mode={mode}
-                setMode={guardedSetMode}
-                modelCosts={modelCosts}
-            />
-        </div>
+        <>
+            {/* The Smooth product mark — a quiet corner lockup that never competes
+                with Big Smooth himself. Hidden on small screens where space is tight. */}
+            <a
+                href="https://smoo.ai"
+                target="_blank"
+                rel="noreferrer"
+                title="Smooth by Smoo AI"
+                className="fixed top-4 left-4 z-10 hidden opacity-35 transition hover:opacity-90 sm:block"
+            >
+                <img src="/smooth-icon.svg" alt="Smooth" className="size-6" />
+            </a>
+            <div className="mx-auto flex h-full max-w-3xl flex-col px-5">
+                {inConversation ? (
+                    <>
+                        <PresenceBar state={state} status={status} faceState={faceState} mode={mode} modelCosts={modelCosts} sessionCostUsd={sessionCostUsd} />
+                        <div className="presence-rule shrink-0" />
+                        <main className="flex min-h-0 flex-1 flex-col">
+                            <ApprovalDeck approvals={approvals} respond={respond} />
+                            <Conversation messages={messages} approvals={approvals} />
+                        </main>
+                    </>
+                ) : (
+                    <Greeting state={state} status={status} faceState={faceState} mode={mode} modelCosts={modelCosts} sessionCostUsd={sessionCostUsd} />
+                )}
+                <Composer
+                    onSend={sendMessage}
+                    disabled={state === 'connecting' || state === 'offline'}
+                    mode={mode}
+                    setMode={guardedSetMode}
+                    modelCosts={modelCosts}
+                />
+            </div>
+        </>
     );
 }
 
