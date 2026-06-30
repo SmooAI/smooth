@@ -20,6 +20,7 @@ pub mod intent;
 pub mod layout;
 pub mod markdown;
 pub mod model_picker;
+pub mod modes;
 pub mod operator_client;
 pub mod permissions;
 pub mod render;

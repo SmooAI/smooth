@@ -308,6 +308,17 @@ pub struct AppState {
     /// asked for. `None` (the default) preserves the legacy behavior
     /// of letting Big Smooth pick.
     pub model_override: Option<String>,
+    /// Active Smooth Mode id (`flash` / `code+` / `max` / …). Pins each turn
+    /// to a concrete model — the mode's `model` is sent on every
+    /// `send_message`. Set via `/smooth-mode <preset>`; defaults to
+    /// [`crate::modes::DEFAULT_MODE_ID`] (`flash`). Web ↔ TUI parity:
+    /// mirrors the composer's `/smooth-mode` switcher (th-f512b1).
+    pub mode_id: String,
+    /// Per-model cost table fetched once (best-effort) from
+    /// `GET {operator}/admin/model-costs`. Empty when the endpoint is
+    /// unreachable — the status bar degrades to the mode's tier for the
+    /// premium warning and omits the cost badge (th-2a6330).
+    pub model_costs: crate::modes::ModelCosts,
     /// Active lead role name (`fixer` / `mapper` / `oracle` / `heckler`).
     /// Flows into every `TaskStart` so the runner applies the right
     /// clearance set; rendered on the status bar so the user can see
@@ -408,6 +419,8 @@ impl AppState {
             user_scrolled: false,
             model_name: "claude-sonnet-4".to_string(),
             model_override: None,
+            mode_id: crate::modes::DEFAULT_MODE_ID.to_string(),
+            model_costs: crate::modes::ModelCosts::new(),
             agent_name: "fixer".to_string(),
             agent_pinned: false,
             verbose: false,
@@ -448,6 +461,19 @@ impl AppState {
             state.agent_pinned = true;
         }
         state
+    }
+
+    /// The active [`Mode`](crate::modes::Mode), resolved from [`Self::mode_id`].
+    /// Falls back to the default mode (`flash`) when the stored id is unknown.
+    pub fn active_mode(&self) -> &'static crate::modes::Mode {
+        crate::modes::mode_by_id(&self.mode_id)
+    }
+
+    /// The model id to send on the next turn: an explicit `--model` CLI
+    /// override wins; otherwise the active mode's model. Keeps the legacy
+    /// `--model` flag working while letting `/smooth-mode` drive routing.
+    pub fn turn_model(&self) -> String {
+        self.model_override.clone().unwrap_or_else(|| self.active_mode().model.to_string())
     }
 
     /// Add a message to the conversation history.

@@ -4243,6 +4243,7 @@ dependencies = [
  "axum 0.8.8",
  "chrono",
  "futures-util",
+ "reqwest",
  "serde",
  "serde_json",
  "smooai-smooth-operator",

@@ -1135,6 +1135,23 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
         remember_session(sid);
     }
 
+    // Fetch the per-model cost table once (best-effort) so the status bar can
+    // show a cost badge + premium warning for the active mode (th-2a6330).
+    // Skipped when already populated — it doesn't change within a session.
+    {
+        let empty = {
+            let s = state.lock().unwrap_or_else(|e| e.into_inner());
+            s.model_costs.is_empty()
+        };
+        if empty {
+            let costs = crate::operator_client::fetch_model_costs(&url).await;
+            if !costs.is_empty() {
+                let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+                s.model_costs = costs;
+            }
+        }
+    }
+
     // Create the streaming assistant message synchronously so tool
     // calls that arrive before the main event loop has a chance to
     // process AgentEvent::Started have somewhere to attach. Without
@@ -1214,16 +1231,16 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
         out
     };
 
-    // Pearl th-20574a: read the user's --model override from AppState
-    // so it actually reaches Big Smooth's routing layer. Was a literal
-    // `None` here; every TaskStart fell back to the smooth-coding alias
-    // regardless of CLI flag.
-    let model_override = {
+    // Pearl th-20574a / th-f512b1: pin the turn to a concrete model. An
+    // explicit `--model` CLI override wins; otherwise the active Smooth Mode's
+    // model (default `flash` → deepseek-v4-flash). Sent verbatim in
+    // `send_message`, mirroring the web composer.
+    let turn_model = {
         let s = state.lock().unwrap_or_else(|e| e.into_inner());
-        s.model_override.clone()
+        s.turn_model()
     };
     let mut events = client
-        .run_task(message, model_override.as_deref(), None, cwd.as_deref(), agent.as_deref(), prior_messages)
+        .run_task(message, Some(turn_model.as_str()), None, cwd.as_deref(), agent.as_deref(), prior_messages)
         .await?;
 
     // Per-tool-name queues of (id, started_at, args). The runner emits

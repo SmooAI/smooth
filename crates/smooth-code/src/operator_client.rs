@@ -80,12 +80,22 @@ pub fn map_event(v: &Value) -> Option<ServerEvent> {
             Some(ServerEvent::ConfirmationRequired { task_id, tool, description })
         }
         // The final text was already streamed via `stream_token`, so the terminal
-        // event just signals completion.
-        "eventual_response" => Some(ServerEvent::TaskComplete {
-            task_id,
-            iterations: 0,
-            cost_usd: 0.0,
-        }),
+        // event just signals completion. Usage rides the `eventual_response`:
+        // the cost lands at `data.data.costUsd` (the operator's nested shape),
+        // with `data.costUsd` as a defensive fallback — read both, mirroring the
+        // web hook (th-2a6330). The TUI sums these into the session total.
+        "eventual_response" => {
+            let cost_usd = v
+                .pointer("/data/data/costUsd")
+                .or_else(|| v.pointer("/data/costUsd"))
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            Some(ServerEvent::TaskComplete {
+                task_id,
+                iterations: 0,
+                cost_usd,
+            })
+        }
         "error" => {
             let message = v
                 .get("message")
@@ -96,6 +106,28 @@ pub fn map_event(v: &Value) -> Option<ServerEvent> {
             Some(ServerEvent::TaskError { task_id, message })
         }
         _ => None,
+    }
+}
+
+/// Fetch the per-model cost table from `GET {base_url}/admin/model-costs`,
+/// best-effort: returns an empty map on any error (unreachable operator, non-2xx,
+/// malformed body) so the status bar degrades gracefully (th-2a6330). Sends the
+/// operator token as `Authorization: Bearer …` when one is configured — the same
+/// endpoint the web console hits.
+pub async fn fetch_model_costs(base_url: &str) -> crate::modes::ModelCosts {
+    let base = base_url.trim_end_matches('/');
+    let url = format!("{base}/admin/model-costs");
+    let Ok(http) = reqwest::Client::builder().timeout(Duration::from_secs(3)).build() else {
+        return crate::modes::ModelCosts::new();
+    };
+    let mut req = http.get(&url);
+    let token = resolve_token();
+    if !token.is_empty() {
+        req = req.bearer_auth(token);
+    }
+    match req.send().await {
+        Ok(resp) if resp.status().is_success() => resp.json::<crate::modes::ModelCosts>().await.unwrap_or_default(),
+        _ => crate::modes::ModelCosts::new(),
     }
 }
 
@@ -275,16 +307,19 @@ impl OperatorClient {
 
     /// Run one turn: send `message` into the session and return a receiver of the
     /// turn's [`ServerEvent`]s (token deltas, tool calls, terminal complete/error).
-    /// `model` / `budget` / `working_dir` / `agent` / `prior_messages` are accepted
-    /// for signature-compatibility but not used — the operator session carries
-    /// model + history server-side.
+    ///
+    /// `model` pins this turn to a specific model (the active Smooth Mode's
+    /// `model`) — sent verbatim in `send_message`, mirroring the web composer
+    /// (th-f512b1). `budget` / `working_dir` / `agent` / `prior_messages` are
+    /// accepted for signature-compatibility but not used — the operator session
+    /// carries history server-side.
     ///
     /// # Errors
     /// Returns an error if no session is open or the message can't be sent.
     pub async fn run_task(
         &mut self,
         message: &str,
-        _model: Option<&str>,
+        model: Option<&str>,
         _budget: Option<f64>,
         _working_dir: Option<&str>,
         _agent: Option<&str>,
@@ -294,12 +329,19 @@ impl OperatorClient {
         let req = self.next_request_id("turn");
         let (tx, rx) = mpsc::unbounded_channel::<ServerEvent>();
         self.pending.lock().expect("pending lock").insert(req.clone(), tx);
-        self.send(&json!({
+        let mut payload = json!({
             "action": "send_message",
             "requestId": req,
             "sessionId": sid,
             "message": message,
-        }))?;
+        });
+        // Pin the turn to the active mode's model when one is set. Omitted
+        // entirely (not `null`) when absent so the server falls back to its
+        // own default — same shape the web composer sends.
+        if let Some(model) = model.filter(|m| !m.is_empty()) {
+            payload["model"] = json!(model);
+        }
+        self.send(&payload)?;
         Ok(rx)
     }
 
@@ -419,14 +461,37 @@ mod tests {
 
     #[test]
     fn maps_terminal_and_error() {
+        // No usage → cost defaults to 0.
         assert!(matches!(
             map_event(&json!({"type":"eventual_response","requestId":"t","status":200,"data":{}})).unwrap(),
-            ServerEvent::TaskComplete { .. }
+            ServerEvent::TaskComplete { cost_usd, .. } if cost_usd == 0.0
         ));
         assert!(matches!(
             map_event(&json!({"type":"error","requestId":"t","message":"boom"})).unwrap(),
             ServerEvent::TaskError { message, .. } if message == "boom"
         ));
+    }
+
+    #[test]
+    fn eventual_response_reads_nested_cost() {
+        // Primary path: data.data.costUsd.
+        let ev = map_event(&json!({
+            "type":"eventual_response","requestId":"t","status":200,
+            "data":{"data":{"costUsd":0.0123,"promptTokens":100,"completionTokens":50}}
+        }))
+        .unwrap();
+        assert!(matches!(ev, ServerEvent::TaskComplete { cost_usd, .. } if (cost_usd - 0.0123).abs() < 1e-9));
+    }
+
+    #[test]
+    fn eventual_response_reads_fallback_cost() {
+        // Defensive fallback: data.costUsd one level up.
+        let ev = map_event(&json!({
+            "type":"eventual_response","requestId":"t","status":200,
+            "data":{"costUsd":0.5}
+        }))
+        .unwrap();
+        assert!(matches!(ev, ServerEvent::TaskComplete { cost_usd, .. } if (cost_usd - 0.5).abs() < 1e-9));
     }
 
     #[test]

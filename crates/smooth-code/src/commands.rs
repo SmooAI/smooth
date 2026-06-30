@@ -105,6 +105,14 @@ impl CommandRegistry {
         // /model
         self.register("model", "Show or switch model: /model [name]", Box::new(cmd_model));
 
+        // /smooth-mode — switch the active Smooth Mode preset (pins each turn
+        // to a concrete model). Bare lists presets with cost badges.
+        self.register(
+            "smooth-mode",
+            "Show or switch Smooth Mode preset: /smooth-mode [flash|code|ui|plan|fast|flash+|code+|ui+|plan+|max]",
+            Box::new(cmd_smooth_mode),
+        );
+
         // /save
         self.register("save", "Force save the current session", Box::new(cmd_save));
 
@@ -215,6 +223,65 @@ fn cmd_model(args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput> 
             state.model_name, state.model_name
         )))
     }
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn cmd_smooth_mode(args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput> {
+    use crate::modes::{cost_badge, mode_by_id, MODES};
+
+    let arg = args.trim();
+    if arg.is_empty() {
+        // Bare `/smooth-mode` — list every preset with its model + cost badge.
+        // Badges come from the (best-effort) model-costs table; absent costs
+        // just omit the glyph. This is a popup message, not a chat send.
+        let active = state.mode_id.clone();
+        let mut lines = vec!["Smooth Modes (pick one with /smooth-mode <preset>):".to_string()];
+        for m in MODES {
+            let badge = state
+                .model_costs
+                .get(m.model)
+                .map_or(String::new(), |c| format!(" {}", cost_badge(c.input_cost_per_token, c.output_cost_per_token)));
+            let marker = if m.id == active { "→" } else { " " };
+            let premium = if m.tier == crate::modes::Tier::Premium { "  [premium]" } else { "" };
+            lines.push(format!("  {marker} {} {:<7} {}{badge}{premium}", m.emoji, m.id, m.model));
+        }
+        lines.push(String::new());
+        lines.push("Badges: 💚 <$1  💛 $1–5  🧡 $5–30  ❤️ >$30  (blended per 1M tokens)".to_string());
+        return Ok(CommandOutput::Message(lines.join("\n")));
+    }
+
+    // Setting a preset. Unknown ids are rejected rather than silently snapping
+    // to the default — a typo shouldn't quietly change which model you pay for.
+    let normalized = arg.to_ascii_lowercase();
+    if !MODES.iter().any(|m| m.id == normalized) {
+        let names = MODES.iter().map(|m| m.id).collect::<Vec<_>>().join(", ");
+        return Ok(CommandOutput::Message(format!("Unknown mode: {arg}. Available: {names}")));
+    }
+
+    let old = std::mem::replace(&mut state.mode_id, normalized.clone());
+    let mode = mode_by_id(&normalized);
+    let badge = state
+        .model_costs
+        .get(mode.model)
+        .map_or(String::new(), |c| format!(" {}", cost_badge(c.input_cost_per_token, c.output_cost_per_token)));
+    // Warn when the new mode is the expensive tier (🧡/❤️ by cost, else premium
+    // by tier) so a switch into real spend is never silent.
+    let warn = if crate::modes::mode_expensive(mode, &state.model_costs) {
+        let blended = state
+            .model_costs
+            .get(mode.model)
+            .map(|c| crate::modes::blended_per_million(c.input_cost_per_token, c.output_cost_per_token));
+        match blended {
+            Some(b) => format!("\n⚠ PREMIUM — ~${b:.0}/1M tokens blended. Spend is shown live on the status bar."),
+            None => "\n⚠ PREMIUM tier — spend is shown live on the status bar.".to_string(),
+        }
+    } else {
+        String::new()
+    };
+    Ok(CommandOutput::Message(format!(
+        "Smooth Mode: {old} -> {} {} ({}){badge}{warn}",
+        mode.emoji, mode.label, mode.model
+    )))
 }
 
 #[allow(clippy::unnecessary_wraps)]
@@ -614,6 +681,110 @@ mod tests {
                 assert!(msg.contains("Tokens used:"));
             }
             other => panic!("Expected Message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_smooth_mode_registered_and_default() {
+        let reg = CommandRegistry::new();
+        let names: Vec<_> = reg.list_commands().iter().map(|(n, _)| n.clone()).collect();
+        assert!(names.contains(&"smooth-mode".to_string()));
+
+        let state = AppState::new(PathBuf::from("/tmp"));
+        // Fresh sessions land on the default mode.
+        assert_eq!(state.mode_id, crate::modes::DEFAULT_MODE_ID);
+        assert_eq!(state.active_mode().id, "flash");
+    }
+
+    #[test]
+    fn test_smooth_mode_sets_preset() {
+        let mut state = AppState::new(PathBuf::from("/tmp"));
+        let reg = CommandRegistry::new();
+
+        let out = reg
+            .execute("smooth-mode", "code+", &mut state)
+            .expect("smooth-mode exists")
+            .expect("handler ok");
+        match out {
+            CommandOutput::Message(msg) => {
+                assert!(msg.contains("flash -> "), "should report the old->new switch: {msg}");
+                assert!(msg.contains("claude-opus-4-8"), "should name the new model: {msg}");
+                // code+ is premium and has no cost data here → premium warning.
+                assert!(msg.contains("PREMIUM"), "premium tier should warn: {msg}");
+            }
+            other => panic!("expected Message, got {other:?}"),
+        }
+        assert_eq!(state.mode_id, "code+");
+        assert_eq!(state.active_mode().model, "claude-opus-4-8");
+        // The mode's model is what the next turn will send.
+        assert_eq!(state.turn_model(), "claude-opus-4-8");
+    }
+
+    #[test]
+    fn test_smooth_mode_is_case_insensitive() {
+        let mut state = AppState::new(PathBuf::from("/tmp"));
+        let reg = CommandRegistry::new();
+        reg.execute("smooth-mode", "CODE", &mut state).expect("exists").expect("ok");
+        assert_eq!(state.mode_id, "code");
+    }
+
+    #[test]
+    fn test_smooth_mode_rejects_unknown_without_changing_mode() {
+        let mut state = AppState::new(PathBuf::from("/tmp"));
+        state.mode_id = "plan".to_string();
+        let reg = CommandRegistry::new();
+        let out = reg.execute("smooth-mode", "turbo", &mut state).expect("exists").expect("ok");
+        match out {
+            CommandOutput::Message(msg) => {
+                assert!(msg.contains("Unknown mode: turbo"), "{msg}");
+                assert!(msg.contains("flash"), "should list available modes: {msg}");
+            }
+            other => panic!("expected Message, got {other:?}"),
+        }
+        // A typo must not silently change which model you pay for.
+        assert_eq!(state.mode_id, "plan");
+    }
+
+    #[test]
+    fn test_smooth_mode_bare_lists_presets() {
+        let mut state = AppState::new(PathBuf::from("/tmp"));
+        let reg = CommandRegistry::new();
+        let out = reg.execute("smooth-mode", "", &mut state).expect("exists").expect("ok");
+        match out {
+            CommandOutput::Message(msg) => {
+                assert!(msg.contains("Smooth Modes"), "{msg}");
+                // Every preset id should be listed.
+                for m in crate::modes::MODES {
+                    assert!(msg.contains(m.id), "missing preset {} in:\n{msg}", m.id);
+                }
+                // The active mode is marked.
+                assert!(msg.contains("→ ⚡ flash"), "active mode should be marked: {msg}");
+                // Badge legend present.
+                assert!(msg.contains("Badges:"), "{msg}");
+            }
+            other => panic!("expected Message, got {other:?}"),
+        }
+        // Listing must not send a chat message or change the mode.
+        assert!(state.messages.is_empty());
+        assert_eq!(state.mode_id, "flash");
+    }
+
+    #[test]
+    fn test_smooth_mode_bare_shows_badges_when_costs_known() {
+        let mut state = AppState::new(PathBuf::from("/tmp"));
+        // Cheap flash → 💚.
+        state.model_costs.insert(
+            "deepseek-v4-flash".to_string(),
+            crate::modes::ModelCost {
+                input_cost_per_token: 0.1 / 1e6,
+                output_cost_per_token: 0.3 / 1e6,
+            },
+        );
+        let reg = CommandRegistry::new();
+        let out = reg.execute("smooth-mode", "", &mut state).expect("exists").expect("ok");
+        match out {
+            CommandOutput::Message(msg) => assert!(msg.contains("💚"), "badge should render: {msg}"),
+            other => panic!("expected Message, got {other:?}"),
         }
     }
 

@@ -8,6 +8,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
+import { DEFAULT_MODE_ID, modeById, type ModelCosts, type SmoothMode } from './modes';
+
 /** The agent's live presence — what the face reflects. */
 export type AgentState = 'connecting' | 'offline' | 'awake' | 'thinking' | 'speaking' | 'awaiting';
 
@@ -52,6 +54,14 @@ interface OperatorApi {
     status: Status;
     sendMessage: (text: string) => void;
     respond: (requestId: string, approved: boolean) => void;
+    /** The active Smooth Mode — pins each turn to a model. */
+    mode: SmoothMode;
+    /** Switch modes by id; persisted to localStorage `smooth.mode`. */
+    setMode: (id: string) => void;
+    /** Running USD spend this session, summed from each turn's `costUsd`. */
+    sessionCostUsd: number;
+    /** Per-model cost table from `GET /admin/model-costs` (empty on failure). */
+    modelCosts: ModelCosts;
 }
 
 /** Globals the daemon injects into `index.html` when it serves this SPA
@@ -89,6 +99,20 @@ export function useOperator(): OperatorApi {
     const [turnActive, setTurnActive] = useState(false);
     const [streaming, setStreaming] = useState(false);
     const [status, setStatus] = useState<Status>({ connected: false, since: Date.now() });
+    const [modeId, setModeId] = useState<string>(() => localStorage.getItem('smooth.mode') ?? DEFAULT_MODE_ID);
+    const [sessionCostUsd, setSessionCostUsd] = useState(0);
+    const [modelCosts, setModelCosts] = useState<ModelCosts>({});
+
+    const mode = useMemo(() => modeById(modeId), [modeId]);
+    // Keep a ref so `sendMessage` always reads the live model without re-binding.
+    const modeRef = useRef(mode);
+    modeRef.current = mode;
+
+    const setMode = useCallback((id: string) => {
+        const next = modeById(id);
+        setModeId(next.id);
+        localStorage.setItem('smooth.mode', next.id);
+    }, []);
 
     const wsRef = useRef<WebSocket | null>(null);
     const sessionRef = useRef<string | null>(null);
@@ -174,16 +198,31 @@ export function useOperator(): OperatorApi {
                     ]);
                     break;
                 }
-                case 'eventual_response':
+                case 'eventual_response': {
                     setTurnActive(false);
                     setStreaming(false);
                     patchStreaming((m) => ({ ...m, streaming: false }));
+                    // Usage rides the eventual_response — read defensively since the
+                    // exact path may shift slightly at integration (th-2a6330).
+                    const cost = Number(v?.data?.data?.usage?.costUsd ?? v?.data?.data?.costUsd ?? v?.data?.costUsd ?? v?.usage?.costUsd);
+                    if (Number.isFinite(cost) && cost > 0) setSessionCostUsd((c) => c + cost);
                     break;
+                }
                 case 'error':
                     setTurnActive(false);
                     setStreaming(false);
                     patchStreaming((m) => ({ ...m, streaming: false }));
-                    setMessages((prev) => [...prev, { id: nextId('e'), role: 'system', content: v.message ?? v?.data?.message ?? 'operator error', reasoning: '', tools: [], streaming: false }]);
+                    setMessages((prev) => [
+                        ...prev,
+                        {
+                            id: nextId('e'),
+                            role: 'system',
+                            content: v.message ?? v?.data?.message ?? 'operator error',
+                            reasoning: '',
+                            tools: [],
+                            streaming: false,
+                        },
+                    ]);
                     break;
                 default:
                     break;
@@ -209,6 +248,11 @@ export function useOperator(): OperatorApi {
                 fetch(`${http}/admin/me`, { headers: token ? { authorization: `Bearer ${token}` } : {} })
                     .then((r) => (r.ok ? r.json() : null))
                     .then((me) => me && setStatus((s) => ({ ...s, identity: me.name ?? me.id, model: me.model })))
+                    .catch(() => {});
+                // Per-model cost table — best-effort; the cost bar degrades gracefully when empty.
+                fetch(`${http}/admin/model-costs`, { headers: token ? { authorization: `Bearer ${token}` } : {} })
+                    .then((r) => (r.ok ? r.json() : null))
+                    .then((costs) => costs && setModelCosts(costs as ModelCosts))
                     .catch(() => {});
             };
             ws.onmessage = (e) => {
@@ -239,7 +283,7 @@ export function useOperator(): OperatorApi {
             if (!body || !sessionRef.current) return;
             setMessages((prev) => [...prev, { id: nextId('u'), role: 'user', content: body, reasoning: '', tools: [], streaming: false }]);
             setTurnActive(true);
-            send({ action: 'send_message', requestId: nextId('turn'), sessionId: sessionRef.current, message: body });
+            send({ action: 'send_message', requestId: nextId('turn'), sessionId: sessionRef.current, message: body, model: modeRef.current.model });
         },
         [send],
     );
@@ -260,5 +304,5 @@ export function useOperator(): OperatorApi {
         return 'awake';
     }, [connected, approvals.length, streaming, turnActive]);
 
-    return { state, messages, approvals, status, sendMessage, respond };
+    return { state, messages, approvals, status, sendMessage, respond, mode, setMode, sessionCostUsd, modelCosts };
 }

@@ -530,19 +530,37 @@ fn render_status(frame: &mut Frame, state: &AppState, area: Rect) {
         })
         .unwrap_or_default();
 
-    // Show the concrete model — never a `smooth-*` slot alias (SMOODEV-1793).
-    // During a turn the runner reports the resolved upstream (e.g.
-    // `claude-opus-4-5`); show it verbatim. Idle, the operator flavor uses one
-    // configured model (`SMOOTH_AGENT_MODEL`, default `claude-haiku-4-5`) and
-    // ignores per-turn overrides, so we surface that — not the old role-slot
-    // alias. (The operator doesn't yet report its model on session-create; see
-    // th-c89c2a follow-up. Until it does, env + the documented default is the
-    // accurate answer.)
-    let model_label = state
-        .current_phase_upstream
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .map_or_else(configured_model, ToString::to_string);
+    // The active Smooth Mode pins each turn to a concrete model (th-f512b1).
+    // Show the mode's model id as the "model id" in the cost bar — that's what
+    // `send_message` carries and what the badge/spend below price out. During a
+    // turn the runner reports the resolved upstream (e.g. `claude-opus-4-5`),
+    // which should equal the mode's model; prefer it when present so the bar
+    // reflects exactly what ran. `configured_model` remains the deep fallback
+    // for the operator's idle default. Never a `smooth-*` slot alias
+    // (SMOODEV-1793).
+    let mode = state.active_mode();
+    let model_label = state.current_phase_upstream.as_deref().filter(|s| !s.is_empty()).map_or_else(
+        || {
+            if mode.model.is_empty() {
+                configured_model()
+            } else {
+                mode.model.to_string()
+            }
+        },
+        ToString::to_string,
+    );
+
+    // Cost surfacing (th-2a6330): a traffic-light badge for the active mode's
+    // model rate, and whether the mode is "expensive" (🧡/❤️ by cost, else the
+    // premium tier when costs are unavailable). Drives the amber spend + the
+    // "⚠ PREMIUM" marker so spending into a pricey model is never silent.
+    let mode_badge = crate::modes::mode_badge(mode, &state.model_costs);
+    let mode_expensive = crate::modes::mode_expensive(mode, &state.model_costs);
+    let spend_style = if mode_expensive {
+        Style::default().fg(theme::SMOO_ORANGE)
+    } else {
+        theme::muted()
+    };
 
     // Colored segments: agent name warm, model cool, everything else mist,
     // separated by a dim middot. Cleaner + on-brand vs the old flat pipes.
@@ -560,11 +578,23 @@ fn render_status(frame: &mut Frame, state: &AppState, area: Rect) {
     }
     spans.push(Span::styled(state.agent_name.clone(), theme::user_label())); // warm
     spans.push(dot());
-    spans.push(Span::styled(model_label, theme::assistant_label())); // cool
+    // Active mode: emoji + label (warm), then its cost badge when known.
+    spans.push(Span::styled(format!("{} {}", mode.emoji, mode.label), theme::user_label()));
+    if let Some(badge) = mode_badge {
+        spans.push(Span::raw(" "));
+        spans.push(Span::raw(badge));
+    }
+    spans.push(dot());
+    spans.push(Span::styled(model_label, theme::assistant_label())); // cool — model id
     spans.push(dot());
     spans.push(Span::styled(format!("{} tok", state.total_tokens), theme::muted()));
     spans.push(dot());
-    spans.push(Span::styled(format_spend(state.total_cost_usd), theme::muted()));
+    // Live session spend — amber when the active mode is the expensive tier.
+    spans.push(Span::styled(format_spend(state.total_cost_usd), spend_style));
+    if mode_expensive {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled("⚠ PREMIUM", Style::default().fg(theme::SMOO_ORANGE)));
+    }
     spans.push(dot());
     spans.push(Span::styled(health_dot, health_style));
     spans.push(Span::styled("  ⌃c quit ", theme::muted()));
