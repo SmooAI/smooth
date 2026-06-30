@@ -33,6 +33,13 @@
 //!   friends — need a host `ToolHook` seam in the operator; see pearl th-1f694a.)
 //! - `SMOOAI_GATEWAY_URL` / `SMOOAI_GATEWAY_KEY` — the LLM gateway (read by the
 //!   operator); with no key the server boots and `send_message` errors cleanly.
+//! - `SMOOTH_ADDR` — the `host:port` the default `th daemon` binds (else
+//!   `127.0.0.1:8787`). Lets a launchd/systemd unit or a shared host (smoo-hub,
+//!   where `:8787` is taken) pick a free port; the tailnet serve follows it.
+//! - `SMOOTH_TAILSCALE_SERVE` — set `0`/`false` to disable tailnet exposure.
+//! - `SMOOTH_TAILSCALE_HTTPS_PORT` — the tailnet HTTPS port (else `443`). Set a
+//!   custom port to **coexist** with another `tailscale serve` already on `:443`
+//!   (teardown then leaves the global serve config untouched).
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

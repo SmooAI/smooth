@@ -21,9 +21,12 @@
 //! (or `false`) to opt out entirely.
 //!
 //! Verified against `tailscale 1.96.5`: background serve is
-//! `tailscale serve --bg --https=443 http://127.0.0.1:<port>` and teardown is
-//! `tailscale serve reset` (the only teardown verb this version documents in
-//! `tailscale serve --help`).
+//! `tailscale serve --bg --https=<port> http://127.0.0.1:<local>`. The tailnet
+//! port defaults to `443` but is overridable via `SMOOTH_TAILSCALE_HTTPS_PORT`
+//! to coexist with another `serve` on a shared host. Teardown is
+//! `tailscale serve reset` — but ONLY on the default `:443` (this version has no
+//! per-port "off", and `reset` wipes ALL handlers); on a custom port the
+//! background handler is left in place (coexistence-safe; see [`teardown_args`]).
 
 use std::process::Command;
 
@@ -60,24 +63,36 @@ fn is_opted_out(value: Option<&str>) -> bool {
 /// `local_port` over HTTPS on the tailnet, in the background.
 ///
 /// Verified against `tailscale 1.96.5`:
-/// `tailscale serve --bg --https=443 http://127.0.0.1:<port>`.
-fn serve_args(local_port: u16) -> Vec<String> {
+/// `tailscale serve --bg --https=<https_port> http://127.0.0.1:<local_port>`.
+fn serve_args(local_port: u16, https_port: u16) -> Vec<String> {
     vec![
         "serve".to_string(),
         "--bg".to_string(),
-        "--https=443".to_string(),
+        format!("--https={https_port}"),
         format!("http://127.0.0.1:{local_port}"),
     ]
 }
 
-/// Argv (sans the `tailscale` program name) that tears down the serve config so
-/// it does not leak across daemon restarts.
-///
-/// Verified against `tailscale 1.96.5`: `tailscale serve reset`. (This version's
-/// `tailscale serve --help` documents `reset`/`clear` as the only teardown
-/// verbs; it does not document a per-port `--https=443 off` form.)
-fn teardown_args() -> Vec<String> {
-    vec!["serve".to_string(), "reset".to_string()]
+/// The tailnet HTTPS port the daemon serves on. Default 443; override with
+/// `SMOOTH_TAILSCALE_HTTPS_PORT` to **coexist** with another `tailscale serve`
+/// already holding `:443` on a shared host (e.g. smoo-hub) — point the daemon at
+/// e.g. `8443` and it adds its own handler without disturbing the existing one.
+fn tailnet_https_port() -> u16 {
+    std::env::var("SMOOTH_TAILSCALE_HTTPS_PORT")
+        .ok()
+        .and_then(|v| v.trim().parse::<u16>().ok())
+        .filter(|p| *p != 0)
+        .unwrap_or(443)
+}
+
+/// Argv that tears down the serve config — but ONLY on the default `:443`, where
+/// the daemon owns the whole serve config. tailscale 1.96.5 has no per-port
+/// "off" (only `serve reset`, which wipes ALL handlers), so on a custom
+/// `https_port` (coexistence mode) we return `None` and DON'T tear down: the
+/// `--bg` handler persists harmlessly and re-applies idempotently on restart,
+/// leaving any other service's `:443` serve config untouched.
+fn teardown_args(https_port: u16) -> Option<Vec<String>> {
+    (https_port == 443).then(|| vec!["serve".to_string(), "reset".to_string()])
 }
 
 /// Parse `tailscale status --json` and report whether the local node is up.
@@ -135,6 +150,9 @@ pub struct TailscaleServe {
     /// Whether a serve config is currently active and still needs teardown.
     /// Cleared by the first teardown so `stop` + `Drop` don't double-run.
     active: bool,
+    /// The tailnet HTTPS port served on — determines whether teardown is safe to
+    /// `serve reset` (only on the default `:443`; see [`teardown_args`]).
+    https_port: u16,
 }
 
 impl TailscaleServe {
@@ -155,12 +173,13 @@ impl TailscaleServe {
             return None;
         }
 
-        let args = serve_args(local_port);
+        let https_port = tailnet_https_port();
+        let args = serve_args(local_port, https_port);
         match Command::new("tailscale").args(&args).output() {
             Ok(output) if output.status.success() => {
                 let url = status_json().as_deref().and_then(parse_tailnet_url);
-                tracing::info!(url = ?url, port = local_port, "daemon exposed on tailnet via tailscale serve");
-                Some(Self { url, active: true })
+                tracing::info!(url = ?url, local_port, https_port, "daemon exposed on tailnet via tailscale serve");
+                Some(Self { url, active: true, https_port })
             }
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -194,7 +213,14 @@ impl TailscaleServe {
             return;
         }
         self.active = false;
-        match Command::new("tailscale").args(teardown_args()).output() {
+        let Some(args) = teardown_args(self.https_port) else {
+            tracing::info!(
+                https_port = self.https_port,
+                "custom tailnet port — leaving the serve handler in place (coexistence-safe; no global `serve reset`)"
+            );
+            return;
+        };
+        match Command::new("tailscale").args(args).output() {
             Ok(output) if output.status.success() => tracing::info!("tailscale serve config torn down"),
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -310,20 +336,35 @@ mod tests {
     }
 
     #[test]
-    fn serve_args_are_https_bg_loopback() {
+    fn serve_args_default_443() {
         // Verified against `tailscale serve --help` (tailscale 1.96.5).
-        assert_eq!(serve_args(8787), vec!["serve", "--bg", "--https=443", "http://127.0.0.1:8787"]);
+        assert_eq!(serve_args(8787, 443), vec!["serve", "--bg", "--https=443", "http://127.0.0.1:8787"]);
     }
 
     #[test]
-    fn serve_args_uses_given_port() {
-        assert_eq!(serve_args(3100), vec!["serve", "--bg", "--https=443", "http://127.0.0.1:3100"]);
+    fn serve_args_uses_given_local_and_https_ports() {
+        // Coexistence: a custom tailnet port (e.g. 8443) + a custom local port.
+        assert_eq!(serve_args(8788, 8443), vec!["serve", "--bg", "--https=8443", "http://127.0.0.1:8788"]);
     }
 
     #[test]
-    fn teardown_args_reset_the_serve_config() {
-        // Verified against `tailscale serve --help` (tailscale 1.96.5).
-        assert_eq!(teardown_args(), vec!["serve", "reset"]);
+    fn teardown_resets_only_on_default_443() {
+        // Default 443 → reset (daemon owns the whole serve config).
+        assert_eq!(teardown_args(443), Some(vec!["serve".to_string(), "reset".to_string()]));
+        // Custom port → None: never `serve reset` (would wipe a coexisting :443).
+        assert_eq!(teardown_args(8443), None);
+    }
+
+    #[test]
+    fn tailnet_https_port_parses_env() {
+        std::env::set_var("SMOOTH_TAILSCALE_HTTPS_PORT", "8443");
+        assert_eq!(tailnet_https_port(), 8443);
+        std::env::set_var("SMOOTH_TAILSCALE_HTTPS_PORT", "  not-a-port  ");
+        assert_eq!(tailnet_https_port(), 443, "garbage falls back to 443");
+        std::env::set_var("SMOOTH_TAILSCALE_HTTPS_PORT", "0");
+        assert_eq!(tailnet_https_port(), 443, "0 falls back to 443");
+        std::env::remove_var("SMOOTH_TAILSCALE_HTTPS_PORT");
+        assert_eq!(tailnet_https_port(), 443, "unset → 443");
     }
 
     #[test]
@@ -331,6 +372,7 @@ mod tests {
         let guard = TailscaleServe {
             url: Some("https://marvin.tailc13b5a.ts.net".to_string()),
             active: false,
+            https_port: 443,
         };
         assert_eq!(guard.url(), Some("https://marvin.tailc13b5a.ts.net".to_string()));
         // active: false so drop is a no-op and never shells out to tailscale.
@@ -339,7 +381,11 @@ mod tests {
     #[test]
     fn teardown_is_idempotent_when_inactive() {
         // active: false means teardown short-circuits without invoking tailscale.
-        let mut guard = TailscaleServe { url: None, active: false };
+        let mut guard = TailscaleServe {
+            url: None,
+            active: false,
+            https_port: 443,
+        };
         guard.teardown();
         assert!(!guard.active);
     }

@@ -117,9 +117,11 @@ async fn run() -> Result<()> {
     // serve_persistent path is retired (EPIC th-c89c2a).
     match Cli::parse().cmd.unwrap_or(Cmd::Run) {
         Cmd::Run => {
-            let socket: SocketAddr = smooth_operator_server::local::DEFAULT_LOCAL_ADDR
-                .parse()
-                .expect("DEFAULT_LOCAL_ADDR is a valid SocketAddr");
+            // `SMOOTH_ADDR` lets a launchd/systemd unit (or smoo-hub, where :8787
+            // is already taken) bind a free port without a CLI arg; default is the
+            // operator's :8787. The tailnet `tailscale serve` follows whatever port
+            // we bind.
+            let socket = resolve_run_addr()?;
             smooth_daemon::serve_local_flavor(socket).await
         }
         Cmd::Operator { addr } => {
@@ -129,6 +131,40 @@ async fn run() -> Result<()> {
         Cmd::Audit { lines } => cmd_audit(lines),
         Cmd::Schedule { cmd } => cmd_schedule(cmd).await,
         Cmd::Permissions { cmd } => cmd_permissions(&cmd),
+    }
+}
+
+/// The address the default `th daemon` (`Run`) binds. `SMOOTH_ADDR` (a
+/// `host:port`) overrides the operator's `127.0.0.1:8787` default — for a
+/// launchd/systemd unit or a host (e.g. smoo-hub) where `:8787` is already taken.
+fn resolve_run_addr() -> Result<SocketAddr> {
+    let default = smooth_operator_server::local::DEFAULT_LOCAL_ADDR;
+    let raw = std::env::var("SMOOTH_ADDR").ok().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
+    let addr = raw.as_deref().unwrap_or(default);
+    addr.parse()
+        .with_context(|| format!("invalid SMOOTH_ADDR {addr:?} (want host:port, e.g. 127.0.0.1:8788)"))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "unwrap is the idiom for test assertions")]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_run_addr_defaults_and_overrides() {
+        std::env::remove_var("SMOOTH_ADDR");
+        assert_eq!(resolve_run_addr().unwrap().to_string(), smooth_operator_server::local::DEFAULT_LOCAL_ADDR);
+        std::env::set_var("SMOOTH_ADDR", "127.0.0.1:8788");
+        assert_eq!(resolve_run_addr().unwrap().to_string(), "127.0.0.1:8788");
+        std::env::set_var("SMOOTH_ADDR", "  ");
+        assert_eq!(
+            resolve_run_addr().unwrap().to_string(),
+            smooth_operator_server::local::DEFAULT_LOCAL_ADDR,
+            "blank → default"
+        );
+        std::env::set_var("SMOOTH_ADDR", "nonsense");
+        assert!(resolve_run_addr().is_err(), "garbage errors clearly");
+        std::env::remove_var("SMOOTH_ADDR");
     }
 }
 
