@@ -147,7 +147,7 @@ fn resolve_run_addr() -> Result<SocketAddr> {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "unwrap is the idiom for test assertions")]
-mod tests {
+mod addr_tests {
     use super::*;
 
     #[test]

@@ -66,6 +66,7 @@ dirs-next.workspace = true
 # spawn this binary rather than statically linking the operator runtime.
 clap = { workspace = true, features = ["derive"] }
 reqwest = { workspace = true, features = ["json"] }
+web-push = "0.11"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

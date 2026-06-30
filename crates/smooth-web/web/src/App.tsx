@@ -5,7 +5,7 @@
 // rather than a detached banner. A thin client on the operator's canonical
 // protocol (EPIC th-c89c2a, th-f1a1f0, th-833b5f).
 
-import { ArrowUp, Check, X, Terminal, FileText, Search, Folder, Pencil, Brain } from 'lucide-react';
+import { ArrowUp, Check, X, Terminal, FileText, Search, Folder, Pencil, Brain, Bell, BellRing } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -13,6 +13,7 @@ import remarkGfm from 'remark-gfm';
 import { BigSmoothFace, type FaceState } from './components/BigSmoothFace';
 import { MODES, costBadge, isExpensiveBadge, blendedPerMillion, type SmoothMode, type ModelCost, type ModelCosts } from './modes';
 import { useOperator, type AgentState, type ChatMessage, type ToolCall, type Approval, type Status } from './operator';
+import { usePush } from './usePush';
 import { useMentionSearch, activeMention, type MentionResult } from './useMentionSearch';
 
 const STATUS_CAPTION: Record<AgentState, string> = {
@@ -96,6 +97,7 @@ function CostBar({ mode, costs, sessionCostUsd, className }: { mode: SmoothMode;
 
 export default function App() {
     const { state, messages, approvals, status, sendMessage, respond, mode, setMode, sessionCostUsd, modelCosts } = useOperator();
+    const push = usePush();
     const faceState: FaceState = state === 'connecting' || state === 'offline' ? 'idle' : (state as FaceState);
     const inConversation = messages.length > 0 || approvals.length > 0;
 
@@ -124,6 +126,23 @@ export default function App() {
             >
                 <img src="/smooth-icon.svg" alt="Smooth" className="size-6" />
             </a>
+            {/* Push to phone: enroll this device so Big Smooth can reach it with the
+                tab closed. Hidden when the browser can't do Web Push, or once enabled. */}
+            {push.supported && !push.enabled && (
+                <button
+                    onClick={() => void push.enable()}
+                    disabled={push.busy}
+                    title="Get notified on this device"
+                    className="fixed top-4 right-4 z-10 flex items-center gap-1.5 rounded-full bg-panel/80 px-3 py-1.5 text-xs text-(--color-muted-foreground) opacity-70 transition hover:opacity-100 disabled:opacity-40"
+                >
+                    <Bell className="size-3.5" /> {push.busy ? 'Enabling…' : 'Notify me'}
+                </button>
+            )}
+            {push.enabled && (
+                <div className="fixed top-4 right-4 z-10 flex items-center gap-1.5 text-xs text-(--color-online) opacity-60" title="Notifications on for this device">
+                    <BellRing className="size-3.5" />
+                </div>
+            )}
             <div className="mx-auto flex h-full max-w-3xl flex-col px-5">
                 {inConversation ? (
                     <>

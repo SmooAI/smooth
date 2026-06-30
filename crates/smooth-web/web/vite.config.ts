@@ -43,7 +43,10 @@ export default defineConfig({
             workbox: {
                 // The daemon serves these — the SW must never shadow them with the
                 // SPA shell. (th-c89c2a: /admin/* and /search added alongside the API.)
-                navigateFallbackDenylist: [/^\/api/, /^\/admin/, /^\/search/, /^\/health/, /^\/ws/],
+                navigateFallbackDenylist: [/^\/api/, /^\/admin/, /^\/search/, /^\/push/, /^\/health/, /^\/ws/],
+                // Pull in the Web Push handler (public/push-sw.js) so the SW shows
+                // notifications Big Smooth pushes to the phone (src/usePush.ts).
+                importScripts: ['push-sw.js'],
             },
             devOptions: {
                 enabled: false,

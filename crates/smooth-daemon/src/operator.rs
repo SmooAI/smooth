@@ -323,7 +323,9 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         // The `@`-mention backend: an ungated `GET /search` merged alongside the
         // operator's routes (CORS-matched to `/admin` by the seam) so the web
         // composer's autocomplete resolves files + paths in the workspace.
-        .serve_routes(crate::search::search_router(workspace))
+        // …and the Web Push routes (/push/key, /push/subscribe, /push/test) so an
+        // installed PWA can be reached on the user's phone (th-* push).
+        .serve_routes(crate::search::search_router(workspace).merge(crate::push::push_router()))
         .spawn()
         .await
         .context("spawning the local-flavor operator")?;
