@@ -81,12 +81,14 @@ pub fn map_event(v: &Value) -> Option<ServerEvent> {
         }
         // The final text was already streamed via `stream_token`, so the terminal
         // event just signals completion. Usage rides the `eventual_response`:
-        // the cost lands at `data.data.costUsd` (the operator's nested shape),
-        // with `data.costUsd` as a defensive fallback — read both, mirroring the
-        // web hook (th-2a6330). The TUI sums these into the session total.
+        // the cost lands at `data.data.usage.costUsd` (the operator-server's
+        // `TurnUsage` sub-object), with `data.data.costUsd` / `data.costUsd` as
+        // defensive fallbacks — read all three, mirroring the web hook
+        // (th-2a6330). The TUI sums these into the session total.
         "eventual_response" => {
             let cost_usd = v
-                .pointer("/data/data/costUsd")
+                .pointer("/data/data/usage/costUsd")
+                .or_else(|| v.pointer("/data/data/costUsd"))
                 .or_else(|| v.pointer("/data/costUsd"))
                 .and_then(Value::as_f64)
                 .unwrap_or(0.0);
@@ -473,11 +475,22 @@ mod tests {
     }
 
     #[test]
-    fn eventual_response_reads_nested_cost() {
-        // Primary path: data.data.costUsd.
+    fn eventual_response_reads_usage_cost() {
+        // Primary path: data.data.usage.costUsd (the operator-server TurnUsage shape).
         let ev = map_event(&json!({
             "type":"eventual_response","requestId":"t","status":200,
-            "data":{"data":{"costUsd":0.0123,"promptTokens":100,"completionTokens":50}}
+            "data":{"data":{"usage":{"costUsd":0.0123,"promptTokens":100,"completionTokens":50}}}
+        }))
+        .unwrap();
+        assert!(matches!(ev, ServerEvent::TaskComplete { cost_usd, .. } if (cost_usd - 0.0123).abs() < 1e-9));
+    }
+
+    #[test]
+    fn eventual_response_reads_nested_cost_fallback() {
+        // Fallback path: data.data.costUsd (no usage sub-object).
+        let ev = map_event(&json!({
+            "type":"eventual_response","requestId":"t","status":200,
+            "data":{"data":{"costUsd":0.0123}}
         }))
         .unwrap();
         assert!(matches!(ev, ServerEvent::TaskComplete { cost_usd, .. } if (cost_usd - 0.0123).abs() < 1e-9));
