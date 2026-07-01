@@ -6,13 +6,12 @@
         "email": "brent@smoo.ai"
     },
     "metadata": {
-        "description": "SmooAI team Claude Code plugins — Big Smooth orchestration (th claude), agent comms (th-mail), and pearls work tracking.",
-        "pluginRoot": "./claude-plugins"
+        "description": "SmooAI team Claude Code plugins — Big Smooth orchestration (th claude), agent comms (th-mail), and pearls work tracking."
     },
     "plugins": [
         {
             "name": "smooth-agent",
-            "source": "smooth-agent",
+            "source": "./claude-plugins/smooth-agent",
             "description": "Run a Big Smooth that drives Claude Code worker sessions over tmux (rate-limit-resilient), coordinate agents over th-mail, and track work in pearls. Provides the /smooth command.",
             "version": "0.1.0",
             "category": "orchestration",
