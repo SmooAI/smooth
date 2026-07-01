@@ -69,6 +69,10 @@ pub enum Cmd {
         /// Channel-agnostic initial greeting seed.
         #[arg(long)]
         greeting: Option<String>,
+        /// Short description shown in the agents list (required by the
+        /// backend). Defaults to the agent name when omitted.
+        #[arg(long)]
+        summary: Option<String>,
         /// Allowed origin for the public widget (repeatable). Populates
         /// `authPublicClientAllowedOrigins`.
         #[arg(long = "allowed-origin")]
@@ -228,6 +232,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             template,
             instructions,
             greeting,
+            summary,
             allowed_origins,
             colors,
             brand_from_url,
@@ -239,22 +244,26 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             let prompt = instructions.map(read_flag_or_file).transpose()?;
             let color_map = parse_colors(&colors)?;
             let body = build_mint_body(
+                &org,
                 &name,
                 kind,
                 visibility,
                 template.as_deref(),
                 prompt.as_deref(),
                 greeting.as_deref(),
+                summary.as_deref(),
                 &allowed_origins,
                 &color_map,
                 require_name,
                 require_email,
             )?;
 
-            let created = client
-                .post(&format!("/organizations/{org}/agents"), Some(&body))
-                .await
-                .context("POST agent (mint)")?;
+            // Creating an agent is a user-attributed admin write. The M2M
+            // `client_credentials` token is org-locked, so it can't create in a
+            // child org; a parent-org admin's user session acts cross-org. Use
+            // the user client (like the CRM/keys commands) for the write.
+            let user = super::user_client::UserClient::from_user_session()?;
+            let created = user.post(&format!("/organizations/{org}/agents"), &body).await.context("POST agent (mint)")?;
 
             let agent_id = created.get("id").and_then(Value::as_str).unwrap_or("?").to_string();
             println!();
@@ -265,7 +274,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             // is never lost just because the extractor is unreachable.
             let mut applied_colors = color_map;
             if let Some(url) = brand_from_url {
-                match extract_and_apply_palette(&client, &org, &agent_id, &url).await {
+                match extract_and_apply_palette(&user, &org, &agent_id, &url).await {
                     Ok(palette) => {
                         println!("  {} applied brand palette from {}", "✓".green(), url.dimmed());
                         applied_colors = palette;
@@ -398,16 +407,19 @@ fn parse_colors(pairs: &[String]) -> Result<Vec<(String, String)>> {
 }
 
 /// Assemble the `CreateAgentRequest` JSON the backend expects from the mint
-/// flags. Pure — no I/O — so it's unit-testable. The backend generates the
-/// summary and owns the auth client; we only send the authored fields.
+/// flags. Pure — no I/O — so it's unit-testable. The backend fills in the
+/// auth-public-client credentials and `createdBy`; every other NOT-NULL column
+/// (`organizationId`, `summary`, `isBuiltin`, …) must be in the body.
 #[allow(clippy::too_many_arguments)]
 fn build_mint_body(
+    org: &str,
     name: &str,
     kind: MintKind,
     visibility: MintVisibility,
     template: Option<&str>,
     instructions: Option<&str>,
     greeting: Option<&str>,
+    summary: Option<&str>,
     allowed_origins: &[String],
     colors: &[(String, String)],
     require_name: bool,
@@ -421,8 +433,15 @@ fn build_mint_body(
         MintKind::Workflow => (json!([]), json!(["outbound"])),
     };
 
+    // `organizationId`, `summary`, and `isBuiltin` are NOT-NULL columns the
+    // create route requires in the body (it only fills in authPublicClient*/
+    // createdBy). summary defaults to the name; it can be regenerated later via
+    // `th api agents regenerate-summary`.
     let mut body = json!({
+        "organizationId": org,
         "name": name,
+        "summary": summary.unwrap_or(name),
+        "isBuiltin": false,
         "kind": kind.api_value(),
         "types": types,
         "directions": directions,
@@ -501,12 +520,9 @@ fn render_embed_snippet(agent_id: &str, name: &str, client_id: &str, client_secr
 /// POST extract-brand-palette, then PATCH the proposed palette onto the
 /// agent's widgetConfig.colors. Returns the palette that was applied so the
 /// caller can echo it into the embed snippet.
-async fn extract_and_apply_palette(client: &smooth_api_client::SmoothApiClient, org: &str, agent_id: &str, url: &str) -> Result<Vec<(String, String)>> {
+async fn extract_and_apply_palette(client: &super::user_client::UserClient, org: &str, agent_id: &str, url: &str) -> Result<Vec<(String, String)>> {
     let extracted = client
-        .post(
-            &format!("/organizations/{org}/agents/{agent_id}/extract-brand-palette"),
-            Some(&json!({ "url": url })),
-        )
+        .post(&format!("/organizations/{org}/agents/{agent_id}/extract-brand-palette"), &json!({ "url": url }))
         .await
         .context("POST extract-brand-palette")?;
     let proposed = extracted
@@ -544,11 +560,13 @@ mod tests {
     #[test]
     fn chat_body_is_inbound_text() {
         let body = build_mint_body(
+            "org-123",
             "Bot",
             MintKind::Chat,
             MintVisibility::Public,
             None,
             Some("be nice"),
+            None,
             None,
             &[],
             &[],
@@ -556,7 +574,11 @@ mod tests {
             false,
         )
         .unwrap();
+        assert_eq!(body["organizationId"], "org-123");
         assert_eq!(body["name"], "Bot");
+        // summary defaults to the name when not supplied.
+        assert_eq!(body["summary"], "Bot");
+        assert_eq!(body["isBuiltin"], false);
         assert_eq!(body["kind"], "chat");
         assert_eq!(body["types"], json!(["text"]));
         assert_eq!(body["directions"], json!(["inbound"]));
@@ -568,7 +590,24 @@ mod tests {
 
     #[test]
     fn workflow_body_is_outbound() {
-        let body = build_mint_body("Flow", MintKind::Workflow, MintVisibility::Internal, None, None, None, &[], &[], false, false).unwrap();
+        let body = build_mint_body(
+            "org-9",
+            "Flow",
+            MintKind::Workflow,
+            MintVisibility::Internal,
+            None,
+            None,
+            None,
+            Some("outbound flow"),
+            &[],
+            &[],
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(body["organizationId"], "org-9");
+        assert_eq!(body["summary"], "outbound flow");
+        assert_eq!(body["isBuiltin"], false);
         assert_eq!(body["kind"], "workflow");
         assert_eq!(body["types"], json!([]));
         assert_eq!(body["directions"], json!(["outbound"]));
@@ -580,18 +619,21 @@ mod tests {
     fn body_carries_optional_fields() {
         let origins = vec!["https://chakrabpc.com".to_string()];
         let body = build_mint_body(
+            "org-7",
             "Bot",
             MintKind::Chat,
             MintVisibility::Public,
             Some("customer_support"),
             None,
             Some("Hi there!"),
+            Some("A helpful bot"),
             &origins,
             &colors(),
             true,
             true,
         )
         .unwrap();
+        assert_eq!(body["summary"], "A helpful bot");
         assert_eq!(body["template"], "customer_support");
         assert_eq!(body["greeting"], "Hi there!");
         assert_eq!(body["authPublicClientAllowedOrigins"], json!(["https://chakrabpc.com"]));
