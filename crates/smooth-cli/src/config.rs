@@ -268,10 +268,10 @@ pub enum Cmd {
     /// remote schema. SAFE by design — direction is always explicit, never
     /// a magic two-way merge:
     ///
-    ///   - `th config sync`          → print the diff, then tell you which
-    ///                                 direction to apply. Changes nothing.
-    ///   - `th config sync --push`   → apply local → remote (same as `push`).
-    ///   - `th config sync --pull`   → apply remote → local (same as `pull`).
+    /// - `th config sync` → print the diff, then tell you which direction to
+    ///   apply. Changes nothing.
+    /// - `th config sync --push` → apply local → remote (same as `push`).
+    /// - `th config sync --pull` → apply remote → local (same as `pull`).
     ///
     /// `--push` and `--pull` are mutually exclusive. `--dry-run` forces the
     /// diff-only behavior even when a direction is given.

@@ -168,7 +168,7 @@ impl Tool for ToolHintsTool {
         let limit = arguments.get("limit").and_then(|v| v.as_u64()).unwrap_or(3).clamp(1, 10) as usize;
 
         let mut scored: Vec<(u32, &ToolHint)> = self.registry.iter().map(|h| (score(h, intent), h)).filter(|(s, _)| *s > 0).collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.sort_by_key(|s| std::cmp::Reverse(s.0));
         scored.truncate(limit);
 
         if scored.is_empty() {

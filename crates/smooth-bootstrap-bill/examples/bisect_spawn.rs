@@ -398,7 +398,7 @@ async fn main() -> Result<()> {
 
     let total_ms = stress_start.elapsed().as_millis();
     let n = spawn_ms_samples.len() as u128;
-    let avg = if n > 0 { spawn_ms_samples.iter().sum::<u128>() / n } else { 0 };
+    let avg = spawn_ms_samples.iter().sum::<u128>().checked_div(n).unwrap_or(0);
     let max = spawn_ms_samples.iter().copied().max().unwrap_or(0);
     let min = spawn_ms_samples.iter().copied().min().unwrap_or(0);
     eprintln!("=== summary ===");

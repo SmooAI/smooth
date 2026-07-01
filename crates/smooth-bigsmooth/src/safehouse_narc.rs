@@ -614,13 +614,11 @@ fn extract_first_json_object(s: &str) -> Option<&str> {
                 }
                 depth += 1;
             }
-            b'}' => {
-                if depth > 0 {
-                    depth -= 1;
-                    if depth == 0 {
-                        let start_idx = start?;
-                        return Some(&s[start_idx..=i]);
-                    }
+            b'}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    let start_idx = start?;
+                    return Some(&s[start_idx..=i]);
                 }
             }
             _ => {}

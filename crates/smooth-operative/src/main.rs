@@ -241,7 +241,7 @@ impl Tool for ListFilesTool {
                 let mtime = entry.metadata().ok().and_then(|m| m.modified().ok()).unwrap_or(std::time::UNIX_EPOCH);
                 entries.push((rel_str.to_string(), mtime));
             }
-            entries.sort_by(|a, b| b.1.cmp(&a.1));
+            entries.sort_by_key(|e| std::cmp::Reverse(e.1));
             let max = 200;
             let total = entries.len();
             let mut result = String::new();
