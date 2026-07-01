@@ -152,11 +152,18 @@ th api agents create -                             # raw JSON body on stdin
 # mint = the typed front door to create — builds the body for you,
 # and for a public chat agent prints the ready-to-paste embed snippet
 th api agents mint --name "Support Bot" \
+    --summary "Answers product questions" \
     --instructions @prompt.md \
     --allowed-origin https://example.com \
     --color background=#020618 --color primary=#f2a618
 th api agents mint --name "Chakra" --brand-from-url https://chakrabpc.com \
     --allowed-origin https://chakrabpc.com   # extract palette → PATCH colors
+# --summary defaults to the name if omitted.
+# Cross-org (mint into a CHILD org as a parent-org admin): th api sends the
+# org-locked M2M, which can't write to a child org. Point the client at your
+# user session (acts cross-org) for the write:
+#   SMOOAI_AUTH_FILE=~/.config/smooth/auth/profiles/<profile>/smooai-user.json \
+#     th api agents mint --name … --org <child-org-id>
 th api agents regenerate <agent-id> --generator=<name>
 th api agents list-knowledge <agent-id>
 th api agents set-knowledge <agent-id> <body>
