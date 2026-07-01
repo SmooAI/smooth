@@ -366,7 +366,7 @@ pub fn suggest_similar_paths(workspace: &Path, missing_rel_path: &str, max_resul
         }
     }
 
-    candidates.sort_by(|a, b| b.1.cmp(&a.1));
+    candidates.sort_by_key(|c| std::cmp::Reverse(c.1));
     candidates.into_iter().take(max_results).map(|(path, _)| path).collect()
 }
 

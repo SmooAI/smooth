@@ -148,7 +148,15 @@ th api members revoke <id> / resend <id>
 th api agents list                                 # active org
 th api agents show <agent-id>
 th api agents summary <agent-id>                   # config + status snapshot
-th api agents create -                             # JSON body on stdin
+th api agents create -                             # raw JSON body on stdin
+# mint = the typed front door to create — builds the body for you,
+# and for a public chat agent prints the ready-to-paste embed snippet
+th api agents mint --name "Support Bot" \
+    --instructions @prompt.md \
+    --allowed-origin https://example.com \
+    --color background=#020618 --color primary=#f2a618
+th api agents mint --name "Chakra" --brand-from-url https://chakrabpc.com \
+    --allowed-origin https://chakrabpc.com   # extract palette → PATCH colors
 th api agents regenerate <agent-id> --generator=<name>
 th api agents list-knowledge <agent-id>
 th api agents set-knowledge <agent-id> <body>

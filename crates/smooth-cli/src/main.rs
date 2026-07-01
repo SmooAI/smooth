@@ -3827,7 +3827,7 @@ async fn cmd_cache(cmd: CacheCommands) -> Result<()> {
                 return Ok(());
             }
             // Newest first across both backends.
-            entries.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
+            entries.sort_by_key(|e| std::cmp::Reverse(e.last_modified));
 
             println!("\n  {}\n", "Project caches".cyan().bold());
             let mut total = 0u64;
@@ -4695,6 +4695,7 @@ async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
 ///   instead of erroring on the `use -f` hint),
 /// - the call is from a linked worktree (SMOODEV-1836 — see below),
 /// - nothing under `.smooth/dolt/` actually changed (idempotent).
+///
 /// True when `dolt_dir` (relative to `repo_root`) matches a
 /// `.gitignore` rule. Implements pearl th-016296's beads-model skip:
 /// when the user has untracked `.smooth/dolt/`, auto-committing it
