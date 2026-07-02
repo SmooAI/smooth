@@ -479,7 +479,7 @@ impl SmoothDolt {
             return self.run_cli_once(args);
         };
 
-        let mut child = Command::new(&self.bin)
+        let child = Command::new(&self.bin)
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -487,45 +487,83 @@ impl SmoothDolt {
             .spawn()
             .with_context(|| format!("spawn smooth-dolt {}: {}", args.join(" "), self.bin.display()))?;
 
+        let what = format!("smooth-dolt {}", args.first().unwrap_or(&""));
+        let output = wait_child_draining(child, Some(timeout), &what)?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr_clip: String = stderr.trim().chars().take(300).collect();
+            anyhow::bail!(
+                "smooth-dolt {} failed (exit {}): {}",
+                args.first().unwrap_or(&""),
+                output.status.code().unwrap_or(-1),
+                if stderr_clip.is_empty() { "(no stderr)" } else { stderr_clip.as_str() }
+            );
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+}
+
+/// Wait for a spawned child (stdout/stderr piped) up to an optional
+/// deadline, draining both pipes on background threads the whole time.
+///
+/// Without the drain, a child that writes more than the ~64KB pipe
+/// buffer blocks on write and looks "stalled" — it then gets killed at
+/// the deadline even though the transfer was healthy. Pearl th-6c6843:
+/// `th pearls doctor`'s remote clone of a 2547-commit store died this
+/// way at ANY timeout, while quiet push/pull only survived by writing
+/// little output.
+///
+/// On deadline the child is SIGKILLed (releases the noms LOCK), reaped,
+/// and a **retryable** error is returned — the message keeps the
+/// "timed out after" + "remote sync stalled" markers that
+/// [`is_sync_timeout_err`] matches.
+fn wait_child_draining(mut child: std::process::Child, timeout: Option<Duration>, what: &str) -> Result<std::process::Output> {
+    fn drain<R: std::io::Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut p) = pipe {
+                use std::io::Read;
+                let _ = p.read_to_end(&mut buf);
+            }
+            buf
+        })
+    }
+    let out_thread = drain(child.stdout.take());
+    let err_thread = drain(child.stderr.take());
+
+    let status = if let Some(timeout) = timeout {
         // Poll for completion up to `timeout`. A short poll interval keeps
         // latency low for fast syncs while not busy-spinning.
         let deadline = std::time::Instant::now() + timeout;
-        let poll = Duration::from_millis(50);
         loop {
-            match child.try_wait().context("poll smooth-dolt child")? {
-                Some(_status) => {
-                    // Completed within the bound — collect output the same
-                    // way run_cli_once does.
-                    let output = child.wait_with_output().context("collect smooth-dolt output")?;
-                    if !output.status.success() {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        let stderr_clip: String = stderr.trim().chars().take(300).collect();
-                        anyhow::bail!(
-                            "smooth-dolt {} failed (exit {}): {}",
-                            args.first().unwrap_or(&""),
-                            output.status.code().unwrap_or(-1),
-                            if stderr_clip.is_empty() { "(no stderr)" } else { stderr_clip.as_str() }
-                        );
-                    }
-                    return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
-                }
-                None => {
-                    if std::time::Instant::now() >= deadline {
-                        // Stalled. Kill the child to release the noms LOCK,
-                        // reap it, and surface a retryable timeout error.
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        anyhow::bail!(
-                            "smooth-dolt {} timed out after {}s (remote sync stalled; killed child to release lock — retryable)",
-                            args.first().unwrap_or(&""),
-                            timeout.as_secs()
-                        );
-                    }
-                    std::thread::sleep(poll);
-                }
+            if let Some(status) = child.try_wait().with_context(|| format!("poll {what}"))? {
+                break status;
             }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                // Do NOT join the drain threads here: a grandchild that
+                // survives the SIGKILL (e.g. `sh -c` that forked instead of
+                // exec'ing) keeps the pipe write-end open, and read_to_end
+                // blocks until it dies — joining would hold this abort
+                // hostage for the grandchild's lifetime (CI caught exactly
+                // that: the 1s-bound stall test took the full 30s). Drop the
+                // handles instead; the detached threads exit on pipe EOF.
+                drop(out_thread);
+                drop(err_thread);
+                anyhow::bail!(
+                    "{what} timed out after {}s (remote sync stalled; killed child to release lock — retryable)",
+                    timeout.as_secs()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
-    }
+    } else {
+        child.wait().with_context(|| format!("wait {what}"))?
+    };
+    let stdout = out_thread.join().unwrap_or_default();
+    let stderr = err_thread.join().unwrap_or_default();
+    Ok(std::process::Output { status, stdout, stderr })
 }
 
 /// Heuristic: a remote sync (`push`/`pull`) that we aborted on the
@@ -606,6 +644,22 @@ mod run_cli_timed_tests {
     }
 
     #[test]
+    fn chatty_command_is_not_mistaken_for_stalled() {
+        // Regression for pearl th-6c6843: a child writing more than the
+        // ~64KB pipe buffer blocked on write (nobody drained until after
+        // exit), looked stalled, and was killed at the deadline. 400KB of
+        // output finishing instantly must succeed, not time out.
+        let h = sh_handle();
+        let out = h
+            .run_cli_timed(
+                &["-c", "i=0; while [ $i -lt 5000 ]; do printf '%080d\\n' $i; i=$((i+1)); done"],
+                Some(Duration::from_secs(10)),
+            )
+            .expect("chatty-but-fast command must not be killed as stalled");
+        assert_eq!(out.lines().count(), 5000);
+    }
+
+    #[test]
     fn stalled_command_is_aborted_and_returns_retryable_error() {
         let h = sh_handle();
         let start = Instant::now();
@@ -617,6 +671,22 @@ mod run_cli_timed_tests {
         let elapsed = start.elapsed();
         // We should have aborted at ~1s, nowhere near the 30s sleep.
         assert!(elapsed < Duration::from_secs(5), "aborted promptly, elapsed={elapsed:?}");
+        assert!(super::is_sync_timeout_err(&err), "error must be classified retryable: {err:#}");
+    }
+
+    #[test]
+    fn kill_is_not_blocked_by_grandchild_holding_pipe() {
+        // th-6c6843 CI regression: the backgrounded `sleep` survives the
+        // SIGKILL of `sh` and keeps the stdout pipe write-end open. The
+        // abort must not join the drain threads (read_to_end would block
+        // on that open pipe for the grandchild's lifetime).
+        let h = sh_handle();
+        let start = Instant::now();
+        let err = h
+            .run_cli_timed(&["-c", "sleep 30 & sleep 30"], Some(Duration::from_secs(1)))
+            .expect_err("must time out");
+        let elapsed = start.elapsed();
+        assert!(elapsed < Duration::from_secs(5), "abort must not wait for the grandchild, elapsed={elapsed:?}");
         assert!(super::is_sync_timeout_err(&err), "error must be classified retryable: {err:#}");
     }
 
@@ -1489,7 +1559,7 @@ fn clone_from_with_timeout(remote_url: &str, target_dir: &std::path::Path, timeo
         std::fs::create_dir_all(parent).with_context(|| format!("create parent of {}", target_dir.display()))?;
     }
     let remote_url = &normalize_remote_url(remote_url);
-    let mut child = Command::new(&bin)
+    let child = Command::new(&bin)
         .args(["clone", remote_url, &target_dir.to_string_lossy()])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1497,23 +1567,10 @@ fn clone_from_with_timeout(remote_url: &str, target_dir: &std::path::Path, timeo
         .spawn()
         .context("exec smooth-dolt clone")?;
 
-    // Same poll-and-kill shape as `run_cli_timed` — a stalled transfer is
-    // SIGKILLed so the caller gets an error instead of a hang.
-    if let Some(timeout) = timeout {
-        let deadline = std::time::Instant::now() + timeout;
-        while child.try_wait().context("poll smooth-dolt clone")?.is_none() {
-            if std::time::Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                anyhow::bail!(
-                    "smooth-dolt clone from {remote_url} timed out after {}s (remote sync stalled; killed child — retryable)",
-                    timeout.as_secs()
-                );
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
-    let output = child.wait_with_output().context("collect smooth-dolt clone output")?;
+    // Drain-while-waiting is load-bearing here: a real clone prints enough
+    // progress to fill the pipe buffer, which read as "stalled" and got
+    // killed at any deadline (pearl th-6c6843).
+    let output = wait_child_draining(child, timeout, &format!("smooth-dolt clone from {remote_url}"))?;
     if !output.status.success() {
         let stderr: String = String::from_utf8_lossy(&output.stderr).trim().chars().take(400).collect();
         anyhow::bail!(
