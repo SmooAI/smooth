@@ -167,6 +167,21 @@ th api agents mint --name "Chakra" --brand-from-url https://chakrabpc.com \
 th api agents regenerate <agent-id> --generator=<name>
 th api agents list-knowledge <agent-id>
 th api agents set-knowledge <agent-id> <body>
+
+# SMOODEV-590 — per-agent config is live on all five polyglot servers
+# (instructions/personality/greeting/toolConfig/conversationWorkflow).
+# update takes either a raw JSON patch body OR typed field flags:
+th api agents update <agent-id> --instructions @prompt.md   # instructions.prompt
+th api agents update <agent-id> --greeting "Hi, I'm Smoo!"
+th api agents update <agent-id> --personality witty         # preset name…
+th api agents update <agent-id> --personality '{"preset":"zen","creativity":0.3,"persona":"dry, terse"}'
+th api agents update <agent-id> --visibility internal
+th api agents update <agent-id> --workflow @workflow.json   # {goal, steps:[{id,intent,criteria,next?}]}
+th api agents update <agent-id> --tool-config '{"enabledTools":[{"toolId":"knowledge_search","enabled":true,"authLevel":"none"}]}'
+# toolConfig rules: empty enabledTools = FULL tool set; non-empty = restrict
+# to enabled=true entries; all-disabled = no tools (fail closed).
+# mint accepts the same --personality/--workflow/--tool-config at create time.
+# Read any of these back with: th api agents show <agent-id>
 ```
 
 ### Knowledge
