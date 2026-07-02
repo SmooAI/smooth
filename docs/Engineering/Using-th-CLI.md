@@ -406,6 +406,24 @@ th api profile                                     # currently-logged-in user
 th api products list                               # billing plans
 ```
 
+### Integrations
+
+Per-org third-party integrations. Currently SendGrid (email delivery — this is
+what backs OTP identity-verification email, per-org outbound mail, etc.).
+
+```bash
+th api integrations sendgrid get                                   # status (API key redacted)
+th api integrations sendgrid create \
+    --from-email hello@smoo.ai --inbound-email inbound@smoo.ai --from-name "Acme"
+th api integrations sendgrid test --to you@example.com             # send a test email
+th api integrations sendgrid delete
+```
+
+The API key is **never a flag** — `create` reads it from `SENDGRID_API_KEY`
+(so it can flow env→env via `SENDGRID_API_KEY=$(…) th …` without ever printing)
+or an interactive no-echo prompt. Server-side the key is write-only: reads
+return `hasApiKey`, never the key.
+
 > **Heuristic:** if you catch yourself typing `curl … api.smoo.ai`, stop and run `th api help` — odds are there's a typed subcommand that handles auth + pagination + error formatting for you. The repo's `th-curl-hint` PreToolUse hook will flag the curl and ask you to use `th api` instead.
 
 ---

@@ -610,6 +610,11 @@ enum ApiCommands {
         #[command(subcommand)]
         cmd: smooai::products::Cmd,
     },
+    /// Smoo AI per-org third-party integrations (SendGrid, …).
+    Integrations {
+        #[command(subcommand)]
+        cmd: smooai::integrations::Cmd,
+    },
     /// Smoo AI profile (the currently-logged-in user).
     Profile {
         #[command(subcommand)]
@@ -1333,6 +1338,7 @@ async fn main() -> Result<()> {
             ApiCommands::Knowledge { cmd } => smooai::knowledge::cmd(cmd).await,
             ApiCommands::Jobs { cmd } => smooai::jobs::cmd(cmd).await,
             ApiCommands::Products { cmd } => smooai::products::cmd(cmd).await,
+            ApiCommands::Integrations { cmd } => smooai::integrations::cmd(cmd).await,
             ApiCommands::Profile { cmd } => smooai::profile::cmd(cmd).await,
             ApiCommands::Testing { cmd } => smooai::testing::cmd(cmd).await,
             ApiCommands::Observability { cmd } => smooai::observability::cmd(cmd).await,
