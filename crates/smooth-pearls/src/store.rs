@@ -30,10 +30,7 @@ fn generate_id() -> String {
     format!("th-{}", &hex[..6])
 }
 
-/// Escape a string for use in SQL string literals (single-quote escaping).
-fn sql_escape(s: &str) -> String {
-    s.replace('\'', "''")
-}
+use crate::dolt::sql_escape;
 
 impl PearlStore {
     /// Open the pearl store at the given Dolt data directory.
@@ -1020,6 +1017,19 @@ mod tests {
         assert_eq!(pearl.id.len(), 9);
         assert_eq!(pearl.title, "Test pearl");
         assert_eq!(pearl.status, PearlStatus::Open);
+    }
+
+    #[test]
+    fn test_create_roundtrips_backslash_quote_text() {
+        // Regression for th-944230: `\'` in field text broke the quotes-only
+        // escape (`\''` — the backslash ate the first quote → Error 1105).
+        let Some(store) = test_store() else { return };
+        let title = r"backslash-quote \' title";
+        let desc = "text with \\' backslash-quote, lone trailing \\, doubled \\\\, quote ', \n newline, unicode 世界 🦀, '; DROP TABLE pearls; --";
+        let created = store.create(&new_pearl(title, desc, PearlType::Task, Priority::Medium)).unwrap();
+        let fetched = store.get(&created.id).unwrap().expect("pearl should exist");
+        assert_eq!(fetched.title, title, "title must read back byte-identical");
+        assert_eq!(fetched.description, desc, "description must read back byte-identical");
     }
 
     #[test]
