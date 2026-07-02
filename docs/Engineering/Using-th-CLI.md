@@ -140,6 +140,12 @@ th api members list --org <id>                     # list seats
 th api members invite '{"email":"x@y","role":"admin"}'
 th api members invitations
 th api members revoke <id> / resend <id>
+# Parent/child org relationships (client-portal model). Parent defaults to
+# the active org; --type defaults to `manages` (the platform convention).
+th admin org link-child <child-org-id>             # link under active org
+th admin org link-child <child-org-id> --parent <org> --type manages
+th admin org children                              # list active org's children
+th admin org unlink-child <child-org-id>           # delete the relationship
 ```
 
 ### Agents (chat agents owned by an org)

@@ -141,6 +141,44 @@ pub enum OrgCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Link a child org under a parent org (creates an organization
+    /// relationship — the client-portal parent/child model). The parent
+    /// defaults to the active org, so from the master org this is just
+    /// `th admin org link-child <child-org-id>`.
+    LinkChild {
+        /// Child org UUID to link under the parent.
+        child_org_id: String,
+        /// Parent org UUID. Defaults to the active org.
+        #[arg(long)]
+        parent: Option<String>,
+        /// Relationship type. `manages` is the platform's parent-management
+        /// convention (what the client portal uses).
+        #[arg(long = "type", default_value = "manages")]
+        relationship_type: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Unlink a child org (deletes the matching organization relationship).
+    UnlinkChild {
+        /// Child org UUID to unlink from the parent.
+        child_org_id: String,
+        /// Parent org UUID. Defaults to the active org.
+        #[arg(long)]
+        parent: Option<String>,
+        /// Relationship type to remove (must match how it was linked).
+        #[arg(long = "type", default_value = "manages")]
+        relationship_type: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List an org's child orgs. Defaults to the active org.
+    Children {
+        /// Parent org UUID. Defaults to the active org.
+        #[arg(long)]
+        parent: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub async fn dispatch(cmd: OrgCommands) -> Result<()> {
@@ -294,6 +332,101 @@ pub async fn dispatch(cmd: OrgCommands) -> Result<()> {
             };
             render(&body, Format::from_flag(json), &TableOptions::default().with_columns(&["orgId", "tier"]));
         }
+        OrgCommands::LinkChild {
+            child_org_id,
+            parent,
+            relationship_type,
+            json,
+        } => {
+            // These are the platform's user-JWT relationship endpoints (not
+            // /admin/*) — a parent-org admin's session is authorized for them.
+            let parent = crate::active_org::resolve(parent).context("resolve parent org (pass --parent or set an active org)")?;
+            let body = client
+                .post(
+                    &format!("/organizations/{parent}/relationships"),
+                    &json!({ "childOrgId": child_org_id, "relationshipType": relationship_type }),
+                )
+                .await?;
+            print_ok(format!("linked {child_org_id} under {parent} ({relationship_type})"));
+            render(
+                &body,
+                Format::from_flag(json),
+                &TableOptions::default().with_columns(&["id", "parentOrgId", "childOrgId", "relationshipType", "status"]),
+            );
+        }
+        OrgCommands::UnlinkChild {
+            child_org_id,
+            parent,
+            relationship_type,
+            json,
+        } => {
+            let parent = crate::active_org::resolve(parent).context("resolve parent org (pass --parent or set an active org)")?;
+            let rows = client.get(&format!("/organizations/{parent}/relationships")).await?;
+            let Some(rel_id) = find_relationship_id(&rows, &child_org_id, &relationship_type) else {
+                anyhow::bail!("no `{relationship_type}` relationship from {parent} to {child_org_id} — see `th admin org children`");
+            };
+            let body = client.delete(&format!("/organizations/{parent}/relationships/{rel_id}")).await?;
+            print_ok(format!("unlinked {child_org_id} from {parent} (relationship {rel_id})"));
+            render(&body, Format::from_flag(json), &TableOptions::default());
+        }
+        OrgCommands::Children { parent, json } => {
+            let parent = crate::active_org::resolve(parent).context("resolve parent org (pass --parent or set an active org)")?;
+            let body = client.get(&format!("/organizations/{parent}/children")).await?;
+            render(
+                &body,
+                Format::from_flag(json),
+                &TableOptions::default().with_label("children").with_columns(&["id", "name", "createdAt"]),
+            );
+        }
     }
     Ok(())
+}
+
+/// Find the relationship id for `child` with `relationship_type` in the
+/// GET /organizations/{parent}/relationships response. Tolerates both a bare
+/// array and `{ "relationships": [...] }` / `{ "data": [...] }` envelopes.
+fn find_relationship_id(rows: &serde_json::Value, child: &str, relationship_type: &str) -> Option<String> {
+    let arr = rows
+        .as_array()
+        .or_else(|| rows.get("relationships").and_then(|v| v.as_array()))
+        .or_else(|| rows.get("data").and_then(|v| v.as_array()))?;
+    arr.iter()
+        .find(|r| r.get("childOrgId").and_then(|v| v.as_str()) == Some(child) && r.get("relationshipType").and_then(|v| v.as_str()) == Some(relationship_type))
+        .and_then(|r| r.get("id").and_then(|v| v.as_str()))
+        .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rows() -> serde_json::Value {
+        json!([
+            { "id": "rel-1", "childOrgId": "child-a", "relationshipType": "manages" },
+            { "id": "rel-2", "childOrgId": "child-a", "relationshipType": "subaccount" },
+            { "id": "rel-3", "childOrgId": "child-b", "relationshipType": "manages" },
+        ])
+    }
+
+    #[test]
+    fn finds_the_matching_child_and_type() {
+        assert_eq!(find_relationship_id(&rows(), "child-a", "manages").as_deref(), Some("rel-1"));
+        assert_eq!(find_relationship_id(&rows(), "child-a", "subaccount").as_deref(), Some("rel-2"));
+        assert_eq!(find_relationship_id(&rows(), "child-b", "manages").as_deref(), Some("rel-3"));
+    }
+
+    #[test]
+    fn misses_return_none() {
+        assert!(find_relationship_id(&rows(), "child-c", "manages").is_none());
+        assert!(find_relationship_id(&rows(), "child-b", "subaccount").is_none());
+    }
+
+    #[test]
+    fn tolerates_enveloped_responses() {
+        let enveloped = json!({ "relationships": rows() });
+        assert_eq!(find_relationship_id(&enveloped, "child-b", "manages").as_deref(), Some("rel-3"));
+        let data = json!({ "data": rows() });
+        assert_eq!(find_relationship_id(&data, "child-a", "manages").as_deref(), Some("rel-1"));
+        assert!(find_relationship_id(&json!({ "nope": true }), "child-a", "manages").is_none());
+    }
 }
