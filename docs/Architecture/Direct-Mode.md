@@ -1,5 +1,7 @@
 # Direct Mode
 
+> **Now the only mode (2026-07, pearl th-f4a801).** The microVM sandboxed mode was removed, so "direct mode" — Big Smooth on the host exec'ing the operative as a subprocess — is simply how Smooth runs. `th up direct` is gone; `th up` does this. The `SMOOTH_WORKFLOW_DIRECT` env var is retained (always effectively on).
+
 #architecture
 
 > [!warn] Trusted environments only

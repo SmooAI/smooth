@@ -60,15 +60,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start Smooth platform — defaults to sandboxed mode (Smooth
-    /// runs inside a microsandbox microVM). Use `th up direct` to
-    /// run on the host without a sandbox (only safe in a pre-trusted
-    /// environment).
+    /// Start Smooth platform — boots Big Smooth on the host and runs
+    /// dispatched tasks in-process. (The microVM sandbox mode was
+    /// removed 2026-07, pearl th-f4a801; see git history.)
     Up {
-        /// Opt out of sandboxed mode. `th up direct` runs the cast
-        /// on the host with no microsandbox VM in front of it.
-        #[command(subcommand)]
-        mode: Option<UpMode>,
         /// Skip starting Big Smooth (API + web UI)
         #[arg(long)]
         no_leader: bool,
@@ -83,12 +78,11 @@ enum Commands {
         /// `th-6db839`.
         #[arg(long, default_value = "127.0.0.1")]
         bind: String,
-        /// Run in foreground (default: daemonize). Only honored in
-        /// direct mode — sandboxed mode is foreground-by-microVM.
+        /// Run in foreground (default: daemonize).
         #[arg(long)]
         foreground: bool,
-        /// Max concurrent Smooth operatives (each is a microVM). Defaults
-        /// to 3. Can also be set via SMOOTH_SANDBOX_MAX_CONCURRENCY.
+        /// Max concurrent Smooth operatives. Defaults to 3. Can also be
+        /// set via SMOOTH_SANDBOX_MAX_CONCURRENCY.
         #[arg(long)]
         max_operators: Option<usize>,
         /// Skip the workflow's post-implementation TEST phase
@@ -190,34 +184,16 @@ enum Commands {
         #[command(subcommand)]
         cmd: smooai::testing::Cmd,
     },
-    /// Run a pearl through a Smooth operative in a microVM — streams
-    /// agent events to stdout. With --keep-alive, the VM stays up
-    /// after the agent completes so you can poke at dev servers,
-    /// REPLs, etc.; stop with `th operatives kill <id>`.
+    /// Run a pearl through a Smooth operative — dispatches to Big Smooth
+    /// (`th up` must be running) and streams agent events to stdout.
     Run {
         /// Pearl id, or a task description prefixed with a space
         /// (e.g. `th run "refactor x to y"`). If empty, picks the
         /// first ready pearl.
         pearl_id: Option<String>,
-        /// OCI image for the operator VM. Defaults to
-        /// smooai/smooth-operative:latest (single unified image —
-        /// the agent installs toolchains at runtime via mise).
-        /// Override via SMOOTH_OPERATIVE_IMAGE env or this flag.
-        #[arg(long)]
-        image: Option<String>,
-        /// Keep the sandbox alive after the agent completes (for
-        /// dev servers, interactive review). Must explicitly stop
-        /// via `th operatives kill <id>`.
-        #[arg(long)]
-        keep_alive: bool,
         /// Override the default model for this run
         #[arg(long)]
         model: Option<String>,
-        /// Override the sandbox's memory allocation in MB
-        /// (default 4096 — bump to 6144/8192 for big Next.js / turbo
-        /// monorepos running dev servers).
-        #[arg(long)]
-        memory_mb: Option<u32>,
         /// Lead role to run under: `fixer` (default, full tools),
         /// `mapper` (read-only, decomposes), `oracle` (read-only, reasons),
         /// or `heckler` (read-only, critiques). Unknown names error
@@ -422,16 +398,6 @@ enum Commands {
         #[arg(long)]
         remote: Option<String>,
     },
-    /// Manage the project-scoped sandbox cache.
-    ///
-    /// Two backends: legacy bind-mount under `~/.smooth/project-cache/`
-    /// and microsandbox named volumes under `~/.microsandbox/volumes/`
-    /// (opt-in via `SMOOTH_USE_VOLUMES=1`). List shows both; prune and
-    /// clear operate on both.
-    Cache {
-        #[command(subcommand)]
-        cmd: CacheCommands,
-    },
     /// Hosted remote-control sessions via th.smoo.ai (reverse-tunnel).
     ///
     /// Opens an outbound connection to th.smoo.ai which gives back a
@@ -485,15 +451,6 @@ enum CastCommands {
         #[arg(long)]
         filter: Option<String>,
     },
-}
-
-#[derive(Subcommand)]
-enum UpMode {
-    /// Run Smooth directly on the host without a microsandbox VM.
-    /// Only safe inside an already-trusted environment (a CI runner,
-    /// a dedicated devbox, etc.). The default `th up` boots inside
-    /// microsandbox; this opts out.
-    Direct,
 }
 
 #[derive(Subcommand)]
@@ -670,25 +627,6 @@ enum ApiCommands {
         #[command(subcommand)]
         cmd: smooai::observability::Cmd,
     },
-}
-
-#[derive(Subcommand)]
-enum CacheCommands {
-    /// List cached projects with size and last-used time
-    List,
-    /// Print the cache directory (optionally for a specific project root)
-    Path { project: Option<String> },
-    /// Remove project caches older than N days (default 30)
-    Prune {
-        /// Evict entries whose mtime is older than this many days
-        #[arg(long, default_value = "30")]
-        older_than: u32,
-        /// Show what would be removed without deleting
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// Remove the cache entry for a single project by canonical path
-    Clear { project: String },
 }
 
 #[derive(Subcommand)]
@@ -1359,17 +1297,15 @@ async fn main() -> Result<()> {
                 cmd_doctor().await
             }
         }
-        Some(Commands::Cache { cmd }) => cmd_cache(cmd).await,
         Some(Commands::Tunnel { cmd }) => cmd_tunnel(cmd).await,
         Some(Commands::Up {
-            mode,
             no_leader,
             port,
             bind,
             foreground,
             max_operators,
             skip_test,
-        }) => cmd_up(mode, no_leader, port, bind, foreground, max_operators, skip_test).await,
+        }) => cmd_up(no_leader, port, bind, foreground, max_operators, skip_test).await,
         Some(Commands::Down) => cmd_down().await,
         Some(Commands::Status) => cmd_status().await,
         Some(Commands::Db { cmd }) => cmd_db(cmd),
@@ -1399,14 +1335,7 @@ async fn main() -> Result<()> {
         Some(Commands::Testing { cmd }) => smooai::testing::cmd(cmd).await,
         Some(Commands::Operatives { cmd }) => cmd_operatives(cmd).await,
         Some(Commands::Inbox) => cmd_inbox().await,
-        Some(Commands::Run {
-            pearl_id,
-            image,
-            keep_alive,
-            model,
-            memory_mb,
-            agent,
-        }) => cmd_run(pearl_id.as_deref(), image.as_deref(), keep_alive, model.as_deref(), memory_mb, agent.as_deref()).await,
+        Some(Commands::Run { pearl_id, model, agent }) => cmd_run(pearl_id.as_deref(), model.as_deref(), agent.as_deref()).await,
         Some(Commands::Approve { bead_id }) => cmd_approve(&bead_id).await,
         Some(Commands::Pause { bead_id }) => cmd_steer(&bead_id, "pause", None).await,
         Some(Commands::Resume { bead_id }) => cmd_steer(&bead_id, "resume", None).await,
@@ -1454,245 +1383,7 @@ fn log_file_path() -> std::path::PathBuf {
     dirs_next::home_dir().unwrap_or_default().join(".smooth").join("smooth.log")
 }
 
-/// State file recording the sandboxed-mode VM name so `th down`
-/// can find and destroy it.
-fn sandboxed_state_path() -> std::path::PathBuf {
-    dirs_next::home_dir().unwrap_or_default().join(".smooth").join("sandboxed.vm")
-}
-
-/// Boot the safehouse OCI image as a microsandbox VM, forward
-/// :4400 out, wait for the in-VM Big Smooth to come up, and
-/// stash the VM name so `th down` can destroy it. Pearl
-/// th-67c96b (sandboxed mode).
-async fn start_sandboxed_vm(port: u16) -> Result<()> {
-    use smooth_bigsmooth::sandbox::{create_sandbox, init_sandbox_client, SandboxConfig};
-    use std::collections::HashMap;
-
-    println!();
-    // The Safehouse image. No fallback to any pre-rename name —
-    // ADR-003 + this user directive: replace everything, no
-    // backwards compat.
-    let image = std::env::var("SMOOTH_SAFEHOUSE_IMAGE").unwrap_or_else(|_| "ghcr.io/smooai/safehouse:latest".to_string());
-    println!("  {} booting safehouse microVM (image: {image})", "●".cyan());
-
-    // Pick the sandbox client (DirectSandboxClient on host, since
-    // direct-sandbox feature is on by default).
-    init_sandbox_client();
-
-    let mut env = HashMap::new();
-    env.insert("SMOOTH_VM_MODE".into(), "1".into());
-    env.insert("SMOOTH_SAFEHOUSE_MODE".into(), "1".into());
-    env.insert("SMOOTH_SINGLE_PROCESS".into(), "1".into());
-    env.insert("SMOOTH_SAFEHOUSE_PORT".into(), port.to_string());
-    // The safehouse binary runs as uid 0 inside the microVM and
-    // reads `~/.smooth/providers.json` for LLM credentials. We
-    // bind-mount the host's ~/.smooth at /root/.smooth (RO) below
-    // so HOME resolution lands on real credentials instead of
-    // "no LLM providers configured" with an empty `~`. Set HOME
-    // explicitly so dirs_next::home_dir() inside the guest
-    // resolves correctly even if /etc/passwd isn't populated.
-    env.insert("HOME".into(), "/root".into());
-
-    // Bind-mount the host's ~/.smooth providers + registry into the
-    // VM (RO) so the safehouse can read LLM credentials, the project
-    // registry, and the cross-compiled operative sync dir.
-    // Without this, an in-VM `dirs_next::home_dir().join(".smooth/
-    // providers.json")` lookup returns either nothing or an empty
-    // path, and dispatch fails with "no LLM providers configured".
-    let mut mounts: Vec<smooth_bigsmooth::sandbox::BindMount> = Vec::new();
-    if let Some(home) = dirs_next::home_dir() {
-        let host_smooth = home.join(".smooth");
-        if host_smooth.is_dir() {
-            mounts.push(smooth_bigsmooth::sandbox::BindMount {
-                host_path: host_smooth.to_string_lossy().into_owned(),
-                guest_path: "/root/.smooth".into(),
-                // Pearl th-14d773: was RO, but the bench harness needs the
-                // agent to edit task fixtures under ~/.smooth/bench-runs/.
-                // Without RW the operator VM's /workspace (bound from
-                // /root/.smooth/bench-runs/<id>/<task>) is also RO and
-                // edit_file/write_file fail. The operator VM still gets
-                // Narc + Wonk guards on top so writes are policy-checked.
-                readonly: false,
-            });
-            // Pearl th-14d773: tell the in-safehouse Big Smooth where the
-            // host's ~/.smooth lives. When the TUI dispatches a task with
-            // a working_dir under the outer host's ~/.smooth/ (the bench
-            // harness does this — work_dirs live at
-            // ~/.smooth/bench-runs/<id>/<task>/), Big Smooth needs to
-            // translate that path to the safehouse-visible /root/.smooth/
-            // prefix before bind-mounting it into the operator VM.
-            // Without this, safehouse-mode dispatch ignores the TUI's
-            // working_dir and uses the shared /workspace (= cwd at
-            // `th up` time), so every bench task sees the SAME workspace
-            // contents — usually the smooth repo, never the task fixture.
-            env.insert("SMOOTH_HOME_HOST_PATH".into(), host_smooth.to_string_lossy().into_owned());
-        }
-        // Also mount the cross-compiled operative into the
-        // safehouse so Big Smooth dispatch (running inside the
-        // safehouse) can exec it as a subprocess per pearl. Mount
-        // the runner-bin dir at /opt/smooth/runner-bin — NOT
-        // /opt/smooth/bin, because the OCI image ships the
-        // safehouse binary at /opt/smooth/bin/safehouse and a
-        // bind-mount over that path would shadow the entrypoint.
-        let runner = home.join(".smooth").join("runner-bin").join("smooth-operative");
-        if runner.is_file() {
-            mounts.push(smooth_bigsmooth::sandbox::BindMount {
-                host_path: runner.parent().unwrap().to_string_lossy().into_owned(),
-                guest_path: "/opt/smooth/runner-bin".into(),
-                readonly: true,
-            });
-            env.insert("SMOOTH_OPERATIVE_NATIVE".into(), "/opt/smooth/runner-bin/smooth-operative".into());
-        }
-        // If a freshly cross-compiled safehouse binary is sitting
-        // alongside the runner, prefer it over the one baked into
-        // the OCI image — that lets dev iteration on
-        // crates/smooth-bigsmooth/src/bin/safehouse.rs (and the
-        // dispatch fork that decides direct-vs-sandboxed inside
-        // the VM) reach the running safehouse without rebuilding
-        // and pushing the OCI image.
-        let safehouse_bin = home.join(".smooth").join("runner-bin").join("safehouse");
-        if safehouse_bin.is_file() {
-            mounts.push(smooth_bigsmooth::sandbox::BindMount {
-                host_path: safehouse_bin.to_string_lossy().into_owned(),
-                guest_path: "/opt/smooth/bin/safehouse".into(),
-                readonly: true,
-            });
-        }
-    }
-
-    // Bind-mount the user's working directory at /workspace (RW) so
-    // operatives dispatched from inside the Safehouse can read
-    // and write the user's repo. Without this the in-VM runner sees
-    // only the safehouse rootfs (essentially empty) and the agent
-    // reports "this workspace is empty" on its first list_files.
-    // Pass SMOOTH_HOST_WORKSPACE so Big Smooth's dispatch can
-    // translate any host-path `working_dir` the TUI sends back to
-    // the in-VM /workspace path.
-    let cwd = std::env::current_dir()?;
-    let cwd_canon = cwd.canonicalize().unwrap_or(cwd.clone());
-    mounts.push(smooth_bigsmooth::sandbox::BindMount {
-        host_path: cwd_canon.to_string_lossy().into_owned(),
-        guest_path: "/workspace".into(),
-        readonly: false,
-    });
-    env.insert("SMOOTH_HOST_WORKSPACE".into(), cwd_canon.to_string_lossy().into_owned());
-
-    let config = SandboxConfig {
-        operator_id: "safehouse".into(),
-        bead_id: "safehouse".into(),
-        workspace_path: std::env::current_dir()?.to_string_lossy().into_owned(),
-        permissions: vec![],
-        system_prompt: None,
-        model: None,
-        phase: "execute".into(),
-        env,
-        cpus: 2,
-        memory_mb: 4096,
-        timeout_seconds: 0,
-        mounts,
-        allow_host_loopback: true,
-        env_cache_key: None,
-        use_named_volume_for_cache: false,
-        extra_ports: vec![smooth_bootstrap_bill::PortMapping {
-            guest_port: port,
-            host_port: port,
-            bind_all: false,
-        }],
-        image: Some(image.clone()),
-        secrets: vec![],
-    };
-
-    // The legacy second arg ("host_port") maps host→guest:4096 for
-    // the operator WebSocket bridge. We don't need that for the
-    // safehouse VM (it IS Big Smooth, not an operator). Pass 0 so
-    // the kernel picks an ephemeral port and our extra_ports
-    // entry (host:port → guest:port) gets the real 4400.
-    let handle = create_sandbox(&config, 0).await.context("boot safehouse microVM")?;
-
-    let state_path = sandboxed_state_path();
-    if let Some(parent) = state_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&state_path, &handle.msb_name)?;
-
-    println!();
-    println!("  {}", "╭──────────────────────────────╮".dimmed());
-    println!(
-        "  {}  {} {} sandboxed (vm: {})",
-        "│".dimmed(),
-        gradient::smooth(),
-        "started".bold(),
-        handle.msb_name.chars().take(16).collect::<String>().cyan()
-    );
-    println!("  {}", "╰──────────────────────────────╯".dimmed());
-    println!("    {}  {}", "Web UI".dimmed(), format!("http://localhost:{port}").cyan().bold());
-    println!("    {}  {}", "Image ".dimmed(), image.dimmed());
-    println!("    {}  {}", "Stop  ".dimmed(), "th down".dimmed());
-    println!();
-
-    // Pearl th-dd0cef: we cannot exit here. The safehouse binary
-    // runs *inside* the VM as an exec session, addressed via the
-    // host-side `AgentClient` connection to agentd's UDS. If this
-    // host process exits, microsandbox-runtime's agent relay sees
-    // "client disconnected" on the host socket and immediately
-    // SIGKILLs every active exec session in the guest — including
-    // safehouse. The VM stays running (kernel + agentd are
-    // process-tree-owned by the child msb binary, which keeps
-    // going), but the *safehouse server* dies and port 4400 stops
-    // having a listener inside the guest. From the outside that
-    // looks like microsandbox's port forwarder accepting the TCP
-    // SYN and immediately closing the connection ("Empty reply
-    // from server") — the bug this pearl tracks.
-    //
-    // Block until SIGINT / SIGTERM so the AgentClient stays alive.
-    tracing::info!("safehouse microVM running; awaiting ctrl-c");
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!("ctrl-c received, shutting down safehouse microVM");
-        }
-        _ = async {
-            // Also exit if SIGTERM arrives (LaunchAgents / systemd).
-            #[cfg(unix)]
-            {
-                let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                    .expect("install SIGTERM handler");
-                term.recv().await;
-            }
-            #[cfg(not(unix))]
-            {
-                std::future::pending::<()>().await;
-            }
-        } => {
-            tracing::info!("SIGTERM received, shutting down safehouse microVM");
-        }
-    }
-    let _ = stop_sandboxed_vm().await;
-    Ok(())
-}
-
-/// Destroy the safehouse microVM if one is running.
-/// Counterpart to [`start_sandboxed_vm`]. Idempotent.
-async fn stop_sandboxed_vm() -> Result<bool> {
-    use smooth_bigsmooth::sandbox::{destroy_sandbox, init_sandbox_client};
-
-    let state_path = sandboxed_state_path();
-    if !state_path.exists() {
-        return Ok(false);
-    }
-    let msb_name = std::fs::read_to_string(&state_path).context("read sandboxed.vm")?.trim().to_string();
-    if msb_name.is_empty() {
-        let _ = std::fs::remove_file(&state_path);
-        return Ok(false);
-    }
-    init_sandbox_client();
-    if let Err(e) = destroy_sandbox(&msb_name).await {
-        tracing::warn!(vm = %msb_name, error = %e, "destroy_sandbox failed; removing state file anyway");
-    }
-    let _ = std::fs::remove_file(&state_path);
-    Ok(true)
-}
-
-async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, foreground: bool, max_operators: Option<usize>, skip_test: bool) -> Result<()> {
+async fn cmd_up(no_leader: bool, port: u16, bind: String, foreground: bool, max_operators: Option<usize>, skip_test: bool) -> Result<()> {
     // CLI flag beats env; set env so AppState::new() (which only sees
     // env) picks the right value in both foreground + daemon paths.
     if let Some(n) = max_operators {
@@ -1700,8 +1391,7 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, 
     }
 
     // Shipped-default MCP servers — populate `~/.smooth/mcp.toml` with our
-    // baseline tool set (budget-aware-mcp, …) before the safehouse VM
-    // bind-mounts `~/.smooth` into the guest. Idempotent: never touches an
+    // baseline tool set (budget-aware-mcp, …). Idempotent: never touches an
     // existing entry of the same name (the user's config always wins).
     // Failures here are non-fatal — `th up` must still boot if disk is
     // read-only, the home dir is unwriteable, etc. Set
@@ -1731,21 +1421,11 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, 
             }
         }
     }
-    // Two modes only:
-    //   * `th up` (default) — boot Smooth inside a microsandbox VM
-    //     with :4400 forwarded out.
-    //   * `th up direct`   — run on the host with no sandbox in
-    //     front. Only safe in pre-trusted environments.
-    //
-    // Subcommand beats env; env `SMOOTH_WORKFLOW_DIRECT=1` is
-    // honored as an override for harness/benchmark scripts that
-    // can't easily change argv.
-    let direct = matches!(mode, Some(UpMode::Direct)) || std::env::var("SMOOTH_WORKFLOW_DIRECT").is_ok();
-    if direct {
-        std::env::set_var("SMOOTH_WORKFLOW_DIRECT", "1");
-    } else {
-        std::env::remove_var("SMOOTH_WORKFLOW_DIRECT");
-    }
+    // Smooth boots Big Smooth on the host and runs dispatched tasks
+    // in-process. (The microVM sandbox mode was removed 2026-07, pearl
+    // th-f4a801.) SMOOTH_WORKFLOW_DIRECT is kept set for any harness
+    // that still keys off it.
+    std::env::set_var("SMOOTH_WORKFLOW_DIRECT", "1");
     // Benchmark knob — skip the TEST phase so the agent doesn't
     // add tests that change the score.
     if skip_test {
@@ -1753,12 +1433,9 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, 
     }
 
     // Daemon mode: re-exec ourselves with --foreground and redirect
-    // output to log file. Applies to BOTH sandboxed and direct mode
-    // — sandboxed needs daemonization too because start_sandboxed_vm
-    // has to keep the host-side `AgentClient` alive (pearl th-dd0cef)
-    // for the duration of the VM's run. Without daemonizing, `th up`
-    // would block its caller until ctrl-c, breaking shell chains
-    // like `th down && th up && th`.
+    // output to log file. Without daemonizing, `th up` would block its
+    // caller until ctrl-c, breaking shell chains like
+    // `th down && th up && th`.
     if !foreground {
         // Check if already running
         let pid_path = pid_file_path();
@@ -1804,11 +1481,7 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, 
         let log_err = log_file.try_clone()?;
 
         let exe = std::env::current_exe()?;
-        // Re-exec the daemon with `th up --foreground [flags...]
-        // [direct]`. The `direct` subcommand is appended only in
-        // direct mode; sandboxed mode goes through the same daemon
-        // path without it so start_sandboxed_vm holds the
-        // AgentClient open in the child process.
+        // Re-exec the daemon with `th up --foreground [flags...]`.
         let mut args = vec![
             "up".to_string(),
             "--foreground".to_string(),
@@ -1827,9 +1500,6 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, 
         if skip_test {
             args.push("--skip-test".to_string());
         }
-        if direct {
-            args.push("direct".to_string());
-        }
 
         let child = std::process::Command::new(exe)
             .args(&args)
@@ -1841,15 +1511,14 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, 
         let pid = child.id();
         std::fs::write(&pid_path, pid.to_string())?;
 
-        // Pearl th-7840d8 — animated boot indicator while the
-        // daemon child boots the Safehouse microVM. Same step set
-        // and timing budget as the cold-start path in main() so
-        // `th up` and `th code` (with no leader running) look
-        // identical to the user.
+        // Pearl th-7840d8 — animated boot indicator while the daemon
+        // child boots Big Smooth. Same timing budget as the cold-start
+        // path in main() so `th up` and `th code` (with no leader
+        // running) look identical to the user.
         let indicator = boot_ui::BootIndicator::new();
-        let step_vm = indicator.step("starting Safehouse microVM");
-        let step_cast = indicator.step("cast online (wonk · goalie · narc · scribe · archivist · diver · groove)");
-        let step_runner = indicator.step("operative pool warm");
+        let step_vm = indicator.step("starting Big Smooth");
+        let step_cast = indicator.step("dolt store online");
+        let step_runner = indicator.step("dispatch ready");
         let step_health = indicator.step("health check");
 
         const TIMEOUT_PER_STEP: std::time::Duration = std::time::Duration::from_secs(30);
@@ -1873,7 +1542,7 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, 
             step_runner.fail("not reached");
             step_health.fail("not reached");
             indicator.finish();
-            anyhow::bail!("Safehouse microVM never opened :{port} — check {}", log_path.display());
+            anyhow::bail!("Big Smooth never opened :{port} — check {}", log_path.display());
         }
         step_vm.ok();
 
@@ -1892,7 +1561,7 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, 
             step_runner.fail("not reached");
             step_health.fail("not reached");
             indicator.finish();
-            anyhow::bail!("Safehouse :{port} accepted TCP but never answered HTTP — check {}", log_path.display());
+            anyhow::bail!("Big Smooth :{port} accepted TCP but never answered HTTP — check {}", log_path.display());
         }
         step_cast.ok();
         step_runner.ok();
@@ -1910,7 +1579,7 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, 
         if !ready {
             step_health.fail("timeout");
             indicator.finish();
-            anyhow::bail!("Safehouse booted but :{port} never became healthy — check {}", log_path.display());
+            anyhow::bail!("Big Smooth booted but :{port} never became healthy — check {}", log_path.display());
         }
         step_health.ok();
         indicator.finish();
@@ -1934,16 +1603,9 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, 
         return Ok(());
     }
 
-    // Foreground mode — actual server startup. If we were called
-    // without --direct, hand off to start_sandboxed_vm; that path
-    // both boots the microsandbox VM AND blocks holding the host
-    // AgentClient until SIGTERM (per pearl th-dd0cef). When this is
-    // the daemon-child re-exec, the parent has already detached
+    // Foreground mode — actual server startup on the host. When this
+    // is the daemon-child re-exec, the parent has already detached
     // stdio to the log file, written the pid, and returned.
-    if !direct {
-        return start_sandboxed_vm(port).await;
-    }
-
     println!();
     println!("  {} / {}", gradient::smoo_ai(), gradient::smooth());
     println!();
@@ -2040,14 +1702,7 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, 
 }
 
 async fn cmd_down() -> Result<()> {
-    // Sandboxed mode: state file recorded the safehouse microVM
-    // name; destroy it via Bill (pearl th-67c96b). Also kill the
-    // daemonized child holding the AgentClient — without that, the
-    // child sits idle on a dead connection until its SIGTERM
-    // handler fires (which it never will, since nobody else signals
-    // it).
-    let vm_destroyed = matches!(stop_sandboxed_vm().await, Ok(true));
-
+    // Kill the daemonized Big Smooth child recorded in the pid file.
     let pid_path = pid_file_path();
     let mut pid_killed: Option<u32> = None;
     if pid_path.exists() {
@@ -2060,24 +1715,12 @@ async fn cmd_down() -> Result<()> {
         let _ = std::fs::remove_file(&pid_path);
     }
 
-    match (vm_destroyed, pid_killed) {
-        (true, Some(pid)) => {
-            let tag = format!("(pid {pid}, sandboxed safehouse microVM destroyed)");
-            println!("  \u{1f534} {} {} {}", gradient::smooth(), "stopped".green().bold(), tag.dimmed());
-        }
-        (true, None) => {
-            println!(
-                "  \u{1f534} {} {} {}",
-                gradient::smooth(),
-                "stopped".green().bold(),
-                "(sandboxed safehouse microVM destroyed)".dimmed()
-            );
-        }
-        (false, Some(pid)) => {
+    match pid_killed {
+        Some(pid) => {
             let tag = format!("(pid {pid})");
             println!("  \u{1f534} {} {} {}", gradient::smooth(), "stopped".green().bold(), tag.dimmed());
         }
-        (false, None) => {
+        None => {
             println!("  {} {}", gradient::smooth(), "is not running.".yellow());
         }
     }
@@ -2692,22 +2335,7 @@ async fn cmd_inbox() -> Result<()> {
     .await
 }
 
-/// Default image for a sandboxed `th run`. One image covers every
-/// stack — the agent installs whatever toolchain the task needs at
-/// runtime via mise, and the installs persist in the project cache.
-/// Kept as a helper so it's easy to swap the tag via env if needed.
-fn default_smooth_operative_image() -> String {
-    std::env::var("SMOOTH_OPERATIVE_IMAGE").unwrap_or_else(|_| "ghcr.io/smooai/smooth-operative:latest".to_string())
-}
-
-async fn cmd_run(
-    pearl_id_arg: Option<&str>,
-    image: Option<&str>,
-    keep_alive: bool,
-    model: Option<&str>,
-    memory_mb: Option<u32>,
-    agent: Option<&str>,
-) -> Result<()> {
+async fn cmd_run(pearl_id_arg: Option<&str>, model: Option<&str>, agent: Option<&str>) -> Result<()> {
     // Validate the agent name up front so a typo fails at the CLI
     // instead of falling through to the runner's "unknown agent,
     // falling back to code" warning.
@@ -2748,24 +2376,12 @@ async fn cmd_run(
 
     let cwd = std::env::current_dir()?;
 
-    // Default image is always smooai/smooth-operative (agent installs
-    // its own toolchain via mise). --image overrides for special cases.
-    let resolved_image: String = image.map(String::from).unwrap_or_else(default_smooth_operative_image);
-
     if let Some(ref id) = pearl_id {
         println!("\n  {} {} {}", "▶".cyan().bold(), "Running pearl".bold(), id.bold());
     } else {
         println!("\n  {} {}", "▶".cyan().bold(), "Running ad-hoc task".bold());
     }
     println!("  {} {}", "cwd".dimmed(), cwd.display().to_string().dimmed());
-    let image_suffix = if image.is_none() { " (default)" } else { "" };
-    println!("  {} {}{}", "image".dimmed(), resolved_image.dimmed(), image_suffix.dimmed());
-    if let Some(mb) = memory_mb {
-        println!("  {} {} MB", "memory".dimmed(), mb);
-    }
-    if keep_alive {
-        println!("  {} VM will stay alive after completion", "⧗".yellow());
-    }
     println!("  {} {}", "agent".dimmed(), agent_name.dimmed());
     println!();
 
@@ -2773,9 +2389,6 @@ async fn cmd_run(
         "message": message,
         "model": model,
         "working_dir": cwd.to_string_lossy(),
-        "image": resolved_image,
-        "keep_alive": keep_alive,
-        "memory_mb": memory_mb,
         "agent": agent_name,
     });
 
@@ -2790,8 +2403,6 @@ async fn cmd_run(
 
     let mut byte_stream = resp.bytes_stream();
     let mut buffer = String::new();
-    let mut operator_id: Option<String> = None;
-    let mut saw_complete = false;
 
     while let Some(chunk_res) = byte_stream.next().await {
         let chunk = chunk_res?;
@@ -2820,35 +2431,16 @@ async fn cmd_run(
                     "ToolCallStart" => {
                         let tool = evt.get("tool_name").and_then(|v| v.as_str()).unwrap_or("?");
                         println!("\n  {} {}", "⚙".cyan(), tool.dimmed());
-                        // Capture operator id from sandbox.create result
-                        // (server emits it as part of ToolCallComplete,
-                        // but also at create-time in `arguments`).
-                        if tool == "sandbox.create" {
-                            if let Some(args) = evt.get("arguments").and_then(|v| v.as_str()) {
-                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args) {
-                                    if let Some(id) = parsed.get("operator_id").and_then(|v| v.as_str()) {
-                                        operator_id = Some(id.to_string());
-                                    }
-                                }
-                            }
-                        }
                     }
                     "ToolCallComplete" => {
                         let tool = evt.get("tool_name").and_then(|v| v.as_str()).unwrap_or("?");
                         let is_error = evt.get("is_error").and_then(serde_json::Value::as_bool).unwrap_or(false);
-                        if tool == "sandbox.create" {
-                            if let Some(result) = evt.get("result").and_then(|v| v.as_str()) {
-                                operator_id = Some(result.to_string());
-                                println!("  {} operator {}", "●".green(), result.bold());
-                            }
-                        }
                         if is_error {
                             let result = evt.get("result").and_then(|v| v.as_str()).unwrap_or("");
                             println!("  {} {} {}", "✗".red().bold(), tool.dimmed(), result.red());
                         }
                     }
                     "Complete" | "TaskComplete" => {
-                        saw_complete = true;
                         println!("\n  {} agent completed", "✓".green().bold());
                     }
                     "Error" | "TaskError" => {
@@ -2859,49 +2451,6 @@ async fn cmd_run(
                 }
             }
         }
-    }
-
-    if keep_alive && saw_complete {
-        let id = operator_id.as_deref().unwrap_or("<unknown>");
-        println!();
-        println!("  {} VM {} is still running.\n", "⧗".yellow(), id.bold());
-
-        // Pull forwarded-port info from the server so the user sees
-        // reachable URLs instead of being told to go run another
-        // command. Best-effort — if the query fails we still print
-        // the stop hint.
-        if let Some(ref opid) = operator_id {
-            let url = format!("http://localhost:4400/api/workers/{opid}");
-            if let Ok(resp) = client.get(&url).send().await {
-                if let Ok(worker) = resp.json::<serde_json::Value>().await {
-                    if let Some(ports) = worker.get("data").and_then(|d| d.get("port_mappings")).and_then(|v| v.as_array()) {
-                        let mut printed_header = false;
-                        for p in ports {
-                            let Some(guest) = p.get(0).and_then(serde_json::Value::as_u64) else {
-                                continue;
-                            };
-                            let Some(host) = p.get(1).and_then(serde_json::Value::as_u64) else {
-                                continue;
-                            };
-                            if guest == 4096 {
-                                continue; // runner control port — not useful to user
-                            }
-                            if !printed_header {
-                                println!("  {}", "Reachable on the host:".bold());
-                                printed_header = true;
-                            }
-                            println!("    guest {guest} → {}", format!("http://localhost:{host}").cyan());
-                        }
-                        if printed_header {
-                            println!();
-                        }
-                    }
-                }
-            }
-        }
-
-        println!("  {} stop with: {}", "→".dimmed(), format!("th operatives kill {id}").cyan());
-        println!();
     }
 
     Ok(())
@@ -3638,300 +3187,6 @@ async fn cmd_doctor() -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Git-init ~/.smooth/ as a repo so config can be backed up and synced
-/// across machines. Writes a .gitignore that excludes secrets
-/// (providers.json), service logs, rotating audit logs, the SQLite
-/// leftover, and the Dolt store (which has its own push/pull). Adds
-/// the files that *should* be versioned (mcp.toml, plugins/<name>/,
-/// registry.json) and makes an initial commit.
-///
-/// Idempotent: re-running on an already-initialized repo just prints
-/// status and optionally adds a new remote.
-/// Path to the project-scoped sandbox cache root.
-fn project_cache_root() -> Result<std::path::PathBuf> {
-    let home = dirs_next::home_dir().context("cannot determine home directory")?;
-    Ok(home.join(".smooth").join("project-cache"))
-}
-
-/// Compute the cache key for a given workspace path. Mirrors
-/// `smooth_bigsmooth::server::project_cache_key` so CLI-side `th cache`
-/// output matches server-side bind-mount keys.
-fn workspace_cache_key(path: &str) -> Option<String> {
-    smooth_bigsmooth::server::project_cache_key(path)
-}
-
-fn dir_size_bytes(path: &std::path::Path) -> u64 {
-    fn walk(p: &std::path::Path) -> u64 {
-        let mut total = 0u64;
-        let Ok(entries) = std::fs::read_dir(p) else { return 0 };
-        for e in entries.flatten() {
-            let Ok(md) = e.metadata() else { continue };
-            if md.is_dir() {
-                total = total.saturating_add(walk(&e.path()));
-            } else {
-                total = total.saturating_add(md.len());
-            }
-        }
-        total
-    }
-    walk(path)
-}
-
-fn fmt_size(bytes: u64) -> String {
-    const K: u64 = 1024;
-    const M: u64 = K * 1024;
-    const G: u64 = M * 1024;
-    if bytes >= G {
-        format!("{:.1} GB", bytes as f64 / G as f64)
-    } else if bytes >= M {
-        format!("{:.1} MB", bytes as f64 / M as f64)
-    } else if bytes >= K {
-        format!("{:.1} KB", bytes as f64 / K as f64)
-    } else {
-        format!("{bytes} B")
-    }
-}
-
-fn fmt_age(modified: std::time::SystemTime) -> String {
-    let Ok(elapsed) = modified.elapsed() else {
-        return "just now".to_string();
-    };
-    let secs = elapsed.as_secs();
-    if secs < 60 {
-        "just now".to_string()
-    } else if secs < 3600 {
-        format!("{}m ago", secs / 60)
-    } else if secs < 86_400 {
-        format!("{}h ago", secs / 3600)
-    } else {
-        format!("{}d ago", secs / 86_400)
-    }
-}
-
-/// Unified row across both cache backends. Populated from either a
-/// bind-mount directory entry or a `ProjectCacheVolumeInfo`; the
-/// display path and pruning logic then treat them uniformly.
-struct CacheEntry {
-    backend: CacheBackend,
-    /// Display name. For bind-mount entries: the directory name (which
-    /// equals the cache_key). For volumes: the volume name (with
-    /// `smooth-cache-` prefix).
-    display: String,
-    /// Workspace cache_key. For volumes this is taken from the
-    /// `smooth-cache-key` label (falls back to name-with-prefix-
-    /// stripped); for bind-mount entries it's just the dir name.
-    cache_key: String,
-    /// Host path to the entry's data directory.
-    path: std::path::PathBuf,
-    size_bytes: u64,
-    /// "Last touched" signal — dir mtime. For volumes this is computed
-    /// from on-disk mtime; for bind-mounts it's the entry's own
-    /// metadata.
-    last_modified: std::time::SystemTime,
-}
-
-#[derive(Copy, Clone, PartialEq, Eq)]
-enum CacheBackend {
-    BindMount,
-    NamedVolume,
-}
-
-impl CacheBackend {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::BindMount => "bind",
-            Self::NamedVolume => "volume",
-        }
-    }
-}
-
-fn collect_bind_mount_entries(root: &std::path::Path) -> Vec<CacheEntry> {
-    if !root.is_dir() {
-        return Vec::new();
-    }
-    let Ok(rd) = std::fs::read_dir(root) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for entry in rd.filter_map(std::result::Result::ok) {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        let size_bytes = dir_size_bytes(&path);
-        let last_modified = entry
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        out.push(CacheEntry {
-            backend: CacheBackend::BindMount,
-            display: name.clone(),
-            cache_key: name,
-            path,
-            size_bytes,
-            last_modified,
-        });
-    }
-    out
-}
-
-async fn collect_volume_entries() -> Vec<CacheEntry> {
-    match smooth_bootstrap_bill::project_cache::list_project_cache_volumes().await {
-        Ok(vols) => vols
-            .into_iter()
-            .map(|v| CacheEntry {
-                backend: CacheBackend::NamedVolume,
-                display: v.volume_name.clone(),
-                cache_key: v.cache_key,
-                path: v.path,
-                size_bytes: v.size_bytes,
-                last_modified: v.last_modified.unwrap_or(std::time::SystemTime::UNIX_EPOCH),
-            })
-            .collect(),
-        Err(e) => {
-            tracing::debug!(error = %e, "th cache: named-volume enumeration failed (treating as empty)");
-            Vec::new()
-        }
-    }
-}
-
-async fn cmd_cache(cmd: CacheCommands) -> Result<()> {
-    let root = project_cache_root()?;
-
-    match cmd {
-        CacheCommands::Path { project } => {
-            let target = if let Some(p) = project {
-                let key = workspace_cache_key(&p).context("cannot derive cache key from empty path")?;
-                root.join(key)
-            } else {
-                root
-            };
-            println!("{}", target.display());
-            Ok(())
-        }
-
-        CacheCommands::List => {
-            let mut entries = collect_bind_mount_entries(&root);
-            let volume_entries = collect_volume_entries().await;
-            entries.extend(volume_entries);
-
-            if entries.is_empty() {
-                println!(
-                    "\n  {} No project caches yet. They're created lazily on first `th up` / `th dev`.\n",
-                    "ℹ".cyan()
-                );
-                return Ok(());
-            }
-            // Newest first across both backends.
-            entries.sort_by_key(|e| std::cmp::Reverse(e.last_modified));
-
-            println!("\n  {}\n", "Project caches".cyan().bold());
-            let mut total = 0u64;
-            for e in &entries {
-                total = total.saturating_add(e.size_bytes);
-                println!(
-                    "  [{:<6}] {:<40} {:>10} {}",
-                    e.backend.label().dimmed(),
-                    e.display.as_str().bold(),
-                    fmt_size(e.size_bytes).dimmed(),
-                    fmt_age(e.last_modified).dimmed()
-                );
-            }
-            println!("\n  {} {}\n", "total".dimmed(), fmt_size(total).bold());
-            Ok(())
-        }
-
-        CacheCommands::Prune { older_than, dry_run } => {
-            let mut entries = collect_bind_mount_entries(&root);
-            let volume_entries = collect_volume_entries().await;
-            entries.extend(volume_entries);
-
-            if entries.is_empty() {
-                println!("\n  {} No cache to prune.\n", "ℹ".cyan());
-                return Ok(());
-            }
-
-            let cutoff = std::time::SystemTime::now()
-                .checked_sub(std::time::Duration::from_secs(u64::from(older_than) * 86_400))
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-
-            let mut removed = 0u32;
-            let mut reclaimed = 0u64;
-            for e in entries {
-                if e.last_modified > cutoff {
-                    continue;
-                }
-                let verb = if dry_run { "would remove" } else { "removing" };
-                println!(
-                    "  {} [{:<6}] {:<40} {}",
-                    verb.yellow(),
-                    e.backend.label().dimmed(),
-                    e.display.as_str().bold(),
-                    fmt_size(e.size_bytes).dimmed()
-                );
-                if !dry_run {
-                    let remove_result = match e.backend {
-                        CacheBackend::BindMount => std::fs::remove_dir_all(&e.path).map_err(anyhow::Error::from),
-                        CacheBackend::NamedVolume => smooth_bootstrap_bill::project_cache::remove_project_cache_volume(&e.cache_key).await.map(drop),
-                    };
-                    if let Err(err) = remove_result {
-                        tracing::warn!(error = %err, path = %e.path.display(), backend = e.backend.label(), "failed to remove cache entry");
-                        continue;
-                    }
-                }
-                removed += 1;
-                reclaimed = reclaimed.saturating_add(e.size_bytes);
-            }
-            if removed == 0 {
-                println!("\n  {} Nothing older than {older_than} days.\n", "✓".green().bold());
-            } else {
-                let verb = if dry_run { "would free" } else { "freed" };
-                println!("\n  {} {removed} entries, {verb} {}\n", "✓".green().bold(), fmt_size(reclaimed).bold());
-            }
-            Ok(())
-        }
-
-        CacheCommands::Clear { project } => {
-            let key = workspace_cache_key(&project).context("cannot derive cache key from empty path")?;
-            let bind_dir = root.join(&key);
-
-            let mut removed_any = false;
-            let mut total_size = 0u64;
-
-            if bind_dir.is_dir() {
-                let size = dir_size_bytes(&bind_dir);
-                std::fs::remove_dir_all(&bind_dir).with_context(|| format!("remove {}", bind_dir.display()))?;
-                println!("  {} [{:<6}] {} — {}", "✓".green().bold(), "bind".dimmed(), key.bold(), fmt_size(size).dimmed());
-                total_size = total_size.saturating_add(size);
-                removed_any = true;
-            }
-
-            match smooth_bootstrap_bill::project_cache::remove_project_cache_volume(&key).await {
-                Ok(true) => {
-                    let vol_name = smooth_bootstrap_bill::project_cache::volume_name_for_cache_key(&key);
-                    println!("  {} [{:<6}] {}", "✓".green().bold(), "volume".dimmed(), vol_name.bold());
-                    removed_any = true;
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    tracing::warn!(error = %e, key = %key, "failed to remove named-volume cache entry");
-                }
-            }
-
-            if !removed_any {
-                println!("\n  {} No cache entry for {} (key: {})\n", "ℹ".cyan(), project.bold(), key.dimmed());
-            } else if total_size > 0 {
-                println!("\n  {} freed {}\n", "total".dimmed(), fmt_size(total_size).bold());
-            } else {
-                println!();
-            }
-            Ok(())
-        }
-    }
 }
 
 async fn cmd_tunnel(cmd: TunnelCommands) -> Result<()> {

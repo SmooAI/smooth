@@ -1,4 +1,4 @@
-//! Shared helpers for `safehouse_e2e.rs` and friends.
+//! Shared helpers for the bigsmooth integration tests.
 //!
 //! Kept as a module (not a separate test file) so cargo doesn't try to
 //! run it as its own test binary.
@@ -6,67 +6,9 @@
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, BufReader};
-
-/// Spawn `bootstrap-bill` as a host subprocess, asking it to listen on an
-/// ephemeral port on all interfaces. Returns (child, host_addr).
-///
-/// Bill prints `BILL_PORT=<port>` on its stdout once the listener is
-/// bound. The caller gets back a `SocketAddr` pointed at
-/// `127.0.0.1:<that_port>` for in-process BillClient use.
-///
-/// The returned `Child` should be kept alive for the full test; drop it
-/// or call `kill` when done. We don't wrap in `Drop` here because tests
-/// usually want explicit control over teardown order.
-pub async fn spawn_bill_subprocess() -> anyhow::Result<(Child, std::net::SocketAddr)> {
-    let bill_bin = find_workspace_target("release/bootstrap-bill")
-        .ok_or_else(|| anyhow::anyhow!("bootstrap-bill binary not found. Run: cargo build --release --bin bootstrap-bill"))?;
-
-    // Bind 0.0.0.0 so the Safehouse VM can reach Bill via host.containers.internal.
-    let mut child = Command::new(&bill_bin)
-        .arg("--listen")
-        .arg("0.0.0.0:0")
-        .arg("--print-port")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("spawn bootstrap-bill: {e}"))?;
-
-    // Read stdout lines until we see BILL_PORT=<port>.
-    let stdout = child.stdout.take().ok_or_else(|| anyhow::anyhow!("bill: no stdout"))?;
-    let (port_tx, port_rx) = tokio::sync::oneshot::channel::<u16>();
-    tokio::spawn(async move {
-        let mut reader = BufReader::new(tokio::process::ChildStdout::from_std(stdout).expect("wrap stdout"));
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line).await {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    if let Some(rest) = line.trim().strip_prefix("BILL_PORT=") {
-                        if let Ok(port) = rest.parse::<u16>() {
-                            let _ = port_tx.send(port);
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    });
-
-    let port = tokio::time::timeout(Duration::from_secs(5), port_rx)
-        .await
-        .map_err(|_| anyhow::anyhow!("bill: timeout waiting for BILL_PORT= line"))?
-        .map_err(|_| anyhow::anyhow!("bill: port channel closed before port was printed"))?;
-    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().expect("valid addr");
-    Ok((child, addr))
-}
-
-/// Walk up from `CARGO_MANIFEST_DIR` looking for `target/<relative>`. Used
-/// to locate both the host `bootstrap-bill` and cross-compiled binaries.
+/// Walk up from `CARGO_MANIFEST_DIR` looking for `target/<relative>`.
 pub fn find_workspace_target(rel: &str) -> Option<PathBuf> {
     let manifest = env!("CARGO_MANIFEST_DIR");
     let mut dir = PathBuf::from(manifest);
