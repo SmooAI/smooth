@@ -1,5 +1,7 @@
 # ADR-001: Consolidate Boardroom and Operator VMs into one microsandbox VM
 
+> **Superseded by [[ADR-004-remove-microvm-sandbox-stack]]** — the microVM stack this ADR consolidated was removed entirely 2026-07 (pearl th-f4a801). Kept as a historical record.
+
 #decision
 
 **Date**: 2026-05

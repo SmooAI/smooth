@@ -3,11 +3,13 @@ status: Accepted
 date: 2026-05-18
 deciders: Brent
 supersedes: None
-superseded-by: None
+superseded-by: ADR-004
 tags: [decision, naming]
 ---
 
 # ADR-003 — Rename "The Boardroom" to "The Safehouse"
+
+> **Superseded by [[ADR-004-remove-microvm-sandbox-stack]]** — the Safehouse microVM this ADR named was removed entirely 2026-07 (pearl th-f4a801). Kept as a historical record.
 
 #decision
 

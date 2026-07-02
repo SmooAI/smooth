@@ -1,5 +1,7 @@
 # Smooth: Hardware-Isolated AI Agent Orchestration
 
+> **Historical document.** This paper describes the microVM security architecture (Safehouse, per-operator VMs, Wonk, Goalie, Bootstrap Bill) that was removed 2026-07 — see [[Decisions/ADR-004-remove-microvm-sandbox-stack]]. Smooth now runs as a host daemon with in-process Narc surveillance only. Retained as a record of the original design.
+
 ## A Security-First Architecture for Autonomous Code Agents
 
 **Version 1.0 — April 2026**
