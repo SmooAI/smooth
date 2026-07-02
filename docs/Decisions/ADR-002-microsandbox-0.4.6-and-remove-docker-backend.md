@@ -3,11 +3,13 @@ status: Accepted
 date: 2026-05-17
 deciders: Brent
 supersedes: None
-superseded-by: None
+superseded-by: ADR-004
 tags: [decision, security, runtime]
 ---
 
 # ADR-002 — Bump microsandbox to 0.4.6 and remove the Docker sandbox backend
+
+> **Superseded by [[ADR-004-remove-microvm-sandbox-stack]]** — the `microsandbox` dependency and the sandbox backends this ADR chose between were removed entirely 2026-07 (pearl th-f4a801). Kept as a historical record.
 
 #decision
 
