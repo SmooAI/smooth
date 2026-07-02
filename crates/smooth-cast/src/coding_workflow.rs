@@ -122,6 +122,16 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
     // catches most of those before we give up.
     let mut no_evidence_retries: u32 = 0;
     const MAX_NO_EVIDENCE_RETRIES: u32 = 1;
+    // Pearl th-fc8a51: THINK-mode exit on a no-edit turn used to fire
+    // on iteration 1, coupled to the shared `no_evidence_retries`
+    // budget above. cpp/bank-account (a real code task) whiffed its
+    // first turn — 0 edits — and got bailed as a chat question, even
+    // though the same task solved 17/17 on a focused rerun. Track
+    // no-edit retries on their own budget so a first-turn miss always
+    // earns a forcing re-prompt before we conclude THINK mode, and so
+    // it doesn't steal the no-test retry a later coding turn needs.
+    let mut no_edit_retries: u32 = 0;
+    const MAX_NO_EDIT_RETRIES: u32 = 1;
 
     let iter_cap = cfg.max_outer_iterations.max(1);
     let mut iteration = 0u32;
@@ -250,49 +260,48 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
                 let did_destructive_bash = conversation_did_destructive_bash(&conversation);
                 let cleanup_intent = is_cleanup_intent(&cfg.task_prompt);
                 if !made_edits && !did_destructive_bash {
-                    // Pearl `th-e93cba`: if the user asked for cleanup
-                    // / ops (delete X, prune Y, remove debris), skip
-                    // the "this is a code task, write code" reprompt
-                    // entirely. That reprompt was designed for code
-                    // benchmarks (aider-polyglot etc.) and on cleanup
-                    // tasks it triggered the agent to fabricate tests
-                    // and pivot to test-fix narrative even when the
-                    // user clearly asked for filesystem operations.
-                    if cleanup_intent {
-                        tracing::info!(
-                            iteration,
-                            "coding workflow: cleanup intent detected in user prompt, no agent actions yet — exiting cleanly without 'this is a code task' reprompt"
-                        );
-                        break;
+                    match decide_no_edit(cleanup_intent, iteration, iter_cap, no_edit_retries, MAX_NO_EDIT_RETRIES) {
+                        // Pearl `th-e93cba`: the user asked for cleanup /
+                        // ops (delete X, prune Y, remove debris). The
+                        // "this is a code task, write code" reprompt was
+                        // built for aider-polyglot-style benchmarks and on
+                        // cleanup tasks it made the agent fabricate tests
+                        // and pivot to a test-fix narrative — exit cleanly.
+                        NoEditDecision::ExitCleanup => {
+                            tracing::info!(
+                                iteration,
+                                "coding workflow: cleanup intent detected in user prompt, no agent actions yet — exiting cleanly without 'this is a code task' reprompt"
+                            );
+                            break;
+                        }
+                        // Pearl th-fc8a51: a dispatched code task whose
+                        // agent read the files and returned without coding
+                        // is a give-up, not a thinker. Force a retry with a
+                        // strong prompt before falling back to THINK mode.
+                        // cpp/bank-account hit this on bench sweep
+                        // b32wx055q: 23s, $0.0001, 0 edits, FAIL — when the
+                        // same task with the same model SOLVED 17/17 on a
+                        // focused rerun.
+                        NoEditDecision::RetryForEdits => {
+                            no_edit_retries += 1;
+                            tracing::info!(
+                                iteration,
+                                retry = no_edit_retries,
+                                "coding workflow: no edits + no tests — forcing a retry before THINK-mode exit"
+                            );
+                            last_verify_output = Some(
+                                "Your previous turn made no edits to any source file. This is a code task — you need to actually implement the solution. Read the source files (the stub plus the test file), then use edit_file or bash to write the implementation, then run the project's test command via `bash`. Do not return until you've at least attempted both.".to_string(),
+                            );
+                            continue;
+                        }
+                        NoEditDecision::ExitThink => {
+                            tracing::info!(
+                                iteration,
+                                "coding workflow: no test-run evidence AND no edits after retry — treating as THINK mode, exiting cleanly"
+                            );
+                            break;
+                        }
                     }
-                    // Pearl th-fc8a51: on the FIRST iteration with no
-                    // edits AND no test runs, retry once with a strong
-                    // forcing prompt before falling back to THINK mode.
-                    // The original "exit immediately as THINK" path was
-                    // designed for chat questions, but for dispatched
-                    // code tasks an agent that just read the
-                    // INSTRUCTIONS.md and returned without coding is a
-                    // give-up, not a thinker. cpp/bank-account hit this
-                    // on bench sweep b32wx055q: 23s, $0.0001, 0 edits,
-                    // FAIL — when the same task with the same model
-                    // SOLVED 17/17 on a focused rerun.
-                    if iteration == 1 && no_evidence_retries < MAX_NO_EVIDENCE_RETRIES {
-                        no_evidence_retries += 1;
-                        tracing::info!(
-                            iteration,
-                            retry = no_evidence_retries,
-                            "coding workflow: no edits + no tests on iter 1 — forcing one retry before THINK-mode exit"
-                        );
-                        last_verify_output = Some(
-                            "Your previous turn made no edits to any source file. This is a code task — you need to actually implement the solution. Read the source files (the stub plus the test file), then use edit_file or bash to write the implementation, then run the project's test command via `bash`. Do not return until you've at least attempted both.".to_string(),
-                        );
-                        continue;
-                    }
-                    tracing::info!(
-                        iteration,
-                        "coding workflow: no test-run evidence AND no edits — treating as THINK mode, exiting cleanly"
-                    );
-                    break;
                 }
                 // Pearl `th-e93cba`: when the agent did destructive
                 // ops via `bash` (rm -rf, find -delete, etc.) but
@@ -516,6 +525,13 @@ fn build_user_prompt_with_hint(task: &str, iteration: u32, prior_output: Option<
     // standard fix-the-failures preamble — there were no
     // failures captured because no test ever ran.
     if prior.starts_with("Your previous turn edited the code but never ran the test suite.") {
+        return format!("{prior}\n\n## Task (reminder)\n\n{task}");
+    }
+    // Pearl th-fc8a51: the no-edits forcing retry injects its own
+    // directive. Pass it through verbatim — wrapping it in the
+    // "tests failing" preamble below would be incoherent (no tests
+    // ran, nothing was edited).
+    if prior.starts_with("Your previous turn made no edits") {
         return format!("{prior}\n\n## Task (reminder)\n\n{task}");
     }
     let compile_err = detect_compile_error(prior);
@@ -934,8 +950,51 @@ fn nonzero_failure_count(upper: &str) -> bool {
 /// when the agent ACTUALLY changed code; if it just answered a
 /// question without editing, the "you didn't run tests" forcing
 /// prompt is a non-sequitur.
+/// Outcome of the "no test evidence AND no edits AND no destructive
+/// bash" branch: what should the workflow do with a turn that produced
+/// no verifiable work? Pulled out as a pure function so the
+/// mode-transition matrix (pearl th-fc8a51) is table-testable without
+/// standing up the whole async agent loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoEditDecision {
+    /// The user asked for filesystem cleanup — nothing to verify, exit clean.
+    ExitCleanup,
+    /// Real code task with an empty turn — re-prompt hard to force an attempt.
+    RetryForEdits,
+    /// Empty turn after the retry budget is spent — treat as a chat/THINK answer.
+    ExitThink,
+}
+
+/// Decide what a no-work turn means. Pearl th-fc8a51: the THINK-mode
+/// exit used to fire on iteration 1, so a real code task that whiffed
+/// its first turn (cpp/bank-account: 0 edits) was bailed as if it were
+/// a chat question. Require a forcing retry first.
+///
+/// ponytail: with `max_no_edit_retries = 1` the earliest a no-edit turn
+/// can exit as THINK is iteration 2 — iteration 1 alone never bails.
+/// Ceiling: a genuine non-code question costs `max_no_edit_retries + 1`
+/// (=2) cheap no-edit turns before we conclude THINK. Upgrade path:
+/// prompt-based code-task detection (pearl option b) to skip the retry
+/// for questions that are obviously not code tasks.
+fn decide_no_edit(cleanup_intent: bool, iteration: u32, iter_cap: u32, no_edit_retries: u32, max_no_edit_retries: u32) -> NoEditDecision {
+    if cleanup_intent {
+        return NoEditDecision::ExitCleanup;
+    }
+    if iteration < iter_cap && no_edit_retries < max_no_edit_retries {
+        return NoEditDecision::RetryForEdits;
+    }
+    NoEditDecision::ExitThink
+}
+
 fn conversation_made_edits(conv: &smooth_operator::conversation::Conversation) -> bool {
     const MUTATING_TOOLS: &[&str] = &["edit_file", "write_file", "apply_patch", "multi_edit", "str_replace", "create_file"];
+    // Pearl th-a03c53: agents also write files through `bash` — a
+    // heredoc (`cat > f <<EOF`), a `python3 -c "open(...,'w')"`, `tee`,
+    // `sed -i`, etc. Those left the affine-cipher stub grown to a full
+    // impl while `made_edits` stayed false (only named edit tools were
+    // tracked), so the workflow mislabelled a real code turn as THINK
+    // mode and exited. Count bash write-commands as edits too.
+    const BASH_TOOLS: &[&str] = &["bash", "shell", "run_command"];
     for msg in &conv.messages {
         if !matches!(msg.role, smooth_operator::conversation::Role::Assistant) {
             continue;
@@ -944,7 +1003,85 @@ fn conversation_made_edits(conv: &smooth_operator::conversation::Conversation) -
             if MUTATING_TOOLS.contains(&tc.name.as_str()) {
                 return true;
             }
+            if BASH_TOOLS.contains(&tc.name.as_str()) && bash_command_writes_files(&tc.arguments.to_string()) {
+                return true;
+            }
         }
+    }
+    false
+}
+
+/// True when a `bash` tool-call's (stringified JSON) arguments contain
+/// a command that writes to a file. Pearl th-a03c53. Deliberately
+/// conservative on the read-only side — a plain `ls` / `cat` / `grep`
+/// / `cargo test` must NOT register — but the pearl says false
+/// positives (counting a write that didn't stick) are cheaper than
+/// false negatives (the affine-cipher THINK-mode misfire), so the
+/// pattern list leans permissive.
+///
+/// ponytail: substring/redirection scan over the raw command text, no
+/// shell parse. Ceiling: a `>` inside a quoted string (`echo "a > b"`)
+/// or a heredoc that never hits disk counts as a write. Upgrade path
+/// is a real shell-word tokenizer if the false-positive rate ever
+/// matters — it doesn't here, where over-counting just keeps the loop
+/// iterating one more turn.
+#[must_use]
+fn bash_command_writes_files(args_text: &str) -> bool {
+    let t = args_text.to_lowercase();
+    // Heredoc into a redirect: `cat > file <<EOF ... EOF`.
+    if t.contains("<<") && t.contains('>') {
+        return true;
+    }
+    // `tee` copies stdin to a named file.
+    if t.contains("tee ") {
+        return true;
+    }
+    // In-place editors.
+    for p in ["sed -i", "perl -i", "perl -pi"] {
+        if t.contains(p) {
+            return true;
+        }
+    }
+    // Interpreter one-liners that open a file for writing:
+    // `python3 -c "open('f','w').write(...)"`, node/ruby equivalents.
+    if t.contains("-c ") && t.contains("open(") {
+        return true;
+    }
+    // Byte-copy / block writers.
+    if t.contains("dd ") && t.contains(" of=") {
+        return true;
+    }
+    for p in ["cp ", "mv ", "truncate ", "install -m", "rsync "] {
+        if t.contains(p) {
+            return true;
+        }
+    }
+    // Output redirection to a real path (not `2>&1`, not `>/dev/null`).
+    has_file_redirection(&t)
+}
+
+/// True when the command redirects stdout/stderr into a real file
+/// path. Skips file-descriptor dups (`2>&1`) and the null/std sinks
+/// (`>/dev/null`, `>/dev/stderr`) so read-only commands that merely
+/// silence output don't read as writes.
+fn has_file_redirection(t: &str) -> bool {
+    let bytes = t.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'>' {
+            let mut j = i + 1;
+            if j < bytes.len() && bytes[j] == b'>' {
+                j += 1; // append form `>>`
+            }
+            while j < bytes.len() && bytes[j] == b' ' {
+                j += 1;
+            }
+            let rest = &t[j..];
+            if j < bytes.len() && !rest.starts_with('&') && !rest.starts_with("/dev/") {
+                return true;
+            }
+        }
+        i += 1;
     }
     false
 }
@@ -1954,5 +2091,144 @@ FooTest > testThree PASSED";
         assert_eq!(snap, Path::new("/workspace/.smooth-best-snapshot"));
         let name = snap.file_name().and_then(|s| s.to_str()).unwrap();
         assert!(name.starts_with('.'), "must be a dotfile for pytest/jest/cargo/gradle to skip");
+    }
+
+    // ---- Pearl th-a03c53: bash-write detection ----
+
+    #[test]
+    fn bash_command_writes_files_detects_write_shapes() {
+        // These are the shapes that grew affine_cipher.py from stub to
+        // impl while `made_edits` stayed false. Every one must register.
+        let writes = [
+            "cat > affine_cipher.py <<'EOF'\ndef encode(): ...\nEOF",
+            "cat >> notes.md <<EOF\nx\nEOF",
+            "python3 -c \"open('affine_cipher.py','w').write(src)\"",
+            "python -c 'open(\"f.py\",\"w\").write(x)'",
+            "echo 'print(1)' > main.py",
+            "printf '%s' \"$body\" >> out.txt",
+            "some_cmd | tee results.py",
+            "sed -i 's/foo/bar/' lib.rs",
+            "perl -i -pe 's/a/b/' f.js",
+            "perl -pi -e 's/a/b/' f.js",
+            "dd if=/dev/zero of=blob.bin bs=1 count=10",
+            "cp template.py solution.py",
+            "mv draft.py final.py",
+            "truncate -s 0 log.txt",
+        ];
+        for w in writes {
+            assert!(bash_command_writes_files(w), "must count as a write: {w:?}");
+        }
+    }
+
+    #[test]
+    fn bash_command_writes_files_ignores_read_only_and_sinks() {
+        // Read-only exploration and output-silencing redirections must
+        // NOT register — otherwise THINK detection would break, every
+        // `cmd 2>&1` chat answer looking like an edit.
+        let reads = [
+            "ls -la",
+            "cat affine_cipher.py",
+            "grep -rn encode .",
+            "cargo test",
+            "pytest -q",
+            "python3 -c \"import affine_cipher; print(affine_cipher.encode('x'))\"",
+            "pnpm test 2>&1",
+            "cargo build > /dev/null 2>&1",
+            "make test >/dev/null",
+            "find . -name '*.py'",
+        ];
+        for r in reads {
+            assert!(!bash_command_writes_files(r), "must NOT count as a write: {r:?}");
+        }
+    }
+
+    #[test]
+    fn has_file_redirection_skips_fd_dups_and_dev_null() {
+        assert!(has_file_redirection("echo hi > out.txt"));
+        assert!(has_file_redirection("echo hi >> out.txt"));
+        assert!(!has_file_redirection("cmd 2>&1"));
+        assert!(!has_file_redirection("cmd > /dev/null 2>&1"));
+        assert!(!has_file_redirection("cmd >/dev/stderr"));
+        assert!(!has_file_redirection("plain command with no redirect"));
+    }
+
+    #[test]
+    fn conversation_made_edits_detects_bash_heredoc_write_th_a03c53() {
+        // The affine-cipher case: the agent wrote the impl via a bash
+        // heredoc, not a named edit tool. Must register as an edit so
+        // the workflow doesn't mislabel the turn as THINK mode.
+        let mut conv = make_conv();
+        conv.push(smooth_operator::conversation::Message::user("implement affine cipher"));
+        conv.push(assistant_with_bash("cat > affine_cipher.py <<'EOF'\ndef encode(): pass\nEOF"));
+        assert!(conversation_made_edits(&conv));
+    }
+
+    #[test]
+    fn conversation_made_edits_detects_bash_python_c_write_th_a03c53() {
+        let mut conv = make_conv();
+        conv.push(smooth_operator::conversation::Message::user("write the file"));
+        conv.push(assistant_with_bash("python3 -c \"open('solution.py','w').write(impl)\""));
+        assert!(conversation_made_edits(&conv));
+    }
+
+    #[test]
+    fn conversation_made_edits_read_only_bash_is_not_an_edit_th_a03c53() {
+        // Regression guard: read-only bash exploration must stay a
+        // non-edit so pure THINK questions still exit cleanly.
+        let mut conv = make_conv();
+        conv.push(smooth_operator::conversation::Message::user("how would you add a movie"));
+        for cmd in ["ls -la", "cat README.md", "grep -rn foo .", "cargo test 2>&1"] {
+            conv.push(assistant_with_bash(cmd));
+        }
+        assert!(!conversation_made_edits(&conv));
+    }
+
+    // ---- Pearl th-fc8a51: no-edit → THINK-mode transition matrix ----
+
+    #[test]
+    fn decide_no_edit_matrix() {
+        const MAX: u32 = 1;
+        // (cleanup, iteration, iter_cap, retries, expected)
+        let cases = [
+            // Cleanup intent short-circuits regardless of iteration/retries.
+            (true, 1, 5, 0, NoEditDecision::ExitCleanup),
+            (true, 3, 5, 1, NoEditDecision::ExitCleanup),
+            // th-fc8a51 core fix: iteration 1 with no edits must retry,
+            // NOT bail as THINK.
+            (false, 1, 5, 0, NoEditDecision::RetryForEdits),
+            // After the retry is spent, exit as THINK.
+            (false, 2, 5, 1, NoEditDecision::ExitThink),
+            // Retry budget available on a later iteration still retries.
+            (false, 2, 5, 0, NoEditDecision::RetryForEdits),
+            // Last iteration: no point retrying (loop ends anyway) → THINK.
+            (false, 5, 5, 0, NoEditDecision::ExitThink),
+        ];
+        for (cleanup, iter, cap, retries, expected) in cases {
+            assert_eq!(
+                decide_no_edit(cleanup, iter, cap, retries, MAX),
+                expected,
+                "decide_no_edit(cleanup={cleanup}, iter={iter}, cap={cap}, retries={retries})"
+            );
+        }
+    }
+
+    #[test]
+    fn decide_no_edit_never_bails_on_iteration_1_th_fc8a51() {
+        // The regression the pearl names: a real code task (cpp/bank-account)
+        // must never exit as THINK on its first no-edit turn.
+        assert_ne!(decide_no_edit(false, 1, 5, 0, 1), NoEditDecision::ExitThink);
+    }
+
+    #[test]
+    fn build_user_prompt_passes_no_edits_forcing_prompt_verbatim_th_fc8a51() {
+        // The no-edits retry directive must NOT be wrapped in the
+        // "tests failing" preamble — no tests ran, nothing was edited.
+        let prior = "Your previous turn made no edits to any source file. This is a code task — you need to actually implement the solution.";
+        let out = build_user_prompt("Implement the bank account.", 2, Some(prior));
+        assert!(out.contains("made no edits to any source file"), "forcing directive must survive");
+        assert!(out.contains("## Task (reminder)"));
+        assert!(out.contains("Implement the bank account."));
+        assert!(!out.contains("left some tests failing"), "must not wrap in the fail-recovery preamble");
+        assert!(!out.contains("Previous test output"), "must not wrap in the fail-recovery preamble");
     }
 }
