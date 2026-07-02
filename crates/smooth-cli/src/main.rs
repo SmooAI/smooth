@@ -1054,6 +1054,14 @@ enum PearlCommands {
     /// and reports whether the noms manifest reads cleanly. If it
     /// doesn't, `--auto-repair` snapshots the broken dir and re-clones
     /// from the configured `origin` remote.
+    ///
+    /// Then checks REMOTE SYNC health: clones the remote `refs/dolt/data`
+    /// to a temp dir (bounded by SMOOTH_DOLT_SYNC_TIMEOUT_SECS, 30s
+    /// default) and compares histories — in-sync / local-ahead (push) /
+    /// remote-ahead (pull) / diverged with no common ancestor (incl. the
+    /// stray "Initialize data repository" re-init that deadlocks push AND
+    /// pull), plus whether the branch upstream is configured. Read-only:
+    /// it recommends the fix, it never force-pushes.
     Doctor {
         /// Snapshot the broken dir and re-clone from `origin` if a
         /// corrupt manifest is found. Without this flag, `doctor` just
@@ -5635,6 +5643,7 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
 
             let mut any_corrupt = false;
             let mut any_failed_repair = false;
+            let mut healthy_dbs: Vec<std::path::PathBuf> = Vec::new();
             for db_dir in &db_dirs {
                 let name = db_dir.file_name().and_then(|n| n.to_str()).unwrap_or("?");
                 println!("probing db: {} at {}", name, db_dir.display());
@@ -5643,6 +5652,7 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
                 match diagnosis {
                     DoctorDiagnosis::Healthy => {
                         println!("  ✓ healthy");
+                        healthy_dbs.push(db_dir.clone());
                     }
                     DoctorDiagnosis::NotInitialized { detail } => {
                         println!("  ✗ not a valid dolt dir: {detail}");
@@ -5673,7 +5683,10 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
                             }
                         }
                         match smooth_pearls::SmoothDolt::diagnose(db_dir) {
-                            DoctorDiagnosis::Healthy => println!("  ✓ post-repair probe healthy"),
+                            DoctorDiagnosis::Healthy => {
+                                println!("  ✓ post-repair probe healthy");
+                                healthy_dbs.push(db_dir.clone());
+                            }
                             other => {
                                 println!("  ✗ post-repair probe still unhealthy: {other:?}");
                                 println!("    Try a different candidate by hand: copy a line from manifest.with-conflicts-<ts>");
@@ -5729,7 +5742,10 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
 
                         // Re-probe
                         match smooth_pearls::SmoothDolt::diagnose(db_dir) {
-                            DoctorDiagnosis::Healthy => println!("  ✓ post-repair probe healthy"),
+                            DoctorDiagnosis::Healthy => {
+                                println!("  ✓ post-repair probe healthy");
+                                healthy_dbs.push(db_dir.clone());
+                            }
                             other => {
                                 println!("  ✗ post-repair probe still unhealthy: {other:?}");
                                 any_failed_repair = true;
@@ -5739,6 +5755,11 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
                 }
             }
 
+            // REMOTE SYNC — the 2026-07-02 incident class: local store
+            // perfectly healthy, but push/pull dead (unset upstream,
+            // stray remote re-init, remote-ahead, …). Diagnose-only.
+            let any_diverged = doctor_remote_sync(&healthy_dbs);
+
             if any_corrupt && !auto_repair {
                 anyhow::bail!(
                     "one or more dbs are corrupt. Re-run with `--auto-repair` to snapshot + re-clone\n\
@@ -5747,6 +5768,12 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             }
             if any_failed_repair {
                 anyhow::bail!("some repairs failed — see output above");
+            }
+            if any_diverged {
+                anyhow::bail!(
+                    "local and remote pearl histories have diverged — push AND pull are deadlocked.\n\
+                     See the remote sync section above for the recommended fix."
+                );
             }
         }
     }
@@ -5758,6 +5785,192 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
 fn find_dolt_dir() -> Result<std::path::PathBuf> {
     let cwd = std::env::current_dir()?;
     smooth_pearls::dolt::find_repo_dolt_dir(&cwd).ok_or_else(|| anyhow::anyhow!("no .smooth/dolt/ found. Run: th pearls init"))
+}
+
+/// `th pearls doctor` — REMOTE SYNC section. Read-only diagnosis of the
+/// local↔remote `refs/dolt/data` relationship: temp-clones the remote
+/// (bounded, see [`smooth_pearls::dolt::clone_from_bounded`]), compares
+/// bounded logs via [`smooth_pearls::dolt::classify_remote_sync`], and
+/// reports whether the branch upstream is configured (an unset upstream
+/// makes a bare push fail with `remote '' not found`).
+///
+/// Returns whether any db is diverged (no common ancestor with the
+/// remote) — the push/pull-deadlock class the doctor previously missed
+/// (2026-07-02 incident: remote stray-re-initialized with a single bare
+/// "Initialize data repository" commit while the local store held 2547
+/// commits; push refused as diverged, pull refused by the data-loss
+/// guard, and doctor said nothing).
+fn doctor_remote_sync(healthy_dbs: &[std::path::PathBuf]) -> bool {
+    use smooth_pearls::dolt::{classify_remote_sync, clone_from_bounded, RemoteSyncStatus};
+
+    println!();
+    println!("remote sync:");
+    if healthy_dbs.is_empty() {
+        println!("  - skipped (no healthy local db to compare against)");
+        return false;
+    }
+    // Probe the primary `pearls` db for remote config — every db under
+    // one root shares the same git remote (refs/dolt/data).
+    let probe = healthy_dbs
+        .iter()
+        .find(|d| d.file_name().and_then(|n| n.to_str()) == Some("pearls"))
+        .unwrap_or(&healthy_dbs[0]);
+
+    let remotes = match smooth_pearls::SmoothDolt::new_cli_only(probe).and_then(|d| d.remote_list()) {
+        Ok(out) => out,
+        Err(e) => {
+            println!("  ✗ couldn't list remotes: {e:#}");
+            return false;
+        }
+    };
+    // smooth-dolt prints one `name<TAB>url` per line; prefer `origin`.
+    let remote = remotes
+        .lines()
+        .filter_map(|l| {
+            let mut parts = l.split_whitespace();
+            Some((parts.next()?, parts.next()?))
+        })
+        .max_by_key(|(name, _)| *name == "origin");
+    let Some((remote_name, remote_url)) = remote else {
+        println!("  - no remote configured — nothing to sync with (add one: th pearls remote add origin <url>)");
+        return false;
+    };
+    println!("  remote: {remote_name} {remote_url}");
+
+    // Upstream check — cheap repo_state.json read. Plain `th pearls
+    // push` auto-repairs a missing upstream via its `-u` retry (PR #123),
+    // so this is informational.
+    match pearl_upstream_remote(probe) {
+        Some(up) => println!("  ✓ branch upstream configured ({up})"),
+        None => {
+            println!("  ! branch upstream not set — a bare dolt push fails with `remote '' not found`.");
+            println!("    Plain `th pearls push` auto-repairs this (retries with -u).");
+        }
+    }
+
+    // Bounded temp clone of the remote's refs/dolt/data.
+    let tmp = match tempfile::TempDir::new() {
+        Ok(t) => t,
+        Err(e) => {
+            println!("  ✗ couldn't create temp dir for remote clone: {e}");
+            return false;
+        }
+    };
+    let clone_root = tmp.path().join("remote");
+    if let Err(e) = clone_from_bounded(remote_url, &clone_root) {
+        println!("  ✗ remote unreachable — clone of {remote_url} failed: {e:#}");
+        return false;
+    }
+
+    // Compare histories per db. `log` is bounded, so the classification
+    // is a heuristic over the last 500 commits on each side.
+    let bounded_log = |dir: &std::path::Path| -> Result<Vec<String>> {
+        let entries = smooth_pearls::SmoothDolt::new_cli_only(dir)?.log(500)?;
+        Ok(entries.into_iter().map(|(line, ..)| line).collect())
+    };
+    let mut any_diverged = false;
+    for db_dir in healthy_dbs {
+        let name = db_dir.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+        let remote_db = clone_root.join(name);
+        if !remote_db.join(".dolt").is_dir() {
+            println!("  ! {name}: remote has no `{name}` db — never pushed? run: th pearls push");
+            continue;
+        }
+        let (local, remote) = match (bounded_log(db_dir), bounded_log(&remote_db)) {
+            (Ok(l), Ok(r)) => (l, r),
+            (Err(e), _) => {
+                println!("  ✗ {name}: couldn't read local log: {e:#}");
+                continue;
+            }
+            (_, Err(e)) => {
+                println!("  ✗ {name}: couldn't read remote log: {e:#}");
+                continue;
+            }
+        };
+        match classify_remote_sync(&local, &remote) {
+            RemoteSyncStatus::InSync => println!("  ✓ {name}: in sync with remote"),
+            RemoteSyncStatus::LocalAhead => {
+                println!("  → {name}: local is ahead of the remote (remote tip found in local history within the last 500 commits) — run: th pearls push");
+            }
+            RemoteSyncStatus::RemoteAhead => {
+                println!("  ← {name}: remote is ahead of local (local tip found in remote history within the last 500 commits) — run: th pearls pull");
+            }
+            RemoteSyncStatus::DivergedBareInit => {
+                any_diverged = true;
+                println!("  ✗ {name}: DIVERGED — the remote refs/dolt/data has exactly ONE commit (\"Initialize data repository\")");
+                println!(
+                    "    sharing no ancestor with the {} local commits. This is a stray re-init of the remote ref:",
+                    local.len()
+                );
+                println!("    push is refused (diverged) and pull is refused (data-loss guard).");
+                println!("    `th pearls push --force` would overwrite ONLY that bare init commit — recommended.");
+            }
+            RemoteSyncStatus::Diverged => {
+                any_diverged = true;
+                println!("  ✗ {name}: DIVERGED — no common ancestor with the remote within the last 500 commits,");
+                println!("    and the remote has real commits. Inspect before any force:");
+                println!("    smooth-dolt clone {remote_url} /tmp/check && smooth-dolt log /tmp/check/{name}");
+            }
+            RemoteSyncStatus::EmptyRemote => println!("  ! {name}: remote history is empty — run: th pearls push"),
+            RemoteSyncStatus::EmptyLocal => println!("  ! {name}: local history is empty — run: th pearls pull"),
+        }
+    }
+    any_diverged
+}
+
+/// Cheap upstream detection for the doctor: dolt records the branch
+/// upstream in `.dolt/repo_state.json` under `branches.<name>.remote`.
+/// `None` when the file/field is missing or the remote is empty —
+/// exactly the state that makes a bare `CALL DOLT_PUSH()` resolve the
+/// remote name to `''`.
+fn pearl_upstream_remote(db_dir: &std::path::Path) -> Option<String> {
+    let raw = std::fs::read_to_string(db_dir.join(".dolt").join("repo_state.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    v.get("branches")?.as_object()?.iter().find_map(|(branch, b)| {
+        let remote = b.get("remote")?.as_str()?;
+        if remote.is_empty() {
+            None
+        } else {
+            Some(format!("{branch} → {remote}"))
+        }
+    })
+}
+
+#[cfg(test)]
+mod pearl_upstream_remote_tests {
+    use super::pearl_upstream_remote;
+
+    fn write_repo_state(json: &str) -> tempfile::TempDir {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dolt = tmp.path().join(".dolt");
+        std::fs::create_dir_all(&dolt).unwrap();
+        std::fs::write(dolt.join("repo_state.json"), json).unwrap();
+        tmp
+    }
+
+    #[test]
+    fn detects_configured_upstream() {
+        let tmp = write_repo_state(r#"{"head":"refs/heads/main","branches":{"main":{"head":"refs/heads/main","remote":"origin"}}}"#);
+        assert_eq!(pearl_upstream_remote(tmp.path()), Some("main → origin".to_string()));
+    }
+
+    #[test]
+    fn missing_branches_key_is_none() {
+        let tmp = write_repo_state(r#"{"head":"refs/heads/main","remotes":{}}"#);
+        assert_eq!(pearl_upstream_remote(tmp.path()), None);
+    }
+
+    #[test]
+    fn empty_remote_is_none() {
+        let tmp = write_repo_state(r#"{"branches":{"main":{"head":"refs/heads/main","remote":""}}}"#);
+        assert_eq!(pearl_upstream_remote(tmp.path()), None);
+    }
+
+    #[test]
+    fn missing_file_is_none() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert_eq!(pearl_upstream_remote(tmp.path()), None);
+    }
 }
 
 /// `th pearls init` — set up a pearl board in the cwd repo.
