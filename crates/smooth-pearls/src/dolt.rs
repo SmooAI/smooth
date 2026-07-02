@@ -50,6 +50,24 @@ fn parse_sync_timeout(raw: &str) -> Option<Duration> {
     }
 }
 
+/// Escape a string for splicing into a single-quoted SQL string literal
+/// sent to `smooth-dolt exec`/`sql` (no prepared statements on this path).
+///
+/// Dolt speaks MySQL dialect, where **backslash is an escape character
+/// inside string literals** — doubling quotes alone is broken: input
+/// containing `\'` became `\''`, the backslash ate the first quote, and
+/// the rest of the value was parsed as SQL (syntax error at best,
+/// injection at worst; pearl th-944230). Order matters: backslashes
+/// first, then quotes, then NUL bytes (which MySQL rejects raw).
+///
+/// This is the ONE escaping function for the workspace — every
+/// SQL-string-building site (pearls, memories, messages, agents,
+/// bigsmooth sessions) must route through it.
+#[must_use]
+pub fn sql_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\'', "''").replace('\0', "\\0")
+}
+
 /// Flags for [`SmoothDolt::push_with`].
 ///
 /// `set_upstream` translates to Dolt's `-u` flag and is needed on the
@@ -1781,6 +1799,79 @@ mod auto_heal_tests {
         let dir = tmp.path();
         Command::new("git").arg("-C").arg(dir).args(["init", "-q"]).output().unwrap();
         assert!(read_git_origin_url(dir).is_err());
+    }
+}
+
+#[cfg(test)]
+mod sql_escape_tests {
+    use super::sql_escape;
+
+    #[test]
+    fn empty_string_unchanged() {
+        assert_eq!(sql_escape(""), "");
+    }
+
+    #[test]
+    fn plain_text_unchanged() {
+        assert_eq!(sql_escape("hello world"), "hello world");
+    }
+
+    #[test]
+    fn single_quote_doubled() {
+        assert_eq!(sql_escape("it's"), "it''s");
+        assert_eq!(sql_escape("''"), "''''");
+    }
+
+    #[test]
+    fn backslash_doubled() {
+        assert_eq!(sql_escape(r"a\b"), r"a\\b");
+    }
+
+    #[test]
+    fn backslash_quote_the_th_944230_case() {
+        // `\'` must become `\\''` — backslash escaped BEFORE the quote is
+        // doubled, so the backslash can't eat the quote.
+        assert_eq!(sql_escape(r"text with \' inside"), r"text with \\'' inside");
+    }
+
+    #[test]
+    fn lone_trailing_backslash() {
+        // `abc\` unescaped would eat the literal's closing quote.
+        assert_eq!(sql_escape(r"abc\"), r"abc\\");
+    }
+
+    #[test]
+    fn doubled_backslashes() {
+        assert_eq!(sql_escape(r"a\\b"), r"a\\\\b");
+    }
+
+    #[test]
+    fn nul_byte_escaped() {
+        assert_eq!(sql_escape("a\0b"), r"a\0b");
+    }
+
+    #[test]
+    fn classic_injection_payload_neutralized() {
+        let escaped = sql_escape("'; DROP TABLE pearls; --");
+        // No lone quote survives: the only quotes are the doubled pair.
+        assert_eq!(escaped, "''; DROP TABLE pearls; --");
+        assert!(!escaped.contains('\\'));
+    }
+
+    #[test]
+    fn quote_backslash_injection_neutralized() {
+        // The bypass the old quotes-only escape allowed.
+        assert_eq!(sql_escape(r"\'; DROP TABLE pearls; --"), r"\\''; DROP TABLE pearls; --");
+    }
+
+    #[test]
+    fn semicolons_and_newlines_pass_through() {
+        assert_eq!(sql_escape("a;b\nc\r\nd"), "a;b\nc\r\nd");
+    }
+
+    #[test]
+    fn unicode_pass_through() {
+        assert_eq!(sql_escape("héllo 世界 🦀"), "héllo 世界 🦀");
     }
 }
 

@@ -20,7 +20,7 @@ pub mod tools;
 pub mod types;
 
 pub use agents::{Agent, AgentRegistry};
-pub use dolt::{PushOpts, SmoothDolt};
+pub use dolt::{sql_escape, PushOpts, SmoothDolt};
 pub use dolt_server::{SmoothDoltClient, SmoothDoltServer};
 pub use memory::{Memory, MemoryStore};
 pub use memory_tools::register_memory_tools;

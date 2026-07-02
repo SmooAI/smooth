@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::dolt::SmoothDolt;
+use crate::dolt::{sql_escape, SmoothDolt};
 
 /// Recipient name used for broadcast messages.
 pub const BROADCAST: &str = "all";
@@ -92,10 +92,6 @@ fn parse_msg(row: &Value) -> Message {
         created_at: parse_dt(&row["created_at"]),
         read_at: parse_opt_dt(&row["read_at"]),
     }
-}
-
-fn sql_escape(s: &str) -> String {
-    s.replace('\'', "''")
 }
 
 const COLS: &str = "id, from_agent, to_agent, body, thread_id, created_at, read_at";
