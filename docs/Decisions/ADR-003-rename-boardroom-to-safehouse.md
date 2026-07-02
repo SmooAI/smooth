@@ -78,5 +78,4 @@ Pure text substitution. If a future ADR wants to back out, sed -i 's/safehouse/b
 - [[ADR-002-microsandbox-0.4.6-and-remove-docker-backend]] — the version bump that landed alongside the consolidation cleanup
 - [[../Architecture/Architecture-Overview]]
 - [[../Architecture/The-Cast]]
-- [[../Architecture/Sandboxed-Mode]]
-- [[../Architecture/Transport]]
+- [[ADR-004-remove-microvm-sandbox-stack]] — the July 2026 teardown that removed the microVM/Sandboxed-Mode/Transport architecture pages (archived in git history)

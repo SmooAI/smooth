@@ -12,7 +12,7 @@ cssclasses:
 #moc
 
 > [!arch] About Smooth
-> A single Rust binary (`th`) that runs an AI agent stack on your machine. Boots as a host daemon, dispatches operatives as subprocesses under Narc surveillance, and writes through a deterministic tool surface. No Docker. No VMs. No cloud.
+> A single Rust binary (`th`) that runs an AI agent stack on your machine. `th up` starts Big Smooth — an orchestrator + API on the host — which dispatches operatives to do real work, with Narc surveillance on the tool surface. No Docker. No nested virtualization. No cloud.
 
 Smooth is part of the [Smoo AI](https://smoo.ai) platform — AI built into every product. This vault is the canonical source of truth for Smooth's architecture, operations, and decisions. Start with [[Start-Here/What-Is-Smooth]], then follow the map below.
 
@@ -21,21 +21,22 @@ Smooth is part of the [Smoo AI](https://smoo.ai) platform — AI built into ever
 ## The picture
 
 ```
-                       th up
-                         │
-             ┌───────────▼────────────┐
-             │      host daemon       │
-             │                        │
-             │  Big Smooth (API, WS,  │
-             │  web UI, dispatch)     │
-             │      │ exec            │
-             │      ▼                 │
-             │  smooth-operative      │
-             │  subprocess + Narc     │
-             └────────────────────────┘
+                        th up
+                          │
+                          ▼
+        ┌─────────────────────────────────────┐
+        │  Big Smooth  (host process, :4400)   │
+        │  API · pearl store · dispatch        │
+        └──────────────────┬──────────────────┘
+                           │ spawn subprocess per task
+                           ▼
+        ┌─────────────────────────────────────┐
+        │  smooth-operative  (agent loop)      │
+        │  tools + Narc surveillance           │
+        └─────────────────────────────────────┘
 ```
 
-One host process, operatives as subprocesses, Narc surveillance in-process. The microVM sandboxed mode was removed 2026-07 — see [[Decisions/ADR-004-remove-microvm-sandbox-stack]] for what was lost and why.
+One process, one operative per task. The microVM sandbox stack was removed in July 2026 (pearl `th-f4a801`; see [[Decisions/ADR-004-remove-microvm-sandbox-stack]] for what was lost and why); the [[Architecture/Daemon-Direction|daemon direction]] is where the always-on personal-agent story continues.
 
 ---
 
@@ -44,7 +45,7 @@ One host process, operatives as subprocesses, Narc surveillance in-process. The 
 | Page                                              | Description                                                 |
 | ------------------------------------------------- | ----------------------------------------------------------- |
 | [[Start-Here/What-Is-Smooth]]                     | One-pager. What `th up` boots, what gets dispatched, the why |
-| [[Start-Here/Glossary]]                           | Cast roles, terms                                           |
+| [[Start-Here/Glossary]]                           | Cast roles, work model, terms                               |
 | [[Operations/Running-Locally]]                    | `th up`, `th down`, `th code`                               |
 
 ---
@@ -54,14 +55,14 @@ One host process, operatives as subprocesses, Narc surveillance in-process. The 
 | Page                                              | Description                                                  |
 | ------------------------------------------------- | ------------------------------------------------------------ |
 | [[Architecture/Architecture-Overview]]            | Top-level diagram + control flow                             |
-| [[Architecture/The-Cast]]                         | Big Smooth, Narc, Scribe, Archivist, Diver, Groove (Wonk/Goalie removed — historical) |
-| [[Architecture/Sandboxed-Mode]]                   | Historical — the removed microVM mode                        |
-| [[Architecture/Direct-Mode]]                      | How Smooth runs now (formerly the escape hatch)              |
-| [[Architecture/Transport]]                        | gRPC over UDS, in-process Arc, HTTP at the edge — the wire story |
-| [[Architecture/Dispatch]]                         | How a task flows from `th up` chat to an operator and back  |
-| [[Architecture/Operatives]]                        | The agent runtime, the operative binary, tool surface  |
+| [[Architecture/The-Cast]]                         | Big Smooth, Operative, Engine, Narc, Scribe, Archivist, Diver |
+| [[Architecture/Dispatch]]                         | How a task flows from chat to an operative and back          |
+| [[Architecture/Operatives]]                       | The agent runtime, the operative binary, tool surface        |
+| [[Architecture/Security-Model]]                   | Narc surveillance today; auto-mode + kernel sandbox planned  |
 | [[Architecture/Pearls]]                           | The work-item tracker (Dolt-backed)                          |
-| [[Architecture/Data-Storage]]                     | Dolt, smooth-dolt, named volumes, sessions, audit            |
+| [[Architecture/Data-Storage]]                     | Dolt, smooth-dolt, sessions, audit                           |
+| [[Architecture/Extension-System]]                 | SEP — the planned extension protocol                         |
+| [[Architecture/Daemon-Direction]]                 | Where Big Smooth is headed (epic `th-c89c2a`)                |
 
 ---
 
@@ -85,13 +86,13 @@ One host process, operatives as subprocesses, Narc surveillance in-process. The 
 
 ## Decisions
 
-- [[Decisions/ADR-Index]] — Architecture Decision Records
+- [[Decisions/ADR-Index]] — Architecture Decision Records. Note: ADR-001/002/003 record the microVM consolidation, superseded by the July 2026 teardown (`th-f4a801`, [[Decisions/ADR-004-remove-microvm-sandbox-stack]]) — kept as history.
 
 ---
 
 ## Conventions
 
-- Cast roles are linked by canonical name: [[Architecture/The-Cast#Big-Smooth|Big Smooth]], [[Architecture/The-Cast#Narc|Narc]], [[Architecture/The-Cast#Scribe|Scribe]], [[Architecture/The-Cast#Archivist|Archivist]], [[Architecture/The-Cast#Diver|Diver]], [[Architecture/The-Cast#Groove|Groove]].
+- Cast roles are linked by canonical name: [[Architecture/The-Cast#Big-Smooth|Big Smooth]], [[Architecture/The-Cast#Narc|Narc]], [[Architecture/The-Cast#Scribe|Scribe]], [[Architecture/The-Cast#Archivist|Archivist]], [[Architecture/The-Cast#Diver|Diver]].
 - ASCII diagrams over Mermaid (renders identically in Obsidian, GitHub, and editor preview).
 - Each page opens with a tagline + a `[!arch]` or `[!info]` callout. Bullets over paragraphs.
 

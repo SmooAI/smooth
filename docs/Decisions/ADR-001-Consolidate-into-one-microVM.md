@@ -110,6 +110,5 @@ Out of scope. microsandbox already gives us a fast Rust-native SDK; replacing th
 ## Related
 
 - [[ADR-Index]]
-- [[../Architecture/Sandboxed-Mode]]
-- [[../Architecture/Direct-Mode]]
+- [[ADR-004-remove-microvm-sandbox-stack]] — the July 2026 teardown that removed the microVM/Sandboxed-Mode/Direct-Mode architecture pages (archived in git history)
 - [[../Architecture/The-Cast]]
