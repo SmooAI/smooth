@@ -1,5 +1,7 @@
 # Architecture Overview
 
+> **microVM stack removed 2026-07 (pearl th-f4a801).** Sections and linked pages describing per-task microsandbox VMs, the Wonk/Goalie access-control cast, Bill (host broker), or "Big Smooth is READ-ONLY inside The Safehouse VM" are historical. The runtime today: Big Smooth runs on the host and execs the operative in-process with Narc tool surveillance. See git history for the deleted VM path.
+
 #moc #architecture
 
 > [!arch] One VM, one cast, two modes

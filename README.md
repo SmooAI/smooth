@@ -19,7 +19,18 @@
 
 ---
 
-> Smooth is the central CLI and orchestration platform for Smoo AI. It dispatches teams of AI agents — Smooth operatives — to work on real projects inside hardware-isolated microVMs, with adversarial surveillance and policy-gated access control. No Docker. No Node.js. No runtime dependencies. One 10MB binary.
+> Smooth is the central CLI and orchestration platform for Smoo AI. It dispatches teams of AI agents — Smooth operatives — to work on real projects, with adversarial tool surveillance. No Docker. No Node.js. No runtime dependencies. One 10MB binary.
+
+> **⚠️ Architecture note (2026-07):** the microVM sandbox stack described in
+> parts of this README was removed (pearl `th-f4a801`). Big Smooth used to run
+> each operative inside a per-task [Microsandbox](https://github.com/microsandbox/microsandbox)
+> microVM fronted by a Wonk/Goalie access-control cast. Dispatch now runs the
+> operative as a host subprocess, in-process, with **Narc** tool surveillance
+> still applied — but without VM isolation or network/filesystem policy
+> enforcement. The forward path is the smooth-daemon epic (`th-c89c2a`); the
+> auto-mode permission model (`th-515a13`) will rebuild enforcement on
+> `smooth-policy`. Sections below that still describe the microVM cast are
+> retained as historical context; git history has the deleted implementation.
 
 ---
 
@@ -36,7 +47,7 @@ th --version
 
 That taps [SmooAI/homebrew-tools](https://github.com/SmooAI/homebrew-tools) and installs the `th` binary on first use; `brew upgrade th` picks up future releases automatically. Every `vX.Y.Z` release bumps the formula's `version` + `sha256` in the tap, so `brew` always tracks the latest published build.
 
-Platforms: Apple Silicon macOS, Linux x86_64, Linux arm64. Windows support is in flight (pearl `th-a165b4` — needs Cargo feature gating so the binary excludes microsandbox + the TUI on Windows; in the meantime, install via WSL).
+Platforms: Apple Silicon macOS, Linux x86_64, Linux arm64. Windows support is in flight (pearl `th-a165b4` — needs Cargo feature gating so the binary excludes the TUI on Windows; in the meantime, install via WSL).
 
 ### `curl | sh`
 
@@ -58,7 +69,7 @@ cargo install --path crates/smooth-cli
 # Authenticate with Smoo AI's gateway (resolves every smooth-* slot)
 th model login smooai-gateway
 
-# Start Smooth — default boots inside a microsandbox microVM
+# Start Smooth (Big Smooth on the host; dispatch runs in-process)
 th up
 
 # Open the interactive coding assistant
@@ -70,26 +81,20 @@ below for the full list.
 
 No Docker. No Node.js. No runtime dependencies. One 10MB binary.
 
-### Two modes, one cast
+### How it runs
 
-Smooth has exactly two ways to run, and they share the same agents,
-tools, and surveillance — the only thing that differs is the blast
-radius:
+`th up` starts **Big Smooth** on the host (API + web UI on `:4400`).
+Dispatched tasks run the `smooth-operative` worker as a host subprocess,
+in-process against your working directory, with **Narc** tool
+surveillance applied on every tool call.
 
-| Command | What it does | When to use it |
-|---|---|---|
-| `th up` (default) | Boots the entire cast inside a hardware-isolated [Microsandbox](https://github.com/microsandbox/microsandbox) microVM (libkrun on Linux, HVF on macOS). `:4400` forwards out for the TUI / web UI. | Your laptop, anywhere the host can run microsandbox. |
-| `th up direct` | Runs the same cast as host processes with no sandbox in front. | CI runners, dedicated devboxes, nested-virt VMs — environments that are *already* sandboxed. |
-
-Docker is never the sandbox runtime. The `docker` CLI is still bundled
-*inside* the microVM so the agent can reach a host Docker / OrbStack /
-Colima / Rancher / Podman daemon for nested-virt-free workloads, but
-Smooth itself runs on microsandbox or directly on the host — nothing
-else.
-
-See [ADR-001](docs/Decisions/ADR-001-Consolidate-into-one-microVM.md)
-for the consolidation rationale and [ADR-002](docs/Decisions/ADR-002-microsandbox-0.4.6-and-remove-docker-backend.md)
-for the most recent microsandbox bump + Docker-backend removal.
+> The microVM sandbox mode (`th up` booting inside a hardware-isolated
+> [Microsandbox](https://github.com/microsandbox/microsandbox) VM, with a
+> Wonk/Goalie access-control cast) was removed 2026-07 (pearl `th-f4a801`).
+> Git history has it; the smooth-daemon epic (`th-c89c2a`) is the forward
+> path. See [ADR-001](docs/Decisions/ADR-001-Consolidate-into-one-microVM.md)
+> and [ADR-002](docs/Decisions/ADR-002-microsandbox-0.4.6-and-remove-docker-backend.md)
+> for the (now-historical) microVM rationale.
 
 ---
 
@@ -97,7 +102,7 @@ for the most recent microsandbox bump + Docker-backend removal.
 
 Smooth is the central CLI and orchestration platform for [Smoo AI](https://smoo.ai). It does two things:
 
-1. **Agent Orchestration** — Dispatch Smooth operatives (sandboxed AI agents) to work on real projects inside hardware-isolated Microsandbox microVMs, with adversarial surveillance and policy-gated access control.
+1. **Agent Orchestration** — Dispatch Smooth operatives (AI agents) to work on real projects, with adversarial tool surveillance (Narc). (The microVM isolation + policy-gated access control was removed 2026-07, pearl `th-f4a801`; see the note at the top.)
 
 2. **Smoo AI Platform CLI** — Manage config schemas, interact with the Smoo AI API, sync with Jira, and control your infrastructure from one command.
 
@@ -183,6 +188,13 @@ per-project, git-syncable).
 ---
 
 ## Architecture
+
+> **Historical (pre-2026-07).** The diagram and "The Cast / Inside each
+> MicroVM / Security Model" subsections below describe the microVM
+> architecture that was removed in pearl `th-f4a801`. They're kept as a
+> record of the design; the current runtime is Big Smooth on the host
+> exec'ing the operative in-process with Narc surveillance (no VM, no
+> Wonk/Goalie). See the note at the top of this README.
 
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{
@@ -468,35 +480,31 @@ Global config lives at `~/.smooth/`; project config at
 `<repo>/.smooth/`. Project entries shadow global on name collision.
 See [`docs/extending.md`](docs/extending.md) for the full guide.
 
-### Run a pearl in a sandbox (`th run`)
+### Run a pearl (`th run`)
 
-Dispatch a pearl (or ad-hoc prompt) to a Smooth operative running in a
-microVM. The agent has bind-mount access to your workspace, a
-project-scoped cache at `/opt/smooth/cache`, and (with `--keep-alive`)
-forwarded ports so you can review dev servers live.
+Dispatch a pearl (or ad-hoc prompt) to a Smooth operative. Big Smooth
+(`th up`) execs the operative as a host subprocess against your current
+directory and streams agent events to stdout.
 
 ```bash
-# First ready pearl, default image
-th run --keep-alive
+# First ready pearl
+th run
 
-# Explicit pearl, explicit memory
-th run th-abcdef --keep-alive --memory-mb 6144
+# Explicit pearl
+th run th-abcdef
 
 # Ad-hoc prompt against the current directory
-th run "add a /health route that returns {\"ok\":true}" --keep-alive
+th run "add a /health route that returns {\"ok\":true}"
 
-# Inspect + tear down
+# Inspect running operatives
 th operatives list
 th operatives kill <operator-id>
 ```
 
-**One image for every stack.** `smooai/smooth-operative` ships with
-alpine + `mise` baked in. The agent reads the workspace
-(`package.json`, `Cargo.toml`, `pyproject.toml`, `go.mod`) and
-installs whatever toolchain it needs at runtime — node + pnpm,
-python + uv, rust, go, bun, deno, or any of the ~140 tools mise
-supports. Installs land in `/opt/smooth/cache/mise`, bound to the
-host project cache so second-run starts are offline-fast.
+> The `--image`, `--memory-mb`, and `--keep-alive` flags (and the
+> `smooai/smooth-operative` microVM image) went away with the microVM
+> stack, 2026-07 (pearl `th-f4a801`). The operative now runs directly on
+> the host and uses your real toolchain — no per-VM image or cache mount.
 
 Build locally:
 
@@ -595,7 +603,6 @@ and [`SECURITY.md`](SECURITY.md).
 | **TUI** | ratatui + crossterm |
 | **Web** | React 19 + Vite + Tailwind CSS 4 (embedded) |
 | **Markdown** | pulldown-cmark (TUI), react-markdown (web) |
-| **Sandboxes** | Microsandbox (hardware-isolated microVMs) |
 | **Agent framework** | smooth-operator (Rust-native, built-in checkpointing) |
 | **LLM** | OpenAI-compatible via `llm.smoo.ai` gateway by default (Kimi, MiniMax, GLM, Qwen, Anthropic, OpenAI, Google) |
 | **Work tracking** | Pearls (Dolt-backed, git-syncable) |
@@ -611,15 +618,14 @@ and [`SECURITY.md`](SECURITY.md).
 smooth/
 ├── crates/
 │   ├── smooth-cli/               # Binary — clap CLI, the `th` entry point
-│   ├── smooth-bigsmooth/         # Library — orchestrator, policy gen, session mgmt
-│   ├── smooth-bootstrap-bill/    # Library + binary — host-side microsandbox broker ("Bill")
+│   ├── smooth-bigsmooth/         # Library — orchestrator, policy gen, session mgmt, in-process dispatch
 │   ├── smooth-operator/          # Library — Rust-native AI agent framework
-│   ├── smooth-operative/   # Binary — agent loop inside each operative VM
+│   ├── smooth-operative/   # Binary — agent loop for a dispatched pearl (host subprocess)
 │   ├── smooth-policy/            # Library — shared policy types, TOML parsing
-│   ├── smooth-wonk/              # Binary — in-VM access control authority
-│   ├── smooth-goalie/            # Binary — in-VM network + filesystem proxy
 │   ├── smooth-narc/              # Library — tool surveillance + secret detection
-│   ├── smooth-scribe/            # Library — per-VM structured logging
+│   ├── smooth-scribe/            # Library — structured logging
+│   #  (removed 2026-07, pearl th-f4a801: smooth-bootstrap-bill, smooth-wonk,
+│   #   smooth-goalie, smooth-host-stub, smooth-credential-helper — see git history)
 │   ├── smooth-archivist/         # Library — central log aggregator
 │   ├── smooth-pearls/            # Library — Dolt-backed pearl tracker
 │   ├── smooth-plugin/            # Library — CLI-wrapper plugin manifests

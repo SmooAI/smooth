@@ -1,5 +1,7 @@
 # Operatives
 
+> **Updated 2026-07 (pearl th-f4a801).** Operatives no longer run inside per-task microVMs. Big Smooth execs the `smooth-operative` binary as a host subprocess against your working directory; it runs the agent loop + file/bash tools + in-process Narc surveillance. References below to microVM boot, bind mounts, `/opt/smooth/cache`, cross-compilation to `aarch64-unknown-linux-musl`, or the Wonk/Goalie cast are historical.
+
 #architecture
 
 > [!arch] The agents that actually do the work
