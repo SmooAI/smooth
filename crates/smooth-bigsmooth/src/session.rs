@@ -309,9 +309,10 @@ impl DoltSessionStore {
         }
     }
 
-    /// Escape a string for SQL string literals.
+    /// Escape a string for SQL string literals (shared workspace-wide
+    /// implementation — handles backslashes, quotes, and NUL; th-944230).
     fn esc(s: &str) -> String {
-        s.replace('\'', "''")
+        smooth_pearls::sql_escape(s)
     }
 
     fn generate_id() -> String {
