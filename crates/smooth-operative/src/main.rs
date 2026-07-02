@@ -48,6 +48,7 @@ mod pearl_tools;
 mod port_forward;
 mod provider_overlay;
 mod reply_to_chat_tool;
+mod skills_tool;
 mod tool_hints;
 mod web_search_tool;
 
@@ -1926,6 +1927,13 @@ async fn main() {
         }
     }
 
+    // Skills — reusable recipes discovered from `.smooth/skills/`,
+    // `~/.smooth/skills/`, `~/.claude/skills/`, `~/.opencode/skills/`
+    // plus built-ins (pearl th-e0f812). Registers the `skill_use` tool
+    // and hands back the discovered set so the catalog can be injected
+    // into the system prompt below.
+    let skills = skills_tool::register_skill_tool(&mut tools, std::path::Path::new(&config.workspace));
+
     // Resolve the active role from the smooth cast (`smooth_cast::cast::builtin`,
     // which adds the harness roles `fixer`/`oracle`/`chief`/`intent_classifier`
     // on top of the generic engine roles the published 0.14.0 engine ships).
@@ -2077,6 +2085,14 @@ async fn main() {
             system_prompt.push_str(trimmed);
             system_prompt.push('\n');
         }
+    }
+
+    // Skill catalog (pearl th-e0f812): names + descriptions + triggers
+    // only — bodies load on demand via `skill_use`. Budget-capped so a
+    // large skill library can't crowd out the context window.
+    if let Some(catalog) = smooth_cast::skills::render_catalog(&skills, smooth_cast::skills::DEFAULT_CATALOG_BUDGET) {
+        system_prompt.push_str("\n\n## Skills\n\n");
+        system_prompt.push_str(&catalog);
     }
 
     // Pearl th-393aed (stopgap for th-VERIFY-PHASE): when
