@@ -15,7 +15,7 @@
 | **Jira sync** | `th jira sync` | Atlassian REST + Dolt pearl store |
 | **Smoo AI platform API** | `th api …` | `https://api.smoo.ai` (auth via JWT at `~/.smooth/auth/smooai.json`) |
 | **Provider auth** | `th auth …` | LLM provider credentials at `~/.smooth/providers.json` |
-| **Sandbox / operator orchestration** | `th up`, `th run`, `th operators`, `th access` | Local `microsandbox` microVMs |
+| **Operator orchestration** | `th up`, `th run`, `th operators`, `th access` | Big Smooth daemon; operatives as host subprocesses |
 | **Coding TUI** | `th` (no args) or `th code` | smooth-code crate, ratatui |
 | **Worktree helpers** | `th worktree create/list/merge/remove` | git plumbing |
 | **MCP / plugins / skills** | `th mcp`, `th plugin`, `th skills` | TOML manifests under `~/.smooth/` |
@@ -498,13 +498,13 @@ th jira sync --push                                # one-way: pearls → Jira
 
 Use this **instead of** raw `curl -u "$JIRA_EMAIL:$JIRA_API_TOKEN" https://smooai.atlassian.net/...` for read/list. Only fall back to curl when you need a Jira REST verb the wrapper doesn't expose (creating issues, transitioning status — both tracked as missing-feature pearls).
 
-### Sandbox / operator orchestration
+### Operator orchestration
 
 ```bash
-th up                                              # boot Smooth platform (sandboxed by default)
+th up                                              # boot Smooth platform (host daemon)
 th down                                            # stop
 th status                                          # health
-th run <pearl-id>                                  # dispatch a pearl through a Smooth Operator microVM
+th run <pearl-id>                                  # dispatch a pearl to a Smooth Operator subprocess
 th operators list / kill / show
 th access pending / approve / deny / policy        # access-control review queue
 th inbox                                           # messages requiring attention

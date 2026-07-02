@@ -36,7 +36,7 @@ See the parity epic (SMOODEV-1466) and the extraction punch-list.
 
 smooth-operator ships abstractions that smooth components keep re-hand-rolling. Prefer the engine's:
 
-- **CheckpointStore** — `MemoryCheckpointStore`, `FileCheckpointStore`, `SqliteCheckpointStore` (`sqlite` feature), `PostgresCheckpointStore` (`postgres` feature, landed). Use these for any resumable/long-running operator instead of bespoke state files. Goalie/scribe should sit behind the `CheckpointStore`/`Memory` traits.
+- **CheckpointStore** — `MemoryCheckpointStore`, `FileCheckpointStore`, `SqliteCheckpointStore` (`sqlite` feature), `PostgresCheckpointStore` (`postgres` feature, landed). Use these for any resumable/long-running operator instead of bespoke state files. Scribe should sit behind the `CheckpointStore`/`Memory` traits.
 - **Memory** (`InMemoryMemory` + the `Memory` trait) — short/long-term + entity/user/feedback/project/reference memory types, with freshness checks. Wire archivist behind it.
 - **KnowledgeBase** (RAG seam) — currently the in-memory stub; smooth gets a real vector backend by depending on smooth-operator-agent's adapter layer (below) rather than building another retriever.
 - **Workflow / WorkflowBuilder** — the graph engine. Author multi-step operator flows as `Workflow<S>` graphs with conditional edges, not ad-hoc loops.

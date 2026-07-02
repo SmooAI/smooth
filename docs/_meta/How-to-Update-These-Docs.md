@@ -9,7 +9,7 @@
 
 1. Open the vault in Obsidian: `obsidian://open?path=<repo>/docs`. Or just edit Markdown in your usual editor — wikilinks, tags, and frontmatter render fine in any tool.
 2. Edit the relevant page. Bias toward short bullets, ASCII diagrams, and `> [!arch]` / `> [!info]` / `> [!warn]` / `> [!todo]` callouts.
-3. Cross-link liberally with `[[Page-Name]]`. Anchors for cast roles use `[[The-Cast#Wonk]]` form so they land at the H2.
+3. Cross-link liberally with `[[Page-Name]]`. Anchors for cast roles use `[[The-Cast#Narc]]` form so they land at the H2.
 4. Commit on a feature branch with a changeset if the docs change implies a behavior change — purely doc-only PRs don't need a changeset.
 
 ## Style

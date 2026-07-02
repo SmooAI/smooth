@@ -20,8 +20,7 @@ All tools — built-ins, MCP, plugins — pass through the same Narc
 surveillance path. CliGuard blocks dangerous shell patterns,
 detectors screen for prompt injection and secret exfiltration, and
 the LLM judge makes an independent call on tool inputs that look
-suspicious. The microVM boundary contains anything the agent does
-either way.
+suspicious.
 
 ---
 
@@ -233,28 +232,22 @@ The defensive layers kick in at **call time**, not install time:
    look like AWS keys, GitHub tokens, private keys, etc.
 4. **LLM judge** (Narc) — for borderline cases, an independent
    model reviews the tool call and can escalate.
-5. **Goalie + Wonk** — every network request and filesystem write
-   passes through the Goalie proxy, gated by Wonk policy. An
-   MCP server that tries to `curl evil.com` hits the same wall as
-   a native tool would.
-6. **Microsandbox** — the whole agent loop runs in a hardware-
-   isolated microVM. Whatever the agent's tools do, they do it to
-   the sandbox, not your host.
 
-A malicious `plugin.toml` committed to a repo can't escape this
-chain any more than a malicious `npm` package can. If a Narc layer
-would reject a call from a built-in tool, it'll reject the same
-call from an MCP server or plugin.
+> Note: the microVM boundary and the Goalie/Wonk network +
+> filesystem enforcement layers were removed 2026-07 (see
+> [[Decisions/ADR-004-remove-microvm-sandbox-stack]]). Tools
+> execute against the host; Narc surveillance is the remaining
+> call-time defense.
+
+If a Narc layer would reject a call from a built-in tool, it'll
+reject the same call from an MCP server or plugin.
 
 ### What's *not* defended against
 
 - Running `th` in a repo whose `.smooth/` contains a plugin with a
-  command you wouldn't otherwise run. The sandbox contains it, but
-  it still runs. If that matters for your workflow, review
-  `.smooth/` before the first `th up` in a new repo.
-- MCP servers that read your files legitimately (filesystem server
-  scoped to `/workspace`) and then exfiltrate on the same tool call
-  that was expected to be benign. Goalie + Wonk narrow this to
-  explicitly-allowed destinations per Wonk policy.
+  command you wouldn't otherwise run. There is no VM around it —
+  review `.smooth/` before the first `th up` in a new repo.
+- MCP servers that read your files legitimately and then exfiltrate
+  on the same tool call that was expected to be benign.
 
 See `SECURITY.md` for the full threat model.

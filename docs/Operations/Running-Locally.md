@@ -2,8 +2,8 @@
 
 #operations
 
-> [!info] Two modes, four commands
-> `th up`, `th up direct`, `th down`, `th status`. Everything else is layered on top.
+> [!info] One mode, three commands
+> `th up`, `th down`, `th status`. Everything else is layered on top. (The microVM sandboxed mode was removed 2026-07 — see [[../Decisions/ADR-004-remove-microvm-sandbox-stack]].)
 
 ## Quickstart
 
@@ -14,7 +14,7 @@ curl -fsSL https://raw.githubusercontent.com/SmooAI/smooth/main/install.sh | sh
 # Sign in (resolves all smooth-* model slots through Smoo AI's gateway)
 th auth login smooai-gateway
 
-# Start Smooth (sandboxed by default)
+# Start Smooth (daemonizes by default)
 th up
 
 # Open the embedded web UI in your browser
@@ -30,54 +30,38 @@ Then stop:
 th down
 ```
 
-## Sandboxed mode (default)
+## How `th up` runs
+
+`th up` boots Big Smooth directly on the host and daemonizes. Dispatched tasks exec the native `smooth-operative` binary as a host subprocess with in-process [[../Architecture/The-Cast#Narc|Narc]] tool surveillance. There is no VM, no OCI image pull, no forwarded port.
 
 ```bash
-th up                                # Boots the Safehouse microVM
-th up --port 4500                    # Use a different forwarded port
-SMOOTH_SAFEHOUSE_IMAGE=ghcr.io/smooai/safehouse:dev th up
-                                     # Override the OCI image
+th up                                # Daemonized (default)
+th up --foreground                   # Run in foreground; ctrl-C kills it
+th up --port 4500                    # Use a different port
 ```
 
-State written by sandboxed boot:
-
-- `~/.smooth/sandboxed.vm` — the microsandbox VM name (so `th down` finds it)
-
-Tear-down: `th down` reads `sandboxed.vm`, calls `microsandbox::destroy_sandbox`, removes the file.
-
-See [[../Architecture/Sandboxed-Mode]] for what's inside.
-
-## Direct mode (escape hatch)
-
-```bash
-th up direct                         # Daemonised, no sandbox
-th up direct --foreground           # Run in foreground; ctrl-C kills it
-SMOOTH_WORKFLOW_DIRECT=1 th up       # Env-var override; for harnesses that can't pass argv
-```
-
-State written by direct boot:
+State written by boot:
 
 - `~/.smooth/smooth.pid` — daemon pid
 - `~/.smooth/smooth.log` — daemon stdout+stderr
 
 Tear-down: `th down` kills the pid, removes the file.
 
-See [[../Architecture/Direct-Mode]] for what changes.
+Dispatch needs the native operative binary. `pnpm install:th` installs it to `~/.cargo/bin/smooth-operative`; auto-discovery also checks `target/{release,debug}/` relative to the repo. Override with `SMOOTH_OPERATIVE_NATIVE=/abs/path`.
 
 ## Useful knobs
 
 | Flag / env                    | Default        | Meaning                                              |
 | ----------------------------- | -------------- | ---------------------------------------------------- |
-| `--port`                      | 4400           | Big Smooth API port (forwarded out of the VM)        |
-| `--no-leader`                 | off            | Skip access-leader-election bootstrap                |
-| `--max-operators N`           | 3              | Sandbox-pool concurrency cap                         |
-| `--skip-test`                 | off            | Pass-through to runner: skip TEST phase (bench only) |
-| `--foreground`                | off            | Don't daemonise (direct mode only)                   |
-| `SMOOTH_SAFEHOUSE_IMAGE`      | `…/safehouse:latest` | OCI image for the safehouse VM                  |
+| `--port`                      | 4400           | Big Smooth API port                                  |
+| `--bind`                      | 127.0.0.1      | Interface to bind on. ⚠️ The API has no auth today — anything other than loopback exposes every route to the network (pearl th-6db839) |
+| `--no-leader`                 | off            | Skip starting Big Smooth (API + web UI)              |
+| `--max-operators N`           | 3              | Max concurrent operatives                            |
+| `--skip-test`                 | off            | Skip the workflow TEST phase (bench only)            |
+| `--foreground`                | off            | Don't daemonise                                      |
 | `SMOOTH_SANDBOX_MAX_CONCURRENCY` | 3           | Equivalent to `--max-operators`                      |
-| `SMOOTH_WORKFLOW_DIRECT`      | unset          | Force direct mode (for harnesses)                    |
+| `SMOOTH_OPERATIVE_NATIVE`     | auto-discovered | Absolute path to the `smooth-operative` binary      |
 | `SMOOTH_WORKFLOW`             | 1              | Multi-phase workflow; `0` falls back to single-Agent |
-| `SMOOTH_USE_VOLUMES`          | 1              | `0` → bind-mount project cache instead of named volume |
 
 ## Status & health
 
@@ -101,6 +85,6 @@ th doctor --init-home-repo           # Make ~/.smooth a git repo (audit history)
 ## Related
 
 - [[../Start-Here/What-Is-Smooth]]
-- [[../Architecture/Sandboxed-Mode]]
-- [[../Architecture/Direct-Mode]]
+- [[../Architecture/Dispatch]]
+- [[../Decisions/ADR-004-remove-microvm-sandbox-stack]]
 - [[Troubleshooting]]

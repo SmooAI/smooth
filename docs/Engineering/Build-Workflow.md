@@ -2,8 +2,8 @@
 
 #engineering
 
-> [!info] Two builds matter
-> Native `cargo build` for the host `th` binary, and a cross-compile of `smooth-operative` to `aarch64-unknown-linux-musl` so it can run inside the microsandbox guest. `pnpm install:th` does both, plus the web bundle.
+> [!info] All native
+> Everything is a plain native `cargo build` — the `th` binary and the `smooth-operative` runner. The musl cross-compile died with the microVM stack ([[../Decisions/ADR-004-remove-microvm-sandbox-stack]]). `pnpm install:th` builds the web bundle and cargo-installs both binaries.
 
 ## Commands
 
@@ -14,28 +14,20 @@ cargo test                           # Run all tests (200+ across crates)
 cargo fmt                            # Format (rustfmt.toml: 160 width)
 cargo clippy                         # Lint (pedantic + nursery)
 
-pnpm install:th                      # Build web SPA + cross-compile runner + install th
+pnpm install:th                      # Build web SPA + install th + smooth-operative to ~/.cargo/bin
 pnpm build:web                       # Just rebuild the embedded Vite SPA
-pnpm build:runner                    # Just cross-compile operative (mirrors to ~/.smooth/runner-bin/)
+cargo build -p smooth-operative --release   # Just the runner (auto-discovered from target/release/)
 ```
 
 ## One-time dev setup
 
 ```bash
-# Rust + cross-compile chain
-rustup target add aarch64-unknown-linux-musl
-cargo install --locked cargo-zigbuild
-pip3 install ziglang                         # provides python-zig for cargo-zigbuild
-
-# Build the in-VM runner
-bash scripts/build-operative.sh        # → target/aarch64-unknown-linux-musl/release/smooth-operative
-
 # Build smooth-dolt (Go binary; embedded Dolt engine)
 brew install icu4c                           # macOS; required by the Dolt link
 bash scripts/build-smooth-dolt.sh            # → target/release/smooth-dolt (~145MB)
 ```
 
-Re-run `scripts/build-operative.sh` after changing anything under `crates/smooth-operative/` or its transitive deps. Re-run `build-smooth-dolt.sh` after changing the Go shim.
+Re-run `build-smooth-dolt.sh` after changing the Go shim.
 
 ## The web SPA
 
@@ -59,7 +51,7 @@ pnpm build                           # Build dist/, then re-`cargo build` to emb
 > Every crate, every module, every public function MUST have tests. `cargo test` must pass before any commit. `cargo clippy` must be clean (zero warnings). `cargo fmt -- --check` must pass.
 
 - Unit tests colocated in each module (`#[cfg(test)]`).
-- Integration tests for cross-crate flows (e.g. policy → sandbox, wonk → goalie).
+- Integration tests for cross-crate flows (e.g. dispatch → operative, narc hooks).
 - Security-critical code (policy enforcement, secret detection, write guard) gets exhaustive coverage including adversarial inputs.
 - When fixing a bug, add a regression test that fails without the fix.
 
