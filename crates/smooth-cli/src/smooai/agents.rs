@@ -69,6 +69,19 @@ pub enum Cmd {
         /// Channel-agnostic initial greeting seed.
         #[arg(long)]
         greeting: Option<String>,
+        /// Personality: a preset name (`friendly`, `professional`, `witty`, …)
+        /// or a full `PersonalityConfig` JSON object; `@` prefix reads a file.
+        #[arg(long)]
+        personality: Option<String>,
+        /// `ConversationWorkflow` JSON (`{goal, steps: [{id, intent, criteria,
+        /// next?}]}`); `@` prefix reads a file (SMOODEV-590 guided agency).
+        #[arg(long)]
+        workflow: Option<String>,
+        /// `AgentToolConfig` JSON (`{enabledTools: [{toolId, enabled,
+        /// authLevel, config?}]}`); `@` prefix reads a file. Empty
+        /// `enabledTools` = full tool set; non-empty = restrict.
+        #[arg(long = "tool-config")]
+        tool_config: Option<String>,
         /// Short description shown in the agents list (required by the
         /// backend). Defaults to the agent name when omitted.
         #[arg(long)]
@@ -97,12 +110,35 @@ pub enum Cmd {
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
-    /// Patch an existing agent with a partial JSON body.
+    /// Patch an existing agent — a partial JSON body, or typed per-field
+    /// flags (SMOODEV-590 per-agent config). Read fields with `show`.
     Update {
         /// The agent id from `th api agents list`.
         agent_id: String,
-        /// JSON patch body, or `-` to read from stdin.
-        body: String,
+        /// JSON patch body, or `-` to read from stdin. Omit when using field flags.
+        body: Option<String>,
+        /// System prompt (`instructions.prompt`). Prefix with `@` to read from a file.
+        #[arg(long)]
+        instructions: Option<String>,
+        /// Channel-agnostic initial greeting seed.
+        #[arg(long)]
+        greeting: Option<String>,
+        /// Personality: a preset name (`friendly`, `professional`, `witty`, …)
+        /// or a full `PersonalityConfig` JSON object; `@` prefix reads a file.
+        #[arg(long)]
+        personality: Option<String>,
+        /// Where the agent is accessible.
+        #[arg(long, value_enum)]
+        visibility: Option<MintVisibility>,
+        /// `ConversationWorkflow` JSON (`{goal, steps: [{id, intent, criteria,
+        /// next?}]}`); `@` prefix reads a file (SMOODEV-590 guided agency).
+        #[arg(long)]
+        workflow: Option<String>,
+        /// `AgentToolConfig` JSON (`{enabledTools: [{toolId, enabled,
+        /// authLevel, config?}]}`); `@` prefix reads a file. Empty
+        /// `enabledTools` = full tool set; non-empty = restrict.
+        #[arg(long = "tool-config")]
+        tool_config: Option<String>,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
@@ -232,6 +268,9 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             template,
             instructions,
             greeting,
+            personality,
+            workflow,
+            tool_config,
             summary,
             allowed_origins,
             colors,
@@ -243,6 +282,9 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             let org = require_active_org(&client, org)?;
             let prompt = instructions.map(read_flag_or_file).transpose()?;
             let color_map = parse_colors(&colors)?;
+            let personality = personality.map(personality_value).transpose()?;
+            let workflow = workflow.map(|v| parse_json_object_flag("workflow", v)).transpose()?;
+            let tool_config = tool_config.map(|v| parse_json_object_flag("tool-config", v)).transpose()?;
             let body = build_mint_body(
                 &org,
                 &name,
@@ -251,6 +293,9 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                 template.as_deref(),
                 prompt.as_deref(),
                 greeting.as_deref(),
+                personality,
+                workflow,
+                tool_config,
                 summary.as_deref(),
                 &allowed_origins,
                 &color_map,
@@ -299,9 +344,35 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             }
             println!();
         }
-        Cmd::Update { agent_id, body, org } => {
+        Cmd::Update {
+            agent_id,
+            body,
+            instructions,
+            greeting,
+            personality,
+            visibility,
+            workflow,
+            tool_config,
+            org,
+        } => {
             let org = require_active_org(&client, org)?;
-            let body = read_body(&body)?;
+            let has_flags =
+                instructions.is_some() || greeting.is_some() || personality.is_some() || visibility.is_some() || workflow.is_some() || tool_config.is_some();
+            let body = match (body, has_flags) {
+                (Some(_), true) => bail!("pass either a JSON body or field flags, not both"),
+                (Some(b), false) => read_body(&b)?,
+                (None, _) => {
+                    let prompt = instructions.map(read_flag_or_file).transpose()?;
+                    build_update_body(
+                        prompt.as_deref(),
+                        greeting.as_deref(),
+                        personality.map(personality_value).transpose()?,
+                        visibility,
+                        workflow.map(|v| parse_json_object_flag("workflow", v)).transpose()?,
+                        tool_config.map(|v| parse_json_object_flag("tool-config", v)).transpose()?,
+                    )?
+                }
+            };
             print_json(
                 &client
                     .patch(&format!("/organizations/{org}/agents/{agent_id}"), &body)
@@ -391,6 +462,78 @@ fn read_flag_or_file(v: String) -> Result<String> {
     }
 }
 
+/// Parse a JSON-object flag value (literal or `@file`), failing loudly on
+/// invalid JSON or a non-object so a stray array/string doesn't reach the
+/// backend as a confusing 400.
+fn parse_json_object_flag(flag: &str, v: String) -> Result<Value> {
+    let raw = read_flag_or_file(v)?;
+    let val: Value = serde_json::from_str(&raw).with_context(|| format!("--{flag} must be a JSON object (or @file containing one)"))?;
+    if !val.is_object() {
+        bail!("--{flag} must be a JSON object, got {}", type_name(&val));
+    }
+    Ok(val)
+}
+
+fn type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    }
+}
+
+/// `--personality` accepts either a bare preset name (`friendly`) or a full
+/// `PersonalityConfig` JSON object / `@file`. Preset validity is left to the
+/// backend schema, which returns a readable 400 listing the valid presets.
+fn personality_value(v: String) -> Result<Value> {
+    let raw = read_flag_or_file(v)?;
+    let trimmed = raw.trim();
+    if trimmed.starts_with('{') {
+        parse_json_object_flag("personality", trimmed.to_string())
+    } else {
+        Ok(json!({ "preset": trimmed }))
+    }
+}
+
+/// Assemble a PATCH body from the typed update flags. Pure — no I/O — so
+/// it's unit-testable. Bails when no field was set so `th api agents update
+/// <id>` with nothing else fails loudly instead of PATCHing `{}`.
+fn build_update_body(
+    instructions: Option<&str>,
+    greeting: Option<&str>,
+    personality: Option<Value>,
+    visibility: Option<MintVisibility>,
+    workflow: Option<Value>,
+    tool_config: Option<Value>,
+) -> Result<Value> {
+    let mut obj = serde_json::Map::new();
+    if let Some(p) = instructions {
+        obj.insert("instructions".into(), json!({ "prompt": p }));
+    }
+    if let Some(g) = greeting {
+        obj.insert("greeting".into(), json!(g));
+    }
+    if let Some(p) = personality {
+        obj.insert("personality".into(), p);
+    }
+    if let Some(v) = visibility {
+        obj.insert("visibility".into(), json!(v.api_value()));
+    }
+    if let Some(w) = workflow {
+        obj.insert("conversationWorkflow".into(), w);
+    }
+    if let Some(t) = tool_config {
+        obj.insert("toolConfig".into(), t);
+    }
+    if obj.is_empty() {
+        bail!("nothing to update — pass a JSON body or at least one of --instructions --greeting --personality --visibility --workflow --tool-config");
+    }
+    Ok(Value::Object(obj))
+}
+
 /// Parse repeated `role=hex` flags into a role→hex map, rejecting unknown
 /// roles so a typo (`primaryColor=…`) fails loudly instead of being dropped
 /// by the backend schema.
@@ -419,6 +562,9 @@ fn build_mint_body(
     template: Option<&str>,
     instructions: Option<&str>,
     greeting: Option<&str>,
+    personality: Option<Value>,
+    workflow: Option<Value>,
+    tool_config: Option<Value>,
     summary: Option<&str>,
     allowed_origins: &[String],
     colors: &[(String, String)],
@@ -455,6 +601,15 @@ fn build_mint_body(
     }
     if let Some(g) = greeting {
         obj.insert("greeting".into(), json!(g));
+    }
+    if let Some(p) = personality {
+        obj.insert("personality".into(), p);
+    }
+    if let Some(w) = workflow {
+        obj.insert("conversationWorkflow".into(), w);
+    }
+    if let Some(t) = tool_config {
+        obj.insert("toolConfig".into(), t);
     }
     if !allowed_origins.is_empty() {
         obj.insert("authPublicClientAllowedOrigins".into(), json!(allowed_origins));
@@ -568,6 +723,9 @@ mod tests {
             Some("be nice"),
             None,
             None,
+            None,
+            None,
+            None,
             &[],
             &[],
             false,
@@ -595,6 +753,9 @@ mod tests {
             "Flow",
             MintKind::Workflow,
             MintVisibility::Internal,
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -626,6 +787,9 @@ mod tests {
             Some("customer_support"),
             None,
             Some("Hi there!"),
+            None,
+            None,
+            None,
             Some("A helpful bot"),
             &origins,
             &colors(),
@@ -641,6 +805,91 @@ mod tests {
         assert_eq!(body["widgetConfig"]["requireEmail"], true);
         assert_eq!(body["widgetConfig"]["colors"]["background"], "#020618");
         assert_eq!(body["widgetConfig"]["colors"]["primary"], "#f2a618");
+    }
+
+    #[test]
+    fn mint_body_carries_per_agent_config() {
+        let workflow = json!({ "goal": "book a demo", "steps": [{ "id": "greet", "intent": "greet", "criteria": "name confirmed" }] });
+        let tools = json!({ "enabledTools": [{ "toolId": "knowledge_search", "enabled": true, "authLevel": "none" }] });
+        let body = build_mint_body(
+            "org-1",
+            "Bot",
+            MintKind::Chat,
+            MintVisibility::Public,
+            None,
+            None,
+            None,
+            Some(json!({ "preset": "witty" })),
+            Some(workflow.clone()),
+            Some(tools.clone()),
+            None,
+            &[],
+            &[],
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(body["personality"]["preset"], "witty");
+        assert_eq!(body["conversationWorkflow"], workflow);
+        assert_eq!(body["toolConfig"], tools);
+    }
+
+    #[test]
+    fn update_body_maps_every_field() {
+        let body = build_update_body(
+            Some("be terse"),
+            Some("Hey!"),
+            Some(json!({ "preset": "zen" })),
+            Some(MintVisibility::Internal),
+            Some(json!({ "goal": "g", "steps": [] })),
+            Some(json!({ "enabledTools": [] })),
+        )
+        .unwrap();
+        assert_eq!(body["instructions"]["prompt"], "be terse");
+        assert_eq!(body["greeting"], "Hey!");
+        assert_eq!(body["personality"]["preset"], "zen");
+        assert_eq!(body["visibility"], "internal");
+        assert_eq!(body["conversationWorkflow"]["goal"], "g");
+        assert_eq!(body["toolConfig"]["enabledTools"], json!([]));
+    }
+
+    #[test]
+    fn update_body_omits_unset_fields() {
+        let body = build_update_body(None, Some("Hi"), None, None, None, None).unwrap();
+        assert_eq!(body, json!({ "greeting": "Hi" }));
+    }
+
+    #[test]
+    fn update_body_rejects_empty() {
+        assert!(build_update_body(None, None, None, None, None, None).is_err());
+    }
+
+    #[test]
+    fn personality_accepts_preset_or_json() {
+        assert_eq!(personality_value("friendly".into()).unwrap(), json!({ "preset": "friendly" }));
+        let full = personality_value(r#"{ "preset": "witty", "creativity": 0.3, "persona": "dry" }"#.into()).unwrap();
+        assert_eq!(full["creativity"], 0.3);
+        // Looks like JSON but isn't → loud error, not a preset named "{".
+        assert!(personality_value("{not json".into()).is_err());
+    }
+
+    #[test]
+    fn json_object_flag_rejects_non_objects() {
+        assert!(parse_json_object_flag("workflow", "[]".into()).is_err());
+        assert!(parse_json_object_flag("workflow", "\"str\"".into()).is_err());
+        assert!(parse_json_object_flag("workflow", "not json".into()).is_err());
+        assert_eq!(parse_json_object_flag("workflow", "{}".into()).unwrap(), json!({}));
+    }
+
+    #[test]
+    fn json_object_flag_reads_at_file() {
+        let dir = std::env::temp_dir().join(format!("th-agents-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("wf.json");
+        std::fs::write(&path, r#"{ "goal": "g", "steps": [] }"#).unwrap();
+        let val = parse_json_object_flag("workflow", format!("@{}", path.display())).unwrap();
+        assert_eq!(val["goal"], "g");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
