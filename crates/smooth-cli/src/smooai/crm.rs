@@ -110,7 +110,7 @@ fn resolve_org(override_org: Option<String>) -> Result<String> {
 }
 
 async fn contacts(cmd: ContactsCmd) -> Result<()> {
-    let client = UserClient::from_user_session()?;
+    let client = UserClient::from_user_session().await?;
     match cmd {
         ContactsCmd::List { org, search, limit } => {
             let org = resolve_org(org)?;

@@ -307,7 +307,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             // `client_credentials` token is org-locked, so it can't create in a
             // child org; a parent-org admin's user session acts cross-org. Use
             // the user client (like the CRM/keys commands) for the write.
-            let user = super::user_client::UserClient::from_user_session()?;
+            let user = super::user_client::UserClient::from_user_session().await?;
             let created = user.post(&format!("/organizations/{org}/agents"), &body).await.context("POST agent (mint)")?;
 
             let agent_id = created.get("id").and_then(Value::as_str).unwrap_or("?").to_string();

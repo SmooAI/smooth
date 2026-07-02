@@ -402,7 +402,7 @@ pub async fn cmd_whoami() -> Result<()> {
 /// M2M token ("auth kind does not satisfy route requirement"). Use the user
 /// session (`th auth login`) via [`UserClient`], same as the CRM commands.
 pub async fn cmd_orgs(cmd: super::OrgsCommands) -> Result<()> {
-    let client = user_client::UserClient::from_user_session()?;
+    let client = user_client::UserClient::from_user_session().await?;
     match cmd {
         super::OrgsCommands::List => {
             let body = client.get("/organizations").await.context("GET /organizations")?;
