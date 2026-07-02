@@ -64,12 +64,7 @@ fn parse_datetime(value: &Value) -> DateTime<Utc> {
     Utc::now()
 }
 
-/// SQL-safe escape for string literals — Dolt's smooth-dolt
-/// CLI doesn't expose prepared statements; doubling single
-/// quotes is the standard SQL escape.
-fn sql_escape(s: &str) -> String {
-    s.replace('\'', "''")
-}
+use crate::dolt::sql_escape;
 
 /// API over the `memories` table. Cheap to clone (the
 /// underlying SmoothDolt is itself cheap to clone).
