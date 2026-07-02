@@ -39,6 +39,7 @@ impl TaskRunner for AlwaysPassRunner {
             cost_usd: 0.0,
             duration_ms: 10,
             inconclusive: false,
+            upstream_error: false,
         })
     }
 }

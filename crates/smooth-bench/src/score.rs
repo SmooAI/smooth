@@ -67,22 +67,38 @@ impl Score {
             self.tasks_attempted
         );
         if self.tasks_inconclusive > 0 {
-            let real_attempts = self.tasks_attempted.saturating_sub(self.tasks_inconclusive);
-            let real_pass_rate = if real_attempts == 0 {
-                0.0
-            } else {
-                f64::from(self.tasks_green.saturating_sub(self.tasks_inconclusive)) / f64::from(real_attempts)
-            };
             let _ = writeln!(
                 out,
                 "  inconclusive:      {} (HTTP-timeout starter passes; not counted as real)",
                 self.tasks_inconclusive
             );
+        }
+        if self.tasks_upstream_error > 0 {
             let _ = writeln!(
                 out,
-                "  real-attempt rate: {:.1}%  ({}/{} excluding inconclusive)",
+                "  upstream-error:    {} (LLM-gateway failures; excluded from scoring)",
+                self.tasks_upstream_error
+            );
+        }
+        if self.tasks_inconclusive > 0 || self.tasks_upstream_error > 0 {
+            // Inconclusive tasks are bogus PASSes (subtract from green
+            // AND attempts); upstream-error tasks are bogus FAILs
+            // (subtract from attempts only).
+            let real_attempts = self
+                .tasks_attempted
+                .saturating_sub(self.tasks_inconclusive)
+                .saturating_sub(self.tasks_upstream_error);
+            let real_green = self.tasks_green.saturating_sub(self.tasks_inconclusive);
+            let real_pass_rate = if real_attempts == 0 {
+                0.0
+            } else {
+                f64::from(real_green) / f64::from(real_attempts)
+            };
+            let _ = writeln!(
+                out,
+                "  real-attempt rate: {:.1}%  ({}/{} excluding inconclusive + upstream-error)",
                 real_pass_rate * 100.0,
-                self.tasks_green.saturating_sub(self.tasks_inconclusive),
+                real_green,
                 real_attempts
             );
         }
@@ -125,6 +141,14 @@ pub struct Score {
     /// real attempts.
     #[serde(default)]
     pub tasks_inconclusive: u32,
+    /// Tasks that died to an upstream LLM-gateway failure (llm.smoo.ai
+    /// dropping the connection mid-stream, 5xx from the gateway) rather
+    /// than anything smooth did. Matched against
+    /// `sweep::UPSTREAM_ERROR_SIGNATURES`. Counted separately and
+    /// excluded from the real-attempt rate so gateway flakiness is
+    /// visible at a glance instead of reading as smooth failures.
+    #[serde(default)]
+    pub tasks_upstream_error: u32,
     pub cost_usd: f64,
     pub median_task_ms: u64,
     pub budget_usd_cap: f64,
@@ -232,6 +256,7 @@ mod tests {
             tasks_attempted: 40,
             tasks_green: 32,
             tasks_inconclusive: 0,
+            tasks_upstream_error: 0,
             cost_usd: 4.23,
             median_task_ms: 15_000,
             budget_usd_cap: 10.0,
@@ -258,6 +283,7 @@ mod tests {
             tasks_attempted: 5,
             tasks_green: 3,
             tasks_inconclusive: 0,
+            tasks_upstream_error: 0,
             cost_usd: 10.07,
             median_task_ms: 8_000,
             budget_usd_cap: 10.0,
@@ -283,6 +309,7 @@ mod tests {
             tasks_attempted: 18,
             tasks_green: 9,
             tasks_inconclusive: 5,
+            tasks_upstream_error: 0,
             cost_usd: 0.42,
             median_task_ms: 30_000,
             budget_usd_cap: 10.0,
@@ -299,6 +326,32 @@ mod tests {
     }
 
     #[test]
+    fn render_table_separates_upstream_errors_from_real_failures() {
+        // 10 attempts, 4 PASS, 3 of the 6 fails are upstream-gateway
+        // flakes. Real-attempt rate: 4/(10-3) = 4/7.
+        let s = Score {
+            smooth_version: "test".into(),
+            commit_sha: "abc".into(),
+            ran_at: chrono::Utc.with_ymd_and_hms(2026, 7, 2, 0, 0, 0).unwrap(),
+            overall_pass_rate: 0.4,
+            by_language: BTreeMap::new(),
+            tasks_attempted: 10,
+            tasks_green: 4,
+            tasks_inconclusive: 0,
+            tasks_upstream_error: 3,
+            cost_usd: 0.42,
+            median_task_ms: 30_000,
+            budget_usd_cap: 10.0,
+            budget_usd_hit: false,
+        };
+        let table = s.render_table();
+        assert!(table.contains("upstream-error:    3"), "{table}");
+        assert!(table.contains("(4/7"), "{table}");
+        // No inconclusive line when that count is zero.
+        assert!(!table.contains("inconclusive:"), "{table}");
+    }
+
+    #[test]
     fn render_table_omits_inconclusive_block_when_zero() {
         let s = Score {
             smooth_version: "test".into(),
@@ -309,6 +362,7 @@ mod tests {
             tasks_attempted: 4,
             tasks_green: 2,
             tasks_inconclusive: 0,
+            tasks_upstream_error: 0,
             cost_usd: 0.0,
             median_task_ms: 0,
             budget_usd_cap: 10.0,

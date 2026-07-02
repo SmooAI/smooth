@@ -276,6 +276,7 @@ pub fn aggregate(per_task: &[ResearchTaskResult], smooth_version: String, commit
         tasks_attempted,
         tasks_green,
         tasks_inconclusive: 0,
+        tasks_upstream_error: 0,
         cost_usd: 0.0,
         median_task_ms: 0,
         budget_usd_cap: 0.0,
