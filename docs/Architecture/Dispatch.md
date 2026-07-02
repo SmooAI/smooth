@@ -1,5 +1,7 @@
 # Dispatch
 
+> **Updated 2026-07 (pearl th-f4a801).** The microVM (sandboxed) dispatch path was removed. Big Smooth's WebSocket `TaskStart` handler now always runs `dispatch_ws_task_direct`: it execs the native `smooth-operative` as a host subprocess and streams its `AgentEvent`s. Any description below of per-task microsandbox VMs, bind mounts, or the Wonk/Goalie cast is historical; git history has it.
+
 #architecture
 
 > [!arch] Chat → pearl → operator → events → done

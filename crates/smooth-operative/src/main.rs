@@ -55,20 +55,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use smooth_goalie::{audit::AuditLogger, proxy::run_proxy, wonk::WonkClient};
 use smooth_narc::NarcHook;
 use smooth_operator::cost::CostBudget;
 use smooth_operator::llm::LlmConfig;
 use smooth_operator::tool::{Tool, ToolCall, ToolHook, ToolRegistry, ToolResult, ToolSchema};
 use smooth_operator::{Agent, AgentConfig, AgentEvent};
-use smooth_policy::Policy;
-use smooth_scribe::hook::AuditHook as ScribeAuditHook;
-use smooth_scribe::server::{build_router_with_state as scribe_router_with_state, AppState as ScribeAppState};
-use smooth_scribe::store::{LogStore, MemoryLogStore, Query as LogQuery};
-use smooth_wonk::hook::WonkHook;
-use smooth_wonk::negotiate::Negotiator;
-use smooth_wonk::policy::PolicyHolder;
-use smooth_wonk::server::{build_router as wonk_router, AppState as WonkAppState};
 use tracing_subscriber::EnvFilter;
 
 mod bg_process;
@@ -899,14 +890,6 @@ impl Tool for GrepTool {
 
 struct BashTool {
     base: PathBuf,
-    /// HTTP(S) proxy URL to forward into child processes via the standard
-    /// env vars. When set, any `curl` / `wget` / etc. the agent invokes is
-    /// routed through Goalie → Wonk for policy enforcement. The runner's
-    /// own HTTP traffic (LLM provider, in-VM Wonk/Scribe) intentionally
-    /// does NOT go through the proxy — setting HTTP_PROXY on the runner
-    /// process would loop WonkHook's localhost check request back through
-    /// Goalie and deadlock the policy check.
-    proxy_url: Option<String>,
 }
 
 #[async_trait]
@@ -938,16 +921,6 @@ impl Tool for BashTool {
 
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-c").arg(command).current_dir(&self.base);
-        if let Some(ref proxy) = self.proxy_url {
-            cmd.env("HTTP_PROXY", proxy)
-                .env("http_proxy", proxy)
-                .env("HTTPS_PROXY", proxy)
-                .env("https_proxy", proxy)
-                // Local in-VM services (Wonk, Scribe, Goalie itself) must
-                // not be proxied — they run on localhost.
-                .env("NO_PROXY", "127.0.0.1,localhost")
-                .env("no_proxy", "127.0.0.1,localhost");
-        }
 
         let output_result = match timeout_secs {
             Some(secs) => match tokio::time::timeout(std::time::Duration::from_secs(secs), cmd.output()).await {
@@ -999,7 +972,6 @@ impl Tool for BashTool {
 struct BgRunTool {
     base: PathBuf,
     registry: Arc<bg_process::BgRegistry>,
-    proxy_url: Option<String>,
 }
 
 #[async_trait]
@@ -1023,18 +995,7 @@ impl Tool for BgRunTool {
             .get("command")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("missing 'command'"))?;
-        let env_vars = if let Some(ref proxy) = self.proxy_url {
-            vec![
-                ("HTTP_PROXY".into(), proxy.clone()),
-                ("http_proxy".into(), proxy.clone()),
-                ("HTTPS_PROXY".into(), proxy.clone()),
-                ("https_proxy".into(), proxy.clone()),
-                ("NO_PROXY".into(), "127.0.0.1,localhost".into()),
-                ("no_proxy".into(), "127.0.0.1,localhost".into()),
-            ]
-        } else {
-            Vec::new()
-        };
+        let env_vars: Vec<(String, String)> = Vec::new();
         let handle = self.registry.run(command, &self.base.to_string_lossy(), &env_vars)?;
         Ok(format!(
             "started: {handle}\ncommand: {command}\n\nUse bg_status('{handle}'), bg_logs('{handle}'), or bg_kill('{handle}') to manage it."
@@ -1635,169 +1596,6 @@ deny = []
 }
 
 // ---------------------------------------------------------------------------
-// In-VM cast: Wonk + Goalie + Scribe spawned on ephemeral localhost ports.
-// ---------------------------------------------------------------------------
-
-/// Handles to the in-VM cast members. Returned from [`spawn_cast`] so the
-/// runner can (a) point the agent's hooks at them, and (b) inspect their
-/// state (e.g. the Scribe log store) for the final stderr summary.
-struct Cast {
-    wonk_url: String,
-    scribe_url: String,
-    #[allow(dead_code)]
-    goalie_url: String,
-    scribe_store: Arc<MemoryLogStore>,
-    /// Absolute path to Goalie's JSON-lines audit log inside the VM. The
-    /// runner reads this back into the final cast summary so tests (and
-    /// humans reading the [runner stderr] forward) can see every allowed
-    /// and denied network request the sandbox actually attempted.
-    goalie_audit_path: String,
-    /// Per-VM bearer token from `[auth]` in the policy. Every caller that
-    /// hits Wonk's HTTP surface (Goalie, the runner's own tool hook) has
-    /// to carry this or Wonk's middleware 401s them with an empty body —
-    /// which surfaces as "error decoding response body" at the hook layer.
-    operator_token: String,
-}
-
-/// Spawn Wonk, Scribe, and Goalie in-process on ephemeral localhost ports.
-///
-/// Wonk gets the runner's configured policy. Scribe is a fresh in-memory
-/// store (we dump it to stderr at the end). Goalie is pointed at Wonk and
-/// writes its JSON-lines audit log to `/tmp/goalie-<operator>.jsonl` inside
-/// the VM (which is tmpfs — ephemeral, fine for this round).
-///
-/// All three bind to `127.0.0.1:0` and their URLs are returned in [`Cast`].
-async fn spawn_cast(policy_toml: &str, operator_id: &str) -> anyhow::Result<Cast> {
-    // --- Scribe ---
-    // If SMOOTH_ARCHIVIST_URL is set, mirror every log entry to the
-    // Safehouse's Archivist via a background forwarder. Otherwise run
-    // standalone (legacy behavior, fine for host-mode sandboxed tests).
-    let archivist_url = std::env::var("SMOOTH_ARCHIVIST_URL").ok().filter(|s| !s.trim().is_empty());
-    // Diagnostic: write the archivist URL to the workspace for host-side
-    // inspection. Uses SMOOTH_WORKSPACE since we don't have the config here.
-    if let Ok(ws) = std::env::var("SMOOTH_WORKSPACE") {
-        let diag = format!("SMOOTH_ARCHIVIST_URL={}", archivist_url.as_deref().unwrap_or("<NOT SET>"));
-        let _ = std::fs::write(format!("{ws}/.archivist-diag.txt"), &diag);
-    }
-    let scribe_state = if let Some(url) = archivist_url {
-        tracing::info!(archivist = %url, operator = operator_id, "spawning scribe with archivist forwarder");
-        let forwarder = smooth_scribe::spawn_forwarder(url, operator_id.to_string());
-        ScribeAppState::with_forwarder(forwarder)
-    } else {
-        tracing::warn!(
-            operator = operator_id,
-            "SMOOTH_ARCHIVIST_URL not set — scribe will store logs locally only (no cross-VM forwarding)"
-        );
-        ScribeAppState::local_only()
-    };
-    let scribe_store = Arc::clone(&scribe_state.store);
-    let scribe_router = scribe_router_with_state(scribe_state);
-    let scribe_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let scribe_addr = scribe_listener.local_addr()?;
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(scribe_listener, scribe_router).await {
-            tracing::error!(error = %e, "in-VM Scribe server crashed");
-        }
-    });
-
-    // --- Wonk ---
-    let policy = Policy::from_toml(policy_toml).map_err(|e| anyhow::anyhow!("invalid policy TOML: {e}"))?;
-    // Stash the operator token so Goalie + anyone else in the VM who
-    // needs to call Wonk's HTTP surface can authenticate. Wonk's
-    // middleware rejects unauthenticated callers with 401.
-    let operator_token = policy.auth.token.clone();
-    let operator_token_for_cast = operator_token.clone();
-    let holder = PolicyHolder::from_policy(policy);
-    // There is no Big Smooth leader to negotiate with from inside this VM
-    // (the runner is self-contained), so we point the negotiator at a stub
-    // URL. access negotiation calls will fail closed, which is the safe
-    // default — we can wire it up later.
-    let negotiator = Negotiator::new("http://127.0.0.1:1/no-leader", holder.clone());
-
-    // Narc escalation client. Two transports, gated by
-    // SMOOTH_SINGLE_PROCESS (pearl th-893801 Phase 4 iter-6c):
-    //
-    // - Single-VM mode (SMOOTH_SINGLE_PROCESS=1): dial Narc on
-    //   the local UDS at $XDG_RUNTIME_DIR/smooth/narc.sock (or
-    //   SMOOTH_SINGLE_PROCESS_SOCKET_DIR/narc.sock when set).
-    //   That's the gRPC server Big Smooth's bootstrap stood up
-    //   in iter-3e.
-    // - Legacy mode: SMOOTH_NARC_URL points at Big Smooth's
-    //   `/api/narc/judge` HTTP endpoint. Same shape as before.
-    //
-    // When neither is configured, Wonk runs without an arbiter
-    // and hard-denies anything its local policy doesn't allow.
-    let mut wonk_state = WonkAppState::new(holder, negotiator);
-    let single_process_mode = matches!(std::env::var("SMOOTH_SINGLE_PROCESS").as_deref(), Ok("1" | "true" | "TRUE"));
-    if single_process_mode {
-        let socket_dir = std::env::var("SMOOTH_SINGLE_PROCESS_SOCKET_DIR")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .map(std::path::PathBuf::from)
-            .or_else(|| std::env::var("XDG_RUNTIME_DIR").ok().map(|x| std::path::PathBuf::from(x).join("smooth")))
-            .unwrap_or_else(|| std::path::PathBuf::from(format!("/tmp/smooth-{}", std::process::id())));
-        let narc_sock = socket_dir.join("narc.sock");
-        match smooth_wonk::NarcGrpcUds::connect(narc_sock.clone()).await {
-            Ok(client) => {
-                tracing::info!(operator = operator_id, sock = %narc_sock.display(), "Wonk wiring gRPC-over-UDS Narc client");
-                wonk_state = wonk_state.with_narc(client);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    operator = operator_id,
-                    sock = %narc_sock.display(),
-                    error = %e,
-                    "SMOOTH_SINGLE_PROCESS=1 but Narc UDS unreachable — Wonk will hard-deny non-allowlisted requests"
-                );
-            }
-        }
-    } else if let Ok(narc_url) = std::env::var("SMOOTH_NARC_URL") {
-        if !narc_url.trim().is_empty() {
-            tracing::info!(operator = operator_id, narc_url = %narc_url, "Wonk wiring HTTP Narc escalation client");
-            wonk_state = wonk_state.with_narc(smooth_wonk::NarcClient::new(narc_url));
-        }
-    }
-    let wonk_state = Arc::new(wonk_state);
-    let wonk_r = wonk_router(wonk_state);
-    let wonk_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let wonk_addr = wonk_listener.local_addr()?;
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(wonk_listener, wonk_r).await {
-            tracing::error!(error = %e, "in-VM Wonk server crashed");
-        }
-    });
-    let wonk_url = format!("http://{wonk_addr}");
-
-    // --- Goalie ---
-    // Audit log → tmpfs under /tmp. Bind to an ephemeral localhost port.
-    let audit_path = format!("/tmp/goalie-{operator_id}.jsonl");
-    let audit = AuditLogger::new(&audit_path)?;
-    let goalie_client = WonkClient::with_auth(&wonk_url, operator_token);
-    // run_proxy binds itself, so we pre-probe for a free port the same way
-    // Big Smooth's sandboxed dispatch does. Tight race, fine for a single
-    // in-VM spawn.
-    let goalie_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let goalie_addr = goalie_listener.local_addr()?;
-    drop(goalie_listener);
-    let goalie_listen = goalie_addr.to_string();
-    tokio::spawn(async move {
-        if let Err(e) = run_proxy(&goalie_listen, goalie_client, audit).await {
-            tracing::error!(error = %e, "in-VM Goalie proxy crashed");
-        }
-    });
-
-    // Give axum + hyper a beat to start accepting before the agent hits them.
-    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-
-    Ok(Cast {
-        wonk_url,
-        scribe_url: format!("http://{scribe_addr}"),
-        goalie_url: format!("http://{goalie_addr}"),
-        scribe_store,
-        goalie_audit_path: audit_path,
-        operator_token: operator_token_for_cast,
-    })
-}
 
 // ---------------------------------------------------------------------------
 // main
@@ -1880,16 +1678,10 @@ async fn main() {
         std::process::exit(2);
     }
 
-    // Spawn the in-VM security cast: Wonk (policy), Goalie (proxy), Scribe
-    // (log sink). All three run as tokio tasks bound to ephemeral localhost
-    // ports. The agent's tool hooks will talk to Wonk + Scribe over HTTP.
-    //
     // Diagnostic: parse the policy TOML so we can log the network allowlist
-    // and policy source. Pearl th-7b95ef — this used to go out as
-    // `AgentEvent::TokenDelta` (stdout), which made bigsmooth treat it as
-    // an LLM-authored chat fragment and persist it as `role: assistant`
-    // content. The runner's stdout channel is reserved for real agent
-    // events; diagnostic chatter goes to stderr via tracing.
+    // and policy source. The Wonk/Goalie network+FS enforcement cast was
+    // removed 2026-07 (pearl th-f4a801) — the policy is still parsed for
+    // Narc's in-process surveillance and diagnostics.
     if let Ok(parsed) = smooth_policy::Policy::from_toml(&config.policy_toml) {
         let domains: Vec<String> = parsed.network.allow.iter().map(|r| r.domain.clone()).collect();
         tracing::info!(
@@ -1901,29 +1693,6 @@ async fn main() {
     } else {
         tracing::warn!(bytes = config.policy_toml.len(), "FAILED to parse policy TOML");
     }
-
-    let cast = match spawn_cast(&config.policy_toml, &config.operator_id).await {
-        Ok(c) => c,
-        Err(e) => {
-            emit_event(&AgentEvent::Error {
-                message: format!("failed to spawn in-VM cast: {e}"),
-            });
-            std::process::exit(2);
-        }
-    };
-    tracing::info!(
-        wonk = %cast.wonk_url,
-        scribe = %cast.scribe_url,
-        goalie = %cast.goalie_url,
-        "in-VM cast spawned"
-    );
-
-    // Only the bash tool's child processes route through Goalie. The runner
-    // itself does NOT set HTTP_PROXY on its own env — if it did, WonkHook
-    // and ScribeAuditHook would pick up the proxy from env and loop their
-    // localhost check requests back through Goalie, deadlocking the policy
-    // check. The bash tool gets the proxy URL injected per-invocation.
-    let proxy_for_bash = Some(cast.goalie_url.clone());
 
     // Build the LLM config + agent config.
     //
@@ -2008,7 +1777,6 @@ async fn main() {
     });
     tools.register(BashTool {
         base: config.workspace.clone(),
-        proxy_url: proxy_for_bash.clone(),
     });
     tools.register(ProjectInspectTool {
         base: config.workspace.clone(),
@@ -2020,7 +1788,6 @@ async fn main() {
     tools.register(BgRunTool {
         base: config.workspace.clone(),
         registry: Arc::clone(&bg_registry),
-        proxy_url: proxy_for_bash,
     });
     tools.register(BgStatusTool {
         registry: Arc::clone(&bg_registry),
@@ -2394,14 +2161,12 @@ async fn main() {
     //      before any downstream hook runs. Returning an error from
     //      pre_call surfaces as a tool-result error to the LLM with
     //      the message "agent '<name>' is not permitted to call
-    //      '<tool>'". This is cheaper than asking Wonk + Narc about
-    //      a call the local agent can't make anyway.
-    //   1. Narc — fastest, catches secrets/injection/dangerous writes purely
+    //      '<tool>'". This is cheaper than asking Narc about a call the
+    //      local agent can't make anyway.
+    //   1. Narc — catches secrets/injection/dangerous writes purely
     //      in-process (no HTTP). Blocks the call outright on Block severity.
-    //   2. Wonk — HTTP check against the policy for tool name, network
-    //      domain, cli command, etc. Blocks the call if the policy denies.
-    //   3. Scribe audit — best-effort POST of pre_call/post_call log entries
-    //      to the in-VM Scribe for later aggregation.
+    //      (The Wonk policy + Scribe audit HTTP hooks were removed with the
+    //      microVM cast, 2026-07, pearl th-f4a801.)
     //
     // C1: filter the registry by the active role's clearance BEFORE the
     // schemas are handed to the LLM. PermissionHook still runs on every
@@ -2411,12 +2176,10 @@ async fn main() {
     let clearance = active_role.permissions.clone();
     tools.retain(|name| clearance.allows(name));
 
-    // All four are `ToolHook` impls so they compose cleanly on the registry.
+    // Both are `ToolHook` impls so they compose cleanly on the registry.
     tools.add_hook(smooth_operator::PermissionHook::new(&active_role));
     let narc = Arc::new(NarcHook::new(config.narc_write_guard));
     tools.add_hook(SharedNarc { inner: Arc::clone(&narc) });
-    tools.add_hook(WonkHook::with_auth(&cast.wonk_url, &cast.operator_token));
-    tools.add_hook(ScribeAuditHook::new(&cast.scribe_url, &config.operator_id));
 
     // Announce the active agent + its permission shape via tracing so
     // operators tailing the runner's stderr / service.log can see what
@@ -2579,51 +2342,20 @@ async fn main() {
     // Drain the emitter before we exit.
     let _ = emit_task.await;
 
-    // Cast summary on stderr: Narc alert count, Scribe log count, Goalie
-    // audit entries, runtime verdict. Big Smooth forwards this verbatim
-    // as a [runner stderr] TokenDelta so operators can audit what every
-    // in-VM security service saw during the run. A parseable prefix
-    // (`[cast-summary]`) lets tests scrape it without false matches on
-    // log output.
+    // Cast summary on stderr: Narc alert count + the alerts themselves.
+    // Big Smooth forwards this verbatim as a [runner stderr] TokenDelta so
+    // operators can audit what in-process surveillance saw during the run.
+    // A parseable prefix (`[cast-summary]`) lets tests scrape it without
+    // false matches on log output. (Scribe/Goalie audit counts were
+    // dropped with the microVM cast, 2026-07, pearl th-f4a801.)
     let narc_alerts = narc.alerts();
-    let scribe_entries = cast.scribe_store.query(&LogQuery::default());
-    let goalie_audit_entries: Vec<serde_json::Value> = std::fs::read_to_string(&cast.goalie_audit_path)
-        .ok()
-        .map(|contents| {
-            contents
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-                .collect()
-        })
-        .unwrap_or_default();
-    let goalie_denied_count = goalie_audit_entries
-        .iter()
-        .filter(|e| e.get("allowed").and_then(serde_json::Value::as_bool) == Some(false))
-        .count();
     let summary = serde_json::json!({
         "narc_alert_count": narc_alerts.len(),
         "narc_alerts": narc_alerts,
-        "scribe_entry_count": scribe_entries.len(),
-        "scribe_entries_sample": scribe_entries.iter().take(10).collect::<Vec<_>>(),
-        "goalie_audit_count": goalie_audit_entries.len(),
-        "goalie_denied_count": goalie_denied_count,
-        "goalie_audit": goalie_audit_entries,
-        "wonk_url": cast.wonk_url,
-        "scribe_url": cast.scribe_url,
-        "goalie_url": cast.goalie_url,
     });
     if let Ok(line) = serde_json::to_string(&summary) {
         eprintln!("[cast-summary] {line}");
     }
-
-    // Give the Scribe forwarder time to flush its last batch to
-    // Archivist before we exit. The forwarder runs as a spawned tokio
-    // task with a 500ms flush interval. `std::process::exit` kills the
-    // runtime instantly, losing buffered entries. A 2-second sleep
-    // before exit lets the forwarder's timer fire at least 3 times,
-    // draining any pending batches to the Archivist.
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     match result {
         Ok(_conv) => {

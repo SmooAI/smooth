@@ -170,11 +170,10 @@ jobs:
             fail-fast: false
             matrix:
                 include:
-                    # x86_64-apple-darwin removed: microsandbox's upstream
-                    # `msb_krun_utils` crate (0.1.9) uses `kvm_bindings`
-                    # unconditionally and refuses to compile on Intel macOS.
-                    # Apple Silicon is the only supported macOS target until
-                    # upstream gates kvm_bindings to Linux.
+                    # Only Apple Silicon is built for macOS today. The microVM
+                    # stack that blocked x86_64-apple-darwin was removed 2026-07
+                    # (pearl th-f4a801); Intel macOS could be re-added here if
+                    # there's demand.
                     - target: aarch64-apple-darwin
                       os: macos-latest
                       asset_name: th-macos-arm64.tar.gz
@@ -189,10 +188,9 @@ jobs:
                       os: ubuntu-24.04-arm
                       asset_name: th-linux-arm64.tar.gz
                     # Windows: gated on sub-pearl th-WIN-GATE (filed
-                    # 2026-05-29). smooth-cli currently has
-                    # unconditional dependencies on smooth-bigsmooth
-                    # (microsandbox — kvm_bindings, Linux-only) and
-                    # smooth-code (ratatui TUI). Adding Windows to the
+                    # 2026-05-29). smooth-cli currently has an
+                    # unconditional dependency on smooth-code (ratatui
+                    # TUI). Adding Windows to the
                     # matrix here requires a workspace-wide Cargo
                     # feature gate (default = "desktop", cli-windows =
                     # bare CLI surface only — pearls/jira/api/admin/
@@ -217,13 +215,12 @@ jobs:
               run: |
                   sudo apt-get update
                   # libdbus-1-dev: libdbus-sys crate uses pkg-config to find it
-                  # (pulled in transitively by the keyring/zbus chain that
-                  # microsandbox depends on). Missing package fails with
-                  # "pkg_config failed" at build time.
-                  # libcap-ng-dev: linker needs `-lcap-ng` — microsandbox's
-                  # Linux-only msb_krun_devices uses libcap-ng for CAP_*
-                  # capability management in the VM host shim.
-                  sudo apt-get install -y pkg-config libdbus-1-dev libcap-ng-dev protobuf-compiler
+                  # (pulled in transitively by the keyring/zbus chain). Missing
+                  # package fails with "pkg_config failed" at build time.
+                  # (libcap-ng-dev was dropped with the microVM stack, 2026-07,
+                  # pearl th-f4a801 — only microsandbox's Linux VM host shim
+                  # needed -lcap-ng.)
+                  sudo apt-get install -y pkg-config libdbus-1-dev protobuf-compiler
 
             - name: Install macOS build deps
               if: runner.os == 'macOS'
