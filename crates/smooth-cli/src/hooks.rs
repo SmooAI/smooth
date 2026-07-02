@@ -102,9 +102,38 @@ pub fn find_git_root(start_dir: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Outcome of an [`install`] attempt.
+#[derive(Debug)]
+pub enum InstallOutcome {
+    /// Hooks were written and `core.hooksPath` set to `.githooks`.
+    Installed(PathBuf),
+    /// `core.hooksPath` already points at a foreign hooks dir (e.g. husky's
+    /// `.husky/_`). We left it untouched rather than clobber the repo's own
+    /// tooling. Carries the existing path. Pearl th-9550e6.
+    SkippedForeign(String),
+}
+
+/// Read `core.hooksPath` for `root`, or `None` if unset/empty.
+fn current_hooks_path(root: &Path) -> Option<String> {
+    let output = Command::new("git").args(["config", "core.hooksPath"]).current_dir(root).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        None
+    } else {
+        Some(path)
+    }
+}
+
 /// Install `.githooks/` scripts and set `core.hooksPath`.
-/// Returns the hooks directory path on success.
-pub fn install(repo_root: Option<&Path>) -> Result<PathBuf> {
+///
+/// Refuses to clobber a foreign `core.hooksPath` (e.g. husky): if one is
+/// already set to anything other than `.githooks`, returns
+/// [`InstallOutcome::SkippedForeign`] without writing files or touching git
+/// config. Pearl th-9550e6.
+pub fn install(repo_root: Option<&Path>) -> Result<InstallOutcome> {
     let root = match repo_root {
         Some(r) => r.to_path_buf(),
         None => {
@@ -112,6 +141,13 @@ pub fn install(repo_root: Option<&Path>) -> Result<PathBuf> {
             find_git_root(&cwd).context("not in a git repository")?
         }
     };
+
+    // Guard: don't overwrite another tool's hooks (husky et al.).
+    if let Some(existing) = current_hooks_path(&root) {
+        if existing != HOOKS_DIR {
+            return Ok(InstallOutcome::SkippedForeign(existing));
+        }
+    }
 
     let hooks_dir = root.join(HOOKS_DIR);
     fs::create_dir_all(&hooks_dir).context("create .githooks/ directory")?;
@@ -132,7 +168,7 @@ pub fn install(repo_root: Option<&Path>) -> Result<PathBuf> {
         anyhow::bail!("git config core.hooksPath failed");
     }
 
-    Ok(hooks_dir)
+    Ok(InstallOutcome::Installed(hooks_dir))
 }
 
 /// Check whether hooks are properly installed.
@@ -163,13 +199,7 @@ pub fn check(repo_root: Option<&Path>) -> HooksStatus {
     }
 
     // Check core.hooksPath
-    let output = Command::new("git").args(["config", "core.hooksPath"]).current_dir(&root).output().ok();
-    let hooks_path = output
-        .as_ref()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-
-    match hooks_path {
+    match current_hooks_path(&root) {
         Some(p) if p == HOOKS_DIR => HooksStatus::Ok,
         Some(p) => HooksStatus::WrongPath(p),
         None => HooksStatus::PathNotSet,
@@ -326,13 +356,25 @@ fn extract_pearl_id(branch: &str) -> &str {
 
 // ── CLI display helpers ───────────────────────────────────────────
 
-/// Print install result (used by `th hooks install` and `th pearls init`).
-pub fn print_install_result(hooks_dir: &Path) {
-    println!("{} Git hooks installed at {}", "✓".green().bold(), hooks_dir.display());
-    println!("  {} cargo fmt --check + clippy", "pre-commit:".bold());
-    println!("  {} cargo test", "pre-push:".bold());
-    println!("  {} pearl ID from branch name", "prepare-commit-msg:".bold());
-    println!("  {} pearl Dolt auto-commit/push", "pearl lifecycle:".bold());
+/// Print the outcome of an [`install`] call (used by `th hooks install`,
+/// `th pearls init`, and `th doctor`).
+pub fn print_install_outcome(outcome: &InstallOutcome) {
+    match outcome {
+        InstallOutcome::Installed(hooks_dir) => {
+            println!("{} Git hooks installed at {}", "✓".green().bold(), hooks_dir.display());
+            println!("  {} cargo fmt --check + clippy", "pre-commit:".bold());
+            println!("  {} cargo test", "pre-push:".bold());
+            println!("  {} pearl ID from branch name", "prepare-commit-msg:".bold());
+            println!("  {} pearl Dolt auto-commit/push", "pearl lifecycle:".bold());
+        }
+        InstallOutcome::SkippedForeign(existing) => {
+            println!(
+                "  {} Git hooks: left {} in place (core.hooksPath already set) — skipped installing smooth's hooks",
+                "○".dimmed(),
+                existing.bold()
+            );
+        }
+    }
 }
 
 /// Print doctor-style status for hooks.
@@ -431,7 +473,10 @@ mod tests {
         assert!(matches!(check(Some(root)), HooksStatus::Missing | HooksStatus::PathNotSet));
 
         // Install
-        let hooks_dir = install(Some(root)).expect("install hooks");
+        let hooks_dir = match install(Some(root)).expect("install hooks") {
+            InstallOutcome::Installed(dir) => dir,
+            InstallOutcome::SkippedForeign(p) => panic!("unexpected skip, hooksPath={p}"),
+        };
         assert!(hooks_dir.join("pre-commit").exists());
         assert!(hooks_dir.join("pre-push").exists());
         assert!(hooks_dir.join("prepare-commit-msg").exists());
@@ -447,5 +492,38 @@ mod tests {
             let meta = std::fs::metadata(&path).expect("stat hook");
             assert!(meta.permissions().mode() & 0o111 != 0, "hook {name} not executable");
         }
+    }
+
+    #[test]
+    fn install_does_not_clobber_foreign_hooks_path_th_9550e6() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        Command::new("git").args(["init"]).current_dir(root).output().expect("git init");
+
+        // Simulate a husky-style repo: core.hooksPath already points elsewhere.
+        Command::new("git")
+            .args(["config", "core.hooksPath", ".husky/_"])
+            .current_dir(root)
+            .output()
+            .expect("set foreign hooksPath");
+
+        // install must refuse and leave the foreign path untouched.
+        match install(Some(root)).expect("install") {
+            InstallOutcome::SkippedForeign(p) => assert_eq!(p, ".husky/_"),
+            InstallOutcome::Installed(_) => panic!("clobbered foreign hooksPath"),
+        }
+        assert!(!root.join(HOOKS_DIR).exists(), ".githooks should not be created");
+        assert_eq!(current_hooks_path(root).as_deref(), Some(".husky/_"), "hooksPath must be unchanged");
+    }
+
+    #[test]
+    fn install_is_idempotent_when_already_ours_th_9550e6() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        Command::new("git").args(["init"]).current_dir(root).output().expect("git init");
+
+        // First install sets it to .githooks; second must proceed (not skip).
+        assert!(matches!(install(Some(root)).expect("first"), InstallOutcome::Installed(_)));
+        assert!(matches!(install(Some(root)).expect("second"), InstallOutcome::Installed(_)));
     }
 }

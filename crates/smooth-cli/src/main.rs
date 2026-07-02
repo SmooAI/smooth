@@ -3019,8 +3019,8 @@ async fn cmd_code(
 fn cmd_hooks(cmd: HooksCommands) -> Result<()> {
     match cmd {
         HooksCommands::Install => {
-            let hooks_dir = hooks::install(None)?;
-            hooks::print_install_result(&hooks_dir);
+            let outcome = hooks::install(None)?;
+            hooks::print_install_outcome(&outcome);
         }
         HooksCommands::Run { hook, args } => {
             hooks::run_hook(&hook, &args)?;
@@ -3177,8 +3177,13 @@ async fn cmd_doctor() -> Result<()> {
         // Auto-fix: install hooks
         println!("    {} installing hooks...", "→".cyan());
         match hooks::install(None) {
-            Ok(hooks_dir) => {
+            Ok(hooks::InstallOutcome::Installed(hooks_dir)) => {
                 println!("    {} fixed: hooks installed at {}", "✓".green().bold(), hooks_dir.display());
+                issues -= 1;
+            }
+            Ok(outcome @ hooks::InstallOutcome::SkippedForeign(_)) => {
+                // Repo has its own hooks (husky etc.); not an issue to fix.
+                hooks::print_install_outcome(&outcome);
                 issues -= 1;
             }
             Err(e) => {
@@ -5301,12 +5306,13 @@ async fn cmd_pearls_init() -> Result<()> {
         }
     }
 
-    // Install git hooks if not already present.
+    // Install git hooks if not already present. `install` itself refuses to
+    // clobber a foreign `core.hooksPath` (husky etc.) — pearl th-9550e6.
     let hooks_status = hooks::check(None);
     if !hooks_status.is_ok() {
         println!();
         match hooks::install(None) {
-            Ok(hooks_dir) => hooks::print_install_result(&hooks_dir),
+            Ok(outcome) => hooks::print_install_outcome(&outcome),
             Err(e) => eprintln!("  Could not install git hooks: {e}"),
         }
     }
