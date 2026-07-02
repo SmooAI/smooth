@@ -132,6 +132,7 @@ impl TuiTaskOutcome {
             // task to a sentinel/turn-cap or the test result is what
             // it is.
             inconclusive: false,
+            upstream_error: false,
         }
     }
 }
@@ -678,6 +679,7 @@ pub async fn run_tui_sweep<D: DriverModel, O: SweepObserver>(curated: &CuratedLi
             cost_usd: outcome.cost_usd,
             duration_ms: outcome.duration_ms,
             inconclusive: false,
+            upstream_error: false,
         };
         observer.on_task_complete(idx + 1, total, *lang, task, &task_outcome, cumulative_cost);
         per_task.push((*lang, task.clone(), outcome));
@@ -755,6 +757,7 @@ fn aggregate(per_task: &[(PolyglotLang, String, TuiTaskOutcome)], inputs: Aggreg
         tasks_attempted,
         tasks_green,
         tasks_inconclusive: 0,
+        tasks_upstream_error: 0,
         cost_usd: inputs.cost_usd,
         median_task_ms: median_ms(inputs.durations_ms),
         budget_usd_cap: inputs.budget_usd_cap,
