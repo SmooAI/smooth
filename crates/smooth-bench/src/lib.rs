@@ -861,44 +861,61 @@ pub fn parse_cargo_summary(combined: &str) -> Option<TestCounts> {
     })
 }
 
-/// pytest summary line: `===== 10 passed, 2 failed, 1 skipped in 1.23s =====`
-/// or `========== 10 passed in 0.01s ==========`. Take the LAST occurrence
-/// since pytest can print interim summaries; the final one is the suite total.
+/// pytest summary line. All of these are valid shapes:
+/// - `===== 10 passed, 2 failed, 1 skipped in 1.23s =====`
+/// - `========== 16 passed in 0.01s ==========`
+/// - `16 passed in 0.01s` (bars omitted when pytest can't detect terminal
+///   width — e.g. output piped to a file, which is exactly our capture path)
+/// - `1 failed in 0.02s` / `1 error in 0.01s` / `no tests ran in 0.00s`
+///
+/// Take the LAST recognized summary line — pytest can print interim
+/// per-file summaries; the final one is the suite total. Returns
+/// `Some(0, 0, 0)` for `no tests ran` (not a pass — `solved()`
+/// requires `total > 0`) so we still skip the LLM judge (pearl th-19ab7c).
 #[must_use]
 pub fn parse_pytest_summary(combined: &str) -> Option<TestCounts> {
-    let mut last_passed = None;
-    let mut last_failed = None;
+    let mut found = false;
+    let mut passed = 0u32;
+    let mut failed = 0u32;
     for line in combined.lines() {
-        let trimmed = line.trim();
-        // Heuristic: pytest summary lines start with `=` and contain
-        // "passed" or "failed" or "error".
-        if !trimmed.starts_with('=') {
+        // Strip the optional `====` decoration so the same logic handles
+        // both the bar-wrapped and bare forms.
+        let trimmed = line.trim().trim_matches('=').trim();
+        if !is_pytest_summary(trimmed) {
             continue;
         }
-        if !(trimmed.contains(" passed") || trimmed.contains(" failed") || trimmed.contains(" error")) {
-            continue;
-        }
-        if let Some(p) = extract_count_before(trimmed, " passed") {
-            last_passed = Some(p);
-        }
-        if let Some(f) = extract_count_before(trimmed, " failed") {
-            last_failed = Some(f);
-        }
-        // pytest's "error" counts (collection errors) as failures.
+        found = true;
+        // Each summary line is self-contained; the last one wins.
+        passed = extract_count_before(trimmed, " passed").unwrap_or(0);
+        failed = extract_count_before(trimmed, " failed").unwrap_or(0);
+        // pytest's "error"/"errors" counts (collection errors) as failures.
         if let Some(e) = extract_count_before(trimmed, " error") {
-            last_failed = Some(last_failed.unwrap_or(0).saturating_add(e));
+            failed = failed.saturating_add(e);
         }
     }
-    if last_passed.is_none() && last_failed.is_none() {
+    if !found {
         return None;
     }
-    let passed = last_passed.unwrap_or(0);
-    let failed = last_failed.unwrap_or(0);
     Some(TestCounts {
         passed,
         failed,
         total: passed.saturating_add(failed),
     })
+}
+
+/// True when `line` (already stripped of `=` decoration) is a pytest
+/// result summary. Discriminator: it reports at least one status keyword
+/// and ends with a pytest duration (`… in <digits>…s`). The duration tail
+/// is what separates a real summary from arbitrary test stdout that
+/// happens to contain the word "passed".
+fn is_pytest_summary(line: &str) -> bool {
+    const KEYWORDS: &[&str] = &["passed", "failed", "error", "skipped", "xfailed", "xpassed", "no tests ran"];
+    if !KEYWORDS.iter().any(|k| line.contains(k)) {
+        return false;
+    }
+    // Must end in `… in <duration>` where duration starts with a digit and
+    // ends with `s` (`0.01s`, `1m 2.34s`, `12s`).
+    matches!(line.rsplit_once(" in "), Some((_, dur)) if dur.ends_with('s') && dur.starts_with(|c: char| c.is_ascii_digit()))
 }
 
 /// jest summary line: `Tests:       1 failed, 10 passed, 11 total`.
@@ -1229,6 +1246,50 @@ mod tests {
         let counts = parse_pytest_summary(out).expect("matches");
         assert_eq!(counts.passed, 10);
         assert_eq!(counts.failed, 2);
+    }
+
+    #[test]
+    fn parse_pytest_summary_handles_bare_undecorated_lines() {
+        // pearl th-19ab7c: when pytest can't detect terminal width (output
+        // piped to a file — our capture path) it drops the `====` bars.
+        // The regression case is the exact combined.txt from smoke run
+        // 115e2ee1: a progress line + a bare `16 passed in 0.01s`.
+        let cases: &[(&str, u32, u32, u32)] = &[
+            // (combined output, expected passed, failed, total)
+            ("................ [100%]\n16 passed in 0.01s\n", 16, 0, 16),
+            ("1 passed in 0.00s", 1, 0, 1),
+            ("3 failed, 12 passed in 0.42s", 12, 3, 15),
+            ("1 failed in 0.02s", 0, 1, 1),
+            ("1 error in 0.01s", 0, 1, 1),
+            ("2 passed, 1 skipped, 3 warnings in 0.10s", 2, 0, 2),
+            ("10 passed, 2 failed, 1 skipped in 1.23s", 10, 2, 12),
+            // Long-form duration.
+            ("5 passed in 1m 2.34s", 5, 0, 5),
+        ];
+        for (out, p, f, t) in cases {
+            let counts = parse_pytest_summary(out).unwrap_or_else(|| panic!("should parse: {out:?}"));
+            assert_eq!(counts.passed, *p, "passed for {out:?}");
+            assert_eq!(counts.failed, *f, "failed for {out:?}");
+            assert_eq!(counts.total, *t, "total for {out:?}");
+        }
+    }
+
+    #[test]
+    fn parse_pytest_summary_no_tests_ran_is_zero_not_judge() {
+        // `no tests ran` must be recognized (so we don't pay the judge
+        // tax) but score as 0/0/0 — not a pass, since all_passed() needs
+        // total > 0.
+        let counts = parse_pytest_summary("no tests ran in 0.00s").expect("recognized");
+        assert_eq!((counts.passed, counts.failed, counts.total), (0, 0, 0));
+        assert!(!counts.solved());
+    }
+
+    #[test]
+    fn parse_pytest_summary_ignores_non_summary_stdout() {
+        // A test that prints "passed" in its own output must NOT be
+        // mistaken for a summary — the duration tail is the discriminator.
+        assert!(parse_pytest_summary("assert result == 'passed'\n").is_none());
+        assert!(parse_pytest_summary("the check passed in review\n").is_none());
     }
 
     #[test]
