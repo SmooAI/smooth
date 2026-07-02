@@ -6043,9 +6043,15 @@ fn is_no_remote_error(e: &anyhow::Error) -> bool {
 
 /// Heuristic: first push to a fresh remote without `-u` returns this.
 /// The CLI auto-retries with `set_upstream = true`.
+///
+/// `remote '' not found` (pearl th-2681fd) is the same condition with a
+/// newer Dolt error string: the branch's upstream remote is empty, so a
+/// bare `CALL DOLT_PUSH()` resolves the remote name to `''`. Note the
+/// quoted-empty form does NOT overlap with [`is_no_remote_error`]'s
+/// `remote not found` (that one matches a *named* missing remote).
 fn is_no_upstream_error(e: &anyhow::Error) -> bool {
     let s = format!("{e:#}").to_lowercase();
-    s.contains("no upstream branch") || s.contains("has no upstream")
+    s.contains("no upstream branch") || s.contains("has no upstream") || s.contains("remote '' not found")
 }
 
 /// Heuristic: the local store and remote `refs/dolt/data` share no
@@ -6056,6 +6062,47 @@ fn is_no_upstream_error(e: &anyhow::Error) -> bool {
 fn is_no_common_ancestor_error(e: &anyhow::Error) -> bool {
     let s = format!("{e:#}").to_lowercase();
     s.contains("no common ancestor")
+}
+
+#[cfg(test)]
+mod push_error_predicate_tests {
+    use super::*;
+
+    fn err(msg: &str) -> anyhow::Error {
+        anyhow::anyhow!("smooth-dolt push failed (exit 1): smooth-dolt: push: {msg}")
+    }
+
+    // Regression for pearl th-2681fd: newer Dolt reports a missing branch
+    // upstream as `remote '' not found`, which must trigger the `-u` retry
+    // — and must NOT be classified as "no remote at all" (the global-store
+    // skip), which only matches a *named* missing remote.
+    #[test]
+    fn empty_remote_is_no_upstream_not_no_remote() {
+        let e = err("Error 1105: fatal: remote '' not found.");
+        assert!(is_no_upstream_error(&e));
+        assert!(!is_no_remote_error(&e));
+    }
+
+    #[test]
+    fn classic_no_upstream_strings_still_match() {
+        assert!(is_no_upstream_error(&err("no upstream branch")));
+        assert!(is_no_upstream_error(&err("branch has no upstream")));
+    }
+
+    #[test]
+    fn named_missing_remote_is_no_remote_not_no_upstream() {
+        let e = err("fatal: remote not found: origin");
+        assert!(is_no_remote_error(&e));
+        assert!(!is_no_upstream_error(&e));
+    }
+
+    #[test]
+    fn divergence_matches_neither() {
+        let e = err("hint: Integrate the remote changes (e.g. 'dolt pull ...') before pushing again.");
+        assert!(!is_no_upstream_error(&e));
+        assert!(!is_no_remote_error(&e));
+        assert!(!is_no_common_ancestor_error(&e));
+    }
 }
 
 fn cmd_migrate_from_beads(store: &smooth_pearls::PearlStore) -> Result<()> {
