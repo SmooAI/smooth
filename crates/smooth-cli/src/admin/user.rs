@@ -64,7 +64,7 @@ pub enum UserCommands {
 }
 
 pub async fn dispatch(cmd: UserCommands) -> Result<()> {
-    let client = AdminClient::from_user_session()?;
+    let client = AdminClient::from_user_session().await?;
     match cmd {
         UserCommands::List { limit, cursor, json } => {
             let mut path = String::from("/admin/users?");
