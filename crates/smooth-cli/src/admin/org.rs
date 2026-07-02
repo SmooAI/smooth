@@ -144,7 +144,7 @@ pub enum OrgCommands {
 }
 
 pub async fn dispatch(cmd: OrgCommands) -> Result<()> {
-    let client = AdminClient::from_user_session()?;
+    let client = AdminClient::from_user_session().await?;
     match cmd {
         OrgCommands::List { search, limit, offset, json } => {
             let mut path = format!("/admin/organizations?limit={limit}&offset={offset}");

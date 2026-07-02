@@ -115,6 +115,15 @@ pub struct AppState {
     /// written back here when a `/api/access/approve` resolution
     /// lands at scope `user` or `project`. Pearl th-38b72c.
     pub wonk_grants: crate::wonk_grants::SharedWonkGrants,
+    /// Per-process host-tool bearer token. The `/api/host/exec` handler
+    /// checks presented bearers against this; dispatch threads it into the
+    /// operative's child env. Held on state (not a process env var) because
+    /// mutating `std::env` from inside the tokio runtime is UB-prone —
+    /// `set_var` racing a `getenv` on another thread can segfault, and
+    /// Rust 2024 marks `set_var` unsafe for exactly this reason (pearl
+    /// th-87dfee). Seeded from an inherited `SMOOTH_HOST_TOKEN` (sandbox
+    /// dispatch passes one in) or freshly generated.
+    pub host_token: Arc<str>,
 }
 
 impl AppState {
@@ -127,12 +136,14 @@ impl AppState {
         // Bootstrap the per-process host-tool bearer token. Sandbox
         // teammates use this when calling /api/host/exec so we know the
         // call is from a legit dispatch and not a stray network reach.
-        // Set in the env so BOTH the host-exec handler (reads
-        // `SMOOTH_HOST_TOKEN`) and the dispatch path (passes the same
-        // env into the sandbox) see the same value.
-        if std::env::var_os("SMOOTH_HOST_TOKEN").is_none() {
-            std::env::set_var("SMOOTH_HOST_TOKEN", crate::host_tools::generate_host_token());
-        }
+        // Store it on state (below) rather than in a process env var:
+        // `std::env::set_var` from inside the tokio runtime is UB-prone
+        // and unsafe in Rust 2024 (pearl th-87dfee). Reading an inherited
+        // value once here is fine (getenv, not setenv); sandbox dispatch
+        // may pass one in, otherwise generate a fresh per-process token.
+        let host_token: Arc<str> = std::env::var("SMOOTH_HOST_TOKEN")
+            .unwrap_or_else(|_| crate::host_tools::generate_host_token())
+            .into();
         let max_operators = max_sandbox_concurrency();
         let session_store = Arc::new(crate::session::DoltSessionStore::new(&pearl_store));
         let (event_tx, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
@@ -314,6 +325,7 @@ impl AppState {
             teammates: Arc::new(crate::teammates::OperativeRegistry::new()),
             access,
             wonk_grants,
+            host_token,
         }
     }
 
@@ -1374,6 +1386,10 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
     }
 
     let tid = task_id.clone();
+    // Clone the host-tool bearer out of state before the 'static spawn —
+    // Arc<str> clone is cheap and avoids borrowing `state` into the task
+    // (pearl th-87dfee).
+    let host_token = state.host_token.clone();
 
     tokio::spawn(async move {
         let _control_dir = control_dir; // keep alive
@@ -1424,9 +1440,11 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
         if let Some(ref pid) = pearl_id {
             cmd.env("SMOOTH_PEARL_ID", pid);
         }
-        if let Ok(host_token) = std::env::var("SMOOTH_HOST_TOKEN") {
-            cmd.env("SMOOTH_HOST_TOKEN", host_token);
-        }
+        // Thread the per-process host-tool bearer into the operative's
+        // env so its host_tool proxy calls authenticate. Setting a child
+        // Command's env is sound; the token lives on state, not the
+        // parent's process env (pearl th-87dfee).
+        cmd.env("SMOOTH_HOST_TOKEN", host_token.as_ref());
         if let Some(home) = dirs_next::home_dir() {
             let smooth_home = home.join(".smooth");
             if smooth_home.exists() {
@@ -3895,6 +3913,26 @@ mod tests {
         let state = AppState::new(pearl_store);
         let _router = build_router(state);
         // If we get here without panic, the router is valid
+    }
+
+    #[test]
+    fn test_app_state_seeds_host_token() {
+        // pearl th-87dfee: the host-tool bearer must live on AppState
+        // (not a mutated process env var). A freshly built state with no
+        // inherited SMOOTH_HOST_TOKEN gets a generated 32-char token, and
+        // separate states get distinct tokens (per-process generation).
+        let tmp = tempfile::tempdir().unwrap();
+        let Ok(store_a) = smooth_pearls::PearlStore::init(&tmp.path().join("a")) else {
+            return;
+        };
+        let Ok(store_b) = smooth_pearls::PearlStore::init(&tmp.path().join("b")) else {
+            return;
+        };
+        let a = AppState::new(store_a);
+        let b = AppState::new(store_b);
+        assert_eq!(a.host_token.len(), 32, "uuid-simple token is 32 hex chars");
+        assert!(a.host_token.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a.host_token, b.host_token, "each process gets a distinct token");
     }
 
     #[test]

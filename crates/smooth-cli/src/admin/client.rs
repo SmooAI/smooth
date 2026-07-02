@@ -3,8 +3,8 @@
 //! Loads the Supabase user JWT from
 //! `~/.smooth/auth/smooai-user.json` (the session `th auth login`
 //! creates), sends every request with `Authorization: Bearer
-//! <jwt>`. No auto-refresh — Supabase tokens expire after ~1h; on
-//! 401 the user re-runs `th auth login`.
+//! <jwt>`. Auto-refreshes an expired session via the stored
+//! Supabase `refresh_token` (pearl th-32d00e).
 //!
 //! Distinct from `smooth-api-client::SmoothApiClient` which is
 //! built around M2M `client_credentials` and auto-refreshes via
@@ -51,21 +51,17 @@ pub struct AdminClient {
 
 impl AdminClient {
     /// Build by loading the user JWT from
-    /// `~/.smooth/auth/smooai-user.json`. Errors with a
-    /// `th auth login` hint if no session is present.
-    pub fn from_user_session() -> Result<Self> {
-        let store = CredentialsStore::default_user().context("locate user credentials store")?;
-        let creds = store
-            .load()
-            .context("load user session")?
-            .ok_or_else(|| anyhow::anyhow!("not logged in — run `th auth login` first"))?;
-        if creds.is_expired() {
-            anyhow::bail!("user session expired (run `th auth login` again)");
-        }
+    /// `~/.smooth/auth/smooai-user.json`, silently refreshing an
+    /// expired session via its Supabase `refresh_token` (pearl
+    /// th-32d00e). Errors with a `th auth login` hint only when no
+    /// session exists or there's no refresh material.
+    pub async fn from_user_session() -> Result<Self> {
+        let http = reqwest::Client::builder().user_agent(format!("th/{}", env!("CARGO_PKG_VERSION"))).build()?;
+        let creds = crate::auth::refresh::fresh_user_credentials(&http).await?;
         Ok(Self {
             base: api_url(),
             bearer: creds.access_token,
-            http: reqwest::Client::builder().user_agent(format!("th/{}", env!("CARGO_PKG_VERSION"))).build()?,
+            http,
         })
     }
 

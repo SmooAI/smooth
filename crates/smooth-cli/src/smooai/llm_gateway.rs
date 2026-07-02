@@ -125,7 +125,7 @@ pub enum KeysCmd {
 }
 
 pub async fn cmd(cmd: Cmd) -> Result<()> {
-    let client = UserClient::from_user_session()?;
+    let client = UserClient::from_user_session().await?;
     match cmd {
         Cmd::Overview { org_id, json } => {
             let org = crate::active_org::resolve(org_id)?;
