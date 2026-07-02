@@ -80,20 +80,17 @@ fn allowed_tools() -> Vec<String> {
     DEFAULT_ALLOWLIST.iter().map(|s| (*s).to_string()).collect()
 }
 
-fn host_token() -> Option<String> {
-    std::env::var("SMOOTH_HOST_TOKEN").ok()
-}
-
 /// `POST /api/host/exec` — run a whitelisted host CLI on behalf of a
 /// teammate.
 pub async fn host_exec_handler(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<HostExecBody>,
 ) -> Result<Json<HostExecResponse>, (StatusCode, String)> {
     // Auth check — reject anything that isn't a teammate calling from
-    // the sandbox network policy with the per-process bearer.
-    let expected = host_token().ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "host-exec: SMOOTH_HOST_TOKEN not set on Big Smooth".into()))?;
+    // the sandbox network policy with the per-process bearer. The token
+    // lives on AppState (pearl th-87dfee), not a process env var.
+    let expected = state.host_token.as_ref();
     let auth = headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("");
     let presented = auth.strip_prefix("Bearer ").unwrap_or("");
     if presented != expected {
