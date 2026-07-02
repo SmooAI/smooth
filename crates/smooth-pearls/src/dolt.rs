@@ -542,9 +542,15 @@ fn wait_child_draining(mut child: std::process::Child, timeout: Option<Duration>
             if std::time::Instant::now() >= deadline {
                 let _ = child.kill();
                 let _ = child.wait();
-                // The drain threads see EOF once the child is reaped.
-                let _ = out_thread.join();
-                let _ = err_thread.join();
+                // Do NOT join the drain threads here: a grandchild that
+                // survives the SIGKILL (e.g. `sh -c` that forked instead of
+                // exec'ing) keeps the pipe write-end open, and read_to_end
+                // blocks until it dies — joining would hold this abort
+                // hostage for the grandchild's lifetime (CI caught exactly
+                // that: the 1s-bound stall test took the full 30s). Drop the
+                // handles instead; the detached threads exit on pipe EOF.
+                drop(out_thread);
+                drop(err_thread);
                 anyhow::bail!(
                     "{what} timed out after {}s (remote sync stalled; killed child to release lock — retryable)",
                     timeout.as_secs()
@@ -665,6 +671,22 @@ mod run_cli_timed_tests {
         let elapsed = start.elapsed();
         // We should have aborted at ~1s, nowhere near the 30s sleep.
         assert!(elapsed < Duration::from_secs(5), "aborted promptly, elapsed={elapsed:?}");
+        assert!(super::is_sync_timeout_err(&err), "error must be classified retryable: {err:#}");
+    }
+
+    #[test]
+    fn kill_is_not_blocked_by_grandchild_holding_pipe() {
+        // th-6c6843 CI regression: the backgrounded `sleep` survives the
+        // SIGKILL of `sh` and keeps the stdout pipe write-end open. The
+        // abort must not join the drain threads (read_to_end would block
+        // on that open pipe for the grandchild's lifetime).
+        let h = sh_handle();
+        let start = Instant::now();
+        let err = h
+            .run_cli_timed(&["-c", "sleep 30 & sleep 30"], Some(Duration::from_secs(1)))
+            .expect_err("must time out");
+        let elapsed = start.elapsed();
+        assert!(elapsed < Duration::from_secs(5), "abort must not wait for the grandchild, elapsed={elapsed:?}");
         assert!(super::is_sync_timeout_err(&err), "error must be classified retryable: {err:#}");
     }
 
