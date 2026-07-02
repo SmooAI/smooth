@@ -319,11 +319,16 @@ impl SmoothDolt {
 
     /// Add a Dolt remote. CLI-only; the server protocol doesn't expose
     /// remote management because it's an administrative one-shot.
+    ///
+    /// SCP-style git URLs (`git@github.com:Org/repo.git`) are normalized
+    /// to `git+ssh://` form first — see [`normalize_remote_url`]. Pearl
+    /// th-c4441b.
     pub fn remote_add(&self, name: &str, url: &str) -> Result<String> {
         if self.server.is_some() {
             anyhow::bail!("remote_add is not supported in server mode; use the CLI directly");
         }
-        self.run_cli(&["remote", &self.data_dir_str(), "add", name, url])
+        let url = normalize_remote_url(url);
+        self.run_cli(&["remote", &self.data_dir_str(), "add", name, &url])
     }
 
     /// List configured Dolt remotes. CLI-only (see `remote_add`).
@@ -1453,6 +1458,7 @@ pub fn clone_from(remote_url: &str, target_dir: &std::path::Path) -> Result<()> 
     if let Some(parent) = target_dir.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create parent of {}", target_dir.display()))?;
     }
+    let remote_url = &normalize_remote_url(remote_url);
     let output = Command::new(&bin)
         .args(["clone", remote_url, &target_dir.to_string_lossy()])
         .stdin(Stdio::null())
@@ -1469,6 +1475,37 @@ pub fn clone_from(remote_url: &str, target_dir: &std::path::Path) -> Result<()> 
         );
     }
     Ok(())
+}
+
+/// Normalize a git remote URL for Dolt's remote machinery.
+///
+/// SCP-style SSH URLs (`user@host:path`) are not real URLs — the colon
+/// separates the host from a RELATIVE path. Dolt's own URL parser
+/// mishandles them, storing `git@github.com:SmooAI/smooth.git` as
+/// `git+ssh://git@github.com/./SmooAI/smooth.git` (bogus `/./`), which
+/// then fails on push/pull. Convert them ourselves to the clean form
+/// Dolt stores for working remotes: `git+ssh://user@host/path`.
+/// Everything that is already a URL (`https://`, `ssh://`, `git+ssh://`)
+/// or a filesystem path passes through unchanged. Pearl th-c4441b.
+fn normalize_remote_url(url: &str) -> String {
+    // Anything with an explicit scheme is already a real URL.
+    if url.contains("://") {
+        return url.to_string();
+    }
+    // SCP-style: `user@host:path`. Require the `@` and a colon before any
+    // slash so filesystem paths (absolute, relative, or colon-bearing)
+    // never match. ponytail: `host:path` without a user passes through —
+    // ambiguous with local paths, and nobody clones pearls that way.
+    let Some((head, path)) = url.split_once(':') else {
+        return url.to_string();
+    };
+    if path.is_empty() || head.contains('/') || !head.contains('@') {
+        return url.to_string();
+    }
+    // `user@host:/abs/path` → keep the path absolute; relative paths get
+    // a single separating slash. Both collapse to `git+ssh://head/path`.
+    let path = path.strip_prefix('/').unwrap_or(path);
+    format!("git+ssh://{head}/{path}")
 }
 
 /// Read the `origin` remote URL from `<data_dir>/.dolt/repo_state.json`.
@@ -1488,9 +1525,10 @@ fn read_origin_url(data_dir: &std::path::Path) -> Result<String> {
 /// Read the enclosing git repository's `origin` URL via
 /// `git -C <start> remote get-url origin`. Recovery fallback for when
 /// the dolt `repo_state.json` (which normally records the remote) has
-/// been wiped by an interrupted operation. The raw git URL (e.g.
-/// `git@github.com:Org/repo.git`) is exactly what `smooth-dolt clone`
-/// already consumes, so it's returned verbatim.
+/// been wiped by an interrupted operation. Returned verbatim; SCP-style
+/// URLs (e.g. `git@github.com:Org/repo.git`) are normalized to
+/// `git+ssh://` form by [`clone_from`] / [`SmoothDolt::remote_add`]
+/// before Dolt sees them (pearl th-c4441b).
 fn read_git_origin_url(start: &std::path::Path) -> Result<String> {
     let output = Command::new("git")
         .arg("-C")
@@ -1587,5 +1625,104 @@ mod auto_heal_tests {
         let dir = tmp.path();
         Command::new("git").arg("-C").arg(dir).args(["init", "-q"]).output().unwrap();
         assert!(read_git_origin_url(dir).is_err());
+    }
+}
+
+#[cfg(test)]
+mod normalize_remote_url_tests {
+    use super::normalize_remote_url;
+
+    /// Regression for pearl th-c4441b: `th pearls remote add` handed the
+    /// SCP form straight to Dolt, which stored the broken
+    /// `git+ssh://git@github.com/./SmooAI/smooth.git` (bogus `/./`).
+    #[test]
+    fn th_c4441b_scp_github_url_converts_cleanly() {
+        assert_eq!(
+            normalize_remote_url("git@github.com:SmooAI/smooth.git"),
+            "git+ssh://git@github.com/SmooAI/smooth.git"
+        );
+    }
+
+    #[test]
+    fn scp_relative_path() {
+        assert_eq!(normalize_remote_url("git@example.com:some/repo.git"), "git+ssh://git@example.com/some/repo.git");
+    }
+
+    #[test]
+    fn scp_absolute_path() {
+        assert_eq!(
+            normalize_remote_url("git@host.example:/srv/git/repo.git"),
+            "git+ssh://git@host.example/srv/git/repo.git"
+        );
+    }
+
+    #[test]
+    fn scp_without_dot_git_suffix() {
+        assert_eq!(normalize_remote_url("git@github.com:SmooAI/smooth"), "git+ssh://git@github.com/SmooAI/smooth");
+    }
+
+    #[test]
+    fn scp_numeric_looking_path_segment_is_a_path_not_a_port() {
+        // In SCP form everything after the colon is a path — git itself
+        // treats `host:2222/repo` as the path `2222/repo`, never a port.
+        assert_eq!(
+            normalize_remote_url("git@host.example:2222/repo.git"),
+            "git+ssh://git@host.example/2222/repo.git"
+        );
+    }
+
+    #[test]
+    fn https_url_passes_through() {
+        assert_eq!(
+            normalize_remote_url("https://github.com/SmooAI/smooth.git"),
+            "https://github.com/SmooAI/smooth.git"
+        );
+    }
+
+    #[test]
+    fn ssh_url_passes_through() {
+        assert_eq!(
+            normalize_remote_url("ssh://git@github.com/SmooAI/smooth.git"),
+            "ssh://git@github.com/SmooAI/smooth.git"
+        );
+    }
+
+    #[test]
+    fn ssh_url_with_port_passes_through() {
+        assert_eq!(
+            normalize_remote_url("ssh://git@host.example:2222/srv/repo.git"),
+            "ssh://git@host.example:2222/srv/repo.git"
+        );
+    }
+
+    #[test]
+    fn git_ssh_url_passes_through() {
+        assert_eq!(
+            normalize_remote_url("git+ssh://git@github.com/SmooAI/smooth.git"),
+            "git+ssh://git@github.com/SmooAI/smooth.git"
+        );
+    }
+
+    #[test]
+    fn file_url_passes_through() {
+        assert_eq!(normalize_remote_url("file:///home/user/repo"), "file:///home/user/repo");
+    }
+
+    #[test]
+    fn local_paths_pass_through() {
+        assert_eq!(normalize_remote_url("/home/user/repo"), "/home/user/repo");
+        assert_eq!(normalize_remote_url("./relative/repo"), "./relative/repo");
+        assert_eq!(normalize_remote_url("../up/repo"), "../up/repo");
+        assert_eq!(normalize_remote_url("plain-dir"), "plain-dir");
+    }
+
+    #[test]
+    fn colon_bearing_paths_without_user_pass_through() {
+        // No `@` before the colon → ambiguous with a local path; leave it.
+        assert_eq!(normalize_remote_url("host:path"), "host:path");
+        // `@` present but a slash before the colon → local path, not SCP.
+        assert_eq!(normalize_remote_url("dir/with@at:colon"), "dir/with@at:colon");
+        // Trailing colon with nothing after it → not a usable SCP URL.
+        assert_eq!(normalize_remote_url("git@github.com:"), "git@github.com:");
     }
 }
