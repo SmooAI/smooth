@@ -2034,11 +2034,32 @@ struct ProjectInfo {
 /// or missing `.smooth/dolt/` directory).
 fn is_invalid_project(path: &str) -> bool {
     let p = std::path::Path::new(path);
-    path.starts_with("/var/folders")
+    is_temp_path(p)
         || path == "/"
         || path == "/root"
         || p.components().count() <= 3 // filter bare home dirs like /Users/username
         || !p.join(".smooth/dolt").exists()
+}
+
+/// True if `p` lives under a well-known temp root. CI test runs register
+/// pearl projects in tempdirs; those entries must not linger in the
+/// registry (each phantom entry spawns a `smooth-dolt serve` at startup).
+/// macOS puts tempdirs under `/var/folders`; Linux uses `/tmp` or
+/// `/run/user/<uid>`. `std::env::temp_dir()` is the authoritative prefix;
+/// the literals are fallbacks for paths recorded under a different mount
+/// alias (e.g. macOS `/tmp` → `/private/tmp`). Pearl th-8bfbf4.
+fn is_temp_path(p: &std::path::Path) -> bool {
+    let mut roots: Vec<std::path::PathBuf> = ["/tmp", "/private/tmp", "/var/folders", "/private/var/folders", "/run/user"]
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+    let sys = std::env::temp_dir();
+    if let Ok(canon) = sys.canonicalize() {
+        roots.push(canon);
+    }
+    roots.push(sys);
+    // Component-wise prefix match, so `/tmpfoo` does not match `/tmp`.
+    roots.iter().any(|root| p.starts_with(root))
 }
 
 async fn list_projects_handler(State(state): State<AppState>) -> Json<ApiResponse<Vec<ProjectInfo>>> {
@@ -3696,6 +3717,28 @@ async fn jira_sync_handler(State(state): State<AppState>) -> Json<ApiResponse<cr
 mod tests {
     use super::*;
     use tower::ServiceExt;
+
+    #[test]
+    fn is_temp_path_matches_cross_platform_roots_th_8bfbf4() {
+        // (path, expected_is_temp)
+        let cases: &[(&str, bool)] = &[
+            ("/var/folders/xy/abc/T/proj", true),       // macOS tempdir
+            ("/private/var/folders/xy/abc/proj", true), // macOS canonical
+            ("/tmp/proj", true),                        // Linux tempdir
+            ("/private/tmp/proj", true),                // macOS /tmp alias
+            ("/run/user/1000/tmp/proj", true),          // Linux per-user runtime
+            ("/tmpfoo/proj", false),                    // not a temp root (no false prefix match)
+            ("/Users/brent/dev/smooai/smooth", false),  // real project
+            ("/home/ci/work/repo", false),              // real project
+        ];
+        for (path, expected) in cases {
+            assert_eq!(is_temp_path(std::path::Path::new(path)), *expected, "is_temp_path({path:?})");
+        }
+
+        // Whatever the OS reports as the system tempdir is always a temp root.
+        let sys = std::env::temp_dir().join("some-phantom-project");
+        assert!(is_temp_path(&sys), "system temp_dir child should be temp: {sys:?}");
+    }
 
     #[test]
     fn cargo_bin_native_operative_prefers_install_root_th_92dac3() {
