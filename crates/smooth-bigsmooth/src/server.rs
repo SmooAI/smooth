@@ -65,40 +65,6 @@ fn max_sandbox_concurrency() -> usize {
     }
 }
 
-/// Detect a routable host IP — the address the kernel would use to
-/// reach a public destination. Used to populate `SMOOTH_NARC_URL` so
-/// the operative inside a microsandbox VM has a destination
-/// the host's TCP proxy can actually `TcpStream::connect()` against.
-///
-/// Trick: bind a UDP socket to `0.0.0.0:0`, `connect()` it to a
-/// public IP, and read `local_addr()`. The kernel picks the source
-/// IP for the route without sending any packet. Returns `None` if
-/// no public-routable IP is available (no network at all), in which
-/// case the caller should fall back loudly — the sandbox path will
-/// not work in that state.
-///
-/// Important: we deliberately do NOT prefer 127.0.0.1, even though
-/// `allow_host_loopback: true` permits the proxy to reach it. The
-/// guest's traffic to 127.0.0.1 routes via the GUEST's lo, not the
-/// device interface, so it never reaches the host-side proxy. A
-/// real RFC1918 / public IP is the only path that lands.
-fn detect_routable_host_ip() -> Option<String> {
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    // Connecting to a globally-routed address forces the kernel to
-    // pick the primary outbound interface. We use a TEST-NET-like
-    // address (`1.1.1.1`) so even if a DNS misconfiguration exists,
-    // the kernel routing table answers immediately. No packets are
-    // actually sent — UDP connect() is just routing setup.
-    socket.connect("1.1.1.1:80").ok()?;
-    let addr = socket.local_addr().ok()?.ip();
-    // Reject the "all zeros" fallback some platforms hand back when
-    // no route exists; treat that as "no address detected".
-    if addr.is_unspecified() {
-        return None;
-    }
-    Some(addr.to_string())
-}
-
 /// Shared application state.
 #[derive(Clone)]
 pub struct AppState {
@@ -119,13 +85,9 @@ pub struct AppState {
     pub idle_timeout: Duration,
     /// Broadcast channel for pushing [`ServerEvent`]s to all connected WebSocket clients.
     pub event_tx: broadcast::Sender<ServerEvent>,
-    /// When running inside a Safehouse microVM (`SMOOTH_SAFEHOUSE_MODE=1`),
-    /// this carries the URLs of the in-process cast (Wonk/Goalie/Narc/
-    /// Scribe/Archivist). `None` in host-mode / dev-mode.
-    pub safehouse: Option<crate::safehouse::SafehouseHandles>,
-    /// Diver client — available when running in Safehouse mode with Diver.
-    /// When present, dispatch/complete go through Diver's HTTP API (with
-    /// Jira sync, cost tracking, etc.) instead of direct PearlStore calls.
+    /// Diver client — when present, dispatch/complete go through Diver's
+    /// HTTP API (with Jira sync, cost tracking, etc.) instead of direct
+    /// PearlStore calls.
     pub diver: Option<crate::diver_client::DiverClient>,
     /// The orchestration state machine. Runs as a background loop picking up
     /// ready pearls and dispatching operators. Behind `Arc<tokio::sync::Mutex<>>`
@@ -153,6 +115,15 @@ pub struct AppState {
     /// written back here when a `/api/access/approve` resolution
     /// lands at scope `user` or `project`. Pearl th-38b72c.
     pub wonk_grants: crate::wonk_grants::SharedWonkGrants,
+    /// Per-process host-tool bearer token. The `/api/host/exec` handler
+    /// checks presented bearers against this; dispatch threads it into the
+    /// operative's child env. Held on state (not a process env var) because
+    /// mutating `std::env` from inside the tokio runtime is UB-prone —
+    /// `set_var` racing a `getenv` on another thread can segfault, and
+    /// Rust 2024 marks `set_var` unsafe for exactly this reason (pearl
+    /// th-87dfee). Seeded from an inherited `SMOOTH_HOST_TOKEN` (sandbox
+    /// dispatch passes one in) or freshly generated.
+    pub host_token: Arc<str>,
 }
 
 impl AppState {
@@ -165,12 +136,14 @@ impl AppState {
         // Bootstrap the per-process host-tool bearer token. Sandbox
         // teammates use this when calling /api/host/exec so we know the
         // call is from a legit dispatch and not a stray network reach.
-        // Set in the env so BOTH the host-exec handler (reads
-        // `SMOOTH_HOST_TOKEN`) and the dispatch path (passes the same
-        // env into the sandbox) see the same value.
-        if std::env::var_os("SMOOTH_HOST_TOKEN").is_none() {
-            std::env::set_var("SMOOTH_HOST_TOKEN", crate::host_tools::generate_host_token());
-        }
+        // Store it on state (below) rather than in a process env var:
+        // `std::env::set_var` from inside the tokio runtime is UB-prone
+        // and unsafe in Rust 2024 (pearl th-87dfee). Reading an inherited
+        // value once here is fine (getenv, not setenv); sandbox dispatch
+        // may pass one in, otherwise generate a fresh per-process token.
+        let host_token: Arc<str> = std::env::var("SMOOTH_HOST_TOKEN")
+            .unwrap_or_else(|_| crate::host_tools::generate_host_token())
+            .into();
         let max_operators = max_sandbox_concurrency();
         let session_store = Arc::new(crate::session::DoltSessionStore::new(&pearl_store));
         let (event_tx, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
@@ -346,24 +319,14 @@ impl AppState {
             last_activity: Arc::new(Mutex::new(Instant::now())),
             idle_timeout: idle_timeout_from_env().unwrap_or_else(|| Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS)),
             event_tx,
-            safehouse: None,
             diver: None,
             orchestrator: Arc::new(tokio::sync::Mutex::new(orchestrator)),
             safehouse_narc,
             teammates: Arc::new(crate::teammates::OperativeRegistry::new()),
             access,
             wonk_grants,
+            host_token,
         }
-    }
-
-    /// Attach Safehouse cast handles to an existing state. Chainable.
-    #[must_use]
-    pub fn with_safehouse(mut self, handles: crate::safehouse::SafehouseHandles) -> Self {
-        if !handles.diver_url.is_empty() {
-            self.diver = Some(crate::diver_client::DiverClient::new(&handles.diver_url));
-        }
-        self.safehouse = Some(handles);
-        self
     }
 
     /// Touch the activity timestamp — call from every handler.
@@ -561,7 +524,6 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/web_search", get(web_search_handler))
         // Credential broker — mints short-lived creds for the sandbox
         // after a human approves. Pearl th-08b65f.
-        .route("/api/creds/issue", post(creds_issue_handler))
         // Steering
         .route("/api/steering/{bead_id}/pause", post(pause_handler))
         .route("/api/steering/{bead_id}/resume", post(resume_handler))
@@ -616,42 +578,7 @@ pub fn build_router(state: AppState) -> Router {
 }
 
 /// Start the leader HTTP server.
-///
-/// On first call this also:
-/// - Initialises the process-global sandbox client (Direct vs Bill,
-///   selected by the `SMOOTH_BOOTSTRAP_BILL_URL` env var).
-/// - If `SMOOTH_VM_MODE=1` (or the legacy `SMOOTH_SAFEHOUSE_MODE=1`),
-///   spawns the in-process cast (Wonk/Goalie/Narc/Scribe/Archivist)
-///   as tokio tasks in this process and attaches their handles to
-///   `AppState`. Idempotent if the state already carries cast
-///   handles. Pearl th-893801 Phase 4 renames the env var to drop
-///   the "safehouse" framing; both names are honored during the
-///   transition.
-pub async fn start(mut state: AppState, addr: SocketAddr) -> anyhow::Result<()> {
-    // Pick the sandbox client (Direct or Bill) exactly once.
-    crate::sandbox::init_sandbox_client();
-
-    // In-process cast bootstrap.
-    fn truthy(v: &str) -> bool {
-        matches!(v, "1" | "true" | "TRUE" | "yes" | "on")
-    }
-    let cast_mode = std::env::var("SMOOTH_VM_MODE")
-        .ok()
-        .map(|v| truthy(&v))
-        .or_else(|| std::env::var("SMOOTH_SAFEHOUSE_MODE").ok().map(|v| truthy(&v)))
-        .unwrap_or(false);
-    if state.safehouse.is_none() && cast_mode {
-        match crate::safehouse::spawn_safehouse_cast(None).await {
-            Ok(handles) => {
-                tracing::info!(archivist = %handles.archivist_url, "Big Smooth running with in-process cast");
-                state.safehouse = Some(handles);
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "in-process cast: spawn failed; continuing without it");
-            }
-        }
-    }
-
+pub async fn start(state: AppState, addr: SocketAddr) -> anyhow::Result<()> {
     // Spawn idle timeout checker (pearl th-1b9b3e). Skip entirely when
     // the timeout is zero — bench harness + long-running dev sessions
     // set `SMOOTH_BIGSMOOTH_IDLE_TIMEOUT_SECS=0` to opt out of the
@@ -721,28 +648,10 @@ pub async fn start(mut state: AppState, addr: SocketAddr) -> anyhow::Result<()> 
         tracing::info!("dolt healthcheck loop started (30s interval)");
     }
 
-    let direct_only = std::env::var("SMOOTH_WORKFLOW_DIRECT")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    if direct_only {
-        tracing::info!("Orchestrator background loop skipped (SMOOTH_WORKFLOW_DIRECT=1)");
-    } else {
-        let orch = state.orchestrator.clone();
-        tokio::spawn(async move {
-            loop {
-                {
-                    let mut o = orch.lock().await;
-                    if let Err(e) = o.step().await {
-                        tracing::debug!(error = %e, state = ?o.state, "orchestrator step error");
-                    }
-                }
-                // Poll interval — 5s default. The lock is released between polls
-                // so API handlers can inspect orchestrator state without blocking.
-                tokio::time::sleep(Duration::from_millis(5000)).await;
-            }
-        });
-        tracing::info!("Orchestrator loop started (poll every 5s)");
-    }
+    // The autonomous orchestrator loop drove per-task microVM dispatch,
+    // removed 2026-07 (pearl th-f4a801). Dispatch is now WebSocket-driven
+    // (TaskStart → dispatch_ws_task_direct); the orchestrator only reports
+    // state for status/TUI/web, so there's no background loop to run.
 
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -1046,30 +955,10 @@ pub struct DispatchOptions {
 }
 
 pub async fn dispatch_ws_task(state: &AppState, opts: DispatchOptions) {
-    // Three cases:
-    //   1. `SMOOTH_WORKFLOW_DIRECT=1`         → spawn runner as host subprocess
-    //      (user opted into direct mode; no microVM around them).
-    //   2. `SMOOTH_SAFEHOUSE_MODE=1`          → spawn runner as safehouse-internal
-    //      subprocess. We ARE the microsandbox VM the user paid for; per-operator
-    //      nested microVMs would need nested virt (which macOS HVF doesn't have)
-    //      and would defeat the consolidated single-VM architecture anyway. Narc /
-    //      Wonk / Goalie are already running in the same VM as gRPC servers, so
-    //      the runner gets the full enforcement story by dialing them over UDS.
-    //   3. Otherwise                          → real per-task microVM via
-    //      `dispatch_ws_task_sandboxed`. This is the host-side path when neither
-    //      flag is set; in practice it's exercised by `th up direct` re-enabling
-    //      sandboxed dispatch (rare) or by old test harnesses.
-    let direct_mode = std::env::var("SMOOTH_WORKFLOW_DIRECT")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    let safehouse_mode = std::env::var("SMOOTH_SAFEHOUSE_MODE")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    if direct_mode || safehouse_mode {
-        dispatch_ws_task_direct(state, opts).await;
-    } else {
-        dispatch_ws_task_sandboxed(state, opts).await;
-    }
+    // The microVM dispatch path was removed 2026-07 (pearl th-f4a801;
+    // git history has the sandboxed variant). Dispatch now always runs
+    // the runner as a host subprocess against the host filesystem.
+    dispatch_ws_task_direct(state, opts).await;
 }
 
 // Pearl th-7b95ef: `strip_ansi_escapes` was used to flatten the
@@ -1221,1440 +1110,15 @@ fn build_resumption_context(store: &crate::session::DoltSessionStore, pearl_id: 
     ctx
 }
 
-fn find_operative_binary() -> Option<std::path::PathBuf> {
-    if let Ok(host_path) = std::env::var("SMOOTH_OPERATIVE_HOST_PATH") {
-        return Some(std::path::PathBuf::from(host_path));
-    }
-    if let Ok(explicit) = std::env::var("SMOOTH_OPERATIVE") {
-        let p = std::path::PathBuf::from(explicit);
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    // ~/.smooth/runner-bin/smooth-operative — the canonical sync
-    // location written by `scripts/build-operative.sh`. Checked
-    // first so a release `th` (running outside any workspace) still
-    // discovers the cross-compiled runner the dev built.
-    if let Some(home) = dirs_next::home_dir() {
-        let synced = home.join(".smooth").join("runner-bin").join("smooth-operative");
-        if synced.is_file() {
-            return Some(synced);
-        }
-    }
-    let manifest = env!("CARGO_MANIFEST_DIR");
-    let mut dir = std::path::PathBuf::from(manifest);
-    for _ in 0..5 {
-        let candidate = dir.join("target").join("aarch64-unknown-linux-musl").join("release").join("smooth-operative");
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        if !dir.pop() {
-            break;
-        }
-    }
-    let cwd_candidate = std::env::current_dir()
-        .ok()?
-        .join("target")
-        .join("aarch64-unknown-linux-musl")
-        .join("release")
-        .join("smooth-operative");
-    if cwd_candidate.is_file() {
-        return Some(cwd_candidate);
-    }
-    None
-}
-
-/// Create a tempdir whose host path microsandbox can bind-mount into a
-/// microVM. On macOS, `$TMPDIR` resolves to a SIP-protected location
-/// (`/var/folders/.../T`) that microsandbox silently fails to mount;
-/// `control_root` (typically `~/.smooth/control/`) avoids that trap. If
-/// no root is provided we fall back to the system default — the caller
-/// has already logged a warning in that case.
-fn make_control_tempdir(prefix: &str, control_root: Option<&std::path::Path>) -> std::io::Result<tempfile::TempDir> {
-    let mut b = tempfile::Builder::new();
-    b.prefix(prefix);
-    match control_root {
-        Some(root) => b.tempdir_in(root),
-        None => b.tempdir(),
-    }
-}
-
-/// pearl th-461ab9 (diag): Decide whether an env-var value enables a flag.
-/// Truthy: `1`, `true`, `TRUE`, `yes`, `on`. Anything else (incl. unset) → false.
-fn diag_flag_is_truthy(value: &str) -> bool {
-    matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "on")
-}
-
-/// pearl th-461ab9 (diag): Build the `/bin/sh -c` argv that wraps the runner
-/// invocation with diagnostic capture. Writes 8 files into
-/// `/var/log/smooth-runner/` (must be a RW bind-mount or guest-writable
-/// tmpfs):
-///
-///   00-started.txt     UTC start timestamp
-///   01-mounts.txt      `mount` output (proves bind mounts landed)
-///   02-listing.txt     ls -la /opt/smooth/{,bin,policy} /workspace
-///   03-env.txt         env var snapshot
-///   04-runner-check.txt   runner binary `-x` test
-///   05-stdout.log      runner stdout transcript
-///   06-stderr.log      runner stderr transcript
-///   07-exit-code.txt   runner exit code
-///
-/// Streaming back to bigsmooth's AgentEvent parser is preserved: tee
-/// runs in the background reading FIFOs, with its OWN stdout/stderr
-/// passed through the parent shell — sandbox.exec captures both as
-/// they're emitted, just like the un-wrapped path.
-fn build_runner_diag_wrapper_argv(runner_in_vm: &str) -> Vec<String> {
-    // The wrapper:
-    //   1. Snapshots pre-flight diagnostics (mounts, listings, env, runner-check)
-    //   2. Pipes runner stdout through `tee` to 05-stdout.log AND parent stdout
-    //      (so sandbox.exec → bigsmooth's AgentEvent parser keeps streaming)
-    //   3. Pipes runner stderr through `tee` to 06-stderr.log AND parent stderr
-    //   4. Captures the runner's exit code via `${PIPESTATUS[0]}` (bash) or by
-    //      using a temp-file dance for plain POSIX `sh`
-    //   5. Writes 07-exit-code.txt and exits with the runner's code
-    //
-    // POSIX sh doesn't have PIPESTATUS, so we round-trip the runner's exit
-    // code through a per-run file inside the diag dir. The runner is wrapped
-    // in a subshell that writes its $? to that file; the parent reads the
-    // file at the end. This avoids FIFOs entirely (no tee-deadlock-on-SIGKILL
-    // risk that bench harness flagged on run #2 of th-461ab9 reproduction).
-    // NOTE: This script is concatenated onto a single logical line by the
-    // surrounding `\\\n         ` continuation; do NOT add `# comments` —
-    // they swallow the following `;`-separated commands. Keep all design
-    // notes in this Rust comment block, not in the shell.
-    //
-    // Pipeline shape:
-    //   { ( runner; echo $? > rcfile ) 2>&1 1>&3 | tee -a stderr.log >&2 ; } 3>&1 \
-    //       | tee -a stdout.log
-    //   rc=$(cat rcfile); exit $rc
-    // - Inner subshell runs the runner, captures its exit status into rcfile
-    //   (POSIX pipelines lose the leftmost stage's exit code, so we round-trip
-    //   through a file).
-    // - 2>&1 1>&3 swaps stdout/stderr so the LEFT branch of the inner pipe
-    //   carries stderr, which is `tee -a stderr.log >&2` — appears on the
-    //   parent's stderr. The 3>&1 redirect on the outer group brings the
-    //   original stdout out as the group's stdout, which the OUTER pipe's
-    //   tee then duplicates to stdout.log AND the parent's stdout.
-    // - sandbox.exec captures both streams as they're emitted (streaming
-    //   preserved). Crucially, NO FIFOs / no background tee — earlier FIFO
-    //   approach could deadlock if the runner was SIGKILL'd before tee
-    //   read EOF, hanging sandbox.exec and breaking subsequent grading
-    //   exec calls (caught by bench harness, run #2 of th-461ab9 repro).
-    let script = format!(
-        "set +e; \
-         mkdir -p /var/log/smooth-runner 2>/dev/null; \
-         date -u +%Y-%m-%dT%H:%M:%SZ > /var/log/smooth-runner/00-started.txt 2>/dev/null; \
-         mount > /var/log/smooth-runner/01-mounts.txt 2>&1; \
-         ls -la /opt/smooth/ /opt/smooth/bin/ /opt/smooth/policy/ /workspace/ /var/log/smooth-runner/ \
-             > /var/log/smooth-runner/02-listing.txt 2>&1; \
-         env > /var/log/smooth-runner/03-env.txt 2>&1; \
-         if [ -x {runner} ]; then echo runner-exists-and-executable; else echo MISSING-RUNNER; ls -la {runner} 2>&1; fi \
-             > /var/log/smooth-runner/04-runner-check.txt 2>&1; \
-         rcfile=/var/log/smooth-runner/07-exit-code.txt; \
-         rm -f \"$rcfile\" 2>/dev/null; \
-         {{ ( {runner}; echo $? > \"$rcfile\" ) 2>&1 1>&3 | tee -a /var/log/smooth-runner/06-stderr.log >&2; }} 3>&1 \
-             | tee -a /var/log/smooth-runner/05-stdout.log; \
-         rc=$(cat \"$rcfile\" 2>/dev/null); \
-         [ -z \"$rc\" ] && rc=1; \
-         exit $rc",
-        runner = runner_in_vm
-    );
-    vec!["/bin/sh".into(), "-c".into(), script]
-}
-
-async fn dispatch_ws_task_sandboxed(state: &AppState, opts: DispatchOptions) {
-    let DispatchOptions {
-        message,
-        model,
-        budget,
-        working_dir,
-        image,
-        keep_alive,
-        memory_mb,
-        agent,
-        pearl_id: pearl_id_in,
-        prior_messages,
-    } = opts;
-    use crate::sandbox::{self, BindMount, SandboxConfig};
-
-    let task_id = uuid::Uuid::new_v4().to_string();
-    let event_tx = state.event_tx.clone();
-    let pearl_store = state.pearl_store.clone();
-    let last_activity = state.last_activity.clone();
-    let safehouse_handles = state.safehouse.clone();
-    let orchestrator = state.orchestrator.clone();
-
-    // Note: the old printable-ASCII guard was removed — the task message
-    // is now delivered via SMOOTH_TASK_FILE (a bind-mounted tempfile), not
-    // the kernel command line, so non-ASCII characters (em dashes, smart
-    // quotes, Unicode, etc.) are safe. The kernel cmdline size limit
-    // concern was also resolved by the task file approach.
-
-    // Pearl lifecycle:
-    //   1. If the caller (typically the chat-agent's `teammate_spawn` tool)
-    //      already created a pearl and passed `pearl_id`, REUSE it. We just
-    //      flip its status to in_progress (via Diver if available) so the
-    //      orchestrator's ready-pearls sweep doesn't dispatch a duplicate.
-    //   2. Otherwise dispatch through Diver when available (Safehouse mode).
-    //   3. Fall back to direct PearlStore when neither applies.
-    let diver = state.diver.clone();
-    let pearl_id: Option<String> = if let Some(supplied) = pearl_id_in {
-        // Pearl already exists — reconcile status so the orchestrator
-        // doesn't pick it up as "ready" and dispatch a second teammate.
-        if diver.is_some() {
-            // Diver knows about the pearl already; ask it to mark in_progress.
-            // If Diver doesn't expose a status update (current state), the
-            // direct PearlStore fallback below covers us. (No Diver client
-            // call here yet — when one is wired up, replace the is_some()
-            // check with `if let Some(ref diver_client) = diver`.)
-            tracing::info!(pearl_id = %supplied, "dispatch: reusing caller-supplied pearl (Diver mode)");
-        } else {
-            tracing::info!(pearl_id = %supplied, "dispatch: reusing caller-supplied pearl");
-        }
-        let _ = pearl_store.update(
-            &supplied,
-            &smooth_pearls::PearlUpdate {
-                status: Some(smooth_pearls::PearlStatus::InProgress),
-                ..Default::default()
-            },
-        );
-        Some(supplied)
-    } else if let Some(ref diver_client) = diver {
-        match diver_client.dispatch(&format!("Task: {}", truncate_str(&message, 60)), &message, None).await {
-            Ok(id) => {
-                tracing::info!(pearl_id = %id, "dispatch: pearl created via Diver");
-                Some(id)
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "dispatch: Diver dispatch failed, falling back to direct PearlStore");
-                crate::pearls::create_pearl(&pearl_store, &format!("Task: {}", truncate_str(&message, 60)), &message, "task", 2)
-                    .ok()
-                    .map(|i| i.id)
-            }
-        }
-    } else {
-        let id = crate::pearls::create_pearl(&pearl_store, &format!("Task: {}", truncate_str(&message, 60)), &message, "task", 2)
-            .ok()
-            .map(|i| i.id);
-        if let Some(ref id) = id {
-            let _ = pearl_store.update(
-                id,
-                &smooth_pearls::PearlUpdate {
-                    status: Some(smooth_pearls::PearlStatus::InProgress),
-                    ..Default::default()
-                },
-            );
-        }
-        id
-    };
-
-    // Register the teammate + spawn the per-pearl comment tap so the web
-    // UI's sidebar / sidebar's chat scope sees live operator output.
-    if let Some(ref pid) = pearl_id {
-        let title = pearl_store
-            .get(pid)
-            .ok()
-            .flatten()
-            .map(|p| p.title)
-            .unwrap_or_else(|| truncate_str(&message, 60));
-        let teammate_name = crate::teammates::slug_from_pearl(pid);
-        let now = chrono::Utc::now();
-        state
-            .teammates
-            .insert(crate::teammates::TeammateView {
-                name: teammate_name.clone(),
-                pearl_id: pid.clone(),
-                title: title.clone(),
-                status: "running".into(),
-                started_at: now,
-                last_event_at: now,
-            })
-            .await;
-        let _ = state.event_tx.send(crate::events::ServerEvent::TeammateSpawned {
-            teammate_name: teammate_name.clone(),
-            pearl_id: pid.clone(),
-            title,
-        });
-        let _tap = crate::teammates::spawn_comment_tap(pearl_store.clone(), pid.clone(), teammate_name, state.event_tx.clone(), state.teammates.clone()).await;
-        // Tap exits naturally on `[IDLE]`; we don't await it here.
-    }
-
-    // Close the task pearl if we early-return before the tokio::spawn
-    // reaches the runner. Otherwise the pearl leaks as permanent
-    // in_progress — that's the E2E-"Task:" leak we cleaned up in th-28edd8.
-    // Clone the store for the closure so the original can move into the
-    // later tokio::spawn; both point at the same Arc<Dolt>.
-    let pearl_store_for_abort = pearl_store.clone();
-    let pearl_id_for_abort = pearl_id.clone();
-    let close_pearl_on_abort = |reason: &str| {
-        if let Some(ref id) = pearl_id_for_abort {
-            tracing::warn!(pearl_id = %id, reason, "closing task pearl due to early-return failure");
-            let _ = pearl_store_for_abort.close(&[id]);
-        }
-    };
-
-    // Resolve the runner binary and working directory upfront. Both are
-    // needed as host paths to mount into the VM.
-    let runner_bin = match find_operative_binary() {
-        Some(p) => p,
-        None => {
-            let err = "smooth-operative binary not found. Run scripts/build-operative.sh to cross-compile it, or set SMOOTH_OPERATIVE=/absolute/path.";
-            let _ = event_tx.send(ServerEvent::TaskError {
-                task_id: task_id.clone(),
-                message: err.into(),
-            });
-            tracing::error!("sandboxed dispatch: {err}");
-            close_pearl_on_abort(err);
-            return;
-        }
-    };
-
-    // Working dir on the host — the agent reads/writes here from inside the
-    // operator VM. Two cases:
-    //
-    //   * **Host mode** (Direct sandbox): Big Smooth IS on the host. We can
-    //     dereference `working_dir` ourselves, create it if missing, etc.
-    //   * **Safehouse mode** (Bill sandbox, brokered): Big Smooth runs
-    //     inside its own microVM and the `working_dir` is an **opaque host
-    //     path** (from the test harness / operator). It does not exist in
-    //     our filesystem view — we must not stat, canonicalize, or create
-    //     it. Bill will bind-mount it on the host.
-    let brokered = std::env::var("SMOOTH_BOOTSTRAP_BILL_URL").map(|v| !v.trim().is_empty()).unwrap_or(false);
-    let host_workspace: std::path::PathBuf = working_dir
-        .as_ref()
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
-    if !brokered && !host_workspace.exists() {
-        if let Err(e) = std::fs::create_dir_all(&host_workspace) {
-            let msg = format!("failed to create host workspace {}: {e}", host_workspace.display());
-            let _ = state.event_tx.send(ServerEvent::TaskError {
-                task_id: task_id.clone(),
-                message: msg.clone(),
-            });
-            close_pearl_on_abort(&msg);
-            return;
-        }
-    }
-
-    // Resolve the binary's parent directory so we can mount the whole folder
-    // (virtiofs prefers directory mounts). The binary will end up at
-    // /opt/smooth/bin/smooth-operative inside the VM.
-    let Some(runner_dir) = runner_bin.parent().map(std::path::Path::to_path_buf) else {
-        let _ = event_tx.send(ServerEvent::TaskError {
-            task_id: task_id.clone(),
-            message: "smooth-operative binary has no parent directory".into(),
-        });
-        close_pearl_on_abort("runner has no parent dir");
-        return;
-    };
-
-    // Canonicalize host paths so bind mounts resolve correctly.
-    let runner_dir_str = runner_dir.canonicalize().unwrap_or(runner_dir).to_string_lossy().to_string();
-    let workspace_canon = host_workspace.canonicalize().unwrap_or(host_workspace.clone()).to_string_lossy().to_string();
-    let runner_name = runner_bin
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "smooth-operative".into());
-
-    let tid = task_id.clone();
-
-    // LLM config — Big Smooth loads providers.json from the host and passes
-    // them into the sandbox as env vars. The runner never touches the host
-    // filesystem; all secrets come in via env.
-    let (api_url, api_key, final_model) = match load_llm_config_for_runner(&model) {
-        Ok(x) => x,
-        Err(e) => {
-            let msg = format!("no LLM provider configured: {e}");
-            let _ = event_tx.send(ServerEvent::TaskError {
-                task_id: tid.clone(),
-                message: msg.clone(),
-            });
-            close_pearl_on_abort(&msg);
-            return;
-        }
-    };
-
-    // Build session-resume context BEFORE the tokio::spawn so we don't
-    // have to smuggle a state reference through the 'static boundary.
-    // Reads the pearl's prior SessionMessages (if any) and renders them
-    // as a "## Resumption context" block that gets prepended to the
-    // task message so the agent can pick up where prior invocations
-    // left off.
-    let resumption_context = build_resumption_context(&state.session_store, pearl_id.as_deref(), 20);
-
-    tokio::spawn(async move {
-        let touch = || {
-            if let Ok(mut last) = last_activity.lock() {
-                *last = std::time::Instant::now();
-            }
-        };
-        touch();
-
-        // Stopwatch for the sandbox.create tool — covers the env+mount
-        // setup AND the actual microsandbox spawn. The TUI shows the
-        // elapsed time on completion (user observation 2026-05-11:
-        // it always showed 0.0s because the ToolCallComplete below
-        // hardcoded duration_ms: 0).
-        let sandbox_create_started = std::time::Instant::now();
-        let _ = event_tx.send(ServerEvent::ToolCallStart {
-            task_id: tid.clone(),
-            tool_name: "sandbox.create".into(),
-            arguments: serde_json::json!({
-                "workspace": workspace_canon,
-                "runner_bin": runner_dir_str,
-                "task": truncate_str(&message, 120)
-            })
-            .to_string(),
-        });
-
-        // Build the sandbox config with two bind mounts:
-        //   /opt/smooth/bin (RO) — runner binary directory
-        //   /workspace       (RW) — user's working dir
-        let mut env = std::collections::HashMap::new();
-        // Note: SMOOTH_TASK is set later, *after* we know whether the task
-        // message is small enough to fit in an env var or needs to land in a
-        // tempfile mounted at /opt/smooth/policy/task.txt. The kernel cmdline
-        // microsandbox builds for the VM has a hard size limit (~2 KB on
-        // aarch64), and a long task message (e.g. 1.5 KB of agent
-        // instructions) will overflow it and panic msb_krun_vmm with
-        // `TooLarge` before the VM ever boots.
-        // SMOOTH_API_URL stays in plain env — it's a URL, not a secret.
-        // SMOOTH_API_KEY is wired as a microsandbox Secret below so the
-        // guest only ever sees a placeholder; the real value is
-        // substituted by the network layer on outbound requests to the
-        // LLM gateway host. That defuses the "agent reads its own env
-        // and exfils the credential" attack.
-        env.insert("SMOOTH_API_URL".into(), api_url.clone());
-        env.insert("SMOOTH_MODEL".into(), final_model);
-        // Role selection — the runner falls back to `fixer` on unset
-        // or empty, so we only plumb this when the caller explicitly
-        // picked one.
-        if let Some(ref agent_name) = agent {
-            if !agent_name.trim().is_empty() {
-                env.insert("SMOOTH_AGENT".into(), agent_name.clone());
-            }
-        }
-
-        // INTERIM (pearl th-a13170 / parent investigation th-6030b0):
-        // microsandbox 0.3.14's SecretBuilder placeholder substitution
-        // wasn't firing on outbound LLM requests — agents kept sending
-        // the literal placeholder string to LiteLLM and getting 401.
-        // Until we either (a) upgrade microsandbox to 0.4.x where this
-        // may be fixed, or (b) figure out why allow_all-network +
-        // secret-builder don't compose, just inject SMOOTH_API_KEY
-        // as a plain env var. The agent in the VM can read its own
-        // key — known exfil risk, accepted to unblock dev.
-        //
-        // 2026-05-10 (failed bump attempt — kept here as breadcrumb):
-        // attempted 0.3 → 0.4.5 and reverted. Build was clean + lib
-        // tests passed, but real sandbox spawn failed with "sandbox
-        // process exited before sending startup info"
-        // (unix_wait_status(512)) on macOS HVF. Some runtime
-        // incompatibility between the new microsandbox host and
-        // either the operator OCI image or our Bill spawn flow.
-        // The bump itself remains the unblocker for this pearl —
-        // future attempt should reproduce the spawn failure with
-        // bisect_spawn.rs --variant baseline first to isolate the
-        // OCI image vs Bill-spawn axis.
-        let _ = extract_host_from_url(&api_url); // (still used by env-key-flow placeholder docs)
-        env.insert("SMOOTH_API_KEY".into(), api_key.clone());
-        env.insert("SMOOTH_WORKSPACE".into(), "/workspace".into());
-        env.insert("SMOOTH_OPERATOR_ID".into(), tid.clone());
-
-        // The multi-phase workflow is the product — always on. The
-        // routing config itself is serialized as a file further down
-        // (after policy_dir_guard is set up) because the JSON is
-        // several kilobytes and would overflow the kernel cmdline if
-        // passed as an env var.
-        //
-        // `SMOOTH_WORKFLOW=0` is kept as an opt-OUT for debugging
-        // and regression bisects — it falls back to the classic
-        // single-Agent loop in `smooth-operative`. Anything
-        // else (unset, "1", "true") turns it on.
-        let workflow_disabled = std::env::var("SMOOTH_WORKFLOW")
-            .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
-            .unwrap_or(false);
-        if !workflow_disabled {
-            env.insert("SMOOTH_WORKFLOW".into(), "1".into());
-            // Pass through the TEST-phase skip flag for benchmark
-            // runs where adding extra tests would change the score.
-            if let Ok(skip) = std::env::var("SMOOTH_WORKFLOW_SKIP_TEST") {
-                env.insert("SMOOTH_WORKFLOW_SKIP_TEST".into(), skip);
-            }
-            if let Ok(iters) = std::env::var("SMOOTH_WORKFLOW_MAX_ITERATIONS") {
-                env.insert("SMOOTH_WORKFLOW_MAX_ITERATIONS".into(), iters);
-            }
-            if let Ok(iters) = std::env::var("SMOOTH_WORKFLOW_AGENT_MAX_ITERATIONS") {
-                env.insert("SMOOTH_WORKFLOW_AGENT_MAX_ITERATIONS".into(), iters);
-            }
-        }
-        // Tell the operator where ~/.smooth is mounted inside the VM.
-        env.insert("SMOOTH_HOME".into(), "/root/.smooth".into());
-        if let Some(b) = budget {
-            env.insert("SMOOTH_BUDGET_USD".into(), b.to_string());
-        }
-        // In Safehouse mode, tell every operator VM how to reach the
-        // Safehouse's Archivist and Big Smooth's pearl API. The Scribe
-        // forwarder inside the operator will POST batches to the Archivist
-        // URL, and pearl tools will call Big Smooth's API.
-        if let Some(ref room) = safehouse_handles {
-            match room.operator_facing_archivist_url() {
-                Some(archivist_url) => {
-                    tracing::info!(task_id = tid, url = %archivist_url, "operator env: SMOOTH_ARCHIVIST_URL set");
-                    env.insert("SMOOTH_ARCHIVIST_URL".into(), archivist_url.clone());
-                    // Pearl tools: operators access .smooth/dolt/ directly in the
-                    // workspace bind mount. No HTTP plumbing needed — the runner
-                    // auto-detects the Dolt dir and registers local pearl tools.
-                }
-                None => {
-                    tracing::warn!(task_id = tid, "operator_facing_archivist_url() returned None — operator will NOT forward logs to Archivist. Check SMOOTH_ARCHIVIST_HOST_PORT and SMOOTH_BOOTSTRAP_BILL_URL env vars.");
-                }
-            }
-        }
-
-        // Every operator's Wonk escalates uncertain /check/* decisions to
-        // the central Safehouse Narc via this URL — and `host_tool`
-        // hits Big Smooth's `/api/host/exec` over the same URL.
-        //
-        // Reaching the host from inside microsandbox 0.3.14 is finicky:
-        // there is NO `host.containers.internal` DNS entry on this
-        // version (that's a 0.4+ feature), and `127.0.0.1` from inside
-        // the guest routes via the guest's own loopback (its own
-        // network namespace), not the host. The TCP proxy
-        // (`microsandbox-network::proxy::spawn_tcp_proxy`) just does
-        // `TcpStream::connect(dst)` on the host with the guest's
-        // destination IP as-is, so for the guest's traffic to land on
-        // Big Smooth we need a destination IP the host actually owns.
-        // Big Smooth listens on `0.0.0.0:4400` so any of the host's
-        // real interface IPs works.
-        //
-        // Detect a routable primary IP via the "UDP-connect-to-public-
-        // IP-and-read-local-addr" trick — no packets are actually sent;
-        // the kernel just picks the source IP it would use for that
-        // route. RFC1918 / loopback / link-local are accepted (the
-        // sandbox's `allow_host_loopback: true` flips microsandbox to
-        // `NetworkPolicy::allow_all()` which removes the denies on
-        // those ranges). Falls back to `127.0.0.1` (the historical
-        // value) only if local-IP detection fails entirely; in that
-        // pathological case host_tool will still error, but at least
-        // the previous "safehouse-mode-only" footgun is gone.
-        //
-        // `SMOOTH_NARC_URL` env override still wins — useful for
-        // tests or for pointing several boards at a shared Narc.
-        let narc_url = if let Ok(override_url) = std::env::var("SMOOTH_NARC_URL") {
-            if override_url.trim().is_empty() {
-                None
-            } else {
-                Some(override_url)
-            }
-        } else {
-            let host_ip = detect_routable_host_ip().unwrap_or_else(|| {
-                tracing::warn!("could not detect a routable host IP for SMOOTH_NARC_URL; falling back to 127.0.0.1 (host_tool calls from inside the sandbox will not work)");
-                "127.0.0.1".to_string()
-            });
-            Some(format!("http://{host_ip}:4400"))
-        };
-        if let Some(ref url) = narc_url {
-            tracing::info!(task_id = tid, url = %url, "operator env: SMOOTH_NARC_URL set");
-            env.insert("SMOOTH_NARC_URL".into(), url.clone());
-        }
-
-        // Hand the operator its pearl id so the in-VM mailbox poller knows
-        // which pearl to read steering/chat comments from. When this is unset
-        // (e.g. dispatch ran without Diver and PearlStore creation failed),
-        // the runner falls through to legacy behaviour with no mailbox.
-        if let Some(ref pid) = pearl_id {
-            tracing::info!(task_id = tid, pearl_id = %pid, "operator env: SMOOTH_PEARL_ID set");
-            env.insert("SMOOTH_PEARL_ID".into(), pid.clone());
-        }
-
-        // Pass through the host-tool bearer so the teammate's `host_tool`
-        // can hit Big Smooth's `/api/host/exec` for whitelisted CLIs (gh,
-        // git, kubectl, …). See `crate::host_tools` for the security
-        // model — secrets stay on the host, sandbox sees only output.
-        if let Ok(host_token) = std::env::var("SMOOTH_HOST_TOKEN") {
-            env.insert("SMOOTH_HOST_TOKEN".into(), host_token);
-        }
-
-        // Generate a task-type-specific policy TOML for Wonk inside the VM.
-        // We default to TaskType::Coding in the `execute` phase, which gives
-        // the in-VM agent full file/bash/search access. Follow-up: thread
-        // TaskType + Phase through TaskStart so the policy matches the
-        // orchestrator's current state.
-        //
-        // The policy TOML is multi-line and microsandbox passes env vars via
-        // the kernel command line, which rejects non-printable ASCII
-        // (newlines included). So instead of shipping it via env var, we
-        // write it to a per-task host tempdir, bind-mount that dir RO into
-        // the VM, and point the runner at the file via SMOOTH_POLICY_FILE.
-        //
-        // CRITICAL: the tempdir lives under `~/.smooth/control/`, NOT
-        // the system `$TMPDIR`. On macOS `$TMPDIR` resolves to
-        // `/var/folders/…/T` which is SIP-protected — microsandbox silently
-        // drops bind-mounts rooted there, and the operative boots to
-        // find `/opt/smooth/policy` empty. The project-cache bind-mount
-        // uses user-home paths for the same reason. See th-b1f040 for the
-        // full debugging trail.
-        let mut policy_dir_guard: Option<tempfile::TempDir> = None;
-        // Best-effort — if we can't find a home dir or mkdir fails, we
-        // fall back to the system tempdir (older broken behavior, still
-        // better than panicking).
-        let control_root: Option<std::path::PathBuf> = dirs_next::home_dir().and_then(|h| {
-            let p = h.join(".smooth").join("control");
-            match std::fs::create_dir_all(&p) {
-                Ok(()) => Some(p),
-                Err(e) => {
-                    tracing::warn!(error = %e, path = %p.display(), "could not mkdir control root; falling back to $TMPDIR (microsandbox bind-mounts will likely fail on macOS)");
-                    None
-                }
-            }
-        });
-        let operator_token = crate::policy::generate_operator_token(&tid);
-        // Build mount mappings so Wonk can translate guest paths to host
-        // paths when checking filesystem deny patterns.
-        let policy_mounts = {
-            let mut pm = vec![smooth_policy::MountMapping {
-                guest_path: "/workspace".into(),
-                host_path: workspace_canon.clone(),
-            }];
-            // Mirror the ~/.smooth mount if it exists on the host.
-            if let Some(host_smooth) = std::env::var("SMOOTH_HOME_HOST_PATH").ok().or_else(|| {
-                if brokered {
-                    None
-                } else {
-                    dirs_next::home_dir()
-                        .map(|h| h.join(".smooth").to_string_lossy().to_string())
-                        .filter(|p| std::path::Path::new(p).exists())
-                }
-            }) {
-                pm.push(smooth_policy::MountMapping {
-                    guest_path: "/root/.smooth".into(),
-                    host_path: host_smooth,
-                });
-            }
-            pm
-        };
-        // Pearl th-e0f812: when chief picked a skill, the message
-        // starts with `## Skill: <name>`. Look it up and pre-grant
-        // its `allowed_hosts` into the dispatch policy so the agent
-        // can reach declared hosts (smoo-hub, etc.) without an
-        // interactive Wonk prompt. The user implicitly authorized
-        // the grant by triggering the skill.
-        let skill_hosts: Vec<String> = extract_skill_allowed_hosts(&message, &workspace_canon);
-        if !skill_hosts.is_empty() {
-            tracing::info!(task_id = tid, hosts = ?skill_hosts, "skill pre-grant: extending policy allowlist with skill's allowed_hosts");
-        }
-        match crate::policy::generate_policy_for_task_with_extra_hosts(
-            &tid,
-            &pearl_id.clone().unwrap_or_default(),
-            "execute",
-            &operator_token,
-            &[],
-            crate::policy::TaskType::Coding,
-            policy_mounts,
-            &skill_hosts,
-        ) {
-            Ok(policy_toml) => match make_control_tempdir("smooth-policy-", control_root.as_deref()) {
-                Ok(dir) => {
-                    let policy_file = dir.path().join("policy.toml");
-                    if let Err(e) = std::fs::write(&policy_file, &policy_toml) {
-                        tracing::warn!(task_id = tid, error = %e, "failed to write policy tempfile; runner will use default");
-                    }
-                    policy_dir_guard = Some(dir);
-                }
-                Err(e) => {
-                    tracing::warn!(task_id = tid, error = %e, "failed to create policy tempdir; runner will use default");
-                }
-            },
-            Err(e) => {
-                tracing::warn!(task_id = tid, error = %e, "policy generation failed; runner will use default");
-            }
-        }
-
-        // If we managed to write a policy file, point the runner at it and
-        // add a bind mount for the dir. In Safehouse mode the tempdir is
-        // inside the Safehouse VM's filesystem — Bill can't bind-mount it
-        // into the operator VM because it doesn't exist on the host. Skip
-        // the mount; the runner will use its default policy which covers
-        // the execute phase. Future: pipe policy content through Bill's
-        // protocol so the file lands on the host.
-        let in_safehouse = safehouse_handles.is_some();
-
-        // Make sure we have *some* tempdir in non-safehouse mode so we can
-        // hand the task message to the runner via a file (avoids the
-        // kernel-cmdline size limit on long messages). If policy generation
-        // failed earlier, fall back to a bare tempdir here.
-        if !in_safehouse && policy_dir_guard.is_none() {
-            if let Ok(dir) = make_control_tempdir("smooth-control-", control_root.as_deref()) {
-                policy_dir_guard = Some(dir);
-            }
-        }
-
-        // Combine the user's task with any resumption context we loaded
-        // up top. Empty `resumption_context` means no prior session, so
-        // we just use the message as-is.
-        let full_task_message = if resumption_context.is_empty() {
-            message.clone()
-        } else {
-            format!("{message}\n\n{resumption_context}")
-        };
-
-        // Write the task message to a file in the control tempdir so the
-        // runner can read it via SMOOTH_TASK_FILE. The kernel cmdline that
-        // microsandbox builds for the VM has a hard size limit (~2 KB on
-        // aarch64) and a long task (e.g. 1.5 KB of agent instructions) will
-        // overflow it and panic msb_krun_vmm before the VM boots. The file
-        // path keeps the cmdline tiny regardless of message size.
-        let task_file_set = if let Some(ref dir) = policy_dir_guard {
-            let task_path = dir.path().join("task.txt");
-            match std::fs::write(&task_path, full_task_message.as_bytes()) {
-                Ok(()) => {
-                    env.insert("SMOOTH_TASK_FILE".into(), "/opt/smooth/policy/task.txt".into());
-                    true
-                }
-                Err(e) => {
-                    tracing::warn!(task_id = tid, error = %e, "failed to write task tempfile; falling back to SMOOTH_TASK env var");
-                    false
-                }
-            }
-        } else {
-            false
-        };
-        if !task_file_set {
-            // Safehouse mode or tempdir creation failed: stuff the task in an
-            // env var. This still works for short messages but will overflow
-            // the kernel cmdline for long ones — Safehouse mode needs a
-            // brokered task-file path eventually.
-            env.insert("SMOOTH_TASK".into(), full_task_message.clone());
-        }
-
-        // Write prior conversation history (pearl th-422b93) to a
-        // bind-mounted JSON file the runner can read. Empty list = no
-        // file written, no env var set, runner skips replay. Schema is
-        // a JSON array of {role:"user"|"assistant", content:"..."}.
-        if !prior_messages.is_empty() {
-            if let Some(ref dir) = policy_dir_guard {
-                let history_path = dir.path().join("prior_history.json");
-                match serde_json::to_vec(&prior_messages) {
-                    Ok(bytes) => match std::fs::write(&history_path, &bytes) {
-                        Ok(()) => {
-                            env.insert("SMOOTH_PRIOR_HISTORY_FILE".into(), "/opt/smooth/policy/prior_history.json".into());
-                            tracing::info!(task_id = tid, messages = prior_messages.len(), "wrote prior_history.json for runner replay");
-                        }
-                        Err(e) => {
-                            tracing::warn!(task_id = tid, error = %e, "failed to write prior_history.json; agent will start without history");
-                        }
-                    },
-                    Err(e) => {
-                        tracing::warn!(task_id = tid, error = %e, "failed to serialize prior_messages; agent will start without history");
-                    }
-                }
-            }
-        }
-
-        // When the workflow is enabled, write the full ProviderRegistry
-        // JSON to the policy bind-mount so the runner can load it at
-        // `/opt/smooth/policy/routing.json`. Too big (~3 KB) to fit
-        // in the kernel cmdline via an env var; same reason task.txt
-        // is mounted rather than inlined.
-        if !workflow_disabled {
-            if let Some(ref dir) = policy_dir_guard {
-                if let Some(home) = dirs_next::home_dir() {
-                    let providers_path = home.join(".smooth/providers.json");
-                    match load_providers_with_migration(&providers_path) {
-                        Ok(mut registry) => {
-                            // See dispatch_ws_task_direct for why: the workflow uses
-                            // routing.coding to resolve the LLM, so opts.model only
-                            // takes effect when we patch the slot here.
-                            if let Some(ref m) = model {
-                                registry.routing.coding.model = m.clone();
-                                tracing::info!(task_id = tid, model = %m, "sandboxed dispatch: overrode routing.coding.model from opts.model");
-                            }
-                            match registry.to_json() {
-                                Ok(json) => {
-                                    let routing_path = dir.path().join("routing.json");
-                                    if let Err(e) = std::fs::write(&routing_path, json) {
-                                        tracing::warn!(task_id = tid, error = %e, "could not write routing.json; workflow will fall back to single-Agent");
-                                    } else {
-                                        env.insert("SMOOTH_ROUTING_JSON_FILE".into(), "/opt/smooth/policy/routing.json".into());
-                                        tracing::info!(task_id = tid, "coding workflow enabled: routing.json mounted for runner");
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(task_id = tid, error = %e, "could not serialize routing config; workflow disabled");
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(task_id = tid, error = %e, "could not load providers.json; workflow disabled");
-                        }
-                    }
-                }
-            } else {
-                tracing::warn!(
-                    task_id = tid,
-                    "SMOOTH_WORKFLOW=1 but no policy dir (Safehouse mode); routing config path not plumbed yet"
-                );
-            }
-        }
-
-        let policy_mount = if !in_safehouse {
-            if let Some(ref dir) = policy_dir_guard {
-                let host = dir
-                    .path()
-                    .canonicalize()
-                    .unwrap_or_else(|_| dir.path().to_path_buf())
-                    .to_string_lossy()
-                    .to_string();
-                // Only point at the policy file if we actually wrote one
-                // (the task tempfile may live in a bare control tempdir
-                // when policy generation failed earlier).
-                if dir.path().join("policy.toml").exists() {
-                    env.insert("SMOOTH_POLICY_FILE".into(), "/opt/smooth/policy/policy.toml".into());
-                }
-                Some(BindMount {
-                    host_path: host,
-                    guest_path: "/opt/smooth/policy".into(),
-                    readonly: true,
-                })
-            } else {
-                None
-            }
-        } else {
-            tracing::info!(task_id = tid, "safehouse mode: skipping policy bind mount (runner will use default policy)");
-            None
-        };
-
-        // Operator VMs need to reach Bill on host loopback so Big Smooth
-        // (running inside the Safehouse VM) can request exec/destroy, AND
-        // their in-VM Scribe needs to reach the Safehouse's Archivist for
-        // log forwarding. Both destinations are 127.0.0.1:<port> from the
-        // guest's perspective, which microsandbox's default `public_only`
-        // policy denies. Always opt operator VMs in — Wonk's in-VM policy
-        // still enforces fine-grained network allowlists for tool traffic,
-        // so this only unlocks the sandbox↔host control plane, not
-        // arbitrary agent access.
-        // Pre-assign host ports for port forwarding declared in the policy.
-        // We parse the generated policy TOML to extract the port config, then
-        // pre-bind host ports so we can inject SMOOTH_PORT_MAP into the VM's
-        // env at creation time (env vars can't be added after boot).
-        let mut extra_ports = Vec::new();
-        let mut port_map_entries: Vec<String> = Vec::new();
-        if let Some(ref dir) = policy_dir_guard {
-            let policy_file = dir.path().join("policy.toml");
-            if let Ok(toml_str) = std::fs::read_to_string(&policy_file) {
-                if let Ok(policy) = smooth_policy::Policy::from_toml(&toml_str) {
-                    if policy.ports.enabled {
-                        // Load any cached mapping for this pearl. If a previous
-                        // task on the same pearl forwarded guest_port=3000 to
-                        // host_port=54321, we'll try to reserve 54321 again so
-                        // "check on the dev server tomorrow" gets the same URL.
-                        let cache_key = pearl_id.clone().unwrap_or_else(|| tid.clone());
-                        let mut cache = crate::port_cache::load(&cache_key);
-
-                        // Pre-declare common dev server ports so `th run --keep-alive`
-                        // exposes them to the host without the agent needing to call
-                        // forward_port. If you start `pnpm dev` inside the VM on
-                        // port 3000, you can hit it on `http://localhost:<host_port>`.
-                        //
-                        // Covers: Next.js/Express (3000/3001), Nuxt/Vite preview (4000),
-                        // Angular (4200), Flask/FastAPI (5000), Vite (5173),
-                        // Django/Python http (8000), generic (8080/8888).
-                        let common_ports: Vec<u16> = vec![3000, 3001, 4000, 4200, 5000, 5173, 8000, 8080, 8888];
-                        for guest_port in common_ports {
-                            if !policy.ports.can_forward(guest_port) || extra_ports.len() >= policy.ports.max_forwards as usize {
-                                continue;
-                            }
-                            // Prefer the cached host port if still free. Fall
-                            // back to an ephemeral port otherwise.
-                            let host_port = cache
-                                .get(&guest_port)
-                                .and_then(|p| crate::port_cache::try_reserve(*p))
-                                .or_else(crate::port_cache::reserve_ephemeral);
-                            let Some(host_port) = host_port else {
-                                continue;
-                            };
-                            extra_ports.push(smooth_bootstrap_bill::protocol::PortMapping {
-                                host_port,
-                                guest_port,
-                                bind_all: false,
-                            });
-                            port_map_entries.push(format!("{guest_port}:{host_port}"));
-                            cache.insert(guest_port, host_port);
-                        }
-                        // Persist the updated mapping. Subsequent dispatches on
-                        // the same pearl will try these host ports first.
-                        crate::port_cache::save(&cache_key, &cache);
-                        if !port_map_entries.is_empty() {
-                            env.insert("SMOOTH_PORT_MAP".into(), port_map_entries.join(","));
-                            tracing::info!(task_id = tid, pearl = %cache_key, ports = %port_map_entries.join(","), "port forwarding: pre-mapped ports (persisted per-pearl)");
-                        }
-                    }
-                }
-            }
-        }
-
-        // pearl th-461ab9 (diag): when SMOOTH_DIAG_RUNNER_LOGS=1, allocate a
-        // host-side dir at ~/.smooth/runner-logs/<task_id>/ that the wrapper
-        // script will tee runner stdout/stderr into. Bind-mounted into the
-        // VM at /var/log/smooth-runner. Lets us recover guest output even
-        // when sandbox.exec returns no data (Mode B's "VM booted but
-        // nothing happened" pattern), AND tells us whether bind-mounts
-        // landed at all (presence-of-file in the host path proves the
-        // wrapper ran inside the guest).
-        let diag_runner_logs_enabled = std::env::var("SMOOTH_DIAG_RUNNER_LOGS").map(|v| diag_flag_is_truthy(&v)).unwrap_or(false);
-        let diag_runner_logs_host: Option<String> = if diag_runner_logs_enabled {
-            dirs_next::home_dir().and_then(|h| {
-                let p = h.join(".smooth").join("runner-logs").join(&tid);
-                match std::fs::create_dir_all(&p) {
-                    Ok(()) => {
-                        tracing::info!(task_id = tid, path = %p.display(), "diag runner-logs: host dir ready");
-                        Some(p.to_string_lossy().to_string())
-                    }
-                    Err(e) => {
-                        tracing::warn!(task_id = tid, error = %e, "diag runner-logs: could not create host dir; logs disabled");
-                        None
-                    }
-                }
-            })
-        } else {
-            None
-        };
-
-        let config = SandboxConfig {
-            bead_id: pearl_id.clone().unwrap_or_default(),
-            workspace_path: "/workspace".into(),
-            env,
-            extra_ports,
-            mounts: {
-                let mut m = vec![
-                    BindMount {
-                        host_path: runner_dir_str.clone(),
-                        guest_path: "/opt/smooth/bin".into(),
-                        readonly: true,
-                    },
-                    BindMount {
-                        host_path: workspace_canon.clone(),
-                        guest_path: "/workspace".into(),
-                        readonly: false,
-                    },
-                ];
-                // pearl th-461ab9 (diag): runner-logs bind mount. RW because
-                // we need the wrapper to tee into it.
-                if let Some(ref host_path) = diag_runner_logs_host {
-                    m.push(BindMount {
-                        host_path: host_path.clone(),
-                        guest_path: "/var/log/smooth-runner".into(),
-                        readonly: false,
-                    });
-                }
-                // Mount ~/.smooth for global config, registry, and pearl access.
-                // RW so operators can update pearls, write audit logs, etc.
-                //
-                // In brokered mode (Safehouse VM), we can't resolve the host
-                // home directory — dirs_next gives the guest /root. Use
-                // SMOOTH_HOME_HOST_PATH if set (the launcher/test harness sets
-                // it to the real host ~/.smooth path). In host mode, resolve
-                // directly.
-                let smooth_home_host = std::env::var("SMOOTH_HOME_HOST_PATH").ok().or_else(|| {
-                    if brokered {
-                        None // can't resolve host path from inside VM
-                    } else {
-                        dirs_next::home_dir()
-                            .map(|h| h.join(".smooth").to_string_lossy().to_string())
-                            .filter(|p| std::path::Path::new(p).exists())
-                    }
-                });
-                if let Some(host_path) = smooth_home_host {
-                    m.push(BindMount {
-                        host_path,
-                        guest_path: "/root/.smooth".into(),
-                        readonly: false,
-                    });
-                }
-                m.into_iter().chain(policy_mount).collect()
-            },
-            allow_host_loopback: true,
-            // Project-scoped cache key. Resolution order:
-            //   1. SMOOTH_ENV_CACHE_KEY env var (test harness stable key)
-            //   2. project_cache_key(workspace) — hash of the
-            //      canonical workspace path. This means the
-            //      budgeting-app repo always gets the same cache
-            //      directory across pearls, and the smooth-monorepo
-            //      repo gets its own. Much more useful than
-            //      pearl-id-per-cache which lost all prior install
-            //      state between tasks.
-            //   3. Task id fallback (ephemeral, only when workspace is
-            //      absent — e.g. one-off chat dispatch).
-            env_cache_key: std::env::var("SMOOTH_ENV_CACHE_KEY")
-                .ok()
-                .filter(|k| !k.is_empty())
-                .or_else(|| project_cache_key(&workspace_canon))
-                .or_else(|| Some(tid.clone())),
-            image: image.clone(),
-            memory_mb: memory_mb.unwrap_or(SandboxConfig::default().memory_mb),
-            // Empty: pearl th-a13170 — interim, see SMOOTH_API_KEY env
-            // injection above for why we don't go through SecretBuilder.
-            secrets: Vec::new(),
-            // Named microsandbox Volume is the default backend for
-            // the project cache (th-266809 flipped this after the CLI
-            // learned both backends in th-fb7bec). Setting
-            // `SMOOTH_USE_VOLUMES=0|false|no|off` opts back into the
-            // legacy bind-mount path (~/.smooth/project-cache/<key>).
-            use_named_volume_for_cache: std::env::var("SMOOTH_USE_VOLUMES")
-                .ok()
-                .map(|v| !matches!(v.trim(), "0" | "false" | "FALSE" | "no" | "off"))
-                .unwrap_or(true),
-            ..SandboxConfig::default()
-        };
-
-        let host_port = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .ok()
-            .and_then(|l| l.local_addr().ok())
-            .map(|a| a.port())
-            .unwrap_or(0);
-
-        let handle = match sandbox::create_sandbox(&config, host_port).await {
-            Ok(h) => h,
-            Err(e) => {
-                let _ = event_tx.send(ServerEvent::TaskError {
-                    task_id: tid.clone(),
-                    message: format!("sandbox create failed: {e:#}"),
-                });
-                tracing::error!(task_id = tid, error = %e, "sandboxed dispatch: create_sandbox failed");
-                return;
-            }
-        };
-
-        let _ = event_tx.send(ServerEvent::ToolCallComplete {
-            task_id: tid.clone(),
-            tool_name: "sandbox.create".into(),
-            result: handle.operator_id.clone(),
-            is_error: false,
-            duration_ms: u64::try_from(sandbox_create_started.elapsed().as_millis()).unwrap_or(u64::MAX),
-        });
-        touch();
-
-        // Exec the runner inside the VM. The agent has a bash tool and can
-        // install whatever dev tools it needs (apk add cargo rust, etc.)
-        // as part of its own workflow. No pre-installation — the agent
-        // discovers its environment and adapts. Quality checks are the
-        // agent's responsibility: it should compile, test, and iterate
-        // before reporting done.
-        let runner_in_vm = format!("/opt/smooth/bin/{runner_name}");
-
-        // Preflight: exec a trivial shell command to verify the
-        // bind-mount landed and the guest can exec anything at all.
-        // When the runner fails with code=-1 and empty stdout/stderr,
-        // this tells us whether it's a runner-binary issue or an
-        // exec-layer issue.
-        let preflight_script = format!(
-            "echo '/opt contents:'; ls -la /opt/ 2>&1 | head -10; \
-             echo '/opt/smooth contents:'; ls -la /opt/smooth/ 2>&1 | head -10; \
-             echo '/opt/smooth/policy contents:'; ls -la /opt/smooth/policy/ 2>&1 | head -20; \
-             echo '/opt/smooth/bin contents:'; ls -la /opt/smooth/bin/ 2>&1 | head -5; \
-             echo '/workspace contents:'; ls /workspace/ 2>&1 | head -8; \
-             echo 'mounts:'; mount 2>&1 | grep -E 'opt/smooth|workspace' | head -10; \
-             echo 'runner check:'; test -x {runner_in_vm} && echo 'runner is executable' || echo 'runner missing or not executable'"
-        );
-        match sandbox::exec_in_sandbox(&handle.msb_name, &["/bin/sh", "-c", preflight_script.as_str()]).await {
-            Ok((out, err, code)) => {
-                tracing::info!(
-                    task_id = tid,
-                    preflight_code = code,
-                    preflight_stdout = %out.chars().take(2000).collect::<String>(),
-                    preflight_stderr = %err.chars().take(2000).collect::<String>(),
-                    "sandboxed dispatch: preflight shell check"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(task_id = tid, error = %e, "sandboxed dispatch: preflight failed outright");
-            }
-        }
-
-        let _ = event_tx.send(ServerEvent::ToolCallStart {
-            task_id: tid.clone(),
-            tool_name: "sandbox.exec".into(),
-            arguments: runner_in_vm.clone(),
-        });
-
-        let exec_started = std::time::Instant::now();
-        // pearl th-461ab9 (diag): when runner-logs is enabled, wrap the
-        // runner exec in a sh script that snapshots /opt mounts + env,
-        // then runs the runner with stdout/stderr tee'd into the
-        // bind-mounted /var/log/smooth-runner/. The runner's stdout
-        // (JSON AgentEvents) still flows back through agent.sock so the
-        // existing parser keeps working — we only ADD a copy on disk.
-        // If the bind-mount silently fails to land, the host dir stays
-        // empty and that itself is a diagnostic signal.
-        let exec_argv: Vec<String> = if diag_runner_logs_host.is_some() {
-            tracing::info!(task_id = tid, "diag runner-logs: dispatching runner via tee wrapper script");
-            build_runner_diag_wrapper_argv(&runner_in_vm)
-        } else {
-            vec![runner_in_vm.clone()]
-        };
-        let exec_argv_refs: Vec<&str> = exec_argv.iter().map(String::as_str).collect();
-
-        // Pearl-comment heartbeat: `exec_in_sandbox` is blocking and
-        // doesn't stream stdout, so the runner's `[ToolCallStart]`-shaped
-        // events arrive in one batch when the exec finishes. Without a
-        // heartbeat the pearl's comment count stays flat for the whole
-        // run, and any external poller (the bench harness in particular,
-        // see SMOOTH_BENCH_IDLE_GRACE_S in smooth-bench/chat_driver.rs)
-        // gives up well before the operator is genuinely done. Post a
-        // [PROGRESS] comment every `heartbeat_secs` so the pearl shows
-        // continued life. Abort the loop after exec returns.
-        //
-        // `SMOOTH_DISPATCH_HEARTBEAT_S=0` disables the heartbeat for
-        // tests / benchmark harnesses that want to observe genuine
-        // quiescence; default 30s.
-        let heartbeat_secs: u64 = std::env::var("SMOOTH_DISPATCH_HEARTBEAT_S").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
-        let heartbeat_handle = if heartbeat_secs > 0 {
-            if let Some(pid) = pearl_id.clone() {
-                let pearl_store_hb = pearl_store.clone();
-                let started = exec_started;
-                Some(tokio::spawn(async move {
-                    let mut tick: u32 = 0;
-                    loop {
-                        tokio::time::sleep(std::time::Duration::from_secs(heartbeat_secs)).await;
-                        tick = tick.saturating_add(1);
-                        let elapsed = started.elapsed().as_secs();
-                        let body = format!("[PROGRESS] sandbox running ({elapsed}s elapsed, heartbeat #{tick})");
-                        if let Err(e) = pearl_store_hb.add_comment(&pid, &body) {
-                            tracing::warn!(pearl_id = %pid, error = %e, "heartbeat comment write failed");
-                        }
-                    }
-                }))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        let (stdout, stderr, code) = match sandbox::exec_in_sandbox(&handle.msb_name, &exec_argv_refs).await {
-            Ok(r) => r,
-            Err(e) => {
-                if let Some(h) = heartbeat_handle.as_ref() {
-                    h.abort();
-                }
-                // Post a terminal `[IDLE]` comment so any external poller
-                // (the bench harness, see SMOOTH_BENCH_IDLE_GRACE_S) sees
-                // the dispatch is truly over and doesn't have to wait the
-                // full grace timeout to find out. Best-effort: a write
-                // failure here is non-fatal. Pearl th-139bbc: also revert
-                // pearl status to Open so the orchestrator doesn't think
-                // the task is still in_progress (matches the non-zero-exit
-                // path's behavior).
-                if let Some(ref pid) = pearl_id {
-                    let body = format!("[IDLE] sandbox exec failed: {e}");
-                    if let Err(write_err) = pearl_store.add_comment(pid, &body) {
-                        tracing::warn!(pearl_id = %pid, error = %write_err, "[IDLE] write failed on exec error path");
-                    }
-                    if let Err(rev_err) = pearl_store.update(
-                        pid,
-                        &smooth_pearls::PearlUpdate {
-                            status: Some(smooth_pearls::PearlStatus::Open),
-                            ..Default::default()
-                        },
-                    ) {
-                        tracing::warn!(pearl_id = %pid, error = %rev_err, "pearl status revert failed on exec error path");
-                    }
-                }
-                let _ = event_tx.send(ServerEvent::TaskError {
-                    task_id: tid.clone(),
-                    message: format!("sandbox exec failed: {e}"),
-                });
-                let _ = sandbox::destroy_sandbox(&handle.msb_name).await;
-                return;
-            }
-        };
-        if let Some(h) = heartbeat_handle.as_ref() {
-            h.abort();
-        }
-        touch();
-
-        // The runner emits one JSON AgentEvent per line on stdout. Parse each
-        // line and translate to ServerEvents. Any non-JSON line is forwarded
-        // as a raw TokenDelta (helps with debugging).
-        let mut agent_iterations: u32 = 0;
-        let mut saw_completed = false;
-        // Accumulates the final cost reported by the runner's
-        // `AgentEvent::Completed`. Runner emits the real cost; a
-        // fallback emit (exit-path race) reports 0.0 so we don't
-        // over-count — we take the max across all Completed events.
-        let mut final_cost_usd: f64 = 0.0;
-        // Same max-across-Completed strategy for cache-hit token counts.
-        // Pearl th-litellm-caching-client.
-        let mut final_cached_tokens: u64 = 0;
-        for raw_line in stdout.lines() {
-            // Pearl th-7b95ef: classify before parsing so the
-            // "non-JSON → drop" contract is enforced through the
-            // unit-tested helper rather than ad-hoc per call site.
-            let line = match classify_runner_stdout_line(raw_line) {
-                RunnerStdoutLine::Empty => continue,
-                RunnerStdoutLine::Json => raw_line.trim(),
-                RunnerStdoutLine::NonJson => {
-                    tracing::warn!(task_id = %tid, line = %raw_line, "non-JSON line on runner stdout (dropped)");
-                    continue;
-                }
-            };
-            match serde_json::from_str::<serde_json::Value>(line) {
-                Ok(event) => {
-                    let Some(ty) = event.get("type").and_then(|v| v.as_str()) else {
-                        continue;
-                    };
-                    match ty {
-                        "TokenDelta" => {
-                            if let Some(content) = event.get("content").and_then(|v| v.as_str()) {
-                                let _ = event_tx.send(ServerEvent::TokenDelta {
-                                    task_id: tid.clone(),
-                                    content: content.to_string(),
-                                });
-                            }
-                        }
-                        "ToolCallStart" => {
-                            let tool_name = event.get("tool_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                            // Pearl th-08d821: read arguments from the runner's
-                            // emit. The direct-dispatch sibling parser was
-                            // already updated; this is the sandboxed-blocking
-                            // path. Older runner builds don't populate the
-                            // field; the "" fallback keeps them working.
-                            let arguments = event.get("arguments").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                            let _ = event_tx.send(ServerEvent::ToolCallStart {
-                                task_id: tid.clone(),
-                                tool_name,
-                                arguments,
-                            });
-                        }
-                        "ToolCallComplete" => {
-                            let tool_name = event.get("tool_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                            let is_error = event.get("is_error").and_then(serde_json::Value::as_bool).unwrap_or(false);
-                            // Pearl th-08d821: forward result + duration_ms so
-                            // the TUI can render the output body and real
-                            // timing (was "(0.0s)" with empty body for every
-                            // call regardless of how long it actually took).
-                            let result = event.get("result").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                            let duration_ms = event.get("duration_ms").and_then(serde_json::Value::as_u64).unwrap_or(0);
-                            let _ = event_tx.send(ServerEvent::ToolCallComplete {
-                                task_id: tid.clone(),
-                                tool_name,
-                                result,
-                                is_error,
-                                duration_ms,
-                            });
-                        }
-                        "Completed" => {
-                            saw_completed = true;
-                            if let Some(iters) = event.get("iterations").and_then(serde_json::Value::as_u64) {
-                                agent_iterations = u32::try_from(iters).unwrap_or(u32::MAX);
-                            }
-                            if let Some(c) = event.get("cost_usd").and_then(serde_json::Value::as_f64) {
-                                if c > final_cost_usd {
-                                    final_cost_usd = c;
-                                }
-                            }
-                            if let Some(t) = event.get("cached_tokens").and_then(serde_json::Value::as_u64) {
-                                if t > final_cached_tokens {
-                                    final_cached_tokens = t;
-                                }
-                            }
-                        }
-                        "Error" => {
-                            if let Some(message) = event.get("message").and_then(|v| v.as_str()) {
-                                let _ = event_tx.send(ServerEvent::TaskError {
-                                    task_id: tid.clone(),
-                                    message: message.to_string(),
-                                });
-                            }
-                        }
-                        "PortForwardActive" => {
-                            let guest = event.get("guest_port").and_then(serde_json::Value::as_u64).unwrap_or(0) as u16;
-                            let host = event.get("host_port").and_then(serde_json::Value::as_u64).unwrap_or(0) as u16;
-                            tracing::info!(task_id = tid, guest_port = guest, host_port = host, "port forward active");
-                        }
-                        // Pearl th-486bd0: bridge LlmRequest and PhaseStart
-                        // to ServerEvent::LlmIteration so the TUI can reset
-                        // its streaming bubble at iteration boundaries.
-                        // Without this the deltas from N agent iterations
-                        // pile into one ChatMessage, producing the giant
-                        // mixed-content assistant bubbles with stream
-                        // duplications observed in the bench matrix.
-                        "LlmRequest" | "PhaseStart" => {
-                            let iteration = event.get("iteration").and_then(serde_json::Value::as_u64).unwrap_or(0) as u32;
-                            let _ = event_tx.send(ServerEvent::LlmIteration {
-                                task_id: tid.clone(),
-                                iteration,
-                            });
-                        }
-                        // LlmResponse / Started / etc. are informational —
-                        // not currently forwarded.
-                        _ => {}
-                    }
-                }
-                Err(e) => {
-                    // Unreachable in practice: `classify_runner_stdout_line`
-                    // above already drops non-JSON. Kept as defense-in-depth
-                    // so a future refactor that bypasses the classifier
-                    // can't accidentally forward bad lines as TokenDelta.
-                    tracing::warn!(task_id = %tid, line = %line, error = %e, "non-JSON line slipped past classifier (dropped)");
-                }
-            }
-        }
-        if !stderr.is_empty() {
-            // Pearl th-7b95ef: runner stderr is diagnostic tracing
-            // output + NarcHook summaries — never LLM content. It used
-            // to be forwarded as `[runner stderr]\n…` TokenDelta, which
-            // appended the whole blob to the session's last assistant
-            // message. Log to service.log for audit and drop from chat.
-            tracing::warn!(task_id = %tid, stderr_bytes = stderr.len(), "runner stderr (sandboxed path) — see service.log for body");
-            tracing::warn!(task_id = %tid, stderr = %stderr, "runner stderr body");
-        }
-
-        let _ = event_tx.send(ServerEvent::ToolCallComplete {
-            task_id: tid.clone(),
-            tool_name: "sandbox.exec".into(),
-            result: format!("exit={code}"),
-            is_error: code != 0,
-            duration_ms: u64::try_from(exec_started.elapsed().as_millis()).unwrap_or(u64::MAX),
-        });
-
-        if keep_alive {
-            // Keep the VM alive so the user can poke at running
-            // dev servers etc. via forwarded ports. Register in the
-            // orchestrator's active_workers so DELETE /api/workers/<id>
-            // can find and tear it down.
-            {
-                let mut orch = orchestrator.lock().await;
-                orch.active_workers.insert(handle.operator_id.clone(), handle.clone());
-            }
-            let _ = event_tx.send(ServerEvent::TokenDelta {
-                task_id: tid.clone(),
-                content: format!(
-                    "[keep-alive] operator VM {} staying up; stop with `th operators kill {}`.\n",
-                    handle.operator_id, handle.operator_id
-                ),
-            });
-            tracing::info!(task_id = tid, operator = %handle.operator_id, "sandboxed dispatch: keep-alive mode, VM left running");
-            touch();
-            return;
-        }
-
-        if let Err(e) = sandbox::destroy_sandbox(&handle.msb_name).await {
-            tracing::warn!(task_id = tid, error = %e, "sandboxed dispatch: destroy_sandbox failed");
-        }
-
-        // Exit code 0 = runner finished successfully. `saw_completed` is the
-        // in-band signal from AgentEvent::Completed, but the runner also emits
-        // it explicitly before exit. Treat exit 0 as success regardless — a
-        // clean exit means the agent loop returned Ok.
-        if code == 0 {
-            if !saw_completed {
-                tracing::warn!(task_id = tid, "runner exited 0 but no Completed event seen in stdout — treating as success");
-            }
-            let _ = event_tx.send(ServerEvent::TaskComplete {
-                task_id: tid.clone(),
-                iterations: agent_iterations,
-                cost_usd: final_cost_usd,
-            });
-            // Pearl-side cost / iterations breadcrumb. Anyone polling
-            // the pearl (the bench harness, the TUI, future tooling)
-            // can grep for `[METRICS] cost_usd=X iterations=Y` and read
-            // the dispatch's actual spend without reading the WS event
-            // stream. Posted before the pearl is closed so the comment
-            // is part of the pearl's history.
-            if let Some(ref id) = pearl_id {
-                let body = format!("[METRICS] cost_usd={final_cost_usd:.6} iterations={agent_iterations} cached_tokens={final_cached_tokens}");
-                if let Err(e) = pearl_store.add_comment(id, &body) {
-                    tracing::warn!(pearl_id = %id, error = %e, "[METRICS] write failed");
-                }
-            }
-            // Close pearl via Diver or directly
-            if let Some(ref id) = pearl_id {
-                if let Some(ref diver_client) = diver {
-                    if let Err(e) = diver_client.complete(id, Some("Task completed successfully"), None).await {
-                        tracing::warn!(error = %e, "diver complete failed, falling back to direct close");
-                        let _ = pearl_store.close(&[id]);
-                    }
-                } else {
-                    let _ = pearl_store.close(&[id]);
-                }
-            }
-            tracing::info!(task_id = tid, iterations = agent_iterations, "sandboxed WS task completed");
-        } else {
-            let _ = event_tx.send(ServerEvent::TaskError {
-                task_id: tid.clone(),
-                message: format!("sandboxed runner exited with code {code}"),
-            });
-            // Post a terminal `[IDLE]` comment + flip the pearl back to
-            // open so the bench harness (and any other comment-poller)
-            // doesn't have to wait the full grace timeout to find out
-            // the dispatch is over. This is the runner-non-zero-exit
-            // path — the workspace may be partially mutated; we
-            // surface that as failure rather than success.
-            if let Some(ref id) = pearl_id {
-                let body = format!("[IDLE] sandboxed runner exited with code {code}");
-                if let Err(write_err) = pearl_store.add_comment(id, &body) {
-                    tracing::warn!(pearl_id = %id, error = %write_err, "[IDLE] write failed on non-zero exit path");
-                }
-                if let Err(close_err) = pearl_store.update(
-                    id,
-                    &smooth_pearls::PearlUpdate {
-                        status: Some(smooth_pearls::PearlStatus::Open),
-                        ..Default::default()
-                    },
-                ) {
-                    tracing::warn!(pearl_id = %id, error = %close_err, "pearl status revert failed");
-                }
-            }
-            tracing::error!(
-                task_id = tid,
-                exit = code,
-                stderr = %stderr.lines().take(20).collect::<Vec<_>>().join("\n"),
-                "sandboxed WS task failed"
-            );
-            // Close the pearl on failure too, otherwise E2E runs leak
-            // "Task: ..." pearls that stay in_progress forever.
-            if let Some(ref id) = pearl_id {
-                if let Some(ref diver_client) = diver {
-                    if let Err(e) = diver_client
-                        .complete(id, Some(&format!("sandboxed runner exited with code {code}")), None)
-                        .await
-                    {
-                        tracing::warn!(error = %e, "diver complete failed on task error, falling back to direct close");
-                        let _ = pearl_store.close(&[id]);
-                    }
-                } else {
-                    let _ = pearl_store.close(&[id]);
-                }
-            }
-        }
-
-        touch();
-    });
-}
-
-/// Spawn the operative as a direct subprocess against the
-/// host workspace. No microVM, no bind mounts, no Narc/Wonk/Goalie
-/// enforcement — the agent has host-level tool access. Intended
-/// for bench runs and fast dev loops. Opt-in via
-/// `SMOOTH_WORKFLOW_DIRECT=1` (checked by `dispatch_ws_task`).
-///
-/// Trade-off vs. `dispatch_ws_task_sandboxed`:
-///   + No VM boot (~10-30s faster per task)
-///   + Runs in nested-virt environments where microsandbox can't
-///     (GitHub Actions Linux runners, k8s pods, most cloud VMs)
-///   + No bind-mount overhead
-///   - No hardware isolation — agent can reach the whole host
-///   - No Goalie/Wonk/Narc enforcement of tool policy
+/// Spawn the operative as a direct subprocess against the host
+/// workspace. No microVM, no bind mounts — the agent has host-level
+/// tool access (Narc tool surveillance still runs in-process). This
+/// is the only dispatch path; the microVM variant was removed 2026-07
+/// (pearl th-f4a801, see git history).
 ///
 /// Wiring: we stream stdout line-by-line via tokio's async pipe
-/// reader and translate each `AgentEvent` JSON line to the same
-/// `ServerEvent` shape the sandboxed path emits. The output-parsing
-/// logic is intentionally identical to the sandboxed branch — the
-/// runner is the same binary emitting the same event stream; we
-/// just don't wrap the exec in a VM.
+/// reader and translate each `AgentEvent` JSON line to a
+/// `ServerEvent`.
 #[allow(clippy::too_many_lines)]
 async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
     use std::process::Stdio;
@@ -2922,6 +1386,10 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
     }
 
     let tid = task_id.clone();
+    // Clone the host-tool bearer out of state before the 'static spawn —
+    // Arc<str> clone is cheap and avoids borrowing `state` into the task
+    // (pearl th-87dfee).
+    let host_token = state.host_token.clone();
 
     tokio::spawn(async move {
         let _control_dir = control_dir; // keep alive
@@ -2972,9 +1440,11 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
         if let Some(ref pid) = pearl_id {
             cmd.env("SMOOTH_PEARL_ID", pid);
         }
-        if let Ok(host_token) = std::env::var("SMOOTH_HOST_TOKEN") {
-            cmd.env("SMOOTH_HOST_TOKEN", host_token);
-        }
+        // Thread the per-process host-tool bearer into the operative's
+        // env so its host_tool proxy calls authenticate. Setting a child
+        // Command's env is sound; the token lives on state, not the
+        // parent's process env (pearl th-87dfee).
+        cmd.env("SMOOTH_HOST_TOKEN", host_token.as_ref());
         if let Some(home) = dirs_next::home_dir() {
             let smooth_home = home.join(".smooth");
             if smooth_home.exists() {
@@ -3304,17 +1774,6 @@ fn resolve_direct_dispatch_narc_url(narc_url: Option<&str>, bigsmooth_url: Optio
         .unwrap_or_else(|| "http://127.0.0.1:4400".into())
 }
 
-fn extract_host_from_url(url: &str) -> String {
-    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
-    // Strip userinfo ("user:pass@").
-    let after_userinfo = after_scheme.rsplit_once('@').map_or(after_scheme, |(_, host)| host);
-    // Cut at first '/', '?', or '#' → authority.
-    let authority = after_userinfo.split(['/', '?', '#']).next().unwrap_or("");
-    // Strip port.
-    let host = authority.rsplit_once(':').map_or(authority, |(h, _)| h);
-    host.to_string()
-}
-
 fn load_llm_config_for_runner(model_override: &Option<String>) -> anyhow::Result<(String, String, String)> {
     let providers_path = dirs_next::home_dir()
         .ok_or_else(|| anyhow::anyhow!("no home directory"))?
@@ -3347,11 +1806,11 @@ async fn system_health_handler(State(state): State<AppState>) -> Json<ApiRespons
     let orch = state.orchestrator.lock().await;
     let orch_health = OrchestratorHealth {
         state: orch.state_name().to_string(),
-        active_workers: orch.active_workers.len() as u32,
+        active_workers: orch.active_worker_count() as u32,
         completed: orch.completed_beads.len() as u32,
     };
-    let sandbox_active = u32::try_from(orch.pool.active_count()).unwrap_or(u32::MAX);
-    let sandbox_max = u32::try_from(orch.pool.max_concurrency()).unwrap_or(u32::MAX);
+    let sandbox_active = u32::try_from(orch.active_worker_count()).unwrap_or(u32::MAX);
+    let sandbox_max = u32::try_from(orch.max_operators).unwrap_or(u32::MAX);
     drop(orch);
 
     Json(ApiResponse {
@@ -3366,7 +1825,7 @@ async fn system_health_handler(State(state): State<AppState>) -> Json<ApiRespons
             },
             sandbox: SandboxHealth {
                 status: "healthy".into(),
-                backend: "local-microsandbox".into(),
+                backend: "in-process".into(),
                 active_sandboxes: sandbox_active,
                 max_concurrency: sandbox_max,
             },
@@ -3391,10 +1850,10 @@ async fn orchestrator_status_handler(State(state): State<AppState>) -> Json<ApiR
     let orch = state.orchestrator.lock().await;
     let status = serde_json::json!({
         "state": orch.state_name(),
-        "active_workers": orch.active_workers.len(),
+        "active_workers": orch.active_worker_count(),
         "completed": orch.completed_beads.len(),
-        "pool_max_concurrency": orch.pool.max_concurrency(),
-        "pool_active": orch.pool.active_count(),
+        "pool_max_concurrency": orch.max_operators,
+        "pool_active": orch.active_worker_count(),
     });
     Json(ApiResponse { data: status, ok: true })
 }
@@ -3517,44 +1976,6 @@ async fn run_task_handler(State(state): State<AppState>, Json(req): Json<TaskReq
     });
 
     Sse::new(sse_stream)
-}
-
-/// Pearl th-e0f812: when chief picked a skill, the dispatch
-/// message starts with a `## Skill: <name> (from <source>)`
-/// header. Extract the name, find the skill in the discovery
-/// list, return its `allowed_hosts` for policy pre-grant.
-/// Returns empty vec when no skill is detected — the common
-/// no-skill dispatch path.
-fn extract_skill_allowed_hosts(message: &str, workspace: &str) -> Vec<String> {
-    // The header shape we prepend in the CLI / TUI dispatchers:
-    //   ## Skill: <name> (from <source>)
-    // Anchor on the literal so we don't match anything else.
-    let Some(rest) = message.lines().next() else {
-        return Vec::new();
-    };
-    let trimmed = rest.trim();
-    let prefix = "## Skill:";
-    if !trimmed.starts_with(prefix) {
-        return Vec::new();
-    }
-    // Pull the name out — first whitespace-delimited token after
-    // the prefix, stripping the optional "(from ...)" suffix.
-    let tail = trimmed[prefix.len()..].trim();
-    let name = tail
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .trim_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '_');
-    if name.is_empty() {
-        return Vec::new();
-    }
-    let workspace_path = std::path::PathBuf::from(workspace);
-    let skills = smooth_cast::skills::discover(&workspace_path);
-    let Some(skill) = skills.into_iter().find(|s| s.name == name) else {
-        tracing::warn!(skill_name = name, "skill named in message header but not found in discovery — no pre-grant");
-        return Vec::new();
-    };
-    skill.allowed_hosts
 }
 
 /// Truncate a string to at most `max_len` characters, appending "..." if truncated.
@@ -3869,20 +2290,24 @@ async fn stats_handler(State(state): State<AppState>) -> Json<ApiResponse<smooth
 
 // ── Workers ────────────────────────────────────────────────
 
+// Live operators are tracked in the teammates registry now that
+// dispatch runs in-process (the VM sandbox handles these routes used
+// to read were removed 2026-07, pearl th-f4a801). `operator_id` maps
+// to the teammate slug and `bead_id` to its pearl.
 async fn list_workers_handler(State(state): State<AppState>) -> Json<ApiResponse<Vec<serde_json::Value>>> {
     state.touch();
-    let orch = state.orchestrator.lock().await;
-    let data: Vec<serde_json::Value> = orch
-        .active_workers
-        .iter()
-        .map(|(id, handle)| {
+    let data: Vec<serde_json::Value> = state
+        .teammates
+        .list()
+        .await
+        .into_iter()
+        .map(|t| {
             serde_json::json!({
-                "operator_id": id,
-                "msb_name": handle.msb_name,
-                "bead_id": handle.bead_id,
-                "host_port": handle.host_port,
-                "port_mappings": handle.port_mappings,
-                "created_at": handle.created_at,
+                "operator_id": t.name,
+                "bead_id": t.pearl_id,
+                "title": t.title,
+                "status": t.status,
+                "created_at": t.started_at,
             })
         })
         .collect();
@@ -3891,48 +2316,30 @@ async fn list_workers_handler(State(state): State<AppState>) -> Json<ApiResponse
 
 async fn get_worker_handler(State(state): State<AppState>, Path(id): Path<String>) -> Json<ApiResponse<serde_json::Value>> {
     state.touch();
-    let orch = state.orchestrator.lock().await;
-    let data = orch
-        .active_workers
-        .get(&id)
-        .map(|h| {
+    let data = state.teammates.get(&id).await.map_or_else(
+        || serde_json::json!({"id": id, "status": "unknown"}),
+        |t| {
             serde_json::json!({
-                "operator_id": id,
-                "msb_name": h.msb_name,
-                "bead_id": h.bead_id,
-                "host_port": h.host_port,
-                "port_mappings": h.port_mappings,
-                "created_at": h.created_at,
-                "status": "running",
+                "operator_id": t.name,
+                "bead_id": t.pearl_id,
+                "title": t.title,
+                "status": t.status,
+                "created_at": t.started_at,
             })
-        })
-        .unwrap_or_else(|| serde_json::json!({"id": id, "status": "unknown"}));
+        },
+    );
     Json(ApiResponse { data, ok: true })
 }
 
 async fn kill_worker_handler(State(state): State<AppState>, Path(id): Path<String>) -> Json<ApiResponse<()>> {
     state.touch();
-    // Look up the sandbox handle so we can destroy the VM by its
-    // msb_name (the sandbox registry key), then drop it from the
-    // orchestrator's active_workers map.
-    let msb_name = {
-        let orch = state.orchestrator.lock().await;
-        orch.active_workers.get(&id).map(|h| h.msb_name.clone())
-    };
-    match msb_name {
-        Some(name) => {
-            if let Err(e) = crate::sandbox::destroy_sandbox(&name).await {
-                tracing::warn!(operator = %id, error = %e, "kill_worker: destroy_sandbox failed");
-            }
-            let mut orch = state.orchestrator.lock().await;
-            orch.active_workers.remove(&id);
-            tracing::info!(operator = %id, "kill_worker: VM destroyed and removed from active set");
-            Json(ApiResponse { data: (), ok: true })
-        }
-        None => {
-            tracing::warn!(operator = %id, "kill_worker: no active operator with that id");
-            Json(ApiResponse { data: (), ok: false })
-        }
+    if state.teammates.get(&id).await.is_some() {
+        state.teammates.mark_status(&id, "ended").await;
+        tracing::info!(operator = %id, "kill_worker: teammate marked ended");
+        Json(ApiResponse { data: (), ok: true })
+    } else {
+        tracing::warn!(operator = %id, "kill_worker: no active operator with that id");
+        Json(ApiResponse { data: (), ok: false })
     }
 }
 
@@ -4939,148 +3346,6 @@ async fn access_stream_handler(State(state): State<AppState>) -> Sse<impl Stream
     Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(15)))
 }
 
-// ── Credential broker ──────────────────────────────────────
-//
-// `/api/creds/issue` mints a short-lived credential for the sandbox.
-// The flow mirrors every other auto-mode gate: check persistent
-// grants, fall through to an AccessStore Ask, on approve mint.
-// Pearl th-08b65f.
-
-#[derive(Deserialize)]
-struct CredsIssueBody {
-    /// Server URL the sandbox needs creds for (Docker
-    /// credential-helper spec calls this `ServerURL`).
-    #[serde(rename = "ServerURL", alias = "server_url", alias = "server")]
-    server_url: String,
-    /// Read vs write scope hint — affects the backend's mint shape
-    /// (PAT scopes / STS role) in future versions. Defaults to read.
-    #[serde(default)]
-    scope_hint: crate::creds::ScopeHint,
-    /// Optional bead_id for audit + AccessStore correlation. Defaults
-    /// empty.
-    #[serde(default)]
-    bead_id: String,
-    /// Optional operator id for audit. Defaults empty.
-    #[serde(default)]
-    operator_id: String,
-}
-
-async fn creds_issue_handler(
-    State(state): State<AppState>,
-    Json(body): Json<CredsIssueBody>,
-) -> Result<Json<crate::creds::Credential>, (axum::http::StatusCode, String)> {
-    state.touch();
-    let server_url = body.server_url.trim().to_string();
-    if server_url.is_empty() {
-        return Err((axum::http::StatusCode::BAD_REQUEST, "server_url is required".into()));
-    }
-
-    // Fast path: the user already approved this host at scope=user
-    // (or scope=project) and the grant lives in wonk-allow.toml.
-    // Mint without filing a pending request.
-    if grants_cover_host(&state.wonk_grants.snapshot(), &server_url) {
-        return mint_and_log(&server_url, body.scope_hint).await.map(Json);
-    }
-
-    // Slow path: file an AccessStore Ask so the human can decide
-    // inline. The scope ladder is the same Once/Session/Project/User
-    // every other tool gate uses; for credentials, `Once` means
-    // "this one mint", `Session` means "this VM's lifetime", and
-    // Project / User write the grant into wonk-allow.toml.
-    let req = smooth_narc::NewAccessRequest {
-        bead_id: body.bead_id.clone(),
-        operator_id: body.operator_id.clone(),
-        kind: "creds".into(),
-        resource: server_url.clone(),
-        detail: Some(format!("scope_hint={:?}", body.scope_hint)),
-        reason: format!("sandbox wants credential for {server_url}"),
-        scope_options: smooth_narc::judge::Scope::default_options(),
-    };
-    let (id, fut) = state.access.file_pending(req);
-    // 60s aligns with SafehouseNarc's ASK_HOLD_TIMEOUT — same
-    // human-attention budget.
-    let Some(resolution) = fut.await_resolution_with_timeout(std::time::Duration::from_secs(60)).await else {
-        let _ = state.access.expire(&id);
-        return Err((
-            axum::http::StatusCode::FORBIDDEN,
-            "credential request timed out without human resolution".into(),
-        ));
-    };
-
-    if !matches!(resolution.verdict, smooth_narc::ResolutionVerdict::Approve) {
-        return Err((
-            axum::http::StatusCode::FORBIDDEN,
-            format!("credential request denied at scope {}", resolution.scope.as_str()),
-        ));
-    }
-
-    // Persist project / user grants so subsequent mints for the same
-    // server skip the prompt. We store the server's host as a
-    // network grant so a single approval flows to both `web_search` /
-    // curl gates AND future credential mints.
-    if matches!(resolution.scope, smooth_narc::judge::Scope::User | smooth_narc::judge::Scope::PearlProject) {
-        if let Some(path) = crate::wonk_grants::user_grants_path() {
-            if let Some(host) = url_host(&server_url) {
-                let _ = crate::wonk_grants::append_grant(&path, "network", &host, None);
-                if let Ok(fresh) = crate::wonk_grants::WonkGrants::load_from_path(&path) {
-                    state.wonk_grants.merge_in(fresh);
-                }
-            }
-        }
-    }
-
-    mint_and_log(&server_url, body.scope_hint).await.map(Json)
-}
-
-/// Mint via the appropriate backend and log the (sanitized) outcome.
-/// The secret never appears in the log — only the server URL +
-/// success/fail.
-async fn mint_and_log(server_url: &str, scope: crate::creds::ScopeHint) -> Result<crate::creds::Credential, (axum::http::StatusCode, String)> {
-    match crate::creds::mint(server_url, scope).await {
-        Ok(cred) => {
-            tracing::info!(server = %server_url, "creds: minted credential");
-            Ok(cred)
-        }
-        Err(e) => {
-            tracing::warn!(server = %server_url, error = %e, "creds: mint failed");
-            let status = match e {
-                crate::creds::CredsError::UnsupportedServer { .. } => axum::http::StatusCode::BAD_REQUEST,
-                crate::creds::CredsError::MintFailed { .. } => axum::http::StatusCode::BAD_GATEWAY,
-                crate::creds::CredsError::Denied { .. } => axum::http::StatusCode::FORBIDDEN,
-            };
-            Err((status, e.to_string()))
-        }
-    }
-}
-
-/// True if `wonk-allow.toml` has a network grant that covers the
-/// server's host. Reused from the network gate's matcher so a host
-/// approved for `web_search` etc. flows naturally to creds.
-fn grants_cover_host(grants: &crate::wonk_grants::WonkGrants, server_url: &str) -> bool {
-    let Some(host) = url_host(server_url) else {
-        return false;
-    };
-    grants.matches_host(&host)
-}
-
-/// Extract a bare host from a URL — `https://github.com/foo` →
-/// `github.com`. Pure (no env / FS lookups) so it can be a `fn`.
-fn url_host(url: &str) -> Option<String> {
-    let trimmed = url.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let without_scheme = trimmed.split_once("://").map(|(_, rest)| rest).unwrap_or(trimmed);
-    let after_userinfo = without_scheme.rsplit_once('@').map(|(_, rest)| rest).unwrap_or(without_scheme);
-    let host_with_port = after_userinfo.split(['/', '?', '#']).next()?;
-    let host = host_with_port.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_with_port);
-    if host.is_empty() {
-        None
-    } else {
-        Some(host.to_string())
-    }
-}
-
 // ── Web search ─────────────────────────────────────────────
 //
 // Native web search backed by the DuckDuckGo HTML endpoint. Runners
@@ -5541,19 +3806,6 @@ mod tests {
     }
 
     #[test]
-    fn extract_host_handles_common_shapes() {
-        assert_eq!(extract_host_from_url("https://llm.smoo.ai/v1"), "llm.smoo.ai");
-        assert_eq!(extract_host_from_url("http://127.0.0.1:11434/v1"), "127.0.0.1");
-        assert_eq!(extract_host_from_url("https://api.openai.com"), "api.openai.com");
-        assert_eq!(extract_host_from_url("https://user:pass@example.com/path"), "example.com");
-        assert_eq!(extract_host_from_url("https://example.com:443/v1?q=1"), "example.com");
-        assert_eq!(extract_host_from_url("example.com"), "example.com", "no scheme still works");
-        // Malformed → empty; callers MUST treat empty as "don't substitute"
-        // because substituting on the wrong host would leak the secret.
-        assert_eq!(extract_host_from_url(""), "");
-    }
-
-    #[test]
     fn find_native_operative_finds_debug_or_release_build() {
         // The direct-dispatch path needs a runner binary built for
         // the host triple. We don't assert which profile — CI or
@@ -5664,6 +3916,26 @@ mod tests {
     }
 
     #[test]
+    fn test_app_state_seeds_host_token() {
+        // pearl th-87dfee: the host-tool bearer must live on AppState
+        // (not a mutated process env var). A freshly built state with no
+        // inherited SMOOTH_HOST_TOKEN gets a generated 32-char token, and
+        // separate states get distinct tokens (per-process generation).
+        let tmp = tempfile::tempdir().unwrap();
+        let Ok(store_a) = smooth_pearls::PearlStore::init(&tmp.path().join("a")) else {
+            return;
+        };
+        let Ok(store_b) = smooth_pearls::PearlStore::init(&tmp.path().join("b")) else {
+            return;
+        };
+        let a = AppState::new(store_a);
+        let b = AppState::new(store_b);
+        assert_eq!(a.host_token.len(), 32, "uuid-simple token is 32 hex chars");
+        assert!(a.host_token.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a.host_token, b.host_token, "each process gets a distinct token");
+    }
+
+    #[test]
     fn test_app_state_touch_updates_activity() {
         let tmp = tempfile::tempdir().unwrap();
         let Ok(pearl_store) = smooth_pearls::PearlStore::init(&tmp.path().join("dolt")) else {
@@ -5681,157 +3953,6 @@ mod tests {
     #[test]
     fn test_truncate_str_short() {
         assert_eq!(truncate_str("hello", 10), "hello");
-    }
-
-    // pearl th-461ab9 (diag): tests for the runner-logs diagnostic helpers.
-    #[test]
-    fn diag_flag_is_truthy_accepts_documented_truthy_values() {
-        for v in ["1", "true", "TRUE", "yes", "on", " 1 ", "  on  "] {
-            assert!(diag_flag_is_truthy(v), "expected truthy for {v:?}");
-        }
-    }
-
-    #[test]
-    fn diag_flag_is_truthy_rejects_falsy_and_unknown_values() {
-        for v in ["", "0", "false", "FALSE", "no", "off", "True", "False", "anything-else", "  "] {
-            assert!(!diag_flag_is_truthy(v), "expected falsy for {v:?}");
-        }
-    }
-
-    #[test]
-    fn build_runner_diag_wrapper_argv_returns_three_elem_sh_invocation() {
-        let argv = build_runner_diag_wrapper_argv("/opt/smooth/bin/smooth-operative");
-        assert_eq!(argv.len(), 3, "expected /bin/sh -c <script>, got: {argv:?}");
-        assert_eq!(argv[0], "/bin/sh");
-        assert_eq!(argv[1], "-c");
-        let script = &argv[2];
-        // The script must include the runner path verbatim (not template
-        // syntax) and reference the host-readable log dir.
-        assert!(script.contains("/opt/smooth/bin/smooth-operative"), "runner path not interpolated: {script}");
-        assert!(script.contains("/var/log/smooth-runner"), "log dir missing: {script}");
-        // The 8 expected diagnostic files must each be addressed.
-        for name in [
-            "00-started.txt",
-            "01-mounts.txt",
-            "02-listing.txt",
-            "03-env.txt",
-            "04-runner-check.txt",
-            "05-stdout.log",
-            "06-stderr.log",
-            "07-exit-code.txt",
-        ] {
-            assert!(script.contains(name), "expected {name} in script: {script}");
-        }
-        // FIFO + background tee pattern is what preserves streaming back to
-        // sandbox.exec — if it ever gets refactored away, this test fires.
-        // The streaming-preserving pipeline: tee duplicates runner output to
-        // both the parent's stdout/stderr (so sandbox.exec keeps seeing it
-        // live) and to disk. fd 3 is used to swap streams so a single
-        // pipeline can split into two tee branches without FIFOs.
-        assert!(script.contains("tee -a "), "tee invocation missing: {script}");
-        assert!(script.contains("3>&1"), "fd-3 stream-swap missing (needed for stderr branch)");
-        // exit $rc preserves the runner's actual exit code (round-tripped
-        // through 07-exit-code.txt because POSIX pipelines drop leftmost
-        // stage's exit status).
-        assert!(script.contains("exit $rc"), "exit code not preserved: {script}");
-        assert!(script.contains("07-exit-code.txt"), "rcfile-via-disk pattern missing: {script}");
-    }
-
-    #[test]
-    fn build_runner_diag_wrapper_argv_handles_runner_with_special_chars() {
-        // Path may contain hyphens/underscores; just make sure the
-        // template doesn't do anything unsafe with them.
-        let argv = build_runner_diag_wrapper_argv("/opt/smooth/bin/smooth-operative_v2");
-        assert!(argv[2].contains("smooth-operative_v2"));
-        // Note: we deliberately do NOT shell-quote runner_in_vm because
-        // it's controlled by Big Smooth (always a fixed
-        // /opt/smooth/bin/<binary> path resolved from a host-side build
-        // artifact). This test pins that assumption — if the call site
-        // ever passes user-controlled input here, this test should be
-        // updated alongside a shell-escape change.
-    }
-
-    #[test]
-    fn build_runner_diag_wrapper_executes_locally_and_captures_streams() {
-        // Run the actual generated script against a tiny shell-script
-        // stand-in for the runner. Proves the FIFO + background tee
-        // pattern doesn't deadlock and does land all 8 files.
-        let tmp = tempfile::tempdir().unwrap();
-        let log_dir = tmp.path().join("var-log-smooth-runner");
-        std::fs::create_dir_all(&log_dir).unwrap();
-        let fake_runner = tmp.path().join("fake-runner.sh");
-        std::fs::write(
-            &fake_runner,
-            "#!/bin/sh\n\
-             echo '{\"type\":\"TokenDelta\",\"content\":\"hello\"}'\n\
-             echo final-stderr-line >&2\n\
-             exit 7\n",
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&fake_runner, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        // Patch the script to use our tmp log dir instead of /var/log/smooth-runner.
-        let argv = build_runner_diag_wrapper_argv(fake_runner.to_str().unwrap());
-        let patched = argv[2].replace("/var/log/smooth-runner", log_dir.to_str().unwrap());
-        let output = std::process::Command::new("/bin/sh").arg("-c").arg(&patched).output().expect("spawn sh");
-        assert_eq!(output.status.code(), Some(7), "runner exit code must be preserved through wrapper");
-        // Streaming preservation: the runner's stdout line must appear on
-        // the wrapper's stdout (this is what sandbox.exec captures).
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.contains("\"TokenDelta\""),
-            "wrapper stdout must echo runner stdout (sandbox.exec captures this); got: {stdout}"
-        );
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("final-stderr-line"), "wrapper stderr must echo runner stderr; got: {stderr}");
-        // All 8 diagnostic files must exist with non-zero size for the ones we expect populated.
-        for name in [
-            "00-started.txt",
-            "01-mounts.txt",
-            "03-env.txt",
-            "04-runner-check.txt",
-            "05-stdout.log",
-            "06-stderr.log",
-            "07-exit-code.txt",
-        ] {
-            let p = log_dir.join(name);
-            assert!(p.exists(), "{name} should exist after wrapper run");
-            let size = std::fs::metadata(&p).unwrap().len();
-            assert!(size > 0, "{name} is empty");
-        }
-        // Exit code file must contain "7\n" (the runner's exit code).
-        let exit_str = std::fs::read_to_string(log_dir.join("07-exit-code.txt")).unwrap();
-        assert_eq!(exit_str.trim(), "7", "07-exit-code.txt should hold runner's exit code");
-        // 04-runner-check.txt must report runner-exists-and-executable.
-        let check = std::fs::read_to_string(log_dir.join("04-runner-check.txt")).unwrap();
-        assert!(check.contains("runner-exists-and-executable"), "got: {check}");
-    }
-
-    #[test]
-    fn build_runner_diag_wrapper_handles_missing_runner() {
-        // Same as above but with a runner path that doesn't exist —
-        // wrapper should still produce all the diagnostic files and
-        // surface a non-zero exit code, NOT hang.
-        let tmp = tempfile::tempdir().unwrap();
-        let log_dir = tmp.path().join("var-log-smooth-runner");
-        std::fs::create_dir_all(&log_dir).unwrap();
-        let argv = build_runner_diag_wrapper_argv("/this/path/does/not/exist/fake-runner");
-        let patched = argv[2].replace("/var/log/smooth-runner", log_dir.to_str().unwrap());
-        let output = std::process::Command::new("/bin/sh").arg("-c").arg(&patched).output().expect("spawn sh");
-        // Non-zero exit (likely 127) indicating runner-not-found.
-        assert_ne!(output.status.code(), Some(0), "missing runner must not produce success exit");
-        // 04-runner-check.txt must report MISSING-RUNNER.
-        let check = std::fs::read_to_string(log_dir.join("04-runner-check.txt")).unwrap();
-        assert!(check.contains("MISSING-RUNNER"), "got: {check}");
-        // Stderr file should capture the shell's "not found" diagnostic.
-        let stderr_log = std::fs::read_to_string(log_dir.join("06-stderr.log")).unwrap_or_default();
-        assert!(
-            stderr_log.contains("not found") || stderr_log.contains("No such file"),
-            "stderr should capture missing-runner error; got: {stderr_log}"
-        );
     }
 
     #[test]
@@ -6011,42 +4132,6 @@ mod tests {
         let body_bytes2 = axum::body::to_bytes(response2.into_body(), usize::MAX).await.unwrap();
         let resp2: serde_json::Value = serde_json::from_slice(&body_bytes2).unwrap();
         assert_eq!(resp2["data"]["status"], "completed");
-    }
-
-    #[test]
-    fn extract_skill_allowed_hosts_no_skill_header_returns_empty() {
-        // Pearl th-e0f812: messages without the ## Skill: prefix
-        // are the common case — no pre-grant, no policy change.
-        let workspace = tempfile::tempdir().expect("tempdir");
-        let result = extract_skill_allowed_hosts("how do I run dev mode", workspace.path().to_str().unwrap());
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn extract_skill_allowed_hosts_returns_skill_hosts() {
-        // Build a project-level SKILL.md with allowed_hosts and
-        // verify the helper extracts them when the message starts
-        // with the matching ## Skill: header.
-        let workspace = tempfile::tempdir().expect("tempdir");
-        let skill_dir = workspace.path().join(".smooth/skills/probe");
-        std::fs::create_dir_all(&skill_dir).expect("mkdir");
-        std::fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\nname: probe\ndescription: test\nallowed_hosts:\n  - example.test\n  - other.test\n---\n\nbody",
-        )
-        .expect("write");
-        let message = "## Skill: probe (from project)\n\nbody\n\n---\n\n## User request\n\ngo";
-        let hosts = extract_skill_allowed_hosts(message, workspace.path().to_str().unwrap());
-        assert_eq!(hosts, vec!["example.test", "other.test"]);
-    }
-
-    #[test]
-    fn extract_skill_allowed_hosts_unknown_skill_returns_empty() {
-        // Header names a skill that doesn't exist — no pre-grant,
-        // and the tracing::warn surfaces in logs (not asserted here).
-        let workspace = tempfile::tempdir().expect("tempdir");
-        let hosts = extract_skill_allowed_hosts("## Skill: nonexistent (from project)\n\nbody", workspace.path().to_str().unwrap());
-        assert!(hosts.is_empty());
     }
 
     #[tokio::test]

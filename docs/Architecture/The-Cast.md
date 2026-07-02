@@ -1,5 +1,7 @@
 # The Cast
 
+> **Partially removed 2026-07 (pearl th-f4a801).** The per-VM access-control cast — **Wonk** (access authority) and **Goalie** (network + FUSE proxy) — was deleted along with the microVM stack. **Narc** (tool surveillance) still runs in-process on the operative; **Scribe**/**Archivist** (logging) and **Groove** (checkpointing) are kept. Sections below describing Wonk/Goalie and the in-VM cast topology are historical; git history has the implementation.
+
 #architecture #cast
 
 > [!arch] One process or one VM, eight roles — two transports between them

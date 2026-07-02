@@ -50,6 +50,24 @@ fn parse_sync_timeout(raw: &str) -> Option<Duration> {
     }
 }
 
+/// Escape a string for splicing into a single-quoted SQL string literal
+/// sent to `smooth-dolt exec`/`sql` (no prepared statements on this path).
+///
+/// Dolt speaks MySQL dialect, where **backslash is an escape character
+/// inside string literals** — doubling quotes alone is broken: input
+/// containing `\'` became `\''`, the backslash ate the first quote, and
+/// the rest of the value was parsed as SQL (syntax error at best,
+/// injection at worst; pearl th-944230). Order matters: backslashes
+/// first, then quotes, then NUL bytes (which MySQL rejects raw).
+///
+/// This is the ONE escaping function for the workspace — every
+/// SQL-string-building site (pearls, memories, messages, agents,
+/// bigsmooth sessions) must route through it.
+#[must_use]
+pub fn sql_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\'', "''").replace('\0', "\\0")
+}
+
 /// Flags for [`SmoothDolt::push_with`].
 ///
 /// `set_upstream` translates to Dolt's `-u` flag and is needed on the
@@ -1454,18 +1472,48 @@ impl SmoothDolt {
 /// - clone subprocess returns non-zero (network failure, ref not found,
 ///   etc.) — stderr is captured + first 400 chars included
 pub fn clone_from(remote_url: &str, target_dir: &std::path::Path) -> Result<()> {
+    clone_from_with_timeout(remote_url, target_dir, None)
+}
+
+/// Like [`clone_from`] but bounded by the standard remote-sync timeout
+/// ([`sync_timeout`] — 30s default, `SMOOTH_DOLT_SYNC_TIMEOUT_SECS` to
+/// override). Used by `th pearls doctor`'s remote-sync probe, where a
+/// dead/unreachable remote must produce a diagnosis rather than a hang.
+pub fn clone_from_bounded(remote_url: &str, target_dir: &std::path::Path) -> Result<()> {
+    clone_from_with_timeout(remote_url, target_dir, sync_timeout())
+}
+
+fn clone_from_with_timeout(remote_url: &str, target_dir: &std::path::Path, timeout: Option<Duration>) -> Result<()> {
     let bin = find_smooth_dolt_binary().context("smooth-dolt binary not found for clone — Run: scripts/build-smooth-dolt.sh")?;
     if let Some(parent) = target_dir.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create parent of {}", target_dir.display()))?;
     }
     let remote_url = &normalize_remote_url(remote_url);
-    let output = Command::new(&bin)
+    let mut child = Command::new(&bin)
         .args(["clone", remote_url, &target_dir.to_string_lossy()])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
+        .spawn()
         .context("exec smooth-dolt clone")?;
+
+    // Same poll-and-kill shape as `run_cli_timed` — a stalled transfer is
+    // SIGKILLed so the caller gets an error instead of a hang.
+    if let Some(timeout) = timeout {
+        let deadline = std::time::Instant::now() + timeout;
+        while child.try_wait().context("poll smooth-dolt clone")?.is_none() {
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                anyhow::bail!(
+                    "smooth-dolt clone from {remote_url} timed out after {}s (remote sync stalled; killed child — retryable)",
+                    timeout.as_secs()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    let output = child.wait_with_output().context("collect smooth-dolt clone output")?;
     if !output.status.success() {
         let stderr: String = String::from_utf8_lossy(&output.stderr).trim().chars().take(400).collect();
         anyhow::bail!(
@@ -1475,6 +1523,132 @@ pub fn clone_from(remote_url: &str, target_dir: &std::path::Path) -> Result<()> 
         );
     }
     Ok(())
+}
+
+/// How the local pearl history relates to the remote's `refs/dolt/data`
+/// history. Computed by [`classify_remote_sync`] from two bounded
+/// `dolt log` outputs — heuristic by construction (a tip older than the
+/// log bound looks like a divergence), so callers should phrase findings
+/// as "within the last N commits".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteSyncStatus {
+    /// Tips are equal.
+    InSync,
+    /// The remote tip appears in local history → safe to `push`.
+    LocalAhead,
+    /// The local tip appears in remote history → safe to `pull`.
+    RemoteAhead,
+    /// No overlap, and the remote is exactly one bare
+    /// "Initialize data repository" commit — the stray-re-init signature
+    /// (2026-07-02 incident). A force push overwrites ONLY that commit.
+    DivergedBareInit,
+    /// No overlap and the remote has real commits — inspect before any
+    /// force push/pull.
+    Diverged,
+    /// Remote log is empty (nothing ever pushed).
+    EmptyRemote,
+    /// Local log is empty (fresh/blank store).
+    EmptyLocal,
+}
+
+/// Pure classification of local vs remote history from `smooth-dolt log`
+/// lines (format: `"<short-hash> <message> (<author>) <date>"` — see
+/// `cmdLog` in go/smooth-dolt). First line is the tip.
+#[must_use]
+pub fn classify_remote_sync(local: &[String], remote: &[String]) -> RemoteSyncStatus {
+    fn hash(line: &str) -> &str {
+        line.split_whitespace().next().unwrap_or("")
+    }
+    fn message(line: &str) -> &str {
+        line.split_once(char::is_whitespace).map_or("", |(_, rest)| rest.trim_start())
+    }
+    if local.is_empty() {
+        return RemoteSyncStatus::EmptyLocal;
+    }
+    if remote.is_empty() {
+        return RemoteSyncStatus::EmptyRemote;
+    }
+    let local_tip = hash(&local[0]);
+    let remote_tip = hash(&remote[0]);
+    if local_tip == remote_tip {
+        return RemoteSyncStatus::InSync;
+    }
+    if local.iter().any(|l| hash(l) == remote_tip) {
+        return RemoteSyncStatus::LocalAhead;
+    }
+    if remote.iter().any(|l| hash(l) == local_tip) {
+        return RemoteSyncStatus::RemoteAhead;
+    }
+    if remote.len() == 1 && message(&remote[0]).starts_with("Initialize data repository") {
+        return RemoteSyncStatus::DivergedBareInit;
+    }
+    RemoteSyncStatus::Diverged
+}
+
+#[cfg(test)]
+mod remote_sync_classify_tests {
+    use super::{classify_remote_sync, RemoteSyncStatus};
+
+    fn log(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn in_sync_when_tips_equal() {
+        let local = log(&["aaaa1111 close th-1 (brent) 2026-07-01", "bbbb2222 create th-1 (brent) 2026-06-30"]);
+        let remote = log(&["aaaa1111 close th-1 (brent) 2026-07-01"]);
+        assert_eq!(classify_remote_sync(&local, &remote), RemoteSyncStatus::InSync);
+    }
+
+    #[test]
+    fn local_ahead_when_remote_tip_in_local_history() {
+        let local = log(&["cccc3333 newer (brent) d", "aaaa1111 shared tip (brent) d", "bbbb2222 older (brent) d"]);
+        let remote = log(&["aaaa1111 shared tip (brent) d", "bbbb2222 older (brent) d"]);
+        assert_eq!(classify_remote_sync(&local, &remote), RemoteSyncStatus::LocalAhead);
+    }
+
+    #[test]
+    fn remote_ahead_when_local_tip_in_remote_history() {
+        let local = log(&["aaaa1111 shared tip (brent) d", "bbbb2222 older (brent) d"]);
+        let remote = log(&["dddd4444 teammate work (kim) d", "aaaa1111 shared tip (brent) d"]);
+        assert_eq!(classify_remote_sync(&local, &remote), RemoteSyncStatus::RemoteAhead);
+    }
+
+    #[test]
+    fn diverged_bare_init_single_stray_init_commit() {
+        // The 2026-07-02 incident: remote refs/dolt/data re-initialized
+        // with a single bare commit, no ancestor with 2547 local commits.
+        let local = log(&["aaaa1111 close th-9 (brent) d", "bbbb2222 create th-9 (brent) d"]);
+        let remote = log(&["ffff9999 Initialize data repository (dolt) d"]);
+        assert_eq!(classify_remote_sync(&local, &remote), RemoteSyncStatus::DivergedBareInit);
+    }
+
+    #[test]
+    fn diverged_when_remote_has_real_unrelated_commits() {
+        let local = log(&["aaaa1111 close th-9 (brent) d"]);
+        let remote = log(&["eeee5555 real work (kim) d", "ffff9999 Initialize data repository (dolt) d"]);
+        assert_eq!(classify_remote_sync(&local, &remote), RemoteSyncStatus::Diverged);
+    }
+
+    #[test]
+    fn diverged_when_single_remote_commit_is_not_bare_init() {
+        let local = log(&["aaaa1111 close th-9 (brent) d"]);
+        let remote = log(&["eeee5555 real work (kim) d"]);
+        assert_eq!(classify_remote_sync(&local, &remote), RemoteSyncStatus::Diverged);
+    }
+
+    #[test]
+    fn empty_remote_log() {
+        let local = log(&["aaaa1111 close th-9 (brent) d"]);
+        assert_eq!(classify_remote_sync(&local, &[]), RemoteSyncStatus::EmptyRemote);
+    }
+
+    #[test]
+    fn empty_local_log_wins_over_empty_remote() {
+        let remote = log(&["aaaa1111 close th-9 (brent) d"]);
+        assert_eq!(classify_remote_sync(&[], &remote), RemoteSyncStatus::EmptyLocal);
+        assert_eq!(classify_remote_sync(&[], &[]), RemoteSyncStatus::EmptyLocal);
+    }
 }
 
 /// Normalize a git remote URL for Dolt's remote machinery.
@@ -1625,6 +1799,79 @@ mod auto_heal_tests {
         let dir = tmp.path();
         Command::new("git").arg("-C").arg(dir).args(["init", "-q"]).output().unwrap();
         assert!(read_git_origin_url(dir).is_err());
+    }
+}
+
+#[cfg(test)]
+mod sql_escape_tests {
+    use super::sql_escape;
+
+    #[test]
+    fn empty_string_unchanged() {
+        assert_eq!(sql_escape(""), "");
+    }
+
+    #[test]
+    fn plain_text_unchanged() {
+        assert_eq!(sql_escape("hello world"), "hello world");
+    }
+
+    #[test]
+    fn single_quote_doubled() {
+        assert_eq!(sql_escape("it's"), "it''s");
+        assert_eq!(sql_escape("''"), "''''");
+    }
+
+    #[test]
+    fn backslash_doubled() {
+        assert_eq!(sql_escape(r"a\b"), r"a\\b");
+    }
+
+    #[test]
+    fn backslash_quote_the_th_944230_case() {
+        // `\'` must become `\\''` — backslash escaped BEFORE the quote is
+        // doubled, so the backslash can't eat the quote.
+        assert_eq!(sql_escape(r"text with \' inside"), r"text with \\'' inside");
+    }
+
+    #[test]
+    fn lone_trailing_backslash() {
+        // `abc\` unescaped would eat the literal's closing quote.
+        assert_eq!(sql_escape(r"abc\"), r"abc\\");
+    }
+
+    #[test]
+    fn doubled_backslashes() {
+        assert_eq!(sql_escape(r"a\\b"), r"a\\\\b");
+    }
+
+    #[test]
+    fn nul_byte_escaped() {
+        assert_eq!(sql_escape("a\0b"), r"a\0b");
+    }
+
+    #[test]
+    fn classic_injection_payload_neutralized() {
+        let escaped = sql_escape("'; DROP TABLE pearls; --");
+        // No lone quote survives: the only quotes are the doubled pair.
+        assert_eq!(escaped, "''; DROP TABLE pearls; --");
+        assert!(!escaped.contains('\\'));
+    }
+
+    #[test]
+    fn quote_backslash_injection_neutralized() {
+        // The bypass the old quotes-only escape allowed.
+        assert_eq!(sql_escape(r"\'; DROP TABLE pearls; --"), r"\\''; DROP TABLE pearls; --");
+    }
+
+    #[test]
+    fn semicolons_and_newlines_pass_through() {
+        assert_eq!(sql_escape("a;b\nc\r\nd"), "a;b\nc\r\nd");
+    }
+
+    #[test]
+    fn unicode_pass_through() {
+        assert_eq!(sql_escape("héllo 世界 🦀"), "héllo 世界 🦀");
     }
 }
 

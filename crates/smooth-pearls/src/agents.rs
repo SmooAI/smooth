@@ -53,10 +53,7 @@ fn parse_agent(row: &Value) -> Agent {
     }
 }
 
-/// SQL-safe single-quote escape (smooth-dolt has no prepared statements).
-fn sql_escape(s: &str) -> String {
-    s.replace('\'', "''")
-}
+use crate::dolt::sql_escape;
 
 /// API over the `agents` table. Cheap to clone.
 #[derive(Clone)]

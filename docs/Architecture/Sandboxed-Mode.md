@@ -1,5 +1,7 @@
 # Sandboxed Mode
 
+> **Removed 2026-07 (pearl th-f4a801).** The microVM sandbox stack this page describes (per-task microsandbox VM + the Wonk/Goalie access-control cast) was deleted. Dispatch now runs the `smooth-operative` worker as a host subprocess, in-process, with **Narc** tool surveillance only — no VM isolation, no network/filesystem policy enforcement. Kept as historical design; git history at this PR's parent commit has the implementation, and the smooth-daemon epic (th-c89c2a) is the forward path.
+
 #architecture
 
 > [!arch] The default

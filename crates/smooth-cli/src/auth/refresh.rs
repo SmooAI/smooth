@@ -12,9 +12,41 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde_json::Value;
-use smooai_client_shared::auth::storage::{CredentialKind, Credentials};
+use smooai_client_shared::auth::storage::{CredentialKind, Credentials, CredentialsStore};
 
 use crate::auth::{supabase_url, PROD_SUPABASE_ANON_KEY};
+
+/// Load the `th auth login` user session, silently refreshing it when
+/// expired and persisting the rotated `refresh_token` (pearl th-32d00e —
+/// login is once-per-machine; the session lives as long as its refresh
+/// token). Errors, each with a `th auth login` hint, only when: no
+/// session exists, the session is expired with no refresh material, or
+/// the refresh grant itself fails.
+pub async fn fresh_user_credentials(http: &reqwest::Client) -> Result<Credentials> {
+    let store = CredentialsStore::default_user().context("locate user credentials store")?;
+    fresh_user_credentials_from(http, &store).await
+}
+
+/// [`fresh_user_credentials`] against an explicit store (testable).
+pub async fn fresh_user_credentials_from(http: &reqwest::Client, store: &CredentialsStore) -> Result<Credentials> {
+    let creds = store
+        .load()
+        .context("load user session")?
+        .ok_or_else(|| anyhow::anyhow!("not logged in as a user — run `th auth login` first"))?;
+    if !creds.is_expired() {
+        return Ok(creds);
+    }
+    if creds.refresh_token.is_none() {
+        anyhow::bail!("user session expired and has no refresh token — run `th auth login` again");
+    }
+    let refreshed = refresh_user_session(http, &creds)
+        .await
+        .context("silent session refresh failed — run `th auth login` again")?;
+    // Best-effort persist: the in-memory token still serves this run
+    // even if the write fails (read-only FS, perms).
+    let _ = store.save(&refreshed);
+    Ok(refreshed)
+}
 
 /// Exchange the stored Supabase `refresh_token` for a fresh
 /// `access_token` + new `refresh_token`. Preserves the user-display
@@ -90,4 +122,76 @@ pub async fn refresh_m2m_session(http: &reqwest::Client, previous: &Credentials)
     let mut refreshed = client_credentials_grant(http, cid, csecret).await.context("client_credentials grant")?;
     refreshed.active_org_id = previous.active_org_id.clone();
     Ok(refreshed)
+}
+
+#[cfg(test)]
+mod fresh_user_credentials_tests {
+    use super::*;
+
+    fn write_creds(dir: &std::path::Path, expires_at: Option<chrono::DateTime<Utc>>, refresh: Option<&str>) -> CredentialsStore {
+        let store = CredentialsStore::at(dir.join("smooai-user.json"));
+        store
+            .save(&Credentials {
+                access_token: "tok".into(),
+                refresh_token: refresh.map(str::to_string),
+                expires_at,
+                user: Some("u@example.com".into()),
+                active_org_id: None,
+                client_id: None,
+                client_secret: None,
+                kind: CredentialKind::User,
+                created_at: Utc::now(),
+            })
+            .unwrap();
+        store
+    }
+
+    fn http() -> reqwest::Client {
+        reqwest::Client::new()
+    }
+
+    #[tokio::test]
+    async fn valid_session_passes_through_without_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = write_creds(dir.path(), Some(Utc::now() + chrono::Duration::hours(1)), None);
+        let creds = fresh_user_credentials_from(&http(), &store).await.unwrap();
+        assert_eq!(creds.access_token, "tok");
+    }
+
+    #[tokio::test]
+    async fn missing_session_says_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredentialsStore::at(dir.path().join("smooai-user.json"));
+        let err = fresh_user_credentials_from(&http(), &store).await.unwrap_err();
+        assert!(format!("{err:#}").contains("th auth login"));
+    }
+
+    #[tokio::test]
+    async fn expired_without_refresh_token_says_login_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = write_creds(dir.path(), Some(Utc::now() - chrono::Duration::hours(1)), None);
+        let err = fresh_user_credentials_from(&http(), &store).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("no refresh token") && msg.contains("th auth login"), "got: {msg}");
+    }
+
+    // The expired-with-refresh-token path exercises the live Supabase
+    // grant; its request/response shape is covered by the whoami and
+    // browser_login tests. Here we only pin that the branch is taken
+    // (a bogus refresh_token fails with the login hint, not a panic).
+    #[tokio::test]
+    async fn expired_with_bad_refresh_token_fails_with_login_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        // Point Supabase at a closed port so the test never leaves the
+        // box; save/restore the env var like supabase_url_honors_env_override.
+        let prev = std::env::var("SMOOAI_SUPABASE_URL").ok();
+        std::env::set_var("SMOOAI_SUPABASE_URL", "http://127.0.0.1:9");
+        let store = write_creds(dir.path(), Some(Utc::now() - chrono::Duration::hours(1)), Some("bogus"));
+        let result = fresh_user_credentials_from(&http(), &store).await;
+        match prev {
+            Some(v) => std::env::set_var("SMOOAI_SUPABASE_URL", v),
+            None => std::env::remove_var("SMOOAI_SUPABASE_URL"),
+        }
+        assert!(format!("{:#}", result.unwrap_err()).contains("th auth login"));
+    }
 }
