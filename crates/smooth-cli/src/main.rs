@@ -5113,7 +5113,17 @@ fn doctor_remote_sync(healthy_dbs: &[std::path::PathBuf]) -> bool {
     };
     let clone_root = tmp.path().join("remote");
     if let Err(e) = clone_from_bounded(remote_url, &clone_root) {
-        println!("  ✗ remote unreachable — clone of {remote_url} failed: {e:#}");
+        // A deadline hit is NOT "unreachable" — a full clone of a large
+        // store is legitimately minutes of CPU (measured ~5min for a
+        // 2547-commit history; pearl th-6c6843). Say what actually
+        // happened and how to get the diagnosis anyway.
+        if smooth_pearls::dolt::is_sync_timeout_err(&e) {
+            println!("  ! remote comparison skipped — the probe clone exceeded its time bound: {e:#}");
+            println!("    A large store can take minutes to clone. Re-run with a bigger bound, e.g.:");
+            println!("    SMOOTH_DOLT_SYNC_TIMEOUT_SECS=600 th pearls doctor");
+        } else {
+            println!("  ✗ remote unreachable — clone of {remote_url} failed: {e:#}");
+        }
         return false;
     }
 
