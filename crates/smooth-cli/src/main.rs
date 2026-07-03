@@ -3328,14 +3328,13 @@ async fn cmd_tunnel(cmd: TunnelCommands) -> Result<()> {
             println!("  {} {}\n", "slug      ".dimmed(), format!("{}", cfg.slug).bold());
 
             let client = TunnelClient::new(cfg);
-            match client.run().await {
-                Ok(()) => Ok(()),
-                // Scaffold-phase: the rendezvous service isn't live
-                // yet. Surface the structured error with a friendly
-                // hint instead of crashing.
-                Err(smooth_tunnel::TunnelError::NotImplementedYet) => {
-                    println!("  {} Scaffold only — the th.smoo.ai rendezvous service is not deployed yet.", "ℹ".cyan());
-                    println!("  {} Track {} (smooai pearl th-8898f2) for the ECS side.\n", "ℹ".cyan(), "SMOODEV-637".bold());
+            let printed = |hello: &smooth_tunnel::ServerHello| {
+                println!("  {} {}", "✓ live at".green().bold(), hello.public_url.bold());
+                println!("  {} {}\n", "session   ".dimmed(), hello.session_id.dimmed());
+            };
+            match client.run(printed).await {
+                Ok(()) => {
+                    println!("  {} tunnel closed\n", "•".dimmed());
                     Ok(())
                 }
                 Err(e) => Err(anyhow::anyhow!("tunnel: {e}")),
