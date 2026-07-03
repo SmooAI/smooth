@@ -1626,6 +1626,27 @@ fn emit_event(event: &AgentEvent) {
     }
 }
 
+/// Byte cap for each injected system-prompt context block (project
+/// context files + workspace memory). Pearl th-5002c4: a giant
+/// AGENTS.md / README shouldn't blow the context budget. 16 KB is the
+/// upper end of the pearl's suggested 8–16 KB.
+const MAX_CONTEXT_BYTES: usize = 16 * 1024;
+
+/// Truncate `s` to at most `max_bytes`, cutting on a UTF-8 char
+/// boundary and appending a marker when truncated. Returns `s`
+/// unchanged when it already fits.
+fn cap_context(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    // Walk back to the nearest char boundary at or below max_bytes.
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n\n[... truncated, {} of {} bytes shown ...]", &s[..end], end, s.len())
+}
+
 #[tokio::main]
 async fn main() {
     // tracing → stderr so stdout stays clean JSON-lines.
@@ -2092,7 +2113,7 @@ async fn main() {
     );
     let workspace_path = std::path::Path::new(&config.workspace);
     let mut system_prompt = match smooth_operator::context::load_project_context(workspace_path) {
-        Some(ctx) => format!("{base_prompt}\n\n## Project Context\n\n{ctx}"),
+        Some(ctx) => format!("{base_prompt}\n\n## Project Context\n\n{}", cap_context(&ctx, MAX_CONTEXT_BYTES)),
         None => base_prompt,
     };
 
@@ -2106,7 +2127,7 @@ async fn main() {
         let trimmed = memory.trim();
         if !trimmed.is_empty() {
             system_prompt.push_str("\n\n## Workspace Memory (.smooth/MEMORY.md)\n\n");
-            system_prompt.push_str(trimmed);
+            system_prompt.push_str(&cap_context(trimmed, MAX_CONTEXT_BYTES));
             system_prompt.push('\n');
         }
     }
@@ -2716,5 +2737,68 @@ mod todo_list_tests {
         let (t, _dir) = tool();
         let err = t.execute(json!({"action": "delete-everything"})).await.unwrap_err();
         assert!(err.to_string().contains("unknown action"));
+    }
+}
+
+#[cfg(test)]
+mod cap_context_tests {
+    use super::{cap_context, MAX_CONTEXT_BYTES};
+
+    #[test]
+    fn returns_unchanged_when_within_cap() {
+        let s = "short project context";
+        assert_eq!(cap_context(s, MAX_CONTEXT_BYTES), s);
+    }
+
+    #[test]
+    fn returns_unchanged_at_exactly_cap() {
+        let s = "x".repeat(100);
+        assert_eq!(cap_context(&s, 100), s);
+    }
+
+    #[test]
+    fn truncates_and_marks_when_over_cap() {
+        let s = "x".repeat(100);
+        let out = cap_context(&s, 40);
+        assert!(out.starts_with(&"x".repeat(40)));
+        assert!(out.contains("truncated"));
+        assert!(out.contains("40 of 100 bytes"));
+        // Only the marker is added past the cap — the retained slice
+        // never exceeds max_bytes.
+        assert!(out.len() < s.len() + 64);
+    }
+
+    #[test]
+    fn truncates_on_char_boundary_for_multibyte() {
+        // "€" is 3 bytes; a naive byte slice at an odd offset panics.
+        let s = "€".repeat(20); // 60 bytes
+        let out = cap_context(&s, 40); // 40 is mid-codepoint (not divisible by 3)
+                                       // Retained prefix is valid UTF-8 (13 full euros = 39 bytes).
+        assert!(out.starts_with(&"€".repeat(13)));
+        assert!(out.contains("truncated"));
+    }
+
+    #[test]
+    fn empty_string_is_unchanged() {
+        assert_eq!(cap_context("", MAX_CONTEXT_BYTES), "");
+    }
+
+    // The exact path main() runs: discover a project context file via
+    // the engine, then cap it before injecting into the system prompt.
+    #[test]
+    fn discovered_context_is_injected_and_capped() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().expect("tempdir");
+        // Big SMOOTH.md — precedence over CLAUDE.md, and over the cap.
+        std::fs::write(dir.path().join("SMOOTH.md"), "S".repeat(MAX_CONTEXT_BYTES * 2)).unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "claude-should-lose").unwrap();
+
+        let ctx = smooth_operator::context::load_project_context(dir.path()).expect("discovered");
+        assert!(ctx.contains(&"S".repeat(64)), "SMOOTH.md discovered");
+        assert!(!ctx.contains("claude-should-lose"), "SMOOTH.md wins precedence");
+
+        let capped = cap_context(&ctx, MAX_CONTEXT_BYTES);
+        assert!(capped.contains("truncated"), "oversize context is truncated: len={}", capped.len());
+        assert!(capped.len() < ctx.len(), "cap shrinks the injected block");
     }
 }
