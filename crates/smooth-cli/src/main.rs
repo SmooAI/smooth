@@ -678,6 +678,13 @@ enum ApiCommands {
         #[command(subcommand)]
         cmd: smooai::crm::Cmd,
     },
+    /// Smoo AI org Copilot — chat / confirm / history. Drives the org's
+    /// always-on dashboard agent (draft email, CRM, analytics, templates).
+    /// Authenticates as the logged-in user (`th auth login`).
+    Copilot {
+        #[command(subcommand)]
+        cmd: smooai::copilot::Cmd,
+    },
     /// Smoo AI knowledge documents (text, websites, files).
     Knowledge {
         #[command(subcommand)]
@@ -1427,6 +1434,7 @@ async fn main() -> Result<()> {
             ApiCommands::Keys { cmd } => smooai::keys::cmd(cmd).await,
             ApiCommands::Members { cmd } => smooai::members::cmd(cmd).await,
             ApiCommands::Crm { cmd } => smooai::crm::cmd(cmd).await,
+            ApiCommands::Copilot { cmd } => smooai::copilot::cmd(cmd).await,
             ApiCommands::Knowledge { cmd } => smooai::knowledge::cmd(cmd).await,
             ApiCommands::Jobs { cmd } => smooai::jobs::cmd(cmd).await,
             ApiCommands::Integrations { cmd } => smooai::integrations::cmd(cmd).await,
