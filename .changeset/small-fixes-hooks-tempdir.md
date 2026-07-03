@@ -1,6 +1,6 @@
 ---
-'smooai-smooth-cli': patch
-'smooai-smooth-bigsmooth': patch
+'@smooai/smooth': patch
+'@smooai/smooth': patch
 ---
 
 Two small bug fixes.

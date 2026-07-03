@@ -1,5 +1,5 @@
 ---
-'smooai-smooth-pearls': patch
+'@smooai/smooth': patch
 ---
 
 Harden the Dolt store against a read-only WEDGE caused by a hung remote sync.

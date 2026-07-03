@@ -1,6 +1,6 @@
 ---
-'smooai-smooth-bigsmooth': patch
-'smooai-smooth-bench': patch
+'@smooai/smooth': patch
+'@smooai/smooth': patch
 ---
 
 Fix two small bugs: a UB-prone env mutation in Big Smooth and a missed pytest

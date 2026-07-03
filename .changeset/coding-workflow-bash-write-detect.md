@@ -1,5 +1,5 @@
 ---
-'smooai-smooth-cast': patch
+'@smooai/smooth': patch
 ---
 
 Fix coding_workflow mislabelling real code turns as THINK mode.
