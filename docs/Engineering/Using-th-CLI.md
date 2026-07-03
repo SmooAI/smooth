@@ -632,6 +632,14 @@ th cast models                                     # list groups from the config
                                                    # (also folds in any configured local provider's live models)
 ```
 
+`th cast models` also surfaces **extension-registered providers** (SEP Phase 7):
+any globally installed extension (`~/.smooth/extensions/`) that registers an LLM
+provider is loaded headlessly and its declared models are listed under an
+`extension <ext>.<provider>` section (and, in `--json`, as `<provider>/<model>`
+ids). Project extensions are never spawned by this command. Extensions register
+providers via the SEP `registerProvider` surface; the host proxies completions to
+them over `provider/complete` with streamed `provider/delta` chunks.
+
 ### Skills — reusable recipes (Claude-Code parity)
 
 A **skill** is a `SKILL.md` (YAML frontmatter + markdown body) that encodes the
