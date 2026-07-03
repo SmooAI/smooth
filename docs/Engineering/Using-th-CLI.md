@@ -186,7 +186,10 @@ th api agents update <agent-id> --workflow @workflow.json   # {goal, steps:[{id,
 th api agents update <agent-id> --tool-config '{"enabledTools":[{"toolId":"knowledge_search","enabled":true,"authLevel":"none"}]}'
 # toolConfig rules: empty enabledTools = FULL tool set; non-empty = restrict
 # to enabled=true entries; all-disabled = no tools (fail closed).
-# mint accepts the same --personality/--workflow/--tool-config at create time.
+th api agents update <agent-id> --extension '{"enabledExtensions":[{"extensionId":"plan-mode","enabled":true,"config":{}}]}'
+# SMOODEV-2259 — extensionConfig gates SEP extensions per agent. extensionId is
+# kebab-case (SEP extension name); empty enabledExtensions = no extensions (fail closed).
+# mint accepts the same --personality/--workflow/--tool-config/--extension at create time.
 # Read any of these back with: th api agents show <agent-id>
 ```
 
