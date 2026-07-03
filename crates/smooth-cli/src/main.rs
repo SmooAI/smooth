@@ -598,11 +598,23 @@ enum OrgsCommands {
     },
 }
 
+/// Pearl th-9cd759: `th api login/logout/whoami` moved to the `th auth`
+/// surface. One release cycle of warnings, then the three arms get removed
+/// (the `th api <resource>` operations stay — they aren't auth).
+fn deprecated_api_auth_hint(old: &str, new: &str) {
+    use owo_colors::OwoColorize;
+    eprintln!(
+        "{} `th api {old}` is deprecated and will be removed in a future release — use `{new}`",
+        "warning:".yellow().bold()
+    );
+}
+
 #[derive(Subcommand)]
 enum ApiCommands {
-    /// Authenticate `th` against the Smoo AI platform API. Exchanges
-    /// an OAuth2 client_credentials grant at `https://auth.smoo.ai/token`
-    /// for a bearer JWT and stores it at `~/.smooth/auth/smooai.json`.
+    /// DEPRECATED — use `th auth login --m2m`. Authenticate `th` against
+    /// the Smoo AI platform API. Exchanges an OAuth2 client_credentials
+    /// grant at `https://auth.smoo.ai/token` for a bearer JWT and stores
+    /// it at `~/.smooth/auth/smooai.json`.
     ///
     /// Credential resolution order (first present wins):
     ///   1. `--client-id` + `--client-secret` flags
@@ -617,10 +629,11 @@ enum ApiCommands {
         #[arg(long)]
         client_secret: Option<String>,
     },
-    /// Forget the current Smoo AI platform session — deletes
-    /// `~/.smooth/auth/smooai.json`. Idempotent.
+    /// DEPRECATED — use `th auth logout --m2m`. Forget the current Smoo AI
+    /// platform session — deletes `~/.smooth/auth/smooai.json`. Idempotent.
     Logout,
-    /// Print the currently-logged-in Smoo AI user + active org.
+    /// DEPRECATED — use `th auth whoami`. Print the currently-logged-in
+    /// Smoo AI user + active org.
     Whoami,
     /// Smoo AI organization management.
     Orgs {
@@ -1390,9 +1403,18 @@ async fn main() -> Result<()> {
         #[cfg(feature = "admin")]
         Some(Commands::Admin { cmd }) => admin::dispatch(cmd).await,
         Some(Commands::Api { cmd }) => match cmd {
-            ApiCommands::Login { client_id, client_secret } => cmd_login(client_id, client_secret).await,
-            ApiCommands::Logout => cmd_logout().await,
-            ApiCommands::Whoami => cmd_whoami().await,
+            ApiCommands::Login { client_id, client_secret } => {
+                deprecated_api_auth_hint("login", "th auth login --m2m");
+                cmd_login(client_id, client_secret).await
+            }
+            ApiCommands::Logout => {
+                deprecated_api_auth_hint("logout", "th auth logout --m2m");
+                cmd_logout().await
+            }
+            ApiCommands::Whoami => {
+                deprecated_api_auth_hint("whoami", "th auth whoami");
+                cmd_whoami().await
+            }
             ApiCommands::Orgs { cmd } => cmd_orgs(cmd).await,
             ApiCommands::Agents { cmd } => smooai::agents::cmd(cmd).await,
             ApiCommands::Keys { cmd } => smooai::keys::cmd(cmd).await,
