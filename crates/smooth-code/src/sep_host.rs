@@ -52,6 +52,25 @@ pub enum RenderBlock {
         label: Option<String>,
         value: f64,
     },
+    /// Phase 8 render-block v2 kinds. Rendered reduced-fidelity in the TUI
+    /// (the web renders them richly); the DSL is shared so a `widget`-driven
+    /// extension degrades cleanly to the terminal.
+    Table {
+        columns: Vec<String>,
+        rows: Vec<Vec<String>>,
+    },
+    Diff {
+        patch: String,
+    },
+    Stack {
+        children: Vec<RenderBlock>,
+    },
+    /// The interactive tier: a body block plus the keybindings the host routes
+    /// back as `widget/key`. The TUI renders the body + a keybinding legend.
+    Widget {
+        body: Box<RenderBlock>,
+        keybindings: Vec<(String, Option<String>)>,
+    },
     /// The mandatory text fallback, or an unknown kind rendered as text.
     Text(String),
 }
@@ -91,6 +110,62 @@ impl RenderBlock {
                 label: widget.get("label").and_then(Value::as_str).map(str::to_string),
                 value: widget.get("value").and_then(Value::as_f64).unwrap_or(0.0).clamp(0.0, 1.0),
             },
+            Some("table") => {
+                let strs = |v: Option<&Value>| {
+                    v.and_then(Value::as_array)
+                        .map(|a| a.iter().map(|c| c.as_str().unwrap_or_default().to_string()).collect::<Vec<_>>())
+                        .unwrap_or_default()
+                };
+                Self::Table {
+                    // Phase 8 DSL uses `columns`; accept pre-Phase-8 `headers` too.
+                    columns: strs(widget.get("columns").or_else(|| widget.get("headers"))),
+                    rows: widget
+                        .get("rows")
+                        .and_then(Value::as_array)
+                        .map(|arr| arr.iter().map(|r| strs(Some(r))).collect())
+                        .unwrap_or_default(),
+                }
+            }
+            Some("diff") => Self::Diff {
+                // Phase 8 DSL uses `patch`; accept pre-Phase-8 `diff` too.
+                patch: widget
+                    .get("patch")
+                    .and_then(Value::as_str)
+                    .or_else(|| widget.get("diff").and_then(Value::as_str))
+                    .or_else(|| widget.get("text").and_then(Value::as_str))
+                    .unwrap_or_default()
+                    .to_string(),
+            },
+            Some("stack") => Self::Stack {
+                // Phase 8 DSL uses `children`; accept pre-Phase-8 `items` too.
+                children: widget
+                    .get("children")
+                    .or_else(|| widget.get("items"))
+                    .and_then(Value::as_array)
+                    .map(|arr| arr.iter().map(Self::from_widget).collect())
+                    .unwrap_or_default(),
+            },
+            Some("widget") => Self::Widget {
+                body: Box::new(
+                    widget
+                        .get("body")
+                        .map(Self::from_widget)
+                        .unwrap_or_else(|| Self::Text(text_fallback().unwrap_or_default())),
+                ),
+                keybindings: widget
+                    .get("keybindings")
+                    .and_then(Value::as_array)
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|k| {
+                                let key = k.get("key").and_then(Value::as_str)?.to_string();
+                                let desc = k.get("description").and_then(Value::as_str).map(str::to_string);
+                                Some((key, desc))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            },
             _ => Self::Text(text_fallback().unwrap_or_else(|| serde_json::to_string_pretty(widget).unwrap_or_default())),
         }
     }
@@ -119,6 +194,43 @@ impl RenderBlock {
                     Some(l) => vec![format!("{l} {bar}")],
                     None => vec![bar],
                 }
+            }
+            Self::Table { columns, rows } => {
+                let ncols = columns.len().max(rows.iter().map(Vec::len).max().unwrap_or(0));
+                let cell = |row: &[String], i: usize| row.get(i).map(String::as_str).unwrap_or("").to_string();
+                let mut widths = vec![0usize; ncols];
+                for (i, w) in widths.iter_mut().enumerate() {
+                    *w = columns.get(i).map(String::len).unwrap_or(0);
+                    for r in rows {
+                        *w = (*w).max(cell(r, i).len());
+                    }
+                }
+                let line = |get: &dyn Fn(usize) -> String| (0..ncols).map(|i| format!("{:<w$}", get(i), w = widths[i])).collect::<Vec<_>>().join("  ");
+                let mut out = Vec::new();
+                if !columns.is_empty() {
+                    out.push(line(&|i| columns.get(i).cloned().unwrap_or_default()));
+                }
+                for r in rows {
+                    out.push(line(&|i| cell(r, i)));
+                }
+                out
+            }
+            Self::Diff { patch } => patch.lines().map(str::to_string).collect(),
+            Self::Stack { children } => children.iter().flat_map(Self::to_lines).collect(),
+            Self::Widget { body, keybindings } => {
+                let mut out = body.to_lines();
+                if !keybindings.is_empty() {
+                    let legend = keybindings
+                        .iter()
+                        .map(|(k, d)| match d {
+                            Some(d) => format!("{k}:{d}"),
+                            None => k.clone(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("  ");
+                    out.push(legend);
+                }
+                out
             }
             Self::Text(t) => t.lines().map(str::to_string).collect(),
         }
@@ -335,6 +447,42 @@ mod tests {
         let lines = RenderBlock::from_widget(&w).to_lines();
         assert!(lines[0].starts_with("Build ["));
         assert!(lines[0].contains("50%"));
+    }
+
+    #[test]
+    fn render_block_table_aligns_columns() {
+        let w = json!({ "kind": "table", "columns": ["Name", "State"], "rows": [["alpha", "ok"], ["b", "fail"]] });
+        let lines = RenderBlock::from_widget(&w).to_lines();
+        assert_eq!(lines.len(), 3); // header + 2 rows
+        assert!(lines[0].starts_with("Name "));
+        assert!(lines[1].contains("alpha"));
+        // Pre-Phase-8 `headers` alias still parses.
+        let legacy = json!({ "kind": "table", "headers": ["A"], "rows": [["1"]] });
+        assert_eq!(RenderBlock::from_widget(&legacy).to_lines()[0].trim(), "A");
+    }
+
+    #[test]
+    fn render_block_diff_and_stack() {
+        let diff = json!({ "kind": "diff", "patch": "+added\n-removed" });
+        assert_eq!(RenderBlock::from_widget(&diff).to_lines(), vec!["+added", "-removed"]);
+
+        let stack = json!({ "kind": "stack", "children": [{ "kind": "markdown", "text": "one" }, { "kind": "markdown", "text": "two" }] });
+        assert_eq!(RenderBlock::from_widget(&stack).to_lines(), vec!["one", "two"]);
+    }
+
+    #[test]
+    fn render_block_widget_renders_body_and_keybinding_legend() {
+        let w = json!({
+            "kind": "widget",
+            "widget_id": "snake",
+            "body": { "kind": "markdown", "text": "score 3" },
+            "keybindings": [{ "key": "ArrowUp", "description": "up" }, { "key": "q" }]
+        });
+        let lines = RenderBlock::from_widget(&w).to_lines();
+        assert_eq!(lines[0], "score 3");
+        let legend = lines.last().unwrap();
+        assert!(legend.contains("ArrowUp:up"));
+        assert!(legend.contains('q'));
     }
 
     /// A UiSink that records one-way calls and answers interactive ones from a
