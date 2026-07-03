@@ -7,7 +7,6 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::extensions::ExtensionRegistry;
 use crate::git::GitState;
 use crate::state::AppState;
 
@@ -138,6 +137,11 @@ impl CommandRegistry {
 
         // /skill
         self.register("skill", "Invoke a skill: /skill (list) or /skill:<name> [args]", Box::new(cmd_skill));
+
+        // /ext — list installed SEP extensions, their trust state and declared
+        // capabilities. Live command/UI dispatch into a running host arrives
+        // with the daemon relay (SEP Phase 6); this is the client-side surface.
+        self.register("ext", "List installed extensions and their trust state", Box::new(cmd_ext));
 
         // /rename
         self.register("rename", "Rename the current session: /rename <title>", Box::new(cmd_rename));
@@ -455,18 +459,20 @@ fn cmd_verbose(args: &str, state: &mut AppState) -> anyhow::Result<CommandOutput
 fn cmd_skill(args: &str, _state: &mut AppState) -> anyhow::Result<CommandOutput> {
     let args = args.trim();
 
-    // Build a registry and load the default skills directory
-    let mut registry = ExtensionRegistry::new();
-    let skills_dir = registry.skills_dir().to_path_buf();
-    if skills_dir.is_dir() {
-        let _ = registry.load_skills_dir(&skills_dir);
-    }
+    // `/skill:name` is now sugar over smooth-cast's canonical skill catalog —
+    // the one discovery path (project + ~/.smooth + Claude/opencode imports +
+    // trusted SEP extensions' `[resources] skills`). smooth-code no longer
+    // parses skills itself.
+    let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let skills = smooth_cast::skills::discover(&workspace);
 
     if args.is_empty() {
         // /skill with no args — list available skills
-        let skills = registry.list_skills();
         if skills.is_empty() {
-            return Ok(CommandOutput::Message("No skills available. Add .md files to ~/.smooth/skills/".to_string()));
+            return Ok(CommandOutput::Message(
+                "No skills available. Add a skill under .smooth/skills/<name>/SKILL.md or ~/.smooth/skills/, or install an extension that ships one."
+                    .to_string(),
+            ));
         }
         let mut lines = vec!["Available skills:".to_string()];
         for s in &skills {
@@ -477,19 +483,66 @@ fn cmd_skill(args: &str, _state: &mut AppState) -> anyhow::Result<CommandOutput>
         // /skill:name [args] — the name is the first word of args
         let (skill_name, _rest) = args.split_once(' ').unwrap_or((args, ""));
 
-        registry.find_skill(skill_name).map_or_else(
+        skills.iter().find(|s| s.name == skill_name).map_or_else(
             || {
                 Ok(CommandOutput::Message(format!(
                     "Unknown skill: {skill_name}. Use /skill to list available skills."
                 )))
             },
-            |skill| {
-                let vars = HashMap::new();
-                let rendered = skill.render(&vars);
-                Ok(CommandOutput::Message(rendered))
-            },
+            |skill| Ok(CommandOutput::Message(smooth_cast::skills::render_invocation(skill))),
         )
     }
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn cmd_ext(_args: &str, _state: &mut AppState) -> anyhow::Result<CommandOutput> {
+    use smooth_operator::extension::manifest::{default_global_dir, discover, project_dir};
+
+    use crate::sep_host::{hash_extension, TrustStore};
+
+    let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let (found, _failures) = discover(default_global_dir().as_deref(), Some(project_dir(&workspace).as_path()));
+
+    if found.is_empty() {
+        return Ok(CommandOutput::Message(
+            "No extensions installed. Install one with `th ext install <source>` (local path, npm:@scope/pkg, or git:host/user/repo).".to_string(),
+        ));
+    }
+
+    let trust = TrustStore::load();
+    let mut lines = vec!["Installed extensions:".to_string()];
+    for ext in &found {
+        let m = &ext.manifest;
+        let hash = hash_extension(&ext.root).unwrap_or_default();
+        let state = if trust.is_trusted(&m.name, &hash) {
+            "trusted".to_string()
+        } else {
+            format!("untrusted — `th ext trust {}`", m.name)
+        };
+        lines.push(format!("  {} v{} [{}] ({})", m.name, m.version, state, ext.scope.as_str()));
+
+        let mut caps: Vec<&str> = Vec::new();
+        for (on, label) in [
+            (m.capabilities.tools, "tools"),
+            (m.capabilities.commands, "commands"),
+            (m.capabilities.ui, "ui"),
+            (m.capabilities.exec, "exec"),
+            (m.capabilities.kv, "kv"),
+            (m.capabilities.bus, "bus"),
+            (m.capabilities.session, "session"),
+        ] {
+            if on {
+                caps.push(label);
+            }
+        }
+        if !caps.is_empty() {
+            lines.push(format!("    capabilities: {}", caps.join(", ")));
+        }
+    }
+    // The live command/UI surface (dispatching an extension's slash commands into
+    // a running host) reaches the TUI over the daemon relay — SEP Phase 6.
+    lines.push("  (live command/UI dispatch arrives with the daemon relay — SEP Phase 6)".to_string());
+    Ok(CommandOutput::Message(lines.join("\n")))
 }
 
 /// Parse a raw input string into its kind: slash command, bang shell, or plain text.
@@ -588,6 +641,23 @@ mod tests {
 
         let loaded = mgr.load("sess-persist").expect("load");
         assert_eq!(loaded.title.as_deref(), Some("Renamed"));
+    }
+
+    #[test]
+    fn test_ext_lists_or_reports_empty() {
+        // Isolate the global extensions store to an empty temp SMOOTH_HOME so the
+        // command reports "none installed" deterministically (project scope is the
+        // crate dir, which has no .smooth/extensions).
+        let home = tempfile::tempdir().expect("tmpdir");
+        std::env::set_var("SMOOTH_HOME", home.path());
+        let mut state = AppState::new(PathBuf::from("/tmp"));
+        let reg = CommandRegistry::new();
+        let output = reg.execute("ext", "", &mut state).expect("ext exists").expect("handler ok");
+        match output {
+            CommandOutput::Message(msg) => assert!(msg.contains("No extensions installed"), "got: {msg}"),
+            other => panic!("Expected Message, got {other:?}"),
+        }
+        std::env::remove_var("SMOOTH_HOME");
     }
 
     #[test]

@@ -505,17 +505,25 @@ For agents collaborating across **different clones/machines** of the same repo, 
 SEP (the Smooth Extension Protocol) extensions are long-lived subprocesses that speak JSON-RPC over stdio to a Smooth host, contributing tools, hooks, event subscriptions, and UI. `th ext` manages the ones installed on this machine; the engine (`smooai-smooth-operator-core`) discovers and loads them, and the frontend renders their `ui/request`s.
 
 ```bash
-th ext install ./path [--project] [--trust]   # copy an extension dir (with extension.toml) into
-                                              #   ~/.smooth/extensions (or <repo>/.smooth/extensions),
-                                              #   show its declared capabilities, and prompt to trust it
-th ext list                                    # installed extensions (global + project) with trust state
-th ext trust <name> [--project]               # trust an installed extension (records its content hash)
-th ext remove <name> [--project]              # delete the extension and its trust record
+th ext install <source> [--project] [--trust]  # install from a local dir, npm, or git:
+                                               #   th ext install ./path                       (local extension dir)
+                                               #   th ext install npm:@scope/pkg[@version]     (npm package)
+                                               #   th ext install git:github.com/user/repo@ref (git repo)
+                                               #   shows declared capabilities, then prompts to trust
+th ext search <query...>                        # find extensions: curated index + live npm `smooth-extension` keyword
+th ext update [<name>] [--project] [--trust]    # re-fetch packaged (npm:/git:) extensions from their recorded source
+th ext list                                     # installed extensions (global + project) with trust state + source
+th ext trust <name> [--project]                # trust an installed extension (records its content hash)
+th ext remove <name> [--project]               # delete the extension and its trust record
 ```
 
-**Trust is content-hashed and fail-safe.** An extension only loads when it's recorded `trusted` in `~/.smooth/extensions/trust.toml` **and** its `extension.toml` still hashes to the value trust was granted against — editing an extension re-locks it until you `th ext trust` again. A non-interactive install (piped/CI) never trusts silently; use `--trust` to opt in explicitly or run `th ext trust <name>` after. Project-scoped extensions live under `<repo>/.smooth/extensions` and win over a same-named global one.
+**Install sources (SEP Phase 5).** A local path is copied in. An `npm:` package is vendored under `~/.smooth/extensions/.npm` (an `npm install --prefix` tree so its own deps resolve); a `git:` repo is cloned under `~/.smooth/extensions/.git/<host>/<path>` at the given ref (and `npm install`ed if it has a `package.json`). Either way a `~/.smooth/extensions/<name>` symlink to the vendored dir is what the engine discovers, so packaged and local installs load identically. An extension may ship its manifest as `extension.toml` **or** a `smooth` key in `package.json` (synthesized into `extension.toml` at install). The recorded source lets `th ext update` re-fetch and reconcile — an unchanged manifest keeps its trust; a changed one is re-locked (fail-safe).
 
-> **Where extensions run today.** The engine `Agent` runs in `smooth-operative` (dispatched server-side); a full ratatui frontend declares it can render all seven `ui/request` kinds (`smooth_code::sep_host::TUI_UI_CAPABILITIES`) and supplies the `TuiUiProvider` delegate. Live interactive `ui/request` relay from a dispatched operative to the TUI lands with the daemon event surface (SEP Phase 6); `th ext` + the trust store + the render-block/host substrate are in place now.
+**Trust is content-hashed and fail-safe.** An extension only loads when it's recorded `trusted` in `~/.smooth/extensions/trust.toml` **and** its `extension.toml` still hashes to the value trust was granted against — editing (or updating) an extension re-locks it until you `th ext trust` again. A non-interactive install (piped/CI) never trusts silently; use `--trust` to opt in explicitly or run `th ext trust <name>` after. Project-scoped extensions live under `<repo>/.smooth/extensions` and win over a same-named global one.
+
+**Extensions can ship skills.** An extension's `[resources] skills = "<dir>"` directory feeds the one canonical skill catalog (`smooth-cast`) — every SKILL under it becomes a `/skill:<name>` (source `extension`), gated on the same content-hashed trust (an untrusted extension contributes no skills). `smooth-cast` is the only skill parser; `th code`'s `/skill` and `/ext` read from it.
+
+> **In the TUI**, `/ext` lists installed extensions with their trust state and declared capabilities. Live command/UI dispatch into a running host reaches the TUI over the daemon event surface (SEP Phase 6); `th ext`, the trust store, skills unification, and the render-block/host substrate are in place now. The engine `Agent` runs in `smooth-operative` (dispatched server-side) and declares all seven `ui/request` kinds (`smooth_code::sep_host::TUI_UI_CAPABILITIES`) via the `TuiUiProvider` delegate.
 
 ### Jira sync
 

@@ -2911,13 +2911,7 @@ async fn cmd_code(
                 let workspace = working_dir.clone();
                 let skills = smooth_cast::skills::discover(&workspace);
                 if let Some(skill) = skills.iter().find(|s| s.name == name) {
-                    let source_label = match skill.source {
-                        smooth_cast::skills::SkillSource::Project => "project",
-                        smooth_cast::skills::SkillSource::UserSmooth => "user-smooth",
-                        smooth_cast::skills::SkillSource::ClaudeCode => "claude-code",
-                        smooth_cast::skills::SkillSource::OpenCode => "opencode",
-                        smooth_cast::skills::SkillSource::Builtin => "builtin",
-                    };
+                    let source_label = skill.source.label();
                     // Pearl th-e0f812: tell the headless caller a skill
                     // was picked. stderr so `--json` consumers parsing
                     // stdout don't get tripped.
@@ -7358,13 +7352,7 @@ fn cmd_skills(cmd: SkillsCommands) -> Result<()> {
     let workspace = std::env::current_dir().context("current directory")?;
 
     fn source_label(src: &SkillSource) -> &'static str {
-        match src {
-            SkillSource::Project => "project",
-            SkillSource::UserSmooth => "user-smooth",
-            SkillSource::ClaudeCode => "claude-code",
-            SkillSource::OpenCode => "opencode",
-            SkillSource::Builtin => "builtin",
-        }
+        src.label()
     }
 
     match cmd {

@@ -7,7 +7,7 @@
 
 ## Why a protocol, not in-process plugins
 
-pi loads TypeScript extension factories in-process. Rust can't import a `.ts`, and in-process trait plugins are exactly what SEP rejects (the existing `smooth-plugin` trait crate is slated for deletion — zero consumers). Three decisions are locked:
+pi loads TypeScript extension factories in-process. Rust can't import a `.ts`, and in-process trait plugins are exactly what SEP rejects (the old `smooth-plugin` trait crate — zero consumers — was deleted in Phase 5). Three decisions are locked:
 
 1. **Runtime** — extensions are long-lived **subprocesses speaking JSON-RPC 2.0 over stdio** (ndjson, one message per line). Any language; a TypeScript SDK is the DX centerpiece. Same framing as MCP stdio (the `smooth-operative` rmcp bridge is the precedent), debuggable with `jq`.
 2. **Scope** — **full pi parity** as the end state, phased across many PRs.
@@ -27,16 +27,21 @@ pi loads TypeScript extension factories in-process. Rust can't import a `.ts`, a
 
 ## SDK
 
-`@smooai/smooth-extension-sdk` (TypeScript, in the smooth-operator repo) mirrors pi's `ExtensionAPI` by name so pi extensions port near-mechanically. Zod v4 schemas (wire truth is JSON Schema), TypeBox pass-through. Testing via `createTestHost` (in-process scripted host) + `runConformance` (real subprocess against the shared fixtures). Scaffold: `create-smooth-extension`.
+`@smooai/smooth-extension-sdk` (TypeScript, in the smooth-operator repo) mirrors pi's `ExtensionAPI` by name so pi extensions port near-mechanically. Zod v4 schemas (wire truth is JSON Schema), TypeBox pass-through. Testing via `createTestHost` (in-process scripted host) + `runConformance` (real subprocess against the shared fixtures). Scaffold a new extension with `npm create smooth-extension` (Phase 5) — templates: `tool`, `permission-gate`, `command`, `provider-less`; scaffolded output passes `runConformance` out of the box.
+
+## Packaging & discovery (Phase 5)
+
+`th ext install` takes a local dir, `npm:@scope/pkg[@version]`, or `git:host/user/repo[@ref]`. Packaged sources vendor under `~/.smooth/extensions/.npm` / `.git/<host>/<path>` and are surfaced to the engine's (top-level-only) discovery via a `~/.smooth/extensions/<name>` symlink, so packaged and local installs load identically. A manifest may be `extension.toml` or a `package.json` `smooth` key (synthesized at install). `th ext update` re-fetches packaged extensions from their recorded source, re-locking trust on a changed manifest. `th ext search` matches a curated in-binary index plus live npm packages tagged `smooth-extension`.
 
 ## Relationship to what exists today
 
-| Existing surface | SEP verdict |
-| --- | --- |
-| `plugin.toml` CLI wrappers | **Keep** — the zero-code declarative tier |
-| `mcp.toml` / rmcp | **Sibling standard** — keep the bridge |
-| `smooth-cast` skills | **Unify** — extension `[resources] skills` feeds smooth-cast discovery; smooth-cast stays canonical |
-| `smooth-plugin` trait crate | **Delete** — zero consumers; in-process traits are what SEP rejects |
+| Existing surface | SEP verdict | Status |
+| --- | --- | --- |
+| `plugin.toml` CLI wrappers | **Keep** — the zero-code declarative tier | — |
+| `mcp.toml` / rmcp | **Sibling standard** — keep the bridge | — |
+| `smooth-cast` skills | **Unify** — extension `[resources] skills` feeds smooth-cast discovery (trusted only); smooth-cast stays canonical | Done (Phase 5) |
+| `smooth-code` duplicate skill parser | **Delete** — migrate to smooth-cast; `/skill:name` stays as frontend sugar | Done (Phase 5) |
+| `smooth-plugin` trait crate | **Delete** — zero consumers; in-process traits are what SEP rejects | Done (Phase 5) |
 
 ## Related
 
