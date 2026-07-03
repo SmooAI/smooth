@@ -1,6 +1,6 @@
 ---
-'smooai-smooth-cast': patch
-'smooai-smooth-operative': patch
+'@smooai/smooth': patch
+'@smooai/smooth': patch
 ---
 
 Add the skills invocation runtime — Claude-Code parity for `~/.smooth/skills/` (pearl th-e0f812).

@@ -1,5 +1,5 @@
 ---
-'smooai-smooth-cli': patch
+'@smooai/smooth': patch
 ---
 
 Add `th api integrations sendgrid get|create|delete|test`.
