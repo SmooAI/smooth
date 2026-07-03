@@ -13,8 +13,7 @@
 
 ## Where it runs
 
-- Sandboxed mode: in-VM tokio task / loopback port / in-process hook
-- Direct mode: in-process / loopback port
+- In-process tokio task / loopback port / in-process hook
 
 ## What it talks to
 

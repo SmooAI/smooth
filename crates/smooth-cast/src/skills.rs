@@ -330,6 +330,90 @@ fn collect_from(root: &Path, source: SkillSource, out: &mut Vec<Skill>) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Invocation rendering (pearl th-e0f812)
+// ---------------------------------------------------------------------------
+
+/// Default char budget for the skill catalog injected into a system
+/// prompt. Names + descriptions + triggers only — bodies are loaded on
+/// demand via `skill_use`, so this stays small. ~4k chars ≈ 1k tokens.
+pub const DEFAULT_CATALOG_BUDGET: usize = 4000;
+
+/// Render the skill catalog (names + one-line descriptions + triggers)
+/// for a system-prompt section. Bodies are NOT included — the agent
+/// calls `skill_use(name)` to load a body on demand. Output is capped
+/// at `budget` chars; skills that don't fit are dropped and a trailing
+/// note reports how many were omitted. Returns `None` when there are no
+/// skills to show.
+#[must_use]
+pub fn render_catalog(skills: &[Skill], budget: usize) -> Option<String> {
+    if skills.is_empty() {
+        return None;
+    }
+    let mut out = String::from(
+        "You have SKILLS available — reusable recipes that encode the right way to do a task. \
+Before improvising a multi-step workflow, check this list. If one matches the user's intent, \
+call `skill_use(\"<name>\")` to load its full instructions, then follow them.\n\n",
+    );
+    let mut shown = 0usize;
+    for skill in skills {
+        let line = if skill.triggers.is_empty() {
+            format!("- {}: {}\n", skill.name, skill.description)
+        } else {
+            format!("- {}: {} (triggers: {})\n", skill.name, skill.description, skill.triggers.join(", "))
+        };
+        // Always show at least one skill even if it alone exceeds the
+        // budget — a truncated catalog is more useful than none.
+        if shown > 0 && out.len() + line.len() > budget {
+            break;
+        }
+        out.push_str(&line);
+        shown += 1;
+    }
+    let omitted = skills.len() - shown;
+    if omitted > 0 {
+        use std::fmt::Write as _;
+        let _ = writeln!(out, "- …and {omitted} more (run `th skills list` to see all)");
+    }
+    Some(out)
+}
+
+/// Render a skill's body for injection into the conversation when the
+/// agent calls `skill_use`. Prepends a header with the description and,
+/// when the skill declares them, its scope / allowed_tools / allowed_hosts
+/// so the model knows the constraints it's meant to work within.
+///
+/// Enforcement of `allowed_tools` / `allowed_hosts` is NOT done here —
+/// this only surfaces the declaration to the model. Hard enforcement
+/// lands with the auto-mode permission model (pearl th-515a13).
+#[must_use]
+pub fn render_invocation(skill: &Skill) -> String {
+    let mut out = format!("# Skill: {}\n\n{}\n\n", skill.name, skill.description);
+
+    let mut constraints: Vec<String> = Vec::new();
+    if skill.scope == SkillScope::Host {
+        constraints.push("runs on the host (outside the sandbox)".to_string());
+    }
+    if !skill.allowed_tools.is_empty() {
+        constraints.push(format!("prefer these tools: {}", skill.allowed_tools.join(", ")));
+    }
+    if !skill.allowed_hosts.is_empty() {
+        constraints.push(format!("may reach these hosts: {}", skill.allowed_hosts.join(", ")));
+    }
+    if !constraints.is_empty() {
+        // ponytail: advisory only — real allowed_tools/allowed_hosts
+        // enforcement arrives with auto-mode (pearl th-515a13). Until
+        // then the header just tells the model the intended envelope.
+        out.push_str("> Constraints: ");
+        out.push_str(&constraints.join("; "));
+        out.push_str(".\n\n");
+    }
+
+    out.push_str("Follow these instructions:\n\n");
+    out.push_str(&skill.body);
+    out
+}
+
 trait WithContextPath {
     fn with_context_path(self, path: &Path) -> anyhow::Result<String>;
 }
@@ -477,6 +561,86 @@ body"#;
         assert!(SkillSource::UserSmooth.precedence() < SkillSource::ClaudeCode.precedence());
         assert!(SkillSource::ClaudeCode.precedence() < SkillSource::OpenCode.precedence());
         assert!(SkillSource::OpenCode.precedence() < SkillSource::Builtin.precedence());
+    }
+
+    fn skill(name: &str, desc: &str, triggers: &[&str]) -> Skill {
+        Skill {
+            name: name.to_string(),
+            description: desc.to_string(),
+            triggers: triggers.iter().map(|s| s.to_string()).collect(),
+            scope: SkillScope::Sandbox,
+            allowed_hosts: Vec::new(),
+            allowed_tools: Vec::new(),
+            body: "do the thing".to_string(),
+            source: SkillSource::UserSmooth,
+            path: PathBuf::from("/tmp/x/SKILL.md"),
+        }
+    }
+
+    #[test]
+    fn render_catalog_empty_is_none() {
+        assert!(render_catalog(&[], DEFAULT_CATALOG_BUDGET).is_none());
+    }
+
+    #[test]
+    fn render_catalog_lists_names_descriptions_triggers() {
+        let skills = vec![skill("add-show", "Add a show to the watchlist", &["add show", "add movie"])];
+        let out = render_catalog(&skills, DEFAULT_CATALOG_BUDGET).expect("some");
+        assert!(out.contains("add-show"));
+        assert!(out.contains("Add a show to the watchlist"));
+        assert!(out.contains("triggers: add show, add movie"));
+        assert!(out.contains("skill_use"), "must tell the model how to invoke");
+        // Body text must NOT leak into the catalog — that's the whole
+        // point of the on-demand load.
+        assert!(!out.contains("do the thing"));
+    }
+
+    #[test]
+    fn render_catalog_respects_budget() {
+        // 50 skills with long descriptions, tiny budget → only a few
+        // shown, rest reported as omitted.
+        let skills: Vec<Skill> = (0..50)
+            .map(|i| skill(&format!("skill-{i}"), "a fairly wordy description that eats budget quickly", &[]))
+            .collect();
+        let out = render_catalog(&skills, 400).expect("some");
+        assert!(out.contains("more (run `th skills list`"), "expected omission note, got: {out}");
+        // At least the intro + one skill, but nowhere near all 50.
+        assert!(out.matches("- skill-").count() < 50);
+    }
+
+    #[test]
+    fn render_catalog_shows_at_least_one_even_over_budget() {
+        let skills = vec![skill("big", "x".repeat(1000).as_str(), &[])];
+        let out = render_catalog(&skills, 10).expect("some");
+        assert!(out.contains("big"), "must show at least one skill even past budget");
+    }
+
+    #[test]
+    fn render_invocation_includes_body_and_header() {
+        let s = skill("add-show", "Add a show", &[]);
+        let out = render_invocation(&s);
+        assert!(out.contains("# Skill: add-show"));
+        assert!(out.contains("Add a show"));
+        assert!(out.contains("do the thing"), "body must be present");
+    }
+
+    #[test]
+    fn render_invocation_surfaces_constraints() {
+        let mut s = skill("scp-thing", "copies files", &[]);
+        s.scope = SkillScope::Host;
+        s.allowed_tools = vec!["bash".to_string()];
+        s.allowed_hosts = vec!["smoo-hub".to_string()];
+        let out = render_invocation(&s);
+        assert!(out.contains("host"), "host scope should be surfaced");
+        assert!(out.contains("bash"), "allowed_tools should be surfaced");
+        assert!(out.contains("smoo-hub"), "allowed_hosts should be surfaced");
+    }
+
+    #[test]
+    fn render_invocation_omits_constraints_line_when_none() {
+        let s = skill("plain", "no constraints", &[]);
+        let out = render_invocation(&s);
+        assert!(!out.contains("> Constraints"), "no constraint line when nothing declared");
     }
 
     #[test]

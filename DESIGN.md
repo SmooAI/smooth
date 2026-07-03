@@ -1,5 +1,7 @@
 # Browser-based `th auth login` — smooth side
 
+> This is a **scoped feature design doc** for the browser-based `th auth login` flow — not the system architecture. For Smooth's architecture (Big Smooth, dispatch, the cast, the security model, the daemon direction) see [`docs/Architecture/`](docs/Architecture/Architecture-Overview.md).
+
 Pearl: **th-fcb579**. Pairs with **th-62e710** (smooai side: `/cli-login` route + org picker).
 
 ## Goal

@@ -15,7 +15,7 @@
 | **Jira sync** | `th jira sync` | Atlassian REST + Dolt pearl store |
 | **Smoo AI platform API** | `th api …` | `https://api.smoo.ai` (auth via JWT at `~/.smooth/auth/smooai.json`) |
 | **Provider auth** | `th auth …` | LLM provider credentials at `~/.smooth/providers.json` |
-| **Sandbox / operator orchestration** | `th up`, `th run`, `th operators`, `th access` | Local `microsandbox` microVMs |
+| **Operator orchestration** | `th up`, `th run`, `th operators`, `th access` | Big Smooth daemon; operatives as host subprocesses |
 | **Coding TUI** | `th` (no args) or `th code` | smooth-code crate, ratatui |
 | **Worktree helpers** | `th worktree create/list/merge/remove` | git plumbing |
 | **MCP / plugins / skills** | `th mcp`, `th plugin`, `th skills` | TOML manifests under `~/.smooth/` |
@@ -356,6 +356,19 @@ th api jobs create <body>
 th api jobs update <job-id> <body>
 ```
 
+### Integrations (SendGrid email)
+
+```bash
+th api integrations sendgrid get
+th api integrations sendgrid create --from-email sender@acme.com --inbound-email inbound@acme.com [--from-name "Acme Support"]
+th api integrations sendgrid delete
+th api integrations sendgrid test --to you@example.com
+```
+
+The API key is never passed on argv — `create` reads it from `SENDGRID_API_KEY`
+or prompts for it (masked). `test` sends a verification email through the
+configured integration.
+
 ### Keys (M2M auth clients)
 
 ```bash
@@ -498,13 +511,13 @@ th jira sync --push                                # one-way: pearls → Jira
 
 Use this **instead of** raw `curl -u "$JIRA_EMAIL:$JIRA_API_TOKEN" https://smooai.atlassian.net/...` for read/list. Only fall back to curl when you need a Jira REST verb the wrapper doesn't expose (creating issues, transitioning status — both tracked as missing-feature pearls).
 
-### Sandbox / operator orchestration
+### Operator orchestration
 
 ```bash
-th up                                              # boot Smooth platform (sandboxed by default)
+th up                                              # boot Smooth platform (host daemon)
 th down                                            # stop
 th status                                          # health
-th run <pearl-id>                                  # dispatch a pearl through a Smooth Operator microVM
+th run <pearl-id>                                  # dispatch a pearl to a Smooth Operator subprocess
 th operators list / kill / show
 th access pending / approve / deny / policy        # access-control review queue
 th inbox                                           # messages requiring attention
@@ -592,6 +605,45 @@ th service install / start / stop / status         # run smooth as a background 
 ```bash
 th cast models                                     # list groups exposed by configured provider via GET /v1/models
 ```
+
+### Skills — reusable recipes (Claude-Code parity)
+
+A **skill** is a `SKILL.md` (YAML frontmatter + markdown body) that encodes the
+right way to do a task, so the agent follows a proven recipe instead of
+re-deriving the workflow every time. Discovery reuses `~/.claude/skills/`
+verbatim, so an existing Claude Code skill library works with Smooth unchanged.
+
+```bash
+th skills list                                     # every discovered skill (name, source, scope, hosts)
+th skills show <name>                              # frontmatter + body, incl. any shadowed sources
+```
+
+Discovery order (first match wins on name collision):
+
+1. `<workspace>/.smooth/skills/<name>/SKILL.md` — project (highest precedence)
+2. `~/.smooth/skills/<name>/SKILL.md` — user-level Smooth
+3. `~/.claude/skills/<name>/SKILL.md` — Claude Code (reused as-is)
+4. `~/.opencode/skills/<name>/…` — opencode
+5. built-ins shipped in the binary (currently `create-skill`)
+
+**How a skill reaches the model.** At dispatch, the operative discovers every
+skill and injects a compact catalog (names + descriptions + triggers, bodies
+excluded, budget-capped) into its system prompt. When the model decides a skill
+fits, it calls the `skill_use("<name>")` tool, which returns the skill's body
+(prefixed with a constraints header derived from `scope` / `allowed_tools` /
+`allowed_hosts`) into the conversation as instructions to follow. No separate
+execution surface — a skill is a prompt that drives the ordinary bash/file/edit
+tools.
+
+**Authoring.** Don't hand-write frontmatter — say "make a skill that …" and the
+built-in `create-skill` meta-skill drafts the `SKILL.md`, asks where to save it
+(project vs. user), and offers a test run.
+
+Frontmatter fields: `name`, `description` (both required), `triggers` (phrases
+that hint when to reach for it), `scope` (`sandbox` default / `host`),
+`allowed_hosts`, `allowed_tools`. `allowed_tools` / `allowed_hosts` are
+currently surfaced to the model as advisory constraints; hard enforcement lands
+with the auto-mode permission model (pearl th-515a13).
 
 ---
 

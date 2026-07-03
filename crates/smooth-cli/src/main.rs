@@ -605,6 +605,11 @@ enum ApiCommands {
         #[command(subcommand)]
         cmd: smooai::jobs::Cmd,
     },
+    /// Smoo AI org integrations (SendGrid email).
+    Integrations {
+        #[command(subcommand)]
+        cmd: smooai::integrations::Cmd,
+    },
     /// Smoo AI billing products / plans.
     Products {
         #[command(subcommand)]
@@ -1332,6 +1337,7 @@ async fn main() -> Result<()> {
             ApiCommands::Crm { cmd } => smooai::crm::cmd(cmd).await,
             ApiCommands::Knowledge { cmd } => smooai::knowledge::cmd(cmd).await,
             ApiCommands::Jobs { cmd } => smooai::jobs::cmd(cmd).await,
+            ApiCommands::Integrations { cmd } => smooai::integrations::cmd(cmd).await,
             ApiCommands::Products { cmd } => smooai::products::cmd(cmd).await,
             ApiCommands::Profile { cmd } => smooai::profile::cmd(cmd).await,
             ApiCommands::Testing { cmd } => smooai::testing::cmd(cmd).await,

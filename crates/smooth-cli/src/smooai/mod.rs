@@ -11,6 +11,7 @@
 
 pub mod agents;
 pub mod crm;
+pub mod integrations;
 pub mod jobs;
 pub mod keys;
 pub mod knowledge;

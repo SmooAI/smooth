@@ -1,5 +1,7 @@
 # ADR-001: Consolidate Boardroom and Operator VMs into one microsandbox VM
 
+> **Superseded by [[ADR-004-remove-microvm-sandbox-stack]]** — the microVM stack this ADR consolidated was removed entirely 2026-07 (pearl th-f4a801). Kept as a historical record.
+
 #decision
 
 **Date**: 2026-05
@@ -108,6 +110,5 @@ Out of scope. microsandbox already gives us a fast Rust-native SDK; replacing th
 ## Related
 
 - [[ADR-Index]]
-- [[../Architecture/Sandboxed-Mode]]
-- [[../Architecture/Direct-Mode]]
+- [[ADR-004-remove-microvm-sandbox-stack]] — the July 2026 teardown that removed the microVM/Sandboxed-Mode/Direct-Mode architecture pages (archived in git history)
 - [[../Architecture/The-Cast]]

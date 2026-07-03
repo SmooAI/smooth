@@ -474,6 +474,7 @@ fn aggregate_score(per_task: &[RealTaskResult], cfg: &RealConfig, budget_hit: bo
         tasks_attempted,
         tasks_green,
         tasks_inconclusive: 0,
+        tasks_upstream_error: 0,
         cost_usd: cost_total,
         median_task_ms: median_ms(&durations_ms),
         budget_usd_cap: cfg.budget_usd_cap,
