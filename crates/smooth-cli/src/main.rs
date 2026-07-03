@@ -678,6 +678,13 @@ enum ApiCommands {
         #[command(subcommand)]
         cmd: smooai::crm::Cmd,
     },
+    /// Smoo AI org Copilot — chat / confirm / history. Drives the org's
+    /// always-on dashboard agent (draft email, CRM, analytics, templates).
+    /// Authenticates as the logged-in user (`th auth login`).
+    Copilot {
+        #[command(subcommand)]
+        cmd: smooai::copilot::Cmd,
+    },
     /// Smoo AI knowledge documents (text, websites, files).
     Knowledge {
         #[command(subcommand)]
@@ -1427,6 +1434,7 @@ async fn main() -> Result<()> {
             ApiCommands::Keys { cmd } => smooai::keys::cmd(cmd).await,
             ApiCommands::Members { cmd } => smooai::members::cmd(cmd).await,
             ApiCommands::Crm { cmd } => smooai::crm::cmd(cmd).await,
+            ApiCommands::Copilot { cmd } => smooai::copilot::cmd(cmd).await,
             ApiCommands::Knowledge { cmd } => smooai::knowledge::cmd(cmd).await,
             ApiCommands::Jobs { cmd } => smooai::jobs::cmd(cmd).await,
             ApiCommands::Integrations { cmd } => smooai::integrations::cmd(cmd).await,
@@ -6273,10 +6281,15 @@ fn cmd_providers_detect(yes: bool, json: bool) -> Result<()> {
 async fn cmd_cast(cmd: CastCommands) -> Result<()> {
     match cmd {
         CastCommands::Models { provider, json, filter } => {
+            // Extension-registered providers (SEP Phase 7) are collected on the
+            // async runtime (loading them handshakes subprocesses); the HTTP
+            // listing itself then runs on a blocking thread. Skipped with zero
+            // cost when no global extensions are installed.
+            let ext_providers = collect_extension_providers().await;
             // `cmd_cast_models` uses `reqwest::blocking`, which panics
             // if dropped inside a tokio runtime context. Hop onto a
             // dedicated blocking thread to keep the runtime happy.
-            tokio::task::spawn_blocking(move || cmd_cast_models(provider.as_deref(), json, filter.as_deref()))
+            tokio::task::spawn_blocking(move || cmd_cast_models(provider.as_deref(), json, filter.as_deref(), &ext_providers))
                 .await
                 .context("cast models task panicked")?
         }
@@ -6388,7 +6401,7 @@ fn filter_and_sort(mut ids: Vec<String>, filter: Option<&str>) -> Vec<String> {
 }
 
 #[allow(clippy::too_many_lines)]
-fn cmd_cast_models(provider_override: Option<&str>, json_out: bool, filter: Option<&str>) -> Result<()> {
+fn cmd_cast_models(provider_override: Option<&str>, json_out: bool, filter: Option<&str>, ext_providers: &[(String, Vec<String>)]) -> Result<()> {
     let providers_path = dirs_next::home_dir()
         .map(|h| h.join(".smooth/providers.json"))
         .context("cannot determine home directory")?;
@@ -6467,12 +6480,20 @@ fn cmd_cast_models(provider_override: Option<&str>, json_out: bool, filter: Opti
         Vec::new()
     };
 
+    // Extension-registered providers (SEP Phase 7): declared models, filtered +
+    // sorted like the rest. `ext` prefixes each id (`<provider>/<model>`) so an
+    // extension model never collides with a gateway one in the flat JSON list.
+    let ext_extra = fold_extension_models(ext_providers, filter);
+
     if json_out {
         // Stable shape: `{"data": [{"id": "..."}]}` — primary provider
-        // first, then each local provider's live models.
+        // first, then each local provider's live models, then extension models.
         let mut data: Vec<_> = chosen.iter().map(|id| serde_json::json!({ "id": id })).collect();
         for (_pid, models) in &local_extra {
             data.extend(models.iter().map(|id| serde_json::json!({ "id": id })));
+        }
+        for (provider, models) in &ext_extra {
+            data.extend(models.iter().map(|id| serde_json::json!({ "id": format!("{provider}/{id}") })));
         }
         println!("{}", serde_json::to_string(&serde_json::json!({ "data": data }))?);
         return Ok(());
@@ -6526,9 +6547,81 @@ fn cmd_cast_models(provider_override: Option<&str>, json_out: bool, filter: Opti
         }
         println!("  {} models", models.len().to_string().cyan().bold());
     }
+
+    // Extension-registered providers, each under its own labeled section.
+    for (provider, models) in &ext_extra {
+        println!();
+        println!("  {} {}", "extension".magenta().bold(), provider.bold());
+        for id in models {
+            println!("  {id}");
+        }
+        println!("  {} models", models.len().to_string().cyan().bold());
+    }
     println!();
 
     Ok(())
+}
+
+/// Fold extension-registered providers into the model listing: apply the same
+/// `filter` + sort as gateway/local models, and drop any provider left with no
+/// matching models. Pure so it can be unit-tested without spawning extensions.
+fn fold_extension_models(ext_providers: &[(String, Vec<String>)], filter: Option<&str>) -> Vec<(String, Vec<String>)> {
+    ext_providers
+        .iter()
+        .filter_map(|(provider, models)| {
+            let models = filter_and_sort(models.clone(), filter);
+            if models.is_empty() {
+                None
+            } else {
+                Some((provider.clone(), models))
+            }
+        })
+        .collect()
+}
+
+/// Load global extensions headlessly and collect the providers they register
+/// (SEP Phase 7). Returns `(provider_label, model_ids)` per registered provider,
+/// where the label is `<extension>.<provider>`. Only GLOBAL extensions (from
+/// `~/.smooth/extensions/`) are loaded — never project extensions — so a plain
+/// `th cast models` in a repo can't be made to spawn an untrusted project
+/// extension. Any failure yields an empty list: extension providers are additive
+/// and must never break the core listing.
+async fn collect_extension_providers() -> Vec<(String, Vec<String>)> {
+    use smooth_operator::extension::manifest::default_global_dir;
+    use smooth_operator::extension::protocol::{HostInfo, WorkspaceInfo};
+    use smooth_operator::extension::{discover, DefaultHostDelegate, ExtensionHost};
+
+    let global = default_global_dir();
+    let (discovered, _failures) = discover(global.as_deref(), None);
+    if discovered.is_empty() {
+        return Vec::new();
+    }
+
+    let host_info = HostInfo {
+        name: "th".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+    };
+    // `trusted: false` + no project dir ⇒ only global extensions load.
+    let workspace = WorkspaceInfo {
+        root: String::new(),
+        trusted: false,
+    };
+    let (host, _load_failures) = ExtensionHost::load(
+        discovered,
+        host_info,
+        workspace,
+        "headless",
+        Vec::new(),
+        std::sync::Arc::new(DefaultHostDelegate),
+    )
+    .await;
+    let providers = host
+        .providers()
+        .into_iter()
+        .map(|(ext, reg)| (format!("{ext}.{}", reg.name), reg.models.into_iter().map(|m| m.id).collect()))
+        .collect();
+    host.shutdown_all().await;
+    providers
 }
 
 /// GET `/v1/models` for every *configured* local provider except
@@ -6572,7 +6665,7 @@ fn probe_configured_local_providers(
 
 #[cfg(test)]
 mod cast_models_tests {
-    use super::{extract_model_ids_lossy, filter_and_sort, models_url_for, parse_models_response, strip_control_chars};
+    use super::{extract_model_ids_lossy, filter_and_sort, fold_extension_models, models_url_for, parse_models_response, strip_control_chars};
 
     #[test]
     fn models_url_appends_models_when_missing() {
@@ -6648,6 +6741,32 @@ mod cast_models_tests {
         let ids = vec!["smooth-coding".to_string(), "smooth-judge".to_string(), "claude-sonnet-4".to_string()];
         let out = filter_and_sort(ids, Some("SMOOTH"));
         assert_eq!(out, vec!["smooth-coding", "smooth-judge"]);
+    }
+
+    #[test]
+    fn fold_extension_models_filters_sorts_and_drops_empty() {
+        let ext = vec![
+            ("corp.corporate-proxy".to_string(), vec!["corp-gpt-4o".to_string(), "corp-fast".to_string()]),
+            ("other.thing".to_string(), vec!["unrelated".to_string()]),
+        ];
+        // No filter: both providers kept, models sorted.
+        let all = fold_extension_models(&ext, None);
+        assert_eq!(all.len(), 2);
+        assert_eq!(
+            all[0],
+            ("corp.corporate-proxy".to_string(), vec!["corp-fast".to_string(), "corp-gpt-4o".to_string()])
+        );
+
+        // Filter to `corp`: the second provider has no match and is dropped.
+        let filtered = fold_extension_models(&ext, Some("corp"));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].0, "corp.corporate-proxy");
+        assert_eq!(filtered[0].1, vec!["corp-fast".to_string(), "corp-gpt-4o".to_string()]);
+    }
+
+    #[test]
+    fn fold_extension_models_empty_input_is_empty() {
+        assert!(fold_extension_models(&[], None).is_empty());
     }
 
     #[test]
