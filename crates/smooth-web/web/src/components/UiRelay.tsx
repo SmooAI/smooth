@@ -75,7 +75,9 @@ function RenderBlock({ widget }: { widget: Record<string, unknown> }) {
             );
         }
         case 'table': {
-            const headers = Array.isArray(widget.headers) ? (widget.headers as unknown[]).map(String) : [];
+            // Phase 8 DSL uses `columns`; accept the pre-Phase-8 `headers` too.
+            const headerSrc = Array.isArray(widget.columns) ? widget.columns : Array.isArray(widget.headers) ? widget.headers : [];
+            const headers = (headerSrc as unknown[]).map(String);
             const rows = Array.isArray(widget.rows) ? (widget.rows as unknown[][]) : [];
             return (
                 <div className="overflow-x-auto">
@@ -107,7 +109,8 @@ function RenderBlock({ widget }: { widget: Record<string, unknown> }) {
             );
         }
         case 'diff': {
-            const diff = typeof widget.diff === 'string' ? widget.diff : text;
+            // Phase 8 DSL uses `patch`; accept the pre-Phase-8 `diff` too.
+            const diff = typeof widget.patch === 'string' ? widget.patch : typeof widget.diff === 'string' ? widget.diff : text;
             return (
                 <pre className="text-xs font-mono overflow-x-auto">
                     {diff.split('\n').map((line, i) => {
@@ -122,12 +125,35 @@ function RenderBlock({ widget }: { widget: Record<string, unknown> }) {
             );
         }
         case 'stack': {
-            const items = Array.isArray(widget.items) ? (widget.items as Array<Record<string, unknown>>) : [];
+            // Phase 8 DSL uses `children`; accept the pre-Phase-8 `items` too.
+            const items = Array.isArray(widget.children) ? widget.children : Array.isArray(widget.items) ? widget.items : [];
             return (
                 <div className="flex flex-col gap-2">
-                    {items.map((item, i) => (
+                    {(items as Array<Record<string, unknown>>).map((item, i) => (
                         <RenderBlock key={i} widget={item} />
                     ))}
+                </div>
+            );
+        }
+        case 'widget': {
+            // Phase 8 interactive tier: render the body block plus a legend of the
+            // declared keybindings. (Live key routing back to the extension needs
+            // the daemon's widget/key relay — the render is available now.)
+            const body = widget.body && typeof widget.body === 'object' ? (widget.body as Record<string, unknown>) : undefined;
+            const keybindings = Array.isArray(widget.keybindings) ? (widget.keybindings as Array<Record<string, unknown>>) : [];
+            return (
+                <div className="text-sm flex flex-col gap-2">
+                    {body ? <RenderBlock widget={body} /> : <div className="whitespace-pre-wrap">{text}</div>}
+                    {keybindings.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5 text-xs text-muted-foreground">
+                            {keybindings.map((k, i) => (
+                                <span key={i} className="rounded border border-border px-1.5 py-0.5">
+                                    <span className="font-mono">{String(k.key ?? '')}</span>
+                                    {k.description ? <span className="ml-1">{String(k.description)}</span> : null}
+                                </span>
+                            ))}
+                        </div>
+                    )}
                 </div>
             );
         }

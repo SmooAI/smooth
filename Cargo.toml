@@ -188,7 +188,7 @@ prost-types = "0.13"
 # crates.io release (the release train only bumped the TS package). Pin the git
 # rev that carries it until a version bump publishes extensions; then flip back to
 # a `version = "…"` release. Matches the SMOODEV-1787 git-rev precedent.
-smooth-operator = { git = "https://github.com/SmooAI/smooth-operator-core.git", rev = "26b4489", package = "smooai-smooth-operator-core" }
+smooth-operator = { git = "https://github.com/SmooAI/smooth-operator-core.git", rev = "46fbbea", package = "smooai-smooth-operator-core" }
 # smooth-owned coding-harness extensions to the generic engine (re-homed from
 # the engine when it went generic at 0.14.0). See crates/smooth-cast.
 smooth-cast = { version = "0.17.0", path = "crates/smooth-cast", package = "smooai-smooth-cast" }
