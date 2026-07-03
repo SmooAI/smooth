@@ -18,15 +18,11 @@
 //! > (SEP Phase 6). Until then this module is the tested rendering/host substrate
 //! > and the home of the trust store `th ext` writes to.
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context as _, Result};
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use smooth_operator::extension::manifest::{default_global_dir, project_dir};
 use smooth_operator::extension::protocol::{codes, HostInfo, RpcError, WorkspaceInfo};
 use smooth_operator::extension::{discover, DiscoveredExtension, ExtensionHost, HostDelegate};
@@ -248,90 +244,12 @@ impl HostDelegate for TuiUiProvider {
 }
 
 // ---------------------------------------------------------------------------
-// Trust store — ~/.smooth/extensions/trust.toml
+// Trust store — moved to `smooth-policy` (a leaf crate the operative can depend
+// on) so both the TUI and the dispatched worker share one trust surface. The
+// `th ext` CLI and this module keep importing it through this re-export.
 // ---------------------------------------------------------------------------
 
-/// A single trust record, keyed by extension name. `hash` is the content hash at
-/// the time trust was granted; a mismatch means the extension changed and must
-/// be re-trusted (fail-safe).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct TrustRecord {
-    pub source: String,
-    pub hash: String,
-    pub trusted: bool,
-}
-
-/// The trust store: `name → TrustRecord`, persisted as TOML.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct TrustStore {
-    #[serde(default)]
-    pub extensions: HashMap<String, TrustRecord>,
-}
-
-/// Path to the trust file: `<global extensions dir>/trust.toml`.
-#[must_use]
-pub fn trust_path() -> Option<PathBuf> {
-    default_global_dir().map(|d| d.join("trust.toml"))
-}
-
-impl TrustStore {
-    /// Load the trust store (empty if the file is missing/unreadable).
-    #[must_use]
-    pub fn load() -> Self {
-        let Some(path) = trust_path() else { return Self::default() };
-        std::fs::read_to_string(path).ok().and_then(|t| toml::from_str(&t).ok()).unwrap_or_default()
-    }
-
-    /// True if `name` is recorded trusted AND its recorded hash still matches.
-    #[must_use]
-    pub fn is_trusted(&self, name: &str, hash: &str) -> bool {
-        self.extensions.get(name).is_some_and(|r| r.trusted && r.hash == hash)
-    }
-
-    /// Record (or overwrite) a trust decision.
-    pub fn set(&mut self, name: &str, source: &str, hash: &str, trusted: bool) {
-        self.extensions.insert(
-            name.to_string(),
-            TrustRecord {
-                source: source.to_string(),
-                hash: hash.to_string(),
-                trusted,
-            },
-        );
-    }
-
-    /// Remove a trust record. Returns whether one was present.
-    pub fn remove(&mut self, name: &str) -> bool {
-        self.extensions.remove(name).is_some()
-    }
-
-    /// Persist to `trust.toml`, creating the parent dir.
-    ///
-    /// # Errors
-    /// Returns an error if the directory can't be created or the file written.
-    pub fn save(&self) -> Result<()> {
-        let path = trust_path().context("no home dir for the trust store")?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&path, toml::to_string_pretty(self)?).with_context(|| format!("write {}", path.display()))?;
-        Ok(())
-    }
-}
-
-/// Content hash of an extension directory: sha256 over its `extension.toml`.
-/// (The manifest fully declares the extension's identity + capabilities + run
-/// command — the security-relevant surface a trust decision is made against.)
-///
-/// # Errors
-/// Returns an error if `<dir>/extension.toml` can't be read.
-pub fn hash_extension(dir: &Path) -> Result<String> {
-    let manifest = dir.join("extension.toml");
-    let bytes = std::fs::read(&manifest).with_context(|| format!("read {}", manifest.display()))?;
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    Ok(format!("{:x}", hasher.finalize()))
-}
+pub use smooth_policy::ext_trust::{hash_extension, trust_path, TrustRecord, TrustStore};
 
 // ---------------------------------------------------------------------------
 // Host loading — discover + trust-gate + ExtensionHost::load
@@ -495,18 +413,5 @@ mod tests {
         });
         let err = TuiUiProvider::new(sink).ui_request("x", json!({ "kind": "bogus" })).await.unwrap_err();
         assert_eq!(err.code, codes::INVALID_PARAMS);
-    }
-
-    #[test]
-    fn trust_store_hash_gating() {
-        let mut store = TrustStore::default();
-        assert!(!store.is_trusted("todo", "abc"));
-        store.set("todo", "/path", "abc", true);
-        assert!(store.is_trusted("todo", "abc"));
-        // A changed hash (extension edited) is no longer trusted.
-        assert!(!store.is_trusted("todo", "def"));
-        // Explicit distrust.
-        store.set("todo", "/path", "abc", false);
-        assert!(!store.is_trusted("todo", "abc"));
     }
 }

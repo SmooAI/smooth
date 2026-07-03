@@ -1401,6 +1401,79 @@ impl ToolHook for SharedNarc {
 }
 
 // ---------------------------------------------------------------------------
+// SEP extension host — attach installed + trusted extensions to the task
+// ---------------------------------------------------------------------------
+
+/// Attach `host` to `agent` when present (registers its tools/hooks and fans
+/// turn events out to subscribed extensions); a no-op when nothing loaded, so
+/// the agent loop is unchanged.
+fn attach_ext_host(agent: Agent, host: Option<Arc<smooth_operator::extension::ExtensionHost>>) -> Agent {
+    match host {
+        Some(host) => agent.with_extension_host(host),
+        None => agent,
+    }
+}
+
+/// Discover SEP extensions (global + project) and load only the PRE-trusted ones
+/// into a headless [`ExtensionHost`](smooth_operator::extension::ExtensionHost).
+///
+/// The dispatched worker is unattended: it never shows a trust prompt, so an
+/// unknown or content-changed extension is silently skipped (fail-safe). Returns
+/// `None` when nothing trusted loads. The delegate is the engine's headless
+/// [`DefaultHostDelegate`](smooth_operator::extension::DefaultHostDelegate) and
+/// `ui_capabilities` is empty: a well-behaved extension gates its UI off via
+/// `hasUI`, and any two-way `ui/request` gets `-32001 NoUI` until the daemon
+/// relay (SEP Phase 6). Extension tools register into the operative's ordinary
+/// `ToolRegistry`, so the NarcHook surveillance already installed applies to them.
+async fn load_pretrusted_extension_host(workspace_root: &std::path::Path) -> Option<Arc<smooth_operator::extension::ExtensionHost>> {
+    use smooth_operator::extension::manifest::{default_global_dir, project_dir};
+    use smooth_operator::extension::protocol::{HostInfo, WorkspaceInfo};
+    use smooth_operator::extension::{discover, DefaultHostDelegate, ExtensionHost};
+    use smooth_policy::ext_trust::{hash_extension, TrustStore};
+
+    let global = default_global_dir();
+    let project = project_dir(workspace_root);
+    let (discovered, disc_failures) = discover(global.as_deref(), Some(project.as_path()));
+    for (src, err) in &disc_failures {
+        tracing::warn!(%src, %err, "sep: extension manifest failed to parse");
+    }
+
+    let trust = TrustStore::load();
+    let trusted: Vec<_> = discovered
+        .into_iter()
+        .filter(|ext| {
+            let hash = hash_extension(&ext.root).unwrap_or_default();
+            let ok = trust.is_trusted(&ext.manifest.name, &hash);
+            if !ok {
+                tracing::info!(name = %ext.manifest.name, "sep: skipping untrusted extension (run `th ext trust`)");
+            }
+            ok
+        })
+        .collect();
+    if trusted.is_empty() {
+        return None;
+    }
+
+    let host_info = HostInfo {
+        name: "smooth-operative".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+    };
+    let workspace = WorkspaceInfo {
+        root: workspace_root.to_string_lossy().into_owned(),
+        trusted: true,
+    };
+    let (host, load_failures) = ExtensionHost::load(trusted, host_info, workspace, "headless", Vec::new(), Arc::new(DefaultHostDelegate)).await;
+    for (name, err) in &load_failures {
+        tracing::warn!(%name, %err, "sep: extension failed to load");
+    }
+    if host.is_empty() {
+        return None;
+    }
+    tracing::info!(count = host.len(), extensions = ?host.names(), "sep: attached extension host to the operative");
+    Some(Arc::new(host))
+}
+
+// ---------------------------------------------------------------------------
 // Env config
 // ---------------------------------------------------------------------------
 
@@ -2320,6 +2393,12 @@ async fn main() {
         );
     }
 
+    // SEP: attach an ExtensionHost for the dispatched task if any PRE-trusted
+    // extensions are installed. None when nothing trusted loads → the agent loop
+    // is byte-for-byte unchanged. Extension tools/hooks ride the same registry as
+    // native ones, so the NarcHook surveillance installed above applies to them.
+    let ext_host = load_pretrusted_extension_host(&config.workspace).await;
+
     let result = if let (true, true, Some(raw)) = (workflow_opt_in, role_supports_coding_workflow, routing_json) {
         use smooth_cast::coding_workflow::{run_coding_workflow, CodingWorkflowConfig};
         use smooth_cast::provider_migration::migrate_in_memory;
@@ -2393,12 +2472,12 @@ async fn main() {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "SMOOTH_ROUTING_JSON set but not deserializable; falling back to single-agent path");
-                let agent = Agent::new(agent_config, tools);
+                let agent = attach_ext_host(Agent::new(agent_config, tools), ext_host.clone());
                 agent.run_with_channel(&config.task, tx.clone()).await
             }
         }
     } else {
-        let agent = Agent::new(agent_config, tools);
+        let agent = attach_ext_host(Agent::new(agent_config, tools), ext_host.clone());
         agent.run_with_channel(&config.task, tx.clone()).await
     };
 
@@ -2800,5 +2879,84 @@ mod cap_context_tests {
         let capped = cap_context(&ctx, MAX_CONTEXT_BYTES);
         assert!(capped.contains("truncated"), "oversize context is truncated: len={}", capped.len());
         assert!(capped.len() < ctx.len(), "cap shrinks the injected block");
+    }
+}
+
+#[cfg(test)]
+mod ext_host_tests {
+    use super::*;
+
+    /// A minimal dependency-free SEP peer: handshakes with one tool, answers
+    /// ping, exits on shutdown. Enough to prove discovery → trust → load →
+    /// tool-attach without a heavier fixture.
+    const PEER_MJS: &str = r#"
+const rl = require('readline').createInterface({ input: process.stdin });
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  const { id, method } = JSON.parse(line);
+  const w = (r) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result: r }) + '\n');
+  if (method === 'initialize') w({ protocol_version: 1, extension: { name: 'echo', version: '0.1.0' }, registrations: { tools: [{ name: 'ping-tool', description: 'x', parameters: { type: 'object' } }] } });
+  else if (method === 'ping') w({});
+  else if (method === 'shutdown') { w({}); process.exit(0); }
+  else if (id !== undefined) process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32601, message: 'no' } }) + '\n');
+});
+"#;
+
+    fn node_available() -> bool {
+        std::process::Command::new("node")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// The operative loads only PRE-trusted extensions (fail-safe), and a trusted
+    /// one's tools attach into the host. Sequential (one SMOOTH_HOME) so the two
+    /// phases can't race each other's env.
+    #[tokio::test]
+    async fn operative_loads_only_pretrusted_extensions() {
+        let home = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let ext_dir = home.path().join("extensions").join("echo");
+        std::fs::create_dir_all(&ext_dir).unwrap();
+        let peer_path = ext_dir.join("peer.cjs");
+        std::fs::write(&peer_path, PEER_MJS).unwrap();
+        std::fs::write(
+            ext_dir.join("extension.toml"),
+            format!(
+                "name = \"echo\"\nversion = \"0.1.0\"\n[run]\ncommand = \"node\"\nargs = [\"{}\"]\n[capabilities]\ntools = true\n",
+                peer_path.display()
+            ),
+        )
+        .unwrap();
+
+        std::env::set_var("SMOOTH_HOME", home.path());
+
+        // Fail-safe: with no trust record, the extension is skipped → no host.
+        assert!(
+            load_pretrusted_extension_host(ws.path()).await.is_none(),
+            "an untrusted extension must never load"
+        );
+
+        // The live load half needs a Node runtime; the fail-safe half above does
+        // not (untrusted extensions are filtered before any spawn).
+        if node_available() {
+            let hash = smooth_policy::ext_trust::hash_extension(&ext_dir).unwrap();
+            std::fs::write(
+                home.path().join("extensions").join("trust.toml"),
+                format!("[extensions.echo]\nsource = \"test\"\nhash = \"{hash}\"\ntrusted = true\n"),
+            )
+            .unwrap();
+
+            let host = load_pretrusted_extension_host(ws.path()).await.expect("a trusted extension should load");
+            assert_eq!(host.len(), 1);
+            let tools: Vec<_> = host.tools().iter().map(|t| t.schema().name).collect();
+            assert!(tools.contains(&"echo.ping-tool".to_string()), "expected echo.ping-tool, got {tools:?}");
+            host.shutdown_all().await;
+        }
+
+        std::env::remove_var("SMOOTH_HOME");
     }
 }
