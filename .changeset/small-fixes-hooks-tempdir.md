@@ -1,6 +1,5 @@
 ---
 '@smooai/smooth': patch
-'@smooai/smooth': patch
 ---
 
 Two small bug fixes.
