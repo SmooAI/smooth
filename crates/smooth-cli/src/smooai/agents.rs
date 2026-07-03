@@ -82,6 +82,12 @@ pub enum Cmd {
         /// `enabledTools` = full tool set; non-empty = restrict.
         #[arg(long = "tool-config")]
         tool_config: Option<String>,
+        /// `AgentExtensionConfig` JSON (`{enabledExtensions: [{extensionId,
+        /// enabled, config?}]}`); `@` prefix reads a file. extensionId is
+        /// kebab-case (SEP extension name, e.g. plan-mode). Empty enabledExtensions
+        /// = no extensions for this agent (fail-closed).
+        #[arg(long = "extension")]
+        extension_config: Option<String>,
         /// Short description shown in the agents list (required by the
         /// backend). Defaults to the agent name when omitted.
         #[arg(long)]
@@ -139,6 +145,12 @@ pub enum Cmd {
         /// `enabledTools` = full tool set; non-empty = restrict.
         #[arg(long = "tool-config")]
         tool_config: Option<String>,
+        /// `AgentExtensionConfig` JSON (`{enabledExtensions: [{extensionId,
+        /// enabled, config?}]}`); `@` prefix reads a file. extensionId is
+        /// kebab-case (SEP extension name, e.g. plan-mode). Empty enabledExtensions
+        /// = no extensions for this agent (fail-closed).
+        #[arg(long = "extension")]
+        extension_config: Option<String>,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
@@ -271,6 +283,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             personality,
             workflow,
             tool_config,
+            extension_config,
             summary,
             allowed_origins,
             colors,
@@ -285,6 +298,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             let personality = personality.map(personality_value).transpose()?;
             let workflow = workflow.map(|v| parse_json_object_flag("workflow", v)).transpose()?;
             let tool_config = tool_config.map(|v| parse_json_object_flag("tool-config", v)).transpose()?;
+            let extension_config = extension_config.map(|v| parse_json_object_flag("extension", v)).transpose()?;
             let body = build_mint_body(
                 &org,
                 &name,
@@ -296,6 +310,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                 personality,
                 workflow,
                 tool_config,
+                extension_config,
                 summary.as_deref(),
                 &allowed_origins,
                 &color_map,
@@ -353,11 +368,17 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             visibility,
             workflow,
             tool_config,
+            extension_config,
             org,
         } => {
             let org = require_active_org(&client, org)?;
-            let has_flags =
-                instructions.is_some() || greeting.is_some() || personality.is_some() || visibility.is_some() || workflow.is_some() || tool_config.is_some();
+            let has_flags = instructions.is_some()
+                || greeting.is_some()
+                || personality.is_some()
+                || visibility.is_some()
+                || workflow.is_some()
+                || tool_config.is_some()
+                || extension_config.is_some();
             let body = match (body, has_flags) {
                 (Some(_), true) => bail!("pass either a JSON body or field flags, not both"),
                 (Some(b), false) => read_body(&b)?,
@@ -370,6 +391,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                         visibility,
                         workflow.map(|v| parse_json_object_flag("workflow", v)).transpose()?,
                         tool_config.map(|v| parse_json_object_flag("tool-config", v)).transpose()?,
+                        extension_config.map(|v| parse_json_object_flag("extension", v)).transpose()?,
                     )?
                 }
             };
@@ -508,6 +530,7 @@ fn build_update_body(
     visibility: Option<MintVisibility>,
     workflow: Option<Value>,
     tool_config: Option<Value>,
+    extension_config: Option<Value>,
 ) -> Result<Value> {
     let mut obj = serde_json::Map::new();
     if let Some(p) = instructions {
@@ -528,8 +551,13 @@ fn build_update_body(
     if let Some(t) = tool_config {
         obj.insert("toolConfig".into(), t);
     }
+    if let Some(e) = extension_config {
+        obj.insert("extensionConfig".into(), e);
+    }
     if obj.is_empty() {
-        bail!("nothing to update — pass a JSON body or at least one of --instructions --greeting --personality --visibility --workflow --tool-config");
+        bail!(
+            "nothing to update — pass a JSON body or at least one of --instructions --greeting --personality --visibility --workflow --tool-config --extension"
+        );
     }
     Ok(Value::Object(obj))
 }
@@ -565,6 +593,7 @@ fn build_mint_body(
     personality: Option<Value>,
     workflow: Option<Value>,
     tool_config: Option<Value>,
+    extension_config: Option<Value>,
     summary: Option<&str>,
     allowed_origins: &[String],
     colors: &[(String, String)],
@@ -610,6 +639,9 @@ fn build_mint_body(
     }
     if let Some(t) = tool_config {
         obj.insert("toolConfig".into(), t);
+    }
+    if let Some(e) = extension_config {
+        obj.insert("extensionConfig".into(), e);
     }
     if !allowed_origins.is_empty() {
         obj.insert("authPublicClientAllowedOrigins".into(), json!(allowed_origins));
@@ -726,6 +758,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &[],
             &[],
             false,
@@ -753,6 +786,7 @@ mod tests {
             "Flow",
             MintKind::Workflow,
             MintVisibility::Internal,
+            None,
             None,
             None,
             None,
@@ -790,6 +824,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some("A helpful bot"),
             &origins,
             &colors(),
@@ -811,6 +846,7 @@ mod tests {
     fn mint_body_carries_per_agent_config() {
         let workflow = json!({ "goal": "book a demo", "steps": [{ "id": "greet", "intent": "greet", "criteria": "name confirmed" }] });
         let tools = json!({ "enabledTools": [{ "toolId": "knowledge_search", "enabled": true, "authLevel": "none" }] });
+        let extensions = json!({ "enabledExtensions": [{ "extensionId": "smooai-crm", "enabled": true }] });
         let body = build_mint_body(
             "org-1",
             "Bot",
@@ -822,6 +858,7 @@ mod tests {
             Some(json!({ "preset": "witty" })),
             Some(workflow.clone()),
             Some(tools.clone()),
+            Some(extensions.clone()),
             None,
             &[],
             &[],
@@ -832,10 +869,12 @@ mod tests {
         assert_eq!(body["personality"]["preset"], "witty");
         assert_eq!(body["conversationWorkflow"], workflow);
         assert_eq!(body["toolConfig"], tools);
+        assert_eq!(body["extensionConfig"], extensions);
     }
 
     #[test]
     fn update_body_maps_every_field() {
+        let extensions = json!({ "enabledExtensions": [{ "extensionId": "smooai-crm", "enabled": true }] });
         let body = build_update_body(
             Some("be terse"),
             Some("Hey!"),
@@ -843,6 +882,7 @@ mod tests {
             Some(MintVisibility::Internal),
             Some(json!({ "goal": "g", "steps": [] })),
             Some(json!({ "enabledTools": [] })),
+            Some(extensions.clone()),
         )
         .unwrap();
         assert_eq!(body["instructions"]["prompt"], "be terse");
@@ -851,17 +891,18 @@ mod tests {
         assert_eq!(body["visibility"], "internal");
         assert_eq!(body["conversationWorkflow"]["goal"], "g");
         assert_eq!(body["toolConfig"]["enabledTools"], json!([]));
+        assert_eq!(body["extensionConfig"], extensions);
     }
 
     #[test]
     fn update_body_omits_unset_fields() {
-        let body = build_update_body(None, Some("Hi"), None, None, None, None).unwrap();
+        let body = build_update_body(None, Some("Hi"), None, None, None, None, None).unwrap();
         assert_eq!(body, json!({ "greeting": "Hi" }));
     }
 
     #[test]
     fn update_body_rejects_empty() {
-        assert!(build_update_body(None, None, None, None, None, None).is_err());
+        assert!(build_update_body(None, None, None, None, None, None, None).is_err());
     }
 
     #[test]
