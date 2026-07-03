@@ -50,6 +50,7 @@ mod provider_overlay;
 mod reply_to_chat_tool;
 mod skills_tool;
 mod tool_hints;
+mod ui_relay_provider;
 mod web_search_tool;
 
 use std::path::PathBuf;
@@ -1419,17 +1420,27 @@ fn attach_ext_host(agent: Agent, host: Option<Arc<smooth_operator::extension::Ex
 ///
 /// The dispatched worker is unattended: it never shows a trust prompt, so an
 /// unknown or content-changed extension is silently skipped (fail-safe). Returns
-/// `None` when nothing trusted loads. The delegate is the engine's headless
-/// [`DefaultHostDelegate`](smooth_operator::extension::DefaultHostDelegate) and
-/// `ui_capabilities` is empty: a well-behaved extension gates its UI off via
-/// `hasUI`, and any two-way `ui/request` gets `-32001 NoUI` until the daemon
-/// relay (SEP Phase 6). Extension tools register into the operative's ordinary
-/// `ToolRegistry`, so the NarcHook surveillance already installed applies to them.
+/// `None` when nothing trusted loads.
+///
+/// **UI (SEP Phase 6).** Under a real Big Smooth dispatch the callback env
+/// (`SMOOTH_NARC_URL` + `SMOOTH_HOST_TOKEN`) is set, so the delegate is
+/// [`HttpUiProvider`](crate::ui_relay_provider::HttpUiProvider): it relays each
+/// `ui/*` request to the daemon, which fans it out to connected frontends and
+/// blocks interactive kinds until a human answers. The declared
+/// `ui_capabilities` then cover the full set the smooth-web components render.
+/// Absent that env (a bare local run) it falls back to the engine's headless
+/// [`DefaultHostDelegate`](smooth_operator::extension::DefaultHostDelegate) with
+/// empty capabilities — a two-way `ui/request` then gets `-32001 NoUI` and a
+/// well-behaved extension gates its UI off via `hasUI`. Extension tools register
+/// into the operative's ordinary `ToolRegistry`, so the NarcHook surveillance
+/// already installed applies to them.
 async fn load_pretrusted_extension_host(workspace_root: &std::path::Path) -> Option<Arc<smooth_operator::extension::ExtensionHost>> {
     use smooth_operator::extension::manifest::{default_global_dir, project_dir};
     use smooth_operator::extension::protocol::{HostInfo, WorkspaceInfo};
-    use smooth_operator::extension::{discover, DefaultHostDelegate, ExtensionHost};
+    use smooth_operator::extension::{discover, DefaultHostDelegate, ExtensionHost, HostDelegate};
     use smooth_policy::ext_trust::{hash_extension, TrustStore};
+
+    use crate::ui_relay_provider::HttpUiProvider;
 
     let global = default_global_dir();
     let project = project_dir(workspace_root);
@@ -1462,7 +1473,14 @@ async fn load_pretrusted_extension_host(workspace_root: &std::path::Path) -> Opt
         root: workspace_root.to_string_lossy().into_owned(),
         trusted: true,
     };
-    let (host, load_failures) = ExtensionHost::load(trusted, host_info, workspace, "headless", Vec::new(), Arc::new(DefaultHostDelegate)).await;
+    // Relay ui/* to the daemon when dispatched (callback env present);
+    // otherwise stay headless. `mode` + `ui_capabilities` are negotiated to the
+    // extensions at handshake so `hasUI` reflects what this run can render.
+    let (mode, ui_caps, delegate): (&str, Vec<String>, Arc<dyn HostDelegate>) = match HttpUiProvider::from_env() {
+        Some(provider) => ("web", HttpUiProvider::capabilities(), Arc::new(provider)),
+        None => ("headless", Vec::new(), Arc::new(DefaultHostDelegate)),
+    };
+    let (host, load_failures) = ExtensionHost::load(trusted, host_info, workspace, mode, ui_caps, delegate).await;
     for (name, err) in &load_failures {
         tracing::warn!(%name, %err, "sep: extension failed to load");
     }

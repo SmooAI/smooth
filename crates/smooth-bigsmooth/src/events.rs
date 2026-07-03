@@ -179,6 +179,31 @@ pub enum ServerEvent {
     BigSmoothThought {
         text: String,
     },
+
+    // ── SEP extension UI relay (Phase 6) ─────────────────────
+    /// A dispatched operative's extension issued a `ui/*` request that the
+    /// daemon is relaying to connected frontends. Interactive kinds
+    /// (`select`/`confirm`/`input`) expect the frontend to answer via
+    /// `POST /api/ui/answer` with the matching `request_id`; one-way kinds
+    /// (`notify`/`set_status`/`set_widget`/`set_title`) are render-only.
+    /// `payload` is the extension's raw `ui/request` params (prompt,
+    /// options, widget, …). See [`crate::ui_relay`].
+    UiRequest {
+        task_id: String,
+        request_id: String,
+        /// Owning extension name (dotted-tool convention: `<ext>`).
+        ext: String,
+        /// `select` | `confirm` | `input` | `notify` | `set_status` |
+        /// `set_widget` | `set_title`.
+        kind: String,
+        payload: serde_json::Value,
+    },
+    /// An interactive [`ServerEvent::UiRequest`] was resolved — answered by
+    /// one client, auto-answered by the permission engine, or timed out.
+    /// Other clients showing the same dialog dismiss it on this.
+    UiResolved {
+        request_id: String,
+    },
 }
 
 #[cfg(test)]
@@ -407,6 +432,14 @@ mod tests {
             ServerEvent::Pong,
             ServerEvent::Error { message: "e".into() },
             ServerEvent::Connected { session_id: "s".into() },
+            ServerEvent::UiRequest {
+                task_id: "t".into(),
+                request_id: "r".into(),
+                ext: "todo".into(),
+                kind: "confirm".into(),
+                payload: serde_json::json!({ "prompt": "sure?" }),
+            },
+            ServerEvent::UiResolved { request_id: "r".into() },
         ];
 
         for (i, event) in events.iter().enumerate() {

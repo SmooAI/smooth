@@ -124,6 +124,13 @@ pub struct AppState {
     /// th-87dfee). Seeded from an inherited `SMOOTH_HOST_TOKEN` (sandbox
     /// dispatch passes one in) or freshly generated.
     pub host_token: Arc<str>,
+    /// In-flight interactive SEP `ui/*` requests (SEP Phase 6). Keyed by
+    /// `request_id`; the value resolves the operative's blocked HTTP call.
+    /// A dispatched operative POSTs `/api/ui/request`, the handler parks a
+    /// oneshot here and broadcasts a [`ServerEvent::UiRequest`]; the frontend
+    /// answers via `/api/ui/answer`, which fires the sender. See
+    /// [`crate::ui_relay`].
+    pub ui_pending: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<serde_json::Value>>>>,
 }
 
 impl AppState {
@@ -326,11 +333,12 @@ impl AppState {
             access,
             wonk_grants,
             host_token,
+            ui_pending: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     /// Touch the activity timestamp — call from every handler.
-    fn touch(&self) {
+    pub(crate) fn touch(&self) {
         if let Ok(mut last) = self.last_activity.lock() {
             *last = Instant::now();
         }
@@ -557,6 +565,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/access/deny", post(access_deny_handler))
         .route("/api/access/stream", get(access_stream_handler))
         .route("/api/host/exec", post(crate::host_tools::host_exec_handler))
+        // SEP Phase 6 — extension ui/* relay. `request` is the operative's
+        // bearer-authed callback (blocks for interactive kinds); `answer` is
+        // the frontend resolving a parked dialog.
+        .route("/api/ui/request", post(crate::ui_relay::request_handler))
+        .route("/api/ui/answer", post(crate::ui_relay::answer_handler))
         // WebSocket — primary real-time channel
         .route("/ws", get(ws_handler))
         // Embedded web UI (SPA fallback — must be last)

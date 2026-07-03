@@ -33,6 +33,32 @@ pi loads TypeScript extension factories in-process. Rust can't import a `.ts`, a
 
 `th ext install` takes a local dir, `npm:@scope/pkg[@version]`, or `git:host/user/repo[@ref]`. Packaged sources vendor under `~/.smooth/extensions/.npm` / `.git/<host>/<path>` and are surfaced to the engine's (top-level-only) discovery via a `~/.smooth/extensions/<name>` symlink, so packaged and local installs load identically. A manifest may be `extension.toml` or a `package.json` `smooth` key (synthesized at install). `th ext update` re-fetches packaged extensions from their recorded source, re-locking trust on a changed manifest. `th ext search` matches a curated in-binary index plus live npm packages tagged `smooth-extension`.
 
+## UI relay across frontends (Phase 6)
+
+An extension's `ui/*` request is capability-negotiated at handshake (`mode` +
+capability list). The extension owns the content, the host owns routing, and
+each frontend owns rendering:
+
+- **smooth-code TUI** — renders the full set inline (Phase 3).
+- **smooth-web via the daemon** — a dispatched operative runs headless, so its
+  `HttpUiProvider` relays each `ui/*` request to Big Smooth over the existing
+  `SMOOTH_NARC_URL` + `SMOOTH_HOST_TOKEN` callback channel (`POST /api/ui/request`,
+  same channel `host_tool` uses). The daemon broadcasts a `UiRequest`
+  [`ServerEvent`] to every connected client and, for the interactive kinds
+  (`select`/`confirm`/`input`), blocks the operative's call until a browser
+  answers via `POST /api/ui/answer`. The smooth-web `UiRelay` component renders
+  `select`/`confirm`/`input` as a modal, `notify` as a toast, and
+  `set_status`/`set_widget`/`set_title` in the chrome; render blocks
+  (`markdown`/`keyvalue`/`progress`/`table`/`diff`/`stack`, each with a `text`
+  fallback) render natively. Unattended (no client connected) the request
+  resolves to `{cancelled:true}` rather than hang; under `SMOOTH_AUTO_MODE=bypass`
+  a `confirm` is auto-answered `{confirmed:true}` (audited); otherwise it waits
+  up to `SMOOTH_UI_TIMEOUT_SECS` (default 120s), then cancels.
+  Source: `smooth-bigsmooth/src/ui_relay.rs`, `smooth-operative/src/ui_relay_provider.rs`,
+  `smooth-web/web/src/components/UiRelay.tsx`.
+- **chat-widget on the public servers** — `select`/`confirm` render as
+  chat-native button frames (smooth-operator repo).
+
 ## Relationship to what exists today
 
 | Existing surface | SEP verdict | Status |
