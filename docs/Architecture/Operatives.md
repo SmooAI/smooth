@@ -46,7 +46,7 @@ For a coding role (`Activity::Coding` with `bash` permission), the operative run
 
 ## The built-in tool surface
 
-The operative registers file tools (`read_file`, `write_file`, `edit_file`, `apply_patch`, `list_files`, `grep`), `bash` plus background-process tools (`bg_run` / `bg_status` / `bg_logs` / `bg_kill`), `lsp` and `project_inspect`, memory tools (`read_memory` / `write_memory`), a `todo_list`, `http_fetch` and (optionally) `web_search`, `forward_port`, `reply_to_chat` and `ask_smooth` (escalate to Big Smooth), `host_tool` (proxy a whitelisted host CLI via `SMOOTH_HOST_TOKEN`), a `delegate` tool that spawns a sub-pearl / child operative, and the pearl read/write tools. Plus any [MCP servers](../extending.md) and [CLI-wrapper plugins](../extending.md) configured via `mcp.toml` / `plugin.toml`.
+The operative registers file tools (`read_file`, `write_file`, `edit_file`, `apply_patch`, `list_files`, `grep`), `bash` plus background-process tools (`bg_run` / `bg_status` / `bg_logs` / `bg_kill`), `lsp` and `project_inspect`, memory tools (`read_memory` / `write_memory`), a `todo_list`, `skill_use` (invoke a named skill from the system-prompt catalog — `th-e0f812`), `http_fetch` and (optionally) `web_search`, `forward_port`, `reply_to_chat` and `ask_smooth` (escalate to Big Smooth), `host_tool` (proxy a whitelisted host CLI via `SMOOTH_HOST_TOKEN`), a `delegate` tool that spawns a sub-pearl / child operative, and the pearl read/write tools. Plus any [MCP servers](../extending.md) and [CLI-wrapper plugins](../extending.md) configured via `mcp.toml` / `plugin.toml`.
 
 ## Mailbox + steering
 
