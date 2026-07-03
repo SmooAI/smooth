@@ -80,7 +80,7 @@ If 0.4.6 turns out to regress on a platform we care about, we can pin back to `0
 ## Related
 
 - [[ADR-001-Consolidate-into-one-microVM]]
-- [[../Architecture/Sandboxed-Mode]]
+- [[ADR-004-remove-microvm-sandbox-stack]] — the July 2026 teardown that removed the microVM/Sandboxed-Mode architecture pages (archived in git history)
 - [[../Operations/Troubleshooting]] — `th up` failure modes
 - Pearl th-9f04c2 — the implementation pearl
 - Pearl th-dd0cef — original `th up --sandboxed` failure that motivated the bump
