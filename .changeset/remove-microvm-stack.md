@@ -1,7 +1,5 @@
 ---
 '@smooai/smooth': minor
-'@smooai/smooth': minor
-'@smooai/smooth': minor
 ---
 
 Remove the microVM / sandbox stack (pearl th-f4a801).
