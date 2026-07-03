@@ -2,6 +2,7 @@
 
 pub mod access;
 pub mod audit;
+pub mod auto_mode;
 pub mod safehouse_narc;
 
 /// `SafehouseNarc` keeps its legacy name on the type but new code
