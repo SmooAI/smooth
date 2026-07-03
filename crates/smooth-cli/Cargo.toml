@@ -68,7 +68,7 @@ quick-xml = { version = "0.37", features = ["serialize"] }
 # `tabled` is what nushell uses — best-of-class in the Rust table-
 # rendering space. Builder API for dynamic JSON, rich modifier chain
 # for theming, 10+ built-in styles.
-tabled = "0.18"
+tabled = { version = "0.18", features = ["ansi"] } # `ansi`: width calc strips escapes — coloured status cells were over-widening columns (th-6e77b7)
 
 # Pearl th-fcb579: browser-based `th auth login`.
 # - `tiny_http`: minimal blocking HTTP listener for the OAuth
