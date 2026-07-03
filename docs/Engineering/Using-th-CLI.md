@@ -369,6 +369,38 @@ The API key is never passed on argv — `create` reads it from `SENDGRID_API_KEY
 or prompts for it (masked). `test` sends a verification email through the
 configured integration.
 
+### Copilot (org's always-on dashboard agent)
+
+Drive the org's [Org Copilot](../Product/Features/Org-Copilot.md) from the CLI —
+the same agent behind the dashboard's ⌘J panel. It acts on the org's own data:
+knowledge search, CRM lookup/create, analytics questions, template generation,
+and drafting + (on confirm) sending email. User-authed (`th auth login`);
+401s under M2M.
+
+```bash
+th api copilot chat "Find contacts named Jane and draft a follow-up"   # run a turn
+th api copilot chat "Make it warmer" --conversation <id>               # continue it
+th api copilot chat "..." --json                                       # raw CopilotTurnResult
+th api copilot history <conversation-id>                               # message history
+```
+
+Destructive tools (e.g. `email.send`) **never auto-run** — a turn that triggers
+one returns a `pendingAction` and pauses. `chat` resolves it with a y/N prompt
+on a TTY, or the up-front `--confirm` / `--no-confirm` flag for
+non-interactive/agent use. With **no flag on a non-TTY** it prints the pending
+action and stops rather than guessing — `--no-confirm` is never a silent
+default. To inspect first, then approve without resending the message:
+
+```bash
+th api copilot chat "Send jane@acme.com the follow-up"     # pauses, prints the pending email.send
+th api copilot confirm <conversation-id> --approve         # run it
+th api copilot confirm <conversation-id> --decline         # or drop it
+th api copilot chat "Send jane@acme.com the follow-up" --confirm   # one-shot, when already authorized
+```
+
+Responses are buffered JSON (token streaming is phase 2). Every tool run is
+audit-logged against the logged-in user.
+
 ### Keys (M2M auth clients)
 
 ```bash
