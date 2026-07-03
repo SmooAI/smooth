@@ -674,6 +674,22 @@ impl Tool for BashTool {
 /// suitable for handing to `Agent::new`.
 pub fn build_chat_tools(state: AppState, registry: Arc<ProviderRegistry>) -> smooth_operator::tool::ToolRegistry {
     let mut tools = smooth_operator::tool::ToolRegistry::new();
+
+    // Auto-mode permission enforcement (pearl th-515a13). This hook runs
+    // FIRST on every tool call — allow / deny / ask per the Claude-Code-
+    // style engine in `crate::auto_mode`. It is the primary enforcement
+    // layer now that the microVM stack (Wonk/Goalie) is gone. Mode comes
+    // from `SMOOTH_AUTO_MODE` (ask [default] / accept-edits / deny /
+    // bypass); grants + the ask channel are the shared `AppState` handles.
+    let mode = crate::auto_mode::AutoMode::from_env_value(std::env::var("SMOOTH_AUTO_MODE").ok().as_deref());
+    let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+    tools.add_hook(crate::auto_mode::AutoModeHook::new(
+        mode,
+        state.access.clone(),
+        state.wonk_grants.clone(),
+        workspace,
+    ));
+
     tools.register(PearlsSearchTool { state: state.clone() });
     tools.register(PearlsListTool { state: state.clone() });
     tools.register(PearlsShowTool { state: state.clone() });

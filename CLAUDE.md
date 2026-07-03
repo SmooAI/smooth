@@ -226,6 +226,16 @@ JSON-lines on stdout, which Big Smooth parses and forwards to WebSocket clients.
 
 Tool-call surveillance still runs **in-process** on the operative:
 
+- **Auto-mode permission engine** (`smooth-bigsmooth/src/auto_mode.rs`, pearl
+  th-515a13) — the **primary enforcement layer** now that Wonk/Goalie are gone.
+  A Claude-Code-style `ToolHook` (added FIRST, so its verdict gates before Narc
+  and before the tool runs) giving every call an allow / deny / **ask** verdict.
+  `ask` blocks on the shared `AccessStore` queue (surfaced via
+  `/api/access/{pending,approve,deny,stream}` + the TUI) and **fails closed** on
+  timeout/headless. Modes via `SMOOTH_AUTO_MODE`: `ask` (default) / `accept-edits`
+  / `deny` (headless, unmatched→deny) / `bypass` (keeps the hard circuit-breakers).
+  Allow-lists (`wonk-allow.toml`, user + project, project-wins) persist approvals.
+  See [`docs/Engineering/Auto-Mode-Permissions.md`](docs/Engineering/Auto-Mode-Permissions.md).
 - **Narc** — tool surveillance + prompt injection guard (regex + optional LLM
   judge), applied as a `ToolHook` on the operative's tool registry.
 - **Archivist** / **Scribe** — log aggregation + structured logging (crates kept).
