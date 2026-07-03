@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { useProject } from "./context";
 import { Select } from "./components/ui/select";
+import { UiRelay } from "./components/UiRelay";
 import {
     SidebarProvider,
     Sidebar,
@@ -131,6 +132,8 @@ export function Layout() {
                     <Outlet />
                 </main>
             </SidebarInset>
+            {/* SEP Phase 6 — global overlay for extension ui/* frames */}
+            <UiRelay />
         </SidebarProvider>
     );
 }
