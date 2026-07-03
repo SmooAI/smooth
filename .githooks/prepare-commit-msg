@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+# ── Pearl hooks ──────────────────────────────────────────────────────
+if command -v th >/dev/null 2>&1; then
+    th hooks run prepare-commit-msg "$@"
+fi
