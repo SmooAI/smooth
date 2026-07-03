@@ -12,7 +12,6 @@ pub mod autocomplete;
 pub mod client;
 pub mod commands;
 pub mod diff_render;
-pub mod extensions;
 pub mod files;
 pub mod git;
 pub mod headless;

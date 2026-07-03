@@ -3972,20 +3972,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "smooai-smooth-plugin"
-version = "0.17.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum 0.8.8",
- "serde",
- "serde_json",
- "smooai-smooth-operator-core",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "smooai-smooth-policy"
 version = "0.17.0"
 dependencies = [
