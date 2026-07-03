@@ -23,6 +23,7 @@ pub mod markdown;
 pub mod model_picker;
 pub mod permissions;
 pub mod render;
+pub mod sep_host;
 pub mod session;
 pub mod state;
 pub mod theme;

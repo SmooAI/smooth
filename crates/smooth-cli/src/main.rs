@@ -9,6 +9,7 @@ mod auth;
 mod boot_ui;
 mod claude;
 mod config;
+mod ext;
 mod gradient;
 mod hooks;
 mod mcp_config;
@@ -375,6 +376,12 @@ enum Commands {
     Plugin {
         #[command(subcommand)]
         cmd: PluginCommands,
+    },
+    /// SEP extensions (subprocess tools/hooks/UI via the Smooth Extension
+    /// Protocol). Install a local extension, list/trust/remove installed ones.
+    Ext {
+        #[command(subcommand)]
+        cmd: ext::ExtCommands,
     },
     /// Run Smooth as a background service (launchd / systemd / Task Scheduler)
     Service {
@@ -1458,6 +1465,7 @@ async fn main() -> Result<()> {
         Some(Commands::Routing { cmd }) => cmd_routing(cmd).await,
         Some(Commands::Mcp { cmd }) => cmd_mcp(cmd),
         Some(Commands::Plugin { cmd }) => cmd_plugin(cmd),
+        Some(Commands::Ext { cmd }) => ext::dispatch(cmd),
         Some(Commands::Service { cmd }) => cmd_service(cmd),
         Some(Commands::Bench { cmd }) => cmd_bench(cmd),
         Some(Commands::Skills { cmd }) => cmd_skills(cmd),
