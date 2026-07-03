@@ -118,41 +118,40 @@ fn check_bearer(state: &AppState, headers: &HeaderMap) -> Result<(), (StatusCode
     Ok(())
 }
 
-/// `POST /api/ui/request` — the operative's `HttpUiProvider` calls this. Blocks
-/// (for interactive kinds) until a human answers, the permission engine
-/// auto-answers, or [`ui_timeout`] elapses.
-pub async fn request_handler(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<UiRequestBody>) -> Result<Json<Value>, (StatusCode, String)> {
-    check_bearer(&state, &headers)?;
-    state.touch();
-
+/// The relay core: broadcast a `ui/*` request to connected frontends, park
+/// interactive kinds until a human answers (or auto-mode / timeout resolves
+/// them). Shared by the operative's HTTP callback ([`request_handler`]) and the
+/// chat loop's in-process delegate ([`crate::sep::DaemonUiProvider`]) so both
+/// surfaces get identical timeout + auto-confirm + audit behavior.
+pub(crate) async fn relay(state: &AppState, task_id: &str, ext: &str, kind: &str, params: Value) -> Value {
     let request_id = uuid::Uuid::new_v4().to_string();
-    let interactive = INTERACTIVE_KINDS.contains(&body.kind.as_str());
+    let interactive = INTERACTIVE_KINDS.contains(&kind);
 
     // Broadcast to every connected frontend so it can render the dialog /
     // toast / widget. `send` erroring only means zero receivers — fine.
     let _ = state.event_tx.send(ServerEvent::UiRequest {
-        task_id: body.task_id.clone(),
+        task_id: task_id.to_string(),
         request_id: request_id.clone(),
-        ext: body.ext.clone(),
-        kind: body.kind.clone(),
-        payload: body.params.clone(),
+        ext: ext.to_string(),
+        kind: kind.to_string(),
+        payload: params.clone(),
     });
 
     // One-way kinds: nothing to await.
     if !interactive {
-        return Ok(Json(json!({})));
+        return json!({});
     }
 
     // Auto-mode may answer a policy-covered `confirm` without a human. Bypass
     // ("allow everything except hard denies") auto-confirms; audited.
     let auto_mode = AutoMode::from_env_value(std::env::var("SMOOTH_AUTO_MODE").ok().as_deref());
-    if body.kind == "confirm" && auto_mode == AutoMode::Bypass {
+    if kind == "confirm" && auto_mode == AutoMode::Bypass {
         crate::audit::audit(&crate::audit::AuditEntry {
             actor: "sep-ui".into(),
             action: "auto-confirm (SMOOTH_AUTO_MODE=bypass)".into(),
-            target: Some(body.ext.clone()),
-            bead_id: Some(body.task_id.clone()),
-            input: Some(body.params.clone()),
+            target: Some(ext.to_string()),
+            bead_id: Some(task_id.to_string()),
+            input: Some(params),
             output: Some(json!({ "confirmed": true })),
             duration_ms: None,
             error: None,
@@ -160,12 +159,12 @@ pub async fn request_handler(State(state): State<AppState>, headers: HeaderMap, 
         let _ = state.event_tx.send(ServerEvent::UiResolved {
             request_id: request_id.clone(),
         });
-        return Ok(Json(json!({ "confirmed": true })));
+        return json!({ "confirmed": true });
     }
 
-    // Unattended (no frontend connected): don't hang the operative — cancel.
+    // Unattended (no frontend connected): don't hang the caller — cancel.
     if state.event_tx.receiver_count() == 0 {
-        return Ok(Json(cancelled()));
+        return cancelled();
     }
 
     // Park a oneshot the answer handler will fire.
@@ -174,7 +173,7 @@ pub async fn request_handler(State(state): State<AppState>, headers: HeaderMap, 
         pending.insert(request_id.clone(), tx);
     }
 
-    let answer = match tokio::time::timeout(ui_timeout(), rx).await {
+    match tokio::time::timeout(ui_timeout(), rx).await {
         Ok(Ok(v)) => v,
         // Sender dropped or timed out → cancel and clean up the slot.
         _ => {
@@ -186,8 +185,16 @@ pub async fn request_handler(State(state): State<AppState>, headers: HeaderMap, 
             });
             cancelled()
         }
-    };
-    Ok(Json(answer))
+    }
+}
+
+/// `POST /api/ui/request` — the operative's `HttpUiProvider` calls this. Blocks
+/// (for interactive kinds) until a human answers, the permission engine
+/// auto-answers, or [`ui_timeout`] elapses.
+pub async fn request_handler(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<UiRequestBody>) -> Result<Json<Value>, (StatusCode, String)> {
+    check_bearer(&state, &headers)?;
+    state.touch();
+    Ok(Json(relay(&state, &body.task_id, &body.ext, &body.kind, body.params).await))
 }
 
 /// `POST /api/ui/answer` — a frontend resolves a parked interactive request.
