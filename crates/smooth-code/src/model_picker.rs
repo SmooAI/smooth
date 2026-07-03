@@ -201,6 +201,15 @@ pub struct ModelPickerState {
     /// server's models are pickable. Empty when no local provider is
     /// configured or reachable. Pearl th-f4a0fb.
     pub local_models: Vec<ModelEntry>,
+    /// Live catalog from the Smoo gateway's `GET /v1/model/info`, fetched
+    /// once at startup via [`fetch_gateway_catalog`]. When non-empty it
+    /// is authoritative — it replaces the offline [`fallback_catalog`] so
+    /// the picker never offers a model the gateway has since removed, and
+    /// its use-cases / tier / cost / benchmarks come straight from the
+    /// gateway rather than a baked editorial table. Empty when no gateway
+    /// provider is configured or the endpoint is unreachable, in which
+    /// case the offline catalog is used. Pearl th-7ee88e (SMOODEV-1793).
+    pub gateway_models: Vec<ModelEntry>,
 }
 
 impl Default for ModelPickerState {
@@ -221,6 +230,7 @@ impl ModelPickerState {
             error: None,
             show_all: false,
             local_models: Vec::new(),
+            gateway_models: Vec::new(),
         }
     }
 
@@ -277,7 +287,7 @@ impl ModelPickerState {
         let Some(entry) = self.slots.get(self.selected).cloned() else { return };
         // Reset the filter override every time the user drills in fresh.
         self.show_all = false;
-        self.models = candidate_models_filtered(&self.slots, &entry, &self.local_models, self.show_all);
+        self.models = candidate_models_filtered(&self.slots, &entry, &self.local_models, &self.gateway_models, self.show_all);
         // Pre-select the slot's current model when it's in the list.
         self.selected = self
             .models
@@ -309,7 +319,7 @@ impl ModelPickerState {
         self.show_all = !self.show_all;
         let focused = self.slots.iter().find(|s| s.slot == slot).cloned();
         if let Some(focused) = focused {
-            self.models = candidate_models_filtered(&self.slots, &focused, &self.local_models, self.show_all);
+            self.models = candidate_models_filtered(&self.slots, &focused, &self.local_models, &self.gateway_models, self.show_all);
             self.selected = prev
                 .as_ref()
                 .and_then(|p| self.models.iter().position(|m| m.provider == p.provider && m.model == p.model))
@@ -466,6 +476,134 @@ pub async fn fetch_local_provider_models() -> Vec<ModelEntry> {
     out
 }
 
+/// Parse a Smoo gateway `GET /v1/model/info` response body into catalog
+/// [`ModelEntry`]s. Pure so it's unit-testable against a captured
+/// payload without a live gateway.
+///
+/// The gateway (LiteLLM) returns `{"data":[{"model_name":..,
+/// "model_info":{use_cases, model_tier, input_cost_per_token,
+/// output_cost_per_token, benchmarks:{swe_bench_verified, gpqa_diamond,
+/// aa_intelligence_index}, description}}]}`. Every field is optional —
+/// LiteLLM emits a large sparse object and only some models carry
+/// benchmarks. Non-chat entries (embeddings, rerank, tts, moderation)
+/// are kept too; the slot use-case filter hides them from the chat
+/// slots. Malformed JSON yields an empty vec so the caller falls back to
+/// the offline catalog. Pearl th-7ee88e (SMOODEV-1793).
+#[must_use]
+pub fn parse_gateway_model_info(provider_id: &str, body: &str) -> Vec<ModelEntry> {
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let Some(data) = root.get("data").and_then(|d| d.as_array()) else {
+        return Vec::new();
+    };
+
+    data.iter()
+        .filter_map(|row| {
+            let model = row.get("model_name").and_then(serde_json::Value::as_str)?;
+            let mi = row.get("model_info");
+            let use_cases = mi
+                .and_then(|m| m.get("use_cases"))
+                .and_then(serde_json::Value::as_array)
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+            let tier = mi
+                .and_then(|m| m.get("model_tier"))
+                .and_then(serde_json::Value::as_str)
+                .map_or(Tier::Workhorse, tier_from_str);
+            let description = mi
+                .and_then(|m| m.get("description"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let cost = |key: &str| mi.and_then(|m| m.get(key)).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+            // Benchmarks are small 0..=100 percentages; f64→f32 can't
+            // meaningfully truncate them.
+            #[allow(clippy::cast_possible_truncation)]
+            let bench = |key: &str| {
+                mi.and_then(|m| m.get("benchmarks"))
+                    .and_then(|b| b.get(key))
+                    .and_then(serde_json::Value::as_f64)
+                    .map(|v| v as f32)
+            };
+            Some(ModelEntry {
+                provider: provider_id.to_string(),
+                model: model.to_string(),
+                info: Some(ModelInfo {
+                    use_cases,
+                    tier,
+                    description,
+                    input_cost_per_token: cost("input_cost_per_token"),
+                    output_cost_per_token: cost("output_cost_per_token"),
+                    benchmarks: Benchmarks {
+                        swe_bench_verified: bench("swe_bench_verified"),
+                        gpqa_diamond: bench("gpqa_diamond"),
+                        aa_intelligence_index: bench("aa_intelligence_index"),
+                    },
+                }),
+            })
+        })
+        .collect()
+}
+
+fn tier_from_str(s: &str) -> Tier {
+    match s.to_ascii_lowercase().as_str() {
+        "flagship" => Tier::Flagship,
+        "fast" => Tier::Fast,
+        "utility" => Tier::Utility,
+        // "workhorse" and anything unrecognised.
+        _ => Tier::Workhorse,
+    }
+}
+
+/// Probe every non-local provider's `GET /v1/model/info` for the merged
+/// live catalog.
+///
+/// This is the Smoo gateway's authoritative model list (use-cases, tier,
+/// cost, benchmarks) that replaces the offline [`fallback_catalog`] in
+/// the picker when present.
+///
+/// Local providers (Ollama, LM Studio) are skipped — they don't serve
+/// `/model/info` and their bare model ids come through
+/// [`fetch_local_provider_models`] instead. Unreachable or non-LiteLLM
+/// providers contribute nothing (parser yields empty), so a direct-BYO
+/// setup with no gateway falls back to the offline catalog cleanly.
+/// Pearl th-7ee88e (SMOODEV-1793).
+pub async fn fetch_gateway_catalog() -> Vec<ModelEntry> {
+    let Some(path) = default_providers_path() else { return Vec::new() };
+    let Ok(registry) = load_providers_with_migration(&path) else {
+        return Vec::new();
+    };
+    let Ok(client) = reqwest::Client::builder().timeout(std::time::Duration::from_secs(3)).build() else {
+        return Vec::new();
+    };
+
+    let mut out: Vec<ModelEntry> = Vec::new();
+    for pid in registry.list_providers() {
+        let Some(cfg) = registry.get_provider(pid) else { continue };
+        if smooth_cast::providers::is_local_url(&cfg.api_url) {
+            continue;
+        }
+        let url = format!("{}/model/info", cfg.api_url.trim_end_matches('/'));
+        let mut req = client.get(&url);
+        if !cfg.api_key.is_empty() {
+            req = req.bearer_auth(&cfg.api_key);
+        }
+        if let Ok(resp) = req.send().await {
+            if resp.status().is_success() {
+                if let Ok(body) = resp.text().await {
+                    for entry in parse_gateway_model_info(pid, &body) {
+                        if !out.iter().any(|e| e.provider == entry.provider && e.model == entry.model) {
+                            out.push(entry);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Fixed display order for the slot list.
 ///
 /// Six canonical activity slots plus the wire-compat `Default` slot
@@ -514,13 +652,22 @@ fn read_slot(registry: &ProviderRegistry, slot: PickerSlot) -> ModelSlot {
 /// other slot we accept models whose `use_cases` intersect the
 /// slot tags.
 pub fn slot_use_cases(slot: PickerSlot) -> &'static [&'static str] {
+    // Each list is a superset: the canonical intent tag (matches the
+    // offline `fallback_catalog`'s editorial tags) plus the adjacent
+    // tags the live gateway `/v1/model/info` actually emits. The live
+    // taxonomy has no `judge`/`summarize`/`guardrails`/`long-context`
+    // tags, so filtering on those alone would empty those slots against
+    // a live catalog — we accept `chat`/`general`/`safety`/`thinking`/
+    // `cheap` too. Over-inclusion is harmless (benchmark sort surfaces
+    // the best rows; Tab shows everything); under-inclusion would hide
+    // the slot's own default model. Pearl th-7ee88e (SMOODEV-1793).
     match slot {
         PickerSlot::Coding => &["coding"],
-        PickerSlot::Reasoning => &["reasoning"],
+        PickerSlot::Reasoning => &["reasoning", "thinking"],
         PickerSlot::Reviewing => &["reviewing", "critique"],
-        PickerSlot::Judge => &["judge", "guardrails"],
-        PickerSlot::Summarize => &["summarize", "long-context"],
-        PickerSlot::Fast => &["fast", "utility"],
+        PickerSlot::Judge => &["judge", "guardrails", "safety", "chat", "general"],
+        PickerSlot::Summarize => &["summarize", "long-context", "general", "chat"],
+        PickerSlot::Fast => &["fast", "utility", "cheap"],
         PickerSlot::Default => &[],
     }
 }
@@ -532,7 +679,7 @@ pub fn slot_use_cases(slot: PickerSlot) -> &'static [&'static str] {
 /// folds in the offline catalog. De-duplicates by (provider,
 /// model) and sorts the result by the slot's relevant benchmark
 /// descending, with un-benchmarked rows after benchmarked ones.
-fn candidate_models_filtered(slots: &[SlotEntry], focused: &SlotEntry, extra: &[ModelEntry], show_all: bool) -> Vec<ModelEntry> {
+fn candidate_models_filtered(slots: &[SlotEntry], focused: &SlotEntry, local: &[ModelEntry], gateway: &[ModelEntry], show_all: bool) -> Vec<ModelEntry> {
     let mut out: Vec<ModelEntry> = Vec::new();
     let push = |entry: ModelEntry, out: &mut Vec<ModelEntry>| {
         if !out.iter().any(|e| e.provider == entry.provider && e.model == entry.model) {
@@ -544,13 +691,43 @@ fn candidate_models_filtered(slots: &[SlotEntry], focused: &SlotEntry, extra: &[
     // startup. `info: None`, so they always pass the use-case filter
     // and sort after benchmarked rows — but they DO show up. Pearl
     // th-f4a0fb.
-    for e in extra {
+    for e in local {
         push(e.clone(), &mut out);
     }
 
+    // Authoritative model catalog. When the live gateway
+    // `/v1/model/info` catalog is present it wins — pushed before the
+    // routed + offline sources so its rich metadata takes the dedup
+    // slot, and models the gateway has removed simply never appear.
+    // Falls back to the offline `fallback_catalog` when no gateway is
+    // configured / reachable. Pearl th-7ee88e (SMOODEV-1793).
+    if gateway.is_empty() {
+        // Offline catalog. Pick the provider from the focused slot so a
+        // freshly-installed gateway user gets `smooai-gateway`-routed
+        // entries and a direct user keeps their own provider id.
+        let provider = focused.current_provider.clone();
+        for (model_name, info) in fallback_catalog() {
+            push(
+                ModelEntry {
+                    provider: provider.clone(),
+                    model: (*model_name).to_string(),
+                    info: Some(info.clone()),
+                },
+                &mut out,
+            );
+        }
+    } else {
+        for e in gateway {
+            push(e.clone(), &mut out);
+        }
+    }
+
     // Currently-routed models always show up — the user might want
-    // to pull `smooth-summarize` into the reviewing slot deliberately,
-    // even when its use_cases don't intersect.
+    // to pull the summarize model into the reviewing slot deliberately,
+    // even when its use_cases don't intersect. Deduped against the
+    // catalog above, so a routed model already in the catalog keeps the
+    // catalog's metadata; only genuinely-unknown routed models are added
+    // here (with offline info if any, else name-only).
     for s in slots {
         let info = catalog_lookup(&s.current_model).cloned();
         push(
@@ -558,22 +735,6 @@ fn candidate_models_filtered(slots: &[SlotEntry], focused: &SlotEntry, extra: &[
                 provider: s.current_provider.clone(),
                 model: s.current_model.clone(),
                 info,
-            },
-            &mut out,
-        );
-    }
-
-    // Offline catalog (eventually replaced by GET /v1/model/info).
-    // Pick the provider from the focused slot so a freshly-installed
-    // gateway user gets `smooai-gateway`-routed entries and a direct
-    // user keeps their own provider id.
-    let provider = focused.current_provider.clone();
-    for (model_name, info) in fallback_catalog() {
-        push(
-            ModelEntry {
-                provider: provider.clone(),
-                model: (*model_name).to_string(),
-                info: Some(info.clone()),
             },
             &mut out,
         );
@@ -940,8 +1101,119 @@ mod tests {
             current_provider: "smooth".to_string(),
             current_model: "deepseek-v4-flash".to_string(),
         }];
-        let models = candidate_models_filtered(&slots, &slots[0], &entries, false);
+        let models = candidate_models_filtered(&slots, &slots[0], &entries, &[], false);
         assert!(models.iter().any(|m| m.provider == "ollama" && m.model == "llama3.3"));
+    }
+
+    /// A captured slice of the live Smoo gateway `GET /v1/model/info`
+    /// payload (llm.smoo.ai, 2026-07), trimmed to the fields the picker
+    /// parses. Guards the parser against the real wire shape — LiteLLM
+    /// nests benchmarks and emits `model_tier`, and only some models
+    /// carry benchmark numbers.
+    const GATEWAY_MODEL_INFO_SAMPLE: &str = r#"{"data":[
+      {"model_name":"deepseek-v4-pro","model_info":{"use_cases":["coding","reasoning","agentic"],"model_tier":"flagship","input_cost_per_token":4.35e-07,"output_cost_per_token":8.7e-07,"benchmarks":{"swe_bench_verified":79.4,"aa_intelligence_index":52}}},
+      {"model_name":"minimax-m2.7-direct","model_info":{"use_cases":["coding","reviewing","agentic"],"model_tier":"workhorse","input_cost_per_token":3e-07,"output_cost_per_token":1.2e-06,"benchmarks":{"swe_bench_verified":78.0}}},
+      {"model_name":"groq-gpt-oss-20b","model_info":{"use_cases":["fast","cheap"],"model_tier":"fast","input_cost_per_token":7.5e-08,"output_cost_per_token":3e-07}},
+      {"model_name":"gemini-2.5-flash","model_info":{"use_cases":["fast","cheap"],"model_tier":"fast","input_cost_per_token":3e-07,"output_cost_per_token":2.5e-06}}
+    ]}"#;
+
+    #[test]
+    fn parse_gateway_model_info_reads_gateway_shape() {
+        let entries = parse_gateway_model_info("smooth", GATEWAY_MODEL_INFO_SAMPLE);
+        assert_eq!(entries.len(), 4);
+        assert!(entries.iter().all(|e| e.provider == "smooth" && e.info.is_some()));
+
+        let pro = entries.iter().find(|e| e.model == "deepseek-v4-pro").expect("pro").info.as_ref().unwrap();
+        assert_eq!(pro.tier, Tier::Flagship);
+        assert!(pro.has_use_case("reasoning"));
+        assert_eq!(pro.benchmarks.swe_bench_verified, Some(79.4));
+        assert_eq!(pro.benchmarks.aa_intelligence_index, Some(52.0));
+        // $/token → $/M conversion the renderer relies on.
+        let (in_m, out_m) = pro.cost_per_million();
+        assert!((in_m - 0.435).abs() < 1e-6 && (out_m - 0.87).abs() < 1e-6);
+
+        // A model with no benchmarks block parses with all-None benchmarks
+        // (not a panic, not a zero).
+        let fast = entries.iter().find(|e| e.model == "groq-gpt-oss-20b").expect("fast").info.as_ref().unwrap();
+        assert_eq!(fast.tier, Tier::Fast);
+        assert_eq!(fast.benchmarks, Benchmarks::default());
+    }
+
+    #[test]
+    fn parse_gateway_model_info_tolerates_garbage() {
+        // Server down mid-write / non-LiteLLM endpoint → empty, never a
+        // panic, so the caller falls back to the offline catalog.
+        assert!(parse_gateway_model_info("smooth", "not json").is_empty());
+        assert!(parse_gateway_model_info("smooth", "{}").is_empty());
+        assert!(parse_gateway_model_info("smooth", r#"{"data":[]}"#).is_empty());
+        // Row missing model_name is skipped, not fatal.
+        assert!(parse_gateway_model_info("smooth", r#"{"data":[{"model_info":{}}]}"#).is_empty());
+        // Unknown tier string falls back to Workhorse rather than erroring.
+        let e = parse_gateway_model_info("smooth", r#"{"data":[{"model_name":"x","model_info":{"model_tier":"bogus"}}]}"#);
+        assert_eq!(e[0].info.as_ref().unwrap().tier, Tier::Workhorse);
+    }
+
+    #[test]
+    fn gateway_catalog_replaces_offline_when_present() {
+        // Coding slot routed at the coding default.
+        let slots = vec![SlotEntry {
+            slot: PickerSlot::Coding,
+            label: "Coding",
+            description: "",
+            current_provider: "smooth".to_string(),
+            current_model: "deepseek-v4-flash".to_string(),
+        }];
+        // Live gateway offers ONLY deepseek-v4-flash (coding), with a
+        // distinctive benchmark so we can prove its metadata wins.
+        let gateway = vec![ModelEntry {
+            provider: "smooth".to_string(),
+            model: "deepseek-v4-flash".to_string(),
+            info: Some(ModelInfo {
+                use_cases: svec(&["coding"]),
+                tier: Tier::Workhorse,
+                description: String::new(),
+                input_cost_per_token: 0.0,
+                output_cost_per_token: 0.0,
+                benchmarks: Benchmarks {
+                    swe_bench_verified: Some(99.9),
+                    ..Default::default()
+                },
+            }),
+        }];
+        let models = candidate_models_filtered(&slots, &slots[0], &[], &gateway, false);
+
+        // Gateway metadata takes the dedup slot (99.9, not the offline
+        // catalog's real score).
+        let ds = models.iter().find(|m| m.model == "deepseek-v4-flash").expect("gateway model present");
+        assert_eq!(ds.info.as_ref().unwrap().benchmarks.swe_bench_verified, Some(99.9));
+
+        // A coding model that lives only in the OFFLINE catalog must NOT
+        // appear when the live gateway catalog is authoritative — the
+        // gateway may have removed it.
+        assert!(
+            !models.iter().any(|m| m.model == "kimi-k2.6-direct"),
+            "offline-only model leaked into a gateway-backed picker: {:?}",
+            models.iter().map(|m| &m.model).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn slot_use_cases_accept_live_gateway_tags() {
+        // The live gateway taxonomy has no judge/summarize tags; the slot
+        // filters must still admit the models those slots default to
+        // (their real live use_cases), or the slot's own default vanishes
+        // from its Models view. Guards the SMOODEV-1793 broadening.
+        let judge = parse_gateway_model_info(
+            "smooth",
+            r#"{"data":[{"model_name":"groq-gpt-oss-120b","model_info":{"use_cases":["chat","general"]}}]}"#,
+        );
+        let ji = judge[0].info.as_ref().unwrap();
+        assert!(slot_use_cases(PickerSlot::Judge).iter().any(|t| ji.has_use_case(t)));
+
+        let fast_tags = slot_use_cases(PickerSlot::Fast);
+        assert!(fast_tags.contains(&"cheap"), "fast slot must accept the live 'cheap' tag");
+        let reasoning_tags = slot_use_cases(PickerSlot::Reasoning);
+        assert!(reasoning_tags.contains(&"thinking"), "reasoning slot must accept the live 'thinking' tag");
     }
 
     /// Regression for pearl th-03b02e: the model-picker sorts rows by
@@ -1171,7 +1443,7 @@ mod tests {
     fn coding_slot_filters_by_coding_use_case() {
         let slots = synthetic_slot_entries();
         let focused = slots[0].clone();
-        let models = candidate_models_filtered(&slots, &focused, &[], false);
+        let models = candidate_models_filtered(&slots, &focused, &[], &[], false);
         assert!(!models.is_empty());
         // Every visible row either has no info (currently-routed pass-through)
         // or has the "coding" tag.
@@ -1191,7 +1463,7 @@ mod tests {
     fn coding_slot_sorts_by_swe_bench_desc() {
         let slots = synthetic_slot_entries();
         let focused = slots[0].clone();
-        let models = candidate_models_filtered(&slots, &focused, &[], false);
+        let models = candidate_models_filtered(&slots, &focused, &[], &[], false);
         // First two benchmarked coding models should be deepseek-v4-pro
         // (80.6) then kimi-k2.6-direct (80.2) then deepseek-v4-flash (79.0).
         let bench_models: Vec<_> = models
@@ -1211,7 +1483,7 @@ mod tests {
             current_provider: "smooai-gateway".into(),
             current_model: "deepseek-v4-pro".into(),
         }];
-        let models = candidate_models_filtered(&slots, &slots[0], &[], false);
+        let models = candidate_models_filtered(&slots, &slots[0], &[], &[], false);
         for m in &models {
             if let Some(info) = &m.info {
                 assert!(info.has_use_case("reasoning"), "{} missing reasoning tag", m.model);
@@ -1230,7 +1502,7 @@ mod tests {
             current_provider: "smooai-gateway".into(),
             current_model: "minimax-m2.7-direct".into(),
         }];
-        let models = candidate_models_filtered(&slots, &slots[0], &[], false);
+        let models = candidate_models_filtered(&slots, &slots[0], &[], &[], false);
         for m in &models {
             if let Some(info) = &m.info {
                 assert!(
@@ -1253,7 +1525,7 @@ mod tests {
             current_provider: "smooai-gateway".into(),
             current_model: "gemini-2.5-flash".into(),
         }];
-        let models = candidate_models_filtered(&slots, &slots[0], &[], false);
+        let models = candidate_models_filtered(&slots, &slots[0], &[], &[], false);
         for m in &models {
             if let Some(info) = &m.info {
                 assert!(
@@ -1276,7 +1548,7 @@ mod tests {
             current_provider: "smooai-gateway".into(),
             current_model: "gemini-2.5-flash".into(),
         }];
-        let models = candidate_models_filtered(&slots, &slots[0], &[], false);
+        let models = candidate_models_filtered(&slots, &slots[0], &[], &[], false);
         for m in &models {
             if let Some(info) = &m.info {
                 assert!(
@@ -1299,7 +1571,7 @@ mod tests {
             current_provider: "smooai-gateway".into(),
             current_model: "gemini-2.5-flash-lite".into(),
         }];
-        let models = candidate_models_filtered(&slots, &slots[0], &[], false);
+        let models = candidate_models_filtered(&slots, &slots[0], &[], &[], false);
         for m in &models {
             if let Some(info) = &m.info {
                 assert!(
@@ -1323,7 +1595,7 @@ mod tests {
             current_provider: "smooai-gateway".into(),
             current_model: "deepseek-v4-flash".into(),
         }];
-        let models = candidate_models_filtered(&slots, &slots[0], &[], false);
+        let models = candidate_models_filtered(&slots, &slots[0], &[], &[], false);
         // Default = no filter. Should match the catalog size minus any
         // dedup'd slot entry (the only slot entry already lives in the
         // catalog so the total equals catalog size).
