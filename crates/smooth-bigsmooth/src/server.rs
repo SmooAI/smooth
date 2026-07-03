@@ -1018,6 +1018,12 @@ fn find_native_operative_binary() -> Option<std::path::PathBuf> {
             return Some(p);
         }
     }
+    // Pearl th-e74aa6: builds redirected via CARGO_TARGET_DIR (shared or
+    // isolated target dirs) never land in <repo>/target — the walk-up below
+    // misses them even though the binary exists. Probe the redirect first.
+    if let Some(p) = cargo_target_dir_native_operative(std::env::var("CARGO_TARGET_DIR").ok().as_deref()) {
+        return Some(p);
+    }
     let check = |base: &std::path::Path| -> Option<std::path::PathBuf> {
         for profile in ["release", "debug"] {
             let candidate = base.join("target").join(profile).join("smooth-operative");
@@ -1069,6 +1075,17 @@ fn cargo_bin_native_operative(cargo_install_root: Option<&str>, cargo_home: Opti
     };
     let candidate = bin_dir.join("smooth-operative");
     candidate.is_file().then_some(candidate)
+}
+
+/// Pure helper for the `CARGO_TARGET_DIR` probe — the env var points at
+/// the target dir itself (profiles directly under it). Split out for
+/// testing without touching process env. Pearl th-e74aa6.
+fn cargo_target_dir_native_operative(cargo_target_dir: Option<&str>) -> Option<std::path::PathBuf> {
+    let target = std::path::Path::new(cargo_target_dir?);
+    ["release", "debug"]
+        .iter()
+        .map(|p| target.join(p).join("smooth-operative"))
+        .find(|c| c.is_file())
 }
 
 /// Build a human-readable resumption context block from prior session
@@ -1196,7 +1213,7 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
     let runner_bin = match find_native_operative_binary() {
         Some(p) => p,
         None => {
-            let err = "native smooth-operative not found. Run `cargo build -p smooai-smooth-operative` (debug) or `--release`, or set SMOOTH_OPERATIVE_NATIVE=/absolute/path.";
+            let err = "native smooth-operative not found. Run `pnpm install:th` (installs to ~/.cargo/bin) or `cargo build -p smooai-smooth-operative`, or set SMOOTH_OPERATIVE_NATIVE=/absolute/path. Checked: $SMOOTH_OPERATIVE_NATIVE, $CARGO_TARGET_DIR/{release,debug}, <workspace>/target/{release,debug}, ~/.cargo/bin.";
             let _ = event_tx.send(ServerEvent::TaskError {
                 task_id: task_id.clone(),
                 message: err.into(),
@@ -3825,6 +3842,28 @@ mod tests {
     #[test]
     fn cargo_bin_native_operative_none_when_all_inputs_none_th_92dac3() {
         assert_eq!(cargo_bin_native_operative(None, None, None), None);
+    }
+
+    #[test]
+    fn cargo_target_dir_probe_finds_redirected_build_th_e74aa6() {
+        // Pearl th-e74aa6: CARGO_TARGET_DIR points at the target dir
+        // itself — release preferred over debug, None when unset/missing.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for profile in ["release", "debug"] {
+            let dir = tmp.path().join(profile);
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(dir.join("smooth-operative"), b"x").unwrap();
+        }
+        let found = cargo_target_dir_native_operative(tmp.path().to_str());
+        assert_eq!(found.as_deref(), Some(tmp.path().join("release").join("smooth-operative").as_path()));
+
+        std::fs::remove_file(tmp.path().join("release").join("smooth-operative")).unwrap();
+        let found = cargo_target_dir_native_operative(tmp.path().to_str());
+        assert_eq!(found.as_deref(), Some(tmp.path().join("debug").join("smooth-operative").as_path()));
+
+        assert_eq!(cargo_target_dir_native_operative(None), None);
+        let empty = tempfile::tempdir().expect("tempdir");
+        assert_eq!(cargo_target_dir_native_operative(empty.path().to_str()), None);
     }
 
     #[test]
