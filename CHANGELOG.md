@@ -1,5 +1,35 @@
 # @smooai/smooth
 
+## 0.17.0
+
+### Minor Changes
+
+- f9c8086: Drive the `th code` `/model` picker from the gateway's live `GET /v1/model/info`
+  (pearl th-7ee88e, SMOODEV-1793) — the last piece of the migration off the
+  gateway's removed `smooth-*` slot aliases.
+
+  The picker previously sourced its catalog (use-cases, tier, $/M cost,
+  benchmarks) from a baked offline table. It now fetches the gateway's live
+  `/v1/model/info` at startup (`fetch_gateway_catalog` +
+  `parse_gateway_model_info` in `smooth-code/src/model_picker.rs`) and treats it
+  as authoritative: models the gateway has removed drop out, new ones appear, and
+  metadata comes from the gateway without a Smooth release. Falls back to the
+  offline catalog when no gateway is reachable, and folds in local providers'
+  live models either way.
+
+  `slot_use_cases` is broadened to the gateway's real use-case taxonomy (which has
+  no `judge`/`summarize`/`guardrails` tags) so the Judge/Summarize/Fast slots
+  still admit the models they default to rather than filtering to empty against a
+  live catalog.
+
+  The concrete-model routing, `providers.json` migration shim, and defaults table
+  already landed under this pearl; this completes the info-driven picker. Docs:
+  Using-th-CLI "Routing slots & the model catalog".
+
+### Patch Changes
+
+- da23bd6: smooth-operative: cap the injected project-context and workspace-memory system-prompt blocks at 16 KB each. The engine already discovers and injects project context files (`~/.smooth/CONTEXT.md`/`AGENTS.md`/`CLAUDE.md`, then `<repo>/.smooth/CONTEXT.md` → `SMOOTH.md` → `AGENTS.md` → `CLAUDE.md`) plus `.smooth/MEMORY.md`, but the consumer injected those unbounded — a giant AGENTS.md/README could crowd out the context window. Each block is now truncated on a UTF-8 char boundary with a `[... truncated ...]` marker (pearl th-5002c4). Documented in `docs/Operations/Running-Locally.md`.
+
 ## 0.16.0
 
 ### Minor Changes
