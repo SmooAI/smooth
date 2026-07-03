@@ -687,6 +687,25 @@ th providers remove lmstudio
   stays the keyed path for the cloud presets (Anthropic, OpenRouter,
   Smoo AI gateway, …).
 
+### Routing slots & the model catalog
+
+`~/.smooth/providers.json` routes seven slots (`coding`, `reasoning`,
+`reviewing`, `judge`, `summarize`, `fast`, `default`) to concrete
+`model_name`s. The old gateway `smooth-*` slot aliases (`smooth-coding`,
+`smooth-fast-gemini`, …) were **removed at the gateway** (SMOODEV-1793) —
+any request for one now 400s. Old config files are migrated in place on
+load: every `smooth-*` alias (and the since-removed `groq-llama-*`
+concretes) is rewritten to its concrete default and saved back, so
+existing installs keep working with no manual edit. The canonical
+mapping lives in `smooth_policy::smooth_alias`.
+
+The `th code` `/model` picker sources its catalog — use-cases, tier,
+$/M cost, benchmarks — from the gateway's live `GET /v1/model/info`
+when a gateway provider is configured, so removed models drop out and
+new ones appear without a Smooth release. It falls back to a baked
+offline catalog when no gateway is reachable, and folds in local
+providers' live models either way (Tab for "show all").
+
 ---
 
 ## 6. Extending `th` — add it when it's missing
