@@ -500,6 +500,23 @@ For agents collaborating across **different clones/machines** of the same repo, 
 
 `th pearls init` injects an **Agent Messaging** section into the repo's `AGENTS.md` (idempotent, between `<!-- th:agent-messaging:* -->` markers) so any harness that reads `AGENTS.md` learns to register + poll without bespoke wiring. Set `$SMOOTH_HARNESS` so `th agent list` shows what tool each agent is. Read/unread is tracked per message via `read_at`; `to = all` broadcasts share read-state (MVP simplification).
 
+### SEP extensions — `th ext` (SEP Phase 3, pearl th-f288ae)
+
+SEP (the Smooth Extension Protocol) extensions are long-lived subprocesses that speak JSON-RPC over stdio to a Smooth host, contributing tools, hooks, event subscriptions, and UI. `th ext` manages the ones installed on this machine; the engine (`smooai-smooth-operator-core`) discovers and loads them, and the frontend renders their `ui/request`s.
+
+```bash
+th ext install ./path [--project] [--trust]   # copy an extension dir (with extension.toml) into
+                                              #   ~/.smooth/extensions (or <repo>/.smooth/extensions),
+                                              #   show its declared capabilities, and prompt to trust it
+th ext list                                    # installed extensions (global + project) with trust state
+th ext trust <name> [--project]               # trust an installed extension (records its content hash)
+th ext remove <name> [--project]              # delete the extension and its trust record
+```
+
+**Trust is content-hashed and fail-safe.** An extension only loads when it's recorded `trusted` in `~/.smooth/extensions/trust.toml` **and** its `extension.toml` still hashes to the value trust was granted against — editing an extension re-locks it until you `th ext trust` again. A non-interactive install (piped/CI) never trusts silently; use `--trust` to opt in explicitly or run `th ext trust <name>` after. Project-scoped extensions live under `<repo>/.smooth/extensions` and win over a same-named global one.
+
+> **Where extensions run today.** The engine `Agent` runs in `smooth-operative` (dispatched server-side); a full ratatui frontend declares it can render all seven `ui/request` kinds (`smooth_code::sep_host::TUI_UI_CAPABILITIES`) and supplies the `TuiUiProvider` delegate. Live interactive `ui/request` relay from a dispatched operative to the TUI lands with the daemon event surface (SEP Phase 6); `th ext` + the trust store + the render-block/host substrate are in place now.
+
 ### Jira sync
 
 ```bash

@@ -182,7 +182,13 @@ prost-types = "0.13"
 # discovery, and the fixer/oracle/chief/intent_classifier cast roles) now live
 # in the smooth-owned `smooth-cast` crate below, built on the engine's generic
 # public API.
-smooth-operator = { version = "0.14.0", package = "smooai-smooth-operator-core" }
+#
+# SEP Phase 3 (th-f288ae): the SEP extension module (host/process/protocol +
+# ui_capabilities handshake, Phases 0–3) lives on core `main` but is NOT yet in a
+# crates.io release (the release train only bumped the TS package). Pin the git
+# rev that carries it until a version bump publishes extensions; then flip back to
+# a `version = "…"` release. Matches the SMOODEV-1787 git-rev precedent.
+smooth-operator = { git = "https://github.com/SmooAI/smooth-operator-core.git", rev = "2c3008beb76e06cf4708608317bdc4e750749def", package = "smooai-smooth-operator-core" }
 # smooth-owned coding-harness extensions to the generic engine (re-homed from
 # the engine when it went generic at 0.14.0). See crates/smooth-cast.
 smooth-cast = { version = "0.15.7", path = "crates/smooth-cast", package = "smooai-smooth-cast" }
