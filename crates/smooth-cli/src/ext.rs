@@ -622,9 +622,10 @@ fn reload(name: &str, project: bool, auto_trust: bool) -> Result<()> {
     );
     print_capabilities(&manifest.capabilities);
 
+    let mut trusted_now = record.as_ref().is_some_and(|r| r.trusted);
     if !changed {
         // Manifest unchanged since it was trusted → nothing to re-confirm.
-        let state = if record.as_ref().is_some_and(|r| r.trusted) {
+        let state = if trusted_now {
             format!("{} still trusted", "✓".green().bold())
         } else {
             format!("{} still untrusted — run `th ext trust {name}`", "⚠".yellow())
@@ -634,21 +635,53 @@ fn reload(name: &str, project: bool, auto_trust: bool) -> Result<()> {
         // The manifest changed (or was never trusted) — fail-safe requires a
         // fresh trust decision before it will load.
         let source = record.map_or_else(|| dir.to_string_lossy().into_owned(), |r| r.source);
-        let trusted = auto_trust || prompt_trust(name)?;
-        store.set(name, &source, &hash, trusted);
+        trusted_now = auto_trust || prompt_trust(name)?;
+        store.set(name, &source, &hash, trusted_now);
         store.save()?;
-        if trusted {
+        if trusted_now {
             println!("  {} Manifest changed — re-trusted.", "✓".green().bold());
         } else {
             println!("  {} Manifest changed — left untrusted; it will NOT load.", "⚠".yellow());
         }
     }
-    println!(
-        "  {} Takes effect on the next {} session (in-session live reload lands with the daemon relay).\n",
-        "ℹ".cyan(),
-        "th code".cyan()
-    );
+
+    // Live-reload the running Big Smooth daemon's chat-loop host (pearl
+    // th-6d8606). Best-effort: daemon down or the extension not loaded there
+    // falls back to the next-session message.
+    if trusted_now && daemon_reload(name) {
+        println!("  {} Hot-reloaded in the running Big Smooth daemon.\n", "✓".green().bold());
+    } else {
+        println!("  {} Takes effect on the next {} session / daemon start.\n", "ℹ".cyan(), "th code".cyan());
+    }
     Ok(())
+}
+
+/// POST `/api/ext/reload` on the local Big Smooth daemon so a live chat-loop
+/// host respawns the extension immediately. Returns `false` on any failure
+/// (daemon down, extension not loaded there) — reload is best-effort and the
+/// caller prints the next-session fallback. Same scoped-thread
+/// `reqwest::blocking` pattern as [`npm_search`].
+fn daemon_reload(name: &str) -> bool {
+    let url = format!(
+        "{}/api/ext/reload",
+        std::env::var("SMOOTH_BIGSMOOTH_URL").unwrap_or_else(|_| "http://127.0.0.1:4400".into())
+    );
+    let name = name.to_string();
+    std::thread::scope(|s| {
+        s.spawn(move || {
+            let Ok(client) = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(5)).build() else {
+                return false;
+            };
+            client
+                .post(&url)
+                .json(&serde_json::json!({ "name": name }))
+                .send()
+                .map(|r| r.status().is_success())
+                .unwrap_or(false)
+        })
+        .join()
+    })
+    .unwrap_or(false)
 }
 
 fn remove(name: &str, project: bool) -> Result<()> {
