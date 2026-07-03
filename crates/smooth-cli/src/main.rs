@@ -429,6 +429,69 @@ enum Commands {
         #[command(subcommand)]
         cmd: CastCommands,
     },
+    /// Bring-your-own LLM providers — add an OpenAI-compatible server
+    /// (Ollama, LM Studio, llama.cpp, …) by URL, list what's
+    /// configured, remove one, or auto-detect a local server.
+    ///
+    /// Edits `~/.smooth/providers.json` field-preservingly: the typed
+    /// loader drops any key it doesn't know (including per-provider
+    /// `max_tokens`), so every write here goes through raw JSON to keep
+    /// those intact. `th model login` remains the preset-keyed path for
+    /// the cloud providers (Anthropic, OpenRouter, Smoo AI gateway, …).
+    Providers {
+        #[command(subcommand)]
+        cmd: ProvidersCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProvidersCommands {
+    /// Add or update a provider by base URL. Re-running with the same
+    /// id merges (only the flags you pass change; everything else on
+    /// the entry is preserved). Adding the first provider to an empty
+    /// file wires every routing slot to it.
+    Add {
+        /// Provider id (e.g. `ollama`, `lmstudio`, `mylocal`).
+        id: String,
+        /// OpenAI-compatible base URL, usually ending in `/v1`
+        /// (e.g. `http://localhost:11434/v1`).
+        #[arg(long)]
+        url: String,
+        /// API key. Local servers (Ollama, LM Studio) need none.
+        #[arg(long)]
+        api_key: Option<String>,
+        /// Wire format: `openai` (default) or `anthropic`.
+        #[arg(long)]
+        format: Option<String>,
+        /// Default model id for this provider (e.g. `llama3.3`).
+        #[arg(long)]
+        model: Option<String>,
+        /// Per-provider output-token cap. Small local-model context
+        /// windows are blown by the default 32768 — set this to fit.
+        #[arg(long)]
+        max_tokens: Option<u32>,
+    },
+    /// List configured providers with a local tag and any per-provider
+    /// max_tokens.
+    List {
+        /// Emit JSON instead of the colorized list.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a provider by id.
+    Remove { id: String },
+    /// Probe common local inference ports (Ollama 11434, LM Studio
+    /// 1234) via `GET /v1/models` and report what responds. Pass
+    /// `--yes` to add every detected server automatically.
+    Detect {
+        /// Add detected servers to providers.json (default model = the
+        /// first model each server reports).
+        #[arg(long)]
+        yes: bool,
+        /// Emit JSON instead of the colorized report.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1377,6 +1440,7 @@ async fn main() -> Result<()> {
         Some(Commands::Bench { cmd }) => cmd_bench(cmd),
         Some(Commands::Skills { cmd }) => cmd_skills(cmd),
         Some(Commands::Cast { cmd }) => cmd_cast(cmd).await,
+        Some(Commands::Providers { cmd }) => cmd_providers(cmd).await,
         Some(Commands::Prime) => cmd_prime(),
         Some(_) => {
             println!("Command not yet implemented. Coming soon!");
@@ -5938,6 +6002,195 @@ async fn cmd_routing(cmd: RoutingCommands) -> Result<()> {
     Ok(())
 }
 
+// ── `th providers` — bring-your-own LLM providers ──────────────────
+
+/// Local inference servers probed by `th providers detect`. OpenAI-
+/// compatible `/v1` in every case: Ollama on 11434, LM Studio on 1234.
+const LOCAL_PROBE_TARGETS: &[(&str, &str)] = &[("ollama", "http://localhost:11434/v1"), ("lmstudio", "http://localhost:1234/v1")];
+
+fn providers_json_path() -> Result<std::path::PathBuf> {
+    dirs_next::home_dir()
+        .map(|h| h.join(".smooth/providers.json"))
+        .context("cannot determine home directory")
+}
+
+async fn cmd_providers(cmd: ProvidersCommands) -> Result<()> {
+    match cmd {
+        ProvidersCommands::Add {
+            id,
+            url,
+            api_key,
+            format,
+            model,
+            max_tokens,
+        } => cmd_providers_add(&id, &url, api_key, format, model, max_tokens),
+        ProvidersCommands::List { json } => cmd_providers_list(json),
+        ProvidersCommands::Remove { id } => cmd_providers_remove(&id),
+        ProvidersCommands::Detect { yes, json } => {
+            // `reqwest::blocking` panics if dropped in a runtime context.
+            tokio::task::spawn_blocking(move || cmd_providers_detect(yes, json))
+                .await
+                .context("providers detect task panicked")?
+        }
+    }
+}
+
+fn cmd_providers_add(id: &str, url: &str, api_key: Option<String>, format: Option<String>, model: Option<String>, max_tokens: Option<u32>) -> Result<()> {
+    let path = providers_json_path()?;
+    let mut root = smooth_cast::providers::load_value(&path)?;
+    let updated = smooth_cast::providers::upsert_provider(
+        &mut root,
+        &smooth_cast::providers::NewProvider {
+            id: id.to_string(),
+            api_url: url.to_string(),
+            api_key,
+            api_format: format,
+            default_model: model,
+            max_tokens,
+        },
+    );
+    smooth_cast::providers::save_value(&path, &root)?;
+    let verb = if updated { "updated" } else { "added" };
+    println!("  {} provider {} {}", verb.green().bold(), id.bold(), url.dimmed());
+    Ok(())
+}
+
+fn cmd_providers_list(json: bool) -> Result<()> {
+    let path = providers_json_path()?;
+    let root = smooth_cast::providers::load_value(&path)?;
+    let providers = smooth_cast::providers::list_providers(&root);
+
+    if json {
+        let arr: Vec<_> = providers
+            .iter()
+            .map(|p| serde_json::json!({ "id": p.id, "api_url": p.api_url, "default_model": p.default_model, "max_tokens": p.max_tokens, "local": p.local }))
+            .collect();
+        println!("{}", serde_json::to_string(&serde_json::json!({ "providers": arr }))?);
+        return Ok(());
+    }
+
+    println!();
+    println!("  {} {}", gradient::smooth(), "providers".bold());
+    println!();
+    if providers.is_empty() {
+        println!("  {} \u{2014} add one with {}", "no providers configured".yellow(), "th providers add".cyan());
+    } else {
+        for p in &providers {
+            let tag = if p.local { format!(" {}", "[local]".cyan()) } else { String::new() };
+            let mt = p.max_tokens.map(|m| format!("  max_tokens={m}")).unwrap_or_default();
+            println!("  {}{}  {}{}", p.id.bold(), tag, p.api_url.dimmed(), mt.dimmed());
+            if !p.default_model.is_empty() {
+                println!("      {} {}", "default_model".dimmed(), p.default_model);
+            }
+        }
+    }
+    println!();
+    Ok(())
+}
+
+fn cmd_providers_remove(id: &str) -> Result<()> {
+    let path = providers_json_path()?;
+    let mut root = smooth_cast::providers::load_value(&path)?;
+    if smooth_cast::providers::remove_provider(&mut root, id) {
+        smooth_cast::providers::save_value(&path, &root)?;
+        println!("  {} provider {}", "removed".green().bold(), id.bold());
+    } else {
+        println!("  {} no provider with id {}", "!".yellow().bold(), id.bold());
+    }
+    Ok(())
+}
+
+/// A local server that answered the `/v1/models` probe.
+struct DetectedServer {
+    id: String,
+    api_url: String,
+    models: Vec<String>,
+}
+
+/// Probe [`LOCAL_PROBE_TARGETS`] and return the ones that answer with a
+/// parseable model list. A refused connection returns immediately; a
+/// live-but-slow server is bounded by the 2s client timeout.
+fn probe_local_servers() -> Vec<DetectedServer> {
+    let Ok(client) = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(2)).build() else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for (id, url) in LOCAL_PROBE_TARGETS {
+        let models_url = models_url_for(url);
+        if let Ok(resp) = client.get(&models_url).send() {
+            if resp.status().is_success() {
+                let body = resp.text().unwrap_or_default();
+                let (strict, lossy) = parse_models_response(&body);
+                let models = if strict.is_empty() { lossy } else { strict };
+                found.push(DetectedServer {
+                    id: (*id).to_string(),
+                    api_url: (*url).to_string(),
+                    models,
+                });
+            }
+        }
+    }
+    found
+}
+
+fn cmd_providers_detect(yes: bool, json: bool) -> Result<()> {
+    let found = probe_local_servers();
+
+    if json {
+        let arr: Vec<_> = found
+            .iter()
+            .map(|s| serde_json::json!({ "id": s.id, "api_url": s.api_url, "models": s.models }))
+            .collect();
+        println!("{}", serde_json::to_string(&serde_json::json!({ "detected": arr }))?);
+    } else {
+        println!();
+        println!("  {} {}", gradient::smooth(), "providers \u{00b7} detect".bold());
+        println!();
+        if found.is_empty() {
+            println!("  {}", "no local inference server found on :11434 (Ollama) or :1234 (LM Studio)".yellow());
+            println!("  {}", "start one, or add a custom server with `th providers add`".dimmed());
+            println!();
+            return Ok(());
+        }
+        for s in &found {
+            println!("  {} {}  {} models", s.id.bold(), s.api_url.dimmed(), s.models.len().to_string().cyan());
+        }
+        println!();
+    }
+
+    if yes {
+        let path = providers_json_path()?;
+        let mut root = smooth_cast::providers::load_value(&path)?;
+        for s in &found {
+            smooth_cast::providers::upsert_provider(
+                &mut root,
+                &smooth_cast::providers::NewProvider {
+                    id: s.id.clone(),
+                    api_url: s.api_url.clone(),
+                    api_key: None,
+                    api_format: None,
+                    default_model: s.models.first().cloned(),
+                    max_tokens: None,
+                },
+            );
+        }
+        if !found.is_empty() {
+            smooth_cast::providers::save_value(&path, &root)?;
+            if !json {
+                for s in &found {
+                    println!("  {} {} {}", "added".green().bold(), s.id.bold(), s.api_url.dimmed());
+                }
+                println!();
+            }
+        }
+    } else if !json && !found.is_empty() {
+        println!("  {} `th providers detect --yes` to add {}", "\u{2192}".dimmed(), "all of the above".dimmed());
+        println!();
+    }
+
+    Ok(())
+}
+
 // ── `th cast` — inspect the LLM cast ───────────────────────────────
 
 /// `th cast models` — list live model groups from the configured
@@ -6129,12 +6382,24 @@ fn cmd_cast_models(provider_override: Option<&str>, json_out: bool, filter: Opti
     let chosen = if strict_ids.is_empty() { lossy_ids.clone() } else { strict_ids.clone() };
     let chosen = filter_and_sort(chosen, filter);
 
+    // Fold in live models from any *other* configured local provider
+    // (Ollama, LM Studio, …), unless the user pinned a specific
+    // `--provider`. Unreachable servers are skipped silently. Pearl
+    // th-f4a0fb.
+    let local_extra = if provider_override.is_none() {
+        probe_configured_local_providers(&registry, &provider_id, filter)
+    } else {
+        Vec::new()
+    };
+
     if json_out {
-        // Stable shape: `{"data": [{"id": "..."}]}`.
-        let payload = serde_json::json!({
-            "data": chosen.iter().map(|id| serde_json::json!({ "id": id })).collect::<Vec<_>>(),
-        });
-        println!("{}", serde_json::to_string(&payload)?);
+        // Stable shape: `{"data": [{"id": "..."}]}` — primary provider
+        // first, then each local provider's live models.
+        let mut data: Vec<_> = chosen.iter().map(|id| serde_json::json!({ "id": id })).collect();
+        for (_pid, models) in &local_extra {
+            data.extend(models.iter().map(|id| serde_json::json!({ "id": id })));
+        }
+        println!("{}", serde_json::to_string(&serde_json::json!({ "data": data }))?);
         return Ok(());
     }
 
@@ -6172,9 +6437,62 @@ fn cmd_cast_models(provider_override: Option<&str>, json_out: bool, filter: Opti
             lossy_ids.len()
         );
     }
+
+    // Local providers, each under its own labeled section.
+    for (pid, models) in &local_extra {
+        println!();
+        println!("  {} {}", "local".cyan().bold(), pid.bold());
+        if models.is_empty() {
+            println!("  {}", "no models returned".yellow());
+        } else {
+            for id in models {
+                println!("  {id}");
+            }
+        }
+        println!("  {} models", models.len().to_string().cyan().bold());
+    }
     println!();
 
     Ok(())
+}
+
+/// GET `/v1/models` for every *configured* local provider except
+/// `skip_id`, tolerating unreachable servers (2s timeout, errors and
+/// non-2xx skipped). Returns `(provider_id, sorted+filtered ids)` for
+/// each that answered. Folds local models into `th cast models`. Pearl
+/// th-f4a0fb.
+fn probe_configured_local_providers(
+    registry: &smooth_operator::providers::ProviderRegistry,
+    skip_id: &str,
+    filter: Option<&str>,
+) -> Vec<(String, Vec<String>)> {
+    let Ok(client) = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(2)).build() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for pid in registry.list_providers() {
+        if pid == skip_id {
+            continue;
+        }
+        let Some(config) = registry.get_provider(pid) else { continue };
+        if !smooth_cast::providers::is_local_url(&config.api_url) {
+            continue;
+        }
+        let url = models_url_for(&config.api_url);
+        let mut req = client.get(&url);
+        if !config.api_key.is_empty() {
+            req = req.bearer_auth(&config.api_key);
+        }
+        if let Ok(resp) = req.send() {
+            if resp.status().is_success() {
+                let body = resp.text().unwrap_or_default();
+                let (strict, lossy) = parse_models_response(&body);
+                let ids = if strict.is_empty() { lossy } else { strict };
+                out.push((pid.to_string(), filter_and_sort(ids, filter)));
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -6310,6 +6628,20 @@ mod cast_models_tests {
         assert_eq!(out, r#"{"data":[{"id":"smooth-coding"},{"id":"smooth-judge"}]}"#);
 
         handle.join().expect("server thread");
+    }
+
+    #[test]
+    fn detect_parses_ollama_models_body() {
+        // `th providers detect` feeds the local server's /v1/models
+        // response through `parse_models_response`; the first id becomes
+        // the added provider's default_model. Guard that path on the
+        // exact shape Ollama returns.
+        let body = r#"{"object":"list","data":[{"id":"llama3.3","object":"model"},{"id":"qwen2.5-coder:7b","object":"model"}]}"#;
+        let (strict, lossy) = parse_models_response(body);
+        assert_eq!(strict, vec!["llama3.3".to_string(), "qwen2.5-coder:7b".to_string()]);
+        // `--yes` picks the first reported model as the default.
+        let chosen = if strict.is_empty() { lossy } else { strict };
+        assert_eq!(chosen.first().map(String::as_str), Some("llama3.3"));
     }
 }
 

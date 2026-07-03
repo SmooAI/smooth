@@ -603,7 +603,8 @@ th service install / start / stop / status         # run smooth as a background 
 ### LLM cast
 
 ```bash
-th cast models                                     # list groups exposed by configured provider via GET /v1/models
+th cast models                                     # list groups from the configured provider via GET /v1/models
+                                                   # (also folds in any configured local provider's live models)
 ```
 
 ### Skills — reusable recipes (Claude-Code parity)
@@ -644,6 +645,47 @@ that hint when to reach for it), `scope` (`sandbox` default / `host`),
 `allowed_hosts`, `allowed_tools`. `allowed_tools` / `allowed_hosts` are
 currently surfaced to the model as advisory constraints; hard enforcement lands
 with the auto-mode permission model (pearl th-515a13).
+
+### Bring-your-own local models (Ollama, LM Studio, …)
+
+`th providers` adds an OpenAI-compatible inference server to
+`~/.smooth/providers.json` and points routing slots at it. Any local
+server that speaks `GET /v1/models` + `POST /v1/chat/completions` works
+(Ollama, LM Studio, llama.cpp, vLLM, …).
+
+**Ollama in three lines:**
+
+```bash
+ollama serve &                                     # starts the API on :11434
+ollama pull llama3.3                               # or any model you like
+th providers detect --yes                          # finds :11434, adds it, picks a default model
+```
+
+`th providers detect` (no `--yes`) just probes the common local ports
+(Ollama `11434`, LM Studio `1234`) and reports what answered. Add a
+server by hand — or a custom port — with:
+
+```bash
+th providers add ollama   --url http://localhost:11434/v1 --model llama3.3
+th providers add lmstudio --url http://localhost:1234/v1  --model my-model  --max-tokens 8192
+th providers list                                  # [local] tag + per-provider max_tokens
+th providers remove lmstudio
+```
+
+- `--max-tokens` caps the output-token request for that provider. Small
+  local context windows are blown by the default 32768 — set it to fit
+  the model. It's plumbed through Big Smooth into the operative on
+  dispatch (no cap = the 32768 default).
+- Writes are field-preserving: re-running `add` with the same id merges
+  (only the flags you pass change), and unknown keys / sibling
+  providers' `max_tokens` survive. Adding the first provider to an empty
+  file wires every routing slot to it.
+- Local models show up live in `th cast models` and in the `th code`
+  `/model` picker (press Tab for "show all"). Both tolerate the server
+  being down — they just skip it.
+- `th providers` is the raw/local surface; `th model login <preset>`
+  stays the keyed path for the cloud presets (Anthropic, OpenRouter,
+  Smoo AI gateway, …).
 
 ---
 

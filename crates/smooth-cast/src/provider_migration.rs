@@ -140,11 +140,65 @@ pub fn load_providers_with_migration(path: &Path) -> anyhow::Result<ProviderRegi
             );
         }
         // Best-effort flush so the user only sees the migration once.
-        if let Err(e) = registry.save_to_file(path) {
-            tracing::warn!(error = %e, "failed to save migrated providers.json — in-memory migration still applied");
+        //
+        // Save via raw JSON, NOT `registry.save_to_file`: the typed
+        // serializer drops any field the published `ProviderConfig` lacks
+        // — including per-provider `max_tokens`. Rewriting the file as a
+        // `Value` preserves those. If the raw path fails to load/parse we
+        // fall back to the typed save (correct model names, no worse than
+        // before on the unknown-field front).
+        match crate::providers::load_value(path) {
+            Ok(mut root) => {
+                migrate_value_in_place(&mut root);
+                if let Err(e) = crate::providers::save_value(path, &root) {
+                    tracing::warn!(error = %e, "failed to save migrated providers.json — in-memory migration still applied");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "raw providers.json reload failed; falling back to typed save (drops unknown fields)");
+                if let Err(e) = registry.save_to_file(path) {
+                    tracing::warn!(error = %e, "failed to save migrated providers.json — in-memory migration still applied");
+                }
+            }
         }
     }
     Ok(registry)
+}
+
+/// Apply the `smooth-*` alias migration to a raw providers.json `Value`,
+/// preserving unknown fields (per-provider `max_tokens`, etc.). Rewrites
+/// every string under a `model` or `default_model` key — the only places
+/// model names live in providers.json (routing slots + provider
+/// `default_model`), including nested `fallback` chains. Returns `true` if
+/// anything changed.
+pub fn migrate_value_in_place(root: &mut serde_json::Value) -> bool {
+    use serde_json::Value;
+    fn walk(v: &mut Value, changed: &mut bool) {
+        match v {
+            Value::Object(map) => {
+                for (k, val) in map.iter_mut() {
+                    if (k == "model" || k == "default_model") && val.is_string() {
+                        if let Value::String(s) = val {
+                            if smooth_alias::migrate_in_place(s) {
+                                *changed = true;
+                            }
+                        }
+                    } else {
+                        walk(val, changed);
+                    }
+                }
+            }
+            Value::Array(arr) => {
+                for e in arr.iter_mut() {
+                    walk(e, changed);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut changed = false;
+    walk(root, &mut changed);
+    changed
 }
 
 /// In-memory variant for callers that have a registry from JSON or
@@ -277,6 +331,56 @@ mod tests {
         assert_eq!(raw_reloaded.routing.coding.model, "deepseek-v4-flash");
         assert_eq!(raw_reloaded.routing.reasoning.as_ref().unwrap().model, "deepseek-v4-pro");
         assert_eq!(raw_reloaded.routing.judge.model, "groq-gpt-oss-120b");
+    }
+
+    #[test]
+    fn load_with_migration_preserves_per_provider_max_tokens() {
+        // The whole reason the migration save goes through raw JSON: a
+        // config that still holds a stale `smooth-*` alias AND a
+        // per-provider `max_tokens` must keep the max_tokens after the
+        // save-back. The typed `save_to_file` would silently drop it.
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = tmp.path().join("providers.json");
+        let raw = serde_json::json!({
+            "providers": [
+                { "id": "ollama", "api_url": "http://localhost:11434/v1", "api_key": "", "api_format": "OpenAiCompat", "default_model": "llama3.3", "max_tokens": 8192 }
+            ],
+            "routing": {
+                "coding": { "provider": "ollama", "model": "smooth-coding" },
+                "reasoning": { "provider": "ollama", "model": "llama3.3" },
+                "reviewing": { "provider": "ollama", "model": "llama3.3" },
+                "judge": { "provider": "ollama", "model": "llama3.3" },
+                "summarize": { "provider": "ollama", "model": "llama3.3" },
+                "fast": { "provider": "ollama", "model": "llama3.3" },
+                "default": { "provider": "ollama", "model": "llama3.3" }
+            }
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&raw).unwrap()).unwrap();
+
+        // Triggers a rewrite (smooth-coding → concrete) hence a save-back.
+        let _ = load_providers_with_migration(&path).expect("load");
+
+        let on_disk: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // Alias got rewritten...
+        assert_eq!(on_disk["routing"]["coding"]["model"], "deepseek-v4-flash");
+        // ...and max_tokens survived.
+        assert_eq!(on_disk["providers"][0]["max_tokens"], 8192);
+    }
+
+    #[test]
+    fn migrate_value_in_place_rewrites_nested_model_keys() {
+        let mut root = serde_json::json!({
+            "providers": [{ "id": "g", "default_model": "smooth-default", "max_tokens": 4096 }],
+            "routing": { "coding": { "provider": "g", "model": "smooth-coding", "fallback": { "provider": "g", "model": "smooth-reasoning" } } }
+        });
+        assert!(migrate_value_in_place(&mut root));
+        assert_eq!(root["providers"][0]["default_model"], "deepseek-v4-flash");
+        assert_eq!(root["routing"]["coding"]["model"], "deepseek-v4-flash");
+        assert_eq!(root["routing"]["coding"]["fallback"]["model"], "deepseek-v4-pro");
+        // Non-model field untouched.
+        assert_eq!(root["providers"][0]["max_tokens"], 4096);
+        // Idempotent.
+        assert!(!migrate_value_in_place(&mut root));
     }
 
     #[test]

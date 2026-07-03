@@ -195,6 +195,12 @@ pub struct ModelPickerState {
     /// Reset whenever the user returns to the Slots view or drills
     /// in fresh.
     pub show_all: bool,
+    /// Live models from configured local providers (Ollama, LM Studio,
+    /// …), fetched once at app startup via [`fetch_local_provider_models`].
+    /// Folded into every Models-view candidate list so a BYO local
+    /// server's models are pickable. Empty when no local provider is
+    /// configured or reachable. Pearl th-f4a0fb.
+    pub local_models: Vec<ModelEntry>,
 }
 
 impl Default for ModelPickerState {
@@ -214,6 +220,7 @@ impl ModelPickerState {
             providers_path: default_providers_path(),
             error: None,
             show_all: false,
+            local_models: Vec::new(),
         }
     }
 
@@ -270,7 +277,7 @@ impl ModelPickerState {
         let Some(entry) = self.slots.get(self.selected).cloned() else { return };
         // Reset the filter override every time the user drills in fresh.
         self.show_all = false;
-        self.models = candidate_models_filtered(&self.slots, &entry, self.show_all);
+        self.models = candidate_models_filtered(&self.slots, &entry, &self.local_models, self.show_all);
         // Pre-select the slot's current model when it's in the list.
         self.selected = self
             .models
@@ -302,7 +309,7 @@ impl ModelPickerState {
         self.show_all = !self.show_all;
         let focused = self.slots.iter().find(|s| s.slot == slot).cloned();
         if let Some(focused) = focused {
-            self.models = candidate_models_filtered(&self.slots, &focused, self.show_all);
+            self.models = candidate_models_filtered(&self.slots, &focused, &self.local_models, self.show_all);
             self.selected = prev
                 .as_ref()
                 .and_then(|p| self.models.iter().position(|m| m.provider == p.provider && m.model == p.model))
@@ -388,6 +395,77 @@ fn default_providers_path() -> Option<PathBuf> {
     dirs_next::home_dir().map(|h| h.join(".smooth/providers.json"))
 }
 
+/// Build [`ModelEntry`]s for a local provider's live model ids. `info`
+/// is `None` — we have no catalog metadata for arbitrary local models,
+/// and the picker renders name-only rows for that case. Pure so it's
+/// unit-testable without a live server.
+#[must_use]
+pub fn local_model_entries(provider_id: &str, ids: &[String]) -> Vec<ModelEntry> {
+    ids.iter()
+        .map(|id| ModelEntry {
+            provider: provider_id.to_string(),
+            model: id.clone(),
+            info: None,
+        })
+        .collect()
+}
+
+/// Parse model ids out of a `/v1/models` response body. Local servers
+/// (Ollama, LM Studio) return clean `{"data":[{"id":...}]}` JSON, so a
+/// strict parse is enough — no need for the CLI's lossy byte-scan.
+fn parse_local_model_ids(body: &str) -> Vec<String> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .as_ref()
+        .and_then(|v| v.get("data"))
+        .and_then(|d| d.as_array())
+        .map(|arr| arr.iter().filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(String::from)).collect())
+        .unwrap_or_default()
+}
+
+/// Probe every configured local provider's live `/v1/models` and
+/// return the union as [`ModelEntry`]s for the picker. Reads
+/// `~/.smooth/providers.json`, filters to localhost URLs, GETs each
+/// with a 2s timeout, and tolerates unreachable servers (skipped
+/// silently). Called once at app startup. Pearl th-f4a0fb.
+pub async fn fetch_local_provider_models() -> Vec<ModelEntry> {
+    let Some(path) = default_providers_path() else { return Vec::new() };
+    let Ok(registry) = load_providers_with_migration(&path) else {
+        return Vec::new();
+    };
+    let Ok(client) = reqwest::Client::builder().timeout(std::time::Duration::from_secs(2)).build() else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    for pid in registry.list_providers() {
+        let Some(cfg) = registry.get_provider(pid) else { continue };
+        if !smooth_cast::providers::is_local_url(&cfg.api_url) {
+            continue;
+        }
+        let url = {
+            let trimmed = cfg.api_url.trim_end_matches('/');
+            if trimmed.ends_with("/models") {
+                trimmed.to_string()
+            } else {
+                format!("{trimmed}/models")
+            }
+        };
+        let mut req = client.get(&url);
+        if !cfg.api_key.is_empty() {
+            req = req.bearer_auth(&cfg.api_key);
+        }
+        if let Ok(resp) = req.send().await {
+            if resp.status().is_success() {
+                if let Ok(body) = resp.text().await {
+                    out.extend(local_model_entries(pid, &parse_local_model_ids(&body)));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Fixed display order for the slot list.
 ///
 /// Six canonical activity slots plus the wire-compat `Default` slot
@@ -454,13 +532,21 @@ pub fn slot_use_cases(slot: PickerSlot) -> &'static [&'static str] {
 /// folds in the offline catalog. De-duplicates by (provider,
 /// model) and sorts the result by the slot's relevant benchmark
 /// descending, with un-benchmarked rows after benchmarked ones.
-fn candidate_models_filtered(slots: &[SlotEntry], focused: &SlotEntry, show_all: bool) -> Vec<ModelEntry> {
+fn candidate_models_filtered(slots: &[SlotEntry], focused: &SlotEntry, extra: &[ModelEntry], show_all: bool) -> Vec<ModelEntry> {
     let mut out: Vec<ModelEntry> = Vec::new();
     let push = |entry: ModelEntry, out: &mut Vec<ModelEntry>| {
         if !out.iter().any(|e| e.provider == entry.provider && e.model == entry.model) {
             out.push(entry);
         }
     };
+
+    // Live local-provider models (Ollama, LM Studio, …), fetched at
+    // startup. `info: None`, so they always pass the use-case filter
+    // and sort after benchmarked rows — but they DO show up. Pearl
+    // th-f4a0fb.
+    for e in extra {
+        push(e.clone(), &mut out);
+    }
 
     // Currently-routed models always show up — the user might want
     // to pull `smooth-summarize` into the reviewing slot deliberately,
@@ -828,6 +914,36 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn parse_local_model_ids_reads_ollama_shape() {
+        // What Ollama / LM Studio return from GET /v1/models.
+        let body = r#"{"object":"list","data":[{"id":"llama3.3","object":"model"},{"id":"qwen2.5-coder:7b","object":"model"}]}"#;
+        assert_eq!(parse_local_model_ids(body), vec!["llama3.3".to_string(), "qwen2.5-coder:7b".to_string()]);
+        // Garbage / non-JSON → empty, never a panic (server down mid-write).
+        assert!(parse_local_model_ids("not json").is_empty());
+        assert!(parse_local_model_ids("{}").is_empty());
+    }
+
+    #[test]
+    fn local_model_entries_are_info_less_and_pass_the_filter() {
+        let ids = vec!["llama3.3".to_string(), "qwen".to_string()];
+        let entries = local_model_entries("ollama", &ids);
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|e| e.provider == "ollama" && e.info.is_none()));
+
+        // Folded into a slot's candidate list, a local model shows even
+        // when the slot's use-case filter is on (info None ⇒ retained).
+        let slots = vec![SlotEntry {
+            slot: PickerSlot::Coding,
+            label: "Coding",
+            description: "",
+            current_provider: "smooth".to_string(),
+            current_model: "deepseek-v4-flash".to_string(),
+        }];
+        let models = candidate_models_filtered(&slots, &slots[0], &entries, false);
+        assert!(models.iter().any(|m| m.provider == "ollama" && m.model == "llama3.3"));
+    }
+
     /// Regression for pearl th-03b02e: the model-picker sorts rows by
     /// benchmark, and a NaN benchmark (possible once `/v1/model/info`
     /// sources these live) must not make the comparator non-total —
@@ -1055,7 +1171,7 @@ mod tests {
     fn coding_slot_filters_by_coding_use_case() {
         let slots = synthetic_slot_entries();
         let focused = slots[0].clone();
-        let models = candidate_models_filtered(&slots, &focused, false);
+        let models = candidate_models_filtered(&slots, &focused, &[], false);
         assert!(!models.is_empty());
         // Every visible row either has no info (currently-routed pass-through)
         // or has the "coding" tag.
@@ -1075,7 +1191,7 @@ mod tests {
     fn coding_slot_sorts_by_swe_bench_desc() {
         let slots = synthetic_slot_entries();
         let focused = slots[0].clone();
-        let models = candidate_models_filtered(&slots, &focused, false);
+        let models = candidate_models_filtered(&slots, &focused, &[], false);
         // First two benchmarked coding models should be deepseek-v4-pro
         // (80.6) then kimi-k2.6-direct (80.2) then deepseek-v4-flash (79.0).
         let bench_models: Vec<_> = models
@@ -1095,7 +1211,7 @@ mod tests {
             current_provider: "smooai-gateway".into(),
             current_model: "deepseek-v4-pro".into(),
         }];
-        let models = candidate_models_filtered(&slots, &slots[0], false);
+        let models = candidate_models_filtered(&slots, &slots[0], &[], false);
         for m in &models {
             if let Some(info) = &m.info {
                 assert!(info.has_use_case("reasoning"), "{} missing reasoning tag", m.model);
@@ -1114,7 +1230,7 @@ mod tests {
             current_provider: "smooai-gateway".into(),
             current_model: "minimax-m2.7-direct".into(),
         }];
-        let models = candidate_models_filtered(&slots, &slots[0], false);
+        let models = candidate_models_filtered(&slots, &slots[0], &[], false);
         for m in &models {
             if let Some(info) = &m.info {
                 assert!(
@@ -1137,7 +1253,7 @@ mod tests {
             current_provider: "smooai-gateway".into(),
             current_model: "gemini-2.5-flash".into(),
         }];
-        let models = candidate_models_filtered(&slots, &slots[0], false);
+        let models = candidate_models_filtered(&slots, &slots[0], &[], false);
         for m in &models {
             if let Some(info) = &m.info {
                 assert!(
@@ -1160,7 +1276,7 @@ mod tests {
             current_provider: "smooai-gateway".into(),
             current_model: "gemini-2.5-flash".into(),
         }];
-        let models = candidate_models_filtered(&slots, &slots[0], false);
+        let models = candidate_models_filtered(&slots, &slots[0], &[], false);
         for m in &models {
             if let Some(info) = &m.info {
                 assert!(
@@ -1183,7 +1299,7 @@ mod tests {
             current_provider: "smooai-gateway".into(),
             current_model: "gemini-2.5-flash-lite".into(),
         }];
-        let models = candidate_models_filtered(&slots, &slots[0], false);
+        let models = candidate_models_filtered(&slots, &slots[0], &[], false);
         for m in &models {
             if let Some(info) = &m.info {
                 assert!(
@@ -1207,7 +1323,7 @@ mod tests {
             current_provider: "smooai-gateway".into(),
             current_model: "deepseek-v4-flash".into(),
         }];
-        let models = candidate_models_filtered(&slots, &slots[0], false);
+        let models = candidate_models_filtered(&slots, &slots[0], &[], false);
         // Default = no filter. Should match the catalog size minus any
         // dedup'd slot entry (the only slot entry already lives in the
         // catalog so the total equals catalog size).
