@@ -1,5 +1,288 @@
 # @smooai/smooth
 
+## 0.16.0
+
+### Minor Changes
+
+- 54e104e: Add the Claude-Code-style auto-mode permission engine (pearl th-515a13) — the
+  primary tool-execution enforcement layer now that the microVM stack
+  (Wonk/Goalie, PR #124) is gone.
+
+  A new `ToolHook` (`smooth-bigsmooth/src/auto_mode.rs`) is added FIRST on the
+  operative's tool registry, so its verdict gates before Narc and before the tool
+  runs. Every tool call gets an **allow / deny / ask** verdict from a pure,
+  exhaustively-tested `decide()`:
+
+  - **Modes** via `SMOOTH_AUTO_MODE`: `ask` (default — read-only allow, mutating
+    ask, dangerous deny), `accept-edits` (filesystem-edit tools auto-approve),
+    `deny` (headless/CI — unmatched ask becomes deny, fail-closed), and `bypass`
+    (allow all except the hard circuit-breakers).
+  - **Layered policy**: credential-path guard (deny read _and_ write, survives
+    bypass) → baseline dangerous-CLI / dangerous-domain deny (reuses
+    `smooth_narc::judge`) → `wonk-allow.toml` allow-lists (user + project,
+    project-wins) → compiled-in read-only default posture. Precedence is
+    deny > ask > allow. Compound commands are split on `&&`/`||`/`;`/`|`/`&`/
+    newlines so a safe first command can't smuggle a dangerous one; wrapper
+    prefixes (`timeout`, `env`, …) are stripped first.
+  - **Ask channel**: an `Ask` verdict blocks on the shared `AccessStore`, surfaced
+    via the existing `/api/access/{pending,approve,deny,stream}` routes + TUI, and
+    **fails closed** on timeout/headless (default 300s). Approvals persist at the
+    chosen scope (`Once` / `Session` / `PearlProject` / `User`) into the
+    corresponding `wonk-allow.toml`.
+
+  Docs: `docs/Engineering/Auto-Mode-Permissions.md` + a CLAUDE.md security note.
+
+- 5c15b37: `th pearls doctor` now diagnoses remote sync health, not just local on-disk state. After the local noms-manifest checks it runs a REMOTE SYNC section: it resolves the configured dolt remote (no remote → informational skip), temp-clones the remote's `refs/dolt/data` under the standard bounded sync timeout (clone failure → "remote unreachable"), and compares local vs remote history over the last 500 commits on each side. Each db is classified as in-sync, local-ahead (recommends `th pearls push`), remote-ahead (recommends `th pearls pull`), or diverged with no common ancestor — the push/pull deadlock the doctor previously had nothing to say about (2026-07-02 incident: the remote ref had been stray-re-initialized with a single bare "Initialize data repository" commit sharing no ancestor with 2547 local commits, so push was refused as diverged and pull was refused by the data-loss guard). That stray-re-init signature is detected specifically, with the targeted fix (`th pearls push --force` overwrites only the bare init commit); a divergence against real remote commits instead recommends inspecting a temp clone before any force. The doctor also reports whether the branch upstream is configured (an unset upstream makes a bare dolt push fail with `remote '' not found`). The whole section is read-only — it diagnoses and recommends, it never force-pushes.
+- cc06230: Remove the microVM / sandbox stack (pearl th-f4a801).
+
+  Big Smooth used to dispatch each task into a per-task
+  [microsandbox](https://github.com/microsandbox/microsandbox) microVM fronted by
+  a per-VM access-control cast (Wonk + Goalie + Narc + Scribe). That whole stack
+  was deleted — git history at this PR's parent commit is the archive, and the
+  smooth-daemon epic (th-c89c2a) is the forward path.
+
+  **Deleted crates:** `smooth-wonk` (in-VM access authority), `smooth-goalie`
+  (in-VM network + FUSE proxy), `smooth-bootstrap-bill` (host-side microsandbox
+  broker), `smooth-host-stub` (VM credential broker), `smooth-credential-helper`.
+  The `microsandbox` dependency and the `direct-sandbox` feature are gone.
+
+  **Behavior changes:**
+
+  - Dispatch now always runs the operative as a host subprocess, in-process
+    (`dispatch_ws_task_direct`). Narc tool surveillance still runs in-process;
+    there is no longer VM isolation or Wonk/Goalie network/filesystem policy
+    enforcement.
+  - `th up` starts Big Smooth on the host (the old `th up direct`). `th up direct`
+    and the sandboxed boot path are removed.
+  - `th run` still dispatches via Big Smooth but its VM-only flags (`--image`,
+    `--memory-mb`, `--keep-alive`) are removed.
+  - `th cache` (project-scoped VM build caches) is removed.
+  - The bigsmooth `smooth-operative` binary is no longer cross-compiled to
+    `aarch64-unknown-linux-musl` / mirrored to `~/.smooth/runner-bin/`; the native
+    build installed via `pnpm install:th` is what dispatch execs.
+
+  Narc, policy, scribe, archivist, and the operative's tools/agent-loop are kept.
+
+- ca0aead: `th api agents` grows typed flags for the per-agent config fields that went live server-side with SMOODEV-590 (per-agent behavior on all five polyglot smooth-operator servers).
+
+  `th api agents update <id>` now takes either a raw JSON patch body (unchanged) or typed field flags: `--instructions` (`instructions.prompt`, `@file` supported), `--greeting`, `--personality` (a preset name like `witty`, or a full `PersonalityConfig` JSON object / `@file`), `--visibility public|internal`, `--workflow` (`ConversationWorkflow` JSON `{goal, steps}` / `@file`), and `--tool-config` (`AgentToolConfig` JSON `{enabledTools}` / `@file`). Passing both a body and flags fails loudly, as does an update with neither. JSON flags are validated to be JSON objects client-side so a stray array/string fails with a clear message instead of a backend 400.
+
+  `th api agents mint` accepts the same `--personality` / `--workflow` / `--tool-config` at create time, alongside the existing `--instructions` / `--greeting` / `--visibility`.
+
+  Reading is unchanged: `th api agents show <id>` returns the full record including all six fields.
+
+- 280d712: th-e82dac (SMOODEV-401): `th tunnel` client is live — dials the th.smoo.ai rendezvous over WebSocket, does the ClientHello/ServerHello handshake, prints the assigned `<slug>.th.smoo.ai` public URL, and multiplexes inbound HTTP requests back to the local Big Smooth using the house `smooai-fetch` client (retries off, per-request timeout + circuit breaker). WebSocket-stream proxying and binary-response fidelity are the remaining follow-ups. `TunnelClient::run` now takes an `on_ready` callback and returns real transport/service errors instead of `NotImplementedYet`.
+- ea81304: `th auth login` user sessions now effectively last as long as their Supabase refresh token — login is once-per-machine. The silent-refresh machinery (`refresh_user_session`) already existed but was only wired into `th auth whoami` and the config client; `UserClient` (agents mint, keys, CRM, LLM gateway, orgs) and `AdminClient` (`th admin *`) hard-bailed with "session expired — run `th auth login` again" after the ~1h JWT expiry. Both clients now load credentials through a shared `fresh_user_credentials()` helper that silently refreshes an expired session (persisting the rotated refresh token) and only errors — with a `th auth login` hint — when no session or refresh material exists. The access-token TTL is deliberately unchanged: short JWT + silent refresh over long-lived tokens.
+
+### Patch Changes
+
+- c303c74: **Security:** auto-mode no longer treats environment dumps as safe read-only commands. `env` and `printenv` were on the `SAFE_BASH_BINS` allowlist, so the chat agent auto-ran `env | sort` on a social-engineering prompt and posted the host environment (including `SSH_CONNECTION` topology) to an untrusted chat participant (pearl th-08f304). A new `dumps_environment` guard now denies environment-revealing commands as an exfiltration risk — `env`/`printenv` (dump forms only, not the `env FOO=bar cmd` setter), bare `export`/`set`/`declare -p`, `/proc/<pid>/environ` reads, and `echo`/`printf` of secret-named `$VAR` expansions — mirroring the existing credential-path deny. Wonk previously would have gated this; it was removed with the microVM stack (th-f4a801), and auto-mode (th-515a13) is its replacement.
+- 79ce8a4: smooth-bench: tag upstream LLM-gateway failures as `upstream-error` instead of scoring them as task failures. Mid-stream drops from llm.smoo.ai (`connection closed before message completed`, `client error (SendRequest)`, 5xx from the gateway) previously scored as FAIL, making gateway flakiness indistinguishable from real smooth bugs. Runs matching the reviewable signature table (`sweep::UPSTREAM_ERROR_SIGNATURES`) are now counted separately in the Score (`tasks_upstream_error`), excluded from the real-attempt pass rate alongside `inconclusive`, and surfaced with a count in the rendered summary and per-task stream output.
+- 8560423: Fix coding_workflow mislabelling real code turns as THINK mode.
+
+  Two related bugs in the operative's single-agent coding loop, both of which made
+  dispatched code tasks bail without finishing:
+
+  1. **Bash writes now count as edits (pearl th-a03c53).** The "no edits" detector
+     only tracked named edit tools (`edit_file`, `write_file`, …), so an agent that
+     wrote a file via bash — a heredoc (`cat > f <<EOF`), `python3 -c "open(...,'w')"`,
+     `tee`, `sed -i`, a `>`/`>>` redirect — looked like it did nothing. The
+     affine-cipher bench run exited "no edits" while the file had grown from a 6-line
+     stub to a 70-line impl. `conversation_made_edits` now also scans `bash`/`shell`
+     tool-calls for write shapes (`bash_command_writes_files`), skipping fd-dups
+     (`2>&1`) and null sinks (`>/dev/null`) so read-only exploration still counts as
+     no edit.
+
+  2. **THINK-mode exit no longer fires on iteration 1 (pearl th-fc8a51).** A real
+     code task that whiffed its first turn with 0 edits (cpp/bank-account: 23s, FAIL —
+     the same task solved 17/17 on a focused rerun) was bailed as if it were a chat
+     question. The no-edit → THINK decision is now a pure, table-tested function
+     (`decide_no_edit`) on its own retry budget: the earliest a no-edit turn can exit
+     as THINK is iteration 2, and it no longer steals the no-test retry a later coding
+     turn needs.
+
+- 4de9a31: th-9cd759: `th api login/logout/whoami` now print deprecation warnings pointing at `th auth login --m2m` / `th auth logout --m2m` / `th auth whoami` (removal after one release cycle); docs updated to the `th auth` spellings.
+- 2596248: docs: rewrite the Architecture vault for the post-teardown current state. Replaces the two-mode microVM framing (Direct-Mode / Sandboxed-Mode / Transport pages, now deleted) with a coherent set describing direct in-process dispatch (operative as host subprocess + `PermissionHook` role gating + `NarcHook` surveillance), a current-state Security-Model, an Extension-System (SEP) page marked to its real phase status (Phase 0 merged in the engine repo, Phase 1 landing), and a Daemon-Direction page for the `th-c89c2a` epic. Every claim verified against code (crate names, env vars, defaults, dispatch symbols); aspirational work labeled with pearl ids (auto-mode `th-515a13`, kernel sandbox `th-c89c2a`, SEP `th-2def2a`). Repoints stale ADR-001/002/003 links and two broken README source links to their real homes.
+- 62e7393: Retire stale microVM/sandboxed-mode documentation outside docs/Architecture: rewrite Running-Locally/Troubleshooting/Build-Workflow to the single-process reality, tombstone Big-Smooth-Direct-Mode, add ADR-004 recording the microVM teardown, and mark ADR-001/002/003 and the security white paper as superseded/historical.
+- f3faaae: `th pearls doctor`'s remote-sync section now runs a cheap tip-level check before the deep probe clone. Four signals answer the common case without cloning: local dolt branch head vs the remote-tracking head (any unpushed commits?), and the last-synced `refs/dolt/data` tip (from dolt's git-remote-cache `FETCH_HEAD`) vs a bounded `git ls-remote` (has the remote ref moved?). All-in-sync → verdict in ~1s with no clone; anything else falls through to the existing probe-clone classification. On a 2547-commit store the probe clone is ~5 minutes at 96% CPU, which always exceeded the default 30s bound — doctor previously skipped the comparison entirely on large stores.
+- d8ffd2b: Fix a pipe-buffer deadlock in every bounded smooth-dolt subprocess call (`th pearls push`/`pull`/doctor's remote probe): the child was spawned with stdout/stderr piped but nothing drained them until after exit, so any child writing more than the ~64KB pipe buffer blocked on write, looked stalled, and was SIGKILLed at the deadline even mid-healthy-transfer. A shared `wait_child_draining` now drains both pipes on background threads while polling the deadline. Also: `th pearls doctor` no longer reports a timed-out probe clone as "remote unreachable" — a full clone of a large store is legitimately minutes of CPU; the timeout case now says what happened and how to raise the bound (`SMOOTH_DOLT_SYNC_TIMEOUT_SECS`).
+- 1efc67f: Harden the Dolt store against a read-only WEDGE caused by a hung remote sync.
+
+  The Dolt remote sync (`smooth-dolt push`/`pull`) shells out to `git` to move
+  `refs/dolt/data`; that git child holds the noms `LOCK` for the whole transfer.
+  If the network to the remote stalls, the lock was held indefinitely and every
+  other writer of the store got `Error 1105: cannot update manifest: database is
+read only` (reads still worked) — a hard wedge until the stuck process was
+  killed by hand.
+
+  Two changes:
+
+  1. **Prevention — bounded remote sync.** CLI-mode `push`/`pull` now run under a
+     wallclock timeout (`run_cli_timed`). On timeout the stalled git child is
+     killed (releasing the noms LOCK so local writes recover immediately) and a
+     _retryable_ "sync timed out" error is returned instead of wedging. Default
+     30s, overridable via `SMOOTH_DOLT_SYNC_TIMEOUT_SECS` (`0` = unbounded).
+
+  2. **Recovery — self-heal clears a stalled sync child.** The read-only
+     auto-doctor now also detects and clears a `git` process holding the store's
+     noms LOCK whose parent is `smooth-dolt` (a stalled dolt-sync child),
+     alongside the existing orphaned `smooth-dolt serve` case. The safety guard is
+     preserved and tightened: an unrelated `git` (parent is a shell/IDE/CI runner)
+     or any non-sync holder is refused. Kill escalation is SIGTERM → brief wait →
+     SIGKILL.
+
+- 98292c7: Fix `th api agents mint`: the assembled `CreateAgentRequest` was missing three NOT-NULL columns the create route requires — `organizationId`, `summary`, and `isBuiltin` — so every mint failed with a 400 (`expected string, received undefined` at `summary`/`organizationId`, `expected boolean` at `isBuiltin`). `build_mint_body` now sets all three (`isBuiltin: false`; `summary` from the new optional `--summary` flag, defaulting to the agent name). The stale doc comment claiming the backend generates the summary is corrected — the route only fills in the auth-public-client credentials and `createdBy`.
+
+  Note for cross-org minting: `th api` sends the org-locked M2M token, which can read a child org but not write to it. To mint into a child org as a parent-org admin, point the client at your user session (which acts cross-org): `SMOOAI_AUTH_FILE=~/.config/smooth/auth/profiles/<profile>/smooai-user.json th api agents mint …`.
+
+- 2e3a3f3: Fix two small bugs: a UB-prone env mutation in Big Smooth and a missed pytest
+  summary shape in the bench scorer.
+
+  **Big Smooth — host-tool bearer moved off process env (pearl th-87dfee).**
+  `AppState::new` mutated the `SMOOTH_HOST_TOKEN` process env var via
+  `std::env::set_var`, which runs after the tokio runtime is up. On glibc,
+  `set_var` racing a `getenv` on another thread can segfault, and Rust 2024 marks
+  `set_var` unsafe for exactly this reason. The token now lives on `AppState`
+  (`Arc<str>`), seeded once from an inherited value or freshly generated. The
+  `/api/host/exec` handler reads it from state; dispatch clones it into the
+  operative's child `Command.env` (setting a child's env is sound — only the
+  in-process global mutation was UB).
+
+  **Bench scorer — recognize bare pytest summaries (pearl th-19ab7c).**
+  `parse_pytest_summary` required a leading `=` decoration, so it missed the
+  all-pass form `16 passed in 0.01s` that pytest emits when it can't detect
+  terminal width (output piped to a file — our exact capture path). Those runs
+  fell through to the LLM judge on every all-pass task. The parser now strips the
+  optional `====` bars and recognizes any line reporting a status keyword and
+  ending in a pytest duration, covering passed-only, failed-only, mixed,
+  skipped/warnings, and `no tests ran` (scored 0/0/0, not a pass).
+
+- db0e469: Local-model ergonomics: bring-your-own OpenAI-compatible providers. New `th providers add/list/remove/detect` manages local inference servers (Ollama, LM Studio, llama.cpp, …) in `~/.smooth/providers.json` — `detect` probes the common local ports (Ollama :11434, LM Studio :1234) via `GET /v1/models` and, with `--yes`, adds what answers. Writes go through a field-preserving raw-JSON path so per-provider `max_tokens` and any unknown keys survive (the typed registry serializer drops them). Local providers' live models are folded into `th cast models` and the `th code` `/model` picker (both tolerate the server being down). A per-provider `--max-tokens` cap is plumbed through Big Smooth (`SMOOTH_MAX_TOKENS`) into the operative so small local-model context windows aren't blown by the hardcoded 32768 default.
+- 5ccdd51: Fix `th pearls push` failing with `fatal: remote '' not found` (pearl th-2681fd). Newer Dolt reports a missing branch upstream with this string — the branch's upstream remote resolves to `''` on a bare `CALL DOLT_PUSH()` — but the CLI's first-push auto-retry predicate only matched the older "no upstream branch" wording, so the recoverable case surfaced as a raw error instead of retrying with `-u origin main`. The empty-remote form now triggers the set-upstream retry; a named missing remote (`remote not found: origin`) still classifies as "no remote at all" (global-store skip), and genuine divergence matches neither.
+- 7aa3a5b: Fix `th pearls remote add` mangling SCP-style SSH URLs. `git@github.com:SmooAI/smooth.git` was handed raw to Dolt, whose URL parser stored it as `git+ssh://git@github.com/./SmooAI/smooth.git` (bogus `/./`) — breaking push/pull. SCP-style URLs (`user@host:path`) are now normalized to the clean `git+ssh://user@host/path` form before Dolt sees them, in both `remote_add` and `clone_from` (so `th pearls init` bootstrap and recovery re-clone are covered too). All real URL forms (`https://`, `ssh://`, `git+ssh://`) and filesystem paths pass through unchanged. Pearl th-c4441b.
+- 905b8e2: Route all user-text-into-SQL sites through one correct MySQL/Dolt-dialect escaper. Dolt treats backslash as an escape character inside string literals, so the previous quotes-only escape was both a crash and an injection surface: input containing `\'` became `\''`, the backslash ate the first quote, and the remainder was parsed as SQL. The shared `sql_escape` now escapes backslashes before quotes and handles NUL, and every pearl/memory/message/agent/session SQL builder uses it.
+- 261d0b0: Add the skills invocation runtime — Claude-Code parity for `~/.smooth/skills/` (pearl th-e0f812).
+
+  Discovery and the `Skill` data model already existed; what was missing was
+  invocation. This wires skills into the agent loop:
+
+  - **`skill_use` tool** registered into the operative's ToolRegistry. It returns
+    a skill's markdown body (prefixed with a constraints header derived from
+    `scope` / `allowed_tools` / `allowed_hosts`) into the conversation as
+    instructions to follow. A skill is a prompt, not code — the recipe drives the
+    ordinary bash/file/edit tools. Missing/empty names error with the available
+    list.
+  - **System-prompt catalog** injected at dispatch: names + descriptions +
+    triggers only (bodies load on demand), budget-capped so a large skill library
+    can't crowd out the context window.
+  - New `smooth_cast::skills::render_catalog` / `render_invocation` helpers (with
+    `DEFAULT_CATALOG_BUDGET`) so chief and other callers can reuse the same
+    rendering.
+
+  `allowed_tools` / `allowed_hosts` are surfaced to the model as advisory
+  constraints only; hard enforcement lands with the auto-mode permission model
+  (pearl th-515a13). `th skills list` / `show` and discovery precedence are
+  unchanged.
+
+- 41c24f3: Two small bug fixes.
+
+  **th-9550e6 — `th pearls init` no longer clobbers husky's git hooks.** Hook
+  install now refuses to overwrite a foreign `core.hooksPath` (e.g. husky's
+  `.husky/_`): if one is already set to anything other than `.githooks`, it
+  leaves it untouched and prints a note instead of writing smooth's Rust hooks
+  and disabling the repo's own lint-staged/prettier. Installing still proceeds
+  when `core.hooksPath` is unset or already points at `.githooks`. Applies to
+  `th pearls init`, `th hooks install`, and `th doctor`'s auto-fix.
+
+  **th-8bfbf4 — bigsmooth `is_invalid_project` filters temp dirs cross-platform.**
+  The registry filter matched only the macOS `/var/folders` tempdir prefix, so
+  Linux CI tempdirs (`/tmp/...`, `/run/user/.../...`) accumulated in
+  `~/.smooth/registry.json` and each spawned a phantom `smooth-dolt serve` at
+  startup. It now checks `std::env::temp_dir()` (canonicalized) plus explicit
+  `/tmp`, `/private/tmp`, `/var/folders`, `/private/var/folders`, and `/run/user`
+  fallbacks, using component-wise prefix matching.
+
+- 03c3028: th-6e77b7: `th admin` tables no longer over-widen columns containing coloured status cells — tabled's `ansi` feature makes its width calc strip escape sequences.
+- adabbf3: th-e74aa6: direct-dispatch operative discovery now probes `$CARGO_TARGET_DIR/{release,debug}` (shared/isolated target dirs never land in `<repo>/target`), and the not-found error lists every probed location plus `pnpm install:th` as the blessed fix.
+- 01331ab: Add `th admin org link-child <child-org-id> [--parent <org>] [--type manages]`, `unlink-child`, and `children` — manage the client-portal parent/child org relationships from the CLI. `link-child` POSTs `/organizations/{parent}/relationships` (parent defaults to the active org, type defaults to the platform's `manages` convention); `unlink-child` resolves the matching relationship id and deletes it; `children` lists a parent's child orgs. These are the user-JWT relationship endpoints (a parent-org admin's session), not `/admin/*`. Previously this required a hand-rolled curl with a bearer token.
+- c589d73: Add `th api integrations sendgrid get|create|delete|test`.
+
+  Wraps the org SendGrid integration CRUD at
+  `/organizations/{org_id}/integrations/sendgrid` (+`/test`). `create` takes
+  `--from-email`/`--inbound-email`/`--from-name` and reads the API key from
+  `SENDGRID_API_KEY` or a masked prompt — never from argv. Unblocks provisioning
+  a fresh test org's OTP email delivery without the dashboard or raw SQL.
+
+- 4ca3359: Add `th api agents mint` — the typed, ergonomic front door to `agents create`. Instead of hand-writing the `CreateAgentRequest` JSON, mint assembles it from flags: `--name`, `--kind chat|workflow` (→ types/directions), `--visibility public|internal`, `--template`, `--instructions <str|@file>`, `--greeting`, repeatable `--allowed-origin`, repeatable `--color role=hex` (or `--brand-from-url <url>`), and `--require-name`/`--require-email`. On success it prints the new agent id, and for a public chat agent it prints a ready-to-paste `<smooai-chat-widget>` embed snippet with the minted `authPublicClientId`/`authPublicClientSecret` + colors baked in. `--brand-from-url` calls the WS11 `extract-brand-palette` endpoint and PATCHes the proposed palette onto `widgetConfig.colors` (falls back gracefully if unreachable). Doesn't duplicate `create` — mint just builds the body for you.
+
+  Also fix CI clippy: the PR/release workflows ran `cargo clippy -- -D warnings` (with `continue-on-error`), which weaponized the `pedantic`/`nursery` lints that `[workspace.lints]` deliberately declares as advisory `warn` — so every stable-Rust bump silently reddened the gate (Rust 1.96 added ~200 new advisory findings across the workspace). The gate now runs plain `cargo clippy`, honoring the declared levels: `clippy::all` (deny) + `unused_must_use`/`unsafe_code` still fail the build (and no longer hide behind `continue-on-error`), while pedantic/nursery stay warnings. Cleared the handful of genuine `clippy::all` findings this surfaced (unnecessary `sort_by` → `sort_by_key`, redundant `into_iter`, `Eq` derives, `map_or_else`, doc-list formatting, `checked_div`).
+
+- 2faf789: th claude: tmux-driven Claude Code session supervisor with a shared rate-limit governor
+
+  Adds `th claude run / ls / attach` plus a new dependency-light `smooth-tmux`
+  crate. `th claude run` launches Claude Code inside an isolated tmux session and
+  supervises it: when the account-wide "temporarily limiting requests" throttle
+  fires, it backs off with full jitter (via a pool-aware `RateLimitGovernor`) and
+  resends the last message until it lands — auto-detecting the last user message
+  from the pane when it didn't send it itself. `th claude attach <id>` hands your
+  terminal to the session; `th claude ls` lists live sessions and prunes dead
+  ones.
+
+  `th claude mode <id> driving|manual|paused` hands control back and forth between
+  Big Smooth and a human sharing the same tmux pane: `driving` = the supervisor
+  sends input and rescues throttles, `manual` = the human drives and the supervisor
+  only rescues their throttled turns, `paused` = the supervisor stands down. Worker
+  sessions are launched with `SMOOTH_AGENT_HANDLE` exported so they can register on
+  the th-mail bus.
+
+  This is the 1:1 vertical slice of a broader topology (1→N Big-Smooth-led farm,
+  N→1 per-session supervisors, and mixed), all built on the same
+  supervisor + governor + registry primitives. The governor is shared so a 429 on
+  any session backs off the whole pool rather than thundering the herd.
+
+  Also adds the **`smooth` Claude Code plugin marketplace** (`.claude-plugin/
+marketplace.json`) with the **`smooth-agent`** plugin — a `/smooth` orchestrator
+  command plus `agent-comms` / `pearls-flow` worker skills and a SessionStart hook
+  that registers a worker on th-mail. The recipe layer over the `th claude` engine.
+
+- 5d6f9c5: th claude tui: ratatui control dashboard for supervised sessions
+
+  Adds `th claude tui` — a live dashboard listing supervised Claude Code sessions
+  with their mode and a snippet of each one's pane, plus single-key control:
+  `d`/`m`/`p` flip a session between driving / manual / paused, `a`/`enter` attach
+  (suspends the TUI, hands the terminal to `tmux attach`, then restores), `r`
+  refreshes, `q` quits. This is the "switch between Big Smooth driving and the
+  session itself" surface from the orchestration plan. The key bindings, selection
+  clamping, pane tailing, and list navigation are pure and unit tested; the draw +
+  event loop is the IO shell.
+
+- e82d976: Fix several `th config` CLI friction points (found bootstrapping customer-org config):
+
+  - **push error text**: stop naming a nonexistent "@smooai/config build step" — now points to `th config init` (scaffold) or `th config pull` (fetch remote), and references the generator pearl (th-4d1d6c).
+  - **`--schema-name` create-vs-update**: clarified that `--schema-name` selects an existing schema to _update_; to _create_ one, omit it and set `$smooaiName` in schema.json. The schema-not-found error now spells this out.
+  - **multi-schema `pull`**: a new pure `resolve_pull_schema` refuses to silently pick when an org has >1 remote schema — it lists the names and requires `--schema-name` (5 unit tests). One schema still auto-selects.
+  - **`th admin config`** help now points to the public `th config environments …` path (parent-org-admin-friendly; `th admin` is internal/org-locked).
+  - Replaced a stale `smooai-config` CLI reference with `th config push`.
+  - Documented the `.smooai-config/` layout + `schema.json` wire format in `docs/Engineering/Using-th-CLI.md`.
+
+- eca2a5e: Add `th config environments` (alias `th config env`) — manage an org's config environments (list / create / update / delete / values) over the **user-JWT** `th config` surface, not the internal `th admin`. Creating an environment is how a new org's config is activated. Because it authenticates with your user session, the SMOODEV-695 path-org guard authorizes it — so a **parent-org admin can create/manage a child org's environments** with `--org-id <child>` (or after `th org switch <child>`), with no `th admin`. Pairs with the smooai backend change that lets master-org admins act on active child orgs.
+- aa97dd3: Add `th config sync` and `th config build`.
+
+  - **`th config sync`** — first-class reconcile between local `.smooai-config/schema.json` and the org's remote schema. Bare `th config sync` prints the diff and tells you which direction to apply (changes nothing); `--push` applies local→remote, `--pull` applies remote→local (mutually exclusive); `--dry-run` forces diff-only. It delegates to the existing `diff`/`push`/`pull` paths — no duplicated HTTP logic, no magic two-way merge. Honors `--org-id`, `--schema-name`, `--json`, `--m2m`.
+  - **`th config build`** — generate `.smooai-config/schema.json` from the consumer's `config.ts` (closes the gap behind pearl th-4d1d6c). Shells out to `tsx` to import the TypeScript config and read the schema fields the `@smooai/config` runtime exposes (`PublicConfigKeys`/`SecretConfigKeys`/`FeatureFlagKeys`/`serializedAllConfigSchemaJsonSchema`), then writes the flat wire format. `--stdout` prints instead of writing; `--check` (CI parity) regenerates in memory and exits non-zero if the committed `schema.json` differs. Requires the consumer to have `@smooai/config` + `tsx`. The `push` "no schema.json" error now also points to `th config build`.
+
+- c7f484d: Bring the `/th-mail` Claude skill into the repo (git-tracked) + a symlink installer.
+
+  - Adds `.claude/skills/th-mail/` (SKILL.md + watch-once.sh) — the harness-agnostic agent-mail watcher (`watch-once.sh` blocks until unread `th msg` mail arrives, prints it, and exits so a background task re-invokes the agent; no busy-poll; does NOT `--pull` by default to avoid the Dolt write-lock contention that caused store-wide `Error 1105: database is read only`).
+  - Adds `scripts/install-skills.sh` + `pnpm install:skills`, which symlinks the repo's skills into `~/.claude/skills` (backing up any existing copy). The skill now lives in ONE git-tracked place, so it can't be silently changed by an untracked local edit. Output follows the Smooth Flow glyph vocabulary.
+
+- acecfc8: fix(smooth marketplace): smooth-agent plugin failed to install ("source type your Claude Code version does not support")
+
+  The marketplace used `metadata.pluginRoot` + a bare `"source": "smooth-agent"`. On Claude Code 2.1.196 that combination is rejected as an unsupported source type. Switched to the canonical explicit relative-path form `"./claude-plugins/smooth-agent"` (matching the official marketplace's working `"./plugins/<name>"` entries) and dropped `pluginRoot`. No change to the plugin itself.
+
+- f6a7322: `th org switch <name>` now resolves a child org you manage as a parent-org admin, as a **lazy fallback** — tried only when the name doesn't match one of your member orgs (a UUID still switches directly). This covers a parent-org admin who isn't a direct member of the child; the common path (member match or UUID) pays nothing, so there's no per-org relationships scan on every switch. (`th org list` is intentionally left as-is: surfacing children there meant an N-per-org relationships call, and in practice the managed children are usually already member orgs and thus already listed.)
+- 6e58c56: SECURITY (th-85d481): tighter auto-mode decide() engine. Command/process substitution (`$(…)`, backticks, `<(…)`) contents are now evaluated as their own policy segments, so `echo $(env)` is denied instead of riding in on `echo`; `~/.smooth/providers.json`, `~/.smooth/auth/` and dotenv files (`.env`, `.envrc`, `.env.*`) join the sensitive-path deny list (token-scoped so `rg "process.env"` stays allowed); `find` loses safe-bin status under `-exec`/`-execdir`/`-ok`/`-delete`/`-fprint*`; `git config` is no longer auto-allowed and `git branch`/`git remote` are restricted to listing forms; read-category tools now hit the same credential-path circuit-breaker as bash and writes.
+
 ## 0.15.7
 
 ### Patch Changes
