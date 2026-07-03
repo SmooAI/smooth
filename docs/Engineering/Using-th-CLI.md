@@ -56,9 +56,9 @@ The Smoo AI platform uses a two-tier identity model that `th` mirrors exactly:
 ### Logging in today (M2M client_credentials)
 
 ```bash
-th api login                       # interactive — prompts for client_id + secret
-SMOOAI_CLIENT_ID=…  SMOOAI_CLIENT_SECRET=… th api login   # env-driven (CI, scripts)
-th api login --client-id=… --client-secret=…              # flag-driven
+th auth login --m2m                # interactive — prompts for client_id + secret
+SMOOAI_CLIENT_ID=…  SMOOAI_CLIENT_SECRET=… th auth login --m2m   # env-driven (CI, scripts)
+th auth login --m2m --client-id=… --client-secret=…              # flag-driven
 ```
 
 Credential resolution order (first present wins):
@@ -77,7 +77,7 @@ The exchange happens against `https://auth.smoo.ai/token` with `grant_type=clien
 ### Verifying you're logged in
 
 ```bash
-th api whoami
+th auth whoami
 # Identity     client:bee846cc-...        ← the M2M client_id (or user:… if dashboard auth)
 # Email        brent@smoo.ai
 # Admin roles  super_admin (1)            ← present iff your client/user has admin grants
@@ -118,7 +118,7 @@ Practical consequences:
 ### Logout
 
 ```bash
-th api logout                             # deletes ~/.smooth/auth/smooai.json (idempotent)
+th auth logout --m2m                             # deletes ~/.smooth/auth/smooai.json (idempotent)
 ```
 
 ### Provider auth is separate
@@ -743,7 +743,7 @@ Both repos ship a `PreToolUse` Bash hook (`.claude/hooks/th-curl-hint.sh`) that 
 | Pattern | Hint |
 |---|---|
 | `curl … api.smoo.ai` | Use `th api …` instead |
-| `curl … auth.smoo.ai/token` | Use `th api login` instead |
+| `curl … auth.smoo.ai/token` | Use `th auth login --m2m` instead |
 | `curl … atlassian.net/rest/api` | Use `th jira sync` (or file a pearl for the missing verb) |
 | `gh secret set … --body -` with stdin echo | Use `scripts/secret-helpers/gh-secret-set` to avoid trailing-newline corruption |
 | `pnpm sst secret list` (raw) | Use `scripts/secret-helpers/sst-secret-list` to avoid plaintext leakage |
@@ -771,7 +771,7 @@ The `th` binary is built from this repo. Every gap is a `th-*` pearl waiting to 
 
 ```bash
 # Identity
-th api whoami                                                       # who am I, which org, when does my JWT expire
+th auth whoami                                                       # who am I, which org, when does my JWT expire
 th api orgs list                                                    # what orgs can I see
 th api orgs switch <id>                                             # change active org
 
