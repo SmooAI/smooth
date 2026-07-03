@@ -129,8 +129,9 @@ const SAFE_BASH_BINS: &[&str] = &[
     "which",
     "whoami",
     "date",
-    "env",
-    "printenv",
+    // NB: `env` / `printenv` are deliberately NOT here — they dump the
+    // process environment (a secret store), caught by `dumps_environment`
+    // and denied. See pearl th-08f304.
     "true",
     "test",
     "dirname",
@@ -298,11 +299,135 @@ fn references_sensitive_path(command: &str) -> bool {
     SENSITIVE_PATH_SUBSTRINGS.iter().any(|p| lower.contains(&p.to_ascii_lowercase()))
 }
 
+/// Env-var names whose value expansion (`$NAME`) is treated as a secret
+/// exfiltration when echoed/printed. Substring match, case-insensitive.
+const SENSITIVE_VAR_FRAGMENTS: &[&str] = &[
+    "secret",
+    "token",
+    "password",
+    "passwd",
+    "api_key",
+    "apikey",
+    "access_key",
+    "credential",
+    "private_key",
+    "aws_",
+    "ssh_",
+    "session",
+];
+
+/// Does this single (already split) subcommand reveal the process
+/// environment? Matches on INTENT rather than a single binary name, since
+/// `env` is only one spelling of the exfil (pearl th-08f304). Returns true
+/// for:
+/// - `env` with no command to exec (bare, piped, or only `-i`/`-u`/assignments)
+/// - `printenv` (any form — bare dumps all, `printenv VAR` reveals one)
+/// - bare `export` / `export -p`, `declare -p`, `typeset -p`, `set` (no args)
+/// - reading `/proc/<pid>/environ`
+/// - `echo`/`printf` expanding a sensitively-named `$VAR`
+///
+/// Deliberately does NOT match the legitimate setter forms: `env FOO=bar cmd`,
+/// `export FOO=bar`, `set -euo pipefail`, `declare -i x=5`.
+fn dumps_environment(subcommand: &str) -> bool {
+    let toks: Vec<&str> = subcommand.split_whitespace().collect();
+    if toks.is_empty() {
+        return false;
+    }
+
+    // `/proc/<pid>/environ` (or /proc/self/environ) read by any tool.
+    let lower = subcommand.to_ascii_lowercase();
+    if lower.contains("proc/") && lower.contains("/environ") {
+        return true;
+    }
+
+    // Skip transparent wrappers that aren't themselves env-revealing
+    // (timeout/nice/nohup/stdbuf) — but NOT `env`, which is the subject here.
+    let mut i = 0;
+    while i < toks.len() && matches!(toks[i], "timeout" | "nice" | "nohup" | "stdbuf") {
+        i += 1;
+        while i < toks.len() && (toks[i].starts_with('-') || toks[i].chars().next().is_some_and(|c| c.is_ascii_digit())) {
+            i += 1;
+        }
+    }
+    let Some(&bin) = toks.get(i) else { return false };
+    let rest = &toks[i + 1..];
+
+    match bin {
+        // printenv always reveals the environment (all vars, or a named one).
+        "printenv" => true,
+        // `env` reveals the environment UNLESS it's the setter form
+        // `env [-i] [-u NAME]... [NAME=value]... command`. It's a dump when
+        // no bare command token follows the options/assignments. `-u`/`-S`
+        // consume the next token, so skip it before looking for a command.
+        "env" => {
+            let mut k = 0;
+            while k < rest.len() {
+                let t = rest[k];
+                if t == "-u" || t == "-S" {
+                    k += 2; // flag + its value (the var name / string)
+                } else if t.starts_with('-') || t.contains('=') || t == "-" {
+                    k += 1; // bare option or NAME=value assignment
+                } else {
+                    return false; // a bare command token → setter form, not a dump
+                }
+            }
+            true
+        }
+        // `export` / `declare` / `typeset` dump only in their no-assignment
+        // listing forms (`export`, `export -p`, `declare -p`, `declare -x`).
+        "export" | "declare" | "typeset" => !rest.iter().any(|t| t.contains('=')) && rest.iter().all(|t| t.starts_with('-')),
+        // Bare `set` prints all shell + env vars; `set -e`/`set -o …` don't.
+        "set" => rest.is_empty(),
+        // `echo`/`printf` of a sensitively-named variable expansion.
+        "echo" | "printf" => contains_sensitive_var_expansion(subcommand),
+        _ => false,
+    }
+}
+
+/// True if the text contains a `$NAME` / `${NAME}` expansion whose name
+/// matches a [`SENSITIVE_VAR_FRAGMENTS`] fragment.
+fn contains_sensitive_var_expansion(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut idx = 0;
+    while let Some(rel) = lower[idx..].find('$') {
+        let start = idx + rel + 1;
+        let mut j = start;
+        if bytes.get(j) == Some(&b'{') {
+            j += 1;
+        }
+        let name_start = j;
+        while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+            j += 1;
+        }
+        let name = &lower[name_start..j];
+        if !name.is_empty() && SENSITIVE_VAR_FRAGMENTS.iter().any(|f| name.contains(f)) {
+            return true;
+        }
+        idx = start;
+    }
+    false
+}
+
 /// Evaluate a single bash subcommand against the layered policy.
 fn decide_bash_subcommand(subcommand: &str, grants: &WonkGrants) -> Verdict {
     // 1. Credential-path guard — deny read AND write (exfil risk).
     if references_sensitive_path(subcommand) {
         return Verdict::Deny(format!("command references a sensitive credential path: {subcommand}"));
+    }
+
+    // 1b. Environment-dump guard (pearl th-08f304). The process environment
+    // is a secret store (API tokens, SSH_CONNECTION topology, …), so a
+    // command that reveals it is an exfiltration primitive — same risk
+    // class as reading ~/.aws/credentials, and NOT made safe by the fact
+    // that it touches no file. A grandma-pretext prompt injection got the
+    // chat agent to run `env | sort` and post the host environment to an
+    // untrusted chat participant precisely because `env`/`printenv` were on
+    // the safe-read-only allowlist. Deny, like the credential-path guard.
+    if dumps_environment(subcommand) {
+        return Verdict::Deny(format!(
+            "command reveals the process environment (secret/credential exfiltration risk): {subcommand}"
+        ));
     }
 
     // 2. Baseline dangerous-CLI deny (rm -rf /, curl | sh, fork bomb, …).
@@ -688,6 +813,85 @@ mod tests {
 
     fn bash(cmd: &str) -> serde_json::Value {
         json!({ "cmd": cmd })
+    }
+
+    // ── environment-dump guard (pearl th-08f304) ───────────────────
+
+    #[test]
+    fn env_dump_forms_are_detected() {
+        for cmd in [
+            "env",
+            "env | sort",  // the live incident command
+            "env|sort",    // split yields "env"
+            "env -i",      // still a dump (no command follows)
+            "env -u PATH", // still a dump
+            "printenv",
+            "printenv PATH", // reveals a specific var
+            "printenv AWS_SECRET_ACCESS_KEY",
+            "export",
+            "export -p",
+            "declare -p",
+            "declare -x",
+            "typeset -p",
+            "set",
+            "cat /proc/self/environ",
+            "cat /proc/1234/environ",
+            "xxd /proc/self/environ",
+            "echo $AWS_SECRET_ACCESS_KEY",
+            "echo \"token: $GITHUB_TOKEN\"",
+            "printf '%s' \"${DATABASE_PASSWORD}\"",
+            "echo $SSH_CONNECTION",
+        ] {
+            // These arrive as single split subcommands (split_compound
+            // handles the pipe), so test the sub the guard actually sees.
+            let sub = split_compound(cmd).into_iter().next().unwrap();
+            assert!(dumps_environment(&sub), "should flag env dump: {cmd:?} (sub {sub:?})");
+        }
+    }
+
+    #[test]
+    fn legit_env_uses_are_not_flagged() {
+        for cmd in [
+            "env FOO=bar my_command",      // env-as-setter
+            "env FOO=bar PATH=/x program", // multiple assignments + command
+            "env -i FOO=bar clean_run",    // clean env then run a command
+            "export FOO=bar",              // setting a var
+            "export PATH=$PATH:/opt/bin",  // setting (no sensitive expansion)
+            "declare -i count=5",          // typed assignment
+            "set -euo pipefail",           // shell options
+            "set -e",
+            "set -o pipefail",
+            "echo hello world", // plain echo
+            "echo $PATH",       // PATH isn't a secret-shaped name
+            "echo $HOME",
+            "printf '%s\\n' done",
+            "cat ./environ_notes.txt", // filename contains "environ" but not under /proc
+        ] {
+            let sub = split_compound(cmd).into_iter().next().unwrap();
+            assert!(!dumps_environment(&sub), "should NOT flag: {cmd:?} (sub {sub:?})");
+        }
+    }
+
+    #[test]
+    fn env_dump_denied_end_to_end() {
+        // The full decision path: Ask mode, no grants — the incident command
+        // must be DENIED, never Allowed or merely Asked.
+        let v = decide(AutoMode::Ask, "bash", &bash("env | sort"), &empty_grants());
+        assert!(matches!(v, Verdict::Deny(_)), "env|sort must be denied, got {v:?}");
+        // And denied even under bypass? No — bypass is the operator's explicit
+        // override; the guard lives in the layered engine, and Bypass short-
+        // circuits to Allow by design. Verify the *engine* verdict is Deny so
+        // every non-bypass mode (incl. the Ask default and headless) blocks it.
+        assert!(matches!(decide_bash("env | sort", &empty_grants()), Verdict::Deny(_)));
+        assert!(matches!(decide_bash("printenv", &empty_grants()), Verdict::Deny(_)));
+        assert!(matches!(decide_bash("echo $AWS_SECRET_ACCESS_KEY", &empty_grants()), Verdict::Deny(_)));
+    }
+
+    #[test]
+    fn env_setter_still_reaches_the_inner_command() {
+        // `env FOO=bar rm -rf /` must NOT be waved through by the dump guard;
+        // it should fall to the normal engine (which denies the rm).
+        assert!(!dumps_environment("env FOO=bar rm -rf /"));
     }
 
     // ── split_compound ─────────────────────────────────────────────
