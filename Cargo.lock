@@ -3834,13 +3834,13 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "sha2",
  "similar",
  "smooai-smooth-bigsmooth",
  "smooai-smooth-cast",
  "smooai-smooth-narc",
  "smooai-smooth-operator-core",
  "smooai-smooth-pearls",
+ "smooai-smooth-policy",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -3930,7 +3930,7 @@ dependencies = [
 [[package]]
 name = "smooai-smooth-operator-core"
 version = "0.15.0"
-source = "git+https://github.com/SmooAI/smooth-operator-core.git?rev=2c3008beb76e06cf4708608317bdc4e750749def#2c3008beb76e06cf4708608317bdc4e750749def"
+source = "git+https://github.com/SmooAI/smooth-operator-core.git?rev=26b4489#26b4489cad74657ae54b0949c1f0965d6d76e27c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3989,9 +3989,12 @@ dependencies = [
 name = "smooai-smooth-policy"
 version = "0.17.0"
 dependencies = [
+ "anyhow",
  "chrono",
+ "dirs-next",
  "globset",
  "serde",
+ "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "toml",

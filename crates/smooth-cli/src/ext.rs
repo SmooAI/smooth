@@ -44,6 +44,18 @@ pub enum ExtCommands {
         #[arg(long)]
         project: bool,
     },
+    /// Re-validate an installed extension after editing it: re-parse its
+    /// manifest, re-hash it, and (if the manifest changed) re-confirm trust so
+    /// the next host start picks up the new version. A live host reloads it
+    /// in-session over the daemon relay (SEP Phase 6).
+    Reload {
+        name: String,
+        #[arg(long)]
+        project: bool,
+        /// Re-trust without prompting (for scripts / CI).
+        #[arg(long)]
+        trust: bool,
+    },
 }
 
 pub fn dispatch(cmd: ExtCommands) -> Result<()> {
@@ -52,6 +64,7 @@ pub fn dispatch(cmd: ExtCommands) -> Result<()> {
         ExtCommands::List => list(),
         ExtCommands::Trust { name, project } => trust_cmd(&name, project),
         ExtCommands::Remove { name, project } => remove(&name, project),
+        ExtCommands::Reload { name, project, trust } => reload(&name, project, trust),
     }
 }
 
@@ -159,6 +172,52 @@ fn trust_cmd(name: &str, project: bool) -> Result<()> {
     Ok(())
 }
 
+fn reload(name: &str, project: bool, auto_trust: bool) -> Result<()> {
+    let dir = scope_dir(project)?.join(name);
+    // Re-parse the manifest — surfaces a syntax error the edit may have introduced.
+    let manifest = ExtensionManifest::load_dir(&dir).with_context(|| format!("extension `{name}` is not installed or its extension.toml is invalid"))?;
+
+    let hash = hash_extension(&dir)?;
+    let mut store = TrustStore::load();
+    let record = store.extensions.get(name).cloned();
+    let changed = record.as_ref().map(|r| r.hash != hash).unwrap_or(true);
+
+    println!(
+        "\n  {} Reloading {} {}",
+        "↻".cyan().bold(),
+        name.bold(),
+        format!("v{}", manifest.version).dimmed()
+    );
+    print_capabilities(&manifest.capabilities);
+
+    if !changed {
+        // Manifest unchanged since it was trusted → nothing to re-confirm.
+        let state = if record.as_ref().is_some_and(|r| r.trusted) {
+            format!("{} still trusted", "✓".green().bold())
+        } else {
+            format!("{} still untrusted — run `th ext trust {name}`", "⚠".yellow())
+        };
+        println!("  {state} (manifest unchanged).");
+    } else {
+        // The manifest changed (or was never trusted) — fail-safe requires a
+        // fresh trust decision before it will load.
+        let trusted = auto_trust || prompt_trust(name)?;
+        store.set(name, &dir.to_string_lossy(), &hash, trusted);
+        store.save()?;
+        if trusted {
+            println!("  {} Manifest changed — re-trusted.", "✓".green().bold());
+        } else {
+            println!("  {} Manifest changed — left untrusted; it will NOT load.", "⚠".yellow());
+        }
+    }
+    println!(
+        "  {} Takes effect on the next {} session (in-session live reload lands with the daemon relay).\n",
+        "ℹ".cyan(),
+        "th code".cyan()
+    );
+    Ok(())
+}
+
 fn remove(name: &str, project: bool) -> Result<()> {
     let dir = scope_dir(project)?.join(name);
     if !dir.exists() {
@@ -257,6 +316,46 @@ mod tests {
         assert!(dest.join("extension.toml").is_file());
         assert!(dest.join("sub/a.txt").is_file());
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn reload_retrusts_only_when_the_manifest_changes() {
+        // Isolate the global store to a temp SMOOTH_HOME (scope_dir + TrustStore
+        // both resolve through it). Single test → no env race with siblings.
+        let home = std::env::temp_dir().join(format!("th-ext-reload-{}", std::process::id()));
+        let ext_dir = home.join("extensions").join("demo");
+        std::fs::create_dir_all(&ext_dir).unwrap();
+        std::fs::write(
+            ext_dir.join("extension.toml"),
+            "name = \"demo\"\nversion = \"0.1.0\"\n[run]\ncommand = \"node\"\n",
+        )
+        .unwrap();
+        std::env::set_var("SMOOTH_HOME", &home);
+
+        // Trust the current content, then reload with no edit → stays trusted,
+        // and reload must NOT flip it (the hash still matches).
+        let h0 = hash_extension(&ext_dir).unwrap();
+        let mut store = TrustStore::load();
+        store.set("demo", &ext_dir.to_string_lossy(), &h0, true);
+        store.save().unwrap();
+        reload("demo", false, false).unwrap();
+        assert!(TrustStore::load().is_trusted("demo", &h0), "unchanged reload keeps trust");
+
+        // Edit the manifest → the old hash no longer matches, so it is untrusted
+        // until re-confirmed; `--trust` re-confirms against the NEW hash.
+        std::fs::write(
+            ext_dir.join("extension.toml"),
+            "name = \"demo\"\nversion = \"0.2.0\"\n[run]\ncommand = \"node\"\n",
+        )
+        .unwrap();
+        let h1 = hash_extension(&ext_dir).unwrap();
+        assert_ne!(h0, h1);
+        assert!(!TrustStore::load().is_trusted("demo", &h1), "an edited manifest is untrusted until reloaded");
+        reload("demo", false, true).unwrap();
+        assert!(TrustStore::load().is_trusted("demo", &h1), "reload --trust re-trusts the new hash");
+
+        std::env::remove_var("SMOOTH_HOME");
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
