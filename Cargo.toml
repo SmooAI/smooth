@@ -210,3 +210,10 @@ smooth-api-client = { version = "0.15.7", path = "crates/smooth-api-client", pac
 # Pearls: th-33d57b (scaffolded), th-0398c1 (auth module),
 # th-abc4e2 (wires `th admin login`).
 smooai-client-shared = { git = "https://github.com/SmooAI/client-shared.git", rev = "7309040afe15e20e7439cb9201cceed826cd2347", features = ["auth"] }
+
+# The house HTTP client — resilient reqwest wrapper (retries, timeout,
+# rate-limit, circuit breaker). The tunnel's local-target proxy uses it
+# instead of raw reqwest. Rev-pinned like client-shared; the crate lives
+# in the `rust/fetch/` subdir of the repo (cargo discovers it). Pearl
+# th-e82dac.
+smooai-fetch = { git = "https://github.com/SmooAI/fetch.git", rev = "238f63eed71155e92f33eb548ee7e862b41e5aa2" }
