@@ -18,8 +18,12 @@
 //!   ships (`fixer`, `oracle`, `chief`, `intent_classifier`) and a
 //!   [`cast::builtin()`] that returns them on top of the engine's generic
 //!   built-in roles.
+//! - [`providers`] — field-preserving `providers.json` editing (raw
+//!   `serde_json::Value`) so `th providers add/remove` and per-provider
+//!   `max_tokens` survive the published registry's lossy serializer.
 
 pub mod cast;
 pub mod coding_workflow;
 pub mod provider_migration;
+pub mod providers;
 pub mod skills;

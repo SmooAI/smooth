@@ -1411,6 +1411,12 @@ struct RunnerConfig {
     model: String,
     budget_usd: Option<f64>,
     max_iterations: u32,
+    /// Per-provider LLM output-token cap. `None` → the default 32768.
+    /// Set from `SMOOTH_MAX_TOKENS`, which Big Smooth populates from the
+    /// dispatched provider's `max_tokens` in providers.json. Small local
+    /// models (Ollama, LM Studio) often have context windows the default
+    /// blows past, so `th providers add --max-tokens` lets the user cap it.
+    max_tokens: Option<u32>,
     workspace: PathBuf,
     operator_id: String,
     narc_write_guard: bool,
@@ -1426,6 +1432,14 @@ struct RunnerConfig {
     /// 3. `/opt/smooth/policy.toml` if present
     /// 4. A permissive default ([`default_policy_toml`]).
     policy_toml: String,
+}
+
+/// Parse `SMOOTH_MAX_TOKENS` into an optional per-provider cap. Absent,
+/// non-numeric, and zero all mean "no override" (`None`) so the caller
+/// falls back to the default 32768 — a `0` cap would let the model emit
+/// nothing. Pearl th-f4a0fb.
+fn parse_max_tokens_env(raw: Option<String>) -> Option<u32> {
+    raw.and_then(|v| v.trim().parse::<u32>().ok()).filter(|&n| n > 0)
 }
 
 impl RunnerConfig {
@@ -1453,6 +1467,7 @@ impl RunnerConfig {
             model: std::env::var("SMOOTH_MODEL").unwrap_or_else(|_| "gpt-5.4-mini".into()),
             budget_usd: std::env::var("SMOOTH_BUDGET_USD").ok().and_then(|v| v.parse().ok()),
             max_iterations: std::env::var("SMOOTH_MAX_ITERATIONS").ok().and_then(|v| v.parse().ok()).unwrap_or(50),
+            max_tokens: parse_max_tokens_env(std::env::var("SMOOTH_MAX_TOKENS").ok()),
             workspace: std::env::var("SMOOTH_WORKSPACE")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("/workspace")),
@@ -1719,7 +1734,9 @@ async fn main() {
         api_url: config.api_url.clone(),
         api_key: config.api_key.clone(),
         model: config.model.clone(),
-        max_tokens: 32768,
+        // Per-provider override (small local-model context windows) or the
+        // default cap. Applied here so the sidekick factory clone inherits it.
+        max_tokens: config.max_tokens.unwrap_or(32768),
         temperature: 0.3,
         retry_policy: smooth_operator::llm::RetryPolicy::default(),
         api_format,
@@ -2028,6 +2045,13 @@ async fn main() {
         llm
     };
 
+    // Re-apply the per-provider token cap: the slot-resolved config above
+    // comes from the published registry, which hardcodes max_tokens=32768.
+    let mut llm = llm;
+    if let Some(mt) = config.max_tokens {
+        llm.max_tokens = mt;
+    }
+
     // System prompt is compiled in from prompts/system.md (the tool
     // harness — tool guidance, workflow constraints, error recovery).
     // On top of that we append the agent's role prompt and, when
@@ -2293,6 +2317,10 @@ async fn main() {
                     registry: Arc::new(registry),
                     tools,
                     budget_usd: config.budget_usd,
+                    // Per-provider output-token cap (small local-model
+                    // context windows); `None` keeps the registry default.
+                    // Pearl th-f4a0fb.
+                    max_tokens: config.max_tokens,
                     // 20 is a safety net, not the primary governor — the
                     // workflow now pushes through plateaus by escalating
                     // (scrap approach, re-examine mental model, one
@@ -2488,6 +2516,28 @@ fn legacy_strip_pseudo_tool_xml(content: &str) -> String {
         rest = &after[advance..];
     }
     out
+}
+
+#[cfg(test)]
+mod max_tokens_tests {
+    use super::parse_max_tokens_env;
+
+    #[test]
+    fn parses_valid_cap() {
+        assert_eq!(parse_max_tokens_env(Some("8192".into())), Some(8192));
+        assert_eq!(parse_max_tokens_env(Some("  4096 ".into())), Some(4096));
+    }
+
+    #[test]
+    fn rejects_absent_zero_and_garbage() {
+        // Absent → default 32768 applies at the call site.
+        assert_eq!(parse_max_tokens_env(None), None);
+        // Zero would silence the model entirely — treat as no override.
+        assert_eq!(parse_max_tokens_env(Some("0".into())), None);
+        assert_eq!(parse_max_tokens_env(Some("".into())), None);
+        assert_eq!(parse_max_tokens_env(Some("lots".into())), None);
+        assert_eq!(parse_max_tokens_env(Some("-5".into())), None);
+    }
 }
 
 #[cfg(test)]

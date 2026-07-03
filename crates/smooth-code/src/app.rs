@@ -301,6 +301,21 @@ pub async fn run_with_session(
         });
     }
 
+    // Populate the model picker's local-provider models in the
+    // background so a BYO local server (Ollama, LM Studio) shows up in
+    // the `/model` picker's "show all" view. Tolerates no/unreachable
+    // local providers (returns empty). Pearl th-f4a0fb.
+    {
+        let state_clone = Arc::clone(&state);
+        tokio::spawn(async move {
+            let locals = crate::model_picker::fetch_local_provider_models().await;
+            if !locals.is_empty() {
+                let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                s.model_picker.local_models = locals;
+            }
+        });
+    }
+
     // Initial forced draw before the event loop starts. If the loop later
     // blocks or errors, we've at least rendered the welcome message once
     // so the user sees the UI is alive.

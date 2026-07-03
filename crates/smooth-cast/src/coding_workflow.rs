@@ -85,6 +85,12 @@ pub struct CodingWorkflowConfig {
     /// the cleanup-intent detection. Pure additive: defaults false,
     /// no behavior change for non-runner callers.
     pub cleanup_intent_hint: bool,
+    /// Per-provider LLM output-token cap. `None` keeps the registry's
+    /// default (32768). Set from a local provider's `max_tokens` so
+    /// small-context models aren't asked for more tokens than they hold.
+    /// The published registry hardcodes 32768, so this override is applied
+    /// after slot resolution.
+    pub max_tokens: Option<u32>,
 }
 
 /// Run the workflow end-to-end. Returns the accumulated cost.
@@ -104,7 +110,12 @@ pub async fn run_coding_workflow(cfg: CodingWorkflowConfig) -> anyhow::Result<f6
     let code_prompt = fixer_role.prompt.clone();
     let code_slot = fixer_role.slot;
 
-    let llm_config = cfg.registry.llm_config_for(code_slot).context("resolving coding slot → LLM config")?;
+    let mut llm_config = cfg.registry.llm_config_for(code_slot).context("resolving coding slot → LLM config")?;
+    // Per-provider token cap (small local-model context windows). The
+    // published registry always yields max_tokens=32768; override here.
+    if let Some(mt) = cfg.max_tokens {
+        llm_config.max_tokens = mt;
+    }
     let coding_slot = cfg.registry.routing.slot_for(code_slot);
     let alias = coding_slot.model.clone();
 

@@ -1408,6 +1408,17 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
             .env("SMOOTH_TASK_FILE", task_path.to_string_lossy().as_ref())
             .env("SMOOTH_WORKFLOW", "1")
             .env("SMOOTH_ROUTING_JSON_FILE", routing_path.to_string_lossy().as_ref());
+        // Per-provider output-token cap (small local-model context
+        // windows): look the resolved api_url up in providers.json —
+        // via the raw-JSON reader so the typed loader doesn't drop it —
+        // and pass it through so the operative caps max_tokens instead
+        // of asking for the hardcoded 32768. Pearl th-f4a0fb.
+        if let Some(mt) = dirs_next::home_dir()
+            .map(|h| h.join(".smooth/providers.json"))
+            .and_then(|p| smooth_cast::providers::max_tokens_for_api_url_from_file(&p, &api_url))
+        {
+            cmd.env("SMOOTH_MAX_TOKENS", mt.to_string());
+        }
         if let Some(ref p) = prior_history_path {
             cmd.env("SMOOTH_PRIOR_HISTORY_FILE", p.to_string_lossy().as_ref());
         }
