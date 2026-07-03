@@ -522,7 +522,6 @@ fn wait_child_draining(mut child: std::process::Child, timeout: Option<Duration>
         std::thread::spawn(move || {
             let mut buf = Vec::new();
             if let Some(mut p) = pipe {
-                use std::io::Read;
                 let _ = p.read_to_end(&mut buf);
             }
             buf
@@ -1705,6 +1704,271 @@ mod remote_sync_classify_tests {
         let remote = log(&["aaaa1111 close th-9 (brent) d"]);
         assert_eq!(classify_remote_sync(&[], &remote), RemoteSyncStatus::EmptyLocal);
         assert_eq!(classify_remote_sync(&[], &[]), RemoteSyncStatus::EmptyLocal);
+    }
+}
+
+/// The git ref that carries dolt data on a git remote.
+pub const DOLT_DATA_REF: &str = "refs/dolt/data";
+
+/// Current tip of `refs/dolt/data` on the remote, via `git ls-remote` —
+/// one ref advertisement instead of a full clone. On a 2547-commit store
+/// the probe clone (`clone_from_bounded`) is ~5 minutes at 96% CPU and
+/// always exceeds the default 30s sync bound; ls-remote answers in ~1s,
+/// so `th pearls doctor` runs this tip-level check first (pearl
+/// th-c42cc4).
+///
+/// Dolt stores git remotes in `git+ssh://` / `git+file://` form — git
+/// itself doesn't accept the `git+` prefix, so it's stripped here.
+/// Bounded by the standard remote-sync timeout ([`sync_timeout`]).
+///
+/// Returns `Ok(None)` when the remote is reachable but has no
+/// `refs/dolt/data` (never pushed).
+///
+/// # Errors
+/// - git unreachable / bad URL / auth failure (non-zero exit)
+/// - the ls-remote exceeded the sync bound (matches [`is_sync_timeout_err`])
+pub fn remote_dolt_data_tip(remote_url: &str) -> Result<Option<String>> {
+    let url = remote_url.strip_prefix("git+").unwrap_or(remote_url);
+    let child = Command::new("git")
+        .args(["ls-remote", url, DOLT_DATA_REF])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("spawn git ls-remote {url}"))?;
+    let output = wait_child_draining(child, sync_timeout(), &format!("git ls-remote {url}"))?;
+    if !output.status.success() {
+        let stderr: String = String::from_utf8_lossy(&output.stderr).trim().chars().take(300).collect();
+        anyhow::bail!(
+            "git ls-remote {url} failed (exit {}): {}",
+            output.status.code().unwrap_or(-1),
+            if stderr.is_empty() { "(no stderr)" } else { stderr.as_str() }
+        );
+    }
+    // Output: "<hash>\trefs/dolt/data\n", or empty when the ref doesn't exist.
+    Ok(String::from_utf8_lossy(&output.stdout).split_whitespace().next().map(str::to_string))
+}
+
+/// The `refs/dolt/data` tip recorded locally at the last successful sync.
+///
+/// The enclosing git repo does NOT carry a local `refs/dolt/data`
+/// (verified: `git show-ref` lists nothing under `refs/dolt/` even on a
+/// store that syncs daily). Dolt's git blobstore instead keeps a bare
+/// repo cache per remote at `<db>/.dolt/git-remote-cache/<key>/repo.git`,
+/// whose `FETCH_HEAD` records the remote's `refs/dolt/data` tip as of the
+/// last fetch — and both push and pull fetch (push does a
+/// check-and-put of the manifest), so the line tracks the last sync in
+/// either direction.
+///
+/// `None` when the cache is absent (never synced from this checkout;
+/// also the case for `file://` remotes, which skip the cache) or when
+/// multiple cache repos disagree — callers fall back to the deep probe.
+#[must_use]
+pub fn last_synced_dolt_data_tip(db_dir: &Path) -> Option<String> {
+    let cache = db_dir.join(".dolt").join("git-remote-cache");
+    let mut tips: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(cache).ok()?.flatten() {
+        let Ok(raw) = std::fs::read_to_string(entry.path().join("repo.git").join("FETCH_HEAD")) else {
+            continue;
+        };
+        // FETCH_HEAD line: "<hash>\t\t'refs/dolt/data' of ssh://github.com/Org/repo"
+        for line in raw.lines().filter(|l| l.contains(&format!("'{DOLT_DATA_REF}'"))) {
+            if let Some(h) = line.split_whitespace().next() {
+                tips.push(h.to_string());
+            }
+        }
+    }
+    tips.sort();
+    tips.dedup();
+    match tips.as_slice() {
+        [one] => Some(one.clone()),
+        _ => None,
+    }
+}
+
+/// Hash of a named branch from `smooth-dolt sql` JSON rows
+/// (`select name, hash from dolt_branches` / `dolt_remote_branches`).
+#[must_use]
+pub fn branch_hash(rows: &[Value], name: &str) -> Option<String> {
+    rows.iter()
+        .find(|r| r.get("name").and_then(Value::as_str) == Some(name))
+        .and_then(|r| r.get("hash").and_then(Value::as_str))
+        .map(str::to_string)
+}
+
+/// Verdict of the cheap tip-level sync check that gates the doctor's
+/// deep probe clone. Computed by [`classify_tip_check`] from four
+/// signals, all obtainable without cloning the remote:
+///
+/// - local dolt branch head (`dolt_branches`)
+/// - dolt remote-tracking head (`dolt_remote_branches`, updated on both
+///   push and pull — verified against a scratch store)
+/// - last-synced git tip ([`last_synced_dolt_data_tip`])
+/// - current remote git tip ([`remote_dolt_data_tip`])
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TipCheck {
+    /// No local commits since the last sync AND the remote ref hasn't
+    /// moved since we last saw it → in sync, no clone needed.
+    InSync,
+    /// Local head differs from the remote-tracking head → local commits
+    /// since the last sync.
+    LocalMoved,
+    /// The remote's `refs/dolt/data` differs from the tip we last synced.
+    RemoteMoved,
+    /// A signal is missing (never synced, no cache, no remote ref) —
+    /// only the deep probe can classify.
+    Unknown,
+}
+
+/// Pure decision for the tip-level check. Any missing signal is
+/// [`TipCheck::Unknown`] (fail toward the deep probe, never toward a
+/// false "in sync"). When both sides moved, `LocalMoved` is reported —
+/// the deep probe runs in every non-`InSync` case anyway.
+#[must_use]
+pub fn classify_tip_check(local_head: Option<&str>, tracking_head: Option<&str>, last_synced_tip: Option<&str>, remote_tip: Option<&str>) -> TipCheck {
+    let (Some(local), Some(tracking), Some(synced), Some(remote)) = (local_head, tracking_head, last_synced_tip, remote_tip) else {
+        return TipCheck::Unknown;
+    };
+    if local != tracking {
+        return TipCheck::LocalMoved;
+    }
+    if synced != remote {
+        return TipCheck::RemoteMoved;
+    }
+    TipCheck::InSync
+}
+
+#[cfg(test)]
+mod tip_check_tests {
+    use super::{branch_hash, classify_tip_check, last_synced_dolt_data_tip, remote_dolt_data_tip, TipCheck, DOLT_DATA_REF};
+    use serde_json::json;
+    use std::path::Path;
+
+    // ---- classify_tip_check (pure) ----
+
+    #[test]
+    fn in_sync_when_all_four_signals_align() {
+        assert_eq!(classify_tip_check(Some("d1"), Some("d1"), Some("g1"), Some("g1")), TipCheck::InSync);
+    }
+
+    #[test]
+    fn local_moved_when_head_diverges_from_tracking() {
+        assert_eq!(classify_tip_check(Some("d2"), Some("d1"), Some("g1"), Some("g1")), TipCheck::LocalMoved);
+    }
+
+    #[test]
+    fn remote_moved_when_remote_tip_differs_from_last_synced() {
+        assert_eq!(classify_tip_check(Some("d1"), Some("d1"), Some("g1"), Some("g2")), TipCheck::RemoteMoved);
+    }
+
+    #[test]
+    fn local_moved_wins_when_both_sides_moved() {
+        assert_eq!(classify_tip_check(Some("d2"), Some("d1"), Some("g1"), Some("g2")), TipCheck::LocalMoved);
+    }
+
+    #[test]
+    fn unknown_when_any_signal_missing() {
+        assert_eq!(classify_tip_check(None, Some("d1"), Some("g1"), Some("g1")), TipCheck::Unknown);
+        assert_eq!(classify_tip_check(Some("d1"), None, Some("g1"), Some("g1")), TipCheck::Unknown);
+        assert_eq!(classify_tip_check(Some("d1"), Some("d1"), None, Some("g1")), TipCheck::Unknown);
+        assert_eq!(classify_tip_check(Some("d1"), Some("d1"), Some("g1"), None), TipCheck::Unknown);
+    }
+
+    // ---- branch_hash (pure) ----
+
+    #[test]
+    fn branch_hash_finds_named_branch() {
+        let rows = vec![json!({"name": "other", "hash": "aaa"}), json!({"name": "main", "hash": "bbb"})];
+        assert_eq!(branch_hash(&rows, "main"), Some("bbb".to_string()));
+        assert_eq!(branch_hash(&rows, "missing"), None);
+        assert_eq!(branch_hash(&[], "main"), None);
+    }
+
+    // ---- last_synced_dolt_data_tip (fixture) ----
+
+    fn write_fetch_head(db_dir: &Path, cache_key: &str, contents: &str) {
+        let repo = db_dir.join(".dolt").join("git-remote-cache").join(cache_key).join("repo.git");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("FETCH_HEAD"), contents).unwrap();
+    }
+
+    #[test]
+    fn last_synced_tip_read_from_fetch_head() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_fetch_head(
+            tmp.path(),
+            "1b5d",
+            "aaaa1111\t\t'refs/heads/main' of ssh://github.com/Org/repo\n4f3a8033\t\t'refs/dolt/data' of ssh://github.com/Org/repo\n",
+        );
+        assert_eq!(last_synced_dolt_data_tip(tmp.path()), Some("4f3a8033".to_string()));
+    }
+
+    #[test]
+    fn last_synced_tip_none_without_cache_or_matching_line() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert_eq!(last_synced_dolt_data_tip(tmp.path()), None, "no git-remote-cache at all");
+
+        write_fetch_head(tmp.path(), "1b5d", "aaaa1111\t\t'refs/heads/main' of ssh://github.com/Org/repo\n");
+        assert_eq!(last_synced_dolt_data_tip(tmp.path()), None, "FETCH_HEAD without a refs/dolt/data line");
+    }
+
+    #[test]
+    fn last_synced_tip_multiple_caches_agree_or_none() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_fetch_head(tmp.path(), "aaaa", "1111\t\t'refs/dolt/data' of ssh://h/r\n");
+        write_fetch_head(tmp.path(), "bbbb", "1111\t\t'refs/dolt/data' of ssh://h/r\n");
+        assert_eq!(
+            last_synced_dolt_data_tip(tmp.path()),
+            Some("1111".to_string()),
+            "agreeing caches are unambiguous"
+        );
+
+        write_fetch_head(tmp.path(), "cccc", "2222\t\t'refs/dolt/data' of ssh://h/r\n");
+        assert_eq!(last_synced_dolt_data_tip(tmp.path()), None, "disagreeing caches are ambiguous");
+    }
+
+    // ---- remote_dolt_data_tip (local git fixture) ----
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+        assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn fixture_repo_with_commit() -> (tempfile::TempDir, String) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        git(tmp.path(), &["init", "-q"]);
+        git(
+            tmp.path(),
+            &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-q", "-m", "x"],
+        );
+        let head = git(tmp.path(), &["rev-parse", "HEAD"]);
+        (tmp, head)
+    }
+
+    #[test]
+    fn remote_tip_found_via_ls_remote() {
+        let (tmp, head) = fixture_repo_with_commit();
+        git(tmp.path(), &["update-ref", DOLT_DATA_REF, &head]);
+        // Plain path form.
+        let tip = remote_dolt_data_tip(&tmp.path().to_string_lossy()).unwrap();
+        assert_eq!(tip, Some(head.clone()));
+        // The git+file:// form dolt stores — the git+ prefix must be stripped.
+        let tip = remote_dolt_data_tip(&format!("git+file://{}", tmp.path().display())).unwrap();
+        assert_eq!(tip, Some(head));
+    }
+
+    #[test]
+    fn remote_tip_none_when_ref_absent() {
+        let (tmp, _head) = fixture_repo_with_commit();
+        assert_eq!(remote_dolt_data_tip(&tmp.path().to_string_lossy()).unwrap(), None);
+    }
+
+    #[test]
+    fn remote_tip_errors_on_non_repo() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let err = remote_dolt_data_tip(&tmp.path().to_string_lossy()).unwrap_err();
+        assert!(format!("{err:#}").contains("ls-remote"), "error names the failing operation: {err:#}");
     }
 }
 

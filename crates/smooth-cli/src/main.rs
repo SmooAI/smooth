@@ -5118,11 +5118,14 @@ fn find_dolt_dir() -> Result<std::path::PathBuf> {
 }
 
 /// `th pearls doctor` — REMOTE SYNC section. Read-only diagnosis of the
-/// local↔remote `refs/dolt/data` relationship: temp-clones the remote
-/// (bounded, see [`smooth_pearls::dolt::clone_from_bounded`]), compares
-/// bounded logs via [`smooth_pearls::dolt::classify_remote_sync`], and
-/// reports whether the branch upstream is configured (an unset upstream
-/// makes a bare push fail with `remote '' not found`).
+/// local↔remote `refs/dolt/data` relationship. A cheap tip-level check
+/// runs first (see [`smooth_pearls::dolt::classify_tip_check`]) — when
+/// it proves in-sync, no clone happens. Otherwise it temp-clones the
+/// remote (bounded, see [`smooth_pearls::dolt::clone_from_bounded`]),
+/// compares bounded logs via
+/// [`smooth_pearls::dolt::classify_remote_sync`], and reports whether
+/// the branch upstream is configured (an unset upstream makes a bare
+/// push fail with `remote '' not found`).
 ///
 /// Returns whether any db is diverged (no common ancestor with the
 /// remote) — the push/pull-deadlock class the doctor previously missed
@@ -5131,7 +5134,9 @@ fn find_dolt_dir() -> Result<std::path::PathBuf> {
 /// commits; push refused as diverged, pull refused by the data-loss
 /// guard, and doctor said nothing).
 fn doctor_remote_sync(healthy_dbs: &[std::path::PathBuf]) -> bool {
-    use smooth_pearls::dolt::{classify_remote_sync, clone_from_bounded, RemoteSyncStatus};
+    use smooth_pearls::dolt::{
+        branch_hash, classify_remote_sync, classify_tip_check, clone_from_bounded, last_synced_dolt_data_tip, remote_dolt_data_tip, RemoteSyncStatus, TipCheck,
+    };
 
     println!();
     println!("remote sync:");
@@ -5175,6 +5180,53 @@ fn doctor_remote_sync(healthy_dbs: &[std::path::PathBuf]) -> bool {
         None => {
             println!("  ! branch upstream not set — a bare dolt push fails with `remote '' not found`.");
             println!("    Plain `th pearls push` auto-repairs this (retries with -u).");
+        }
+    }
+
+    // Tip-level check FIRST (pearl th-c42cc4). The deep probe below
+    // clones the full remote refs/dolt/data — measured ~5 minutes at 96%
+    // CPU on a 2547-commit store, which always exceeds the default 30s
+    // sync bound, so on large stores the doctor used to skip the
+    // comparison entirely. Four cheap signals answer the common case
+    // without any clone: local dolt head vs remote-tracking head (no
+    // unpushed commits?) and last-synced git tip vs `git ls-remote`
+    // (remote ref unmoved?). Anything short of a clean "in sync" falls
+    // through to the deep probe unchanged.
+    let remote_tip = match remote_dolt_data_tip(remote_url) {
+        Ok(tip) => tip,
+        Err(e) => {
+            println!("  ! tip check skipped — git ls-remote failed: {e:#}");
+            None
+        }
+    };
+    let tip_verdicts: Vec<(String, TipCheck)> = healthy_dbs
+        .iter()
+        .map(|db_dir| {
+            let name = db_dir.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_string();
+            let (local, tracking) = smooth_pearls::SmoothDolt::new_cli_only(db_dir).map_or((None, None), |dolt| {
+                let head = |query: &str, branch: &str| dolt.sql(query).ok().and_then(|rows| branch_hash(&rows, branch));
+                (
+                    head("select name, hash from dolt_branches", "main"),
+                    head("select name, hash from dolt_remote_branches", "remotes/origin/main"),
+                )
+            });
+            let last_synced = last_synced_dolt_data_tip(db_dir);
+            let verdict = classify_tip_check(local.as_deref(), tracking.as_deref(), last_synced.as_deref(), remote_tip.as_deref());
+            (name, verdict)
+        })
+        .collect();
+    if tip_verdicts.iter().all(|(_, v)| *v == TipCheck::InSync) {
+        for (name, _) in &tip_verdicts {
+            println!("  ✓ {name}: in sync with remote (tip-level check — no local commits since last sync, remote ref unmoved)");
+        }
+        return false;
+    }
+    for (name, verdict) in &tip_verdicts {
+        match verdict {
+            TipCheck::InSync => {}
+            TipCheck::LocalMoved => println!("  … {name}: tip check found local commits since the last sync — running the deep probe to classify"),
+            TipCheck::RemoteMoved => println!("  … {name}: tip check found the remote ref moved since the last sync — running the deep probe to classify"),
+            TipCheck::Unknown => println!("  … {name}: tip check inconclusive (missing sync marker or remote ref) — running the deep probe to classify"),
         }
     }
 
