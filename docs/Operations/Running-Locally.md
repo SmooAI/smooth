@@ -49,6 +49,19 @@ Tear-down: `th down` kills the pid, removes the file.
 
 Dispatch needs the native operative binary. `pnpm install:th` installs it to `~/.cargo/bin/smooth-operative`; auto-discovery also checks `target/{release,debug}/` relative to the repo. Override with `SMOOTH_OPERATIVE_NATIVE=/abs/path`.
 
+## Project context files (like CLAUDE.md)
+
+A dispatched operative reads project context files at startup and prepends them to its system prompt as a `## Project Context` block — so a fresh agent walks in knowing the repo layout instead of rediscovering it every turn (pearl th-5002c4).
+
+Discovery stacks two layers; within a layer the first hit wins:
+
+- **User layer** (read once): `~/.smooth/CONTEXT.md` → `~/.smooth/AGENTS.md` → `~/.smooth/CLAUDE.md` — facts you want every dispatch to know (e.g. "I run a smoo-hub dashboard at smoo-hub:8787").
+- **Project layer** (walked up from the workspace): `<repo>/.smooth/CONTEXT.md` → `<repo>/SMOOTH.md` → `<repo>/AGENTS.md` → `<repo>/CLAUDE.md`.
+
+An `AGENTS.md` / `SMOOTH.md` may list additional files under a `## File References` section (`- [Label](path.md#section) — note`); those are resolved and appended inline. Separately, `<repo>/.smooth/MEMORY.md` (the agent's own `write_memory` store) is injected as a `## Workspace Memory` block.
+
+Each injected block is capped at **16 KB**; an oversized file is truncated on a UTF-8 boundary with a `[... truncated ...]` marker so a giant README can't blow the context budget.
+
 ## Useful knobs
 
 | Flag / env                    | Default        | Meaning                                              |
