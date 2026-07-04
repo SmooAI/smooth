@@ -448,6 +448,10 @@ pub struct ChatBody {
     /// answers → recurse). Defaults to no cap.
     #[serde(default)]
     budget_usd: Option<f64>,
+    /// Optional multimodal attachments (pearl th-5295a2). Absent/empty
+    /// keeps existing `{ "content": "..." }` bodies working byte-for-byte.
+    #[serde(default)]
+    attachments: Vec<crate::attachments::Attachment>,
 }
 
 #[derive(Deserialize)]
@@ -2528,6 +2532,7 @@ async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>)
         user_content: &str,
         model_override: Option<&str>,
         budget_usd: Option<f64>,
+        images: Vec<smooth_operator::conversation::ImageContent>,
     ) -> anyhow::Result<String> {
         use smooth_operator::agent::{Agent, AgentConfig, AgentEvent};
         use smooth_operator::cost::CostBudget;
@@ -2551,7 +2556,8 @@ async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>)
         // (e.g. smooth-reasoning) for hard requests, or down (e.g.
         // smooth-fast-gemini) when the user is willing to risk less
         // capability for more speed.
-        let llm_config = if let Some(m) = model_override.filter(|s| !s.trim().is_empty()) {
+        let has_override = model_override.map(|s| !s.trim().is_empty()).unwrap_or(false);
+        let mut llm_config = if let Some(m) = model_override.filter(|s| !s.trim().is_empty()) {
             let mut cfg = registry.default_llm_config().map_err(|e| anyhow::anyhow!("no default provider: {e}"))?;
             cfg.model = m.to_string();
             cfg
@@ -2560,6 +2566,12 @@ async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>)
                 .llm_config_for(smooth_operator::providers::Activity::Coding)
                 .map_err(|e| anyhow::anyhow!("resolving coding slot for chat: {e}"))?
         };
+        // Vision auto-route (precedence: explicit override > vision > default).
+        // An image turn without an override swaps to VISION_MODEL. Pearl th-5295a2.
+        let has_image = !images.is_empty();
+        if has_image && !has_override {
+            llm_config.model = VISION_MODEL.to_string();
+        }
 
         let registry_arc = std::sync::Arc::new(registry);
         let tools = crate::chat_tools::build_chat_tools(state.clone(), registry_arc.clone());
@@ -2575,6 +2587,11 @@ async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>)
                 max_cost_usd: Some(cap),
                 max_tokens: None,
             });
+        }
+        // ponytail: image rides this (stateless) turn only; the bare /api/chat
+        // path keeps no history, so there's nothing multi-turn to re-feed.
+        if has_image {
+            agent_cfg = agent_cfg.with_user_images(images);
         }
         let agent = crate::sep::attach_chat_ext_host(Agent::new(agent_cfg, tools), &state);
 
@@ -2648,10 +2665,14 @@ async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>)
     // Same 5-minute ceiling as the session-bound chat path. Anything
     // past this is a wedge — return an actionable error so the user
     // can retry instead of watching a spinner indefinitely.
+    // Store attachments; feed the marker-augmented text (documents are
+    // marker-only this phase) and route images through the multimodal turn.
+    let (images, content_with_markers) = process_attachments(&body.content, &body.attachments);
+
     const CHAT_TURN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
     let result: anyhow::Result<String> = match tokio::time::timeout(
         CHAT_TURN_TIMEOUT,
-        chat_inner(state, system_prompt, &body.content, body.model.as_deref(), body.budget_usd),
+        chat_inner(state, system_prompt, &content_with_markers, body.model.as_deref(), body.budget_usd, images),
     )
     .await
     {
@@ -2681,6 +2702,10 @@ pub struct CreateChatSessionBody {
 #[derive(Deserialize)]
 pub struct PostChatMessageBody {
     content: String,
+    /// Optional multimodal attachments (pearl th-5295a2). Absent/empty
+    /// keeps existing `{ "content": "..." }` bodies working byte-for-byte.
+    #[serde(default)]
+    attachments: Vec<crate::attachments::Attachment>,
 }
 
 #[derive(Serialize)]
@@ -2781,6 +2806,60 @@ async fn get_chat_messages_handler(State(state): State<AppState>, Path(id): Path
     Json(ApiResponse { data: views, ok: true })
 }
 
+/// Vision-capable model the chat turn auto-routes to when the user
+/// attaches an image. Same llm.smoo.ai gateway as the coding slot — we
+/// only swap the model name on the resolved `LlmConfig`. Pearl th-5295a2.
+const VISION_MODEL: &str = "gemini-2.5-flash-lite";
+
+/// Model-selection precedence for a chat turn:
+///   1. explicit `body.model` (user override) — always wins, even for image turns
+///   2. vision auto-route — `VISION_MODEL` when the turn carries ≥1 image
+///   3. `default` — the resolved coding-slot model, unchanged for text-only
+///
+/// Factored out as a pure fn so it's testable without a live LLM.
+fn pick_model(default: &str, body_model: Option<&str>, has_image: bool) -> String {
+    if let Some(m) = body_model.filter(|s| !s.trim().is_empty()) {
+        return m.to_string();
+    }
+    if has_image {
+        return VISION_MODEL.to_string();
+    }
+    default.to_string()
+}
+
+/// Store inbound attachments and split them into (1) image `data:` URLs
+/// for the multimodal turn and (2) the user-visible text with one
+/// `[attached <kind>: <name>]` marker appended per attachment.
+///
+/// Documents are marker-only this phase — the marker is the ONLY signal
+/// they reach the model with (Phase 4 owns real ingestion). Bad base64
+/// fails soft (logged + skipped) rather than aborting the whole turn.
+fn process_attachments(text: &str, attachments: &[crate::attachments::Attachment]) -> (Vec<smooth_operator::conversation::ImageContent>, String) {
+    use smooth_operator::conversation::ImageContent;
+    let mut images = Vec::new();
+    let mut content = text.to_string();
+    for att in attachments {
+        let kind = crate::attachments::classify(&att.mime);
+        match crate::attachments::store_and_data_url(att) {
+            Ok(stored) => {
+                // Images and PDFs both ride the multimodal turn as data:
+                // media parts (Gemini reads PDFs natively); other docs are
+                // marker-only. The vision-model route keys off this vec.
+                if stored.kind.is_model_media() {
+                    images.push(ImageContent::new(stored.data_url));
+                }
+            }
+            // ponytail: fail-soft — drop the bad attachment, keep the turn.
+            // Handlers return Json/Sse (infallible), so a 400 HTTPException
+            // would mean restructuring both to return Result. Flagged for
+            // orchestrator review if a hard 400 is preferred.
+            Err(e) => tracing::warn!(error = %e, name = %att.name, "failed to store attachment — skipping"),
+        }
+        content.push_str(&format!("\n[attached {}: {}]", kind.label(), att.name));
+    }
+    (images, content)
+}
+
 async fn post_chat_message_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -2790,13 +2869,16 @@ async fn post_chat_message_handler(
     state.touch();
 
     let user_content = body.content;
+    // Store attachments; `content_with_markers` is what we persist AND feed
+    // the model (images additionally ride the multimodal turn below).
+    let (images, content_with_markers) = process_attachments(&user_content, &body.attachments);
     let user_msg_id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
     let user_msg = crate::session::SessionMessage {
         id: user_msg_id.clone(),
         session_id: id.clone(),
         from: "user".into(),
         to: "bigsmooth".into(),
-        content: user_content.clone(),
+        content: content_with_markers.clone(),
         timestamp: chrono::Utc::now(),
         message_type: crate::session::MessageType::Command,
         tool_calls: Vec::new(),
@@ -2846,8 +2928,11 @@ async fn post_chat_message_handler(
     // returning an error to the user than leaving them watching the
     // thinking spinner forever.
     const CHAT_TURN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
-    let (assistant_text, tool_calls) = match tokio::time::timeout(CHAT_TURN_TIMEOUT, run_chat_with_history(&state, system_prompt, &history, &user_content))
-        .await
+    let (assistant_text, tool_calls) = match tokio::time::timeout(
+        CHAT_TURN_TIMEOUT,
+        run_chat_with_history(&state, system_prompt, &history, &content_with_markers, images),
+    )
+    .await
     {
         Ok(Ok(pair)) => pair,
         Ok(Err(e)) => (format!("Error: {e}"), Vec::new()),
@@ -2910,13 +2995,16 @@ async fn post_chat_message_stream_handler(
     state.touch();
 
     let user_content = body.content;
+    // Store attachments; `content_with_markers` is persisted AND feeds the
+    // model (images additionally ride the multimodal turn below).
+    let (images, content_with_markers) = process_attachments(&user_content, &body.attachments);
     let user_msg_id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
     let user_msg = crate::session::SessionMessage {
         id: user_msg_id.clone(),
         session_id: id.clone(),
         from: "user".into(),
         to: "bigsmooth".into(),
-        content: user_content.clone(),
+        content: content_with_markers.clone(),
         timestamp: chrono::Utc::now(),
         message_type: crate::session::MessageType::Command,
         tool_calls: Vec::new(),
@@ -2999,7 +3087,7 @@ async fn post_chat_message_stream_handler(
                 return;
             }
         };
-        let llm_config = match registry.llm_config_for(smooth_operator::providers::Activity::Coding) {
+        let mut llm_config = match registry.llm_config_for(smooth_operator::providers::Activity::Coding) {
             Ok(c) => c,
             Err(e) => {
                 let _ = sse_tx.send(AgentEvent::Error {
@@ -3008,6 +3096,10 @@ async fn post_chat_message_stream_handler(
                 return;
             }
         };
+        // Auto-route image turns to a vision model (no model override on this
+        // endpoint, so precedence collapses to vision > coding-default).
+        let has_image = !images.is_empty();
+        llm_config.model = pick_model(&llm_config.model, None, has_image);
 
         let registry_arc = std::sync::Arc::new(registry);
         let tools = crate::chat_tools::build_chat_tools(state_for_agent.clone(), registry_arc.clone());
@@ -3017,14 +3109,22 @@ async fn post_chat_message_stream_handler(
             let speaker = if m.from == "user" { "User" } else { "Big Smooth" };
             history_block.push_str(&format!("{speaker}: {}\n\n", m.content));
         }
+        // Feed the marker-augmented text so document attachments (marker-only
+        // this phase) reach the model; images ride the multimodal turn below.
         let user_payload = if history_block.is_empty() {
-            user_content.clone()
+            content_with_markers.clone()
         } else {
-            format!("Recent conversation history (read-only context):\n\n{history_block}---\n\nNew user message:\n\n{user_content}")
+            format!("Recent conversation history (read-only context):\n\n{history_block}---\n\nNew user message:\n\n{content_with_markers}")
         };
 
         let system_prompt = include_str!("chat_tools_system_prompt.txt");
-        let agent_cfg = AgentConfig::new("big-smooth-chat-stream", system_prompt, llm_config).with_max_iterations(20);
+        let mut agent_cfg = AgentConfig::new("big-smooth-chat-stream", system_prompt, llm_config).with_max_iterations(20);
+        // ponytail: images ride only THIS turn; history fold is text-only, so
+        // prior-turn images are not re-fed later. Richer session schema if
+        // multi-turn image context is ever needed.
+        if has_image {
+            agent_cfg = agent_cfg.with_user_images(images);
+        }
         let agent = crate::sep::attach_chat_ext_host(Agent::new(agent_cfg, tools), &state_for_agent);
 
         // Two-pronged forward: every AgentEvent is forwarded to the
@@ -3178,6 +3278,7 @@ async fn run_chat_with_history(
     system_prompt: &str,
     history: &[crate::session::SessionMessage],
     user_content: &str,
+    images: Vec<smooth_operator::conversation::ImageContent>,
 ) -> anyhow::Result<(String, Vec<crate::session::SessionToolCall>)> {
     use smooth_operator::agent::{Agent, AgentConfig, AgentEvent};
 
@@ -3191,9 +3292,14 @@ async fn run_chat_with_history(
 
     // Coding slot (MiniMax) — fast AND tool-call-capable. See the
     // chat_handler comment for why we pick coding over fast/reasoning.
-    let llm_config = registry
+    let mut llm_config = registry
         .llm_config_for(smooth_operator::providers::Activity::Coding)
         .map_err(|e| anyhow::anyhow!("resolving coding slot for chat: {e}"))?;
+
+    // Auto-route image turns to a vision model (this endpoint takes no
+    // model override, so precedence collapses to vision > coding-default).
+    let has_image = !images.is_empty();
+    llm_config.model = pick_model(&llm_config.model, None, has_image);
 
     let registry_arc = std::sync::Arc::new(registry);
     let tools = crate::chat_tools::build_chat_tools(state.clone(), registry_arc.clone());
@@ -3216,7 +3322,14 @@ async fn run_chat_with_history(
     // 20 iterations so the agent can spawn → wait → format without
     // running out of turns. teammate_wait absorbs the long wait into
     // one iteration so this stays responsive.
-    let agent_cfg = AgentConfig::new("big-smooth-chat-session", system_prompt, llm_config).with_max_iterations(20);
+    let mut agent_cfg = AgentConfig::new("big-smooth-chat-session", system_prompt, llm_config).with_max_iterations(20);
+    // ponytail: images ride only THIS turn's user message; the history fold
+    // above is text-only, so prior-turn images are NOT re-fed on later turns.
+    // Upgrade to a richer session schema (store image refs per message) if
+    // multi-turn image context is ever needed.
+    if has_image {
+        agent_cfg = agent_cfg.with_user_images(images);
+    }
     let agent = crate::sep::attach_chat_ext_host(Agent::new(agent_cfg, tools), state);
 
     // Thought stream — Gemini Flash Lite summarizes each tool call /
@@ -3869,6 +3982,40 @@ async fn jira_sync_handler(State(state): State<AppState>) -> Json<ApiResponse<cr
 mod tests {
     use super::*;
     use tower::ServiceExt;
+
+    // ── Multimodal chat (pearl th-5295a2, Phase 2) ─────────────
+
+    #[test]
+    fn pick_model_precedence_th_5295a2() {
+        // 1. explicit override wins, even over an image turn.
+        assert_eq!(pick_model("coding-default", Some("user-picked"), true), "user-picked");
+        assert_eq!(pick_model("coding-default", Some("user-picked"), false), "user-picked");
+        // Blank/whitespace override is ignored (falls through).
+        assert_eq!(pick_model("coding-default", Some("   "), true), VISION_MODEL);
+        // 2. image turn without override → vision model.
+        assert_eq!(pick_model("coding-default", None, true), VISION_MODEL);
+        // 3. text-only turn keeps the default UNCHANGED.
+        assert_eq!(pick_model("coding-default", None, false), "coding-default");
+    }
+
+    #[test]
+    fn post_chat_body_backcompat_no_attachments_th_5295a2() {
+        // Existing `{ "content": "..." }` bodies must keep working byte-for-byte.
+        let body: PostChatMessageBody = serde_json::from_str(r#"{"content":"hi"}"#).unwrap();
+        assert_eq!(body.content, "hi");
+        assert!(body.attachments.is_empty());
+    }
+
+    #[test]
+    fn post_chat_body_with_attachments_th_5295a2() {
+        let json = r#"{"content":"hi","attachments":[{"name":"photo.png","mime":"image/png","data":"AAAA"}]}"#;
+        let body: PostChatMessageBody = serde_json::from_str(json).unwrap();
+        assert_eq!(body.content, "hi");
+        assert_eq!(body.attachments.len(), 1);
+        assert_eq!(body.attachments[0].name, "photo.png");
+        assert_eq!(body.attachments[0].mime, "image/png");
+        assert_eq!(body.attachments[0].data, "AAAA");
+    }
 
     #[test]
     fn is_temp_path_matches_cross_platform_roots_th_8bfbf4() {

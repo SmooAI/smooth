@@ -44,6 +44,11 @@ async-trait.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 dirs-next.workspace = true
+# Chat attachments (pearl th-5295a2): base64-decode inbound uploads +
+# sha256 content-address for the ~/.smooth/attachments cache. Both are
+# already in the lockfile (used by smooth-cli / smooth-policy).
+base64 = "0.22"
+sha2 = "0.10"
 toml.workspace = true
 tokio-tungstenite.workspace = true
 tempfile.workspace = true
