@@ -88,8 +88,11 @@ export function SidebarProvider({ children }: { children: ReactNode }) {
 
     return (
         <SidebarContext.Provider value={{ open, setOpen, toggle, isMobile }}>
+            {/* h-dvh (fixed, keyboard/toolbar-aware) not min-h-screen: the shell is
+                exactly the viewport so nothing grows the page / scrolls off on iOS.
+                overflow-hidden keeps scroll inside the panes. Pearl th-ios-scroll. */}
             <div
-                className="flex min-h-screen w-full"
+                className="flex h-dvh w-full overflow-hidden"
                 style={
                     {
                         "--sidebar-width": SIDEBAR_WIDTH,
