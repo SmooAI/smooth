@@ -1,7 +1,8 @@
+import { ArrowLeft, FileText, Paperclip, Plus, Send, Square, Trash2, Users, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, Plus, Send, Square, Trash2, Users } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+
 import { api } from '../api';
 import { BigSmoothFace } from '../components/BigSmoothFace';
 import { useIsMobile } from '../hooks/use-mobile';
@@ -14,7 +15,11 @@ const SLASH_COMMANDS: { name: string; description: string; expand: () => string 
     { name: '/pearls', description: 'List open pearls', expand: () => 'List my open pearls.' },
     { name: '/teammates', description: 'List active teammates', expand: () => 'Which teammates are running right now?' },
     { name: '/spawn', description: 'Spawn a teammate on a new task', expand: () => 'Create a pearl for ' },
-    { name: '/status', description: 'Show overall status', expand: () => 'Give me a quick status — pearls open vs in progress, active teammates, anything stuck.' },
+    {
+        name: '/status',
+        description: 'Show overall status',
+        expand: () => 'Give me a quick status — pearls open vs in progress, active teammates, anything stuck.',
+    },
     { name: '/clear', description: 'Clear the input', expand: () => '' },
 ];
 
@@ -48,6 +53,20 @@ interface Msg {
     /// turns. Pearl th-880f2c — backend now persists these in the
     /// `tool_calls` JSON column on `session_messages`.
     tool_calls?: ToolCall[];
+    /// Image/PDF attachments sent with a user message. Carried so the
+    /// user's own bubble can render thumbnails optimistically. `dataUrl`
+    /// is a full `data:` URL (not the stripped base64 sent on the wire).
+    attachments?: { name: string; mime: string; dataUrl: string }[];
+}
+
+/// A file the user has staged in the composer but not yet sent.
+/// `data` is base64 WITHOUT the `data:...;base64,` prefix (the wire
+/// format); `dataUrl` keeps the full URL for previews + optimistic render.
+interface PendingAttachment {
+    name: string;
+    mime: string;
+    data: string;
+    dataUrl: string;
 }
 
 interface ToolCall {
@@ -86,6 +105,31 @@ interface Thought {
 // `null` selection means the user is chatting with Big Smooth (the lead).
 type Scope = { kind: 'lead' } | { kind: 'teammate'; name: string };
 
+// Read a File into a PendingAttachment. `data` strips the
+// `data:...;base64,` prefix (wire format); `dataUrl` keeps the full URL.
+function readAttachment(file: File): Promise<PendingAttachment> {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+            const dataUrl = String(reader.result);
+            const comma = dataUrl.indexOf(',');
+            resolve({
+                name: file.name || 'file',
+                mime: file.type || 'application/octet-stream',
+                data: comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl,
+                dataUrl,
+            });
+        };
+        reader.onerror = () => reject(reader.error ?? new Error('file read failed'));
+        reader.readAsDataURL(file);
+    });
+}
+
+// Keep only images and PDFs — matches the file-picker `accept` filter.
+function isAcceptedFile(file: File): boolean {
+    return file.type.startsWith('image/') || file.type === 'application/pdf';
+}
+
 function RelativeTime({ iso }: { iso: string }) {
     const then = new Date(iso).getTime();
     const now = Date.now();
@@ -103,6 +147,8 @@ export function ChatPage() {
     const [activeId, setActiveId] = useState<string | null>(null);
     const [messages, setMessages] = useState<Msg[]>([]);
     const [input, setInput] = useState('');
+    const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+    const [dragActive, setDragActive] = useState(false);
     const [streaming, setStreaming] = useState(false);
     const [loadingSessions, setLoadingSessions] = useState(true);
     const [teammates, setTeammates] = useState<Teammate[]>([]);
@@ -111,6 +157,7 @@ export function ChatPage() {
     const [thoughts, setThoughts] = useState<Thought[]>([]);
     const bottomRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLInputElement>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
     const thoughtIdRef = useRef(0);
     const activityIdRef = useRef(0);
     const streamingRef = useRef(false);
@@ -131,41 +178,38 @@ export function ChatPage() {
     }, [acMode, acQuery]);
 
     // Drive autocomplete from the current input value + caret position.
-    const refreshAutocomplete = useCallback(
-        async (value: string) => {
-            // Slash commands: the input must START with `/` (and not contain
-            // a space yet). Anything else closes the menu.
-            if (value.startsWith('/') && !value.includes(' ')) {
-                setAcMode('slash');
-                setAcQuery(value);
-                setAcIndex(0);
+    const refreshAutocomplete = useCallback(async (value: string) => {
+        // Slash commands: the input must START with `/` (and not contain
+        // a space yet). Anything else closes the menu.
+        if (value.startsWith('/') && !value.includes(' ')) {
+            setAcMode('slash');
+            setAcQuery(value);
+            setAcIndex(0);
+            return;
+        }
+        // Mentions: look back from the end of the buffer for an `@`,
+        // bounded by whitespace, ≤ 30 chars.
+        const m = value.match(/(?:^|\s)@([^\s]{0,30})$/);
+        if (m) {
+            setAcMode('mention');
+            const q = m[1] ?? '';
+            setAcQuery(q);
+            setAcIndex(0);
+            if (q.length === 0) {
+                setAcResults([]);
                 return;
             }
-            // Mentions: look back from the end of the buffer for an `@`,
-            // bounded by whitespace, ≤ 30 chars.
-            const m = value.match(/(?:^|\s)@([^\s]{0,30})$/);
-            if (m) {
-                setAcMode('mention');
-                const q = m[1] ?? '';
-                setAcQuery(q);
-                setAcIndex(0);
-                if (q.length === 0) {
-                    setAcResults([]);
-                    return;
-                }
-                try {
-                    const r = await api<{ data: SearchResult[] }>(`/api/search?q=${encodeURIComponent(q)}`);
-                    setAcResults((r.data || []).slice(0, 8));
-                } catch {
-                    setAcResults([]);
-                }
-                return;
+            try {
+                const r = await api<{ data: SearchResult[] }>(`/api/search?q=${encodeURIComponent(q)}`);
+                setAcResults((r.data || []).slice(0, 8));
+            } catch {
+                setAcResults([]);
             }
-            setAcMode(null);
-            setAcResults([]);
-        },
-        [],
-    );
+            return;
+        }
+        setAcMode(null);
+        setAcResults([]);
+    }, []);
 
     const acceptAutocomplete = useCallback(() => {
         if (acMode === 'slash') {
@@ -420,7 +464,8 @@ export function ChatPage() {
 
     const sendToLead = useCallback(async () => {
         const content = input.trim();
-        if (!content || streaming) return;
+        const pending = attachments;
+        if ((!content && pending.length === 0) || streaming) return;
         let sessionId = activeId;
         if (!sessionId) {
             try {
@@ -437,7 +482,16 @@ export function ChatPage() {
             }
         }
         setInput('');
-        setMessages((prev) => [...prev, { id: `tmp-${Date.now()}`, role: 'user', content }]);
+        setAttachments([]);
+        setMessages((prev) => [
+            ...prev,
+            {
+                id: `tmp-${Date.now()}`,
+                role: 'user',
+                content,
+                attachments: pending.map((a) => ({ name: a.name, mime: a.mime, dataUrl: a.dataUrl })),
+            },
+        ]);
         setStreaming(true);
         // AbortController so the user can hit Stop and reclaim the input.
         // Server-side the chat-agent task may keep running for a beat
@@ -448,7 +502,9 @@ export function ChatPage() {
             const resp = await fetch(`/api/chat/sessions/${sessionId}/messages`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ content }),
+                body: JSON.stringify(
+                    pending.length > 0 ? { content, attachments: pending.map((a) => ({ name: a.name, mime: a.mime, data: a.data })) } : { content },
+                ),
                 signal: ctrl.signal,
             });
             const json = await resp.json();
@@ -464,16 +520,38 @@ export function ChatPage() {
             if (!aborted) {
                 setMessages((prev) => [...prev, { id: `err-${Date.now()}`, role: 'assistant', content: `Error: ${(e as Error).message}` }]);
             } else {
-                setMessages((prev) => [...prev, { id: `cancel-${Date.now()}`, role: 'assistant', content: '_(stopped — Big Smooth was still working when you cancelled)_' }]);
+                setMessages((prev) => [
+                    ...prev,
+                    { id: `cancel-${Date.now()}`, role: 'assistant', content: '_(stopped — Big Smooth was still working when you cancelled)_' },
+                ]);
             }
         } finally {
             sendAbortRef.current = null;
             setStreaming(false);
         }
-    }, [input, streaming, activeId, refreshSessions]);
+    }, [input, attachments, streaming, activeId, refreshSessions]);
 
     const stopSend = useCallback(() => {
         sendAbortRef.current?.abort();
+    }, []);
+
+    // Ingest a list of Files (from the picker, paste, or drop): filter to
+    // images/PDFs, base64-encode, and stage them in the composer.
+    const addFiles = useCallback(
+        async (files: FileList | File[]) => {
+            // Attachments only flow to Big Smooth (lead). Teammate sends
+            // don't carry them, so ignore staged files in teammate scope.
+            if (scope.kind !== 'lead') return;
+            const accepted = Array.from(files).filter(isAcceptedFile);
+            if (accepted.length === 0) return;
+            const read = await Promise.all(accepted.map(readAttachment));
+            setAttachments((prev) => [...prev, ...read]);
+        },
+        [scope],
+    );
+
+    const removeAttachment = useCallback((idx: number) => {
+        setAttachments((prev) => prev.filter((_, i) => i !== idx));
     }, []);
 
     const sendToTeammate = useCallback(async () => {
@@ -525,7 +603,9 @@ export function ChatPage() {
                     <div className="w-2 h-2 rounded-full" style={{ background: 'var(--smoo-green)' }} />
                     <div className="font-semibold text-sm">Big Smooth</div>
                 </div>
-                <div className="text-[11px] mt-0.5" style={{ color: 'var(--muted)' }}>Lead · orchestrates work</div>
+                <div className="text-[11px] mt-0.5" style={{ color: 'var(--muted)' }}>
+                    Lead · orchestrates work
+                </div>
             </button>
 
             {/* Teammates */}
@@ -555,9 +635,13 @@ export function ChatPage() {
                         >
                             <div className="flex items-center gap-2">
                                 <div className="w-2 h-2 rounded-full" style={{ background: dotColor }} />
-                                <div className="text-sm font-mono truncate flex-1" title={t.name}>{t.name}</div>
+                                <div className="text-sm font-mono truncate flex-1" title={t.name}>
+                                    {t.name}
+                                </div>
                             </div>
-                            <div className="text-[11px] mt-0.5 truncate" style={{ color: 'var(--muted)' }}>{t.title}</div>
+                            <div className="text-[11px] mt-0.5 truncate" style={{ color: 'var(--muted)' }}>
+                                {t.title}
+                            </div>
                             <div className="text-[10px] mt-0.5" style={{ color: 'var(--muted)' }}>
                                 {t.status} · <RelativeTime iso={t.last_event_at} />
                             </div>
@@ -569,7 +653,10 @@ export function ChatPage() {
             {/* Chats with Big Smooth (only meaningful in lead mode) */}
             {scope.kind === 'lead' && (
                 <>
-                    <div className="px-3 py-2 flex items-center justify-between text-xs uppercase tracking-wide border-b" style={{ color: 'var(--muted)', borderColor: 'var(--border)' }}>
+                    <div
+                        className="px-3 py-2 flex items-center justify-between text-xs uppercase tracking-wide border-b"
+                        style={{ color: 'var(--muted)', borderColor: 'var(--border)' }}
+                    >
                         <span>Chats</span>
                         <button
                             onClick={() => newChat()}
@@ -583,7 +670,9 @@ export function ChatPage() {
                     </div>
                     <div className="flex-1 overflow-auto">
                         {loadingSessions && (
-                            <div className="p-3 text-xs" style={{ color: 'var(--muted)' }}>Loading…</div>
+                            <div className="p-3 text-xs" style={{ color: 'var(--muted)' }}>
+                                Loading…
+                            </div>
                         )}
                         {!loadingSessions && sessions.length === 0 && (
                             <div className="p-3 text-xs" style={{ color: 'var(--muted)' }}>
@@ -618,7 +707,9 @@ export function ChatPage() {
                                     </button>
                                 </div>
                                 <div className="text-[11px] flex items-center gap-2 mt-0.5" style={{ color: 'var(--muted)' }}>
-                                    <span>{s.message_count} msg{s.message_count === 1 ? '' : 's'}</span>
+                                    <span>
+                                        {s.message_count} msg{s.message_count === 1 ? '' : 's'}
+                                    </span>
                                     <span>·</span>
                                     <RelativeTime iso={s.started_at} />
                                 </div>
@@ -660,50 +751,87 @@ export function ChatPage() {
                         {msg.content}
                     </div>
                 ) : (
-                <div
-                    key={msg.id}
-                    className={`rounded-lg px-3 py-2 max-w-[90%] sm:max-w-[80%] ${msg.role === 'user' ? 'bg-blue-900/40 self-end' : ''}`}
-                    style={msg.role === 'assistant' ? { background: 'var(--smoo-dark-blue-850)', border: '1px solid var(--border)' } : {}}
-                >
-                    <div className="text-[11px] mb-1" style={{ color: 'var(--muted)' }}>
-                        {msg.role === 'user' ? 'You' : 'Big Smooth'}
-                    </div>
-                    {msg.role === 'assistant' ? (
-                        <ReactMarkdown
-                            remarkPlugins={[remarkGfm]}
-                            components={{
-                                code: (props) => (
-                                    <code className="px-1 py-0.5 rounded text-sm font-mono" style={{ background: '#0a1f7a', color: 'var(--smoo-green)' }}>
-                                        {props.children}
-                                    </code>
-                                ),
-                                h1: (props) => <h1 className="text-xl font-bold mb-2">{props.children}</h1>,
-                                h2: (props) => <h2 className="text-lg font-semibold mb-2">{props.children}</h2>,
-                                p: (props) => <p className="mb-2">{props.children}</p>,
-                                table: (props) => (
-                                    <div className="overflow-x-auto mb-2">
-                                        <table className="min-w-full border-collapse text-sm" style={{ border: '1px solid var(--border)' }}>
+                    <div
+                        key={msg.id}
+                        className={`rounded-lg px-3 py-2 max-w-[90%] sm:max-w-[80%] ${msg.role === 'user' ? 'bg-blue-900/40 self-end' : ''}`}
+                        style={msg.role === 'assistant' ? { background: 'var(--smoo-dark-blue-850)', border: '1px solid var(--border)' } : {}}
+                    >
+                        <div className="text-[11px] mb-1" style={{ color: 'var(--muted)' }}>
+                            {msg.role === 'user' ? 'You' : 'Big Smooth'}
+                        </div>
+                        {msg.role === 'assistant' ? (
+                            <ReactMarkdown
+                                remarkPlugins={[remarkGfm]}
+                                components={{
+                                    code: (props) => (
+                                        <code className="px-1 py-0.5 rounded text-sm font-mono" style={{ background: '#0a1f7a', color: 'var(--smoo-green)' }}>
                                             {props.children}
-                                        </table>
+                                        </code>
+                                    ),
+                                    h1: (props) => <h1 className="text-xl font-bold mb-2">{props.children}</h1>,
+                                    h2: (props) => <h2 className="text-lg font-semibold mb-2">{props.children}</h2>,
+                                    p: (props) => <p className="mb-2">{props.children}</p>,
+                                    table: (props) => (
+                                        <div className="overflow-x-auto mb-2">
+                                            <table className="min-w-full border-collapse text-sm" style={{ border: '1px solid var(--border)' }}>
+                                                {props.children}
+                                            </table>
+                                        </div>
+                                    ),
+                                    th: (props) => (
+                                        <th
+                                            className="px-3 py-1.5 text-left font-semibold"
+                                            style={{ border: '1px solid var(--border)', background: 'var(--smoo-dark-blue-850)' }}
+                                        >
+                                            {props.children}
+                                        </th>
+                                    ),
+                                    td: (props) => (
+                                        <td className="px-3 py-1.5" style={{ border: '1px solid var(--border)' }}>
+                                            {props.children}
+                                        </td>
+                                    ),
+                                }}
+                            >
+                                {msg.content}
+                            </ReactMarkdown>
+                        ) : (
+                            <>
+                                {msg.attachments && msg.attachments.length > 0 && (
+                                    <div className="flex flex-wrap gap-2 mb-2">
+                                        {msg.attachments.map((a, i) =>
+                                            a.mime.startsWith('image/') ? (
+                                                <img
+                                                    key={i}
+                                                    src={a.dataUrl}
+                                                    alt={a.name}
+                                                    className="max-h-64 max-w-full rounded"
+                                                    style={{ border: '1px solid var(--border)' }}
+                                                />
+                                            ) : (
+                                                <a
+                                                    key={i}
+                                                    href={a.dataUrl}
+                                                    download={a.name}
+                                                    className="flex items-center gap-2 rounded px-2 py-1.5 text-sm no-underline"
+                                                    style={{
+                                                        background: 'var(--smoo-dark-blue-850)',
+                                                        border: '1px solid var(--border)',
+                                                        color: 'var(--color-foreground)',
+                                                    }}
+                                                >
+                                                    <FileText size={16} />
+                                                    <span className="truncate max-w-[200px]">{a.name}</span>
+                                                </a>
+                                            ),
+                                        )}
                                     </div>
-                                ),
-                                th: (props) => (
-                                    <th className="px-3 py-1.5 text-left font-semibold" style={{ border: '1px solid var(--border)', background: 'var(--smoo-dark-blue-850)' }}>
-                                        {props.children}
-                                    </th>
-                                ),
-                                td: (props) => (
-                                    <td className="px-3 py-1.5" style={{ border: '1px solid var(--border)' }}>{props.children}</td>
-                                ),
-                            }}
-                        >
-                            {msg.content}
-                        </ReactMarkdown>
-                    ) : (
-                        <div className="whitespace-pre-wrap break-words">{msg.content}</div>
-                    )}
-                </div>
-                )
+                                )}
+                                {msg.content && <div className="whitespace-pre-wrap break-words">{msg.content}</div>}
+                            </>
+                        )}
+                    </div>
+                ),
             )}
         </>
     );
@@ -720,7 +848,7 @@ export function ChatPage() {
             const isUser = m.from === 'user';
             const isTeammate = m.from === 'teammate';
             const isLead = m.from === 'lead';
-            const label = isUser ? 'You' : isTeammate ? scope.kind === 'teammate' ? scope.name : 'Teammate' : isLead ? 'Big Smooth' : 'System';
+            const label = isUser ? 'You' : isTeammate ? (scope.kind === 'teammate' ? scope.name : 'Teammate') : isLead ? 'Big Smooth' : 'System';
             // Strip prefix tags from the rendered body for readability.
             const cleaned = m.content.replace(/^\s*\[[A-Z:_a-z0-9-]+\]\s*/, '');
             return (
@@ -781,10 +909,7 @@ export function ChatPage() {
                             animation: 'bs-face-fly-in 420ms cubic-bezier(0.34, 1.56, 0.64, 1) both',
                         }}
                     >
-                        <div
-                            className="relative shrink-0"
-                            style={{ width: isMobile ? 64 : 96, height: isMobile ? 64 : 96 }}
-                        >
+                        <div className="relative shrink-0" style={{ width: isMobile ? 64 : 96, height: isMobile ? 64 : 96 }}>
                             <BigSmoothFace state="thinking" size={isMobile ? 64 : 96} />
                         </div>
                         <div
@@ -816,7 +941,10 @@ export function ChatPage() {
                         className="absolute bottom-full left-0 right-0 mb-2 rounded-lg overflow-hidden z-10"
                         style={{ background: 'var(--smoo-dark-blue-850)', border: '2px solid var(--border)', maxHeight: '240px', overflowY: 'auto' }}
                     >
-                        <div className="px-3 py-1.5 text-[11px] uppercase tracking-wide" style={{ color: 'var(--muted)', borderBottom: '1px solid var(--border)' }}>
+                        <div
+                            className="px-3 py-1.5 text-[11px] uppercase tracking-wide"
+                            style={{ color: 'var(--muted)', borderBottom: '1px solid var(--border)' }}
+                        >
                             Slash commands
                         </div>
                         {slashSuggestions.map((cmd, i) => (
@@ -846,7 +974,10 @@ export function ChatPage() {
                         className="absolute bottom-full left-0 right-0 mb-2 rounded-lg overflow-hidden z-10"
                         style={{ background: 'var(--smoo-dark-blue-850)', border: '2px solid var(--border)', maxHeight: '320px', overflowY: 'auto' }}
                     >
-                        <div className="px-3 py-1.5 text-[11px] uppercase tracking-wide" style={{ color: 'var(--muted)', borderBottom: '1px solid var(--border)' }}>
+                        <div
+                            className="px-3 py-1.5 text-[11px] uppercase tracking-wide"
+                            style={{ color: 'var(--muted)', borderBottom: '1px solid var(--border)' }}
+                        >
                             @{acQuery}
                         </div>
                         {acResults.map((r, i) => (
@@ -862,7 +993,10 @@ export function ChatPage() {
                                 style={{ background: i === acIndex ? 'var(--smoo-green-alpha)' : 'transparent' }}
                             >
                                 <div className="flex items-center gap-2">
-                                    <span className="text-[10px] uppercase tracking-wide rounded px-1.5 py-0.5" style={{ background: 'var(--smoo-green-alpha)', color: 'var(--smoo-green)' }}>
+                                    <span
+                                        className="text-[10px] uppercase tracking-wide rounded px-1.5 py-0.5"
+                                        style={{ background: 'var(--smoo-green-alpha)', color: 'var(--smoo-green)' }}
+                                    >
                                         {r.kind}
                                     </span>
                                     <span className="text-sm font-medium truncate">{r.label}</span>
@@ -876,6 +1010,35 @@ export function ChatPage() {
                         ))}
                     </div>
                 )}
+                {attachments.length > 0 && (
+                    <div className="flex flex-wrap gap-2 mb-2">
+                        {attachments.map((a, i) => (
+                            <div
+                                key={i}
+                                className="relative flex items-center gap-2 rounded px-2 py-1.5 text-sm"
+                                style={{ background: 'var(--smoo-dark-blue-850)', border: '1px solid var(--border)' }}
+                            >
+                                {a.mime.startsWith('image/') ? (
+                                    <img src={a.dataUrl} alt={a.name} className="h-10 w-10 rounded object-cover" />
+                                ) : (
+                                    <FileText size={18} style={{ color: 'var(--muted)' }} />
+                                )}
+                                <span className="truncate max-w-[160px]" title={a.name}>
+                                    {a.name}
+                                </span>
+                                <button
+                                    type="button"
+                                    onClick={() => removeAttachment(i)}
+                                    className="rounded-full p-0.5 cursor-pointer hover:bg-white/10"
+                                    aria-label={`Remove ${a.name}`}
+                                    title="Remove"
+                                >
+                                    <X size={14} />
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                )}
                 <form
                     onSubmit={(e) => {
                         e.preventDefault();
@@ -885,14 +1048,59 @@ export function ChatPage() {
                         }
                         send();
                     }}
-                    className="flex gap-2"
+                    onDragOver={(e) => {
+                        e.preventDefault();
+                        if (!dragActive) setDragActive(true);
+                    }}
+                    onDragLeave={(e) => {
+                        // Only clear when the pointer actually leaves the form,
+                        // not when moving between child elements.
+                        if (e.currentTarget === e.target) setDragActive(false);
+                    }}
+                    onDrop={(e) => {
+                        e.preventDefault();
+                        setDragActive(false);
+                        if (e.dataTransfer.files.length > 0) addFiles(e.dataTransfer.files);
+                    }}
+                    className={`flex gap-2 rounded-lg ${dragActive ? 'ring-2' : ''}`}
+                    style={dragActive ? { boxShadow: '0 0 0 2px var(--smoo-green)' } : undefined}
                 >
+                    <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept="image/*,application/pdf"
+                        multiple
+                        className="hidden"
+                        onChange={(e) => {
+                            if (e.target.files) addFiles(e.target.files);
+                            e.target.value = '';
+                        }}
+                    />
+                    {scope.kind === 'lead' && (
+                        <button
+                            type="button"
+                            onClick={() => fileInputRef.current?.click()}
+                            className="rounded-lg px-4 py-4 flex items-center justify-center cursor-pointer shrink-0 min-h-[56px] min-w-[56px] hover:bg-white/5"
+                            style={{ border: '2px solid var(--color-border)', color: 'var(--color-foreground)' }}
+                            aria-label="Attach file"
+                            title="Attach image or PDF"
+                        >
+                            <Paperclip size={20} />
+                        </button>
+                    )}
                     <input
                         ref={inputRef}
                         value={input}
                         onChange={(e) => {
                             setInput(e.target.value);
                             refreshAutocomplete(e.target.value);
+                        }}
+                        onPaste={(e) => {
+                            const files = Array.from(e.clipboardData.files).filter(isAcceptedFile);
+                            if (files.length > 0) {
+                                e.preventDefault();
+                                addFiles(files);
+                            }
                         }}
                         onKeyDown={(e) => {
                             if (acMode) {
@@ -957,7 +1165,7 @@ export function ChatPage() {
                     ) : (
                         <button
                             type="submit"
-                            disabled={!input.trim()}
+                            disabled={!input.trim() && attachments.length === 0}
                             className="rounded-lg px-5 sm:px-6 py-4 font-semibold flex items-center justify-center gap-2 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed shrink-0 min-h-[56px] min-w-[56px] shadow-lg"
                             style={{ background: 'var(--smoo-green)', color: '#020618' }}
                             aria-label="Send"
@@ -1021,9 +1229,15 @@ function PendingThoughtBubble() {
         >
             <span>Big Smooth is thinking</span>
             <span className="inline-flex gap-0.5">
-                <span className="bs-dot" style={{ animationDelay: '0ms' }}>·</span>
-                <span className="bs-dot" style={{ animationDelay: '150ms' }}>·</span>
-                <span className="bs-dot" style={{ animationDelay: '300ms' }}>·</span>
+                <span className="bs-dot" style={{ animationDelay: '0ms' }}>
+                    ·
+                </span>
+                <span className="bs-dot" style={{ animationDelay: '150ms' }}>
+                    ·
+                </span>
+                <span className="bs-dot" style={{ animationDelay: '300ms' }}>
+                    ·
+                </span>
             </span>
         </div>
     );

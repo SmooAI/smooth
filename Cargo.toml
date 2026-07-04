@@ -191,7 +191,17 @@ prost-types = "0.13"
 # crates.io release (the release train only bumped the TS package). Pin the git
 # rev that carries it until a version bump publishes extensions; then flip back to
 # a `version = "…"` release. Matches the SMOODEV-1787 git-rev precedent.
-smooth-operator = { git = "https://github.com/SmooAI/smooth-operator-core.git", rev = "46fbbea", package = "smooai-smooth-operator-core" }
+#
+# Multimodal (th-25ce5c / epic th-3be564): this rev is the `multimodal-content-model`
+# BRANCH head — `ee648d1` (engine main release #53) + the two multimodal commits
+# (Message.images / image_url wire, and AgentConfig::with_user_images). It is
+# deliberately NOT a core-`main` rev: core main also carries th-10eb50 (the
+# `post_call` redaction-seam signature change) which smooth-narc/smooth-scribe have
+# not yet consumed. Pinning the side branch gets multimodal WITHOUT forcing that
+# unrelated break. The multimodal commits are ALSO merged to core main (PRs #58/#62)
+# — flip this to a core-main rev once smooth absorbs th-10eb50. Keep the
+# `multimodal-content-model` remote branch alive until then (it anchors this rev).
+smooth-operator = { git = "https://github.com/SmooAI/smooth-operator-core.git", rev = "b43c04fe", package = "smooai-smooth-operator-core" }
 # smooth-owned coding-harness extensions to the generic engine (re-homed from
 # the engine when it went generic at 0.14.0). See crates/smooth-cast.
 smooth-cast = { version = "0.17.0", path = "crates/smooth-cast", package = "smooai-smooth-cast" }

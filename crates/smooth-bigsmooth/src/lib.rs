@@ -1,6 +1,7 @@
 //! Big Smooth — orchestrator, policy generation, API server.
 
 pub mod access;
+pub mod attachments;
 pub mod audit;
 pub mod auto_mode;
 pub mod safehouse_narc;
