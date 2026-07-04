@@ -2842,7 +2842,10 @@ fn process_attachments(text: &str, attachments: &[crate::attachments::Attachment
         let kind = crate::attachments::classify(&att.mime);
         match crate::attachments::store_and_data_url(att) {
             Ok(stored) => {
-                if stored.kind == crate::attachments::AttachmentKind::Image {
+                // Images and PDFs both ride the multimodal turn as data:
+                // media parts (Gemini reads PDFs natively); other docs are
+                // marker-only. The vision-model route keys off this vec.
+                if stored.kind.is_model_media() {
                     images.push(ImageContent::new(stored.data_url));
                 }
             }

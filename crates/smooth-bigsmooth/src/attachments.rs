@@ -3,8 +3,9 @@
 //! Web sends `{ name, mime, data }` where `data` is raw base64 (no
 //! `data:` prefix). We decode, content-address by sha256, and cache the
 //! bytes under `~/.smooth/attachments/{sha}.{ext}` so identical uploads
-//! dedupe. Images additionally get a `data:` URL for the multimodal turn;
-//! documents are marker-only this phase (ingestion is Phase 4).
+//! dedupe. Images AND PDFs get a `data:` URL for the multimodal turn
+//! (Gemini reads both natively); other documents (docx/xlsx/…) are
+//! marker-only until a converter lands.
 
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -24,6 +25,12 @@ pub struct Attachment {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttachmentKind {
     Image,
+    /// A PDF — Gemini reads it natively as a `data:` media part (verified
+    /// against llm.smoo.ai), so it rides the same multimodal path as an
+    /// image rather than being marker-only. Pearl th-1b14d6.
+    Pdf,
+    /// Any other document (docx/xlsx/…) — marker-only for now; native
+    /// ingest needs a converter (docling microVM, future th-1b14d6b).
     Document,
 }
 
@@ -32,16 +39,25 @@ impl AttachmentKind {
     pub fn label(self) -> &'static str {
         match self {
             Self::Image => "image",
-            Self::Document => "document",
+            Self::Pdf | Self::Document => "document",
         }
+    }
+
+    /// Whether this kind is sent to the model as a `data:` media part
+    /// (and therefore routes the turn to the vision model). True for
+    /// images and PDFs — both of which Gemini ingests natively.
+    pub fn is_model_media(self) -> bool {
+        matches!(self, Self::Image | Self::Pdf)
     }
 }
 
-/// Images route to a vision model + `with_user_images`; everything else
-/// is a document (marker-only this phase).
+/// Images and PDFs route to a vision model as `data:` media parts;
+/// everything else is a document (marker-only until a converter lands).
 pub fn classify(mime: &str) -> AttachmentKind {
     if mime.starts_with("image/") {
         AttachmentKind::Image
+    } else if mime == "application/pdf" {
+        AttachmentKind::Pdf
     } else {
         AttachmentKind::Document
     }
@@ -113,12 +129,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classify_image_vs_document() {
+    fn classify_image_pdf_document() {
         assert_eq!(classify("image/png"), AttachmentKind::Image);
         assert_eq!(classify("image/jpeg"), AttachmentKind::Image);
-        assert_eq!(classify("application/pdf"), AttachmentKind::Document);
+        assert_eq!(classify("application/pdf"), AttachmentKind::Pdf);
         assert_eq!(classify("text/plain"), AttachmentKind::Document);
         assert_eq!(classify(""), AttachmentKind::Document);
+    }
+
+    #[test]
+    fn images_and_pdfs_are_model_media() {
+        // Both ride the vision path; other docs don't (marker-only).
+        assert!(AttachmentKind::Image.is_model_media());
+        assert!(AttachmentKind::Pdf.is_model_media());
+        assert!(!AttachmentKind::Document.is_model_media());
     }
 
     #[test]
