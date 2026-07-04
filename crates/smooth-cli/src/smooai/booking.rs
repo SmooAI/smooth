@@ -58,6 +58,11 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: BlockCmd,
     },
+    /// Connected Google calendars — primary + extra blocking accounts.
+    Calendars {
+        #[command(subcommand)]
+        cmd: CalendarsCmd,
+    },
     /// Print the public booking link for the org.
     Link {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
@@ -158,6 +163,34 @@ pub enum BlockCmd {
     Rm {
         /// The event id from `th booking block list`.
         event_id: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum CalendarsCmd {
+    /// List the org's connected Google calendars (primary + blocking).
+    List {
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Start the Google OAuth flow to add a blocking calendar. Prints an
+    /// authorization URL to open in the browser signed into that account.
+    Connect {
+        /// Permission tier requested from Google.
+        #[arg(long, default_value = "read_only")]
+        tier: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Remove a connected calendar by its integration id.
+    Rm {
+        /// The integration id from `th booking calendars list`.
+        integration_id: String,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
@@ -317,6 +350,45 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                     .context("DELETE block")?,
             );
         }
+        Cmd::Calendars {
+            cmd: CalendarsCmd::List { org },
+        } => {
+            let o = require_active_org(&client, org)?;
+            let body = client.get(&format!("/booking/calendars/{o}")).await.context("GET calendars")?;
+            render_calendars(&body);
+        }
+        Cmd::Calendars {
+            cmd: CalendarsCmd::Connect { tier, org },
+        } => {
+            let o = require_active_org(&client, org)?;
+            // Real route is /organizations/{org}/integrations/google/oauth/authorize?tier=…
+            // `purpose=blocking` is per the booking contract; the authorize route
+            // ignores it today (state only carries orgId+tier) — the blocking
+            // distinction needs the platform side to thread it through.
+            let path = format!(
+                "/organizations/{o}/integrations/google/oauth/authorize?purpose=blocking&tier={}",
+                urlencoding::encode(&tier)
+            );
+            let body = client.get(&path).await.context("GET google authorize url")?;
+            let url = body.get("url").and_then(|v| v.as_str()).context("authorize response missing `url`")?;
+            println!();
+            println!("  {} Open this URL in the browser signed into the Google account", "→".cyan());
+            println!("    you want to add as a blocking calendar:");
+            println!();
+            println!("    {url}");
+            println!();
+        }
+        Cmd::Calendars {
+            cmd: CalendarsCmd::Rm { integration_id, org },
+        } => {
+            let o = require_active_org(&client, org)?;
+            print_json(
+                &client
+                    .delete(&format!("/booking/calendars/{o}/{}", urlencoding::encode(&integration_id)))
+                    .await
+                    .context("DELETE calendar")?,
+            );
+        }
         Cmd::Link { org } => {
             let o = require_active_org(&client, org)?;
             let config = client.get(&format!("/booking/config/{o}")).await.context("GET booking config")?;
@@ -453,6 +525,30 @@ fn render_blocks(body: &Value) {
         let start = b.get("start").and_then(|v| v.as_str()).unwrap_or("");
         let end = b.get("end").and_then(|v| v.as_str()).unwrap_or("");
         println!("  {} {} {}  {}–{}", "○".dimmed(), id.cyan(), summary.bold(), start.dimmed(), end.dimmed());
+    }
+    println!();
+}
+
+/// Print the `{ calendars: [{integrationId, userEmail, role, status}] }` body as a list.
+fn render_calendars(body: &Value) {
+    let calendars = body.get("calendars").and_then(|v| v.as_array());
+    println!();
+    let Some(calendars) = calendars else {
+        print_json(body);
+        return;
+    };
+    if calendars.is_empty() {
+        println!("  {} {}", "●".dimmed(), "no connected calendars".dimmed());
+        println!();
+        return;
+    }
+    for c in calendars {
+        let id = c.get("integrationId").and_then(|v| v.as_str()).unwrap_or("?");
+        let email = c.get("userEmail").and_then(|v| v.as_str()).unwrap_or("");
+        let role = c.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        let status = c.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        let suffix = if status.is_empty() { String::new() } else { format!(" [{status}]") };
+        println!("  {} {} {}  {}{}", "○".dimmed(), id.cyan(), email.bold(), role.dimmed(), suffix.dimmed());
     }
     println!();
 }
