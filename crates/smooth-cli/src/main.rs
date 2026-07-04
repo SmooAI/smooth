@@ -9,6 +9,7 @@ mod auth;
 mod boot_ui;
 mod claude;
 mod config;
+mod ext;
 mod gradient;
 mod hooks;
 mod mcp_config;
@@ -376,6 +377,12 @@ enum Commands {
         #[command(subcommand)]
         cmd: PluginCommands,
     },
+    /// SEP extensions (subprocess tools/hooks/UI via the Smooth Extension
+    /// Protocol). Install a local extension, list/trust/remove installed ones.
+    Ext {
+        #[command(subcommand)]
+        cmd: ext::ExtCommands,
+    },
     /// Run Smooth as a background service (launchd / systemd / Task Scheduler)
     Service {
         #[command(subcommand)]
@@ -598,11 +605,23 @@ enum OrgsCommands {
     },
 }
 
+/// Pearl th-9cd759: `th api login/logout/whoami` moved to the `th auth`
+/// surface. One release cycle of warnings, then the three arms get removed
+/// (the `th api <resource>` operations stay — they aren't auth).
+fn deprecated_api_auth_hint(old: &str, new: &str) {
+    use owo_colors::OwoColorize;
+    eprintln!(
+        "{} `th api {old}` is deprecated and will be removed in a future release — use `{new}`",
+        "warning:".yellow().bold()
+    );
+}
+
 #[derive(Subcommand)]
 enum ApiCommands {
-    /// Authenticate `th` against the Smoo AI platform API. Exchanges
-    /// an OAuth2 client_credentials grant at `https://auth.smoo.ai/token`
-    /// for a bearer JWT and stores it at `~/.smooth/auth/smooai.json`.
+    /// DEPRECATED — use `th auth login --m2m`. Authenticate `th` against
+    /// the Smoo AI platform API. Exchanges an OAuth2 client_credentials
+    /// grant at `https://auth.smoo.ai/token` for a bearer JWT and stores
+    /// it at `~/.smooth/auth/smooai.json`.
     ///
     /// Credential resolution order (first present wins):
     ///   1. `--client-id` + `--client-secret` flags
@@ -617,10 +636,11 @@ enum ApiCommands {
         #[arg(long)]
         client_secret: Option<String>,
     },
-    /// Forget the current Smoo AI platform session — deletes
-    /// `~/.smooth/auth/smooai.json`. Idempotent.
+    /// DEPRECATED — use `th auth logout --m2m`. Forget the current Smoo AI
+    /// platform session — deletes `~/.smooth/auth/smooai.json`. Idempotent.
     Logout,
-    /// Print the currently-logged-in Smoo AI user + active org.
+    /// DEPRECATED — use `th auth whoami`. Print the currently-logged-in
+    /// Smoo AI user + active org.
     Whoami,
     /// Smoo AI organization management.
     Orgs {
@@ -657,6 +677,13 @@ enum ApiCommands {
     Crm {
         #[command(subcommand)]
         cmd: smooai::crm::Cmd,
+    },
+    /// Smoo AI org Copilot — chat / confirm / history. Drives the org's
+    /// always-on dashboard agent (draft email, CRM, analytics, templates).
+    /// Authenticates as the logged-in user (`th auth login`).
+    Copilot {
+        #[command(subcommand)]
+        cmd: smooai::copilot::Cmd,
     },
     /// Smoo AI knowledge documents (text, websites, files).
     Knowledge {
@@ -1390,14 +1417,24 @@ async fn main() -> Result<()> {
         #[cfg(feature = "admin")]
         Some(Commands::Admin { cmd }) => admin::dispatch(cmd).await,
         Some(Commands::Api { cmd }) => match cmd {
-            ApiCommands::Login { client_id, client_secret } => cmd_login(client_id, client_secret).await,
-            ApiCommands::Logout => cmd_logout().await,
-            ApiCommands::Whoami => cmd_whoami().await,
+            ApiCommands::Login { client_id, client_secret } => {
+                deprecated_api_auth_hint("login", "th auth login --m2m");
+                cmd_login(client_id, client_secret).await
+            }
+            ApiCommands::Logout => {
+                deprecated_api_auth_hint("logout", "th auth logout --m2m");
+                cmd_logout().await
+            }
+            ApiCommands::Whoami => {
+                deprecated_api_auth_hint("whoami", "th auth whoami");
+                cmd_whoami().await
+            }
             ApiCommands::Orgs { cmd } => cmd_orgs(cmd).await,
             ApiCommands::Agents { cmd } => smooai::agents::cmd(cmd).await,
             ApiCommands::Keys { cmd } => smooai::keys::cmd(cmd).await,
             ApiCommands::Members { cmd } => smooai::members::cmd(cmd).await,
             ApiCommands::Crm { cmd } => smooai::crm::cmd(cmd).await,
+            ApiCommands::Copilot { cmd } => smooai::copilot::cmd(cmd).await,
             ApiCommands::Knowledge { cmd } => smooai::knowledge::cmd(cmd).await,
             ApiCommands::Jobs { cmd } => smooai::jobs::cmd(cmd).await,
             ApiCommands::Integrations { cmd } => smooai::integrations::cmd(cmd).await,
@@ -1436,6 +1473,7 @@ async fn main() -> Result<()> {
         Some(Commands::Routing { cmd }) => cmd_routing(cmd).await,
         Some(Commands::Mcp { cmd }) => cmd_mcp(cmd),
         Some(Commands::Plugin { cmd }) => cmd_plugin(cmd),
+        Some(Commands::Ext { cmd }) => ext::dispatch(cmd),
         Some(Commands::Service { cmd }) => cmd_service(cmd),
         Some(Commands::Bench { cmd }) => cmd_bench(cmd),
         Some(Commands::Skills { cmd }) => cmd_skills(cmd),
@@ -2881,13 +2919,7 @@ async fn cmd_code(
                 let workspace = working_dir.clone();
                 let skills = smooth_cast::skills::discover(&workspace);
                 if let Some(skill) = skills.iter().find(|s| s.name == name) {
-                    let source_label = match skill.source {
-                        smooth_cast::skills::SkillSource::Project => "project",
-                        smooth_cast::skills::SkillSource::UserSmooth => "user-smooth",
-                        smooth_cast::skills::SkillSource::ClaudeCode => "claude-code",
-                        smooth_cast::skills::SkillSource::OpenCode => "opencode",
-                        smooth_cast::skills::SkillSource::Builtin => "builtin",
-                    };
+                    let source_label = skill.source.label();
                     // Pearl th-e0f812: tell the headless caller a skill
                     // was picked. stderr so `--json` consumers parsing
                     // stdout don't get tripped.
@@ -3306,14 +3338,13 @@ async fn cmd_tunnel(cmd: TunnelCommands) -> Result<()> {
             println!("  {} {}\n", "slug      ".dimmed(), format!("{}", cfg.slug).bold());
 
             let client = TunnelClient::new(cfg);
-            match client.run().await {
-                Ok(()) => Ok(()),
-                // Scaffold-phase: the rendezvous service isn't live
-                // yet. Surface the structured error with a friendly
-                // hint instead of crashing.
-                Err(smooth_tunnel::TunnelError::NotImplementedYet) => {
-                    println!("  {} Scaffold only — the th.smoo.ai rendezvous service is not deployed yet.", "ℹ".cyan());
-                    println!("  {} Track {} (smooai pearl th-8898f2) for the ECS side.\n", "ℹ".cyan(), "SMOODEV-637".bold());
+            let printed = |hello: &smooth_tunnel::ServerHello| {
+                println!("  {} {}", "✓ live at".green().bold(), hello.public_url.bold());
+                println!("  {} {}\n", "session   ".dimmed(), hello.session_id.dimmed());
+            };
+            match client.run(printed).await {
+                Ok(()) => {
+                    println!("  {} tunnel closed\n", "•".dimmed());
                     Ok(())
                 }
                 Err(e) => Err(anyhow::anyhow!("tunnel: {e}")),
@@ -6250,10 +6281,15 @@ fn cmd_providers_detect(yes: bool, json: bool) -> Result<()> {
 async fn cmd_cast(cmd: CastCommands) -> Result<()> {
     match cmd {
         CastCommands::Models { provider, json, filter } => {
+            // Extension-registered providers (SEP Phase 7) are collected on the
+            // async runtime (loading them handshakes subprocesses); the HTTP
+            // listing itself then runs on a blocking thread. Skipped with zero
+            // cost when no global extensions are installed.
+            let ext_providers = collect_extension_providers().await;
             // `cmd_cast_models` uses `reqwest::blocking`, which panics
             // if dropped inside a tokio runtime context. Hop onto a
             // dedicated blocking thread to keep the runtime happy.
-            tokio::task::spawn_blocking(move || cmd_cast_models(provider.as_deref(), json, filter.as_deref()))
+            tokio::task::spawn_blocking(move || cmd_cast_models(provider.as_deref(), json, filter.as_deref(), &ext_providers))
                 .await
                 .context("cast models task panicked")?
         }
@@ -6365,7 +6401,7 @@ fn filter_and_sort(mut ids: Vec<String>, filter: Option<&str>) -> Vec<String> {
 }
 
 #[allow(clippy::too_many_lines)]
-fn cmd_cast_models(provider_override: Option<&str>, json_out: bool, filter: Option<&str>) -> Result<()> {
+fn cmd_cast_models(provider_override: Option<&str>, json_out: bool, filter: Option<&str>, ext_providers: &[(String, Vec<String>)]) -> Result<()> {
     let providers_path = dirs_next::home_dir()
         .map(|h| h.join(".smooth/providers.json"))
         .context("cannot determine home directory")?;
@@ -6444,12 +6480,20 @@ fn cmd_cast_models(provider_override: Option<&str>, json_out: bool, filter: Opti
         Vec::new()
     };
 
+    // Extension-registered providers (SEP Phase 7): declared models, filtered +
+    // sorted like the rest. `ext` prefixes each id (`<provider>/<model>`) so an
+    // extension model never collides with a gateway one in the flat JSON list.
+    let ext_extra = fold_extension_models(ext_providers, filter);
+
     if json_out {
         // Stable shape: `{"data": [{"id": "..."}]}` — primary provider
-        // first, then each local provider's live models.
+        // first, then each local provider's live models, then extension models.
         let mut data: Vec<_> = chosen.iter().map(|id| serde_json::json!({ "id": id })).collect();
         for (_pid, models) in &local_extra {
             data.extend(models.iter().map(|id| serde_json::json!({ "id": id })));
+        }
+        for (provider, models) in &ext_extra {
+            data.extend(models.iter().map(|id| serde_json::json!({ "id": format!("{provider}/{id}") })));
         }
         println!("{}", serde_json::to_string(&serde_json::json!({ "data": data }))?);
         return Ok(());
@@ -6503,9 +6547,81 @@ fn cmd_cast_models(provider_override: Option<&str>, json_out: bool, filter: Opti
         }
         println!("  {} models", models.len().to_string().cyan().bold());
     }
+
+    // Extension-registered providers, each under its own labeled section.
+    for (provider, models) in &ext_extra {
+        println!();
+        println!("  {} {}", "extension".magenta().bold(), provider.bold());
+        for id in models {
+            println!("  {id}");
+        }
+        println!("  {} models", models.len().to_string().cyan().bold());
+    }
     println!();
 
     Ok(())
+}
+
+/// Fold extension-registered providers into the model listing: apply the same
+/// `filter` + sort as gateway/local models, and drop any provider left with no
+/// matching models. Pure so it can be unit-tested without spawning extensions.
+fn fold_extension_models(ext_providers: &[(String, Vec<String>)], filter: Option<&str>) -> Vec<(String, Vec<String>)> {
+    ext_providers
+        .iter()
+        .filter_map(|(provider, models)| {
+            let models = filter_and_sort(models.clone(), filter);
+            if models.is_empty() {
+                None
+            } else {
+                Some((provider.clone(), models))
+            }
+        })
+        .collect()
+}
+
+/// Load global extensions headlessly and collect the providers they register
+/// (SEP Phase 7). Returns `(provider_label, model_ids)` per registered provider,
+/// where the label is `<extension>.<provider>`. Only GLOBAL extensions (from
+/// `~/.smooth/extensions/`) are loaded — never project extensions — so a plain
+/// `th cast models` in a repo can't be made to spawn an untrusted project
+/// extension. Any failure yields an empty list: extension providers are additive
+/// and must never break the core listing.
+async fn collect_extension_providers() -> Vec<(String, Vec<String>)> {
+    use smooth_operator::extension::manifest::default_global_dir;
+    use smooth_operator::extension::protocol::{HostInfo, WorkspaceInfo};
+    use smooth_operator::extension::{discover, DefaultHostDelegate, ExtensionHost};
+
+    let global = default_global_dir();
+    let (discovered, _failures) = discover(global.as_deref(), None);
+    if discovered.is_empty() {
+        return Vec::new();
+    }
+
+    let host_info = HostInfo {
+        name: "th".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+    };
+    // `trusted: false` + no project dir ⇒ only global extensions load.
+    let workspace = WorkspaceInfo {
+        root: String::new(),
+        trusted: false,
+    };
+    let (host, _load_failures) = ExtensionHost::load(
+        discovered,
+        host_info,
+        workspace,
+        "headless",
+        Vec::new(),
+        std::sync::Arc::new(DefaultHostDelegate),
+    )
+    .await;
+    let providers = host
+        .providers()
+        .into_iter()
+        .map(|(ext, reg)| (format!("{ext}.{}", reg.name), reg.models.into_iter().map(|m| m.id).collect()))
+        .collect();
+    host.shutdown_all().await;
+    providers
 }
 
 /// GET `/v1/models` for every *configured* local provider except
@@ -6549,7 +6665,7 @@ fn probe_configured_local_providers(
 
 #[cfg(test)]
 mod cast_models_tests {
-    use super::{extract_model_ids_lossy, filter_and_sort, models_url_for, parse_models_response, strip_control_chars};
+    use super::{extract_model_ids_lossy, filter_and_sort, fold_extension_models, models_url_for, parse_models_response, strip_control_chars};
 
     #[test]
     fn models_url_appends_models_when_missing() {
@@ -6625,6 +6741,32 @@ mod cast_models_tests {
         let ids = vec!["smooth-coding".to_string(), "smooth-judge".to_string(), "claude-sonnet-4".to_string()];
         let out = filter_and_sort(ids, Some("SMOOTH"));
         assert_eq!(out, vec!["smooth-coding", "smooth-judge"]);
+    }
+
+    #[test]
+    fn fold_extension_models_filters_sorts_and_drops_empty() {
+        let ext = vec![
+            ("corp.corporate-proxy".to_string(), vec!["corp-gpt-4o".to_string(), "corp-fast".to_string()]),
+            ("other.thing".to_string(), vec!["unrelated".to_string()]),
+        ];
+        // No filter: both providers kept, models sorted.
+        let all = fold_extension_models(&ext, None);
+        assert_eq!(all.len(), 2);
+        assert_eq!(
+            all[0],
+            ("corp.corporate-proxy".to_string(), vec!["corp-fast".to_string(), "corp-gpt-4o".to_string()])
+        );
+
+        // Filter to `corp`: the second provider has no match and is dropped.
+        let filtered = fold_extension_models(&ext, Some("corp"));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].0, "corp.corporate-proxy");
+        assert_eq!(filtered[0].1, vec!["corp-fast".to_string(), "corp-gpt-4o".to_string()]);
+    }
+
+    #[test]
+    fn fold_extension_models_empty_input_is_empty() {
+        assert!(fold_extension_models(&[], None).is_empty());
     }
 
     #[test]
@@ -7329,13 +7471,7 @@ fn cmd_skills(cmd: SkillsCommands) -> Result<()> {
     let workspace = std::env::current_dir().context("current directory")?;
 
     fn source_label(src: &SkillSource) -> &'static str {
-        match src {
-            SkillSource::Project => "project",
-            SkillSource::UserSmooth => "user-smooth",
-            SkillSource::ClaudeCode => "claude-code",
-            SkillSource::OpenCode => "opencode",
-            SkillSource::Builtin => "builtin",
-        }
+        src.label()
     }
 
     match cmd {

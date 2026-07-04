@@ -62,6 +62,10 @@ pub enum SkillSource {
     ClaudeCode,
     /// `~/.opencode/skills/<name>/...` — opencode.
     OpenCode,
+    /// A trusted SEP extension's `[resources] skills` directory. Extensions are
+    /// user-installed, so they sit above the imported Claude/opencode ecosystems
+    /// but below the user's own project / `~/.smooth` skills.
+    Extension,
     /// Embedded in the smooth binary. Shipped with every install
     /// (currently: `create-skill`). User-authored skills with the
     /// same name OVERRIDE the built-in (the built-in is the lowest
@@ -76,9 +80,24 @@ impl SkillSource {
         match self {
             Self::Project => 0,
             Self::UserSmooth => 1,
-            Self::ClaudeCode => 2,
-            Self::OpenCode => 3,
-            Self::Builtin => 4,
+            Self::Extension => 2,
+            Self::ClaudeCode => 3,
+            Self::OpenCode => 4,
+            Self::Builtin => 5,
+        }
+    }
+
+    /// Short display label for the source (`project`, `user-smooth`,
+    /// `claude-code`, `opencode`, `extension`, `builtin`).
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Project => "project",
+            Self::UserSmooth => "user-smooth",
+            Self::ClaudeCode => "claude-code",
+            Self::OpenCode => "opencode",
+            Self::Extension => "extension",
+            Self::Builtin => "builtin",
         }
     }
 }
@@ -250,6 +269,11 @@ pub fn discover_with_overrides(workspace_root: &Path) -> Vec<Skill> {
         collect_from(&home.join(".opencode/agents"), SkillSource::OpenCode, &mut skills);
     }
 
+    // SEP extensions contribute their `[resources] skills` dirs (trusted only).
+    // This is the unification seam: smooth-cast stays the one canonical skill
+    // catalog; extensions feed it rather than parsing skills themselves.
+    skills.extend(resources_discover(workspace_root));
+
     // Builtin skills ship with the binary. They land last so any
     // user-authored skill at the same name overrides them.
     skills.extend(builtin_skills());
@@ -269,6 +293,41 @@ fn builtin_skills() -> Vec<Skill> {
         out.push(skill);
     }
     out
+}
+
+/// Discover skills contributed by trusted SEP extensions.
+///
+/// Each installed extension may declare `[resources] skills = "<dir>"` in its
+/// `extension.toml`; every SKILL under that dir (resolved against the extension
+/// root) becomes a [`SkillSource::Extension`] skill. Only **trusted** extensions
+/// contribute — a skill body is prepended to the agent's prompt, so loading an
+/// untrusted extension's skills is the same prompt-injection surface as loading
+/// its code, and gates on the same content-hashed trust store the host uses.
+///
+/// This is the unification seam (SEP Phase 5): the engine's extension discovery
+/// finds the dirs, smooth-cast's parser turns them into the one canonical
+/// `Skill` type. Extensions never parse skills themselves.
+#[must_use]
+pub fn resources_discover(workspace_root: &Path) -> Vec<Skill> {
+    use smooth_operator::extension::manifest::{default_global_dir, discover as discover_extensions, project_dir};
+    use smooth_policy::ext_trust::{hash_extension, TrustStore};
+
+    let global = default_global_dir();
+    let project = project_dir(workspace_root);
+    let (extensions, _failures) = discover_extensions(global.as_deref(), Some(project.as_path()));
+    let trust = TrustStore::load();
+
+    let mut skills = Vec::new();
+    for ext in extensions {
+        let Some(rel) = ext.manifest.resources.skills.as_deref() else { continue };
+        let hash = hash_extension(&ext.root).unwrap_or_default();
+        if !trust.is_trusted(&ext.manifest.name, &hash) {
+            tracing::debug!(name = %ext.manifest.name, "skipping untrusted extension's skills");
+            continue;
+        }
+        collect_from(&ext.root.join(rel), SkillSource::Extension, &mut skills);
+    }
+    skills
 }
 
 /// Scan a single skills root directory and append every valid
@@ -654,5 +713,50 @@ body"#;
         assert!(!create_skill.triggers.is_empty(), "create-skill needs triggers");
         assert_eq!(create_skill.source, SkillSource::Builtin);
         assert!(create_skill.body.contains("Process"), "body should be the markdown recipe");
+    }
+
+    #[test]
+    fn resources_discover_gates_extension_skills_on_trust() {
+        use smooth_policy::ext_trust::{hash_extension, TrustStore};
+
+        // Isolate BOTH the extension store and the trust store under one
+        // SMOOTH_HOME. `default_global_dir` (engine) and the trust store both
+        // resolve through it, so the extension lands in the discovered global
+        // scope and the trust file sits alongside it. Single test → no env race.
+        let home = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("SMOOTH_HOME", home.path());
+
+        let ext_root = home.path().join("extensions").join("demo");
+        std::fs::create_dir_all(ext_root.join("skills").join("hi")).unwrap();
+        std::fs::write(
+            ext_root.join("extension.toml"),
+            "name = \"demo\"\nversion = \"0.1.0\"\n[run]\ncommand = \"node\"\n[resources]\nskills = \"skills\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ext_root.join("skills").join("hi").join("SKILL.md"),
+            "---\nname: ext-hi\ndescription: contributed by an extension\n---\nBody.\n",
+        )
+        .unwrap();
+
+        // Untrusted → contributes nothing (prompt-injection surface stays closed).
+        let workspace = tempfile::tempdir().expect("ws");
+        assert!(
+            resources_discover(workspace.path()).is_empty(),
+            "untrusted extension must not contribute skills"
+        );
+
+        // Trust it against its current content hash → the skill appears.
+        let hash = hash_extension(&ext_root).unwrap();
+        let mut trust = TrustStore::load();
+        trust.set("demo", &ext_root.to_string_lossy(), &hash, true);
+        trust.save().unwrap();
+
+        let found = resources_discover(workspace.path());
+        assert_eq!(found.len(), 1, "trusted extension contributes its skill");
+        assert_eq!(found[0].name, "ext-hi");
+        assert_eq!(found[0].source, SkillSource::Extension);
+
+        std::env::remove_var("SMOOTH_HOME");
     }
 }

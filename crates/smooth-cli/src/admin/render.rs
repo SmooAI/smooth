@@ -367,6 +367,21 @@ mod tests {
     }
 
     #[test]
+    fn ansi_escapes_do_not_widen_columns_th_6e77b7() {
+        // Explicit escapes (owo-colors may no-op off-TTY): the coloured
+        // cell must render the same table width as the plain one.
+        let table_width = |cell: &str| {
+            let mut b = Builder::default();
+            b.push_record(["status"]);
+            b.push_record([cell]);
+            let mut t = b.build();
+            apply_modern_style(&mut t);
+            t.to_string().lines().next().map_or(0, |l| l.chars().count())
+        };
+        assert_eq!(table_width("\u{1b}[32;1mactive\u{1b}[0m"), table_width("active"));
+    }
+
+    #[test]
     fn colour_status_known_values_get_colour_codes_other_passthrough() {
         // Coloured = contains an ANSI escape. The actual code depends
         // on the terminal-detect logic in owo-colors; in tests it's

@@ -56,9 +56,9 @@ The Smoo AI platform uses a two-tier identity model that `th` mirrors exactly:
 ### Logging in today (M2M client_credentials)
 
 ```bash
-th api login                       # interactive — prompts for client_id + secret
-SMOOAI_CLIENT_ID=…  SMOOAI_CLIENT_SECRET=… th api login   # env-driven (CI, scripts)
-th api login --client-id=… --client-secret=…              # flag-driven
+th auth login --m2m                # interactive — prompts for client_id + secret
+SMOOAI_CLIENT_ID=…  SMOOAI_CLIENT_SECRET=… th auth login --m2m   # env-driven (CI, scripts)
+th auth login --m2m --client-id=… --client-secret=…              # flag-driven
 ```
 
 Credential resolution order (first present wins):
@@ -77,7 +77,7 @@ The exchange happens against `https://auth.smoo.ai/token` with `grant_type=clien
 ### Verifying you're logged in
 
 ```bash
-th api whoami
+th auth whoami
 # Identity     client:bee846cc-...        ← the M2M client_id (or user:… if dashboard auth)
 # Email        brent@smoo.ai
 # Admin roles  super_admin (1)            ← present iff your client/user has admin grants
@@ -118,7 +118,7 @@ Practical consequences:
 ### Logout
 
 ```bash
-th api logout                             # deletes ~/.smooth/auth/smooai.json (idempotent)
+th auth logout --m2m                             # deletes ~/.smooth/auth/smooai.json (idempotent)
 ```
 
 ### Provider auth is separate
@@ -186,7 +186,10 @@ th api agents update <agent-id> --workflow @workflow.json   # {goal, steps:[{id,
 th api agents update <agent-id> --tool-config '{"enabledTools":[{"toolId":"knowledge_search","enabled":true,"authLevel":"none"}]}'
 # toolConfig rules: empty enabledTools = FULL tool set; non-empty = restrict
 # to enabled=true entries; all-disabled = no tools (fail closed).
-# mint accepts the same --personality/--workflow/--tool-config at create time.
+th api agents update <agent-id> --extension '{"enabledExtensions":[{"extensionId":"plan-mode","enabled":true,"config":{}}]}'
+# SMOODEV-2259 — extensionConfig gates SEP extensions per agent. extensionId is
+# kebab-case (SEP extension name); empty enabledExtensions = no extensions (fail closed).
+# mint accepts the same --personality/--workflow/--tool-config/--extension at create time.
 # Read any of these back with: th api agents show <agent-id>
 ```
 
@@ -369,6 +372,38 @@ The API key is never passed on argv — `create` reads it from `SENDGRID_API_KEY
 or prompts for it (masked). `test` sends a verification email through the
 configured integration.
 
+### Copilot (org's always-on dashboard agent)
+
+Drive the org's [Org Copilot](../Product/Features/Org-Copilot.md) from the CLI —
+the same agent behind the dashboard's ⌘J panel. It acts on the org's own data:
+knowledge search, CRM lookup/create, analytics questions, template generation,
+and drafting + (on confirm) sending email. User-authed (`th auth login`);
+401s under M2M.
+
+```bash
+th api copilot chat "Find contacts named Jane and draft a follow-up"   # run a turn
+th api copilot chat "Make it warmer" --conversation <id>               # continue it
+th api copilot chat "..." --json                                       # raw CopilotTurnResult
+th api copilot history <conversation-id>                               # message history
+```
+
+Destructive tools (e.g. `email.send`) **never auto-run** — a turn that triggers
+one returns a `pendingAction` and pauses. `chat` resolves it with a y/N prompt
+on a TTY, or the up-front `--confirm` / `--no-confirm` flag for
+non-interactive/agent use. With **no flag on a non-TTY** it prints the pending
+action and stops rather than guessing — `--no-confirm` is never a silent
+default. To inspect first, then approve without resending the message:
+
+```bash
+th api copilot chat "Send jane@acme.com the follow-up"     # pauses, prints the pending email.send
+th api copilot confirm <conversation-id> --approve         # run it
+th api copilot confirm <conversation-id> --decline         # or drop it
+th api copilot chat "Send jane@acme.com the follow-up" --confirm   # one-shot, when already authorized
+```
+
+Responses are buffered JSON (token streaming is phase 2). Every tool run is
+audit-logged against the logged-in user.
+
 ### Keys (M2M auth clients)
 
 ```bash
@@ -500,6 +535,34 @@ For agents collaborating across **different clones/machines** of the same repo, 
 
 `th pearls init` injects an **Agent Messaging** section into the repo's `AGENTS.md` (idempotent, between `<!-- th:agent-messaging:* -->` markers) so any harness that reads `AGENTS.md` learns to register + poll without bespoke wiring. Set `$SMOOTH_HARNESS` so `th agent list` shows what tool each agent is. Read/unread is tracked per message via `read_at`; `to = all` broadcasts share read-state (MVP simplification).
 
+### SEP extensions — `th ext` (SEP Phase 3, pearl th-f288ae)
+
+SEP (the Smooth Extension Protocol) extensions are long-lived subprocesses that speak JSON-RPC over stdio to a Smooth host, contributing tools, hooks, event subscriptions, and UI. `th ext` manages the ones installed on this machine; the engine (`smooai-smooth-operator-core`) discovers and loads them, and the frontend renders their `ui/request`s.
+
+```bash
+th ext install <source> [--project] [--trust]  # install from a local dir, npm, or git:
+                                               #   th ext install ./path                       (local extension dir)
+                                               #   th ext install npm:@scope/pkg[@version]     (npm package)
+                                               #   th ext install git:github.com/user/repo@ref (git repo)
+                                               #   shows declared capabilities, then prompts to trust
+th ext search <query...>                        # find extensions: curated index + live npm `smooth-extension` keyword
+th ext update [<name>] [--project] [--trust]    # re-fetch packaged (npm:/git:) extensions from their recorded source
+th ext list                                     # installed extensions (global + project) with trust state + source
+th ext trust <name> [--project]                # trust an installed extension (records its content hash)
+th ext reload <name> [--project] [--trust]     # re-check manifest + trust, then HOT-RELOAD the running daemon's host
+th ext remove <name> [--project]               # delete the extension and its trust record
+```
+
+**Install sources (SEP Phase 5).** A local path is copied in. An `npm:` package is vendored under `~/.smooth/extensions/.npm` (an `npm install --prefix` tree so its own deps resolve); a `git:` repo is cloned under `~/.smooth/extensions/.git/<host>/<path>` at the given ref (and `npm install`ed if it has a `package.json`). Either way a `~/.smooth/extensions/<name>` symlink to the vendored dir is what the engine discovers, so packaged and local installs load identically. An extension may ship its manifest as `extension.toml` **or** a `smooth` key in `package.json` (synthesized into `extension.toml` at install). The recorded source lets `th ext update` re-fetch and reconcile — an unchanged manifest keeps its trust; a changed one is re-locked (fail-safe).
+
+**Trust is content-hashed and fail-safe.** An extension only loads when it's recorded `trusted` in `~/.smooth/extensions/trust.toml` **and** its `extension.toml` still hashes to the value trust was granted against — editing (or updating) an extension re-locks it until you `th ext trust` again. A non-interactive install (piped/CI) never trusts silently; use `--trust` to opt in explicitly or run `th ext trust <name>` after. Project-scoped extensions live under `<repo>/.smooth/extensions` and win over a same-named global one.
+
+**Extensions can ship skills.** An extension's `[resources] skills = "<dir>"` directory feeds the one canonical skill catalog (`smooth-cast`) — every SKILL under it becomes a `/skill:<name>` (source `extension`), gated on the same content-hashed trust (an untrusted extension contributes no skills). `smooth-cast` is the only skill parser; `th code`'s `/skill` and `/ext` read from it.
+
+> **In the TUI**, `/ext` lists installed extensions with their trust state and declared capabilities. Live command/UI dispatch into a running host reaches the TUI over the daemon event surface (SEP Phase 6); `th ext`, the trust store, skills unification, and the render-block/host substrate are in place now. The engine `Agent` runs in `smooth-operative` (dispatched server-side) and declares all seven `ui/request` kinds (`smooth_code::sep_host::TUI_UI_CAPABILITIES`) via the `TuiUiProvider` delegate.
+
+**Big Smooth's own chat hosts extensions too (pearl th-6d8606).** The daemon loads pre-trusted extensions once at startup into a shared host; chatting with Big Smooth (smooth-web or `/api/chat`) exposes their tools (gated by AutoMode + Narc like every chat tool), their `ui/*` renders via the same `UiRelay` components, and `/cmd args` in the chat box runs a registered extension command directly. `th ext reload <name>` hot-reloads the daemon's live host over `POST /api/ext/reload` (set `SMOOTH_BIGSMOOTH_URL` if not `http://127.0.0.1:4400`); `GET /api/ext` lists what's live. Newly installed extensions need a daemon restart — discovery runs at startup.
+
 ### Jira sync
 
 ```bash
@@ -607,6 +670,14 @@ th cast models                                     # list groups from the config
                                                    # (also folds in any configured local provider's live models)
 ```
 
+`th cast models` also surfaces **extension-registered providers** (SEP Phase 7):
+any globally installed extension (`~/.smooth/extensions/`) that registers an LLM
+provider is loaded headlessly and its declared models are listed under an
+`extension <ext>.<provider>` section (and, in `--json`, as `<provider>/<model>`
+ids). Project extensions are never spawned by this command. Extensions register
+providers via the SEP `registerProvider` surface; the host proxies completions to
+them over `provider/complete` with streamed `provider/delta` chunks.
+
 ### Skills — reusable recipes (Claude-Code parity)
 
 A **skill** is a `SKILL.md` (YAML frontmatter + markdown body) that encodes the
@@ -687,6 +758,25 @@ th providers remove lmstudio
   stays the keyed path for the cloud presets (Anthropic, OpenRouter,
   Smoo AI gateway, …).
 
+### Routing slots & the model catalog
+
+`~/.smooth/providers.json` routes seven slots (`coding`, `reasoning`,
+`reviewing`, `judge`, `summarize`, `fast`, `default`) to concrete
+`model_name`s. The old gateway `smooth-*` slot aliases (`smooth-coding`,
+`smooth-fast-gemini`, …) were **removed at the gateway** (SMOODEV-1793) —
+any request for one now 400s. Old config files are migrated in place on
+load: every `smooth-*` alias (and the since-removed `groq-llama-*`
+concretes) is rewritten to its concrete default and saved back, so
+existing installs keep working with no manual edit. The canonical
+mapping lives in `smooth_policy::smooth_alias`.
+
+The `th code` `/model` picker sources its catalog — use-cases, tier,
+$/M cost, benchmarks — from the gateway's live `GET /v1/model/info`
+when a gateway provider is configured, so removed models drop out and
+new ones appear without a Smooth release. It falls back to a baked
+offline catalog when no gateway is reachable, and folds in local
+providers' live models either way (Tab for "show all").
+
 ---
 
 ## 6. Extending `th` — add it when it's missing
@@ -743,7 +833,7 @@ Both repos ship a `PreToolUse` Bash hook (`.claude/hooks/th-curl-hint.sh`) that 
 | Pattern | Hint |
 |---|---|
 | `curl … api.smoo.ai` | Use `th api …` instead |
-| `curl … auth.smoo.ai/token` | Use `th api login` instead |
+| `curl … auth.smoo.ai/token` | Use `th auth login --m2m` instead |
 | `curl … atlassian.net/rest/api` | Use `th jira sync` (or file a pearl for the missing verb) |
 | `gh secret set … --body -` with stdin echo | Use `scripts/secret-helpers/gh-secret-set` to avoid trailing-newline corruption |
 | `pnpm sst secret list` (raw) | Use `scripts/secret-helpers/sst-secret-list` to avoid plaintext leakage |
@@ -771,7 +861,7 @@ The `th` binary is built from this repo. Every gap is a `th-*` pearl waiting to 
 
 ```bash
 # Identity
-th api whoami                                                       # who am I, which org, when does my JWT expire
+th auth whoami                                                       # who am I, which org, when does my JWT expire
 th api orgs list                                                    # what orgs can I see
 th api orgs switch <id>                                             # change active org
 

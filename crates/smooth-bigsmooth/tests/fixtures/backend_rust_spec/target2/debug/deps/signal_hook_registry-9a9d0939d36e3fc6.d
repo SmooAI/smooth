@@ -1,0 +1,9 @@
+/Users/brentrager/dev/smooai/smooth-th-6d8606-bigsmooth-sep/crates/smooth-bigsmooth/tests/fixtures/backend_rust_spec/./target2/debug/deps/signal_hook_registry-9a9d0939d36e3fc6.d: /Users/brentrager/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/lib.rs /Users/brentrager/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/half_lock.rs /Users/brentrager/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/vec_map.rs
+
+/Users/brentrager/dev/smooai/smooth-th-6d8606-bigsmooth-sep/crates/smooth-bigsmooth/tests/fixtures/backend_rust_spec/./target2/debug/deps/libsignal_hook_registry-9a9d0939d36e3fc6.rlib: /Users/brentrager/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/lib.rs /Users/brentrager/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/half_lock.rs /Users/brentrager/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/vec_map.rs
+
+/Users/brentrager/dev/smooai/smooth-th-6d8606-bigsmooth-sep/crates/smooth-bigsmooth/tests/fixtures/backend_rust_spec/./target2/debug/deps/libsignal_hook_registry-9a9d0939d36e3fc6.rmeta: /Users/brentrager/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/lib.rs /Users/brentrager/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/half_lock.rs /Users/brentrager/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/vec_map.rs
+
+/Users/brentrager/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/lib.rs:
+/Users/brentrager/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/half_lock.rs:
+/Users/brentrager/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/vec_map.rs:

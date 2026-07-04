@@ -124,6 +124,21 @@ pub struct AppState {
     /// th-87dfee). Seeded from an inherited `SMOOTH_HOST_TOKEN` (sandbox
     /// dispatch passes one in) or freshly generated.
     pub host_token: Arc<str>,
+    /// In-flight interactive SEP `ui/*` requests (SEP Phase 6). Keyed by
+    /// `request_id`; the value resolves the operative's blocked HTTP call.
+    /// A dispatched operative POSTs `/api/ui/request`, the handler parks a
+    /// oneshot here and broadcasts a [`ServerEvent::UiRequest`]; the frontend
+    /// answers via `/api/ui/answer`, which fires the sender. See
+    /// [`crate::ui_relay`].
+    pub ui_pending: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<serde_json::Value>>>>,
+    /// The chat loop's shared SEP extension host (pearl th-6d8606) —
+    /// daemon-lifetime, loaded once at startup by
+    /// [`crate::sep::init_chat_extension_host`] (pre-trusted extensions only),
+    /// attached to every chat agent via [`crate::sep::attach_chat_ext_host`].
+    /// `None` when the user has no trusted extensions. std `RwLock` (not
+    /// tokio's): reads just clone the `Arc` on the chat path; the only write
+    /// is startup init.
+    pub ext_host: Arc<std::sync::RwLock<Option<Arc<smooth_operator::extension::ExtensionHost>>>>,
 }
 
 impl AppState {
@@ -141,9 +156,12 @@ impl AppState {
         // and unsafe in Rust 2024 (pearl th-87dfee). Reading an inherited
         // value once here is fine (getenv, not setenv); sandbox dispatch
         // may pass one in, otherwise generate a fresh per-process token.
-        let host_token: Arc<str> = std::env::var("SMOOTH_HOST_TOKEN")
-            .unwrap_or_else(|_| crate::host_tools::generate_host_token())
-            .into();
+        // Always generate a fresh per-instance token so that two AppState
+        // values in the same process are always distinct (pearl th-87dfee).
+        // If the caller needs to inherit a pre-assigned token (e.g. sandbox
+        // subprocess dispatch), it should call `with_host_token` after
+        // construction, or pass the env-var value in at the binary level.
+        let host_token: Arc<str> = crate::host_tools::generate_host_token().into();
         let max_operators = max_sandbox_concurrency();
         let session_store = Arc::new(crate::session::DoltSessionStore::new(&pearl_store));
         let (event_tx, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
@@ -326,11 +344,13 @@ impl AppState {
             access,
             wonk_grants,
             host_token,
+            ui_pending: Arc::new(Mutex::new(HashMap::new())),
+            ext_host: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
     /// Touch the activity timestamp — call from every handler.
-    fn touch(&self) {
+    pub(crate) fn touch(&self) {
         if let Ok(mut last) = self.last_activity.lock() {
             *last = Instant::now();
         }
@@ -557,6 +577,15 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/access/deny", post(access_deny_handler))
         .route("/api/access/stream", get(access_stream_handler))
         .route("/api/host/exec", post(crate::host_tools::host_exec_handler))
+        // SEP Phase 6 — extension ui/* relay. `request` is the operative's
+        // bearer-authed callback (blocks for interactive kinds); `answer` is
+        // the frontend resolving a parked dialog.
+        .route("/api/ui/request", post(crate::ui_relay::request_handler))
+        .route("/api/ui/answer", post(crate::ui_relay::answer_handler))
+        // SEP in the chat loop (pearl th-6d8606) — list the daemon's loaded
+        // extensions + their slash commands; hot-reload one (`th ext reload`).
+        .route("/api/ext", get(crate::sep::ext_list_handler))
+        .route("/api/ext/reload", post(crate::sep::ext_reload_handler))
         // WebSocket — primary real-time channel
         .route("/ws", get(ws_handler))
         // Embedded web UI (SPA fallback — must be last)
@@ -652,6 +681,12 @@ pub async fn start(state: AppState, addr: SocketAddr) -> anyhow::Result<()> {
     // removed 2026-07 (pearl th-f4a801). Dispatch is now WebSocket-driven
     // (TaskStart → dispatch_ws_task_direct); the orchestrator only reports
     // state for status/TUI/web, so there's no background loop to run.
+
+    // SEP in the chat loop (pearl th-6d8606): load the user's pre-trusted
+    // extensions once into the daemon-lifetime host. Best-effort — no trusted
+    // extensions (the common case) leaves `ext_host` None and the chat loop
+    // exactly as before.
+    crate::sep::init_chat_extension_host(&state).await;
 
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -1018,6 +1053,12 @@ fn find_native_operative_binary() -> Option<std::path::PathBuf> {
             return Some(p);
         }
     }
+    // Pearl th-e74aa6: builds redirected via CARGO_TARGET_DIR (shared or
+    // isolated target dirs) never land in <repo>/target — the walk-up below
+    // misses them even though the binary exists. Probe the redirect first.
+    if let Some(p) = cargo_target_dir_native_operative(std::env::var("CARGO_TARGET_DIR").ok().as_deref()) {
+        return Some(p);
+    }
     let check = |base: &std::path::Path| -> Option<std::path::PathBuf> {
         for profile in ["release", "debug"] {
             let candidate = base.join("target").join(profile).join("smooth-operative");
@@ -1069,6 +1110,17 @@ fn cargo_bin_native_operative(cargo_install_root: Option<&str>, cargo_home: Opti
     };
     let candidate = bin_dir.join("smooth-operative");
     candidate.is_file().then_some(candidate)
+}
+
+/// Pure helper for the `CARGO_TARGET_DIR` probe — the env var points at
+/// the target dir itself (profiles directly under it). Split out for
+/// testing without touching process env. Pearl th-e74aa6.
+fn cargo_target_dir_native_operative(cargo_target_dir: Option<&str>) -> Option<std::path::PathBuf> {
+    let target = std::path::Path::new(cargo_target_dir?);
+    ["release", "debug"]
+        .iter()
+        .map(|p| target.join(p).join("smooth-operative"))
+        .find(|c| c.is_file())
 }
 
 /// Build a human-readable resumption context block from prior session
@@ -1196,7 +1248,7 @@ async fn dispatch_ws_task_direct(state: &AppState, opts: DispatchOptions) {
     let runner_bin = match find_native_operative_binary() {
         Some(p) => p,
         None => {
-            let err = "native smooth-operative not found. Run `cargo build -p smooai-smooth-operative` (debug) or `--release`, or set SMOOTH_OPERATIVE_NATIVE=/absolute/path.";
+            let err = "native smooth-operative not found. Run `pnpm install:th` (installs to ~/.cargo/bin) or `cargo build -p smooai-smooth-operative`, or set SMOOTH_OPERATIVE_NATIVE=/absolute/path. Checked: $SMOOTH_OPERATIVE_NATIVE, $CARGO_TARGET_DIR/{release,debug}, <workspace>/target/{release,debug}, ~/.cargo/bin.";
             let _ = event_tx.send(ServerEvent::TaskError {
                 task_id: task_id.clone(),
                 message: err.into(),
@@ -1899,6 +1951,21 @@ async fn set_config_handler(State(state): State<AppState>, Json(body): Json<Conf
 async fn run_task_handler(State(state): State<AppState>, Json(req): Json<TaskRequest>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     state.touch();
 
+    // Validate: empty message is an immediate error — stream one error event
+    // and close. This prevents the SSE stream from hanging open indefinitely
+    // waiting for a task that was never dispatched.
+    if req.message.trim().is_empty() {
+        let (sse_tx, sse_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+        let _ = sse_tx.send(AgentEvent::Error {
+            message: "message must not be empty".into(),
+        });
+        // Drop sse_tx so the stream closes immediately after the error event.
+        drop(sse_tx);
+        let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(sse_rx);
+        let sse_stream = futures_util::StreamExt::map(stream, agent_event_to_sse);
+        return Sse::new(sse_stream);
+    }
+
     // Subscribe to the broadcast channel BEFORE dispatching so we don't miss
     // events. The dispatched task broadcasts ServerEvents which we forward as
     // AgentEvent SSE chunks for clients.
@@ -1926,11 +1993,22 @@ async fn run_task_handler(State(state): State<AppState>, Json(req): Json<TaskReq
         dispatch_ws_task(&state_clone, opts).await;
     });
 
-    // Bridge ServerEvent broadcast → AgentEvent SSE stream
+    // Bridge ServerEvent broadcast → AgentEvent SSE stream.
+    // A 5-minute hard timeout ensures the SSE stream always closes even when
+    // the operative subprocess hangs or no LLM provider is configured.
     tokio::spawn(async move {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
         loop {
-            match event_rx.recv().await {
-                Ok(event) => {
+            let recv_fut = event_rx.recv();
+            match tokio::time::timeout_at(deadline, recv_fut).await {
+                Err(_elapsed) => {
+                    // Timeout — close the stream with an error event.
+                    let _ = sse_tx.send(AgentEvent::Error {
+                        message: "task timed out after 5 minutes".into(),
+                    });
+                    break;
+                }
+                Ok(Ok(event)) => {
                     let agent_event = match event {
                         ServerEvent::TokenDelta { content, .. } => Some(AgentEvent::TokenDelta { content }),
                         ServerEvent::ToolCallStart { tool_name, arguments, .. } => Some(AgentEvent::ToolCallStart {
@@ -1974,19 +2052,24 @@ async fn run_task_handler(State(state): State<AppState>, Json(req): Json<TaskReq
                         }
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(_) => break,
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(_)) => break,
             }
         }
     });
 
     let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(sse_rx);
-    let sse_stream = futures_util::StreamExt::map(stream, |event| {
-        let data = serde_json::to_string(&event).unwrap_or_else(|_| r#"{"type":"Error","message":"serialization failed"}"#.into());
-        Ok(Event::default().data(data))
-    });
+    let sse_stream = futures_util::StreamExt::map(stream, agent_event_to_sse);
 
     Sse::new(sse_stream)
+}
+
+/// Convert an [`AgentEvent`] to an SSE [`Event`]. Used as a named function so
+/// both early-return and normal-return paths in `run_task_handler` share the
+/// same type, satisfying Rust's closure-uniqueness rule.
+fn agent_event_to_sse(event: AgentEvent) -> Result<Event, std::convert::Infallible> {
+    let data = serde_json::to_string(&event).unwrap_or_else(|_| r#"{"type":"Error","message":"serialization failed"}"#.into());
+    Ok(Event::default().data(data))
 }
 
 /// Truncate a string to at most `max_len` characters, appending "..." if truncated.
@@ -2449,6 +2532,11 @@ async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>)
         use smooth_operator::agent::{Agent, AgentConfig, AgentEvent};
         use smooth_operator::cost::CostBudget;
 
+        // Extension slash command? Runs command-tier without an LLM turn.
+        if let Some(reply) = crate::sep::try_ext_command(&state, user_content).await {
+            return Ok(reply);
+        }
+
         let providers_path = dirs_next::home_dir().unwrap_or_default().join(".smooth/providers.json");
         let registry = load_providers_with_migration(&providers_path).map_err(|e| anyhow::anyhow!("no LLM providers configured: {e}"))?;
 
@@ -2488,7 +2576,7 @@ async fn chat_handler(State(state): State<AppState>, Json(body): Json<ChatBody>)
                 max_tokens: None,
             });
         }
-        let agent = Agent::new(agent_cfg, tools);
+        let agent = crate::sep::attach_chat_ext_host(Agent::new(agent_cfg, tools), &state);
 
         let thoughts = crate::thoughts::ThoughtStreamer::new(&registry_arc, state.event_tx.clone());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
@@ -2866,6 +2954,39 @@ async fn post_chat_message_stream_handler(
     let state_for_agent = state.clone();
     let session_id = id.clone();
     tokio::spawn(async move {
+        // Extension slash command? Runs command-tier without an LLM turn —
+        // persist the reply as the assistant message and complete the stream.
+        if let Some(reply) = crate::sep::try_ext_command(&state_for_agent, &user_content).await {
+            let assistant_msg = crate::session::SessionMessage {
+                id: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
+                session_id: session_id.clone(),
+                from: "bigsmooth".into(),
+                to: "user".into(),
+                content: reply.clone(),
+                timestamp: chrono::Utc::now(),
+                message_type: crate::session::MessageType::Response,
+                tool_calls: Vec::new(),
+            };
+            if let Err(e) = state_for_agent.session_store.save_message(assistant_msg) {
+                tracing::warn!(error = %e, "failed to save ext-command chat reply");
+            }
+            let _ = state_for_agent.session_store.bump_message_count(&session_id, 2);
+            let _ = sse_tx.send(AgentEvent::LlmResponse {
+                iteration: 0,
+                content_preview: reply,
+                tool_call_count: 0,
+            });
+            let _ = sse_tx.send(AgentEvent::Completed {
+                agent_id: "big-smooth-chat-stream".into(),
+                iterations: 0,
+                cost_usd: 0.0,
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                cached_tokens: 0,
+            });
+            return;
+        }
+
         // Resolve provider config — fail fast with an Error event if
         // the user hasn't configured an LLM provider.
         let providers_path = dirs_next::home_dir().unwrap_or_default().join(".smooth/providers.json");
@@ -2904,7 +3025,7 @@ async fn post_chat_message_stream_handler(
 
         let system_prompt = include_str!("chat_tools_system_prompt.txt");
         let agent_cfg = AgentConfig::new("big-smooth-chat-stream", system_prompt, llm_config).with_max_iterations(20);
-        let agent = Agent::new(agent_cfg, tools);
+        let agent = crate::sep::attach_chat_ext_host(Agent::new(agent_cfg, tools), &state_for_agent);
 
         // Two-pronged forward: every AgentEvent is forwarded to the
         // SSE channel, AND ToolCallStart/Complete are accumulated for
@@ -2989,10 +3110,7 @@ async fn post_chat_message_stream_handler(
     });
 
     let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(sse_rx);
-    let sse_stream = futures_util::StreamExt::map(stream, |event| {
-        let data = serde_json::to_string(&event).unwrap_or_else(|_| r#"{"type":"Error","message":"serialization failed"}"#.into());
-        Ok(Event::default().data(data))
-    });
+    let sse_stream = futures_util::StreamExt::map(stream, agent_event_to_sse);
 
     Sse::new(sse_stream)
 }
@@ -3063,6 +3181,11 @@ async fn run_chat_with_history(
 ) -> anyhow::Result<(String, Vec<crate::session::SessionToolCall>)> {
     use smooth_operator::agent::{Agent, AgentConfig, AgentEvent};
 
+    // Extension slash command? Runs command-tier without an LLM turn.
+    if let Some(reply) = crate::sep::try_ext_command(state, user_content).await {
+        return Ok((reply, Vec::new()));
+    }
+
     let providers_path = dirs_next::home_dir().unwrap_or_default().join(".smooth/providers.json");
     let registry = load_providers_with_migration(&providers_path).map_err(|e| anyhow::anyhow!("no LLM providers configured: {e}"))?;
 
@@ -3094,7 +3217,7 @@ async fn run_chat_with_history(
     // running out of turns. teammate_wait absorbs the long wait into
     // one iteration so this stays responsive.
     let agent_cfg = AgentConfig::new("big-smooth-chat-session", system_prompt, llm_config).with_max_iterations(20);
-    let agent = Agent::new(agent_cfg, tools);
+    let agent = crate::sep::attach_chat_ext_host(Agent::new(agent_cfg, tools), state);
 
     // Thought stream — Gemini Flash Lite summarizes each tool call /
     // assistant snippet into a one-line first-person thought and
@@ -3828,6 +3951,28 @@ mod tests {
     }
 
     #[test]
+    fn cargo_target_dir_probe_finds_redirected_build_th_e74aa6() {
+        // Pearl th-e74aa6: CARGO_TARGET_DIR points at the target dir
+        // itself — release preferred over debug, None when unset/missing.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for profile in ["release", "debug"] {
+            let dir = tmp.path().join(profile);
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(dir.join("smooth-operative"), b"x").unwrap();
+        }
+        let found = cargo_target_dir_native_operative(tmp.path().to_str());
+        assert_eq!(found.as_deref(), Some(tmp.path().join("release").join("smooth-operative").as_path()));
+
+        std::fs::remove_file(tmp.path().join("release").join("smooth-operative")).unwrap();
+        let found = cargo_target_dir_native_operative(tmp.path().to_str());
+        assert_eq!(found.as_deref(), Some(tmp.path().join("debug").join("smooth-operative").as_path()));
+
+        assert_eq!(cargo_target_dir_native_operative(None), None);
+        let empty = tempfile::tempdir().expect("tempdir");
+        assert_eq!(cargo_target_dir_native_operative(empty.path().to_str()), None);
+    }
+
+    #[test]
     fn resolve_direct_dispatch_narc_url_prefers_explicit_narc() {
         let got = resolve_direct_dispatch_narc_url(Some("http://narc.example/x"), Some("http://bs.example"));
         assert_eq!(got, "http://narc.example/x");
@@ -3873,13 +4018,16 @@ mod tests {
             assert!(p.is_file(), "returned path must point at a real file: {}", p.display());
             let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
             assert_eq!(name, "smooth-operative", "must be the runner binary, got: {name}");
-            // Must be under target/<profile>/, not the
-            // aarch64-unknown-linux-musl cross-compile output
-            // (that one is for sandboxed dispatch).
+            // Must be a native resolution: target/<profile>/ (workspace or
+            // CARGO_TARGET_DIR build) or the `cargo install` drop at
+            // $CARGO_HOME/bin (pearl th-92dac3 — the ONLY hit on a machine
+            // with `pnpm install:th` but an isolated target dir). Never the
+            // aarch64-unknown-linux-musl cross-compile output (that one is
+            // for sandboxed dispatch).
             let path_str = p.to_string_lossy();
             assert!(
-                path_str.contains("/target/release/") || path_str.contains("/target/debug/"),
-                "native path should be target/release or target/debug, got: {path_str}"
+                path_str.contains("/target/release/") || path_str.contains("/target/debug/") || path_str.contains("/bin/"),
+                "native path should be target/release, target/debug, or a cargo-install bin dir, got: {path_str}"
             );
             assert!(
                 !path_str.contains("aarch64-unknown-linux-musl"),

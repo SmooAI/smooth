@@ -316,6 +316,22 @@ pub async fn run_with_session(
         });
     }
 
+    // Populate the model picker's catalog from the Smoo gateway's live
+    // `GET /v1/model/info` so use-cases / tier / cost / benchmarks reflect
+    // the gateway's current model set (and removed models drop out)
+    // instead of the baked offline catalog. Tolerates no/unreachable
+    // gateway (returns empty → offline catalog used). Pearl th-7ee88e.
+    {
+        let state_clone = Arc::clone(&state);
+        tokio::spawn(async move {
+            let catalog = crate::model_picker::fetch_gateway_catalog().await;
+            if !catalog.is_empty() {
+                let mut s = state_clone.lock().unwrap_or_else(|e| e.into_inner());
+                s.model_picker.gateway_models = catalog;
+            }
+        });
+    }
+
     // Initial forced draw before the event loop starts. If the loop later
     // blocks or errors, we've at least rendered the welcome message once
     // so the user sees the UI is alive.
@@ -625,13 +641,7 @@ fn refresh_autocomplete(state: &mut AppState, command_registry: &CommandRegistry
                 if commands.iter().any(|(n, _)| n == &skill.name) {
                     continue;
                 }
-                let source_label = match skill.source {
-                    smooth_cast::skills::SkillSource::Project => "project",
-                    smooth_cast::skills::SkillSource::UserSmooth => "user-smooth",
-                    smooth_cast::skills::SkillSource::ClaudeCode => "claude-code",
-                    smooth_cast::skills::SkillSource::OpenCode => "opencode",
-                    smooth_cast::skills::SkillSource::Builtin => "builtin",
-                };
+                let source_label = skill.source.label();
                 commands.push((skill.name.clone(), format!("[skill:{source_label}] {}", skill.description)));
             }
             state.autocomplete.update_command_query(&query, &commands);
@@ -812,13 +822,7 @@ fn handle_input_mode(
                             let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
                             let skills = smooth_cast::skills::discover(&workspace);
                             if let Some(skill) = skills.into_iter().find(|s| s.name == name) {
-                                let source_label = match skill.source {
-                                    smooth_cast::skills::SkillSource::Project => "project",
-                                    smooth_cast::skills::SkillSource::UserSmooth => "user-smooth",
-                                    smooth_cast::skills::SkillSource::ClaudeCode => "claude-code",
-                                    smooth_cast::skills::SkillSource::OpenCode => "opencode",
-                                    smooth_cast::skills::SkillSource::Builtin => "builtin",
-                                };
+                                let source_label = skill.source.label();
                                 state.add_message(ChatMessage::system(format!("✦ Invoking skill: {} (from {})", skill.name, source_label)));
                                 let user_request = if args.trim().is_empty() {
                                     "Invoke the skill with reasonable defaults; if any input is required and not provided, ask the user.".to_string()
@@ -935,13 +939,7 @@ fn handle_input_mode(
                                 let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
                                 let skills = smooth_cast::skills::discover(&workspace);
                                 if let Some(skill) = skills.iter().find(|s| s.name == name) {
-                                    let source_label = match skill.source {
-                                        smooth_cast::skills::SkillSource::Project => "project",
-                                        smooth_cast::skills::SkillSource::UserSmooth => "user-smooth",
-                                        smooth_cast::skills::SkillSource::ClaudeCode => "claude-code",
-                                        smooth_cast::skills::SkillSource::OpenCode => "opencode",
-                                        smooth_cast::skills::SkillSource::Builtin => "builtin",
-                                    };
+                                    let source_label = skill.source.label();
                                     // Pearl th-e0f812 (user observation 2026-05-12):
                                     // surface the chosen skill in the chat so the
                                     // user knows what's happening. Push as a

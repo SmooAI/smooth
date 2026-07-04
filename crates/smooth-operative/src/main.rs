@@ -50,6 +50,7 @@ mod provider_overlay;
 mod reply_to_chat_tool;
 mod skills_tool;
 mod tool_hints;
+mod ui_relay_provider;
 mod web_search_tool;
 
 use std::path::PathBuf;
@@ -1401,6 +1402,96 @@ impl ToolHook for SharedNarc {
 }
 
 // ---------------------------------------------------------------------------
+// SEP extension host — attach installed + trusted extensions to the task
+// ---------------------------------------------------------------------------
+
+/// Attach `host` to `agent` when present (registers its tools/hooks and fans
+/// turn events out to subscribed extensions); a no-op when nothing loaded, so
+/// the agent loop is unchanged.
+fn attach_ext_host(agent: Agent, host: Option<Arc<smooth_operator::extension::ExtensionHost>>) -> Agent {
+    match host {
+        Some(host) => agent.with_extension_host(host),
+        None => agent,
+    }
+}
+
+/// Discover SEP extensions (global + project) and load only the PRE-trusted ones
+/// into a headless [`ExtensionHost`](smooth_operator::extension::ExtensionHost).
+///
+/// The dispatched worker is unattended: it never shows a trust prompt, so an
+/// unknown or content-changed extension is silently skipped (fail-safe). Returns
+/// `None` when nothing trusted loads.
+///
+/// **UI (SEP Phase 6).** Under a real Big Smooth dispatch the callback env
+/// (`SMOOTH_NARC_URL` + `SMOOTH_HOST_TOKEN`) is set, so the delegate is
+/// [`HttpUiProvider`](crate::ui_relay_provider::HttpUiProvider): it relays each
+/// `ui/*` request to the daemon, which fans it out to connected frontends and
+/// blocks interactive kinds until a human answers. The declared
+/// `ui_capabilities` then cover the full set the smooth-web components render.
+/// Absent that env (a bare local run) it falls back to the engine's headless
+/// [`DefaultHostDelegate`](smooth_operator::extension::DefaultHostDelegate) with
+/// empty capabilities — a two-way `ui/request` then gets `-32001 NoUI` and a
+/// well-behaved extension gates its UI off via `hasUI`. Extension tools register
+/// into the operative's ordinary `ToolRegistry`, so the NarcHook surveillance
+/// already installed applies to them.
+async fn load_pretrusted_extension_host(workspace_root: &std::path::Path) -> Option<Arc<smooth_operator::extension::ExtensionHost>> {
+    use smooth_operator::extension::manifest::{default_global_dir, project_dir};
+    use smooth_operator::extension::protocol::{HostInfo, WorkspaceInfo};
+    use smooth_operator::extension::{discover, DefaultHostDelegate, ExtensionHost, HostDelegate};
+    use smooth_policy::ext_trust::{hash_extension, TrustStore};
+
+    use crate::ui_relay_provider::HttpUiProvider;
+
+    let global = default_global_dir();
+    let project = project_dir(workspace_root);
+    let (discovered, disc_failures) = discover(global.as_deref(), Some(project.as_path()));
+    for (src, err) in &disc_failures {
+        tracing::warn!(%src, %err, "sep: extension manifest failed to parse");
+    }
+
+    let trust = TrustStore::load();
+    let trusted: Vec<_> = discovered
+        .into_iter()
+        .filter(|ext| {
+            let hash = hash_extension(&ext.root).unwrap_or_default();
+            let ok = trust.is_trusted(&ext.manifest.name, &hash);
+            if !ok {
+                tracing::info!(name = %ext.manifest.name, "sep: skipping untrusted extension (run `th ext trust`)");
+            }
+            ok
+        })
+        .collect();
+    if trusted.is_empty() {
+        return None;
+    }
+
+    let host_info = HostInfo {
+        name: "smooth-operative".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+    };
+    let workspace = WorkspaceInfo {
+        root: workspace_root.to_string_lossy().into_owned(),
+        trusted: true,
+    };
+    // Relay ui/* to the daemon when dispatched (callback env present);
+    // otherwise stay headless. `mode` + `ui_capabilities` are negotiated to the
+    // extensions at handshake so `hasUI` reflects what this run can render.
+    let (mode, ui_caps, delegate): (&str, Vec<String>, Arc<dyn HostDelegate>) = match HttpUiProvider::from_env() {
+        Some(provider) => ("web", HttpUiProvider::capabilities(), Arc::new(provider)),
+        None => ("headless", Vec::new(), Arc::new(DefaultHostDelegate)),
+    };
+    let (host, load_failures) = ExtensionHost::load(trusted, host_info, workspace, mode, ui_caps, delegate).await;
+    for (name, err) in &load_failures {
+        tracing::warn!(%name, %err, "sep: extension failed to load");
+    }
+    if host.is_empty() {
+        return None;
+    }
+    tracing::info!(count = host.len(), extensions = ?host.names(), "sep: attached extension host to the operative");
+    Some(Arc::new(host))
+}
+
+// ---------------------------------------------------------------------------
 // Env config
 // ---------------------------------------------------------------------------
 
@@ -1624,6 +1715,27 @@ fn emit_event(event: &AgentEvent) {
     if let Ok(line) = serde_json::to_string(event) {
         println!("{line}");
     }
+}
+
+/// Byte cap for each injected system-prompt context block (project
+/// context files + workspace memory). Pearl th-5002c4: a giant
+/// AGENTS.md / README shouldn't blow the context budget. 16 KB is the
+/// upper end of the pearl's suggested 8–16 KB.
+const MAX_CONTEXT_BYTES: usize = 16 * 1024;
+
+/// Truncate `s` to at most `max_bytes`, cutting on a UTF-8 char
+/// boundary and appending a marker when truncated. Returns `s`
+/// unchanged when it already fits.
+fn cap_context(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    // Walk back to the nearest char boundary at or below max_bytes.
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n\n[... truncated, {} of {} bytes shown ...]", &s[..end], end, s.len())
 }
 
 #[tokio::main]
@@ -2092,7 +2204,7 @@ async fn main() {
     );
     let workspace_path = std::path::Path::new(&config.workspace);
     let mut system_prompt = match smooth_operator::context::load_project_context(workspace_path) {
-        Some(ctx) => format!("{base_prompt}\n\n## Project Context\n\n{ctx}"),
+        Some(ctx) => format!("{base_prompt}\n\n## Project Context\n\n{}", cap_context(&ctx, MAX_CONTEXT_BYTES)),
         None => base_prompt,
     };
 
@@ -2106,7 +2218,7 @@ async fn main() {
         let trimmed = memory.trim();
         if !trimmed.is_empty() {
             system_prompt.push_str("\n\n## Workspace Memory (.smooth/MEMORY.md)\n\n");
-            system_prompt.push_str(trimmed);
+            system_prompt.push_str(&cap_context(trimmed, MAX_CONTEXT_BYTES));
             system_prompt.push('\n');
         }
     }
@@ -2299,6 +2411,12 @@ async fn main() {
         );
     }
 
+    // SEP: attach an ExtensionHost for the dispatched task if any PRE-trusted
+    // extensions are installed. None when nothing trusted loads → the agent loop
+    // is byte-for-byte unchanged. Extension tools/hooks ride the same registry as
+    // native ones, so the NarcHook surveillance installed above applies to them.
+    let ext_host = load_pretrusted_extension_host(&config.workspace).await;
+
     let result = if let (true, true, Some(raw)) = (workflow_opt_in, role_supports_coding_workflow, routing_json) {
         use smooth_cast::coding_workflow::{run_coding_workflow, CodingWorkflowConfig};
         use smooth_cast::provider_migration::migrate_in_memory;
@@ -2372,12 +2490,12 @@ async fn main() {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "SMOOTH_ROUTING_JSON set but not deserializable; falling back to single-agent path");
-                let agent = Agent::new(agent_config, tools);
+                let agent = attach_ext_host(Agent::new(agent_config, tools), ext_host.clone());
                 agent.run_with_channel(&config.task, tx.clone()).await
             }
         }
     } else {
-        let agent = Agent::new(agent_config, tools);
+        let agent = attach_ext_host(Agent::new(agent_config, tools), ext_host.clone());
         agent.run_with_channel(&config.task, tx.clone()).await
     };
 
@@ -2716,5 +2834,147 @@ mod todo_list_tests {
         let (t, _dir) = tool();
         let err = t.execute(json!({"action": "delete-everything"})).await.unwrap_err();
         assert!(err.to_string().contains("unknown action"));
+    }
+}
+
+#[cfg(test)]
+mod cap_context_tests {
+    use super::{cap_context, MAX_CONTEXT_BYTES};
+
+    #[test]
+    fn returns_unchanged_when_within_cap() {
+        let s = "short project context";
+        assert_eq!(cap_context(s, MAX_CONTEXT_BYTES), s);
+    }
+
+    #[test]
+    fn returns_unchanged_at_exactly_cap() {
+        let s = "x".repeat(100);
+        assert_eq!(cap_context(&s, 100), s);
+    }
+
+    #[test]
+    fn truncates_and_marks_when_over_cap() {
+        let s = "x".repeat(100);
+        let out = cap_context(&s, 40);
+        assert!(out.starts_with(&"x".repeat(40)));
+        assert!(out.contains("truncated"));
+        assert!(out.contains("40 of 100 bytes"));
+        // Only the marker is added past the cap — the retained slice
+        // never exceeds max_bytes.
+        assert!(out.len() < s.len() + 64);
+    }
+
+    #[test]
+    fn truncates_on_char_boundary_for_multibyte() {
+        // "€" is 3 bytes; a naive byte slice at an odd offset panics.
+        let s = "€".repeat(20); // 60 bytes
+        let out = cap_context(&s, 40); // 40 is mid-codepoint (not divisible by 3)
+                                       // Retained prefix is valid UTF-8 (13 full euros = 39 bytes).
+        assert!(out.starts_with(&"€".repeat(13)));
+        assert!(out.contains("truncated"));
+    }
+
+    #[test]
+    fn empty_string_is_unchanged() {
+        assert_eq!(cap_context("", MAX_CONTEXT_BYTES), "");
+    }
+
+    // The exact path main() runs: discover a project context file via
+    // the engine, then cap it before injecting into the system prompt.
+    #[test]
+    fn discovered_context_is_injected_and_capped() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().expect("tempdir");
+        // Big SMOOTH.md — precedence over CLAUDE.md, and over the cap.
+        std::fs::write(dir.path().join("SMOOTH.md"), "S".repeat(MAX_CONTEXT_BYTES * 2)).unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "claude-should-lose").unwrap();
+
+        let ctx = smooth_operator::context::load_project_context(dir.path()).expect("discovered");
+        assert!(ctx.contains(&"S".repeat(64)), "SMOOTH.md discovered");
+        assert!(!ctx.contains("claude-should-lose"), "SMOOTH.md wins precedence");
+
+        let capped = cap_context(&ctx, MAX_CONTEXT_BYTES);
+        assert!(capped.contains("truncated"), "oversize context is truncated: len={}", capped.len());
+        assert!(capped.len() < ctx.len(), "cap shrinks the injected block");
+    }
+}
+
+#[cfg(test)]
+mod ext_host_tests {
+    use super::*;
+
+    /// A minimal dependency-free SEP peer: handshakes with one tool, answers
+    /// ping, exits on shutdown. Enough to prove discovery → trust → load →
+    /// tool-attach without a heavier fixture.
+    const PEER_MJS: &str = r#"
+const rl = require('readline').createInterface({ input: process.stdin });
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  const { id, method } = JSON.parse(line);
+  const w = (r) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result: r }) + '\n');
+  if (method === 'initialize') w({ protocol_version: 1, extension: { name: 'echo', version: '0.1.0' }, registrations: { tools: [{ name: 'ping-tool', description: 'x', parameters: { type: 'object' } }] } });
+  else if (method === 'ping') w({});
+  else if (method === 'shutdown') { w({}); process.exit(0); }
+  else if (id !== undefined) process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32601, message: 'no' } }) + '\n');
+});
+"#;
+
+    fn node_available() -> bool {
+        std::process::Command::new("node")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// The operative loads only PRE-trusted extensions (fail-safe), and a trusted
+    /// one's tools attach into the host. Sequential (one SMOOTH_HOME) so the two
+    /// phases can't race each other's env.
+    #[tokio::test]
+    async fn operative_loads_only_pretrusted_extensions() {
+        let home = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let ext_dir = home.path().join("extensions").join("echo");
+        std::fs::create_dir_all(&ext_dir).unwrap();
+        let peer_path = ext_dir.join("peer.cjs");
+        std::fs::write(&peer_path, PEER_MJS).unwrap();
+        std::fs::write(
+            ext_dir.join("extension.toml"),
+            format!(
+                "name = \"echo\"\nversion = \"0.1.0\"\n[run]\ncommand = \"node\"\nargs = [\"{}\"]\n[capabilities]\ntools = true\n",
+                peer_path.display()
+            ),
+        )
+        .unwrap();
+
+        std::env::set_var("SMOOTH_HOME", home.path());
+
+        // Fail-safe: with no trust record, the extension is skipped → no host.
+        assert!(
+            load_pretrusted_extension_host(ws.path()).await.is_none(),
+            "an untrusted extension must never load"
+        );
+
+        // The live load half needs a Node runtime; the fail-safe half above does
+        // not (untrusted extensions are filtered before any spawn).
+        if node_available() {
+            let hash = smooth_policy::ext_trust::hash_extension(&ext_dir).unwrap();
+            std::fs::write(
+                home.path().join("extensions").join("trust.toml"),
+                format!("[extensions.echo]\nsource = \"test\"\nhash = \"{hash}\"\ntrusted = true\n"),
+            )
+            .unwrap();
+
+            let host = load_pretrusted_extension_host(ws.path()).await.expect("a trusted extension should load");
+            assert_eq!(host.len(), 1);
+            let tools: Vec<_> = host.tools().iter().map(|t| t.schema().name).collect();
+            assert!(tools.contains(&"echo.ping-tool".to_string()), "expected echo.ping-tool, got {tools:?}");
+            host.shutdown_all().await;
+        }
+
+        std::env::remove_var("SMOOTH_HOME");
     }
 }
