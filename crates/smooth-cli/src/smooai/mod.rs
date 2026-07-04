@@ -10,6 +10,7 @@
 //! and call this helper.
 
 pub mod agents;
+pub mod booking;
 pub mod copilot;
 pub mod crm;
 pub mod integrations;

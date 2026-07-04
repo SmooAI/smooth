@@ -186,7 +186,10 @@ th api agents update <agent-id> --workflow @workflow.json   # {goal, steps:[{id,
 th api agents update <agent-id> --tool-config '{"enabledTools":[{"toolId":"knowledge_search","enabled":true,"authLevel":"none"}]}'
 # toolConfig rules: empty enabledTools = FULL tool set; non-empty = restrict
 # to enabled=true entries; all-disabled = no tools (fail closed).
-# mint accepts the same --personality/--workflow/--tool-config at create time.
+th api agents update <agent-id> --extension '{"enabledExtensions":[{"extensionId":"plan-mode","enabled":true,"config":{}}]}'
+# SMOODEV-2259 — extensionConfig gates SEP extensions per agent. extensionId is
+# kebab-case (SEP extension name); empty enabledExtensions = no extensions (fail closed).
+# mint accepts the same --personality/--workflow/--tool-config/--extension at create time.
 # Read any of these back with: th api agents show <agent-id>
 ```
 
@@ -546,6 +549,7 @@ th ext search <query...>                        # find extensions: curated index
 th ext update [<name>] [--project] [--trust]    # re-fetch packaged (npm:/git:) extensions from their recorded source
 th ext list                                     # installed extensions (global + project) with trust state + source
 th ext trust <name> [--project]                # trust an installed extension (records its content hash)
+th ext reload <name> [--project] [--trust]     # re-check manifest + trust, then HOT-RELOAD the running daemon's host
 th ext remove <name> [--project]               # delete the extension and its trust record
 ```
 
@@ -556,6 +560,8 @@ th ext remove <name> [--project]               # delete the extension and its tr
 **Extensions can ship skills.** An extension's `[resources] skills = "<dir>"` directory feeds the one canonical skill catalog (`smooth-cast`) — every SKILL under it becomes a `/skill:<name>` (source `extension`), gated on the same content-hashed trust (an untrusted extension contributes no skills). `smooth-cast` is the only skill parser; `th code`'s `/skill` and `/ext` read from it.
 
 > **In the TUI**, `/ext` lists installed extensions with their trust state and declared capabilities. Live command/UI dispatch into a running host reaches the TUI over the daemon event surface (SEP Phase 6); `th ext`, the trust store, skills unification, and the render-block/host substrate are in place now. The engine `Agent` runs in `smooth-operative` (dispatched server-side) and declares all seven `ui/request` kinds (`smooth_code::sep_host::TUI_UI_CAPABILITIES`) via the `TuiUiProvider` delegate.
+
+**Big Smooth's own chat hosts extensions too (pearl th-6d8606).** The daemon loads pre-trusted extensions once at startup into a shared host; chatting with Big Smooth (smooth-web or `/api/chat`) exposes their tools (gated by AutoMode + Narc like every chat tool), their `ui/*` renders via the same `UiRelay` components, and `/cmd args` in the chat box runs a registered extension command directly. `th ext reload <name>` hot-reloads the daemon's live host over `POST /api/ext/reload` (set `SMOOTH_BIGSMOOTH_URL` if not `http://127.0.0.1:4400`); `GET /api/ext` lists what's live. Newly installed extensions need a daemon restart — discovery runs at startup.
 
 ### Jira sync
 

@@ -59,6 +59,37 @@ each frontend owns rendering:
 - **chat-widget on the public servers** — `select`/`confirm` render as
   chat-native button frames (smooth-operator repo).
 
+## Big Smooth's own chat loop (pearl th-6d8606)
+
+The assistant itself hosts extensions — not just the operatives it dispatches.
+At daemon startup, `sep::init_chat_extension_host` discovers global + cwd
+extensions, loads the **pre-trusted** ones (never a trust prompt — the daemon
+is unattended; run `th ext trust` first) into ONE daemon-lifetime
+`ExtensionHost`, and every chat turn attaches it (`Agent::with_extension_host`
+against the registry `build_chat_tools` returns). Consequences:
+
+- **Tools** — extension tools (`<ext>.<tool>`) sit alongside the pearl/teammate
+  tools and pass through the same AutoMode permission hook and Narc
+  surveillance hook, in that order.
+- **UI** — the chat loop runs IN the daemon, so its delegate
+  (`sep::DaemonUiProvider`) calls the relay in-process (no HTTP-to-self),
+  broadcasting with `task_id = "big-smooth-chat"`; timeout / bypass
+  auto-confirm / audit behavior is byte-identical to the operative relay.
+- **Slash commands** — a chat message shaped `/cmd args` (or `/ext:cmd args`)
+  that matches a registered extension command executes command-tier and
+  returns the extension's text as the assistant reply, no LLM turn. Unmatched
+  slash text falls through to the agent. Arguments arrive as
+  `{ "args": "<raw remainder>" }`.
+- **Reload** — `th ext reload <name>` now POSTs `/api/ext/reload` on the local
+  daemon (best-effort) so the live host respawns the extension immediately;
+  the next chat turn picks up fresh tool proxies. `GET /api/ext` lists loaded
+  extensions + commands. Newly *installed* extensions still need a daemon
+  restart (discovery runs at startup).
+- **Lifetime** — one shared host across chat sessions (a per-turn host would
+  respawn every subprocess per message). Extension in-process state therefore
+  spans sessions; per-session hosts are the upgrade when the daemon epic's
+  durable sessions land (th-c89c2a).
+
 ## Relationship to what exists today
 
 | Existing surface | SEP verdict | Status |

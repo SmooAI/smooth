@@ -21,6 +21,7 @@ pub mod orchestrator;
 pub mod pearls;
 pub mod policy;
 pub mod search;
+pub mod sep;
 pub mod server;
 pub mod session;
 pub mod tailscale;

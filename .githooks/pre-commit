@@ -1,0 +1,21 @@
+#!/usr/bin/env sh
+set -e
+
+# ── Cargo format check ──────────────────────────────────────────────
+echo "pre-commit: cargo fmt --check"
+cargo fmt -- --check || {
+    echo >&2 "pre-commit: formatting issues found. Run 'cargo fmt' and re-stage."
+    exit 1
+}
+
+# ── Cargo clippy ─────────────────────────────────────────────────────
+echo "pre-commit: cargo clippy"
+cargo clippy --workspace --all-targets -- -D warnings || {
+    echo >&2 "pre-commit: clippy warnings found. Fix them before committing."
+    exit 1
+}
+
+# ── Pearl hooks ──────────────────────────────────────────────────────
+if command -v th >/dev/null 2>&1; then
+    th hooks run pre-commit "$@" || true
+fi

@@ -210,6 +210,15 @@ enum Commands {
         #[command(subcommand)]
         cmd: smooai::testing::Cmd,
     },
+    /// Smoo AI booking — the org's Google-Calendar booking page.
+    /// `config get/set` availability, `slots` to see open times,
+    /// `bookings` to list them, `block add/list/rm` for manual busy
+    /// time, `link` for the public URL. Same commands as
+    /// `th api booking`, promoted to the top level alongside `th config`.
+    Booking {
+        #[command(subcommand)]
+        cmd: smooai::booking::Cmd,
+    },
     /// Run a pearl through a Smooth operative — dispatches to Big Smooth
     /// (`th up` must be running) and streams agent events to stdout.
     Run {
@@ -696,7 +705,8 @@ enum ApiCommands {
         #[command(subcommand)]
         cmd: smooai::members::Cmd,
     },
-    /// Smoo AI CRM — contacts (list / get / create / update / import).
+    /// Smoo AI CRM — the revenue engine: contacts, companies, deals,
+    /// pipeline forecast, stages, tasks, conversations, timeline & invoices.
     /// Authenticates as the logged-in user (`th auth login`), so writes
     /// are attributed to a real person rather than an M2M client.
     Crm {
@@ -729,6 +739,12 @@ enum ApiCommands {
     Products {
         #[command(subcommand)]
         cmd: smooai::products::Cmd,
+    },
+    /// Smoo AI booking — Google-Calendar availability config, open
+    /// slots, bookings, manual busy blocks, and the public booking link.
+    Booking {
+        #[command(subcommand)]
+        cmd: smooai::booking::Cmd,
     },
     /// Smoo AI profile (the currently-logged-in user).
     Profile {
@@ -1464,6 +1480,7 @@ async fn main() -> Result<()> {
             ApiCommands::Jobs { cmd } => smooai::jobs::cmd(cmd).await,
             ApiCommands::Integrations { cmd } => smooai::integrations::cmd(cmd).await,
             ApiCommands::Products { cmd } => smooai::products::cmd(cmd).await,
+            ApiCommands::Booking { cmd } => smooai::booking::cmd(cmd).await,
             ApiCommands::Profile { cmd } => smooai::profile::cmd(cmd).await,
             ApiCommands::Testing { cmd } => smooai::testing::cmd(cmd).await,
             ApiCommands::Observability { cmd } => smooai::observability::cmd(cmd).await,
@@ -1479,6 +1496,7 @@ async fn main() -> Result<()> {
             org,
         }) => smooai::notify::cmd(message, title, priority, url, org).await,
         Some(Commands::Testing { cmd }) => smooai::testing::cmd(cmd).await,
+        Some(Commands::Booking { cmd }) => smooai::booking::cmd(cmd).await,
         Some(Commands::Operatives { cmd }) => cmd_operatives(cmd).await,
         Some(Commands::Inbox) => cmd_inbox().await,
         Some(Commands::Run { pearl_id, model, agent }) => cmd_run(pearl_id.as_deref(), model.as_deref(), agent.as_deref()).await,
