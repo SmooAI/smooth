@@ -3739,6 +3739,7 @@ dependencies = [
  "async-trait",
  "axum 0.8.8",
  "axum-extra",
+ "base64",
  "chrono",
  "dirs-next",
  "futures-core",
@@ -3753,6 +3754,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "smooai-smooth-archivist",
  "smooai-smooth-cast",
  "smooai-smooth-code",
@@ -3959,7 +3961,7 @@ dependencies = [
 [[package]]
 name = "smooai-smooth-operator-core"
 version = "0.15.0"
-source = "git+https://github.com/SmooAI/smooth-operator-core.git?rev=46fbbea#46fbbeab111d382ed4dd65a45ed45ab8eba05be7"
+source = "git+https://github.com/SmooAI/smooth-operator-core.git?rev=b43c04fe#b43c04fe482fce4f534c18e696b8fcab48388dc2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3968,6 +3970,7 @@ dependencies = [
  "dirs-next",
  "futures-core",
  "futures-util",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
