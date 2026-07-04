@@ -58,7 +58,7 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: BlockCmd,
     },
-    /// Connected Google calendars — primary + extra blocking accounts.
+    /// Connected Google calendars — primary + extra conflict accounts.
     Calendars {
         #[command(subcommand)]
         cmd: CalendarsCmd,
@@ -171,13 +171,13 @@ pub enum BlockCmd {
 
 #[derive(Subcommand)]
 pub enum CalendarsCmd {
-    /// List the org's connected Google calendars (primary + blocking).
+    /// List the org's connected Google calendars (primary + conflict).
     List {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
-    /// Start the Google OAuth flow to add a blocking calendar. Prints an
+    /// Start the Google OAuth flow to add a conflict calendar. Prints an
     /// authorization URL to open in the browser signed into that account.
     Connect {
         /// Permission tier requested from Google.
@@ -362,18 +362,18 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
         } => {
             let o = require_active_org(&client, org)?;
             // Real route is /organizations/{org}/integrations/google/oauth/authorize?tier=…
-            // `purpose=blocking` is per the booking contract; the authorize route
-            // ignores it today (state only carries orgId+tier) — the blocking
+            // `purpose=conflict` is per the booking contract; the authorize route
+            // ignores it today (state only carries orgId+tier) — the conflict
             // distinction needs the platform side to thread it through.
             let path = format!(
-                "/organizations/{o}/integrations/google/oauth/authorize?purpose=blocking&tier={}",
+                "/organizations/{o}/integrations/google/oauth/authorize?purpose=conflict&tier={}",
                 urlencoding::encode(&tier)
             );
             let body = client.get(&path).await.context("GET google authorize url")?;
             let url = body.get("url").and_then(|v| v.as_str()).context("authorize response missing `url`")?;
             println!();
             println!("  {} Open this URL in the browser signed into the Google account", "→".cyan());
-            println!("    you want to add as a blocking calendar:");
+            println!("    you want to add as a conflict calendar:");
             println!();
             println!("    {url}");
             println!();
