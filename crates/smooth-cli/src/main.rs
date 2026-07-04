@@ -671,7 +671,8 @@ enum ApiCommands {
         #[command(subcommand)]
         cmd: smooai::members::Cmd,
     },
-    /// Smoo AI CRM — contacts (list / get / create / update / import).
+    /// Smoo AI CRM — the revenue engine: contacts, companies, deals,
+    /// pipeline forecast, stages, tasks, conversations, timeline & invoices.
     /// Authenticates as the logged-in user (`th auth login`), so writes
     /// are attributed to a real person rather than an M2M client.
     Crm {

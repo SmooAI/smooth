@@ -36,6 +36,46 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: DealsCmd,
     },
+    /// Pipeline board — weighted forecast by stage (the money view).
+    Pipeline {
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// Print the raw forecast JSON instead of the board.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Pipeline stage catalog (list / show / create / update / reorder / init).
+    Stages {
+        #[command(subcommand)]
+        cmd: StagesCmd,
+    },
+    /// Tasks — next actions on deals & contacts.
+    Tasks {
+        #[command(subcommand)]
+        cmd: TasksCmd,
+    },
+    /// Conversations — email threads with contacts.
+    Conversations {
+        #[command(subcommand)]
+        cmd: ConversationsCmd,
+    },
+    /// Timeline — unified, date-sorted history for a deal.
+    Timeline {
+        /// The deal id from `th api crm deals list`.
+        deal_id: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// Print the raw timeline JSON instead of the rendered view.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Invoices — revenue actuals (read-only; Stripe-backed).
+    Invoices {
+        #[command(subcommand)]
+        cmd: InvoicesCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -146,6 +186,292 @@ pub enum DealsCmd {
 }
 
 #[derive(Subcommand)]
+pub enum StagesCmd {
+    /// List pipeline stages in board order.
+    List {
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// Print raw JSON instead of the table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a single stage by id.
+    Show {
+        /// The stage id from `th api crm stages list`.
+        stage_id: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Create a pipeline stage.
+    Create {
+        /// Stage name (e.g. "Discovery").
+        name: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// Board position (lower = earlier).
+        #[arg(long)]
+        position: Option<i64>,
+        /// Win probability, 0–100.
+        #[arg(long)]
+        probability: Option<f64>,
+        /// Mark this stage as a won (closed-won) stage.
+        #[arg(long)]
+        won: bool,
+        /// Mark this stage as a lost (closed-lost) stage.
+        #[arg(long)]
+        lost: bool,
+        /// Hex color for the stage chip (e.g. #22c55e).
+        #[arg(long)]
+        color: Option<String>,
+    },
+    /// Update a pipeline stage.
+    Update {
+        /// The stage id from `th api crm stages list`.
+        stage_id: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// New stage name.
+        #[arg(long)]
+        name: Option<String>,
+        /// New board position.
+        #[arg(long)]
+        position: Option<i64>,
+        /// New win probability, 0–100.
+        #[arg(long)]
+        probability: Option<f64>,
+        /// Mark as a won (closed-won) stage.
+        #[arg(long)]
+        won: bool,
+        /// Mark as a lost (closed-lost) stage.
+        #[arg(long)]
+        lost: bool,
+        /// New hex color.
+        #[arg(long)]
+        color: Option<String>,
+    },
+    /// Delete a pipeline stage.
+    Delete {
+        /// The stage id from `th api crm stages list`.
+        stage_id: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Reorder stages — pass ids in the desired board order.
+    Reorder {
+        /// Stage ids, in the new order.
+        ids: Vec<String>,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Seed the default pipeline stages (idempotent).
+    Init {
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum TasksCmd {
+    /// List tasks (open by default).
+    List {
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// Filter to a deal (id, or title to resolve).
+        #[arg(long)]
+        deal: Option<String>,
+        /// Filter to a contact (id, email, or name to resolve).
+        #[arg(long)]
+        contact: Option<String>,
+        /// Filter to an assignee user id.
+        #[arg(long)]
+        assignee: Option<String>,
+        /// Only show tasks past their due date.
+        #[arg(long)]
+        overdue: bool,
+        /// Include completed tasks too.
+        #[arg(long)]
+        all: bool,
+        /// Print raw JSON instead of the table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a single task by id.
+    Show {
+        /// The task id from `th api crm tasks list`.
+        task_id: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Add a task.
+    Add {
+        /// Task title.
+        title: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// Link to a deal (id, or title to resolve).
+        #[arg(long)]
+        deal: Option<String>,
+        /// Link to a contact (id, email, or name to resolve).
+        #[arg(long)]
+        contact: Option<String>,
+        /// Link to a company (id, or name to resolve).
+        #[arg(long)]
+        company: Option<String>,
+        /// Due date (ISO-8601, e.g. 2026-07-10).
+        #[arg(long)]
+        due: Option<String>,
+        /// Free-text description.
+        #[arg(long)]
+        description: Option<String>,
+        /// Assignee user id.
+        #[arg(long)]
+        assignee: Option<String>,
+    },
+    /// Update a task.
+    Update {
+        /// The task id from `th api crm tasks list`.
+        task_id: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// New title.
+        #[arg(long)]
+        title: Option<String>,
+        /// New due date (ISO-8601).
+        #[arg(long)]
+        due: Option<String>,
+        /// New description.
+        #[arg(long)]
+        description: Option<String>,
+        /// New assignee user id.
+        #[arg(long)]
+        assignee: Option<String>,
+    },
+    /// Mark a task complete.
+    Done {
+        /// The task id from `th api crm tasks list`.
+        task_id: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Delete a task.
+    Rm {
+        /// The task id from `th api crm tasks list`.
+        task_id: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ConversationsCmd {
+    /// List conversations (optionally by contact or deal).
+    List {
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// Filter to a contact (id, email, or name to resolve).
+        #[arg(long)]
+        contact: Option<String>,
+        /// Filter to a deal id.
+        #[arg(long)]
+        deal: Option<String>,
+        /// Print raw JSON instead of the table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a conversation thread as a timeline.
+    Show {
+        /// The conversation id from `th api crm conversations list`.
+        conversation_id: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// Print raw JSON instead of the thread view.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Start a conversation, optionally with a first message.
+    Create {
+        /// Conversation name / subject line.
+        name: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// Platform (default: email).
+        #[arg(long, default_value = "email")]
+        platform: String,
+        /// Link to a contact (id, email, or name to resolve).
+        #[arg(long)]
+        contact: Option<String>,
+        /// First message subject.
+        #[arg(long)]
+        subject: Option<String>,
+        /// First message body.
+        #[arg(long)]
+        body: Option<String>,
+    },
+    /// Append an email message to a conversation.
+    AddEmail {
+        /// The conversation id from `th api crm conversations list`.
+        conversation_id: String,
+        /// Message direction.
+        #[arg(value_parser = ["inbound", "outbound"])]
+        direction: String,
+        /// Message body.
+        body: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// Message subject.
+        #[arg(long)]
+        subject: Option<String>,
+        /// When it occurred (ISO-8601; defaults to now server-side).
+        #[arg(long)]
+        occurred: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum InvoicesCmd {
+    /// List invoices (optionally by deal or contact).
+    List {
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// Filter to a deal id.
+        #[arg(long)]
+        deal: Option<String>,
+        /// Filter to a contact id.
+        #[arg(long)]
+        contact: Option<String>,
+        /// Print raw JSON instead of the table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a single invoice by id.
+    Show {
+        /// The invoice id from `th api crm invoices list`.
+        invoice_id: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum ContactsCmd {
     /// List contacts for the org.
     List {
@@ -211,6 +537,12 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
         Cmd::Contacts { cmd } => contacts(cmd).await,
         Cmd::Companies { cmd } => companies(cmd).await,
         Cmd::Deals { cmd } => deals(cmd).await,
+        Cmd::Pipeline { org, json } => pipeline(org, json).await,
+        Cmd::Stages { cmd } => stages(cmd).await,
+        Cmd::Tasks { cmd } => tasks(cmd).await,
+        Cmd::Conversations { cmd } => conversations(cmd).await,
+        Cmd::Timeline { deal_id, org, json } => timeline(deal_id, org, json).await,
+        Cmd::Invoices { cmd } => invoices(cmd).await,
     }
 }
 
@@ -542,6 +874,17 @@ async fn resolve_contact_id(client: &UserClient, org: &str, s: &str) -> Result<S
     }
 }
 
+/// Resolve a deal id from a uuid (used as-is) or a title (looked up).
+async fn resolve_deal_id(client: &UserClient, org: &str, s: &str) -> Result<String> {
+    if looks_like_uuid(s) {
+        return Ok(s.to_string());
+    }
+    match find_deal(client, org, s).await? {
+        Some(d) => d.get("id").and_then(Value::as_str).map(str::to_string).context("matched deal has no id"),
+        None => anyhow::bail!("no deal matches '{s}' — create it first: `th api crm deals create \"{s}\"`"),
+    }
+}
+
 async fn show_deal(client: &UserClient, org: &str, deal_id: &str) -> Result<()> {
     let d = client.get(&format!("/organizations/{org}/crm/deals/{deal_id}")).await.context("GET deal")?;
     println!();
@@ -568,7 +911,12 @@ async fn show_deal(client: &UserClient, org: &str, deal_id: &str) -> Result<()> 
         println!("  {} {}", "Contact".dimmed(), label);
     }
     println!("  {} {}", "id     ".dimmed(), deal_id.dimmed());
-    println!();
+    // The deal's merged timeline, when the endpoint is available.
+    if let Ok(tl) = client.get(&format!("/organizations/{org}/crm/deals/{deal_id}/timeline")).await {
+        render_timeline(&tl, false);
+    } else {
+        println!();
+    }
     Ok(())
 }
 
@@ -626,6 +974,728 @@ fn render_deals(body: &Value) {
     println!();
 }
 
+// ---------------------------------------------------------------------------
+// Pipeline (forecast board)
+// ---------------------------------------------------------------------------
+
+async fn pipeline(org: Option<String>, json: bool) -> Result<()> {
+    let client = UserClient::from_user_session().await?;
+    let org = resolve_org(org)?;
+    let body = client
+        .get(&format!("/organizations/{org}/crm/deals/forecast"))
+        .await
+        .context("GET deal forecast")?;
+    if json {
+        print_json(&body);
+    } else {
+        render_pipeline(&body);
+    }
+    Ok(())
+}
+
+fn render_pipeline(body: &Value) {
+    let mut stages = body.get("stages").and_then(Value::as_array).cloned().unwrap_or_default();
+    stages.sort_by_key(|s| s.get("position").and_then(Value::as_i64).unwrap_or(i64::MAX));
+    let totals = body.get("totals").cloned().unwrap_or(Value::Null);
+
+    println!();
+    println!("  {}", "Pipeline".bold());
+    if stages.is_empty() {
+        println!("\n  {}\n", "no stages — seed defaults with `th api crm stages init`".dimmed());
+        return;
+    }
+
+    let (h_stage, h_open, h_val, h_wt, h_prob) = (
+        format!("{:<16}", "STAGE"),
+        format!("{:>5}", "OPEN"),
+        format!("{:>13}", "OPEN VALUE"),
+        format!("{:>13}", "WEIGHTED"),
+        format!("{:<14}", "PROB"),
+    );
+    println!();
+    println!(
+        "  {}  {}  {}  {}  {}",
+        h_stage.dimmed(),
+        h_open.dimmed(),
+        h_val.dimmed(),
+        h_wt.dimmed(),
+        h_prob.dimmed()
+    );
+    for s in &stages {
+        let name = s.get("stage").and_then(Value::as_str).unwrap_or("—");
+        let open = s.get("openCount").and_then(Value::as_i64).unwrap_or(0);
+        let openv = fmt_money(as_money(s.get("openValue")));
+        let wt = fmt_money(as_money(s.get("weightedValue")));
+        let prob = as_money(s.get("probability")).unwrap_or(0.0);
+        let open_cell = format!("{open:>5}");
+        let openv_cell = format!("{openv:>13}");
+        let wt_cell = format!("{wt:>13}");
+        let prob_cell = prob_bar(prob, 10);
+        println!("  {}  {}  {}  {}  {}", stage_cell(name, 16), open_cell, openv_cell, wt_cell.bold(), prob_cell,);
+    }
+
+    // Totals line — the number that matters.
+    let open_value = fmt_money(as_money(totals.get("openValue")));
+    let weighted = fmt_money(as_money(totals.get("weightedValue")));
+    let won_value = fmt_money(as_money(totals.get("wonValue")));
+    let won_count = totals.get("wonCount").and_then(Value::as_i64).unwrap_or(0);
+    println!();
+    let open_lbl = format!("Open {}", open_value);
+    let fc_lbl = format!("Forecast {}", weighted);
+    let won_lbl = format!("Won {} ({})", won_value, won_count);
+    println!("  {}   {}   {}", open_lbl.dimmed(), fc_lbl.green().bold(), won_lbl.cyan());
+
+    // By-source mini table.
+    if let Some(sources) = body.get("bySource").and_then(Value::as_array).filter(|a| !a.is_empty()) {
+        println!();
+        println!("  {}", "By source".dimmed());
+        for src in sources {
+            let name = src.get("source").and_then(Value::as_str).unwrap_or("—");
+            let count = src.get("count").and_then(Value::as_i64).unwrap_or(0);
+            let value = fmt_money(as_money(src.get("value")));
+            let name_cell = format!("{:<20}", truncate(name, 20));
+            let count_cell = format!("{count:>4}");
+            let value_cell = format!("{value:>13}");
+            println!("    {}  {}  {}", name_cell, count_cell.dimmed(), value_cell);
+        }
+    }
+    println!();
+}
+
+// ---------------------------------------------------------------------------
+// Stages
+// ---------------------------------------------------------------------------
+
+async fn stages(cmd: StagesCmd) -> Result<()> {
+    let client = UserClient::from_user_session().await?;
+    match cmd {
+        StagesCmd::List { org, json } => {
+            let org = resolve_org(org)?;
+            let body = client.get(&format!("/organizations/{org}/crm/stages")).await.context("GET stages")?;
+            if json {
+                print_json(&body);
+            } else {
+                render_stages(&body);
+            }
+        }
+        StagesCmd::Show { stage_id, org } => {
+            let org = resolve_org(org)?;
+            print_json(&client.get(&format!("/organizations/{org}/crm/stages/{stage_id}")).await.context("GET stage")?);
+        }
+        StagesCmd::Create {
+            name,
+            org,
+            position,
+            probability,
+            won,
+            lost,
+            color,
+        } => {
+            let org = resolve_org(org)?;
+            let mut b = json!({ "name": name });
+            stage_fields(&mut b, position, probability, won, lost, color);
+            let r = client.post(&format!("/organizations/{org}/crm/stages"), &b).await.context("POST stage")?;
+            let id = r.get("id").and_then(Value::as_str).unwrap_or("?");
+            println!("  {} created stage {} {}", "✚".green(), id.dimmed(), name.bold());
+        }
+        StagesCmd::Update {
+            stage_id,
+            org,
+            name,
+            position,
+            probability,
+            won,
+            lost,
+            color,
+        } => {
+            let org = resolve_org(org)?;
+            let mut b = json!({});
+            if let Some(n) = name.filter(|s| !s.trim().is_empty()) {
+                b["name"] = json!(n);
+            }
+            stage_fields(&mut b, position, probability, won, lost, color);
+            client
+                .patch(&format!("/organizations/{org}/crm/stages/{stage_id}"), &b)
+                .await
+                .context("PATCH stage")?;
+            println!("  {} updated stage {}", "↻".yellow(), stage_id.dimmed());
+        }
+        StagesCmd::Delete { stage_id, org } => {
+            let org = resolve_org(org)?;
+            client
+                .delete(&format!("/organizations/{org}/crm/stages/{stage_id}"))
+                .await
+                .context("DELETE stage")?;
+            println!("  {} deleted stage {}", "✗".red(), stage_id.dimmed());
+        }
+        StagesCmd::Reorder { ids, org } => {
+            let org = resolve_org(org)?;
+            client
+                .post(&format!("/organizations/{org}/crm/stages/reorder"), &json!({ "orderedIds": ids }))
+                .await
+                .context("POST stages reorder")?;
+            let n = ids.len();
+            println!("  {} reordered {} stages", "↻".yellow(), n.to_string().bold());
+        }
+        StagesCmd::Init { org } => {
+            let org = resolve_org(org)?;
+            client
+                .post(&format!("/organizations/{org}/crm/stages/ensure-defaults"), &json!({}))
+                .await
+                .context("POST ensure-defaults")?;
+            println!("  {} default pipeline stages ensured", "✓".green().bold());
+        }
+    }
+    Ok(())
+}
+
+/// Fold the shared stage flags/options into a JSON body. `won`/`lost` are
+/// only set when the flag is present (a bare `false` isn't meaningful on update).
+fn stage_fields(b: &mut Value, position: Option<i64>, probability: Option<f64>, won: bool, lost: bool, color: Option<String>) {
+    if let Some(p) = position {
+        b["position"] = json!(p);
+    }
+    if let Some(p) = probability {
+        b["probability"] = json!(p);
+    }
+    if won {
+        b["isWon"] = json!(true);
+    }
+    if lost {
+        b["isLost"] = json!(true);
+    }
+    if let Some(c) = color.filter(|s| !s.trim().is_empty()) {
+        b["color"] = json!(c);
+    }
+}
+
+fn render_stages(body: &Value) {
+    let mut stages = body.as_array().cloned().unwrap_or_default();
+    stages.sort_by_key(|s| s.get("position").and_then(Value::as_i64).unwrap_or(i64::MAX));
+    let count = format!("({})", stages.len());
+    println!();
+    println!("  {} {}", "Stages".bold(), count.dimmed());
+    if stages.is_empty() {
+        println!("\n  {}\n", "none — seed defaults with `th api crm stages init`".dimmed());
+        return;
+    }
+    let (h_pos, h_name, h_prob, h_won, h_lost) = (
+        format!("{:>3}", "#"),
+        format!("{:<22}", "NAME"),
+        format!("{:>5}", "PROB"),
+        format!("{:<4}", "WON"),
+        format!("{:<4}", "LOST"),
+    );
+    println!();
+    println!(
+        "  {}  {}  {}  {}  {}",
+        h_pos.dimmed(),
+        h_name.dimmed(),
+        h_prob.dimmed(),
+        h_won.dimmed(),
+        h_lost.dimmed()
+    );
+    for s in &stages {
+        let pos = s.get("position").and_then(Value::as_i64).unwrap_or(0);
+        let prob = as_money(s.get("probability")).unwrap_or(0.0);
+        let name = s.get("stage").or_else(|| s.get("name")).and_then(Value::as_str).unwrap_or("—");
+        let pos_cell = format!("{pos:>3}");
+        let prob_cell = format!("{:>4}%", prob.round() as i64);
+        let won_cell = yes_no(s.get("isWon").and_then(Value::as_bool).unwrap_or(false));
+        let lost_cell = yes_no(s.get("isLost").and_then(Value::as_bool).unwrap_or(false));
+        println!(
+            "  {}  {}  {}  {:<4}  {:<4}",
+            pos_cell.dimmed(),
+            stage_cell(name, 22),
+            prob_cell,
+            won_cell,
+            lost_cell,
+        );
+    }
+    println!();
+}
+
+// ---------------------------------------------------------------------------
+// Tasks
+// ---------------------------------------------------------------------------
+
+async fn tasks(cmd: TasksCmd) -> Result<()> {
+    let client = UserClient::from_user_session().await?;
+    match cmd {
+        TasksCmd::List {
+            org,
+            deal,
+            contact,
+            assignee,
+            overdue,
+            all,
+            json,
+        } => {
+            let org = resolve_org(org)?;
+            let mut path = format!("/organizations/{org}/crm/tasks?");
+            let mut params: Vec<String> = Vec::new();
+            if let Some(d) = deal.filter(|s| !s.trim().is_empty()) {
+                params.push(format!("dealId={}", resolve_deal_id(&client, &org, &d).await?));
+            }
+            if let Some(c) = contact.filter(|s| !s.trim().is_empty()) {
+                params.push(format!("contactId={}", resolve_contact_id(&client, &org, &c).await?));
+            }
+            if let Some(a) = assignee.filter(|s| !s.trim().is_empty()) {
+                params.push(format!("assigneeUserId={a}"));
+            }
+            if overdue {
+                params.push("overdue=true".into());
+            }
+            if all {
+                params.push("includeCompleted=true".into());
+            }
+            path.push_str(&params.join("&"));
+            let body = client.get(&path).await.context("GET tasks")?;
+            if json {
+                print_json(&body);
+            } else {
+                render_tasks(&body);
+            }
+        }
+        TasksCmd::Show { task_id, org } => {
+            let org = resolve_org(org)?;
+            print_json(&client.get(&format!("/organizations/{org}/crm/tasks/{task_id}")).await.context("GET task")?);
+        }
+        TasksCmd::Add {
+            title,
+            org,
+            deal,
+            contact,
+            company,
+            due,
+            description,
+            assignee,
+        } => {
+            let org = resolve_org(org)?;
+            let mut b = json!({ "title": title });
+            if let Some(d) = deal.filter(|s| !s.trim().is_empty()) {
+                b["dealId"] = json!(resolve_deal_id(&client, &org, &d).await?);
+            }
+            if let Some(c) = contact.filter(|s| !s.trim().is_empty()) {
+                b["contactId"] = json!(resolve_contact_id(&client, &org, &c).await?);
+            }
+            if let Some(c) = company.filter(|s| !s.trim().is_empty()) {
+                b["companyId"] = json!(resolve_company_id(&client, &org, &c).await?);
+            }
+            if let Some(d) = due.filter(|s| !s.trim().is_empty()) {
+                b["dueAt"] = json!(d);
+            }
+            if let Some(d) = description.filter(|s| !s.trim().is_empty()) {
+                b["description"] = json!(d);
+            }
+            if let Some(a) = assignee.filter(|s| !s.trim().is_empty()) {
+                b["assigneeUserId"] = json!(a);
+            }
+            let r = client.post(&format!("/organizations/{org}/crm/tasks"), &b).await.context("POST task")?;
+            let id = r.get("id").and_then(Value::as_str).unwrap_or("?");
+            println!("  {} added task {} {}", "✚".green(), id.dimmed(), title.bold());
+        }
+        TasksCmd::Update {
+            task_id,
+            org,
+            title,
+            due,
+            description,
+            assignee,
+        } => {
+            let org = resolve_org(org)?;
+            let mut b = json!({});
+            if let Some(t) = title.filter(|s| !s.trim().is_empty()) {
+                b["title"] = json!(t);
+            }
+            if let Some(d) = due.filter(|s| !s.trim().is_empty()) {
+                b["dueAt"] = json!(d);
+            }
+            if let Some(d) = description.filter(|s| !s.trim().is_empty()) {
+                b["description"] = json!(d);
+            }
+            if let Some(a) = assignee.filter(|s| !s.trim().is_empty()) {
+                b["assigneeUserId"] = json!(a);
+            }
+            client
+                .patch(&format!("/organizations/{org}/crm/tasks/{task_id}"), &b)
+                .await
+                .context("PATCH task")?;
+            println!("  {} updated task {}", "↻".yellow(), task_id.dimmed());
+        }
+        TasksCmd::Done { task_id, org } => {
+            let org = resolve_org(org)?;
+            client
+                .post(&format!("/organizations/{org}/crm/tasks/{task_id}/complete"), &json!({}))
+                .await
+                .context("POST task complete")?;
+            println!("  {} completed task {}", "✓".green().bold(), task_id.dimmed());
+        }
+        TasksCmd::Rm { task_id, org } => {
+            let org = resolve_org(org)?;
+            client
+                .delete(&format!("/organizations/{org}/crm/tasks/{task_id}"))
+                .await
+                .context("DELETE task")?;
+            println!("  {} deleted task {}", "✗".red(), task_id.dimmed());
+        }
+    }
+    Ok(())
+}
+
+fn render_tasks(body: &Value) {
+    let items = body.as_array().cloned().unwrap_or_default();
+    let count = format!("({})", items.len());
+    println!();
+    println!("  {} {}", "Tasks".bold(), count.dimmed());
+    if items.is_empty() {
+        println!("\n  {}\n", "no tasks".dimmed());
+        return;
+    }
+    let (h_due, h_title, h_link, h_flag) = (
+        format!("{:<10}", "DUE"),
+        format!("{:<38}", "TITLE"),
+        format!("{:<24}", "LINKED"),
+        format!("{:<8}", ""),
+    );
+    println!();
+    println!("  {}  {}  {}  {}", h_due.dimmed(), h_title.dimmed(), h_link.dimmed(), h_flag.dimmed());
+    for t in &items {
+        let due = format!("{:<10}", short_date(t.get("dueAt")));
+        let title = truncate(t.get("title").and_then(Value::as_str).unwrap_or("—"), 38);
+        let done = t.get("completedAt").map(|v| !v.is_null()).unwrap_or(false) || t.get("isCompleted").and_then(Value::as_bool).unwrap_or(false);
+        let link = task_link(t);
+        let link_cell = format!("{:<24}", truncate(&link, 24));
+        let flag = if done {
+            "DONE".green().to_string()
+        } else if is_overdue(t.get("dueAt")) {
+            "OVERDUE".red().bold().to_string()
+        } else {
+            String::new()
+        };
+        println!("  {}  {:<38}  {}  {}", due.dimmed(), title, link_cell, flag);
+    }
+    println!();
+}
+
+/// A short "linked to" label for a task: deal title, else contact, else company.
+fn task_link(t: &Value) -> String {
+    for key in ["dealTitle", "deal", "contactName", "contact", "companyName", "company"] {
+        if let Some(s) = t.get(key).and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+            return s.to_string();
+        }
+    }
+    for key in ["dealId", "contactId", "companyId"] {
+        if let Some(s) = t.get(key).and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+            return s.chars().take(8).collect::<String>();
+        }
+    }
+    "—".into()
+}
+
+// ---------------------------------------------------------------------------
+// Conversations
+// ---------------------------------------------------------------------------
+
+async fn conversations(cmd: ConversationsCmd) -> Result<()> {
+    let client = UserClient::from_user_session().await?;
+    match cmd {
+        ConversationsCmd::List { org, contact, deal, json } => {
+            let org = resolve_org(org)?;
+            let mut params: Vec<String> = Vec::new();
+            if let Some(c) = contact.filter(|s| !s.trim().is_empty()) {
+                params.push(format!("contactId={}", resolve_contact_id(&client, &org, &c).await?));
+            }
+            if let Some(d) = deal.filter(|s| !s.trim().is_empty()) {
+                params.push(format!("dealId={d}"));
+            }
+            let path = format!("/organizations/{org}/crm/conversations?{}", params.join("&"));
+            let body = client.get(&path).await.context("GET conversations")?;
+            if json {
+                print_json(&body);
+            } else {
+                render_conversations(&body);
+            }
+        }
+        ConversationsCmd::Show { conversation_id, org, json } => {
+            let org = resolve_org(org)?;
+            let body = client
+                .get(&format!("/organizations/{org}/crm/conversations/{conversation_id}"))
+                .await
+                .context("GET conversation")?;
+            if json {
+                print_json(&body);
+            } else {
+                render_thread(&body);
+            }
+        }
+        ConversationsCmd::Create {
+            name,
+            org,
+            platform,
+            contact,
+            subject,
+            body,
+        } => {
+            let org = resolve_org(org)?;
+            let mut b = json!({ "platform": platform, "name": name });
+            if let Some(c) = contact.filter(|s| !s.trim().is_empty()) {
+                b["contactId"] = json!(resolve_contact_id(&client, &org, &c).await?);
+            }
+            // A body implies an outbound first message.
+            if let Some(body) = body.filter(|s| !s.trim().is_empty()) {
+                let mut msg = json!({ "direction": "outbound", "body": body });
+                if let Some(s) = subject.filter(|s| !s.trim().is_empty()) {
+                    msg["subject"] = json!(s);
+                }
+                b["firstMessage"] = msg;
+            }
+            let r = client
+                .post(&format!("/organizations/{org}/crm/conversations"), &b)
+                .await
+                .context("POST conversation")?;
+            let id = r.get("id").and_then(Value::as_str).unwrap_or("?");
+            println!("  {} started conversation {} {}", "✚".green(), id.dimmed(), name.bold());
+        }
+        ConversationsCmd::AddEmail {
+            conversation_id,
+            direction,
+            body,
+            org,
+            subject,
+            occurred,
+        } => {
+            let org = resolve_org(org)?;
+            let mut b = json!({ "direction": direction, "body": body });
+            if let Some(s) = subject.filter(|s| !s.trim().is_empty()) {
+                b["subject"] = json!(s);
+            }
+            if let Some(o) = occurred.filter(|s| !s.trim().is_empty()) {
+                b["occurredAt"] = json!(o);
+            }
+            client
+                .post(&format!("/organizations/{org}/crm/conversations/{conversation_id}/messages"), &b)
+                .await
+                .context("POST message")?;
+            let arrow = if direction == "inbound" {
+                "←".cyan().to_string()
+            } else {
+                "→".green().to_string()
+            };
+            println!("  {} {} message added to {}", "✚".green(), arrow, conversation_id.dimmed());
+        }
+    }
+    Ok(())
+}
+
+fn render_conversations(body: &Value) {
+    let items = body.as_array().cloned().unwrap_or_default();
+    let count = format!("({})", items.len());
+    println!();
+    println!("  {} {}", "Conversations".bold(), count.dimmed());
+    if items.is_empty() {
+        println!("\n  {}\n", "none".dimmed());
+        return;
+    }
+    let (h_date, h_name, h_plat, h_id) = (
+        format!("{:<10}", "UPDATED"),
+        format!("{:<40}", "NAME"),
+        format!("{:<10}", "PLATFORM"),
+        format!("{:<10}", "ID"),
+    );
+    println!();
+    println!("  {}  {}  {}  {}", h_date.dimmed(), h_name.dimmed(), h_plat.dimmed(), h_id.dimmed());
+    for c in &items {
+        let date = format!("{:<10}", short_date(c.get("updatedAt").or_else(|| c.get("createdAt"))));
+        let name = truncate(c.get("name").and_then(Value::as_str).unwrap_or("—"), 40);
+        let plat = format!("{:<10}", truncate(c.get("platform").and_then(Value::as_str).unwrap_or("—"), 10));
+        let id = c.get("id").and_then(Value::as_str).unwrap_or("—").chars().take(8).collect::<String>();
+        println!("  {}  {:<40}  {}  {}", date.dimmed(), name, plat.cyan(), id.dimmed());
+    }
+    println!();
+}
+
+fn render_thread(body: &Value) {
+    let name = body.get("name").and_then(Value::as_str).unwrap_or("—");
+    let messages = body
+        .get("messages")
+        .and_then(Value::as_array)
+        .cloned()
+        .or_else(|| body.as_array().cloned())
+        .unwrap_or_default();
+    println!();
+    println!("  {}", name.bold());
+    if messages.is_empty() {
+        println!("\n  {}\n", "no messages".dimmed());
+        return;
+    }
+    for m in &messages {
+        let inbound = m.get("direction").and_then(Value::as_str) == Some("inbound");
+        let arrow = if inbound { "←".cyan().to_string() } else { "→".green().to_string() };
+        let dir = if inbound { "in ".cyan().to_string() } else { "out".green().to_string() };
+        let when = short_date(m.get("occurredAt").or_else(|| m.get("createdAt")));
+        let subject = m.get("subject").and_then(Value::as_str).filter(|s| !s.trim().is_empty());
+        println!();
+        let hdr = match subject {
+            Some(s) => format!("{arrow} {dir}  {when}  {}", s.bold()),
+            None => format!("{arrow} {dir}  {when}"),
+        };
+        println!("  {hdr}");
+        let text = m.get("body").and_then(Value::as_str).unwrap_or("");
+        let preview = preview_body(text, 3, 100);
+        for line in preview {
+            println!("      {}", line.dimmed());
+        }
+    }
+    println!();
+}
+
+/// First `max_lines` non-empty lines of a body, each truncated to `width`.
+fn preview_body(text: &str, max_lines: usize, width: usize) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .take(max_lines)
+        .map(|l| truncate(l, width))
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Timeline
+// ---------------------------------------------------------------------------
+
+async fn timeline(deal_id: String, org: Option<String>, json: bool) -> Result<()> {
+    let client = UserClient::from_user_session().await?;
+    let org = resolve_org(org)?;
+    let body = client
+        .get(&format!("/organizations/{org}/crm/deals/{deal_id}/timeline"))
+        .await
+        .context("GET deal timeline")?;
+    if json {
+        print_json(&body);
+    } else {
+        render_timeline(&body, true);
+    }
+    Ok(())
+}
+
+/// Render a merged, date-sorted event list newest-first. `heading` prints the
+/// "Timeline" title (off when appended under `deals show`).
+fn render_timeline(body: &Value, heading: bool) {
+    let mut items = body
+        .as_array()
+        .cloned()
+        .or_else(|| body.get("events").and_then(Value::as_array).cloned())
+        .unwrap_or_default();
+    // Newest first. `at` is an ISO string; lexical sort matches chronological.
+    items.sort_by(|a, b| {
+        let av = a.get("at").and_then(Value::as_str).unwrap_or("");
+        let bv = b.get("at").and_then(Value::as_str).unwrap_or("");
+        bv.cmp(av)
+    });
+    println!();
+    if heading {
+        println!("  {}", "Timeline".bold());
+    } else {
+        println!("  {}", "Timeline".dimmed());
+    }
+    if items.is_empty() {
+        println!("\n  {}\n", "no activity yet".dimmed());
+        return;
+    }
+    for e in &items {
+        let kind = e.get("type").and_then(Value::as_str).unwrap_or("event");
+        let glyph = timeline_glyph(kind);
+        let when = format!("{:<10}", short_date(e.get("at")));
+        let summary = e.get("summary").and_then(Value::as_str).unwrap_or("—");
+        let kind_cell = format!("{:<8}", truncate(kind, 8));
+        println!("  {}  {}  {}  {}", when.dimmed(), glyph, kind_cell.dimmed(), summary);
+    }
+    println!();
+}
+
+/// A single-glyph icon per timeline event type.
+fn timeline_glyph(kind: &str) -> &'static str {
+    match kind.to_lowercase().as_str() {
+        "activity" | "activities" => "◆",
+        "note" | "notes" => "✎",
+        "conversation" | "conversations" | "message" | "email" => "✉",
+        "invoice" | "invoices" => "$",
+        "task" | "tasks" => "☑",
+        "stage" | "stage_change" => "↻",
+        _ => "•",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Invoices
+// ---------------------------------------------------------------------------
+
+async fn invoices(cmd: InvoicesCmd) -> Result<()> {
+    let client = UserClient::from_user_session().await?;
+    match cmd {
+        InvoicesCmd::List { org, deal, contact, json } => {
+            let org = resolve_org(org)?;
+            let mut params: Vec<String> = Vec::new();
+            if let Some(d) = deal.filter(|s| !s.trim().is_empty()) {
+                params.push(format!("dealId={d}"));
+            }
+            if let Some(c) = contact.filter(|s| !s.trim().is_empty()) {
+                params.push(format!("contactId={c}"));
+            }
+            let path = format!("/organizations/{org}/invoicing/invoices?{}", params.join("&"));
+            let body = client.get(&path).await.context("GET invoices")?;
+            if json {
+                print_json(&body);
+            } else {
+                render_invoices(&body);
+            }
+        }
+        InvoicesCmd::Show { invoice_id, org } => {
+            let org = resolve_org(org)?;
+            print_json(
+                &client
+                    .get(&format!("/organizations/{org}/invoicing/invoices/{invoice_id}"))
+                    .await
+                    .context("GET invoice")?,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn render_invoices(body: &Value) {
+    let items = body
+        .as_array()
+        .cloned()
+        .or_else(|| body.get("invoices").and_then(Value::as_array).cloned())
+        .unwrap_or_default();
+    let count = format!("({})", items.len());
+    println!();
+    println!("  {} {}", "Invoices".bold(), count.dimmed());
+    if items.is_empty() {
+        println!("\n  {}\n", "none".dimmed());
+        return;
+    }
+    let (h_num, h_status, h_total, h_due) = (
+        format!("{:<20}", "NUMBER"),
+        format!("{:<14}", "STATUS"),
+        format!("{:>13}", "TOTAL"),
+        format!("{:<10}", "DUE"),
+    );
+    println!();
+    println!("  {}  {}  {}  {}", h_num.dimmed(), h_status.dimmed(), h_total.dimmed(), h_due.dimmed());
+    for inv in &items {
+        let num = truncate(inv.get("number").or_else(|| inv.get("id")).and_then(Value::as_str).unwrap_or("—"), 20);
+        let status = inv.get("status").and_then(Value::as_str).unwrap_or("");
+        let total = fmt_cents(inv.get("total").and_then(Value::as_i64).unwrap_or(0));
+        let total_cell = format!("{total:>13}");
+        let due = short_date(inv.get("dueAt").or_else(|| inv.get("dueDate")));
+        println!("  {:<20}  {}  {}  {}", num, invoice_status_cell(status, 14), total_cell, due);
+    }
+    println!();
+}
+
 // --- small formatting helpers ------------------------------------------------
 
 /// A JSON number OR numeric-string (drizzle serializes numeric(15,2) as a
@@ -639,6 +1709,57 @@ fn fmt_money(v: Option<f64>) -> String {
     match v {
         Some(n) => format!("${}", group_thousands(n)),
         None => "—".to_string(),
+    }
+}
+
+/// Integer cents → a `$1,234.56` dollar string. Invoice amounts arrive as
+/// integer cents (`total`, `amount_paid`, …), unlike deal `value` (dollars).
+fn fmt_cents(cents: i64) -> String {
+    format!("${}", group_thousands(cents as f64 / 100.0))
+}
+
+/// A tiny inline progress bar for a 0–100 probability, e.g. `██████░░░░ 60%`.
+fn prob_bar(pct: f64, width: usize) -> String {
+    let p = pct.clamp(0.0, 100.0);
+    let filled = ((p / 100.0) * width as f64).round() as usize;
+    let filled = filled.min(width);
+    let bar: String = "█".repeat(filled);
+    let rest: String = "░".repeat(width - filled);
+    let label = format!("{}%", p.round() as i64);
+    format!("{}{} {}", bar.cyan(), rest.dimmed(), label.dimmed())
+}
+
+/// A green ✓ / dimmed · cell for a boolean flag.
+fn yes_no(b: bool) -> String {
+    if b {
+        "✓".green().to_string()
+    } else {
+        "·".dimmed().to_string()
+    }
+}
+
+/// True when an ISO-8601 timestamp is strictly in the past.
+fn is_overdue(v: Option<&Value>) -> bool {
+    let Some(s) = v.and_then(Value::as_str) else { return false };
+    match chrono::DateTime::parse_from_rfc3339(s) {
+        Ok(dt) => dt < chrono::Utc::now(),
+        Err(_) => false,
+    }
+}
+
+/// Color + pad an invoice status: paid=green, overdue/uncollectible=red,
+/// void=dimmed, else cyan. Pads BEFORE coloring so columns stay aligned.
+fn invoice_status_cell(status: &str, width: usize) -> String {
+    let plain = truncate(status.trim(), width);
+    if plain.is_empty() {
+        return format!("{:<width$}", "—").dimmed().to_string();
+    }
+    let padded = format!("{plain:<width$}");
+    match plain.to_lowercase().as_str() {
+        "paid" => padded.green().to_string(),
+        "overdue" | "uncollectible" => padded.red().to_string(),
+        "void" | "draft" => padded.dimmed().to_string(),
+        _ => padded.cyan().to_string(),
     }
 }
 
@@ -900,8 +2021,40 @@ fn remember(email_to_id: &mut HashMap<String, String>, phone_to_id: &mut HashMap
 
 #[cfg(test)]
 mod tests {
-    use super::{group_thousands, looks_like_uuid, norm_email, norm_phone};
+    use super::{fmt_cents, group_thousands, is_overdue, looks_like_uuid, norm_email, norm_phone, preview_body, timeline_glyph};
     use serde_json::json;
+
+    #[test]
+    fn cents_render_as_dollars() {
+        assert_eq!(fmt_cents(0), "$0.00");
+        assert_eq!(fmt_cents(199), "$1.99");
+        assert_eq!(fmt_cents(550000), "$5,500.00");
+        assert_eq!(fmt_cents(123456789), "$1,234,567.89");
+    }
+
+    #[test]
+    fn timeline_glyph_maps_known_types_and_falls_back() {
+        assert_eq!(timeline_glyph("invoice"), "$");
+        assert_eq!(timeline_glyph("Note"), "✎");
+        assert_eq!(timeline_glyph("conversation"), "✉");
+        assert_eq!(timeline_glyph("activities"), "◆");
+        assert_eq!(timeline_glyph("something_else"), "•");
+    }
+
+    #[test]
+    fn overdue_only_for_past_timestamps() {
+        assert!(is_overdue(Some(&json!("2000-01-01T00:00:00Z"))));
+        assert!(!is_overdue(Some(&json!("2999-01-01T00:00:00Z"))));
+        assert!(!is_overdue(Some(&json!("not-a-date"))));
+        assert!(!is_overdue(None));
+    }
+
+    #[test]
+    fn body_preview_trims_and_caps_lines() {
+        let text = "  first line  \n\n  second  \n third \n fourth ";
+        let out = preview_body(text, 2, 100);
+        assert_eq!(out, vec!["first line".to_string(), "second".to_string()]);
+    }
 
     #[test]
     fn money_is_comma_grouped_with_two_decimals() {
