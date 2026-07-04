@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use owo_colors::OwoColorize;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use super::{print_json, read_body};
 use crate::smooai::user_client::UserClient;
@@ -25,6 +25,123 @@ pub enum Cmd {
     Contacts {
         #[command(subcommand)]
         cmd: ContactsCmd,
+    },
+    /// Company / account records (list / show / upsert).
+    Companies {
+        #[command(subcommand)]
+        cmd: CompaniesCmd,
+    },
+    /// Deals — your sales pipeline (list / show / create / move).
+    Deals {
+        #[command(subcommand)]
+        cmd: DealsCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum CompaniesCmd {
+    /// List companies for the org.
+    List {
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// Filter to companies matching this search term.
+        #[arg(long)]
+        search: Option<String>,
+        /// Maximum number of companies to return.
+        #[arg(long, default_value = "50")]
+        limit: u32,
+        /// Print raw JSON instead of the table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a single company by id.
+    Show {
+        /// The company id from `th api crm companies list`.
+        company_id: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Create or update a company, matched by name (case-insensitive) or
+    /// domain. Safe to re-run — a second call patches the same row.
+    Upsert {
+        /// Company name (the match key).
+        name: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// Website domain (e.g. rpmpizza.com) — also a match key.
+        #[arg(long)]
+        domain: Option<String>,
+        /// Industry (free text).
+        #[arg(long)]
+        industry: Option<String>,
+        /// Website URL.
+        #[arg(long)]
+        website: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum DealsCmd {
+    /// List deals as a pipeline view (totals + table).
+    List {
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// Filter to a single stage.
+        #[arg(long)]
+        stage: Option<String>,
+        /// Maximum number of deals to return.
+        #[arg(long, default_value = "50")]
+        limit: u32,
+        /// Print raw JSON instead of the pipeline view.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a single deal by id.
+    Show {
+        /// The deal id from `th api crm deals list`.
+        deal_id: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Create a deal, matched by title (case-insensitive). Safe to
+    /// re-run — an existing deal with the same title is left untouched
+    /// (use `move` to change its stage).
+    Create {
+        /// Deal title (the match key).
+        title: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// Deal value in dollars (e.g. 5500).
+        #[arg(long)]
+        value: Option<f64>,
+        /// Pipeline stage (free text, e.g. "closed_won", "discovery").
+        #[arg(long)]
+        stage: Option<String>,
+        /// Link to a company id.
+        #[arg(long)]
+        company: Option<String>,
+        /// Link to a contact id.
+        #[arg(long)]
+        contact: Option<String>,
+        /// Close date (ISO-8601, e.g. 2026-07-02).
+        #[arg(long = "close-date")]
+        close_date: Option<String>,
+    },
+    /// Move a deal to a new stage.
+    Move {
+        /// The deal id from `th api crm deals list`.
+        deal_id: String,
+        /// New stage (free text).
+        stage: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
     },
 }
 
@@ -92,6 +209,8 @@ pub enum ContactsCmd {
 pub async fn cmd(cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::Contacts { cmd } => contacts(cmd).await,
+        Cmd::Companies { cmd } => companies(cmd).await,
+        Cmd::Deals { cmd } => deals(cmd).await,
     }
 }
 
@@ -155,6 +274,447 @@ async fn contacts(cmd: ContactsCmd) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Companies
+// ---------------------------------------------------------------------------
+
+async fn companies(cmd: CompaniesCmd) -> Result<()> {
+    let client = UserClient::from_user_session().await?;
+    match cmd {
+        CompaniesCmd::List { org, search, limit, json } => {
+            let org = resolve_org(org)?;
+            let mut path = format!("/organizations/{org}/crm/companies?limit={limit}");
+            if let Some(s) = search.filter(|s| !s.trim().is_empty()) {
+                path.push_str(&format!("&search={}", urlencoding::encode(&s)));
+            }
+            let body = client.get(&path).await.context("GET companies")?;
+            if json {
+                print_json(&body);
+            } else {
+                render_companies(&body);
+            }
+        }
+        CompaniesCmd::Show { company_id, org } => {
+            let org = resolve_org(org)?;
+            print_json(
+                &client
+                    .get(&format!("/organizations/{org}/crm/companies/{company_id}"))
+                    .await
+                    .context("GET company")?,
+            );
+        }
+        CompaniesCmd::Upsert {
+            name,
+            org,
+            domain,
+            industry,
+            website,
+        } => {
+            let org = resolve_org(org)?;
+            upsert_company(&client, &org, &name, domain, industry, website).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Find an existing company by case-insensitive name, or by domain.
+async fn find_company(client: &UserClient, org: &str, name: &str, domain: Option<&str>) -> Result<Option<Value>> {
+    let list = client
+        .get(&format!("/organizations/{org}/crm/companies?limit=200"))
+        .await
+        .context("GET companies for match")?;
+    let name_l = name.trim().to_lowercase();
+    let dom_l = domain.map(|d| d.trim().to_lowercase()).filter(|d| !d.is_empty());
+    Ok(list.as_array().and_then(|arr| {
+        arr.iter()
+            .find(|c| {
+                let cn = c.get("name").and_then(Value::as_str).unwrap_or_default().trim().to_lowercase();
+                let cd = c.get("domain").and_then(Value::as_str).map(|s| s.trim().to_lowercase());
+                cn == name_l || (dom_l.is_some() && cd == dom_l)
+            })
+            .cloned()
+    }))
+}
+
+async fn upsert_company(client: &UserClient, org: &str, name: &str, domain: Option<String>, industry: Option<String>, website: Option<String>) -> Result<()> {
+    let mut body = json!({ "name": name });
+    if let Some(d) = domain.filter(|s| !s.trim().is_empty()) {
+        body["domain"] = json!(d);
+    }
+    if let Some(i) = industry.filter(|s| !s.trim().is_empty()) {
+        body["industry"] = json!(i);
+    }
+    if let Some(w) = website.filter(|s| !s.trim().is_empty()) {
+        body["website"] = json!(w);
+    }
+
+    let existing = find_company(client, org, name, body.get("domain").and_then(Value::as_str)).await?;
+    if let Some(c) = existing {
+        let id = c.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+        client
+            .patch(&format!("/organizations/{org}/crm/companies/{id}"), &body)
+            .await
+            .context("PATCH company")?;
+        println!("  {} updated company {} {}", "↻".yellow(), id.dimmed(), name.bold());
+    } else {
+        let r = client
+            .post(&format!("/organizations/{org}/crm/companies"), &body)
+            .await
+            .context("POST company")?;
+        let id = r.get("id").and_then(Value::as_str).unwrap_or("?").to_string();
+        println!("  {} created company {} {}", "✚".green(), id.dimmed(), name.bold());
+    }
+    Ok(())
+}
+
+fn render_companies(body: &Value) {
+    let cos = body.as_array().cloned().unwrap_or_default();
+    let count = format!("({})", cos.len());
+    println!();
+    println!("  {} {}", "Companies".bold(), count.dimmed());
+    if cos.is_empty() {
+        println!("\n  {}\n", "none".dimmed());
+        return;
+    }
+    let (h_name, h_dom, h_ind) = (format!("{:<28}", "NAME"), format!("{:<26}", "DOMAIN"), format!("{:<20}", "INDUSTRY"));
+    println!();
+    println!("  {}  {}  {}", h_name.dimmed(), h_dom.dimmed(), h_ind.dimmed());
+    for c in &cos {
+        println!(
+            "  {:<28}  {:<26}  {:<20}",
+            truncate(c.get("name").and_then(Value::as_str).unwrap_or("—"), 28),
+            truncate(c.get("domain").and_then(Value::as_str).unwrap_or("—"), 26),
+            truncate(c.get("industry").and_then(Value::as_str).unwrap_or("—"), 20),
+        );
+    }
+    println!();
+}
+
+// ---------------------------------------------------------------------------
+// Deals (pipeline)
+// ---------------------------------------------------------------------------
+
+async fn deals(cmd: DealsCmd) -> Result<()> {
+    let client = UserClient::from_user_session().await?;
+    match cmd {
+        DealsCmd::List { org, stage, limit, json } => {
+            let org = resolve_org(org)?;
+            let mut path = format!("/organizations/{org}/crm/deals?limit={limit}");
+            if let Some(s) = stage.filter(|s| !s.trim().is_empty()) {
+                path.push_str(&format!("&stage={}", urlencoding::encode(&s)));
+            }
+            let body = client.get(&path).await.context("GET deals")?;
+            if json {
+                print_json(&body);
+            } else {
+                render_deals(&body);
+            }
+        }
+        DealsCmd::Show { deal_id, org } => {
+            let org = resolve_org(org)?;
+            show_deal(&client, &org, &deal_id).await?;
+        }
+        DealsCmd::Create {
+            title,
+            org,
+            value,
+            stage,
+            company,
+            contact,
+            close_date,
+        } => {
+            let org = resolve_org(org)?;
+            create_deal(&client, &org, &title, value, stage, company, contact, close_date).await?;
+        }
+        DealsCmd::Move { deal_id, stage, org } => {
+            let org = resolve_org(org)?;
+            client
+                .patch(&format!("/organizations/{org}/crm/deals/{deal_id}"), &json!({ "stage": stage }))
+                .await
+                .context("PATCH deal stage")?;
+            println!("  {} moved deal {} → {}", "↻".yellow(), deal_id.dimmed(), stage_color(&stage));
+        }
+    }
+    Ok(())
+}
+
+async fn find_deal(client: &UserClient, org: &str, title: &str) -> Result<Option<Value>> {
+    let list = client
+        .get(&format!("/organizations/{org}/crm/deals?limit=200"))
+        .await
+        .context("GET deals for match")?;
+    let t = title.trim().to_lowercase();
+    Ok(list.as_array().and_then(|arr| {
+        arr.iter()
+            .find(|d| d.get("title").and_then(Value::as_str).unwrap_or_default().trim().to_lowercase() == t)
+            .cloned()
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_deal(
+    client: &UserClient,
+    org: &str,
+    title: &str,
+    value: Option<f64>,
+    stage: Option<String>,
+    company: Option<String>,
+    contact: Option<String>,
+    close_date: Option<String>,
+) -> Result<()> {
+    if let Some(existing) = find_deal(client, org, title).await? {
+        let id = existing.get("id").and_then(Value::as_str).unwrap_or("?");
+        println!(
+            "  {} deal {} already exists {} — left as-is (use `deals move` to change stage)",
+            "•".cyan(),
+            id.dimmed(),
+            title.bold()
+        );
+        return Ok(());
+    }
+    let stage = stage.filter(|s| !s.trim().is_empty());
+    let mut body = json!({ "title": title });
+    if let Some(v) = value {
+        body["value"] = json!(v);
+    }
+    if let Some(s) = &stage {
+        body["stage"] = json!(s);
+    }
+    if let Some(c) = company.filter(|s| !s.trim().is_empty()) {
+        body["companyId"] = json!(resolve_company_id(client, org, &c).await?);
+    }
+    if let Some(c) = contact.filter(|s| !s.trim().is_empty()) {
+        body["contactId"] = json!(resolve_contact_id(client, org, &c).await?);
+    }
+    if let Some(d) = close_date.filter(|s| !s.trim().is_empty()) {
+        body["closeDate"] = json!(d);
+    }
+    let r = client.post(&format!("/organizations/{org}/crm/deals"), &body).await.context("POST deal")?;
+    let id = r.get("id").and_then(Value::as_str).unwrap_or("?");
+    println!(
+        "  {} created deal {} {}  {}  {}",
+        "✚".green(),
+        id.dimmed(),
+        title.bold(),
+        stage_color(stage.as_deref().unwrap_or("")),
+        fmt_money(value),
+    );
+    Ok(())
+}
+
+/// Resolve a company id from a uuid (used as-is) or a name (looked up).
+async fn resolve_company_id(client: &UserClient, org: &str, s: &str) -> Result<String> {
+    if looks_like_uuid(s) {
+        return Ok(s.to_string());
+    }
+    match find_company(client, org, s, None).await? {
+        Some(c) => c.get("id").and_then(Value::as_str).map(str::to_string).context("matched company has no id"),
+        None => anyhow::bail!("no company matches '{s}' — create it first: `th api crm companies upsert \"{s}\"`"),
+    }
+}
+
+/// Resolve a contact id from a uuid (used as-is) or an email/name (looked up).
+async fn resolve_contact_id(client: &UserClient, org: &str, s: &str) -> Result<String> {
+    if looks_like_uuid(s) {
+        return Ok(s.to_string());
+    }
+    // Match locally against every contact — the `?search=` param doesn't
+    // reliably hit a full email address, so reuse the same paged fetch as
+    // `import` and compare exact email / "first last" here.
+    let contacts = fetch_all(client, org, std::time::Duration::from_millis(0)).await?;
+    let sl = s.trim().to_lowercase();
+    let found = contacts.iter().find(|c| {
+        let email = c.get("email").and_then(Value::as_str).unwrap_or_default().to_lowercase();
+        let name = format!(
+            "{} {}",
+            c.get("firstName").and_then(Value::as_str).unwrap_or(""),
+            c.get("lastName").and_then(Value::as_str).unwrap_or("")
+        )
+        .trim()
+        .to_lowercase();
+        email == sl || name == sl
+    });
+    match found {
+        Some(c) => c.get("id").and_then(Value::as_str).map(str::to_string).context("matched contact has no id"),
+        None => anyhow::bail!("no contact matches '{s}' — create it first: `th api crm contacts create`"),
+    }
+}
+
+async fn show_deal(client: &UserClient, org: &str, deal_id: &str) -> Result<()> {
+    let d = client.get(&format!("/organizations/{org}/crm/deals/{deal_id}")).await.context("GET deal")?;
+    println!();
+    println!("  {}", d.get("title").and_then(Value::as_str).unwrap_or("—").bold());
+    println!("  {} {}", "Stage  ".dimmed(), stage_color(d.get("stage").and_then(Value::as_str).unwrap_or("")));
+    println!("  {} {}", "Value  ".dimmed(), fmt_money(as_money(d.get("value"))).bold());
+    println!("  {} {}", "Close  ".dimmed(), short_date(d.get("closeDate")));
+    if let Some(cid) = d.get("companyId").and_then(Value::as_str) {
+        let name = client
+            .get(&format!("/organizations/{org}/crm/companies/{cid}"))
+            .await
+            .ok()
+            .and_then(|c| c.get("name").and_then(Value::as_str).map(str::to_string))
+            .unwrap_or_else(|| cid.to_string());
+        println!("  {} {}", "Company".dimmed(), name);
+    }
+    if let Some(cid) = d.get("contactId").and_then(Value::as_str) {
+        let label = client
+            .get(&format!("/organizations/{org}/crm/contacts/{cid}"))
+            .await
+            .ok()
+            .map(|c| contact_label(&c))
+            .unwrap_or_else(|| cid.to_string());
+        println!("  {} {}", "Contact".dimmed(), label);
+    }
+    println!("  {} {}", "id     ".dimmed(), deal_id.dimmed());
+    println!();
+    Ok(())
+}
+
+fn contact_label(c: &Value) -> String {
+    let name = format!(
+        "{} {}",
+        c.get("firstName").and_then(Value::as_str).unwrap_or(""),
+        c.get("lastName").and_then(Value::as_str).unwrap_or("")
+    )
+    .trim()
+    .to_string();
+    let email = c.get("email").and_then(Value::as_str).unwrap_or("");
+    match (name.is_empty(), email.is_empty()) {
+        (false, false) => format!("{name} <{email}>"),
+        (false, true) => name,
+        _ => email.to_string(),
+    }
+}
+
+fn render_deals(body: &Value) {
+    let deals = body.as_array().cloned().unwrap_or_default();
+    let pipeline: f64 = deals.iter().filter_map(|d| as_money(d.get("value"))).sum();
+    println!();
+    println!("  {}", "Deals".bold());
+    println!(
+        "  {} {}     {} {}",
+        "Total".dimmed(),
+        deals.len().to_string().bold(),
+        "Pipeline".dimmed(),
+        fmt_money(Some(pipeline)).bold()
+    );
+    if deals.is_empty() {
+        println!("\n  {}\n", "no deals yet".dimmed());
+        return;
+    }
+    let (h_title, h_stage, h_value, h_close) = (
+        format!("{:<38}", "TITLE"),
+        format!("{:<14}", "STAGE"),
+        format!("{:>12}", "VALUE"),
+        format!("{:<10}", "CLOSE"),
+    );
+    println!();
+    println!("  {}  {}  {}  {}", h_title.dimmed(), h_stage.dimmed(), h_value.dimmed(), h_close.dimmed());
+    for d in &deals {
+        let title = truncate(d.get("title").and_then(Value::as_str).unwrap_or("—"), 38);
+        let value = format!("{:>12}", fmt_money(as_money(d.get("value"))));
+        println!(
+            "  {:<38}  {}  {}  {}",
+            title,
+            stage_cell(d.get("stage").and_then(Value::as_str).unwrap_or(""), 14),
+            value,
+            short_date(d.get("closeDate")),
+        );
+    }
+    println!();
+}
+
+// --- small formatting helpers ------------------------------------------------
+
+/// A JSON number OR numeric-string (drizzle serializes numeric(15,2) as a
+/// string) as an f64.
+fn as_money(v: Option<&Value>) -> Option<f64> {
+    let v = v?;
+    v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+}
+
+fn fmt_money(v: Option<f64>) -> String {
+    match v {
+        Some(n) => format!("${}", group_thousands(n)),
+        None => "—".to_string(),
+    }
+}
+
+/// `1234567.5` → `1,234,567.50`. Comma-grouped, always 2 decimals.
+fn group_thousands(n: f64) -> String {
+    let neg = n < 0.0;
+    let cents = (n.abs() * 100.0).round() as u64;
+    let (dollars, frac) = (cents / 100, cents % 100);
+    let ds = dollars.to_string();
+    let bytes = ds.as_bytes();
+    let len = bytes.len();
+    let mut out = String::new();
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 && (len - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(*b as char);
+    }
+    format!("{}{}.{:02}", if neg { "-" } else { "" }, out, frac)
+}
+
+fn short_date(v: Option<&Value>) -> String {
+    v.and_then(Value::as_str)
+        .map(|s| s.chars().take(10).collect::<String>())
+        .unwrap_or_else(|| "—".into())
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(max.saturating_sub(1)).collect::<String>())
+    }
+}
+
+/// Color a stage label (green=won, red=lost, cyan=otherwise). No padding.
+fn stage_color(stage: &str) -> String {
+    let s = stage.trim();
+    if s.is_empty() {
+        return "—".dimmed().to_string();
+    }
+    let low = s.to_lowercase();
+    if low.contains("won") {
+        s.green().to_string()
+    } else if low.contains("lost") {
+        s.red().to_string()
+    } else {
+        s.cyan().to_string()
+    }
+}
+
+/// Left-pad a stage label to `width` THEN color it, so table columns stay
+/// aligned (padding a pre-colored string would count the ANSI escapes).
+fn stage_cell(stage: &str, width: usize) -> String {
+    let plain = truncate(stage.trim(), width);
+    let padded = format!("{plain:<width$}");
+    let low = stage.to_lowercase();
+    if plain.is_empty() {
+        format!("{:<width$}", "—").dimmed().to_string()
+    } else if low.contains("won") {
+        padded.green().to_string()
+    } else if low.contains("lost") {
+        padded.red().to_string()
+    } else {
+        padded.cyan().to_string()
+    }
+}
+
+/// True for a canonical 8-4-4-4-12 hex uuid, so `--company`/`--contact`
+/// accept either an id or a human name.
+fn looks_like_uuid(s: &str) -> bool {
+    let s = s.trim();
+    s.len() == 36
+        && s.chars()
+            .enumerate()
+            .all(|(i, c)| if matches!(i, 8 | 13 | 18 | 23) { c == '-' } else { c.is_ascii_hexdigit() })
 }
 
 /// Lowercased, trimmed email if it looks like an email (`x@y`).
@@ -340,8 +900,27 @@ fn remember(email_to_id: &mut HashMap<String, String>, phone_to_id: &mut HashMap
 
 #[cfg(test)]
 mod tests {
-    use super::{norm_email, norm_phone};
+    use super::{group_thousands, looks_like_uuid, norm_email, norm_phone};
     use serde_json::json;
+
+    #[test]
+    fn money_is_comma_grouped_with_two_decimals() {
+        assert_eq!(group_thousands(5500.0), "5,500.00");
+        assert_eq!(group_thousands(1234567.5), "1,234,567.50");
+        assert_eq!(group_thousands(0.0), "0.00");
+        assert_eq!(group_thousands(299.0), "299.00");
+        // Rounds cents, doesn't truncate.
+        assert_eq!(group_thousands(99.995), "100.00");
+    }
+
+    #[test]
+    fn uuid_detection_gates_name_vs_id() {
+        assert!(looks_like_uuid("660e8400-e29b-41d4-a716-446655440000"));
+        assert!(!looks_like_uuid("RPM Pizza"));
+        assert!(!looks_like_uuid("tim.fikes@rpmpizza.com"));
+        // right length, wrong dash positions
+        assert!(!looks_like_uuid("660e8400e29b-41d4-a716-4466554400001"));
+    }
 
     #[test]
     fn email_is_lowercased_and_trimmed() {

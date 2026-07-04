@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+set -e
+
+# ── Cargo tests ──────────────────────────────────────────────────────
+echo "pre-push: cargo test"
+cargo test --workspace || {
+    echo >&2 "pre-push: tests failed. Fix them before pushing."
+    exit 1
+}
+
+# ── Pearl hooks ──────────────────────────────────────────────────────
+if command -v th >/dev/null 2>&1; then
+    th hooks run pre-push "$@" || true
+fi
