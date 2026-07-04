@@ -19,6 +19,7 @@ pub mod keys;
 pub mod knowledge;
 pub mod llm_gateway;
 pub mod members;
+pub mod notify;
 pub mod observability;
 pub mod products;
 pub mod profile;
