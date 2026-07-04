@@ -116,6 +116,9 @@ tracing-appender = "0.2"
 # Misc
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
+# IANA timezone db — `th booking slots` renders slot times in the org's
+# configured timezone (chrono alone only knows fixed offsets / UTC).
+chrono-tz = "0.10"
 futures-core = "0.3"
 futures-util = "0.3"
 anyhow = "1"
