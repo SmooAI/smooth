@@ -1581,12 +1581,20 @@ async fn timeline(deal_id: String, org: Option<String>, json: bool) -> Result<()
 
 /// Render a merged, date-sorted event list newest-first. `heading` prints the
 /// "Timeline" title (off when appended under `deals show`).
-fn render_timeline(body: &Value, heading: bool) {
-    let mut items = body
-        .as_array()
+/// Extract the timeline event array from an API response body.
+/// The API returns `{ dealId, items: [...] }` (see CrmDealTimeline in
+/// smooai/packages/backend/src/routes/crm/crm-deals.ts). Read `items`; keep the
+/// bare-array + legacy `events` fallbacks so no consumer regresses.
+fn extract_timeline_items(body: &Value) -> Vec<Value> {
+    body.as_array()
         .cloned()
+        .or_else(|| body.get("items").and_then(Value::as_array).cloned())
         .or_else(|| body.get("events").and_then(Value::as_array).cloned())
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+fn render_timeline(body: &Value, heading: bool) {
+    let mut items = extract_timeline_items(body);
     // Newest first. `at` is an ISO string; lexical sort matches chronological.
     items.sort_by(|a, b| {
         let av = a.get("at").and_then(Value::as_str).unwrap_or("");
@@ -2021,8 +2029,21 @@ fn remember(email_to_id: &mut HashMap<String, String>, phone_to_id: &mut HashMap
 
 #[cfg(test)]
 mod tests {
-    use super::{fmt_cents, group_thousands, is_overdue, looks_like_uuid, norm_email, norm_phone, preview_body, timeline_glyph};
+    use super::{extract_timeline_items, fmt_cents, group_thousands, is_overdue, looks_like_uuid, norm_email, norm_phone, preview_body, timeline_glyph};
     use serde_json::json;
+
+    #[test]
+    fn timeline_items_read_from_items_key() {
+        // The real API shape: `{ dealId, items: [...] }`. Regression guard for the
+        // bug where the CLI read `events` and always rendered "no activity yet".
+        let body = json!({ "dealId": "d1", "items": [{ "type": "deal_won", "at": "2026-07-04T00:00:00Z", "summary": "Won" }] });
+        assert_eq!(extract_timeline_items(&body).len(), 1);
+        // Legacy fallbacks still work.
+        assert_eq!(extract_timeline_items(&json!([{ "type": "note" }])).len(), 1);
+        assert_eq!(extract_timeline_items(&json!({ "events": [{ "type": "note" }] })).len(), 1);
+        // No recognized array → empty.
+        assert!(extract_timeline_items(&json!({ "dealId": "d1" })).is_empty());
+    }
 
     #[test]
     fn cents_render_as_dollars() {
