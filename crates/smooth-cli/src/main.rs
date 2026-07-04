@@ -175,6 +175,31 @@ enum Commands {
         #[command(subcommand)]
         cmd: smooai::llm_gateway::Cmd,
     },
+    /// Ping the human on their own phone. Designed to be called BY an
+    /// agent (Big Smooth / claude-driver) as a notify-the-human
+    /// primitive — "blocked, need input", "done", "approve this" — it
+    /// sends a PUSH + in-app notification to the logged-in user's own
+    /// devices via `api.smoo.ai`. The message is the positional words
+    /// joined with spaces, so `th notify done, review the PR` works
+    /// unquoted.
+    Notify {
+        /// The message body — the positional words, joined with spaces.
+        #[arg(value_name = "MESSAGE", required = true)]
+        message: Vec<String>,
+        /// Notification title (what shows as the heading).
+        #[arg(long, default_value = "Smoo AI")]
+        title: String,
+        /// Urgency: low, medium (default), high, or critical.
+        #[arg(long, value_enum, default_value_t = smooai::notify::Priority::Medium)]
+        priority: smooai::notify::Priority,
+        /// Optional deep link to open when the notification is tapped.
+        #[arg(long, value_name = "DEEPLINK")]
+        url: Option<String>,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then
+        /// the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
     /// Smoo AI testing platform — the daily-developer surface for
     /// reporting test results and managing runs / cases / environments /
     /// deployments. `runs report <file>` is the high-level entry point:
@@ -1446,6 +1471,13 @@ async fn main() -> Result<()> {
         Some(Commands::Org { cmd }) => cmd_orgs(cmd).await,
         Some(Commands::Config { cmd }) => config::cmd(cmd).await,
         Some(Commands::Llm { cmd }) => smooai::llm_gateway::cmd(cmd).await,
+        Some(Commands::Notify {
+            message,
+            title,
+            priority,
+            url,
+            org,
+        }) => smooai::notify::cmd(message, title, priority, url, org).await,
         Some(Commands::Testing { cmd }) => smooai::testing::cmd(cmd).await,
         Some(Commands::Operatives { cmd }) => cmd_operatives(cmd).await,
         Some(Commands::Inbox) => cmd_inbox().await,
