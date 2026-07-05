@@ -49,6 +49,21 @@ pub enum Cmd {
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Regenerate an EXISTING site in place: fresh spec → new revision on each
+    /// page it already has → publish. Idempotent — updates the live site (its
+    /// slug/URL are unchanged), never spawns a duplicate. This is the path that
+    /// refreshes the live showcase examples.
+    Regen {
+        /// Site id to regenerate.
+        #[arg(long)]
+        site: String,
+        /// Brief JSON (file path, or `-` for stdin). See `generate --brief`.
+        #[arg(long)]
+        brief: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
     /// Publish (moderate, then go live) an existing site.
     Publish {
         /// Site id.
@@ -82,11 +97,31 @@ fn generate_body(brief_path: &str) -> Result<serde_json::Value> {
     Ok(body)
 }
 
-/// Pull the live `heypage.ai/p/<slug>` URL out of a create-site response
-/// (`{ site: { slug, .. } }`) or its bare-site fallback.
-fn live_url(site_resp: &serde_json::Value) -> Option<String> {
-    let site = site_resp.get("site").unwrap_or(site_resp);
+/// Pull the live `heypage.ai/p/<slug>` URL out of a response carrying a site
+/// (`{ site: { slug, .. } }` — create-site or site-detail) or its bare fallback.
+fn live_url(resp: &serde_json::Value) -> Option<String> {
+    let site = resp.get("site").unwrap_or(resp);
     site.get("slug").and_then(|v| v.as_str()).map(|s| format!("https://heypage.ai/p/{s}"))
+}
+
+/// Page paths present in BOTH a freshly-generated spec (`spec.pages` object,
+/// keyed by path) and the existing site detail (`detail.pages[].page.path`),
+/// in the spec's order. The PUT-revision endpoint 404s on a path the site
+/// doesn't have, so regen only touches paths that already exist.
+fn revisable_paths(spec: &serde_json::Value, detail: &serde_json::Value) -> Vec<String> {
+    let existing: std::collections::HashSet<&str> = detail
+        .get("pages")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|p| p.get("page").and_then(|pg| pg.get("path")).and_then(|v| v.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+    spec.get("pages")
+        .and_then(|v| v.as_object())
+        .map(|m| m.keys().filter(|k| existing.contains(k.as_str())).cloned().collect())
+        .unwrap_or_default()
 }
 
 pub async fn cmd(cmd: Cmd) -> Result<()> {
@@ -138,6 +173,48 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                 "url": live_url(&site_resp),
             }));
         }
+        Cmd::Regen { site, brief, org } => {
+            let o = require_active_org(&client, org)?;
+
+            // 1. Fresh spec from the brief.
+            let gen = client
+                .post(&format!("/organizations/{o}/content-items/generate"), Some(&generate_body(&brief)?))
+                .await
+                .context("POST content-items/generate")?;
+            let spec = gen.get("spec").context("generate response had no `spec`")?;
+
+            // 2. Existing pages on the site — revisions only append to paths it has.
+            let detail = client
+                .get(&format!("/organizations/{o}/heypage/sites/{site}"))
+                .await
+                .context("GET heypage/sites/{id}")?;
+
+            // 3. New revision per shared page path.
+            let paths = revisable_paths(spec, &detail);
+            for path in &paths {
+                let page_spec = &spec["pages"][path];
+                client
+                    .put(
+                        &format!("/organizations/{o}/heypage/sites/{site}/pages/revision"),
+                        &json!({ "path": path, "spec": page_spec }),
+                    )
+                    .await
+                    .with_context(|| format!("PUT heypage/sites/{site}/pages/revision (path {path:?})"))?;
+            }
+
+            // 4. Publish.
+            client
+                .post(&format!("/organizations/{o}/heypage/sites/{site}/publish"), None)
+                .await
+                .context("POST heypage/sites/{id}/publish (422 = moderation-flagged)")?;
+
+            print_json(&json!({
+                "siteId": site,
+                "updatedPaths": paths,
+                "published": true,
+                "url": live_url(&detail),
+            }));
+        }
         Cmd::Publish { site, org } => {
             let o = require_active_org(&client, org)?;
             print_json(
@@ -183,6 +260,15 @@ mod tests {
         assert_eq!(body["contentType"], "website");
         assert_eq!(body["brief"]["businessName"], "Acme");
         assert_eq!(body["assetUrls"][0], "u");
+    }
+
+    #[test]
+    fn revisable_paths_intersects_spec_and_site() {
+        let spec = json!({ "pages": { "": {}, "classes": {}, "new-page": {} } });
+        let detail = json!({ "pages": [{ "page": { "path": "" } }, { "page": { "path": "classes" } }, { "page": { "path": "gallery" } }] });
+        let got = revisable_paths(&spec, &detail);
+        // "new-page" (not on site) and "gallery" (not in spec) are excluded.
+        assert_eq!(got, vec!["".to_string(), "classes".to_string()]);
     }
 
     #[test]
