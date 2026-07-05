@@ -7,7 +7,8 @@ use clap::{Subcommand, ValueEnum};
 use owo_colors::OwoColorize;
 use serde_json::{json, Value};
 
-use super::{print_json, print_list_envelope, read_body, require_active_org, require_authed};
+use super::user_client::UserClient;
+use super::{print_json, print_list_envelope, read_body};
 
 #[derive(Subcommand)]
 pub enum Cmd {
@@ -248,19 +249,25 @@ impl MintVisibility {
 }
 
 pub async fn cmd(cmd: Cmd) -> Result<()> {
-    let client = require_authed().await?;
+    // SMOODEV-1863 — authenticate as the logged-in USER (Supabase JWT), the
+    // same way `th api crm` does, NOT the org-locked M2M `client_credentials`
+    // token. A master-org M2M can't act on a child org (api-prime enforces the
+    // org-lock — see the paired monorepo PR), so `show`/`update` 403'd on child
+    // orgs. A parent-org admin's user session carries cross-org access via
+    // membership, so every agent verb works on the orgs the user belongs to.
+    let client = UserClient::from_user_session().await?;
     match cmd {
         Cmd::List { org } => {
-            let org = require_active_org(&client, org)?;
+            let org = crate::active_org::resolve(org)?;
             let body = client.get(&format!("/organizations/{org}/agents")).await.context("GET agents")?;
             print_list_envelope(&body, "agents");
         }
         Cmd::Show { agent_id, org } => {
-            let org = require_active_org(&client, org)?;
+            let org = crate::active_org::resolve(org)?;
             print_json(&client.get(&format!("/organizations/{org}/agents/{agent_id}")).await.context("GET agent")?);
         }
         Cmd::Summary { agent_id, org } => {
-            let org = require_active_org(&client, org)?;
+            let org = crate::active_org::resolve(org)?;
             print_json(
                 &client
                     .get(&format!("/organizations/{org}/agents/{agent_id}/summary"))
@@ -269,9 +276,9 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             );
         }
         Cmd::Create { body, org } => {
-            let org = require_active_org(&client, org)?;
+            let org = crate::active_org::resolve(org)?;
             let body = read_body(&body)?;
-            print_json(&client.post(&format!("/organizations/{org}/agents"), Some(&body)).await.context("POST agent")?);
+            print_json(&client.post(&format!("/organizations/{org}/agents"), &body).await.context("POST agent")?);
         }
         Cmd::Mint {
             name,
@@ -292,7 +299,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             require_email,
             org,
         } => {
-            let org = require_active_org(&client, org)?;
+            let org = crate::active_org::resolve(org)?;
             let prompt = instructions.map(read_flag_or_file).transpose()?;
             let color_map = parse_colors(&colors)?;
             let personality = personality.map(personality_value).transpose()?;
@@ -318,12 +325,9 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                 require_email,
             )?;
 
-            // Creating an agent is a user-attributed admin write. The M2M
-            // `client_credentials` token is org-locked, so it can't create in a
-            // child org; a parent-org admin's user session acts cross-org. Use
-            // the user client (like the CRM/keys commands) for the write.
-            let user = super::user_client::UserClient::from_user_session().await?;
-            let created = user.post(&format!("/organizations/{org}/agents"), &body).await.context("POST agent (mint)")?;
+            // Creating an agent is a user-attributed admin write; the whole
+            // command already runs on the user session (see top of `cmd`).
+            let created = client.post(&format!("/organizations/{org}/agents"), &body).await.context("POST agent (mint)")?;
 
             let agent_id = created.get("id").and_then(Value::as_str).unwrap_or("?").to_string();
             println!();
@@ -334,7 +338,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             // is never lost just because the extractor is unreachable.
             let mut applied_colors = color_map;
             if let Some(url) = brand_from_url {
-                match extract_and_apply_palette(&user, &org, &agent_id, &url).await {
+                match extract_and_apply_palette(&client, &org, &agent_id, &url).await {
                     Ok(palette) => {
                         println!("  {} applied brand palette from {}", "✓".green(), url.dimmed());
                         applied_colors = palette;
@@ -371,7 +375,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             extension_config,
             org,
         } => {
-            let org = require_active_org(&client, org)?;
+            let org = crate::active_org::resolve(org)?;
             let has_flags = instructions.is_some()
                 || greeting.is_some()
                 || personality.is_some()
@@ -403,7 +407,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             );
         }
         Cmd::Delete { agent_id, org } => {
-            let org = require_active_org(&client, org)?;
+            let org = crate::active_org::resolve(org)?;
             print_json(
                 &client
                     .delete(&format!("/organizations/{org}/agents/{agent_id}"))
@@ -412,7 +416,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             );
         }
         Cmd::Regenerate { agent_id, slot, org } => {
-            let org = require_active_org(&client, org)?;
+            let org = crate::active_org::resolve(org)?;
             let suffix = match slot {
                 RegenerateSlot::Prompts => "regenerate-prompts",
                 RegenerateSlot::Summary => "regenerate-summary",
@@ -422,13 +426,13 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             };
             print_json(
                 &client
-                    .post(&format!("/organizations/{org}/agents/{agent_id}/{suffix}"), None)
+                    .post_empty(&format!("/organizations/{org}/agents/{agent_id}/{suffix}"))
                     .await
                     .context("POST regenerate")?,
             );
         }
         Cmd::ListKnowledge { agent_id, org } => {
-            let org = require_active_org(&client, org)?;
+            let org = crate::active_org::resolve(org)?;
             print_json(
                 &client
                     .get(&format!("/organizations/{org}/agents/{agent_id}/knowledge"))
@@ -437,7 +441,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             );
         }
         Cmd::SetKnowledge { agent_id, body, org } => {
-            let org = require_active_org(&client, org)?;
+            let org = crate::active_org::resolve(org)?;
             let body = read_body(&body)?;
             print_json(
                 &client
@@ -447,11 +451,11 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             );
         }
         Cmd::GenerateConfig { body, org } => {
-            let org = require_active_org(&client, org)?;
+            let org = crate::active_org::resolve(org)?;
             let body = read_body(&body)?;
             print_json(
                 &client
-                    .post(&format!("/organizations/{org}/agents/generate-config"), Some(&body))
+                    .post(&format!("/organizations/{org}/agents/generate-config"), &body)
                     .await
                     .context("POST generate-config")?,
             );

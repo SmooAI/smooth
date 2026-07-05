@@ -98,6 +98,34 @@ impl UserClient {
         Self::body(resp, "PATCH", &url).await
     }
 
+    pub async fn put(&self, path: &str, body: &Value) -> Result<Value> {
+        let url = format!("{}{path}", self.base);
+        let resp = self
+            .http
+            .put(&url)
+            .bearer_auth(&self.bearer)
+            .json(body)
+            .send()
+            .await
+            .with_context(|| format!("PUT {url}"))?;
+        Self::body(resp, "PUT", &url).await
+    }
+
+    /// POST with no request body — for the fire-and-forget endpoints (agent
+    /// `regenerate-*`) that take no input. Mirrors the M2M client's
+    /// `post(path, None)`: no `Content-Type`, no JSON payload.
+    pub async fn post_empty(&self, path: &str) -> Result<Value> {
+        let url = format!("{}{path}", self.base);
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.bearer)
+            .send()
+            .await
+            .with_context(|| format!("POST {url}"))?;
+        Self::body(resp, "POST", &url).await
+    }
+
     pub async fn delete(&self, path: &str) -> Result<Value> {
         let url = format!("{}{path}", self.base);
         let resp = self
