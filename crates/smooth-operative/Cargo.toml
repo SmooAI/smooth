@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "Smooth operative — the sandboxed-worker binary that runs inside each microVM. Hosts the agent loop (running the smooth-operator engine), Narc tool surveillance, and (optionally) Wonk policy checks, streaming JSON-lines AgentEvents on stdout."
+description = "Smooth operative — the worker binary that runs a dispatched task. Hosts the agent loop (running the smooth-operator engine) plus in-process Narc tool surveillance, streaming JSON-lines AgentEvents on stdout."
 
 [[bin]]
 name = "smooth-operative"
@@ -16,9 +16,6 @@ smooth-operator.workspace = true
 # coding_workflow + the fixer cast role (re-homed from the engine at 0.14.0)
 smooth-cast.workspace = true
 smooth-narc = { path = "../smooth-narc", package = "smooai-smooth-narc" }
-smooth-scribe = { path = "../smooth-scribe", package = "smooai-smooth-scribe" }
-smooth-wonk = { path = "../smooth-wonk", package = "smooai-smooth-wonk" }
-smooth-goalie = { path = "../smooth-goalie", package = "smooai-smooth-goalie" }
 smooth-pearls = { path = "../smooth-pearls", package = "smooai-smooth-pearls" }
 smooth-policy.workspace = true
 tokio.workspace = true

@@ -2,100 +2,77 @@
 
 #moc #architecture
 
-> [!arch] One VM, one cast, two modes
-> Smooth is a Rust binary that boots Big Smooth + the security cast + an operator runtime in one address space (direct) or one microVM (sandboxed). There is no per-operator VM and no separate safehouse VM. Operators are dispatched as work units inside the same process or VM where Big Smooth lives.
+> [!arch] One process, one operative per task
+> Smooth is a Rust binary (`th`). `th up` starts **Big Smooth** — an axum server on the host that owns the pearl store, the API, and dispatch. Each task spawns one **operative** subprocess that runs the agent loop and streams events back. There is no microVM, no per-task VM, and no separate safehouse. The VM sandbox stack (microsandbox + the Wonk/Goalie access cast) was removed in July 2026 (pearl `th-f4a801`); [[Daemon-Direction|the daemon direction]] is where the security story is being rebuilt.
 
 ## System diagram
 
 ```
-                              th up
-                                │
-        ┌───────────────────────┴──────────────────────────┐
-        │                                                  │
-        │              SANDBOXED MODE (default)            │
-        │                                                  │
-        │  ┌────────────────────────────────────────────┐  │
-        │  │       microsandbox microVM (one)           │  │
-        │  │                                            │  │
-        │  │   ┌──────────────────────────────────┐     │  │
-        │  │   │           Big Smooth             │     │  │
-        │  │   │  (axum API on :4400, READ-ONLY)  │     │  │
-        │  │   └──────┬───────┬───────┬───────────┘     │  │
-        │  │          │       │       │                 │  │
-        │  │     ┌────▼──┐ ┌──▼──┐ ┌──▼──┐  ┌──────┐    │  │
-        │  │     │ Wonk  │ │Narc │ │Diver│  │Goalie│    │  │
-        │  │     └───────┘ └─────┘ └─────┘  └──┬───┘    │  │
-        │  │                                   │        │  │
-        │  │     ┌────────────┐  ┌─────────────▼────┐   │  │
-        │  │     │  Scribe    ├─►│    Archivist     │   │  │
-        │  │     └────────────┘  └──────────────────┘   │  │
-        │  │                                            │  │
-        │  │   ┌──────────────────────────────────┐     │  │
-        │  │   │  Operative(s) — one per    │     │  │
-        │  │   │  dispatched pearl. Agent loop,   │     │  │
-        │  │   │  file/bash tools, NarcHook,      │     │  │
-        │  │   │  WonkHook on every tool call.    │     │  │
-        │  │   └──────────────────────────────────┘     │  │
-        │  └────────────────────────────────────────────┘  │
-        │                                                  │
-        │  Outbound to host Docker/OrbStack/Kalima:        │
-        │  → host.docker.internal (allow_host_loopback)    │
-        │                                                  │
-        └──────────────────────────────────────────────────┘
+                       th up
+                         │
+                         ▼
+  ┌────────────────────────────────────────────────────────────┐
+  │  Big Smooth  (host process, ~/.smooth/smooth.pid)           │
+  │  axum HTTP + WebSocket on 127.0.0.1:4400 (loopback default) │
+  │                                                            │
+  │   ├── pearl store (Dolt, per project)                      │
+  │   ├── sessions / messages / orchestrator snapshots         │
+  │   ├── Diver        — pearl lifecycle + Jira sync           │
+  │   ├── Archivist    — log + event aggregator (SSE)          │
+  │   └── dispatch_ws_task → spawns one operative per task     │
+  └───────────────────────────┬────────────────────────────────┘
+                              │ spawn subprocess, JSON-lines on stdout
+                              ▼
+  ┌────────────────────────────────────────────────────────────┐
+  │  smooth-operative  (host subprocess, one per pearl)         │
+  │  runs the smooth-operator agent loop                        │
+  │   ├── tool registry (read / write / bash / …)               │
+  │   ├── PermissionHook  — role-scoped tool gating (engine)    │
+  │   └── NarcHook        — secret / injection / write guard    │
+  │  streams AgentEvent JSON-lines → Big Smooth → ServerEvent   │
+  └────────────────────────────────────────────────────────────┘
 
-                              th up direct
-                                │
-        ┌───────────────────────┴──────────────────────────┐
-        │                                                  │
-        │              DIRECT MODE (escape hatch)          │
-        │                                                  │
-        │   ┌──────────────────────────────────────────┐   │
-        │   │             Host process (`th`)          │   │
-        │   │  same cast + operative, no VM      │   │
-        │   │  daemonised, PID file at ~/.smooth/      │   │
-        │   └──────────────────────────────────────────┘   │
-        │                                                  │
-        └──────────────────────────────────────────────────┘
+  Frontends talk HTTP + WebSocket to Big Smooth on :4400
+   ├── th code   — ratatui TUI (smooth-code)
+   └── web UI    — embedded Vite SPA (smooth-web), served at /
 ```
 
-## Control flow (sandboxed)
+## Control flow
 
-1. User runs `th up` on the host.
-2. `th` calls `start_sandboxed_vm()` — boots the Safehouse microVM via the embedded `microsandbox` SDK, forwards `:4400` to host `:4400`, exits.
-3. Inside the VM, the `safehouse` binary launches. It opens the Dolt pearl store, calls `spawn_safehouse_cast()` to bring up Wonk / Goalie / Narc / Scribe / Archivist / Diver as tokio tasks, and starts the Big Smooth axum server.
-4. User opens `http://localhost:4400` or runs `th code`. UI talks to Big Smooth's REST + WebSocket API.
-5. User issues a task. Big Smooth's `dispatch_ws_task` decides direct vs sandboxed (env / flag) and runs the operator. See [[Dispatch]].
-6. Operator emits `AgentEvent`s as JSON-lines; Big Smooth re-emits them as `ServerEvent`s on the WebSocket. The dashboard and TUI subscribe.
+1. User runs `th up`. Big Smooth starts on the host and daemonizes (`--foreground` to stay attached), binding `127.0.0.1:4400` by default. `--bind 0.0.0.0` exposes it — the API has **no authentication today** (pearl `th-6db839`), so keep it on loopback or a trusted tailnet.
+2. User opens `http://localhost:4400` or runs `th code`. The UI speaks Big Smooth's REST + WebSocket API.
+3. User issues a task. Big Smooth's `dispatch_ws_task` resolves a pearl, then `dispatch_ws_task_direct` spawns a `smooth-operative` subprocess. See [[Dispatch]].
+4. The operative runs the [[Operatives|agent loop]] with a scoped tool surface, [[Security-Model|Narc surveillance]], and role-based permission gating.
+5. The operative emits `AgentEvent`s as JSON-lines on stdout; Big Smooth re-emits them as `ServerEvent`s over the WebSocket. The TUI and web UI subscribe.
 
 ## Component map
 
-| Crate                        | Role                                                                 |
-| ---------------------------- | -------------------------------------------------------------------- |
-| `smooth-cli`                 | The `th` binary. Clap entry point, `th up`, `th down`, all subcommands. |
-| `smooth-bigsmooth`           | Big Smooth itself. axum server, dispatch, sandbox SDK, pearl + Diver wiring. |
-| `smooth-bigsmooth/bin/safehouse` | In-VM Big Smooth binary. Cross-compiled to musl, baked into Safehouse image. |
-| `smooth-wonk`                | Access-control authority. tonic gRPC server on `wonk.sock`.          |
-| `smooth-goalie`              | HTTP/HTTPS forward proxy. Delegates every decision to Wonk via the gRPC client. |
-| `smooth-narc`                | Tool-surveillance hook. Regex + LLM judge. tonic gRPC server on `narc.sock`. |
-| `smooth-scribe`              | Per-actor structured logging. tonic gRPC server on `scribe.sock`; forwards batches over HTTP to Archivist. |
-| `smooth-archivist`           | Central log aggregator. HTTP `:4401` + SSE `/events`. Backs the dashboard. |
-| `smooth-diver`               | Pearl lifecycle manager + Jira sync.                                 |
-| `smooth-operator`            | Agent framework: LLM client, tools, conversation, checkpoints (Groove). |
-| `smooth-operative`     | Binary the dispatcher exec's per task. Hosts the agent loop.         |
-| `smooth-pearls`              | Pearl store. Dolt-backed.                                            |
-| `smooth-policy`              | Policy types + TOML.                                                 |
-| `smooth-code`                | Ratatui TUI dashboard.                                               |
-| `smooth-web`                 | Embedded Vite SPA via `rust-embed`.                                  |
+| Crate                  | Role                                                                     |
+| ---------------------- | ------------------------------------------------------------------------ |
+| `smooth-cli`           | The `th` binary. Clap entry point — `th up`/`down`/`status`, all subcommands. |
+| `smooth-bigsmooth`     | Big Smooth. axum server, dispatch, orchestrator state, pearl + Diver wiring. |
+| `smooth-operative`     | The worker binary the dispatcher exec's per task. Hosts the agent loop.   |
+| `smooth-operator`      | Agent engine (external dep, `smooth-operator-core`): LLM client, tools, conversation, checkpoints (Groove). |
+| `smooth-narc`          | Tool-surveillance hook — regex secret/injection detectors + optional LLM judge. |
+| `smooth-policy`        | Policy types + TOML. Parsed for surveillance/diagnostics; feeds the in-progress auto-mode engine (`th-515a13`). |
+| `smooth-scribe`        | Per-actor structured logging.                                            |
+| `smooth-archivist`     | Central log + event aggregator. SSE stream backs the dashboard.          |
+| `smooth-diver`         | Pearl lifecycle manager + Jira sync.                                     |
+| `smooth-pearls`        | Pearl store. Dolt-backed.                                                |
+| `smooth-cast`          | Skills discovery + agent role/persona resources.                         |
+| `smooth-code`          | Ratatui TUI (`th code`).                                                 |
+| `smooth-web`           | Embedded Vite SPA via `rust-embed`.                                      |
+| `smooth-tunnel`        | `th tunnel` — reverse tunnel to th.smoo.ai for remote control.           |
 
 ## Where to next
 
-- [[Sandboxed-Mode]] — what's inside the microVM
-- [[Direct-Mode]] — what changes without it
-- [[The-Cast]] — every named role, definitively
-- [[Transport]] — gRPC over UDS topology, .proto files, what's wired where
-- [[Dispatch]] — how tasks get from chat to operator
-- [[Operatives]] — the agent runtime
-- [[Data-Storage]] — Dolt, named volumes, sessions
+- [[The-Cast]] — the surviving roles, definitively
+- [[Dispatch]] — how a task flows from chat to an operative and back
+- [[Operatives]] — the agent runtime and the operative binary
+- [[Security-Model]] — Narc surveillance today, auto-mode permissions in progress
+- [[Data-Storage]] — Dolt, sessions, `~/.smooth/`
+- [[Extension-System]] — SEP, the planned extension protocol
+- [[Daemon-Direction]] — where Big Smooth is headed (epic `th-c89c2a`)
 
 ## Related
 

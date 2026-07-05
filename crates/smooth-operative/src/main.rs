@@ -48,27 +48,20 @@ mod pearl_tools;
 mod port_forward;
 mod provider_overlay;
 mod reply_to_chat_tool;
+mod skills_tool;
 mod tool_hints;
+mod ui_relay_provider;
 mod web_search_tool;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use smooth_goalie::{audit::AuditLogger, proxy::run_proxy, wonk::WonkClient};
 use smooth_narc::NarcHook;
 use smooth_operator::cost::CostBudget;
 use smooth_operator::llm::LlmConfig;
 use smooth_operator::tool::{Tool, ToolCall, ToolHook, ToolRegistry, ToolResult, ToolSchema};
 use smooth_operator::{Agent, AgentConfig, AgentEvent};
-use smooth_policy::Policy;
-use smooth_scribe::hook::AuditHook as ScribeAuditHook;
-use smooth_scribe::server::{build_router_with_state as scribe_router_with_state, AppState as ScribeAppState};
-use smooth_scribe::store::{LogStore, MemoryLogStore, Query as LogQuery};
-use smooth_wonk::hook::WonkHook;
-use smooth_wonk::negotiate::Negotiator;
-use smooth_wonk::policy::PolicyHolder;
-use smooth_wonk::server::{build_router as wonk_router, AppState as WonkAppState};
 use tracing_subscriber::EnvFilter;
 
 mod bg_process;
@@ -241,7 +234,7 @@ impl Tool for ListFilesTool {
                 let mtime = entry.metadata().ok().and_then(|m| m.modified().ok()).unwrap_or(std::time::UNIX_EPOCH);
                 entries.push((rel_str.to_string(), mtime));
             }
-            entries.sort_by(|a, b| b.1.cmp(&a.1));
+            entries.sort_by_key(|e| std::cmp::Reverse(e.1));
             let max = 200;
             let total = entries.len();
             let mut result = String::new();
@@ -899,14 +892,6 @@ impl Tool for GrepTool {
 
 struct BashTool {
     base: PathBuf,
-    /// HTTP(S) proxy URL to forward into child processes via the standard
-    /// env vars. When set, any `curl` / `wget` / etc. the agent invokes is
-    /// routed through Goalie → Wonk for policy enforcement. The runner's
-    /// own HTTP traffic (LLM provider, in-VM Wonk/Scribe) intentionally
-    /// does NOT go through the proxy — setting HTTP_PROXY on the runner
-    /// process would loop WonkHook's localhost check request back through
-    /// Goalie and deadlock the policy check.
-    proxy_url: Option<String>,
 }
 
 #[async_trait]
@@ -938,16 +923,6 @@ impl Tool for BashTool {
 
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-c").arg(command).current_dir(&self.base);
-        if let Some(ref proxy) = self.proxy_url {
-            cmd.env("HTTP_PROXY", proxy)
-                .env("http_proxy", proxy)
-                .env("HTTPS_PROXY", proxy)
-                .env("https_proxy", proxy)
-                // Local in-VM services (Wonk, Scribe, Goalie itself) must
-                // not be proxied — they run on localhost.
-                .env("NO_PROXY", "127.0.0.1,localhost")
-                .env("no_proxy", "127.0.0.1,localhost");
-        }
 
         let output_result = match timeout_secs {
             Some(secs) => match tokio::time::timeout(std::time::Duration::from_secs(secs), cmd.output()).await {
@@ -999,7 +974,6 @@ impl Tool for BashTool {
 struct BgRunTool {
     base: PathBuf,
     registry: Arc<bg_process::BgRegistry>,
-    proxy_url: Option<String>,
 }
 
 #[async_trait]
@@ -1023,18 +997,7 @@ impl Tool for BgRunTool {
             .get("command")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("missing 'command'"))?;
-        let env_vars = if let Some(ref proxy) = self.proxy_url {
-            vec![
-                ("HTTP_PROXY".into(), proxy.clone()),
-                ("http_proxy".into(), proxy.clone()),
-                ("HTTPS_PROXY".into(), proxy.clone()),
-                ("https_proxy".into(), proxy.clone()),
-                ("NO_PROXY".into(), "127.0.0.1,localhost".into()),
-                ("no_proxy".into(), "127.0.0.1,localhost".into()),
-            ]
-        } else {
-            Vec::new()
-        };
+        let env_vars: Vec<(String, String)> = Vec::new();
         let handle = self.registry.run(command, &self.base.to_string_lossy(), &env_vars)?;
         Ok(format!(
             "started: {handle}\ncommand: {command}\n\nUse bg_status('{handle}'), bg_logs('{handle}'), or bg_kill('{handle}') to manage it."
@@ -1439,6 +1402,96 @@ impl ToolHook for SharedNarc {
 }
 
 // ---------------------------------------------------------------------------
+// SEP extension host — attach installed + trusted extensions to the task
+// ---------------------------------------------------------------------------
+
+/// Attach `host` to `agent` when present (registers its tools/hooks and fans
+/// turn events out to subscribed extensions); a no-op when nothing loaded, so
+/// the agent loop is unchanged.
+fn attach_ext_host(agent: Agent, host: Option<Arc<smooth_operator::extension::ExtensionHost>>) -> Agent {
+    match host {
+        Some(host) => agent.with_extension_host(host),
+        None => agent,
+    }
+}
+
+/// Discover SEP extensions (global + project) and load only the PRE-trusted ones
+/// into a headless [`ExtensionHost`](smooth_operator::extension::ExtensionHost).
+///
+/// The dispatched worker is unattended: it never shows a trust prompt, so an
+/// unknown or content-changed extension is silently skipped (fail-safe). Returns
+/// `None` when nothing trusted loads.
+///
+/// **UI (SEP Phase 6).** Under a real Big Smooth dispatch the callback env
+/// (`SMOOTH_NARC_URL` + `SMOOTH_HOST_TOKEN`) is set, so the delegate is
+/// [`HttpUiProvider`](crate::ui_relay_provider::HttpUiProvider): it relays each
+/// `ui/*` request to the daemon, which fans it out to connected frontends and
+/// blocks interactive kinds until a human answers. The declared
+/// `ui_capabilities` then cover the full set the smooth-web components render.
+/// Absent that env (a bare local run) it falls back to the engine's headless
+/// [`DefaultHostDelegate`](smooth_operator::extension::DefaultHostDelegate) with
+/// empty capabilities — a two-way `ui/request` then gets `-32001 NoUI` and a
+/// well-behaved extension gates its UI off via `hasUI`. Extension tools register
+/// into the operative's ordinary `ToolRegistry`, so the NarcHook surveillance
+/// already installed applies to them.
+async fn load_pretrusted_extension_host(workspace_root: &std::path::Path) -> Option<Arc<smooth_operator::extension::ExtensionHost>> {
+    use smooth_operator::extension::manifest::{default_global_dir, project_dir};
+    use smooth_operator::extension::protocol::{HostInfo, WorkspaceInfo};
+    use smooth_operator::extension::{discover, DefaultHostDelegate, ExtensionHost, HostDelegate};
+    use smooth_policy::ext_trust::{hash_extension, TrustStore};
+
+    use crate::ui_relay_provider::HttpUiProvider;
+
+    let global = default_global_dir();
+    let project = project_dir(workspace_root);
+    let (discovered, disc_failures) = discover(global.as_deref(), Some(project.as_path()));
+    for (src, err) in &disc_failures {
+        tracing::warn!(%src, %err, "sep: extension manifest failed to parse");
+    }
+
+    let trust = TrustStore::load();
+    let trusted: Vec<_> = discovered
+        .into_iter()
+        .filter(|ext| {
+            let hash = hash_extension(&ext.root).unwrap_or_default();
+            let ok = trust.is_trusted(&ext.manifest.name, &hash);
+            if !ok {
+                tracing::info!(name = %ext.manifest.name, "sep: skipping untrusted extension (run `th ext trust`)");
+            }
+            ok
+        })
+        .collect();
+    if trusted.is_empty() {
+        return None;
+    }
+
+    let host_info = HostInfo {
+        name: "smooth-operative".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+    };
+    let workspace = WorkspaceInfo {
+        root: workspace_root.to_string_lossy().into_owned(),
+        trusted: true,
+    };
+    // Relay ui/* to the daemon when dispatched (callback env present);
+    // otherwise stay headless. `mode` + `ui_capabilities` are negotiated to the
+    // extensions at handshake so `hasUI` reflects what this run can render.
+    let (mode, ui_caps, delegate): (&str, Vec<String>, Arc<dyn HostDelegate>) = match HttpUiProvider::from_env() {
+        Some(provider) => ("web", HttpUiProvider::capabilities(), Arc::new(provider)),
+        None => ("headless", Vec::new(), Arc::new(DefaultHostDelegate)),
+    };
+    let (host, load_failures) = ExtensionHost::load(trusted, host_info, workspace, mode, ui_caps, delegate).await;
+    for (name, err) in &load_failures {
+        tracing::warn!(%name, %err, "sep: extension failed to load");
+    }
+    if host.is_empty() {
+        return None;
+    }
+    tracing::info!(count = host.len(), extensions = ?host.names(), "sep: attached extension host to the operative");
+    Some(Arc::new(host))
+}
+
+// ---------------------------------------------------------------------------
 // Env config
 // ---------------------------------------------------------------------------
 
@@ -1449,6 +1502,12 @@ struct RunnerConfig {
     model: String,
     budget_usd: Option<f64>,
     max_iterations: u32,
+    /// Per-provider LLM output-token cap. `None` → the default 32768.
+    /// Set from `SMOOTH_MAX_TOKENS`, which Big Smooth populates from the
+    /// dispatched provider's `max_tokens` in providers.json. Small local
+    /// models (Ollama, LM Studio) often have context windows the default
+    /// blows past, so `th providers add --max-tokens` lets the user cap it.
+    max_tokens: Option<u32>,
     workspace: PathBuf,
     operator_id: String,
     narc_write_guard: bool,
@@ -1464,6 +1523,14 @@ struct RunnerConfig {
     /// 3. `/opt/smooth/policy.toml` if present
     /// 4. A permissive default ([`default_policy_toml`]).
     policy_toml: String,
+}
+
+/// Parse `SMOOTH_MAX_TOKENS` into an optional per-provider cap. Absent,
+/// non-numeric, and zero all mean "no override" (`None`) so the caller
+/// falls back to the default 32768 — a `0` cap would let the model emit
+/// nothing. Pearl th-f4a0fb.
+fn parse_max_tokens_env(raw: Option<String>) -> Option<u32> {
+    raw.and_then(|v| v.trim().parse::<u32>().ok()).filter(|&n| n > 0)
 }
 
 impl RunnerConfig {
@@ -1491,6 +1558,7 @@ impl RunnerConfig {
             model: std::env::var("SMOOTH_MODEL").unwrap_or_else(|_| "gpt-5.4-mini".into()),
             budget_usd: std::env::var("SMOOTH_BUDGET_USD").ok().and_then(|v| v.parse().ok()),
             max_iterations: std::env::var("SMOOTH_MAX_ITERATIONS").ok().and_then(|v| v.parse().ok()).unwrap_or(50),
+            max_tokens: parse_max_tokens_env(std::env::var("SMOOTH_MAX_TOKENS").ok()),
             workspace: std::env::var("SMOOTH_WORKSPACE")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("/workspace")),
@@ -1635,169 +1703,6 @@ deny = []
 }
 
 // ---------------------------------------------------------------------------
-// In-VM cast: Wonk + Goalie + Scribe spawned on ephemeral localhost ports.
-// ---------------------------------------------------------------------------
-
-/// Handles to the in-VM cast members. Returned from [`spawn_cast`] so the
-/// runner can (a) point the agent's hooks at them, and (b) inspect their
-/// state (e.g. the Scribe log store) for the final stderr summary.
-struct Cast {
-    wonk_url: String,
-    scribe_url: String,
-    #[allow(dead_code)]
-    goalie_url: String,
-    scribe_store: Arc<MemoryLogStore>,
-    /// Absolute path to Goalie's JSON-lines audit log inside the VM. The
-    /// runner reads this back into the final cast summary so tests (and
-    /// humans reading the [runner stderr] forward) can see every allowed
-    /// and denied network request the sandbox actually attempted.
-    goalie_audit_path: String,
-    /// Per-VM bearer token from `[auth]` in the policy. Every caller that
-    /// hits Wonk's HTTP surface (Goalie, the runner's own tool hook) has
-    /// to carry this or Wonk's middleware 401s them with an empty body —
-    /// which surfaces as "error decoding response body" at the hook layer.
-    operator_token: String,
-}
-
-/// Spawn Wonk, Scribe, and Goalie in-process on ephemeral localhost ports.
-///
-/// Wonk gets the runner's configured policy. Scribe is a fresh in-memory
-/// store (we dump it to stderr at the end). Goalie is pointed at Wonk and
-/// writes its JSON-lines audit log to `/tmp/goalie-<operator>.jsonl` inside
-/// the VM (which is tmpfs — ephemeral, fine for this round).
-///
-/// All three bind to `127.0.0.1:0` and their URLs are returned in [`Cast`].
-async fn spawn_cast(policy_toml: &str, operator_id: &str) -> anyhow::Result<Cast> {
-    // --- Scribe ---
-    // If SMOOTH_ARCHIVIST_URL is set, mirror every log entry to the
-    // Safehouse's Archivist via a background forwarder. Otherwise run
-    // standalone (legacy behavior, fine for host-mode sandboxed tests).
-    let archivist_url = std::env::var("SMOOTH_ARCHIVIST_URL").ok().filter(|s| !s.trim().is_empty());
-    // Diagnostic: write the archivist URL to the workspace for host-side
-    // inspection. Uses SMOOTH_WORKSPACE since we don't have the config here.
-    if let Ok(ws) = std::env::var("SMOOTH_WORKSPACE") {
-        let diag = format!("SMOOTH_ARCHIVIST_URL={}", archivist_url.as_deref().unwrap_or("<NOT SET>"));
-        let _ = std::fs::write(format!("{ws}/.archivist-diag.txt"), &diag);
-    }
-    let scribe_state = if let Some(url) = archivist_url {
-        tracing::info!(archivist = %url, operator = operator_id, "spawning scribe with archivist forwarder");
-        let forwarder = smooth_scribe::spawn_forwarder(url, operator_id.to_string());
-        ScribeAppState::with_forwarder(forwarder)
-    } else {
-        tracing::warn!(
-            operator = operator_id,
-            "SMOOTH_ARCHIVIST_URL not set — scribe will store logs locally only (no cross-VM forwarding)"
-        );
-        ScribeAppState::local_only()
-    };
-    let scribe_store = Arc::clone(&scribe_state.store);
-    let scribe_router = scribe_router_with_state(scribe_state);
-    let scribe_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let scribe_addr = scribe_listener.local_addr()?;
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(scribe_listener, scribe_router).await {
-            tracing::error!(error = %e, "in-VM Scribe server crashed");
-        }
-    });
-
-    // --- Wonk ---
-    let policy = Policy::from_toml(policy_toml).map_err(|e| anyhow::anyhow!("invalid policy TOML: {e}"))?;
-    // Stash the operator token so Goalie + anyone else in the VM who
-    // needs to call Wonk's HTTP surface can authenticate. Wonk's
-    // middleware rejects unauthenticated callers with 401.
-    let operator_token = policy.auth.token.clone();
-    let operator_token_for_cast = operator_token.clone();
-    let holder = PolicyHolder::from_policy(policy);
-    // There is no Big Smooth leader to negotiate with from inside this VM
-    // (the runner is self-contained), so we point the negotiator at a stub
-    // URL. access negotiation calls will fail closed, which is the safe
-    // default — we can wire it up later.
-    let negotiator = Negotiator::new("http://127.0.0.1:1/no-leader", holder.clone());
-
-    // Narc escalation client. Two transports, gated by
-    // SMOOTH_SINGLE_PROCESS (pearl th-893801 Phase 4 iter-6c):
-    //
-    // - Single-VM mode (SMOOTH_SINGLE_PROCESS=1): dial Narc on
-    //   the local UDS at $XDG_RUNTIME_DIR/smooth/narc.sock (or
-    //   SMOOTH_SINGLE_PROCESS_SOCKET_DIR/narc.sock when set).
-    //   That's the gRPC server Big Smooth's bootstrap stood up
-    //   in iter-3e.
-    // - Legacy mode: SMOOTH_NARC_URL points at Big Smooth's
-    //   `/api/narc/judge` HTTP endpoint. Same shape as before.
-    //
-    // When neither is configured, Wonk runs without an arbiter
-    // and hard-denies anything its local policy doesn't allow.
-    let mut wonk_state = WonkAppState::new(holder, negotiator);
-    let single_process_mode = matches!(std::env::var("SMOOTH_SINGLE_PROCESS").as_deref(), Ok("1" | "true" | "TRUE"));
-    if single_process_mode {
-        let socket_dir = std::env::var("SMOOTH_SINGLE_PROCESS_SOCKET_DIR")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .map(std::path::PathBuf::from)
-            .or_else(|| std::env::var("XDG_RUNTIME_DIR").ok().map(|x| std::path::PathBuf::from(x).join("smooth")))
-            .unwrap_or_else(|| std::path::PathBuf::from(format!("/tmp/smooth-{}", std::process::id())));
-        let narc_sock = socket_dir.join("narc.sock");
-        match smooth_wonk::NarcGrpcUds::connect(narc_sock.clone()).await {
-            Ok(client) => {
-                tracing::info!(operator = operator_id, sock = %narc_sock.display(), "Wonk wiring gRPC-over-UDS Narc client");
-                wonk_state = wonk_state.with_narc(client);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    operator = operator_id,
-                    sock = %narc_sock.display(),
-                    error = %e,
-                    "SMOOTH_SINGLE_PROCESS=1 but Narc UDS unreachable — Wonk will hard-deny non-allowlisted requests"
-                );
-            }
-        }
-    } else if let Ok(narc_url) = std::env::var("SMOOTH_NARC_URL") {
-        if !narc_url.trim().is_empty() {
-            tracing::info!(operator = operator_id, narc_url = %narc_url, "Wonk wiring HTTP Narc escalation client");
-            wonk_state = wonk_state.with_narc(smooth_wonk::NarcClient::new(narc_url));
-        }
-    }
-    let wonk_state = Arc::new(wonk_state);
-    let wonk_r = wonk_router(wonk_state);
-    let wonk_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let wonk_addr = wonk_listener.local_addr()?;
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(wonk_listener, wonk_r).await {
-            tracing::error!(error = %e, "in-VM Wonk server crashed");
-        }
-    });
-    let wonk_url = format!("http://{wonk_addr}");
-
-    // --- Goalie ---
-    // Audit log → tmpfs under /tmp. Bind to an ephemeral localhost port.
-    let audit_path = format!("/tmp/goalie-{operator_id}.jsonl");
-    let audit = AuditLogger::new(&audit_path)?;
-    let goalie_client = WonkClient::with_auth(&wonk_url, operator_token);
-    // run_proxy binds itself, so we pre-probe for a free port the same way
-    // Big Smooth's sandboxed dispatch does. Tight race, fine for a single
-    // in-VM spawn.
-    let goalie_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let goalie_addr = goalie_listener.local_addr()?;
-    drop(goalie_listener);
-    let goalie_listen = goalie_addr.to_string();
-    tokio::spawn(async move {
-        if let Err(e) = run_proxy(&goalie_listen, goalie_client, audit).await {
-            tracing::error!(error = %e, "in-VM Goalie proxy crashed");
-        }
-    });
-
-    // Give axum + hyper a beat to start accepting before the agent hits them.
-    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-
-    Ok(Cast {
-        wonk_url,
-        scribe_url: format!("http://{scribe_addr}"),
-        goalie_url: format!("http://{goalie_addr}"),
-        scribe_store,
-        goalie_audit_path: audit_path,
-        operator_token: operator_token_for_cast,
-    })
-}
 
 // ---------------------------------------------------------------------------
 // main
@@ -1810,6 +1715,27 @@ fn emit_event(event: &AgentEvent) {
     if let Ok(line) = serde_json::to_string(event) {
         println!("{line}");
     }
+}
+
+/// Byte cap for each injected system-prompt context block (project
+/// context files + workspace memory). Pearl th-5002c4: a giant
+/// AGENTS.md / README shouldn't blow the context budget. 16 KB is the
+/// upper end of the pearl's suggested 8–16 KB.
+const MAX_CONTEXT_BYTES: usize = 16 * 1024;
+
+/// Truncate `s` to at most `max_bytes`, cutting on a UTF-8 char
+/// boundary and appending a marker when truncated. Returns `s`
+/// unchanged when it already fits.
+fn cap_context(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    // Walk back to the nearest char boundary at or below max_bytes.
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n\n[... truncated, {} of {} bytes shown ...]", &s[..end], end, s.len())
 }
 
 #[tokio::main]
@@ -1880,16 +1806,10 @@ async fn main() {
         std::process::exit(2);
     }
 
-    // Spawn the in-VM security cast: Wonk (policy), Goalie (proxy), Scribe
-    // (log sink). All three run as tokio tasks bound to ephemeral localhost
-    // ports. The agent's tool hooks will talk to Wonk + Scribe over HTTP.
-    //
     // Diagnostic: parse the policy TOML so we can log the network allowlist
-    // and policy source. Pearl th-7b95ef — this used to go out as
-    // `AgentEvent::TokenDelta` (stdout), which made bigsmooth treat it as
-    // an LLM-authored chat fragment and persist it as `role: assistant`
-    // content. The runner's stdout channel is reserved for real agent
-    // events; diagnostic chatter goes to stderr via tracing.
+    // and policy source. The Wonk/Goalie network+FS enforcement cast was
+    // removed 2026-07 (pearl th-f4a801) — the policy is still parsed for
+    // Narc's in-process surveillance and diagnostics.
     if let Ok(parsed) = smooth_policy::Policy::from_toml(&config.policy_toml) {
         let domains: Vec<String> = parsed.network.allow.iter().map(|r| r.domain.clone()).collect();
         tracing::info!(
@@ -1901,29 +1821,6 @@ async fn main() {
     } else {
         tracing::warn!(bytes = config.policy_toml.len(), "FAILED to parse policy TOML");
     }
-
-    let cast = match spawn_cast(&config.policy_toml, &config.operator_id).await {
-        Ok(c) => c,
-        Err(e) => {
-            emit_event(&AgentEvent::Error {
-                message: format!("failed to spawn in-VM cast: {e}"),
-            });
-            std::process::exit(2);
-        }
-    };
-    tracing::info!(
-        wonk = %cast.wonk_url,
-        scribe = %cast.scribe_url,
-        goalie = %cast.goalie_url,
-        "in-VM cast spawned"
-    );
-
-    // Only the bash tool's child processes route through Goalie. The runner
-    // itself does NOT set HTTP_PROXY on its own env — if it did, WonkHook
-    // and ScribeAuditHook would pick up the proxy from env and loop their
-    // localhost check requests back through Goalie, deadlocking the policy
-    // check. The bash tool gets the proxy URL injected per-invocation.
-    let proxy_for_bash = Some(cast.goalie_url.clone());
 
     // Build the LLM config + agent config.
     //
@@ -1949,7 +1846,9 @@ async fn main() {
         api_url: config.api_url.clone(),
         api_key: config.api_key.clone(),
         model: config.model.clone(),
-        max_tokens: 32768,
+        // Per-provider override (small local-model context windows) or the
+        // default cap. Applied here so the sidekick factory clone inherits it.
+        max_tokens: config.max_tokens.unwrap_or(32768),
         temperature: 0.3,
         retry_policy: smooth_operator::llm::RetryPolicy::default(),
         api_format,
@@ -2008,7 +1907,6 @@ async fn main() {
     });
     tools.register(BashTool {
         base: config.workspace.clone(),
-        proxy_url: proxy_for_bash.clone(),
     });
     tools.register(ProjectInspectTool {
         base: config.workspace.clone(),
@@ -2020,7 +1918,6 @@ async fn main() {
     tools.register(BgRunTool {
         base: config.workspace.clone(),
         registry: Arc::clone(&bg_registry),
-        proxy_url: proxy_for_bash,
     });
     tools.register(BgStatusTool {
         registry: Arc::clone(&bg_registry),
@@ -2159,6 +2056,13 @@ async fn main() {
         }
     }
 
+    // Skills — reusable recipes discovered from `.smooth/skills/`,
+    // `~/.smooth/skills/`, `~/.claude/skills/`, `~/.opencode/skills/`
+    // plus built-ins (pearl th-e0f812). Registers the `skill_use` tool
+    // and hands back the discovered set so the catalog can be injected
+    // into the system prompt below.
+    let skills = skills_tool::register_skill_tool(&mut tools, std::path::Path::new(&config.workspace));
+
     // Resolve the active role from the smooth cast (`smooth_cast::cast::builtin`,
     // which adds the harness roles `fixer`/`oracle`/`chief`/`intent_classifier`
     // on top of the generic engine roles the published 0.14.0 engine ships).
@@ -2253,6 +2157,13 @@ async fn main() {
         llm
     };
 
+    // Re-apply the per-provider token cap: the slot-resolved config above
+    // comes from the published registry, which hardcodes max_tokens=32768.
+    let mut llm = llm;
+    if let Some(mt) = config.max_tokens {
+        llm.max_tokens = mt;
+    }
+
     // System prompt is compiled in from prompts/system.md (the tool
     // harness — tool guidance, workflow constraints, error recovery).
     // On top of that we append the agent's role prompt and, when
@@ -2293,7 +2204,7 @@ async fn main() {
     );
     let workspace_path = std::path::Path::new(&config.workspace);
     let mut system_prompt = match smooth_operator::context::load_project_context(workspace_path) {
-        Some(ctx) => format!("{base_prompt}\n\n## Project Context\n\n{ctx}"),
+        Some(ctx) => format!("{base_prompt}\n\n## Project Context\n\n{}", cap_context(&ctx, MAX_CONTEXT_BYTES)),
         None => base_prompt,
     };
 
@@ -2307,9 +2218,17 @@ async fn main() {
         let trimmed = memory.trim();
         if !trimmed.is_empty() {
             system_prompt.push_str("\n\n## Workspace Memory (.smooth/MEMORY.md)\n\n");
-            system_prompt.push_str(trimmed);
+            system_prompt.push_str(&cap_context(trimmed, MAX_CONTEXT_BYTES));
             system_prompt.push('\n');
         }
+    }
+
+    // Skill catalog (pearl th-e0f812): names + descriptions + triggers
+    // only — bodies load on demand via `skill_use`. Budget-capped so a
+    // large skill library can't crowd out the context window.
+    if let Some(catalog) = smooth_cast::skills::render_catalog(&skills, smooth_cast::skills::DEFAULT_CATALOG_BUDGET) {
+        system_prompt.push_str("\n\n## Skills\n\n");
+        system_prompt.push_str(&catalog);
     }
 
     // Pearl th-393aed (stopgap for th-VERIFY-PHASE): when
@@ -2394,14 +2313,12 @@ async fn main() {
     //      before any downstream hook runs. Returning an error from
     //      pre_call surfaces as a tool-result error to the LLM with
     //      the message "agent '<name>' is not permitted to call
-    //      '<tool>'". This is cheaper than asking Wonk + Narc about
-    //      a call the local agent can't make anyway.
-    //   1. Narc — fastest, catches secrets/injection/dangerous writes purely
+    //      '<tool>'". This is cheaper than asking Narc about a call the
+    //      local agent can't make anyway.
+    //   1. Narc — catches secrets/injection/dangerous writes purely
     //      in-process (no HTTP). Blocks the call outright on Block severity.
-    //   2. Wonk — HTTP check against the policy for tool name, network
-    //      domain, cli command, etc. Blocks the call if the policy denies.
-    //   3. Scribe audit — best-effort POST of pre_call/post_call log entries
-    //      to the in-VM Scribe for later aggregation.
+    //      (The Wonk policy + Scribe audit HTTP hooks were removed with the
+    //      microVM cast, 2026-07, pearl th-f4a801.)
     //
     // C1: filter the registry by the active role's clearance BEFORE the
     // schemas are handed to the LLM. PermissionHook still runs on every
@@ -2411,12 +2328,10 @@ async fn main() {
     let clearance = active_role.permissions.clone();
     tools.retain(|name| clearance.allows(name));
 
-    // All four are `ToolHook` impls so they compose cleanly on the registry.
+    // Both are `ToolHook` impls so they compose cleanly on the registry.
     tools.add_hook(smooth_operator::PermissionHook::new(&active_role));
     let narc = Arc::new(NarcHook::new(config.narc_write_guard));
     tools.add_hook(SharedNarc { inner: Arc::clone(&narc) });
-    tools.add_hook(WonkHook::with_auth(&cast.wonk_url, &cast.operator_token));
-    tools.add_hook(ScribeAuditHook::new(&cast.scribe_url, &config.operator_id));
 
     // Announce the active agent + its permission shape via tracing so
     // operators tailing the runner's stderr / service.log can see what
@@ -2496,6 +2411,12 @@ async fn main() {
         );
     }
 
+    // SEP: attach an ExtensionHost for the dispatched task if any PRE-trusted
+    // extensions are installed. None when nothing trusted loads → the agent loop
+    // is byte-for-byte unchanged. Extension tools/hooks ride the same registry as
+    // native ones, so the NarcHook surveillance installed above applies to them.
+    let ext_host = load_pretrusted_extension_host(&config.workspace).await;
+
     let result = if let (true, true, Some(raw)) = (workflow_opt_in, role_supports_coding_workflow, routing_json) {
         use smooth_cast::coding_workflow::{run_coding_workflow, CodingWorkflowConfig};
         use smooth_cast::provider_migration::migrate_in_memory;
@@ -2514,6 +2435,10 @@ async fn main() {
                     registry: Arc::new(registry),
                     tools,
                     budget_usd: config.budget_usd,
+                    // Per-provider output-token cap (small local-model
+                    // context windows); `None` keeps the registry default.
+                    // Pearl th-f4a0fb.
+                    max_tokens: config.max_tokens,
                     // 20 is a safety net, not the primary governor — the
                     // workflow now pushes through plateaus by escalating
                     // (scrap approach, re-examine mental model, one
@@ -2565,12 +2490,12 @@ async fn main() {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "SMOOTH_ROUTING_JSON set but not deserializable; falling back to single-agent path");
-                let agent = Agent::new(agent_config, tools);
+                let agent = attach_ext_host(Agent::new(agent_config, tools), ext_host.clone());
                 agent.run_with_channel(&config.task, tx.clone()).await
             }
         }
     } else {
-        let agent = Agent::new(agent_config, tools);
+        let agent = attach_ext_host(Agent::new(agent_config, tools), ext_host.clone());
         agent.run_with_channel(&config.task, tx.clone()).await
     };
 
@@ -2579,51 +2504,20 @@ async fn main() {
     // Drain the emitter before we exit.
     let _ = emit_task.await;
 
-    // Cast summary on stderr: Narc alert count, Scribe log count, Goalie
-    // audit entries, runtime verdict. Big Smooth forwards this verbatim
-    // as a [runner stderr] TokenDelta so operators can audit what every
-    // in-VM security service saw during the run. A parseable prefix
-    // (`[cast-summary]`) lets tests scrape it without false matches on
-    // log output.
+    // Cast summary on stderr: Narc alert count + the alerts themselves.
+    // Big Smooth forwards this verbatim as a [runner stderr] TokenDelta so
+    // operators can audit what in-process surveillance saw during the run.
+    // A parseable prefix (`[cast-summary]`) lets tests scrape it without
+    // false matches on log output. (Scribe/Goalie audit counts were
+    // dropped with the microVM cast, 2026-07, pearl th-f4a801.)
     let narc_alerts = narc.alerts();
-    let scribe_entries = cast.scribe_store.query(&LogQuery::default());
-    let goalie_audit_entries: Vec<serde_json::Value> = std::fs::read_to_string(&cast.goalie_audit_path)
-        .ok()
-        .map(|contents| {
-            contents
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-                .collect()
-        })
-        .unwrap_or_default();
-    let goalie_denied_count = goalie_audit_entries
-        .iter()
-        .filter(|e| e.get("allowed").and_then(serde_json::Value::as_bool) == Some(false))
-        .count();
     let summary = serde_json::json!({
         "narc_alert_count": narc_alerts.len(),
         "narc_alerts": narc_alerts,
-        "scribe_entry_count": scribe_entries.len(),
-        "scribe_entries_sample": scribe_entries.iter().take(10).collect::<Vec<_>>(),
-        "goalie_audit_count": goalie_audit_entries.len(),
-        "goalie_denied_count": goalie_denied_count,
-        "goalie_audit": goalie_audit_entries,
-        "wonk_url": cast.wonk_url,
-        "scribe_url": cast.scribe_url,
-        "goalie_url": cast.goalie_url,
     });
     if let Ok(line) = serde_json::to_string(&summary) {
         eprintln!("[cast-summary] {line}");
     }
-
-    // Give the Scribe forwarder time to flush its last batch to
-    // Archivist before we exit. The forwarder runs as a spawned tokio
-    // task with a 500ms flush interval. `std::process::exit` kills the
-    // runtime instantly, losing buffered entries. A 2-second sleep
-    // before exit lets the forwarder's timer fire at least 3 times,
-    // draining any pending batches to the Archivist.
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     match result {
         Ok(_conv) => {
@@ -2740,6 +2634,28 @@ fn legacy_strip_pseudo_tool_xml(content: &str) -> String {
         rest = &after[advance..];
     }
     out
+}
+
+#[cfg(test)]
+mod max_tokens_tests {
+    use super::parse_max_tokens_env;
+
+    #[test]
+    fn parses_valid_cap() {
+        assert_eq!(parse_max_tokens_env(Some("8192".into())), Some(8192));
+        assert_eq!(parse_max_tokens_env(Some("  4096 ".into())), Some(4096));
+    }
+
+    #[test]
+    fn rejects_absent_zero_and_garbage() {
+        // Absent → default 32768 applies at the call site.
+        assert_eq!(parse_max_tokens_env(None), None);
+        // Zero would silence the model entirely — treat as no override.
+        assert_eq!(parse_max_tokens_env(Some("0".into())), None);
+        assert_eq!(parse_max_tokens_env(Some("".into())), None);
+        assert_eq!(parse_max_tokens_env(Some("lots".into())), None);
+        assert_eq!(parse_max_tokens_env(Some("-5".into())), None);
+    }
 }
 
 #[cfg(test)]
@@ -2918,5 +2834,147 @@ mod todo_list_tests {
         let (t, _dir) = tool();
         let err = t.execute(json!({"action": "delete-everything"})).await.unwrap_err();
         assert!(err.to_string().contains("unknown action"));
+    }
+}
+
+#[cfg(test)]
+mod cap_context_tests {
+    use super::{cap_context, MAX_CONTEXT_BYTES};
+
+    #[test]
+    fn returns_unchanged_when_within_cap() {
+        let s = "short project context";
+        assert_eq!(cap_context(s, MAX_CONTEXT_BYTES), s);
+    }
+
+    #[test]
+    fn returns_unchanged_at_exactly_cap() {
+        let s = "x".repeat(100);
+        assert_eq!(cap_context(&s, 100), s);
+    }
+
+    #[test]
+    fn truncates_and_marks_when_over_cap() {
+        let s = "x".repeat(100);
+        let out = cap_context(&s, 40);
+        assert!(out.starts_with(&"x".repeat(40)));
+        assert!(out.contains("truncated"));
+        assert!(out.contains("40 of 100 bytes"));
+        // Only the marker is added past the cap — the retained slice
+        // never exceeds max_bytes.
+        assert!(out.len() < s.len() + 64);
+    }
+
+    #[test]
+    fn truncates_on_char_boundary_for_multibyte() {
+        // "€" is 3 bytes; a naive byte slice at an odd offset panics.
+        let s = "€".repeat(20); // 60 bytes
+        let out = cap_context(&s, 40); // 40 is mid-codepoint (not divisible by 3)
+                                       // Retained prefix is valid UTF-8 (13 full euros = 39 bytes).
+        assert!(out.starts_with(&"€".repeat(13)));
+        assert!(out.contains("truncated"));
+    }
+
+    #[test]
+    fn empty_string_is_unchanged() {
+        assert_eq!(cap_context("", MAX_CONTEXT_BYTES), "");
+    }
+
+    // The exact path main() runs: discover a project context file via
+    // the engine, then cap it before injecting into the system prompt.
+    #[test]
+    fn discovered_context_is_injected_and_capped() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().expect("tempdir");
+        // Big SMOOTH.md — precedence over CLAUDE.md, and over the cap.
+        std::fs::write(dir.path().join("SMOOTH.md"), "S".repeat(MAX_CONTEXT_BYTES * 2)).unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "claude-should-lose").unwrap();
+
+        let ctx = smooth_operator::context::load_project_context(dir.path()).expect("discovered");
+        assert!(ctx.contains(&"S".repeat(64)), "SMOOTH.md discovered");
+        assert!(!ctx.contains("claude-should-lose"), "SMOOTH.md wins precedence");
+
+        let capped = cap_context(&ctx, MAX_CONTEXT_BYTES);
+        assert!(capped.contains("truncated"), "oversize context is truncated: len={}", capped.len());
+        assert!(capped.len() < ctx.len(), "cap shrinks the injected block");
+    }
+}
+
+#[cfg(test)]
+mod ext_host_tests {
+    use super::*;
+
+    /// A minimal dependency-free SEP peer: handshakes with one tool, answers
+    /// ping, exits on shutdown. Enough to prove discovery → trust → load →
+    /// tool-attach without a heavier fixture.
+    const PEER_MJS: &str = r#"
+const rl = require('readline').createInterface({ input: process.stdin });
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  const { id, method } = JSON.parse(line);
+  const w = (r) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result: r }) + '\n');
+  if (method === 'initialize') w({ protocol_version: 1, extension: { name: 'echo', version: '0.1.0' }, registrations: { tools: [{ name: 'ping-tool', description: 'x', parameters: { type: 'object' } }] } });
+  else if (method === 'ping') w({});
+  else if (method === 'shutdown') { w({}); process.exit(0); }
+  else if (id !== undefined) process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32601, message: 'no' } }) + '\n');
+});
+"#;
+
+    fn node_available() -> bool {
+        std::process::Command::new("node")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// The operative loads only PRE-trusted extensions (fail-safe), and a trusted
+    /// one's tools attach into the host. Sequential (one SMOOTH_HOME) so the two
+    /// phases can't race each other's env.
+    #[tokio::test]
+    async fn operative_loads_only_pretrusted_extensions() {
+        let home = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let ext_dir = home.path().join("extensions").join("echo");
+        std::fs::create_dir_all(&ext_dir).unwrap();
+        let peer_path = ext_dir.join("peer.cjs");
+        std::fs::write(&peer_path, PEER_MJS).unwrap();
+        std::fs::write(
+            ext_dir.join("extension.toml"),
+            format!(
+                "name = \"echo\"\nversion = \"0.1.0\"\n[run]\ncommand = \"node\"\nargs = [\"{}\"]\n[capabilities]\ntools = true\n",
+                peer_path.display()
+            ),
+        )
+        .unwrap();
+
+        std::env::set_var("SMOOTH_HOME", home.path());
+
+        // Fail-safe: with no trust record, the extension is skipped → no host.
+        assert!(
+            load_pretrusted_extension_host(ws.path()).await.is_none(),
+            "an untrusted extension must never load"
+        );
+
+        // The live load half needs a Node runtime; the fail-safe half above does
+        // not (untrusted extensions are filtered before any spawn).
+        if node_available() {
+            let hash = smooth_policy::ext_trust::hash_extension(&ext_dir).unwrap();
+            std::fs::write(
+                home.path().join("extensions").join("trust.toml"),
+                format!("[extensions.echo]\nsource = \"test\"\nhash = \"{hash}\"\ntrusted = true\n"),
+            )
+            .unwrap();
+
+            let host = load_pretrusted_extension_host(ws.path()).await.expect("a trusted extension should load");
+            assert_eq!(host.len(), 1);
+            let tools: Vec<_> = host.tools().iter().map(|t| t.schema().name).collect();
+            assert!(tools.contains(&"echo.ping-tool".to_string()), "expected echo.ping-tool, got {tools:?}");
+            host.shutdown_all().await;
+        }
+
+        std::env::remove_var("SMOOTH_HOME");
     }
 }

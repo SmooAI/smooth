@@ -5,35 +5,19 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "Big Smooth — orchestrator, policy generation, sandbox management, API server"
+description = "Big Smooth — orchestrator, policy generation, API server"
 
 [lib]
 name = "smooth_bigsmooth"
 
-[features]
-default = ["direct-sandbox"]
-# Enables the in-process `DirectSandboxClient`, which links microsandbox
-# transitively via `smooth-bootstrap-bill/server`. Required on the host
-# (`th up` dev mode, integration tests that boot VMs directly). Disabled
-# when cross-compiling the Safehouse binary for
-# aarch64-unknown-linux-musl, because microsandbox's `msb_krun_devices`
-# can't compile for musl/aarch64 (Linux VM ioctls absent from musl libc).
-direct-sandbox = ["smooth-bootstrap-bill/server"]
-
 [dependencies]
 smooth-pearls.workspace = true
-smooth-bootstrap-bill = { workspace = true, default-features = false }
 smooth-operator.workspace = true
 # skills discovery + the smooth cast roles (re-homed from the engine at 0.14.0)
 smooth-cast.workspace = true
 smooth-code = { path = "../smooth-code", package = "smooai-smooth-code" }
 smooth-policy.workspace = true
 smooth-web = { path = "../smooth-web", package = "smooai-smooth-web" }
-# Safehouse cast — Big Smooth hosts these as tokio tasks when it boots
-# inside a Safehouse VM (SMOOTH_SAFEHOUSE_MODE=1). They mirror the per-VM
-# cast every Operator spawns inside its own pod.
-smooth-wonk.workspace = true
-smooth-goalie.workspace = true
 smooth-narc.workspace = true
 smooth-scribe.workspace = true
 smooth-archivist.workspace = true
@@ -60,6 +44,11 @@ async-trait.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 dirs-next.workspace = true
+# Chat attachments (pearl th-5295a2): base64-decode inbound uploads +
+# sha256 content-address for the ~/.smooth/attachments cache. Both are
+# already in the lockfile (used by smooth-cli / smooth-policy).
+base64 = "0.22"
+sha2 = "0.10"
 toml.workspace = true
 tokio-tungstenite.workspace = true
 tempfile.workspace = true

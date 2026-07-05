@@ -54,8 +54,11 @@ jobs:
               run: cargo fmt --check
 
             - name: Clippy
-              run: cargo clippy -- -D warnings
-              continue-on-error: true  # pedantic warnings shouldn't block
+              # Honor the lint levels declared in [workspace.lints]: clippy::all
+              # (deny) + unused_must_use/unsafe_code fail the build; pedantic and
+              # nursery are advisory `warn` by design, so a blanket `-D warnings`
+              # would weaponize them (and every new lint a stable Rust bump adds).
+              run: cargo clippy
 
             - name: Build examples (needed by cross-process file-lock test, pearl th-9799fa)
               run: cargo build --examples --workspace

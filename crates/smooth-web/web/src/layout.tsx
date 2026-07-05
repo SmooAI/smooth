@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { useProject } from "./context";
 import { Select } from "./components/ui/select";
+import { UiRelay } from "./components/UiRelay";
 import {
     SidebarProvider,
     Sidebar,
@@ -127,10 +128,16 @@ export function Layout() {
 
             <SidebarInset>
                 <Header />
-                <main className="flex-1 p-4 md:p-6 min-w-0">
+                {/* min-h-0 + overflow-y-auto: the shell is fixed-height (h-dvh), so
+                    content-heavy pages scroll HERE, under a pinned header, instead of
+                    growing the document. Chat sizes itself to exactly this box
+                    (h-[calc(100dvh-…)]) and manages its own inner scroll. Pearl th-ios-scroll. */}
+                <main className="flex-1 min-h-0 overflow-y-auto p-4 md:p-6 min-w-0">
                     <Outlet />
                 </main>
             </SidebarInset>
+            {/* SEP Phase 6 — global overlay for extension ui/* frames */}
+            <UiRelay />
         </SidebarProvider>
     );
 }

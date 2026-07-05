@@ -2,158 +2,60 @@
 
 #architecture #cast
 
-> [!arch] One process or one VM, eight roles — two transports between them
-> Every cast member runs as a tokio task or in-process service alongside Big Smooth. There are no per-actor VMs. In sandboxed mode they share the Safehouse microVM; in direct mode they share the `th` host process. Crate boundaries are preserved so each role keeps its own state, hooks, and tests.
+> [!arch] One process, one operative per task
+> Big Smooth and its supporting roles run as tokio tasks / in-process services inside the single `th` host process. Each dispatched task spawns one `smooth-operative` subprocess that runs the agent loop. Crate boundaries are preserved so each role keeps its own state, hooks, and tests.
 >
-> Within Big Smooth's process they talk over **`Arc`-shared state** (no wire, no serialization). Across the operative subprocess boundary — which exists in both modes — they talk over **tonic gRPC on UDS**. See [[Transport]] for the full topology.
+> The microVM-era access cast — **Wonk** (policy authority) and **Goalie** (network/FS proxy) — was removed in July 2026 (pearl `th-f4a801`) along with the per-task VM. Enforcement is being rebuilt as an auto-mode permission engine on `smooth-policy` (`th-515a13`, in progress) — see [[Security-Model]].
 
 ## Cast at a glance
 
-| Role            | Crate              | What it does                                       | Talks to                | Transport surface                          |
-| --------------- | ------------------ | -------------------------------------------------- | ----------------------- | ------------------------------------------ |
-| Big Smooth      | `smooth-bigsmooth` | Orchestrator, API, dispatch. READ-ONLY.            | Everyone                | HTTP+WS `:4400` (out); gRPC `bigsmooth.sock` (in) |
-| Wonk            | `smooth-wonk`      | Policy engine; answers "is X allowed?"             | Big Smooth, Goalie, Narc | gRPC `wonk.sock`                           |
-| Goalie          | `smooth-goalie`    | Outbound HTTP/HTTPS proxy                          | Wonk                    | HTTP proxy (in-VM loopback)                |
-| Narc            | `smooth-narc`      | Tool surveillance hook + LLM judge                 | Wonk, Big Smooth        | gRPC `narc.sock`                           |
-| Scribe          | `smooth-scribe`    | Per-actor structured logging                       | Archivist               | gRPC `scribe.sock`                         |
-| Archivist       | `smooth-archivist` | Central log + event aggregator                     | Scribes, dashboard      | HTTP `:4401`; SSE `/events`                |
-| Diver           | `smooth-diver`     | Pearl lifecycle + Jira sync                        | Pearl store, Jira       | In-process to Big Smooth                   |
-| Groove          | `smooth-operator`  | LLM checkpointing + resume                         | Operative only    | In-process to the operative          |
+| Role            | Crate              | What it does                                       | Where it runs                     |
+| --------------- | ------------------ | -------------------------------------------------- | --------------------------------- |
+| Big Smooth      | `smooth-bigsmooth` | Orchestrator, API, dispatch                        | Host process (axum on `:4400`)    |
+| Operative       | `smooth-operative` | Runs one pearl's agent loop + tools                | Host subprocess (one per pearl)   |
+| Engine (Groove) | `smooth-operator`  | Agent loop, LLM client, tools, checkpoint/resume   | In-process to the operative       |
+| Narc            | `smooth-narc`      | Tool surveillance hook + optional LLM judge        | In-process on the operative's registry |
+| Scribe          | `smooth-scribe`    | Per-actor structured logging                       | In-process, feeds Archivist       |
+| Archivist       | `smooth-archivist` | Central log + event aggregator, SSE stream         | In-process to Big Smooth          |
+| Diver           | `smooth-diver`     | Pearl lifecycle + Jira sync                        | In-process to Big Smooth          |
 
-The `.sock` files live in `$SMOOTH_SINGLE_PROCESS_SOCKET_DIR` (defaults to `$XDG_RUNTIME_DIR/smooth/` in-VM, a tempdir on the host in direct mode). `single_process::bootstrap_from_app_state` binds all four servers at startup; the operative subprocess dials them with `NarcGrpcUds::connect`, `WonkClient`, etc. See `crates/smooth-bigsmooth/src/single_process.rs` and `proto/{narc,wonk,scribe,bigsmooth}.proto`.
+There is no longer any gRPC-over-UDS wire between cast members. Big Smooth's cast shares `Arc<AppState>`. The one real process boundary is Big Smooth ↔ each operative subprocess, and it is crossed with **JSON-lines `AgentEvent`s on the operative's stdout** — see [[Dispatch]].
 
 ---
 
 ## Big Smooth
 
-The orchestrator. The `axum` server on `:4400`. Owns:
+The orchestrator and the `axum` server on `127.0.0.1:4400` (loopback by default; the API is unauthenticated today — pearl `th-6db839`). Owns:
 
-- The REST + WebSocket API surface (20+ routes — pearls, sessions, access, dispatch).
-- The `Orchestrator` state machine: `Idle → Scheduling → Dispatching → Monitoring → Reviewing`.
-- The dispatch fork: direct vs sandboxed (see [[Dispatch]]).
-- The teammate registry (the UI's "who's running right now").
-- The access store (pending and approved access requests).
+- The pearl store (Dolt) and session/message/snapshot history.
+- Dispatch: `dispatch_ws_task` → `dispatch_ws_task_direct` spawns the operative.
+- The teammate registry that backs the UI sidebar (`th operatives` reads it).
+- Orchestrator state (`orchestrator.rs`) — a state surface (`Idle → Scheduling → Dispatching → Monitoring → Reviewing`) that status/TUI/web readers poll. Its VM-dispatch guts were removed; it now reports state only.
+- Diver, Archivist, and the audit tap.
 
-**Invariant: Big Smooth never writes user-code paths.** Operators write code; Big Smooth records, dispatches, and reports. The safehouse-mode Narc enforces this with the WriteGuard hook.
+## Operative
 
-**Boots** via `crates/smooth-bigsmooth/src/bin/safehouse.rs` (in-VM) or via the host-side `cmd_up` path when running in direct mode.
+The worker. `smooth-operative` is the only crate that runs the agent loop in production, exec'd as a native host subprocess per pearl. It registers the tool surface, installs `PermissionHook` (role-scoped tool gating, from the engine) and `NarcHook` (surveillance), and runs the coding workflow or single-agent loop. Full detail in [[Operatives]].
 
----
+## Engine (smooth-operator / Groove)
 
-## Wonk
-
-The access-control authority. Pure policy → answer; no LLM.
-
-- Reads policy TOML from `/etc/smooth/policy.toml` (inside the VM) or in-memory (direct mode).
-- Exposes `/check/*` endpoints: `/check/network`, `/check/filesystem`, `/check/tool`, `/check/pearl`, `/check/mcp`, `/check/cli`.
-- Hot-reloads via `notify` + `ArcSwap` when policy changes.
-- Escalates uncertain calls to the [[#Narc|Narc]] LLM judge for a verdict.
-- Negotiates expanded access at runtime: when a policy check fails, Wonk asks Big Smooth via `/api/access/request`. Big Smooth auto-approves or routes to inbox.
-
-Goalie and Narc both delegate every decision to Wonk. A single source of policy truth.
-
----
-
-## Goalie
-
-The outbound HTTP/HTTPS forward proxy. Dumb pipe: every request asks Wonk, then forwards or returns 403.
-
-- Binds an ephemeral loopback port; `HTTP_PROXY` + `HTTPS_PROXY` in operator env point to it.
-- JSON-lines audit log (default `/tmp/goalie-safehouse.jsonl` for the safehouse Goalie; per-operator path otherwise).
-- In sandboxed mode, microsandbox's `allow_host_loopback` exposes the host's gateway IP to the guest so Goalie can reach LLM providers, Docker / OrbStack / Kalima APIs, or anything the policy allows on `host.docker.internal`.
-
-Goalie has no policy of its own. Everything is delegated.
-
----
+The agent framework the operative runs — an external dependency (`smooth-operator-core`, published as a crate; path-dep'd during the daemon rewrite). Provides the observe→think→act loop (`agent.rs`), the OpenAI-compatible / native-Anthropic LLM client, the `Tool` trait + `ToolRegistry` with pre/post `ToolHook`s, conversation/context management, and **Groove** — checkpointing + session resume so an interrupted operative picks up at the last checkpoint. Don't conflate the engine crate with the operative binary or the public `smooth-operator` service.
 
 ## Narc
 
-Tool surveillance. Two layers:
+Tool surveillance. Installed as a `ToolHook` on the operative's registry, so it fires on every tool call in-process (no wire). Two-tier: fast regex detectors (secrets — 10 patterns; prompt injection — 6 patterns; an optional write guard) plus an optional LLM-as-a-judge (`smooth-judge` slot) for ambiguous cases. It is the surviving enforcement surface post-teardown; the network/FS kernel boundary that Goalie/Wonk provided is gone. See [[Security-Model]].
 
-1. **Regex pre-filter.** Ten secret patterns (AWS keys, GitHub tokens, OpenAI keys, JWTs, etc.), six prompt-injection patterns ("ignore previous instructions", base64-encoded payloads, etc.), the write-path guard ([Big Smooth path], log paths only for Archivist).
-2. **LLM judge.** Ambiguous cases get escalated to a small, fast model (Haiku, Flash, GPT-4o-mini) for a structured yes/no verdict. Cached.
+## Scribe + Archivist
 
-Narc is wired as a `ToolHook` in `smooth-operator`. Every tool call passes through `pre_call` (block before exec) and `post_call` (block before result is handed back to LLM). Severity-tagged alerts are forwarded to Scribe.
-
-**How operative subprocesses reach Narc.** Each operative dials the local UDS at `$SMOOTH_SINGLE_PROCESS_SOCKET_DIR/narc.sock` (or the safehouse default `$XDG_RUNTIME_DIR/smooth/narc.sock`) via `smooth_wonk::NarcGrpcUds::connect` — see `crates/smooth-operative/src/main.rs` ≈ line 1546. The wire is `tonic 0.12` + `prost 0.13` speaking the `smooth.narc.v1.Judge` service defined in `proto/narc.proto`. The legacy `SMOOTH_NARC_URL` HTTP fallback is only kept for old dispatch paths that haven't been ported to UDS.
-
----
-
-## Scribe
-
-Per-actor structured logging. One Scribe per cast member (and one per operator). Each accepts:
-
-- `LogEntry` POSTs from its actor.
-- W3C `traceparent` propagation across process / VM boundaries.
-
-A background `ForwarderHandle` batches entries and POSTs them to the [[#Archivist|Archivist]] URL. The forwarder URL is the Archivist as seen from the actor's network namespace.
-
----
-
-## Archivist
-
-Central log + event aggregator. One per Smooth instance — bound to `0.0.0.0:4401` inside the Safehouse VM (the guest port microsandbox forwards to the host so all Scribes can reach it, even across VM boundaries).
-
-- Stores log entries in a `MemoryArchiveStore` (in-RAM) by default; persistent backends are pluggable.
-- Stores rich agent events (`AgentEvent` variants) in `MemoryEventArchive`.
-- Exposes `/query`, `/stats`, `/events` (SSE), `/health`. The dashboard subscribes to `/events`.
-
-Archivist is the only cast member that writes — and it only writes to log paths. Narc enforces that.
-
----
+Structured logging. Scribe captures per-actor structured events; Archivist aggregates them and exposes an SSE stream that backs the live dashboard and `th audit`. Both run in-process now.
 
 ## Diver
 
-Pearl lifecycle manager. Wraps the [[Pearls|pearl store]] with:
-
-- `dispatch(title, description, parent)` — creates a pearl, marks it in_progress, returns the ID.
-- `complete(id)` — closes a pearl after dispatch completes successfully.
-- Sub-pearl creation for child work spawned mid-dispatch.
-- Optional Jira sync: when `JIRA_URL` + `JIRA_API_TOKEN` are set, Diver bidirectionally syncs pearl status with the configured Jira project.
-
-Diver runs only when the cast is up with a pearl store. The `dispatch_ws_task_*` paths prefer Diver and fall back to the raw pearl store if Diver is absent.
-
----
-
-## Groove
-
-LLM checkpointing + session resume. Lives inside `smooth-operator` (not a separate process). Captures conversation state after every tool call. When an operator is interrupted (process exit, sandbox timeout, network cut), Groove can rebuild the in-flight conversation from the last checkpoint when resuming.
-
-The pearl store is Groove's checkpoint backing — session messages, tool calls, and orchestrator snapshots all land in Dolt tables (`session_messages`, `orchestrator_snapshots`). See [[Data-Storage]].
-
----
-
-## Budget-Aware MCP (default tool surface)
-
-Not a cast member in the security sense — it's an [external MCP server](https://github.com/Doorman11991/budget-aware-mcp) Smooth registers by default in `~/.smooth/mcp.toml` on first `th up`. The operator gets a focused, token-budgeted alternative to ripgrep-then-read-file: `graph_walk(symbol, hop=2, max_tokens=8000)` returns exactly the structurally-connected code under the budget, `check_scope` answers feasibility questions without an LLM call, `explain_symbol` produces signature + callers + callees in a few hundred bytes, `search_graph` does fuzzy-match-then-graph-walk, and `find_dead_code` surfaces zero-inbound-edge symbols for cleanup. Backed by SQLite + tree-sitter (with a built-in regex fallback parser when the optional CodeGraphContext Python service isn't present, MIT-licensed). Spawned via `npx -y budget-aware-mcp` so it auto-fetches the first time and runs out of the operator's microVM. Opt out with `SMOOTH_SKIP_DEFAULT_MCP=1` or `th mcp remove budget-aware-mcp`. See `th mcp defaults` / `th mcp install` for the management surface.
-
-## How they wire together
-
-```
-   Operative ─► tool call
-                        │
-                        ├──► NarcHook (pre-call) ─────► narc.sock ──► Narc ─► wonk.sock ─► Wonk
-                        │                                              │                   │
-                        │                                              ▼                   ▼
-                        │                                          regex + LLM         policy
-                        │
-                        ├──► (file write?)    ──► WriteGuard ─► narc.sock ─► Narc
-                        │
-                        ├──► (HTTP fetch?)    ──► HTTP_PROXY ─► Goalie ─► wonk.sock ─► Wonk
-                        │
-                        └──► result ─► NarcHook (post-call) ─► back to LLM
-                                                │
-                                                ▼
-                                          scribe.sock ─► Scribe ─► HTTP `:4401` ─► Archivist
-```
-
-The agent loop sees one tool surface. The hooks transparently fan out to the cast — every dashed/arrow into a `.sock` is a tonic gRPC call over a Unix-domain socket inside the same VM (sandboxed) or the same process tree (direct). The protos are at `proto/{narc,wonk,scribe,bigsmooth}.proto` and the wire types are codegen'd at build time by each crate's `build.rs` via `tonic-build`.
+The Pearl Diver. Owns the pearl lifecycle — creates a pearl on dispatch, closes it on completion, tracks sub-pearls, manages the work model (parent/child, deps, labels, costs), and syncs bidirectionally with Jira. In-process to Big Smooth.
 
 ## Related
 
 - [[Architecture-Overview]]
-- [[Sandboxed-Mode]]
-- [[Direct-Mode]]
 - [[Dispatch]]
 - [[Operatives]]
-- [[Transport]] — the gRPC + UDS topology in detail
+- [[Security-Model]]

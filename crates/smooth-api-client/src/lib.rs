@@ -28,7 +28,16 @@ pub mod credentials;
 /// for "the wire types"). Consumers shouldn't usually need to dip in
 /// here — use `SmoothApiClient` from the crate root instead.
 pub mod pb {
-    #![allow(clippy::all, clippy::pedantic, clippy::nursery, unused_imports, dead_code, missing_docs, unreachable_pub)]
+    #![allow(
+        clippy::all,
+        clippy::pedantic,
+        clippy::nursery,
+        unused_imports,
+        dead_code,
+        missing_docs,
+        unreachable_pub,
+        renamed_and_removed_lints
+    )]
     include!(concat!(env!("OUT_DIR"), "/codegen.rs"));
 }
 

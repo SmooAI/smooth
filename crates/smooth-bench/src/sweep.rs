@@ -38,6 +38,52 @@ pub struct TaskOutcome {
     /// timeout (within 100 ms) AND cost_usd is 0 (no LLM rounds
     /// completed) AND no LLM error was surfaced.
     pub inconclusive: bool,
+    /// True when the run died to an upstream LLM-gateway failure
+    /// (llm.smoo.ai dropping the connection mid-stream, 5xx from the
+    /// gateway) rather than anything smooth did. Detected by matching
+    /// the surfaced LLM error against `UPSTREAM_ERROR_SIGNATURES`.
+    /// Excluded from pass/fail scoring the same way `inconclusive`
+    /// is — gateway flakiness must not read as a smooth bug.
+    pub upstream_error: bool,
+}
+
+/// Signatures of upstream LLM-gateway failures. Each row is a set of
+/// needles that must ALL appear (case-insensitive) in the surfaced
+/// error text for the row to match.
+///
+/// Tradeoff: we match the full error-context phrase (e.g. reqwest's
+/// "connection closed before message completed"), never a bare
+/// fragment like "connection closed" — an agent can legitimately
+/// print that inside code it wrote or test output. The matcher only
+/// runs against the captured transport error (`BenchResult.llm_error`
+/// / the sweep runner's error), not the agent transcript or test
+/// stdout, which keeps false positives to "the transport error itself
+/// happened to contain one of these exact phrases" — i.e. real ones.
+/// The cost is that a novel gateway failure shape won't be tagged
+/// until its phrase is added here. That's deliberate: an unreviewed
+/// fuzzy match that silently excludes real failures from scoring is
+/// worse than an occasional untagged flake.
+pub const UPSTREAM_ERROR_SIGNATURES: &[&[&str]] = &[
+    // reqwest: server hung up mid-response.
+    &["connection closed before message completed"],
+    // reqwest transport error naming the gateway.
+    &["error sending request for url", "llm.smoo.ai"],
+    // hyper/reqwest SendRequest-stage client error.
+    &["client error (sendrequest)"],
+    // reqwest status errors for any 5xx from the gateway, e.g.
+    // "HTTP status server error (502 Bad Gateway) for url (https://llm.smoo.ai/...)".
+    &["server error (5", "llm.smoo.ai"],
+    // Gateway 5xx surfaced as a plain status line/body.
+    &["502 bad gateway", "llm.smoo.ai"],
+    &["503 service unavailable", "llm.smoo.ai"],
+];
+
+/// True when `text` matches any row of `UPSTREAM_ERROR_SIGNATURES`
+/// (all needles in a row present, case-insensitive).
+#[must_use]
+pub fn is_upstream_error(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    UPSTREAM_ERROR_SIGNATURES.iter().any(|needles| needles.iter().all(|n| lower.contains(n)))
 }
 
 /// Injection point for the per-task runner. Production implementation
@@ -81,12 +127,14 @@ impl TaskRunner for PolyglotTaskRunner {
         let http_timeout_ms = http_timeout_secs * 1000;
         let near_timeout = duration_ms.saturating_sub(http_timeout_ms) < 100 && http_timeout_ms.saturating_sub(duration_ms) < 100;
         let inconclusive = res.solved && near_timeout && res.cost_usd <= 0.0;
+        let upstream_error = res.llm_error.as_deref().is_some_and(is_upstream_error);
 
         Ok(TaskOutcome {
             solved: res.solved,
             cost_usd: res.cost_usd,
             duration_ms,
             inconclusive,
+            upstream_error,
         })
     }
 }
@@ -102,6 +150,7 @@ pub fn outcome_from_result(r: &BenchResult) -> TaskOutcome {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
         duration_ms: (r.duration_s * 1000.0).max(0.0) as u64,
         inconclusive: false,
+        upstream_error: r.llm_error.as_deref().is_some_and(is_upstream_error),
     }
 }
 
@@ -154,7 +203,13 @@ pub struct StdoutObserver;
 
 impl SweepObserver for StdoutObserver {
     fn on_task_complete(&mut self, idx: usize, total: usize, lang: PolyglotLang, task: &str, outcome: &TaskOutcome, cumulative_cost: f64) {
-        let tag = if outcome.solved { "PASS" } else { "FAIL" };
+        let tag = if outcome.upstream_error {
+            "UPSTREAM-ERR"
+        } else if outcome.solved {
+            "PASS"
+        } else {
+            "FAIL"
+        };
         println!(
             "[{idx:>3}/{total:>3}] {tag}  {lang:<10}  {task:<28}  {ms:>6}ms  ${cost:.4}  (total ${cum:.4})",
             lang = lang.dataset_dir(),
@@ -226,6 +281,7 @@ where
                     cost_usd: 0.0,
                     duration_ms: 0,
                     inconclusive: false,
+                    upstream_error: is_upstream_error(&format!("{e:#}")),
                 }
             }
         };
@@ -296,6 +352,7 @@ fn aggregate(per_task: &[(PolyglotLang, String, TaskOutcome)], inputs: Aggregate
     let mut tasks_attempted: u32 = 0;
     let mut tasks_green: u32 = 0;
     let mut tasks_inconclusive: u32 = 0;
+    let mut tasks_upstream_error: u32 = 0;
     for (lang, _task, outcome) in per_task {
         let entry = by_lang_counts.entry(*lang).or_insert((0, 0));
         entry.0 += 1;
@@ -306,6 +363,9 @@ fn aggregate(per_task: &[(PolyglotLang, String, TaskOutcome)], inputs: Aggregate
         }
         if outcome.inconclusive {
             tasks_inconclusive += 1;
+        }
+        if outcome.upstream_error {
+            tasks_upstream_error += 1;
         }
     }
 
@@ -329,6 +389,7 @@ fn aggregate(per_task: &[(PolyglotLang, String, TaskOutcome)], inputs: Aggregate
         tasks_attempted,
         tasks_green,
         tasks_inconclusive,
+        tasks_upstream_error,
         cost_usd: inputs.cost_usd,
         median_task_ms: median_ms(inputs.durations_ms),
         budget_usd_cap: inputs.budget_usd_cap,
@@ -398,6 +459,7 @@ mod tests {
                     cost_usd: 0.0,
                     duration_ms: 0,
                     inconclusive: false,
+                    upstream_error: false,
                 });
             }
             let (solved, cost_usd, duration_ms) = q.remove(0);
@@ -406,6 +468,7 @@ mod tests {
                 cost_usd,
                 duration_ms,
                 inconclusive: false,
+                upstream_error: false,
             })
         }
     }
@@ -608,6 +671,7 @@ mod tests {
                         cost_usd: 0.1,
                         duration_ms: 500,
                         inconclusive: false,
+                        upstream_error: false,
                     })
                 }
             }
@@ -622,6 +686,138 @@ mod tests {
         // First task counted as failed-with-no-cost.
         assert_eq!(run.score.tasks_green, 5);
         assert!(!run.score.budget_usd_hit);
+    }
+
+    #[test]
+    fn upstream_signature_connection_closed() {
+        assert!(is_upstream_error(
+            "HTTP request failed: error sending request for url (https://llm.smoo.ai/v1/chat/completions) → client error (SendRequest) → connection closed before message completed"
+        ));
+        // Each fragment of the observed error also matches on its own.
+        assert!(is_upstream_error("connection closed before message completed"));
+        assert!(is_upstream_error("client error (SendRequest)"));
+        assert!(is_upstream_error("error sending request for url (https://llm.smoo.ai/v1/chat/completions)"));
+    }
+
+    #[test]
+    fn upstream_signature_gateway_5xx() {
+        assert!(is_upstream_error(
+            "HTTP status server error (502 Bad Gateway) for url (https://llm.smoo.ai/v1/chat/completions)"
+        ));
+        assert!(is_upstream_error(
+            "HTTP status server error (503 Service Unavailable) for url (https://llm.smoo.ai/v1/chat/completions)"
+        ));
+        assert!(is_upstream_error(
+            "HTTP status server error (500 Internal Server Error) for url (https://llm.smoo.ai/v1/chat/completions)"
+        ));
+        assert!(is_upstream_error("gateway returned 502 Bad Gateway from llm.smoo.ai"));
+        assert!(is_upstream_error("gateway returned 503 Service Unavailable from llm.smoo.ai"));
+    }
+
+    #[test]
+    fn upstream_signature_case_insensitive() {
+        assert!(is_upstream_error("CONNECTION CLOSED BEFORE MESSAGE COMPLETED"));
+        assert!(is_upstream_error("Client Error (SendRequest)"));
+    }
+
+    #[test]
+    fn upstream_signature_near_misses_do_not_match() {
+        // Bare fragments an agent could legitimately produce in code or
+        // test output must NOT match — the matcher requires the full
+        // error-context phrase.
+        assert!(!is_upstream_error("connection closed"));
+        assert!(!is_upstream_error("// close the connection before the message"));
+        assert!(!is_upstream_error("fn send_request() {}"));
+        // Gateway-ish words without the gateway host.
+        assert!(!is_upstream_error("error sending request for url (https://example.com)"));
+        assert!(!is_upstream_error("502 bad gateway"));
+        // A 4xx from the gateway is OUR bug (bad request), not upstream flake.
+        assert!(!is_upstream_error(
+            "HTTP status client error (429 Too Many Requests) for url (https://llm.smoo.ai/v1/chat/completions)"
+        ));
+        assert!(!is_upstream_error(""));
+    }
+
+    #[test]
+    fn outcome_from_result_tags_upstream_error_from_llm_error() {
+        let mut r = crate::BenchResult {
+            run_id: "r".into(),
+            run_dir: std::path::PathBuf::from("/tmp/r"),
+            benchmark: "aider-polyglot".into(),
+            task: "t".into(),
+            lang: "rust".into(),
+            timestamp: "now".into(),
+            model: None,
+            budget_usd: None,
+            counts: crate::TestCounts::default(),
+            solved: false,
+            duration_s: 1.0,
+            cost_usd: 0.0,
+            tool_calls: Vec::new(),
+            llm_error: Some("connection closed before message completed".into()),
+            test_stdout: String::new(),
+        };
+        assert!(outcome_from_result(&r).upstream_error);
+        // The same phrase in test stdout (agent-visible output) is ignored.
+        r.llm_error = None;
+        r.test_stdout = "connection closed before message completed".into();
+        assert!(!outcome_from_result(&r).upstream_error);
+    }
+
+    #[tokio::test]
+    async fn sweep_excludes_upstream_errors_from_real_attempt_denominator() {
+        // 6 tasks: 2 solved, 2 real failures, 2 upstream-error failures.
+        struct MixedRunner {
+            called: Mutex<u32>,
+        }
+        #[async_trait]
+        impl TaskRunner for MixedRunner {
+            async fn run_one(&self, _l: PolyglotLang, _t: &str, _o: &BenchOpts) -> anyhow::Result<TaskOutcome> {
+                let mut n = self.called.lock().unwrap();
+                *n += 1;
+                Ok(TaskOutcome {
+                    solved: *n <= 2,
+                    cost_usd: 0.1,
+                    duration_ms: 500,
+                    inconclusive: false,
+                    upstream_error: *n >= 5,
+                })
+            }
+        }
+        let (list, mut cfg) = tiny_curated_pr_pairs();
+        cfg.budget_usd_cap = 100.0;
+        let runner = MixedRunner { called: Mutex::new(0) };
+        let mut obs = CapturingObserver::new();
+        let run = run_sweep(&list, &runner, &cfg, &mut obs).await.unwrap();
+
+        assert_eq!(run.score.tasks_attempted, 6);
+        assert_eq!(run.score.tasks_green, 2);
+        assert_eq!(run.score.tasks_upstream_error, 2);
+        let table = run.score.render_table();
+        assert!(table.contains("upstream-error:    2"), "{table}");
+        // Real-attempt rate excludes the 2 upstream errors: 2/(6-2) = 50%.
+        assert!(table.contains("(2/4"), "{table}");
+        assert!(table.contains("50.0%"), "{table}");
+    }
+
+    #[tokio::test]
+    async fn sweep_runner_error_with_upstream_signature_is_tagged() {
+        struct UpstreamFailRunner;
+        #[async_trait]
+        impl TaskRunner for UpstreamFailRunner {
+            async fn run_one(&self, _l: PolyglotLang, _t: &str, _o: &BenchOpts) -> anyhow::Result<TaskOutcome> {
+                Err(anyhow::anyhow!(
+                    "HTTP request failed: error sending request for url (https://llm.smoo.ai/v1/chat/completions): connection closed before message completed"
+                ))
+            }
+        }
+        let (list, mut cfg) = tiny_curated_pr_pairs();
+        cfg.budget_usd_cap = 100.0;
+        let mut obs = CapturingObserver::new();
+        let run = run_sweep(&list, &UpstreamFailRunner, &cfg, &mut obs).await.unwrap();
+        assert_eq!(run.score.tasks_attempted, 6);
+        assert_eq!(run.score.tasks_green, 0);
+        assert_eq!(run.score.tasks_upstream_error, 6);
     }
 
     #[test]

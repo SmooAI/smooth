@@ -12,8 +12,7 @@ use std::fs;
 use std::path::PathBuf;
 
 fn main() {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
-    let dist = PathBuf::from(manifest_dir).join("web").join("dist");
+    let dist = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("web").join("dist");
     let index = dist.join("index.html");
 
     if index.exists() {

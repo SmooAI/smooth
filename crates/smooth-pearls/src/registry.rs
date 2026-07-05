@@ -92,7 +92,7 @@ impl Registry {
     /// List all registered projects, sorted by last accessed (most recent first).
     pub fn list(&self) -> Vec<&ProjectEntry> {
         let mut entries: Vec<&ProjectEntry> = self.projects.values().collect();
-        entries.sort_by(|a, b| b.last_accessed.cmp(&a.last_accessed));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.last_accessed));
         entries
     }
 

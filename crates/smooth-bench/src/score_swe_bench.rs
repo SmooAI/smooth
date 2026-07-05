@@ -448,6 +448,7 @@ pub fn aggregate_swe_bench(per_task: &[SweBenchInstanceScore], smooth_version: &
         tasks_attempted,
         tasks_green,
         tasks_inconclusive: 0,
+        tasks_upstream_error: 0,
         cost_usd,
         median_task_ms: median_ms(&durations),
         budget_usd_cap,

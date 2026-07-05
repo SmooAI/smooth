@@ -4,7 +4,7 @@ use axum::body::Body;
 use axum::Router;
 use http_body_util::BodyExt;
 use hyper::Request;
-use smooth_bigsmooth::orchestrator::{Orchestrator, OrchestratorState};
+use smooth_bigsmooth::orchestrator::Orchestrator;
 use smooth_bigsmooth::server::{build_router, AppState};
 use smooth_pearls::PearlStore;
 use tower::ServiceExt;
@@ -333,44 +333,21 @@ async fn beads_backward_compat() {
     assert_eq!(body2["data"]["title"], "Bead compat");
 }
 
-// ── 10. Orchestrator schedules ready issues ──────────────────
+// ── 10. Orchestrator state reporting ─────────────────────────
 
 #[tokio::test]
-async fn orchestrator_schedules_ready_issues() {
+async fn orchestrator_reports_idle() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let Ok(store) = PearlStore::init(&tmp.path().join("dolt")) else { return };
     std::mem::forget(tmp);
 
-    // Seed ready issues.
-    let new = smooth_pearls::NewPearl {
-        title: "Ready task 1".into(),
-        description: String::new(),
-        pearl_type: smooth_pearls::PearlType::Task,
-        priority: smooth_pearls::Priority::High,
-        assigned_to: None,
-        parent_id: None,
-        labels: Vec::new(),
-    };
-    store.create(&new).expect("create 1");
-    store
-        .create(&smooth_pearls::NewPearl {
-            title: "Ready task 2".into(),
-            ..new
-        })
-        .expect("create 2");
-
-    let mut orch = Orchestrator::new(3, store);
+    // The autonomous scheduling loop was removed with the microVM stack
+    // (pearl th-f4a801); the orchestrator now just reports state for the
+    // status/TUI surface. Dispatch runs in-process via the WS handler.
+    let orch = Orchestrator::new(3, store);
     assert_eq!(orch.state_name(), "idle");
-
-    // Step once — should transition from Idle to Scheduling with the 2 ready issues.
-    orch.step().await.expect("step");
-    assert_eq!(orch.state_name(), "scheduling");
-
-    if let OrchestratorState::Scheduling { ready_beads } = &orch.state {
-        assert_eq!(ready_beads.len(), 2);
-    } else {
-        panic!("expected Scheduling state");
-    }
+    assert_eq!(orch.active_worker_count(), 0);
+    assert_eq!(orch.max_operators, 3);
 }
 
 // ── 11. Pearl CRUD lifecycle through Dolt ──────────────────────

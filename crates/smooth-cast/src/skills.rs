@@ -62,6 +62,10 @@ pub enum SkillSource {
     ClaudeCode,
     /// `~/.opencode/skills/<name>/...` — opencode.
     OpenCode,
+    /// A trusted SEP extension's `[resources] skills` directory. Extensions are
+    /// user-installed, so they sit above the imported Claude/opencode ecosystems
+    /// but below the user's own project / `~/.smooth` skills.
+    Extension,
     /// Embedded in the smooth binary. Shipped with every install
     /// (currently: `create-skill`). User-authored skills with the
     /// same name OVERRIDE the built-in (the built-in is the lowest
@@ -76,9 +80,24 @@ impl SkillSource {
         match self {
             Self::Project => 0,
             Self::UserSmooth => 1,
-            Self::ClaudeCode => 2,
-            Self::OpenCode => 3,
-            Self::Builtin => 4,
+            Self::Extension => 2,
+            Self::ClaudeCode => 3,
+            Self::OpenCode => 4,
+            Self::Builtin => 5,
+        }
+    }
+
+    /// Short display label for the source (`project`, `user-smooth`,
+    /// `claude-code`, `opencode`, `extension`, `builtin`).
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Project => "project",
+            Self::UserSmooth => "user-smooth",
+            Self::ClaudeCode => "claude-code",
+            Self::OpenCode => "opencode",
+            Self::Extension => "extension",
+            Self::Builtin => "builtin",
         }
     }
 }
@@ -250,6 +269,11 @@ pub fn discover_with_overrides(workspace_root: &Path) -> Vec<Skill> {
         collect_from(&home.join(".opencode/agents"), SkillSource::OpenCode, &mut skills);
     }
 
+    // SEP extensions contribute their `[resources] skills` dirs (trusted only).
+    // This is the unification seam: smooth-cast stays the one canonical skill
+    // catalog; extensions feed it rather than parsing skills themselves.
+    skills.extend(resources_discover(workspace_root));
+
     // Builtin skills ship with the binary. They land last so any
     // user-authored skill at the same name overrides them.
     skills.extend(builtin_skills());
@@ -269,6 +293,41 @@ fn builtin_skills() -> Vec<Skill> {
         out.push(skill);
     }
     out
+}
+
+/// Discover skills contributed by trusted SEP extensions.
+///
+/// Each installed extension may declare `[resources] skills = "<dir>"` in its
+/// `extension.toml`; every SKILL under that dir (resolved against the extension
+/// root) becomes a [`SkillSource::Extension`] skill. Only **trusted** extensions
+/// contribute — a skill body is prepended to the agent's prompt, so loading an
+/// untrusted extension's skills is the same prompt-injection surface as loading
+/// its code, and gates on the same content-hashed trust store the host uses.
+///
+/// This is the unification seam (SEP Phase 5): the engine's extension discovery
+/// finds the dirs, smooth-cast's parser turns them into the one canonical
+/// `Skill` type. Extensions never parse skills themselves.
+#[must_use]
+pub fn resources_discover(workspace_root: &Path) -> Vec<Skill> {
+    use smooth_operator::extension::manifest::{default_global_dir, discover as discover_extensions, project_dir};
+    use smooth_policy::ext_trust::{hash_extension, TrustStore};
+
+    let global = default_global_dir();
+    let project = project_dir(workspace_root);
+    let (extensions, _failures) = discover_extensions(global.as_deref(), Some(project.as_path()));
+    let trust = TrustStore::load();
+
+    let mut skills = Vec::new();
+    for ext in extensions {
+        let Some(rel) = ext.manifest.resources.skills.as_deref() else { continue };
+        let hash = hash_extension(&ext.root).unwrap_or_default();
+        if !trust.is_trusted(&ext.manifest.name, &hash) {
+            tracing::debug!(name = %ext.manifest.name, "skipping untrusted extension's skills");
+            continue;
+        }
+        collect_from(&ext.root.join(rel), SkillSource::Extension, &mut skills);
+    }
+    skills
 }
 
 /// Scan a single skills root directory and append every valid
@@ -328,6 +387,90 @@ fn collect_from(root: &Path, source: SkillSource, out: &mut Vec<Skill>) {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Invocation rendering (pearl th-e0f812)
+// ---------------------------------------------------------------------------
+
+/// Default char budget for the skill catalog injected into a system
+/// prompt. Names + descriptions + triggers only — bodies are loaded on
+/// demand via `skill_use`, so this stays small. ~4k chars ≈ 1k tokens.
+pub const DEFAULT_CATALOG_BUDGET: usize = 4000;
+
+/// Render the skill catalog (names + one-line descriptions + triggers)
+/// for a system-prompt section. Bodies are NOT included — the agent
+/// calls `skill_use(name)` to load a body on demand. Output is capped
+/// at `budget` chars; skills that don't fit are dropped and a trailing
+/// note reports how many were omitted. Returns `None` when there are no
+/// skills to show.
+#[must_use]
+pub fn render_catalog(skills: &[Skill], budget: usize) -> Option<String> {
+    if skills.is_empty() {
+        return None;
+    }
+    let mut out = String::from(
+        "You have SKILLS available — reusable recipes that encode the right way to do a task. \
+Before improvising a multi-step workflow, check this list. If one matches the user's intent, \
+call `skill_use(\"<name>\")` to load its full instructions, then follow them.\n\n",
+    );
+    let mut shown = 0usize;
+    for skill in skills {
+        let line = if skill.triggers.is_empty() {
+            format!("- {}: {}\n", skill.name, skill.description)
+        } else {
+            format!("- {}: {} (triggers: {})\n", skill.name, skill.description, skill.triggers.join(", "))
+        };
+        // Always show at least one skill even if it alone exceeds the
+        // budget — a truncated catalog is more useful than none.
+        if shown > 0 && out.len() + line.len() > budget {
+            break;
+        }
+        out.push_str(&line);
+        shown += 1;
+    }
+    let omitted = skills.len() - shown;
+    if omitted > 0 {
+        use std::fmt::Write as _;
+        let _ = writeln!(out, "- …and {omitted} more (run `th skills list` to see all)");
+    }
+    Some(out)
+}
+
+/// Render a skill's body for injection into the conversation when the
+/// agent calls `skill_use`. Prepends a header with the description and,
+/// when the skill declares them, its scope / allowed_tools / allowed_hosts
+/// so the model knows the constraints it's meant to work within.
+///
+/// Enforcement of `allowed_tools` / `allowed_hosts` is NOT done here —
+/// this only surfaces the declaration to the model. Hard enforcement
+/// lands with the auto-mode permission model (pearl th-515a13).
+#[must_use]
+pub fn render_invocation(skill: &Skill) -> String {
+    let mut out = format!("# Skill: {}\n\n{}\n\n", skill.name, skill.description);
+
+    let mut constraints: Vec<String> = Vec::new();
+    if skill.scope == SkillScope::Host {
+        constraints.push("runs on the host (outside the sandbox)".to_string());
+    }
+    if !skill.allowed_tools.is_empty() {
+        constraints.push(format!("prefer these tools: {}", skill.allowed_tools.join(", ")));
+    }
+    if !skill.allowed_hosts.is_empty() {
+        constraints.push(format!("may reach these hosts: {}", skill.allowed_hosts.join(", ")));
+    }
+    if !constraints.is_empty() {
+        // ponytail: advisory only — real allowed_tools/allowed_hosts
+        // enforcement arrives with auto-mode (pearl th-515a13). Until
+        // then the header just tells the model the intended envelope.
+        out.push_str("> Constraints: ");
+        out.push_str(&constraints.join("; "));
+        out.push_str(".\n\n");
+    }
+
+    out.push_str("Follow these instructions:\n\n");
+    out.push_str(&skill.body);
+    out
 }
 
 trait WithContextPath {
@@ -479,6 +622,86 @@ body"#;
         assert!(SkillSource::OpenCode.precedence() < SkillSource::Builtin.precedence());
     }
 
+    fn skill(name: &str, desc: &str, triggers: &[&str]) -> Skill {
+        Skill {
+            name: name.to_string(),
+            description: desc.to_string(),
+            triggers: triggers.iter().map(|s| s.to_string()).collect(),
+            scope: SkillScope::Sandbox,
+            allowed_hosts: Vec::new(),
+            allowed_tools: Vec::new(),
+            body: "do the thing".to_string(),
+            source: SkillSource::UserSmooth,
+            path: PathBuf::from("/tmp/x/SKILL.md"),
+        }
+    }
+
+    #[test]
+    fn render_catalog_empty_is_none() {
+        assert!(render_catalog(&[], DEFAULT_CATALOG_BUDGET).is_none());
+    }
+
+    #[test]
+    fn render_catalog_lists_names_descriptions_triggers() {
+        let skills = vec![skill("add-show", "Add a show to the watchlist", &["add show", "add movie"])];
+        let out = render_catalog(&skills, DEFAULT_CATALOG_BUDGET).expect("some");
+        assert!(out.contains("add-show"));
+        assert!(out.contains("Add a show to the watchlist"));
+        assert!(out.contains("triggers: add show, add movie"));
+        assert!(out.contains("skill_use"), "must tell the model how to invoke");
+        // Body text must NOT leak into the catalog — that's the whole
+        // point of the on-demand load.
+        assert!(!out.contains("do the thing"));
+    }
+
+    #[test]
+    fn render_catalog_respects_budget() {
+        // 50 skills with long descriptions, tiny budget → only a few
+        // shown, rest reported as omitted.
+        let skills: Vec<Skill> = (0..50)
+            .map(|i| skill(&format!("skill-{i}"), "a fairly wordy description that eats budget quickly", &[]))
+            .collect();
+        let out = render_catalog(&skills, 400).expect("some");
+        assert!(out.contains("more (run `th skills list`"), "expected omission note, got: {out}");
+        // At least the intro + one skill, but nowhere near all 50.
+        assert!(out.matches("- skill-").count() < 50);
+    }
+
+    #[test]
+    fn render_catalog_shows_at_least_one_even_over_budget() {
+        let skills = vec![skill("big", "x".repeat(1000).as_str(), &[])];
+        let out = render_catalog(&skills, 10).expect("some");
+        assert!(out.contains("big"), "must show at least one skill even past budget");
+    }
+
+    #[test]
+    fn render_invocation_includes_body_and_header() {
+        let s = skill("add-show", "Add a show", &[]);
+        let out = render_invocation(&s);
+        assert!(out.contains("# Skill: add-show"));
+        assert!(out.contains("Add a show"));
+        assert!(out.contains("do the thing"), "body must be present");
+    }
+
+    #[test]
+    fn render_invocation_surfaces_constraints() {
+        let mut s = skill("scp-thing", "copies files", &[]);
+        s.scope = SkillScope::Host;
+        s.allowed_tools = vec!["bash".to_string()];
+        s.allowed_hosts = vec!["smoo-hub".to_string()];
+        let out = render_invocation(&s);
+        assert!(out.contains("host"), "host scope should be surfaced");
+        assert!(out.contains("bash"), "allowed_tools should be surfaced");
+        assert!(out.contains("smoo-hub"), "allowed_hosts should be surfaced");
+    }
+
+    #[test]
+    fn render_invocation_omits_constraints_line_when_none() {
+        let s = skill("plain", "no constraints", &[]);
+        let out = render_invocation(&s);
+        assert!(!out.contains("> Constraints"), "no constraint line when nothing declared");
+    }
+
     #[test]
     fn builtin_create_skill_loads() {
         // Smooth ships with `create-skill` embedded — every install
@@ -490,5 +713,50 @@ body"#;
         assert!(!create_skill.triggers.is_empty(), "create-skill needs triggers");
         assert_eq!(create_skill.source, SkillSource::Builtin);
         assert!(create_skill.body.contains("Process"), "body should be the markdown recipe");
+    }
+
+    #[test]
+    fn resources_discover_gates_extension_skills_on_trust() {
+        use smooth_policy::ext_trust::{hash_extension, TrustStore};
+
+        // Isolate BOTH the extension store and the trust store under one
+        // SMOOTH_HOME. `default_global_dir` (engine) and the trust store both
+        // resolve through it, so the extension lands in the discovered global
+        // scope and the trust file sits alongside it. Single test → no env race.
+        let home = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("SMOOTH_HOME", home.path());
+
+        let ext_root = home.path().join("extensions").join("demo");
+        std::fs::create_dir_all(ext_root.join("skills").join("hi")).unwrap();
+        std::fs::write(
+            ext_root.join("extension.toml"),
+            "name = \"demo\"\nversion = \"0.1.0\"\n[run]\ncommand = \"node\"\n[resources]\nskills = \"skills\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ext_root.join("skills").join("hi").join("SKILL.md"),
+            "---\nname: ext-hi\ndescription: contributed by an extension\n---\nBody.\n",
+        )
+        .unwrap();
+
+        // Untrusted → contributes nothing (prompt-injection surface stays closed).
+        let workspace = tempfile::tempdir().expect("ws");
+        assert!(
+            resources_discover(workspace.path()).is_empty(),
+            "untrusted extension must not contribute skills"
+        );
+
+        // Trust it against its current content hash → the skill appears.
+        let hash = hash_extension(&ext_root).unwrap();
+        let mut trust = TrustStore::load();
+        trust.set("demo", &ext_root.to_string_lossy(), &hash, true);
+        trust.save().unwrap();
+
+        let found = resources_discover(workspace.path());
+        assert_eq!(found.len(), 1, "trusted extension contributes its skill");
+        assert_eq!(found[0].name, "ext-hi");
+        assert_eq!(found[0].source, SkillSource::Extension);
+
+        std::env::remove_var("SMOOTH_HOME");
     }
 }

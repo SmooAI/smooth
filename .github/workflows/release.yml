@@ -72,8 +72,11 @@ jobs:
               run: cargo fmt --check
 
             - name: Clippy
-              run: cargo clippy -- -D warnings
-              continue-on-error: true
+              # Honor the lint levels declared in [workspace.lints]: clippy::all
+              # (deny) + unused_must_use/unsafe_code fail the build; pedantic and
+              # nursery are advisory `warn` by design, so a blanket `-D warnings`
+              # would weaponize them (and every new lint a stable Rust bump adds).
+              run: cargo clippy
 
             - name: Build examples (needed by cross-process file-lock test, pearl th-9799fa)
               run: cargo build --examples --workspace
@@ -109,12 +112,34 @@ jobs:
 
             - name: Check if release needed
               id: check_release
+              # The PUSH payload's head commit — NOT `git log -1`. The
+              # changesets action above creates its own "🦋 New version
+              # release" commit on the local changeset-release/main side-
+              # branch and leaves HEAD pointed at it, so `git log -1` matched
+              # in the *version-PR* run too. That set should_release=true in
+              # the wrong run: build/release/update-homebrew-tap fired against
+              # a half-merged tree, and the tap job 404'd fetching an asset
+              # for a release that run never published (pearl th-891ccb). The
+              # push event's head_commit reflects what actually landed on
+              # main, immune to the side-branch commit.
+              env:
+                  HEAD_COMMIT_MSG: ${{ github.event.head_commit.message }}
               run: |
-                  # A release is needed when changesets says published OR when
-                  # the current commit is a changeset merge (version was just bumped).
+                  # A release is needed when changesets says published, OR when
+                  # the commit actually pushed to main is the changeset version
+                  # merge ("🦋 New version release"). For workflow_dispatch there
+                  # is no head_commit, so fall back to origin/main's real tip
+                  # (still NOT local HEAD, which the changesets side-branch moved).
+                  release_commit_subject() {
+                      if [[ -n "$HEAD_COMMIT_MSG" ]]; then
+                          printf '%s\n' "$HEAD_COMMIT_MSG" | head -1
+                      else
+                          git log -1 origin/main --pretty=%s
+                      fi
+                  }
                   if [[ "${{ steps.changesets.outputs.published }}" == "true" ]]; then
                     echo "should_release=true" >> $GITHUB_OUTPUT
-                  elif git log -1 --pretty=%s | grep -q "🦋 New version release"; then
+                  elif release_commit_subject | grep -q "🦋 New version release"; then
                     echo "should_release=true" >> $GITHUB_OUTPUT
                   else
                     echo "should_release=false" >> $GITHUB_OUTPUT
@@ -145,11 +170,10 @@ jobs:
             fail-fast: false
             matrix:
                 include:
-                    # x86_64-apple-darwin removed: microsandbox's upstream
-                    # `msb_krun_utils` crate (0.1.9) uses `kvm_bindings`
-                    # unconditionally and refuses to compile on Intel macOS.
-                    # Apple Silicon is the only supported macOS target until
-                    # upstream gates kvm_bindings to Linux.
+                    # Only Apple Silicon is built for macOS today. The microVM
+                    # stack that blocked x86_64-apple-darwin was removed 2026-07
+                    # (pearl th-f4a801); Intel macOS could be re-added here if
+                    # there's demand.
                     - target: aarch64-apple-darwin
                       os: macos-latest
                       asset_name: th-macos-arm64.tar.gz
@@ -164,10 +188,9 @@ jobs:
                       os: ubuntu-24.04-arm
                       asset_name: th-linux-arm64.tar.gz
                     # Windows: gated on sub-pearl th-WIN-GATE (filed
-                    # 2026-05-29). smooth-cli currently has
-                    # unconditional dependencies on smooth-bigsmooth
-                    # (microsandbox — kvm_bindings, Linux-only) and
-                    # smooth-code (ratatui TUI). Adding Windows to the
+                    # 2026-05-29). smooth-cli currently has an
+                    # unconditional dependency on smooth-code (ratatui
+                    # TUI). Adding Windows to the
                     # matrix here requires a workspace-wide Cargo
                     # feature gate (default = "desktop", cli-windows =
                     # bare CLI surface only — pearls/jira/api/admin/
@@ -192,13 +215,12 @@ jobs:
               run: |
                   sudo apt-get update
                   # libdbus-1-dev: libdbus-sys crate uses pkg-config to find it
-                  # (pulled in transitively by the keyring/zbus chain that
-                  # microsandbox depends on). Missing package fails with
-                  # "pkg_config failed" at build time.
-                  # libcap-ng-dev: linker needs `-lcap-ng` — microsandbox's
-                  # Linux-only msb_krun_devices uses libcap-ng for CAP_*
-                  # capability management in the VM host shim.
-                  sudo apt-get install -y pkg-config libdbus-1-dev libcap-ng-dev protobuf-compiler
+                  # (pulled in transitively by the keyring/zbus chain). Missing
+                  # package fails with "pkg_config failed" at build time.
+                  # (libcap-ng-dev was dropped with the microVM stack, 2026-07,
+                  # pearl th-f4a801 — only microsandbox's Linux VM host shim
+                  # needed -lcap-ng.)
+                  sudo apt-get install -y pkg-config libdbus-1-dev protobuf-compiler
 
             - name: Install macOS build deps
               if: runner.os == 'macOS'

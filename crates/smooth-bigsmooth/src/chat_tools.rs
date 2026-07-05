@@ -674,6 +674,31 @@ impl Tool for BashTool {
 /// suitable for handing to `Agent::new`.
 pub fn build_chat_tools(state: AppState, registry: Arc<ProviderRegistry>) -> smooth_operator::tool::ToolRegistry {
     let mut tools = smooth_operator::tool::ToolRegistry::new();
+
+    // Auto-mode permission enforcement (pearl th-515a13). This hook runs
+    // FIRST on every tool call — allow / deny / ask per the Claude-Code-
+    // style engine in `crate::auto_mode`. It is the primary enforcement
+    // layer now that the microVM stack (Wonk/Goalie) is gone. Mode comes
+    // from `SMOOTH_AUTO_MODE` (ask [default] / accept-edits / deny /
+    // bypass); grants + the ask channel are the shared `AppState` handles.
+    let mode = crate::auto_mode::AutoMode::from_env_value(std::env::var("SMOOTH_AUTO_MODE").ok().as_deref());
+    let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+    tools.add_hook(crate::auto_mode::AutoModeHook::new(
+        mode,
+        state.access.clone(),
+        state.wonk_grants.clone(),
+        workspace,
+    ));
+
+    // Narc surveillance SECOND (mirrors the operative's PermissionHook →
+    // NarcHook ordering): CLI guard + injection alerts on arguments,
+    // secret-leak blocking on output. Matters most for SEP extension tools
+    // (pearl th-6d8606), which register into this same registry via
+    // `Agent::with_extension_host` and so pass through both hooks like any
+    // native chat tool. Write guard off — the chat registry has no file-write
+    // tools; auto-mode owns permissioning here.
+    tools.add_hook(smooth_narc::NarcHook::new(false));
+
     tools.register(PearlsSearchTool { state: state.clone() });
     tools.register(PearlsListTool { state: state.clone() });
     tools.register(PearlsShowTool { state: state.clone() });
@@ -740,5 +765,102 @@ mod tests {
         assert!(msg.contains("files"));
         assert!(msg.contains("judgment"));
         assert!(msg.contains("Re-issue"));
+    }
+
+    // ── Hook layering for SEP extension tools (pearl th-6d8606) ─────────
+    //
+    // `Agent::with_extension_host` registers extension tools into the SAME
+    // registry `build_chat_tools` returns — AFTER the AutoMode + Narc hooks
+    // are installed. These tests pin the security claim: a post-hoc
+    // `register_arc`'d tool (exactly how ext tool proxies arrive) is gated
+    // by both hooks like any native chat tool.
+
+    use smooth_operator::tool::{ToolCall, ToolRegistry};
+
+    /// Stand-in for an SEP extension tool proxy: registered via
+    /// `register_arc` after the hooks, executes a "write" and leaks a
+    /// secret-shaped string in its output.
+    struct ExtCanaryTool;
+
+    #[async_trait]
+    impl Tool for ExtCanaryTool {
+        fn schema(&self) -> ToolSchema {
+            ToolSchema {
+                name: "todo.add".to_string(),
+                description: "canary ext tool".to_string(),
+                parameters: json!({ "type": "object" }),
+            }
+        }
+        async fn execute(&self, _arguments: serde_json::Value) -> anyhow::Result<String> {
+            Ok("done — btw key is AKIAIOSFODNN7EXAMPLE".to_string())
+        }
+    }
+
+    fn hooked_registry(mode: crate::auto_mode::AutoMode, narc: Arc<smooth_narc::NarcHook>) -> ToolRegistry {
+        // Same stack, same order as build_chat_tools: AutoMode first, Narc
+        // second. (Not build_chat_tools itself — that needs a PearlStore +
+        // ProviderRegistry; the hook stack is what's under test.)
+        use smooth_operator::tool::ToolHook;
+        struct SharedNarc(Arc<smooth_narc::NarcHook>);
+        #[async_trait]
+        impl ToolHook for SharedNarc {
+            async fn pre_call(&self, call: &ToolCall) -> anyhow::Result<()> {
+                self.0.pre_call(call).await
+            }
+            async fn post_call(&self, call: &ToolCall, result: &smooth_operator::tool::ToolResult) -> anyhow::Result<()> {
+                self.0.post_call(call, result).await
+            }
+        }
+        let mut tools = ToolRegistry::new();
+        tools.add_hook(crate::auto_mode::AutoModeHook::new(
+            mode,
+            crate::access::AccessStore::new(),
+            crate::wonk_grants::SharedWonkGrants::new(crate::wonk_grants::WonkGrants::new()),
+            std::path::PathBuf::from("/tmp"),
+        ));
+        tools.add_hook(SharedNarc(narc));
+        tools.register_arc(Arc::new(ExtCanaryTool));
+        tools
+    }
+
+    #[tokio::test]
+    async fn auto_mode_deny_gates_ext_tools() {
+        // DenyUnmatched (headless posture): an unmatched tool — which an
+        // unknown extension tool always is — must be denied BEFORE it executes.
+        let narc = Arc::new(smooth_narc::NarcHook::new(false));
+        let tools = hooked_registry(crate::auto_mode::AutoMode::DenyUnmatched, narc);
+        let result = tools
+            .execute(&ToolCall {
+                id: "t1".into(),
+                name: "todo.add".into(),
+                arguments: json!({ "text": "milk" }),
+            })
+            .await;
+        assert!(result.is_error, "deny-mode auto-mode must gate ext tools, got: {}", result.content);
+        assert!(result.content.contains("blocked by hook"), "{}", result.content);
+    }
+
+    #[tokio::test]
+    async fn narc_post_call_flags_secret_leak_in_ext_tool_output() {
+        // Bypass mode lets the tool run; Narc's post_call scans the output
+        // and raises a Block-severity secret_leak alert. (The engine treats
+        // post-hook errors as non-fatal to the result, so the alert stream —
+        // which feeds /api/narc — is the enforcement surface here.)
+        let narc = Arc::new(smooth_narc::NarcHook::new(false));
+        let tools = hooked_registry(crate::auto_mode::AutoMode::Bypass, Arc::clone(&narc));
+        let result = tools
+            .execute(&ToolCall {
+                id: "t2".into(),
+                name: "todo.add".into(),
+                arguments: json!({ "text": "milk" }),
+            })
+            .await;
+        assert!(!result.is_error, "bypass mode should let the ext tool run: {}", result.content);
+        let blocks = narc.alerts_above(smooth_narc::Severity::Block);
+        assert!(
+            blocks.iter().any(|a| a.category == "secret_leak"),
+            "Narc post_call must flag the leaked secret; alerts: {:?}",
+            narc.alerts()
+        );
     }
 }

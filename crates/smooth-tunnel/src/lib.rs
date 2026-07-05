@@ -34,12 +34,10 @@
 //! - Slug generation + validation ([`slug`]).
 //! - Client config + builder ([`client::TunnelClient`]).
 //!
-//! The dial + multiplex loop is intentionally a stub — the tunnel
-//! service isn't deployed yet, so the first real round-trip will be
-//! written against an ECS endpoint that doesn't exist.
-//! [`client::TunnelClient::run`] returns
-//! [`TunnelError::NotImplementedYet`] until then. Pearl th-e82dac
-//! tracks the scaffold → impl transition.
+//! The dial + handshake + HTTP multiplex loop is live
+//! ([`client::TunnelClient::run`]); WebSocket-stream proxying is the
+//! remaining follow-up (inbound WS streams are rejected with a
+//! `StreamClose`). Pearl th-e82dac.
 
 #![forbid(unsafe_code)]
 
@@ -72,16 +70,6 @@ pub enum TunnelError {
     /// enumerate every `tokio-tungstenite` error variant.
     #[error("tunnel transport: {0}")]
     Transport(String),
-
-    /// Fired by [`TunnelClient::run`] while the ECS tunnel service
-    /// doesn't exist yet. Removal is the signal that the scaffold
-    /// grew teeth.
-    #[error(
-        "th tunnel is scaffolded but the rendezvous service isn't deployed yet — \
-         track SMOODEV-637 (smooai pearl th-8898f2) for the ECS side, and pearl \
-         th-e82dac for the client impl"
-    )]
-    NotImplementedYet,
 }
 
 /// Result alias used across the tunnel client.

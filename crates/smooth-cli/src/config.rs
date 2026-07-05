@@ -92,6 +92,10 @@ pub enum Tier {
     Secret,
     /// Boolean / string flags consumed via `featureFlag.get(...)`.
     FeatureFlag,
+    /// Numeric, segment-resolved limit consumed via `limit.evaluateLimit(...)`.
+    /// Never baked — resolves live like a feature flag; the consuming client
+    /// clamps the resolved number into the schema's `[min, max]`. SMOODEV-2306.
+    Limit,
 }
 
 impl Tier {
@@ -101,7 +105,19 @@ impl Tier {
             Self::Public => "public",
             Self::Secret => "secret",
             Self::FeatureFlag => "feature_flag",
+            Self::Limit => "limit",
         }
+    }
+}
+
+/// Parse-time guard for `th config limits set`: limits are NUMERIC, so reject
+/// anything that isn't a finite number before we PUT it. A non-numeric raw
+/// value would resolve to the schema `default` at evaluate time, silently
+/// ignoring the set — better to fail here with a clear message.
+fn parse_limit_value(s: &str) -> std::result::Result<String, String> {
+    match s.trim().parse::<f64>() {
+        Ok(n) if n.is_finite() => Ok(s.trim().to_string()),
+        _ => Err(format!("limit value must be a finite number, got `{s}`")),
     }
 }
 
@@ -128,7 +144,7 @@ pub enum Cmd {
         environment: String,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` env
         /// then the credentials file's `active_org_id`.
-        #[arg(long)]
+        #[arg(long, visible_alias = "org")]
         org_id: Option<String>,
         /// Emit the response as JSON instead of the raw value.
         #[arg(long)]
@@ -155,7 +171,7 @@ pub enum Cmd {
         #[arg(long, alias = "env", default_value = DEFAULT_ENVIRONMENT)]
         environment: String,
         /// Override the active org.
-        #[arg(long)]
+        #[arg(long, visible_alias = "org")]
         org_id: Option<String>,
         /// Tier. Defaults to `public`. Validated at parse-time.
         #[arg(long, value_enum, default_value_t = Tier::Public)]
@@ -185,7 +201,7 @@ pub enum Cmd {
         #[arg(long, alias = "env", default_value = DEFAULT_ENVIRONMENT)]
         environment: String,
         /// Override the active org.
-        #[arg(long)]
+        #[arg(long, visible_alias = "org")]
         org_id: Option<String>,
         /// Emit the response as JSON instead of a key/value listing.
         /// JSON output is NEVER masked — assumes script consumer.
@@ -202,13 +218,17 @@ pub enum Cmd {
     },
     /// Push the local `.smooai-config/schema.json` to the org's remote
     /// schema. Prints a per-tier diff first; with `--dry-run`, stops
-    /// after printing. Creates a new remote schema if none matches.
+    /// after printing. To create a NEW remote schema, omit `--schema-name`
+    /// and set `"$smooaiName": "<name>"` in schema.json.
     Push {
         /// Override the active org.
-        #[arg(long)]
+        #[arg(long, visible_alias = "org")]
         org_id: Option<String>,
-        /// Schema name to push under. Defaults to `$smooaiName` from
-        /// schema.json, falling back to the first remote schema.
+        /// Select an EXISTING remote schema to update (must match a
+        /// schema already on the org). To CREATE a new schema instead,
+        /// drop this flag and set `"$smooaiName": "<name>"` in
+        /// schema.json. Defaults to `$smooaiName`, falling back to the
+        /// first remote schema.
         #[arg(long)]
         schema_name: Option<String>,
         /// Optional change description recorded with the new version.
@@ -227,9 +247,11 @@ pub enum Cmd {
     /// existing file unless `--force`.
     Pull {
         /// Override the active org.
-        #[arg(long)]
+        #[arg(long, visible_alias = "org")]
         org_id: Option<String>,
-        /// Schema name to pull. Defaults to the first remote schema.
+        /// Schema name to pull. Optional when the org has exactly one
+        /// remote schema (auto-selected); REQUIRED when it has more than
+        /// one — pull refuses to guess and lists the available names.
         #[arg(long)]
         schema_name: Option<String>,
         /// Overwrite an existing `.smooai-config/schema.json`.
@@ -244,7 +266,7 @@ pub enum Cmd {
     /// for the org. Prints added / removed / tier-changed keys.
     Diff {
         /// Override the active org.
-        #[arg(long)]
+        #[arg(long, visible_alias = "org")]
         org_id: Option<String>,
         /// Schema name to compare against. Defaults to the first
         /// remote schema.
@@ -257,6 +279,68 @@ pub enum Cmd {
         /// instead of the user JWT.
         #[arg(long)]
         m2m: bool,
+    },
+    /// Reconcile the local `.smooai-config/schema.json` with the org's
+    /// remote schema. SAFE by design — direction is always explicit, never
+    /// a magic two-way merge:
+    ///
+    /// - `th config sync` → print the diff, then tell you which direction to
+    ///   apply. Changes nothing.
+    /// - `th config sync --push` → apply local → remote (same as `push`).
+    /// - `th config sync --pull` → apply remote → local (same as `pull`).
+    ///
+    /// `--push` and `--pull` are mutually exclusive. `--dry-run` forces the
+    /// diff-only behavior even when a direction is given.
+    Sync {
+        /// Apply local → remote (same as `th config push`). Mutually
+        /// exclusive with `--pull`.
+        #[arg(long, conflicts_with = "pull")]
+        push: bool,
+        /// Apply remote → local (same as `th config pull`). Mutually
+        /// exclusive with `--push`.
+        #[arg(long)]
+        pull: bool,
+        /// Override the active org.
+        #[arg(long, visible_alias = "org")]
+        org_id: Option<String>,
+        /// Schema name to reconcile against. On the push path, defaults to
+        /// `$smooaiName` then the first remote schema; on the pull path, it
+        /// is required when the org has more than one remote schema.
+        #[arg(long)]
+        schema_name: Option<String>,
+        /// Emit the diff (no-direction / dry-run) as structured JSON.
+        #[arg(long)]
+        json: bool,
+        /// Compute + print the diff but apply nothing, even with a
+        /// direction. Forces the same behavior as bare `th config sync`.
+        #[arg(long)]
+        dry_run: bool,
+        /// Use the M2M session at `~/.smooth/auth/smooai.json`
+        /// instead of the user JWT.
+        #[arg(long)]
+        m2m: bool,
+    },
+    /// Generate `.smooai-config/schema.json` from the consumer's
+    /// `.smooai-config/config.ts`. Shells out to `tsx` to import the
+    /// TypeScript config module, reads the schema fields the
+    /// `@smooai/config` runtime exposes (`PublicConfigKeys`,
+    /// `SecretConfigKeys`, `FeatureFlagKeys`,
+    /// `serializedAllConfigSchemaJsonSchema`), and emits the flat wire
+    /// format. Requires the consumer to have `@smooai/config` + `tsx`
+    /// available (installed alongside `config.ts`). Pearl th-4d1d6c.
+    Build {
+        /// Directory containing `.smooai-config/` (or the
+        /// `.smooai-config/` dir itself). Defaults to the cwd.
+        #[arg(long)]
+        directory: Option<String>,
+        /// Print the generated schema.json to stdout instead of writing
+        /// the file. Useful for piping into `th config diff`-style checks.
+        #[arg(long)]
+        stdout: bool,
+        /// CI parity: regenerate in memory and exit non-zero if the
+        /// committed `schema.json` differs. Writes nothing.
+        #[arg(long)]
+        check: bool,
     },
     /// Scaffold a fresh `.smooai-config/` directory with TypeScript
     /// `config.ts`, `default.ts`, and `package.json` templates.
@@ -281,7 +365,7 @@ pub enum Cmd {
         #[arg(long, alias = "env", default_value = DEFAULT_ENVIRONMENT)]
         environment: String,
         /// Override the active org.
-        #[arg(long)]
+        #[arg(long, visible_alias = "org")]
         org_id: Option<String>,
         /// JSON evaluation context: a file path, `-` for stdin, or an
         /// inline JSON object. Used by context-aware flag rules
@@ -308,7 +392,7 @@ pub enum Cmd {
         #[arg(long, alias = "env", default_value = DEFAULT_ENVIRONMENT)]
         environment: String,
         /// Override the active org.
-        #[arg(long)]
+        #[arg(long, visible_alias = "org")]
         org_id: Option<String>,
         /// Required to delete a secret-tier value — the server returns
         /// 409 without it. Prevents accidental loss of credentials.
@@ -316,6 +400,210 @@ pub enum Cmd {
         force: bool,
         /// Use the M2M session at `~/.smooth/auth/smooai.json`
         /// instead of the user JWT.
+        #[arg(long)]
+        m2m: bool,
+    },
+    /// Manage an org's config environments (e.g. `production`,
+    /// `staging`). Creating an environment is how a new org's config is
+    /// activated. Authorized by your **user** session — so a parent-org
+    /// admin can create/manage one on a CHILD org with `--org-id`,
+    /// without `th admin`.
+    #[command(visible_alias = "env")]
+    Environments {
+        #[command(subcommand)]
+        cmd: EnvironmentsCmd,
+    },
+    /// Manage numeric, segment-resolved **limits** — the fourth
+    /// `@smooai/config` kind (SMOODEV-2306). Unlike public/secret config a
+    /// limit resolves LIVE per request context (never baked) and carries clamp
+    /// metadata (`default`/`min`/`max`/`step`); the consuming client clamps the
+    /// resolved number into `[min, max]`. Subcommands mirror the feature-flag
+    /// surface: `evaluate` resolves a value, `get`/`list` surface the clamp
+    /// metadata declared in the schema, `set` writes a raw value.
+    #[command(visible_alias = "limit")]
+    Limits {
+        #[command(subcommand)]
+        cmd: LimitsCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LimitsCmd {
+    /// Evaluate a limit for the active org + environment. POSTs to
+    /// `/config/limits/{key}/evaluate` — the SAME segment machinery as
+    /// `th config feature-flag`, but the resolved value is a NUMBER. Prints the
+    /// raw resolved number on its own line (pipe-friendly); `--json` returns
+    /// the full envelope (`value`, `source`, `matchedRuleId`, `rolloutBucket`).
+    /// The value is PRE-clamp — the consuming client applies `[min, max]`.
+    Evaluate {
+        /// The limit key (e.g. `agentMaxIterations`).
+        key: String,
+        /// Environment name. Defaults to `development`.
+        #[arg(long, alias = "env", default_value = DEFAULT_ENVIRONMENT)]
+        environment: String,
+        /// Override the active org.
+        #[arg(long, visible_alias = "org")]
+        org_id: Option<String>,
+        /// JSON evaluation context: a file path, `-` for stdin, or an inline
+        /// JSON object (e.g. `{"orgId":"x","agentId":"y"}`). Used by
+        /// context-aware limit rules. Omitted = empty `{}`.
+        #[arg(long)]
+        context: Option<String>,
+        /// Emit the full evaluation envelope as JSON instead of the resolved
+        /// value alone.
+        #[arg(long)]
+        json: bool,
+        /// Use the M2M session at `~/.smooth/auth/smooai.json`
+        /// instead of the user JWT.
+        #[arg(long)]
+        m2m: bool,
+    },
+    /// Show a single limit's clamp metadata (`default`/`min`/`max`/`step`) as
+    /// declared in the org's config schema.
+    Get {
+        /// The limit key.
+        key: String,
+        /// Override the active org.
+        #[arg(long, visible_alias = "org")]
+        org_id: Option<String>,
+        /// Restrict the lookup to a single schema by name. Defaults to
+        /// searching every schema on the org.
+        #[arg(long)]
+        schema_name: Option<String>,
+        /// Emit the metadata as JSON instead of the pretty line.
+        #[arg(long)]
+        json: bool,
+        /// Use the M2M session at `~/.smooth/auth/smooai.json`
+        /// instead of the user JWT.
+        #[arg(long)]
+        m2m: bool,
+    },
+    /// List every declared limit with its clamp metadata
+    /// (`default`/`min`/`max`/`step`) from the org's config schema(s).
+    List {
+        /// Override the active org.
+        #[arg(long, visible_alias = "org")]
+        org_id: Option<String>,
+        /// Restrict to a single schema by name. Defaults to all schemas.
+        #[arg(long)]
+        schema_name: Option<String>,
+        /// Emit the limits as a JSON map instead of the pretty listing.
+        #[arg(long)]
+        json: bool,
+        /// Use the M2M session at `~/.smooth/auth/smooai.json`
+        /// instead of the user JWT.
+        #[arg(long)]
+        m2m: bool,
+    },
+    /// Set a raw limit value for an environment (the `raw` resolution source).
+    /// Numeric-only — non-numbers are rejected at parse time. Thin wrapper over
+    /// `th config set <key> <value> --tier limit`.
+    Set {
+        /// The limit key.
+        key: String,
+        /// The numeric value. Rejected at parse time if not a finite number.
+        #[arg(value_parser = parse_limit_value)]
+        value: String,
+        /// Environment name. Defaults to `development`.
+        #[arg(long, alias = "env", default_value = DEFAULT_ENVIRONMENT)]
+        environment: String,
+        /// Override the active org.
+        #[arg(long, visible_alias = "org")]
+        org_id: Option<String>,
+        /// Schema name to write under. Defaults to the first schema.
+        #[arg(long)]
+        schema_name: Option<String>,
+        /// Emit the API response as JSON instead of the pretty echo.
+        #[arg(long)]
+        json: bool,
+        /// Use the M2M session at `~/.smooth/auth/smooai.json`
+        /// instead of the user JWT.
+        #[arg(long)]
+        m2m: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EnvironmentsCmd {
+    /// List the org's config environments.
+    List {
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then
+        /// the credentials file's `active_org_id`.
+        #[arg(long, visible_alias = "org")]
+        org_id: Option<String>,
+        /// Emit the raw JSON response instead of the pretty list.
+        #[arg(long)]
+        json: bool,
+        /// Use the M2M session instead of the user JWT (M2M is
+        /// org-locked, so this won't work cross-org).
+        #[arg(long)]
+        m2m: bool,
+    },
+    /// Create a config environment (e.g. `production`) — how you
+    /// activate a new org's config. A parent-org admin can create one
+    /// on a child org via `--org-id`.
+    Create {
+        /// Environment name (e.g. `production`).
+        name: String,
+        /// Override the active org (see `list` for the fallback chain).
+        #[arg(long, visible_alias = "org")]
+        org_id: Option<String>,
+        /// Raw JSON body escape hatch (file, `-` for stdin, or inline
+        /// JSON). Overrides `name` when given.
+        #[arg(long)]
+        body: Option<String>,
+        /// Emit the raw JSON response.
+        #[arg(long)]
+        json: bool,
+        /// Use the M2M session instead of the user JWT.
+        #[arg(long)]
+        m2m: bool,
+    },
+    /// Update an environment (e.g. rename). Pass `--name` or `--body`.
+    Update {
+        /// The environment id (from `list`).
+        env_id: String,
+        /// New environment name.
+        #[arg(long)]
+        name: Option<String>,
+        /// Override the active org (see `list` for the fallback chain).
+        #[arg(long, visible_alias = "org")]
+        org_id: Option<String>,
+        /// Raw JSON body escape hatch — overrides `--name` when given.
+        #[arg(long)]
+        body: Option<String>,
+        /// Emit the raw JSON response.
+        #[arg(long)]
+        json: bool,
+        /// Use the M2M session instead of the user JWT.
+        #[arg(long)]
+        m2m: bool,
+    },
+    /// Delete a config environment.
+    Delete {
+        /// The environment id (from `list`).
+        env_id: String,
+        /// Override the active org (see `list` for the fallback chain).
+        #[arg(long, visible_alias = "org")]
+        org_id: Option<String>,
+        /// Emit the raw JSON response.
+        #[arg(long)]
+        json: bool,
+        /// Use the M2M session instead of the user JWT.
+        #[arg(long)]
+        m2m: bool,
+    },
+    /// List all config values set in an environment (across schemas).
+    Values {
+        /// The environment id (from `list`).
+        env_id: String,
+        /// Override the active org (see `list` for the fallback chain).
+        #[arg(long, visible_alias = "org")]
+        org_id: Option<String>,
+        /// Emit the raw JSON response.
+        #[arg(long)]
+        json: bool,
+        /// Use the M2M session instead of the user JWT.
         #[arg(long)]
         m2m: bool,
     },
@@ -374,6 +662,16 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             json,
             m2m,
         } => cmd_diff(org_id, schema_name, json, m2m).await,
+        Cmd::Sync {
+            push,
+            pull,
+            org_id,
+            schema_name,
+            json,
+            dry_run,
+            m2m,
+        } => cmd_sync(push, pull, org_id, schema_name, json, dry_run, m2m).await,
+        Cmd::Build { directory, stdout, check } => cmd_build(directory, stdout, check),
         Cmd::Init { directory, force } => cmd_init(directory, force),
         Cmd::FeatureFlag {
             key,
@@ -390,7 +688,136 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             force,
             m2m,
         } => cmd_delete(key, environment, org_id, force, m2m).await,
+        Cmd::Environments { cmd } => cmd_environments(cmd).await,
+        Cmd::Limits { cmd } => cmd_limits(cmd).await,
     }
+}
+
+/// `th config environments …` — manage an org's config environments over
+/// the user-JWT surface. Authorized by the SMOODEV-695 path-org guard
+/// (super-admin OR org member OR active-parent-org admin), so a master-
+/// org admin can create/manage a child org's environments with
+/// `--org-id` — no `th admin` (internal) required.
+async fn cmd_environments(cmd: EnvironmentsCmd) -> Result<()> {
+    match cmd {
+        EnvironmentsCmd::List { org_id, json, m2m } => {
+            let cfg = ConfigClient::load(m2m).await?;
+            let org = cfg.resolve_org(org_id)?;
+            let resp = cfg
+                .get(&format!("/organizations/{org}/config/environments"))
+                .await
+                .context("GET environments")?;
+            print_environments(&resp, json);
+        }
+        EnvironmentsCmd::Create {
+            name,
+            org_id,
+            body,
+            json: _,
+            m2m,
+        } => {
+            let cfg = ConfigClient::load(m2m).await?;
+            let org = cfg.resolve_org(org_id)?;
+            let payload = match body {
+                Some(b) => parse_body(&b)?,
+                None => serde_json::json!({ "name": name }),
+            };
+            let resp = cfg
+                .post(&format!("/organizations/{org}/config/environments"), &payload)
+                .await
+                .context("POST environment")?;
+            println!();
+            println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+            println!();
+        }
+        EnvironmentsCmd::Update {
+            env_id,
+            name,
+            org_id,
+            body,
+            json: _,
+            m2m,
+        } => {
+            let cfg = ConfigClient::load(m2m).await?;
+            let org = cfg.resolve_org(org_id)?;
+            let payload = match body {
+                Some(b) => parse_body(&b)?,
+                None => {
+                    let n = name.context("pass --name <new-name> or --body <json>")?;
+                    serde_json::json!({ "name": n })
+                }
+            };
+            let resp = cfg
+                .patch(&format!("/organizations/{org}/config/environments/{env_id}"), &payload)
+                .await
+                .context("PATCH environment")?;
+            println!();
+            println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+            println!();
+        }
+        EnvironmentsCmd::Delete { env_id, org_id, json: _, m2m } => {
+            let cfg = ConfigClient::load(m2m).await?;
+            let org = cfg.resolve_org(org_id)?;
+            let resp = cfg
+                .delete(&format!("/organizations/{org}/config/environments/{env_id}"))
+                .await
+                .context("DELETE environment")?;
+            println!();
+            println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+            println!();
+        }
+        EnvironmentsCmd::Values { env_id, org_id, json: _, m2m } => {
+            let cfg = ConfigClient::load(m2m).await?;
+            let org = cfg.resolve_org(org_id)?;
+            let resp = cfg
+                .get(&format!("/organizations/{org}/config/environments/{env_id}/values"))
+                .await
+                .context("GET environment values")?;
+            println!();
+            println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+            println!();
+        }
+    }
+    Ok(())
+}
+
+/// Parse a `--body` argument: a file path, `-` for stdin, or inline JSON.
+fn parse_body(arg: &str) -> Result<Value> {
+    let raw = if arg == "-" {
+        use std::io::Read;
+        let mut s = String::new();
+        std::io::stdin().read_to_string(&mut s).context("read stdin")?;
+        s
+    } else if std::path::Path::new(arg).is_file() {
+        std::fs::read_to_string(arg).with_context(|| format!("read {arg}"))?
+    } else {
+        arg.to_string()
+    };
+    serde_json::from_str(&raw).with_context(|| format!("parse JSON body: {raw}"))
+}
+
+/// Pretty-print the environments list (`[{ id, name, ... }]`), or fall
+/// back to raw JSON.
+fn print_environments(resp: &Value, json: bool) {
+    if json {
+        println!();
+        println!("{}", serde_json::to_string_pretty(resp).unwrap_or_default());
+        println!();
+        return;
+    }
+    let items = resp.get("data").and_then(Value::as_array).or_else(|| resp.as_array());
+    println!();
+    match items {
+        Some(arr) if !arr.is_empty() => {
+            for e in arr {
+                let id = e.get("id").and_then(Value::as_str).unwrap_or("?");
+                let name = e.get("name").and_then(Value::as_str).unwrap_or("?");
+                println!("  {name}  {id}");
+            }
+        }
+        _ => println!("  no environments"),
+    }
+    println!();
 }
 
 async fn cmd_get(key: String, environment: String, org_id: Option<String>, json: bool, m2m: bool) -> Result<()> {
@@ -493,7 +920,7 @@ async fn cmd_set(
     let schema_id = match (schema_arr, &schema_name) {
         (None, _) => anyhow::bail!("no schemas returned from /config/schemas"),
         (Some(arr), _) if arr.is_empty() => {
-            anyhow::bail!("org has no config schemas — push one first via the smooai-config CLI or `th api config schemas create`");
+            anyhow::bail!("org has no config schemas — push one first via `th config push` or `th api config schemas create`");
         }
         (Some(arr), Some(name)) => arr
             .iter()
@@ -560,23 +987,7 @@ async fn cmd_feature_flag(key: String, environment: String, org_id: Option<Strin
     let cfg = ConfigClient::load(m2m).await?;
     let org = cfg.resolve_org(org_id)?;
 
-    // Context resolution: file path / `-` for stdin / inline JSON / empty.
-    // The "inline JSON" path lets callers do `--context '{"userId":"x"}'`
-    // without an intermediate file when the context is tiny.
-    let ctx_value: Value = match context {
-        None => serde_json::json!({}),
-        Some(raw) if raw == "-" => {
-            use std::io::Read;
-            let mut s = String::new();
-            std::io::stdin().read_to_string(&mut s).context("read stdin context")?;
-            serde_json::from_str(&s).context("parse stdin JSON context")?
-        }
-        Some(raw) if raw.trim().starts_with('{') => serde_json::from_str(&raw).context("parse inline JSON context")?,
-        Some(path) => {
-            let s = std::fs::read_to_string(&path).with_context(|| format!("read context file {path}"))?;
-            serde_json::from_str(&s).with_context(|| format!("parse JSON from {path}"))?
-        }
-    };
+    let ctx_value = parse_context(context)?;
 
     let body = serde_json::json!({
         "key": &key,
@@ -607,6 +1018,228 @@ async fn cmd_feature_flag(key: String, environment: String, org_id: Option<Strin
         other => println!("{}", serde_json::to_string(&other).unwrap_or_default()),
     }
     Ok(())
+}
+
+/// Resolve a `--context` argument into a JSON object for flag / limit
+/// evaluation: `None` → `{}`, `-` → stdin, `{...}` → inline JSON, else a file
+/// path. The "inline JSON" path lets callers do `--context '{"userId":"x"}'`
+/// without an intermediate file. Shared by `feature-flag` and `limits evaluate`.
+fn parse_context(context: Option<String>) -> Result<Value> {
+    match context {
+        None => Ok(serde_json::json!({})),
+        Some(raw) if raw == "-" => {
+            use std::io::Read;
+            let mut s = String::new();
+            std::io::stdin().read_to_string(&mut s).context("read stdin context")?;
+            serde_json::from_str(&s).context("parse stdin JSON context")
+        }
+        Some(raw) if raw.trim().starts_with('{') => serde_json::from_str(&raw).context("parse inline JSON context"),
+        Some(path) => {
+            let s = std::fs::read_to_string(&path).with_context(|| format!("read context file {path}"))?;
+            serde_json::from_str(&s).with_context(|| format!("parse JSON from {path}"))
+        }
+    }
+}
+
+/// Clamp metadata for one limit key, read from the schema's `limitsSchema`
+/// JSON-Schema node. Mirrors the `@smooai/config` `LimitDefinition`
+/// (`default`/`min`/`max`/`step`) as it serializes to JSON-Schema
+/// (`default`/`minimum`/`maximum`/`multipleOf`). SMOODEV-2306.
+#[derive(Debug, Default, serde::Serialize, PartialEq)]
+struct LimitMeta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    step: Option<f64>,
+}
+
+/// Extract per-key clamp metadata from a schema's `limitsSchema` JSON-Schema
+/// node. Tolerates the doc with or without the outer `properties` wrapper
+/// (matches [`flatten_schema`]'s defensive parsing). Each limit key serializes
+/// to a bounded JSON-Schema number: `{ type, default, minimum, maximum,
+/// multipleOf }`.
+fn extract_limit_meta(schema: &Value) -> std::collections::BTreeMap<String, LimitMeta> {
+    let mut out = std::collections::BTreeMap::new();
+    let num = |node: &Value, field: &str| node.get(field).and_then(Value::as_f64);
+    for root in [Some(schema), schema.get("properties")].into_iter().flatten() {
+        if let Some(keys) = root.get("limitsSchema").and_then(|v| v.get("properties")).and_then(|v| v.as_object()) {
+            for (k, spec) in keys {
+                out.entry(k.clone()).or_insert_with(|| LimitMeta {
+                    default: num(spec, "default"),
+                    min: num(spec, "minimum"),
+                    max: num(spec, "maximum"),
+                    step: num(spec, "multipleOf"),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Render a limit's clamp metadata as a compact `default=… min=… max=… step=…`
+/// line, omitting unset fields.
+fn format_limit_meta(meta: &LimitMeta) -> String {
+    let mut parts = Vec::new();
+    if let Some(d) = meta.default {
+        parts.push(format!("default={d}"));
+    }
+    if let Some(m) = meta.min {
+        parts.push(format!("min={m}"));
+    }
+    if let Some(m) = meta.max {
+        parts.push(format!("max={m}"));
+    }
+    if let Some(s) = meta.step {
+        parts.push(format!("step={s}"));
+    }
+    if parts.is_empty() {
+        "(no clamp metadata)".to_string()
+    } else {
+        parts.join("  ")
+    }
+}
+
+/// `th config limits …` — the fourth config kind (SMOODEV-2306). Numeric,
+/// segment-resolved, never baked. `evaluate` hits the live limits evaluator;
+/// `get`/`list` read clamp metadata from the schema; `set` writes a raw value.
+async fn cmd_limits(cmd: LimitsCmd) -> Result<()> {
+    match cmd {
+        LimitsCmd::Evaluate {
+            key,
+            environment,
+            org_id,
+            context,
+            json,
+            m2m,
+        } => cmd_limit_evaluate(key, environment, org_id, context, json, m2m).await,
+        LimitsCmd::Get {
+            key,
+            org_id,
+            schema_name,
+            json,
+            m2m,
+        } => cmd_limit_get(key, org_id, schema_name, json, m2m).await,
+        LimitsCmd::List {
+            org_id,
+            schema_name,
+            json,
+            m2m,
+        } => cmd_limit_list(org_id, schema_name, json, m2m).await,
+        LimitsCmd::Set {
+            key,
+            value,
+            environment,
+            org_id,
+            schema_name,
+            json,
+            m2m,
+        } => {
+            // Reuse the shared value-write path with the tier pinned to Limit.
+            // `reveal=true` because limit values are non-sensitive numbers —
+            // masking a number to `**` would be pure noise.
+            cmd_set(key, value, environment, org_id, Tier::Limit, schema_name, json, true, m2m).await
+        }
+    }
+}
+
+async fn cmd_limit_evaluate(key: String, environment: String, org_id: Option<String>, context: Option<String>, json: bool, m2m: bool) -> Result<()> {
+    let cfg = ConfigClient::load(m2m).await?;
+    let org = cfg.resolve_org(org_id)?;
+    let ctx_value = parse_context(context)?;
+
+    // Body shape matches the @smooai/config client's `evaluateLimit` exactly:
+    // `{ environment, context }` — the key travels in the path, not the body.
+    let body = serde_json::json!({ "environment": &environment, "context": ctx_value });
+    let path = format!("/organizations/{org}/config/limits/{}/evaluate", urlencoding::encode(&key));
+    let resp = cfg.post(&path, &body).await.with_context(|| format!("POST evaluate limit {key}"))?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+        return Ok(());
+    }
+
+    // Pretty path: print the raw resolved number on its own line (pipe-friendly).
+    match resp.get("value") {
+        Some(Value::Number(n)) => println!("{n}"),
+        Some(v) => println!("{}", serde_json::to_string(v).unwrap_or_default()),
+        None => println!("{}", serde_json::to_string(&resp).unwrap_or_default()),
+    }
+    Ok(())
+}
+
+async fn cmd_limit_list(org_id: Option<String>, schema_name: Option<String>, json: bool, m2m: bool) -> Result<()> {
+    let cfg = ConfigClient::load(m2m).await?;
+    let org = cfg.resolve_org(org_id)?;
+    let schemas = list_schemas(&cfg, &org).await?;
+
+    // Merge limit metadata across all schemas (or just the named one). First
+    // schema to declare a key wins its metadata — matches how the config
+    // server would resolve a key across schemas.
+    let mut all: std::collections::BTreeMap<String, LimitMeta> = std::collections::BTreeMap::new();
+    for s in schemas_matching(&schemas, schema_name.as_deref()) {
+        if let Some(js) = s.get("jsonSchema") {
+            for (k, meta) in extract_limit_meta(js) {
+                all.entry(k).or_insert(meta);
+            }
+        }
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&all).unwrap_or_default());
+        return Ok(());
+    }
+
+    println!();
+    if all.is_empty() {
+        println!("  {} {}", "●".dimmed(), "no limits declared in schema".dimmed());
+        println!();
+        return Ok(());
+    }
+    let max_key_len = all.keys().map(String::len).max().unwrap_or(0);
+    for (k, meta) in &all {
+        println!("  {:<width$}  {}", k.cyan(), format_limit_meta(meta).dimmed(), width = max_key_len);
+    }
+    println!();
+    Ok(())
+}
+
+async fn cmd_limit_get(key: String, org_id: Option<String>, schema_name: Option<String>, json: bool, m2m: bool) -> Result<()> {
+    let cfg = ConfigClient::load(m2m).await?;
+    let org = cfg.resolve_org(org_id)?;
+    let schemas = list_schemas(&cfg, &org).await?;
+
+    let meta = schemas_matching(&schemas, schema_name.as_deref())
+        .into_iter()
+        .find_map(|s| s.get("jsonSchema").and_then(|js| extract_limit_meta(js).remove(&key)));
+
+    let Some(meta) = meta else {
+        anyhow::bail!("limit `{key}` not declared in the org's config schema. Run `th config limits list` to see declared limits.");
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&meta).unwrap_or_default());
+        return Ok(());
+    }
+    println!();
+    println!("  {}  {}", key.cyan().bold(), format_limit_meta(&meta).dimmed());
+    println!();
+    Ok(())
+}
+
+/// Filter remote schema entries by an optional `--schema-name` (returns all
+/// when `None`). Shared by `limits list` / `limits get`.
+fn schemas_matching<'a>(schemas: &'a [Value], name: Option<&str>) -> Vec<&'a Value> {
+    schemas
+        .iter()
+        .filter(|s| match name {
+            Some(n) => s.get("name").and_then(|v| v.as_str()) == Some(n),
+            None => true,
+        })
+        .collect()
 }
 
 async fn cmd_delete(key: String, environment: String, org_id: Option<String>, force: bool, m2m: bool) -> Result<()> {
@@ -760,6 +1393,10 @@ impl ConfigClient {
 
     async fn put(&self, path: &str, body: &Value) -> Result<Value> {
         self.send(reqwest::Method::PUT, path, Some(body)).await
+    }
+
+    async fn patch(&self, path: &str, body: &Value) -> Result<Value> {
+        self.send(reqwest::Method::PATCH, path, Some(body)).await
     }
 
     async fn delete(&self, path: &str) -> Result<Value> {
@@ -936,8 +1573,8 @@ fn load_local_schema_json() -> Result<(std::path::PathBuf, Value)> {
     if !path.exists() {
         anyhow::bail!(
             "no `.smooai-config/schema.json` in {}.\n\
-             Build the schema first (the @smooai/config build step writes it from config.ts), \
-             or scaffold a new package with `th config init`.",
+             Generate one from your `config.ts` with `th config build`, scaffold a fresh \
+             `.smooai-config/` with `th config init`, or fetch an existing remote schema with `th config pull`.",
             cwd.display()
         );
     }
@@ -958,7 +1595,11 @@ fn pick_remote_schema<'a>(remote_schemas: &'a [Value], flag: Option<&str>, local
                 .iter()
                 .filter_map(|s| s.get("name").and_then(|v| v.as_str()).map(str::to_string))
                 .collect();
-            format!("schema `{name}` not found. Available: {}", available.join(", "))
+            format!(
+                "schema `{name}` not found. Available: {}.\n\
+                 To create a new schema named `{name}`, omit `--schema-name` and set \"$smooaiName\": \"{name}\" in schema.json.",
+                available.join(", ")
+            )
         })?));
     }
     if let Some(local) = local_schema {
@@ -971,6 +1612,34 @@ fn pick_remote_schema<'a>(remote_schemas: &'a [Value], flag: Option<&str>, local
         }
     }
     Ok(remote_schemas.first())
+}
+
+/// Decide which remote schema `pull` should write, given the remote
+/// schema names and an optional `--schema-name` flag. Pure so it can
+/// be unit-tested without a live API.
+///
+/// - flag set + match  → `Ok(index)`
+/// - flag set + no match → `Err(...)` listing available names
+/// - no flag, 0 remote → `Err("no remote schemas …")`
+/// - no flag, 1 remote → `Ok(0)` (auto-select the only one)
+/// - no flag, >1 remote → `Err(...)` — never silently pick; the user
+///   must disambiguate with `--schema-name`
+fn resolve_pull_schema(names: &[&str], flag: Option<&str>) -> std::result::Result<usize, String> {
+    if let Some(name) = flag {
+        return names
+            .iter()
+            .position(|n| *n == name)
+            .ok_or_else(|| format!("schema `{name}` not found. Available: {}", names.join(", ")));
+    }
+    match names.len() {
+        0 => Err("no remote schemas found for this org".to_string()),
+        1 => Ok(0),
+        _ => Err(format!(
+            "org has {} config schemas — refusing to guess. Pass `--schema-name <name>` to pick one. Available: {}",
+            names.len(),
+            names.join(", ")
+        )),
+    }
 }
 
 /// List remote schemas for an org, normalising both `[...]` and
@@ -1078,7 +1747,11 @@ async fn cmd_pull(org_id: Option<String>, schema_name: Option<String>, force: bo
     let cfg = ConfigClient::load(m2m).await?;
     let org = cfg.resolve_org(org_id)?;
     let remote_schemas = list_schemas(&cfg, &org).await?;
-    let picked = pick_remote_schema(&remote_schemas, schema_name.as_deref(), None)?.context("no remote schemas found for this org")?;
+    // Keep positions aligned with `remote_schemas` (unnamed entries map
+    // to "" so the returned index stays valid as a slice index).
+    let names: Vec<&str> = remote_schemas.iter().map(|s| s.get("name").and_then(|v| v.as_str()).unwrap_or("")).collect();
+    let idx = resolve_pull_schema(&names, schema_name.as_deref()).map_err(|e| anyhow::anyhow!(e))?;
+    let picked = &remote_schemas[idx];
 
     let json_schema = picked.get("jsonSchema").cloned().context("remote schema entry has no jsonSchema field")?;
 
@@ -1128,6 +1801,65 @@ async fn cmd_diff(org_id: Option<String>, schema_name: Option<String>, json: boo
         println!();
     }
     Ok(())
+}
+
+/// What `th config sync` should do, decided purely from its flags.
+/// Kept separate from the I/O so the direction logic is unit-testable
+/// without a live API. clap already guarantees `push` and `pull` are not
+/// both set (`conflicts_with`), but we treat that case defensively here
+/// too so the function is correct in isolation.
+#[derive(Debug, PartialEq, Eq)]
+enum SyncDirection {
+    /// No direction (or `--dry-run`): compute + print the diff, apply nothing.
+    DiffOnly,
+    /// `--push`: apply local → remote.
+    Push,
+    /// `--pull`: apply remote → local.
+    Pull,
+}
+
+/// Decide the sync direction from the `--push` / `--pull` / `--dry-run`
+/// flags. `--dry-run` always wins → `DiffOnly`, even with a direction.
+/// Bare `sync` (neither flag) → `DiffOnly`. Pure; see [`SyncDirection`].
+fn decide_sync_direction(push: bool, pull: bool, dry_run: bool) -> SyncDirection {
+    if dry_run || (!push && !pull) {
+        SyncDirection::DiffOnly
+    } else if push {
+        SyncDirection::Push
+    } else {
+        SyncDirection::Pull
+    }
+}
+
+/// `th config sync` — a thin, SAFE wrapper over `diff` / `push` / `pull`.
+/// Direction is explicit (never a two-way merge); the no-direction path
+/// only ever reads. Genuinely reuses the existing command paths — it
+/// delegates to `cmd_diff` / `cmd_push` / `cmd_pull` rather than
+/// re-implementing any HTTP logic.
+#[allow(clippy::too_many_arguments)]
+async fn cmd_sync(push: bool, pull: bool, org_id: Option<String>, schema_name: Option<String>, json: bool, dry_run: bool, m2m: bool) -> Result<()> {
+    match decide_sync_direction(push, pull, dry_run) {
+        SyncDirection::DiffOnly => {
+            // Reuse the read-only diff renderer (same comparison the
+            // dry-run side of `push` performs).
+            cmd_diff(org_id, schema_name, json, m2m).await?;
+            if !json {
+                println!("  {} {}", "sync:".dimmed(), "review the diff above, then choose a direction:".dimmed());
+                println!("      {}  apply local → remote", "th config sync --push".cyan());
+                println!("      {}  apply remote → local", "th config sync --pull".cyan());
+                println!();
+            }
+            Ok(())
+        }
+        // local → remote: identical to `th config push`. The `pull`-path
+        // multi-schema guard (`resolve_pull_schema`) lives inside
+        // `cmd_pull`; the push path uses `pick_remote_schema`.
+        SyncDirection::Push => cmd_push(org_id, schema_name, None, false, m2m).await,
+        // remote → local: identical to `th config pull`. `--force` is true
+        // here because sync's whole job is to reconcile an existing file;
+        // refusing on an existing schema.json would defeat the command.
+        SyncDirection::Pull => cmd_pull(org_id, schema_name, true, m2m).await,
+    }
 }
 
 /// Pretty-print a schema diff. When `is_new` is true (no remote
@@ -1205,6 +1937,236 @@ fn cmd_init(directory: Option<String>, force: bool) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// `th config build` (pearl th-4d1d6c) — generate `.smooai-config/schema.json`
+// from the consumer's `.smooai-config/config.ts`.
+//
+// The realistic, robust implementation (NOT fragile Zod runtime
+// introspection): shell out to `tsx` and dynamically `import()` the
+// consumer's `config.ts`. The `@smooai/config` `defineConfig(...)` output
+// exposes everything we need as plain, documented fields:
+//
+//   - `PublicConfigKeys` / `SecretConfigKeys` / `FeatureFlagKeys`
+//     — `{ WIRE_KEY: schemaKey }` maps; the UPPER_SNAKE wire names are the
+//       object keys.
+//   - `serializedAllConfigSchemaJsonSchema.properties.<tier>ConfigSchema
+//      .properties.<WIRE_KEY>.type` — `"string"` / `"boolean"`.
+//
+// We read those and emit the flat wire format byte-for-byte identically to
+// the monorepo's canonical generator (`scripts/build-smooai-config-schema.ts`):
+//
+//   { "$schema", "generatedFromVersion", "public":[…], "secret":[…],
+//     "featureFlag":[…], "types": { wireKey: "string"|"boolean" } }
+//
+// This is robust because it depends only on stable, exported runtime
+// fields — never on parsing TypeScript or introspecting Zod internals.
+// Requirement: the consumer must have `@smooai/config` + `tsx` installed
+// next to `config.ts` (documented in the help text).
+// ---------------------------------------------------------------------------
+
+/// Embedded Node/ESM generator run via `tsx`. Argument 1 is the absolute
+/// path to the consumer's `config.ts`. Prints the flat schema.json to
+/// stdout. Mirrors `scripts/build-smooai-config-schema.ts` in the smooai
+/// monorepo so output is byte-identical (incl. `generatedFromVersion` and
+/// 4-space indent + trailing newline).
+const BUILD_GENERATOR_JS: &str = r#"
+import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+
+const target = process.argv[2];
+const mod = await import(target);
+const cfg = (mod && mod.default) ? mod.default : mod;
+
+function extractKeys(map) {
+    return Object.keys(map ?? {}).sort();
+}
+
+function buildTypes(cfg) {
+    const out = {};
+    const tiers = cfg.serializedAllConfigSchemaJsonSchema?.properties ?? {};
+    for (const tier of Object.values(tiers)) {
+        const props = tier?.properties ?? {};
+        for (const [wireKey, def] of Object.entries(props)) {
+            if (typeof def?.type === 'string') out[wireKey] = def.type;
+        }
+    }
+    return Object.fromEntries(Object.entries(out).sort(([a], [b]) => a.localeCompare(b)));
+}
+
+function resolveVersion(target) {
+    try {
+        const require = createRequire(target);
+        const entry = require.resolve('@smooai/config');
+        const pkgRoot = dirname(dirname(entry));
+        const pkg = JSON.parse(readFileSync(join(pkgRoot, 'package.json'), 'utf8'));
+        return pkg.version ?? 'unknown';
+    } catch {
+        return 'unknown';
+    }
+}
+
+const payload = {
+    $schema: 'https://smoo.ai/schemas/smooai-config-schema-v1.json',
+    generatedFromVersion: `@smooai/config@${resolveVersion(target)}`,
+    public: extractKeys(cfg.PublicConfigKeys),
+    secret: extractKeys(cfg.SecretConfigKeys),
+    featureFlag: extractKeys(cfg.FeatureFlagKeys),
+    types: buildTypes(cfg),
+};
+process.stdout.write(JSON.stringify(payload, null, 4) + '\n');
+"#;
+
+/// Resolve the `.smooai-config` directory from an optional `--directory`
+/// argument. Accepts either the parent dir (we append `.smooai-config`) or
+/// the `.smooai-config` dir itself. Defaults to `cwd/.smooai-config`.
+fn resolve_config_dir(directory: Option<String>) -> Result<std::path::PathBuf> {
+    let base = match directory {
+        Some(d) => std::path::PathBuf::from(d),
+        None => std::env::current_dir().context("get current dir")?,
+    };
+    if base.file_name().and_then(|n| n.to_str()) == Some(".smooai-config") {
+        Ok(base)
+    } else {
+        Ok(base.join(".smooai-config"))
+    }
+}
+
+/// Find a `tsx` runner. Prefers the consumer's local
+/// `node_modules/.bin/tsx`, then a `tsx` on `PATH`, then `npx tsx`.
+/// Returns the command + leading args (without the script path).
+fn resolve_tsx_command(config_dir: &std::path::Path) -> Vec<String> {
+    // Walk up from the config dir looking for a local node_modules/.bin/tsx
+    // (covers both `<repo>/.smooai-config` and nested-package layouts).
+    let mut dir = config_dir.parent();
+    while let Some(d) = dir {
+        let candidate = d.join("node_modules").join(".bin").join("tsx");
+        if candidate.is_file() {
+            return vec![candidate.to_string_lossy().into_owned()];
+        }
+        dir = d.parent();
+    }
+    if which_on_path("tsx") {
+        vec!["tsx".to_string()]
+    } else {
+        vec!["npx".to_string(), "--yes".to_string(), "tsx".to_string()]
+    }
+}
+
+/// Cheap PATH lookup — avoids a dep on the `which` crate.
+fn which_on_path(bin: &str) -> bool {
+    let Ok(path) = std::env::var("PATH") else { return false };
+    std::env::split_paths(&path).any(|p| p.join(bin).is_file())
+}
+
+/// Generate the schema.json wire JSON from `config.ts` by running the
+/// embedded generator under `tsx`. Returns the raw stdout (already
+/// 4-space-indented + trailing newline, matching the canonical generator).
+fn generate_schema_json(config_dir: &std::path::Path) -> Result<String> {
+    let config_ts = config_dir.join("config.ts");
+    if !config_ts.is_file() {
+        anyhow::bail!(
+            "no `config.ts` in {}.\n\
+             Scaffold one with `th config init`, then add your keys before running `th config build`.",
+            config_dir.display()
+        );
+    }
+
+    // Write the embedded generator to a temp .mjs next to nowhere in
+    // particular — tsx imports the consumer's config.ts by absolute path,
+    // so the generator's own location doesn't matter for module resolution.
+    let tmp = tempfile::Builder::new()
+        .prefix("smooth-config-build-")
+        .suffix(".mjs")
+        .tempfile()
+        .context("create temp generator file")?;
+    std::fs::write(tmp.path(), BUILD_GENERATOR_JS).context("write temp generator")?;
+
+    let runner = resolve_tsx_command(config_dir);
+    let (cmd, lead_args) = runner.split_first().expect("resolve_tsx_command returns at least one element");
+
+    let mut command = std::process::Command::new(cmd);
+    command
+        .args(lead_args)
+        .arg(tmp.path())
+        .arg(&config_ts)
+        // Run from the config dir's parent so `@smooai/config` resolves
+        // against the consumer's node_modules.
+        .current_dir(config_dir.parent().unwrap_or(config_dir));
+
+    let output = command.output().with_context(|| {
+        format!(
+            "run `{}` — is `tsx` installed next to {}? \
+             `th config build` needs `@smooai/config` + `tsx` available (e.g. `pnpm add -D tsx`).",
+            runner.join(" "),
+            config_dir.display()
+        )
+    })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "schema generation failed (tsx exited {}).\n{}\n\
+             Common causes: `@smooai/config` not installed, or `config.ts` has a syntax/import error.",
+            output.status,
+            stderr.trim()
+        );
+    }
+
+    let stdout = String::from_utf8(output.stdout).context("generator stdout was not valid UTF-8")?;
+    // Validate it's the wire shape we expect before handing it back —
+    // catches a config.ts that exports the wrong thing.
+    let parsed: Value = serde_json::from_str(stdout.trim()).with_context(|| format!("parse generator output as JSON:\n{stdout}"))?;
+    if !parsed.get("public").map(Value::is_array).unwrap_or(false) {
+        anyhow::bail!("generator output is missing the `public` array — does config.ts export a `defineConfig(...)` default?");
+    }
+    Ok(stdout)
+}
+
+fn cmd_build(directory: Option<String>, stdout: bool, check: bool) -> Result<()> {
+    let config_dir = resolve_config_dir(directory)?;
+    let fresh = generate_schema_json(&config_dir)?;
+    let schema_path = config_dir.join("schema.json");
+
+    if stdout {
+        print!("{fresh}");
+        return Ok(());
+    }
+
+    if check {
+        if !schema_path.exists() {
+            anyhow::bail!("{} is missing. Run `th config build` to generate it.", schema_path.display());
+        }
+        let existing = std::fs::read_to_string(&schema_path).with_context(|| format!("read {}", schema_path.display()))?;
+        if existing != fresh {
+            anyhow::bail!("{} is OUT OF DATE. Run `th config build` and commit the result.", schema_path.display());
+        }
+        println!();
+        println!("  {} {} is up to date", "✓".green().bold(), schema_path.display().to_string().cyan());
+        println!();
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(&config_dir).with_context(|| format!("create {}", config_dir.display()))?;
+    std::fs::write(&schema_path, &fresh).with_context(|| format!("write {}", schema_path.display()))?;
+
+    let key_count = serde_json::from_str::<Value>(fresh.trim()).ok().map(|v| flatten_schema(&v).len()).unwrap_or(0);
+    println!();
+    println!(
+        "  {} generated {} ({} keys)",
+        "✓".green().bold(),
+        schema_path.display().to_string().cyan(),
+        key_count
+    );
+    println!(
+        "  {} {}",
+        "next:".dimmed(),
+        "`th config diff` to compare with remote, then `th config push`".dimmed()
+    );
+    println!();
+    Ok(())
+}
+
 // `ConfigClient::post` is added in Lane D — Lane C only needed GET/PUT.
 impl ConfigClient {
     async fn post(&self, path: &str, body: &Value) -> Result<Value> {
@@ -1227,6 +2189,67 @@ mod tests {
     fn mask_secret_long() {
         assert_eq!(mask_secret("abcdef"), "**cdef");
         assert_eq!(mask_secret("very-secret-value"), "*************alue");
+    }
+
+    #[test]
+    fn resolve_pull_schema_single_auto_selects() {
+        assert_eq!(resolve_pull_schema(&["only"], None), Ok(0));
+    }
+
+    #[test]
+    fn resolve_pull_schema_empty_errors() {
+        let err = resolve_pull_schema(&[], None).expect_err("no schemas should error");
+        assert!(err.contains("no remote schemas"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_pull_schema_multi_without_flag_refuses() {
+        let err = resolve_pull_schema(&["alpha", "beta"], None).expect_err("ambiguous should error");
+        assert!(err.contains("refusing to guess"), "got: {err}");
+        assert!(err.contains("--schema-name"), "got: {err}");
+        // Lists the available names so the user can pick.
+        assert!(err.contains("alpha") && err.contains("beta"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_pull_schema_multi_with_matching_flag_picks() {
+        assert_eq!(resolve_pull_schema(&["alpha", "beta"], Some("beta")), Ok(1));
+    }
+
+    #[test]
+    fn resolve_pull_schema_flag_no_match_errors() {
+        let err = resolve_pull_schema(&["alpha", "beta"], Some("gamma")).expect_err("missing name should error");
+        assert!(err.contains("`gamma` not found"), "got: {err}");
+        assert!(err.contains("alpha") && err.contains("beta"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_body_accepts_inline_json() {
+        let v = parse_body(r#"{"name":"production"}"#).expect("inline JSON parses");
+        assert_eq!(v["name"], "production");
+    }
+
+    #[test]
+    fn parse_body_rejects_garbage() {
+        assert!(parse_body("not json at all").is_err());
+    }
+
+    #[test]
+    fn sync_direction_bare_is_diff_only() {
+        assert_eq!(decide_sync_direction(false, false, false), SyncDirection::DiffOnly);
+    }
+
+    #[test]
+    fn sync_direction_push_and_pull_apply() {
+        assert_eq!(decide_sync_direction(true, false, false), SyncDirection::Push);
+        assert_eq!(decide_sync_direction(false, true, false), SyncDirection::Pull);
+    }
+
+    #[test]
+    fn sync_direction_dry_run_always_wins() {
+        // --dry-run forces diff-only even with an explicit direction.
+        assert_eq!(decide_sync_direction(true, false, true), SyncDirection::DiffOnly);
+        assert_eq!(decide_sync_direction(false, true, true), SyncDirection::DiffOnly);
     }
 
     #[test]
@@ -1301,6 +2324,110 @@ mod tests {
         assert_eq!(Tier::Public.as_wire(), "public");
         assert_eq!(Tier::Secret.as_wire(), "secret");
         assert_eq!(Tier::FeatureFlag.as_wire(), "feature_flag");
+        // SMOODEV-2306: matches `assertKeyDefined(key, 'limit')` on the server.
+        assert_eq!(Tier::Limit.as_wire(), "limit");
+    }
+
+    // ----- Limits tests (SMOODEV-2306) -------------------------------------
+
+    #[test]
+    fn parse_limit_value_accepts_finite_numbers() {
+        assert_eq!(parse_limit_value("12").unwrap(), "12");
+        assert_eq!(parse_limit_value("4096").unwrap(), "4096");
+        // Leading/trailing whitespace trimmed on the accepted value.
+        assert_eq!(parse_limit_value("  3.5 ").unwrap(), "3.5");
+        assert_eq!(parse_limit_value("-1").unwrap(), "-1");
+    }
+
+    #[test]
+    fn parse_limit_value_rejects_non_numeric_and_nonfinite() {
+        assert!(parse_limit_value("abc").is_err());
+        assert!(parse_limit_value("").is_err());
+        assert!(parse_limit_value("   ").is_err());
+        // NaN / inf parse as f64 but aren't finite — a limit must be a real number.
+        assert!(parse_limit_value("NaN").is_err());
+        assert!(parse_limit_value("inf").is_err());
+    }
+
+    #[test]
+    fn extract_limit_meta_reads_wrapped_json_schema() {
+        // The remote `jsonSchema` shape the config server returns.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "limitsSchema": { "properties": {
+                    "agentMaxIterations": { "type": "number", "default": 12, "minimum": 1, "maximum": 50 },
+                    "maxTokens": { "type": "number", "default": 4096, "multipleOf": 256 },
+                }},
+            },
+        });
+        let m = extract_limit_meta(&schema);
+        assert_eq!(m.len(), 2);
+        let ami = m.get("agentMaxIterations").expect("agentMaxIterations");
+        assert_eq!(ami.default, Some(12.0));
+        assert_eq!(ami.min, Some(1.0));
+        assert_eq!(ami.max, Some(50.0));
+        assert_eq!(ami.step, None);
+        let mt = m.get("maxTokens").expect("maxTokens");
+        assert_eq!(mt.default, Some(4096.0));
+        assert_eq!(mt.step, Some(256.0)); // multipleOf → step
+        assert_eq!(mt.min, None);
+    }
+
+    #[test]
+    fn extract_limit_meta_tolerates_unwrapped_shape() {
+        let schema = serde_json::json!({
+            "limitsSchema": { "properties": { "maxTokens": { "default": 4096, "multipleOf": 256 } } },
+        });
+        let m = extract_limit_meta(&schema);
+        assert_eq!(m.get("maxTokens").and_then(|x| x.step), Some(256.0));
+    }
+
+    #[test]
+    fn extract_limit_meta_empty_when_no_limits() {
+        assert!(extract_limit_meta(&serde_json::json!({})).is_empty());
+        // A schema with only other tiers contributes no limits.
+        let other = serde_json::json!({ "properties": { "publicConfigSchema": { "properties": { "x": {} } } } });
+        assert!(extract_limit_meta(&other).is_empty());
+    }
+
+    #[test]
+    fn format_limit_meta_omits_unset_fields() {
+        let meta = LimitMeta {
+            default: Some(12.0),
+            min: Some(1.0),
+            max: Some(50.0),
+            step: None,
+        };
+        let s = format_limit_meta(&meta);
+        assert!(s.contains("default=12") && s.contains("min=1") && s.contains("max=50"), "got: {s}");
+        assert!(!s.contains("step"), "got: {s}");
+    }
+
+    #[test]
+    fn format_limit_meta_handles_empty() {
+        assert_eq!(format_limit_meta(&LimitMeta::default()), "(no clamp metadata)");
+    }
+
+    #[test]
+    fn schemas_matching_filters_by_name_else_all() {
+        let schemas = vec![serde_json::json!({"name": "alpha"}), serde_json::json!({"name": "beta"})];
+        assert_eq!(schemas_matching(&schemas, None).len(), 2);
+        let only_beta = schemas_matching(&schemas, Some("beta"));
+        assert_eq!(only_beta.len(), 1);
+        assert_eq!(only_beta[0].get("name").and_then(|v| v.as_str()), Some("beta"));
+        assert!(schemas_matching(&schemas, Some("gamma")).is_empty());
+    }
+
+    #[test]
+    fn parse_context_defaults_to_empty_object() {
+        assert_eq!(parse_context(None).unwrap(), serde_json::json!({}));
+    }
+
+    #[test]
+    fn parse_context_reads_inline_json() {
+        let v = parse_context(Some(r#"{"orgId":"x"}"#.to_string())).unwrap();
+        assert_eq!(v["orgId"], "x");
     }
 
     #[test]

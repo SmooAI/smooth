@@ -31,10 +31,21 @@
     --color-sidebar-accent: oklch(0.2 0.02 260);
 }
 
+/* Fixed-height app shell: the page itself never scrolls (only inner panes do),
+ * so on iOS the view can't rubber-band or scroll off. `height: 100%` gives the
+ * `h-dvh` shell a concrete parent; `overscroll-behavior: none` stops the pull-to-
+ * refresh / bounce chaining to the document. Pearl th-ios-scroll. */
+html,
+body,
+#root {
+    height: 100%;
+}
+
 body {
     background: var(--color-background);
     color: var(--color-foreground);
     font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+    overscroll-behavior: none;
 }
 
 /* Aliases used by chat.tsx and operators.tsx — these were referenced

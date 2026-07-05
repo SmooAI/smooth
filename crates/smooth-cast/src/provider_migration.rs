@@ -140,11 +140,65 @@ pub fn load_providers_with_migration(path: &Path) -> anyhow::Result<ProviderRegi
             );
         }
         // Best-effort flush so the user only sees the migration once.
-        if let Err(e) = registry.save_to_file(path) {
-            tracing::warn!(error = %e, "failed to save migrated providers.json — in-memory migration still applied");
+        //
+        // Save via raw JSON, NOT `registry.save_to_file`: the typed
+        // serializer drops any field the published `ProviderConfig` lacks
+        // — including per-provider `max_tokens`. Rewriting the file as a
+        // `Value` preserves those. If the raw path fails to load/parse we
+        // fall back to the typed save (correct model names, no worse than
+        // before on the unknown-field front).
+        match crate::providers::load_value(path) {
+            Ok(mut root) => {
+                migrate_value_in_place(&mut root);
+                if let Err(e) = crate::providers::save_value(path, &root) {
+                    tracing::warn!(error = %e, "failed to save migrated providers.json — in-memory migration still applied");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "raw providers.json reload failed; falling back to typed save (drops unknown fields)");
+                if let Err(e) = registry.save_to_file(path) {
+                    tracing::warn!(error = %e, "failed to save migrated providers.json — in-memory migration still applied");
+                }
+            }
         }
     }
     Ok(registry)
+}
+
+/// Apply the `smooth-*` alias migration to a raw providers.json `Value`,
+/// preserving unknown fields (per-provider `max_tokens`, etc.). Rewrites
+/// every string under a `model` or `default_model` key — the only places
+/// model names live in providers.json (routing slots + provider
+/// `default_model`), including nested `fallback` chains. Returns `true` if
+/// anything changed.
+pub fn migrate_value_in_place(root: &mut serde_json::Value) -> bool {
+    use serde_json::Value;
+    fn walk(v: &mut Value, changed: &mut bool) {
+        match v {
+            Value::Object(map) => {
+                for (k, val) in map.iter_mut() {
+                    if (k == "model" || k == "default_model") && val.is_string() {
+                        if let Value::String(s) = val {
+                            if smooth_alias::migrate_in_place(s) {
+                                *changed = true;
+                            }
+                        }
+                    } else {
+                        walk(val, changed);
+                    }
+                }
+            }
+            Value::Array(arr) => {
+                for e in arr.iter_mut() {
+                    walk(e, changed);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut changed = false;
+    walk(root, &mut changed);
+    changed
 }
 
 /// In-memory variant for callers that have a registry from JSON or
@@ -191,10 +245,10 @@ mod tests {
         assert_eq!(r.routing.coding.model, "deepseek-v4-flash");
         assert_eq!(r.routing.reasoning.as_ref().unwrap().model, "deepseek-v4-pro");
         assert_eq!(r.routing.reviewing.model, "minimax-m2.7-direct");
-        assert_eq!(r.routing.judge.model, "groq-llama-3.3-70b");
+        assert_eq!(r.routing.judge.model, "groq-gpt-oss-120b");
         assert_eq!(r.routing.summarize.model, "gemini-2.5-flash");
         assert_eq!(r.routing.default.model, "deepseek-v4-flash");
-        assert_eq!(r.routing.fast.as_ref().unwrap().model, "groq-llama-3.1-8b");
+        assert_eq!(r.routing.fast.as_ref().unwrap().model, "groq-gpt-oss-20b");
     }
 
     #[test]
@@ -269,14 +323,64 @@ mod tests {
         // Load via the wrapper: should rewrite + save back.
         let loaded = load_providers_with_migration(&path).expect("load");
         assert_eq!(loaded.routing.coding.model, "deepseek-v4-flash");
-        assert_eq!(loaded.routing.fast.as_ref().unwrap().model, "groq-llama-3.1-8b");
+        assert_eq!(loaded.routing.fast.as_ref().unwrap().model, "groq-gpt-oss-20b");
 
         // Read again with raw load_from_file — the file on disk must
         // now hold the concrete names too.
         let raw_reloaded = ProviderRegistry::load_from_file(&path).expect("reload");
         assert_eq!(raw_reloaded.routing.coding.model, "deepseek-v4-flash");
         assert_eq!(raw_reloaded.routing.reasoning.as_ref().unwrap().model, "deepseek-v4-pro");
-        assert_eq!(raw_reloaded.routing.judge.model, "groq-llama-3.3-70b");
+        assert_eq!(raw_reloaded.routing.judge.model, "groq-gpt-oss-120b");
+    }
+
+    #[test]
+    fn load_with_migration_preserves_per_provider_max_tokens() {
+        // The whole reason the migration save goes through raw JSON: a
+        // config that still holds a stale `smooth-*` alias AND a
+        // per-provider `max_tokens` must keep the max_tokens after the
+        // save-back. The typed `save_to_file` would silently drop it.
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = tmp.path().join("providers.json");
+        let raw = serde_json::json!({
+            "providers": [
+                { "id": "ollama", "api_url": "http://localhost:11434/v1", "api_key": "", "api_format": "OpenAiCompat", "default_model": "llama3.3", "max_tokens": 8192 }
+            ],
+            "routing": {
+                "coding": { "provider": "ollama", "model": "smooth-coding" },
+                "reasoning": { "provider": "ollama", "model": "llama3.3" },
+                "reviewing": { "provider": "ollama", "model": "llama3.3" },
+                "judge": { "provider": "ollama", "model": "llama3.3" },
+                "summarize": { "provider": "ollama", "model": "llama3.3" },
+                "fast": { "provider": "ollama", "model": "llama3.3" },
+                "default": { "provider": "ollama", "model": "llama3.3" }
+            }
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&raw).unwrap()).unwrap();
+
+        // Triggers a rewrite (smooth-coding → concrete) hence a save-back.
+        let _ = load_providers_with_migration(&path).expect("load");
+
+        let on_disk: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // Alias got rewritten...
+        assert_eq!(on_disk["routing"]["coding"]["model"], "deepseek-v4-flash");
+        // ...and max_tokens survived.
+        assert_eq!(on_disk["providers"][0]["max_tokens"], 8192);
+    }
+
+    #[test]
+    fn migrate_value_in_place_rewrites_nested_model_keys() {
+        let mut root = serde_json::json!({
+            "providers": [{ "id": "g", "default_model": "smooth-default", "max_tokens": 4096 }],
+            "routing": { "coding": { "provider": "g", "model": "smooth-coding", "fallback": { "provider": "g", "model": "smooth-reasoning" } } }
+        });
+        assert!(migrate_value_in_place(&mut root));
+        assert_eq!(root["providers"][0]["default_model"], "deepseek-v4-flash");
+        assert_eq!(root["routing"]["coding"]["model"], "deepseek-v4-flash");
+        assert_eq!(root["routing"]["coding"]["fallback"]["model"], "deepseek-v4-pro");
+        // Non-model field untouched.
+        assert_eq!(root["providers"][0]["max_tokens"], 4096);
+        // Idempotent.
+        assert!(!migrate_value_in_place(&mut root));
     }
 
     #[test]
@@ -303,6 +407,35 @@ mod tests {
         assert_eq!(coding.new, "deepseek-v4-flash");
         let fast = rewrites.iter().find(|r| r.slot == "fast").expect("fast rewrite");
         assert_eq!(fast.old, "smooth-fast");
-        assert_eq!(fast.new, "groq-llama-3.1-8b");
+        assert_eq!(fast.new, "groq-gpt-oss-20b");
+    }
+
+    /// SMOODEV-2097: a config that already ran the smooth-* migration is
+    /// pinned to the *concrete* Groq Llama names. The gateway then
+    /// removed those models, so the second migration step must bump them
+    /// to gpt-oss — even though they carry no `smooth-` prefix.
+    #[test]
+    fn migrate_bumps_already_migrated_groq_llama_to_gpt_oss() {
+        let mut r = ProviderRegistry::new().with_routing(ModelRouting {
+            coding: ModelSlot::new("smooai-gateway", "deepseek-v4-flash"),
+            reasoning: Some(ModelSlot::new("smooai-gateway", "deepseek-v4-pro")),
+            reviewing: ModelSlot::new("smooai-gateway", "minimax-m2.7-direct"),
+            judge: ModelSlot::new("smooai-gateway", "groq-llama-3.3-70b"),
+            summarize: ModelSlot::new("smooai-gateway", "gemini-2.5-flash"),
+            default: ModelSlot::new("smooai-gateway", "deepseek-v4-flash"),
+            fast: Some(ModelSlot::new("smooai-gateway", "groq-llama-3.1-8b")),
+            planning: None,
+        });
+        let rewrites = migrate_provider_registry(&mut r);
+        // Only judge + fast change; the rest were already live concrete
+        // names.
+        assert_eq!(rewrites.len(), 2, "rewrites = {rewrites:?}");
+        assert_eq!(r.routing.judge.model, "groq-gpt-oss-120b");
+        assert_eq!(r.routing.fast.as_ref().unwrap().model, "groq-gpt-oss-20b");
+        let judge = rewrites.iter().find(|r| r.slot == "judge").expect("judge rewrite");
+        assert_eq!(judge.old, "groq-llama-3.3-70b");
+        assert_eq!(judge.new, "groq-gpt-oss-120b");
+        // Idempotent: a second pass makes no further changes.
+        assert!(migrate_provider_registry(&mut r).is_empty());
     }
 }

@@ -9,25 +9,37 @@ use super::{print_json, print_list_envelope, read_body, require_authed};
 pub enum Cmd {
     /// List jobs. Filterable via query params.
     List {
+        /// Max number of jobs to return.
         #[arg(long)]
         limit: Option<u64>,
+        /// Number of jobs to skip for pagination.
         #[arg(long)]
         offset: Option<u64>,
-        #[arg(long)]
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
         organization_id: Option<String>,
+        /// Filter by job status (e.g. `pending`, `running`, `completed`).
         #[arg(long)]
         status: Option<String>,
-        #[arg(long, name = "type")]
+        /// Filter by job type.
+        #[arg(long, name = "type", value_name = "TYPE")]
         type_: Option<String>,
     },
+    /// Show one job's full record (status, payload, result).
     Show {
+        /// The job id from `th api jobs list`.
         job_id: String,
     },
+    /// Create a job (JSON body); use `-` for stdin.
     Create {
+        /// JSON job body, or `-` to read from stdin.
         body: String,
     },
+    /// Patch an existing job with a partial JSON body.
     Update {
+        /// The job id from `th api jobs list`.
         job_id: String,
+        /// JSON patch body, or `-` to read from stdin.
         body: String,
     },
 }

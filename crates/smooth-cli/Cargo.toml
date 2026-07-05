@@ -11,10 +11,20 @@ description = "Smoo AI CLI — agent orchestration, config management, and platf
 name = "th"
 path = "src/main.rs"
 
+[features]
+# `admin` gates the `th admin` superadmin/cross-org command tree. It is
+# NOT in `default`, so the public release/brew binary excludes it. Local
+# and internal builds opt in via `cargo install … --features admin`
+# (see the root package.json `install:th` / `install:th:full` scripts).
+default = []
+admin = []
+
 [dependencies]
 smooth-bench.workspace = true
+smooth-tmux.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
 smooth-bigsmooth.workspace = true
-smooth-bootstrap-bill = { workspace = true, default-features = false, features = ["server"] }
 smooth-code.workspace = true
 smooth-diver.workspace = true
 smooth-pearls.workspace = true
@@ -39,6 +49,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
 chrono.workspace = true
+chrono-tz.workspace = true
 dirs-next.workspace = true
 toml.workspace = true
 owo-colors.workspace = true
@@ -50,11 +61,15 @@ futures-util.workspace = true
 # and url-encode query params for the list endpoint.
 walkdir = "2"
 urlencoding = "2"
+# SMOODEV-2090: `th testing runs report` converts a JUnit XML report (e.g.
+# cargo-nextest output) into CTRF before submitting, so CI never needs a
+# separate junit-to-ctrf step. quick-xml is the de-facto Rust XML parser.
+quick-xml = { version = "0.37", features = ["serialize"] }
 # Pretty tables for `th admin` default output (with --json opt-out).
 # `tabled` is what nushell uses — best-of-class in the Rust table-
 # rendering space. Builder API for dynamic JSON, rich modifier chain
 # for theming, 10+ built-in styles.
-tabled = "0.18"
+tabled = { version = "0.18", features = ["ansi"] } # `ansi`: width calc strips escapes — coloured status cells were over-widening columns (th-6e77b7)
 
 # Pearl th-fcb579: browser-based `th auth login`.
 # - `tiny_http`: minimal blocking HTTP listener for the OAuth
@@ -70,9 +85,11 @@ open = "5"
 sha2 = "0.10"
 rand = "0.8"
 base64 = "0.22"
+# Used by `th config build` (non-test) to drop the embedded JS schema
+# generator to a temp .mjs before invoking node/tsx.
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
 # Pearl th-abc4e2: admin::tests verify the baked-in Supabase anon
 # key really IS the anon key (not service_role) by base64-decoding
 # its JWT payload and checking the role claim. (Lifted to a

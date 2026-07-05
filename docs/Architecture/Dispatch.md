@@ -2,8 +2,8 @@
 
 #architecture
 
-> [!arch] Chat → pearl → operator → events → done
-> A task enters Big Smooth over WebSocket, becomes a pearl via [[The-Cast#Diver|Diver]], gets handed to an operative, and streams `AgentEvent`s back as `ServerEvent`s. The fork between direct and sandboxed dispatch is invisible above the WebSocket.
+> [!arch] Chat → pearl → operative subprocess → events → done
+> A task enters Big Smooth over WebSocket, becomes a pearl via [[The-Cast#Diver|Diver]], is handed to a freshly spawned `smooth-operative` subprocess, and streams `AgentEvent`s back as `ServerEvent`s. Dispatch is always in-process now — one host subprocess per task, no VM fork.
 
 ## End-to-end flow
 
@@ -12,125 +12,61 @@
      │
      │  WebSocket: { type: "TaskStart", message, model?, agent? }
      ▼
-   Big Smooth (axum)
+   Big Smooth (axum, :4400)
      │
      │  resolve pearl_id (caller-supplied | Diver.dispatch | PearlStore.create)
      │  mark pearl status = in_progress
      │  register teammate (UI sidebar)
      ▼
-   dispatch_ws_task
+   dispatch_ws_task → dispatch_ws_task_direct
      │
-     ├── SMOOTH_WORKFLOW_DIRECT=1 ─► dispatch_ws_task_direct
-     │                                  │
-     │                                  ▼
-     │                          spawn smooth-operative
-     │                          as a host subprocess
-     │
-     └── otherwise              ─► dispatch_ws_task_sandboxed
-                                       │
-                                       ▼
-                               build SandboxConfig, mount runner +
-                               workspace, create_sandbox, exec runner
-                               in VM
-
-   Operative
-     │
-     │  agent loop: observe → think → act
-     │  each tool call hits NarcHook → WonkHook
-     │  each AgentEvent → JSON line on stdout
+     │  resolve the native smooth-operative binary
+     │  spawn it as a host subprocess (cwd = workspace)
+     │  pass task, model, api creds, agent role via env
      ▼
-   Big Smooth captures stdout, re-emits as ServerEvent on WebSocket
+   smooth-operative (subprocess)
+     │  run the agent loop (smooth-operator engine)
+     │  emit AgentEvent JSON-lines on stdout
+     ▼
+   Big Smooth parses each line, re-emits as ServerEvent over the WebSocket
      │
      ▼
-   User UI streams: ToolCallStart, TokenDelta, ToolCallComplete, ...
-     │
-     ▼
-   On Completed event:
-     - Diver.complete(pearl_id)  OR  pearl_store.close([pearl_id])
-     - teammate marked done
-     - sandbox optionally torn down (keep_alive flag)
+   TUI + web UI render tokens, tool calls, results, cost, completion
 ```
 
-## DispatchOptions
+## Resolving the operative binary
 
-The dispatch entry point takes:
+`dispatch_ws_task_direct` needs a native `smooth-operative` on the host. It looks, in order:
 
-| Field            | Meaning                                                                 |
-| ---------------- | ----------------------------------------------------------------------- |
-| `message`        | The task prompt the agent receives                                       |
-| `model`          | Optional override; falls back to provider default                        |
-| `budget`         | Cost cap in USD (optional)                                               |
-| `working_dir`    | Host path the operator's workspace bind mounts to                        |
-| `image`          | OCI image for the operator VM (sandboxed only; rarely overridden)        |
-| `keep_alive`     | Hold the sandbox open after `Completed` for debugging (sandboxed only)   |
-| `memory_mb`      | Sandbox memory (default 4096)                                            |
-| `agent`          | Named agent role (`fixer`, `tester`, etc.); defaults to `fixer`          |
-| `pearl_id`       | Caller-supplied pearl id when the chat agent already created one         |
-| `prior_messages` | Resume context — prior session messages re-played into the conversation |
+1. `$SMOOTH_OPERATIVE_NATIVE` — an explicit absolute path.
+2. `target/release/smooth-operative`, then `target/debug/smooth-operative` under the workspace root.
+3. `$CARGO_HOME/bin/smooth-operative` (from `cargo install --path crates/smooth-operative`).
 
-## Pearl resolution
+If none resolve, Big Smooth logs a loud startup warning and every dispatch closes its pearl with `cost_usd=0` until it's fixed. Build it with `cargo build -p smooai-smooth-operative --release` (or `--debug`). There is no longer a cross-compile / musl / image step — the operative runs on the host triple.
 
-Three cascading paths:
+## What the operative gets
 
-1. **Caller supplied.** The chat-agent's `teammate_spawn` tool created the pearl already. Reuse it, flip status to `in_progress`.
-2. **Diver available.** Call `Diver.dispatch(title, description, parent)` — creates pearl, marks in_progress, returns ID.
-3. **No Diver.** Fall back to `PearlStore::create` directly, then `update(status=in_progress)`.
+The subprocess inherits **host-level access** — the workspace is the caller's working directory (no bind mount, no isolation). It receives via env:
 
-A single side effect: the `Task: <truncated message>` pearl shows up in `th pearls list`.
+- `SMOOTH_TASK` (or `SMOOTH_TASK_FILE` for long messages) — the task.
+- `SMOOTH_API_URL` / `SMOOTH_API_KEY` — the LLM gateway endpoint + key.
+- `SMOOTH_MODEL` — routed model (default `gpt-5.4-mini`); the operative switches to native Anthropic request shape for Claude-class models.
+- `SMOOTH_AGENT` — the agent role (default `fixer`, the full-tool coding role) which selects the tool surface.
+- `SMOOTH_BUDGET_USD` / `SMOOTH_MAX_ITERATIONS` — dispatch limits.
 
-## Operator env (sandboxed)
+Inside, the operative installs `PermissionHook` (role-scoped tool gating from the engine) and `NarcHook` (surveillance) on its tool registry, then runs `Agent::run_with_channel`. See [[Operatives]] and [[Security-Model]].
 
-The runner reads its task and config from env vars (no file I/O):
+## Events on the wire
 
-| Var                         | Source                                                   |
-| --------------------------- | -------------------------------------------------------- |
-| `SMOOTH_TASK_FILE`          | Path inside VM to a bind-mounted tempfile with the task   |
-| `SMOOTH_API_URL`            | LLM gateway base URL (from `providers.json`)              |
-| `SMOOTH_API_KEY`            | Bearer token                                              |
-| `SMOOTH_MODEL`              | Resolved model id                                         |
-| `SMOOTH_BUDGET_USD`         | Cost cap                                                  |
-| `SMOOTH_WORKSPACE`          | `/workspace` (mount root)                                  |
-| `SMOOTH_OPERATOR_ID`        | UUID; used in log lines                                   |
-| `SMOOTH_AGENT`              | Role name (`fixer`, `tester`, …)                          |
-| `SMOOTH_SINGLE_PROCESS_SOCKET_DIR` | UDS dir containing `narc.sock` / `wonk.sock` / `scribe.sock` / `bigsmooth.sock`. Runner uses tonic over UDS; this is the primary cast transport in both sandboxed and direct mode. |
-| `SMOOTH_NARC_URL`           | **Legacy HTTP fallback.** Only used by old dispatch paths that haven't been ported to UDS; the runner prefers the local socket when the dir env var is set. |
-| `SMOOTH_ARCHIVIST_URL`      | Host-facing Archivist URL (forwarder destination, still HTTP)         |
-| `SMOOTH_PEARL_ID`           | Pearl id (for mailbox + comment tap)                       |
-| `SMOOTH_HOST_TOKEN`         | Bearer for `host_tool` calls back to Big Smooth (gated)   |
-| `SMOOTH_WORKFLOW`           | `1` enables multi-phase workflow (default)                 |
-| `SMOOTH_WORKFLOW_SKIP_TEST` | Bench knob — skip TEST phase to keep scoring stable       |
+The operative's stdout is a stream of JSON-lines `AgentEvent`s (token deltas, tool calls, tool results, cost, completion). Big Smooth reads them line by line and forwards each as a `ServerEvent` over the WebSocket. Any non-JSON line on stdout is dropped as defense-in-depth — the operative routes all diagnostics to stderr (`tracing`).
 
-## Operator env (direct)
+## The `th run` shortcut
 
-A subset of the above. `SMOOTH_SINGLE_PROCESS_SOCKET_DIR` still points at a real UDS dir (a tempdir under `~/.smooth/run/` instead of the in-VM `$XDG_RUNTIME_DIR/smooth/`), so the runner dials the same `narc.sock` / `wonk.sock` / `scribe.sock` / `bigsmooth.sock` over tonic gRPC — the cast topology is identical between modes. `SMOOTH_WORKSPACE` defaults to the host cwd unless overridden; no bind mounts.
-
-## AgentEvent → ServerEvent
-
-The runner emits `AgentEvent`s as JSON lines on stdout. Big Smooth parses each line and forwards a matching `ServerEvent` to every WebSocket subscriber:
-
-| AgentEvent          | ServerEvent              | UI effect                  |
-| ------------------- | ------------------------ | -------------------------- |
-| `IterationStart`    | `IterationStart`         | Heartbeat / progress       |
-| `LlmRequest`        | `LlmRequest`             | "Asking model…"            |
-| `TokenDelta`        | `TokenDelta`             | Streamed text into chat    |
-| `ToolCallStart`     | `ToolCallStart`          | Tool card appears          |
-| `ToolCallComplete`  | `ToolCallComplete`       | Tool card resolves         |
-| `Completed`         | `TaskCompleted`          | Pearl closes, teammate done |
-| `Error`             | `TaskError`              | Banner + pearl close        |
-
-Stderr from the runner is also captured and forwarded as `TokenDelta`s with a `[stderr]` prefix.
-
-## Resume
-
-When a pearl already has prior session messages (from a previous dispatch on the same pearl), `build_resumption_context` reads the last N (default 20) and prepends a `## Resumption context` block to the task message. The agent sees what was done before and continues from there.
-
-## Comment tap
-
-For each dispatched pearl, Big Smooth spawns a `comment_tap` tokio task that watches the pearl's comments and re-emits them as WebSocket events scoped to the teammate. This is how the sidebar shows live operator output even when the dashboard wasn't open at dispatch time.
+`th run <pearl>` dispatches a pearl through Big Smooth's HTTP API without opening the TUI — the same dispatch path, headless. The old VM flags (`--image`, `--memory-mb`, `--keep-alive`) were removed with the sandbox stack.
 
 ## Related
 
 - [[Architecture-Overview]]
-- [[The-Cast]]
 - [[Operatives]]
-- [[Pearls]]
+- [[The-Cast]]
+- [[Security-Model]]

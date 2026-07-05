@@ -17,7 +17,7 @@ th bench --task <id>                 # Run a single task
 th bench --print                     # Pretty-print results + cost
 ```
 
-The harness uses **direct mode** (`SMOOTH_WORKFLOW_DIRECT=1`) by default — microVM cold-start cost would dominate the timing and the bench needs reproducible numbers. See [[Direct-Mode]].
+The harness talks to the same host-process daemon everything else does (`th up`; the microVM mode is gone — [[../Decisions/ADR-004-remove-microvm-sandbox-stack]]). It needs the native `smooth-operative` binary in `target/release/` — build it with `cargo build -p smooth-operative --release` before running.
 
 It also sets `SMOOTH_WORKFLOW_SKIP_TEST=1` so the TEST phase doesn't add tests of its own (which would skew the score). The harness runs the canonical test suite itself, post-agent.
 
@@ -45,6 +45,5 @@ The "Line" is the rolling per-task score in `docs/bench-history.md`. Every merge
 
 ## Related
 
-- [[Direct-Mode]]
 - [[Architecture-Overview]]
 - [[../bench-history]]

@@ -80,6 +80,70 @@ pub struct SessionToolCall {
     /// Wall-clock duration of the tool call, set on completion.
     #[serde(default)]
     pub duration_ms: Option<u64>,
+    /// `true` if secret redaction scrubbed this call's `arguments` or
+    /// `output` before it was persisted (pearl th-0bb776). Downstream
+    /// consumers use this to know the stored record is not verbatim.
+    /// `#[serde(default)]` so rows written before this field existed
+    /// deserialize as `false`.
+    #[serde(default)]
+    pub redaction_applied: bool,
+}
+
+/// Replace every secret Narc's detector finds in `s` with a
+/// `[REDACTED:<type>]` marker. Returns the (possibly unchanged) string
+/// and whether any redaction fired. A clean string is returned
+/// byte-identical with `false` — the scan never mutates on no match.
+#[must_use]
+fn redact_secrets(s: &str) -> (String, bool) {
+    let findings = smooth_narc::SecretDetector::scan(s);
+    if findings.is_empty() {
+        return (s.to_string(), false);
+    }
+    let mut out = s.to_string();
+    for f in &findings {
+        // `matched_text` is never empty (every pattern has a min length),
+        // so `replace` can't loop-insert. Already-scrubbed matches are a
+        // no-op on the second pass, keeping this idempotent.
+        out = out.replace(&f.matched_text, &format!("[REDACTED:{}]", f.pattern_name));
+    }
+    (out, true)
+}
+
+impl SessionToolCall {
+    /// Scrub secrets from this call's `arguments` and `output` in place,
+    /// setting [`Self::redaction_applied`] if anything changed. Returns
+    /// whether any field was redacted.
+    fn redact_in_place(&mut self) -> bool {
+        let (args, args_redacted) = redact_secrets(&self.arguments);
+        self.arguments = args;
+        let out_redacted = if let Some(output) = &self.output {
+            let (red, r) = redact_secrets(output);
+            self.output = Some(red);
+            r
+        } else {
+            false
+        };
+        let applied = args_redacted || out_redacted;
+        if applied {
+            self.redaction_applied = true;
+        }
+        applied
+    }
+}
+
+impl SessionMessage {
+    /// Scrub secrets from every tool call's arguments/output before the
+    /// message is written to durable storage. Returns `true` if any call
+    /// was redacted. Leaves clean messages byte-identical.
+    pub fn redact_tool_call_secrets(&mut self) -> bool {
+        let mut any = false;
+        for tc in &mut self.tool_calls {
+            if tc.redact_in_place() {
+                any = true;
+            }
+        }
+        any
+    }
 }
 
 /// Point-in-time snapshot of an orchestration run — used for resuming interrupted work.
@@ -309,9 +373,10 @@ impl DoltSessionStore {
         }
     }
 
-    /// Escape a string for SQL string literals.
+    /// Escape a string for SQL string literals (shared workspace-wide
+    /// implementation — handles backslashes, quotes, and NUL; th-944230).
     fn esc(s: &str) -> String {
-        s.replace('\'', "''")
+        smooth_pearls::sql_escape(s)
     }
 
     fn generate_id() -> String {
@@ -362,7 +427,27 @@ impl std::fmt::Debug for DoltSessionStore {
 }
 
 impl SessionStore for DoltSessionStore {
-    fn save_message(&self, message: SessionMessage) -> anyhow::Result<()> {
+    fn save_message(&self, mut message: SessionMessage) -> anyhow::Result<()> {
+        // Scrub secrets from tool-call arguments/outputs BEFORE they hit
+        // durable Dolt storage. Chat tool_calls persist arguments+output
+        // verbatim, forever (pearl th-880f2c) — a pasted
+        // `curl -H "Authorization: Bearer sk-..."`, an `env`/`printenv`/
+        // `git config --list` dump, or a `read_file ~/.aws/credentials`
+        // path would otherwise leak into the pearl store for anyone with
+        // read access. Only what is written is scrubbed; the live
+        // in-memory conversation is untouched (pearl th-0bb776).
+        if message.redact_tool_call_secrets() {
+            crate::audit::audit(&crate::audit::AuditEntry {
+                actor: message.from.clone(),
+                action: "toolcall_redaction".into(),
+                target: Some(message.session_id.clone()),
+                bead_id: None,
+                input: None,
+                output: None,
+                duration_ms: None,
+                error: None,
+            });
+        }
         let mt = format!("{:?}", message.message_type);
         let tool_calls_sql = if message.tool_calls.is_empty() {
             "NULL".to_string()
@@ -621,6 +706,7 @@ mod tests {
             output: Some("README.md".into()),
             status: "done".into(),
             duration_ms: Some(42),
+            redaction_applied: false,
         });
         let json = serde_json::to_string(&msg).unwrap();
         let deser: SessionMessage = serde_json::from_str(&json).unwrap();
@@ -628,6 +714,89 @@ mod tests {
         assert_eq!(deser.tool_calls[0].tool_name, "bash");
         assert_eq!(deser.tool_calls[0].status, "done");
         assert_eq!(deser.tool_calls[0].duration_ms, Some(42));
+    }
+
+    // --- Tool-call secret redaction (pearl th-0bb776) ---
+
+    fn tool_call(arguments: &str, output: Option<&str>) -> SessionToolCall {
+        SessionToolCall {
+            id: "tc-1".into(),
+            tool_name: "bash".into(),
+            arguments: arguments.into(),
+            output: output.map(Into::into),
+            status: "done".into(),
+            duration_ms: Some(1),
+            redaction_applied: false,
+        }
+    }
+
+    #[test]
+    fn redacts_secret_in_arguments() {
+        // Leak class 1/3: a user pastes a curl with a Bearer token / the
+        // agent runs it → the secret is persisted verbatim without this.
+        let mut tc = tool_call(r#"{"command":"deploy AKIAIOSFODNN7EXAMPLE"}"#, None);
+        assert!(tc.redact_in_place());
+        assert!(tc.redaction_applied);
+        assert!(!tc.arguments.contains("AKIAIOSFODNN7EXAMPLE"));
+        assert!(tc.arguments.contains("[REDACTED:AWS Access Key]"));
+    }
+
+    #[test]
+    fn redacts_secret_in_output() {
+        // Leak class 2/3: `env`/`printenv`/`git config --list` output
+        // captured as the tool result carries secrets into the store.
+        let mut tc = tool_call(r#"{"command":"env"}"#, Some("TOKEN=Bearer sk-test1234567890abcdefXYZ"));
+        assert!(tc.redact_in_place());
+        assert!(tc.redaction_applied);
+        let out = tc.output.unwrap();
+        assert!(!out.contains("sk-test1234567890abcdefXYZ"));
+        assert!(out.contains("[REDACTED:"));
+    }
+
+    #[test]
+    fn clean_tool_call_is_left_byte_identical_and_flag_false() {
+        let original = tool_call(r#"{"command":"ls -la"}"#, Some("README.md\nCargo.toml"));
+        let mut tc = original.clone();
+        assert!(!tc.redact_in_place());
+        assert!(!tc.redaction_applied);
+        assert_eq!(tc.arguments, original.arguments);
+        assert_eq!(tc.output, original.output);
+    }
+
+    #[test]
+    fn redact_secrets_is_idempotent_on_clean_input() {
+        let (out, applied) = redact_secrets("nothing secret here");
+        assert!(!applied);
+        assert_eq!(out, "nothing secret here");
+    }
+
+    #[test]
+    fn message_redaction_survives_the_persist_serialization_path() {
+        // Exercises exactly what DoltSessionStore::save_message serializes
+        // into the `tool_calls` column (serde_json::to_string on the vec),
+        // asserting the secret is gone and the flag rides along so
+        // downstream consumers know the record was scrubbed.
+        let mut msg = make_message("m5", "s1", MessageType::Response);
+        msg.tool_calls.push(tool_call(r#"{"path":"~/.aws/credentials AKIAIOSFODNN7EXAMPLE"}"#, None));
+        assert!(msg.redact_tool_call_secrets());
+
+        let json = serde_json::to_string(&msg.tool_calls).unwrap();
+        assert!(!json.contains("AKIAIOSFODNN7EXAMPLE"));
+        assert!(json.contains("[REDACTED:AWS Access Key]"));
+        assert!(json.contains(r#""redaction_applied":true"#));
+
+        // Round-trips back with the flag preserved.
+        let deser: Vec<SessionToolCall> = serde_json::from_str(&json).unwrap();
+        assert!(deser[0].redaction_applied);
+    }
+
+    #[test]
+    fn redaction_applied_defaults_false_for_pre_th_0bb776_rows() {
+        // Tool-call records written before this field existed must still
+        // deserialize (serde default = false), not error.
+        let old = r#"{"id":"t","tool_name":"bash","arguments":"{}","status":"done"}"#;
+        let deser: SessionToolCall = serde_json::from_str(old).unwrap();
+        assert!(!deser.redaction_applied);
     }
 
     #[test]

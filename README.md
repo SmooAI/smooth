@@ -19,7 +19,7 @@
 
 ---
 
-> Smooth is the central CLI and orchestration platform for Smoo AI. It dispatches teams of AI agents — Smooth operatives — to work on real projects inside hardware-isolated microVMs, with adversarial surveillance and policy-gated access control. No Docker. No Node.js. No runtime dependencies. One 10MB binary.
+> Smooth is the central CLI and orchestration platform for Smoo AI. It dispatches teams of AI agents — Smooth operatives — to work on real projects, with adversarial tool surveillance. No Docker. No Node.js. No runtime dependencies. One 10MB binary.
 
 ---
 
@@ -29,11 +29,14 @@
 
 ```bash
 brew install SmooAI/tools/th
+
+# verify
+th --version
 ```
 
-That taps [SmooAI/homebrew-tools](https://github.com/SmooAI/homebrew-tools) and installs the `th` binary on first use; `brew upgrade th` picks up future releases automatically.
+That taps [SmooAI/homebrew-tools](https://github.com/SmooAI/homebrew-tools) and installs the `th` binary on first use; `brew upgrade th` picks up future releases automatically. Every `vX.Y.Z` release bumps the formula's `version` + `sha256` in the tap, so `brew` always tracks the latest published build.
 
-Platforms: Apple Silicon macOS, Linux x86_64, Linux arm64. Windows support is in flight (pearl `th-a165b4` — needs Cargo feature gating so the binary excludes microsandbox + the TUI on Windows; in the meantime, install via WSL).
+Platforms: Apple Silicon macOS, Linux x86_64, Linux arm64. Windows support is in flight (pearl `th-a165b4` — needs Cargo feature gating so the binary excludes the TUI on Windows; in the meantime, install via WSL).
 
 ### `curl | sh`
 
@@ -55,7 +58,7 @@ cargo install --path crates/smooth-cli
 # Authenticate with Smoo AI's gateway (resolves every smooth-* slot)
 th model login smooai-gateway
 
-# Start Smooth — default boots inside a microsandbox microVM
+# Start Smooth (Big Smooth on the host; dispatch runs in-process)
 th up
 
 # Open the interactive coding assistant
@@ -67,26 +70,20 @@ below for the full list.
 
 No Docker. No Node.js. No runtime dependencies. One 10MB binary.
 
-### Two modes, one cast
+### How it runs
 
-Smooth has exactly two ways to run, and they share the same agents,
-tools, and surveillance — the only thing that differs is the blast
-radius:
+`th up` starts **Big Smooth** on the host (API + web UI on `:4400`).
+Dispatched tasks run the `smooth-operative` worker as a host subprocess,
+in-process against your working directory, with **Narc** tool
+surveillance applied on every tool call.
 
-| Command | What it does | When to use it |
-|---|---|---|
-| `th up` (default) | Boots the entire cast inside a hardware-isolated [Microsandbox](https://github.com/microsandbox/microsandbox) microVM (libkrun on Linux, HVF on macOS). `:4400` forwards out for the TUI / web UI. | Your laptop, anywhere the host can run microsandbox. |
-| `th up direct` | Runs the same cast as host processes with no sandbox in front. | CI runners, dedicated devboxes, nested-virt VMs — environments that are *already* sandboxed. |
-
-Docker is never the sandbox runtime. The `docker` CLI is still bundled
-*inside* the microVM so the agent can reach a host Docker / OrbStack /
-Colima / Rancher / Podman daemon for nested-virt-free workloads, but
-Smooth itself runs on microsandbox or directly on the host — nothing
-else.
-
-See [ADR-001](docs/Decisions/ADR-001-Consolidate-into-one-microVM.md)
-for the consolidation rationale and [ADR-002](docs/Decisions/ADR-002-microsandbox-0.4.6-and-remove-docker-backend.md)
-for the most recent microsandbox bump + Docker-backend removal.
+> The microVM sandbox mode (`th up` booting inside a hardware-isolated
+> [Microsandbox](https://github.com/microsandbox/microsandbox) VM, with a
+> Wonk/Goalie access-control cast) was removed 2026-07 (pearl `th-f4a801`).
+> Git history has it; the smooth-daemon epic (`th-c89c2a`) is the forward
+> path. See [ADR-001](docs/Decisions/ADR-001-Consolidate-into-one-microVM.md)
+> and [ADR-002](docs/Decisions/ADR-002-microsandbox-0.4.6-and-remove-docker-backend.md)
+> for the (now-historical) microVM rationale.
 
 ---
 
@@ -94,13 +91,13 @@ for the most recent microsandbox bump + Docker-backend removal.
 
 Smooth is the central CLI and orchestration platform for [Smoo AI](https://smoo.ai). It does two things:
 
-1. **Agent Orchestration** — Dispatch Smooth operatives (sandboxed AI agents) to work on real projects inside hardware-isolated Microsandbox microVMs, with adversarial surveillance and policy-gated access control.
+1. **Agent Orchestration** — Dispatch Smooth operatives (AI agents) to work on real projects, with adversarial tool surveillance (Narc). (The microVM isolation + policy-gated access control was removed 2026-07, pearl `th-f4a801`; see the note at the top.)
 
 2. **Smoo AI Platform CLI** — Manage config schemas, interact with the Smoo AI API, sync with Jira, and control your infrastructure from one command.
 
 ### How the agent loop works
 
-Inside each operative VM, a **single agent** handles its own inner iteration
+Inside each operative, a **single agent** handles its own inner iteration
 (LLM → tool → LLM → …) via `smooth-operator`'s agent loop. A thin outer
 governor wraps it with three jobs: feed last run's test output back in,
 snapshot the workspace when failing tests drop, and stop on the first
@@ -126,7 +123,7 @@ flowchart LR
     class DONE teal
 ```
 
-Implemented in [`smooth-operator::coding_workflow`](crates/smooth-operator/src/coding_workflow.rs).
+Implemented in [`smooth_cast::coding_workflow`](crates/smooth-cast/src/coding_workflow.rs).
 An earlier version decomposed the run into seven phases (ASSESS / PLAN /
 EXECUTE / VERIFY / REVIEW / TEST / FINALIZE). The phase pipeline kept
 silently short-circuiting at one detector or another; the single-agent
@@ -161,7 +158,7 @@ the gateway routes onto `smooth-coding`):
 | `smooth-summarize` | Context compression during long runs | Summarization |
 | `smooth-fast` | Session auto-naming, short titles, autocomplete | Haiku/Flash-class, sub-second TTFT |
 
-Routing is in [`smooth-operator::providers`](crates/smooth-operator/src/providers.rs).
+The slot → concrete-model mapping lives in [`smooth_policy::smooth_alias`](crates/smooth-policy/src/smooth_alias.rs) (the gateway's `smooth-*` aliases are being retired, SMOODEV-1793, so the CLI resolves slots itself); the engine's provider dispatch lives in the external `smooth-operator` crate.
 The CLI's `th code` presets remap slots to arbitrary models via the
 model picker — e.g. point Coding at Kimi Code for a run, Reasoning at
 GLM, whatever.
@@ -181,202 +178,42 @@ per-project, git-syncable).
 
 ## Architecture
 
-```mermaid
-%%{init: {'theme':'base','themeVariables':{
-  'background':'#020618','primaryColor':'#0b1426','primaryTextColor':'#e6edf6','primaryBorderColor':'#2b3a52',
-  'lineColor':'#7c8aa0','secondaryColor':'#0b1426','tertiaryColor':'#0b1426','fontFamily':'ui-sans-serif, system-ui, sans-serif',
-  'clusterBkg':'#0b1426','clusterBorder':'#22304a'}}}%%
-flowchart TB
-    TH["th binary<br/>+ host credential broker"]
+`th up` starts **Big Smooth** — an axum HTTP + WebSocket server — as a host process on `127.0.0.1:4400`. It owns the pearl store, the API, and dispatch. Each task spawns one **operative** subprocess that runs the agent loop and streams events back. One process, one operative per task — no microVM, no per-task VM.
 
-    subgraph VM["The microVM · microsandbox"]
-        BS["Big Smooth<br/>orchestrator · READ-ONLY"]
-        W["Wonk · access control"]
-        G["Goalie · net + fs proxy"]
-        N["Narc · surveillance"]
-        SC["Scribe → Archivist · logging"]
-        OPS["Smooth operatives<br/>the workers"]
-    end
+```
+                       th up
+                         │
+                         ▼
+  ┌────────────────────────────────────────────────────────────┐
+  │  Big Smooth  (host process, 127.0.0.1:4400)                 │
+  │  API · pearl store (Dolt) · dispatch · Diver · Archivist    │
+  └───────────────────────────┬────────────────────────────────┘
+                              │ spawn subprocess, JSON-lines on stdout
+                              ▼
+  ┌────────────────────────────────────────────────────────────┐
+  │  smooth-operative  (host subprocess, one per pearl)         │
+  │  smooth-operator agent loop + tools                         │
+  │  PermissionHook (role gating) · NarcHook (surveillance)     │
+  └────────────────────────────────────────────────────────────┘
 
-    TH -->|spawns| VM
-    BS -->|orchestrates| OPS
-    OPS -->|HTTP_PROXY| G
-    G -->|"allowed?"| W
-    N -->|intercepts| OPS
-    OPS --> SC
-
-    classDef warm fill:#f49f0a,stroke:#ff6b6c,color:#1a0f00;
-    classDef teal fill:#00a6a6,stroke:#00c2c2,color:#011;
-    class OPS warm
-    class W teal
+  Frontends (th code TUI, embedded web UI) speak HTTP + WebSocket to :4400
 ```
 
-`th up direct` runs the exact same cast as host processes — same gRPC
-sockets, same surveillance, same credential broker — just without the
-microsandbox boundary in front. Same diagram, the microVM box is just
-not there.
+A task enters over WebSocket (`TaskStart`), becomes a pearl via **Diver**, and is handed to a freshly spawned `smooth-operative`. The operative runs the coding workflow (single-agent loop + test-feedback governor) or a single-agent pass, emitting `AgentEvent`s as JSON-lines on stdout; Big Smooth re-emits them as `ServerEvent`s over the WebSocket, and the TUI + web UI render tokens, tool calls, results, and cost.
 
-**Wire transport.** The cast services bind four tonic-gRPC servers on
-Unix-domain sockets at startup (`narc.sock`, `wonk.sock`, `scribe.sock`,
-`bigsmooth.sock` under `$SMOOTH_SINGLE_PROCESS_SOCKET_DIR`). Each
-operative subprocess dials those sockets for every tool check,
-policy decision, and log entry — see `proto/{narc,wonk,scribe,bigsmooth}.proto`
-and `crates/smooth-bigsmooth/src/single_process.rs::bootstrap_from_app_state`.
-Inside Big Smooth's own process the same services are reached via
-`Arc<AppState>` directly (no wire). The outer TUI/web UI/bench harness
-speaks HTTP+WebSocket to Big Smooth on `:4400`. Full topology lives in
-[`docs/Architecture/Transport.md`](docs/Architecture/Transport.md).
+**Surveillance, not isolation.** Every tool call passes two in-process hooks on the operative's registry — role-scoped tool gating and **Narc** (regex secret + prompt-injection detectors, optional LLM judge). The operative runs with host-level access to your working directory; there is no VM boundary today. Real enforcement is being rebuilt — an auto-mode permission engine (`th-515a13`) and a kernel tool-subprocess sandbox as part of the always-on daemon direction (`th-c89c2a`).
 
-### The Cast
+> The per-task microVM + the Wonk/Goalie network/filesystem access cast were removed in July 2026 (pearl `th-f4a801`). Git history at that PR's parent commit is the archive.
 
-Big Smooth, Archivist, Wonk, Goalie, Narc, Scribe, and Groove all live
-in the same microVM (sandboxed mode) or the same process tree (direct
-mode). Smooth operatives are subprocesses spawned inside that same
-boundary, one per dispatched pearl.
+Full detail lives in the docs vault:
 
-| Service | Role |
-|---|---|
-| **Big Smooth** | Orchestrator. Schedules work, generates policies, handles access requests. **READ-ONLY** — cannot write to the filesystem. |
-| **Archivist** | Central log + trace aggregator. Receives events and OTLP traces from every Scribe. Stores traces in SQLite, optionally forwards to external OTel backends (Jaeger, Tempo, Honeycomb). Can write, but only to log paths. |
-| **Wonk** | Access control authority. Reads policy TOML, answers "is this allowed?" for every network request, tool call, pearl access, and CLI command. No LLM. |
-| **Goalie** | Network + filesystem proxy. Dumb pipe — forwards or blocks based on Wonk's answer. iptables + FUSE enforced at the kernel level inside the VM. |
-| **Narc** | Tool surveillance + prompt-injection guard. Two-tier detection: fast regex pre-filters + LLM-as-a-judge for ambiguous cases. |
-| **Scribe** | Structured logging service. All services log through Scribe, which writes to in-memory SQLite and feeds Archivist. |
-| **Groove** | LLM checkpointing + session resume. Captures conversation state after tool calls so an interrupted operative picks up at the last checkpoint. |
-
-**The Board** = Big Smooth + Archivist (leadership). **The Safehouse**
-is the microVM (or, in direct mode, the host process tree) where The
-Board operates alongside the rest of the cast.
-
-**Smooth operatives** = the AI agents (the sandboxed workers). The only ones who write code. (They run the `smooth-operator` engine; don't confuse the worker with the engine.)
-
-### Inside each MicroVM
-
-```mermaid
-%%{init: {'theme':'base','themeVariables':{
-  'background':'#020618','primaryColor':'#0b1426','primaryTextColor':'#e6edf6','primaryBorderColor':'#2b3a52',
-  'lineColor':'#7c8aa0','secondaryColor':'#0b1426','tertiaryColor':'#0b1426','fontFamily':'ui-sans-serif, system-ui, sans-serif',
-  'clusterBkg':'#0b1426','clusterBorder':'#22304a'}}}%%
-flowchart LR
-    subgraph VM["MicroVM · --scope none"]
-        Operator["Operative / Big Smooth"]
-        Wonk["Wonk · :8400"]
-        Goalie["Goalie · :8480"]
-        Narc["Narc"]
-        Scribe["Scribe · :8401"]
-    end
-
-    Operator -->|HTTP_PROXY| Goalie
-    Goalie -->|"allowed?"| Wonk
-    Narc -->|"intercepts · checks tool"| Operator
-    Operator --> Scribe
-    Wonk --> Scribe
-    Goalie --> Scribe
-    Narc --> Scribe
-
-    classDef warm fill:#f49f0a,stroke:#ff6b6c,color:#1a0f00;
-    classDef teal fill:#00a6a6,stroke:#00c2c2,color:#011;
-    class Operator warm
-    class Scribe teal
-```
-
-- **Wonk** reads `/etc/smooth/policy.toml`, listens on `127.0.0.1:8400`, hot-reloads on file change
-- **Goalie** listens on `127.0.0.1:8480` as HTTP proxy. iptables rejects all outbound TCP except from the Goalie UID. FUSE mount at `/workspace` for filesystem access control.
-- **Narc** intercepts tool calls and incoming prompts. Regex fast path catches obvious secrets and write violations. Ambiguous cases go to a small/fast LLM (Haiku, Flash, GPT-4o-mini) for a yes/no verdict.
-- **Scribe** listens on `127.0.0.1:8401`, writes to on-pod SQLite and JSON-lines, feeds events to Archivist. Bridges `tracing` spans to OpenTelemetry via `tracing-opentelemetry`, generating trace hierarchies for operative lifecycles, prompts, tool calls, and network requests. Exports OTLP traces to Archivist with W3C traceparent propagation across VM boundaries.
-
-### Security Model
-
-```mermaid
-%%{init: {'theme':'base','themeVariables':{
-  'background':'#020618','primaryColor':'#0b1426','primaryTextColor':'#e6edf6','primaryBorderColor':'#2b3a52',
-  'lineColor':'#7c8aa0','secondaryColor':'#0b1426','tertiaryColor':'#0b1426','fontFamily':'ui-sans-serif, system-ui, sans-serif',
-  'clusterBkg':'#0b1426','clusterBorder':'#22304a'}}}%%
-flowchart TD
-    subgraph Enforcement["Kernel-level enforcement"]
-        IPT["iptables · only Goalie UID egress"]
-        FUSE["FUSE mount · all file I/O via Goalie"]
-    end
-
-    subgraph Policy["Policy-driven access control"]
-        TOML["policy.toml<br/>generated per operative"]
-        NET["Network allowlist"]
-        FS["Filesystem deny<br/>*.env · *.pem · .ssh/*"]
-        REST["Tools · pearls · MCP allowlists"]
-    end
-
-    subgraph Detection["Narc · two-tier detection"]
-        REGEX["Regex fast path"]
-        LLM["LLM judge · ambiguous cases"]
-    end
-
-    TOML --> NET & FS & REST
-    IPT --> NET
-    FUSE --> FS
-
-    classDef warm fill:#f49f0a,stroke:#ff6b6c,color:#1a0f00;
-    classDef teal fill:#00a6a6,stroke:#00c2c2,color:#011;
-    class TOML warm
-    class LLM teal
-```
-
-**Key invariants:**
-- Big Smooth **never writes**. Narc enforces this in-VM — any write attempt is instantly blocked.
-- Archivist **can write**, but only to log paths. Writes to any other path are blocked.
-- Operatives can only see their assigned pearls and dependencies (scoped by auth token).
-- All outbound traffic goes through Goalie. No process can bypass the proxy — enforced at the kernel level.
-
-### Continuous Access Negotiation
-
-Operatives can request expanded access at runtime. The flow:
-
-```mermaid
-%%{init: {'theme':'base','themeVariables':{
-  'background':'#020618','primaryColor':'#0b1426','primaryTextColor':'#e6edf6','primaryBorderColor':'#2b3a52',
-  'lineColor':'#7c8aa0','actorBkg':'#0b1426','actorBorder':'#2b3a52','actorTextColor':'#e6edf6',
-  'signalColor':'#7c8aa0','signalTextColor':'#e6edf6','noteBkgColor':'#f49f0a','noteTextColor':'#1a0f00','noteBorderColor':'#ff6b6c',
-  'fontFamily':'ui-sans-serif, system-ui, sans-serif'}}}%%
-sequenceDiagram
-    participant Op as Operative
-    participant G as Goalie
-    participant W as Wonk
-    participant BS as Big Smooth
-
-    Op->>G: GET api.stripe.com/v1/charges
-    G->>W: is this allowed?
-    W-->>G: BLOCKED (not in allowlist)
-    G-->>Op: 403 Blocked
-    G->>W: request access
-    W->>BS: POST /api/access/request
-    BS->>BS: auto-approve? check pearl labels?
-    alt auto-approved
-        BS-->>W: approved + updated policy
-        W-->>W: hot-reload policy
-        Note over Op,G: retry succeeds
-    else needs human
-        BS->>BS: send to inbox
-        Note over BS: th access approve &lt;pearl&gt; &lt;domain&gt;
-    end
-```
-
-### Default access envelope
-
-Each operative VM boots with a minimal envelope:
-
-- **Network**: the configured LLM gateway (`llm.smoo.ai` by default),
-  relevant package registries (crates.io, npm, PyPI), and GitHub. Any
-  other domain needs explicit approval — see continuous access negotiation
-  above.
-- **Filesystem**: read-write on `/workspace` (bind-mount of the user's
-  repo). Everything else is read-only or denied. `.env`, `*.pem`,
-  `.ssh/*`, and other secret-shaped paths are always denied.
-- **Pearls**: the assigned pearl + its dependency closure (depth 2).
-  Tasks cannot reach pearls outside that closure.
-- **Tools**: the registered tool allowlist (file read/write, bash via
-  Goalie, MCP tools that were approved, CLI-wrapper plugins). Every
-  invocation passes Narc's regex prefilter + ambiguous-case LLM judge.
-
----
+- [`Architecture-Overview`](docs/Architecture/Architecture-Overview.md) — top-level diagram + control flow
+- [`The-Cast`](docs/Architecture/The-Cast.md) — Big Smooth, Operative, Engine, Narc, Scribe, Archivist, Diver
+- [`Dispatch`](docs/Architecture/Dispatch.md) — chat → pearl → operative → events
+- [`Operatives`](docs/Architecture/Operatives.md) — the agent runtime + tool surface
+- [`Security-Model`](docs/Architecture/Security-Model.md) — Narc today; auto-mode + kernel sandbox planned
+- [`Extension-System`](docs/Architecture/Extension-System.md) — SEP, the planned extension protocol
+- [`Daemon-Direction`](docs/Architecture/Daemon-Direction.md) — where Big Smooth is headed
 
 ## The `th` CLI
 
@@ -465,35 +302,31 @@ Global config lives at `~/.smooth/`; project config at
 `<repo>/.smooth/`. Project entries shadow global on name collision.
 See [`docs/extending.md`](docs/extending.md) for the full guide.
 
-### Run a pearl in a sandbox (`th run`)
+### Run a pearl (`th run`)
 
-Dispatch a pearl (or ad-hoc prompt) to a Smooth operative running in a
-microVM. The agent has bind-mount access to your workspace, a
-project-scoped cache at `/opt/smooth/cache`, and (with `--keep-alive`)
-forwarded ports so you can review dev servers live.
+Dispatch a pearl (or ad-hoc prompt) to a Smooth operative. Big Smooth
+(`th up`) execs the operative as a host subprocess against your current
+directory and streams agent events to stdout.
 
 ```bash
-# First ready pearl, default image
-th run --keep-alive
+# First ready pearl
+th run
 
-# Explicit pearl, explicit memory
-th run th-abcdef --keep-alive --memory-mb 6144
+# Explicit pearl
+th run th-abcdef
 
 # Ad-hoc prompt against the current directory
-th run "add a /health route that returns {\"ok\":true}" --keep-alive
+th run "add a /health route that returns {\"ok\":true}"
 
-# Inspect + tear down
+# Inspect running operatives
 th operatives list
 th operatives kill <operator-id>
 ```
 
-**One image for every stack.** `smooai/smooth-operative` ships with
-alpine + `mise` baked in. The agent reads the workspace
-(`package.json`, `Cargo.toml`, `pyproject.toml`, `go.mod`) and
-installs whatever toolchain it needs at runtime — node + pnpm,
-python + uv, rust, go, bun, deno, or any of the ~140 tools mise
-supports. Installs land in `/opt/smooth/cache/mise`, bound to the
-host project cache so second-run starts are offline-fast.
+> The `--image`, `--memory-mb`, and `--keep-alive` flags (and the
+> `smooai/smooth-operative` microVM image) went away with the microVM
+> stack, 2026-07 (pearl `th-f4a801`). The operative now runs directly on
+> the host and uses your real toolchain — no per-VM image or cache mount.
 
 Build locally:
 
@@ -575,10 +408,12 @@ Both are configurable globally (`~/.smooth/`) and per-project
 **no trust gate** on loading these — consistent with `npm install`,
 `.zshrc`, or cloning any repo and running `pnpm dev`. Defense-in-depth
 happens at *call time*: Narc's CliGuard / injection / secret
-detectors gate every tool invocation, Wonk policy gates every
-network + filesystem access, and the whole agent loop runs inside
-a hardware-isolated microVM. See [`docs/extending.md`](docs/extending.md)
-and [`SECURITY.md`](SECURITY.md).
+detectors gate every tool invocation. (The kernel-enforced network +
+filesystem boundary that Wonk/Goalie provided was removed with the
+microVM stack; enforcement is being rebuilt via the auto-mode
+permission engine, pearl `th-515a13` — see
+[`docs/Architecture/Security-Model.md`](docs/Architecture/Security-Model.md).)
+See [`docs/extending.md`](docs/extending.md) and [`SECURITY.md`](SECURITY.md).
 
 ---
 
@@ -592,7 +427,6 @@ and [`SECURITY.md`](SECURITY.md).
 | **TUI** | ratatui + crossterm |
 | **Web** | React 19 + Vite + Tailwind CSS 4 (embedded) |
 | **Markdown** | pulldown-cmark (TUI), react-markdown (web) |
-| **Sandboxes** | Microsandbox (hardware-isolated microVMs) |
 | **Agent framework** | smooth-operator (Rust-native, built-in checkpointing) |
 | **LLM** | OpenAI-compatible via `llm.smoo.ai` gateway by default (Kimi, MiniMax, GLM, Qwen, Anthropic, OpenAI, Google) |
 | **Work tracking** | Pearls (Dolt-backed, git-syncable) |
@@ -608,19 +442,18 @@ and [`SECURITY.md`](SECURITY.md).
 smooth/
 ├── crates/
 │   ├── smooth-cli/               # Binary — clap CLI, the `th` entry point
-│   ├── smooth-bigsmooth/         # Library — orchestrator, policy gen, session mgmt
-│   ├── smooth-bootstrap-bill/    # Library + binary — host-side microsandbox broker ("Bill")
+│   ├── smooth-bigsmooth/         # Library — orchestrator, policy gen, session mgmt, in-process dispatch
 │   ├── smooth-operator/          # Library — Rust-native AI agent framework
-│   ├── smooth-operative/   # Binary — agent loop inside each operative VM
+│   ├── smooth-operative/   # Binary — agent loop for a dispatched pearl (host subprocess)
 │   ├── smooth-policy/            # Library — shared policy types, TOML parsing
-│   ├── smooth-wonk/              # Binary — in-VM access control authority
-│   ├── smooth-goalie/            # Binary — in-VM network + filesystem proxy
 │   ├── smooth-narc/              # Library — tool surveillance + secret detection
-│   ├── smooth-scribe/            # Library — per-VM structured logging
+│   ├── smooth-scribe/            # Library — structured logging
+│   #  (removed 2026-07, pearl th-f4a801: smooth-bootstrap-bill, smooth-wonk,
+│   #   smooth-goalie, smooth-host-stub, smooth-credential-helper — see git history)
 │   ├── smooth-archivist/         # Library — central log aggregator
 │   ├── smooth-pearls/            # Library — Dolt-backed pearl tracker
 │   ├── smooth-plugin/            # Library — CLI-wrapper plugin manifests
-│   ├── smooth-diver/             # Library — deep research / exploratory agent
+│   ├── smooth-diver/             # Library — pearl lifecycle manager + Jira sync
 │   ├── smooth-tunnel/            # Library — th.smoo.ai reverse-tunnel client
 │   ├── smooth-bench/             # Binary — coding-benchmark harness (aider-polyglot, SWE-bench, …)
 │   ├── smooth-code/              # Library — ratatui terminal dashboard

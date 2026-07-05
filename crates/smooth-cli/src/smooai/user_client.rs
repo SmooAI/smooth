@@ -11,16 +11,24 @@
 //! loads the session `th auth login` creates
 //! (`~/.smooth/auth/smooai-user.json`) and sends it as a bearer.
 //!
-//! No auto-refresh — Supabase tokens expire after ~1h; on 401 the
-//! user re-runs `th auth login`. This mirrors `admin::client::
-//! AdminClient` but with neutral (non-admin) error messages so it
-//! can front any user-authenticated API surface. SMOODEV-1735.
+//! Auto-refreshes an expired session via the stored Supabase
+//! `refresh_token` (pearl th-32d00e), so `th auth login` is
+//! once-per-machine. This mirrors `admin::client::AdminClient` but
+//! with neutral (non-admin) error messages so it can front any
+//! user-authenticated API surface. SMOODEV-1735.
 
 use anyhow::{Context, Result};
 use serde_json::Value;
 use smooai_client_shared::auth::storage::CredentialsStore;
 
-use crate::admin::client::api_url;
+/// `https://api.smoo.ai` by default; override with `SMOOAI_API_URL`.
+///
+/// Inlined here (rather than reused from the admin module) so this
+/// user-JWT client compiles in builds that exclude the `admin`
+/// feature. Both helpers read the same `SMOOAI_API_URL` env var.
+fn api_url() -> String {
+    std::env::var("SMOOAI_API_URL").unwrap_or_else(|_| "https://api.smoo.ai".to_string())
+}
 
 /// Authenticated client for user-bearer API calls.
 pub struct UserClient {
@@ -31,21 +39,17 @@ pub struct UserClient {
 
 impl UserClient {
     /// Build by loading the user JWT from
-    /// `~/.smooth/auth/smooai-user.json`. Errors with a
-    /// `th auth login` hint if no (valid) session is present.
-    pub fn from_user_session() -> Result<Self> {
-        let store = CredentialsStore::default_user().context("locate user credentials store")?;
-        let creds = store
-            .load()
-            .context("load user session")?
-            .ok_or_else(|| anyhow::anyhow!("not logged in as a user — run `th auth login` first"))?;
-        if creds.is_expired() {
-            anyhow::bail!("user session expired — run `th auth login` again");
-        }
+    /// `~/.smooth/auth/smooai-user.json`, silently refreshing an
+    /// expired session via its Supabase `refresh_token` (pearl
+    /// th-32d00e). Errors with a `th auth login` hint only when no
+    /// session exists or there's no refresh material.
+    pub async fn from_user_session() -> Result<Self> {
+        let http = reqwest::Client::builder().user_agent(format!("th/{}", env!("CARGO_PKG_VERSION"))).build()?;
+        let creds = crate::auth::refresh::fresh_user_credentials(&http).await?;
         Ok(Self {
             base: api_url(),
             bearer: creds.access_token,
-            http: reqwest::Client::builder().user_agent(format!("th/{}", env!("CARGO_PKG_VERSION"))).build()?,
+            http,
         })
     }
 
@@ -92,6 +96,18 @@ impl UserClient {
             .await
             .with_context(|| format!("PATCH {url}"))?;
         Self::body(resp, "PATCH", &url).await
+    }
+
+    pub async fn delete(&self, path: &str) -> Result<Value> {
+        let url = format!("{}{path}", self.base);
+        let resp = self
+            .http
+            .delete(&url)
+            .bearer_auth(&self.bearer)
+            .send()
+            .await
+            .with_context(|| format!("DELETE {url}"))?;
+        Self::body(resp, "DELETE", &url).await
     }
 
     async fn body(resp: reqwest::Response, method: &str, url: &str) -> Result<Value> {

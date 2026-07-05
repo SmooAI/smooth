@@ -1,0 +1,14 @@
+{
+    "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+    "name": "smooth-agent",
+    "version": "0.1.0",
+    "description": "Big Smooth orchestration for Claude Code: tmux-supervised worker sessions that survive the account-wide rate-limit throttle, coordinate over th-mail, and track work in pearls. Provides the /smooth command.",
+    "author": {
+        "name": "SmooAI",
+        "email": "brent@smoo.ai"
+    },
+    "homepage": "https://github.com/SmooAI/smooth",
+    "repository": "https://github.com/SmooAI/smooth",
+    "license": "MIT",
+    "keywords": ["orchestration", "tmux", "multi-agent", "th-mail", "pearls", "rate-limit"]
+}

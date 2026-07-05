@@ -20,9 +20,9 @@
 //! | `smooth-coding`               | `deepseek-v4-flash`        |
 //! | `smooth-reasoning`            | `deepseek-v4-pro`          |
 //! | `smooth-reviewing`            | `minimax-m2.7-direct`      |
-//! | `smooth-judge`                | `gemini-2.5-flash`         |
+//! | `smooth-judge`                | `groq-gpt-oss-120b`        |
 //! | `smooth-summarize`            | `gemini-2.5-flash`         |
-//! | `smooth-fast`                 | `gemini-2.5-flash-lite`    |
+//! | `smooth-fast`                 | `groq-gpt-oss-20b`         |
 //! | `smooth-default`              | (alias of coding)          |
 //! | `smooth-planning` (deprecated)| (alias of reasoning)       |
 //! | `smooth-thinking` (deprecated)| (alias of reasoning)       |
@@ -61,18 +61,20 @@ impl SmoothSlot {
             Self::Reasoning => "deepseek-v4-pro",
             Self::Reviewing => "minimax-m2.7-direct",
             // Pearl th-3468bd: judge runs once per dispatch and gates
-            // tool execution; an 8B's miss on adversarial paraphrase
-            // attacks costs more than the few hundred extra ms.
-            // Llama 3.3-70B on Groq is still sub-second p95 and well
+            // tool execution; a small model's miss on adversarial
+            // paraphrase attacks costs more than the few hundred extra
+            // ms. gpt-oss-120B on Groq is still sub-second p95 and well
             // under Gemini Flash on cost, with substantially better
-            // refusal/jailbreak detection.
-            Self::Judge => "groq-llama-3.3-70b",
+            // refusal/jailbreak detection. (Replaces the deprecated
+            // groq-llama-3.3-70b alias removed at the gateway.)
+            Self::Judge => "groq-gpt-oss-120b",
             // Summarize needs the 1M context window — gemini-2.5-flash
             // stays.
             Self::Summarize => "gemini-2.5-flash",
             // Fast is utility (titles, autocomplete) — sub-300ms first
-            // token and ~10x cheaper than Gemini Flash Lite.
-            Self::Fast => "groq-llama-3.1-8b",
+            // token and cheap. (Replaces the deprecated groq-llama-3.1-8b
+            // alias removed at the gateway.)
+            Self::Fast => "groq-gpt-oss-20b",
         }
     }
 
@@ -112,6 +114,18 @@ pub const ALL_SLOTS: &[SmoothSlot] = &[
 #[must_use]
 pub fn migrate_alias(model: &str) -> Option<&'static str> {
     let lower = model.to_ascii_lowercase();
+
+    // Deprecated *concrete* gateway models. Configs that already ran the
+    // smooth-* → concrete migration are pinned to a literal model name,
+    // so they never hit the `smooth-` branches below. The Groq Llama
+    // aliases (`groq-llama-3.3-70b`, `groq-llama-3.1-8b`) were removed at
+    // the gateway and replaced by gpt-oss; rewrite them here so an
+    // already-migrated config gets bumped to the live alias instead of
+    // 404ing on a dead model.
+    if let Some(replacement) = migrate_deprecated_concrete(&lower) {
+        return Some(replacement);
+    }
+
     let stripped = lower.strip_prefix("smooth-")?;
 
     // Exact slot aliases.
@@ -141,6 +155,25 @@ pub fn migrate_alias(model: &str) -> Option<&'static str> {
     }
 
     None
+}
+
+/// Map a deprecated *concrete* gateway model name to its live
+/// replacement. Returns `None` for anything still valid.
+///
+/// This is a second migration step layered on top of the `smooth-*`
+/// alias rewrite: the gateway removed the `groq-llama-3.3-70b` /
+/// `groq-llama-3.1-8b` models (SMOODEV-2097) after configs had already
+/// been migrated *onto* them, so a config can hold the literal dead name
+/// with no `smooth-` prefix left to re-trigger the slot mapping. The
+/// `input` is expected to be pre-lowercased by the caller.
+fn migrate_deprecated_concrete(lower: &str) -> Option<&'static str> {
+    match lower {
+        // Judge slot — the removed 70B Llama → gpt-oss-120B.
+        "groq-llama-3.3-70b" => Some("groq-gpt-oss-120b"),
+        // Fast slot — the removed 8B Llama → gpt-oss-20B.
+        "groq-llama-3.1-8b" => Some("groq-gpt-oss-20b"),
+        _ => None,
+    }
 }
 
 fn match_slot_exact(stripped: &str) -> Option<SmoothSlot> {
@@ -185,9 +218,9 @@ mod tests {
         assert_eq!(migrate_alias("smooth-coding"), Some("deepseek-v4-flash"));
         assert_eq!(migrate_alias("smooth-reasoning"), Some("deepseek-v4-pro"));
         assert_eq!(migrate_alias("smooth-reviewing"), Some("minimax-m2.7-direct"));
-        assert_eq!(migrate_alias("smooth-judge"), Some("groq-llama-3.3-70b"));
+        assert_eq!(migrate_alias("smooth-judge"), Some("groq-gpt-oss-120b"));
         assert_eq!(migrate_alias("smooth-summarize"), Some("gemini-2.5-flash"));
-        assert_eq!(migrate_alias("smooth-fast"), Some("groq-llama-3.1-8b"));
+        assert_eq!(migrate_alias("smooth-fast"), Some("groq-gpt-oss-20b"));
         assert_eq!(migrate_alias("smooth-default"), Some("deepseek-v4-flash"));
     }
 
@@ -200,12 +233,12 @@ mod tests {
 
     #[test]
     fn sub_aliases_map_to_slot_concrete_default() {
-        assert_eq!(migrate_alias("smooth-fast-gemini"), Some("groq-llama-3.1-8b"));
-        assert_eq!(migrate_alias("smooth-fast-haiku"), Some("groq-llama-3.1-8b"));
-        assert_eq!(migrate_alias("smooth-fast-gpt"), Some("groq-llama-3.1-8b"));
-        assert_eq!(migrate_alias("smooth-judge-gemini"), Some("groq-llama-3.3-70b"));
-        assert_eq!(migrate_alias("smooth-judge-haiku"), Some("groq-llama-3.3-70b"));
-        assert_eq!(migrate_alias("smooth-judge-gpt"), Some("groq-llama-3.3-70b"));
+        assert_eq!(migrate_alias("smooth-fast-gemini"), Some("groq-gpt-oss-20b"));
+        assert_eq!(migrate_alias("smooth-fast-haiku"), Some("groq-gpt-oss-20b"));
+        assert_eq!(migrate_alias("smooth-fast-gpt"), Some("groq-gpt-oss-20b"));
+        assert_eq!(migrate_alias("smooth-judge-gemini"), Some("groq-gpt-oss-120b"));
+        assert_eq!(migrate_alias("smooth-judge-haiku"), Some("groq-gpt-oss-120b"));
+        assert_eq!(migrate_alias("smooth-judge-gpt"), Some("groq-gpt-oss-120b"));
         assert_eq!(migrate_alias("smooth-summarize-gemini"), Some("gemini-2.5-flash"));
         assert_eq!(migrate_alias("smooth-summarize-gpt"), Some("gemini-2.5-flash"));
         assert_eq!(migrate_alias("smooth-summarize-qwen"), Some("gemini-2.5-flash"));
@@ -218,6 +251,21 @@ mod tests {
         assert_eq!(migrate_alias("smooth-reasoning-qwen"), Some("deepseek-v4-pro"));
         assert_eq!(migrate_alias("smooth-reviewing-minimax"), Some("minimax-m2.7-direct"));
         assert_eq!(migrate_alias("smooth-reviewing-qwen-coder"), Some("minimax-m2.7-direct"));
+    }
+
+    #[test]
+    fn deprecated_concrete_groq_models_migrate_to_gpt_oss() {
+        // SMOODEV-2097: the gateway removed the Groq Llama models that
+        // earlier migrations had already pinned configs onto. A config
+        // holding the literal dead name (no `smooth-` prefix) must still
+        // get bumped to the live gpt-oss alias.
+        assert_eq!(migrate_alias("groq-llama-3.3-70b"), Some("groq-gpt-oss-120b"));
+        assert_eq!(migrate_alias("groq-llama-3.1-8b"), Some("groq-gpt-oss-20b"));
+        // Case-insensitive, matching the rest of the lookup.
+        assert_eq!(migrate_alias("GROQ-LLAMA-3.3-70B"), Some("groq-gpt-oss-120b"));
+        // The live gpt-oss names are not themselves deprecated.
+        assert_eq!(migrate_alias("groq-gpt-oss-120b"), None);
+        assert_eq!(migrate_alias("groq-gpt-oss-20b"), None);
     }
 
     #[test]

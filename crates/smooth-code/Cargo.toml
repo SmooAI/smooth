@@ -21,6 +21,8 @@ smooth-cast.workspace = true
 # coupling.
 smooth-narc = { path = "../smooth-narc", package = "smooai-smooth-narc" }
 smooth-pearls.workspace = true
+# SEP extension trust store (re-exported from sep_host; shared with the operative).
+smooth-policy.workspace = true
 async-trait.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
@@ -34,6 +36,7 @@ tracing.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 dirs-next.workspace = true
+toml.workspace = true
 futures-util.workspace = true
 ignore.workspace = true
 globset.workspace = true

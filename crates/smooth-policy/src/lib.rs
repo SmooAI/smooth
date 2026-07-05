@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 
+pub mod ext_trust;
 pub mod smooth_alias;
 
 // ---------------------------------------------------------------------------
@@ -374,7 +375,7 @@ impl McpPolicy {
 // ---------------------------------------------------------------------------
 
 /// Port forwarding policy — controls which guest ports operators can expose to the host.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PortPolicy {
     /// Whether port forwarding is enabled for this task.
     pub enabled: bool,
@@ -518,7 +519,7 @@ pub struct EnterpriseMcpPolicy {
     pub deny_servers: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EnterprisePortPolicy {
     /// Ports that enterprise policy denies (merged into every task's deny list).
     #[serde(default)]

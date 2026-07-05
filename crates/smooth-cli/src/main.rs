@@ -3,10 +3,13 @@
 //! Single binary for agent orchestration, config management, and platform tools.
 
 mod active_org;
+#[cfg(feature = "admin")]
 mod admin;
 mod auth;
 mod boot_ui;
+mod claude;
 mod config;
+mod ext;
 mod gradient;
 mod hooks;
 mod mcp_config;
@@ -58,15 +61,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start Smooth platform — defaults to sandboxed mode (Smooth
-    /// runs inside a microsandbox microVM). Use `th up direct` to
-    /// run on the host without a sandbox (only safe in a pre-trusted
-    /// environment).
+    /// Start Smooth platform — boots Big Smooth on the host and runs
+    /// dispatched tasks in-process. (The microVM sandbox mode was
+    /// removed 2026-07, pearl th-f4a801; see git history.)
     Up {
-        /// Opt out of sandboxed mode. `th up direct` runs the cast
-        /// on the host with no microsandbox VM in front of it.
-        #[command(subcommand)]
-        mode: Option<UpMode>,
         /// Skip starting Big Smooth (API + web UI)
         #[arg(long)]
         no_leader: bool,
@@ -81,12 +79,11 @@ enum Commands {
         /// `th-6db839`.
         #[arg(long, default_value = "127.0.0.1")]
         bind: String,
-        /// Run in foreground (default: daemonize). Only honored in
-        /// direct mode — sandboxed mode is foreground-by-microVM.
+        /// Run in foreground (default: daemonize).
         #[arg(long)]
         foreground: bool,
-        /// Max concurrent Smooth operatives (each is a microVM). Defaults
-        /// to 3. Can also be set via SMOOTH_SANDBOX_MAX_CONCURRENCY.
+        /// Max concurrent Smooth operatives. Defaults to 3. Can also be
+        /// set via SMOOTH_SANDBOX_MAX_CONCURRENCY.
         #[arg(long)]
         max_operators: Option<usize>,
         /// Skip the workflow's post-implementation TEST phase
@@ -122,6 +119,7 @@ enum Commands {
     /// Smoo AI superadmin operations against the /admin/* endpoints
     /// on api.smoo.ai. Requires a `th auth login` user session whose
     /// account has the requireSuperAdmin role (403 otherwise).
+    #[cfg(feature = "admin")]
     Admin {
         #[command(subcommand)]
         cmd: admin::AdminCommands,
@@ -134,6 +132,20 @@ enum Commands {
     Api {
         #[command(subcommand)]
         cmd: ApiCommands,
+    },
+    /// Smoo AI organizations — `list` the orgs you belong to, `switch`
+    /// the active org (persisted across all credential stores), or
+    /// `show` one. Top-level alias for `th api orgs`, promoted for
+    /// discoverability alongside `th config` / `th testing`.
+    ///
+    /// Note: `switch` flips the *active org* that user-JWT commands
+    /// default to. The user JWT can act cross-org (a master admin is
+    /// authorized over child orgs) — pass `--org`/`--org-id` per call,
+    /// or `switch` to change the default. M2M tokens are org-locked
+    /// server-side, so `switch` is cosmetic for the `--m2m` surface.
+    Org {
+        #[command(subcommand)]
+        cmd: OrgsCommands,
     },
     /// Smoo AI `@smooai/config` — the daily-developer config surface.
     /// `get` / `set` / `list` for single values; `feature-flag` to
@@ -151,34 +163,72 @@ enum Commands {
         #[command(subcommand)]
         cmd: config::Cmd,
     },
-    /// Run a pearl through a Smooth operative in a microVM — streams
-    /// agent events to stdout. With --keep-alive, the VM stays up
-    /// after the agent completes so you can poke at dev servers,
-    /// REPLs, etc.; stop with `th operatives kill <id>`.
+    /// Smoo AI LLM gateway keys — mint / rotate / list the org's
+    /// `llm.smoo.ai` keys and inspect spend. `th llm create-key`
+    /// provisions the org's persistent key (a LiteLLM virtual key
+    /// scoped to the org budget) and prints it once.
+    ///
+    /// Authenticates as the user (Supabase JWT) and is org-admin-gated
+    /// — a master admin can mint for a child org with `--org-id`.
+    /// Wraps `api.smoo.ai/organizations/{org_id}/llm-gateway/*`.
+    Llm {
+        #[command(subcommand)]
+        cmd: smooai::llm_gateway::Cmd,
+    },
+    /// Ping the human on their own phone. Designed to be called BY an
+    /// agent (Big Smooth / claude-driver) as a notify-the-human
+    /// primitive — "blocked, need input", "done", "approve this" — it
+    /// sends a PUSH + in-app notification to the logged-in user's own
+    /// devices via `api.smoo.ai`. The message is the positional words
+    /// joined with spaces, so `th notify done, review the PR` works
+    /// unquoted.
+    Notify {
+        /// The message body — the positional words, joined with spaces.
+        #[arg(value_name = "MESSAGE", required = true)]
+        message: Vec<String>,
+        /// Notification title (what shows as the heading).
+        #[arg(long, default_value = "Smoo AI")]
+        title: String,
+        /// Urgency: low, medium (default), high, or critical.
+        #[arg(long, value_enum, default_value_t = smooai::notify::Priority::Medium)]
+        priority: smooai::notify::Priority,
+        /// Optional deep link to open when the notification is tapped.
+        #[arg(long, value_name = "DEEPLINK")]
+        url: Option<String>,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then
+        /// the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Smoo AI testing platform — the daily-developer surface for
+    /// reporting test results and managing runs / cases / environments /
+    /// deployments. `runs report <file>` is the high-level entry point:
+    /// it creates a run and submits a CTRF (or, with `--junit`, a
+    /// converted JUnit) report in one call. Same commands as
+    /// `th api testing`, promoted to the top level alongside `th config`.
+    Testing {
+        #[command(subcommand)]
+        cmd: smooai::testing::Cmd,
+    },
+    /// Smoo AI booking — the org's Google-Calendar booking page.
+    /// `config get/set` availability, `slots` to see open times,
+    /// `bookings` to list them, `block add/list/rm` for manual busy
+    /// time, `link` for the public URL. Same commands as
+    /// `th api booking`, promoted to the top level alongside `th config`.
+    Booking {
+        #[command(subcommand)]
+        cmd: smooai::booking::Cmd,
+    },
+    /// Run a pearl through a Smooth operative — dispatches to Big Smooth
+    /// (`th up` must be running) and streams agent events to stdout.
     Run {
         /// Pearl id, or a task description prefixed with a space
         /// (e.g. `th run "refactor x to y"`). If empty, picks the
         /// first ready pearl.
         pearl_id: Option<String>,
-        /// OCI image for the operator VM. Defaults to
-        /// smooai/smooth-operative:latest (single unified image —
-        /// the agent installs toolchains at runtime via mise).
-        /// Override via SMOOTH_OPERATIVE_IMAGE env or this flag.
-        #[arg(long)]
-        image: Option<String>,
-        /// Keep the sandbox alive after the agent completes (for
-        /// dev servers, interactive review). Must explicitly stop
-        /// via `th operatives kill <id>`.
-        #[arg(long)]
-        keep_alive: bool,
         /// Override the default model for this run
         #[arg(long)]
         model: Option<String>,
-        /// Override the sandbox's memory allocation in MB
-        /// (default 4096 — bump to 6144/8192 for big Next.js / turbo
-        /// monorepos running dev servers).
-        #[arg(long)]
-        memory_mb: Option<u32>,
         /// Lead role to run under: `fixer` (default, full tools),
         /// `mapper` (read-only, decomposes), `oracle` (read-only, reasons),
         /// or `heckler` (read-only, critiques). Unknown names error
@@ -186,34 +236,61 @@ enum Commands {
         #[arg(long)]
         agent: Option<String>,
     },
-    /// Pause a running Smooth operative
-    Pause { bead_id: String },
-    /// Resume a paused Smooth operative
-    Resume { bead_id: String },
-    /// Send guidance to a running Smooth operative
-    Steer { bead_id: String, message: String },
-    /// Cancel a running Smooth operative
-    Cancel { bead_id: String },
-    /// Approve a pending review
-    Approve { bead_id: String },
-    /// Show messages requiring attention
+    /// Pause a running operative — its agent loop halts until `resume`.
+    Pause {
+        /// The operative id from `th operatives list`.
+        #[arg(value_name = "OPERATIVE_ID")]
+        bead_id: String,
+    },
+    /// Resume a paused operative.
+    Resume {
+        /// The operative id from `th operatives list`.
+        #[arg(value_name = "OPERATIVE_ID")]
+        bead_id: String,
+    },
+    /// Send mid-run guidance to a running operative.
+    Steer {
+        /// The operative id from `th operatives list`.
+        #[arg(value_name = "OPERATIVE_ID")]
+        bead_id: String,
+        /// The guidance message to inject into the run.
+        message: String,
+    },
+    /// Cancel a running operative (stops the run; see also `operatives kill`).
+    Cancel {
+        /// The operative id from `th operatives list`.
+        #[arg(value_name = "OPERATIVE_ID")]
+        bead_id: String,
+    },
+    /// Approve a pending operative review gate.
+    Approve {
+        /// The operative id from `th operatives list`.
+        #[arg(value_name = "OPERATIVE_ID")]
+        bead_id: String,
+    },
+    /// Show operative reviews + notifications needing your attention
+    /// (distinct from `th msg inbox`, which is agent-to-agent mail).
     Inbox,
     /// Smooth operative management
     Operatives {
         #[command(subcommand)]
         cmd: Option<OperativesCommands>,
     },
-    /// Project management
+    /// Pearl projects in the global registry (`~/.smooth/registry.json`)
+    /// — `create` to register one, `list` to see all tracked projects.
+    /// For per-pearl work use `th pearls`.
     Project {
         #[command(subcommand)]
         cmd: ProjectCommands,
     },
-    /// Database management
+    /// Local pearl Dolt database — `status` (health), `backup`, and
+    /// on-disk `path` of this project's `.smooth/dolt/` store.
     Db {
         #[command(subcommand)]
         cmd: DbCommands,
     },
-    /// Jira integration
+    /// Jira sync — `sync` pushes/pulls SMOODEV issues against pearls,
+    /// `status` shows the current sync state.
     Jira {
         #[command(subcommand)]
         cmd: JiraCommands,
@@ -223,14 +300,21 @@ enum Commands {
         #[command(subcommand)]
         cmd: AuditCommands,
     },
-    /// Open web interface
+    /// Open the Smooth web dashboard in your browser.
     Web,
+    /// Supervise Claude Code sessions running inside tmux. On the
+    /// account-wide rate-limit throttle, back off with jitter and resend
+    /// the last message until it lands. `run` / `ls` / `attach`.
+    Claude {
+        #[command(subcommand)]
+        cmd: claude::ClaudeCommands,
+    },
     /// Git worktree management
     Worktree {
         #[command(subcommand)]
         cmd: WorktreeCommands,
     },
-    /// Tailscale integration
+    /// Tailscale status — show the tailnet devices Smooth can see.
     Tailscale {
         #[command(subcommand)]
         cmd: TailscaleCommands,
@@ -327,6 +411,12 @@ enum Commands {
         #[command(subcommand)]
         cmd: PluginCommands,
     },
+    /// SEP extensions (subprocess tools/hooks/UI via the Smooth Extension
+    /// Protocol). Install a local extension, list/trust/remove installed ones.
+    Ext {
+        #[command(subcommand)]
+        cmd: ext::ExtCommands,
+    },
     /// Run Smooth as a background service (launchd / systemd / Task Scheduler)
     Service {
         #[command(subcommand)]
@@ -348,16 +438,6 @@ enum Commands {
         /// (e.g. git@github.com:you/smooth-config.git)
         #[arg(long)]
         remote: Option<String>,
-    },
-    /// Manage the project-scoped sandbox cache.
-    ///
-    /// Two backends: legacy bind-mount under `~/.smooth/project-cache/`
-    /// and microsandbox named volumes under `~/.microsandbox/volumes/`
-    /// (opt-in via `SMOOTH_USE_VOLUMES=1`). List shows both; prune and
-    /// clear operate on both.
-    Cache {
-        #[command(subcommand)]
-        cmd: CacheCommands,
     },
     /// Hosted remote-control sessions via th.smoo.ai (reverse-tunnel).
     ///
@@ -390,6 +470,69 @@ enum Commands {
         #[command(subcommand)]
         cmd: CastCommands,
     },
+    /// Bring-your-own LLM providers — add an OpenAI-compatible server
+    /// (Ollama, LM Studio, llama.cpp, …) by URL, list what's
+    /// configured, remove one, or auto-detect a local server.
+    ///
+    /// Edits `~/.smooth/providers.json` field-preservingly: the typed
+    /// loader drops any key it doesn't know (including per-provider
+    /// `max_tokens`), so every write here goes through raw JSON to keep
+    /// those intact. `th model login` remains the preset-keyed path for
+    /// the cloud providers (Anthropic, OpenRouter, Smoo AI gateway, …).
+    Providers {
+        #[command(subcommand)]
+        cmd: ProvidersCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProvidersCommands {
+    /// Add or update a provider by base URL. Re-running with the same
+    /// id merges (only the flags you pass change; everything else on
+    /// the entry is preserved). Adding the first provider to an empty
+    /// file wires every routing slot to it.
+    Add {
+        /// Provider id (e.g. `ollama`, `lmstudio`, `mylocal`).
+        id: String,
+        /// OpenAI-compatible base URL, usually ending in `/v1`
+        /// (e.g. `http://localhost:11434/v1`).
+        #[arg(long)]
+        url: String,
+        /// API key. Local servers (Ollama, LM Studio) need none.
+        #[arg(long)]
+        api_key: Option<String>,
+        /// Wire format: `openai` (default) or `anthropic`.
+        #[arg(long)]
+        format: Option<String>,
+        /// Default model id for this provider (e.g. `llama3.3`).
+        #[arg(long)]
+        model: Option<String>,
+        /// Per-provider output-token cap. Small local-model context
+        /// windows are blown by the default 32768 — set this to fit.
+        #[arg(long)]
+        max_tokens: Option<u32>,
+    },
+    /// List configured providers with a local tag and any per-provider
+    /// max_tokens.
+    List {
+        /// Emit JSON instead of the colorized list.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a provider by id.
+    Remove { id: String },
+    /// Probe common local inference ports (Ollama 11434, LM Studio
+    /// 1234) via `GET /v1/models` and report what responds. Pass
+    /// `--yes` to add every detected server automatically.
+    Detect {
+        /// Add detected servers to providers.json (default model = the
+        /// first model each server reports).
+        #[arg(long)]
+        yes: bool,
+        /// Emit JSON instead of the colorized report.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -412,15 +555,6 @@ enum CastCommands {
         #[arg(long)]
         filter: Option<String>,
     },
-}
-
-#[derive(Subcommand)]
-enum UpMode {
-    /// Run Smooth directly on the host without a microsandbox VM.
-    /// Only safe inside an already-trusted environment (a CI runner,
-    /// a dedicated devbox, etc.). The default `th up` boots inside
-    /// microsandbox; this opts out.
-    Direct,
 }
 
 #[derive(Subcommand)]
@@ -492,12 +626,12 @@ enum OrgsCommands {
         /// `~/.smooth/auth/smooai.json`.
         org_id: Option<String>,
     },
-    /// Switch the active org persisted in `~/.smooth/auth/smooai.json`.
-    /// Subsequent commands default to this org unless `--org` is set.
+    /// Switch the active org, persisted across the credential stores.
+    /// Subsequent commands default to it unless `--org-id` is passed.
     ///
     /// Omit the argument on a TTY to pick interactively from the orgs you
     /// belong to. A value is matched as a UUID first, then case-insensitively
-    /// against org name / slug (substring) — so `th api orgs switch ats`
+    /// against org name / slug (substring) — so `th org switch ats`
     /// works without copying a UUID.
     Switch {
         /// Org id (UUID) or a name/slug substring. Omit to pick from a list.
@@ -505,11 +639,23 @@ enum OrgsCommands {
     },
 }
 
+/// Pearl th-9cd759: `th api login/logout/whoami` moved to the `th auth`
+/// surface. One release cycle of warnings, then the three arms get removed
+/// (the `th api <resource>` operations stay — they aren't auth).
+fn deprecated_api_auth_hint(old: &str, new: &str) {
+    use owo_colors::OwoColorize;
+    eprintln!(
+        "{} `th api {old}` is deprecated and will be removed in a future release — use `{new}`",
+        "warning:".yellow().bold()
+    );
+}
+
 #[derive(Subcommand)]
 enum ApiCommands {
-    /// Authenticate `th` against the Smoo AI platform API. Exchanges
-    /// an OAuth2 client_credentials grant at `https://auth.smoo.ai/token`
-    /// for a bearer JWT and stores it at `~/.smooth/auth/smooai.json`.
+    /// DEPRECATED — use `th auth login --m2m`. Authenticate `th` against
+    /// the Smoo AI platform API. Exchanges an OAuth2 client_credentials
+    /// grant at `https://auth.smoo.ai/token` for a bearer JWT and stores
+    /// it at `~/.smooth/auth/smooai.json`.
     ///
     /// Credential resolution order (first present wins):
     ///   1. `--client-id` + `--client-secret` flags
@@ -524,10 +670,11 @@ enum ApiCommands {
         #[arg(long)]
         client_secret: Option<String>,
     },
-    /// Forget the current Smoo AI platform session — deletes
-    /// `~/.smooth/auth/smooai.json`. Idempotent.
+    /// DEPRECATED — use `th auth logout --m2m`. Forget the current Smoo AI
+    /// platform session — deletes `~/.smooth/auth/smooai.json`. Idempotent.
     Logout,
-    /// Print the currently-logged-in Smoo AI user + active org.
+    /// DEPRECATED — use `th auth whoami`. Print the currently-logged-in
+    /// Smoo AI user + active org.
     Whoami,
     /// Smoo AI organization management.
     Orgs {
@@ -540,8 +687,15 @@ enum ApiCommands {
         #[command(subcommand)]
         cmd: smooai::agents::Cmd,
     },
-    /// Smoo AI M2M auth clients ("API keys") — list / create /
-    /// rotate / revoke.
+    /// Smoo AI auth clients ("API keys") — mint and manage both
+    /// machine-to-machine (M2M, server/CI secret) and browser-to-machine
+    /// (B2M, origin-restricted publishable key) clients: list, create
+    /// (`--type m2m|b2m`, `--allowed-origin` for B2M), update a B2M
+    /// client's origins, rotate, and revoke.
+    ///
+    /// These routes require a dashboard **user** session (`th auth
+    /// login`) — they 403 under M2M. A master admin can target a child
+    /// org with `--org-id`.
     Keys {
         #[command(subcommand)]
         cmd: smooai::keys::Cmd,
@@ -551,12 +705,20 @@ enum ApiCommands {
         #[command(subcommand)]
         cmd: smooai::members::Cmd,
     },
-    /// Smoo AI CRM — contacts (list / get / create / update / import).
+    /// Smoo AI CRM — the revenue engine: contacts, companies, deals,
+    /// pipeline forecast, stages, tasks, conversations, timeline & invoices.
     /// Authenticates as the logged-in user (`th auth login`), so writes
     /// are attributed to a real person rather than an M2M client.
     Crm {
         #[command(subcommand)]
         cmd: smooai::crm::Cmd,
+    },
+    /// Smoo AI org Copilot — chat / confirm / history. Drives the org's
+    /// always-on dashboard agent (draft email, CRM, analytics, templates).
+    /// Authenticates as the logged-in user (`th auth login`).
+    Copilot {
+        #[command(subcommand)]
+        cmd: smooai::copilot::Cmd,
     },
     /// Smoo AI knowledge documents (text, websites, files).
     Knowledge {
@@ -568,10 +730,21 @@ enum ApiCommands {
         #[command(subcommand)]
         cmd: smooai::jobs::Cmd,
     },
+    /// Smoo AI org integrations (SendGrid email).
+    Integrations {
+        #[command(subcommand)]
+        cmd: smooai::integrations::Cmd,
+    },
     /// Smoo AI billing products / plans.
     Products {
         #[command(subcommand)]
         cmd: smooai::products::Cmd,
+    },
+    /// Smoo AI booking — Google-Calendar availability config, open
+    /// slots, bookings, manual busy blocks, and the public booking link.
+    Booking {
+        #[command(subcommand)]
+        cmd: smooai::booking::Cmd,
     },
     /// Smoo AI profile (the currently-logged-in user).
     Profile {
@@ -590,25 +763,6 @@ enum ApiCommands {
         #[command(subcommand)]
         cmd: smooai::observability::Cmd,
     },
-}
-
-#[derive(Subcommand)]
-enum CacheCommands {
-    /// List cached projects with size and last-used time
-    List,
-    /// Print the cache directory (optionally for a specific project root)
-    Path { project: Option<String> },
-    /// Remove project caches older than N days (default 30)
-    Prune {
-        /// Evict entries whose mtime is older than this many days
-        #[arg(long, default_value = "30")]
-        older_than: u32,
-        /// Show what would be removed without deleting
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// Remove the cache entry for a single project by canonical path
-    Clear { project: String },
 }
 
 #[derive(Subcommand)]
@@ -954,7 +1108,13 @@ enum PearlCommands {
         force: bool,
     },
     /// Pull pearl data from git remote
-    Pull,
+    Pull {
+        /// Pull even if local `main` has commits not yet on the remote
+        /// (which the pull could orphan). Without this, the pull refuses
+        /// and tells you to `th pearls push` first.
+        #[arg(short = 'f', long)]
+        force: bool,
+    },
     /// Manage Dolt remotes for pearl sync
     Remote {
         #[command(subcommand)]
@@ -968,6 +1128,14 @@ enum PearlCommands {
     /// and reports whether the noms manifest reads cleanly. If it
     /// doesn't, `--auto-repair` snapshots the broken dir and re-clones
     /// from the configured `origin` remote.
+    ///
+    /// Then checks REMOTE SYNC health: clones the remote `refs/dolt/data`
+    /// to a temp dir (bounded by SMOOTH_DOLT_SYNC_TIMEOUT_SECS, 30s
+    /// default) and compares histories — in-sync / local-ahead (push) /
+    /// remote-ahead (pull) / diverged with no common ancestor (incl. the
+    /// stray "Initialize data repository" re-init that deadlocks push AND
+    /// pull), plus whether the branch upstream is configured. Read-only:
+    /// it recommends the fix, it never force-pushes.
     Doctor {
         /// Snapshot the broken dir and re-clone from `origin` if a
         /// corrupt manifest is found. Without this flag, `doctor` just
@@ -1273,50 +1441,65 @@ async fn main() -> Result<()> {
                 cmd_doctor().await
             }
         }
-        Some(Commands::Cache { cmd }) => cmd_cache(cmd).await,
         Some(Commands::Tunnel { cmd }) => cmd_tunnel(cmd).await,
         Some(Commands::Up {
-            mode,
             no_leader,
             port,
             bind,
             foreground,
             max_operators,
             skip_test,
-        }) => cmd_up(mode, no_leader, port, bind, foreground, max_operators, skip_test).await,
+        }) => cmd_up(no_leader, port, bind, foreground, max_operators, skip_test).await,
         Some(Commands::Down) => cmd_down().await,
         Some(Commands::Status) => cmd_status().await,
         Some(Commands::Db { cmd }) => cmd_db(cmd),
         Some(Commands::Model { cmd }) => cmd_model(cmd).await,
         Some(Commands::Auth { cmd }) => auth::dispatch(cmd).await,
+        #[cfg(feature = "admin")]
         Some(Commands::Admin { cmd }) => admin::dispatch(cmd).await,
         Some(Commands::Api { cmd }) => match cmd {
-            ApiCommands::Login { client_id, client_secret } => cmd_login(client_id, client_secret).await,
-            ApiCommands::Logout => cmd_logout().await,
-            ApiCommands::Whoami => cmd_whoami().await,
+            ApiCommands::Login { client_id, client_secret } => {
+                deprecated_api_auth_hint("login", "th auth login --m2m");
+                cmd_login(client_id, client_secret).await
+            }
+            ApiCommands::Logout => {
+                deprecated_api_auth_hint("logout", "th auth logout --m2m");
+                cmd_logout().await
+            }
+            ApiCommands::Whoami => {
+                deprecated_api_auth_hint("whoami", "th auth whoami");
+                cmd_whoami().await
+            }
             ApiCommands::Orgs { cmd } => cmd_orgs(cmd).await,
             ApiCommands::Agents { cmd } => smooai::agents::cmd(cmd).await,
             ApiCommands::Keys { cmd } => smooai::keys::cmd(cmd).await,
             ApiCommands::Members { cmd } => smooai::members::cmd(cmd).await,
             ApiCommands::Crm { cmd } => smooai::crm::cmd(cmd).await,
+            ApiCommands::Copilot { cmd } => smooai::copilot::cmd(cmd).await,
             ApiCommands::Knowledge { cmd } => smooai::knowledge::cmd(cmd).await,
             ApiCommands::Jobs { cmd } => smooai::jobs::cmd(cmd).await,
+            ApiCommands::Integrations { cmd } => smooai::integrations::cmd(cmd).await,
             ApiCommands::Products { cmd } => smooai::products::cmd(cmd).await,
+            ApiCommands::Booking { cmd } => smooai::booking::cmd(cmd).await,
             ApiCommands::Profile { cmd } => smooai::profile::cmd(cmd).await,
             ApiCommands::Testing { cmd } => smooai::testing::cmd(cmd).await,
             ApiCommands::Observability { cmd } => smooai::observability::cmd(cmd).await,
         },
+        Some(Commands::Org { cmd }) => cmd_orgs(cmd).await,
         Some(Commands::Config { cmd }) => config::cmd(cmd).await,
+        Some(Commands::Llm { cmd }) => smooai::llm_gateway::cmd(cmd).await,
+        Some(Commands::Notify {
+            message,
+            title,
+            priority,
+            url,
+            org,
+        }) => smooai::notify::cmd(message, title, priority, url, org).await,
+        Some(Commands::Testing { cmd }) => smooai::testing::cmd(cmd).await,
+        Some(Commands::Booking { cmd }) => smooai::booking::cmd(cmd).await,
         Some(Commands::Operatives { cmd }) => cmd_operatives(cmd).await,
         Some(Commands::Inbox) => cmd_inbox().await,
-        Some(Commands::Run {
-            pearl_id,
-            image,
-            keep_alive,
-            model,
-            memory_mb,
-            agent,
-        }) => cmd_run(pearl_id.as_deref(), image.as_deref(), keep_alive, model.as_deref(), memory_mb, agent.as_deref()).await,
+        Some(Commands::Run { pearl_id, model, agent }) => cmd_run(pearl_id.as_deref(), model.as_deref(), agent.as_deref()).await,
         Some(Commands::Approve { bead_id }) => cmd_approve(&bead_id).await,
         Some(Commands::Pause { bead_id }) => cmd_steer(&bead_id, "pause", None).await,
         Some(Commands::Resume { bead_id }) => cmd_steer(&bead_id, "resume", None).await,
@@ -1332,6 +1515,7 @@ async fn main() -> Result<()> {
             println!("Start with: th up");
             Ok(())
         }
+        Some(Commands::Claude { cmd }) => claude::cmd_claude(cmd).await,
         Some(Commands::Worktree { cmd }) => cmd_worktree(cmd),
         Some(Commands::Tailscale { cmd }) => cmd_tailscale(cmd),
         Some(Commands::Access { cmd }) => cmd_access(cmd).await,
@@ -1339,10 +1523,12 @@ async fn main() -> Result<()> {
         Some(Commands::Routing { cmd }) => cmd_routing(cmd).await,
         Some(Commands::Mcp { cmd }) => cmd_mcp(cmd),
         Some(Commands::Plugin { cmd }) => cmd_plugin(cmd),
+        Some(Commands::Ext { cmd }) => ext::dispatch(cmd),
         Some(Commands::Service { cmd }) => cmd_service(cmd),
         Some(Commands::Bench { cmd }) => cmd_bench(cmd),
         Some(Commands::Skills { cmd }) => cmd_skills(cmd),
         Some(Commands::Cast { cmd }) => cmd_cast(cmd).await,
+        Some(Commands::Providers { cmd }) => cmd_providers(cmd).await,
         Some(Commands::Prime) => cmd_prime(),
         Some(_) => {
             println!("Command not yet implemented. Coming soon!");
@@ -1363,245 +1549,7 @@ fn log_file_path() -> std::path::PathBuf {
     dirs_next::home_dir().unwrap_or_default().join(".smooth").join("smooth.log")
 }
 
-/// State file recording the sandboxed-mode VM name so `th down`
-/// can find and destroy it.
-fn sandboxed_state_path() -> std::path::PathBuf {
-    dirs_next::home_dir().unwrap_or_default().join(".smooth").join("sandboxed.vm")
-}
-
-/// Boot the safehouse OCI image as a microsandbox VM, forward
-/// :4400 out, wait for the in-VM Big Smooth to come up, and
-/// stash the VM name so `th down` can destroy it. Pearl
-/// th-67c96b (sandboxed mode).
-async fn start_sandboxed_vm(port: u16) -> Result<()> {
-    use smooth_bigsmooth::sandbox::{create_sandbox, init_sandbox_client, SandboxConfig};
-    use std::collections::HashMap;
-
-    println!();
-    // The Safehouse image. No fallback to any pre-rename name —
-    // ADR-003 + this user directive: replace everything, no
-    // backwards compat.
-    let image = std::env::var("SMOOTH_SAFEHOUSE_IMAGE").unwrap_or_else(|_| "ghcr.io/smooai/safehouse:latest".to_string());
-    println!("  {} booting safehouse microVM (image: {image})", "●".cyan());
-
-    // Pick the sandbox client (DirectSandboxClient on host, since
-    // direct-sandbox feature is on by default).
-    init_sandbox_client();
-
-    let mut env = HashMap::new();
-    env.insert("SMOOTH_VM_MODE".into(), "1".into());
-    env.insert("SMOOTH_SAFEHOUSE_MODE".into(), "1".into());
-    env.insert("SMOOTH_SINGLE_PROCESS".into(), "1".into());
-    env.insert("SMOOTH_SAFEHOUSE_PORT".into(), port.to_string());
-    // The safehouse binary runs as uid 0 inside the microVM and
-    // reads `~/.smooth/providers.json` for LLM credentials. We
-    // bind-mount the host's ~/.smooth at /root/.smooth (RO) below
-    // so HOME resolution lands on real credentials instead of
-    // "no LLM providers configured" with an empty `~`. Set HOME
-    // explicitly so dirs_next::home_dir() inside the guest
-    // resolves correctly even if /etc/passwd isn't populated.
-    env.insert("HOME".into(), "/root".into());
-
-    // Bind-mount the host's ~/.smooth providers + registry into the
-    // VM (RO) so the safehouse can read LLM credentials, the project
-    // registry, and the cross-compiled operative sync dir.
-    // Without this, an in-VM `dirs_next::home_dir().join(".smooth/
-    // providers.json")` lookup returns either nothing or an empty
-    // path, and dispatch fails with "no LLM providers configured".
-    let mut mounts: Vec<smooth_bigsmooth::sandbox::BindMount> = Vec::new();
-    if let Some(home) = dirs_next::home_dir() {
-        let host_smooth = home.join(".smooth");
-        if host_smooth.is_dir() {
-            mounts.push(smooth_bigsmooth::sandbox::BindMount {
-                host_path: host_smooth.to_string_lossy().into_owned(),
-                guest_path: "/root/.smooth".into(),
-                // Pearl th-14d773: was RO, but the bench harness needs the
-                // agent to edit task fixtures under ~/.smooth/bench-runs/.
-                // Without RW the operator VM's /workspace (bound from
-                // /root/.smooth/bench-runs/<id>/<task>) is also RO and
-                // edit_file/write_file fail. The operator VM still gets
-                // Narc + Wonk guards on top so writes are policy-checked.
-                readonly: false,
-            });
-            // Pearl th-14d773: tell the in-safehouse Big Smooth where the
-            // host's ~/.smooth lives. When the TUI dispatches a task with
-            // a working_dir under the outer host's ~/.smooth/ (the bench
-            // harness does this — work_dirs live at
-            // ~/.smooth/bench-runs/<id>/<task>/), Big Smooth needs to
-            // translate that path to the safehouse-visible /root/.smooth/
-            // prefix before bind-mounting it into the operator VM.
-            // Without this, safehouse-mode dispatch ignores the TUI's
-            // working_dir and uses the shared /workspace (= cwd at
-            // `th up` time), so every bench task sees the SAME workspace
-            // contents — usually the smooth repo, never the task fixture.
-            env.insert("SMOOTH_HOME_HOST_PATH".into(), host_smooth.to_string_lossy().into_owned());
-        }
-        // Also mount the cross-compiled operative into the
-        // safehouse so Big Smooth dispatch (running inside the
-        // safehouse) can exec it as a subprocess per pearl. Mount
-        // the runner-bin dir at /opt/smooth/runner-bin — NOT
-        // /opt/smooth/bin, because the OCI image ships the
-        // safehouse binary at /opt/smooth/bin/safehouse and a
-        // bind-mount over that path would shadow the entrypoint.
-        let runner = home.join(".smooth").join("runner-bin").join("smooth-operative");
-        if runner.is_file() {
-            mounts.push(smooth_bigsmooth::sandbox::BindMount {
-                host_path: runner.parent().unwrap().to_string_lossy().into_owned(),
-                guest_path: "/opt/smooth/runner-bin".into(),
-                readonly: true,
-            });
-            env.insert("SMOOTH_OPERATIVE_NATIVE".into(), "/opt/smooth/runner-bin/smooth-operative".into());
-        }
-        // If a freshly cross-compiled safehouse binary is sitting
-        // alongside the runner, prefer it over the one baked into
-        // the OCI image — that lets dev iteration on
-        // crates/smooth-bigsmooth/src/bin/safehouse.rs (and the
-        // dispatch fork that decides direct-vs-sandboxed inside
-        // the VM) reach the running safehouse without rebuilding
-        // and pushing the OCI image.
-        let safehouse_bin = home.join(".smooth").join("runner-bin").join("safehouse");
-        if safehouse_bin.is_file() {
-            mounts.push(smooth_bigsmooth::sandbox::BindMount {
-                host_path: safehouse_bin.to_string_lossy().into_owned(),
-                guest_path: "/opt/smooth/bin/safehouse".into(),
-                readonly: true,
-            });
-        }
-    }
-
-    // Bind-mount the user's working directory at /workspace (RW) so
-    // operatives dispatched from inside the Safehouse can read
-    // and write the user's repo. Without this the in-VM runner sees
-    // only the safehouse rootfs (essentially empty) and the agent
-    // reports "this workspace is empty" on its first list_files.
-    // Pass SMOOTH_HOST_WORKSPACE so Big Smooth's dispatch can
-    // translate any host-path `working_dir` the TUI sends back to
-    // the in-VM /workspace path.
-    let cwd = std::env::current_dir()?;
-    let cwd_canon = cwd.canonicalize().unwrap_or(cwd.clone());
-    mounts.push(smooth_bigsmooth::sandbox::BindMount {
-        host_path: cwd_canon.to_string_lossy().into_owned(),
-        guest_path: "/workspace".into(),
-        readonly: false,
-    });
-    env.insert("SMOOTH_HOST_WORKSPACE".into(), cwd_canon.to_string_lossy().into_owned());
-
-    let config = SandboxConfig {
-        operator_id: "safehouse".into(),
-        bead_id: "safehouse".into(),
-        workspace_path: std::env::current_dir()?.to_string_lossy().into_owned(),
-        permissions: vec![],
-        system_prompt: None,
-        model: None,
-        phase: "execute".into(),
-        env,
-        cpus: 2,
-        memory_mb: 4096,
-        timeout_seconds: 0,
-        mounts,
-        allow_host_loopback: true,
-        env_cache_key: None,
-        use_named_volume_for_cache: false,
-        extra_ports: vec![smooth_bootstrap_bill::PortMapping {
-            guest_port: port,
-            host_port: port,
-            bind_all: false,
-        }],
-        image: Some(image.clone()),
-        secrets: vec![],
-    };
-
-    // The legacy second arg ("host_port") maps host→guest:4096 for
-    // the operator WebSocket bridge. We don't need that for the
-    // safehouse VM (it IS Big Smooth, not an operator). Pass 0 so
-    // the kernel picks an ephemeral port and our extra_ports
-    // entry (host:port → guest:port) gets the real 4400.
-    let handle = create_sandbox(&config, 0).await.context("boot safehouse microVM")?;
-
-    let state_path = sandboxed_state_path();
-    if let Some(parent) = state_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&state_path, &handle.msb_name)?;
-
-    println!();
-    println!("  {}", "╭──────────────────────────────╮".dimmed());
-    println!(
-        "  {}  {} {} sandboxed (vm: {})",
-        "│".dimmed(),
-        gradient::smooth(),
-        "started".bold(),
-        handle.msb_name.chars().take(16).collect::<String>().cyan()
-    );
-    println!("  {}", "╰──────────────────────────────╯".dimmed());
-    println!("    {}  {}", "Web UI".dimmed(), format!("http://localhost:{port}").cyan().bold());
-    println!("    {}  {}", "Image ".dimmed(), image.dimmed());
-    println!("    {}  {}", "Stop  ".dimmed(), "th down".dimmed());
-    println!();
-
-    // Pearl th-dd0cef: we cannot exit here. The safehouse binary
-    // runs *inside* the VM as an exec session, addressed via the
-    // host-side `AgentClient` connection to agentd's UDS. If this
-    // host process exits, microsandbox-runtime's agent relay sees
-    // "client disconnected" on the host socket and immediately
-    // SIGKILLs every active exec session in the guest — including
-    // safehouse. The VM stays running (kernel + agentd are
-    // process-tree-owned by the child msb binary, which keeps
-    // going), but the *safehouse server* dies and port 4400 stops
-    // having a listener inside the guest. From the outside that
-    // looks like microsandbox's port forwarder accepting the TCP
-    // SYN and immediately closing the connection ("Empty reply
-    // from server") — the bug this pearl tracks.
-    //
-    // Block until SIGINT / SIGTERM so the AgentClient stays alive.
-    tracing::info!("safehouse microVM running; awaiting ctrl-c");
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!("ctrl-c received, shutting down safehouse microVM");
-        }
-        _ = async {
-            // Also exit if SIGTERM arrives (LaunchAgents / systemd).
-            #[cfg(unix)]
-            {
-                let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                    .expect("install SIGTERM handler");
-                term.recv().await;
-            }
-            #[cfg(not(unix))]
-            {
-                std::future::pending::<()>().await;
-            }
-        } => {
-            tracing::info!("SIGTERM received, shutting down safehouse microVM");
-        }
-    }
-    let _ = stop_sandboxed_vm().await;
-    Ok(())
-}
-
-/// Destroy the safehouse microVM if one is running.
-/// Counterpart to [`start_sandboxed_vm`]. Idempotent.
-async fn stop_sandboxed_vm() -> Result<bool> {
-    use smooth_bigsmooth::sandbox::{destroy_sandbox, init_sandbox_client};
-
-    let state_path = sandboxed_state_path();
-    if !state_path.exists() {
-        return Ok(false);
-    }
-    let msb_name = std::fs::read_to_string(&state_path).context("read sandboxed.vm")?.trim().to_string();
-    if msb_name.is_empty() {
-        let _ = std::fs::remove_file(&state_path);
-        return Ok(false);
-    }
-    init_sandbox_client();
-    if let Err(e) = destroy_sandbox(&msb_name).await {
-        tracing::warn!(vm = %msb_name, error = %e, "destroy_sandbox failed; removing state file anyway");
-    }
-    let _ = std::fs::remove_file(&state_path);
-    Ok(true)
-}
-
-async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, foreground: bool, max_operators: Option<usize>, skip_test: bool) -> Result<()> {
+async fn cmd_up(no_leader: bool, port: u16, bind: String, foreground: bool, max_operators: Option<usize>, skip_test: bool) -> Result<()> {
     // CLI flag beats env; set env so AppState::new() (which only sees
     // env) picks the right value in both foreground + daemon paths.
     if let Some(n) = max_operators {
@@ -1609,8 +1557,7 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, 
     }
 
     // Shipped-default MCP servers — populate `~/.smooth/mcp.toml` with our
-    // baseline tool set (budget-aware-mcp, …) before the safehouse VM
-    // bind-mounts `~/.smooth` into the guest. Idempotent: never touches an
+    // baseline tool set (budget-aware-mcp, …). Idempotent: never touches an
     // existing entry of the same name (the user's config always wins).
     // Failures here are non-fatal — `th up` must still boot if disk is
     // read-only, the home dir is unwriteable, etc. Set
@@ -1640,21 +1587,11 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, 
             }
         }
     }
-    // Two modes only:
-    //   * `th up` (default) — boot Smooth inside a microsandbox VM
-    //     with :4400 forwarded out.
-    //   * `th up direct`   — run on the host with no sandbox in
-    //     front. Only safe in pre-trusted environments.
-    //
-    // Subcommand beats env; env `SMOOTH_WORKFLOW_DIRECT=1` is
-    // honored as an override for harness/benchmark scripts that
-    // can't easily change argv.
-    let direct = matches!(mode, Some(UpMode::Direct)) || std::env::var("SMOOTH_WORKFLOW_DIRECT").is_ok();
-    if direct {
-        std::env::set_var("SMOOTH_WORKFLOW_DIRECT", "1");
-    } else {
-        std::env::remove_var("SMOOTH_WORKFLOW_DIRECT");
-    }
+    // Smooth boots Big Smooth on the host and runs dispatched tasks
+    // in-process. (The microVM sandbox mode was removed 2026-07, pearl
+    // th-f4a801.) SMOOTH_WORKFLOW_DIRECT is kept set for any harness
+    // that still keys off it.
+    std::env::set_var("SMOOTH_WORKFLOW_DIRECT", "1");
     // Benchmark knob — skip the TEST phase so the agent doesn't
     // add tests that change the score.
     if skip_test {
@@ -1662,12 +1599,9 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, 
     }
 
     // Daemon mode: re-exec ourselves with --foreground and redirect
-    // output to log file. Applies to BOTH sandboxed and direct mode
-    // — sandboxed needs daemonization too because start_sandboxed_vm
-    // has to keep the host-side `AgentClient` alive (pearl th-dd0cef)
-    // for the duration of the VM's run. Without daemonizing, `th up`
-    // would block its caller until ctrl-c, breaking shell chains
-    // like `th down && th up && th`.
+    // output to log file. Without daemonizing, `th up` would block its
+    // caller until ctrl-c, breaking shell chains like
+    // `th down && th up && th`.
     if !foreground {
         // Check if already running
         let pid_path = pid_file_path();
@@ -1713,11 +1647,7 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, 
         let log_err = log_file.try_clone()?;
 
         let exe = std::env::current_exe()?;
-        // Re-exec the daemon with `th up --foreground [flags...]
-        // [direct]`. The `direct` subcommand is appended only in
-        // direct mode; sandboxed mode goes through the same daemon
-        // path without it so start_sandboxed_vm holds the
-        // AgentClient open in the child process.
+        // Re-exec the daemon with `th up --foreground [flags...]`.
         let mut args = vec![
             "up".to_string(),
             "--foreground".to_string(),
@@ -1736,9 +1666,6 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, 
         if skip_test {
             args.push("--skip-test".to_string());
         }
-        if direct {
-            args.push("direct".to_string());
-        }
 
         let child = std::process::Command::new(exe)
             .args(&args)
@@ -1750,15 +1677,14 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, 
         let pid = child.id();
         std::fs::write(&pid_path, pid.to_string())?;
 
-        // Pearl th-7840d8 — animated boot indicator while the
-        // daemon child boots the Safehouse microVM. Same step set
-        // and timing budget as the cold-start path in main() so
-        // `th up` and `th code` (with no leader running) look
-        // identical to the user.
+        // Pearl th-7840d8 — animated boot indicator while the daemon
+        // child boots Big Smooth. Same timing budget as the cold-start
+        // path in main() so `th up` and `th code` (with no leader
+        // running) look identical to the user.
         let indicator = boot_ui::BootIndicator::new();
-        let step_vm = indicator.step("starting Safehouse microVM");
-        let step_cast = indicator.step("cast online (wonk · goalie · narc · scribe · archivist · diver · groove)");
-        let step_runner = indicator.step("operative pool warm");
+        let step_vm = indicator.step("starting Big Smooth");
+        let step_cast = indicator.step("dolt store online");
+        let step_runner = indicator.step("dispatch ready");
         let step_health = indicator.step("health check");
 
         const TIMEOUT_PER_STEP: std::time::Duration = std::time::Duration::from_secs(30);
@@ -1782,7 +1708,7 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, 
             step_runner.fail("not reached");
             step_health.fail("not reached");
             indicator.finish();
-            anyhow::bail!("Safehouse microVM never opened :{port} — check {}", log_path.display());
+            anyhow::bail!("Big Smooth never opened :{port} — check {}", log_path.display());
         }
         step_vm.ok();
 
@@ -1801,7 +1727,7 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, 
             step_runner.fail("not reached");
             step_health.fail("not reached");
             indicator.finish();
-            anyhow::bail!("Safehouse :{port} accepted TCP but never answered HTTP — check {}", log_path.display());
+            anyhow::bail!("Big Smooth :{port} accepted TCP but never answered HTTP — check {}", log_path.display());
         }
         step_cast.ok();
         step_runner.ok();
@@ -1819,7 +1745,7 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, 
         if !ready {
             step_health.fail("timeout");
             indicator.finish();
-            anyhow::bail!("Safehouse booted but :{port} never became healthy — check {}", log_path.display());
+            anyhow::bail!("Big Smooth booted but :{port} never became healthy — check {}", log_path.display());
         }
         step_health.ok();
         indicator.finish();
@@ -1843,16 +1769,9 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, 
         return Ok(());
     }
 
-    // Foreground mode — actual server startup. If we were called
-    // without --direct, hand off to start_sandboxed_vm; that path
-    // both boots the microsandbox VM AND blocks holding the host
-    // AgentClient until SIGTERM (per pearl th-dd0cef). When this is
-    // the daemon-child re-exec, the parent has already detached
+    // Foreground mode — actual server startup on the host. When this
+    // is the daemon-child re-exec, the parent has already detached
     // stdio to the log file, written the pid, and returned.
-    if !direct {
-        return start_sandboxed_vm(port).await;
-    }
-
     println!();
     println!("  {} / {}", gradient::smoo_ai(), gradient::smooth());
     println!();
@@ -1949,14 +1868,7 @@ async fn cmd_up(mode: Option<UpMode>, no_leader: bool, port: u16, bind: String, 
 }
 
 async fn cmd_down() -> Result<()> {
-    // Sandboxed mode: state file recorded the safehouse microVM
-    // name; destroy it via Bill (pearl th-67c96b). Also kill the
-    // daemonized child holding the AgentClient — without that, the
-    // child sits idle on a dead connection until its SIGTERM
-    // handler fires (which it never will, since nobody else signals
-    // it).
-    let vm_destroyed = matches!(stop_sandboxed_vm().await, Ok(true));
-
+    // Kill the daemonized Big Smooth child recorded in the pid file.
     let pid_path = pid_file_path();
     let mut pid_killed: Option<u32> = None;
     if pid_path.exists() {
@@ -1969,24 +1881,12 @@ async fn cmd_down() -> Result<()> {
         let _ = std::fs::remove_file(&pid_path);
     }
 
-    match (vm_destroyed, pid_killed) {
-        (true, Some(pid)) => {
-            let tag = format!("(pid {pid}, sandboxed safehouse microVM destroyed)");
-            println!("  \u{1f534} {} {} {}", gradient::smooth(), "stopped".green().bold(), tag.dimmed());
-        }
-        (true, None) => {
-            println!(
-                "  \u{1f534} {} {} {}",
-                gradient::smooth(),
-                "stopped".green().bold(),
-                "(sandboxed safehouse microVM destroyed)".dimmed()
-            );
-        }
-        (false, Some(pid)) => {
+    match pid_killed {
+        Some(pid) => {
             let tag = format!("(pid {pid})");
             println!("  \u{1f534} {} {} {}", gradient::smooth(), "stopped".green().bold(), tag.dimmed());
         }
-        (false, None) => {
+        None => {
             println!("  {} {}", gradient::smooth(), "is not running.".yellow());
         }
     }
@@ -2601,22 +2501,7 @@ async fn cmd_inbox() -> Result<()> {
     .await
 }
 
-/// Default image for a sandboxed `th run`. One image covers every
-/// stack — the agent installs whatever toolchain the task needs at
-/// runtime via mise, and the installs persist in the project cache.
-/// Kept as a helper so it's easy to swap the tag via env if needed.
-fn default_smooth_operative_image() -> String {
-    std::env::var("SMOOTH_OPERATIVE_IMAGE").unwrap_or_else(|_| "ghcr.io/smooai/smooth-operative:latest".to_string())
-}
-
-async fn cmd_run(
-    pearl_id_arg: Option<&str>,
-    image: Option<&str>,
-    keep_alive: bool,
-    model: Option<&str>,
-    memory_mb: Option<u32>,
-    agent: Option<&str>,
-) -> Result<()> {
+async fn cmd_run(pearl_id_arg: Option<&str>, model: Option<&str>, agent: Option<&str>) -> Result<()> {
     // Validate the agent name up front so a typo fails at the CLI
     // instead of falling through to the runner's "unknown agent,
     // falling back to code" warning.
@@ -2657,24 +2542,12 @@ async fn cmd_run(
 
     let cwd = std::env::current_dir()?;
 
-    // Default image is always smooai/smooth-operative (agent installs
-    // its own toolchain via mise). --image overrides for special cases.
-    let resolved_image: String = image.map(String::from).unwrap_or_else(default_smooth_operative_image);
-
     if let Some(ref id) = pearl_id {
         println!("\n  {} {} {}", "▶".cyan().bold(), "Running pearl".bold(), id.bold());
     } else {
         println!("\n  {} {}", "▶".cyan().bold(), "Running ad-hoc task".bold());
     }
     println!("  {} {}", "cwd".dimmed(), cwd.display().to_string().dimmed());
-    let image_suffix = if image.is_none() { " (default)" } else { "" };
-    println!("  {} {}{}", "image".dimmed(), resolved_image.dimmed(), image_suffix.dimmed());
-    if let Some(mb) = memory_mb {
-        println!("  {} {} MB", "memory".dimmed(), mb);
-    }
-    if keep_alive {
-        println!("  {} VM will stay alive after completion", "⧗".yellow());
-    }
     println!("  {} {}", "agent".dimmed(), agent_name.dimmed());
     println!();
 
@@ -2682,9 +2555,6 @@ async fn cmd_run(
         "message": message,
         "model": model,
         "working_dir": cwd.to_string_lossy(),
-        "image": resolved_image,
-        "keep_alive": keep_alive,
-        "memory_mb": memory_mb,
         "agent": agent_name,
     });
 
@@ -2699,8 +2569,6 @@ async fn cmd_run(
 
     let mut byte_stream = resp.bytes_stream();
     let mut buffer = String::new();
-    let mut operator_id: Option<String> = None;
-    let mut saw_complete = false;
 
     while let Some(chunk_res) = byte_stream.next().await {
         let chunk = chunk_res?;
@@ -2729,35 +2597,16 @@ async fn cmd_run(
                     "ToolCallStart" => {
                         let tool = evt.get("tool_name").and_then(|v| v.as_str()).unwrap_or("?");
                         println!("\n  {} {}", "⚙".cyan(), tool.dimmed());
-                        // Capture operator id from sandbox.create result
-                        // (server emits it as part of ToolCallComplete,
-                        // but also at create-time in `arguments`).
-                        if tool == "sandbox.create" {
-                            if let Some(args) = evt.get("arguments").and_then(|v| v.as_str()) {
-                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args) {
-                                    if let Some(id) = parsed.get("operator_id").and_then(|v| v.as_str()) {
-                                        operator_id = Some(id.to_string());
-                                    }
-                                }
-                            }
-                        }
                     }
                     "ToolCallComplete" => {
                         let tool = evt.get("tool_name").and_then(|v| v.as_str()).unwrap_or("?");
                         let is_error = evt.get("is_error").and_then(serde_json::Value::as_bool).unwrap_or(false);
-                        if tool == "sandbox.create" {
-                            if let Some(result) = evt.get("result").and_then(|v| v.as_str()) {
-                                operator_id = Some(result.to_string());
-                                println!("  {} operator {}", "●".green(), result.bold());
-                            }
-                        }
                         if is_error {
                             let result = evt.get("result").and_then(|v| v.as_str()).unwrap_or("");
                             println!("  {} {} {}", "✗".red().bold(), tool.dimmed(), result.red());
                         }
                     }
                     "Complete" | "TaskComplete" => {
-                        saw_complete = true;
                         println!("\n  {} agent completed", "✓".green().bold());
                     }
                     "Error" | "TaskError" => {
@@ -2768,49 +2617,6 @@ async fn cmd_run(
                 }
             }
         }
-    }
-
-    if keep_alive && saw_complete {
-        let id = operator_id.as_deref().unwrap_or("<unknown>");
-        println!();
-        println!("  {} VM {} is still running.\n", "⧗".yellow(), id.bold());
-
-        // Pull forwarded-port info from the server so the user sees
-        // reachable URLs instead of being told to go run another
-        // command. Best-effort — if the query fails we still print
-        // the stop hint.
-        if let Some(ref opid) = operator_id {
-            let url = format!("http://localhost:4400/api/workers/{opid}");
-            if let Ok(resp) = client.get(&url).send().await {
-                if let Ok(worker) = resp.json::<serde_json::Value>().await {
-                    if let Some(ports) = worker.get("data").and_then(|d| d.get("port_mappings")).and_then(|v| v.as_array()) {
-                        let mut printed_header = false;
-                        for p in ports {
-                            let Some(guest) = p.get(0).and_then(serde_json::Value::as_u64) else {
-                                continue;
-                            };
-                            let Some(host) = p.get(1).and_then(serde_json::Value::as_u64) else {
-                                continue;
-                            };
-                            if guest == 4096 {
-                                continue; // runner control port — not useful to user
-                            }
-                            if !printed_header {
-                                println!("  {}", "Reachable on the host:".bold());
-                                printed_header = true;
-                            }
-                            println!("    guest {guest} → {}", format!("http://localhost:{host}").cyan());
-                        }
-                        if printed_header {
-                            println!();
-                        }
-                    }
-                }
-            }
-        }
-
-        println!("  {} stop with: {}", "→".dimmed(), format!("th operatives kill {id}").cyan());
-        println!();
     }
 
     Ok(())
@@ -3163,13 +2969,7 @@ async fn cmd_code(
                 let workspace = working_dir.clone();
                 let skills = smooth_cast::skills::discover(&workspace);
                 if let Some(skill) = skills.iter().find(|s| s.name == name) {
-                    let source_label = match skill.source {
-                        smooth_cast::skills::SkillSource::Project => "project",
-                        smooth_cast::skills::SkillSource::UserSmooth => "user-smooth",
-                        smooth_cast::skills::SkillSource::ClaudeCode => "claude-code",
-                        smooth_cast::skills::SkillSource::OpenCode => "opencode",
-                        smooth_cast::skills::SkillSource::Builtin => "builtin",
-                    };
+                    let source_label = skill.source.label();
                     // Pearl th-e0f812: tell the headless caller a skill
                     // was picked. stderr so `--json` consumers parsing
                     // stdout don't get tripped.
@@ -3371,8 +3171,8 @@ async fn cmd_code(
 fn cmd_hooks(cmd: HooksCommands) -> Result<()> {
     match cmd {
         HooksCommands::Install => {
-            let hooks_dir = hooks::install(None)?;
-            hooks::print_install_result(&hooks_dir);
+            let outcome = hooks::install(None)?;
+            hooks::print_install_outcome(&outcome);
         }
         HooksCommands::Run { hook, args } => {
             hooks::run_hook(&hook, &args)?;
@@ -3529,8 +3329,13 @@ async fn cmd_doctor() -> Result<()> {
         // Auto-fix: install hooks
         println!("    {} installing hooks...", "→".cyan());
         match hooks::install(None) {
-            Ok(hooks_dir) => {
+            Ok(hooks::InstallOutcome::Installed(hooks_dir)) => {
                 println!("    {} fixed: hooks installed at {}", "✓".green().bold(), hooks_dir.display());
+                issues -= 1;
+            }
+            Ok(outcome @ hooks::InstallOutcome::SkippedForeign(_)) => {
+                // Repo has its own hooks (husky etc.); not an issue to fix.
+                hooks::print_install_outcome(&outcome);
                 issues -= 1;
             }
             Err(e) => {
@@ -3547,300 +3352,6 @@ async fn cmd_doctor() -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Git-init ~/.smooth/ as a repo so config can be backed up and synced
-/// across machines. Writes a .gitignore that excludes secrets
-/// (providers.json), service logs, rotating audit logs, the SQLite
-/// leftover, and the Dolt store (which has its own push/pull). Adds
-/// the files that *should* be versioned (mcp.toml, plugins/<name>/,
-/// registry.json) and makes an initial commit.
-///
-/// Idempotent: re-running on an already-initialized repo just prints
-/// status and optionally adds a new remote.
-/// Path to the project-scoped sandbox cache root.
-fn project_cache_root() -> Result<std::path::PathBuf> {
-    let home = dirs_next::home_dir().context("cannot determine home directory")?;
-    Ok(home.join(".smooth").join("project-cache"))
-}
-
-/// Compute the cache key for a given workspace path. Mirrors
-/// `smooth_bigsmooth::server::project_cache_key` so CLI-side `th cache`
-/// output matches server-side bind-mount keys.
-fn workspace_cache_key(path: &str) -> Option<String> {
-    smooth_bigsmooth::server::project_cache_key(path)
-}
-
-fn dir_size_bytes(path: &std::path::Path) -> u64 {
-    fn walk(p: &std::path::Path) -> u64 {
-        let mut total = 0u64;
-        let Ok(entries) = std::fs::read_dir(p) else { return 0 };
-        for e in entries.flatten() {
-            let Ok(md) = e.metadata() else { continue };
-            if md.is_dir() {
-                total = total.saturating_add(walk(&e.path()));
-            } else {
-                total = total.saturating_add(md.len());
-            }
-        }
-        total
-    }
-    walk(path)
-}
-
-fn fmt_size(bytes: u64) -> String {
-    const K: u64 = 1024;
-    const M: u64 = K * 1024;
-    const G: u64 = M * 1024;
-    if bytes >= G {
-        format!("{:.1} GB", bytes as f64 / G as f64)
-    } else if bytes >= M {
-        format!("{:.1} MB", bytes as f64 / M as f64)
-    } else if bytes >= K {
-        format!("{:.1} KB", bytes as f64 / K as f64)
-    } else {
-        format!("{bytes} B")
-    }
-}
-
-fn fmt_age(modified: std::time::SystemTime) -> String {
-    let Ok(elapsed) = modified.elapsed() else {
-        return "just now".to_string();
-    };
-    let secs = elapsed.as_secs();
-    if secs < 60 {
-        "just now".to_string()
-    } else if secs < 3600 {
-        format!("{}m ago", secs / 60)
-    } else if secs < 86_400 {
-        format!("{}h ago", secs / 3600)
-    } else {
-        format!("{}d ago", secs / 86_400)
-    }
-}
-
-/// Unified row across both cache backends. Populated from either a
-/// bind-mount directory entry or a `ProjectCacheVolumeInfo`; the
-/// display path and pruning logic then treat them uniformly.
-struct CacheEntry {
-    backend: CacheBackend,
-    /// Display name. For bind-mount entries: the directory name (which
-    /// equals the cache_key). For volumes: the volume name (with
-    /// `smooth-cache-` prefix).
-    display: String,
-    /// Workspace cache_key. For volumes this is taken from the
-    /// `smooth-cache-key` label (falls back to name-with-prefix-
-    /// stripped); for bind-mount entries it's just the dir name.
-    cache_key: String,
-    /// Host path to the entry's data directory.
-    path: std::path::PathBuf,
-    size_bytes: u64,
-    /// "Last touched" signal — dir mtime. For volumes this is computed
-    /// from on-disk mtime; for bind-mounts it's the entry's own
-    /// metadata.
-    last_modified: std::time::SystemTime,
-}
-
-#[derive(Copy, Clone, PartialEq, Eq)]
-enum CacheBackend {
-    BindMount,
-    NamedVolume,
-}
-
-impl CacheBackend {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::BindMount => "bind",
-            Self::NamedVolume => "volume",
-        }
-    }
-}
-
-fn collect_bind_mount_entries(root: &std::path::Path) -> Vec<CacheEntry> {
-    if !root.is_dir() {
-        return Vec::new();
-    }
-    let Ok(rd) = std::fs::read_dir(root) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for entry in rd.filter_map(std::result::Result::ok) {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        let size_bytes = dir_size_bytes(&path);
-        let last_modified = entry
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        out.push(CacheEntry {
-            backend: CacheBackend::BindMount,
-            display: name.clone(),
-            cache_key: name,
-            path,
-            size_bytes,
-            last_modified,
-        });
-    }
-    out
-}
-
-async fn collect_volume_entries() -> Vec<CacheEntry> {
-    match smooth_bootstrap_bill::project_cache::list_project_cache_volumes().await {
-        Ok(vols) => vols
-            .into_iter()
-            .map(|v| CacheEntry {
-                backend: CacheBackend::NamedVolume,
-                display: v.volume_name.clone(),
-                cache_key: v.cache_key,
-                path: v.path,
-                size_bytes: v.size_bytes,
-                last_modified: v.last_modified.unwrap_or(std::time::SystemTime::UNIX_EPOCH),
-            })
-            .collect(),
-        Err(e) => {
-            tracing::debug!(error = %e, "th cache: named-volume enumeration failed (treating as empty)");
-            Vec::new()
-        }
-    }
-}
-
-async fn cmd_cache(cmd: CacheCommands) -> Result<()> {
-    let root = project_cache_root()?;
-
-    match cmd {
-        CacheCommands::Path { project } => {
-            let target = if let Some(p) = project {
-                let key = workspace_cache_key(&p).context("cannot derive cache key from empty path")?;
-                root.join(key)
-            } else {
-                root
-            };
-            println!("{}", target.display());
-            Ok(())
-        }
-
-        CacheCommands::List => {
-            let mut entries = collect_bind_mount_entries(&root);
-            let volume_entries = collect_volume_entries().await;
-            entries.extend(volume_entries);
-
-            if entries.is_empty() {
-                println!(
-                    "\n  {} No project caches yet. They're created lazily on first `th up` / `th dev`.\n",
-                    "ℹ".cyan()
-                );
-                return Ok(());
-            }
-            // Newest first across both backends.
-            entries.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
-
-            println!("\n  {}\n", "Project caches".cyan().bold());
-            let mut total = 0u64;
-            for e in &entries {
-                total = total.saturating_add(e.size_bytes);
-                println!(
-                    "  [{:<6}] {:<40} {:>10} {}",
-                    e.backend.label().dimmed(),
-                    e.display.as_str().bold(),
-                    fmt_size(e.size_bytes).dimmed(),
-                    fmt_age(e.last_modified).dimmed()
-                );
-            }
-            println!("\n  {} {}\n", "total".dimmed(), fmt_size(total).bold());
-            Ok(())
-        }
-
-        CacheCommands::Prune { older_than, dry_run } => {
-            let mut entries = collect_bind_mount_entries(&root);
-            let volume_entries = collect_volume_entries().await;
-            entries.extend(volume_entries);
-
-            if entries.is_empty() {
-                println!("\n  {} No cache to prune.\n", "ℹ".cyan());
-                return Ok(());
-            }
-
-            let cutoff = std::time::SystemTime::now()
-                .checked_sub(std::time::Duration::from_secs(u64::from(older_than) * 86_400))
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-
-            let mut removed = 0u32;
-            let mut reclaimed = 0u64;
-            for e in entries {
-                if e.last_modified > cutoff {
-                    continue;
-                }
-                let verb = if dry_run { "would remove" } else { "removing" };
-                println!(
-                    "  {} [{:<6}] {:<40} {}",
-                    verb.yellow(),
-                    e.backend.label().dimmed(),
-                    e.display.as_str().bold(),
-                    fmt_size(e.size_bytes).dimmed()
-                );
-                if !dry_run {
-                    let remove_result = match e.backend {
-                        CacheBackend::BindMount => std::fs::remove_dir_all(&e.path).map_err(anyhow::Error::from),
-                        CacheBackend::NamedVolume => smooth_bootstrap_bill::project_cache::remove_project_cache_volume(&e.cache_key).await.map(drop),
-                    };
-                    if let Err(err) = remove_result {
-                        tracing::warn!(error = %err, path = %e.path.display(), backend = e.backend.label(), "failed to remove cache entry");
-                        continue;
-                    }
-                }
-                removed += 1;
-                reclaimed = reclaimed.saturating_add(e.size_bytes);
-            }
-            if removed == 0 {
-                println!("\n  {} Nothing older than {older_than} days.\n", "✓".green().bold());
-            } else {
-                let verb = if dry_run { "would free" } else { "freed" };
-                println!("\n  {} {removed} entries, {verb} {}\n", "✓".green().bold(), fmt_size(reclaimed).bold());
-            }
-            Ok(())
-        }
-
-        CacheCommands::Clear { project } => {
-            let key = workspace_cache_key(&project).context("cannot derive cache key from empty path")?;
-            let bind_dir = root.join(&key);
-
-            let mut removed_any = false;
-            let mut total_size = 0u64;
-
-            if bind_dir.is_dir() {
-                let size = dir_size_bytes(&bind_dir);
-                std::fs::remove_dir_all(&bind_dir).with_context(|| format!("remove {}", bind_dir.display()))?;
-                println!("  {} [{:<6}] {} — {}", "✓".green().bold(), "bind".dimmed(), key.bold(), fmt_size(size).dimmed());
-                total_size = total_size.saturating_add(size);
-                removed_any = true;
-            }
-
-            match smooth_bootstrap_bill::project_cache::remove_project_cache_volume(&key).await {
-                Ok(true) => {
-                    let vol_name = smooth_bootstrap_bill::project_cache::volume_name_for_cache_key(&key);
-                    println!("  {} [{:<6}] {}", "✓".green().bold(), "volume".dimmed(), vol_name.bold());
-                    removed_any = true;
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    tracing::warn!(error = %e, key = %key, "failed to remove named-volume cache entry");
-                }
-            }
-
-            if !removed_any {
-                println!("\n  {} No cache entry for {} (key: {})\n", "ℹ".cyan(), project.bold(), key.dimmed());
-            } else if total_size > 0 {
-                println!("\n  {} freed {}\n", "total".dimmed(), fmt_size(total_size).bold());
-            } else {
-                println!();
-            }
-            Ok(())
-        }
-    }
 }
 
 async fn cmd_tunnel(cmd: TunnelCommands) -> Result<()> {
@@ -3877,14 +3388,13 @@ async fn cmd_tunnel(cmd: TunnelCommands) -> Result<()> {
             println!("  {} {}\n", "slug      ".dimmed(), format!("{}", cfg.slug).bold());
 
             let client = TunnelClient::new(cfg);
-            match client.run().await {
-                Ok(()) => Ok(()),
-                // Scaffold-phase: the rendezvous service isn't live
-                // yet. Surface the structured error with a friendly
-                // hint instead of crashing.
-                Err(smooth_tunnel::TunnelError::NotImplementedYet) => {
-                    println!("  {} Scaffold only — the th.smoo.ai rendezvous service is not deployed yet.", "ℹ".cyan());
-                    println!("  {} Track {} (smooai pearl th-8898f2) for the ECS side.\n", "ℹ".cyan(), "SMOODEV-637".bold());
+            let printed = |hello: &smooth_tunnel::ServerHello| {
+                println!("  {} {}", "✓ live at".green().bold(), hello.public_url.bold());
+                println!("  {} {}\n", "session   ".dimmed(), hello.session_id.dimmed());
+            };
+            match client.run(printed).await {
+                Ok(()) => {
+                    println!("  {} tunnel closed\n", "•".dimmed());
                     Ok(())
                 }
                 Err(e) => Err(anyhow::anyhow!("tunnel: {e}")),
@@ -4327,17 +3837,19 @@ fn commit_messaging_state(store: &smooth_pearls::PearlStore, dolt_dir: &std::pat
     }
 }
 
-/// Best-effort push of the messaging/pearl state to the repo's
+/// Best-effort push of the pearl/messaging state to the repo's
 /// `refs/dolt/data` remote so other clones/machines on the same repo see
-/// it. Messages live in the pearl store, which syncs over the repo's git
-/// origin — so a `send`/`register` that only commits locally won't reach a
-/// teammate's clone until a push. Quiet by design: a missing remote (the
-/// global `~/.smooth/dolt`, or a project with no origin) or being offline
-/// is a silent no-op — never an error, and never a stray `fatal:` on
-/// stderr (we drive only `dolt push`, which captures its own output; the
-/// git-side `git_push_pearl_state` inherits git's stderr and is only for
-/// the legacy tracked-store model, so it's not used here). Pearl th-bdaaa7.
-fn sync_push_messaging(dolt_dir: &std::path::Path) {
+/// it. Pearls and messages both live in the pearl store, which syncs over
+/// the repo's git origin via Dolt's own ref — so a mutation that only
+/// commits locally won't reach a teammate's clone until a push, and an
+/// un-pushed local commit is exactly what a later `th pearls pull` can
+/// orphan (pearl th-4a4559). Quiet by design: a missing remote (the global
+/// `~/.smooth/dolt`, or a project with no origin) or being offline is a
+/// silent no-op — never an error, and never a stray `fatal:` on stderr (we
+/// drive only `dolt push`, which captures its own output; the git-side
+/// `git_push_pearl_state` inherits git's stderr and is only for the legacy
+/// tracked-store model, so it's not used here). Pearls th-bdaaa7 / th-4a4559.
+fn sync_push_pearl_state(dolt_dir: &std::path::Path) {
     let Ok(dolt) = smooth_pearls::SmoothDolt::new(dolt_dir) else { return };
     match dolt.push_with(smooth_pearls::PushOpts {
         force: false,
@@ -4351,17 +3863,50 @@ fn sync_push_messaging(dolt_dir: &std::path::Path) {
                 set_upstream: true,
             });
         }
-        Err(e) => tracing::debug!(error = %e, "messaging push skipped (no remote / offline)"),
+        Err(e) => tracing::debug!(error = %e, "pearl push skipped (no remote / offline)"),
     }
+}
+
+/// Commit a pearl mutation to the on-disk store/git AND push it to the
+/// repo's `refs/dolt/data` remote, so the work is durable the moment it's
+/// made — closing the un-pushed window that a later pull/re-clone can drop
+/// (pearl th-4a4559). The git commit is propagated (callers `?` it); the
+/// push is best-effort + quiet (offline / no-remote is fine). Opt out of
+/// the push with `SMOOTH_PEARLS_NO_PUSH=1` (e.g. bulk/scripted creates that
+/// push once at the end).
+fn commit_and_push_pearl_state(dolt_dir: &std::path::Path, action: &str) -> Result<()> {
+    auto_commit_pearl_state(dolt_dir, action)?;
+    if std::env::var_os("SMOOTH_PEARLS_NO_PUSH").is_none() {
+        sync_push_pearl_state(dolt_dir);
+    }
+    Ok(())
 }
 
 /// Best-effort pull so the local store reflects messages sent from other
 /// clones/machines on the same repo. Quiet on no-remote/offline (drives
 /// only `dolt pull`, which captures its own output).
-fn sync_pull_messaging(dolt_dir: &std::path::Path) {
+fn sync_pull_pearl_state(dolt_dir: &std::path::Path) {
     if let Ok(dolt) = smooth_pearls::SmoothDolt::new(dolt_dir) {
         let _ = dolt.pull();
     }
+}
+
+/// How many commits local `main` is ahead of `remotes/origin/main` — i.e.
+/// committed locally but not yet on the remote's `refs/dolt/data`. These
+/// are exactly the commits a `th pearls pull` could orphan. Returns `None`
+/// when it can't be determined (no `origin`, fetch fails, or the remote
+/// branch was never fetched) so callers skip the guard rather than wrongly
+/// block. Pearl th-4a4559.
+fn pearl_local_ahead_count(dolt_dir: &std::path::Path) -> Option<usize> {
+    let dolt = smooth_pearls::SmoothDolt::new(dolt_dir).ok()?;
+    // Refresh the remote-tracking ref so the comparison is current.
+    // Best-effort — a missing/unreachable remote just leaves
+    // `remotes/origin/main` stale or absent, handled below.
+    let _ = dolt.sql("CALL DOLT_FETCH('origin', 'main')");
+    // Commits reachable from local `main` but not from the remote tip.
+    let rows = dolt.sql("SELECT COUNT(*) AS n FROM dolt_log('remotes/origin/main..main')").ok()?;
+    let n = rows.first().and_then(|r| r["n"].as_u64())?;
+    usize::try_from(n).ok()
 }
 
 fn print_message(m: &smooth_pearls::Message) {
@@ -4395,7 +3940,7 @@ async fn cmd_agent(cmd: AgentCommands) -> Result<()> {
             reg.register(&name, &harness, Some(pid))?;
             commit_messaging_state(&store, &dolt_dir, &format!("agent register {name}"));
             if !no_push {
-                sync_push_messaging(&dolt_dir);
+                sync_push_pearl_state(&dolt_dir);
             }
             println!("{} registered as {} ({})", "✓".green().bold(), name.green().bold(), harness.dimmed());
             println!("  {} continuously check: {}", "→".dimmed(), format!("th msg watch --agent {name}").cyan());
@@ -4428,7 +3973,7 @@ async fn cmd_agent(cmd: AgentCommands) -> Result<()> {
             let name = name.unwrap_or_else(default_agent_name);
             reg.set_status(&name, "offline")?;
             commit_messaging_state(&store, &dolt_dir, &format!("agent offline {name}"));
-            sync_push_messaging(&dolt_dir);
+            sync_push_pearl_state(&dolt_dir);
             println!("{} {} marked offline", "✓".green().bold(), name);
         }
     }
@@ -4450,7 +3995,7 @@ async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
             let id = mb.send(&from, &to, &body, thread_id.as_deref())?;
             commit_messaging_state(&store, &dolt_dir, &format!("msg {id} {from}->{to}"));
             if !no_push {
-                sync_push_messaging(&dolt_dir);
+                sync_push_pearl_state(&dolt_dir);
             }
             println!("{} sent {} to {}", "✓".green().bold(), id.dimmed(), to.green());
         }
@@ -4464,7 +4009,7 @@ async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
         } => {
             let who = agent.unwrap_or_else(default_agent_name);
             if pull {
-                sync_pull_messaging(&dolt_dir);
+                sync_pull_pearl_state(&dolt_dir);
             }
             let _ = reg.touch(&who); // heartbeat (best-effort)
             let msgs = mb.inbox(&who, unread, limit)?;
@@ -4499,7 +4044,7 @@ async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
             let to = orig.from_agent.clone();
             let new_id = mb.send(&from, &to, &body, Some(&root))?;
             commit_messaging_state(&store, &dolt_dir, &format!("msg reply {new_id} -> {to}"));
-            sync_push_messaging(&dolt_dir);
+            sync_push_pearl_state(&dolt_dir);
             println!("{} replied {} to {}", "✓".green().bold(), new_id.dimmed(), to.green());
         }
         MsgCommands::Thread { id } => {
@@ -4522,7 +4067,7 @@ async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
             let interval = std::time::Duration::from_secs(interval.max(1));
             loop {
                 if !no_pull {
-                    sync_pull_messaging(&dolt_dir);
+                    sync_pull_pearl_state(&dolt_dir);
                 }
                 let _ = reg.touch(&who);
                 match mb.inbox(&who, true, 200) {
@@ -4569,6 +4114,7 @@ async fn cmd_msg(cmd: MsgCommands) -> Result<()> {
 ///   instead of erroring on the `use -f` hint),
 /// - the call is from a linked worktree (SMOODEV-1836 — see below),
 /// - nothing under `.smooth/dolt/` actually changed (idempotent).
+///
 /// True when `dolt_dir` (relative to `repo_root`) matches a
 /// `.gitignore` rule. Implements pearl th-016296's beads-model skip:
 /// when the user has untracked `.smooth/dolt/`, auto-committing it
@@ -5061,7 +4607,7 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             let issue = store.create(&new)?;
             println!("{} Created {}", "✓".green().bold(), issue.id.green().bold());
             println!("  {}", format_pearl_line(&issue));
-            auto_commit_pearl_state(&dolt_dir, &format!("create {} {}", issue.id, truncate_for_msg(&issue.title)))?;
+            commit_and_push_pearl_state(&dolt_dir, &format!("create {} {}", issue.id, truncate_for_msg(&issue.title)))?;
         }
 
         PearlCommands::List { status } => {
@@ -5151,40 +4697,40 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             let updated = store.update(&id, &updates)?;
             println!("{} Updated {}", "✓".green().bold(), updated.id);
             println!("  {}", format_pearl_line(&updated));
-            auto_commit_pearl_state(&dolt_dir, &format!("update {}", updated.id))?;
+            commit_and_push_pearl_state(&dolt_dir, &format!("update {}", updated.id))?;
         }
 
         PearlCommands::Close { ids } => {
             let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
             let count = store.close(&id_refs)?;
             println!("{} Closed {count} issue(s)", "✓".green().bold());
-            auto_commit_pearl_state(&dolt_dir, &format!("close {}", ids.join(", ")))?;
+            commit_and_push_pearl_state(&dolt_dir, &format!("close {}", ids.join(", ")))?;
         }
 
         PearlCommands::Reopen { id } => {
             let issue = store.reopen(&id)?;
             println!("{} Reopened {}", "✓".green().bold(), issue.id);
             println!("  {}", format_pearl_line(&issue));
-            auto_commit_pearl_state(&dolt_dir, &format!("reopen {}", issue.id))?;
+            commit_and_push_pearl_state(&dolt_dir, &format!("reopen {}", issue.id))?;
         }
 
         PearlCommands::Dep { cmd } => match cmd {
             DepCommands::Add { issue, depends_on } => {
                 store.add_dep(&issue, &depends_on)?;
                 println!("{} {issue} now depends on {depends_on}", "✓".green().bold());
-                auto_commit_pearl_state(&dolt_dir, &format!("dep add {issue} → {depends_on}"))?;
+                commit_and_push_pearl_state(&dolt_dir, &format!("dep add {issue} → {depends_on}"))?;
             }
             DepCommands::Remove { issue, depends_on } => {
                 store.remove_dep(&issue, &depends_on)?;
                 println!("{} Removed dependency {issue} → {depends_on}", "✓".green().bold());
-                auto_commit_pearl_state(&dolt_dir, &format!("dep remove {issue} → {depends_on}"))?;
+                commit_and_push_pearl_state(&dolt_dir, &format!("dep remove {issue} → {depends_on}"))?;
             }
         },
 
         PearlCommands::Comment { id, content } => {
             let comment = store.add_comment(&id, &content)?;
             println!("{} Comment added ({})", "✓".green().bold(), comment.id.dimmed());
-            auto_commit_pearl_state(&dolt_dir, &format!("comment on {id}"))?;
+            commit_and_push_pearl_state(&dolt_dir, &format!("comment on {id}"))?;
         }
 
         PearlCommands::Search { query } => {
@@ -5242,18 +4788,18 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             LabelCommands::Add { label } => {
                 store.add_label(&id, &label)?;
                 println!("{} Added label \"{label}\" to {id}", "✓".green().bold());
-                auto_commit_pearl_state(&dolt_dir, &format!("label add {id} +{label}"))?;
+                commit_and_push_pearl_state(&dolt_dir, &format!("label add {id} +{label}"))?;
             }
             LabelCommands::Remove { label } => {
                 store.remove_label(&id, &label)?;
                 println!("{} Removed label \"{label}\" from {id}", "✓".green().bold());
-                auto_commit_pearl_state(&dolt_dir, &format!("label remove {id} -{label}"))?;
+                commit_and_push_pearl_state(&dolt_dir, &format!("label remove {id} -{label}"))?;
             }
         },
 
         PearlCommands::MigrateFromBeads => {
             cmd_migrate_from_beads(&store)?;
-            auto_commit_pearl_state(&dolt_dir, "migrate from beads")?;
+            commit_and_push_pearl_state(&dolt_dir, "migrate from beads")?;
         }
 
         PearlCommands::Projects => {
@@ -5420,7 +4966,26 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             }
         }
 
-        PearlCommands::Pull => {
+        PearlCommands::Pull { force } => {
+            // Guard against the data-loss footgun: if local `main` carries
+            // commits the remote doesn't have, a pull can orphan them
+            // (the refs/dolt/data divergence). Refuse by default and tell
+            // the user to push first; `--force` opts into the old
+            // behaviour. Skipped silently when we can't determine ahead-ness
+            // (no remote / fetch fails) so a remote-less store still pulls.
+            // Pearl th-4a4559.
+            if !force {
+                if let Some(ahead) = pearl_local_ahead_count(&dolt_dir) {
+                    if ahead > 0 {
+                        anyhow::bail!(
+                            "Refusing to pull: {ahead} local pearl commit(s) aren't on the remote yet, and \
+                             pulling could orphan them.\n  • Recommended: `th pearls push` first, then pull.\n  \
+                             • Or `th pearls pull --force` to pull anyway (your local-only commits stay in the \
+                             Dolt history and can be recovered, but `main` will move to the remote)."
+                        );
+                    }
+                }
+            }
             // Pull git first so any auto-commits from teammates
             // (under `.smooth/dolt/`) land in the working tree before
             // the dolt layer reads it. Best-effort: failure to git
@@ -5489,6 +5054,7 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
 
             let mut any_corrupt = false;
             let mut any_failed_repair = false;
+            let mut healthy_dbs: Vec<std::path::PathBuf> = Vec::new();
             for db_dir in &db_dirs {
                 let name = db_dir.file_name().and_then(|n| n.to_str()).unwrap_or("?");
                 println!("probing db: {} at {}", name, db_dir.display());
@@ -5497,6 +5063,7 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
                 match diagnosis {
                     DoctorDiagnosis::Healthy => {
                         println!("  ✓ healthy");
+                        healthy_dbs.push(db_dir.clone());
                     }
                     DoctorDiagnosis::NotInitialized { detail } => {
                         println!("  ✗ not a valid dolt dir: {detail}");
@@ -5527,7 +5094,10 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
                             }
                         }
                         match smooth_pearls::SmoothDolt::diagnose(db_dir) {
-                            DoctorDiagnosis::Healthy => println!("  ✓ post-repair probe healthy"),
+                            DoctorDiagnosis::Healthy => {
+                                println!("  ✓ post-repair probe healthy");
+                                healthy_dbs.push(db_dir.clone());
+                            }
                             other => {
                                 println!("  ✗ post-repair probe still unhealthy: {other:?}");
                                 println!("    Try a different candidate by hand: copy a line from manifest.with-conflicts-<ts>");
@@ -5583,7 +5153,10 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
 
                         // Re-probe
                         match smooth_pearls::SmoothDolt::diagnose(db_dir) {
-                            DoctorDiagnosis::Healthy => println!("  ✓ post-repair probe healthy"),
+                            DoctorDiagnosis::Healthy => {
+                                println!("  ✓ post-repair probe healthy");
+                                healthy_dbs.push(db_dir.clone());
+                            }
                             other => {
                                 println!("  ✗ post-repair probe still unhealthy: {other:?}");
                                 any_failed_repair = true;
@@ -5593,6 +5166,11 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
                 }
             }
 
+            // REMOTE SYNC — the 2026-07-02 incident class: local store
+            // perfectly healthy, but push/pull dead (unset upstream,
+            // stray remote re-init, remote-ahead, …). Diagnose-only.
+            let any_diverged = doctor_remote_sync(&healthy_dbs);
+
             if any_corrupt && !auto_repair {
                 anyhow::bail!(
                     "one or more dbs are corrupt. Re-run with `--auto-repair` to snapshot + re-clone\n\
@@ -5601,6 +5179,12 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             }
             if any_failed_repair {
                 anyhow::bail!("some repairs failed — see output above");
+            }
+            if any_diverged {
+                anyhow::bail!(
+                    "local and remote pearl histories have diverged — push AND pull are deadlocked.\n\
+                     See the remote sync section above for the recommended fix."
+                );
             }
         }
     }
@@ -5612,6 +5196,254 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
 fn find_dolt_dir() -> Result<std::path::PathBuf> {
     let cwd = std::env::current_dir()?;
     smooth_pearls::dolt::find_repo_dolt_dir(&cwd).ok_or_else(|| anyhow::anyhow!("no .smooth/dolt/ found. Run: th pearls init"))
+}
+
+/// `th pearls doctor` — REMOTE SYNC section. Read-only diagnosis of the
+/// local↔remote `refs/dolt/data` relationship. A cheap tip-level check
+/// runs first (see [`smooth_pearls::dolt::classify_tip_check`]) — when
+/// it proves in-sync, no clone happens. Otherwise it temp-clones the
+/// remote (bounded, see [`smooth_pearls::dolt::clone_from_bounded`]),
+/// compares bounded logs via
+/// [`smooth_pearls::dolt::classify_remote_sync`], and reports whether
+/// the branch upstream is configured (an unset upstream makes a bare
+/// push fail with `remote '' not found`).
+///
+/// Returns whether any db is diverged (no common ancestor with the
+/// remote) — the push/pull-deadlock class the doctor previously missed
+/// (2026-07-02 incident: remote stray-re-initialized with a single bare
+/// "Initialize data repository" commit while the local store held 2547
+/// commits; push refused as diverged, pull refused by the data-loss
+/// guard, and doctor said nothing).
+fn doctor_remote_sync(healthy_dbs: &[std::path::PathBuf]) -> bool {
+    use smooth_pearls::dolt::{
+        branch_hash, classify_remote_sync, classify_tip_check, clone_from_bounded, last_synced_dolt_data_tip, remote_dolt_data_tip, RemoteSyncStatus, TipCheck,
+    };
+
+    println!();
+    println!("remote sync:");
+    if healthy_dbs.is_empty() {
+        println!("  - skipped (no healthy local db to compare against)");
+        return false;
+    }
+    // Probe the primary `pearls` db for remote config — every db under
+    // one root shares the same git remote (refs/dolt/data).
+    let probe = healthy_dbs
+        .iter()
+        .find(|d| d.file_name().and_then(|n| n.to_str()) == Some("pearls"))
+        .unwrap_or(&healthy_dbs[0]);
+
+    let remotes = match smooth_pearls::SmoothDolt::new_cli_only(probe).and_then(|d| d.remote_list()) {
+        Ok(out) => out,
+        Err(e) => {
+            println!("  ✗ couldn't list remotes: {e:#}");
+            return false;
+        }
+    };
+    // smooth-dolt prints one `name<TAB>url` per line; prefer `origin`.
+    let remote = remotes
+        .lines()
+        .filter_map(|l| {
+            let mut parts = l.split_whitespace();
+            Some((parts.next()?, parts.next()?))
+        })
+        .max_by_key(|(name, _)| *name == "origin");
+    let Some((remote_name, remote_url)) = remote else {
+        println!("  - no remote configured — nothing to sync with (add one: th pearls remote add origin <url>)");
+        return false;
+    };
+    println!("  remote: {remote_name} {remote_url}");
+
+    // Upstream check — cheap repo_state.json read. Plain `th pearls
+    // push` auto-repairs a missing upstream via its `-u` retry (PR #123),
+    // so this is informational.
+    match pearl_upstream_remote(probe) {
+        Some(up) => println!("  ✓ branch upstream configured ({up})"),
+        None => {
+            println!("  ! branch upstream not set — a bare dolt push fails with `remote '' not found`.");
+            println!("    Plain `th pearls push` auto-repairs this (retries with -u).");
+        }
+    }
+
+    // Tip-level check FIRST (pearl th-c42cc4). The deep probe below
+    // clones the full remote refs/dolt/data — measured ~5 minutes at 96%
+    // CPU on a 2547-commit store, which always exceeds the default 30s
+    // sync bound, so on large stores the doctor used to skip the
+    // comparison entirely. Four cheap signals answer the common case
+    // without any clone: local dolt head vs remote-tracking head (no
+    // unpushed commits?) and last-synced git tip vs `git ls-remote`
+    // (remote ref unmoved?). Anything short of a clean "in sync" falls
+    // through to the deep probe unchanged.
+    let remote_tip = match remote_dolt_data_tip(remote_url) {
+        Ok(tip) => tip,
+        Err(e) => {
+            println!("  ! tip check skipped — git ls-remote failed: {e:#}");
+            None
+        }
+    };
+    let tip_verdicts: Vec<(String, TipCheck)> = healthy_dbs
+        .iter()
+        .map(|db_dir| {
+            let name = db_dir.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_string();
+            let (local, tracking) = smooth_pearls::SmoothDolt::new_cli_only(db_dir).map_or((None, None), |dolt| {
+                let head = |query: &str, branch: &str| dolt.sql(query).ok().and_then(|rows| branch_hash(&rows, branch));
+                (
+                    head("select name, hash from dolt_branches", "main"),
+                    head("select name, hash from dolt_remote_branches", "remotes/origin/main"),
+                )
+            });
+            let last_synced = last_synced_dolt_data_tip(db_dir);
+            let verdict = classify_tip_check(local.as_deref(), tracking.as_deref(), last_synced.as_deref(), remote_tip.as_deref());
+            (name, verdict)
+        })
+        .collect();
+    if tip_verdicts.iter().all(|(_, v)| *v == TipCheck::InSync) {
+        for (name, _) in &tip_verdicts {
+            println!("  ✓ {name}: in sync with remote (tip-level check — no local commits since last sync, remote ref unmoved)");
+        }
+        return false;
+    }
+    for (name, verdict) in &tip_verdicts {
+        match verdict {
+            TipCheck::InSync => {}
+            TipCheck::LocalMoved => println!("  … {name}: tip check found local commits since the last sync — running the deep probe to classify"),
+            TipCheck::RemoteMoved => println!("  … {name}: tip check found the remote ref moved since the last sync — running the deep probe to classify"),
+            TipCheck::Unknown => println!("  … {name}: tip check inconclusive (missing sync marker or remote ref) — running the deep probe to classify"),
+        }
+    }
+
+    // Bounded temp clone of the remote's refs/dolt/data.
+    let tmp = match tempfile::TempDir::new() {
+        Ok(t) => t,
+        Err(e) => {
+            println!("  ✗ couldn't create temp dir for remote clone: {e}");
+            return false;
+        }
+    };
+    let clone_root = tmp.path().join("remote");
+    if let Err(e) = clone_from_bounded(remote_url, &clone_root) {
+        // A deadline hit is NOT "unreachable" — a full clone of a large
+        // store is legitimately minutes of CPU (measured ~5min for a
+        // 2547-commit history; pearl th-6c6843). Say what actually
+        // happened and how to get the diagnosis anyway.
+        if smooth_pearls::dolt::is_sync_timeout_err(&e) {
+            println!("  ! remote comparison skipped — the probe clone exceeded its time bound: {e:#}");
+            println!("    A large store can take minutes to clone. Re-run with a bigger bound, e.g.:");
+            println!("    SMOOTH_DOLT_SYNC_TIMEOUT_SECS=600 th pearls doctor");
+        } else {
+            println!("  ✗ remote unreachable — clone of {remote_url} failed: {e:#}");
+        }
+        return false;
+    }
+
+    // Compare histories per db. `log` is bounded, so the classification
+    // is a heuristic over the last 500 commits on each side.
+    let bounded_log = |dir: &std::path::Path| -> Result<Vec<String>> {
+        let entries = smooth_pearls::SmoothDolt::new_cli_only(dir)?.log(500)?;
+        Ok(entries.into_iter().map(|(line, ..)| line).collect())
+    };
+    let mut any_diverged = false;
+    for db_dir in healthy_dbs {
+        let name = db_dir.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+        let remote_db = clone_root.join(name);
+        if !remote_db.join(".dolt").is_dir() {
+            println!("  ! {name}: remote has no `{name}` db — never pushed? run: th pearls push");
+            continue;
+        }
+        let (local, remote) = match (bounded_log(db_dir), bounded_log(&remote_db)) {
+            (Ok(l), Ok(r)) => (l, r),
+            (Err(e), _) => {
+                println!("  ✗ {name}: couldn't read local log: {e:#}");
+                continue;
+            }
+            (_, Err(e)) => {
+                println!("  ✗ {name}: couldn't read remote log: {e:#}");
+                continue;
+            }
+        };
+        match classify_remote_sync(&local, &remote) {
+            RemoteSyncStatus::InSync => println!("  ✓ {name}: in sync with remote"),
+            RemoteSyncStatus::LocalAhead => {
+                println!("  → {name}: local is ahead of the remote (remote tip found in local history within the last 500 commits) — run: th pearls push");
+            }
+            RemoteSyncStatus::RemoteAhead => {
+                println!("  ← {name}: remote is ahead of local (local tip found in remote history within the last 500 commits) — run: th pearls pull");
+            }
+            RemoteSyncStatus::DivergedBareInit => {
+                any_diverged = true;
+                println!("  ✗ {name}: DIVERGED — the remote refs/dolt/data has exactly ONE commit (\"Initialize data repository\")");
+                println!(
+                    "    sharing no ancestor with the {} local commits. This is a stray re-init of the remote ref:",
+                    local.len()
+                );
+                println!("    push is refused (diverged) and pull is refused (data-loss guard).");
+                println!("    `th pearls push --force` would overwrite ONLY that bare init commit — recommended.");
+            }
+            RemoteSyncStatus::Diverged => {
+                any_diverged = true;
+                println!("  ✗ {name}: DIVERGED — no common ancestor with the remote within the last 500 commits,");
+                println!("    and the remote has real commits. Inspect before any force:");
+                println!("    smooth-dolt clone {remote_url} /tmp/check && smooth-dolt log /tmp/check/{name}");
+            }
+            RemoteSyncStatus::EmptyRemote => println!("  ! {name}: remote history is empty — run: th pearls push"),
+            RemoteSyncStatus::EmptyLocal => println!("  ! {name}: local history is empty — run: th pearls pull"),
+        }
+    }
+    any_diverged
+}
+
+/// Cheap upstream detection for the doctor: dolt records the branch
+/// upstream in `.dolt/repo_state.json` under `branches.<name>.remote`.
+/// `None` when the file/field is missing or the remote is empty —
+/// exactly the state that makes a bare `CALL DOLT_PUSH()` resolve the
+/// remote name to `''`.
+fn pearl_upstream_remote(db_dir: &std::path::Path) -> Option<String> {
+    let raw = std::fs::read_to_string(db_dir.join(".dolt").join("repo_state.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    v.get("branches")?.as_object()?.iter().find_map(|(branch, b)| {
+        let remote = b.get("remote")?.as_str()?;
+        if remote.is_empty() {
+            None
+        } else {
+            Some(format!("{branch} → {remote}"))
+        }
+    })
+}
+
+#[cfg(test)]
+mod pearl_upstream_remote_tests {
+    use super::pearl_upstream_remote;
+
+    fn write_repo_state(json: &str) -> tempfile::TempDir {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dolt = tmp.path().join(".dolt");
+        std::fs::create_dir_all(&dolt).unwrap();
+        std::fs::write(dolt.join("repo_state.json"), json).unwrap();
+        tmp
+    }
+
+    #[test]
+    fn detects_configured_upstream() {
+        let tmp = write_repo_state(r#"{"head":"refs/heads/main","branches":{"main":{"head":"refs/heads/main","remote":"origin"}}}"#);
+        assert_eq!(pearl_upstream_remote(tmp.path()), Some("main → origin".to_string()));
+    }
+
+    #[test]
+    fn missing_branches_key_is_none() {
+        let tmp = write_repo_state(r#"{"head":"refs/heads/main","remotes":{}}"#);
+        assert_eq!(pearl_upstream_remote(tmp.path()), None);
+    }
+
+    #[test]
+    fn empty_remote_is_none() {
+        let tmp = write_repo_state(r#"{"branches":{"main":{"head":"refs/heads/main","remote":""}}}"#);
+        assert_eq!(pearl_upstream_remote(tmp.path()), None);
+    }
+
+    #[test]
+    fn missing_file_is_none() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert_eq!(pearl_upstream_remote(tmp.path()), None);
+    }
 }
 
 /// `th pearls init` — set up a pearl board in the cwd repo.
@@ -5687,12 +5519,13 @@ async fn cmd_pearls_init() -> Result<()> {
         }
     }
 
-    // Install git hooks if not already present.
+    // Install git hooks if not already present. `install` itself refuses to
+    // clobber a foreign `core.hooksPath` (husky etc.) — pearl th-9550e6.
     let hooks_status = hooks::check(None);
     if !hooks_status.is_ok() {
         println!();
         match hooks::install(None) {
-            Ok(hooks_dir) => hooks::print_install_result(&hooks_dir),
+            Ok(outcome) => hooks::print_install_outcome(&outcome),
             Err(e) => eprintln!("  Could not install git hooks: {e}"),
         }
     }
@@ -5897,9 +5730,15 @@ fn is_no_remote_error(e: &anyhow::Error) -> bool {
 
 /// Heuristic: first push to a fresh remote without `-u` returns this.
 /// The CLI auto-retries with `set_upstream = true`.
+///
+/// `remote '' not found` (pearl th-2681fd) is the same condition with a
+/// newer Dolt error string: the branch's upstream remote is empty, so a
+/// bare `CALL DOLT_PUSH()` resolves the remote name to `''`. Note the
+/// quoted-empty form does NOT overlap with [`is_no_remote_error`]'s
+/// `remote not found` (that one matches a *named* missing remote).
 fn is_no_upstream_error(e: &anyhow::Error) -> bool {
     let s = format!("{e:#}").to_lowercase();
-    s.contains("no upstream branch") || s.contains("has no upstream")
+    s.contains("no upstream branch") || s.contains("has no upstream") || s.contains("remote '' not found")
 }
 
 /// Heuristic: the local store and remote `refs/dolt/data` share no
@@ -5910,6 +5749,47 @@ fn is_no_upstream_error(e: &anyhow::Error) -> bool {
 fn is_no_common_ancestor_error(e: &anyhow::Error) -> bool {
     let s = format!("{e:#}").to_lowercase();
     s.contains("no common ancestor")
+}
+
+#[cfg(test)]
+mod push_error_predicate_tests {
+    use super::*;
+
+    fn err(msg: &str) -> anyhow::Error {
+        anyhow::anyhow!("smooth-dolt push failed (exit 1): smooth-dolt: push: {msg}")
+    }
+
+    // Regression for pearl th-2681fd: newer Dolt reports a missing branch
+    // upstream as `remote '' not found`, which must trigger the `-u` retry
+    // — and must NOT be classified as "no remote at all" (the global-store
+    // skip), which only matches a *named* missing remote.
+    #[test]
+    fn empty_remote_is_no_upstream_not_no_remote() {
+        let e = err("Error 1105: fatal: remote '' not found.");
+        assert!(is_no_upstream_error(&e));
+        assert!(!is_no_remote_error(&e));
+    }
+
+    #[test]
+    fn classic_no_upstream_strings_still_match() {
+        assert!(is_no_upstream_error(&err("no upstream branch")));
+        assert!(is_no_upstream_error(&err("branch has no upstream")));
+    }
+
+    #[test]
+    fn named_missing_remote_is_no_remote_not_no_upstream() {
+        let e = err("fatal: remote not found: origin");
+        assert!(is_no_remote_error(&e));
+        assert!(!is_no_upstream_error(&e));
+    }
+
+    #[test]
+    fn divergence_matches_neither() {
+        let e = err("hint: Integrate the remote changes (e.g. 'dolt pull ...') before pushing again.");
+        assert!(!is_no_upstream_error(&e));
+        assert!(!is_no_remote_error(&e));
+        assert!(!is_no_common_ancestor_error(&e));
+    }
 }
 
 fn cmd_migrate_from_beads(store: &smooth_pearls::PearlStore) -> Result<()> {
@@ -6255,6 +6135,195 @@ async fn cmd_routing(cmd: RoutingCommands) -> Result<()> {
     Ok(())
 }
 
+// ── `th providers` — bring-your-own LLM providers ──────────────────
+
+/// Local inference servers probed by `th providers detect`. OpenAI-
+/// compatible `/v1` in every case: Ollama on 11434, LM Studio on 1234.
+const LOCAL_PROBE_TARGETS: &[(&str, &str)] = &[("ollama", "http://localhost:11434/v1"), ("lmstudio", "http://localhost:1234/v1")];
+
+fn providers_json_path() -> Result<std::path::PathBuf> {
+    dirs_next::home_dir()
+        .map(|h| h.join(".smooth/providers.json"))
+        .context("cannot determine home directory")
+}
+
+async fn cmd_providers(cmd: ProvidersCommands) -> Result<()> {
+    match cmd {
+        ProvidersCommands::Add {
+            id,
+            url,
+            api_key,
+            format,
+            model,
+            max_tokens,
+        } => cmd_providers_add(&id, &url, api_key, format, model, max_tokens),
+        ProvidersCommands::List { json } => cmd_providers_list(json),
+        ProvidersCommands::Remove { id } => cmd_providers_remove(&id),
+        ProvidersCommands::Detect { yes, json } => {
+            // `reqwest::blocking` panics if dropped in a runtime context.
+            tokio::task::spawn_blocking(move || cmd_providers_detect(yes, json))
+                .await
+                .context("providers detect task panicked")?
+        }
+    }
+}
+
+fn cmd_providers_add(id: &str, url: &str, api_key: Option<String>, format: Option<String>, model: Option<String>, max_tokens: Option<u32>) -> Result<()> {
+    let path = providers_json_path()?;
+    let mut root = smooth_cast::providers::load_value(&path)?;
+    let updated = smooth_cast::providers::upsert_provider(
+        &mut root,
+        &smooth_cast::providers::NewProvider {
+            id: id.to_string(),
+            api_url: url.to_string(),
+            api_key,
+            api_format: format,
+            default_model: model,
+            max_tokens,
+        },
+    );
+    smooth_cast::providers::save_value(&path, &root)?;
+    let verb = if updated { "updated" } else { "added" };
+    println!("  {} provider {} {}", verb.green().bold(), id.bold(), url.dimmed());
+    Ok(())
+}
+
+fn cmd_providers_list(json: bool) -> Result<()> {
+    let path = providers_json_path()?;
+    let root = smooth_cast::providers::load_value(&path)?;
+    let providers = smooth_cast::providers::list_providers(&root);
+
+    if json {
+        let arr: Vec<_> = providers
+            .iter()
+            .map(|p| serde_json::json!({ "id": p.id, "api_url": p.api_url, "default_model": p.default_model, "max_tokens": p.max_tokens, "local": p.local }))
+            .collect();
+        println!("{}", serde_json::to_string(&serde_json::json!({ "providers": arr }))?);
+        return Ok(());
+    }
+
+    println!();
+    println!("  {} {}", gradient::smooth(), "providers".bold());
+    println!();
+    if providers.is_empty() {
+        println!("  {} \u{2014} add one with {}", "no providers configured".yellow(), "th providers add".cyan());
+    } else {
+        for p in &providers {
+            let tag = if p.local { format!(" {}", "[local]".cyan()) } else { String::new() };
+            let mt = p.max_tokens.map(|m| format!("  max_tokens={m}")).unwrap_or_default();
+            println!("  {}{}  {}{}", p.id.bold(), tag, p.api_url.dimmed(), mt.dimmed());
+            if !p.default_model.is_empty() {
+                println!("      {} {}", "default_model".dimmed(), p.default_model);
+            }
+        }
+    }
+    println!();
+    Ok(())
+}
+
+fn cmd_providers_remove(id: &str) -> Result<()> {
+    let path = providers_json_path()?;
+    let mut root = smooth_cast::providers::load_value(&path)?;
+    if smooth_cast::providers::remove_provider(&mut root, id) {
+        smooth_cast::providers::save_value(&path, &root)?;
+        println!("  {} provider {}", "removed".green().bold(), id.bold());
+    } else {
+        println!("  {} no provider with id {}", "!".yellow().bold(), id.bold());
+    }
+    Ok(())
+}
+
+/// A local server that answered the `/v1/models` probe.
+struct DetectedServer {
+    id: String,
+    api_url: String,
+    models: Vec<String>,
+}
+
+/// Probe [`LOCAL_PROBE_TARGETS`] and return the ones that answer with a
+/// parseable model list. A refused connection returns immediately; a
+/// live-but-slow server is bounded by the 2s client timeout.
+fn probe_local_servers() -> Vec<DetectedServer> {
+    let Ok(client) = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(2)).build() else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for (id, url) in LOCAL_PROBE_TARGETS {
+        let models_url = models_url_for(url);
+        if let Ok(resp) = client.get(&models_url).send() {
+            if resp.status().is_success() {
+                let body = resp.text().unwrap_or_default();
+                let (strict, lossy) = parse_models_response(&body);
+                let models = if strict.is_empty() { lossy } else { strict };
+                found.push(DetectedServer {
+                    id: (*id).to_string(),
+                    api_url: (*url).to_string(),
+                    models,
+                });
+            }
+        }
+    }
+    found
+}
+
+fn cmd_providers_detect(yes: bool, json: bool) -> Result<()> {
+    let found = probe_local_servers();
+
+    if json {
+        let arr: Vec<_> = found
+            .iter()
+            .map(|s| serde_json::json!({ "id": s.id, "api_url": s.api_url, "models": s.models }))
+            .collect();
+        println!("{}", serde_json::to_string(&serde_json::json!({ "detected": arr }))?);
+    } else {
+        println!();
+        println!("  {} {}", gradient::smooth(), "providers \u{00b7} detect".bold());
+        println!();
+        if found.is_empty() {
+            println!("  {}", "no local inference server found on :11434 (Ollama) or :1234 (LM Studio)".yellow());
+            println!("  {}", "start one, or add a custom server with `th providers add`".dimmed());
+            println!();
+            return Ok(());
+        }
+        for s in &found {
+            println!("  {} {}  {} models", s.id.bold(), s.api_url.dimmed(), s.models.len().to_string().cyan());
+        }
+        println!();
+    }
+
+    if yes {
+        let path = providers_json_path()?;
+        let mut root = smooth_cast::providers::load_value(&path)?;
+        for s in &found {
+            smooth_cast::providers::upsert_provider(
+                &mut root,
+                &smooth_cast::providers::NewProvider {
+                    id: s.id.clone(),
+                    api_url: s.api_url.clone(),
+                    api_key: None,
+                    api_format: None,
+                    default_model: s.models.first().cloned(),
+                    max_tokens: None,
+                },
+            );
+        }
+        if !found.is_empty() {
+            smooth_cast::providers::save_value(&path, &root)?;
+            if !json {
+                for s in &found {
+                    println!("  {} {} {}", "added".green().bold(), s.id.bold(), s.api_url.dimmed());
+                }
+                println!();
+            }
+        }
+    } else if !json && !found.is_empty() {
+        println!("  {} `th providers detect --yes` to add {}", "\u{2192}".dimmed(), "all of the above".dimmed());
+        println!();
+    }
+
+    Ok(())
+}
+
 // ── `th cast` — inspect the LLM cast ───────────────────────────────
 
 /// `th cast models` — list live model groups from the configured
@@ -6262,10 +6331,15 @@ async fn cmd_routing(cmd: RoutingCommands) -> Result<()> {
 async fn cmd_cast(cmd: CastCommands) -> Result<()> {
     match cmd {
         CastCommands::Models { provider, json, filter } => {
+            // Extension-registered providers (SEP Phase 7) are collected on the
+            // async runtime (loading them handshakes subprocesses); the HTTP
+            // listing itself then runs on a blocking thread. Skipped with zero
+            // cost when no global extensions are installed.
+            let ext_providers = collect_extension_providers().await;
             // `cmd_cast_models` uses `reqwest::blocking`, which panics
             // if dropped inside a tokio runtime context. Hop onto a
             // dedicated blocking thread to keep the runtime happy.
-            tokio::task::spawn_blocking(move || cmd_cast_models(provider.as_deref(), json, filter.as_deref()))
+            tokio::task::spawn_blocking(move || cmd_cast_models(provider.as_deref(), json, filter.as_deref(), &ext_providers))
                 .await
                 .context("cast models task panicked")?
         }
@@ -6377,7 +6451,7 @@ fn filter_and_sort(mut ids: Vec<String>, filter: Option<&str>) -> Vec<String> {
 }
 
 #[allow(clippy::too_many_lines)]
-fn cmd_cast_models(provider_override: Option<&str>, json_out: bool, filter: Option<&str>) -> Result<()> {
+fn cmd_cast_models(provider_override: Option<&str>, json_out: bool, filter: Option<&str>, ext_providers: &[(String, Vec<String>)]) -> Result<()> {
     let providers_path = dirs_next::home_dir()
         .map(|h| h.join(".smooth/providers.json"))
         .context("cannot determine home directory")?;
@@ -6446,12 +6520,32 @@ fn cmd_cast_models(provider_override: Option<&str>, json_out: bool, filter: Opti
     let chosen = if strict_ids.is_empty() { lossy_ids.clone() } else { strict_ids.clone() };
     let chosen = filter_and_sort(chosen, filter);
 
+    // Fold in live models from any *other* configured local provider
+    // (Ollama, LM Studio, …), unless the user pinned a specific
+    // `--provider`. Unreachable servers are skipped silently. Pearl
+    // th-f4a0fb.
+    let local_extra = if provider_override.is_none() {
+        probe_configured_local_providers(&registry, &provider_id, filter)
+    } else {
+        Vec::new()
+    };
+
+    // Extension-registered providers (SEP Phase 7): declared models, filtered +
+    // sorted like the rest. `ext` prefixes each id (`<provider>/<model>`) so an
+    // extension model never collides with a gateway one in the flat JSON list.
+    let ext_extra = fold_extension_models(ext_providers, filter);
+
     if json_out {
-        // Stable shape: `{"data": [{"id": "..."}]}`.
-        let payload = serde_json::json!({
-            "data": chosen.iter().map(|id| serde_json::json!({ "id": id })).collect::<Vec<_>>(),
-        });
-        println!("{}", serde_json::to_string(&payload)?);
+        // Stable shape: `{"data": [{"id": "..."}]}` — primary provider
+        // first, then each local provider's live models, then extension models.
+        let mut data: Vec<_> = chosen.iter().map(|id| serde_json::json!({ "id": id })).collect();
+        for (_pid, models) in &local_extra {
+            data.extend(models.iter().map(|id| serde_json::json!({ "id": id })));
+        }
+        for (provider, models) in &ext_extra {
+            data.extend(models.iter().map(|id| serde_json::json!({ "id": format!("{provider}/{id}") })));
+        }
+        println!("{}", serde_json::to_string(&serde_json::json!({ "data": data }))?);
         return Ok(());
     }
 
@@ -6489,14 +6583,139 @@ fn cmd_cast_models(provider_override: Option<&str>, json_out: bool, filter: Opti
             lossy_ids.len()
         );
     }
+
+    // Local providers, each under its own labeled section.
+    for (pid, models) in &local_extra {
+        println!();
+        println!("  {} {}", "local".cyan().bold(), pid.bold());
+        if models.is_empty() {
+            println!("  {}", "no models returned".yellow());
+        } else {
+            for id in models {
+                println!("  {id}");
+            }
+        }
+        println!("  {} models", models.len().to_string().cyan().bold());
+    }
+
+    // Extension-registered providers, each under its own labeled section.
+    for (provider, models) in &ext_extra {
+        println!();
+        println!("  {} {}", "extension".magenta().bold(), provider.bold());
+        for id in models {
+            println!("  {id}");
+        }
+        println!("  {} models", models.len().to_string().cyan().bold());
+    }
     println!();
 
     Ok(())
 }
 
+/// Fold extension-registered providers into the model listing: apply the same
+/// `filter` + sort as gateway/local models, and drop any provider left with no
+/// matching models. Pure so it can be unit-tested without spawning extensions.
+fn fold_extension_models(ext_providers: &[(String, Vec<String>)], filter: Option<&str>) -> Vec<(String, Vec<String>)> {
+    ext_providers
+        .iter()
+        .filter_map(|(provider, models)| {
+            let models = filter_and_sort(models.clone(), filter);
+            if models.is_empty() {
+                None
+            } else {
+                Some((provider.clone(), models))
+            }
+        })
+        .collect()
+}
+
+/// Load global extensions headlessly and collect the providers they register
+/// (SEP Phase 7). Returns `(provider_label, model_ids)` per registered provider,
+/// where the label is `<extension>.<provider>`. Only GLOBAL extensions (from
+/// `~/.smooth/extensions/`) are loaded — never project extensions — so a plain
+/// `th cast models` in a repo can't be made to spawn an untrusted project
+/// extension. Any failure yields an empty list: extension providers are additive
+/// and must never break the core listing.
+async fn collect_extension_providers() -> Vec<(String, Vec<String>)> {
+    use smooth_operator::extension::manifest::default_global_dir;
+    use smooth_operator::extension::protocol::{HostInfo, WorkspaceInfo};
+    use smooth_operator::extension::{discover, DefaultHostDelegate, ExtensionHost};
+
+    let global = default_global_dir();
+    let (discovered, _failures) = discover(global.as_deref(), None);
+    if discovered.is_empty() {
+        return Vec::new();
+    }
+
+    let host_info = HostInfo {
+        name: "th".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+    };
+    // `trusted: false` + no project dir ⇒ only global extensions load.
+    let workspace = WorkspaceInfo {
+        root: String::new(),
+        trusted: false,
+    };
+    let (host, _load_failures) = ExtensionHost::load(
+        discovered,
+        host_info,
+        workspace,
+        "headless",
+        Vec::new(),
+        std::sync::Arc::new(DefaultHostDelegate),
+    )
+    .await;
+    let providers = host
+        .providers()
+        .into_iter()
+        .map(|(ext, reg)| (format!("{ext}.{}", reg.name), reg.models.into_iter().map(|m| m.id).collect()))
+        .collect();
+    host.shutdown_all().await;
+    providers
+}
+
+/// GET `/v1/models` for every *configured* local provider except
+/// `skip_id`, tolerating unreachable servers (2s timeout, errors and
+/// non-2xx skipped). Returns `(provider_id, sorted+filtered ids)` for
+/// each that answered. Folds local models into `th cast models`. Pearl
+/// th-f4a0fb.
+fn probe_configured_local_providers(
+    registry: &smooth_operator::providers::ProviderRegistry,
+    skip_id: &str,
+    filter: Option<&str>,
+) -> Vec<(String, Vec<String>)> {
+    let Ok(client) = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(2)).build() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for pid in registry.list_providers() {
+        if pid == skip_id {
+            continue;
+        }
+        let Some(config) = registry.get_provider(pid) else { continue };
+        if !smooth_cast::providers::is_local_url(&config.api_url) {
+            continue;
+        }
+        let url = models_url_for(&config.api_url);
+        let mut req = client.get(&url);
+        if !config.api_key.is_empty() {
+            req = req.bearer_auth(&config.api_key);
+        }
+        if let Ok(resp) = req.send() {
+            if resp.status().is_success() {
+                let body = resp.text().unwrap_or_default();
+                let (strict, lossy) = parse_models_response(&body);
+                let ids = if strict.is_empty() { lossy } else { strict };
+                out.push((pid.to_string(), filter_and_sort(ids, filter)));
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod cast_models_tests {
-    use super::{extract_model_ids_lossy, filter_and_sort, models_url_for, parse_models_response, strip_control_chars};
+    use super::{extract_model_ids_lossy, filter_and_sort, fold_extension_models, models_url_for, parse_models_response, strip_control_chars};
 
     #[test]
     fn models_url_appends_models_when_missing() {
@@ -6575,6 +6794,32 @@ mod cast_models_tests {
     }
 
     #[test]
+    fn fold_extension_models_filters_sorts_and_drops_empty() {
+        let ext = vec![
+            ("corp.corporate-proxy".to_string(), vec!["corp-gpt-4o".to_string(), "corp-fast".to_string()]),
+            ("other.thing".to_string(), vec!["unrelated".to_string()]),
+        ];
+        // No filter: both providers kept, models sorted.
+        let all = fold_extension_models(&ext, None);
+        assert_eq!(all.len(), 2);
+        assert_eq!(
+            all[0],
+            ("corp.corporate-proxy".to_string(), vec!["corp-fast".to_string(), "corp-gpt-4o".to_string()])
+        );
+
+        // Filter to `corp`: the second provider has no match and is dropped.
+        let filtered = fold_extension_models(&ext, Some("corp"));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].0, "corp.corporate-proxy");
+        assert_eq!(filtered[0].1, vec!["corp-fast".to_string(), "corp-gpt-4o".to_string()]);
+    }
+
+    #[test]
+    fn fold_extension_models_empty_input_is_empty() {
+        assert!(fold_extension_models(&[], None).is_empty());
+    }
+
+    #[test]
     fn filter_and_sort_dedupes_after_sort() {
         let ids = vec!["a".to_string(), "b".to_string(), "a".to_string()];
         let out = filter_and_sort(ids, None);
@@ -6627,6 +6872,20 @@ mod cast_models_tests {
         assert_eq!(out, r#"{"data":[{"id":"smooth-coding"},{"id":"smooth-judge"}]}"#);
 
         handle.join().expect("server thread");
+    }
+
+    #[test]
+    fn detect_parses_ollama_models_body() {
+        // `th providers detect` feeds the local server's /v1/models
+        // response through `parse_models_response`; the first id becomes
+        // the added provider's default_model. Guard that path on the
+        // exact shape Ollama returns.
+        let body = r#"{"object":"list","data":[{"id":"llama3.3","object":"model"},{"id":"qwen2.5-coder:7b","object":"model"}]}"#;
+        let (strict, lossy) = parse_models_response(body);
+        assert_eq!(strict, vec!["llama3.3".to_string(), "qwen2.5-coder:7b".to_string()]);
+        // `--yes` picks the first reported model as the default.
+        let chosen = if strict.is_empty() { lossy } else { strict };
+        assert_eq!(chosen.first().map(String::as_str), Some("llama3.3"));
     }
 }
 
@@ -7262,13 +7521,7 @@ fn cmd_skills(cmd: SkillsCommands) -> Result<()> {
     let workspace = std::env::current_dir().context("current directory")?;
 
     fn source_label(src: &SkillSource) -> &'static str {
-        match src {
-            SkillSource::Project => "project",
-            SkillSource::UserSmooth => "user-smooth",
-            SkillSource::ClaudeCode => "claude-code",
-            SkillSource::OpenCode => "opencode",
-            SkillSource::Builtin => "builtin",
-        }
+        src.label()
     }
 
     match cmd {
@@ -7653,5 +7906,146 @@ mod beads_model_tests {
         // up — caller treats None as "no remote to bootstrap from."
         let tmp = tempfile::tempdir().expect("tempdir");
         assert!(read_git_origin_url(tmp.path()).unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod org_cli_tests {
+    use super::*;
+    use clap::Parser;
+
+    /// clap's own structural lint — catches alias collisions, duplicate
+    /// flags, and other config errors at test time.
+    #[test]
+    fn cli_definition_is_valid() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+    }
+
+    /// `th org` is the top-level alias for `th api orgs` — list / show /
+    /// switch must all parse into the same OrgsCommands as the api path.
+    #[test]
+    fn th_org_top_level_alias_parses() {
+        let cli = Cli::try_parse_from(["th", "org", "list"]).expect("th org list parses");
+        assert!(matches!(cli.command, Some(Commands::Org { cmd: OrgsCommands::List })));
+
+        let cli = Cli::try_parse_from(["th", "org", "switch", "ats"]).expect("th org switch parses");
+        match cli.command {
+            Some(Commands::Org {
+                cmd: OrgsCommands::Switch { org_id },
+            }) => assert_eq!(org_id.as_deref(), Some("ats")),
+            _ => panic!("expected Org/Switch"),
+        }
+
+        let cli = Cli::try_parse_from(["th", "org", "show"]).expect("th org show parses");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Org {
+                cmd: OrgsCommands::Show { org_id: None }
+            })
+        ));
+    }
+
+    /// The whole point of this pearl: `--org` and `--org-id` are
+    /// interchangeable on the config surface (`th config` declares
+    /// `org_id`, `th admin config` declares `org`).
+    #[test]
+    fn config_accepts_both_org_and_org_id() {
+        let canonical = Cli::try_parse_from(["th", "config", "get", "databaseUrl", "--org-id", "X"]).expect("--org-id parses");
+        let aliased = Cli::try_parse_from(["th", "config", "get", "databaseUrl", "--org", "X"]).expect("--org alias parses");
+        // Both must land on the same Config/Get with org_id = "X".
+        for cli in [canonical, aliased] {
+            match cli.command {
+                Some(Commands::Config {
+                    cmd: config::Cmd::Get { org_id, .. },
+                }) => assert_eq!(org_id.as_deref(), Some("X")),
+                _ => panic!("expected Config/Get"),
+            }
+        }
+    }
+
+    /// `th llm` wraps the org llm-gateway API. create-key takes the org
+    /// override (with the --org alias) and the keys subgroup parses.
+    #[test]
+    fn th_llm_parses() {
+        use smooai::llm_gateway::{Cmd as LlmCmd, KeysCmd};
+
+        // create-key with both flag spellings lands on the same variant.
+        for flag in ["--org-id", "--org"] {
+            let cli = Cli::try_parse_from(["th", "llm", "create-key", flag, "org-x"]).expect("th llm create-key parses");
+            match cli.command {
+                Some(Commands::Llm {
+                    cmd: LlmCmd::CreateKey { org_id, .. },
+                }) => assert_eq!(org_id.as_deref(), Some("org-x")),
+                _ => panic!("expected Llm/CreateKey"),
+            }
+        }
+
+        // Nested keys create carries the positional name + org override.
+        let cli = Cli::try_parse_from(["th", "llm", "keys", "create", "ci", "--org", "org-x"]).expect("th llm keys create parses");
+        match cli.command {
+            Some(Commands::Llm {
+                cmd: LlmCmd::Keys {
+                    cmd: KeysCmd::Create { name, org_id, .. },
+                },
+            }) => {
+                assert_eq!(name, "ci");
+                assert_eq!(org_id.as_deref(), Some("org-x"));
+            }
+            _ => panic!("expected Llm/Keys/Create"),
+        }
+    }
+
+    /// `th api keys create` exposes structured --type + repeatable
+    /// --allowed-origin flags (the first-class B2M/M2M surface).
+    #[test]
+    fn th_api_keys_create_flags_parse() {
+        use smooai::keys::{ClientType, Cmd as KeysCmd};
+
+        let cli = Cli::try_parse_from([
+            "th",
+            "api",
+            "keys",
+            "create",
+            "--type",
+            "b2m",
+            "--allowed-origin",
+            "https://a.example.com",
+            "--allowed-origin",
+            "https://b.example.com",
+            "--org",
+            "org-x",
+        ])
+        .expect("th api keys create --type b2m parses");
+        match cli.command {
+            Some(Commands::Api {
+                cmd:
+                    ApiCommands::Keys {
+                        cmd:
+                            KeysCmd::Create {
+                                client_type,
+                                allowed_origins,
+                                org_id,
+                                ..
+                            },
+                    },
+            }) => {
+                assert_eq!(client_type, ClientType::B2m);
+                assert_eq!(allowed_origins, vec!["https://a.example.com", "https://b.example.com"]);
+                assert_eq!(org_id.as_deref(), Some("org-x"));
+            }
+            _ => panic!("expected Api/Keys/Create"),
+        }
+
+        // Default type is m2m when --type is omitted.
+        let cli = Cli::try_parse_from(["th", "api", "keys", "create"]).expect("default create parses");
+        match cli.command {
+            Some(Commands::Api {
+                cmd: ApiCommands::Keys {
+                    cmd: KeysCmd::Create { client_type, .. },
+                },
+            }) => assert_eq!(client_type, ClientType::M2m),
+            _ => panic!("expected Api/Keys/Create"),
+        }
     }
 }

@@ -7,11 +7,66 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::dolt_server::SmoothDoltServer;
+
+/// Default wallclock bound on a remote sync (`smooth-dolt push` /
+/// `pull`). The Dolt remote sync shells out to git to move
+/// `refs/dolt/data`; that git child holds the noms `LOCK` for the whole
+/// transfer. If the network to the remote stalls, the lock is held
+/// indefinitely and EVERY other writer of this store gets `Error 1105:
+/// cannot update manifest: database is read only` (reads still work).
+/// Bounding the sync means a network stall can NEVER wedge local writes
+/// — on timeout we kill the child, the OS releases the lock, and the
+/// caller sees a retryable "sync timed out" error instead of a wedge.
+///
+/// Override with `SMOOTH_DOLT_SYNC_TIMEOUT_SECS`. A value of `0`
+/// disables the bound (restores the old unbounded behavior) for callers
+/// that genuinely want to block on a slow-but-progressing transfer.
+const DEFAULT_SYNC_TIMEOUT_SECS: u64 = 30;
+
+/// Resolve the remote-sync timeout from the environment, falling back to
+/// [`DEFAULT_SYNC_TIMEOUT_SECS`]. `None` means "no bound" (env set to
+/// `0` or a value that doesn't parse as a positive integer where the
+/// caller explicitly passed `0`).
+fn sync_timeout() -> Option<Duration> {
+    std::env::var("SMOOTH_DOLT_SYNC_TIMEOUT_SECS").map_or_else(|_| Some(Duration::from_secs(DEFAULT_SYNC_TIMEOUT_SECS)), |raw| parse_sync_timeout(&raw))
+}
+
+/// Pure parser for the `SMOOTH_DOLT_SYNC_TIMEOUT_SECS` value. Factored
+/// out so the env-parsing logic is unit-testable without touching real
+/// process env. `0` → `None` (unbounded). A non-numeric / negative
+/// value → fall back to the default bound (fail safe: we never silently
+/// drop the protection because someone typo'd the env var).
+fn parse_sync_timeout(raw: &str) -> Option<Duration> {
+    match raw.trim().parse::<u64>() {
+        Ok(0) => None,
+        Ok(secs) => Some(Duration::from_secs(secs)),
+        Err(_) => Some(Duration::from_secs(DEFAULT_SYNC_TIMEOUT_SECS)),
+    }
+}
+
+/// Escape a string for splicing into a single-quoted SQL string literal
+/// sent to `smooth-dolt exec`/`sql` (no prepared statements on this path).
+///
+/// Dolt speaks MySQL dialect, where **backslash is an escape character
+/// inside string literals** — doubling quotes alone is broken: input
+/// containing `\'` became `\''`, the backslash ate the first quote, and
+/// the rest of the value was parsed as SQL (syntax error at best,
+/// injection at worst; pearl th-944230). Order matters: backslashes
+/// first, then quotes, then NUL bytes (which MySQL rejects raw).
+///
+/// This is the ONE escaping function for the workspace — every
+/// SQL-string-building site (pearls, memories, messages, agents,
+/// bigsmooth sessions) must route through it.
+#[must_use]
+pub fn sql_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\'', "''").replace('\0', "\\0")
+}
 
 /// Flags for [`SmoothDolt::push_with`].
 ///
@@ -266,7 +321,9 @@ impl SmoothDolt {
             args.push("origin");
             args.push("main");
         }
-        self.run_cli(&args)
+        // Bound the remote sync so a network stall can't hold the noms
+        // LOCK forever and wedge local writes into read-only.
+        self.run_cli_timed(&args, sync_timeout())
     }
 
     /// Pull from the configured Dolt remote.
@@ -274,16 +331,22 @@ impl SmoothDolt {
         if let Some(server) = &self.server {
             return Self::run_with_self_heal(server, |s| s.with_client(|c| c.dolt("pull")));
         }
-        self.run_cli(&["pull", &self.data_dir_str()])
+        // Bounded like push — a stalled pull holds the same LOCK.
+        self.run_cli_timed(&["pull", &self.data_dir_str()], sync_timeout())
     }
 
     /// Add a Dolt remote. CLI-only; the server protocol doesn't expose
     /// remote management because it's an administrative one-shot.
+    ///
+    /// SCP-style git URLs (`git@github.com:Org/repo.git`) are normalized
+    /// to `git+ssh://` form first — see [`normalize_remote_url`]. Pearl
+    /// th-c4441b.
     pub fn remote_add(&self, name: &str, url: &str) -> Result<String> {
         if self.server.is_some() {
             anyhow::bail!("remote_add is not supported in server mode; use the CLI directly");
         }
-        self.run_cli(&["remote", &self.data_dir_str(), "add", name, url])
+        let url = normalize_remote_url(url);
+        self.run_cli(&["remote", &self.data_dir_str(), "add", name, &url])
     }
 
     /// List configured Dolt remotes. CLI-only (see `remote_add`).
@@ -394,6 +457,245 @@ impl SmoothDolt {
             );
         }
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    /// Run a smooth-dolt command (CLI mode) with a wallclock bound,
+    /// killing the child if it exceeds `timeout`. Used for remote-sync
+    /// commands (`push` / `pull`) where a network stall would otherwise
+    /// hold the noms `LOCK` forever and wedge every other writer into
+    /// read-only (Pearl: dolt-sync-timeout-selfheal).
+    ///
+    /// `timeout = None` means "no bound" — falls straight through to the
+    /// ordinary blocking [`Self::run_cli_once`].
+    ///
+    /// On timeout the child is SIGKILLed (it's a stuck git transfer; a
+    /// graceful term would just have us wait longer for a process that's
+    /// blocked on a dead socket), reaped to avoid a zombie, and a
+    /// **retryable** error is returned — see [`is_sync_timeout_err`].
+    /// Killing the child releases its hold on the noms LOCK, so local
+    /// writes recover immediately; the sync itself can be retried later.
+    fn run_cli_timed(&self, args: &[&str], timeout: Option<Duration>) -> Result<String> {
+        let Some(timeout) = timeout else {
+            return self.run_cli_once(args);
+        };
+
+        let child = Command::new(&self.bin)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("spawn smooth-dolt {}: {}", args.join(" "), self.bin.display()))?;
+
+        let what = format!("smooth-dolt {}", args.first().unwrap_or(&""));
+        let output = wait_child_draining(child, Some(timeout), &what)?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr_clip: String = stderr.trim().chars().take(300).collect();
+            anyhow::bail!(
+                "smooth-dolt {} failed (exit {}): {}",
+                args.first().unwrap_or(&""),
+                output.status.code().unwrap_or(-1),
+                if stderr_clip.is_empty() { "(no stderr)" } else { stderr_clip.as_str() }
+            );
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+}
+
+/// Wait for a spawned child (stdout/stderr piped) up to an optional
+/// deadline, draining both pipes on background threads the whole time.
+///
+/// Without the drain, a child that writes more than the ~64KB pipe
+/// buffer blocks on write and looks "stalled" — it then gets killed at
+/// the deadline even though the transfer was healthy. Pearl th-6c6843:
+/// `th pearls doctor`'s remote clone of a 2547-commit store died this
+/// way at ANY timeout, while quiet push/pull only survived by writing
+/// little output.
+///
+/// On deadline the child is SIGKILLed (releases the noms LOCK), reaped,
+/// and a **retryable** error is returned — the message keeps the
+/// "timed out after" + "remote sync stalled" markers that
+/// [`is_sync_timeout_err`] matches.
+fn wait_child_draining(mut child: std::process::Child, timeout: Option<Duration>, what: &str) -> Result<std::process::Output> {
+    fn drain<R: std::io::Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut buf);
+            }
+            buf
+        })
+    }
+    let out_thread = drain(child.stdout.take());
+    let err_thread = drain(child.stderr.take());
+
+    let status = if let Some(timeout) = timeout {
+        // Poll for completion up to `timeout`. A short poll interval keeps
+        // latency low for fast syncs while not busy-spinning.
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Some(status) = child.try_wait().with_context(|| format!("poll {what}"))? {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                // Do NOT join the drain threads here: a grandchild that
+                // survives the SIGKILL (e.g. `sh -c` that forked instead of
+                // exec'ing) keeps the pipe write-end open, and read_to_end
+                // blocks until it dies — joining would hold this abort
+                // hostage for the grandchild's lifetime (CI caught exactly
+                // that: the 1s-bound stall test took the full 30s). Drop the
+                // handles instead; the detached threads exit on pipe EOF.
+                drop(out_thread);
+                drop(err_thread);
+                anyhow::bail!(
+                    "{what} timed out after {}s (remote sync stalled; killed child to release lock — retryable)",
+                    timeout.as_secs()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    } else {
+        child.wait().with_context(|| format!("wait {what}"))?
+    };
+    let stdout = out_thread.join().unwrap_or_default();
+    let stderr = err_thread.join().unwrap_or_default();
+    Ok(std::process::Output { status, stdout, stderr })
+}
+
+/// Heuristic: a remote sync (`push`/`pull`) that we aborted on the
+/// wallclock bound.
+///
+/// Distinct from a transport or lock-wedge error because the remediation
+/// is "retry the sync later" — the local store is healthy (we killed the
+/// child precisely to keep it that way), so callers can treat the local
+/// write as durable and the sync as best-effort / deferrable rather than
+/// fatal.
+pub fn is_sync_timeout_err(e: &anyhow::Error) -> bool {
+    let s = format!("{e:#}").to_lowercase();
+    s.contains("timed out after") && s.contains("remote sync stalled")
+}
+
+#[cfg(test)]
+mod sync_timeout_tests {
+    use super::{is_sync_timeout_err, parse_sync_timeout};
+    use std::time::Duration;
+
+    #[test]
+    fn parse_default_when_unset_via_caller() {
+        // The env-read wrapper falls back to the default; here we test the
+        // pure parser's branches directly.
+        assert_eq!(parse_sync_timeout("30"), Some(Duration::from_secs(30)));
+        assert_eq!(parse_sync_timeout("  5 "), Some(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn parse_zero_disables_bound() {
+        assert_eq!(parse_sync_timeout("0"), None);
+    }
+
+    #[test]
+    fn parse_garbage_falls_back_to_default_not_unbounded() {
+        // Fail-safe: a typo must not silently drop the protection.
+        assert_eq!(parse_sync_timeout("banana"), Some(Duration::from_secs(30)));
+        assert_eq!(parse_sync_timeout("-5"), Some(Duration::from_secs(30)));
+        assert_eq!(parse_sync_timeout(""), Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn classifies_sync_timeout_error() {
+        let e = anyhow::anyhow!("smooth-dolt push timed out after 30s (remote sync stalled; killed child to release lock — retryable)");
+        assert!(is_sync_timeout_err(&e));
+    }
+
+    #[test]
+    fn does_not_classify_unrelated_timeouts() {
+        // A generic transport "timed out" is NOT a sync-timeout — it
+        // lacks the "remote sync stalled" marker.
+        assert!(!is_sync_timeout_err(&anyhow::anyhow!("read response: timed out")));
+        assert!(!is_sync_timeout_err(&anyhow::anyhow!("syntax error")));
+    }
+}
+
+#[cfg(test)]
+mod run_cli_timed_tests {
+    use super::SmoothDolt;
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    /// Build a SmoothDolt whose "binary" is `/bin/sh` so we can drive
+    /// arbitrary child behavior through the args. `data_dir` is unused by
+    /// these tests.
+    fn sh_handle() -> SmoothDolt {
+        SmoothDolt::with_bin(PathBuf::from("/bin/sh"), PathBuf::from("/tmp/unused"))
+    }
+
+    #[test]
+    fn fast_command_completes_within_bound() {
+        let h = sh_handle();
+        // `sh -c 'printf hi'` exits immediately with stdout "hi".
+        let out = h
+            .run_cli_timed(&["-c", "printf hi"], Some(Duration::from_secs(5)))
+            .expect("fast command should succeed");
+        assert_eq!(out, "hi");
+    }
+
+    #[test]
+    fn chatty_command_is_not_mistaken_for_stalled() {
+        // Regression for pearl th-6c6843: a child writing more than the
+        // ~64KB pipe buffer blocked on write (nobody drained until after
+        // exit), looked stalled, and was killed at the deadline. 400KB of
+        // output finishing instantly must succeed, not time out.
+        let h = sh_handle();
+        let out = h
+            .run_cli_timed(
+                &["-c", "i=0; while [ $i -lt 5000 ]; do printf '%080d\\n' $i; i=$((i+1)); done"],
+                Some(Duration::from_secs(10)),
+            )
+            .expect("chatty-but-fast command must not be killed as stalled");
+        assert_eq!(out.lines().count(), 5000);
+    }
+
+    #[test]
+    fn stalled_command_is_aborted_and_returns_retryable_error() {
+        let h = sh_handle();
+        let start = Instant::now();
+        // `sh -c 'sleep 30'` blocks far past the 1s bound — simulates a
+        // hung git transfer holding the lock.
+        let err = h
+            .run_cli_timed(&["-c", "sleep 30"], Some(Duration::from_secs(1)))
+            .expect_err("stalled command must time out");
+        let elapsed = start.elapsed();
+        // We should have aborted at ~1s, nowhere near the 30s sleep.
+        assert!(elapsed < Duration::from_secs(5), "aborted promptly, elapsed={elapsed:?}");
+        assert!(super::is_sync_timeout_err(&err), "error must be classified retryable: {err:#}");
+    }
+
+    #[test]
+    fn kill_is_not_blocked_by_grandchild_holding_pipe() {
+        // th-6c6843 CI regression: the backgrounded `sleep` survives the
+        // SIGKILL of `sh` and keeps the stdout pipe write-end open. The
+        // abort must not join the drain threads (read_to_end would block
+        // on that open pipe for the grandchild's lifetime).
+        let h = sh_handle();
+        let start = Instant::now();
+        let err = h
+            .run_cli_timed(&["-c", "sleep 30 & sleep 30"], Some(Duration::from_secs(1)))
+            .expect_err("must time out");
+        let elapsed = start.elapsed();
+        assert!(elapsed < Duration::from_secs(5), "abort must not wait for the grandchild, elapsed={elapsed:?}");
+        assert!(super::is_sync_timeout_err(&err), "error must be classified retryable: {err:#}");
+    }
+
+    #[test]
+    fn none_timeout_runs_unbounded_path() {
+        // With no bound, a fast command still completes normally (we don't
+        // exercise the unbounded-hang case for obvious reasons).
+        let h = sh_handle();
+        let out = h.run_cli_timed(&["-c", "printf ok"], None).expect("unbounded fast command");
+        assert_eq!(out, "ok");
     }
 }
 
@@ -558,26 +860,119 @@ fn is_lock_wedge_err(e: &anyhow::Error) -> bool {
     .any(|needle| s.contains(needle))
 }
 
-/// Auto-doctor — find `smooth-dolt serve` processes holding the LOCK
-/// file under `data_dir/.dolt/noms/LOCK` and kill them. Returns the
-/// number of orphan PIDs cleared (0 if none found, which is the
-/// normal happy-path case where the read-only error came from a
-/// different cause and we should propagate it).
+/// Decision for a single process found holding the noms LOCK. The
+/// classification is a PURE function of the holder's own command line
+/// and (when relevant) its parent's command line, so it's exhaustively
+/// unit-testable without spawning real processes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockHolderAction {
+    /// Holder is an orphaned `smooth-dolt serve` — clear it (original
+    /// Pearl th-49e37b behavior).
+    ClearOrphanServer,
+    /// Holder is a `git` (or `git-remote-*`) process whose PARENT is
+    /// `smooth-dolt` — a stalled dolt-sync child pinning the LOCK during
+    /// a hung remote push/pull. Clear it (Pearl: dolt-sync-timeout-
+    /// selfheal). This is the recovery safety net for a sync that
+    /// stalled before the wallclock timeout could kill it (e.g. the
+    /// sync ran in server mode, or in an older build without the bound).
+    ClearStalledSyncChild,
+    /// Anything else — a debugger, a backup tool, an unrelated git, an
+    /// editor. NEVER kill: refuse and propagate the original error.
+    Refuse,
+}
+
+/// Pure classifier: given the holder's command line and its parent's
+/// command line (both as raw `ps -o command=` output, may be empty if
+/// the lookup failed), decide what to do.
 ///
-/// Pearl th-49e37b. The shape of the bug we're fixing: an earlier
-/// `th up` spawned `smooth-dolt serve <data-dir> --socket <path>` as
-/// a child. The parent died (e.g. `th down`) but the serve child got
-/// reparented to init and the socket file got cleaned up, leaving the
-/// serve process running with no way to reach it. It still holds the
-/// noms LOCK file. `try_attach_handle` does `socket.exists()` →
-/// returns None (file gone) → `SmoothDolt::new` falls back to CLI
-/// mode → CLI `smooth-dolt exec` tries to grab the lock → fails with
-/// `Error 1105: cannot update manifest: database is read only`.
+/// Safety invariant — the ONLY things we ever clear:
+///   1. `smooth-dolt serve` (the holder itself), or
+///   2. a `git` holder whose PARENT command line names `smooth-dolt`.
 ///
-/// SIGTERM the orphan; the OS releases its file locks on death; the
-/// retry succeeds. Best-effort: any errors in the doctor itself (e.g.
-/// `lsof` not on PATH) silently return 0 so we fall through to the
-/// original read-only error rather than masking a real bug.
+/// A `git` whose parent is NOT smooth-dolt (e.g. the user's own
+/// `git push` in a shell, or a git invoked by an IDE) is REFUSED — we
+/// must not reach outside this store's own sync machinery. An unrelated
+/// non-git, non-serve holder is likewise refused.
+fn classify_lock_holder(holder_cmd: &str, parent_cmd: &str) -> LockHolderAction {
+    let holder = holder_cmd.to_lowercase();
+    let parent = parent_cmd.to_lowercase();
+
+    // Case 1: the original orphaned `smooth-dolt serve`.
+    if holder.contains("smooth-dolt") && holder.contains("serve") {
+        return LockHolderAction::ClearOrphanServer;
+    }
+
+    // Case 2: a stalled dolt-sync git child. The holder must be a git
+    // process AND its parent must be smooth-dolt. Both conditions are
+    // required — this is what keeps us from killing an unrelated git.
+    if holder_is_git(&holder) && parent.contains("smooth-dolt") {
+        return LockHolderAction::ClearStalledSyncChild;
+    }
+
+    LockHolderAction::Refuse
+}
+
+/// Does this command line look like a git remote-transfer process?
+/// Matches the `git` driver itself and the `git-remote-*` /
+/// `git-upload-pack` / `git-receive-pack` helpers Dolt's sync spawns.
+fn holder_is_git(cmd_lower: &str) -> bool {
+    // Match on a `git` token boundary so we don't false-match e.g.
+    // "digital" or a path component. Cheap heuristic: the basename or an
+    // arg starts with "git".
+    cmd_lower.split_whitespace().any(|tok| {
+        let base = tok.rsplit('/').next().unwrap_or(tok);
+        base == "git" || base.starts_with("git-remote") || base.starts_with("git-upload") || base.starts_with("git-receive")
+    })
+}
+
+/// Look up a PID's command line via `ps -p <pid> -o command=`. Returns
+/// an empty string on any failure (process gone, ps missing) — callers
+/// treat empty as "unknown", which classifies as Refuse (fail safe).
+fn ps_command(pid: u32) -> String {
+    Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Look up a PID's parent PID via `ps -p <pid> -o ppid=`. Returns `None`
+/// on any failure.
+fn ps_parent_pid(pid: u32) -> Option<u32> {
+    let out = Command::new("ps").args(["-p", &pid.to_string(), "-o", "ppid="]).output().ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse::<u32>().ok()
+}
+
+/// Auto-doctor — find processes holding the LOCK file under
+/// `data_dir/.dolt/noms/LOCK` and clear the ones that are safe to clear.
+/// Returns the number of PIDs cleared (0 if none found / none eligible,
+/// which is the normal happy-path case where the read-only error came
+/// from a different cause and we should propagate it).
+///
+/// Two clearable shapes (see [`classify_lock_holder`]):
+///
+/// 1. **Orphaned `smooth-dolt serve`** (Pearl th-49e37b): an earlier
+///    `th up` spawned `smooth-dolt serve <dir> --socket <path>`. The
+///    parent died but the serve child got reparented to init and the
+///    socket file got cleaned up, leaving the serve process holding the
+///    noms LOCK with no way to reach it. CLI calls then fall back to CLI
+///    mode and hit `Error 1105: cannot update manifest: database is read
+///    only`.
+///
+/// 2. **Stalled dolt-sync git child** (Pearl: dolt-sync-timeout-
+///    selfheal): a `smooth-dolt push`/`pull` shelled out to `git` to
+///    move `refs/dolt/data`; the network stalled; the git child still
+///    holds the noms LOCK. The wallclock timeout normally kills this,
+///    but this is the recovery net for paths the timeout doesn't cover
+///    (server-mode sync, older builds). We clear it ONLY when the git
+///    holder's parent is `smooth-dolt` — never an unrelated git.
+///
+/// Escalation: SIGTERM, brief wait, SIGKILL if still alive. The OS
+/// releases file locks on death; the retry succeeds. Best-effort: any
+/// errors in the doctor itself (e.g. `lsof`/`ps` not on PATH) silently
+/// return 0 so we fall through to the original read-only error rather
+/// than masking a real bug.
 fn auto_doctor_clear_orphan_server(data_dir: &Path) -> Result<u32> {
     let lock_path = data_dir.join("pearls").join(".dolt").join("noms").join("LOCK");
     if !lock_path.exists() {
@@ -609,32 +1004,39 @@ fn auto_doctor_clear_orphan_server(data_dir: &Path) -> Result<u32> {
 
     let mut cleared = 0u32;
     for pid in pids {
-        // Verify the holder is actually `smooth-dolt serve` BEFORE
-        // killing — we don't want to accidentally kill a debugger or
-        // a backup tool that happened to open the file. `ps -p <pid>
-        // -o command=` prints the command line.
-        let ps_out = Command::new("ps").args(["-p", &pid.to_string(), "-o", "command="]).output();
-        let Ok(ps_out) = ps_out else {
-            continue;
+        let holder_cmd = ps_command(pid);
+        // Only look up the parent when the holder is a git process —
+        // saves a `ps` call on the common serve case and makes the
+        // intent explicit.
+        let parent_cmd = if holder_is_git(&holder_cmd.to_lowercase()) {
+            ps_parent_pid(pid).map(ps_command).unwrap_or_default()
+        } else {
+            String::new()
         };
-        let cmdline = String::from_utf8_lossy(&ps_out.stdout);
-        if !cmdline.contains("smooth-dolt") || !cmdline.contains("serve") {
-            tracing::warn!(
-                pid,
-                cmdline = %cmdline.trim(),
-                "auto_doctor: process holds the dolt LOCK file but is not `smooth-dolt serve` — refusing to kill"
-            );
-            continue;
-        }
 
-        // SIGTERM is the right escalation: gives the server's
-        // graceful-shutdown path a chance to fire if it's running,
-        // and releases file locks when the process dies. If we ever
-        // need a SIGKILL fallback (process truly stuck and ignoring
-        // SIGTERM), add a poll-then-escalate here.
-        tracing::warn!(pid, "auto_doctor: SIGTERM orphaned `smooth-dolt serve` holding noms LOCK");
-        let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
-        cleared += 1;
+        match classify_lock_holder(&holder_cmd, &parent_cmd) {
+            LockHolderAction::Refuse => {
+                tracing::warn!(
+                    pid,
+                    cmdline = %holder_cmd,
+                    "auto_doctor: process holds the dolt LOCK file but is neither an orphaned `smooth-dolt serve` nor a stalled smooth-dolt sync child — refusing to kill"
+                );
+            }
+            LockHolderAction::ClearOrphanServer => {
+                tracing::warn!(pid, "auto_doctor: clearing orphaned `smooth-dolt serve` holding noms LOCK");
+                kill_with_escalation(pid);
+                cleared += 1;
+            }
+            LockHolderAction::ClearStalledSyncChild => {
+                tracing::warn!(
+                    pid,
+                    cmdline = %holder_cmd,
+                    "auto_doctor: clearing stalled smooth-dolt sync child (git) holding noms LOCK"
+                );
+                kill_with_escalation(pid);
+                cleared += 1;
+            }
+        }
     }
 
     if cleared > 0 {
@@ -645,6 +1047,104 @@ fn auto_doctor_clear_orphan_server(data_dir: &Path) -> Result<u32> {
     }
 
     Ok(cleared)
+}
+
+/// SIGTERM a PID, briefly wait, then SIGKILL if it's still alive.
+/// SIGTERM gives a `smooth-dolt serve` its graceful-shutdown path and a
+/// git child a chance to unwind; the SIGKILL fallback handles a process
+/// truly wedged on a dead socket (the stalled-sync case) that ignores
+/// SIGTERM. Either way the OS releases the file lock when the process
+/// finally dies.
+fn kill_with_escalation(pid: u32) {
+    let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+    // Poll briefly for the process to exit. `kill -0` succeeds while the
+    // process is alive (or a zombie we can still signal).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let alive = Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !alive {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            tracing::warn!(pid, "auto_doctor: process survived SIGTERM, escalating to SIGKILL");
+            let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).status();
+            return;
+        }
+    }
+}
+
+#[cfg(test)]
+mod classify_lock_holder_tests {
+    use super::{classify_lock_holder, holder_is_git, LockHolderAction};
+
+    #[test]
+    fn orphan_serve_is_cleared() {
+        assert_eq!(
+            classify_lock_holder("/usr/local/bin/smooth-dolt serve /repo/.smooth/dolt --socket /tmp/x.sock", ""),
+            LockHolderAction::ClearOrphanServer
+        );
+    }
+
+    #[test]
+    fn git_child_of_smooth_dolt_is_cleared() {
+        // The stalled-sync case: a git transfer whose parent is the
+        // smooth-dolt push process pinning the LOCK.
+        assert_eq!(
+            classify_lock_holder(
+                "git-remote-https origin https://github.com/SmooAI/smooth.git",
+                "smooth-dolt push /repo/.smooth/dolt"
+            ),
+            LockHolderAction::ClearStalledSyncChild
+        );
+        assert_eq!(
+            classify_lock_holder("/usr/bin/git push origin", "/usr/local/bin/smooth-dolt pull /repo/.smooth/dolt"),
+            LockHolderAction::ClearStalledSyncChild
+        );
+    }
+
+    #[test]
+    fn unrelated_git_is_refused() {
+        // SAFETY GUARD: a git whose parent is NOT smooth-dolt (the user's
+        // own shell, an IDE, a CI runner) must never be touched.
+        assert_eq!(classify_lock_holder("git push origin main", "/bin/zsh"), LockHolderAction::Refuse);
+        assert_eq!(classify_lock_holder("git fetch", "node /path/to/vscode"), LockHolderAction::Refuse);
+        // Even with an empty (unknown) parent — fail safe.
+        assert_eq!(classify_lock_holder("git push", ""), LockHolderAction::Refuse);
+    }
+
+    #[test]
+    fn unrelated_nongit_holder_is_refused() {
+        // A debugger / backup tool / editor that happened to open the
+        // LOCK file. Never kill.
+        assert_eq!(classify_lock_holder("/usr/bin/lldb", "smooth-dolt push"), LockHolderAction::Refuse);
+        assert_eq!(classify_lock_holder("vim LOCK", ""), LockHolderAction::Refuse);
+        assert_eq!(classify_lock_holder("rsync -a .dolt backup:/", "smooth-dolt"), LockHolderAction::Refuse);
+    }
+
+    #[test]
+    fn smooth_dolt_non_serve_holder_is_refused() {
+        // A `smooth-dolt push` itself (not `serve`, not a git child)
+        // holding the lock is its own legitimate writer — don't kill the
+        // sync process directly here; the wallclock timeout owns that.
+        assert_eq!(classify_lock_holder("smooth-dolt push /repo/.smooth/dolt", ""), LockHolderAction::Refuse);
+    }
+
+    #[test]
+    fn holder_is_git_token_boundary() {
+        assert!(holder_is_git("git push"));
+        assert!(holder_is_git("/usr/bin/git fetch"));
+        assert!(holder_is_git("git-remote-https origin url"));
+        assert!(holder_is_git("git-upload-pack /repo"));
+        // Must not false-match substrings.
+        assert!(!holder_is_git("digital-ocean-agent"));
+        assert!(!holder_is_git("/opt/legit/server"));
+        assert!(!holder_is_git("smooth-dolt serve"));
+    }
 }
 
 #[cfg(test)]
@@ -1041,17 +1541,35 @@ impl SmoothDolt {
 /// - clone subprocess returns non-zero (network failure, ref not found,
 ///   etc.) — stderr is captured + first 400 chars included
 pub fn clone_from(remote_url: &str, target_dir: &std::path::Path) -> Result<()> {
+    clone_from_with_timeout(remote_url, target_dir, None)
+}
+
+/// Like [`clone_from`] but bounded by the standard remote-sync timeout
+/// ([`sync_timeout`] — 30s default, `SMOOTH_DOLT_SYNC_TIMEOUT_SECS` to
+/// override). Used by `th pearls doctor`'s remote-sync probe, where a
+/// dead/unreachable remote must produce a diagnosis rather than a hang.
+pub fn clone_from_bounded(remote_url: &str, target_dir: &std::path::Path) -> Result<()> {
+    clone_from_with_timeout(remote_url, target_dir, sync_timeout())
+}
+
+fn clone_from_with_timeout(remote_url: &str, target_dir: &std::path::Path, timeout: Option<Duration>) -> Result<()> {
     let bin = find_smooth_dolt_binary().context("smooth-dolt binary not found for clone — Run: scripts/build-smooth-dolt.sh")?;
     if let Some(parent) = target_dir.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create parent of {}", target_dir.display()))?;
     }
-    let output = Command::new(&bin)
+    let remote_url = &normalize_remote_url(remote_url);
+    let child = Command::new(&bin)
         .args(["clone", remote_url, &target_dir.to_string_lossy()])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
+        .spawn()
         .context("exec smooth-dolt clone")?;
+
+    // Drain-while-waiting is load-bearing here: a real clone prints enough
+    // progress to fill the pipe buffer, which read as "stalled" and got
+    // killed at any deadline (pearl th-6c6843).
+    let output = wait_child_draining(child, timeout, &format!("smooth-dolt clone from {remote_url}"))?;
     if !output.status.success() {
         let stderr: String = String::from_utf8_lossy(&output.stderr).trim().chars().take(400).collect();
         anyhow::bail!(
@@ -1061,6 +1579,428 @@ pub fn clone_from(remote_url: &str, target_dir: &std::path::Path) -> Result<()> 
         );
     }
     Ok(())
+}
+
+/// How the local pearl history relates to the remote's `refs/dolt/data`
+/// history. Computed by [`classify_remote_sync`] from two bounded
+/// `dolt log` outputs — heuristic by construction (a tip older than the
+/// log bound looks like a divergence), so callers should phrase findings
+/// as "within the last N commits".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteSyncStatus {
+    /// Tips are equal.
+    InSync,
+    /// The remote tip appears in local history → safe to `push`.
+    LocalAhead,
+    /// The local tip appears in remote history → safe to `pull`.
+    RemoteAhead,
+    /// No overlap, and the remote is exactly one bare
+    /// "Initialize data repository" commit — the stray-re-init signature
+    /// (2026-07-02 incident). A force push overwrites ONLY that commit.
+    DivergedBareInit,
+    /// No overlap and the remote has real commits — inspect before any
+    /// force push/pull.
+    Diverged,
+    /// Remote log is empty (nothing ever pushed).
+    EmptyRemote,
+    /// Local log is empty (fresh/blank store).
+    EmptyLocal,
+}
+
+/// Pure classification of local vs remote history from `smooth-dolt log`
+/// lines (format: `"<short-hash> <message> (<author>) <date>"` — see
+/// `cmdLog` in go/smooth-dolt). First line is the tip.
+#[must_use]
+pub fn classify_remote_sync(local: &[String], remote: &[String]) -> RemoteSyncStatus {
+    fn hash(line: &str) -> &str {
+        line.split_whitespace().next().unwrap_or("")
+    }
+    fn message(line: &str) -> &str {
+        line.split_once(char::is_whitespace).map_or("", |(_, rest)| rest.trim_start())
+    }
+    if local.is_empty() {
+        return RemoteSyncStatus::EmptyLocal;
+    }
+    if remote.is_empty() {
+        return RemoteSyncStatus::EmptyRemote;
+    }
+    let local_tip = hash(&local[0]);
+    let remote_tip = hash(&remote[0]);
+    if local_tip == remote_tip {
+        return RemoteSyncStatus::InSync;
+    }
+    if local.iter().any(|l| hash(l) == remote_tip) {
+        return RemoteSyncStatus::LocalAhead;
+    }
+    if remote.iter().any(|l| hash(l) == local_tip) {
+        return RemoteSyncStatus::RemoteAhead;
+    }
+    if remote.len() == 1 && message(&remote[0]).starts_with("Initialize data repository") {
+        return RemoteSyncStatus::DivergedBareInit;
+    }
+    RemoteSyncStatus::Diverged
+}
+
+#[cfg(test)]
+mod remote_sync_classify_tests {
+    use super::{classify_remote_sync, RemoteSyncStatus};
+
+    fn log(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn in_sync_when_tips_equal() {
+        let local = log(&["aaaa1111 close th-1 (brent) 2026-07-01", "bbbb2222 create th-1 (brent) 2026-06-30"]);
+        let remote = log(&["aaaa1111 close th-1 (brent) 2026-07-01"]);
+        assert_eq!(classify_remote_sync(&local, &remote), RemoteSyncStatus::InSync);
+    }
+
+    #[test]
+    fn local_ahead_when_remote_tip_in_local_history() {
+        let local = log(&["cccc3333 newer (brent) d", "aaaa1111 shared tip (brent) d", "bbbb2222 older (brent) d"]);
+        let remote = log(&["aaaa1111 shared tip (brent) d", "bbbb2222 older (brent) d"]);
+        assert_eq!(classify_remote_sync(&local, &remote), RemoteSyncStatus::LocalAhead);
+    }
+
+    #[test]
+    fn remote_ahead_when_local_tip_in_remote_history() {
+        let local = log(&["aaaa1111 shared tip (brent) d", "bbbb2222 older (brent) d"]);
+        let remote = log(&["dddd4444 teammate work (kim) d", "aaaa1111 shared tip (brent) d"]);
+        assert_eq!(classify_remote_sync(&local, &remote), RemoteSyncStatus::RemoteAhead);
+    }
+
+    #[test]
+    fn diverged_bare_init_single_stray_init_commit() {
+        // The 2026-07-02 incident: remote refs/dolt/data re-initialized
+        // with a single bare commit, no ancestor with 2547 local commits.
+        let local = log(&["aaaa1111 close th-9 (brent) d", "bbbb2222 create th-9 (brent) d"]);
+        let remote = log(&["ffff9999 Initialize data repository (dolt) d"]);
+        assert_eq!(classify_remote_sync(&local, &remote), RemoteSyncStatus::DivergedBareInit);
+    }
+
+    #[test]
+    fn diverged_when_remote_has_real_unrelated_commits() {
+        let local = log(&["aaaa1111 close th-9 (brent) d"]);
+        let remote = log(&["eeee5555 real work (kim) d", "ffff9999 Initialize data repository (dolt) d"]);
+        assert_eq!(classify_remote_sync(&local, &remote), RemoteSyncStatus::Diverged);
+    }
+
+    #[test]
+    fn diverged_when_single_remote_commit_is_not_bare_init() {
+        let local = log(&["aaaa1111 close th-9 (brent) d"]);
+        let remote = log(&["eeee5555 real work (kim) d"]);
+        assert_eq!(classify_remote_sync(&local, &remote), RemoteSyncStatus::Diverged);
+    }
+
+    #[test]
+    fn empty_remote_log() {
+        let local = log(&["aaaa1111 close th-9 (brent) d"]);
+        assert_eq!(classify_remote_sync(&local, &[]), RemoteSyncStatus::EmptyRemote);
+    }
+
+    #[test]
+    fn empty_local_log_wins_over_empty_remote() {
+        let remote = log(&["aaaa1111 close th-9 (brent) d"]);
+        assert_eq!(classify_remote_sync(&[], &remote), RemoteSyncStatus::EmptyLocal);
+        assert_eq!(classify_remote_sync(&[], &[]), RemoteSyncStatus::EmptyLocal);
+    }
+}
+
+/// The git ref that carries dolt data on a git remote.
+pub const DOLT_DATA_REF: &str = "refs/dolt/data";
+
+/// Current tip of `refs/dolt/data` on the remote, via `git ls-remote` —
+/// one ref advertisement instead of a full clone. On a 2547-commit store
+/// the probe clone (`clone_from_bounded`) is ~5 minutes at 96% CPU and
+/// always exceeds the default 30s sync bound; ls-remote answers in ~1s,
+/// so `th pearls doctor` runs this tip-level check first (pearl
+/// th-c42cc4).
+///
+/// Dolt stores git remotes in `git+ssh://` / `git+file://` form — git
+/// itself doesn't accept the `git+` prefix, so it's stripped here.
+/// Bounded by the standard remote-sync timeout ([`sync_timeout`]).
+///
+/// Returns `Ok(None)` when the remote is reachable but has no
+/// `refs/dolt/data` (never pushed).
+///
+/// # Errors
+/// - git unreachable / bad URL / auth failure (non-zero exit)
+/// - the ls-remote exceeded the sync bound (matches [`is_sync_timeout_err`])
+pub fn remote_dolt_data_tip(remote_url: &str) -> Result<Option<String>> {
+    let url = remote_url.strip_prefix("git+").unwrap_or(remote_url);
+    let child = Command::new("git")
+        .args(["ls-remote", url, DOLT_DATA_REF])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("spawn git ls-remote {url}"))?;
+    let output = wait_child_draining(child, sync_timeout(), &format!("git ls-remote {url}"))?;
+    if !output.status.success() {
+        let stderr: String = String::from_utf8_lossy(&output.stderr).trim().chars().take(300).collect();
+        anyhow::bail!(
+            "git ls-remote {url} failed (exit {}): {}",
+            output.status.code().unwrap_or(-1),
+            if stderr.is_empty() { "(no stderr)" } else { stderr.as_str() }
+        );
+    }
+    // Output: "<hash>\trefs/dolt/data\n", or empty when the ref doesn't exist.
+    Ok(String::from_utf8_lossy(&output.stdout).split_whitespace().next().map(str::to_string))
+}
+
+/// The `refs/dolt/data` tip recorded locally at the last successful sync.
+///
+/// The enclosing git repo does NOT carry a local `refs/dolt/data`
+/// (verified: `git show-ref` lists nothing under `refs/dolt/` even on a
+/// store that syncs daily). Dolt's git blobstore instead keeps a bare
+/// repo cache per remote at `<db>/.dolt/git-remote-cache/<key>/repo.git`,
+/// whose `FETCH_HEAD` records the remote's `refs/dolt/data` tip as of the
+/// last fetch — and both push and pull fetch (push does a
+/// check-and-put of the manifest), so the line tracks the last sync in
+/// either direction.
+///
+/// `None` when the cache is absent (never synced from this checkout;
+/// also the case for `file://` remotes, which skip the cache) or when
+/// multiple cache repos disagree — callers fall back to the deep probe.
+#[must_use]
+pub fn last_synced_dolt_data_tip(db_dir: &Path) -> Option<String> {
+    let cache = db_dir.join(".dolt").join("git-remote-cache");
+    let mut tips: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(cache).ok()?.flatten() {
+        let Ok(raw) = std::fs::read_to_string(entry.path().join("repo.git").join("FETCH_HEAD")) else {
+            continue;
+        };
+        // FETCH_HEAD line: "<hash>\t\t'refs/dolt/data' of ssh://github.com/Org/repo"
+        for line in raw.lines().filter(|l| l.contains(&format!("'{DOLT_DATA_REF}'"))) {
+            if let Some(h) = line.split_whitespace().next() {
+                tips.push(h.to_string());
+            }
+        }
+    }
+    tips.sort();
+    tips.dedup();
+    match tips.as_slice() {
+        [one] => Some(one.clone()),
+        _ => None,
+    }
+}
+
+/// Hash of a named branch from `smooth-dolt sql` JSON rows
+/// (`select name, hash from dolt_branches` / `dolt_remote_branches`).
+#[must_use]
+pub fn branch_hash(rows: &[Value], name: &str) -> Option<String> {
+    rows.iter()
+        .find(|r| r.get("name").and_then(Value::as_str) == Some(name))
+        .and_then(|r| r.get("hash").and_then(Value::as_str))
+        .map(str::to_string)
+}
+
+/// Verdict of the cheap tip-level sync check that gates the doctor's
+/// deep probe clone. Computed by [`classify_tip_check`] from four
+/// signals, all obtainable without cloning the remote:
+///
+/// - local dolt branch head (`dolt_branches`)
+/// - dolt remote-tracking head (`dolt_remote_branches`, updated on both
+///   push and pull — verified against a scratch store)
+/// - last-synced git tip ([`last_synced_dolt_data_tip`])
+/// - current remote git tip ([`remote_dolt_data_tip`])
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TipCheck {
+    /// No local commits since the last sync AND the remote ref hasn't
+    /// moved since we last saw it → in sync, no clone needed.
+    InSync,
+    /// Local head differs from the remote-tracking head → local commits
+    /// since the last sync.
+    LocalMoved,
+    /// The remote's `refs/dolt/data` differs from the tip we last synced.
+    RemoteMoved,
+    /// A signal is missing (never synced, no cache, no remote ref) —
+    /// only the deep probe can classify.
+    Unknown,
+}
+
+/// Pure decision for the tip-level check. Any missing signal is
+/// [`TipCheck::Unknown`] (fail toward the deep probe, never toward a
+/// false "in sync"). When both sides moved, `LocalMoved` is reported —
+/// the deep probe runs in every non-`InSync` case anyway.
+#[must_use]
+pub fn classify_tip_check(local_head: Option<&str>, tracking_head: Option<&str>, last_synced_tip: Option<&str>, remote_tip: Option<&str>) -> TipCheck {
+    let (Some(local), Some(tracking), Some(synced), Some(remote)) = (local_head, tracking_head, last_synced_tip, remote_tip) else {
+        return TipCheck::Unknown;
+    };
+    if local != tracking {
+        return TipCheck::LocalMoved;
+    }
+    if synced != remote {
+        return TipCheck::RemoteMoved;
+    }
+    TipCheck::InSync
+}
+
+#[cfg(test)]
+mod tip_check_tests {
+    use super::{branch_hash, classify_tip_check, last_synced_dolt_data_tip, remote_dolt_data_tip, TipCheck, DOLT_DATA_REF};
+    use serde_json::json;
+    use std::path::Path;
+
+    // ---- classify_tip_check (pure) ----
+
+    #[test]
+    fn in_sync_when_all_four_signals_align() {
+        assert_eq!(classify_tip_check(Some("d1"), Some("d1"), Some("g1"), Some("g1")), TipCheck::InSync);
+    }
+
+    #[test]
+    fn local_moved_when_head_diverges_from_tracking() {
+        assert_eq!(classify_tip_check(Some("d2"), Some("d1"), Some("g1"), Some("g1")), TipCheck::LocalMoved);
+    }
+
+    #[test]
+    fn remote_moved_when_remote_tip_differs_from_last_synced() {
+        assert_eq!(classify_tip_check(Some("d1"), Some("d1"), Some("g1"), Some("g2")), TipCheck::RemoteMoved);
+    }
+
+    #[test]
+    fn local_moved_wins_when_both_sides_moved() {
+        assert_eq!(classify_tip_check(Some("d2"), Some("d1"), Some("g1"), Some("g2")), TipCheck::LocalMoved);
+    }
+
+    #[test]
+    fn unknown_when_any_signal_missing() {
+        assert_eq!(classify_tip_check(None, Some("d1"), Some("g1"), Some("g1")), TipCheck::Unknown);
+        assert_eq!(classify_tip_check(Some("d1"), None, Some("g1"), Some("g1")), TipCheck::Unknown);
+        assert_eq!(classify_tip_check(Some("d1"), Some("d1"), None, Some("g1")), TipCheck::Unknown);
+        assert_eq!(classify_tip_check(Some("d1"), Some("d1"), Some("g1"), None), TipCheck::Unknown);
+    }
+
+    // ---- branch_hash (pure) ----
+
+    #[test]
+    fn branch_hash_finds_named_branch() {
+        let rows = vec![json!({"name": "other", "hash": "aaa"}), json!({"name": "main", "hash": "bbb"})];
+        assert_eq!(branch_hash(&rows, "main"), Some("bbb".to_string()));
+        assert_eq!(branch_hash(&rows, "missing"), None);
+        assert_eq!(branch_hash(&[], "main"), None);
+    }
+
+    // ---- last_synced_dolt_data_tip (fixture) ----
+
+    fn write_fetch_head(db_dir: &Path, cache_key: &str, contents: &str) {
+        let repo = db_dir.join(".dolt").join("git-remote-cache").join(cache_key).join("repo.git");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("FETCH_HEAD"), contents).unwrap();
+    }
+
+    #[test]
+    fn last_synced_tip_read_from_fetch_head() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_fetch_head(
+            tmp.path(),
+            "1b5d",
+            "aaaa1111\t\t'refs/heads/main' of ssh://github.com/Org/repo\n4f3a8033\t\t'refs/dolt/data' of ssh://github.com/Org/repo\n",
+        );
+        assert_eq!(last_synced_dolt_data_tip(tmp.path()), Some("4f3a8033".to_string()));
+    }
+
+    #[test]
+    fn last_synced_tip_none_without_cache_or_matching_line() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert_eq!(last_synced_dolt_data_tip(tmp.path()), None, "no git-remote-cache at all");
+
+        write_fetch_head(tmp.path(), "1b5d", "aaaa1111\t\t'refs/heads/main' of ssh://github.com/Org/repo\n");
+        assert_eq!(last_synced_dolt_data_tip(tmp.path()), None, "FETCH_HEAD without a refs/dolt/data line");
+    }
+
+    #[test]
+    fn last_synced_tip_multiple_caches_agree_or_none() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_fetch_head(tmp.path(), "aaaa", "1111\t\t'refs/dolt/data' of ssh://h/r\n");
+        write_fetch_head(tmp.path(), "bbbb", "1111\t\t'refs/dolt/data' of ssh://h/r\n");
+        assert_eq!(
+            last_synced_dolt_data_tip(tmp.path()),
+            Some("1111".to_string()),
+            "agreeing caches are unambiguous"
+        );
+
+        write_fetch_head(tmp.path(), "cccc", "2222\t\t'refs/dolt/data' of ssh://h/r\n");
+        assert_eq!(last_synced_dolt_data_tip(tmp.path()), None, "disagreeing caches are ambiguous");
+    }
+
+    // ---- remote_dolt_data_tip (local git fixture) ----
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+        assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn fixture_repo_with_commit() -> (tempfile::TempDir, String) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        git(tmp.path(), &["init", "-q"]);
+        git(
+            tmp.path(),
+            &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-q", "-m", "x"],
+        );
+        let head = git(tmp.path(), &["rev-parse", "HEAD"]);
+        (tmp, head)
+    }
+
+    #[test]
+    fn remote_tip_found_via_ls_remote() {
+        let (tmp, head) = fixture_repo_with_commit();
+        git(tmp.path(), &["update-ref", DOLT_DATA_REF, &head]);
+        // Plain path form.
+        let tip = remote_dolt_data_tip(&tmp.path().to_string_lossy()).unwrap();
+        assert_eq!(tip, Some(head.clone()));
+        // The git+file:// form dolt stores — the git+ prefix must be stripped.
+        let tip = remote_dolt_data_tip(&format!("git+file://{}", tmp.path().display())).unwrap();
+        assert_eq!(tip, Some(head));
+    }
+
+    #[test]
+    fn remote_tip_none_when_ref_absent() {
+        let (tmp, _head) = fixture_repo_with_commit();
+        assert_eq!(remote_dolt_data_tip(&tmp.path().to_string_lossy()).unwrap(), None);
+    }
+
+    #[test]
+    fn remote_tip_errors_on_non_repo() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let err = remote_dolt_data_tip(&tmp.path().to_string_lossy()).unwrap_err();
+        assert!(format!("{err:#}").contains("ls-remote"), "error names the failing operation: {err:#}");
+    }
+}
+
+/// Normalize a git remote URL for Dolt's remote machinery.
+///
+/// SCP-style SSH URLs (`user@host:path`) are not real URLs — the colon
+/// separates the host from a RELATIVE path. Dolt's own URL parser
+/// mishandles them, storing `git@github.com:SmooAI/smooth.git` as
+/// `git+ssh://git@github.com/./SmooAI/smooth.git` (bogus `/./`), which
+/// then fails on push/pull. Convert them ourselves to the clean form
+/// Dolt stores for working remotes: `git+ssh://user@host/path`.
+/// Everything that is already a URL (`https://`, `ssh://`, `git+ssh://`)
+/// or a filesystem path passes through unchanged. Pearl th-c4441b.
+fn normalize_remote_url(url: &str) -> String {
+    // Anything with an explicit scheme is already a real URL.
+    if url.contains("://") {
+        return url.to_string();
+    }
+    // SCP-style: `user@host:path`. Require the `@` and a colon before any
+    // slash so filesystem paths (absolute, relative, or colon-bearing)
+    // never match. ponytail: `host:path` without a user passes through —
+    // ambiguous with local paths, and nobody clones pearls that way.
+    let Some((head, path)) = url.split_once(':') else {
+        return url.to_string();
+    };
+    if path.is_empty() || head.contains('/') || !head.contains('@') {
+        return url.to_string();
+    }
+    // `user@host:/abs/path` → keep the path absolute; relative paths get
+    // a single separating slash. Both collapse to `git+ssh://head/path`.
+    let path = path.strip_prefix('/').unwrap_or(path);
+    format!("git+ssh://{head}/{path}")
 }
 
 /// Read the `origin` remote URL from `<data_dir>/.dolt/repo_state.json`.
@@ -1080,9 +2020,10 @@ fn read_origin_url(data_dir: &std::path::Path) -> Result<String> {
 /// Read the enclosing git repository's `origin` URL via
 /// `git -C <start> remote get-url origin`. Recovery fallback for when
 /// the dolt `repo_state.json` (which normally records the remote) has
-/// been wiped by an interrupted operation. The raw git URL (e.g.
-/// `git@github.com:Org/repo.git`) is exactly what `smooth-dolt clone`
-/// already consumes, so it's returned verbatim.
+/// been wiped by an interrupted operation. Returned verbatim; SCP-style
+/// URLs (e.g. `git@github.com:Org/repo.git`) are normalized to
+/// `git+ssh://` form by [`clone_from`] / [`SmoothDolt::remote_add`]
+/// before Dolt sees them (pearl th-c4441b).
 fn read_git_origin_url(start: &std::path::Path) -> Result<String> {
     let output = Command::new("git")
         .arg("-C")
@@ -1179,5 +2120,177 @@ mod auto_heal_tests {
         let dir = tmp.path();
         Command::new("git").arg("-C").arg(dir).args(["init", "-q"]).output().unwrap();
         assert!(read_git_origin_url(dir).is_err());
+    }
+}
+
+#[cfg(test)]
+mod sql_escape_tests {
+    use super::sql_escape;
+
+    #[test]
+    fn empty_string_unchanged() {
+        assert_eq!(sql_escape(""), "");
+    }
+
+    #[test]
+    fn plain_text_unchanged() {
+        assert_eq!(sql_escape("hello world"), "hello world");
+    }
+
+    #[test]
+    fn single_quote_doubled() {
+        assert_eq!(sql_escape("it's"), "it''s");
+        assert_eq!(sql_escape("''"), "''''");
+    }
+
+    #[test]
+    fn backslash_doubled() {
+        assert_eq!(sql_escape(r"a\b"), r"a\\b");
+    }
+
+    #[test]
+    fn backslash_quote_the_th_944230_case() {
+        // `\'` must become `\\''` — backslash escaped BEFORE the quote is
+        // doubled, so the backslash can't eat the quote.
+        assert_eq!(sql_escape(r"text with \' inside"), r"text with \\'' inside");
+    }
+
+    #[test]
+    fn lone_trailing_backslash() {
+        // `abc\` unescaped would eat the literal's closing quote.
+        assert_eq!(sql_escape(r"abc\"), r"abc\\");
+    }
+
+    #[test]
+    fn doubled_backslashes() {
+        assert_eq!(sql_escape(r"a\\b"), r"a\\\\b");
+    }
+
+    #[test]
+    fn nul_byte_escaped() {
+        assert_eq!(sql_escape("a\0b"), r"a\0b");
+    }
+
+    #[test]
+    fn classic_injection_payload_neutralized() {
+        let escaped = sql_escape("'; DROP TABLE pearls; --");
+        // No lone quote survives: the only quotes are the doubled pair.
+        assert_eq!(escaped, "''; DROP TABLE pearls; --");
+        assert!(!escaped.contains('\\'));
+    }
+
+    #[test]
+    fn quote_backslash_injection_neutralized() {
+        // The bypass the old quotes-only escape allowed.
+        assert_eq!(sql_escape(r"\'; DROP TABLE pearls; --"), r"\\''; DROP TABLE pearls; --");
+    }
+
+    #[test]
+    fn semicolons_and_newlines_pass_through() {
+        assert_eq!(sql_escape("a;b\nc\r\nd"), "a;b\nc\r\nd");
+    }
+
+    #[test]
+    fn unicode_pass_through() {
+        assert_eq!(sql_escape("héllo 世界 🦀"), "héllo 世界 🦀");
+    }
+}
+
+#[cfg(test)]
+mod normalize_remote_url_tests {
+    use super::normalize_remote_url;
+
+    /// Regression for pearl th-c4441b: `th pearls remote add` handed the
+    /// SCP form straight to Dolt, which stored the broken
+    /// `git+ssh://git@github.com/./SmooAI/smooth.git` (bogus `/./`).
+    #[test]
+    fn th_c4441b_scp_github_url_converts_cleanly() {
+        assert_eq!(
+            normalize_remote_url("git@github.com:SmooAI/smooth.git"),
+            "git+ssh://git@github.com/SmooAI/smooth.git"
+        );
+    }
+
+    #[test]
+    fn scp_relative_path() {
+        assert_eq!(normalize_remote_url("git@example.com:some/repo.git"), "git+ssh://git@example.com/some/repo.git");
+    }
+
+    #[test]
+    fn scp_absolute_path() {
+        assert_eq!(
+            normalize_remote_url("git@host.example:/srv/git/repo.git"),
+            "git+ssh://git@host.example/srv/git/repo.git"
+        );
+    }
+
+    #[test]
+    fn scp_without_dot_git_suffix() {
+        assert_eq!(normalize_remote_url("git@github.com:SmooAI/smooth"), "git+ssh://git@github.com/SmooAI/smooth");
+    }
+
+    #[test]
+    fn scp_numeric_looking_path_segment_is_a_path_not_a_port() {
+        // In SCP form everything after the colon is a path — git itself
+        // treats `host:2222/repo` as the path `2222/repo`, never a port.
+        assert_eq!(
+            normalize_remote_url("git@host.example:2222/repo.git"),
+            "git+ssh://git@host.example/2222/repo.git"
+        );
+    }
+
+    #[test]
+    fn https_url_passes_through() {
+        assert_eq!(
+            normalize_remote_url("https://github.com/SmooAI/smooth.git"),
+            "https://github.com/SmooAI/smooth.git"
+        );
+    }
+
+    #[test]
+    fn ssh_url_passes_through() {
+        assert_eq!(
+            normalize_remote_url("ssh://git@github.com/SmooAI/smooth.git"),
+            "ssh://git@github.com/SmooAI/smooth.git"
+        );
+    }
+
+    #[test]
+    fn ssh_url_with_port_passes_through() {
+        assert_eq!(
+            normalize_remote_url("ssh://git@host.example:2222/srv/repo.git"),
+            "ssh://git@host.example:2222/srv/repo.git"
+        );
+    }
+
+    #[test]
+    fn git_ssh_url_passes_through() {
+        assert_eq!(
+            normalize_remote_url("git+ssh://git@github.com/SmooAI/smooth.git"),
+            "git+ssh://git@github.com/SmooAI/smooth.git"
+        );
+    }
+
+    #[test]
+    fn file_url_passes_through() {
+        assert_eq!(normalize_remote_url("file:///home/user/repo"), "file:///home/user/repo");
+    }
+
+    #[test]
+    fn local_paths_pass_through() {
+        assert_eq!(normalize_remote_url("/home/user/repo"), "/home/user/repo");
+        assert_eq!(normalize_remote_url("./relative/repo"), "./relative/repo");
+        assert_eq!(normalize_remote_url("../up/repo"), "../up/repo");
+        assert_eq!(normalize_remote_url("plain-dir"), "plain-dir");
+    }
+
+    #[test]
+    fn colon_bearing_paths_without_user_pass_through() {
+        // No `@` before the colon → ambiguous with a local path; leave it.
+        assert_eq!(normalize_remote_url("host:path"), "host:path");
+        // `@` present but a slash before the colon → local path, not SCP.
+        assert_eq!(normalize_remote_url("dir/with@at:colon"), "dir/with@at:colon");
+        // Trailing colon with nothing after it → not a usable SCP URL.
+        assert_eq!(normalize_remote_url("git@github.com:"), "git@github.com:");
     }
 }
