@@ -219,6 +219,13 @@ enum Commands {
         #[command(subcommand)]
         cmd: smooai::booking::Cmd,
     },
+    /// HeyPage — dogfood the AI website builder through the real product
+    /// API: `build` (generate → create → publish → live URL), plus
+    /// `generate` / `publish` / `get`.
+    Heypage {
+        #[command(subcommand)]
+        cmd: smooai::heypage::Cmd,
+    },
     /// Run a pearl through a Smooth operative — dispatches to Big Smooth
     /// (`th up` must be running) and streams agent events to stdout.
     Run {
@@ -1497,6 +1504,7 @@ async fn main() -> Result<()> {
         }) => smooai::notify::cmd(message, title, priority, url, org).await,
         Some(Commands::Testing { cmd }) => smooai::testing::cmd(cmd).await,
         Some(Commands::Booking { cmd }) => smooai::booking::cmd(cmd).await,
+        Some(Commands::Heypage { cmd }) => smooai::heypage::cmd(cmd).await,
         Some(Commands::Operatives { cmd }) => cmd_operatives(cmd).await,
         Some(Commands::Inbox) => cmd_inbox().await,
         Some(Commands::Run { pearl_id, model, agent }) => cmd_run(pearl_id.as_deref(), model.as_deref(), agent.as_deref()).await,
