@@ -3149,6 +3149,7 @@ async fn post_chat_message_stream_handler(
                             output: None,
                             status: "running".to_string(),
                             duration_ms: None,
+                            redaction_applied: false,
                         });
                     }
                     AgentEvent::ToolCallComplete {
@@ -3369,6 +3370,7 @@ async fn run_chat_with_history(
                             output: None,
                             status: "running".to_string(),
                             duration_ms: None,
+                            redaction_applied: false,
                         });
                     }
                     thoughts_drain.emit(crate::thoughts::ThoughtContext::ToolCall { tool_name });
