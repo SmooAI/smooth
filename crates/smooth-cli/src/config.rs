@@ -92,6 +92,10 @@ pub enum Tier {
     Secret,
     /// Boolean / string flags consumed via `featureFlag.get(...)`.
     FeatureFlag,
+    /// Numeric, segment-resolved limit consumed via `limit.evaluateLimit(...)`.
+    /// Never baked — resolves live like a feature flag; the consuming client
+    /// clamps the resolved number into the schema's `[min, max]`. SMOODEV-2306.
+    Limit,
 }
 
 impl Tier {
@@ -101,7 +105,19 @@ impl Tier {
             Self::Public => "public",
             Self::Secret => "secret",
             Self::FeatureFlag => "feature_flag",
+            Self::Limit => "limit",
         }
+    }
+}
+
+/// Parse-time guard for `th config limits set`: limits are NUMERIC, so reject
+/// anything that isn't a finite number before we PUT it. A non-numeric raw
+/// value would resolve to the schema `default` at evaluate time, silently
+/// ignoring the set — better to fail here with a clear message.
+fn parse_limit_value(s: &str) -> std::result::Result<String, String> {
+    match s.trim().parse::<f64>() {
+        Ok(n) if n.is_finite() => Ok(s.trim().to_string()),
+        _ => Err(format!("limit value must be a finite number, got `{s}`")),
     }
 }
 
@@ -397,6 +413,114 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: EnvironmentsCmd,
     },
+    /// Manage numeric, segment-resolved **limits** — the fourth
+    /// `@smooai/config` kind (SMOODEV-2306). Unlike public/secret config a
+    /// limit resolves LIVE per request context (never baked) and carries clamp
+    /// metadata (`default`/`min`/`max`/`step`); the consuming client clamps the
+    /// resolved number into `[min, max]`. Subcommands mirror the feature-flag
+    /// surface: `evaluate` resolves a value, `get`/`list` surface the clamp
+    /// metadata declared in the schema, `set` writes a raw value.
+    #[command(visible_alias = "limit")]
+    Limits {
+        #[command(subcommand)]
+        cmd: LimitsCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LimitsCmd {
+    /// Evaluate a limit for the active org + environment. POSTs to
+    /// `/config/limits/{key}/evaluate` — the SAME segment machinery as
+    /// `th config feature-flag`, but the resolved value is a NUMBER. Prints the
+    /// raw resolved number on its own line (pipe-friendly); `--json` returns
+    /// the full envelope (`value`, `source`, `matchedRuleId`, `rolloutBucket`).
+    /// The value is PRE-clamp — the consuming client applies `[min, max]`.
+    Evaluate {
+        /// The limit key (e.g. `agentMaxIterations`).
+        key: String,
+        /// Environment name. Defaults to `development`.
+        #[arg(long, alias = "env", default_value = DEFAULT_ENVIRONMENT)]
+        environment: String,
+        /// Override the active org.
+        #[arg(long, visible_alias = "org")]
+        org_id: Option<String>,
+        /// JSON evaluation context: a file path, `-` for stdin, or an inline
+        /// JSON object (e.g. `{"orgId":"x","agentId":"y"}`). Used by
+        /// context-aware limit rules. Omitted = empty `{}`.
+        #[arg(long)]
+        context: Option<String>,
+        /// Emit the full evaluation envelope as JSON instead of the resolved
+        /// value alone.
+        #[arg(long)]
+        json: bool,
+        /// Use the M2M session at `~/.smooth/auth/smooai.json`
+        /// instead of the user JWT.
+        #[arg(long)]
+        m2m: bool,
+    },
+    /// Show a single limit's clamp metadata (`default`/`min`/`max`/`step`) as
+    /// declared in the org's config schema.
+    Get {
+        /// The limit key.
+        key: String,
+        /// Override the active org.
+        #[arg(long, visible_alias = "org")]
+        org_id: Option<String>,
+        /// Restrict the lookup to a single schema by name. Defaults to
+        /// searching every schema on the org.
+        #[arg(long)]
+        schema_name: Option<String>,
+        /// Emit the metadata as JSON instead of the pretty line.
+        #[arg(long)]
+        json: bool,
+        /// Use the M2M session at `~/.smooth/auth/smooai.json`
+        /// instead of the user JWT.
+        #[arg(long)]
+        m2m: bool,
+    },
+    /// List every declared limit with its clamp metadata
+    /// (`default`/`min`/`max`/`step`) from the org's config schema(s).
+    List {
+        /// Override the active org.
+        #[arg(long, visible_alias = "org")]
+        org_id: Option<String>,
+        /// Restrict to a single schema by name. Defaults to all schemas.
+        #[arg(long)]
+        schema_name: Option<String>,
+        /// Emit the limits as a JSON map instead of the pretty listing.
+        #[arg(long)]
+        json: bool,
+        /// Use the M2M session at `~/.smooth/auth/smooai.json`
+        /// instead of the user JWT.
+        #[arg(long)]
+        m2m: bool,
+    },
+    /// Set a raw limit value for an environment (the `raw` resolution source).
+    /// Numeric-only — non-numbers are rejected at parse time. Thin wrapper over
+    /// `th config set <key> <value> --tier limit`.
+    Set {
+        /// The limit key.
+        key: String,
+        /// The numeric value. Rejected at parse time if not a finite number.
+        #[arg(value_parser = parse_limit_value)]
+        value: String,
+        /// Environment name. Defaults to `development`.
+        #[arg(long, alias = "env", default_value = DEFAULT_ENVIRONMENT)]
+        environment: String,
+        /// Override the active org.
+        #[arg(long, visible_alias = "org")]
+        org_id: Option<String>,
+        /// Schema name to write under. Defaults to the first schema.
+        #[arg(long)]
+        schema_name: Option<String>,
+        /// Emit the API response as JSON instead of the pretty echo.
+        #[arg(long)]
+        json: bool,
+        /// Use the M2M session at `~/.smooth/auth/smooai.json`
+        /// instead of the user JWT.
+        #[arg(long)]
+        m2m: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -565,6 +689,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             m2m,
         } => cmd_delete(key, environment, org_id, force, m2m).await,
         Cmd::Environments { cmd } => cmd_environments(cmd).await,
+        Cmd::Limits { cmd } => cmd_limits(cmd).await,
     }
 }
 
@@ -862,23 +987,7 @@ async fn cmd_feature_flag(key: String, environment: String, org_id: Option<Strin
     let cfg = ConfigClient::load(m2m).await?;
     let org = cfg.resolve_org(org_id)?;
 
-    // Context resolution: file path / `-` for stdin / inline JSON / empty.
-    // The "inline JSON" path lets callers do `--context '{"userId":"x"}'`
-    // without an intermediate file when the context is tiny.
-    let ctx_value: Value = match context {
-        None => serde_json::json!({}),
-        Some(raw) if raw == "-" => {
-            use std::io::Read;
-            let mut s = String::new();
-            std::io::stdin().read_to_string(&mut s).context("read stdin context")?;
-            serde_json::from_str(&s).context("parse stdin JSON context")?
-        }
-        Some(raw) if raw.trim().starts_with('{') => serde_json::from_str(&raw).context("parse inline JSON context")?,
-        Some(path) => {
-            let s = std::fs::read_to_string(&path).with_context(|| format!("read context file {path}"))?;
-            serde_json::from_str(&s).with_context(|| format!("parse JSON from {path}"))?
-        }
-    };
+    let ctx_value = parse_context(context)?;
 
     let body = serde_json::json!({
         "key": &key,
@@ -909,6 +1018,228 @@ async fn cmd_feature_flag(key: String, environment: String, org_id: Option<Strin
         other => println!("{}", serde_json::to_string(&other).unwrap_or_default()),
     }
     Ok(())
+}
+
+/// Resolve a `--context` argument into a JSON object for flag / limit
+/// evaluation: `None` → `{}`, `-` → stdin, `{...}` → inline JSON, else a file
+/// path. The "inline JSON" path lets callers do `--context '{"userId":"x"}'`
+/// without an intermediate file. Shared by `feature-flag` and `limits evaluate`.
+fn parse_context(context: Option<String>) -> Result<Value> {
+    match context {
+        None => Ok(serde_json::json!({})),
+        Some(raw) if raw == "-" => {
+            use std::io::Read;
+            let mut s = String::new();
+            std::io::stdin().read_to_string(&mut s).context("read stdin context")?;
+            serde_json::from_str(&s).context("parse stdin JSON context")
+        }
+        Some(raw) if raw.trim().starts_with('{') => serde_json::from_str(&raw).context("parse inline JSON context"),
+        Some(path) => {
+            let s = std::fs::read_to_string(&path).with_context(|| format!("read context file {path}"))?;
+            serde_json::from_str(&s).with_context(|| format!("parse JSON from {path}"))
+        }
+    }
+}
+
+/// Clamp metadata for one limit key, read from the schema's `limitsSchema`
+/// JSON-Schema node. Mirrors the `@smooai/config` `LimitDefinition`
+/// (`default`/`min`/`max`/`step`) as it serializes to JSON-Schema
+/// (`default`/`minimum`/`maximum`/`multipleOf`). SMOODEV-2306.
+#[derive(Debug, Default, serde::Serialize, PartialEq)]
+struct LimitMeta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    step: Option<f64>,
+}
+
+/// Extract per-key clamp metadata from a schema's `limitsSchema` JSON-Schema
+/// node. Tolerates the doc with or without the outer `properties` wrapper
+/// (matches [`flatten_schema`]'s defensive parsing). Each limit key serializes
+/// to a bounded JSON-Schema number: `{ type, default, minimum, maximum,
+/// multipleOf }`.
+fn extract_limit_meta(schema: &Value) -> std::collections::BTreeMap<String, LimitMeta> {
+    let mut out = std::collections::BTreeMap::new();
+    let num = |node: &Value, field: &str| node.get(field).and_then(Value::as_f64);
+    for root in [Some(schema), schema.get("properties")].into_iter().flatten() {
+        if let Some(keys) = root.get("limitsSchema").and_then(|v| v.get("properties")).and_then(|v| v.as_object()) {
+            for (k, spec) in keys {
+                out.entry(k.clone()).or_insert_with(|| LimitMeta {
+                    default: num(spec, "default"),
+                    min: num(spec, "minimum"),
+                    max: num(spec, "maximum"),
+                    step: num(spec, "multipleOf"),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Render a limit's clamp metadata as a compact `default=… min=… max=… step=…`
+/// line, omitting unset fields.
+fn format_limit_meta(meta: &LimitMeta) -> String {
+    let mut parts = Vec::new();
+    if let Some(d) = meta.default {
+        parts.push(format!("default={d}"));
+    }
+    if let Some(m) = meta.min {
+        parts.push(format!("min={m}"));
+    }
+    if let Some(m) = meta.max {
+        parts.push(format!("max={m}"));
+    }
+    if let Some(s) = meta.step {
+        parts.push(format!("step={s}"));
+    }
+    if parts.is_empty() {
+        "(no clamp metadata)".to_string()
+    } else {
+        parts.join("  ")
+    }
+}
+
+/// `th config limits …` — the fourth config kind (SMOODEV-2306). Numeric,
+/// segment-resolved, never baked. `evaluate` hits the live limits evaluator;
+/// `get`/`list` read clamp metadata from the schema; `set` writes a raw value.
+async fn cmd_limits(cmd: LimitsCmd) -> Result<()> {
+    match cmd {
+        LimitsCmd::Evaluate {
+            key,
+            environment,
+            org_id,
+            context,
+            json,
+            m2m,
+        } => cmd_limit_evaluate(key, environment, org_id, context, json, m2m).await,
+        LimitsCmd::Get {
+            key,
+            org_id,
+            schema_name,
+            json,
+            m2m,
+        } => cmd_limit_get(key, org_id, schema_name, json, m2m).await,
+        LimitsCmd::List {
+            org_id,
+            schema_name,
+            json,
+            m2m,
+        } => cmd_limit_list(org_id, schema_name, json, m2m).await,
+        LimitsCmd::Set {
+            key,
+            value,
+            environment,
+            org_id,
+            schema_name,
+            json,
+            m2m,
+        } => {
+            // Reuse the shared value-write path with the tier pinned to Limit.
+            // `reveal=true` because limit values are non-sensitive numbers —
+            // masking a number to `**` would be pure noise.
+            cmd_set(key, value, environment, org_id, Tier::Limit, schema_name, json, true, m2m).await
+        }
+    }
+}
+
+async fn cmd_limit_evaluate(key: String, environment: String, org_id: Option<String>, context: Option<String>, json: bool, m2m: bool) -> Result<()> {
+    let cfg = ConfigClient::load(m2m).await?;
+    let org = cfg.resolve_org(org_id)?;
+    let ctx_value = parse_context(context)?;
+
+    // Body shape matches the @smooai/config client's `evaluateLimit` exactly:
+    // `{ environment, context }` — the key travels in the path, not the body.
+    let body = serde_json::json!({ "environment": &environment, "context": ctx_value });
+    let path = format!("/organizations/{org}/config/limits/{}/evaluate", urlencoding::encode(&key));
+    let resp = cfg.post(&path, &body).await.with_context(|| format!("POST evaluate limit {key}"))?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+        return Ok(());
+    }
+
+    // Pretty path: print the raw resolved number on its own line (pipe-friendly).
+    match resp.get("value") {
+        Some(Value::Number(n)) => println!("{n}"),
+        Some(v) => println!("{}", serde_json::to_string(v).unwrap_or_default()),
+        None => println!("{}", serde_json::to_string(&resp).unwrap_or_default()),
+    }
+    Ok(())
+}
+
+async fn cmd_limit_list(org_id: Option<String>, schema_name: Option<String>, json: bool, m2m: bool) -> Result<()> {
+    let cfg = ConfigClient::load(m2m).await?;
+    let org = cfg.resolve_org(org_id)?;
+    let schemas = list_schemas(&cfg, &org).await?;
+
+    // Merge limit metadata across all schemas (or just the named one). First
+    // schema to declare a key wins its metadata — matches how the config
+    // server would resolve a key across schemas.
+    let mut all: std::collections::BTreeMap<String, LimitMeta> = std::collections::BTreeMap::new();
+    for s in schemas_matching(&schemas, schema_name.as_deref()) {
+        if let Some(js) = s.get("jsonSchema") {
+            for (k, meta) in extract_limit_meta(js) {
+                all.entry(k).or_insert(meta);
+            }
+        }
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&all).unwrap_or_default());
+        return Ok(());
+    }
+
+    println!();
+    if all.is_empty() {
+        println!("  {} {}", "●".dimmed(), "no limits declared in schema".dimmed());
+        println!();
+        return Ok(());
+    }
+    let max_key_len = all.keys().map(String::len).max().unwrap_or(0);
+    for (k, meta) in &all {
+        println!("  {:<width$}  {}", k.cyan(), format_limit_meta(meta).dimmed(), width = max_key_len);
+    }
+    println!();
+    Ok(())
+}
+
+async fn cmd_limit_get(key: String, org_id: Option<String>, schema_name: Option<String>, json: bool, m2m: bool) -> Result<()> {
+    let cfg = ConfigClient::load(m2m).await?;
+    let org = cfg.resolve_org(org_id)?;
+    let schemas = list_schemas(&cfg, &org).await?;
+
+    let meta = schemas_matching(&schemas, schema_name.as_deref())
+        .into_iter()
+        .find_map(|s| s.get("jsonSchema").and_then(|js| extract_limit_meta(js).remove(&key)));
+
+    let Some(meta) = meta else {
+        anyhow::bail!("limit `{key}` not declared in the org's config schema. Run `th config limits list` to see declared limits.");
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&meta).unwrap_or_default());
+        return Ok(());
+    }
+    println!();
+    println!("  {}  {}", key.cyan().bold(), format_limit_meta(&meta).dimmed());
+    println!();
+    Ok(())
+}
+
+/// Filter remote schema entries by an optional `--schema-name` (returns all
+/// when `None`). Shared by `limits list` / `limits get`.
+fn schemas_matching<'a>(schemas: &'a [Value], name: Option<&str>) -> Vec<&'a Value> {
+    schemas
+        .iter()
+        .filter(|s| match name {
+            Some(n) => s.get("name").and_then(|v| v.as_str()) == Some(n),
+            None => true,
+        })
+        .collect()
 }
 
 async fn cmd_delete(key: String, environment: String, org_id: Option<String>, force: bool, m2m: bool) -> Result<()> {
@@ -1993,6 +2324,110 @@ mod tests {
         assert_eq!(Tier::Public.as_wire(), "public");
         assert_eq!(Tier::Secret.as_wire(), "secret");
         assert_eq!(Tier::FeatureFlag.as_wire(), "feature_flag");
+        // SMOODEV-2306: matches `assertKeyDefined(key, 'limit')` on the server.
+        assert_eq!(Tier::Limit.as_wire(), "limit");
+    }
+
+    // ----- Limits tests (SMOODEV-2306) -------------------------------------
+
+    #[test]
+    fn parse_limit_value_accepts_finite_numbers() {
+        assert_eq!(parse_limit_value("12").unwrap(), "12");
+        assert_eq!(parse_limit_value("4096").unwrap(), "4096");
+        // Leading/trailing whitespace trimmed on the accepted value.
+        assert_eq!(parse_limit_value("  3.5 ").unwrap(), "3.5");
+        assert_eq!(parse_limit_value("-1").unwrap(), "-1");
+    }
+
+    #[test]
+    fn parse_limit_value_rejects_non_numeric_and_nonfinite() {
+        assert!(parse_limit_value("abc").is_err());
+        assert!(parse_limit_value("").is_err());
+        assert!(parse_limit_value("   ").is_err());
+        // NaN / inf parse as f64 but aren't finite — a limit must be a real number.
+        assert!(parse_limit_value("NaN").is_err());
+        assert!(parse_limit_value("inf").is_err());
+    }
+
+    #[test]
+    fn extract_limit_meta_reads_wrapped_json_schema() {
+        // The remote `jsonSchema` shape the config server returns.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "limitsSchema": { "properties": {
+                    "agentMaxIterations": { "type": "number", "default": 12, "minimum": 1, "maximum": 50 },
+                    "maxTokens": { "type": "number", "default": 4096, "multipleOf": 256 },
+                }},
+            },
+        });
+        let m = extract_limit_meta(&schema);
+        assert_eq!(m.len(), 2);
+        let ami = m.get("agentMaxIterations").expect("agentMaxIterations");
+        assert_eq!(ami.default, Some(12.0));
+        assert_eq!(ami.min, Some(1.0));
+        assert_eq!(ami.max, Some(50.0));
+        assert_eq!(ami.step, None);
+        let mt = m.get("maxTokens").expect("maxTokens");
+        assert_eq!(mt.default, Some(4096.0));
+        assert_eq!(mt.step, Some(256.0)); // multipleOf → step
+        assert_eq!(mt.min, None);
+    }
+
+    #[test]
+    fn extract_limit_meta_tolerates_unwrapped_shape() {
+        let schema = serde_json::json!({
+            "limitsSchema": { "properties": { "maxTokens": { "default": 4096, "multipleOf": 256 } } },
+        });
+        let m = extract_limit_meta(&schema);
+        assert_eq!(m.get("maxTokens").and_then(|x| x.step), Some(256.0));
+    }
+
+    #[test]
+    fn extract_limit_meta_empty_when_no_limits() {
+        assert!(extract_limit_meta(&serde_json::json!({})).is_empty());
+        // A schema with only other tiers contributes no limits.
+        let other = serde_json::json!({ "properties": { "publicConfigSchema": { "properties": { "x": {} } } } });
+        assert!(extract_limit_meta(&other).is_empty());
+    }
+
+    #[test]
+    fn format_limit_meta_omits_unset_fields() {
+        let meta = LimitMeta {
+            default: Some(12.0),
+            min: Some(1.0),
+            max: Some(50.0),
+            step: None,
+        };
+        let s = format_limit_meta(&meta);
+        assert!(s.contains("default=12") && s.contains("min=1") && s.contains("max=50"), "got: {s}");
+        assert!(!s.contains("step"), "got: {s}");
+    }
+
+    #[test]
+    fn format_limit_meta_handles_empty() {
+        assert_eq!(format_limit_meta(&LimitMeta::default()), "(no clamp metadata)");
+    }
+
+    #[test]
+    fn schemas_matching_filters_by_name_else_all() {
+        let schemas = vec![serde_json::json!({"name": "alpha"}), serde_json::json!({"name": "beta"})];
+        assert_eq!(schemas_matching(&schemas, None).len(), 2);
+        let only_beta = schemas_matching(&schemas, Some("beta"));
+        assert_eq!(only_beta.len(), 1);
+        assert_eq!(only_beta[0].get("name").and_then(|v| v.as_str()), Some("beta"));
+        assert!(schemas_matching(&schemas, Some("gamma")).is_empty());
+    }
+
+    #[test]
+    fn parse_context_defaults_to_empty_object() {
+        assert_eq!(parse_context(None).unwrap(), serde_json::json!({}));
+    }
+
+    #[test]
+    fn parse_context_reads_inline_json() {
+        let v = parse_context(Some(r#"{"orgId":"x"}"#.to_string())).unwrap();
+        assert_eq!(v["orgId"], "x");
     }
 
     #[test]
