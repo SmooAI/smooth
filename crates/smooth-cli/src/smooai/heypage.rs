@@ -19,7 +19,8 @@ use anyhow::{Context, Result};
 use clap::Subcommand;
 use serde_json::json;
 
-use super::{print_json, read_body, require_active_org, require_authed};
+use super::{print_json, print_list_envelope, read_body, require_active_org, require_authed};
+use smooth_api_client::SmoothApiClient;
 
 #[derive(Subcommand)]
 pub enum Cmd {
@@ -54,12 +55,22 @@ pub enum Cmd {
     /// slug/URL are unchanged), never spawns a duplicate. This is the path that
     /// refreshes the live showcase examples.
     Regen {
-        /// Site id to regenerate.
+        /// Site id to regenerate. Or use `--slug` to resolve the id via `list`.
         #[arg(long)]
-        site: String,
+        site: Option<String>,
+        /// Site slug (resolved to an id via `list`) — the loop-friendly form,
+        /// e.g. `--slug claysmith-studio`. Mutually exclusive with `--site`.
+        #[arg(long, conflicts_with = "site")]
+        slug: Option<String>,
         /// Brief JSON (file path, or `-` for stdin). See `generate --brief`.
         #[arg(long)]
         brief: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// List the org's sites (id + slug + name). Slug resolution for `regen --slug`.
+    List {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
@@ -124,6 +135,30 @@ fn revisable_paths(spec: &serde_json::Value, detail: &serde_json::Value) -> Vec<
         .unwrap_or_default()
 }
 
+/// Resolve a regen target to a site id: `--site` wins; otherwise `--slug` is
+/// looked up against the org's site list (`GET heypage/sites`). Errors if
+/// neither is given or the slug matches no site.
+async fn resolve_site_id(client: &SmoothApiClient, org: &str, site: Option<String>, slug: Option<String>) -> Result<String> {
+    if let Some(id) = site {
+        return Ok(id);
+    }
+    let slug = slug.context("pass --site <id> or --slug <slug>")?;
+    let list = client.get(&format!("/organizations/{org}/heypage/sites")).await.context("GET heypage/sites")?;
+    find_slug_id(&list, &slug).with_context(|| format!("no site with slug {slug:?} in org {org}"))
+}
+
+/// Find the `id` of the site whose `slug` matches, in a `{data:[…]}` envelope
+/// or a bare array.
+fn find_slug_id(list: &serde_json::Value, slug: &str) -> Option<String> {
+    list.get("data")
+        .and_then(|v| v.as_array())
+        .or_else(|| list.as_array())
+        .into_iter()
+        .flatten()
+        .find(|s| s.get("slug").and_then(|v| v.as_str()) == Some(slug))
+        .and_then(|s| s.get("id").and_then(|v| v.as_str()).map(str::to_string))
+}
+
 pub async fn cmd(cmd: Cmd) -> Result<()> {
     let client = require_authed().await?;
     match cmd {
@@ -173,8 +208,9 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                 "url": live_url(&site_resp),
             }));
         }
-        Cmd::Regen { site, brief, org } => {
+        Cmd::Regen { site, slug, brief, org } => {
             let o = require_active_org(&client, org)?;
+            let site = resolve_site_id(&client, &o, site, slug).await?;
 
             // 1. Fresh spec from the brief.
             let gen = client
@@ -214,6 +250,13 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                 "published": true,
                 "url": live_url(&detail),
             }));
+        }
+        Cmd::List { org } => {
+            let o = require_active_org(&client, org)?;
+            print_list_envelope(
+                &client.get(&format!("/organizations/{o}/heypage/sites")).await.context("GET heypage/sites")?,
+                "sites",
+            );
         }
         Cmd::Publish { site, org } => {
             let o = require_active_org(&client, org)?;
@@ -269,6 +312,15 @@ mod tests {
         let got = revisable_paths(&spec, &detail);
         // "new-page" (not on site) and "gallery" (not in spec) are excluded.
         assert_eq!(got, vec!["".to_string(), "classes".to_string()]);
+    }
+
+    #[test]
+    fn find_slug_id_matches_in_envelope_and_bare() {
+        let env = json!({ "data": [{ "id": "a", "slug": "claysmith-studio" }, { "id": "b", "slug": "north-fork-caf" }] });
+        assert_eq!(find_slug_id(&env, "north-fork-caf"), Some("b".to_string()));
+        assert_eq!(find_slug_id(&env, "nope"), None);
+        let bare = json!([{ "id": "c", "slug": "jesse-builds" }]);
+        assert_eq!(find_slug_id(&bare, "jesse-builds"), Some("c".to_string()));
     }
 
     #[test]
