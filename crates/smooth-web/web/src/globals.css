@@ -39,6 +39,10 @@ body,
 
 body {
     margin: 0;
+    /* Mobile scroll-lock: only the message list scrolls; the page never
+       rubber-bands or scrolls off (iOS Safari). Paired with the app shell's
+       h-dvh + overflow-hidden and the fixed viewport-fit meta. */
+    overscroll-behavior: none;
     background:
         radial-gradient(1100px 700px at 78% -8%, color-mix(in oklch, var(--color-th-teal) 11%, transparent), transparent 60%),
         radial-gradient(900px 600px at 12% 108%, color-mix(in oklch, var(--color-th-blue) 13%, transparent), transparent 62%),
@@ -175,4 +179,12 @@ body {
     border-radius: 999px;
     border: 3px solid transparent;
     background-clip: content-box;
+}
+
+/* WebGL-less fallback for the 3D face (headless browsers, GPU blocklists) —
+   a static brand-gradient orb so presence survives without Three.js. */
+.face-fallback {
+    border-radius: 50%;
+    background: radial-gradient(circle at 50% 42%, var(--color-th-teal), var(--color-th-blue) 78%);
+    box-shadow: 0 8px 40px -8px color-mix(in oklch, var(--color-th-blue) 60%, transparent);
 }

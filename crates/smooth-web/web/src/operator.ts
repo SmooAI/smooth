@@ -22,6 +22,14 @@ export interface ToolCall {
     done: boolean;
 }
 
+/** A pending/sent attachment. `dataUrl` is the full `data:<mime>;base64,…`
+ * string — it's both the wire value (the backend's `images[]`) and the preview. */
+export interface Attachment {
+    name: string;
+    mime: string;
+    dataUrl: string;
+}
+
 export interface ChatMessage {
     id: string;
     role: 'user' | 'assistant' | 'system';
@@ -31,6 +39,8 @@ export interface ChatMessage {
     reasoning: string;
     tools: ToolCall[];
     streaming: boolean;
+    /** Images/PDFs sent with a user message. */
+    attachments?: Attachment[];
 }
 
 /** A parked write-tool the agent needs a human verdict on. */
@@ -52,7 +62,7 @@ interface OperatorApi {
     messages: ChatMessage[];
     approvals: Approval[];
     status: Status;
-    sendMessage: (text: string) => void;
+    sendMessage: (text: string, attachments?: Attachment[]) => void;
     respond: (requestId: string, approved: boolean) => void;
     /** The active Smooth Mode — pins each turn to a model. */
     mode: SmoothMode;
@@ -278,12 +288,25 @@ export function useOperator(): OperatorApi {
     }, [handle, send]);
 
     const sendMessage = useCallback(
-        (text: string) => {
+        (text: string, attachments: Attachment[] = []) => {
             const body = text.trim();
-            if (!body || !sessionRef.current) return;
-            setMessages((prev) => [...prev, { id: nextId('u'), role: 'user', content: body, reasoning: '', tools: [], streaming: false }]);
+            if ((!body && attachments.length === 0) || !sessionRef.current) return;
+            setMessages((prev) => [
+                ...prev,
+                { id: nextId('u'), role: 'user', content: body, reasoning: '', tools: [], streaming: false, attachments: attachments.length ? attachments : undefined },
+            ]);
             setTurnActive(true);
-            send({ action: 'send_message', requestId: nextId('turn'), sessionId: sessionRef.current, message: body, model: modeRef.current.model });
+            // The backend accepts an optional `images` array of full data-URL strings;
+            // omit it entirely for text-only sends so nothing changes there.
+            const frame: Record<string, unknown> = {
+                action: 'send_message',
+                requestId: nextId('turn'),
+                sessionId: sessionRef.current,
+                message: body,
+                model: modeRef.current.model,
+            };
+            if (attachments.length) frame.images = attachments.map((a) => a.dataUrl);
+            send(frame);
         },
         [send],
     );

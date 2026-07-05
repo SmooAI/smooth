@@ -5,14 +5,14 @@
 // rather than a detached banner. A thin client on the operator's canonical
 // protocol (EPIC th-c89c2a, th-f1a1f0, th-833b5f).
 
-import { ArrowUp, Check, X, Terminal, FileText, Search, Folder, Pencil, Brain, Bell, BellRing } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowUp, Check, X, Terminal, FileText, Search, Folder, Pencil, Brain, Bell, BellRing, Paperclip } from 'lucide-react';
+import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 import { BigSmoothFace, type FaceState } from './components/BigSmoothFace';
 import { MODES, costBadge, isExpensiveBadge, blendedPerMillion, type SmoothMode, type ModelCost, type ModelCosts } from './modes';
-import { useOperator, type AgentState, type ChatMessage, type ToolCall, type Approval, type Status } from './operator';
+import { useOperator, type AgentState, type Attachment, type ChatMessage, type ToolCall, type Approval, type Status } from './operator';
 import { usePush } from './usePush';
 import { useMentionSearch, activeMention, type MentionResult } from './useMentionSearch';
 
@@ -143,7 +143,7 @@ export default function App() {
                     <BellRing className="size-3.5" />
                 </div>
             )}
-            <div className="mx-auto flex h-full max-w-3xl flex-col px-5">
+            <div className="mx-auto flex h-dvh max-w-3xl flex-col overflow-hidden px-5">
                 {inConversation ? (
                     <>
                         <PresenceBar state={state} status={status} faceState={faceState} mode={mode} modelCosts={modelCosts} sessionCostUsd={sessionCostUsd} />
@@ -180,11 +180,27 @@ function Wordmark({ className }: { className?: string }) {
 }
 
 /** The face + its breathing halo, sized for the moment. */
+// WebGL can be absent (headless browsers, locked-down devices, GPU blocklists).
+// Three.js throws on context creation — without this, that error crashes the whole
+// app. Degrade to a static brand-gradient orb so presence survives without 3D.
+class FaceBoundary extends Component<{ size: number; children: ReactNode }, { failed: boolean }> {
+    state = { failed: false };
+    static getDerivedStateFromError() {
+        return { failed: true };
+    }
+    render() {
+        if (this.state.failed) return <div className="face-fallback" style={{ width: this.props.size, height: this.props.size }} />;
+        return this.props.children;
+    }
+}
+
 function FaceStage({ state, size, strong }: { state: FaceState; size: number; strong?: boolean }) {
     return (
         <div className="face-stage" style={{ width: size, height: size }}>
             <div className={`halo${strong ? ' halo-strong' : ''}`} style={{ '--halo': haloColor(state) } as React.CSSProperties} />
-            <BigSmoothFace state={state} size={size} />
+            <FaceBoundary size={size}>
+                <BigSmoothFace state={state} size={size} />
+            </FaceBoundary>
         </div>
     );
 }
@@ -333,8 +349,22 @@ function MessageRow({ m, awaiting }: { m: ChatMessage; awaiting: Set<string> }) 
     }
     if (m.role === 'user') {
         return (
-            <div className="flex justify-end">
-                <div className="max-w-[85%] rounded-2xl rounded-br-md bg-coral/15 px-4 py-2.5 text-[0.95rem] leading-relaxed">{m.content}</div>
+            <div className="flex flex-col items-end gap-1.5">
+                {m.attachments && m.attachments.length > 0 && (
+                    <div className="flex max-w-[85%] flex-wrap justify-end gap-2">
+                        {m.attachments.map((a, i) =>
+                            a.mime.startsWith('image/') ? (
+                                <img key={i} src={a.dataUrl} alt={a.name} className="max-h-64 rounded-lg" />
+                            ) : (
+                                <div key={i} className="flex items-center gap-2 rounded-lg border border-border bg-panel-2 px-3 py-2 text-sm">
+                                    <FileText size={15} className="shrink-0 text-(--color-th-teal)" />
+                                    <span className="max-w-40 truncate">{a.name}</span>
+                                </div>
+                            ),
+                        )}
+                    </div>
+                )}
+                {m.content && <div className="max-w-[85%] rounded-2xl rounded-br-md bg-coral/15 px-4 py-2.5 text-[0.95rem] leading-relaxed">{m.content}</div>}
             </div>
         );
     }
@@ -466,7 +496,7 @@ function Composer({
     setMode,
     modelCosts,
 }: {
-    onSend: (t: string) => void;
+    onSend: (t: string, attachments: Attachment[]) => void;
     disabled: boolean;
     mode: SmoothMode;
     setMode: (id: string) => void;
@@ -476,7 +506,23 @@ function Composer({
     const [caret, setCaret] = useState(0);
     const [sel, setSel] = useState(0);
     const [dismissed, setDismissed] = useState(false);
+    const [attachments, setAttachments] = useState<Attachment[]>([]);
+    const [dragging, setDragging] = useState(false);
     const taRef = useRef<HTMLTextAreaElement>(null);
+    const fileRef = useRef<HTMLInputElement>(null);
+
+    // Read picked/pasted/dropped images + PDFs as full data-URLs (prefix kept —
+    // it's the wire value AND the preview src).
+    const addFiles = (files: FileList | File[] | null) => {
+        if (!files) return;
+        for (const file of Array.from(files)) {
+            if (!/^image\//.test(file.type) && file.type !== 'application/pdf') continue;
+            const reader = new FileReader();
+            reader.onload = () => setAttachments((prev) => [...prev, { name: file.name, mime: file.type, dataUrl: reader.result as string }]);
+            reader.readAsDataURL(file);
+        }
+    };
+    const removeAttachment = (i: number) => setAttachments((prev) => prev.filter((_, j) => j !== i));
 
     // The `@` token under the caret (if any) drives the mention popup. When it's
     // active we suppress the `/` slash menu — only the token the caret sits in wins.
@@ -541,13 +587,29 @@ function Composer({
             applyItem(selItem);
             return;
         }
-        if (!text.trim()) return;
-        onSend(text);
+        if (!text.trim() && attachments.length === 0) return;
+        onSend(text, attachments);
+        setAttachments([]);
         update('');
     };
 
     return (
-        <div className="relative pb-5 pt-1">
+        <div
+            className="relative pb-5 pt-1"
+            onDragOver={(e) => {
+                e.preventDefault();
+                if (!disabled) setDragging(true);
+            }}
+            onDragLeave={(e) => {
+                e.preventDefault();
+                setDragging(false);
+            }}
+            onDrop={(e) => {
+                e.preventDefault();
+                setDragging(false);
+                if (!disabled) addFiles(e.dataTransfer.files);
+            }}
+        >
             {mentionVisible && (
                 <div className="absolute right-0 bottom-full left-0 mb-2 overflow-hidden rounded-2xl border border-border bg-panel/95 shadow-xl backdrop-blur">
                     <ul className="max-h-72 overflow-y-auto py-1">
@@ -627,13 +689,68 @@ function Composer({
                     </ul>
                 </div>
             )}
-            <div className="flex items-end gap-2 rounded-2xl border border-border bg-panel/70 p-2 backdrop-blur focus-within:border-(--color-th-teal)/50">
-                <textarea
+            <input
+                ref={fileRef}
+                type="file"
+                accept="image/*,application/pdf"
+                multiple
+                className="hidden"
+                onChange={(e) => {
+                    addFiles(e.target.files);
+                    e.target.value = '';
+                }}
+            />
+            <div
+                className={`rounded-2xl border bg-panel/70 p-2 backdrop-blur focus-within:border-(--color-th-teal)/50 ${dragging ? 'border-(--color-th-teal) bg-(--color-th-teal)/5' : 'border-border'}`}
+            >
+                {attachments.length > 0 && (
+                    <div className="mb-2 flex flex-wrap gap-2 px-1 pt-1">
+                        {attachments.map((a, i) => (
+                            <div key={`${a.name}-${i}`} className="relative">
+                                {a.mime.startsWith('image/') ? (
+                                    <img src={a.dataUrl} alt={a.name} className="size-16 rounded-lg object-cover" />
+                                ) : (
+                                    <div className="flex size-16 flex-col items-center justify-center gap-1 rounded-lg border border-border bg-panel-2 p-1 text-center">
+                                        <FileText size={18} className="shrink-0 text-(--color-th-teal)" />
+                                        <span className="w-full truncate text-[0.6rem] text-(--color-muted-foreground)">{a.name}</span>
+                                    </div>
+                                )}
+                                <button
+                                    type="button"
+                                    onClick={() => removeAttachment(i)}
+                                    aria-label={`Remove ${a.name}`}
+                                    className="absolute -right-1.5 -top-1.5 grid size-5 place-items-center rounded-full border border-border bg-panel-2 text-foreground/80 transition hover:brightness-125"
+                                >
+                                    <X size={11} />
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                )}
+                <div className="flex items-end gap-2">
+                    <button
+                        type="button"
+                        onClick={() => fileRef.current?.click()}
+                        disabled={disabled}
+                        aria-label="Attach image or PDF"
+                        title="Attach image or PDF"
+                        className="grid size-9 shrink-0 place-items-center rounded-xl text-(--color-muted-foreground) transition enabled:hover:text-foreground disabled:opacity-40"
+                    >
+                        <Paperclip size={18} />
+                    </button>
+                    <textarea
                     ref={taRef}
                     value={text}
                     onChange={(e) => {
                         update(e.target.value);
                         setCaret(e.target.selectionStart ?? e.target.value.length);
+                    }}
+                    onPaste={(e) => {
+                        const usable = Array.from(e.clipboardData.files).filter((f) => /^image\//.test(f.type) || f.type === 'application/pdf');
+                        if (usable.length) {
+                            e.preventDefault();
+                            addFiles(usable);
+                        }
                     }}
                     onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
                     onKeyDown={(e) => {
@@ -690,14 +807,15 @@ function Composer({
                     disabled={disabled}
                     className="max-h-40 flex-1 resize-none bg-transparent px-2 py-1.5 text-[0.95rem] outline-none placeholder:text-(--color-muted-foreground)"
                 />
-                <button
-                    onClick={submit}
-                    disabled={disabled || !text.trim()}
-                    className="grid size-9 shrink-0 place-items-center rounded-xl bg-coral text-(--color-coral-ink) transition enabled:hover:brightness-110 disabled:opacity-40"
-                    aria-label="Send"
-                >
-                    <ArrowUp size={18} />
-                </button>
+                    <button
+                        onClick={submit}
+                        disabled={disabled || (!text.trim() && attachments.length === 0)}
+                        className="grid size-9 shrink-0 place-items-center rounded-xl bg-coral text-(--color-coral-ink) transition enabled:hover:brightness-110 disabled:opacity-40"
+                        aria-label="Send"
+                    >
+                        <ArrowUp size={18} />
+                    </button>
+                </div>
             </div>
             {expensive && (
                 <div className="mt-2 flex items-center gap-1.5 rounded-xl border border-amber/30 bg-amber/5 px-3 py-1.5 text-xs font-medium text-amber">
