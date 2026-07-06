@@ -21,6 +21,7 @@ use smooai::{cmd_login, cmd_logout, cmd_orgs, cmd_whoami};
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use dialoguer::{theme::ColorfulTheme, Input, Password, Select};
 use owo_colors::OwoColorize;
@@ -1069,6 +1070,18 @@ enum PearlCommands {
     Close { ids: Vec<String> },
     /// Reopen an issue
     Reopen { id: String },
+    /// Schedule a pearl to "speak up" in the prime hook once its time arrives.
+    /// WHEN is relative (`+2h`, `30m`, `2d`, `1w`, `tomorrow`, `now`) or
+    /// absolute (`2026-07-10`, `2026-07-10 09:00`, RFC3339). Omit WHEN to clear.
+    Schedule {
+        id: String,
+        // allow_hyphen_values so relative-past offsets like `-1h` aren't
+        // mistaken for a flag.
+        #[arg(allow_hyphen_values = true)]
+        when: Option<String>,
+    },
+    /// Show scheduled pearls whose time has arrived (scheduled_at <= now)
+    Due,
     /// Add dependency
     Dep {
         #[command(subcommand)]
@@ -4558,21 +4571,121 @@ mod pearl_autocommit_tests {
     }
 }
 
+/// Parse a `th pearls schedule` WHEN argument into an absolute UTC instant,
+/// relative to `now`. Accepts:
+///   - `now`
+///   - relative offsets: `+2h`, `30m`, `2d`, `1w`, `90s` (unit s/m/h/d/w; `+` optional)
+///   - `tomorrow` (now + 24h)
+///   - absolute: `YYYY-MM-DD`, `YYYY-MM-DD HH:MM`, or RFC3339
+///
+/// ponytail: absolute dates without a zone are read as UTC — good enough for
+/// reminders; wire chrono-tz (already a dep) here if wall-clock local time matters.
+fn parse_when(input: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>> {
+    let s = input.trim();
+    let lower = s.to_lowercase();
+    if lower == "now" {
+        return Ok(now);
+    }
+    if lower == "tomorrow" {
+        return Ok(now + chrono::Duration::days(1));
+    }
+    // Relative offset: optional '+', digits, single unit suffix.
+    let rel = lower.strip_prefix('+').unwrap_or(&lower);
+    if let Some(unit) = rel.chars().last() {
+        if "smhdw".contains(unit) && rel.len() > 1 {
+            if let Ok(n) = rel[..rel.len() - 1].parse::<i64>() {
+                let dur = match unit {
+                    's' => chrono::Duration::seconds(n),
+                    'm' => chrono::Duration::minutes(n),
+                    'h' => chrono::Duration::hours(n),
+                    'd' => chrono::Duration::days(n),
+                    'w' => chrono::Duration::weeks(n),
+                    _ => unreachable!(),
+                };
+                return Ok(now + dur);
+            }
+        }
+    }
+    // Absolute forms.
+    if let Ok(dt) = s.parse::<DateTime<Utc>>() {
+        return Ok(dt);
+    }
+    if let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M") {
+        return Ok(ndt.and_utc());
+    }
+    if let Ok(nd) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        return Ok(nd.and_hms_opt(0, 0, 0).unwrap_or_default().and_utc());
+    }
+    anyhow::bail!("could not parse schedule time '{input}' (try +2h, 30m, 2d, 1w, tomorrow, or 2026-07-10 09:00)")
+}
+
 fn format_pearl_line(issue: &smooth_pearls::Pearl) -> String {
     let labels_str = if issue.labels.is_empty() {
         String::new()
     } else {
         format!(" [{}]", issue.labels.join(", "))
     };
+    let sched_str = match issue.scheduled_at {
+        Some(dt) if dt <= Utc::now() => format!(" ⏰ due {}", dt.format("%Y-%m-%d %H:%M")),
+        Some(dt) => format!(" ⏰ {}", dt.format("%Y-%m-%d %H:%M")),
+        None => String::new(),
+    };
     format!(
-        "{} {} {} P{} {}{}",
+        "{} {} {} P{} {}{}{}",
         issue.status,
         issue.id.dimmed(),
         "\u{25CF}".dimmed(),
         issue.priority.as_u8(),
         issue.title,
-        labels_str.dimmed()
+        labels_str.dimmed(),
+        sched_str.yellow()
     )
+}
+
+#[cfg(test)]
+mod schedule_tests {
+    use super::*;
+
+    fn base() -> DateTime<Utc> {
+        "2026-07-05T12:00:00Z".parse().unwrap()
+    }
+
+    #[test]
+    fn relative_offsets() {
+        let n = base();
+        assert_eq!(parse_when("+2h", n).unwrap(), n + chrono::Duration::hours(2));
+        assert_eq!(parse_when("30m", n).unwrap(), n + chrono::Duration::minutes(30));
+        assert_eq!(parse_when("2d", n).unwrap(), n + chrono::Duration::days(2));
+        assert_eq!(parse_when("1w", n).unwrap(), n + chrono::Duration::weeks(1));
+        assert_eq!(parse_when("90s", n).unwrap(), n + chrono::Duration::seconds(90));
+    }
+
+    #[test]
+    fn keywords() {
+        let n = base();
+        assert_eq!(parse_when("now", n).unwrap(), n);
+        assert_eq!(parse_when("TOMORROW", n).unwrap(), n + chrono::Duration::days(1));
+    }
+
+    #[test]
+    fn absolute_forms() {
+        let n = base();
+        assert_eq!(
+            parse_when("2026-07-10 09:00", n).unwrap(),
+            "2026-07-10T09:00:00Z".parse::<DateTime<Utc>>().unwrap()
+        );
+        assert_eq!(parse_when("2026-07-10", n).unwrap(), "2026-07-10T00:00:00Z".parse::<DateTime<Utc>>().unwrap());
+        assert_eq!(
+            parse_when("2026-07-10T09:30:00Z", n).unwrap(),
+            "2026-07-10T09:30:00Z".parse::<DateTime<Utc>>().unwrap()
+        );
+    }
+
+    #[test]
+    fn garbage_is_rejected() {
+        assert!(parse_when("whenever", base()).is_err());
+        assert!(parse_when("2x", base()).is_err());
+    }
 }
 
 async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
@@ -4634,6 +4747,10 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             println!("  {} {} | {} | {}", "ID:".dimmed(), issue.id, issue.priority, issue.pearl_type);
             if let Some(ref assignee) = issue.assigned_to {
                 println!("  {} {assignee}", "Assigned:".dimmed());
+            }
+            if let Some(dt) = issue.scheduled_at {
+                let tag = if dt <= Utc::now() { " (due)" } else { "" };
+                println!("  {} {}{tag}", "Scheduled:".dimmed(), dt.format("%Y-%m-%d %H:%M UTC"));
             }
             if !issue.labels.is_empty() {
                 println!("  {} {}", "Labels:".dimmed(), issue.labels.join(", "));
@@ -4712,6 +4829,36 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             println!("{} Reopened {}", "✓".green().bold(), issue.id);
             println!("  {}", format_pearl_line(&issue));
             commit_and_push_pearl_state(&dolt_dir, &format!("reopen {}", issue.id))?;
+        }
+
+        PearlCommands::Schedule { id, when } => {
+            let scheduled = match when {
+                Some(ref w) => Some(parse_when(w, Utc::now())?),
+                None => None,
+            };
+            let updates = smooth_pearls::PearlUpdate {
+                scheduled_at: Some(scheduled),
+                ..Default::default()
+            };
+            let updated = store.update(&id, &updates)?;
+            match scheduled {
+                Some(dt) => println!("{} Scheduled {} for {}", "✓".green().bold(), updated.id, dt.format("%Y-%m-%d %H:%M UTC")),
+                None => println!("{} Cleared schedule on {}", "✓".green().bold(), updated.id),
+            }
+            commit_and_push_pearl_state(&dolt_dir, &format!("schedule {}", updated.id))?;
+        }
+
+        PearlCommands::Due => {
+            let issues = store.due_scheduled()?;
+            if issues.is_empty() {
+                println!("No pearls due.");
+            } else {
+                println!("{}", "Due Pearls (scheduled time arrived):".bold().yellow());
+                for issue in &issues {
+                    println!("  {}", format_pearl_line(issue));
+                }
+                println!("\n{} issue(s)", issues.len());
+            }
         }
 
         PearlCommands::Dep { cmd } => match cmd {
@@ -7476,33 +7623,45 @@ fn cmd_prime() -> Result<()> {
     // we stay consistent even when multiple `th` copies are on PATH.
     let exe = std::env::current_exe().ok();
     if let Some(exe) = exe {
-        let output = std::process::Command::new(&exe)
-            .args(["pearls", "ready"])
-            .env("NO_COLOR", "1")
-            .env("CLICOLOR", "0")
-            .output();
-        if let Ok(out) = output {
-            if out.status.success() {
-                let s = String::from_utf8_lossy(&out.stdout);
-                let trimmed = s.trim();
-                if !trimmed.is_empty() {
-                    println!("\n## Ready to work\n");
-                    println!("```");
-                    // Cap to ~40 lines so we don't bloat the hook output.
-                    for (i, line) in trimmed.lines().enumerate() {
-                        if i >= 40 {
-                            println!("... (truncated; run `th pearls ready` for the full list)");
-                            break;
-                        }
-                        println!("{line}");
-                    }
-                    println!("```");
-                }
-            }
-        }
+        // Scheduled pearls that have come due "speak up" first (pearl th-01aa6a).
+        prime_pearls_section(&exe, "due", "\u{23F0} Scheduled & due", 20);
+        prime_pearls_section(&exe, "ready", "Ready to work", 40);
     }
 
     Ok(())
+}
+
+/// Run `th pearls <sub>` and, if it produced output, print it as a fenced
+/// markdown section under `heading` (capped to `cap` lines). Best-effort:
+/// a missing/empty store just skips the section.
+fn prime_pearls_section(exe: &std::path::Path, sub: &str, heading: &str, cap: usize) {
+    let Ok(out) = std::process::Command::new(exe)
+        .args(["pearls", sub])
+        .env("NO_COLOR", "1")
+        .env("CLICOLOR", "0")
+        .output()
+    else {
+        return;
+    };
+    if !out.status.success() {
+        return;
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    let trimmed = s.trim();
+    // "No pearls due." / "No ready issues." — nothing to surface.
+    if trimmed.is_empty() || trimmed.starts_with("No ") {
+        return;
+    }
+    println!("\n## {heading}\n");
+    println!("```");
+    for (i, line) in trimmed.lines().enumerate() {
+        if i >= cap {
+            println!("... (truncated; run `th pearls {sub}` for the full list)");
+            break;
+        }
+        println!("{line}");
+    }
+    println!("```");
 }
 
 fn cmd_bench(cmd: BenchCommands) -> Result<()> {
