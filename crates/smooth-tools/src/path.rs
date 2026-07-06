@@ -16,26 +16,35 @@ use std::path::{Component, Path, PathBuf};
 
 /// Resolve `rel` against the workspace `base`, confining the result to `base`.
 ///
-/// Rejects empty paths, absolute paths, and any path that escapes `base` after
-/// lexically collapsing `.` / `..`.
+/// Accepts a relative path (joined onto `base`) OR an absolute path that
+/// lexically resolves **inside** `base`. Rejects empty paths and any path —
+/// relative or absolute — that escapes `base` after collapsing `.` / `..`.
+///
+/// Absolute-within-workspace is allowed because the agent naturally emits
+/// absolute paths when the user names one (e.g. `~/dev/smooai/x` →
+/// `/Users/you/dev/smooai/x`); rejecting them outright made tool-using turns
+/// flail and give up (th-c89c2a). Confinement is unchanged: an absolute path
+/// outside `base` still fails the `starts_with` check, exactly as a relative
+/// `../escape` does. The lexical (no-`canonicalize`) rule and the kernel
+/// OS-sandbox remain the load-bearing symlink boundary.
 ///
 /// # Errors
-/// Returns an error if `rel` is empty, absolute, or escapes the workspace.
+/// Returns an error if `rel` is empty or escapes the workspace.
 pub fn resolve_workspace_path(base: &Path, rel: &str) -> anyhow::Result<PathBuf> {
     if rel.is_empty() {
         anyhow::bail!("empty path");
     }
-    let requested = Path::new(rel);
-    if requested.is_absolute() {
-        anyhow::bail!("absolute path `{rel}` is not allowed — all paths must be relative to the workspace");
-    }
-
     let base_norm = lexical_normalize(base);
-    let normalized = lexical_normalize(&base_norm.join(requested));
+    let requested = Path::new(rel);
+    let normalized = if requested.is_absolute() {
+        lexical_normalize(requested)
+    } else {
+        lexical_normalize(&base_norm.join(requested))
+    };
 
     if !normalized.starts_with(&base_norm) {
         anyhow::bail!(
-            "path `{rel}` escapes the workspace (resolved to {}, outside {})",
+            "path `{rel}` is outside the workspace (resolved to {}, which is not under {})",
             normalized.display(),
             base_norm.display()
         );
@@ -96,10 +105,34 @@ mod tests {
     }
 
     #[test]
-    fn rejects_absolute_paths() {
-        for abs in ["/etc/passwd", "/work/space/x", "//x"] {
+    fn allows_absolute_path_inside_workspace() {
+        // The agent naturally emits absolute paths when the user names one.
+        // An absolute path INSIDE the workspace is allowed and resolves to itself.
+        let p = resolve_workspace_path(&base(), "/work/space/x").unwrap();
+        assert_eq!(p, PathBuf::from("/work/space/x"));
+        let p = resolve_workspace_path(&base(), "/work/space/src/main.rs").unwrap();
+        assert_eq!(p, PathBuf::from("/work/space/src/main.rs"));
+        // The base itself.
+        let p = resolve_workspace_path(&base(), "/work/space").unwrap();
+        assert_eq!(p, base());
+    }
+
+    #[test]
+    fn rejects_absolute_paths_outside_workspace() {
+        // Absolute paths OUTSIDE the workspace are still rejected — confinement
+        // is preserved. `//x` normalizes to `/x`, also outside.
+        for abs in ["/etc/passwd", "//x", "/work", "/work/spaceother"] {
             let err = resolve_workspace_path(&base(), abs).unwrap_err();
-            assert!(err.to_string().contains("absolute"), "{abs}: {err}");
+            assert!(err.to_string().contains("outside"), "{abs}: {err}");
+        }
+    }
+
+    #[test]
+    fn rejects_absolute_dotdot_escape_from_inside() {
+        // An absolute path that starts inside but climbs out via `..` is rejected.
+        for esc in ["/work/space/../../etc/passwd", "/work/space/../space-evil/x"] {
+            let err = resolve_workspace_path(&base(), esc).unwrap_err();
+            assert!(err.to_string().contains("outside"), "{esc}: {err}");
         }
     }
 
@@ -107,7 +140,7 @@ mod tests {
     fn rejects_escape_via_dotdot() {
         for esc in ["../secret", "../../etc/passwd", "a/../../b", "src/../../outside"] {
             let err = resolve_workspace_path(&base(), esc).unwrap_err();
-            assert!(err.to_string().contains("escapes"), "{esc}: {err}");
+            assert!(err.to_string().contains("outside"), "{esc}: {err}");
         }
     }
 
@@ -116,7 +149,7 @@ mod tests {
         // `/work/space-evil` shares a string prefix with `/work/space` but is a
         // different directory; the component-wise starts_with must reject it.
         let err = resolve_workspace_path(&base(), "../space-evil/x").unwrap_err();
-        assert!(err.to_string().contains("escapes"), "{err}");
+        assert!(err.to_string().contains("outside"), "{err}");
     }
 
     #[test]
