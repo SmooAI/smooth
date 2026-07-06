@@ -170,6 +170,25 @@ impl PearlStore {
             }
         }
 
+        // Same column-heal shape for columns whose original migration wrongly
+        // used `ADD COLUMN IF NOT EXISTS` (a Dolt syntax error, so they never
+        // landed on pre-existing stores): pearls.scheduled_at (th-01aa6a) and
+        // session_messages.tool_calls (th-880f2c). Probe first, bare ALTER only
+        // when absent. (table, column, ddl) tuples — all trusted literals.
+        const COLUMN_HEALS: &[(&str, &str, &str)] = &[
+            ("pearls", "scheduled_at", "ALTER TABLE pearls ADD COLUMN scheduled_at DATETIME"),
+            ("session_messages", "tool_calls", "ALTER TABLE session_messages ADD COLUMN tool_calls TEXT NULL"),
+        ];
+        for (table, column, ddl) in COLUMN_HEALS {
+            if present.contains(*table) && !Self::column_exists(dolt, table, column)? {
+                if let Err(e) = dolt.exec(ddl) {
+                    tracing::debug!(error = %e, table, column, "migrate_schema: column add returned error");
+                } else if let Err(e) = dolt.commit(&format!("schema migration: add {table}.{column}")) {
+                    tracing::debug!(error = %e, table, column, "migrate_schema: column commit returned error (likely no-op)");
+                }
+            }
+        }
+
         if REQUIRED_TABLES.iter().all(|t| present.contains(*t)) {
             return Ok(());
         }
@@ -260,9 +279,9 @@ impl PearlStore {
                 scheduled_at DATETIME
             )",
         )?;
-        // Idempotent migration for databases created before pearl th-01aa6a
-        // (scheduled pearls). No-op when the column already exists.
-        let _ = dolt.exec("ALTER TABLE pearls ADD COLUMN IF NOT EXISTS scheduled_at DATETIME");
+        // NOTE: pre-existing stores gain `pearls.scheduled_at` via a
+        // column_exists-gated ALTER in migrate_schema (th-eba7b4) — Dolt has no
+        // `ADD COLUMN IF NOT EXISTS`, so it can't go here.
         dolt.exec(
             "CREATE TABLE IF NOT EXISTS pearl_dependencies (
                 pearl_id VARCHAR(20) NOT NULL,
@@ -320,11 +339,10 @@ impl PearlStore {
                 tool_calls TEXT NULL
             )",
         )?;
-        // Idempotent migration: existing databases created before
-        // pearl th-880f2c (tool-call persistence) won't have the
-        // column. Dolt supports `ADD COLUMN IF NOT EXISTS`; the call
-        // is a no-op when the column already exists.
-        let _ = dolt.exec("ALTER TABLE session_messages ADD COLUMN IF NOT EXISTS tool_calls TEXT NULL");
+        // NOTE: pre-existing stores gain `session_messages.tool_calls` via a
+        // column_exists-gated ALTER in migrate_schema (th-eba7b4). This used to
+        // be an `ADD COLUMN IF NOT EXISTS` here (th-880f2c) — which Dolt rejects
+        // as a syntax error, so the column was silently never added.
         dolt.exec(
             "CREATE TABLE IF NOT EXISTS orchestrator_snapshots (
                 id VARCHAR(40) PRIMARY KEY,
@@ -1441,5 +1459,43 @@ mod tests {
         // "duplicate column" error.
         PearlStore::migrate_schema(&store.dolt).expect("migrate idempotent on healed store");
         assert!(PearlStore::column_exists(&store.dolt, "pearl_comments", "seq").expect("seq still present"));
+    }
+
+    /// Regression (pearl th-eba7b4): `pearls.scheduled_at` (th-01aa6a) and
+    /// `session_messages.tool_calls` (th-880f2c) shipped their migration as
+    /// `ADD COLUMN IF NOT EXISTS`, which Dolt rejects — so pre-existing stores
+    /// never got the columns and `th pearls due` errored "table p does not have
+    /// column scheduled_at". The COLUMN_HEALS loop in migrate_schema must re-add
+    /// them, and be idempotent on an already-healed store.
+    #[test]
+    fn test_migrate_heals_column_if_not_exists_columns() {
+        let Some(store) = test_store() else { return };
+
+        for (table, column) in [("pearls", "scheduled_at"), ("session_messages", "tool_calls")] {
+            store
+                .dolt
+                .exec(&format!("ALTER TABLE {table} DROP COLUMN {column}"))
+                .unwrap_or_else(|e| panic!("drop {table}.{column} to simulate legacy: {e}"));
+            assert!(
+                !PearlStore::column_exists(&store.dolt, table, column).expect("probe after drop"),
+                "{table}.{column} should be absent after drop"
+            );
+        }
+
+        PearlStore::migrate_schema(&store.dolt).expect("migrate re-adds the columns");
+        for (table, column) in [("pearls", "scheduled_at"), ("session_messages", "tool_calls")] {
+            assert!(
+                PearlStore::column_exists(&store.dolt, table, column).expect("probe after migrate"),
+                "{table}.{column} should be present after migrate"
+            );
+        }
+
+        // due_scheduled must work now (it queries scheduled_at) — this is the
+        // exact call that failed in the field before the fix.
+        assert!(store.due_scheduled().expect("due_scheduled works after heal").is_empty());
+
+        // Idempotent second pass: no "duplicate column" error.
+        PearlStore::migrate_schema(&store.dolt).expect("migrate idempotent on healed store");
+        assert!(PearlStore::column_exists(&store.dolt, "pearls", "scheduled_at").expect("still present"));
     }
 }
