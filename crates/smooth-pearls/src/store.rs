@@ -256,9 +256,13 @@ impl PearlStore {
                 assigned_to VARCHAR(100),
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                closed_at DATETIME
+                closed_at DATETIME,
+                scheduled_at DATETIME
             )",
         )?;
+        // Idempotent migration for databases created before pearl th-01aa6a
+        // (scheduled pearls). No-op when the column already exists.
+        let _ = dolt.exec("ALTER TABLE pearls ADD COLUMN IF NOT EXISTS scheduled_at DATETIME");
         dolt.exec(
             "CREATE TABLE IF NOT EXISTS pearl_dependencies (
                 pearl_id VARCHAR(20) NOT NULL,
@@ -405,6 +409,11 @@ impl PearlStore {
         } else {
             Some(Self::parse_datetime(&row["closed_at"]))
         };
+        let scheduled_at = if row["scheduled_at"].is_null() {
+            None
+        } else {
+            Some(Self::parse_datetime(&row["scheduled_at"]))
+        };
 
         Ok(Pearl {
             id,
@@ -419,6 +428,7 @@ impl PearlStore {
             created_at,
             updated_at,
             closed_at,
+            scheduled_at,
         })
     }
 
@@ -631,6 +641,20 @@ impl PearlStore {
                 "UPDATE pearls SET parent_id = {val}, updated_at = NOW() WHERE id = '{}'",
                 sql_escape(id)
             ))?;
+        }
+
+        if let Some(ref scheduled) = updates.scheduled_at {
+            // Store as UTC "YYYY-MM-DD HH:MM:SS" — the same shape parse_datetime reads back.
+            let val = scheduled
+                .as_ref()
+                .map_or("NULL".to_string(), |dt| format!("'{}'", dt.format("%Y-%m-%d %H:%M:%S")));
+            self.dolt.exec(&format!(
+                "UPDATE pearls SET scheduled_at = {val}, updated_at = NOW() WHERE id = '{}'",
+                sql_escape(id)
+            ))?;
+            let old = current.scheduled_at.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
+            let new = scheduled.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
+            self.record_history(id, "scheduled_at", old.as_deref(), new.as_deref())?;
         }
 
         self.dolt.commit(&format!("update pearl {id}"))?;
@@ -865,6 +889,28 @@ impl PearlStore {
              ) \
              ORDER BY p.priority ASC, p.created_at DESC",
         )?;
+        let mut result = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let pearl = Self::parse_pearl(row)?;
+            result.push(self.load_pearl_with_labels(pearl)?);
+        }
+        Ok(result)
+    }
+
+    /// Scheduled pearls whose time has arrived: `scheduled_at <= now` and not
+    /// yet closed. Soonest-due first. This is what the prime hook surfaces so a
+    /// scheduled pearl "speaks up" when it comes due (pearl th-01aa6a).
+    pub fn due_scheduled(&self) -> Result<Vec<Pearl>> {
+        // Compare against a Rust-computed UTC instant, NOT Dolt's `NOW()`:
+        // scheduled_at is stored as UTC (Rust-formatted), but Dolt's NOW()
+        // returns the server's *local* time, so `scheduled_at <= NOW()` would
+        // be off by the local UTC offset.
+        let now = Utc::now().format("%Y-%m-%d %H:%M:%S");
+        let rows = self.dolt.sql(&format!(
+            "SELECT p.* FROM pearls p \
+             WHERE p.scheduled_at IS NOT NULL AND p.scheduled_at <= '{now}' AND p.status != 'closed' \
+             ORDER BY p.scheduled_at ASC",
+        ))?;
         let mut result = Vec::with_capacity(rows.len());
         for row in &rows {
             let pearl = Self::parse_pearl(row)?;
@@ -1294,6 +1340,41 @@ mod tests {
         assert_eq!(stats.closed, 1);
         assert_eq!(stats.deferred, 0);
         assert_eq!(stats.total, 4);
+    }
+
+    #[test]
+    fn test_due_scheduled_uses_utc_not_dolt_local_now() {
+        let Some(store) = test_store() else { return };
+        let past = store.create(&new_task("due already")).unwrap();
+        let future = store.create(&new_task("due later")).unwrap();
+        let unscheduled = store.create(&new_task("no schedule")).unwrap();
+
+        // A pearl scheduled an hour ago is due; one scheduled an hour out is not.
+        // The gap is small enough that a local-vs-UTC NOW() mismatch would flip
+        // the result — this is the regression guard.
+        let set = |id: &str, dt: chrono::DateTime<Utc>| {
+            store
+                .update(
+                    id,
+                    &PearlUpdate {
+                        scheduled_at: Some(Some(dt)),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        };
+        set(&past.id, Utc::now() - chrono::Duration::hours(1));
+        set(&future.id, Utc::now() + chrono::Duration::hours(1));
+
+        let due = store.due_scheduled().unwrap();
+        let ids: Vec<&str> = due.iter().map(|p| p.id.as_str()).collect();
+        assert!(ids.contains(&past.id.as_str()), "past-scheduled pearl should be due");
+        assert!(!ids.contains(&future.id.as_str()), "future-scheduled pearl should not be due");
+        assert!(!ids.contains(&unscheduled.id.as_str()), "unscheduled pearl should never be due");
+
+        // Closing a due pearl drops it from the list.
+        store.close(&[&past.id]).unwrap();
+        assert!(store.due_scheduled().unwrap().is_empty());
     }
 
     /// Regression: stores created before the `config` table was part of

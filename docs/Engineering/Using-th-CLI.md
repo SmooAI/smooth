@@ -516,6 +516,8 @@ See the dedicated [Pearls Workflow Context](../../README.md) — `th pearls crea
 
 **Session priming + memories (pearl th-202885).** `th pearls remember "insight"` records a durable project note; `th pearls memories` lists them; `th pearls forget <id>` drops one. `th pearls prime` prints a compact context block — in-progress + open pearls plus recent memories — for an agent to load at session start (`--json` for machine consumption).
 
+**Scheduling — pearls that speak up when due (pearl th-01aa6a).** `th pearls schedule <id> <when>` sets an optional `scheduled_at` on a pearl; omit `<when>` to clear it. `<when>` is relative (`+2h`, `30m`, `2d`, `1w`, `tomorrow`, `now`) or absolute (`2026-07-10`, `2026-07-10 09:00`, RFC3339; parsed as UTC). `th pearls due` lists pearls whose time has arrived (`scheduled_at <= now`, not closed, soonest-first). The **prime hook** surfaces a `⏰ Scheduled & due` section above `Ready to work`, so a scheduled pearl automatically "speaks up" at the next session start / compaction once it comes due. `th pearls show` and the `ready`/`list`/`due` lines render a `⏰` marker for scheduled pearls.
+
 ### Agent messaging — `th agent` / `th msg` (pearl th-70aaef)
 
 A harness-agnostic, Dolt-backed mailbox: **any** agent (Claude Code, opencode, pi, a shell loop) in **any** session — same machine or not — registers a name and messages other agents. It's all plain `th` calls layered on the pearl store, so it rides the repo's `refs/dolt/data` git ref. Two sessions sharing one checkout's `.smooth/dolt` see each other instantly; **different clones/machines of the same repo sync automatically** — `send`/`register` push and `watch` pulls each poll (`--no-push`/`--no-pull` for a purely local, offline mailbox).

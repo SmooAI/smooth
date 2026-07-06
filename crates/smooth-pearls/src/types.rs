@@ -150,6 +150,9 @@ pub struct Pearl {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub closed_at: Option<DateTime<Utc>>,
+    /// When this pearl becomes "due" — surfaced by `th pearls due` and the
+    /// prime hook once `scheduled_at <= now`. `None` = not scheduled.
+    pub scheduled_at: Option<DateTime<Utc>>,
 }
 
 /// Parameters for creating a new pearl.
@@ -174,6 +177,8 @@ pub struct PearlUpdate {
     pub pearl_type: Option<PearlType>,
     pub assigned_to: Option<Option<String>>,
     pub parent_id: Option<Option<String>>,
+    /// `Some(Some(dt))` schedules, `Some(None)` clears, `None` leaves unchanged.
+    pub scheduled_at: Option<Option<DateTime<Utc>>>,
 }
 
 /// A comment on an pearl.
@@ -275,6 +280,7 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             closed_at: None,
+            scheduled_at: None,
         };
         let json = serde_json::to_string(&pearl).expect("serialize");
         let parsed: Pearl = serde_json::from_str(&json).expect("deserialize");
