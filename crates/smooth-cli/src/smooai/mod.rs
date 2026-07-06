@@ -13,6 +13,7 @@ pub mod agents;
 pub mod booking;
 pub mod copilot;
 pub mod crm;
+pub mod files;
 pub mod heypage;
 pub mod integrations;
 pub mod jobs;

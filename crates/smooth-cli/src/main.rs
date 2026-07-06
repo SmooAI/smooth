@@ -227,6 +227,13 @@ enum Commands {
         #[command(subcommand)]
         cmd: smooai::heypage::Cmd,
     },
+    /// Smoo AI org file system — `ls`, `mkdir`, `upload`, `download`, `mv`,
+    /// `rm`, `lock`, `share`. Same commands as `th api files`, promoted to
+    /// the top level alongside `th config`.
+    Files {
+        #[command(subcommand)]
+        cmd: smooai::files::Cmd,
+    },
     /// Run a pearl through a Smooth operative — dispatches to Big Smooth
     /// (`th up` must be running) and streams agent events to stdout.
     Run {
@@ -732,6 +739,12 @@ enum ApiCommands {
     Knowledge {
         #[command(subcommand)]
         cmd: smooai::knowledge::Cmd,
+    },
+    /// Smoo AI org file system — folders, files, presigned upload/download,
+    /// deletion locks, and anonymous/tracked shares (ADR-060).
+    Files {
+        #[command(subcommand)]
+        cmd: smooai::files::Cmd,
     },
     /// Smoo AI async job queue.
     Jobs {
@@ -1497,6 +1510,7 @@ async fn main() -> Result<()> {
             ApiCommands::Crm { cmd } => smooai::crm::cmd(cmd).await,
             ApiCommands::Copilot { cmd } => smooai::copilot::cmd(cmd).await,
             ApiCommands::Knowledge { cmd } => smooai::knowledge::cmd(cmd).await,
+            ApiCommands::Files { cmd } => smooai::files::cmd(cmd).await,
             ApiCommands::Jobs { cmd } => smooai::jobs::cmd(cmd).await,
             ApiCommands::Integrations { cmd } => smooai::integrations::cmd(cmd).await,
             ApiCommands::Products { cmd } => smooai::products::cmd(cmd).await,
@@ -1518,6 +1532,7 @@ async fn main() -> Result<()> {
         Some(Commands::Testing { cmd }) => smooai::testing::cmd(cmd).await,
         Some(Commands::Booking { cmd }) => smooai::booking::cmd(cmd).await,
         Some(Commands::Heypage { cmd }) => smooai::heypage::cmd(cmd).await,
+        Some(Commands::Files { cmd }) => smooai::files::cmd(cmd).await,
         Some(Commands::Operatives { cmd }) => cmd_operatives(cmd).await,
         Some(Commands::Inbox) => cmd_inbox().await,
         Some(Commands::Run { pearl_id, model, agent }) => cmd_run(pearl_id.as_deref(), model.as_deref(), agent.as_deref()).await,
