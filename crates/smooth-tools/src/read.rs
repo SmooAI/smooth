@@ -127,16 +127,55 @@ impl Tool for ListFilesTool {
     }
 }
 
+/// The longest leading run of glob components that contain no glob metachars —
+/// the concrete directory a pattern is rooted at. `dev/smooai/x/**/*.rs` →
+/// `dev/smooai/x`. Lets the walk start deep instead of at the workspace root,
+/// so a glob into one repo doesn't walk (and blow the budget on) a huge home.
+fn glob_literal_prefix(glob: &str) -> String {
+    let mut parts = Vec::new();
+    for comp in glob.split('/') {
+        if comp.is_empty() || comp.contains(['*', '?', '[', ']', '{', '}']) {
+            break;
+        }
+        parts.push(comp);
+    }
+    parts.join("/")
+}
+
 fn list_files_blocking(base: &std::path::Path, pattern: &str) -> anyhow::Result<String> {
-    let glob = Glob::new(pattern).map_err(|e| anyhow::anyhow!("invalid glob `{pattern}`: {e}"))?;
+    // Accept an absolute-within-workspace pattern by making it workspace-relative
+    // (globs match against paths relative to `base`). Absolute-but-outside ⇒
+    // nothing to list. The agent naturally emits absolute paths (th-c89c2a).
+    let base_str = base.to_string_lossy();
+    let mut rel_pattern: String = if pattern.starts_with('/') {
+        match pattern.strip_prefix(base_str.as_ref()) {
+            Some(stripped) => stripped.trim_start_matches('/').to_string(),
+            None => return Ok(format!("no files match `{pattern}` (path is outside the workspace)")),
+        }
+    } else {
+        pattern.to_string()
+    };
+    if rel_pattern.is_empty() {
+        rel_pattern = "**/*".to_string();
+    } else if glob_literal_prefix(&rel_pattern) == rel_pattern {
+        // A bare directory path (no glob chars) ⇒ list everything under it.
+        rel_pattern = format!("{}/**/*", rel_pattern.trim_end_matches('/'));
+    }
+
+    let glob = Glob::new(&rel_pattern).map_err(|e| anyhow::anyhow!("invalid glob `{rel_pattern}`: {e}"))?;
     let mut gsb = GlobSetBuilder::new();
     gsb.add(glob);
     let set = gsb.build().map_err(|e| anyhow::anyhow!("invalid glob set: {e}"))?;
 
+    // Root the walk at the pattern's literal prefix — a glob deep in a large
+    // workspace then walks only that subtree instead of the whole home dir.
+    let literal = glob_literal_prefix(&rel_pattern);
+    let walk_root = if literal.is_empty() { base.to_path_buf() } else { base.join(&literal) };
+
     let mut matches: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
     let mut examined = 0usize;
     let mut budget_hit = false;
-    for entry in crate::walk::pruned_walk(base).flatten() {
+    for entry in crate::walk::pruned_walk(&walk_root).flatten() {
         examined += 1;
         if examined > LIST_WALK_BUDGET {
             budget_hit = true;
@@ -223,7 +262,7 @@ mod tests {
             workspace: dir.path().to_path_buf(),
         };
         let err = tool.execute(json!({"path": "../../../etc/passwd"})).await.unwrap_err();
-        assert!(err.to_string().contains("escapes"), "{err}");
+        assert!(err.to_string().contains("outside"), "{err}");
     }
 
     #[tokio::test]
@@ -245,5 +284,46 @@ mod tests {
         };
         let out = tool.execute(json!({})).await.unwrap();
         assert!(out.contains("README.md") && out.contains("src/main.rs"), "{out}");
+    }
+
+    #[test]
+    fn glob_literal_prefix_extracts_root() {
+        assert_eq!(glob_literal_prefix("dev/smooai/x/**/*.rs"), "dev/smooai/x");
+        assert_eq!(glob_literal_prefix("**/*.rs"), "");
+        assert_eq!(glob_literal_prefix("src/*.rs"), "src");
+        assert_eq!(glob_literal_prefix("dev/smoo-hub"), "dev/smoo-hub");
+    }
+
+    #[tokio::test]
+    async fn list_files_accepts_absolute_path_inside_workspace() {
+        // The agent emits an absolute path (the user named one) — it must resolve.
+        let dir = workspace_with_files().await;
+        let tool = ListFilesTool {
+            workspace: dir.path().to_path_buf(),
+        };
+        let abs = format!("{}/src/*.rs", dir.path().display());
+        let out = tool.execute(json!({ "pattern": abs })).await.unwrap();
+        assert!(out.contains("src/main.rs"), "abs-in-workspace should match: {out}");
+    }
+
+    #[tokio::test]
+    async fn list_files_bare_directory_lists_its_contents() {
+        // A bare directory path (no glob chars) lists everything under it.
+        let dir = workspace_with_files().await;
+        let tool = ListFilesTool {
+            workspace: dir.path().to_path_buf(),
+        };
+        let out = tool.execute(json!({ "pattern": "src" })).await.unwrap();
+        assert!(out.contains("src/main.rs"), "bare dir should list contents: {out}");
+    }
+
+    #[tokio::test]
+    async fn list_files_absolute_outside_workspace_no_match() {
+        let dir = workspace_with_files().await;
+        let tool = ListFilesTool {
+            workspace: dir.path().to_path_buf(),
+        };
+        let out = tool.execute(json!({ "pattern": "/etc/*" })).await.unwrap();
+        assert!(out.contains("outside the workspace"), "abs-outside must be refused: {out}");
     }
 }

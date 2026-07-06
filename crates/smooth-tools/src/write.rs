@@ -157,7 +157,7 @@ mod tests {
             workspace: dir.path().to_path_buf(),
         };
         let err = tool.execute(json!({"path": "../evil.txt", "content": "x"})).await.unwrap_err();
-        assert!(err.to_string().contains("escapes"), "{err}");
+        assert!(err.to_string().contains("outside"), "{err}");
     }
 
     #[tokio::test]
