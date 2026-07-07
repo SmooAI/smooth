@@ -63,7 +63,15 @@ export function BigSmoothFace({ state, size = 96 }: BigSmoothFaceProps) {
         const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 100);
         camera.position.set(0, 0, 4.6);
 
-        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        // ponytail: no WebGL (headless browsers, GPU blocklists) → skip the 3D face
+        // instead of throwing out of the effect (which crashes the whole app). The
+        // halo + rest of the UI still render.
+        let renderer: THREE.WebGLRenderer;
+        try {
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        } catch {
+            return;
+        }
         renderer.setSize(size, size);
         renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         container.appendChild(renderer.domElement);
