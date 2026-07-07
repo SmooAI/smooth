@@ -4890,7 +4890,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-core"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4899,14 +4899,17 @@ dependencies = [
  "dirs-next",
  "futures-core",
  "futures-util",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
  "serde_yml",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
  "tokio-tungstenite 0.26.2",
+ "toml",
  "tracing",
  "uuid",
 ]

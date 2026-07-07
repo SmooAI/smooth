@@ -263,7 +263,27 @@ fn resolve_gateway_config() -> ServerConfig {
         // Env-gateway path: still honor an explicit model pin.
         config.model = m;
     }
-    tracing::info!(gateway = %config.gateway_url, model = %config.model, fast_mode = fast, "gateway + model resolved");
+    // The upstream ServerConfig defaults (512 max_tokens / 6 iterations) are
+    // sized for the tiny customer-support chat WIDGET, not a personal coding
+    // assistant. A reasoning model (deepseek-v4-*, kimi, minimax) spends its
+    // whole 512-token budget on `reasoning_content` and returns EMPTY `content`
+    // (looks "hung"); 6 iterations makes any read-a-few-files turn hit
+    // "Maximum iterations reached" (pearl th-4b1867). Give the daemon
+    // assistant-grade headroom unless the env explicitly overrides.
+    if std::env::var_os("SMOOTH_AGENT_MAX_TOKENS").is_none() {
+        config.max_tokens = 32_768;
+    }
+    if std::env::var_os("SMOOTH_AGENT_MAX_ITERATIONS").is_none() {
+        config.max_iterations = 50;
+    }
+    tracing::info!(
+        gateway = %config.gateway_url,
+        model = %config.model,
+        fast_mode = fast,
+        max_tokens = config.max_tokens,
+        max_iterations = config.max_iterations,
+        "gateway + model resolved"
+    );
     config
 }
 
@@ -437,6 +457,26 @@ mod tests {
         assert_eq!(model_override(), None, "blank override is ignored");
         std::env::remove_var("SMOOTH_AGENT_MODEL");
         assert_eq!(model_override(), None);
+    }
+
+    #[test]
+    fn gateway_config_gives_assistant_headroom_unless_env_overrides() {
+        // Unset → assistant-grade headroom, NOT the 512/6 widget defaults that
+        // starve a reasoning model into empty replies (pearl th-4b1867).
+        std::env::remove_var("SMOOTH_AGENT_MAX_TOKENS");
+        std::env::remove_var("SMOOTH_AGENT_MAX_ITERATIONS");
+        let cfg = resolve_gateway_config();
+        assert_eq!(cfg.max_tokens, 32_768);
+        assert_eq!(cfg.max_iterations, 50);
+
+        // Explicit env wins.
+        std::env::set_var("SMOOTH_AGENT_MAX_TOKENS", "1024");
+        std::env::set_var("SMOOTH_AGENT_MAX_ITERATIONS", "3");
+        let cfg = resolve_gateway_config();
+        assert_eq!(cfg.max_tokens, 1024);
+        assert_eq!(cfg.max_iterations, 3);
+        std::env::remove_var("SMOOTH_AGENT_MAX_TOKENS");
+        std::env::remove_var("SMOOTH_AGENT_MAX_ITERATIONS");
     }
 
     #[test]
