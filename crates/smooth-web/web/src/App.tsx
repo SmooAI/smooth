@@ -5,16 +5,25 @@
 // rather than a detached banner. A thin client on the operator's canonical
 // protocol (EPIC th-c89c2a, th-f1a1f0, th-833b5f).
 
-import { ArrowUp, Check, X, Terminal, FileText, Search, Folder, Pencil, Brain, Bell, BellRing, Paperclip } from 'lucide-react';
+import { ArrowUp, Check, X, Terminal, FileText, Search, Folder, Pencil, Brain, Bell, BellRing, Paperclip, Menu, Plus, MessageSquare } from 'lucide-react';
 import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 import { BigSmoothFace, type FaceState } from './components/BigSmoothFace';
 import { MODES, costBadge, isExpensiveBadge, blendedPerMillion, type SmoothMode, type ModelCost, type ModelCosts } from './modes';
-import { useOperator, type AgentState, type Attachment, type ChatMessage, type ToolCall, type Approval, type Status } from './operator';
-import { usePush } from './usePush';
+import {
+    useOperator,
+    type AgentState,
+    type Attachment,
+    type ChatMessage,
+    type ToolCall,
+    type Approval,
+    type Status,
+    type ConversationSummary,
+} from './operator';
 import { useMentionSearch, activeMention, type MentionResult } from './useMentionSearch';
+import { usePush } from './usePush';
 
 const STATUS_CAPTION: Record<AgentState, string> = {
     connecting: 'waking up',
@@ -75,6 +84,19 @@ function uptime(since: number): string {
     return `${Math.floor(s / 86400)}d`;
 }
 
+/** "3m ago" for a sidebar row. `updatedAt` may be an ISO string or an epoch
+ * (seconds or ms — a bare number under 1e12 is treated as seconds). Assumption
+ * flagged in operator.ts ConversationSummary — reconcile with the server shape. */
+function relTime(v: string | number): string {
+    const t = typeof v === 'number' ? (v < 1e12 ? v * 1000 : v) : Date.parse(v);
+    if (!Number.isFinite(t)) return '';
+    const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+    if (s < 60) return 'just now';
+    if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+    return `${Math.floor(s / 86400)}d ago`;
+}
+
 /** The halo colour reads his mood: blue at rest, teal working, amber when he needs you. */
 function haloColor(s: FaceState): string {
     if (s === 'awaiting') return 'var(--color-amber)';
@@ -129,10 +151,40 @@ function CostBar({ mode, costs, sessionCostUsd, className }: { mode: SmoothMode;
 }
 
 export default function App() {
-    const { state, messages, approvals, status, sendMessage, respond, mode, setMode, sessionCostUsd, modelCosts } = useOperator();
+    const {
+        state,
+        messages,
+        approvals,
+        status,
+        sendMessage,
+        respond,
+        mode,
+        setMode,
+        sessionCostUsd,
+        modelCosts,
+        conversations,
+        activeConversationId,
+        resumeConversation,
+        newConversation,
+    } = useOperator();
     const push = usePush();
+    const [sidebarOpen, setSidebarOpen] = useState(false);
     const faceState: FaceState = state === 'connecting' || state === 'offline' ? 'idle' : (state as FaceState);
     const inConversation = messages.length > 0 || approvals.length > 0;
+
+    // On mobile the drawer overlays, so a pick should dismiss it; on desktop it's
+    // docked and stays. `lg` is 1024px — match that breakpoint.
+    const closeOnMobile = () => {
+        if (window.matchMedia('(max-width: 1023px)').matches) setSidebarOpen(false);
+    };
+    const onResume = (id: string) => {
+        resumeConversation(id);
+        closeOnMobile();
+    };
+    const onNew = () => {
+        newConversation();
+        closeOnMobile();
+    };
 
     // Switching into the ❤️ `max` mode is a one-time, deliberate spend — confirm it.
     const guardedSetMode = useMemo(
@@ -148,17 +200,24 @@ export default function App() {
 
     return (
         <>
-            {/* The Smooth product mark — a quiet corner lockup that never competes
-                with Big Smooth himself. Hidden on small screens where space is tight. */}
-            <a
-                href="https://smoo.ai"
-                target="_blank"
-                rel="noreferrer"
-                title="Smooth by Smoo AI"
-                className="fixed top-4 left-4 z-10 hidden opacity-35 transition hover:opacity-90 sm:block"
+            <Sidebar
+                open={sidebarOpen}
+                conversations={conversations}
+                activeId={activeConversationId}
+                onResume={onResume}
+                onNew={onNew}
+                onClose={() => setSidebarOpen(false)}
+            />
+            {/* Menu toggle — sits above the sidebar so it flips it open/closed from
+                either state. The Smooth brand mark now lives in the sidebar header. */}
+            <button
+                onClick={() => setSidebarOpen((o) => !o)}
+                aria-label={sidebarOpen ? 'Close conversations' : 'Open conversations'}
+                title="Conversations"
+                className="fixed top-3.5 left-4 z-50 grid size-9 place-items-center rounded-xl bg-panel/70 text-(--color-muted-foreground) backdrop-blur transition hover:text-foreground"
             >
-                <img src="/smooth-icon.svg" alt="Smooth" className="size-6" />
-            </a>
+                <Menu size={18} />
+            </button>
             {/* Push to phone: enroll this device so Big Smooth can reach it with the
                 tab closed. Hidden when the browser can't do Web Push, or once enabled. */}
             {push.supported && !push.enabled && (
@@ -172,31 +231,115 @@ export default function App() {
                 </button>
             )}
             {push.enabled && (
-                <div className="fixed top-4 right-4 z-10 flex items-center gap-1.5 text-xs text-(--color-online) opacity-60" title="Notifications on for this device">
+                <div
+                    className="fixed top-4 right-4 z-10 flex items-center gap-1.5 text-xs text-(--color-online) opacity-60"
+                    title="Notifications on for this device"
+                >
                     <BellRing className="size-3.5" />
                 </div>
             )}
-            <div className="mx-auto flex h-dvh max-w-3xl flex-col overflow-hidden px-5">
-                {inConversation ? (
-                    <>
-                        <PresenceBar state={state} status={status} faceState={faceState} mode={mode} modelCosts={modelCosts} sessionCostUsd={sessionCostUsd} />
-                        <div className="presence-rule shrink-0" />
-                        <main className="flex min-h-0 flex-1 flex-col">
-                            <ApprovalDeck approvals={approvals} respond={respond} />
-                            <Conversation messages={messages} approvals={approvals} />
-                        </main>
-                    </>
-                ) : (
-                    <Greeting state={state} status={status} faceState={faceState} mode={mode} modelCosts={modelCosts} sessionCostUsd={sessionCostUsd} />
-                )}
-                <Composer
-                    onSend={sendMessage}
-                    disabled={state === 'connecting' || state === 'offline'}
-                    mode={mode}
-                    setMode={guardedSetMode}
-                    modelCosts={modelCosts}
-                />
+            <div className={`h-dvh transition-[padding] duration-200 ${sidebarOpen ? 'lg:pl-72' : ''}`}>
+                <div className="mx-auto flex h-dvh max-w-3xl flex-col overflow-hidden px-5">
+                    {inConversation ? (
+                        <>
+                            <PresenceBar
+                                state={state}
+                                status={status}
+                                faceState={faceState}
+                                mode={mode}
+                                modelCosts={modelCosts}
+                                sessionCostUsd={sessionCostUsd}
+                            />
+                            <div className="presence-rule shrink-0" />
+                            <main className="flex min-h-0 flex-1 flex-col">
+                                <ApprovalDeck approvals={approvals} respond={respond} />
+                                <Conversation messages={messages} approvals={approvals} />
+                            </main>
+                        </>
+                    ) : (
+                        <Greeting state={state} status={status} faceState={faceState} mode={mode} modelCosts={modelCosts} sessionCostUsd={sessionCostUsd} />
+                    )}
+                    <Composer
+                        onSend={sendMessage}
+                        disabled={state === 'connecting' || state === 'offline'}
+                        mode={mode}
+                        setMode={guardedSetMode}
+                        modelCosts={modelCosts}
+                    />
+                </div>
             </div>
+        </>
+    );
+}
+
+/** The slide-in conversation sidebar: New chat + a list of recent conversations.
+ * Overlays with a backdrop on mobile; docks (no backdrop) on desktop (lg). */
+function Sidebar({
+    open,
+    conversations,
+    activeId,
+    onResume,
+    onNew,
+    onClose,
+}: {
+    open: boolean;
+    conversations: ConversationSummary[];
+    activeId: string | null;
+    onResume: (id: string) => void;
+    onNew: () => void;
+    onClose: () => void;
+}) {
+    return (
+        <>
+            {/* Backdrop — mobile only; a tap dismisses the drawer. */}
+            {open && <div onClick={onClose} className="fixed inset-0 z-30 bg-background/60 backdrop-blur-sm lg:hidden" aria-hidden />}
+            <aside
+                className={`fixed top-0 left-0 z-40 flex h-dvh w-72 flex-col border-r border-border bg-panel/85 backdrop-blur-xl transition-transform duration-200 ${open ? 'translate-x-0' : '-translate-x-full'}`}
+            >
+                {/* pt-16 clears the floating menu button that overlaps this corner. */}
+                <div className="flex items-center gap-2 px-4 pt-16 pb-3">
+                    <a href="https://smoo.ai" target="_blank" rel="noreferrer" title="Smooth by Smoo AI" className="opacity-70 transition hover:opacity-100">
+                        <img src="/smooth-icon.svg" alt="Smooth" className="size-5" />
+                    </a>
+                    <span className="text-sm font-semibold text-foreground/80">Conversations</span>
+                </div>
+                <button
+                    onClick={onNew}
+                    className="mx-3 mb-2 flex items-center justify-center gap-2 rounded-xl bg-coral px-4 py-2 text-sm font-semibold text-(--color-coral-ink) transition hover:brightness-110"
+                >
+                    <Plus size={16} /> New chat
+                </button>
+                <nav className="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-2 pt-1 pb-4">
+                    {conversations.length === 0 ? (
+                        <p className="px-3 py-6 text-center text-xs text-(--color-muted-foreground)">No conversations yet.</p>
+                    ) : (
+                        conversations.map((c) => {
+                            const active = c.conversationId === activeId;
+                            return (
+                                <button
+                                    key={c.conversationId}
+                                    onClick={() => onResume(c.conversationId)}
+                                    className={`flex w-full flex-col gap-0.5 rounded-xl px-3 py-2 text-left transition ${
+                                        active ? 'bg-(--color-th-teal)/12 ring-1 ring-(--color-th-teal)/40' : 'hover:bg-panel-2'
+                                    }`}
+                                >
+                                    <span className="flex items-center gap-2">
+                                        <MessageSquare
+                                            size={13}
+                                            className={`shrink-0 ${active ? 'text-(--color-th-teal)' : 'text-(--color-muted-foreground)'}`}
+                                        />
+                                        <span className="truncate text-sm font-medium">{c.title || 'Untitled'}</span>
+                                    </span>
+                                    <span className="pl-[21px] text-xs text-(--color-muted-foreground)">
+                                        {relTime(c.updatedAt)}
+                                        {c.messageCount ? ` · ${c.messageCount} msg` : ''}
+                                    </span>
+                                </button>
+                            );
+                        })
+                    )}
+                </nav>
+            </aside>
         </>
     );
 }
@@ -414,7 +557,10 @@ function MessageRow({ m, awaiting }: { m: ChatMessage; awaiting: Set<string> }) 
                     b.kind === 'tool' ? (
                         <ToolChip key={b.tool.id} t={b.tool} awaiting={awaiting.has(b.tool.name)} />
                     ) : b.text.trim() ? (
-                        <div key={`t-${i}`} className={`prose-msg text-[0.95rem] leading-relaxed text-foreground/95 ${m.streaming && i === lastIdx ? 'caret' : ''}`}>
+                        <div
+                            key={`t-${i}`}
+                            className={`prose-msg text-[0.95rem] leading-relaxed text-foreground/95 ${m.streaming && i === lastIdx ? 'caret' : ''}`}
+                        >
                             <Markdown remarkPlugins={[remarkGfm]}>{b.text}</Markdown>
                         </div>
                     ) : null,
@@ -832,74 +978,74 @@ function Composer({
                         <Paperclip size={18} />
                     </button>
                     <textarea
-                    ref={taRef}
-                    value={text}
-                    onChange={(e) => {
-                        update(e.target.value);
-                        setCaret(e.target.selectionStart ?? e.target.value.length);
-                    }}
-                    onPaste={(e) => {
-                        const usable = Array.from(e.clipboardData.files).filter((f) => /^image\//.test(f.type) || f.type === 'application/pdf');
-                        if (usable.length) {
-                            e.preventDefault();
-                            addFiles(usable);
-                        }
-                    }}
-                    onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
-                    onKeyDown={(e) => {
-                        if (mentionVisible) {
-                            if (e.key === 'ArrowDown') {
+                        ref={taRef}
+                        value={text}
+                        onChange={(e) => {
+                            update(e.target.value);
+                            setCaret(e.target.selectionStart ?? e.target.value.length);
+                        }}
+                        onPaste={(e) => {
+                            const usable = Array.from(e.clipboardData.files).filter((f) => /^image\//.test(f.type) || f.type === 'application/pdf');
+                            if (usable.length) {
                                 e.preventDefault();
-                                setSel((s) => (s + 1) % mentionResults.length);
-                                return;
+                                addFiles(usable);
                             }
-                            if (e.key === 'ArrowUp') {
+                        }}
+                        onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
+                        onKeyDown={(e) => {
+                            if (mentionVisible) {
+                                if (e.key === 'ArrowDown') {
+                                    e.preventDefault();
+                                    setSel((s) => (s + 1) % mentionResults.length);
+                                    return;
+                                }
+                                if (e.key === 'ArrowUp') {
+                                    e.preventDefault();
+                                    setSel((s) => (s - 1 + mentionResults.length) % mentionResults.length);
+                                    return;
+                                }
+                                if (e.key === 'Enter' || e.key === 'Tab') {
+                                    e.preventDefault();
+                                    insertMention(mentionResults[mentionSel]);
+                                    return;
+                                }
+                                if (e.key === 'Escape') {
+                                    e.preventDefault();
+                                    setDismissed(true);
+                                    return;
+                                }
+                            } else if (menu && menu.items.length) {
+                                if (e.key === 'ArrowDown') {
+                                    e.preventDefault();
+                                    setSel((s) => (s + 1) % menu.items.length);
+                                    return;
+                                }
+                                if (e.key === 'ArrowUp') {
+                                    e.preventDefault();
+                                    setSel((s) => (s - 1 + menu.items.length) % menu.items.length);
+                                    return;
+                                }
+                                if (e.key === 'Tab') {
+                                    e.preventDefault();
+                                    if (selItem) applyItem(selItem);
+                                    return;
+                                }
+                                if (e.key === 'Escape') {
+                                    e.preventDefault();
+                                    setDismissed(true);
+                                    return;
+                                }
+                            }
+                            if (e.key === 'Enter' && !e.shiftKey) {
                                 e.preventDefault();
-                                setSel((s) => (s - 1 + mentionResults.length) % mentionResults.length);
-                                return;
+                                submit();
                             }
-                            if (e.key === 'Enter' || e.key === 'Tab') {
-                                e.preventDefault();
-                                insertMention(mentionResults[mentionSel]);
-                                return;
-                            }
-                            if (e.key === 'Escape') {
-                                e.preventDefault();
-                                setDismissed(true);
-                                return;
-                            }
-                        } else if (menu && menu.items.length) {
-                            if (e.key === 'ArrowDown') {
-                                e.preventDefault();
-                                setSel((s) => (s + 1) % menu.items.length);
-                                return;
-                            }
-                            if (e.key === 'ArrowUp') {
-                                e.preventDefault();
-                                setSel((s) => (s - 1 + menu.items.length) % menu.items.length);
-                                return;
-                            }
-                            if (e.key === 'Tab') {
-                                e.preventDefault();
-                                if (selItem) applyItem(selItem);
-                                return;
-                            }
-                            if (e.key === 'Escape') {
-                                e.preventDefault();
-                                setDismissed(true);
-                                return;
-                            }
-                        }
-                        if (e.key === 'Enter' && !e.shiftKey) {
-                            e.preventDefault();
-                            submit();
-                        }
-                    }}
-                    rows={1}
-                    placeholder={disabled ? 'Waiting for your operator…' : 'Talk to Big Smooth…  (/ for modes · @ to mention)'}
-                    disabled={disabled}
-                    className="max-h-40 flex-1 resize-none bg-transparent px-2 py-1.5 text-[0.95rem] outline-none placeholder:text-(--color-muted-foreground)"
-                />
+                        }}
+                        rows={1}
+                        placeholder={disabled ? 'Waiting for your operator…' : 'Talk to Big Smooth…  (/ for modes · @ to mention)'}
+                        disabled={disabled}
+                        className="max-h-40 flex-1 resize-none bg-transparent px-2 py-1.5 text-[0.95rem] outline-none placeholder:text-(--color-muted-foreground)"
+                    />
                     <button
                         onClick={submit}
                         disabled={disabled || (!text.trim() && attachments.length === 0)}
