@@ -591,6 +591,50 @@ function Composer({
         setSel(0);
     }, [mentionQuery]);
 
+    // Whole-window drag-and-drop: drop an image/PDF ANYWHERE on the PWA to
+    // attach it, not just onto the composer strip. A depth counter avoids
+    // flicker as the pointer crosses child elements; we only react to file
+    // drags (`types` includes 'Files') so internal text/element drags are
+    // ignored. `addFiles` uses functional setState, so the stale closure is
+    // safe. Pearl th-3be564 (drop-anywhere).
+    useEffect(() => {
+        let depth = 0;
+        const hasFiles = (e: DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes('Files');
+        const onEnter = (e: DragEvent) => {
+            if (!hasFiles(e)) return;
+            e.preventDefault();
+            depth += 1;
+            if (!disabled) setDragging(true);
+        };
+        // preventDefault on dragover is REQUIRED or the browser navigates to the
+        // file instead of firing `drop`.
+        const onOver = (e: DragEvent) => {
+            if (hasFiles(e)) e.preventDefault();
+        };
+        const onLeave = (e: DragEvent) => {
+            if (!hasFiles(e)) return;
+            depth = Math.max(0, depth - 1);
+            if (depth === 0) setDragging(false);
+        };
+        const onDrop = (e: DragEvent) => {
+            if (!hasFiles(e)) return;
+            e.preventDefault();
+            depth = 0;
+            setDragging(false);
+            if (!disabled) addFiles(e.dataTransfer?.files ?? null);
+        };
+        window.addEventListener('dragenter', onEnter);
+        window.addEventListener('dragover', onOver);
+        window.addEventListener('dragleave', onLeave);
+        window.addEventListener('drop', onDrop);
+        return () => {
+            window.removeEventListener('dragenter', onEnter);
+            window.removeEventListener('dragover', onOver);
+            window.removeEventListener('dragleave', onLeave);
+            window.removeEventListener('drop', onDrop);
+        };
+    }, [disabled]);
+
     const update = (next: string) => {
         setText(next);
         setSel(0);
@@ -641,22 +685,19 @@ function Composer({
     };
 
     return (
-        <div
-            className="relative pb-5 pt-1"
-            onDragOver={(e) => {
-                e.preventDefault();
-                if (!disabled) setDragging(true);
-            }}
-            onDragLeave={(e) => {
-                e.preventDefault();
-                setDragging(false);
-            }}
-            onDrop={(e) => {
-                e.preventDefault();
-                setDragging(false);
-                if (!disabled) addFiles(e.dataTransfer.files);
-            }}
-        >
+        <div className="relative pb-5 pt-1">
+            {/* Drag-anywhere: full-screen cue while a file is over the PWA. The
+                window-level listeners (above) do the actual attach; this overlay
+                is purely visual (pointer-events-none so it never eats the drop). */}
+            {dragging && (
+                <div className="pointer-events-none fixed inset-0 z-50 grid place-items-center bg-background/70 backdrop-blur-sm">
+                    <div className="rounded-2xl border-2 border-dashed border-(--color-th-teal) bg-panel/80 px-8 py-6 text-center shadow-xl">
+                        <Paperclip size={28} className="mx-auto mb-2 text-(--color-th-teal)" />
+                        <p className="text-lg font-semibold">Drop to attach</p>
+                        <p className="text-sm text-(--color-muted-foreground)">images &amp; PDFs</p>
+                    </div>
+                </div>
+            )}
             {mentionVisible && (
                 <div className="absolute right-0 bottom-full left-0 mb-2 overflow-hidden rounded-2xl border border-border bg-panel/95 shadow-xl backdrop-blur">
                     <ul className="max-h-72 overflow-y-auto py-1">
