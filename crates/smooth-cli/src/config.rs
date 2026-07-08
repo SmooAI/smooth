@@ -9,13 +9,21 @@
 //!   `{"value": ...}`).
 //!
 //! - `th config set <key> <value> [--environment=<env>] [--org-id=<id>]
-//!   [--tier=secret|public|featureFlag] [--schema-name=<name>]`
+//!   [--tier=secret|public|feature_flag|limit] [--schema-name=<name>]
+//!   [--force]`
 //!   Looks up the env-by-name to get its UUID + lists schemas to pick
 //!   one (first by default, or `--schema-name`). PUTs to
 //!   `/organizations/{org}/config/values` with
 //!   `{schemaId, environmentId, key, value, tier}`. `value` is parsed
 //!   as JSON when possible, otherwise stored as a string — matches the
 //!   `smooai-config set` CLI behavior.
+//!
+//!   Tier (ADR-075): when `--tier` is omitted it is derived from the
+//!   key's declaration in the org's schema(s); a key declared in no
+//!   schema defaults to `secret` (the loud-failure direction). An
+//!   explicit `--tier` that contradicts the schema is refused unless
+//!   `--force`. A credential-shaped value resolving to `public` prompts
+//!   for confirmation (refused non-interactively without `--force`).
 //!
 //! - `th config list [--environment=<env>] [--org-id=<id>] [--json]`
 //!   GET `/organizations/{org}/config/values?environment={env}`
@@ -173,9 +181,12 @@ pub enum Cmd {
         /// Override the active org.
         #[arg(long, visible_alias = "org")]
         org_id: Option<String>,
-        /// Tier. Defaults to `public`. Validated at parse-time.
-        #[arg(long, value_enum, default_value_t = Tier::Public)]
-        tier: Tier,
+        /// Tier. When omitted, derived from the key's declaration in the
+        /// org's config schema(s); an undeclared key defaults to `secret`
+        /// (ADR-075). An explicit `--tier` that contradicts the schema is
+        /// refused unless `--force`. Validated at parse-time.
+        #[arg(long, value_enum)]
+        tier: Option<Tier>,
         /// Schema name to write under. Defaults to the first schema
         /// returned by the API (matches `smooai-config set` behavior).
         #[arg(long)]
@@ -194,6 +205,12 @@ pub enum Cmd {
         /// instead of the user JWT.
         #[arg(long)]
         m2m: bool,
+        /// Override the ADR-075 guardrails: let an explicit `--tier`
+        /// contradict the schema tier (still warns), and skip the
+        /// credential tripwire confirm for a public-tier credential-shaped
+        /// value.
+        #[arg(long)]
+        force: bool,
     },
     /// List all config values for an environment as a key→value map.
     List {
@@ -635,7 +652,8 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             json,
             reveal,
             m2m,
-        } => cmd_set(key, value, environment, org_id, tier, schema_name, json, reveal, m2m).await,
+            force,
+        } => cmd_set(key, value, environment, org_id, tier, schema_name, json, reveal, m2m, force).await,
         Cmd::List {
             environment,
             org_id,
@@ -884,11 +902,12 @@ async fn cmd_set(
     value: String,
     environment: String,
     org_id: Option<String>,
-    tier: Tier,
+    tier: Option<Tier>,
     schema_name: Option<String>,
     json: bool,
     reveal: bool,
     m2m: bool,
+    force: bool,
 ) -> Result<()> {
     let cfg = ConfigClient::load(m2m).await?;
     let org = cfg.resolve_org(org_id)?;
@@ -943,10 +962,25 @@ async fn cmd_set(
             .context("first schema has no id field")?,
     };
 
+    // Resolve the tier per ADR-075: the schema is the authority. If the user
+    // passed an explicit --tier we validate it against the schema; otherwise we
+    // derive it (secret for a key declared in no schema — the loud-failure
+    // default). `schema_arr` is the union of the org's pushed schemas (D1).
+    let schemas_slice: &[Value] = schema_arr.map_or(&[], |a| a.as_slice());
+    let derived = derive_tier_from_schemas(schemas_slice, &key);
+    let resolved_tier = resolve_set_tier(tier, derived, &key, force)?;
+
+    // Credential tripwire (D6): a public-tier slot is unencrypted and, on the
+    // ADR-074 app surface, anonymously readable — a credential-shaped value
+    // there is the exact incident this ADR exists to prevent.
+    if resolved_tier == Tier::Public && looks_credential_shaped(&value) {
+        credential_tripwire_gate(&key, force)?;
+    }
+
     // Parse value as JSON, fall back to string. Matches smooai-config.
     let parsed_value = serde_json::from_str::<Value>(&value).unwrap_or_else(|_| Value::String(value.clone()));
 
-    let tier_wire = tier.as_wire();
+    let tier_wire = resolved_tier.as_wire();
     let body = serde_json::json!({
         "schemaId": schema_id,
         "environmentId": env_id,
@@ -1141,7 +1175,7 @@ async fn cmd_limits(cmd: LimitsCmd) -> Result<()> {
             // Reuse the shared value-write path with the tier pinned to Limit.
             // `reveal=true` because limit values are non-sensitive numbers —
             // masking a number to `**` would be pure noise.
-            cmd_set(key, value, environment, org_id, Tier::Limit, schema_name, json, true, m2m).await
+            cmd_set(key, value, environment, org_id, Some(Tier::Limit), schema_name, json, true, m2m, false).await
         }
     }
 }
@@ -1528,6 +1562,158 @@ fn flatten_schema(schema: &Value) -> std::collections::BTreeMap<String, TieredKe
     }
 
     out
+}
+
+/// Map a [`flatten_schema`] tier label (`public`/`secret`/`featureFlag`) to a
+/// [`Tier`]. `limit` isn't produced by `flatten_schema` — it's handled
+/// separately in [`schema_tier_for_key`].
+fn tier_from_flatten_label(label: &str) -> Option<Tier> {
+    match label {
+        "public" => Some(Tier::Public),
+        "secret" => Some(Tier::Secret),
+        "featureFlag" => Some(Tier::FeatureFlag),
+        _ => None,
+    }
+}
+
+/// Find `canonical`'s tier within a single schema doc, across all four schema
+/// tiers. public/secret/feature_flag come from [`flatten_schema`]; `limitsSchema`
+/// is a separate JSON-Schema node ([`extract_limit_meta`]'s shape) so it's
+/// checked directly. `canonical` must already be a [`canonical_key`].
+fn schema_tier_for_key(doc: &Value, canonical: &str) -> Option<Tier> {
+    if let Some(tk) = flatten_schema(doc).get(canonical) {
+        return tier_from_flatten_label(&tk.tier);
+    }
+    for root in [Some(doc), doc.get("properties")].into_iter().flatten() {
+        if let Some(keys) = root.get("limitsSchema").and_then(|v| v.get("properties")).and_then(|v| v.as_object()) {
+            if keys.keys().any(|k| canonical_key(k) == canonical) {
+                return Some(Tier::Limit);
+            }
+        }
+    }
+    None
+}
+
+/// Derive a key's tier from the union of the org's remote schemas (ADR-075 D1).
+/// `None` when the key is declared in no schema. Declared in multiple schemas
+/// with conflicting tiers → `secret` wins (the D1 migration tiebreak, the safe
+/// direction — same loud-failure asymmetry as the rest of the ADR).
+fn derive_tier_from_schemas(schemas: &[Value], key: &str) -> Option<Tier> {
+    let ck = canonical_key(key);
+    let mut found: Option<Tier> = None;
+    for schema in schemas {
+        // Each schemas-list entry carries its doc under `jsonSchema`; tolerate a
+        // bare doc too (matches flatten_schema's defensive parsing).
+        let doc = schema.get("jsonSchema").unwrap_or(schema);
+        if let Some(t) = schema_tier_for_key(doc, &ck) {
+            found = Some(match (found, t) {
+                (Some(Tier::Secret), _) | (_, Tier::Secret) => Tier::Secret,
+                (Some(prev), _) => prev,
+                (None, t) => t,
+            });
+        }
+    }
+    found
+}
+
+/// Resolve the effective tier for `th config set` per ADR-075 D6. The schema is
+/// authoritative: an explicit `--tier` that contradicts the derived schema tier
+/// errors (naming the schema tier) unless `force` downgrades it to a warning; a
+/// key declared in no schema defaults to `secret` (the loud-failure direction)
+/// with a warning. Warnings go to stderr so `--json` stdout stays clean.
+fn resolve_set_tier(explicit: Option<Tier>, derived: Option<Tier>, key: &str, force: bool) -> Result<Tier> {
+    match (explicit, derived) {
+        (Some(t), Some(d)) if t != d && !force => anyhow::bail!(
+            "--tier {} contradicts the schema tier `{}` for key `{key}`. The schema is authoritative (ADR-075) — drop --tier to use it, or pass --force to override.",
+            t.as_wire(),
+            d.as_wire()
+        ),
+        (Some(t), Some(d)) if t != d => {
+            eprintln!(
+                "  {} --tier {} contradicts schema tier `{}` for `{key}`; overriding due to --force",
+                "!".yellow().bold(),
+                t.as_wire(),
+                d.as_wire()
+            );
+            Ok(t)
+        }
+        (Some(t), _) => Ok(t),
+        (None, Some(d)) => Ok(d),
+        (None, None) => {
+            eprintln!(
+                "  {} `{key}` is not declared in any schema; defaulting to `secret` per ADR-075 — declare it in .smooai-config or pass --tier explicitly",
+                "!".yellow().bold()
+            );
+            Ok(Tier::Secret)
+        }
+    }
+}
+
+/// ADR-075 D6 tripwire heuristic: does this value carry the shape of a
+/// credential that must never sit in an unencrypted, anon-readable public slot?
+/// Covers the incident-class prefixes plus PEM blocks and long JWTs.
+fn looks_credential_shaped(value: &str) -> bool {
+    let v = value.trim();
+    v.starts_with("sk-") || v.starts_with("github_pat_") || v.starts_with("ghp_") || v.starts_with("xox") || v.contains("-----BEGIN") || looks_like_jwt(v)
+}
+
+/// A long three-part token (`header.payload.signature`) — the JWT shape. The
+/// length gate keeps short dotted values (version strings, hostnames) from
+/// tripping.
+fn looks_like_jwt(v: &str) -> bool {
+    v.len() > 100 && v.matches('.').count() == 2
+}
+
+/// The three ways the credential tripwire can resolve, split out from the IO so
+/// it's unit-testable (mirrors `copilot::decide`). `force` skips the gate;
+/// otherwise a TTY prompts and a non-TTY refuses (no way to confirm in CI).
+#[derive(Debug, PartialEq, Eq)]
+enum TripwireAction {
+    Proceed,
+    Prompt,
+    Refuse,
+}
+
+fn credential_tripwire_decision(force: bool, is_tty: bool) -> TripwireAction {
+    if force {
+        TripwireAction::Proceed
+    } else if is_tty {
+        TripwireAction::Prompt
+    } else {
+        TripwireAction::Refuse
+    }
+}
+
+/// Gate a public-tier write of a credential-shaped value (ADR-075 D6): confirm
+/// on a TTY, refuse in non-interactive mode, or proceed with `--force`.
+fn credential_tripwire_gate(key: &str, force: bool) -> Result<()> {
+    use std::io::IsTerminal;
+    match credential_tripwire_decision(force, std::io::stdin().is_terminal()) {
+        TripwireAction::Proceed => {
+            eprintln!(
+                "  {} `{key}` looks credential-shaped and resolves to public tier (unencrypted, may be anon-readable); proceeding due to --force",
+                "!".yellow().bold()
+            );
+            Ok(())
+        }
+        TripwireAction::Prompt => {
+            let ok = dialoguer::Confirm::new()
+                .with_prompt(format!(
+                    "`{key}` looks credential-shaped but resolves to PUBLIC tier (unencrypted, may be anon-readable). Set it anyway?"
+                ))
+                .default(false)
+                .interact()
+                .context("read credential-tripwire confirmation")?;
+            if ok {
+                Ok(())
+            } else {
+                anyhow::bail!("aborted: credential-shaped value not written to public tier")
+            }
+        }
+        TripwireAction::Refuse => anyhow::bail!(
+            "`{key}`: value looks credential-shaped but tier resolves to public (unencrypted, may be anon-readable). Refusing in non-interactive mode — use `--tier secret`, or `--force` to override."
+        ),
+    }
 }
 
 /// Compare local vs remote flattened maps. A key in both maps but with
@@ -2400,6 +2586,119 @@ mod tests {
         assert_eq!(Tier::FeatureFlag.as_wire(), "feature_flag");
         // SMOODEV-2306: matches `assertKeyDefined(key, 'limit')` on the server.
         assert_eq!(Tier::Limit.as_wire(), "limit");
+    }
+
+    // ----- ADR-075 WS1: schema-derived tier + tripwire ---------------------
+
+    fn schema_entry(js: Value) -> Value {
+        serde_json::json!({ "jsonSchema": js })
+    }
+
+    #[test]
+    fn derive_tier_finds_each_tier_across_all_schema_kinds() {
+        let schema = schema_entry(serde_json::json!({
+            "properties": {
+                "publicConfigSchema": { "properties": { "apiUrl": {"type":"string"} } },
+                "secretConfigSchema": { "properties": { "anthropicApiKey": {"type":"string"} } },
+                "featureFlagSchema": { "properties": { "customerService": {"type":"boolean"} } },
+                "limitsSchema": { "properties": { "maxSeats": {"type":"number"} } },
+            }
+        }));
+        let schemas = [schema];
+        // Canonicalization matches SCREAMING_SNAKE input against camelCase decls.
+        assert_eq!(derive_tier_from_schemas(&schemas, "API_URL"), Some(Tier::Public));
+        assert_eq!(derive_tier_from_schemas(&schemas, "anthropicApiKey"), Some(Tier::Secret));
+        assert_eq!(derive_tier_from_schemas(&schemas, "CUSTOMER_SERVICE"), Some(Tier::FeatureFlag));
+        assert_eq!(derive_tier_from_schemas(&schemas, "maxSeats"), Some(Tier::Limit));
+        assert_eq!(derive_tier_from_schemas(&schemas, "notDeclared"), None);
+    }
+
+    #[test]
+    fn derive_tier_union_secret_wins_on_conflict() {
+        // Two schemas declare the same key with different tiers → secret wins
+        // (D1 migration tiebreak, safe direction).
+        let a = schema_entry(serde_json::json!({
+            "properties": { "publicConfigSchema": { "properties": { "sharedKey": {"type":"string"} } } }
+        }));
+        let b = schema_entry(serde_json::json!({
+            "properties": { "secretConfigSchema": { "properties": { "sharedKey": {"type":"string"} } } }
+        }));
+        assert_eq!(derive_tier_from_schemas(&[a.clone(), b.clone()], "sharedKey"), Some(Tier::Secret));
+        // Order-independent.
+        assert_eq!(derive_tier_from_schemas(&[b, a], "sharedKey"), Some(Tier::Secret));
+    }
+
+    #[test]
+    fn derive_tier_tolerates_bare_doc_without_jsonschema_wrapper() {
+        let bare = serde_json::json!({
+            "properties": { "secretConfigSchema": { "properties": { "apiKey": {"type":"string"} } } }
+        });
+        assert_eq!(derive_tier_from_schemas(&[bare], "apiKey"), Some(Tier::Secret));
+    }
+
+    #[test]
+    fn resolve_set_tier_uses_schema_when_no_explicit() {
+        assert_eq!(resolve_set_tier(None, Some(Tier::Secret), "k", false).unwrap(), Tier::Secret);
+        assert_eq!(resolve_set_tier(None, Some(Tier::Public), "k", false).unwrap(), Tier::Public);
+    }
+
+    #[test]
+    fn resolve_set_tier_unknown_key_defaults_secret() {
+        assert_eq!(resolve_set_tier(None, None, "k", false).unwrap(), Tier::Secret);
+    }
+
+    #[test]
+    fn resolve_set_tier_explicit_matching_schema_is_ok() {
+        assert_eq!(resolve_set_tier(Some(Tier::Secret), Some(Tier::Secret), "k", false).unwrap(), Tier::Secret);
+    }
+
+    #[test]
+    fn resolve_set_tier_explicit_contradiction_refused_without_force() {
+        let err = resolve_set_tier(Some(Tier::Public), Some(Tier::Secret), "argocdImageUpdaterGitPat", false).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("secret"), "error must name the schema tier: {msg}");
+        assert!(msg.contains("--force"), "error must mention the override: {msg}");
+    }
+
+    #[test]
+    fn resolve_set_tier_explicit_contradiction_allowed_with_force() {
+        assert_eq!(resolve_set_tier(Some(Tier::Public), Some(Tier::Secret), "k", true).unwrap(), Tier::Public);
+    }
+
+    #[test]
+    fn resolve_set_tier_explicit_for_undeclared_key_is_ok() {
+        // No schema entry → explicit tier is honored (no contradiction to check).
+        assert_eq!(resolve_set_tier(Some(Tier::Public), None, "k", false).unwrap(), Tier::Public);
+    }
+
+    #[test]
+    fn looks_credential_shaped_catches_incident_classes() {
+        assert!(looks_credential_shaped("sk-ant-abc123"));
+        assert!(looks_credential_shaped("github_pat_11ABCDEF"));
+        assert!(looks_credential_shaped("ghp_16Cabc"));
+        assert!(looks_credential_shaped("xoxb-123-456"));
+        assert!(looks_credential_shaped("-----BEGIN PRIVATE KEY-----\nMII..."));
+        // Long three-part JWT.
+        let jwt = format!("{}.{}.{}", "a".repeat(40), "b".repeat(60), "c".repeat(20));
+        assert!(looks_credential_shaped(&jwt));
+    }
+
+    #[test]
+    fn looks_credential_shaped_ignores_benign_values() {
+        assert!(!looks_credential_shaped("https://api.smoo.ai"));
+        assert!(!looks_credential_shaped("1.2.3")); // version string: short + dotted
+        assert!(!looks_credential_shaped("true"));
+        assert!(!looks_credential_shaped("customer-service"));
+        // Two dots but short → not a JWT.
+        assert!(!looks_credential_shaped("a.b.c"));
+    }
+
+    #[test]
+    fn credential_tripwire_decision_branches() {
+        assert_eq!(credential_tripwire_decision(true, true), TripwireAction::Proceed);
+        assert_eq!(credential_tripwire_decision(true, false), TripwireAction::Proceed);
+        assert_eq!(credential_tripwire_decision(false, true), TripwireAction::Prompt);
+        assert_eq!(credential_tripwire_decision(false, false), TripwireAction::Refuse);
     }
 
     // ----- Limits tests (SMOODEV-2306) -------------------------------------
