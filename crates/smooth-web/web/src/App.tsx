@@ -401,20 +401,25 @@ function MessageRow({ m, awaiting }: { m: ChatMessage; awaiting: Set<string> }) 
             </div>
         );
     }
+    // Render the turn as the model produced it: prose and tool chips interleaved
+    // in arrival order (say a bit → call a tool → say a bit → final summary),
+    // rather than every chip stacked above one concatenated wall of text.
+    const lastIdx = m.blocks.length - 1;
     return (
         <div className="flex gap-3">
             <span className="mt-1 size-2 shrink-0 rounded-full bg-gradient-to-b from-(--color-th-teal) to-(--color-th-blue)" />
-            <div className="min-w-0 flex-1">
+            <div className="min-w-0 flex-1 space-y-2">
                 {m.reasoning && <Thinking text={m.reasoning} active={m.streaming && !m.content} />}
-                {m.tools.map((t) => (
-                    <ToolChip key={t.id} t={t} awaiting={awaiting.has(t.name)} />
-                ))}
-                {m.content && (
-                    <div className={`prose-msg text-[0.95rem] leading-relaxed text-foreground/95 ${m.streaming ? 'caret' : ''}`}>
-                        <Markdown remarkPlugins={[remarkGfm]}>{m.content}</Markdown>
-                    </div>
+                {m.blocks.map((b, i) =>
+                    b.kind === 'tool' ? (
+                        <ToolChip key={b.tool.id} t={b.tool} awaiting={awaiting.has(b.tool.name)} />
+                    ) : b.text.trim() ? (
+                        <div key={`t-${i}`} className={`prose-msg text-[0.95rem] leading-relaxed text-foreground/95 ${m.streaming && i === lastIdx ? 'caret' : ''}`}>
+                            <Markdown remarkPlugins={[remarkGfm]}>{b.text}</Markdown>
+                        </div>
+                    ) : null,
                 )}
-                {m.streaming && !m.content && !m.tools.length && <span className="caret text-(--color-muted-foreground)" />}
+                {m.streaming && m.blocks.length === 0 && <span className="caret text-(--color-muted-foreground)" />}
             </div>
         </div>
     );

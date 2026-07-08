@@ -30,6 +30,12 @@ export interface Attachment {
     dataUrl: string;
 }
 
+/** One ordered segment of an assistant turn: a run of prose, or a tool call.
+ * `blocks` preserves the interleave order the model produced (say a bit → call a
+ * tool → say a bit → …) so the UI shows tools INLINE between text instead of
+ * piling every chip at the top and concatenating all prose at the bottom. */
+export type MessageBlock = { kind: 'text'; text: string } | { kind: 'tool'; tool: ToolCall };
+
 export interface ChatMessage {
     id: string;
     role: 'user' | 'assistant' | 'system';
@@ -38,6 +44,8 @@ export interface ChatMessage {
      * collapsed, never folded into `content` (the answer). */
     reasoning: string;
     tools: ToolCall[];
+    /** Text + tool segments in the order the model streamed them (assistant turns). */
+    blocks: MessageBlock[];
     streaming: boolean;
     /** Images/PDFs sent with a user message. */
     attachments?: Attachment[];
@@ -145,7 +153,7 @@ export function useOperator(): OperatorApi {
         setMessages((prev) => {
             const hasOpen = prev.some((m) => m.role === 'assistant' && m.streaming);
             if (hasOpen) return prev;
-            return [...prev, { id: nextId('a'), role: 'assistant', content: '', reasoning: '', tools: [], streaming: true }];
+            return [...prev, { id: nextId('a'), role: 'assistant', content: '', reasoning: '', tools: [], blocks: [], streaming: true }];
         });
     }, []);
 
@@ -162,7 +170,16 @@ export function useOperator(): OperatorApi {
                 case 'stream_token':
                     ensureStreamingMessage();
                     setStreaming(true);
-                    patchStreaming((m) => ({ ...m, content: m.content + (v.token ?? '') }));
+                    patchStreaming((m) => {
+                        const tok = v.token ?? '';
+                        // Grow the trailing text block, or open a new one if the last
+                        // block was a tool — that's what interleaves prose with chips.
+                        const blocks = m.blocks.slice();
+                        const last = blocks[blocks.length - 1];
+                        if (last && last.kind === 'text') blocks[blocks.length - 1] = { kind: 'text', text: last.text + tok };
+                        else blocks.push({ kind: 'text', text: tok });
+                        return { ...m, content: m.content + tok, blocks };
+                    });
                     break;
                 case 'stream_reasoning':
                     // Reasoning rides its own channel — accumulate it separately
@@ -175,27 +192,43 @@ export function useOperator(): OperatorApi {
                 case 'stream_chunk': {
                     const st = v?.data?.state;
                     const call = st?.rawResponse?.toolCall;
-                    const res = st?.toolResult;
+                    // toolResult is nested under rawResponse, same as toolCall (server
+                    // runner.rs). Reading st.toolResult left every chip stuck on
+                    // "running…" forever because the completion branch never fired.
+                    const res = st?.rawResponse?.toolResult;
                     if (call) {
                         ensureStreamingMessage();
                         const args = typeof call.arguments === 'string' ? call.arguments : JSON.stringify(call.arguments ?? {});
-                        patchStreaming((m) => ({ ...m, tools: [...m.tools, { id: nextId('t'), name: call.name ?? '', args, done: false }] }));
+                        const tool: ToolCall = { id: nextId('t'), name: call.name ?? '', args, done: false };
+                        // Push the tool as its own block so it renders inline, right
+                        // where the model called it — between the prose around it.
+                        patchStreaming((m) => ({ ...m, tools: [...m.tools, tool], blocks: [...m.blocks, { kind: 'tool', tool }] }));
                     } else if (res) {
                         patchStreaming((m) => {
+                            const complete = (t: ToolCall): ToolCall => ({
+                                ...t,
+                                done: true,
+                                isError: !!res.isError,
+                                result: typeof res.result === 'string' ? res.result : JSON.stringify(res.result ?? ''),
+                            });
+                            // Complete the most recent open tool with this name, in both
+                            // the flat list and the ordered blocks.
                             const tools = m.tools.slice();
-                            // Complete the most recent open tool with this name.
                             for (let i = tools.length - 1; i >= 0; i--) {
                                 if (tools[i].name === res.name && !tools[i].done) {
-                                    tools[i] = {
-                                        ...tools[i],
-                                        done: true,
-                                        isError: !!res.isError,
-                                        result: typeof res.result === 'string' ? res.result : JSON.stringify(res.result ?? ''),
-                                    };
+                                    tools[i] = complete(tools[i]);
                                     break;
                                 }
                             }
-                            return { ...m, tools };
+                            const blocks = m.blocks.slice();
+                            for (let i = blocks.length - 1; i >= 0; i--) {
+                                const b = blocks[i];
+                                if (b.kind === 'tool' && b.tool.name === res.name && !b.tool.done) {
+                                    blocks[i] = { kind: 'tool', tool: complete(b.tool) };
+                                    break;
+                                }
+                            }
+                            return { ...m, tools, blocks };
                         });
                     }
                     break;
