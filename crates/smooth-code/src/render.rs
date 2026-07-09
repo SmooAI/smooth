@@ -65,6 +65,92 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     if state.model_picker.active {
         render_model_picker(frame, state, area);
     }
+
+    if state.session_picker.active {
+        render_session_sidebar(frame, state, area);
+    }
+}
+
+/// Render the conversation sidebar — a left-anchored overlay listing
+/// saved sessions (newest-first) plus a "New conversation" entry at the
+/// top. The active session and the cursor row are highlighted.
+fn render_session_sidebar(frame: &mut Frame, state: &AppState, area: Rect) {
+    let picker = &state.session_picker;
+
+    let width = 44u16.min(area.width.saturating_sub(2));
+    if width < 6 || area.height < 4 {
+        return; // Terminal too small to render a usable panel.
+    }
+
+    // +2 border, +1 footer. Cap to the frame height.
+    #[allow(clippy::cast_possible_truncation)]
+    let rows = picker.row_count().min(usize::from(u16::MAX) - 4) as u16;
+    let height = (rows + 3).min(area.height.saturating_sub(1)).max(4);
+
+    // Left-anchored, vertically centered — reads as a sidebar without a
+    // persistent pane in inline-viewport mode.
+    let [col] = Layout::horizontal([Constraint::Length(width)]).flex(Flex::Start).areas(area);
+    let [panel] = Layout::vertical([Constraint::Length(height)]).flex(Flex::Center).areas(col);
+
+    frame.render_widget(Clear, panel);
+    let block = Block::default().title(" Conversations ").borders(Borders::ALL).border_style(theme::title());
+    let inner = block.inner(panel);
+    frame.render_widget(block, panel);
+
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+    let list_area = chunks[0];
+    let footer_area = chunks[1];
+    let max_chars = usize::from(list_area.width).max(1);
+
+    let mut items: Vec<ListItem<'_>> = Vec::with_capacity(picker.row_count());
+    // Row 0: the New-conversation entry.
+    items.push(session_row("＋ New conversation", false, picker.selected == 0, max_chars));
+    // Remaining rows: sessions, newest-first.
+    for (i, summary) in picker.sessions.iter().enumerate() {
+        let selected = picker.selected == i + 1;
+        let is_current = summary.id == picker.current_session_id;
+        let marker = if is_current { "● " } else { "  " };
+        let label = format!("{marker}{}  ·  {}", summary.display_label(), relative_time(summary.updated_at));
+        items.push(session_row(&label, is_current, selected, max_chars));
+    }
+    frame.render_widget(List::new(items), list_area);
+
+    frame.render_widget(Paragraph::new("↑/↓ select  Enter resume  n new  Esc close").style(theme::muted()), footer_area);
+}
+
+/// Build one sidebar list row, truncating to `max_chars` (char-safe)
+/// and highlighting the selected row. The currently-active session
+/// (non-selected) is tinted to stand out from the rest.
+fn session_row(label: &str, is_current: bool, selected: bool, max_chars: usize) -> ListItem<'static> {
+    let prefix = if selected { "▸ " } else { "  " };
+    let raw = format!("{prefix}{label}");
+    let text: String = if raw.chars().count() > max_chars && max_chars > 1 {
+        let cut: String = raw.chars().take(max_chars.saturating_sub(1)).collect();
+        format!("{cut}…")
+    } else {
+        raw
+    };
+    if selected {
+        ListItem::new(Span::styled(text, Style::default().bg(theme::SMOO_ORANGE).fg(ratatui::style::Color::Black)))
+    } else if is_current {
+        ListItem::new(Span::styled(text, Style::default().fg(theme::SMOO_ORANGE)))
+    } else {
+        ListItem::new(Span::raw(text))
+    }
+}
+
+/// Compact "time ago" label for the sidebar (e.g. `3m`, `2h`, `5d`).
+fn relative_time(when: chrono::DateTime<chrono::Utc>) -> String {
+    let secs = (chrono::Utc::now() - when).num_seconds().max(0);
+    if secs < 60 {
+        "now".to_string()
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86_400)
+    }
 }
 
 /// Render the autocomplete popup directly above the input box.
@@ -594,7 +680,7 @@ fn render_status(frame: &mut Frame, state: &AppState, area: Rect) {
         state.total_tokens,
         format_spend(state.total_cost_usd),
     );
-    let status_right = " | Ctrl+C quit ";
+    let status_right = " | Ctrl+B chats | Ctrl+C quit ";
 
     let line = Line::from(vec![
         Span::styled(status_left, theme::status_style()),
@@ -608,7 +694,7 @@ fn render_status(frame: &mut Frame, state: &AppState, area: Rect) {
 }
 
 /// Render the sidebar panel with the file tree.
-#[allow(dead_code)] // sidebar removed when switching to inline viewport (Ctrl+B unbound)
+#[allow(dead_code)] // old file-tree sidebar; inline viewport dropped it. Ctrl+B now opens the conversation sidebar (session_picker).
 fn render_sidebar(frame: &mut Frame, state: &AppState, area: Rect) {
     let block = Block::default()
         .title(" Files ")
@@ -858,5 +944,25 @@ mod spend_fmt_tests {
     fn dollar_plus_has_two_decimals() {
         assert_eq!(format_spend(1.0), "$1.00");
         assert_eq!(format_spend(12.345), "$12.35");
+    }
+}
+
+#[cfg(test)]
+mod relative_time_tests {
+    use chrono::{Duration, Utc};
+
+    use super::relative_time;
+
+    #[test]
+    fn buckets_by_magnitude() {
+        assert_eq!(relative_time(Utc::now() - Duration::seconds(10)), "now");
+        assert_eq!(relative_time(Utc::now() - Duration::minutes(3)), "3m");
+        assert_eq!(relative_time(Utc::now() - Duration::hours(2)), "2h");
+        assert_eq!(relative_time(Utc::now() - Duration::days(5)), "5d");
+    }
+
+    #[test]
+    fn future_timestamps_clamp_to_now() {
+        assert_eq!(relative_time(Utc::now() + Duration::hours(1)), "now");
     }
 }

@@ -470,17 +470,17 @@ fn event_loop(
             if let Event::Key(key) = evt {
                 let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
 
-                // Global keybindings. Ctrl+B used to toggle the
-                // sidebar, but inline-viewport mode has no panel
-                // for one — the file tree / git pane / etc. that
-                // used to live there are reachable via slash
-                // commands (`/git`, future `/files`). The key is
-                // intentionally left unbound rather than re-purposed
-                // so muscle memory doesn't fire something
-                // unexpected.
+                // Global keybindings. Ctrl+C quits; Ctrl+B toggles the
+                // conversation sidebar (list saved sessions → resume /
+                // new). The sidebar is an overlay popup, not a
+                // persistent pane, because inline-viewport mode has no
+                // room for one — finalized chat lives in the terminal's
+                // own scrollback.
                 if key.modifiers.contains(KeyModifiers::CONTROL) {
-                    if let KeyCode::Char('c') = key.code {
-                        s.should_quit = true;
+                    match key.code {
+                        KeyCode::Char('c') => s.should_quit = true,
+                        KeyCode::Char('b') => toggle_session_sidebar(&mut s),
+                        _ => {}
                     }
                 }
 
@@ -503,6 +503,91 @@ fn event_loop(
     }
 
     Ok(())
+}
+
+/// Toggle the conversation sidebar. Opening it saves the current
+/// session first (so it shows up in — and is highlighted within — the
+/// freshly-listed set) and loads the summaries from the on-disk
+/// [`SessionManager`] store. A store error just yields an empty list
+/// (the "New conversation" row still works).
+fn toggle_session_sidebar(state: &mut AppState) {
+    if state.session_picker.active {
+        state.session_picker.deactivate();
+        return;
+    }
+    let sessions = match SessionManager::new() {
+        Ok(mgr) => {
+            // Persist the current session so resuming back into it
+            // later doesn't lose in-flight history, and so it appears
+            // in the list we're about to show.
+            if !state.messages.is_empty() {
+                let _ = mgr.save(&Session::from_state(state));
+            }
+            mgr.list().unwrap_or_default()
+        }
+        Err(_) => Vec::new(),
+    };
+    let current_id = state.session_id.clone();
+    state.session_picker.open(sessions, &current_id);
+}
+
+/// Handle a key while the conversation sidebar owns the keyboard.
+/// Returns `true` when the key was consumed.
+fn handle_session_sidebar_key(key: event::KeyEvent, state: &mut AppState) -> bool {
+    use crate::session_picker::PickerAction;
+
+    match key.code {
+        KeyCode::Up => state.session_picker.select_up(),
+        KeyCode::Down => state.session_picker.select_down(),
+        KeyCode::Esc => state.session_picker.deactivate(),
+        KeyCode::Char('n') => {
+            // Shortcut for the "New conversation" entry regardless of
+            // cursor position.
+            save_current_session(state);
+            state.start_new_conversation();
+            state.add_message(ChatMessage::system("Started a new conversation. Type a message to get going."));
+            state.session_picker.deactivate();
+        }
+        KeyCode::Enter => {
+            match state.session_picker.selected_action() {
+                PickerAction::New => {
+                    save_current_session(state);
+                    state.start_new_conversation();
+                    state.add_message(ChatMessage::system("Started a new conversation. Type a message to get going."));
+                }
+                PickerAction::Resume(id) => {
+                    if id == state.session_id {
+                        // Already viewing it — just close.
+                    } else if let Ok(mgr) = SessionManager::new() {
+                        save_current_session(state);
+                        match mgr.load(&id) {
+                            Ok(session) => {
+                                state.resume_from(&session);
+                                let label = state.session_title.clone().unwrap_or_else(|| id.clone());
+                                state.add_message(ChatMessage::system(format!("Resumed session: {label}")));
+                            }
+                            Err(e) => {
+                                state.add_message(ChatMessage::system(format!("Could not load session {id}: {e}")));
+                            }
+                        }
+                    }
+                }
+            }
+            state.session_picker.deactivate();
+        }
+        _ => {}
+    }
+    true
+}
+
+/// Best-effort save of the current session to the on-disk store.
+fn save_current_session(state: &AppState) {
+    if state.messages.is_empty() {
+        return;
+    }
+    if let Ok(mgr) = SessionManager::new() {
+        let _ = mgr.save(&Session::from_state(state));
+    }
 }
 
 /// Map an `AgentEvent` to the appropriate state mutation.
@@ -703,6 +788,14 @@ fn handle_input_mode(
                 }
             }
         }
+    }
+
+    // Conversation sidebar owns the keyboard while it's visible.
+    // Up/Down navigates, Enter resumes (or starts a new chat on the
+    // "New conversation" row), `n` is a new-chat shortcut, Esc closes.
+    if state.session_picker.active {
+        handle_session_sidebar_key(key, state);
+        return;
     }
 
     // Model picker owns the keyboard while it's visible. Up/Down

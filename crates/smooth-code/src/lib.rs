@@ -24,6 +24,7 @@ pub mod permissions;
 pub mod render;
 pub mod sep_host;
 pub mod session;
+pub mod session_picker;
 pub mod state;
 pub mod theme;
 pub mod thesaurus;

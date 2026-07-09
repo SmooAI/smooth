@@ -1236,7 +1236,7 @@ mod tests {
         // and the result is stable/transitive — assert antisymmetry holds
         // across the whole set (the property the old comparator violated).
         for w in scores.windows(2) {
-            assert!(w[0].total_cmp(&w[1]) != std::cmp::Ordering::Less, "sorted descending: {:?}", &scores);
+            assert!(w[0].total_cmp(&w[1]) != std::cmp::Ordering::Less, "sorted descending: {:?}", scores);
         }
     }
 

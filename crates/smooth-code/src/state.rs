@@ -376,6 +376,9 @@ pub struct AppState {
     /// the most recently filed open prompt by POSTing to
     /// `/api/access/{approve,deny}`.
     pub permission_prompts: Vec<crate::auto_mode::PermissionPromptState>,
+    /// Conversation sidebar overlay state — lists saved sessions for
+    /// resume / new-chat. Toggled with Ctrl+B.
+    pub session_picker: crate::session_picker::SessionPickerState,
 }
 
 impl AppState {
@@ -416,6 +419,7 @@ impl AppState {
             model_picker: ModelPickerState::new(),
             health_status: HealthStatus::default(),
             permission_prompts: Vec::new(),
+            session_picker: crate::session_picker::SessionPickerState::new(),
         }
     }
 
@@ -437,6 +441,43 @@ impl AppState {
             state.agent_pinned = true;
         }
         state
+    }
+
+    /// Swap the live conversation for a persisted one, in place. Used
+    /// by the conversation sidebar to resume a session without tearing
+    /// down the TUI. Working dir, model picker catalog, and pearls are
+    /// preserved; the chat history, ids, model, agent, and token count
+    /// come from `session`.
+    ///
+    /// `committed_count` resets to 0 so the resumed messages flush into
+    /// the terminal scrollback on the next tick. Prior scrollback stays
+    /// (the terminal owns it) — the resumed history simply appends
+    /// below, like re-running a program in the same terminal.
+    pub fn resume_from(&mut self, session: &crate::session::Session) {
+        self.session_id = session.id.clone();
+        self.session_title = session.title.clone();
+        self.messages = session.messages.iter().map(|m| m.to_chat_message()).collect();
+        self.committed_count = 0;
+        self.model_name = session.model_name.clone();
+        self.total_tokens = session.total_tokens;
+        if let Some(ref a) = session.agent_name {
+            self.agent_name = a.clone();
+            self.agent_pinned = true;
+        }
+        self.thinking = false;
+    }
+
+    /// Start a fresh conversation in place, keeping the working dir,
+    /// model, and agent selection. Used by the sidebar's "New
+    /// conversation" entry.
+    pub fn start_new_conversation(&mut self) {
+        self.session_id = Uuid::new_v4().to_string();
+        self.session_title = None;
+        self.messages.clear();
+        self.committed_count = 0;
+        self.total_tokens = 0;
+        self.total_cost_usd = 0.0;
+        self.thinking = false;
     }
 
     /// Add a message to the conversation history.
