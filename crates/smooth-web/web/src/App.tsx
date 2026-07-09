@@ -166,6 +166,7 @@ export default function App() {
         activeConversationId,
         resumeConversation,
         newConversation,
+        renameConversation,
     } = useOperator();
     const push = usePush();
     const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -206,6 +207,7 @@ export default function App() {
                 activeId={activeConversationId}
                 onResume={onResume}
                 onNew={onNew}
+                onRename={renameConversation}
                 onClose={() => setSidebarOpen(false)}
             />
             {/* Menu toggle — sits above the sidebar so it flips it open/closed from
@@ -280,6 +282,7 @@ function Sidebar({
     activeId,
     onResume,
     onNew,
+    onRename,
     onClose,
 }: {
     open: boolean;
@@ -287,8 +290,21 @@ function Sidebar({
     activeId: string | null;
     onResume: (id: string) => void;
     onNew: () => void;
+    onRename: (id: string, title: string) => void;
     onClose: () => void;
 }) {
+    // Inline rename: which row is being edited + its draft text. Enter commits,
+    // Esc (or blur) cancels. Double-clicking a title or the pencil opens it.
+    const [editingId, setEditingId] = useState<string | null>(null);
+    const [draft, setDraft] = useState('');
+    const beginEdit = (id: string, current: string) => {
+        setEditingId(id);
+        setDraft(current);
+    };
+    const commitEdit = () => {
+        if (editingId) onRename(editingId, draft);
+        setEditingId(null);
+    };
     return (
         <>
             {/* Backdrop — mobile only; a tap dismisses the drawer. */}
@@ -315,26 +331,58 @@ function Sidebar({
                     ) : (
                         conversations.map((c) => {
                             const active = c.conversationId === activeId;
+                            const editing = editingId === c.conversationId;
                             return (
-                                <button
+                                <div
                                     key={c.conversationId}
-                                    onClick={() => onResume(c.conversationId)}
-                                    className={`flex w-full flex-col gap-0.5 rounded-xl px-3 py-2 text-left transition ${
+                                    className={`group relative rounded-xl transition ${
                                         active ? 'bg-(--color-th-teal)/12 ring-1 ring-(--color-th-teal)/40' : 'hover:bg-panel-2'
                                     }`}
                                 >
-                                    <span className="flex items-center gap-2">
-                                        <MessageSquare
-                                            size={13}
-                                            className={`shrink-0 ${active ? 'text-(--color-th-teal)' : 'text-(--color-muted-foreground)'}`}
+                                    <button
+                                        onClick={() => onResume(c.conversationId)}
+                                        onDoubleClick={() => beginEdit(c.conversationId, c.title || '')}
+                                        className="flex w-full flex-col gap-0.5 px-3 py-2 text-left"
+                                    >
+                                        <span className="flex items-center gap-2">
+                                            <MessageSquare
+                                                size={13}
+                                                className={`shrink-0 ${active ? 'text-(--color-th-teal)' : 'text-(--color-muted-foreground)'}`}
+                                            />
+                                            <span className="truncate pr-6 text-sm font-medium">{c.title || 'Untitled'}</span>
+                                        </span>
+                                        <span className="pl-[21px] text-xs text-(--color-muted-foreground)">
+                                            {relTime(c.updatedAt)}
+                                            {c.messageCount ? ` · ${c.messageCount} msg` : ''}
+                                        </span>
+                                    </button>
+                                    {/* Rename affordance — a hover pencil (or double-click the row).
+                                        Overlaid as a sibling so it never nests inside the resume button. */}
+                                    {!editing && (
+                                        <button
+                                            onClick={() => beginEdit(c.conversationId, c.title || '')}
+                                            aria-label="Rename conversation"
+                                            title="Rename"
+                                            className="absolute top-2 right-2 grid size-6 place-items-center rounded-lg text-(--color-muted-foreground) opacity-0 transition group-hover:opacity-70 hover:bg-panel hover:!opacity-100"
+                                        >
+                                            <Pencil size={12} />
+                                        </button>
+                                    )}
+                                    {editing && (
+                                        <input
+                                            autoFocus
+                                            value={draft}
+                                            onChange={(e) => setDraft(e.target.value)}
+                                            onKeyDown={(e) => {
+                                                if (e.key === 'Enter') commitEdit();
+                                                else if (e.key === 'Escape') setEditingId(null);
+                                            }}
+                                            onBlur={commitEdit}
+                                            aria-label="Conversation title"
+                                            className="absolute inset-x-2 top-1.5 rounded-lg bg-panel-2 px-2 py-1 text-sm font-medium text-foreground outline-none ring-1 ring-(--color-th-teal)/50"
                                         />
-                                        <span className="truncate text-sm font-medium">{c.title || 'Untitled'}</span>
-                                    </span>
-                                    <span className="pl-[21px] text-xs text-(--color-muted-foreground)">
-                                        {relTime(c.updatedAt)}
-                                        {c.messageCount ? ` · ${c.messageCount} msg` : ''}
-                                    </span>
-                                </button>
+                                    )}
+                                </div>
                             );
                         })
                     )}
