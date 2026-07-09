@@ -58,6 +58,44 @@ export interface Approval {
     description: string;
 }
 
+/** One row in the conversation sidebar — from `list_conversations`. */
+export interface ConversationSummary {
+    conversationId: string;
+    title: string;
+    /** Server-provided; ISO string or epoch. Rendered defensively (see App relTime). */
+    updatedAt: string | number;
+    messageCount: number;
+}
+
+/** A raw history message from `get_conversation_messages`. Shape is assumed
+ * `{ role, content }` (defensive on `text`/`message` aliases) — reconcile with
+ * the server agent's actual payload. Past tool calls are NOT reconstructed; only
+ * the text of each turn is rendered. */
+interface HistoryMessage {
+    role?: string;
+    content?: string;
+    text?: string;
+    message?: string;
+}
+
+/** Render server history into our ChatMessage model: user turns are inbound,
+ * everything else assistant/system. Assistant text becomes a single text block. */
+function renderHistory(raw: HistoryMessage[]): ChatMessage[] {
+    return (raw ?? []).map((m) => {
+        const content = m.content ?? m.text ?? m.message ?? '';
+        const role: ChatMessage['role'] = m.role === 'user' ? 'user' : m.role === 'system' ? 'system' : 'assistant';
+        return {
+            id: nextId('h'),
+            role,
+            content,
+            reasoning: '',
+            tools: [],
+            blocks: role === 'assistant' ? [{ kind: 'text', text: content }] : [],
+            streaming: false,
+        };
+    });
+}
+
 export interface Status {
     connected: boolean;
     model?: string;
@@ -72,6 +110,16 @@ interface OperatorApi {
     status: Status;
     sendMessage: (text: string, attachments?: Attachment[]) => void;
     respond: (requestId: string, approved: boolean) => void;
+    /** Recent conversations for the sidebar (most-recent first), from `list_conversations`. */
+    conversations: ConversationSummary[];
+    /** The conversation currently loaded, for highlighting the active sidebar row. */
+    activeConversationId: string | null;
+    /** Re-request `list_conversations` (called after a turn completes). */
+    refreshConversations: () => void;
+    /** Bind a session to an existing conversation and load its history into `messages`. */
+    resumeConversation: (conversationId: string) => void;
+    /** Start a fresh conversation (new session, cleared transcript). */
+    newConversation: () => void;
     /** The active Smooth Mode — pins each turn to a model. */
     mode: SmoothMode;
     /** Switch modes by id; persisted to localStorage `smooth.mode`. */
@@ -120,6 +168,12 @@ export function useOperator(): OperatorApi {
     const [modeId, setModeId] = useState<string>(() => localStorage.getItem('smooth.mode') ?? DEFAULT_MODE_ID);
     const [sessionCostUsd, setSessionCostUsd] = useState(0);
     const [modelCosts, setModelCosts] = useState<ModelCosts>({});
+    const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+    const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+    // When set, the create_conversation_session reply should trigger a history
+    // load for this conversationId (resume can't fetch messages until it has a
+    // sessionId from the create reply).
+    const pendingResumeRef = useRef<string | null>(null);
 
     const mode = useMemo(() => modeById(modeId), [modeId]);
     // Keep a ref so `sendMessage` always reads the live model without re-binding.
@@ -164,9 +218,32 @@ export function useOperator(): OperatorApi {
     const handle = useCallback(
         (v: any) => {
             switch (v?.type) {
-                case 'immediate_response':
-                    if (v?.data?.sessionId) sessionRef.current = v.data.sessionId;
+                case 'immediate_response': {
+                    const d = v?.data ?? {};
+                    // list_conversations → the sidebar list (most-recent first, non-empty only).
+                    if (Array.isArray(d.conversations)) {
+                        setConversations(d.conversations as ConversationSummary[]);
+                        break;
+                    }
+                    // get_conversation_messages → history for a resumed conversation.
+                    if (Array.isArray(d.messages)) {
+                        if (d.conversationId) setActiveConversationId(d.conversationId);
+                        setMessages(renderHistory(d.messages as HistoryMessage[]));
+                        break;
+                    }
+                    // create_conversation_session → bind the session; on a resume, chase
+                    // it with a history load now that we have the sessionId.
+                    if (d.sessionId) {
+                        sessionRef.current = d.sessionId;
+                        if (d.conversationId) setActiveConversationId(d.conversationId);
+                        const resume = pendingResumeRef.current;
+                        if (resume) {
+                            pendingResumeRef.current = null;
+                            send({ action: 'get_conversation_messages', requestId: nextId('gm'), sessionId: d.sessionId, conversationId: resume });
+                        }
+                    }
                     break;
+                }
                 case 'stream_token':
                     ensureStreamingMessage();
                     setStreaming(true);
@@ -249,6 +326,8 @@ export function useOperator(): OperatorApi {
                     // exact path may shift slightly at integration (th-2a6330).
                     const cost = Number(v?.data?.data?.usage?.costUsd ?? v?.data?.data?.costUsd ?? v?.data?.costUsd ?? v?.usage?.costUsd);
                     if (Number.isFinite(cost) && cost > 0) setSessionCostUsd((c) => c + cost);
+                    // The turn just landed — refresh the sidebar so this chat appears/updates.
+                    send({ action: 'list_conversations', requestId: nextId('lc') });
                     break;
                 }
                 case 'error':
@@ -263,6 +342,7 @@ export function useOperator(): OperatorApi {
                             content: v.message ?? v?.data?.message ?? 'operator error',
                             reasoning: '',
                             tools: [],
+                            blocks: [],
                             streaming: false,
                         },
                     ]);
@@ -271,7 +351,7 @@ export function useOperator(): OperatorApi {
                     break;
             }
         },
-        [ensureStreamingMessage, patchStreaming],
+        [ensureStreamingMessage, patchStreaming, send],
     );
 
     useEffect(() => {
@@ -287,6 +367,8 @@ export function useOperator(): OperatorApi {
                 setStatus((s) => ({ ...s, connected: true, since: Date.now() }));
                 // Open one persistent session for the control surface.
                 send({ action: 'create_conversation_session', requestId: nextId('cs'), agentId: crypto.randomUUID(), userName: 'console' });
+                // Pull the conversation history list for the sidebar.
+                send({ action: 'list_conversations', requestId: nextId('lc') });
                 // Best-effort identity/health.
                 fetch(`${http}/admin/me`, { headers: token ? { authorization: `Bearer ${token}` } : {} })
                     .then((r) => (r.ok ? r.json() : null))
@@ -326,7 +408,16 @@ export function useOperator(): OperatorApi {
             if ((!body && attachments.length === 0) || !sessionRef.current) return;
             setMessages((prev) => [
                 ...prev,
-                { id: nextId('u'), role: 'user', content: body, reasoning: '', tools: [], streaming: false, attachments: attachments.length ? attachments : undefined },
+                {
+                    id: nextId('u'),
+                    role: 'user',
+                    content: body,
+                    reasoning: '',
+                    tools: [],
+                    blocks: [],
+                    streaming: false,
+                    attachments: attachments.length ? attachments : undefined,
+                },
             ]);
             setTurnActive(true);
             // The backend accepts an optional `images` array of full data-URL strings;
@@ -352,6 +443,36 @@ export function useOperator(): OperatorApi {
         [send],
     );
 
+    const refreshConversations = useCallback(() => {
+        send({ action: 'list_conversations', requestId: nextId('lc') });
+    }, [send]);
+
+    // Resume: bind a NEW session to the existing conversationId, then load its
+    // history. The get_conversation_messages fires from the create reply handler
+    // (it needs the sessionId), driven by pendingResumeRef.
+    const resumeConversation = useCallback(
+        (conversationId: string) => {
+            if (!conversationId) return;
+            setActiveConversationId(conversationId);
+            setMessages([]);
+            setApprovals([]);
+            pendingResumeRef.current = conversationId;
+            sessionRef.current = null;
+            send({ action: 'create_conversation_session', requestId: nextId('cs'), agentId: crypto.randomUUID(), conversationId, userName: 'console' });
+        },
+        [send],
+    );
+
+    // New chat: fresh session (no conversationId), cleared transcript.
+    const newConversation = useCallback(() => {
+        pendingResumeRef.current = null;
+        setActiveConversationId(null);
+        setMessages([]);
+        setApprovals([]);
+        sessionRef.current = null;
+        send({ action: 'create_conversation_session', requestId: nextId('cs'), agentId: crypto.randomUUID(), userName: 'console' });
+    }, [send]);
+
     const state: AgentState = useMemo(() => {
         if (!connected) return reconnectRef.current ? 'offline' : 'connecting';
         if (approvals.length) return 'awaiting';
@@ -360,5 +481,21 @@ export function useOperator(): OperatorApi {
         return 'awake';
     }, [connected, approvals.length, streaming, turnActive]);
 
-    return { state, messages, approvals, status, sendMessage, respond, mode, setMode, sessionCostUsd, modelCosts };
+    return {
+        state,
+        messages,
+        approvals,
+        status,
+        sendMessage,
+        respond,
+        mode,
+        setMode,
+        sessionCostUsd,
+        modelCosts,
+        conversations,
+        activeConversationId,
+        refreshConversations,
+        resumeConversation,
+        newConversation,
+    };
 }
