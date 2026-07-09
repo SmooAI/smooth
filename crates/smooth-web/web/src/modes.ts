@@ -21,7 +21,7 @@ export interface SmoothMode {
 /** The full lineup, budget first then premium — also the picker order. */
 export const MODES: SmoothMode[] = [
     // Budget — the everyday tier.
-    { id: 'flash', label: 'Flash', emoji: '⚡', model: 'gemini-2.5-flash', tier: 'budget' },
+    { id: 'flash', label: 'Flash', emoji: '⚡', model: 'deepseek-v4-flash', tier: 'budget' },
     { id: 'code', label: 'Code', emoji: '💻', model: 'minimax-m2.7', tier: 'budget' },
     { id: 'ui', label: 'UI', emoji: '🎨', model: 'glm-5.1', tier: 'budget' },
     { id: 'plan', label: 'Plan', emoji: '🧠', model: 'deepseek-v4-pro', tier: 'budget' },
