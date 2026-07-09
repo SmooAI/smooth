@@ -81,6 +81,9 @@ interface HistoryMessage {
     content?: { items?: HistoryContentItem[] } | string;
     role?: string;
     text?: string;
+    /** ISO-8601 send time — used to render history oldest-first (the server
+     * returns newest-first). */
+    createdAt?: string;
 }
 
 /** Flatten a history message's content to text (real shape = content.items[] of
@@ -98,9 +101,12 @@ function historyText(m: HistoryMessage): string {
 }
 
 /** Render server history into our ChatMessage model: `inbound` = user turn,
- * `outbound`/other = assistant (or system). Assistant text becomes one text block. */
+ * `outbound`/other = assistant (or system). Assistant text becomes one text block.
+ * The server returns messages newest-first, so we sort ascending by `createdAt`
+ * to display them chronologically (oldest at top), the way a chat reads. */
 function renderHistory(raw: HistoryMessage[]): ChatMessage[] {
-    return (raw ?? []).map((m) => {
+    const chronological = (raw ?? []).slice().sort((a, b) => (Date.parse(a.createdAt ?? '') || 0) - (Date.parse(b.createdAt ?? '') || 0));
+    return chronological.map((m) => {
         const content = historyText(m);
         const isUser = m.direction === 'inbound' || m.role === 'user';
         const role: ChatMessage['role'] = isUser ? 'user' : m.role === 'system' ? 'system' : 'assistant';
@@ -140,6 +146,8 @@ interface OperatorApi {
     resumeConversation: (conversationId: string) => void;
     /** Start a fresh conversation (new session, cleared transcript). */
     newConversation: () => void;
+    /** Rename a conversation (optimistic; server sanitizes + echoes the canonical title). */
+    renameConversation: (conversationId: string, title: string) => void;
     /** The active Smooth Mode — pins each turn to a model. */
     mode: SmoothMode;
     /** Switch modes by id; persisted to localStorage `smooth.mode`. */
@@ -243,6 +251,14 @@ export function useOperator(): OperatorApi {
                     // list_conversations → the sidebar list (most-recent first, non-empty only).
                     if (Array.isArray(d.conversations)) {
                         setConversations(d.conversations as ConversationSummary[]);
+                        break;
+                    }
+                    // rename_conversation → reconcile the row to the server's
+                    // canonical (sanitized) title. Discriminated by a `title` with
+                    // no `sessionId`/`messages` (create-session / history replies
+                    // carry those).
+                    if (d.title && d.conversationId && !d.sessionId && !Array.isArray(d.messages)) {
+                        setConversations((prev) => prev.map((c) => (c.conversationId === d.conversationId ? { ...c, title: d.title } : c)));
                         break;
                     }
                     // get_conversation_messages → history for a resumed conversation.
@@ -483,6 +499,19 @@ export function useOperator(): OperatorApi {
         [send],
     );
 
+    // Rename: optimistically patch the row, then tell the server. The server
+    // sanitizes (strips wrapping quotes/markdown, caps length) and echoes the
+    // canonical title, which `handle` reconciles onto the row.
+    const renameConversation = useCallback(
+        (conversationId: string, title: string) => {
+            const clean = title.trim();
+            if (!conversationId || !clean) return;
+            setConversations((prev) => prev.map((c) => (c.conversationId === conversationId ? { ...c, title: clean } : c)));
+            send({ action: 'rename_conversation', requestId: nextId('rn'), conversationId, title: clean });
+        },
+        [send],
+    );
+
     // New chat: fresh session (no conversationId), cleared transcript.
     const newConversation = useCallback(() => {
         pendingResumeRef.current = null;
@@ -517,5 +546,6 @@ export function useOperator(): OperatorApi {
         refreshConversations,
         resumeConversation,
         newConversation,
+        renameConversation,
     };
 }
