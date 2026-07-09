@@ -322,13 +322,10 @@ fn extract_attr(fragment: &str, name: &str) -> Option<String> {
     let needle = format!("{name}=");
     let start = fragment.find(&needle)?;
     let after = &fragment[start + needle.len()..];
-    let (quote, body) = if let Some(b) = after.strip_prefix('"') {
-        ('"', b)
-    } else if let Some(b) = after.strip_prefix('\'') {
-        ('\'', b)
-    } else {
-        return None;
-    };
+    let (quote, body) = after
+        .strip_prefix('"')
+        .map(|b| ('"', b))
+        .or_else(|| after.strip_prefix('\'').map(|b| ('\'', b)))?;
     let end = body.find(quote)?;
     Some(body[..end].to_string())
 }
