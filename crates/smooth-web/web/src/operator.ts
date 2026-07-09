@@ -67,23 +67,43 @@ export interface ConversationSummary {
     messageCount: number;
 }
 
-/** A raw history message from `get_conversation_messages`. Shape is assumed
- * `{ role, content }` (defensive on `text`/`message` aliases) — reconcile with
- * the server agent's actual payload. Past tool calls are NOT reconstructed; only
- * the text of each turn is rendered. */
-interface HistoryMessage {
-    role?: string;
-    content?: string;
+/** A raw history message from `get_conversation_messages`. The server returns
+ * the stored domain `Message`: `direction` ('inbound' = user, 'outbound' = agent)
+ * + `content: { items: [{ type:'text', text }] }`. Fallbacks (`role`, string
+ * content, `text`) tolerate other shapes. Past tool calls are NOT reconstructed;
+ * only the text of each turn is rendered. */
+interface HistoryContentItem {
+    type?: string;
     text?: string;
-    message?: string;
+}
+interface HistoryMessage {
+    direction?: string;
+    content?: { items?: HistoryContentItem[] } | string;
+    role?: string;
+    text?: string;
 }
 
-/** Render server history into our ChatMessage model: user turns are inbound,
- * everything else assistant/system. Assistant text becomes a single text block. */
+/** Flatten a history message's content to text (real shape = content.items[] of
+ * text parts; tolerate a bare string or a `text` alias). */
+function historyText(m: HistoryMessage): string {
+    const c = m.content;
+    if (c && typeof c === 'object' && Array.isArray(c.items)) {
+        return c.items
+            .filter((i) => (i.type ?? 'text') === 'text')
+            .map((i) => i.text ?? '')
+            .join('');
+    }
+    if (typeof c === 'string') return c;
+    return m.text ?? '';
+}
+
+/** Render server history into our ChatMessage model: `inbound` = user turn,
+ * `outbound`/other = assistant (or system). Assistant text becomes one text block. */
 function renderHistory(raw: HistoryMessage[]): ChatMessage[] {
     return (raw ?? []).map((m) => {
-        const content = m.content ?? m.text ?? m.message ?? '';
-        const role: ChatMessage['role'] = m.role === 'user' ? 'user' : m.role === 'system' ? 'system' : 'assistant';
+        const content = historyText(m);
+        const isUser = m.direction === 'inbound' || m.role === 'user';
+        const role: ChatMessage['role'] = isUser ? 'user' : m.role === 'system' ? 'system' : 'assistant';
         return {
             id: nextId('h'),
             role,
