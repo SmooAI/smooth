@@ -279,7 +279,7 @@ pub async fn harvest_prs_with(gh: &dyn GhCli, repo: &str, since: NaiveDate, limi
     let fetch_cap = (limit.saturating_mul(4)).min(500).max(limit);
     let json = gh.pr_list_json(repo, since, fetch_cap).await?;
     let raw_list: Vec<RawPr> =
-        serde_json::from_str(&json).with_context(|| format!("parsing gh pr list output (first 200 bytes: {})", &json.chars().take(200).collect::<String>()))?;
+        serde_json::from_str(&json).with_context(|| format!("parsing gh pr list output (first 200 bytes: {})", json.chars().take(200).collect::<String>()))?;
     let mut out: Vec<HarvestedPR> = raw_list.into_iter().filter(is_eligible).filter_map(to_harvested).collect();
     out.truncate(limit);
     Ok(out)
