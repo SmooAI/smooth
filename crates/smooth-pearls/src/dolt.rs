@@ -15,19 +15,32 @@ use serde_json::Value;
 use crate::dolt_server::SmoothDoltServer;
 
 /// Default wallclock bound on a remote sync (`smooth-dolt push` /
-/// `pull`). The Dolt remote sync shells out to git to move
-/// `refs/dolt/data`; that git child holds the noms `LOCK` for the whole
-/// transfer. If the network to the remote stalls, the lock is held
-/// indefinitely and EVERY other writer of this store gets `Error 1105:
-/// cannot update manifest: database is read only` (reads still work).
-/// Bounding the sync means a network stall can NEVER wedge local writes
-/// — on timeout we kill the child, the OS releases the lock, and the
-/// caller sees a retryable "sync timed out" error instead of a wedge.
+/// `pull`). The Dolt remote sync moves `refs/dolt/data`; the sync child
+/// holds the noms `LOCK` for the whole transfer. If the network to the
+/// remote stalls, the lock is held indefinitely and EVERY other writer
+/// of this store gets `Error 1105: cannot update manifest: database is
+/// read only` (reads still work). Bounding the sync means a network
+/// stall can NEVER wedge local writes *forever* — on timeout we kill the
+/// child, the OS releases the lock, and the caller sees a retryable
+/// "sync timed out" error instead of a permanent wedge.
+///
+/// This bound is a wallclock ceiling, NOT a stall detector. It cannot
+/// tell a healthy-but-slow transfer from a dead socket, because
+/// `smooth-dolt push` runs `CALL DOLT_PUSH(...)` as a single synchronous
+/// SQL call that emits NO progress on stdout/stderr — a legitimate large
+/// upload is byte-silent for its entire duration (pearl th-e814a9: a
+/// 303M smooai pearl store re-uploaded a post-gc 114M oldgen table in
+/// ~150s over a home uplink, emitting nothing). So the ceiling must be
+/// generous enough to clear a real large push; at 30s every retry
+/// restarted the same transfer and hit the same wall, making the store
+/// impossible to sync. 300s clears observed large pushes while still
+/// capping a genuine dead-socket wedge at 5 minutes. Normal incremental
+/// pushes finish in ~10s and are unaffected.
 ///
 /// Override with `SMOOTH_DOLT_SYNC_TIMEOUT_SECS`. A value of `0`
 /// disables the bound (restores the old unbounded behavior) for callers
 /// that genuinely want to block on a slow-but-progressing transfer.
-const DEFAULT_SYNC_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_SYNC_TIMEOUT_SECS: u64 = 300;
 
 /// Resolve the remote-sync timeout from the environment, falling back to
 /// [`DEFAULT_SYNC_TIMEOUT_SECS`]. `None` means "no bound" (env set to
@@ -598,10 +611,11 @@ mod sync_timeout_tests {
 
     #[test]
     fn parse_garbage_falls_back_to_default_not_unbounded() {
-        // Fail-safe: a typo must not silently drop the protection.
-        assert_eq!(parse_sync_timeout("banana"), Some(Duration::from_secs(30)));
-        assert_eq!(parse_sync_timeout("-5"), Some(Duration::from_secs(30)));
-        assert_eq!(parse_sync_timeout(""), Some(Duration::from_secs(30)));
+        // Fail-safe: a typo must not silently drop the protection. Falls
+        // back to the 300s default bound, not unbounded (pearl th-e814a9).
+        assert_eq!(parse_sync_timeout("banana"), Some(Duration::from_secs(300)));
+        assert_eq!(parse_sync_timeout("-5"), Some(Duration::from_secs(300)));
+        assert_eq!(parse_sync_timeout(""), Some(Duration::from_secs(300)));
     }
 
     #[test]
@@ -1545,7 +1559,7 @@ pub fn clone_from(remote_url: &str, target_dir: &std::path::Path) -> Result<()> 
 }
 
 /// Like [`clone_from`] but bounded by the standard remote-sync timeout
-/// ([`sync_timeout`] — 30s default, `SMOOTH_DOLT_SYNC_TIMEOUT_SECS` to
+/// ([`sync_timeout`] — 300s default, `SMOOTH_DOLT_SYNC_TIMEOUT_SECS` to
 /// override). Used by `th pearls doctor`'s remote-sync probe, where a
 /// dead/unreachable remote must produce a diagnosis rather than a hang.
 pub fn clone_from_bounded(remote_url: &str, target_dir: &std::path::Path) -> Result<()> {
@@ -1713,8 +1727,8 @@ pub const DOLT_DATA_REF: &str = "refs/dolt/data";
 /// Current tip of `refs/dolt/data` on the remote, via `git ls-remote` —
 /// one ref advertisement instead of a full clone. On a 2547-commit store
 /// the probe clone (`clone_from_bounded`) is ~5 minutes at 96% CPU and
-/// always exceeds the default 30s sync bound; ls-remote answers in ~1s,
-/// so `th pearls doctor` runs this tip-level check first (pearl
+/// brushes up against the default 300s sync bound; ls-remote answers in
+/// ~1s, so `th pearls doctor` runs this tip-level check first (pearl
 /// th-c42cc4).
 ///
 /// Dolt stores git remotes in `git+ssh://` / `git+file://` form — git
