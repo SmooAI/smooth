@@ -728,12 +728,13 @@ enum ApiCommands {
         #[command(subcommand)]
         cmd: smooai::crm::Cmd,
     },
-    /// Smoo AI org Copilot — chat / confirm / history. Drives the org's
+    /// Smoo AI org Smooth Operator — chat / confirm / history. Drives the org's
     /// always-on dashboard agent (draft email, CRM, analytics, templates).
     /// Authenticates as the logged-in user (`th auth login`).
-    Copilot {
+    #[command(name = "smooth-operator")]
+    SmoothOperator {
         #[command(subcommand)]
-        cmd: smooai::copilot::Cmd,
+        cmd: smooai::smooth_operator::Cmd,
     },
     /// Smoo AI knowledge documents (text, websites, files).
     Knowledge {
@@ -1508,7 +1509,7 @@ async fn main() -> Result<()> {
             ApiCommands::Keys { cmd } => smooai::keys::cmd(cmd).await,
             ApiCommands::Members { cmd } => smooai::members::cmd(cmd).await,
             ApiCommands::Crm { cmd } => smooai::crm::cmd(cmd).await,
-            ApiCommands::Copilot { cmd } => smooai::copilot::cmd(cmd).await,
+            ApiCommands::SmoothOperator { cmd } => smooai::smooth_operator::cmd(cmd).await,
             ApiCommands::Knowledge { cmd } => smooai::knowledge::cmd(cmd).await,
             ApiCommands::Files { cmd } => smooai::files::cmd(cmd).await,
             ApiCommands::Jobs { cmd } => smooai::jobs::cmd(cmd).await,
