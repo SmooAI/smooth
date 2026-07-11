@@ -68,7 +68,7 @@ smooth/
 
 ```bash
 # Smoo platform — replaces every curl to api.smoo.ai
-th api orgs|agents|copilot|knowledge|jobs|members|config|keys|observability|profile|testing
+th api orgs|agents|smooth-operator|knowledge|jobs|members|config|keys|observability|profile|testing
 
 # Cross-org admin (planned — pearl th-feebd2, blocked on th-abc4e2)
 th admin onboard-customer / mint-key / set-secret / org list|show

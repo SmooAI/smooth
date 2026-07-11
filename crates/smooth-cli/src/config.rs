@@ -1665,7 +1665,7 @@ fn looks_like_jwt(v: &str) -> bool {
 }
 
 /// The three ways the credential tripwire can resolve, split out from the IO so
-/// it's unit-testable (mirrors `copilot::decide`). `force` skips the gate;
+/// it's unit-testable (mirrors `smooth_operator::decide`). `force` skips the gate;
 /// otherwise a TTY prompts and a non-TTY refuses (no way to confirm in CI).
 #[derive(Debug, PartialEq, Eq)]
 enum TripwireAction {

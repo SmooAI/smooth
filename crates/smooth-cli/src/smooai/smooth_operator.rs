@@ -1,15 +1,15 @@
-//! `th api copilot …` — drive the org's always-on dashboard Copilot from
+//! `th api smooth-operator …` — drive the org's always-on dashboard Smooth Operator from
 //! the CLI. Authenticates as the logged-in *user* (`th auth login`), same
-//! as `th api crm`, because the copilot routes are `auth: 'user'` (they
+//! as `th api crm`, because the smooth-operator routes are `auth: 'user'` (they
 //! 401 under an M2M client) — every tool run is audit-logged against the
 //! real person. Pearl th-f15107; smooai PR #2383.
 //!
 //! Three subcommands mirror the three routes:
-//!   chat     POST /organizations/{org}/copilot/chat      {message, conversationId?}
-//!   confirm  POST /organizations/{org}/copilot/confirm   {conversationId, approve}
-//!   history  GET  /organizations/{org}/copilot/conversations/{id}
+//!   chat     POST /organizations/{org}/smooth-operator/chat      {message, conversationId?}
+//!   confirm  POST /organizations/{org}/smooth-operator/confirm   {conversationId, approve}
+//!   history  GET  /organizations/{org}/smooth-operator/conversations/{id}
 //!
-//! Responses are buffered JSON (`CopilotTurnResult`) — token streaming is
+//! Responses are buffered JSON (`SmoothOperatorTurnResult`) — token streaming is
 //! phase 2 on the smooai side. A turn may return a `pendingAction`: a
 //! destructive tool (e.g. `email.send`) the loop paused on. `chat` resolves
 //! it inline — a y/N prompt on a TTY, or the up-front `--confirm`/
@@ -30,10 +30,10 @@ use crate::smooai::user_client::UserClient;
 
 #[derive(Subcommand)]
 pub enum Cmd {
-    /// Send a message to the org copilot and print its reply. Resolves any
+    /// Send a message to the org smooth-operator and print its reply. Resolves any
     /// destructive-action confirmation inline (TTY prompt or `--confirm`/`--no-confirm`).
     Chat {
-        /// The message to send to the copilot.
+        /// The message to send to the smooth-operator.
         message: String,
         /// Continue an existing conversation. Omit to start a new one.
         #[arg(long = "conversation", visible_alias = "conversation-id")]
@@ -69,7 +69,7 @@ pub enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Print the message history of a copilot conversation.
+    /// Print the message history of a smooth-operator conversation.
     History {
         /// The conversation id from a `chat` turn.
         conversation_id: String,
@@ -82,7 +82,7 @@ pub enum Cmd {
     },
 }
 
-// ---- API response shapes (subset of smooai CopilotTurnResult / CopilotHistory) ----
+// ---- API response shapes (subset of smooai SmoothOperatorTurnResult / SmoothOperatorHistory) ----
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -205,9 +205,9 @@ async fn chat(client: &UserClient, org: String, message: String, conversation: O
         body["conversationId"] = Value::String(cid);
     }
     let raw = client
-        .post(&format!("/organizations/{org}/copilot/chat"), &body)
+        .post(&format!("/organizations/{org}/smooth-operator/chat"), &body)
         .await
-        .context("POST copilot chat")?;
+        .context("POST smooth-operator chat")?;
     resolve_turn(client, &org, raw, confirm_flag, no_confirm, json).await
 }
 
@@ -224,9 +224,9 @@ async fn confirm(client: &UserClient, org: &str, conversation_id: &str, approve:
 async fn post_confirm(client: &UserClient, org: &str, conversation_id: &str, approve: bool) -> Result<Value> {
     let body = json!({ "conversationId": conversation_id, "approve": approve });
     client
-        .post(&format!("/organizations/{org}/copilot/confirm"), &body)
+        .post(&format!("/organizations/{org}/smooth-operator/confirm"), &body)
         .await
-        .context("POST copilot confirm")
+        .context("POST smooth-operator confirm")
 }
 
 /// Render a turn, then keep resolving any `pendingAction` (a turn can pause on
@@ -249,7 +249,7 @@ async fn resolve_turn(client: &UserClient, org: &str, raw: Value, confirm_flag: 
             Decision::Prompt => prompt_confirm(pending)?,
             Decision::NeedFlag => {
                 println!(
-                    "  {} pending action needs a decision — re-run with {} or {}, or `th api copilot confirm {} --approve|--decline`",
+                    "  {} pending action needs a decision — re-run with {} or {}, or `th api smooth-operator confirm {} --approve|--decline`",
                     "!".yellow().bold(),
                     "--confirm".bold(),
                     "--no-confirm".bold(),
@@ -272,7 +272,7 @@ fn prompt_confirm(pending: &PendingAction) -> Result<bool> {
 }
 
 fn parse_turn(raw: &Value) -> Result<TurnResult> {
-    serde_json::from_value(raw.clone()).context("parse copilot turn result")
+    serde_json::from_value(raw.clone()).context("parse smooth-operator turn result")
 }
 
 fn render_turn(turn: &TurnResult) {
@@ -301,14 +301,14 @@ fn render_turn(turn: &TurnResult) {
 
 async fn history(client: &UserClient, org: &str, conversation_id: &str, json: bool) -> Result<()> {
     let raw = client
-        .get(&format!("/organizations/{org}/copilot/conversations/{conversation_id}"))
+        .get(&format!("/organizations/{org}/smooth-operator/conversations/{conversation_id}"))
         .await
-        .context("GET copilot conversation")?;
+        .context("GET smooth-operator conversation")?;
     if json {
         print_json(&raw);
         return Ok(());
     }
-    let hist: History = serde_json::from_value(raw).context("parse copilot history")?;
+    let hist: History = serde_json::from_value(raw).context("parse smooth-operator history")?;
     println!();
     if hist.messages.is_empty() {
         println!("  {} {}", "●".dimmed(), "no messages".dimmed());
@@ -318,7 +318,7 @@ async fn history(client: &UserClient, org: &str, conversation_id: &str, json: bo
     for m in &hist.messages {
         let who = match m.role.as_str() {
             "user" => "you".cyan().to_string(),
-            "assistant" => "copilot".green().to_string(),
+            "assistant" => "smooth-operator".green().to_string(),
             "tool" => m.tool_name.clone().unwrap_or_else(|| "tool".into()).yellow().to_string(),
             other => other.to_string(),
         };
