@@ -1,8 +1,8 @@
 {
     "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
     "name": "smooth-agent",
-    "version": "0.1.0",
-    "description": "Big Smooth orchestration for Claude Code: tmux-supervised worker sessions that survive the account-wide rate-limit throttle, coordinate over th-mail, and track work in pearls. Provides the /smooth command.",
+    "version": "0.2.0",
+    "description": "Big Smooth orchestration for Claude Code: tmux-supervised worker sessions that survive the account-wide rate-limit throttle, coordinate over th-mail, and track work in pearls. Provides the /smooth command. Also ships the shared SmooAI repo guardrails as hooks (worktree enforcement, th-over-curl nudges, pearls-label reminder) so smooth·smooai·smooblue stop hand-copying .claude/hooks.",
     "author": {
         "name": "SmooAI",
         "email": "brent@smoo.ai"

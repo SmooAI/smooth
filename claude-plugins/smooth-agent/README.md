@@ -16,6 +16,22 @@ sessions that survive the account-wide rate-limit throttle, coordinate them over
 - **SessionStart hook** — when a session is launched by `th claude run` (which
   exports `SMOOTH_AGENT_HANDLE`), auto-registers it on the th-mail bus so Big
   Smooth can address it by id.
+- **Shared repo guardrail hooks** — the SmooAI worktree/pearls guardrails that
+  used to be hand-copied into every repo's `.claude/hooks/`, now one source of
+  truth (pearl th-44bace). All derive the repo/main-worktree from git at runtime,
+  so the same scripts guard smooth·smooai·smooblue:
+    - `enforce-worktree.sh` (PreToolUse Edit/Write/Bash) — asks before editing
+      source or committing on `main` in the main worktree.
+    - `session-worktree-warning.sh` (SessionStart) — warns when a session opens
+      in the main worktree on `main`.
+    - `th-curl-hint.sh` (PreToolUse Bash) — nudges raw curl against
+      api/auth.smoo.ai / Jira toward the `th` CLI, and flags two secret-handling
+      footguns.
+    - `enforce-pearls-labels.sh` (PostToolUse Bash) — reminds to label a
+      `th pearls create`.
+
+  Enable per-repo in `.claude/settings.json` (`enabledPlugins`) and delete the
+  local `.claude/hooks/` copies — see the repo's own settings for the pattern.
 
 ## Requires
 
