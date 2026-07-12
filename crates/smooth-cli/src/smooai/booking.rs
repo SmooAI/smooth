@@ -26,6 +26,12 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: ConfigCmd,
     },
+    /// Named booking types (Calendly-style event types) — list / create / update / rm.
+    #[command(visible_alias = "type")]
+    Types {
+        #[command(subcommand)]
+        cmd: TypesCmd,
+    },
     /// Open booking slots for a member, rendered in the config timezone.
     Slots {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
@@ -54,20 +60,29 @@ pub enum Cmd {
         org: Option<String>,
     },
     /// Manual calendar blocks — busy time carved out of availability.
+    #[command(visible_alias = "blocks")]
     Block {
         #[command(subcommand)]
         cmd: BlockCmd,
     },
     /// Connected Google calendars — primary + extra conflict accounts.
+    #[command(visible_alias = "calendar")]
     Calendars {
         #[command(subcommand)]
         cmd: CalendarsCmd,
     },
-    /// Print the public booking link for the org.
+    /// Print the public booking link for the org (uses the config's link
+    /// handle/slug when set, otherwise the member email).
     Link {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
+        /// Booking type slug — prints the typed link `/book/{org}/{member}/{type}`.
+        #[arg(long = "type")]
+        type_slug: Option<String>,
+        /// Ad-hoc personal note — appended as `?m=<urlencoded>` for the pre-filled link variant.
+        #[arg(long)]
+        note: Option<String>,
     },
 }
 
@@ -127,6 +142,102 @@ pub enum ConfigCmd {
         /// Public display name on the booking page.
         #[arg(long = "display-name")]
         display_name: Option<String>,
+        /// Public link handle (org-unique). Server validates `^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`.
+        #[arg(long)]
+        slug: Option<String>,
+        /// Default online-meeting provider for new bookings.
+        #[arg(long, value_parser = ["none", "google_meet", "teams", "zoom"])]
+        conferencing: Option<String>,
+        /// Avatar image URL shown on the public booking page.
+        #[arg(long = "avatar-url")]
+        avatar_url: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
+pub enum TypesCmd {
+    /// List the org's booking types.
+    List {
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Create a booking type.
+    Create {
+        /// Display name of the type.
+        #[arg(long)]
+        name: String,
+        /// Public slug (lowercase letters, numbers, hyphens).
+        #[arg(long)]
+        slug: String,
+        /// Offered meeting lengths in minutes, comma-separated (e.g. 30,45).
+        #[arg(long, value_delimiter = ',', required = true)]
+        durations: Vec<u32>,
+        /// Personal note shown on the public typed page (max 500).
+        #[arg(long)]
+        note: Option<String>,
+        /// Online-meeting override. Omit to inherit the config's choice.
+        #[arg(long, value_parser = ["none", "google_meet", "teams", "zoom"])]
+        conferencing: Option<String>,
+        /// Window start (ISO 8601) — link opens at this time.
+        #[arg(long = "window-start")]
+        window_start: Option<String>,
+        /// Window end (ISO 8601) — link closes at this time.
+        #[arg(long = "window-end")]
+        window_end: Option<String>,
+        /// One-time link (maxBookings = 1).
+        #[arg(long = "one-time")]
+        one_time: bool,
+        /// Share on the public org directory (scope = org) instead of personal.
+        #[arg(long = "org-shared")]
+        org_shared: bool,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Update a booking type by id (all fields are replaced by the payload).
+    Update {
+        /// The type id from `th booking types list`.
+        type_id: String,
+        /// Display name of the type.
+        #[arg(long)]
+        name: String,
+        /// Public slug (lowercase letters, numbers, hyphens).
+        #[arg(long)]
+        slug: String,
+        /// Offered meeting lengths in minutes, comma-separated (e.g. 30,45).
+        #[arg(long, value_delimiter = ',', required = true)]
+        durations: Vec<u32>,
+        /// Personal note shown on the public typed page (max 500).
+        #[arg(long)]
+        note: Option<String>,
+        /// Online-meeting override. Omit to inherit the config's choice.
+        #[arg(long, value_parser = ["none", "google_meet", "teams", "zoom"])]
+        conferencing: Option<String>,
+        /// Window start (ISO 8601) — link opens at this time.
+        #[arg(long = "window-start")]
+        window_start: Option<String>,
+        /// Window end (ISO 8601) — link closes at this time.
+        #[arg(long = "window-end")]
+        window_end: Option<String>,
+        /// One-time link (maxBookings = 1).
+        #[arg(long = "one-time")]
+        one_time: bool,
+        /// Share on the public org directory (scope = org) instead of personal.
+        #[arg(long = "org-shared")]
+        org_shared: bool,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Remove a booking type by id.
+    Rm {
+        /// The type id from `th booking types list`.
+        type_id: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
     },
 }
 
@@ -213,6 +324,9 @@ struct ConfigOverlay {
     calendar_id: Option<String>,
     conflict_calendars: Option<Vec<String>>,
     display_name: Option<String>,
+    slug: Option<String>,
+    conferencing: Option<String>,
+    avatar_url: Option<String>,
 }
 
 pub async fn cmd(cmd: Cmd) -> Result<()> {
@@ -239,6 +353,9 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                     calendar_id,
                     conflict_calendars,
                     display_name,
+                    slug,
+                    conferencing,
+                    avatar_url,
                 },
         } => {
             let o = require_active_org(&client, org)?;
@@ -254,10 +371,100 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                 calendar_id,
                 conflict_calendars,
                 display_name,
+                slug,
+                conferencing,
+                avatar_url,
             };
             let current = client.get(&format!("/booking/config/{o}")).await.context("GET booking config")?;
             let payload = build_payload(&current, &overlay);
             print_json(&client.put(&format!("/booking/config/{o}"), &payload).await.context("PUT booking config")?);
+        }
+        Cmd::Types { cmd: TypesCmd::List { org } } => {
+            let o = require_active_org(&client, org)?;
+            let body = client.get(&format!("/booking/types/{o}")).await.context("GET booking types")?;
+            // Prefer the config's public handle over each type's member email
+            // when building URLs — matches the `link` command's contract.
+            let slug = client
+                .get(&format!("/booking/config/{o}"))
+                .await
+                .ok()
+                .and_then(|c| c.get("slug").and_then(|v| v.as_str()).map(str::to_string));
+            render_types(&body, &o, slug.as_deref());
+        }
+        Cmd::Types {
+            cmd:
+                TypesCmd::Create {
+                    name,
+                    slug,
+                    durations,
+                    note,
+                    conferencing,
+                    window_start,
+                    window_end,
+                    one_time,
+                    org_shared,
+                    org,
+                },
+        } => {
+            let o = require_active_org(&client, org)?;
+            let payload = build_type_payload(&TypeInput {
+                name,
+                slug,
+                durations,
+                note,
+                conferencing,
+                window_start,
+                window_end,
+                one_time,
+                org_shared,
+            });
+            print_json(&client.post(&format!("/booking/types/{o}"), Some(&payload)).await.context("POST booking type")?);
+        }
+        Cmd::Types {
+            cmd:
+                TypesCmd::Update {
+                    type_id,
+                    name,
+                    slug,
+                    durations,
+                    note,
+                    conferencing,
+                    window_start,
+                    window_end,
+                    one_time,
+                    org_shared,
+                    org,
+                },
+        } => {
+            let o = require_active_org(&client, org)?;
+            let payload = build_type_payload(&TypeInput {
+                name,
+                slug,
+                durations,
+                note,
+                conferencing,
+                window_start,
+                window_end,
+                one_time,
+                org_shared,
+            });
+            print_json(
+                &client
+                    .patch(&format!("/booking/types/{o}/{}", urlencoding::encode(&type_id)), &payload)
+                    .await
+                    .context("PATCH booking type")?,
+            );
+        }
+        Cmd::Types {
+            cmd: TypesCmd::Rm { type_id, org },
+        } => {
+            let o = require_active_org(&client, org)?;
+            print_json(
+                &client
+                    .delete(&format!("/booking/types/{o}/{}", urlencoding::encode(&type_id)))
+                    .await
+                    .context("DELETE booking type")?,
+            );
         }
         Cmd::Slots {
             org,
@@ -389,15 +596,19 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                     .context("DELETE calendar")?,
             );
         }
-        Cmd::Link { org } => {
+        Cmd::Link { org, type_slug, note } => {
             let o = require_active_org(&client, org)?;
             let config = client.get(&format!("/booking/config/{o}")).await.context("GET booking config")?;
-            let member = config
-                .get("memberEmail")
+            // Prefer the org-unique link handle; fall back to the member email.
+            let handle = config
+                .get("slug")
                 .and_then(|v| v.as_str())
-                .context("config has no memberEmail — connect a Google Calendar first")?;
+                .filter(|s| !s.is_empty())
+                .or_else(|| config.get("memberEmail").and_then(|v| v.as_str()))
+                .context("config has no slug or memberEmail — connect a Google Calendar first")?;
+            let url = build_public_url(&o, handle, type_slug.as_deref(), note.as_deref());
             println!();
-            println!("  {} https://smoo.ai/book/{o}/{}", "→".cyan(), member.bold());
+            println!("  {} {}", "→".cyan(), url.bold());
             if config.get("connected").and_then(serde_json::Value::as_bool) == Some(false) {
                 println!("  {} calendar not connected — the link won't work until it is", "⚠".yellow());
             }
@@ -471,7 +682,73 @@ fn build_payload(current: &Value, overlay: &ConfigOverlay) -> Value {
     if let Some(v) = &overlay.display_name {
         obj.insert("displayName".into(), json!(v));
     }
+    if let Some(v) = &overlay.slug {
+        obj.insert("slug".into(), json!(v));
+    }
+    if let Some(v) = &overlay.conferencing {
+        obj.insert("conferencing".into(), json!(v));
+    }
+    if let Some(v) = &overlay.avatar_url {
+        obj.insert("avatarUrl".into(), json!(v));
+    }
     Value::Object(obj)
+}
+
+/// Resolved `types create/update` flags, shared by both paths so the
+/// payload shaping (durations, one-time → maxBookings, scope) lives in
+/// one place and is unit-testable without a `Cmd`.
+struct TypeInput {
+    name: String,
+    slug: String,
+    durations: Vec<u32>,
+    note: Option<String>,
+    conferencing: Option<String>,
+    window_start: Option<String>,
+    window_end: Option<String>,
+    one_time: bool,
+    org_shared: bool,
+}
+
+/// Build the POST/PATCH body for a booking type. Optional windows,
+/// conferencing, and note are only set when supplied (omitted = inherit /
+/// unset server-side); `--one-time` maps to `maxBookings: 1` and
+/// `--org-shared` to `scope: "org"` (default "personal").
+fn build_type_payload(input: &TypeInput) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("name".into(), json!(input.name));
+    obj.insert("slug".into(), json!(input.slug));
+    obj.insert("durationsMinutes".into(), json!(input.durations));
+    obj.insert("scope".into(), json!(if input.org_shared { "org" } else { "personal" }));
+    if input.one_time {
+        obj.insert("maxBookings".into(), json!(1));
+    }
+    if let Some(v) = &input.note {
+        obj.insert("note".into(), json!(v));
+    }
+    if let Some(v) = &input.conferencing {
+        obj.insert("conferencing".into(), json!(v));
+    }
+    if let Some(v) = &input.window_start {
+        obj.insert("windowStartAt".into(), json!(v));
+    }
+    if let Some(v) = &input.window_end {
+        obj.insert("windowEndAt".into(), json!(v));
+    }
+    Value::Object(obj)
+}
+
+/// Public booking URL. `handle` is the config link slug or the member
+/// email; `type_slug` appends the typed path; `note` appends `?m=<enc>`.
+fn build_public_url(org: &str, handle: &str, type_slug: Option<&str>, note: Option<&str>) -> String {
+    let mut url = format!("https://smoo.ai/book/{org}/{}", urlencoding::encode(handle));
+    if let Some(t) = type_slug {
+        url.push('/');
+        url.push_str(&urlencoding::encode(t));
+    }
+    if let Some(n) = note {
+        url.push_str(&format!("?m={}", urlencoding::encode(n)));
+    }
+    url
 }
 
 /// Render a slot ISO timestamp in `tz` as e.g. "Thu Jul 09 1:00 PM".
@@ -551,6 +828,61 @@ fn render_calendars(body: &Value) {
         println!("  {} {} {}  {}{}", "○".dimmed(), id.cyan(), email.bold(), role.dimmed(), suffix.dimmed());
     }
     println!();
+}
+
+/// Print the `{ types: [...] }` body as a list: name, slug, durations,
+/// note (truncated), scope, window, and the full public URL per type.
+fn render_types(body: &Value, org: &str, config_slug: Option<&str>) {
+    let types = body.get("types").and_then(|v| v.as_array());
+    println!();
+    let Some(types) = types else {
+        print_json(body);
+        return;
+    };
+    if types.is_empty() {
+        println!("  {} {}", "●".dimmed(), "no booking types".dimmed());
+        println!();
+        return;
+    }
+    for t in types {
+        let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let slug = t.get("slug").and_then(|v| v.as_str()).unwrap_or("");
+        let scope = t.get("scope").and_then(|v| v.as_str()).unwrap_or("personal");
+        let durations: Vec<String> = t
+            .get("durationsMinutes")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(serde_json::Value::as_u64).map(|n| format!("{n}m")).collect())
+            .unwrap_or_default();
+        // Build the public URL with the config handle, falling back to the type's member email.
+        let handle = config_slug
+            .filter(|s| !s.is_empty())
+            .or_else(|| t.get("memberEmail").and_then(|v| v.as_str()))
+            .unwrap_or("");
+        let url = build_public_url(org, handle, Some(slug), None);
+        println!("  {} {} {}  {}", "○".dimmed(), slug.cyan(), name.bold(), durations.join(",").dimmed());
+        println!("    {} {}", "scope".dimmed(), scope.dimmed());
+        if let Some(note) = t.get("note").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+            println!("    {} {}", "note ".dimmed(), truncate(note, 60).dimmed());
+        }
+        let start = t.get("windowStartAt").and_then(|v| v.as_str());
+        let end = t.get("windowEndAt").and_then(|v| v.as_str());
+        if start.is_some() || end.is_some() {
+            println!("    {} {}–{}", "win  ".dimmed(), start.unwrap_or("").dimmed(), end.unwrap_or("").dimmed());
+        }
+        println!("    {} {}", "url  ".dimmed(), url.dimmed());
+    }
+    println!();
+}
+
+/// Truncate `s` to `max` chars, appending `…` when clipped. Char-based so
+/// it never splits a multibyte boundary.
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
 }
 
 #[cfg(test)]
@@ -656,5 +988,88 @@ mod tests {
     #[test]
     fn slot_bad_timestamp_is_none() {
         assert!(format_slot_in_tz("not-a-date", chrono_tz::UTC).is_none());
+    }
+
+    #[test]
+    fn config_set_writes_slug_conferencing_avatar() {
+        let out = build_payload(
+            &json!({}),
+            &ConfigOverlay {
+                slug: Some("brent".into()),
+                conferencing: Some("google_meet".into()),
+                avatar_url: Some("https://img/a.png".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(out["slug"], json!("brent"));
+        assert_eq!(out["conferencing"], json!("google_meet"));
+        assert_eq!(out["avatarUrl"], json!("https://img/a.png"));
+    }
+
+    #[test]
+    fn type_payload_minimal() {
+        let out = build_type_payload(&TypeInput {
+            name: "Intro".into(),
+            slug: "intro".into(),
+            durations: vec![30],
+            note: None,
+            conferencing: None,
+            window_start: None,
+            window_end: None,
+            one_time: false,
+            org_shared: false,
+        });
+        assert_eq!(out["name"], json!("Intro"));
+        assert_eq!(out["slug"], json!("intro"));
+        assert_eq!(out["durationsMinutes"], json!([30]));
+        assert_eq!(out["scope"], json!("personal"));
+        // Optional fields stay absent when unset (server inherits / leaves null).
+        assert!(out.get("maxBookings").is_none());
+        assert!(out.get("note").is_none());
+        assert!(out.get("conferencing").is_none());
+        assert!(out.get("windowStartAt").is_none());
+    }
+
+    #[test]
+    fn type_payload_full() {
+        let out = build_type_payload(&TypeInput {
+            name: "Demo".into(),
+            slug: "demo".into(),
+            durations: vec![30, 45],
+            note: Some("bring your team".into()),
+            conferencing: Some("zoom".into()),
+            window_start: Some("2026-07-09T00:00:00Z".into()),
+            window_end: Some("2026-07-16T00:00:00Z".into()),
+            one_time: true,
+            org_shared: true,
+        });
+        assert_eq!(out["durationsMinutes"], json!([30, 45]));
+        assert_eq!(out["scope"], json!("org"));
+        assert_eq!(out["maxBookings"], json!(1));
+        assert_eq!(out["note"], json!("bring your team"));
+        assert_eq!(out["conferencing"], json!("zoom"));
+        assert_eq!(out["windowStartAt"], json!("2026-07-09T00:00:00Z"));
+        assert_eq!(out["windowEndAt"], json!("2026-07-16T00:00:00Z"));
+    }
+
+    #[test]
+    fn public_url_variants() {
+        assert_eq!(build_public_url("org1", "brent", None, None), "https://smoo.ai/book/org1/brent");
+        assert_eq!(build_public_url("org1", "brent", Some("demo"), None), "https://smoo.ai/book/org1/brent/demo");
+        // Note is url-encoded into the `?m=` param.
+        assert_eq!(
+            build_public_url("org1", "brent", Some("demo"), Some("hi there")),
+            "https://smoo.ai/book/org1/brent/demo?m=hi%20there"
+        );
+        // Email handle is url-encoded (the `@` survives, the fallback path works).
+        assert_eq!(build_public_url("org1", "me@x.com", None, None), "https://smoo.ai/book/org1/me%40x.com");
+    }
+
+    #[test]
+    fn truncate_clips_with_ellipsis() {
+        assert_eq!(truncate("short", 60), "short");
+        assert_eq!(truncate("abcdef", 3), "abc…");
+        // Char-based: multibyte input isn't split mid-codepoint.
+        assert_eq!(truncate("héllo wörld", 4), "héll…");
     }
 }
