@@ -28,6 +28,7 @@ pub mod profile;
 pub mod smooth_operator;
 pub mod testing;
 pub mod user_client;
+pub mod websearch;
 pub mod widgets;
 
 use std::io::IsTerminal;
