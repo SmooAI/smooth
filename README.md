@@ -415,12 +415,25 @@ Add it to the repo's `.claude/settings.json`:
 |---|---|
 | `/smooth` | Drive **Big Smooth** — spin up tmux-supervised Claude Code workers that survive the account-wide rate-limit throttle, coordinate over th-mail, and track work in pearls (`run` / `add-agent` / `drive` / `manual` / `mail` / `status`). |
 | `org-copilot` | Drive your Smoo AI org's dashboard agent from the CLI (`th api copilot`) — CRM lookups, analytics, knowledge base, draft + send email, with confirm-before-send. |
-| `agent-comms` | Talk to Big Smooth and other agents over th-mail (`th agent` / `th msg`) — report status, answer pings, hand off work. |
+| `agent-comms` | Talk to Big Smooth and other agents over th-mail (`th agent` / `th msg`) — report status, answer pings, hand off work. Reliable because the session **auto-registers** on the bus (see Session hooks below). |
 | `pearls-flow` | Track work as pearls — create before you code, claim it, close it on push. |
+
+### Session hooks
+
+On `SessionStart` the plugin wires the session into Smooth:
+
+- **th-mail registration** — when the session was launched by
+  `th claude run` (which exports `SMOOTH_AGENT_HANDLE`), the hook runs
+  `th agent register` to put it on the th-mail bus under that handle, so
+  **Big Smooth and other agents can reach it with zero manual setup** —
+  this is the reliability layer under the `agent-comms` skill. A plain
+  `claude` launch is a no-op.
+- **Worktree warning** — a heads-up when you start a session in the main
+  worktree on `main`, before you edit anything.
 
 ### Guardrail hooks
 
-The plugin also ships the **shared SmooAI repo guardrails** as hooks, so
+On tool use the plugin enforces the **shared SmooAI repo guardrails**, so
 `smooth`·`smooai`·`smooblue` stop hand-copying `.claude/hooks/`:
 
 - **Worktree enforcement** — blocks source edits and commits on `main`,
