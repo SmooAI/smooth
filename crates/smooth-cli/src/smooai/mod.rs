@@ -11,6 +11,7 @@
 
 pub mod agents;
 pub mod booking;
+pub mod crawl;
 pub mod crm;
 pub mod files;
 pub mod heypage;
