@@ -164,6 +164,14 @@ enum Commands {
         #[command(subcommand)]
         cmd: config::Cmd,
     },
+    /// Smoo AI in-house web crawler (ADR-035) — `th crawl scrape <url>`
+    /// turns a page into clean markdown through the authed crawler
+    /// service (real browser UA + JS render), so it gets pages a plain
+    /// fetch 403s on. Any authenticated org member can use it.
+    Crawl {
+        #[command(subcommand)]
+        cmd: smooai::crawl::Cmd,
+    },
     /// Smoo AI LLM gateway keys — mint / rotate / list the org's
     /// `llm.smoo.ai` keys and inspect spend. `th llm create-key`
     /// provisions the org's persistent key (a LiteLLM virtual key
@@ -1522,6 +1530,7 @@ async fn main() -> Result<()> {
         },
         Some(Commands::Org { cmd }) => cmd_orgs(cmd).await,
         Some(Commands::Config { cmd }) => config::cmd(cmd).await,
+        Some(Commands::Crawl { cmd }) => smooai::crawl::cmd(cmd).await,
         Some(Commands::Llm { cmd }) => smooai::llm_gateway::cmd(cmd).await,
         Some(Commands::Notify {
             message,
