@@ -183,6 +183,15 @@ enum Commands {
         #[command(subcommand)]
         cmd: smooai::crawl::Cmd,
     },
+    /// Smoo AI agentic web search (Tavily, SMOODEV-2573) — `th web-search
+    /// search <query>` returns ranked results (+ optional answer). Full
+    /// options when logged in; an anonymous free tier (basic depth, capped
+    /// results) otherwise. A companion to `th crawl` for agentic coding.
+    #[command(name = "web-search")]
+    WebSearch {
+        #[command(subcommand)]
+        cmd: smooai::websearch::Cmd,
+    },
     /// Smoo AI LLM gateway keys — mint / rotate / list the org's
     /// `llm.smoo.ai` keys and inspect spend. `th llm create-key`
     /// provisions the org's persistent key (a LiteLLM virtual key
@@ -1561,6 +1570,7 @@ async fn main() -> Result<()> {
         Some(Commands::Config { cmd }) => config::cmd(cmd).await,
         Some(Commands::Widgets { cmd }) => smooai::widgets::cmd(cmd).await,
         Some(Commands::Crawl { cmd }) => smooai::crawl::cmd(cmd).await,
+        Some(Commands::WebSearch { cmd }) => smooai::websearch::cmd(cmd).await,
         Some(Commands::Llm { cmd }) => smooai::llm_gateway::cmd(cmd).await,
         Some(Commands::Notify {
             message,

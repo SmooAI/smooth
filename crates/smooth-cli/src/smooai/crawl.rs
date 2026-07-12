@@ -16,11 +16,12 @@ use serde_json::{json, Value};
 
 use super::{print_json, require_active_org, require_authed};
 
-/// Bundled publishable client id for the free tier. NON-secret by design (see
-/// ADR-005): it only asserts "this is the `th` tool" and selects the free tier.
-/// Rotated by shipping a new id here and allow-listing both for a window via the
-/// `crawlerPublicClientIds` config key; bump the version suffix on rotation.
-const PUBLIC_CRAWL_CLIENT_ID: &str = "th-crawl-v1";
+/// Bundled publishable client id for the `th` public-tools free tier (crawl +
+/// web-search). NON-secret by design (see ADR-005): it only asserts "this is the
+/// `th` tool" and selects the free tier. Rotated by shipping a new id here and
+/// allow-listing both for a window via the `crawlerPublicClientIds` config key;
+/// bump the version suffix on rotation. Shared with [`super::websearch`].
+pub(crate) const PUBLIC_TOOL_CLIENT_ID: &str = "th-crawl-v1";
 
 #[derive(Subcommand)]
 pub enum Cmd {
@@ -92,7 +93,7 @@ async fn public_scrape(body: &Value) -> Result<Value> {
     let base = smooth_api_client::base_url();
     let resp = reqwest::Client::new()
         .post(format!("{base}/crawl/scrape"))
-        .header("x-crawl-client-id", PUBLIC_CRAWL_CLIENT_ID)
+        .header("x-crawl-client-id", PUBLIC_TOOL_CLIENT_ID)
         .json(body)
         .send()
         .await
