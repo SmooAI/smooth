@@ -13,21 +13,25 @@ use super::{print_json, print_list_envelope, read_body, require_active_org, requ
 #[derive(Subcommand)]
 pub enum Cmd {
     /// Manage deployments — the release targets test runs are associated with.
+    #[command(visible_alias = "deployment")]
     Deployments {
         #[command(subcommand)]
         cmd: DeploymentsCmd,
     },
     /// Manage test cases — the individual checks runs report results against.
+    #[command(visible_alias = "case")]
     Cases {
         #[command(subcommand)]
         cmd: CasesCmd,
     },
     /// Manage test environments — the named contexts (e.g. staging) runs target.
+    #[command(visible_alias = "environment")]
     Environments {
         #[command(subcommand)]
         cmd: EnvironmentsCmd,
     },
     /// Manage test runs — execute, report results, and submit CTRF/JUnit reports.
+    #[command(visible_alias = "run")]
     Runs {
         #[command(subcommand)]
         cmd: RunsCmd,

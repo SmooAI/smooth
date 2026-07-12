@@ -144,6 +144,7 @@ enum Commands {
     /// authorized over child orgs) — pass `--org`/`--org-id` per call,
     /// or `switch` to change the default. M2M tokens are org-locked
     /// server-side, so `switch` is cosmetic for the `--m2m` surface.
+    #[command(visible_alias = "orgs")]
     Org {
         #[command(subcommand)]
         cmd: OrgsCommands,
@@ -173,6 +174,7 @@ enum Commands {
     /// `th widgets list` enumerates the registry, `th widgets check`
     /// is the TS↔Rust↔renderer parity gate, `th widgets preview`
     /// (best-effort) scaffolds a temp render route + screenshot command.
+    #[command(visible_alias = "widget")]
     Widgets {
         #[command(subcommand)]
         cmd: smooai::widgets::Cmd,
@@ -249,6 +251,7 @@ enum Commands {
     /// Smoo AI org file system — `ls`, `mkdir`, `upload`, `download`, `mv`,
     /// `rm`, `lock`, `share`. Same commands as `th api files`, promoted to
     /// the top level alongside `th config`.
+    #[command(visible_alias = "file")]
     Files {
         #[command(subcommand)]
         cmd: smooai::files::Cmd,
@@ -306,6 +309,7 @@ enum Commands {
     /// (distinct from `th msg inbox`, which is agent-to-agent mail).
     Inbox,
     /// Smooth operative management
+    #[command(visible_alias = "operative")]
     Operatives {
         #[command(subcommand)]
         cmd: Option<OperativesCommands>,
@@ -313,6 +317,7 @@ enum Commands {
     /// Pearl projects in the global registry (`~/.smooth/registry.json`)
     /// — `create` to register one, `list` to see all tracked projects.
     /// For per-pearl work use `th pearls`.
+    #[command(visible_alias = "projects")]
     Project {
         #[command(subcommand)]
         cmd: ProjectCommands,
@@ -441,6 +446,7 @@ enum Commands {
         cmd: McpCommands,
     },
     /// File-based CLI-wrapper plugins (~/.smooth/plugins/*/plugin.toml)
+    #[command(visible_alias = "plugins")]
     Plugin {
         #[command(subcommand)]
         cmd: PluginCommands,
@@ -494,6 +500,7 @@ enum Commands {
     /// `.smooth/skills/`, `~/.smooth/skills/`, `~/.claude/skills/`,
     /// and `~/.opencode/skills/` — first hit wins on name. Pearl
     /// th-e0f812.
+    #[command(visible_alias = "skill")]
     Skills {
         #[command(subcommand)]
         cmd: SkillsCommands,
@@ -513,6 +520,7 @@ enum Commands {
     /// `max_tokens`), so every write here goes through raw JSON to keep
     /// those intact. `th model login` remains the preset-keyed path for
     /// the cloud providers (Anthropic, OpenRouter, Smoo AI gateway, …).
+    #[command(visible_alias = "provider")]
     Providers {
         #[command(subcommand)]
         cmd: ProvidersCommands,
@@ -711,12 +719,14 @@ enum ApiCommands {
     /// Smoo AI user + active org.
     Whoami,
     /// Smoo AI organization management.
+    #[command(visible_alias = "org")]
     Orgs {
         #[command(subcommand)]
         cmd: OrgsCommands,
     },
     /// Smoo AI agents — list / show / create / update / delete + the
     /// regenerate-* and per-agent knowledge endpoints.
+    #[command(visible_alias = "agent")]
     Agents {
         #[command(subcommand)]
         cmd: smooai::agents::Cmd,
@@ -730,11 +740,13 @@ enum ApiCommands {
     /// These routes require a dashboard **user** session (`th auth
     /// login`) — they 403 under M2M. A master admin can target a child
     /// org with `--org-id`.
+    #[command(visible_alias = "key")]
     Keys {
         #[command(subcommand)]
         cmd: smooai::keys::Cmd,
     },
     /// Smoo AI org members + invitations.
+    #[command(visible_alias = "member")]
     Members {
         #[command(subcommand)]
         cmd: smooai::members::Cmd,
@@ -762,21 +774,25 @@ enum ApiCommands {
     },
     /// Smoo AI org file system — folders, files, presigned upload/download,
     /// deletion locks, and anonymous/tracked shares (ADR-060).
+    #[command(visible_alias = "file")]
     Files {
         #[command(subcommand)]
         cmd: smooai::files::Cmd,
     },
     /// Smoo AI async job queue.
+    #[command(visible_alias = "job")]
     Jobs {
         #[command(subcommand)]
         cmd: smooai::jobs::Cmd,
     },
     /// Smoo AI org integrations (SendGrid email).
+    #[command(visible_alias = "integration")]
     Integrations {
         #[command(subcommand)]
         cmd: smooai::integrations::Cmd,
     },
     /// Smoo AI billing products / plans.
+    #[command(visible_alias = "product")]
     Products {
         #[command(subcommand)]
         cmd: smooai::products::Cmd,
@@ -8269,6 +8285,59 @@ mod org_cli_tests {
             }
             _ => panic!("expected Booking/Link"),
         }
+    }
+
+    /// CLI-wide plural⇄singular normalization (th-6c4ddf): resource-noun
+    /// command groups accept either form. Sample a few across the surfaces —
+    /// top-level Commands, ApiCommands, and a nested crm/testing group — so a
+    /// dropped alias regresses this test. (Full coverage is the clap
+    /// debug_assert + the /normalize skill audit.)
+    #[test]
+    fn singular_plural_aliases_parse() {
+        // top-level: `th org` ⇄ `th orgs`
+        assert!(matches!(
+            Cli::try_parse_from(["th", "orgs", "list"]).expect("th orgs").command,
+            Some(Commands::Org { .. })
+        ));
+        // top-level: `th operatives` ⇄ `th operative`
+        assert!(matches!(
+            Cli::try_parse_from(["th", "operative"]).expect("th operative").command,
+            Some(Commands::Operatives { .. })
+        ));
+        // api: `th api agents` ⇄ `th api agent`, `th api keys` ⇄ `th api key`
+        assert!(matches!(
+            Cli::try_parse_from(["th", "api", "agent", "list"]).expect("api agent").command,
+            Some(Commands::Api {
+                cmd: ApiCommands::Agents { .. }
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["th", "api", "key", "list"]).expect("api key").command,
+            Some(Commands::Api { cmd: ApiCommands::Keys { .. } })
+        ));
+        // nested crm: `th api crm contacts` ⇄ `th api crm contact`
+        assert!(matches!(
+            Cli::try_parse_from(["th", "api", "crm", "contact", "list"]).expect("crm contact").command,
+            Some(Commands::Api {
+                cmd: ApiCommands::Crm {
+                    cmd: smooai::crm::Cmd::Contacts { .. }
+                }
+            })
+        ));
+        // nested testing: `th testing runs` ⇄ `th testing run`
+        assert!(matches!(
+            Cli::try_parse_from(["th", "testing", "run", "list"]).expect("testing run").command,
+            Some(Commands::Testing {
+                cmd: smooai::testing::Cmd::Runs { .. }
+            })
+        ));
+        // The plural spelling still works too (aliases don't displace the canonical name).
+        assert!(matches!(
+            Cli::try_parse_from(["th", "api", "agents", "list"]).expect("api agents").command,
+            Some(Commands::Api {
+                cmd: ApiCommands::Agents { .. }
+            })
+        ));
     }
 
     /// `th llm` wraps the org llm-gateway API. create-key takes the org
