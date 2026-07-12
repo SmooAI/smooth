@@ -71,6 +71,7 @@ pub enum Cmd {
     },
     /// Manage additional named keys beyond the default — e.g. one per
     /// service or environment.
+    #[command(visible_alias = "key")]
     Keys {
         #[command(subcommand)]
         cmd: KeysCmd,

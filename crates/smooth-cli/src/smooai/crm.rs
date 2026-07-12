@@ -22,16 +22,19 @@ use crate::smooai::user_client::UserClient;
 #[derive(Subcommand)]
 pub enum Cmd {
     /// Contact records (list / get / create / update / import).
+    #[command(visible_alias = "contact")]
     Contacts {
         #[command(subcommand)]
         cmd: ContactsCmd,
     },
     /// Company / account records (list / show / upsert).
+    #[command(visible_alias = "company")]
     Companies {
         #[command(subcommand)]
         cmd: CompaniesCmd,
     },
     /// Deals — your sales pipeline (list / show / create / move).
+    #[command(visible_alias = "deal")]
     Deals {
         #[command(subcommand)]
         cmd: DealsCmd,
@@ -46,16 +49,19 @@ pub enum Cmd {
         json: bool,
     },
     /// Pipeline stage catalog (list / show / create / update / reorder / init).
+    #[command(visible_alias = "stage")]
     Stages {
         #[command(subcommand)]
         cmd: StagesCmd,
     },
     /// Tasks — next actions on deals & contacts.
+    #[command(visible_alias = "task")]
     Tasks {
         #[command(subcommand)]
         cmd: TasksCmd,
     },
     /// Conversations — email threads with contacts.
+    #[command(visible_alias = "conversation")]
     Conversations {
         #[command(subcommand)]
         cmd: ConversationsCmd,
@@ -72,6 +78,7 @@ pub enum Cmd {
         json: bool,
     },
     /// Invoices — revenue actuals (read-only; Stripe-backed).
+    #[command(visible_alias = "invoice")]
     Invoices {
         #[command(subcommand)]
         cmd: InvoicesCmd,
