@@ -1,5 +1,5 @@
 ---
-status: Proposed
+status: Accepted
 date: 2026-07
 deciders: Brent
 supersedes: None
@@ -12,8 +12,27 @@ tags: [decision, security, auth, product, crawl]
 #decision
 
 **Date**: 2026-07
-**Status**: Proposed
+**Status**: Accepted (implemented SMOODEV-2564, 2026-07-12)
 **Pearl**: th-91f158 (this ADR); blocks th-1d88f5 (search.smoo.ai implementation)
+
+> **Implementation note (SMOODEV-2564).** The free tier shipped on the existing
+> api-prime + in-house-crawler seam (ADR-035), not on search.smoo.ai (th-1d88f5,
+> still future). The bundled credential is realized as a **rotatable, non-secret
+> client-id header** (`x-crawl-client-id`, allow-listed via the
+> `crawlerPublicClientIds` config key) on a **pure `auth:['public']` route**
+> `POST /crawl/scrape` — rather than a real org JWT scoped to a dedicated org.
+> This delivers the same four properties more simply: the credential is public
+> (§Decision 1), its blast radius is exactly the crawl route because there is **no
+> org behind a public route at all** (§Decision 1 — stronger than a scoped org),
+> it's rotatable via the allow-list (§Decision 4), and abuse is bounded by an
+> **in-handler per-client-IP per-minute + per-day quota** keyed on
+> `x-forwarded-for` (§Decision 2 — the edge limiter only sees the ingress IP for a
+> public route, so the real quota lives in the handler). The free tier is also
+> **static-only**: `render` is forced to `never` (no headless Chrome) and
+> `extract`/`summary` (billed LLM) are rejected — those need a login (paid tier,
+> §Decision 3). A dedicated org + role (§Implementation) was therefore
+> unnecessary for the crawl route; keep it in mind if a future public tier ever
+> needs to touch org-scoped data.
 
 ## Context
 

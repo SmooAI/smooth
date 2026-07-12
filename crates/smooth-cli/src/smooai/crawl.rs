@@ -1,16 +1,26 @@
 //! `th crawl …` — scrape a web page through Smoo's in-house crawler (ADR-035).
 //!
-//! Backed by the authed `POST /organizations/{orgId}/crawl/scrape` route in
-//! api-prime, which proxies to the internal `crawler-service` `/scrape`
-//! (real browser UA + optional JS render), so it gets pages that a plain
-//! unauthenticated fetch 403s on. Available to any authenticated member of an
-//! org — signing up (custom org/user) is what unlocks it.
+//! Two tiers, chosen automatically by login state:
+//!   - **Logged in** → the authed `POST /organizations/{orgId}/crawl/scrape`
+//!     route: full features (JS render, LLM extract), higher limits.
+//!   - **Not logged in** → the anonymous free tier `POST /crawl/scrape`
+//!     (ADR-005), gated by the bundled publishable client id below. Static-only
+//!     (no JS render, no LLM extract) and per-IP quota-capped.
+//!
+//! Either way it beats the 403s a plain fetch gets. `th auth login` unlocks the
+//! full tier — the nudge toward custom org/user signup.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::Subcommand;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use super::{print_json, require_active_org, require_authed};
+
+/// Bundled publishable client id for the free tier. NON-secret by design (see
+/// ADR-005): it only asserts "this is the `th` tool" and selects the free tier.
+/// Rotated by shipping a new id here and allow-listing both for a window via the
+/// `crawlerPublicClientIds` config key; bump the version suffix on rotation.
+const PUBLIC_CRAWL_CLIENT_ID: &str = "th-crawl-v1";
 
 #[derive(Subcommand)]
 pub enum Cmd {
@@ -24,17 +34,17 @@ pub enum Cmd {
         json: bool,
         /// Firecrawl-style extra formats to attach, e.g. `--format links`
         /// `--format html`. `markdown` is always returned. Repeatable.
+        /// (`summary` needs a login — it's a billed LLM step.)
         #[arg(long = "format", value_name = "FORMAT")]
         formats: Vec<String>,
-        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the
-        /// credentials file's `active_org_id`.
+        /// Override the active org (authed tier only). Falls back to
+        /// `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
 }
 
 pub async fn cmd(cmd: Cmd) -> Result<()> {
-    let client = require_authed().await?;
     match cmd {
         Cmd::Scrape {
             url,
@@ -42,15 +52,26 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             formats,
             org,
         } => {
-            let o = require_active_org(&client, org)?;
             let mut body = json!({ "url": url });
             if !formats.is_empty() {
                 body["formats"] = json!(formats);
             }
-            let resp = client
-                .post(&format!("/organizations/{o}/crawl/scrape"), Some(&body))
-                .await
-                .context("POST crawl scrape")?;
+
+            // Authed tier when logged in; otherwise the anonymous free tier.
+            let resp = match require_authed().await {
+                Ok(client) => {
+                    let o = require_active_org(&client, org)?;
+                    client
+                        .post(&format!("/organizations/{o}/crawl/scrape"), Some(&body))
+                        .await
+                        .context("POST crawl scrape")?
+                }
+                Err(_) => {
+                    eprintln!("• not logged in — using the free tier (static only). Run `th auth login` for JS render + higher limits.");
+                    public_scrape(&body).await?
+                }
+            };
+
             if as_json {
                 print_json(&resp);
             } else {
@@ -63,4 +84,27 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Anonymous free-tier scrape: an unauthenticated POST to `/crawl/scrape`
+/// carrying the bundled publishable client id (no Bearer token).
+async fn public_scrape(body: &Value) -> Result<Value> {
+    let base = smooth_api_client::base_url();
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/crawl/scrape"))
+        .header("x-crawl-client-id", PUBLIC_CRAWL_CLIENT_ID)
+        .json(body)
+        .send()
+        .await
+        .context("POST /crawl/scrape")?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        let msg = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(str::to_string))
+            .unwrap_or(text);
+        bail!("crawl failed ({status}): {msg}");
+    }
+    serde_json::from_str(&text).context("parse crawl response")
 }
