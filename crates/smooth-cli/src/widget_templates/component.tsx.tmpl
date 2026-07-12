@@ -1,0 +1,76 @@
+'use client';
+
+/**
+ * {{NAME}} widget — Apple-style size variants + Aurora.
+ *
+ *   small  → one headline stat
+ *   medium → + a short detail list
+ *   large  → + every row / fuller detail
+ *
+ * Scaffolded by `th widgets new`. Replace the placeholder data below with a
+ * real `useQuery` fetch (see crm-pipeline-widget.tsx for the reference), wire
+ * the heat spectrum to MEANING, and delete this comment.
+ */
+
+import { {{ICON}} } from 'lucide-react';
+import { HeatChip, useWidgetSizeFlags, WidgetEmpty, WidgetHeader, WidgetRow, WidgetStat } from './widget-kit';
+
+interface {{COMPONENT}}Props {
+    config?: Record<string, unknown>;
+}
+
+interface {{COMPONENT}}Row {
+    label: string;
+    value: string;
+}
+
+// TODO(th widgets): replace with a real `useQuery` fetch against the org API.
+const PLACEHOLDER_ROWS: {{COMPONENT}}Row[] = [
+    { label: 'First', value: '—' },
+    { label: 'Second', value: '—' },
+    { label: 'Third', value: '—' },
+];
+
+export function {{COMPONENT}}({ config: _config }: {{COMPONENT}}Props) {
+    const { isSmall, isLarge } = useWidgetSizeFlags();
+
+    const header = <WidgetHeader icon={<{{ICON}} className="size-3.5" />} title="{{NAME}}" accent={0} />;
+
+    const rows = PLACEHOLDER_ROWS;
+
+    if (rows.length === 0) {
+        return (
+            <div>
+                {header}
+                <WidgetEmpty message="Nothing to show yet" />
+            </div>
+        );
+    }
+
+    // small → headline only; medium → top 3; large → all rows.
+    const visibleCount = isSmall ? 0 : isLarge ? rows.length : 3;
+    const visibleRows = rows.slice(0, visibleCount);
+
+    return (
+        <div className="flex h-full flex-col">
+            {header}
+
+            <div className="mb-3 flex items-end justify-between gap-2">
+                <WidgetStat value={rows.length} label="{{NAME}}" accent={0} size={isSmall ? 'lg' : 'xl'} />
+                <HeatChip level={0}>Live</HeatChip>
+            </div>
+
+            {visibleRows.length > 0 && (
+                <div className="mt-1">
+                    {visibleRows.map((r) => (
+                        <WidgetRow key={r.label} label={r.label} value={r.value} accent={0} />
+                    ))}
+                </div>
+            )}
+
+            {!isSmall && !isLarge && rows.length > visibleCount && (
+                <p className="text-muted-foreground mt-2 text-xs">+{rows.length - visibleCount} more</p>
+            )}
+        </div>
+    );
+}

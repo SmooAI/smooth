@@ -168,6 +168,15 @@ enum Commands {
     /// turns a page into clean markdown through the authed crawler
     /// service (real browser UA + JS render), so it gets pages a plain
     /// fetch 403s on. Any authenticated org member can use it.
+    /// Scaffold + verify SmooAI dashboard widgets. `th widgets new`
+    /// scaffolds all 5 touchpoints across the smooai monorepo,
+    /// `th widgets list` enumerates the registry, `th widgets check`
+    /// is the TS↔Rust↔renderer parity gate, `th widgets preview`
+    /// (best-effort) scaffolds a temp render route + screenshot command.
+    Widgets {
+        #[command(subcommand)]
+        cmd: smooai::widgets::Cmd,
+    },
     Crawl {
         #[command(subcommand)]
         cmd: smooai::crawl::Cmd,
@@ -1530,6 +1539,7 @@ async fn main() -> Result<()> {
         },
         Some(Commands::Org { cmd }) => cmd_orgs(cmd).await,
         Some(Commands::Config { cmd }) => config::cmd(cmd).await,
+        Some(Commands::Widgets { cmd }) => smooai::widgets::cmd(cmd).await,
         Some(Commands::Crawl { cmd }) => smooai::crawl::cmd(cmd).await,
         Some(Commands::Llm { cmd }) => smooai::llm_gateway::cmd(cmd).await,
         Some(Commands::Notify {
