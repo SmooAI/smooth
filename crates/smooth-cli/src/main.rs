@@ -229,10 +229,12 @@ enum Commands {
         cmd: smooai::testing::Cmd,
     },
     /// Smoo AI booking — the org's Google-Calendar booking page.
-    /// `config get/set` availability, `slots` to see open times,
-    /// `bookings` to list them, `block add/list/rm` for manual busy
-    /// time, `link` for the public URL. Same commands as
-    /// `th api booking`, promoted to the top level alongside `th config`.
+    /// `config get/set` availability + link handle, `types` for named
+    /// event types, `slots` to see open times, `bookings` to list them,
+    /// `block add/list/rm` for manual busy time, `link` for the public
+    /// URL. Same commands as `th api booking`, promoted to the top level
+    /// alongside `th config`.
+    #[command(visible_alias = "bookings")]
     Booking {
         #[command(subcommand)]
         cmd: smooai::booking::Cmd,
@@ -779,8 +781,10 @@ enum ApiCommands {
         #[command(subcommand)]
         cmd: smooai::products::Cmd,
     },
-    /// Smoo AI booking — Google-Calendar availability config, open
-    /// slots, bookings, manual busy blocks, and the public booking link.
+    /// Smoo AI booking — Google-Calendar availability config + link
+    /// handle, named booking types, open slots, bookings, manual busy
+    /// blocks, and the public booking link.
+    #[command(visible_alias = "bookings")]
     Booking {
         #[command(subcommand)]
         cmd: smooai::booking::Cmd,
@@ -8163,6 +8167,107 @@ mod org_cli_tests {
                 }) => assert_eq!(org_id.as_deref(), Some("X")),
                 _ => panic!("expected Config/Get"),
             }
+        }
+    }
+
+    /// Booking plural/singular forms are interchangeable: top-level
+    /// `booking` ⇄ `bookings`, and within the group `types` ⇄ `type`,
+    /// `block` ⇄ `blocks`, `calendars` ⇄ `calendar`. `types create`
+    /// parses its flags on both the plural and singular spellings.
+    #[test]
+    fn th_booking_aliases_and_types_parse() {
+        use smooai::booking::{Cmd as BookingCmd, TypesCmd};
+
+        // `th bookings types create …` (both plural). `--slug` is required (the
+        // server rejects a slug-less create), so it's included here.
+        let cli = Cli::try_parse_from([
+            "th",
+            "bookings",
+            "types",
+            "create",
+            "--name",
+            "X",
+            "--slug",
+            "x",
+            "--durations",
+            "30",
+            "--note",
+            "hi",
+        ])
+        .expect("th bookings types create parses");
+        match cli.command {
+            Some(Commands::Booking {
+                cmd: BookingCmd::Types {
+                    cmd: TypesCmd::Create { name, durations, note, .. },
+                },
+            }) => {
+                assert_eq!(name, "X");
+                assert_eq!(durations, vec![30]);
+                assert_eq!(note.as_deref(), Some("hi"));
+            }
+            _ => panic!("expected Booking/Types/Create"),
+        }
+
+        // Singular everything: `th booking type create …` must land identically.
+        let cli = Cli::try_parse_from([
+            "th",
+            "booking",
+            "type",
+            "create",
+            "--name",
+            "X",
+            "--slug",
+            "x",
+            "--durations",
+            "30,45",
+            "--one-time",
+            "--org-shared",
+        ])
+        .expect("th booking type create parses");
+        match cli.command {
+            Some(Commands::Booking {
+                cmd:
+                    BookingCmd::Types {
+                        cmd:
+                            TypesCmd::Create {
+                                durations,
+                                one_time,
+                                org_shared,
+                                ..
+                            },
+                    },
+            }) => {
+                assert_eq!(durations, vec![30, 45]);
+                assert!(one_time);
+                assert!(org_shared);
+            }
+            _ => panic!("expected Booking/Types/Create"),
+        }
+
+        // block ⇄ blocks and calendars ⇄ calendar both resolve.
+        assert!(matches!(
+            Cli::try_parse_from(["th", "booking", "blocks", "list"]).expect("blocks alias").command,
+            Some(Commands::Booking { cmd: BookingCmd::Block { .. } })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["th", "booking", "calendar", "list"]).expect("calendar alias").command,
+            Some(Commands::Booking {
+                cmd: BookingCmd::Calendars { .. }
+            })
+        ));
+
+        // Typed link with a note parses the new Link flags.
+        match Cli::try_parse_from(["th", "booking", "link", "--type", "demo", "--note", "hi"])
+            .expect("link flags")
+            .command
+        {
+            Some(Commands::Booking {
+                cmd: BookingCmd::Link { type_slug, note, .. },
+            }) => {
+                assert_eq!(type_slug.as_deref(), Some("demo"));
+                assert_eq!(note.as_deref(), Some("hi"));
+            }
+            _ => panic!("expected Booking/Link"),
         }
     }
 
