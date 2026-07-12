@@ -25,6 +25,7 @@ Write one when a decision:
 | [[ADR-002-microsandbox-0.4.6-and-remove-docker-backend]] | Bump microsandbox to 0.4.6 and remove Docker backend | Superseded by ADR-004 | 2026-05 |
 | [[ADR-003-rename-boardroom-to-safehouse]]                | Rename "The Boardroom" to "The Safehouse"            | Superseded by ADR-004 | 2026-05 |
 | [[ADR-004-remove-microvm-sandbox-stack]]                 | Remove the microVM sandbox stack                     | Accepted | 2026-07 |
+| [[ADR-005-public-client-crawl-auth]]                     | Publishable-client + scoped-org auth for the `th` web-crawl free tier | Proposed | 2026-07 |
 
 > [!todo] More to backfill
 > Older decisions worth ADRing once we have time: Dolt over SQLite for pearls (2025), microsandbox over Firecracker (2025), single Rust binary over multi-binary CLI (2024), pearls naming over beads/issues (2025), workflow phases as the default agent loop (2026), gRPC + UDS for in-VM cast comms (2026; see `single_process.rs`).
