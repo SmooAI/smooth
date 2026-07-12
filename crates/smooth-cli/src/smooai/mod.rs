@@ -11,7 +11,6 @@
 
 pub mod agents;
 pub mod booking;
-pub mod copilot;
 pub mod crm;
 pub mod files;
 pub mod heypage;
@@ -25,6 +24,7 @@ pub mod notify;
 pub mod observability;
 pub mod products;
 pub mod profile;
+pub mod smooth_operator;
 pub mod testing;
 pub mod user_client;
 
