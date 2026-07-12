@@ -1,0 +1,21 @@
+import { render, screen } from '@testing-library/react';
+import * as React from 'react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+(globalThis as unknown as { React: typeof React }).React = React;
+
+vi.mock('#/hooks/use-user-organizations', () => ({
+    useOrganizationsWithSelection: () => ({ currentOrgId: 'org-1' }),
+}));
+
+import { {{COMPONENT}} } from '../{{FILE_STEM}}';
+
+afterEach(() => vi.clearAllMocks());
+
+describe('{{COMPONENT}}', () => {
+    it('renders the header title', () => {
+        render(React.createElement({{COMPONENT}}, {}));
+        // TODO(th widgets): assert on real rendered data once the fetch is wired.
+        expect(screen.getByText('{{NAME}}')).toBeDefined();
+    });
+});
