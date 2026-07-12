@@ -383,6 +383,61 @@ th worktree create/list/merge    # Git worktrees
 
 ---
 
+## Claude Code plugin (`smooth-agent`)
+
+Smooth ships a **Claude Code plugin** that makes Claude a first-class
+Smooth citizen — the same `th` workflow, guardrails, and orchestration
+you get in the TUI, now inside every Claude Code session. It lives in
+this repo at `claude-plugins/smooth-agent/` and installs from the
+built-in `smooth` marketplace:
+
+```
+# In Claude Code:
+/plugin marketplace add SmooAI/smooth
+/plugin install smooth-agent@smooth
+```
+
+Prefer to pin it per-repo (no interactive step, travels with the repo)?
+Add it to the repo's `.claude/settings.json`:
+
+```jsonc
+{
+  "extraKnownMarketplaces": {
+    "smooth": { "source": { "source": "github", "repo": "SmooAI/smooth" } }
+  },
+  "enabledPlugins": { "smooth-agent@smooth": true }
+}
+```
+
+### Skills & commands
+
+| Invoke | What it does |
+|---|---|
+| `/smooth` | Drive **Big Smooth** — spin up tmux-supervised Claude Code workers that survive the account-wide rate-limit throttle, coordinate over th-mail, and track work in pearls (`run` / `add-agent` / `drive` / `manual` / `mail` / `status`). |
+| `org-copilot` | Drive your Smoo AI org's dashboard agent from the CLI (`th api copilot`) — CRM lookups, analytics, knowledge base, draft + send email, with confirm-before-send. |
+| `agent-comms` | Talk to Big Smooth and other agents over th-mail (`th agent` / `th msg`) — report status, answer pings, hand off work. |
+| `pearls-flow` | Track work as pearls — create before you code, claim it, close it on push. |
+
+### Guardrail hooks
+
+The plugin also ships the **shared SmooAI repo guardrails** as hooks, so
+`smooth`·`smooai`·`smooblue` stop hand-copying `.claude/hooks/`:
+
+- **Worktree enforcement** — blocks source edits and commits on `main`,
+  nudging you into a worktree. Derives the main worktree at runtime, so
+  a single copy guards every repo.
+- **`th`-over-`curl` nudges** — flags a raw `curl api.smoo.ai`,
+  `auth.smoo.ai/token`, or `atlassian.net/rest` call and points at the
+  `th` equivalent.
+- **Pearls-label reminder** — a light PostToolUse nudge to keep pearls
+  labeled.
+
+Change a guardrail **once** — edit the plugin here, bump its version —
+and every repo picks it up on `claude plugin marketplace update smooth`.
+No more per-repo drift.
+
+---
+
 ## Extending Smooth
 
 Two extension points add tools without rebuilding the binary:
