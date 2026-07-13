@@ -5299,12 +5299,44 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
                 anyhow::bail!("no dolt dbs found under {} — is this an initialized pearl root?", dolt_root.display());
             }
 
+            let mut any_bad_remote = false;
+
+            // ── REMOTE URL — the root cause of the wedge ─────────────
+            // A `/./`-mangled origin makes git reject the path, so
+            // `smooth-dolt push` hangs forever holding the write lock and
+            // the whole store goes read-only for every agent. Check and
+            // repair this FIRST: reaping a hung push against a still-
+            // broken remote just buys time until the next auto-push.
+            for db_dir in &db_dirs {
+                let cli = smooth_pearls::SmoothDolt::new_cli_only(db_dir)?;
+                let Some(fixed) = smooth_pearls::dolt::repair_malformed_remote_url(&cli.origin_url().unwrap_or_default()) else {
+                    continue;
+                };
+                println!("✗ malformed `origin` remote on {}", db_dir.display());
+                println!("    the `/./` makes git reject the path — every push hangs holding the write lock,");
+                println!("    which is what turns the whole store read-only for every writer.");
+                println!("    repaired URL: {fixed}");
+                if !auto_repair {
+                    println!("    fix: th pearls doctor --auto-repair   (repoints the remote; never touches history)");
+                    any_bad_remote = true;
+                    continue;
+                }
+                match cli.repair_origin_remote() {
+                    Ok(Some(url)) => println!("  ✓ origin repointed to {url}"),
+                    Ok(None) => {}
+                    Err(e) => {
+                        println!("  ✗ could not repair origin: {e:#}");
+                        any_bad_remote = true;
+                    }
+                }
+            }
+
             // ── PROCESSES holding this store ─────────────────────────
-            // The write-lock class (pearl th-118847): leaked one-shot
-            // `smooth-dolt sql …` processes keep the store open, so every
-            // write fails read-only while every read still works. Doctor
-            // used to call that "✓ healthy" and offer only the destructive
-            // re-clone. Name the holders first — they're the cause.
+            // The write-lock class (pearl th-118847): a hung `smooth-dolt
+            // push` (or a leaked one-shot queued behind it) keeps the
+            // store open, so every write fails read-only while every read
+            // still works. Doctor used to call that "✓ healthy" and offer
+            // only the destructive re-clone. Name the holders first.
             let holders = find_store_holders(&dolt_root);
             if holders.is_empty() {
                 println!("smooth-dolt processes holding this store: none");
@@ -5313,7 +5345,9 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
                 for h in &holders {
                     let kind = match h.kind {
                         HolderKind::Serve => "serve",
+                        HolderKind::Sync => "sync (push/pull)",
                         HolderKind::OneShot => "one-shot",
+                        HolderKind::Child => "child of a holder",
                     };
                     println!(
                         "  pid {} [{}] alive {}s: {}",
@@ -5350,6 +5384,13 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
                             println!("    but no smooth-dolt process was found holding it, so there is nothing to reap.");
                             println!("    Something outside this store's own machinery has it open — investigate with:");
                             println!("      lsof {}", db_dir.join(".dolt/noms/LOCK").display());
+                        } else if holders.iter().any(|h| h.kind == HolderKind::Sync) {
+                            // The real causal chain, named explicitly.
+                            println!(
+                                "  ✗ store is write-locked by a hung `smooth-dolt push` against a malformed/unreachable remote \
+                                 — writes will fail with \"database is read only\""
+                            );
+                            println!("    → fix the remote, then reap the push. Other leaked processes are queued BEHIND it, not the cause.");
                         } else {
                             println!(
                                 "  ✗ store is write-locked by {} leaked smooth-dolt process(es) — writes will fail with \"database is read only\"",
@@ -5381,9 +5422,9 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
                         for h in &refused {
                             let why = match h.kind {
                                 HolderKind::Serve => "a live `smooth-dolt serve` — re-run with --force to stop it".to_string(),
-                                HolderKind::OneShot => {
+                                HolderKind::Sync | HolderKind::OneShot | HolderKind::Child => {
                                     format!(
-                                        "only {}s old (< --reap-age-secs {reap_age_secs}) — may be a live query; --force to reap anyway",
+                                        "only {}s old (< --reap-age-secs {reap_age_secs}) — may still be working; --force to reap anyway",
                                         h.age_secs
                                     )
                                 }
@@ -5534,6 +5575,13 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             }
             if any_failed_repair {
                 anyhow::bail!("some repairs failed — see output above");
+            }
+            if any_bad_remote {
+                anyhow::bail!(
+                    "the dolt `origin` remote is malformed (the `/./` mangling) — git rejects the path, so every\n\
+                     `smooth-dolt push` hangs holding the write lock and the store goes read-only for every agent.\n  \
+                     • Fix: th pearls doctor --auto-repair   (repoints the remote — it never touches history)"
+                );
             }
             if any_write_locked {
                 anyhow::bail!(

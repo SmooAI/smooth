@@ -1623,10 +1623,21 @@ pub enum HolderKind {
     /// `smooth-dolt serve <dir> --socket <path>` — the long-running
     /// server. Legitimately long-lived; only reaped with `--force`.
     Serve,
+    /// `smooth-dolt push|pull|fetch|clone <dir>` — a remote sync. THE
+    /// wedge: pointed at a malformed remote (the `/./` mangling — see
+    /// [`repair_malformed_remote_url`]) git rejects the path and the
+    /// push never returns, while holding the noms write lock. Every
+    /// other writer of the store then gets `database is read only`, and
+    /// their queries pile up BEHIND the lock looking like the cause.
+    Sync,
     /// `smooth-dolt sql|exec|log|... <dir> -q …` — a one-shot. Should
-    /// live milliseconds; a long-lived one is leaked and is what pins
-    /// the store into `database is read only` for every other writer.
+    /// live milliseconds; a long-lived one is leaked and pins the store
+    /// the same way (usually as a symptom, queued behind a hung Sync).
     OneShot,
+    /// A child of one of the above — e.g. the `git fetch` a hung
+    /// `smooth-dolt push` spawned. It inherits the lock, so killing only
+    /// the parent leaves the store wedged.
+    Child,
 }
 
 /// A live `smooth-dolt` process whose argv references this project's
@@ -1668,10 +1679,11 @@ pub fn classify_store_process(cmd: &str, dolt_root: &Path) -> Option<HolderKind>
         return None;
     }
 
-    if tokens[1..].contains(&"serve") {
-        Some(HolderKind::Serve)
-    } else {
-        Some(HolderKind::OneShot)
+    let sub = tokens.get(1).copied().unwrap_or_default();
+    match sub {
+        "serve" => Some(HolderKind::Serve),
+        "push" | "pull" | "fetch" | "clone" => Some(HolderKind::Sync),
+        _ => Some(HolderKind::OneShot),
     }
 }
 
@@ -1697,11 +1709,15 @@ fn path_is_within(candidate: &Path, root: &Path) -> bool {
 /// - A `serve` is a legitimate long-running process — only `--force`
 ///   reaps it (same semantics doctor already applies to an attached
 ///   server before a re-clone).
+/// - A hung `push`/`pull` (and the `git` child it spawned) is the store
+///   wedge itself — reap it on the same age rule. A healthy sync is
+///   bounded by [`sync_timeout`] and kills itself; one still alive past
+///   the threshold is stuck on a remote it can never reach.
 #[must_use]
 pub fn should_reap(kind: HolderKind, age_secs: u64, min_age_secs: u64, force: bool) -> bool {
     match kind {
         HolderKind::Serve => force,
-        HolderKind::OneShot => force || age_secs >= min_age_secs,
+        HolderKind::Sync | HolderKind::OneShot | HolderKind::Child => force || age_secs >= min_age_secs,
     }
 }
 
@@ -1712,32 +1728,69 @@ pub fn should_reap(kind: HolderKind, age_secs: u64, min_age_secs: u64, force: bo
 /// identified by *what store it was pointed at*, not by whether it
 /// currently has the LOCK fd open. Never returns our own pid.
 ///
+/// Children of a matched holder are included too: a hung
+/// `smooth-dolt push` spawns `git fetch …`, and that child inherits the
+/// lock — killing only the parent leaves the store wedged.
+///
 /// Best-effort: if `ps` is unavailable the result is empty, and the
 /// caller falls through to reporting whatever the write probe said.
 #[must_use]
 pub fn find_store_holders(dolt_root: &Path) -> Vec<StoreHolder> {
-    let Ok(output) = Command::new("ps").args(["-Ao", "pid=,etime=,command="]).output() else {
+    let Ok(output) = Command::new("ps").args(["-Ao", "pid=,ppid=,etime=,command="]).output() else {
         return Vec::new();
     };
     let me = std::process::id();
-    String::from_utf8_lossy(&output.stdout)
+    let procs: Vec<(u32, u32, u64, String)> = String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(parse_ps_line)
-        .filter(|(pid, _, _)| *pid != me)
-        .filter_map(|(pid, age_secs, cmd)| classify_store_process(&cmd, dolt_root).map(|kind| StoreHolder { pid, cmd, age_secs, kind }))
-        .collect()
+        .filter(|(pid, ..)| *pid != me)
+        .collect();
+
+    let mut holders: Vec<StoreHolder> = procs
+        .iter()
+        .filter_map(|(pid, _, age_secs, cmd)| {
+            classify_store_process(cmd, dolt_root).map(|kind| StoreHolder {
+                pid: *pid,
+                cmd: cmd.clone(),
+                age_secs: *age_secs,
+                kind,
+            })
+        })
+        .collect();
+
+    // Second pass: adopt the children of what we matched. One level is
+    // enough — dolt's sync spawns `git` directly.
+    // ponytail: one level, not a full tree walk. Deepen if a grandchild
+    // ever turns up holding the lock.
+    let parents: Vec<u32> = holders.iter().map(|h| h.pid).collect();
+    holders.extend(
+        procs
+            .iter()
+            .filter(|(pid, ppid, ..)| parents.contains(ppid) && !parents.contains(pid))
+            .map(|(pid, _, age_secs, cmd)| StoreHolder {
+                pid: *pid,
+                cmd: cmd.clone(),
+                age_secs: *age_secs,
+                kind: HolderKind::Child,
+            }),
+    );
+    holders
 }
 
-/// Parse one `ps -Ao pid=,etime=,command=` line into (pid, age_secs, command).
-fn parse_ps_line(line: &str) -> Option<(u32, u64, String)> {
-    let mut parts = line.trim().splitn(3, char::is_whitespace);
-    let pid: u32 = parts.next()?.trim().parse().ok()?;
-    let age = parse_etime(parts.next()?.trim())?;
-    let cmd = parts.next()?.trim().to_string();
+/// Parse one `ps -Ao pid=,ppid=,etime=,command=` line into
+/// (pid, ppid, age_secs, command).
+fn parse_ps_line(line: &str) -> Option<(u32, u32, u64, String)> {
+    // `split_whitespace` (not `splitn`) — ps right-pads the numeric
+    // columns, so the separators are runs of spaces, not single ones.
+    let mut parts = line.split_whitespace();
+    let pid: u32 = parts.next()?.parse().ok()?;
+    let ppid: u32 = parts.next()?.parse().ok()?;
+    let age = parse_etime(parts.next()?)?;
+    let cmd = parts.collect::<Vec<_>>().join(" ");
     if cmd.is_empty() {
         return None;
     }
-    Some((pid, age, cmd))
+    Some((pid, ppid, age, cmd))
 }
 
 /// Parse `ps` elapsed-time (`[[dd-]hh:]mm:ss`) into seconds.
@@ -1877,6 +1930,28 @@ mod holder_tests {
     }
 
     #[test]
+    fn matches_hung_push_for_this_store() {
+        // THE wedge (pearl th-118847 / th-3ef2c1): a push against a
+        // malformed remote that never returns, holding the write lock.
+        assert_eq!(
+            classify_store_process("smooth-dolt push /Users/b/dev/smooai/smooai/.smooth/dolt", root()),
+            Some(HolderKind::Sync)
+        );
+        assert_eq!(
+            classify_store_process("smooth-dolt pull /Users/b/dev/smooai/smooai/.smooth/dolt", root()),
+            Some(HolderKind::Sync)
+        );
+    }
+
+    #[test]
+    fn hung_sync_is_reaped_on_the_age_rule() {
+        assert!(should_reap(HolderKind::Sync, 45, DEFAULT_REAP_AGE_SECS, false));
+        assert!(should_reap(HolderKind::Child, 45, DEFAULT_REAP_AGE_SECS, false));
+        // A sync that just started may be a legitimate push in flight.
+        assert!(!should_reap(HolderKind::Sync, 2, DEFAULT_REAP_AGE_SECS, false));
+    }
+
+    #[test]
     fn matches_one_shot_sql_for_this_store() {
         assert_eq!(
             classify_store_process(
@@ -2005,12 +2080,55 @@ mod holder_tests {
 
     #[test]
     fn ps_line_parses() {
+        // ps right-pads the numeric columns — the separators are runs of
+        // spaces, which is why this can't be a `splitn`.
         assert_eq!(
-            parse_ps_line(" 4242 01:05 /usr/local/bin/smooth-dolt sql /x/.smooth/dolt -q SELECT 1"),
-            Some((4242, 65, "/usr/local/bin/smooth-dolt sql /x/.smooth/dolt -q SELECT 1".to_string()))
+            parse_ps_line(" 4242   3517 01:05 /usr/local/bin/smooth-dolt sql /x/.smooth/dolt -q SELECT 1"),
+            Some((4242, 3517, 65, "/usr/local/bin/smooth-dolt sql /x/.smooth/dolt -q SELECT 1".to_string()))
         );
         assert_eq!(parse_ps_line(""), None);
-        assert_eq!(parse_ps_line("notapid 01:05 cmd"), None);
+        assert_eq!(parse_ps_line("notapid 1 01:05 cmd"), None);
+    }
+}
+
+#[cfg(test)]
+mod repair_malformed_remote_url_tests {
+    use super::{normalize_remote_url, repair_malformed_remote_url};
+
+    #[test]
+    fn repairs_the_real_wedged_remotes() {
+        // Both stores on Brent's machine carried these, and both hung
+        // every push: git rejects `./SmooAI/smooai` as a repo name.
+        assert_eq!(
+            repair_malformed_remote_url("git+ssh://git@github.com/./SmooAI/smooai.git").as_deref(),
+            Some("git+ssh://git@github.com/SmooAI/smooai.git")
+        );
+        assert_eq!(
+            repair_malformed_remote_url("git+ssh://git@github.com/./brentrager/smooth-home.git").as_deref(),
+            Some("git+ssh://git@github.com/brentrager/smooth-home.git")
+        );
+    }
+
+    #[test]
+    fn leaves_a_healthy_remote_alone() {
+        assert_eq!(repair_malformed_remote_url("git+ssh://git@github.com/SmooAI/smooth.git"), None);
+        assert_eq!(repair_malformed_remote_url("https://github.com/SmooAI/smooth.git"), None);
+        assert_eq!(repair_malformed_remote_url("file:///tmp/store"), None);
+    }
+
+    #[test]
+    fn derivation_never_produces_the_mangling() {
+        // The write side (pearl th-c4441b): whatever we hand Dolt must
+        // already be a clean URL, so no new store can acquire a `/./`.
+        for scp in ["git@github.com:SmooAI/smooai.git", "git@github.com:brentrager/smooth-home.git"] {
+            let derived = normalize_remote_url(scp);
+            assert!(!derived.contains("/./"), "{scp} derived a mangled URL: {derived}");
+            assert_eq!(repair_malformed_remote_url(&derived), None);
+        }
+        assert_eq!(
+            normalize_remote_url("git@github.com:SmooAI/smooai.git"),
+            "git+ssh://git@github.com/SmooAI/smooai.git"
+        );
     }
 }
 
@@ -2488,6 +2606,49 @@ fn normalize_remote_url(url: &str) -> String {
     // a single separating slash. Both collapse to `git+ssh://head/path`.
     let path = path.strip_prefix('/').unwrap_or(path);
     format!("git+ssh://{head}/{path}")
+}
+
+/// Is this a stored remote URL that Dolt mangled with the bogus `/./`
+/// segment? Returns the repaired URL.
+///
+/// [`normalize_remote_url`] stops NEW stores from getting one, but every
+/// store created before that fix still has the broken URL persisted in
+/// `repo_state.json` — and nothing repaired it. The consequence is
+/// nastier than a cosmetic typo: `git` rejects the path
+/// (`./SmooAI/smooai is not a valid repository name`), the
+/// `smooth-dolt push` never returns, and the hung push holds the noms
+/// write lock — so EVERY writer of that store gets `Error 1105: cannot
+/// update manifest: database is read only` while reads keep working.
+/// One bad URL join wedges every agent's pearl and mail writes.
+#[must_use]
+pub fn repair_malformed_remote_url(url: &str) -> Option<String> {
+    url.contains("/./").then(|| url.replace("/./", "/"))
+}
+
+impl SmoothDolt {
+    /// The `origin` URL Dolt has recorded for this store, if any.
+    ///
+    /// # Errors
+    /// No `repo_state.json`, or no `origin` remote in it.
+    pub fn origin_url(&self) -> Result<String> {
+        read_origin_url(&self.data_dir)
+    }
+
+    /// Repoint `origin` at the repaired URL when it carries the `/./`
+    /// mangling. Returns the new URL, or `None` when the remote was
+    /// already fine.
+    ///
+    /// Touches only the remote pointer — never history. No push, no
+    /// fetch, no re-clone.
+    pub fn repair_origin_remote(&self) -> Result<Option<String>> {
+        let current = read_origin_url(&self.data_dir)?;
+        let Some(fixed) = repair_malformed_remote_url(&current) else {
+            return Ok(None);
+        };
+        self.exec("CALL DOLT_REMOTE('remove', 'origin')").context("drop the malformed origin remote")?;
+        self.remote_add("origin", &fixed).context("re-add origin with the repaired URL")?;
+        Ok(Some(fixed))
+    }
 }
 
 /// Read the `origin` remote URL from `<data_dir>/.dolt/repo_state.json`.
