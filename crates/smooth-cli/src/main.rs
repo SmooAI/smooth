@@ -165,10 +165,6 @@ enum Commands {
         #[command(subcommand)]
         cmd: config::Cmd,
     },
-    /// Smoo AI in-house web crawler (ADR-035) — `th crawl scrape <url>`
-    /// turns a page into clean markdown through the authed crawler
-    /// service (real browser UA + JS render), so it gets pages a plain
-    /// fetch 403s on. Any authenticated org member can use it.
     /// Scaffold + verify SmooAI dashboard widgets. `th widgets new`
     /// scaffolds all 5 touchpoints across the smooai monorepo,
     /// `th widgets list` enumerates the registry, `th widgets check`
@@ -179,15 +175,26 @@ enum Commands {
         #[command(subcommand)]
         cmd: smooai::widgets::Cmd,
     },
+    /// Smoo AI in-house web crawler (ADR-035) — `th crawl scrape <url>`
+    /// turns a page into clean markdown through the authed crawler
+    /// service (real browser UA + JS render), so it gets pages a plain
+    /// fetch 403s on. Any authenticated org member can use it.
     Crawl {
         #[command(subcommand)]
         cmd: smooai::crawl::Cmd,
     },
-    /// Smoo AI agentic web search (Tavily, SMOODEV-2573) — `th web-search
-    /// search <query>` returns ranked results (+ optional answer). Full
+    /// Smoo AI agentic web search (ADR-088) — `th search <query>` returns
+    /// ranked results (+ optional `--answer`), served by our own search stack
+    /// (self-hosted SearXNG + in-house crawler + LLM answer synthesis). Full
     /// options when logged in; an anonymous free tier (basic depth, capped
     /// results) otherwise. A companion to `th crawl` for agentic coding.
-    #[command(name = "web-search")]
+    Search {
+        #[command(flatten)]
+        args: smooai::websearch::SearchArgs,
+    },
+    /// Deprecated alias for `th search` — kept for the form shipped in v0.18.0
+    /// (`th web-search search <query>`). Use `th search` instead.
+    #[command(name = "web-search", hide = true)]
     WebSearch {
         #[command(subcommand)]
         cmd: smooai::websearch::Cmd,
@@ -1592,6 +1599,7 @@ async fn main() -> Result<()> {
         Some(Commands::Config { cmd }) => config::cmd(cmd).await,
         Some(Commands::Widgets { cmd }) => smooai::widgets::cmd(cmd).await,
         Some(Commands::Crawl { cmd }) => smooai::crawl::cmd(cmd).await,
+        Some(Commands::Search { args }) => smooai::websearch::run(args).await,
         Some(Commands::WebSearch { cmd }) => smooai::websearch::cmd(cmd).await,
         Some(Commands::Llm { cmd }) => smooai::llm_gateway::cmd(cmd).await,
         Some(Commands::Notify {
