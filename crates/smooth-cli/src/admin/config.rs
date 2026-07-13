@@ -35,6 +35,7 @@ use crate::smooai::{print_json, print_list_envelope, read_body, require_active_o
 pub enum ConfigCommands {
     /// Schemas — the document that declares which keys exist + their
     /// tiers (public / secret / feature_flag).
+    #[command(visible_alias = "schema")]
     Schemas {
         #[command(subcommand)]
         cmd: SchemasCmd,
@@ -48,6 +49,7 @@ pub enum ConfigCommands {
     /// admin acting on a child org. This `th admin config environments …`
     /// surface is org-locked (M2M / direct org authority only) and 403s on
     /// child orgs even for a parent-org admin.
+    #[command(visible_alias = "environment")]
     Environments {
         #[command(subcommand)]
         cmd: EnvironmentsCmd,
@@ -55,6 +57,7 @@ pub enum ConfigCommands {
     /// Bulk value operations + record deletion. Single-key writes
     /// belong in `th config set`; this is the "manage values as
     /// records" surface.
+    #[command(visible_alias = "value")]
     Values {
         #[command(subcommand)]
         cmd: ValuesCmd,

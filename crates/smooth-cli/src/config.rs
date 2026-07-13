@@ -425,7 +425,7 @@ pub enum Cmd {
     /// activated. Authorized by your **user** session — so a parent-org
     /// admin can create/manage one on a CHILD org with `--org-id`,
     /// without `th admin`.
-    #[command(visible_alias = "env")]
+    #[command(visible_aliases = ["env", "environment"])]
     Environments {
         #[command(subcommand)]
         cmd: EnvironmentsCmd,

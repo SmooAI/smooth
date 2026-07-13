@@ -39,6 +39,7 @@ pub enum AdminCommands {
     },
     /// Organization operations: list / show / create / members / products /
     /// mint-client / scc-tier.
+    #[command(visible_alias = "orgs")]
     Org {
         #[command(subcommand)]
         cmd: org::OrgCommands,
