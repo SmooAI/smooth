@@ -70,11 +70,24 @@ const updates = [
             // 3. Add version to any smooth-X workspace dep that doesn't have
             //    one yet. Match "smooth-X = { path = "crates/smooth-X", ... }"
             //    and splice `version = "X.Y.Z",` in right after the opening brace.
+            //
+            //    SAME EXCEPTION AS STEP 2: skip the EXTERNAL operator-core git
+            //    dep (`smooth-operator = { git, rev, package =
+            //    "smooai-smooth-operator-core" }`). It carries no version on
+            //    `main`, so this add-branch would otherwise stamp the workspace
+            //    version onto it — pointing at an operator-core release that
+            //    doesn't exist at the pinned rev and breaking `cargo` resolution
+            //    on the version PR (`failed to select a version for
+            //    smooai-smooth-operator-core = ^X.Y.Z`). Step 2 skipped it but
+            //    step 3 forgot to. Pearl th-1ee32b.
             const addVersionPattern =
                 /^(smooth-[a-z-]+\s*=\s*\{)(?!([^}\n]*\bversion\b))([^}\n]*)(\})/gm;
             next = next.replace(
                 addVersionPattern,
-                (_, pre, _v, body, close) => {
+                (match, pre, _v, body, close) => {
+                    if (match.includes("smooai-smooth-operator-core")) {
+                        return match;
+                    }
                     const trimmed = body.trimStart();
                     const separator = trimmed.length > 0 ? " " : "";
                     return `${pre} version = "${version}",${separator}${trimmed}${close}`;
