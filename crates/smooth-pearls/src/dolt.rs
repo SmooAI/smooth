@@ -63,6 +63,54 @@ fn parse_sync_timeout(raw: &str) -> Option<Duration> {
     }
 }
 
+/// Default wallclock bound on a LOCAL one-shot (`sql`, `exec`, `log`,
+/// `status`, `version`) — no network, no big transfer, so a healthy call
+/// returns in tens of milliseconds. Anything still running after this is
+/// wedged.
+///
+/// Pearl th-118847: without a bound, a wedged one-shot hung `th`
+/// forever; the user Ctrl-C'd, the child was orphaned (Rust's `Command`
+/// does not kill children on drop), and the orphan kept the store pinned
+/// — every later write got `Error 1105: cannot update manifest: database
+/// is read only`. Five of them had piled up. Bounding the call means the
+/// child is SIGKILLed and reaped by the process that spawned it, so
+/// there is nothing left to leak.
+///
+/// Remote-sync commands (`push`/`pull`/`clone`) are NOT bounded by this
+/// — they have their own, far more generous [`sync_timeout`]. Override
+/// with `SMOOTH_DOLT_QUERY_TIMEOUT_SECS`; `0` disables the bound.
+const DEFAULT_QUERY_TIMEOUT_SECS: u64 = 120;
+
+/// Stall note for an aborted remote sync. [`is_sync_timeout_err`] keys
+/// off the "remote sync stalled" marker to classify the failure as
+/// retryable — keep them in step.
+const SYNC_STALL_HINT: &str = "remote sync stalled; killed child to release lock — retryable";
+
+/// Stall note for an aborted LOCAL one-shot. Deliberately does NOT carry
+/// the sync marker: this is not a network problem and is not deferrable.
+const QUERY_STALL_HINT: &str = "local query stalled; killed the child so it can't leak and pin the store read-only — \
+     re-run, and `th pearls doctor --reap` if writes still fail (SMOOTH_DOLT_QUERY_TIMEOUT_SECS to change the bound)";
+
+/// Wallclock bound for a given smooth-dolt subcommand, or `None` for
+/// "unbounded" (remote-sync commands, which [`SmoothDolt::run_cli_timed`]
+/// bounds separately, and long local maintenance like `gc`).
+fn one_shot_timeout(subcommand: &str) -> Option<Duration> {
+    if !matches!(subcommand, "sql" | "exec" | "log" | "status" | "version") {
+        return None;
+    }
+    std::env::var("SMOOTH_DOLT_QUERY_TIMEOUT_SECS").map_or_else(|_| Some(Duration::from_secs(DEFAULT_QUERY_TIMEOUT_SECS)), |raw| parse_query_timeout(&raw))
+}
+
+/// Pure parser for `SMOOTH_DOLT_QUERY_TIMEOUT_SECS`. Same fail-safe
+/// shape as [`parse_sync_timeout`]: `0` → unbounded, garbage → default.
+fn parse_query_timeout(raw: &str) -> Option<Duration> {
+    match raw.trim().parse::<u64>() {
+        Ok(0) => None,
+        Ok(secs) => Some(Duration::from_secs(secs)),
+        Err(_) => Some(Duration::from_secs(DEFAULT_QUERY_TIMEOUT_SECS)),
+    }
+}
+
 /// Escape a string for splicing into a single-quoted SQL string literal
 /// sent to `smooth-dolt exec`/`sql` (no prepared statements on this path).
 ///
@@ -266,6 +314,14 @@ impl SmoothDolt {
         self.run_cli(&["exec", &self.data_dir_str(), "-q", statement])
     }
 
+    /// `exec` without the auto-doctor self-heal retry — the read-only
+    /// error propagates verbatim instead of triggering a kill+retry.
+    /// Used by [`probe_writable`]: a diagnostic must report the store's
+    /// real state, not change it as a side effect of looking.
+    fn exec_no_heal(&self, statement: &str) -> Result<String> {
+        self.run_cli_once(&["exec", &self.data_dir_str(), "-q", statement])
+    }
+
     /// Stage all changes and commit with a message.
     pub fn commit(&self, message: &str) -> Result<String> {
         if let Some(server) = &self.server {
@@ -446,14 +502,21 @@ impl SmoothDolt {
     /// auto-doctor retry — that's the public entry point. This bare
     /// version lives separately so the doctor's retry path can call
     /// it without re-entering the doctor and looping forever.
+    ///
+    /// Local one-shots (`sql`/`exec`/`log`/…) carry a wallclock bound —
+    /// see [`one_shot_timeout`] and pearl th-118847: an unbounded hung
+    /// child gets orphaned when the user gives up on `th` and Ctrl-Cs,
+    /// and the orphan then pins the store read-only for everyone.
     fn run_cli_once(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new(&self.bin)
+        let subcommand = args.first().copied().unwrap_or_default();
+        let child = Command::new(&self.bin)
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .output()
+            .spawn()
             .with_context(|| format!("exec smooth-dolt {}: {}", args.join(" "), self.bin.display()))?;
+        let output = wait_child_draining(child, one_shot_timeout(subcommand), &format!("smooth-dolt {subcommand}"), QUERY_STALL_HINT)?;
 
         if !output.status.success() {
             // Capture stderr inline so callers (and the operator log) get
@@ -501,7 +564,7 @@ impl SmoothDolt {
             .with_context(|| format!("spawn smooth-dolt {}: {}", args.join(" "), self.bin.display()))?;
 
         let what = format!("smooth-dolt {}", args.first().unwrap_or(&""));
-        let output = wait_child_draining(child, Some(timeout), &what)?;
+        let output = wait_child_draining(child, Some(timeout), &what, SYNC_STALL_HINT)?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stderr_clip: String = stderr.trim().chars().take(300).collect();
@@ -530,7 +593,12 @@ impl SmoothDolt {
 /// and a **retryable** error is returned — the message keeps the
 /// "timed out after" + "remote sync stalled" markers that
 /// [`is_sync_timeout_err`] matches.
-fn wait_child_draining(mut child: std::process::Child, timeout: Option<Duration>, what: &str) -> Result<std::process::Output> {
+///
+/// `stall_hint` is appended to the timeout error. Remote-sync callers
+/// pass [`SYNC_STALL_HINT`] — [`is_sync_timeout_err`] keys off it to
+/// classify the failure as retryable — while local one-shots pass their
+/// own, so a stalled local query is never mistaken for a network stall.
+fn wait_child_draining(mut child: std::process::Child, timeout: Option<Duration>, what: &str, stall_hint: &str) -> Result<std::process::Output> {
     fn drain<R: std::io::Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
         std::thread::spawn(move || {
             let mut buf = Vec::new();
@@ -563,10 +631,7 @@ fn wait_child_draining(mut child: std::process::Child, timeout: Option<Duration>
                 // handles instead; the detached threads exit on pipe EOF.
                 drop(out_thread);
                 drop(err_thread);
-                anyhow::bail!(
-                    "{what} timed out after {}s (remote sync stalled; killed child to release lock — retryable)",
-                    timeout.as_secs()
-                );
+                anyhow::bail!("{what} timed out after {}s ({stall_hint})", timeout.as_secs());
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -1070,14 +1135,17 @@ fn auto_doctor_clear_orphan_server(data_dir: &Path) -> Result<u32> {
 /// SIGTERM. Either way the OS releases the file lock when the process
 /// finally dies.
 fn kill_with_escalation(pid: u32) {
-    let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+    let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).stderr(Stdio::null()).status();
     // Poll briefly for the process to exit. `kill -0` succeeds while the
-    // process is alive (or a zombie we can still signal).
+    // process is alive (or a zombie we can still signal). Its stderr is
+    // discarded: once the process is gone, `kill -0` prints "No such
+    // process" — which is the SUCCESS case here, not something to show.
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
     loop {
         std::thread::sleep(std::time::Duration::from_millis(100));
         let alive = Command::new("kill")
             .args(["-0", &pid.to_string()])
+            .stderr(Stdio::null())
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
@@ -1086,7 +1154,7 @@ fn kill_with_escalation(pid: u32) {
         }
         if std::time::Instant::now() >= deadline {
             tracing::warn!(pid, "auto_doctor: process survived SIGTERM, escalating to SIGKILL");
-            let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).status();
+            let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).stderr(Stdio::null()).status();
             return;
         }
     }
@@ -1541,6 +1609,411 @@ impl SmoothDolt {
     }
 }
 
+/// Default minimum age before a hung one-shot `smooth-dolt sql`/`exec`
+/// process is considered leaked and safe to reap. One-shots are
+/// transient by design (a healthy one lives for tens of milliseconds);
+/// anything still alive after this long is wedged, not working. The
+/// bound exists purely so a concurrently-launched, legitimately-running
+/// one-shot from another `th` isn't killed mid-write.
+pub const DEFAULT_REAP_AGE_SECS: u64 = 30;
+
+/// What a running `smooth-dolt` process holding this store is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HolderKind {
+    /// `smooth-dolt serve <dir> --socket <path>` — the long-running
+    /// server. Legitimately long-lived; only reaped with `--force`.
+    Serve,
+    /// `smooth-dolt sql|exec|log|... <dir> -q …` — a one-shot. Should
+    /// live milliseconds; a long-lived one is leaked and is what pins
+    /// the store into `database is read only` for every other writer.
+    OneShot,
+}
+
+/// A live `smooth-dolt` process whose argv references this project's
+/// dolt store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreHolder {
+    pub pid: u32,
+    /// Full command line as reported by `ps`.
+    pub cmd: String,
+    /// Wallclock age in seconds (from `ps -o etime=`).
+    pub age_secs: u64,
+    pub kind: HolderKind,
+}
+
+/// Pure predicate: does this `ps` command line belong to a `smooth-dolt`
+/// process operating on `dolt_root` (or a database directory beneath
+/// it)?
+///
+/// SAFETY INVARIANT — both halves are required:
+///   1. the **executable** (argv[0]) has basename exactly `smooth-dolt`,
+///      and
+///   2. some argv token is `dolt_root` itself or a path *under* it.
+///
+/// So a smooth-dolt serving a DIFFERENT project's store never matches,
+/// and an unrelated process that merely mentions the binary or the path
+/// (an editor, a `grep`, a backup job) never matches either — it isn't
+/// argv[0]. Path containment is checked on component boundaries, so
+/// `/x/.smooth/dolt-backup` is not treated as being under
+/// `/x/.smooth/dolt`.
+#[must_use]
+pub fn classify_store_process(cmd: &str, dolt_root: &Path) -> Option<HolderKind> {
+    let tokens: Vec<&str> = cmd.split_whitespace().collect();
+
+    let exe = Path::new(tokens.first()?);
+    if exe.file_name()? != "smooth-dolt" {
+        return None;
+    }
+    if !tokens.iter().any(|tok| path_is_within(Path::new(tok), dolt_root)) {
+        return None;
+    }
+
+    if tokens[1..].contains(&"serve") {
+        Some(HolderKind::Serve)
+    } else {
+        Some(HolderKind::OneShot)
+    }
+}
+
+/// Is `candidate` `root` itself, or a path beneath it? Component-wise so
+/// a shared string prefix (`dolt` vs `dolt-backup`) can't false-match.
+///
+/// Both sides are canonicalized when they exist on disk: the argv of a
+/// running process carries whatever path its caller typed, while the
+/// doctor's root comes from a canonicalized walk-up — on macOS that's
+/// the difference between `/var/…` and `/private/var/…`, and comparing
+/// them raw finds zero holders for a store that is very much held.
+/// Paths that don't exist (unit tests, a since-deleted dir) compare raw.
+fn path_is_within(candidate: &Path, root: &Path) -> bool {
+    let candidate = candidate.canonicalize().unwrap_or_else(|_| candidate.to_path_buf());
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    candidate == root || candidate.starts_with(&root)
+}
+
+/// Pure decision: should this holder be reaped?
+///
+/// - A one-shot older than `min_age_secs` is leaked — reap it. It is
+///   transient by design; nothing legitimate lives that long.
+/// - A `serve` is a legitimate long-running process — only `--force`
+///   reaps it (same semantics doctor already applies to an attached
+///   server before a re-clone).
+#[must_use]
+pub fn should_reap(kind: HolderKind, age_secs: u64, min_age_secs: u64, force: bool) -> bool {
+    match kind {
+        HolderKind::Serve => force,
+        HolderKind::OneShot => force || age_secs >= min_age_secs,
+    }
+}
+
+/// Enumerate live `smooth-dolt` processes holding this project's store.
+///
+/// Uses `ps -Ao pid=,etime=,command=` (portable across macOS + Linux)
+/// rather than `lsof` on the noms LOCK, because a leaked one-shot is
+/// identified by *what store it was pointed at*, not by whether it
+/// currently has the LOCK fd open. Never returns our own pid.
+///
+/// Best-effort: if `ps` is unavailable the result is empty, and the
+/// caller falls through to reporting whatever the write probe said.
+#[must_use]
+pub fn find_store_holders(dolt_root: &Path) -> Vec<StoreHolder> {
+    let Ok(output) = Command::new("ps").args(["-Ao", "pid=,etime=,command="]).output() else {
+        return Vec::new();
+    };
+    let me = std::process::id();
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(parse_ps_line)
+        .filter(|(pid, _, _)| *pid != me)
+        .filter_map(|(pid, age_secs, cmd)| classify_store_process(&cmd, dolt_root).map(|kind| StoreHolder { pid, cmd, age_secs, kind }))
+        .collect()
+}
+
+/// Parse one `ps -Ao pid=,etime=,command=` line into (pid, age_secs, command).
+fn parse_ps_line(line: &str) -> Option<(u32, u64, String)> {
+    let mut parts = line.trim().splitn(3, char::is_whitespace);
+    let pid: u32 = parts.next()?.trim().parse().ok()?;
+    let age = parse_etime(parts.next()?.trim())?;
+    let cmd = parts.next()?.trim().to_string();
+    if cmd.is_empty() {
+        return None;
+    }
+    Some((pid, age, cmd))
+}
+
+/// Parse `ps` elapsed-time (`[[dd-]hh:]mm:ss`) into seconds.
+fn parse_etime(raw: &str) -> Option<u64> {
+    let (days, hms) = match raw.split_once('-') {
+        Some((d, rest)) => (d.parse::<u64>().ok()?, rest),
+        None => (0, raw),
+    };
+    let fields: Vec<u64> = hms.split(':').map(|f| f.parse::<u64>().ok()).collect::<Option<_>>()?;
+    let (h, m, s) = match fields.as_slice() {
+        [h, m, s] => (*h, *m, *s),
+        [m, s] => (0, *m, *s),
+        _ => return None,
+    };
+    Some(days * 86_400 + h * 3_600 + m * 60 + s)
+}
+
+/// Reap the leaked `smooth-dolt` processes holding this store. Returns
+/// (reaped, refused) — refused holders are the ones `should_reap` said
+/// to leave alone (a `serve` without `--force`, a one-shot too young to
+/// call leaked), so the caller can explain itself.
+///
+/// SIGTERM → brief grace → SIGKILL, via [`kill_with_escalation`].
+pub fn reap_store_holders(dolt_root: &Path, min_age_secs: u64, force: bool) -> (Vec<StoreHolder>, Vec<StoreHolder>) {
+    let (to_reap, refused): (Vec<_>, Vec<_>) = find_store_holders(dolt_root)
+        .into_iter()
+        .partition(|h| should_reap(h.kind, h.age_secs, min_age_secs, force));
+
+    for holder in &to_reap {
+        tracing::warn!(pid = holder.pid, cmdline = %holder.cmd, "reaping leaked smooth-dolt process holding the pearl store");
+        kill_with_escalation(holder.pid);
+    }
+    if !to_reap.is_empty() {
+        // Let the kernel finish releasing the store's file locks before
+        // the caller re-probes; otherwise the re-probe races fd cleanup
+        // and reports a false read-only.
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    (to_reap, refused)
+}
+
+/// Result of the doctor's write-ability probe. [`DoctorDiagnosis`]
+/// only tells you whether the store READS — a store pinned by a leaked
+/// process reads perfectly and still refuses every write, which is
+/// exactly the failure that made doctor say `✓ healthy` while
+/// `th pearls create` died (pearl th-118847).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WriteProbe {
+    /// A trivial write succeeded — the store accepts writes.
+    Writable,
+    /// The store is read-only: writes fail with the Dolt
+    /// `cannot update manifest: database is read only` family of errors.
+    ReadOnly { detail: String },
+    /// The probe itself couldn't run (binary missing, unrelated SQL
+    /// failure). Reported, but not treated as a write-lock.
+    Failed { detail: String },
+}
+
+/// Probe whether `db_dir` actually accepts writes, by creating and
+/// dropping a throwaway table. A read-only store fails the CREATE with
+/// the manifest error; a healthy store round-trips and is left exactly
+/// as it was found.
+///
+/// Deliberately bypasses the CLI self-heal ([`SmoothDolt::run_cli`]'s
+/// auto-doctor retry) — a diagnostic must report what it sees, not
+/// silently kill processes as a side effect of looking.
+#[must_use]
+pub fn probe_writable(db_dir: &Path) -> WriteProbe {
+    // Unique per probe: a leftover table from an interrupted earlier
+    // probe would turn `CREATE TABLE IF NOT EXISTS` into a no-op that
+    // succeeds even on a read-only store — a false "writable".
+    let probe_table = format!("_th_doctor_write_probe_{}", std::process::id());
+
+    let cli = match SmoothDolt::new_cli_only(db_dir) {
+        Ok(c) => c,
+        Err(e) => {
+            return WriteProbe::Failed {
+                detail: format!("{e:#}").chars().take(200).collect(),
+            };
+        }
+    };
+
+    match cli.exec_no_heal(&format!("CREATE TABLE IF NOT EXISTS {probe_table} (id INT PRIMARY KEY)")) {
+        Ok(_) => {
+            // Leave no trace. A failure to drop is worth surfacing but
+            // isn't a write-lock — writes plainly work.
+            if let Err(e) = cli.exec_no_heal(&format!("DROP TABLE IF EXISTS {probe_table}")) {
+                tracing::warn!(error = %e, table = probe_table, "doctor write probe could not drop its probe table");
+            }
+            WriteProbe::Writable
+        }
+        Err(e) if is_lock_wedge_err(&e) => WriteProbe::ReadOnly {
+            detail: format!("{e:#}").chars().take(200).collect(),
+        },
+        Err(e) => WriteProbe::Failed {
+            detail: format!("{e:#}").chars().take(200).collect(),
+        },
+    }
+}
+
+/// The one repair the doctor should attempt for a given state. Exists as
+/// a pure function so the invariant that matters can be unit-tested:
+/// **a healthy-but-write-locked store gets REAPED, never re-cloned.**
+/// Losing a healthy local pearl DB to a re-clone from a broken remote
+/// must be impossible (pearl th-118847).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Remedy {
+    /// Nothing to do.
+    None,
+    /// Kill the leaked processes pinning the store, then re-probe.
+    Reap,
+    /// Hand-resolve the conflicted noms manifest.
+    RepairManifest,
+    /// Snapshot + re-clone from `origin`. ONLY when the manifest does
+    /// not read cleanly — i.e. the store is genuinely corrupt.
+    RecloneFromRemote,
+}
+
+#[must_use]
+pub fn select_remedy(diagnosis: &DoctorDiagnosis, write_locked: bool) -> Remedy {
+    match diagnosis {
+        DoctorDiagnosis::ConflictMarkers { .. } => Remedy::RepairManifest,
+        DoctorDiagnosis::Corrupt { .. } => Remedy::RecloneFromRemote,
+        DoctorDiagnosis::NotInitialized { .. } => Remedy::None,
+        DoctorDiagnosis::Healthy if write_locked => Remedy::Reap,
+        DoctorDiagnosis::Healthy => Remedy::None,
+    }
+}
+
+#[cfg(test)]
+mod holder_tests {
+    use super::{classify_store_process, parse_etime, parse_ps_line, select_remedy, should_reap, DoctorDiagnosis, HolderKind, Remedy, DEFAULT_REAP_AGE_SECS};
+    use std::path::Path;
+
+    fn root() -> &'static Path {
+        Path::new("/Users/b/dev/smooai/smooai/.smooth/dolt")
+    }
+
+    #[test]
+    fn matches_one_shot_sql_for_this_store() {
+        assert_eq!(
+            classify_store_process(
+                "/Users/b/.cargo/bin/smooth-dolt sql /Users/b/dev/smooai/smooai/.smooth/dolt -q SELECT * FROM pearl_labels",
+                root()
+            ),
+            Some(HolderKind::OneShot)
+        );
+    }
+
+    #[test]
+    fn matches_serve_for_this_store() {
+        assert_eq!(
+            classify_store_process("smooth-dolt serve /Users/b/dev/smooai/smooai/.smooth/dolt --socket /tmp/x.sock", root()),
+            Some(HolderKind::Serve)
+        );
+    }
+
+    #[test]
+    fn matches_db_subdir_under_the_root() {
+        // The doctor probes per-db (`<root>/pearls`); a process pointed
+        // at the db dir is still holding this project's store.
+        assert_eq!(
+            classify_store_process("smooth-dolt exec /Users/b/dev/smooai/smooai/.smooth/dolt/pearls -q INSERT INTO x", root()),
+            Some(HolderKind::OneShot)
+        );
+    }
+
+    #[test]
+    fn never_matches_another_projects_store() {
+        // SAFETY: the whole point. A smooth-dolt for a different repo,
+        // or the global ~/.smooth store, must be invisible to us.
+        assert_eq!(
+            classify_store_process("smooth-dolt sql /Users/b/dev/smooai/smooth/.smooth/dolt -q SELECT 1", root()),
+            None
+        );
+        assert_eq!(
+            classify_store_process("smooth-dolt serve /Users/b/.smooth/dolt --socket /tmp/g.sock", root()),
+            None
+        );
+    }
+
+    #[test]
+    fn never_matches_a_sibling_path_with_a_shared_prefix() {
+        assert_eq!(
+            classify_store_process("smooth-dolt sql /Users/b/dev/smooai/smooai/.smooth/dolt-backup -q SELECT 1", root()),
+            None
+        );
+    }
+
+    #[test]
+    fn never_matches_a_non_smooth_dolt_process() {
+        // An editor, a grep, a backup job that merely names the path.
+        assert_eq!(
+            classify_store_process("vim /Users/b/dev/smooai/smooai/.smooth/dolt/pearls/.dolt/noms/LOCK", root()),
+            None
+        );
+        assert_eq!(classify_store_process("rg smooth-dolt /Users/b/dev/smooai/smooai/.smooth/dolt", root()), None);
+        assert_eq!(
+            classify_store_process("rsync -a /Users/b/dev/smooai/smooai/.smooth/dolt backup:/", root()),
+            None
+        );
+        // `th` itself, which names both the binary and the path.
+        assert_eq!(
+            classify_store_process("smooth-dolt-wrapper /Users/b/dev/smooai/smooai/.smooth/dolt", root()),
+            None
+        );
+    }
+
+    #[test]
+    fn never_matches_smooth_dolt_without_our_path() {
+        assert_eq!(classify_store_process("smooth-dolt version", root()), None);
+    }
+
+    #[test]
+    fn one_shot_is_reaped_only_once_stale() {
+        assert!(
+            !should_reap(HolderKind::OneShot, 2, DEFAULT_REAP_AGE_SECS, false),
+            "a fresh one-shot may be a live query"
+        );
+        assert!(should_reap(HolderKind::OneShot, 45, DEFAULT_REAP_AGE_SECS, false));
+        // --force reaps regardless of age.
+        assert!(should_reap(HolderKind::OneShot, 0, DEFAULT_REAP_AGE_SECS, true));
+    }
+
+    #[test]
+    fn serve_is_only_reaped_with_force() {
+        assert!(!should_reap(HolderKind::Serve, 99_999, DEFAULT_REAP_AGE_SECS, false));
+        assert!(should_reap(HolderKind::Serve, 1, DEFAULT_REAP_AGE_SECS, true));
+    }
+
+    #[test]
+    fn healthy_but_write_locked_reaps_and_never_reclones() {
+        // THE invariant: a store that reads fine must never be re-cloned
+        // from origin just because writes are blocked.
+        assert_eq!(select_remedy(&DoctorDiagnosis::Healthy, true), Remedy::Reap);
+        assert_eq!(select_remedy(&DoctorDiagnosis::Healthy, false), Remedy::None);
+    }
+
+    #[test]
+    fn corrupt_manifest_still_reclones() {
+        assert_eq!(
+            select_remedy(&DoctorDiagnosis::Corrupt { detail: "bad manifest".into() }, false),
+            Remedy::RecloneFromRemote
+        );
+        // Even if it ALSO can't be written, corruption wins — a corrupt
+        // store can't be fixed by killing processes.
+        assert_eq!(
+            select_remedy(&DoctorDiagnosis::Corrupt { detail: "bad manifest".into() }, true),
+            Remedy::RecloneFromRemote
+        );
+        assert_eq!(
+            select_remedy(&DoctorDiagnosis::ConflictMarkers { candidates: vec!["x".into()] }, true),
+            Remedy::RepairManifest
+        );
+    }
+
+    #[test]
+    fn etime_formats() {
+        assert_eq!(parse_etime("05"), None);
+        assert_eq!(parse_etime("01:30"), Some(90));
+        assert_eq!(parse_etime("02:01:30"), Some(7_290));
+        assert_eq!(parse_etime("1-02:01:30"), Some(93_690));
+        assert_eq!(parse_etime("garbage"), None);
+    }
+
+    #[test]
+    fn ps_line_parses() {
+        assert_eq!(
+            parse_ps_line(" 4242 01:05 /usr/local/bin/smooth-dolt sql /x/.smooth/dolt -q SELECT 1"),
+            Some((4242, 65, "/usr/local/bin/smooth-dolt sql /x/.smooth/dolt -q SELECT 1".to_string()))
+        );
+        assert_eq!(parse_ps_line(""), None);
+        assert_eq!(parse_ps_line("notapid 01:05 cmd"), None);
+    }
+}
+
 /// Clone a dolt store from a remote URL into `target_dir`. Used by
 /// `th pearls init` for post-`git clone` bootstrap — when a fresh
 /// checkout has no `.smooth/dolt/` on disk (it's gitignored under the
@@ -1583,7 +2056,7 @@ fn clone_from_with_timeout(remote_url: &str, target_dir: &std::path::Path, timeo
     // Drain-while-waiting is load-bearing here: a real clone prints enough
     // progress to fill the pipe buffer, which read as "stalled" and got
     // killed at any deadline (pearl th-6c6843).
-    let output = wait_child_draining(child, timeout, &format!("smooth-dolt clone from {remote_url}"))?;
+    let output = wait_child_draining(child, timeout, &format!("smooth-dolt clone from {remote_url}"), SYNC_STALL_HINT)?;
     if !output.status.success() {
         let stderr: String = String::from_utf8_lossy(&output.stderr).trim().chars().take(400).collect();
         anyhow::bail!(
@@ -1750,7 +2223,7 @@ pub fn remote_dolt_data_tip(remote_url: &str) -> Result<Option<String>> {
         .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("spawn git ls-remote {url}"))?;
-    let output = wait_child_draining(child, sync_timeout(), &format!("git ls-remote {url}"))?;
+    let output = wait_child_draining(child, sync_timeout(), &format!("git ls-remote {url}"), SYNC_STALL_HINT)?;
     if !output.status.success() {
         let stderr: String = String::from_utf8_lossy(&output.stderr).trim().chars().take(300).collect();
         anyhow::bail!(
