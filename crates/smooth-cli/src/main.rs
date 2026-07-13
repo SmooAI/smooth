@@ -8341,6 +8341,24 @@ mod org_cli_tests {
                 cmd: smooai::testing::Cmd::Runs { .. }
             })
         ));
+        // config: `th config environments` ⇄ `th config environment` (and the old `env`)
+        assert!(matches!(
+            Cli::try_parse_from(["th", "config", "environment", "list"])
+                .expect("config environment")
+                .command,
+            Some(Commands::Config {
+                cmd: config::Cmd::Environments { .. }
+            })
+        ));
+        // admin: `th admin org` ⇄ `th admin orgs` — behind the `admin` feature,
+        // so only parse-tested in admin builds (the /normalize audit covers it statically).
+        #[cfg(feature = "admin")]
+        assert!(matches!(
+            Cli::try_parse_from(["th", "admin", "orgs", "list"]).expect("admin orgs").command,
+            Some(Commands::Admin {
+                cmd: admin::AdminCommands::Org { .. }
+            })
+        ));
         // The plural spelling still works too (aliases don't displace the canonical name).
         assert!(matches!(
             Cli::try_parse_from(["th", "api", "agents", "list"]).expect("api agents").command,
