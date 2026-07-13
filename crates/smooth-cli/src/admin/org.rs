@@ -40,6 +40,11 @@ pub enum OrgCommands {
         /// Organization display name.
         #[arg(long)]
         name: String,
+        /// Optional parent org UUID to link the new org under (a `manages`
+        /// relationship — the client-portal parent/child model). One-shot
+        /// equivalent of `create` then `link-child`.
+        #[arg(long)]
+        parent: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -223,12 +228,27 @@ pub async fn dispatch(cmd: OrgCommands) -> Result<()> {
                 );
             }
         }
-        OrgCommands::Create { name, json } => {
+        OrgCommands::Create { name, parent, json } => {
             // SMOODEV-1937: the endpoint requires `createdBy` as well as `name`.
             // It's the calling user (the DB trigger adds them as an admin member).
             let created_by = client.user_id().context("derive createdBy from session")?;
             let body = client.post("/admin/organizations", &json!({ "name": name, "createdBy": created_by })).await?;
             print_ok(format!("created org \"{name}\""));
+
+            // Optional one-shot parent link (same `manages` relationship LinkChild
+            // creates) so onboarding a child org is a single command.
+            if let Some(parent) = parent {
+                let child_id = body.get("id").and_then(|v| v.as_str()).context("new org id missing from create response")?;
+                client
+                    .post(
+                        &format!("/organizations/{parent}/relationships"),
+                        &json!({ "childOrgId": child_id, "relationshipType": "manages" }),
+                    )
+                    .await
+                    .with_context(|| format!("link new org under parent {parent}"))?;
+                print_ok(format!("linked under parent {parent} (manages)"));
+            }
+
             render(&body, Format::from_flag(json), &TableOptions::default());
         }
         OrgCommands::Members { org_id, json } => {
