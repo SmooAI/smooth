@@ -518,8 +518,102 @@ pub async fn cmd_orgs(cmd: super::OrgsCommands) -> Result<()> {
             }
             println!();
         }
+        super::OrgsCommands::Brand {
+            org,
+            app_name,
+            mut logo,
+            logo_file,
+            mut logo_dark,
+            logo_dark_file,
+            mut favicon,
+            favicon_file,
+            primary,
+            accent,
+            support_url,
+            hide_powered_by,
+        } => {
+            let resolved = crate::active_org::resolve(org).context("no org id specified and no active org set — pass --org <id> or `th org switch <id>`")?;
+
+            // Upload any local files first; the returned URLs override the URL flags.
+            if let Some(f) = logo_file {
+                logo = Some(client.upload_logo(&resolved, "logo", &f).await.context("upload logo file")?);
+                println!("  {} uploaded logo → {}", "↑".cyan(), logo.as_deref().unwrap_or("").dimmed());
+            }
+            if let Some(f) = logo_dark_file {
+                // The upload endpoint only accepts logo|icon|logoWordmark variants; the
+                // returned URL is what matters, so a dark logo uploads as "logo".
+                logo_dark = Some(client.upload_logo(&resolved, "logo", &f).await.context("upload dark logo file")?);
+                println!("  {} uploaded dark logo → {}", "↑".cyan(), logo_dark.as_deref().unwrap_or("").dimmed());
+            }
+            if let Some(f) = favicon_file {
+                favicon = Some(client.upload_logo(&resolved, "icon", &f).await.context("upload favicon file")?);
+                println!("  {} uploaded favicon → {}", "↑".cyan(), favicon.as_deref().unwrap_or("").dimmed());
+            }
+
+            let current = client.get(&format!("/organizations/{resolved}/branding")).await.context("GET branding")?;
+
+            let no_changes = app_name.is_none()
+                && logo.is_none()
+                && logo_dark.is_none()
+                && favicon.is_none()
+                && primary.is_none()
+                && accent.is_none()
+                && support_url.is_none()
+                && !hide_powered_by;
+            if no_changes {
+                print_branding(&current);
+                return Ok(());
+            }
+
+            let cur = |k: &str| current.get(k).cloned().unwrap_or(serde_json::Value::Null);
+            let mut theme = current
+                .get("themeJson")
+                .cloned()
+                .filter(serde_json::Value::is_object)
+                .unwrap_or_else(|| serde_json::json!({}));
+            if let Some(p) = &primary {
+                theme["primary"] = serde_json::json!(p);
+            }
+            if let Some(a) = &accent {
+                theme["accent"] = serde_json::json!(a);
+            }
+            let body = serde_json::json!({
+                "appName": app_name.map(serde_json::Value::from).unwrap_or_else(|| cur("appName")),
+                "logoUrl": logo.map(serde_json::Value::from).unwrap_or_else(|| cur("logoUrl")),
+                "logoDarkUrl": logo_dark.map(serde_json::Value::from).unwrap_or_else(|| cur("logoDarkUrl")),
+                "faviconUrl": favicon.map(serde_json::Value::from).unwrap_or_else(|| cur("faviconUrl")),
+                "themeJson": theme,
+                "supportUrl": support_url.map(serde_json::Value::from).unwrap_or_else(|| cur("supportUrl")),
+                "hidePoweredBy": if hide_powered_by {
+                    serde_json::json!(true)
+                } else {
+                    current.get("hidePoweredBy").and_then(serde_json::Value::as_bool).map(serde_json::Value::from).unwrap_or(serde_json::json!(false))
+                },
+            });
+            let updated = client
+                .put(&format!("/organizations/{resolved}/branding"), &body)
+                .await
+                .context("PUT branding")?;
+            println!("  {} updated branding for {}", "↻".yellow(), resolved.dimmed());
+            print_branding(&updated);
+        }
     }
     Ok(())
+}
+
+/// Pretty-print an organization branding payload.
+fn print_branding(b: &serde_json::Value) {
+    let s = |k: &str| b.get(k).and_then(serde_json::Value::as_str).unwrap_or("—").to_string();
+    let theme = b.get("themeJson");
+    let tc = |k: &str| theme.and_then(|t| t.get(k)).and_then(serde_json::Value::as_str).unwrap_or("—").to_string();
+    println!();
+    println!("  {}  {}", "App name  ".dimmed(), s("appName").bold());
+    println!("  {}  {}", "Logo      ".dimmed(), s("logoUrl"));
+    println!("  {}  {}", "Logo dark ".dimmed(), s("logoDarkUrl"));
+    println!("  {}  {}", "Favicon   ".dimmed(), s("faviconUrl"));
+    println!("  {}  primary {}  accent {}", "Colors    ".dimmed(), tc("primary").cyan(), tc("accent").cyan());
+    println!("  {}  {}", "Support   ".dimmed(), s("supportUrl"));
+    println!();
 }
 
 /// A single org as far as the switcher cares.

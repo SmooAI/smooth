@@ -98,6 +98,54 @@ impl UserClient {
         Self::body(resp, "PATCH", &url).await
     }
 
+    pub async fn put(&self, path: &str, body: &Value) -> Result<Value> {
+        let url = format!("{}{path}", self.base);
+        let resp = self
+            .http
+            .put(&url)
+            .bearer_auth(&self.bearer)
+            .json(body)
+            .send()
+            .await
+            .with_context(|| format!("PUT {url}"))?;
+        Self::body(resp, "PUT", &url).await
+    }
+
+    /// Upload a local file to the org logo endpoint (multipart). `variant` is
+    /// e.g. "logo" | "logoDark" | "favicon". Returns the hosted URL.
+    pub async fn upload_logo(&self, org: &str, variant: &str, file_path: &str) -> Result<String> {
+        let bytes = std::fs::read(file_path).with_context(|| format!("read {file_path}"))?;
+        let name = std::path::Path::new(file_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("logo.png")
+            .to_string();
+        let mime = match name.rsplit('.').next().unwrap_or("").to_lowercase().as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "svg" => "image/svg+xml",
+            "webp" => "image/webp",
+            "gif" => "image/gif",
+            _ => "application/octet-stream",
+        };
+        let part = reqwest::multipart::Part::bytes(bytes).file_name(name).mime_str(mime)?;
+        let form = reqwest::multipart::Form::new().part("file", part).text("variant", variant.to_string());
+        let url = format!("{}/organizations/{org}/logo/upload", self.base);
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.bearer)
+            .multipart(form)
+            .send()
+            .await
+            .with_context(|| format!("POST {url}"))?;
+        let body = Self::body(resp, "POST", &url).await?;
+        body.get("url")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .context("logo upload response missing `url`")
+    }
+
     pub async fn delete(&self, path: &str) -> Result<Value> {
         let url = format!("{}{path}", self.base);
         let resp = self

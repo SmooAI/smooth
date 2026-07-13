@@ -649,6 +649,10 @@ enum TunnelCommands {
 }
 
 #[derive(Subcommand)]
+// `Brand` carries a dozen optional branding flags, so it dwarfs the other
+// variants. Boxing it would break clap's derive (it needs the args inline), and
+// a command enum is parsed once per process — the size difference is irrelevant.
+#[allow(clippy::large_enum_variant)]
 enum OrgsCommands {
     /// List organizations the logged-in user belongs to.
     List,
@@ -668,6 +672,45 @@ enum OrgsCommands {
     Switch {
         /// Org id (UUID) or a name/slug substring. Omit to pick from a list.
         org_id: Option<String>,
+    },
+    /// View or set org branding (white-label): app name, logo, colors.
+    /// With no flags, prints the current branding; any flag PUTs a merged update.
+    Brand {
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// White-label app name (e.g. shown as "Proposal by <name>").
+        #[arg(long = "app-name")]
+        app_name: Option<String>,
+        /// Logo URL (light theme).
+        #[arg(long)]
+        logo: Option<String>,
+        /// Upload a local logo file (light) instead of passing a URL.
+        #[arg(long = "logo-file")]
+        logo_file: Option<String>,
+        /// Logo URL (dark theme).
+        #[arg(long = "logo-dark")]
+        logo_dark: Option<String>,
+        /// Upload a local logo file (dark).
+        #[arg(long = "logo-dark-file")]
+        logo_dark_file: Option<String>,
+        /// Favicon URL.
+        #[arg(long)]
+        favicon: Option<String>,
+        /// Upload a local favicon file.
+        #[arg(long = "favicon-file")]
+        favicon_file: Option<String>,
+        /// Primary brand color (hex, e.g. #00a6a6).
+        #[arg(long)]
+        primary: Option<String>,
+        /// Accent brand color (hex).
+        #[arg(long)]
+        accent: Option<String>,
+        /// Support URL.
+        #[arg(long = "support-url")]
+        support_url: Option<String>,
+        /// Hide the "powered by Smoo AI" mark.
+        #[arg(long = "hide-powered-by")]
+        hide_powered_by: bool,
     },
 }
 

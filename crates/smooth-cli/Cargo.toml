@@ -47,7 +47,7 @@ serde_json.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-reqwest = { workspace = true, features = ["blocking"] }
+reqwest = { workspace = true, features = ["blocking", "multipart"] }
 chrono.workspace = true
 chrono-tz.workspace = true
 dirs-next.workspace = true
