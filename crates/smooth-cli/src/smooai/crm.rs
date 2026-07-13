@@ -83,6 +83,12 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: InvoicesCmd,
     },
+    /// Proposals — client proposals sent as password-gated magic links (list / show / create / update / link / url).
+    #[command(visible_alias = "proposal")]
+    Proposals {
+        #[command(subcommand)]
+        cmd: ProposalsCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -550,6 +556,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
         Cmd::Conversations { cmd } => conversations(cmd).await,
         Cmd::Timeline { deal_id, org, json } => timeline(deal_id, org, json).await,
         Cmd::Invoices { cmd } => invoices(cmd).await,
+        Cmd::Proposals { cmd } => proposals(cmd).await,
     }
 }
 
@@ -2032,6 +2039,288 @@ fn remember(email_to_id: &mut HashMap<String, String>, phone_to_id: &mut HashMap
     if let Some(p) = phone {
         phone_to_id.insert(p.clone(), id.to_string());
     }
+}
+
+// ─── Proposals (SMOODEV-2566) ───────────────────────────────────────────────
+// Client proposals authored in the dashboard and sent as password-gated magic
+// links. Routes are top-level org-scoped (`/organizations/{org}/proposals`),
+// NOT under `/crm`. A proposal optionally links to a CRM deal via `dealId`.
+
+const PROPOSAL_WEB_URL: &str = "https://smoo.ai";
+
+fn proposal_web_url() -> String {
+    std::env::var("SMOOAI_WEB_URL").unwrap_or_else(|_| PROPOSAL_WEB_URL.to_string())
+}
+
+#[derive(Subcommand)]
+pub enum ProposalsCmd {
+    /// List the org's proposals.
+    List {
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// Print raw JSON instead of the table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one proposal, with its shareable magic link.
+    Show {
+        /// The proposal id from `… proposals list`.
+        proposal_id: String,
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// Print raw JSON instead of the rendered view.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a proposal.
+    Create {
+        /// Proposal title.
+        title: String,
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// Link to a CRM deal (uuid or title).
+        #[arg(long)]
+        deal: Option<String>,
+        /// Access key (password) recipients need to open the link.
+        #[arg(long)]
+        key: Option<String>,
+        /// Publish immediately (default is draft).
+        #[arg(long)]
+        publish: bool,
+    },
+    /// Update a proposal — only the flags you pass change.
+    Update {
+        proposal_id: String,
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        /// Link to a CRM deal (uuid or title).
+        #[arg(long)]
+        deal: Option<String>,
+        /// Set the access key (password).
+        #[arg(long)]
+        key: Option<String>,
+        /// Publish it.
+        #[arg(long)]
+        publish: bool,
+        /// Unpublish it (back to draft).
+        #[arg(long)]
+        unpublish: bool,
+        /// Rotate the magic-link token (invalidates the old link).
+        #[arg(long = "rotate-token")]
+        rotate_token: bool,
+    },
+    /// Link a proposal to a CRM deal (uuid or title).
+    Link {
+        proposal_id: String,
+        /// Deal uuid or title.
+        deal: String,
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Print the shareable magic link for a proposal.
+    Url {
+        proposal_id: String,
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Delete a proposal.
+    Delete {
+        proposal_id: String,
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+}
+
+async fn proposals(cmd: ProposalsCmd) -> Result<()> {
+    let client = UserClient::from_user_session().await?;
+    match cmd {
+        ProposalsCmd::List { org, json } => {
+            let org = resolve_org(org)?;
+            let body = client.get(&format!("/organizations/{org}/proposals")).await.context("GET proposals")?;
+            if json {
+                print_json(&body);
+            } else {
+                render_proposals(&body);
+            }
+        }
+        ProposalsCmd::Show { proposal_id, org, json } => {
+            let org = resolve_org(org)?;
+            let p = client
+                .get(&format!("/organizations/{org}/proposals/{proposal_id}"))
+                .await
+                .context("GET proposal")?;
+            if json {
+                print_json(&p);
+            } else {
+                show_proposal(&p);
+            }
+        }
+        ProposalsCmd::Create {
+            title,
+            org,
+            deal,
+            key,
+            publish,
+        } => {
+            let org = resolve_org(org)?;
+            let mut body = json!({ "title": title });
+            if publish {
+                body["status"] = json!("published");
+            }
+            let key = key.filter(|s| !s.trim().is_empty());
+            if let Some(k) = &key {
+                body["password"] = json!(k);
+            }
+            if let Some(d) = deal.filter(|s| !s.trim().is_empty()) {
+                body["dealId"] = json!(resolve_deal_id(&client, &org, &d).await?);
+            }
+            let p = client.post(&format!("/organizations/{org}/proposals"), &body).await.context("POST proposal")?;
+            let id = p.get("id").and_then(Value::as_str).unwrap_or("?");
+            println!("  {} created proposal {} {}", "✚".green(), id.dimmed(), title.bold());
+            print_proposal_link(&p, key.as_deref());
+        }
+        ProposalsCmd::Update {
+            proposal_id,
+            org,
+            title,
+            deal,
+            key,
+            publish,
+            unpublish,
+            rotate_token,
+        } => {
+            let org = resolve_org(org)?;
+            let mut body = json!({});
+            if let Some(t) = title.filter(|s| !s.trim().is_empty()) {
+                body["title"] = json!(t);
+            }
+            let key = key.filter(|s| !s.trim().is_empty());
+            if let Some(k) = &key {
+                body["password"] = json!(k);
+            }
+            if let Some(d) = deal.filter(|s| !s.trim().is_empty()) {
+                body["dealId"] = json!(resolve_deal_id(&client, &org, &d).await?);
+            }
+            if publish {
+                body["status"] = json!("published");
+            }
+            if unpublish {
+                body["status"] = json!("draft");
+            }
+            if rotate_token {
+                body["rotateToken"] = json!(true);
+            }
+            let p = client
+                .patch(&format!("/organizations/{org}/proposals/{proposal_id}"), &body)
+                .await
+                .context("PATCH proposal")?;
+            println!("  {} updated proposal {}", "↻".yellow(), proposal_id.dimmed());
+            print_proposal_link(&p, key.as_deref());
+        }
+        ProposalsCmd::Link { proposal_id, deal, org } => {
+            let org = resolve_org(org)?;
+            let deal_id = resolve_deal_id(&client, &org, &deal).await?;
+            client
+                .patch(&format!("/organizations/{org}/proposals/{proposal_id}"), &json!({ "dealId": deal_id }))
+                .await
+                .context("PATCH proposal (link deal)")?;
+            println!(
+                "  {} linked proposal {} {} deal {}",
+                "🔗".cyan(),
+                proposal_id.dimmed(),
+                "→".dimmed(),
+                deal_id.dimmed()
+            );
+        }
+        ProposalsCmd::Url { proposal_id, org } => {
+            let org = resolve_org(org)?;
+            let p = client
+                .get(&format!("/organizations/{org}/proposals/{proposal_id}"))
+                .await
+                .context("GET proposal")?;
+            print_proposal_link(&p, None);
+        }
+        ProposalsCmd::Delete { proposal_id, org } => {
+            let org = resolve_org(org)?;
+            client
+                .delete(&format!("/organizations/{org}/proposals/{proposal_id}"))
+                .await
+                .context("DELETE proposal")?;
+            println!("  {} deleted proposal {}", "✗".red(), proposal_id.dimmed());
+        }
+    }
+    Ok(())
+}
+
+fn proposal_status_cell(status: &str, width: usize) -> String {
+    let padded = format!("{status:<width$}");
+    if status == "published" {
+        padded.green().to_string()
+    } else {
+        padded.dimmed().to_string()
+    }
+}
+
+fn proposal_link(p: &Value, key: Option<&str>) -> Option<String> {
+    let token = p.get("token").and_then(Value::as_str)?;
+    let base = format!("{}/proposals/{token}", proposal_web_url());
+    Some(match key {
+        Some(k) if !k.is_empty() => format!("{base}?key={}", urlencoding::encode(k)),
+        _ => base,
+    })
+}
+
+fn print_proposal_link(p: &Value, key: Option<&str>) {
+    if let Some(link) = proposal_link(p, key) {
+        println!("  {} {}", "link".dimmed(), link.cyan());
+        if p.get("status").and_then(Value::as_str) != Some("published") {
+            println!("  {} draft — run `… proposals update <id> --publish` to make it resolve", "!".yellow());
+        }
+    }
+}
+
+fn show_proposal(p: &Value) {
+    println!();
+    println!("  {}", p.get("title").and_then(Value::as_str).unwrap_or("—").bold());
+    println!(
+        "  {} {}",
+        "Status ".dimmed(),
+        proposal_status_cell(p.get("status").and_then(Value::as_str).unwrap_or("draft"), 0)
+    );
+    println!("  {} {}", "Views  ".dimmed(), p.get("viewCount").and_then(Value::as_u64).unwrap_or(0));
+    if let Some(d) = p.get("dealId").and_then(Value::as_str) {
+        println!("  {} {}", "Deal   ".dimmed(), d.dimmed());
+    }
+    println!("  {} {}", "id     ".dimmed(), p.get("id").and_then(Value::as_str).unwrap_or("?").dimmed());
+    print_proposal_link(p, None);
+    println!();
+}
+
+fn render_proposals(body: &Value) {
+    let items = body.get("proposals").and_then(Value::as_array).cloned().unwrap_or_default();
+    if items.is_empty() {
+        println!("\n  {}\n", "no proposals yet".dimmed());
+        return;
+    }
+    println!();
+    println!(
+        "  {}  {}  {}  {}",
+        format!("{:<38}", "TITLE").dimmed(),
+        format!("{:<10}", "STATUS").dimmed(),
+        format!("{:>6}", "VIEWS").dimmed(),
+        "ID".dimmed()
+    );
+    for p in &items {
+        let title = truncate(p.get("title").and_then(Value::as_str).unwrap_or("—"), 38);
+        let status = proposal_status_cell(p.get("status").and_then(Value::as_str).unwrap_or("draft"), 10);
+        let views = format!("{:>6}", p.get("viewCount").and_then(Value::as_u64).unwrap_or(0));
+        let id = p.get("id").and_then(Value::as_str).unwrap_or("?");
+        println!("  {:<38}  {}  {}  {}", title, status, views, id.dimmed());
+    }
+    println!();
 }
 
 #[cfg(test)]
