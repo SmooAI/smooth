@@ -1,5 +1,204 @@
 # @smooai/smooth
 
+## 0.18.0
+
+### Minor Changes
+
+- 17541b6: Big Smooth's own chat loop now hosts SEP extensions (pearl th-6d8606). The daemon loads pre-trusted extensions once at startup into a shared ExtensionHost; every chat turn registers their tools alongside the pearl/teammate tools (gated by the same AutoMode permission hook and a newly-added Narc surveillance hook on the chat registry), routes their ui/\* requests onto the existing UiRelay machinery in-process (task_id `big-smooth-chat` — no HTTP-to-self), and intercepts `/cmd args` chat messages as extension slash commands. New routes: `GET /api/ext` (loaded extensions + commands) and `POST /api/ext/reload`; `th ext reload` now hot-reloads the running daemon's host best-effort instead of always deferring to the next session.
+- 7a21dfa: `th booking` — CLI for the org's Google-Calendar booking page. `config get/set` (merge-updates availability: timezone, days, hours via HH:MM or minutes, durations, buffer, min-notice, window, calendar + conflict calendars, display name), `slots` (open times rendered in the config timezone), `bookings` (list), `block add/list/rm` (manual busy time), `calendars list/connect/rm` (Calendly-style multiple Google account connections — connect prints the Google OAuth URL to authorize a conflict calendar), and `link` (public booking URL). Available as both `th booking …` and `th api booking …`.
+- 75d97b5: `th files` — CLI for the Smoo AI org file system (ADR-060). `ls` (folders + files in a folder or root), `mkdir`, `upload` (presigned PUT from a local path, MIME inferred from extension), `download` (presigned GET → local file), `mv`/`mvdir` (move and/or rename; `root` moves to the org root), `rm`/`rmdir`, `lock`/`unlock` (admin deletion lock on a file or folder), and shares: `share` (anonymous link with `--permission`/`--password`/`--expires-in-hours`/`--max-downloads`, prints the `smoo.ai/share/<token>` URL), `shares` (list), `unshare` (revoke), and `invite` (tracked email invite → `smoo.ai/share/recipient/<token>`). Available as both `th files …` and `th api files …`.
+- 792f479: th pearls: schedulable pearls that speak up when due (th-01aa6a)
+
+  Pearls gain an optional `scheduled_at`. `th pearls schedule <id> <when>` sets it
+  (relative `+2h`/`30m`/`2d`/`1w`/`tomorrow`/`now` or absolute `2026-07-10 09:00`/RFC3339,
+  UTC); omit `<when>` to clear. `th pearls due` lists pearls whose time has arrived, and
+  the session-priming hook (`th prime`) now surfaces a `⏰ Scheduled & due` section above
+  `Ready to work` so a scheduled pearl automatically speaks up at the next session start
+  once it comes due. `th pearls show` / `ready` / `list` render a `⏰` marker for
+  scheduled pearls. Existing Dolt stores migrate idempotently (`ADD COLUMN IF NOT EXISTS`).
+
+- 4f51437: SEP Phase 3 (smooth) — `th ext` + the extension host substrate.
+
+  **`th ext`** manages SEP extensions: `install ./path [--project] [--trust]` copies a local extension directory into `~/.smooth/extensions` (or `<repo>/.smooth/extensions`), prints its declared capabilities, and prompts to trust it; `list` shows installed extensions with their trust state; `trust <name>` records trust; `remove <name>` deletes it. Trust is **content-hashed and fail-safe** — an extension only loads when it's recorded trusted in `~/.smooth/extensions/trust.toml` and its `extension.toml` still hashes to the value trust was granted against (editing re-locks it), and a non-interactive install never trusts silently.
+
+  **`smooth_code::sep_host`** is the frontend host substrate: a `RenderBlock` model for `set_widget` payloads (markdown/keyvalue/progress + text fallback), the `UiSink` trait that decouples `ui/request` from the ratatui event loop, `TuiUiProvider` (the engine `HostDelegate` that routes `select`/`confirm`/`input`/`notify`/`set_status`/`set_widget`/`set_title` onto a `UiSink`), the trust store, and `load_trusted_host` (discover → trust-gate → `ExtensionHost::load` declaring the seven TUI ui capabilities).
+
+  **Engine pin** flipped from crates.io `0.14.0` to a git rev of `smooai-smooth-operator-core` `main` (SEP Phases 0–3, incl. the `ui_capabilities` handshake), which is not yet in a crates.io release. Flip back to a version pin once a release publishes the extension module.
+
+  The live agent runs in `smooth-operative`; relaying a dispatched operative's `ui/request` to the TUI is SEP Phase 6 (the daemon event surface). This ships the CLI, trust model, and tested render/host substrate it builds on.
+
+- 0449b2c: SEP Phase 4 (smooth) — attach extensions to the operative + `th ext reload`.
+
+  **Operative attach** (pearl th-70cd08). The dispatched worker (`smooth-operative`)
+  now discovers installed SEP extensions and loads the PRE-trusted ones into a
+  headless `ExtensionHost` attached to its `Agent`, so their tools, `tool_call`
+  hooks, and turn events run in real dispatched tasks and flow out on the existing
+  `AgentEvent` stdout stream. Trust is fail-safe: unattended, an unknown or
+  content-changed extension is silently skipped (never prompts). The delegate is
+  the engine's headless default (empty `ui_capabilities`, `-32001 NoUI` for two-way
+  `ui/request` until the daemon relay, Phase 6); extension tools ride the ordinary
+  `ToolRegistry`, so the NarcHook surveillance already installed applies to them.
+
+  **Trust store extraction.** `TrustStore` / `TrustRecord` / `hash_extension` /
+  `trust_path` moved from `smooth-code::sep_host` down into `smooth-policy`
+  (`ext_trust`) — a leaf crate both the TUI and the operative can depend on — and
+  are re-exported from `sep_host` so the `th ext` CLI is unchanged.
+
+  **Engine pin.** Bumped `smooth-operator-core` to the SEP Phase 4 engine rev
+  (command dispatch, session actions, hot reload).
+
+  **`th ext reload <name>`.** Re-validate an installed extension after editing it:
+  re-parse the manifest, re-hash it, and (when the manifest changed) re-confirm
+  trust so the next host start picks up the new version. In-session live reload
+  (the engine's `ExtensionHost::reload`) lands with the daemon relay (Phase 6).
+
+- 83094a4: SEP Phase 5 (smooth) — packaging, skills unification, marketplace search, legacy deletion.
+
+  **`th ext install` gains npm/git sources.** Beyond a local directory, install from `npm:@scope/pkg[@version]` or `git:host/user/repo[@ref]`. npm packages are vendored under `~/.smooth/extensions/.npm` (an `npm install --prefix` tree so their deps resolve), git repos under `~/.smooth/extensions/.git/<host>/<path>` at the pinned ref (and `npm install`ed when they carry a `package.json`). A `~/.smooth/extensions/<name>` symlink to the vendored dir is what the engine discovers, so packaged and local installs load identically through the engine's existing top-level discovery. A manifest may be `extension.toml` **or** a `smooth` key in `package.json` (synthesized into `extension.toml` at install). Trust records the source spec so `th ext update [<name>]` re-fetches and reconciles — an unchanged manifest keeps its trust, a changed one is re-locked (fail-safe).
+
+  **`th ext search <query>`** matches a curated index shipped in the binary plus live npm packages tagged with the `smooth-extension` keyword, printing the install command for each hit.
+
+  **Skills unification.** A trusted extension's `[resources] skills` directory now feeds the one canonical skill catalog (`smooth-cast`) via `skills::resources_discover`; each SKILL becomes a `/skill:<name>` with source `extension`, gated on the same content-hashed trust (an untrusted extension contributes no skills — the skill body is a prompt-injection surface). The duplicate skill parser in `smooth-code` (`extensions.rs`) is deleted; `/skill` and the new `/ext` TUI command both read from `smooth-cast`. `SkillSource` gains an `Extension` variant and a shared `label()` (replacing five inline `match` copies).
+
+  **`/ext` TUI command** lists installed extensions with their trust state and declared capabilities. Live command/UI dispatch into a running host reaches the TUI over the daemon event surface (SEP Phase 6).
+
+  **Deletions (migration verdicts).** The zero-consumer `smooth-plugin` trait crate is removed (in-process trait plugins are exactly what SEP rejects), and the duplicate `smooth-code` skill parser is removed in favor of `smooth-cast`.
+
+- 479035e: SEP Phase 6 (smooth side) — relay a dispatched operative's extension `ui/*`
+  requests to smooth-web.
+
+  A dispatched operative runs headless, so its new `HttpUiProvider` relays each
+  `ui/*` request to Big Smooth over the existing `SMOOTH_NARC_URL` +
+  `SMOOTH_HOST_TOKEN` callback channel (`POST /api/ui/request` — the same channel
+  `host_tool` uses). Big Smooth broadcasts a `UiRequest` server event to connected
+  frontends and, for the interactive kinds (`select`/`confirm`/`input`), blocks the
+  operative's call until a browser answers via `POST /api/ui/answer`. The new
+  smooth-web `UiRelay` component renders `select`/`confirm`/`input` as a modal,
+  `notify` as a toast, and `set_status`/`set_widget`/`set_title` in the chrome;
+  render blocks (`markdown`/`keyvalue`/`progress`/`table`/`diff`/`stack`, each with
+  a `text` fallback) render natively.
+
+  Unattended (no client connected) an interactive request resolves to
+  `{cancelled:true}` rather than hang; under `SMOOTH_AUTO_MODE=bypass` a `confirm`
+  is auto-answered `{confirmed:true}` (audited); otherwise it waits up to
+  `SMOOTH_UI_TIMEOUT_SECS` (default 120s) then cancels.
+
+  Also removes the dangling `smooth-plugin` workspace dependency entry (the crate
+  was deleted in Phase 5).
+
+- 5e6418a: SEP Phase 8 (smooth) — render-block v2 DSL parity in both frontends.
+
+  **Web (`UiRelay.tsx`).** The daemon `ui/*` relay's `RenderBlock` now renders the
+  Phase 8 interactive `widget` kind (its `body` block plus a legend of the declared
+  keybindings) and aligns the `table`/`diff`/`stack` field names to the formalized
+  DSL (`columns`/`patch`/`children`), accepting the pre-Phase-8 aliases
+  (`headers`/`diff`/`items`) as a fallback.
+
+  **TUI (`smooth_code::sep_host::RenderBlock`).** The terminal render-block
+  substrate gains reduced-fidelity `table` (aligned columns), `diff`, `stack`
+  (recursive), and `widget` (body + keybinding legend) kinds, matching the web and
+  the SDK DSL, so a `widget`-driven extension degrades cleanly to the terminal.
+
+  **Deferred (out of Phase 8 scope, follow-ups filed).** Live interactive
+  `widget/key` routing from the TUI needs the engine-pin cutover to the Phase 8
+  `smooth-operator-core` (which adds `dispatch_widget_key`) plus a live `UiSink`
+  wired through the daemon relay (the daemon/auto-mode epic). Discovered
+  `[resources] themes` application is deferred too: it needs either the compile-time
+  `theme.rs` palette refactored to a runtime state (TUI) or theme colors plumbed
+  through the daemon to the web SPA — discovery without either is dead code.
+
+- 5b4d7a6: SEP Phase 7 (smooth) — `th cast models` surfaces extension-registered providers.
+
+  `th cast models` now folds in LLM providers contributed by globally installed
+  extensions (`~/.smooth/extensions/`). Any extension that registers a provider via
+  the SEP `registerProvider` surface is loaded headlessly and its declared models
+  are listed under an `extension <ext>.<provider>` section (in `--json`, as
+  `<provider>/<model>` ids). Model ids are filtered + sorted like gateway/local
+  models; a provider left with no matching models is dropped. Loading is gated to
+  **global** extensions — a plain `th cast models` in a repo never spawns a project
+  extension — and any failure yields an empty list, so extension providers are
+  strictly additive and can't break the core listing.
+
+  **Engine pin** bumped to the `smooai-smooth-operator-core` git rev carrying SEP
+  Phase 7 (registerProvider / OAuth / proxied streaming / `session/set_model`),
+  which exposes `ExtensionHost::providers()`.
+
+- 5f7dc65: th-3be564: Big Smooth chat is now multimodal — attach images to a chat message and the assistant sees them.
+
+  **Web** (`smooth-web` chat): a paperclip button, clipboard paste, and drag-and-drop stage image/PDF attachments; the composer shows removable thumbnails and the sent user bubble renders the images inline. Attachments ride the existing `POST /api/chat/sessions/{id}/messages` as `{ content, attachments: [{ name, mime, data(base64) }] }` — the field is optional, so text-only sends are unchanged.
+
+  **Daemon** (`smooth-bigsmooth`): the chat routes accept `attachments`, content-address the bytes under `~/.smooth/attachments/`, and build a multimodal turn via the engine's `Message::user_with_images`. **Images and PDFs** both ride the turn as `data:` media parts and auto-route to `gemini-2.5-flash-lite` — verified live that the gateway reads a PDF sent this way natively (it answered a question about the file's contents), so "read this PDF" works with no separate ingest pipeline. Text-only turns keep the default coding-slot model; an explicit per-request `model` still wins. Other document types (docx/xlsx/…) are marker-only until a converter lands (a docling microVM is the planned upgrade). Consumes the engine's new multimodal message/wire model via a git-rev pin bump (smooth-operator-core PRs #58/#62).
+
+- 10e9625: `th code` TUI conversation sidebar. Ctrl+B toggles a left-anchored overlay listing saved coding sessions (newest-first, the active one highlighted) with a "New conversation" entry at the top. Enter resumes the selected session (loads its history into the chat view via the existing `SessionManager` store) or starts a fresh one; `n` is a new-chat shortcut; Esc closes. Parity with the daemon PWA sidebar.
+- 4160767: `th config limits` — CLI surface for the new `@smooai/config` **limits** kind
+  (SMOODEV-2306), numeric segment-resolved config that never bakes and clamps
+  client-side. `limits evaluate <key>` POSTs to
+  `/organizations/{org}/config/limits/{key}/evaluate` (same segment machinery as
+  `th config feature-flag`, but the resolved value is a number; prints the raw
+  pre-clamp value, `--json` for the full envelope), `limits list` / `limits get`
+  surface the clamp metadata (`default`/`min`/`max`/`step`) declared in the org's
+  schema, and `limits set <key> <value>` writes a raw numeric value (thin wrapper
+  over `th config set … --tier limit`, rejecting non-finite values at parse
+  time). Adds a `limit` value tier (`--tier limit`). Aliased `th config limit`.
+  Runtime resolution depends on the config-server route being wired separately.
+- 66b4cb0: SMOODEV-2259 — `th api agents mint/update --extension` carries per-agent extensionConfig (SEP extension enablement), mirroring --tool-config.
+
+### Patch Changes
+
+- 201825d: docs: ADR-005 — publishable-client + scoped-org auth model for the th web-crawl free tier. The credential bundled in the binary is a public client identifier (not a secret M2M key), scoped to a dedicated org that can reach only the crawl free-tier route; paid tiers authenticate with the caller's own org identity. Blocks search.smoo.ai (th-1d88f5).
+- 0bdf871: th booking: add booking-types CRUD (`th booking types list|create|update|rm`) against the `/booking/types/{orgId}` endpoints, with `--durations`, `--note`, `--conferencing`, `--window-start/--window-end`, `--one-time`, and `--org-shared`. `config set` gains `--slug` (public link handle), `--conferencing`, and `--avatar-url`; `link` now prefers the config's link handle over the member email and supports `--type <slug>` (typed link) and `--note <text>` (ad-hoc pre-fill). Plural/singular command forms are now interchangeable via clap aliases: `booking`⇄`bookings`, `types`⇄`type`, `block`⇄`blocks`, `calendars`⇄`calendar`. Parity with the shipped monorepo booking features (SMOODEV-2443/2518/2528).
+- 2103aab: docs: document the smooth-agent Claude Code plugin in the README — install, the four skills (/smooth, org-copilot, agent-comms, pearls-flow), and the shared guardrail hooks (worktree enforcement, th-over-curl nudges, pearls-label reminder).
+- c1157fe: `th pearls push/pull`: raise the Dolt remote-sync wallclock bound from 30s to 300s. The bound SIGKILLs any sync exceeding it and returns a retryable error, but each retry restarts the same transfer — so a legitimately large push (observed ~150s to re-upload a 303M pearl store's post-gc 114M oldgen table over a home uplink) could never complete at 30s. `DOLT_PUSH` is a single synchronous SQL call with no progress stream, so the upload is byte-silent and a stall detector is unworkable; the bound's only real job is preventing an _infinite_ dead-socket wedge, which 300s still does. The `SMOOTH_DOLT_SYNC_TIMEOUT_SECS` override (and `0` = unbounded) is unchanged; normal incremental pushes finish in ~10s and are unaffected.
+- df983ae: th CLI: plural⇄singular command aliases across the board. Every resource-noun command GROUP in `main.rs` (`Commands` + `ApiCommands`) and the `smooai/*.rs` subcommand enums now accepts either form via clap `visible_alias` — e.g. `th api agents`⇄`th api agent`, `th api keys`⇄`th api key`, `th orgs`⇄`th org`, `th operatives`⇄`th operative`, `th api crm contacts`⇄`th api crm contact`, `th testing runs`⇄`th testing run`. Verbs, positional args, gerunds, and acronyms are deliberately not aliased; top-level `th agent` (agent messaging) is intentionally NOT aliased to `agents` to avoid a semantic collision with `th api agents` (agent CRUD). Adds a `/normalize` skill (`.claude/skills/normalize/`) that audits every clap enum for resource-noun groups missing their counterpart alias and reports the gap table.
+- 4fad6da: Fix pearls schema migration: `scheduled_at` / `tool_calls` never added to pre-existing stores (th-eba7b4)
+
+  `pearls.scheduled_at` (th-01aa6a) and `session_messages.tool_calls` (th-880f2c)
+  shipped their migration as `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, which the
+  embedded Dolt engine rejects as a syntax error — the failure was swallowed by
+  `let _ = …`, so the columns were silently never added to existing databases and
+  `th pearls due` errored `table "p" does not have column "scheduled_at"`. Both
+  now heal through the `column_exists`-gated `COLUMN_HEALS` loop in
+  `migrate_schema` (the same proven pattern as `pearl_comments.seq`), with a
+  regression test that drops the columns and asserts a reopen re-adds them.
+
+- 4e4f4b1: feat: `th crawl scrape` now works logged-out via the anonymous free tier (SMOODEV-2564, ADR-005). When not authenticated it POSTs to the public `POST /crawl/scrape` route with a bundled publishable client id (`x-crawl-client-id`) instead of failing — static-only, per-IP quota-capped — and prints a one-line nudge to `th auth login` for JS render + higher limits. Logged-in behavior (authed org route, full features) is unchanged. Implements the real-identity + free-tier seams of [[ADR-005-public-client-crawl-auth]] (now Accepted).
+- d2ec797: smooth-agent plugin (0.2.0): ship the shared SmooAI repo guardrail hooks so smooth·smooai·smooblue stop hand-copying `.claude/hooks/`. The plugin now provides `enforce-worktree` (PreToolUse), `session-worktree-warning` (SessionStart), `th-curl-hint` (PreToolUse), and `enforce-pearls-labels` (PostToolUse) — all repo-agnostic (main worktree, parent, and repo name derived from git at runtime), so one source of truth guards every SmooAI repo. Enable per-repo via `enabledPlugins: {"smooth-agent@smooth": true}` and delete the local hook copies.
+- 8c0f599: Redact secrets from chat `tool_calls` before they are persisted to the Dolt session store (pearl th-0bb776). Since pearl th-880f2c, `session_messages` stored tool-call `arguments` and `output` JSON verbatim, forever, with zero redaction — three leak classes: (1) a user pasting `curl -H "Authorization: Bearer sk-..."` that the agent runs, (2) `env`/`printenv`/`git config --list` output captured as a tool result, and (3) `read_file` paths like `~/.aws/credentials`.
+
+  `DoltSessionStore::save_message` now runs Narc's `SecretDetector::scan` over each tool call's arguments and output and replaces every match with a `[REDACTED:<type>]` marker before the INSERT. A new `redaction_applied: bool` (serde-default `false`, so pre-existing rows still deserialize) rides along on `SessionToolCall` so downstream consumers know a record was scrubbed, and an audit-log entry (`toolcall_redaction`) fires whenever redaction happens. The live in-memory conversation is untouched — only what is written to durable storage is scrubbed. Clean tool calls are left byte-identical with the flag `false`.
+
+- 4c063f7: `th api crm timeline` (and the timeline appended under `th api crm deals show`) always rendered "no activity yet". The renderer read the event array from a top-level array or an `events` key, but the API returns `{ dealId, items: [...] }` — so `items` was never read and every timeline looked empty, including deal lifecycle events (`deal_won`, `deal_lost`, `deal_stage_changed`). Now reads `items` (bare-array + legacy `events` fallbacks kept).
+- 1c7ef6d: Rename `th api copilot` → `th api smooth-operator`. The org's always-on dashboard
+  agent is now called "Smooth Operator" (echoing the OSS `smooth-operator` package).
+  Renames the CLI subcommand, its module (`copilot.rs` → `smooth_operator.rs`), the
+  `org-copilot` skill (→ `smooth-operator`), and updates the API request paths to
+  `/organizations/{org}/smooth-operator/*` to match the renamed backend routes.
+- 54d749f: feat: `th crawl scrape <url>` — turn a page into clean markdown through Smoo's authed crawler (SMOODEV-2559). Any authenticated org member can use it; it POSTs to the new api-prime `POST /organizations/:org_id/crawl/scrape` route with the caller's own org identity. This is the **real-identity** seam of [[ADR-005-public-client-crawl-auth]] (paid/authenticated tier); the free bundled-public-client tier + search.smoo.ai backend remain future work. `--json` for the full response, `--format` for extra Firecrawl formats, `--org` to override the active org.
+- 994ed34: `th api copilot` — CLI bridge to the org's always-on dashboard Copilot (smooai PR #2383, pearl th-f15107).
+
+  Three subcommands mirror the org-authed copilot routes on `api.smoo.ai`:
+
+  - `th api copilot chat "<message>" [--conversation <id>] [--json]` — runs a turn, prints the reply plus a compact `ran <tool>` line per tool call. Continues an existing conversation with `--conversation`.
+  - `th api copilot confirm <conversation-id> --approve|--decline` — resolves the destructive action a turn paused on, without resending the message.
+  - `th api copilot history <conversation-id>` — prints the conversation's message history.
+
+  Destructive tools (e.g. `email.send`) never auto-run: a turn that triggers one returns a `pendingAction` and pauses. `chat` resolves it with a y/N prompt on a TTY, or the up-front `--confirm` / `--no-confirm` flag for non-interactive/agent use. With **no flag on a non-TTY** it prints the pending action and stops rather than guessing — `--no-confirm` is never a silent default. Authenticates as the logged-in user (`th auth login`), like `th api crm`, so every tool run is audit-logged against the real person.
+
+  Ships an `org-copilot` marketplace skill (`claude-plugins/smooth-agent`) teaching Claude Code when and how to drive the copilot (including the confirm-flow safety rules), and documents the surface in `docs/Engineering/Using-th-CLI.md`.
+
+- 4360dc0: th-fed6d9: Fix the smooth-web chat view scrolling/zooming out of whack on iOS.
+
+  The app shell used `min-h-screen` (100vh — ignores the iOS toolbar/keyboard and lets content grow the page), had no viewport zoom lock, and no overscroll guard, so on iOS the chat rubber-banded, pinch/double-tap-zoomed, and the input scrolled off. Now the shell is a fixed `h-dvh` (dynamic viewport, keyboard/toolbar-aware) with `overflow-hidden`; `main` is the scroll container so content pages scroll under a pinned header; the viewport meta locks zoom (`maximum-scale=1, user-scalable=no, viewport-fit=cover`); and `overscroll-behavior: none` + a `height:100%` html/body/#root chain stop the document from bouncing. The chat's existing `h-[calc(100dvh-…)]` sizing now resolves against a real fixed-height shell.
+
+- 7cfc945: `th notify <message>…` — an agentic notify-the-human primitive. An AI agent running under `th` (Big Smooth / claude-driver) calls `th notify "blocked, need input"` to send a PUSH + in-app notification to the operator's OWN phone via `api.smoo.ai`.
+
+  The message is a positional joined with spaces, so `th notify done, review the PR` works unquoted (the way an agent would call it). Options: `--title` (default "Smoo AI"), `--priority low|medium|high|critical` (default medium), `--url <deepLink>`, and `--org-id`/`--org` to override the active org.
+
+  Authenticates as the logged-in user (`th auth login`), so there's no target to address — the human behind the session is the recipient. Wraps `POST /organizations/{org_id}/notifications/self`; prints `✓ Notified <you@email> — pushed to N device(s)`, with a hint to open the Smoo AI app when no devices are registered.
+
+- 7819f3f: docs: document the plugin's th-mail register-agent SessionStart hook — the auto-registration that makes the agent-comms skill reach fellow agents reliably. Splits the plugin hooks into Session hooks (th-mail registration, worktree warning) and Guardrail hooks in the README.
+- 5e9ba02: feat: `th web-search search <query>` — agentic web search (Tavily-backed) alongside `th crawl`, for augmenting agentic coding (usable directly from `th code` / Big Smooth worker sessions). Ranked results with an optional synthesized `--answer`; `--max`, `--depth basic|advanced`, `--json`. Same two-tier model as crawl (SMOODEV-2573): full options when logged in (authed org route), an anonymous free tier (basic depth, capped results, per-IP quota) with the bundled `th` public-tools client id when not. Shares the ADR-005 public-client id with `th crawl`.
+
 ## 0.17.0
 
 ### Minor Changes
