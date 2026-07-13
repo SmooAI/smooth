@@ -1,5 +1,7 @@
-//! `th web-search …` — agentic web search over Smoo's Tavily-backed search API
-//! (SMOODEV-2573), a companion to `th crawl`. Same two-tier model as crawl:
+//! `th search …` — agentic web search over Smoo's in-house search service
+//! (SMOODEV-2573 / ADR-088: self-hosted SearXNG index + our crawler + LLM answer
+//! synthesis — Tavily was retired in SMOODEV-2592), a companion to `th crawl`.
+//! Same two-tier model as crawl:
 //!
 //!   - **Logged in** → authed `POST /organizations/{orgId}/search`: full options
 //!     (advanced depth, higher `--max`, `--answer`).
@@ -7,78 +9,94 @@
 //!     the bundled `th` public-tools client id, basic depth + capped results.
 //!
 //! `th auth login` unlocks the full tier.
+//!
+//! The top-level command is `th search <query>`. `th web-search search <query>`
+//! is kept as a hidden back-compat alias for the form shipped in v0.18.0.
 
 use anyhow::{bail, Context, Result};
-use clap::Subcommand;
+use clap::{Args, Subcommand};
 use serde_json::{json, Value};
 
 use super::crawl::PUBLIC_TOOL_CLIENT_ID;
 use super::{print_json, require_active_org, require_authed};
 
+/// Shared args for the top-level `th search` and the legacy `th web-search search`.
+#[derive(Args)]
+pub struct SearchArgs {
+    /// The search query.
+    pub query: String,
+    /// Print the full JSON response (results + optional answer) instead of
+    /// the compact list.
+    #[arg(long)]
+    pub json: bool,
+    /// Max results to return (authed tier; the free tier caps lower).
+    #[arg(long, value_name = "N")]
+    pub max: Option<u64>,
+    /// Search depth: `basic` (default) or `advanced` (authed tier only).
+    #[arg(long)]
+    pub depth: Option<String>,
+    /// Include a synthesized answer (authed tier only — a billed LLM step).
+    #[arg(long)]
+    pub answer: bool,
+    /// Override the active org (authed tier). Falls back to `SMOOAI_ORG_ID`
+    /// then the credentials file's `active_org_id`.
+    #[arg(long = "org-id", visible_alias = "org")]
+    pub org: Option<String>,
+}
+
 #[derive(Subcommand)]
 pub enum Cmd {
     /// Search the web → ranked results (title, url, snippet).
     Search {
-        /// The search query.
-        query: String,
-        /// Print the full JSON response (results + optional answer) instead of
-        /// the compact list.
-        #[arg(long)]
-        json: bool,
-        /// Max results to return (authed tier; the free tier caps lower).
-        #[arg(long, value_name = "N")]
-        max: Option<u64>,
-        /// Search depth: `basic` (default) or `advanced` (authed tier only).
-        #[arg(long)]
-        depth: Option<String>,
-        /// Include a synthesized answer (authed tier only — a billed LLM step).
-        #[arg(long)]
-        answer: bool,
-        /// Override the active org (authed tier). Falls back to `SMOOAI_ORG_ID`
-        /// then the credentials file's `active_org_id`.
-        #[arg(long = "org-id", visible_alias = "org")]
-        org: Option<String>,
+        #[command(flatten)]
+        args: SearchArgs,
     },
 }
 
+/// Legacy `th web-search <cmd>` dispatch (hidden). Delegates to [`run`].
 pub async fn cmd(cmd: Cmd) -> Result<()> {
     match cmd {
-        Cmd::Search {
-            query,
-            json: as_json,
-            max,
-            depth,
-            answer,
-            org,
-        } => {
-            let mut body = json!({ "query": query });
-            if let Some(m) = max {
-                body["maxResults"] = json!(m);
-            }
-            if let Some(d) = depth {
-                body["searchDepth"] = json!(d);
-            }
-            if answer {
-                body["includeAnswer"] = json!(true);
-            }
+        Cmd::Search { args } => run(args).await,
+    }
+}
 
-            let resp = match require_authed().await {
-                Ok(client) => {
-                    let o = require_active_org(&client, org)?;
-                    client.post(&format!("/organizations/{o}/search"), Some(&body)).await.context("POST search")?
-                }
-                Err(_) => {
-                    eprintln!("• not logged in — using the free tier (basic depth, capped results). Run `th auth login` for advanced search + answers.");
-                    public_search(&body).await?
-                }
-            };
+/// The actual search, shared by `th search` and `th web-search search`.
+pub async fn run(args: SearchArgs) -> Result<()> {
+    let SearchArgs {
+        query,
+        json: as_json,
+        max,
+        depth,
+        answer,
+        org,
+    } = args;
 
-            if as_json {
-                print_json(&resp);
-            } else {
-                print_results(&resp);
-            }
+    let mut body = json!({ "query": query });
+    if let Some(m) = max {
+        body["maxResults"] = json!(m);
+    }
+    if let Some(d) = depth {
+        body["searchDepth"] = json!(d);
+    }
+    if answer {
+        body["includeAnswer"] = json!(true);
+    }
+
+    let resp = match require_authed().await {
+        Ok(client) => {
+            let o = require_active_org(&client, org)?;
+            client.post(&format!("/organizations/{o}/search"), Some(&body)).await.context("POST search")?
         }
+        Err(_) => {
+            eprintln!("• not logged in — using the free tier (basic depth, capped results). Run `th auth login` for advanced search + answers.");
+            public_search(&body).await?
+        }
+    };
+
+    if as_json {
+        print_json(&resp);
+    } else {
+        print_results(&resp);
     }
     Ok(())
 }
