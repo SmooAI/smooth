@@ -128,6 +128,32 @@ pub enum CompaniesCmd {
         #[arg(long)]
         website: Option<String>,
     },
+    /// Upload a local image and make it the company's logo.
+    SetImage {
+        /// The company id from `th api crm companies list`.
+        company_id: String,
+        /// Path to a local image (png, jpg, jpeg, gif or webp).
+        path: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Resolve the company's logo server-side from its domain (no local file).
+    ResolveLogo {
+        /// The company id from `th api crm companies list`.
+        company_id: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Remove the company's logo (falls back to initials).
+    RemoveImage {
+        /// The company id from `th api crm companies list`.
+        company_id: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -186,6 +212,25 @@ pub enum DealsCmd {
         deal_id: String,
         /// New stage (free text).
         stage: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Upload a local image and make it the deal's image.
+    SetImage {
+        /// The deal id from `th api crm deals list`.
+        deal_id: String,
+        /// Path to a local image (png, jpg, jpeg, gif or webp).
+        path: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Remove the deal's own image (its displayed image then falls back to the
+    /// linked company logo / contact avatar). No-op when the image is inherited.
+    RemoveImage {
+        /// The deal id from `th api crm deals list`.
+        deal_id: String,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
@@ -537,6 +582,24 @@ pub enum ContactsCmd {
         #[arg(long, default_value = "700")]
         rate_ms: u64,
     },
+    /// Upload a local image and make it the contact's primary avatar.
+    SetImage {
+        /// The contact id from `th api crm contacts list`.
+        contact_id: String,
+        /// Path to a local image (png, jpg, jpeg, gif or webp).
+        path: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Remove the contact's avatar (falls back to initials).
+    RemoveImage {
+        /// The contact id from `th api crm contacts list`.
+        contact_id: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
 }
 
 pub async fn cmd(cmd: Cmd) -> Result<()> {
@@ -611,6 +674,14 @@ async fn contacts(cmd: ContactsCmd) -> Result<()> {
             let org = resolve_org(org)?;
             import(&client, &org, &file, dry_run, rate_ms).await?;
         }
+        ContactsCmd::SetImage { contact_id, path, org } => {
+            let org = resolve_org(org)?;
+            set_image(&client, &org, ImageEntity::Contact, &contact_id, &path).await?;
+        }
+        ContactsCmd::RemoveImage { contact_id, org } => {
+            let org = resolve_org(org)?;
+            remove_image(&client, &org, ImageEntity::Contact, &contact_id).await?;
+        }
     }
     Ok(())
 }
@@ -653,6 +724,18 @@ async fn companies(cmd: CompaniesCmd) -> Result<()> {
         } => {
             let org = resolve_org(org)?;
             upsert_company(&client, &org, &name, domain, industry, website).await?;
+        }
+        CompaniesCmd::SetImage { company_id, path, org } => {
+            let org = resolve_org(org)?;
+            set_image(&client, &org, ImageEntity::Company, &company_id, &path).await?;
+        }
+        CompaniesCmd::ResolveLogo { company_id, org } => {
+            let org = resolve_org(org)?;
+            resolve_logo(&client, &org, &company_id).await?;
+        }
+        CompaniesCmd::RemoveImage { company_id, org } => {
+            let org = resolve_org(org)?;
+            remove_image(&client, &org, ImageEntity::Company, &company_id).await?;
         }
     }
     Ok(())
@@ -775,7 +858,201 @@ async fn deals(cmd: DealsCmd) -> Result<()> {
                 .context("PATCH deal stage")?;
             println!("  {} moved deal {} → {}", "↻".yellow(), deal_id.dimmed(), stage_color(&stage));
         }
+        DealsCmd::SetImage { deal_id, path, org } => {
+            let org = resolve_org(org)?;
+            set_image(&client, &org, ImageEntity::Deal, &deal_id, &path).await?;
+        }
+        DealsCmd::RemoveImage { deal_id, org } => {
+            let org = resolve_org(org)?;
+            remove_image(&client, &org, ImageEntity::Deal, &deal_id).await?;
+        }
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Images (contact avatar / company logo / deal image) — SMOODEV-2605.
+//
+// One polymorphic `crm_images` table backs all three (SMOODEV-2589). Uploads
+// mirror `th files upload`: presign via `/media/upload-url`, PUT the bytes to
+// S3 with a bearer-less client, then link the DURABLE `mediaUrl` under
+// `/crm/images`. Removal needs the image UUID, which the client does not hold —
+// it reads the id off the entity's own read payload.
+// ---------------------------------------------------------------------------
+
+/// The three CRM entities that can carry an image, and the wire vocabulary each
+/// uses across the API.
+#[derive(Clone, Copy)]
+enum ImageEntity {
+    Contact,
+    Company,
+    Deal,
+}
+
+impl ImageEntity {
+    /// `entityType` value in the `POST /crm/images` body.
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Contact => "contact",
+            Self::Company => "company",
+            Self::Deal => "deal",
+        }
+    }
+
+    /// URL path segment for the entity's read endpoint (`/crm/<seg>/<id>`).
+    fn seg(self) -> &'static str {
+        match self {
+            Self::Contact => "contacts",
+            Self::Company => "companies",
+            Self::Deal => "deals",
+        }
+    }
+
+    /// Field on the entity read payload holding its OWN primary image id — what
+    /// `DELETE /crm/images/{id}` needs. Null when the entity has no own image
+    /// (for a deal, when the displayed picture is inherited from company/contact).
+    fn image_id_field(self) -> &'static str {
+        match self {
+            Self::Contact => "avatarImageId",
+            Self::Company => "logoImageId",
+            Self::Deal => "imageId",
+        }
+    }
+}
+
+/// Map an image file name to the MIME type `/media/upload-url` accepts, or bail
+/// naming the allowed types. That endpoint only takes png/jpeg/jpg/gif/webp;
+/// SVG and everything else is rejected (an SVG served back is a script vector).
+fn image_content_type(name: &str) -> Result<&'static str> {
+    let ext = std::path::Path::new(name)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Ok("image/png"),
+        "jpg" | "jpeg" => Ok("image/jpeg"),
+        "gif" => Ok("image/gif"),
+        "webp" => Ok("image/webp"),
+        other => anyhow::bail!(
+            "unsupported image type {:?} — allowed: png, jpg, jpeg, gif, webp",
+            if other.is_empty() { name } else { other }
+        ),
+    }
+}
+
+/// The entity's OWN primary image id from its read payload, or None when it has
+/// none (field absent or JSON null). For a deal, None ⇒ the displayed image is
+/// inherited and there is nothing this entity can delete.
+fn own_image_id(entity: ImageEntity, read: &Value) -> Option<String> {
+    read.get(entity.image_id_field()).and_then(Value::as_str).map(str::to_string)
+}
+
+/// Upload a local image (presigned PUT) and link it as the entity's primary
+/// image. Prints the created `crm_images` row.
+async fn set_image(client: &UserClient, org: &str, entity: ImageEntity, entity_id: &str, path: &str) -> Result<()> {
+    let bytes = std::fs::read(path).with_context(|| format!("read {path}"))?;
+    let file_name = std::path::Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow::anyhow!("cannot derive a file name from {path}"))?;
+    let content_type = image_content_type(file_name)?;
+    let size = bytes.len();
+
+    // 1. Presigned S3 PUT URL + the durable, non-expiring object URL we persist.
+    let upload_req = json!({ "fileName": file_name, "contentType": content_type, "fileSizeBytes": size });
+    let resp = client
+        .post(&format!("/organizations/{org}/media/upload-url"), &upload_req)
+        .await
+        .context("POST media/upload-url")?;
+    let upload_url = resp
+        .get("uploadUrl")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("upload-url response missing uploadUrl"))?;
+    let media_url = resp
+        .get("mediaUrl")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("upload-url response missing mediaUrl"))?
+        .to_string();
+
+    // 2. PUT the bytes with a bearer-less client — the presigned URL is
+    //    self-authorizing; an extra Authorization header makes S3 400.
+    let put = reqwest::Client::new()
+        .put(upload_url)
+        .header(reqwest::header::CONTENT_TYPE, content_type)
+        .body(bytes)
+        .send()
+        .await
+        .context("PUT to presigned URL")?;
+    if !put.status().is_success() {
+        let status = put.status();
+        let text = put.text().await.unwrap_or_default();
+        anyhow::bail!("upload PUT failed: HTTP {status}: {text}");
+    }
+
+    // 3. Link the durable URL as the entity's primary image.
+    let body = json!({
+        "entityType": entity.wire(),
+        "entityId": entity_id,
+        "url": media_url,
+        "mimeType": content_type,
+        "size": size,
+    });
+    print_json(
+        &client
+            .post(&format!("/organizations/{org}/crm/images"), &body)
+            .await
+            .context("POST crm/images")?,
+    );
+    Ok(())
+}
+
+/// Remove the entity's own image. Resolves the image UUID from the entity read
+/// (there is no other way to get it), then DELETEs by that id. When the entity
+/// has no own image it exits 0 with a clear message rather than erroring.
+async fn remove_image(client: &UserClient, org: &str, entity: ImageEntity, entity_id: &str) -> Result<()> {
+    let read = client
+        .get(&format!("/organizations/{org}/crm/{}/{entity_id}", entity.seg()))
+        .await
+        .with_context(|| format!("GET {}", entity.seg()))?;
+    let Some(image_id) = own_image_id(entity, &read) else {
+        let msg = match entity {
+            ImageEntity::Deal => {
+                "deal has no image of its own — its displayed image is inherited from the linked company/contact, so there is nothing to remove"
+            }
+            _ => "no image set — nothing to remove",
+        };
+        println!();
+        println!("  {} {}", "●".dimmed(), msg.dimmed());
+        println!();
+        return Ok(());
+    };
+    print_json(
+        &client
+            .delete(&format!("/organizations/{org}/crm/images/{image_id}"))
+            .await
+            .context("DELETE crm/images")?,
+    );
+    Ok(())
+}
+
+/// Resolve a company's logo server-side from its own domain (no local file).
+/// Prints the durable URL, or a clear message when nothing was resolved.
+async fn resolve_logo(client: &UserClient, org: &str, company_id: &str) -> Result<()> {
+    let resp = client
+        .post(&format!("/organizations/{org}/crm/companies/{company_id}/resolve-logo"), &json!({}))
+        .await
+        .context("POST resolve-logo")?;
+    println!();
+    match resp.get("logoUrl").and_then(Value::as_str) {
+        Some(url) => println!("  {} {}", "Logo resolved →".dimmed(), url.cyan().bold()),
+        None => println!(
+            "  {} {}",
+            "●".dimmed(),
+            "no logo resolved — the company has no domain, or nothing was found".dimmed()
+        ),
+    }
+    println!();
     Ok(())
 }
 
@@ -2036,8 +2313,52 @@ fn remember(email_to_id: &mut HashMap<String, String>, phone_to_id: &mut HashMap
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_timeline_items, fmt_cents, group_thousands, is_overdue, looks_like_uuid, norm_email, norm_phone, preview_body, timeline_glyph};
+    use super::{
+        extract_timeline_items, fmt_cents, group_thousands, image_content_type, is_overdue, looks_like_uuid, norm_email, norm_phone, own_image_id,
+        preview_body, timeline_glyph, ImageEntity,
+    };
     use serde_json::json;
+
+    #[test]
+    fn image_content_type_maps_allowed_and_rejects_others() {
+        assert_eq!(image_content_type("avatar.png").unwrap(), "image/png");
+        assert_eq!(image_content_type("logo.JPG").unwrap(), "image/jpeg"); // case-insensitive
+        assert_eq!(image_content_type("pic.jpeg").unwrap(), "image/jpeg");
+        assert_eq!(image_content_type("anim.gif").unwrap(), "image/gif");
+        assert_eq!(image_content_type("shot.webp").unwrap(), "image/webp");
+        // SVG is a script vector — rejected, like anything unrecognized or extensionless.
+        assert!(image_content_type("icon.svg").is_err());
+        assert!(image_content_type("doc.pdf").is_err());
+        assert!(image_content_type("noext").is_err());
+    }
+
+    #[test]
+    fn image_id_field_per_entity() {
+        assert_eq!(ImageEntity::Contact.image_id_field(), "avatarImageId");
+        assert_eq!(ImageEntity::Company.image_id_field(), "logoImageId");
+        assert_eq!(ImageEntity::Deal.image_id_field(), "imageId");
+        assert_eq!(ImageEntity::Contact.wire(), "contact");
+        assert_eq!(ImageEntity::Company.seg(), "companies");
+    }
+
+    #[test]
+    fn own_image_id_reads_the_right_field() {
+        let contact = json!({ "id": "c1", "avatarImageId": "img-1" });
+        assert_eq!(own_image_id(ImageEntity::Contact, &contact).as_deref(), Some("img-1"));
+
+        let company = json!({ "id": "co1", "logoImageId": "img-2" });
+        assert_eq!(own_image_id(ImageEntity::Company, &company).as_deref(), Some("img-2"));
+
+        // A deal whose displayed image is INHERITED carries a null `imageId` —
+        // remove-image must treat that as "nothing to remove", not an error.
+        let inherited = json!({ "id": "d1", "imageId": null, "displayImageUrl": "https://b/co.png" });
+        assert_eq!(own_image_id(ImageEntity::Deal, &inherited), None);
+        // Absent field is also None (not every read echoes it).
+        assert_eq!(own_image_id(ImageEntity::Deal, &json!({ "id": "d1" })), None);
+        // A deal with its own image resolves the id.
+        let owned = json!({ "id": "d1", "imageId": "img-3" });
+        assert_eq!(own_image_id(ImageEntity::Deal, &owned).as_deref(), Some("img-3"));
+    }
 
     #[test]
     fn timeline_items_read_from_items_key() {
