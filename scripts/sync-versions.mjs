@@ -70,11 +70,24 @@ const updates = [
             // 3. Add version to any smooth-X workspace dep that doesn't have
             //    one yet. Match "smooth-X = { path = "crates/smooth-X", ... }"
             //    and splice `version = "X.Y.Z",` in right after the opening brace.
+            //
+            //    SAME EXCEPTION as step 2: `smooth-operator` is the EXTERNAL engine
+            //    (`smooai-smooth-operator-core`), a GIT dep at a fixed rev that
+            //    provides its OWN version (0.15.0), not the workspace version. It
+            //    has no `version` key, so without this guard step 3 splices
+            //    `version = "0.19.0"` onto it and `cargo` fails to resolve
+            //    ("requirement ^0.19.0 … candidate 0.15.0") — which blocked the
+            //    0.19.0 release (smooth-scribe consumed it). Step 2 already skips
+            //    it for deps that HAVE a version; step 3 must skip it for those
+            //    that don't. Pearl th-1ee32b.
             const addVersionPattern =
                 /^(smooth-[a-z-]+\s*=\s*\{)(?!([^}\n]*\bversion\b))([^}\n]*)(\})/gm;
             next = next.replace(
                 addVersionPattern,
-                (_, pre, _v, body, close) => {
+                (match, pre, _v, body, close) => {
+                    if (match.includes("smooai-smooth-operator-core")) {
+                        return match;
+                    }
                     const trimmed = body.trimStart();
                     const separator = trimmed.length > 0 ? " " : "";
                     return `${pre} version = "${version}",${separator}${trimmed}${close}`;
