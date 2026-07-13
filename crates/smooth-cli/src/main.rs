@@ -1207,7 +1207,15 @@ enum PearlCommands {
     /// Cold-loads the pearl DB through the CLI (not the running server)
     /// and reports whether the noms manifest reads cleanly. If it
     /// doesn't, `--auto-repair` snapshots the broken dir and re-clones
-    /// from the configured `origin` remote.
+    /// from the configured `origin` remote. A store that reads cleanly
+    /// is NEVER re-cloned.
+    ///
+    /// Also reports which `smooth-dolt` processes hold this store, and
+    /// whether the store actually accepts WRITES — a store pinned by a
+    /// leaked one-shot reads perfectly while every write dies with
+    /// `Error 1105: cannot update manifest: database is read only`.
+    /// `--reap` (implied by `--auto-repair`) kills the leaked processes
+    /// and re-probes.
     ///
     /// Then checks REMOTE SYNC health: clones the remote `refs/dolt/data`
     /// to a temp dir (bounded by SMOOTH_DOLT_SYNC_TIMEOUT_SECS, 30s
@@ -1217,17 +1225,31 @@ enum PearlCommands {
     /// pull), plus whether the branch upstream is configured. Read-only:
     /// it recommends the fix, it never force-pushes.
     Doctor {
-        /// Snapshot the broken dir and re-clone from `origin` if a
-        /// corrupt manifest is found. Without this flag, `doctor` just
-        /// reports — no destructive changes.
+        /// Apply the remedy each finding calls for: reap leaked
+        /// smooth-dolt processes when the store is write-locked, resolve
+        /// a conflicted manifest, and — ONLY when the manifest doesn't
+        /// read cleanly — snapshot + re-clone from `origin`. Without
+        /// this flag, `doctor` just reports.
         #[arg(long)]
         auto_repair: bool,
-        /// Repair even when a `smooth-dolt serve` is attached to this
-        /// dir. Stops the server first. Without this flag, doctor
-        /// refuses to repair when a server is running (in-memory state
-        /// could differ from disk; you'd lose any unsaved work).
+        /// Kill the leaked `smooth-dolt` processes pinning this store
+        /// into read-only, without touching the manifest. The targeted
+        /// fix for `cannot update manifest: database is read only`.
+        #[arg(long)]
+        reap: bool,
+        /// Reap even a live `smooth-dolt serve`, and one-shots younger
+        /// than --reap-age-secs. Also allows repair when a server is
+        /// attached (it's stopped first) — without it, doctor refuses to
+        /// repair while a server is running, since in-memory state could
+        /// differ from disk.
         #[arg(long)]
         force: bool,
+        /// How long a one-shot `smooth-dolt` process must have been
+        /// alive before it counts as leaked. Healthy one-shots live
+        /// milliseconds; the bound only exists so a concurrently-running
+        /// query from another `th` isn't killed mid-write.
+        #[arg(long, default_value_t = smooth_pearls::dolt::DEFAULT_REAP_AGE_SECS)]
+        reap_age_secs: u64,
     },
     /// Migrate from beads
     MigrateFromBeads,
@@ -5256,8 +5278,13 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             println!("{output}");
         }
 
-        PearlCommands::Doctor { auto_repair, force } => {
-            use smooth_pearls::dolt::DoctorDiagnosis;
+        PearlCommands::Doctor {
+            auto_repair,
+            reap,
+            force,
+            reap_age_secs,
+        } => {
+            use smooth_pearls::dolt::{find_store_holders, probe_writable, reap_store_holders, select_remedy, DoctorDiagnosis, HolderKind, Remedy, WriteProbe};
 
             let dolt_root = find_dolt_dir()?;
             // .smooth/dolt/ is a multi-db root — each subdir with its own
@@ -5272,17 +5299,120 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
                 anyhow::bail!("no dolt dbs found under {} — is this an initialized pearl root?", dolt_root.display());
             }
 
+            // ── PROCESSES holding this store ─────────────────────────
+            // The write-lock class (pearl th-118847): leaked one-shot
+            // `smooth-dolt sql …` processes keep the store open, so every
+            // write fails read-only while every read still works. Doctor
+            // used to call that "✓ healthy" and offer only the destructive
+            // re-clone. Name the holders first — they're the cause.
+            let holders = find_store_holders(&dolt_root);
+            if holders.is_empty() {
+                println!("smooth-dolt processes holding this store: none");
+            } else {
+                println!("smooth-dolt processes holding this store: {}", holders.len());
+                for h in &holders {
+                    let kind = match h.kind {
+                        HolderKind::Serve => "serve",
+                        HolderKind::OneShot => "one-shot",
+                    };
+                    println!(
+                        "  pid {} [{}] alive {}s: {}",
+                        h.pid,
+                        kind,
+                        h.age_secs,
+                        h.cmd.chars().take(100).collect::<String>()
+                    );
+                }
+            }
+            println!();
+
             let mut any_corrupt = false;
             let mut any_failed_repair = false;
+            let mut any_write_locked = false;
             let mut healthy_dbs: Vec<std::path::PathBuf> = Vec::new();
             for db_dir in &db_dirs {
                 let name = db_dir.file_name().and_then(|n| n.to_str()).unwrap_or("?");
                 println!("probing db: {} at {}", name, db_dir.display());
                 let diagnosis = smooth_pearls::SmoothDolt::diagnose(db_dir);
 
+                // A cold `log` probe only proves the store READS. Probe
+                // writes too — otherwise a write-locked store is reported
+                // healthy while `th pearls create` dies.
+                let write = matches!(diagnosis, DoctorDiagnosis::Healthy).then(|| probe_writable(db_dir));
+                let write_locked = matches!(write, Some(WriteProbe::ReadOnly { .. }));
+                let remedy = select_remedy(&diagnosis, write_locked);
+
                 match diagnosis {
+                    DoctorDiagnosis::Healthy if write_locked => {
+                        println!("  ✓ manifest reads cleanly — the db is NOT corrupt");
+                        if holders.is_empty() {
+                            println!("  ✗ store is write-locked — writes will fail with \"database is read only\"");
+                            println!("    but no smooth-dolt process was found holding it, so there is nothing to reap.");
+                            println!("    Something outside this store's own machinery has it open — investigate with:");
+                            println!("      lsof {}", db_dir.join(".dolt/noms/LOCK").display());
+                        } else {
+                            println!(
+                                "  ✗ store is write-locked by {} leaked smooth-dolt process(es) — writes will fail with \"database is read only\"",
+                                holders.len()
+                            );
+                        }
+                        if let Some(WriteProbe::ReadOnly { detail }) = &write {
+                            println!("    {detail}");
+                        }
+
+                        if remedy != Remedy::Reap || !(reap || auto_repair) {
+                            any_write_locked = true;
+                            println!("    fix: th pearls doctor --reap");
+                            println!("         (add --force to also stop an attached `smooth-dolt serve`)");
+                            continue;
+                        }
+
+                        // REAP — never a re-clone. The store is healthy;
+                        // only the processes pinning it need to go.
+                        let (reaped, refused) = reap_store_holders(&dolt_root, reap_age_secs, force);
+                        for h in &reaped {
+                            println!(
+                                "  ✓ reaped pid {} (alive {}s): {}",
+                                h.pid,
+                                h.age_secs,
+                                h.cmd.chars().take(100).collect::<String>()
+                            );
+                        }
+                        for h in &refused {
+                            let why = match h.kind {
+                                HolderKind::Serve => "a live `smooth-dolt serve` — re-run with --force to stop it".to_string(),
+                                HolderKind::OneShot => {
+                                    format!(
+                                        "only {}s old (< --reap-age-secs {reap_age_secs}) — may be a live query; --force to reap anyway",
+                                        h.age_secs
+                                    )
+                                }
+                            };
+                            println!("  ○ left alone pid {}: {why}", h.pid);
+                        }
+                        if reaped.is_empty() {
+                            println!("  ✗ nothing eligible to reap — see above");
+                        }
+
+                        match probe_writable(db_dir) {
+                            WriteProbe::Writable => {
+                                println!("  ✓ store accepts writes again");
+                                healthy_dbs.push(db_dir.clone());
+                            }
+                            other => {
+                                println!("  ✗ store still refuses writes: {other:?}");
+                                any_write_locked = true;
+                            }
+                        }
+                    }
                     DoctorDiagnosis::Healthy => {
-                        println!("  ✓ healthy");
+                        match &write {
+                            Some(WriteProbe::Failed { detail }) => {
+                                println!("  ✓ healthy (reads OK)");
+                                println!("  ! write probe could not run: {detail}");
+                            }
+                            _ => println!("  ✓ healthy (reads + writes OK)"),
+                        }
                         healthy_dbs.push(db_dir.clone());
                     }
                     DoctorDiagnosis::NotInitialized { detail } => {
@@ -5329,7 +5459,12 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
                     DoctorDiagnosis::Corrupt { detail } => {
                         any_corrupt = true;
                         println!("  ✗ corrupt: {detail}");
-                        if !auto_repair {
+                        // The re-clone is the ONE destructive remedy, and
+                        // it is reachable only from here — a store whose
+                        // manifest reads cleanly can never land on this
+                        // arm, so a healthy-but-write-locked db can never
+                        // be re-cloned away (pearl th-118847).
+                        if !auto_repair || remedy != Remedy::RecloneFromRemote {
                             continue;
                         }
 
@@ -5399,6 +5534,15 @@ async fn cmd_pearls(cmd: PearlCommands) -> Result<()> {
             }
             if any_failed_repair {
                 anyhow::bail!("some repairs failed — see output above");
+            }
+            if any_write_locked {
+                anyhow::bail!(
+                    "the pearl store reads fine but refuses WRITES — leaked smooth-dolt process(es) are holding it.\n\
+                     `th pearls create` / `th msg send` will keep failing with \"cannot update manifest: database is read only\".\n  \
+                     • Fix: th pearls doctor --reap\n  \
+                     • If a `smooth-dolt serve` is holding it: th pearls doctor --reap --force\n\
+                     This does NOT re-clone — your local pearl history is intact."
+                );
             }
             if any_diverged {
                 anyhow::bail!(
