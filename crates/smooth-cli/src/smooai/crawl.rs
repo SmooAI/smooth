@@ -38,11 +38,70 @@ pub enum Cmd {
         /// (`summary` needs a login — it's a billed LLM step.)
         #[arg(long = "format", value_name = "FORMAT")]
         formats: Vec<String>,
+        /// LLM structured extraction (authed tier only). A JSON schema/spec is
+        /// sent verbatim; any other string is wrapped as `{"prompt": <SPEC>}`.
+        #[arg(long, value_name = "SPEC")]
+        extract: Option<String>,
+        /// Also capture a screenshot (adds `screenshot` to the formats).
+        #[arg(long)]
+        screenshot: bool,
+        /// JS-render mode, e.g. `auto` or `always` (authed tier only).
+        #[arg(long, value_name = "MODE")]
+        render: Option<String>,
         /// Override the active org (authed tier only). Falls back to
         /// `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Crawl a whole site from a seed URL → markdown for every page (authed).
+    Crawl {
+        /// The seed URL to crawl from.
+        url: String,
+        /// Cap the number of pages crawled.
+        #[arg(long, value_name = "N")]
+        limit: Option<u64>,
+        /// Max link-following depth from the seed (sent as `maxDiscoveryDepth`).
+        #[arg(long = "max-depth", value_name = "N")]
+        max_depth: Option<u64>,
+        /// LLM structured extraction per page: a JSON spec is sent verbatim, any
+        /// other string is wrapped as `{"prompt": <SPEC>}`.
+        #[arg(long, value_name = "SPEC")]
+        extract: Option<String>,
+        /// Print the full JSON response instead of the compact summary.
+        #[arg(long)]
+        json: bool,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the
+        /// credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Map a site → the list of discoverable URLs (no content; authed).
+    Map {
+        /// The URL to map.
+        url: String,
+        /// Only return links matching this search term.
+        #[arg(long, value_name = "TERM")]
+        search: Option<String>,
+        /// Cap the number of links returned.
+        #[arg(long, value_name = "N")]
+        limit: Option<u64>,
+        /// Include links on subdomains of the target.
+        #[arg(long = "include-subdomains")]
+        include_subdomains: bool,
+        /// Print the full JSON response instead of one link per line.
+        #[arg(long)]
+        json: bool,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the
+        /// credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+}
+
+/// Parse an `--extract` spec: valid JSON is used verbatim, anything else is
+/// wrapped as `{"prompt": <SPEC>}`.
+fn parse_extract(spec: &str) -> Value {
+    serde_json::from_str::<Value>(spec).unwrap_or_else(|_| json!({ "prompt": spec }))
 }
 
 pub async fn cmd(cmd: Cmd) -> Result<()> {
@@ -50,12 +109,24 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
         Cmd::Scrape {
             url,
             json: as_json,
-            formats,
+            mut formats,
+            extract,
+            screenshot,
+            render,
             org,
         } => {
+            if screenshot {
+                formats.push("screenshot".to_string());
+            }
             let mut body = json!({ "url": url });
             if !formats.is_empty() {
                 body["formats"] = json!(formats);
+            }
+            if let Some(spec) = &extract {
+                body["extract"] = parse_extract(spec);
+            }
+            if let Some(mode) = &render {
+                body["render"] = json!(mode);
             }
 
             // Authed tier when logged in; otherwise the anonymous free tier.
@@ -69,6 +140,9 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                 }
                 Err(_) => {
                     eprintln!("• not logged in — using the free tier (static only). Run `th auth login` for JS render + higher limits.");
+                    if extract.is_some() || render.is_some() {
+                        eprintln!("• note: --extract/--render are authed-only; the free tier will reject them.");
+                    }
                     public_scrape(&body).await?
                 }
             };
@@ -79,6 +153,85 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                 // Default surface: just the markdown, so the output pipes cleanly.
                 match resp.get("markdown").and_then(|m| m.as_str()) {
                     Some(md) => println!("{md}"),
+                    None => print_json(&resp),
+                }
+            }
+        }
+        Cmd::Crawl {
+            url,
+            limit,
+            max_depth,
+            extract,
+            json: as_json,
+            org,
+        } => {
+            let client = require_authed().await.context("`th crawl crawl` requires login — run `th auth login`")?;
+            let o = require_active_org(&client, org)?;
+            let mut body = json!({ "url": url });
+            if let Some(n) = limit {
+                body["limit"] = json!(n);
+            }
+            if let Some(n) = max_depth {
+                body["maxDiscoveryDepth"] = json!(n);
+            }
+            if let Some(spec) = &extract {
+                body["extract"] = parse_extract(spec);
+            }
+            let resp = client
+                .post(&format!("/organizations/{o}/crawl/crawl"), Some(&body))
+                .await
+                .context("POST crawl crawl")?;
+            if as_json {
+                print_json(&resp);
+            } else {
+                let completed = resp.get("completed").and_then(Value::as_u64).unwrap_or(0);
+                let total = resp.get("total").and_then(Value::as_u64).unwrap_or(0);
+                println!("{completed}/{total} pages crawled");
+                if let Some(data) = resp.get("data").and_then(|d| d.as_array()) {
+                    for page in data {
+                        if let Some(u) = page.get("url").and_then(|v| v.as_str()) {
+                            println!("{u}");
+                        }
+                    }
+                }
+            }
+        }
+        Cmd::Map {
+            url,
+            search,
+            limit,
+            include_subdomains,
+            json: as_json,
+            org,
+        } => {
+            let client = require_authed().await.context("`th crawl map` requires login — run `th auth login`")?;
+            let o = require_active_org(&client, org)?;
+            let mut body = json!({ "url": url });
+            if let Some(s) = &search {
+                body["search"] = json!(s);
+            }
+            if let Some(n) = limit {
+                body["limit"] = json!(n);
+            }
+            if include_subdomains {
+                body["includeSubdomains"] = json!(true);
+            }
+            let resp = client
+                .post(&format!("/organizations/{o}/crawl/map"), Some(&body))
+                .await
+                .context("POST crawl map")?;
+            if as_json {
+                print_json(&resp);
+            } else {
+                match resp.get("links").and_then(|l| l.as_array()) {
+                    Some(links) => {
+                        for link in links {
+                            match link.as_str() {
+                                Some(s) => println!("{s}"),
+                                None => println!("{link}"),
+                            }
+                        }
+                    }
                     None => print_json(&resp),
                 }
             }

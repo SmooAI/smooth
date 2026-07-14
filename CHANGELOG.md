@@ -1,5 +1,47 @@
 # @smooai/smooth
 
+## 0.19.1
+
+### Patch Changes
+
+- cac83eb: smooth-agent plugin 0.3.0: every session is now registered on the th-mail bus, not just `th claude run` workers.
+
+  The SessionStart hook previously no-op'd unless `SMOOTH_AGENT_HANDLE` was set (i.e. a Big Smooth worker). It now registers plain `claude` sessions too, under a stable per-(user, host, repo) handle (`<user>@<host>/<repo>`), so any session with the plugin enabled is active and mailable by Big Smooth and other agents. Workers still register under their `SMOOTH_AGENT_HANDLE`; a `SMOOTH_AGENT` override wins if set. `th` absent → the hook remains a no-op and the rest of the plugin (/smooth, skills, guardrails) still works.
+
+## 0.19.0
+
+### Minor Changes
+
+- 7fa4dd3: Add `th crm` image commands (SMOODEV-2605), reaching parity with the web/mobile
+  CRM-image support from SMOODEV-2589:
+
+  - `th crm contacts set-image <id> <path>` / `remove-image <id>` — upload/clear a contact avatar
+  - `th crm companies set-image <id> <path>` / `resolve-logo <id>` / `remove-image <id>` — upload, server-side favicon resolve, or clear a company logo
+  - `th crm deals set-image <id> <path>` / `remove-image <id>` — upload/clear a deal image (remove is a no-op when the shown image is inherited from the linked company/contact)
+
+  Uploads mirror `th files upload`: presign via `/media/upload-url`, PUT bytes to
+  S3 with a bearer-less client, then link the durable `mediaUrl` under
+  `/crm/images`. Removal resolves the image UUID from the entity read
+  (`avatarImageId` / `logoImageId` / `imageId`).
+
+- c3c0926: `th search <query>` — promote agentic web search to a clean top-level command.
+
+  The old form was `th web-search search <query>` — a redundant noun-then-verb. Search is now `th search "<query>"` (same flags: `--answer`, `--depth`, `--max`, `--json`, `--org-id`). `th web-search search <query>` still works as a hidden back-compat alias for the form shipped in v0.18.0.
+
+  Also fixes the top-level `--help` copy, which had three bugs: the `crawl` command's description was empty, the `widgets` command had the crawler's description copy-pasted onto the front of it, and the search description still credited Tavily (retired in SMOODEV-2592 — search is now our own SearXNG + in-house crawler + LLM-synthesis stack, ADR-088).
+
+### Patch Changes
+
+- a4d1044: Fix release automation: `sync-versions.mjs` no longer injects the workspace
+  version onto the external `smooai-smooth-operator-core` git dependency. Step 2
+  already skipped it (pearl th-1ee32b), but step 3 — which adds a `version =` to
+  any `smooth-X` dep missing one — did not, re-introducing the exact broken pin
+  (`operator-core = "^0.19.0"` against a rev that is only 0.15.0) and failing
+  `cargo` resolution in the version PR. This had blocked every `th` release past
+  0.18.0.
+- 5136011: `th pearls doctor`: reap leaked `smooth-dolt` processes, and never re-clone a healthy DB. Leaked one-shot `smooth-dolt sql …` processes pin the pearl store so every write dies with `Error 1105: cannot update manifest: database is read only` while reads still work — doctor reported `✓ healthy` and offered only `--auto-repair`, whose sole remedy was a destructive snapshot + re-clone from `origin` (pearl th-118847). Doctor now (1) lists the `smooth-dolt` processes holding THIS project's store (argv[0] must be the `smooth-dolt` binary AND an argv path must be under this store — never another project's, never an unrelated process), (2) probes WRITE-ability, not just readability, so a write-locked store is reported as `✗ store is write-locked by N leaked smooth-dolt process(es)`, and (3) adds `--reap` (implied by `--auto-repair`, tuned by `--reap-age-secs`, default 30s) to SIGTERM→SIGKILL those processes and re-probe. A `smooth-dolt serve` is only reaped with `--force`. The re-clone is now reachable only when the manifest does not read cleanly, so a healthy-but-write-locked store can never be re-cloned away. Root cause: local one-shots (`sql`/`exec`/`log`/`status`/`version`) now carry a 120s wallclock bound (`SMOOTH_DOLT_QUERY_TIMEOUT_SECS`, `0` disables) — previously an unbounded hung child was orphaned when the user gave up on `th`, and the orphan kept the store pinned.
+- 1b7d50a: `th pearls doctor`: repair the `/./`-mangled dolt `origin` remote — the root cause of the read-only store wedge. Dolt, handed an SCP-style URL, records it as `git+ssh://git@github.com/./SmooAI/smooai.git`. Git rejects that path (`./SmooAI/smooai is not a valid repository name`), so `smooth-dolt push` never returns — and the hung push holds the noms write lock, turning the store read-only for EVERY agent (`Error 1105: cannot update manifest: database is read only`) while reads keep working. Leaked `smooth-dolt sql` one-shots pile up behind that lock and look like the cause; they're a symptom. `normalize_remote_url` (th-c4441b) stopped NEW stores acquiring the mangling, but every store created before it kept the broken URL persisted in `repo_state.json` and nothing repaired it. Doctor now detects a malformed `origin` and, under `--auto-repair`, repoints it at the repaired URL — remote pointer only, never history, no push, no re-clone. Holder detection also widened: a hung `push`/`pull` is classified as `Sync` (previously lumped in with one-shots) and the `git fetch` child it spawned is reaped with it, since that child inherits the lock. When a hung sync is present the diagnosis names the real causal chain instead of blaming the queued queries.
+
 ## 0.18.0
 
 ### Minor Changes

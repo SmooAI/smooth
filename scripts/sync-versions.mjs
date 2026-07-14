@@ -70,11 +70,23 @@ const updates = [
             // 3. Add version to any smooth-X workspace dep that doesn't have
             //    one yet. Match "smooth-X = { path = "crates/smooth-X", ... }"
             //    and splice `version = "X.Y.Z",` in right after the opening brace.
+            //
+            //    SAME EXCEPTION as step 2: `smooth-operator` points at the
+            //    EXTERNAL `smooai-smooth-operator-core` and carries no version
+            //    key on purpose. Step 2 skips it, but this pass targets exactly
+            //    the version-less lines it left alone — so without this guard it
+            //    re-injects the bad `version = "<workspace>"` step 2 avoids,
+            //    pinning a release that doesn't exist and breaking `cargo`
+            //    resolution. Pearl th-1ee32b (this is the twin the first fix
+            //    missed).
             const addVersionPattern =
                 /^(smooth-[a-z-]+\s*=\s*\{)(?!([^}\n]*\bversion\b))([^}\n]*)(\})/gm;
             next = next.replace(
                 addVersionPattern,
-                (_, pre, _v, body, close) => {
+                (match, pre, _v, body, close) => {
+                    if (body.includes("smooai-smooth-operator-core")) {
+                        return match;
+                    }
                     const trimmed = body.trimStart();
                     const separator = trimmed.length > 0 ? " " : "";
                     return `${pre} version = "${version}",${separator}${trimmed}${close}`;

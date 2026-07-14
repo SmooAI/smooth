@@ -13,9 +13,11 @@ sessions that survive the account-wide rate-limit throttle, coordinate them over
   pings, and hand off work over `th msg`/`th agent`.
 - **`pearls-flow`** skill — teaches a worker to track work as pearls
   (`th pearls`).
-- **SessionStart hook** — when a session is launched by `th claude run` (which
-  exports `SMOOTH_AGENT_HANDLE`), auto-registers it on the th-mail bus so Big
-  Smooth can address it by id.
+- **SessionStart hook** — auto-registers **every** session on the th-mail bus so
+  Big Smooth and other agents can reach it. `th claude run` workers register under
+  their `SMOOTH_AGENT_HANDLE`; a plain `claude` session registers under a stable
+  per-repo handle (`<user>@<host>/<repo>`). No `th` on PATH → the hook is a no-op
+  and the rest of the plugin still works.
 - **Shared repo guardrail hooks** — the SmooAI worktree/pearls guardrails that
   used to be hand-copied into every repo's `.claude/hooks/`, now one source of
   truth (pearl th-44bace). All derive the repo/main-worktree from git at runtime,
