@@ -13,7 +13,7 @@
             "name": "smooth-agent",
             "source": "./claude-plugins/smooth-agent",
             "description": "Run a Big Smooth that drives Claude Code worker sessions over tmux (rate-limit-resilient), coordinate agents over th-mail, and track work in pearls. Provides the /smooth command. Ships the shared SmooAI repo guardrail hooks (worktree enforcement, th-over-curl nudges, pearls-label reminder).",
-            "version": "0.2.0",
+            "version": "0.3.0",
             "category": "orchestration",
             "keywords": ["orchestration", "tmux", "multi-agent", "th-mail", "pearls", "rate-limit"],
             "author": {

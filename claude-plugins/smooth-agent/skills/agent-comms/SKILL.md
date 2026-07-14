@@ -1,21 +1,23 @@
 ---
 name: agent-comms
-description: Coordinate with Big Smooth and other agents over th-mail (the th msg / th agent bus) — report status, answer pings, and hand off work. Use when this session is a Big Smooth worker (launched via `th claude run`, with SMOOTH_AGENT_HANDLE set) or whenever you need to reach another agent. Invoke for "message the orchestrator", "tell big smooth", "reply to the agent", "who else is working".
+description: Coordinate with Big Smooth and other agents over th-mail (the th msg / th agent bus) — report status, answer pings, and hand off work. Every session with this plugin is registered and mailable (the SessionStart hook registers workers under SMOOTH_AGENT_HANDLE and plain sessions under a per-repo handle). Invoke for "message the orchestrator", "tell big smooth", "reply to the agent", "who else is working", or whenever you need to reach another agent.
 ---
 
 # agent-comms — talk to Big Smooth and other agents over th-mail
 
 `th` ships a harness-agnostic agent mailbox: `th agent` (registry) + `th msg`
-(mail), backed by the pearl Dolt store and synced over `refs/dolt/data`. When
-this session was launched by `th claude run`, the `smooth-agent` SessionStart
-hook already **registered** it under the handle in `$SMOOTH_AGENT_HANDLE` (your
-session id), so Big Smooth can reach you. Your job is to **send** status and
-**answer** pings — not to sit in a foreground poll.
+(mail), backed by the pearl Dolt store and synced over `refs/dolt/data`. The
+`smooth-agent` SessionStart hook **already registered this session** so Big Smooth
+and other agents can reach you — under `$SMOOTH_AGENT_HANDLE` if you're a
+`th claude run` worker, otherwise under a stable per-repo handle
+(`<user>@<host>/<repo>`, shown in the hook's startup line). Your job is to **send**
+status and **answer** pings — not to sit in a foreground poll.
 
-Your handle: `$SMOOTH_AGENT_HANDLE` (fall back to a name you pick if unset).
-**Pass `--agent`/`--from <handle>` on every command** — shell env doesn't persist
-between Bash calls in this harness, and the default handle is `user@host`, not
-yours.
+Your handle: `$SMOOTH_AGENT_HANDLE` if set, else the `<user>@<host>/<repo>` the
+hook printed at startup (run `th agent register` again to reprint it, or
+`th agent list` to see it). **Pass `--agent`/`--from <handle>` on every command** —
+shell env doesn't persist between Bash calls in this harness, and the bare default
+is `user@host`, not your per-repo handle.
 
 ## Report status / hand off to the orchestrator
 
