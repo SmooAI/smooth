@@ -7,6 +7,25 @@ use super::{print_json, print_list_envelope, read_body, require_active_org, requ
 
 #[derive(Subcommand)]
 pub enum Cmd {
+    /// Semantic search over the org's OWN knowledge base — the same retrieval an
+    /// agent runs. Returns the most relevant passages (name + content + score).
+    /// Give it a question or a few keywords; scope to one document with `--doc`.
+    Search {
+        /// What to look for in the org's knowledge (a question or keywords).
+        query: String,
+        /// Max passages to return (1-20).
+        #[arg(long, value_name = "N")]
+        max: Option<u64>,
+        /// Scope the search to a single knowledge document (id from `th knowledge list`).
+        #[arg(long = "doc", visible_alias = "document-id", value_name = "DOC_ID")]
+        doc: Option<String>,
+        /// Print the full JSON response instead of the compact passage list.
+        #[arg(long)]
+        json: bool,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
     /// List the knowledge documents in the active (or `--org-id`) organization.
     List {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
@@ -98,6 +117,31 @@ pub enum Cmd {
 pub async fn cmd(cmd: Cmd) -> Result<()> {
     let client = require_authed().await?;
     match cmd {
+        Cmd::Search {
+            query,
+            max,
+            doc,
+            json: as_json,
+            org,
+        } => {
+            let o = require_active_org(&client, org)?;
+            let mut body = serde_json::json!({ "query": query });
+            if let Some(m) = max {
+                body["maxResults"] = serde_json::json!(m);
+            }
+            if let Some(d) = doc {
+                body["documentId"] = serde_json::json!(d);
+            }
+            let resp = client
+                .post(&format!("/organizations/{o}/knowledge/search"), Some(&body))
+                .await
+                .context("POST knowledge search")?;
+            if as_json {
+                print_json(&resp);
+            } else {
+                print_knowledge_results(&resp);
+            }
+        }
         Cmd::List { org } => {
             let o = require_active_org(&client, org)?;
             print_list_envelope(
@@ -195,4 +239,28 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Compact rendering of `POST /knowledge/search`: a numbered list of
+/// `name` with the passage below each, most-relevant first. Falls back to JSON on
+/// an unexpected shape.
+fn print_knowledge_results(resp: &serde_json::Value) {
+    match resp.get("results").and_then(|r| r.as_array()) {
+        Some(results) if !results.is_empty() => {
+            for (i, r) in results.iter().enumerate() {
+                let name = r.get("name").and_then(|v| v.as_str()).unwrap_or("(untitled)");
+                println!("{}. {name}", i + 1);
+                if let Some(content) = r.get("content").and_then(|v| v.as_str()) {
+                    // Indent the passage under its heading; keep it whole (unlike
+                    // web search, knowledge passages are the answer, not a teaser).
+                    for line in content.lines() {
+                        println!("   {line}");
+                    }
+                }
+                println!();
+            }
+        }
+        Some(_) => println!("No matching knowledge found for that query."),
+        None => print_json(resp),
+    }
 }

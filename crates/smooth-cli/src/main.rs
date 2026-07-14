@@ -272,6 +272,17 @@ enum Commands {
         #[command(subcommand)]
         cmd: smooai::files::Cmd,
     },
+    /// Smoo AI knowledge base — `th knowledge search <query>` runs the SAME
+    /// semantic retrieval an agent does over the org's OWN documents (scope to one
+    /// with `--doc`), plus `list` / `show` / `content` / `upload` / `website` /
+    /// `process` / `update` / `delete`. Same commands as `th api knowledge`,
+    /// promoted to the top level as an agentic-coding primitive alongside
+    /// `th search` (the web) and `th crawl` (a page).
+    #[command(visible_alias = "kb")]
+    Knowledge {
+        #[command(subcommand)]
+        cmd: smooai::knowledge::Cmd,
+    },
     /// Run a pearl through a Smooth operative — dispatches to Big Smooth
     /// (`th up` must be running) and streams agent events to stdout.
     Run {
@@ -1600,6 +1611,7 @@ async fn main() -> Result<()> {
         Some(Commands::Widgets { cmd }) => smooai::widgets::cmd(cmd).await,
         Some(Commands::Crawl { cmd }) => smooai::crawl::cmd(cmd).await,
         Some(Commands::Search { args }) => smooai::websearch::run(args).await,
+        Some(Commands::Knowledge { cmd }) => smooai::knowledge::cmd(cmd).await,
         Some(Commands::WebSearch { cmd }) => smooai::websearch::cmd(cmd).await,
         Some(Commands::Llm { cmd }) => smooai::llm_gateway::cmd(cmd).await,
         Some(Commands::Notify {
