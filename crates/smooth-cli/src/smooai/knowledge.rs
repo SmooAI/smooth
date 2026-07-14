@@ -38,6 +38,17 @@ pub enum Cmd {
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Crawl a website into the org's knowledge base (async ingestion job).
+    AddUrl {
+        /// The website URL to crawl and ingest.
+        url: String,
+        /// Display name for the knowledge source (defaults to the URL).
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
     /// Register a website as a knowledge source.
     Website {
         /// JSON body describing the website to crawl, or `-` for stdin.
@@ -120,6 +131,17 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                     .post(&format!("/organizations/{o}/knowledge/upload"), Some(&b))
                     .await
                     .context("POST knowledge upload")?,
+            );
+        }
+        Cmd::AddUrl { url, name, org } => {
+            let o = require_active_org(&client, org)?;
+            let name = name.unwrap_or_else(|| url.clone());
+            let body = serde_json::json!({ "urls": [url], "name": name });
+            print_json(
+                &client
+                    .post(&format!("/organizations/{o}/knowledge/websites"), Some(&body))
+                    .await
+                    .context("POST knowledge add-url")?,
             );
         }
         Cmd::Website { body, org } => {

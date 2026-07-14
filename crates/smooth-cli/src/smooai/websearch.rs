@@ -35,6 +35,10 @@ pub struct SearchArgs {
     /// Search depth: `basic` (default) or `advanced` (authed tier only).
     #[arg(long)]
     pub depth: Option<String>,
+    /// Fetch full page content for each result (crawl-enriched; forces
+    /// `advanced` depth). Authed tier only — ignored on the free tier.
+    #[arg(long)]
+    pub scrape: bool,
     /// Include a synthesized answer (authed tier only — a billed LLM step).
     #[arg(long)]
     pub answer: bool,
@@ -67,6 +71,7 @@ pub async fn run(args: SearchArgs) -> Result<()> {
         json: as_json,
         max,
         depth,
+        scrape,
         answer,
         org,
     } = args;
@@ -75,8 +80,12 @@ pub async fn run(args: SearchArgs) -> Result<()> {
     if let Some(m) = max {
         body["maxResults"] = json!(m);
     }
+    // `--scrape` forces advanced depth (crawl-enriches each result with full page
+    // content); an explicit `--depth` still wins if the user passed one.
     if let Some(d) = depth {
         body["searchDepth"] = json!(d);
+    } else if scrape {
+        body["searchDepth"] = json!("advanced");
     }
     if answer {
         body["includeAnswer"] = json!(true);
