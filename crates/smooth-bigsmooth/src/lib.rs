@@ -3,6 +3,7 @@
 pub mod access;
 pub mod attachments;
 pub mod audit;
+pub mod auth_login;
 pub mod auto_mode;
 pub mod safehouse_narc;
 

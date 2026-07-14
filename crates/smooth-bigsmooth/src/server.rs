@@ -139,6 +139,14 @@ pub struct AppState {
     /// tokio's): reads just clone the `Arc` on the chat path; the only write
     /// is startup init.
     pub ext_host: Arc<std::sync::RwLock<Option<Arc<smooth_operator::extension::ExtensionHost>>>>,
+    /// In-flight Big Smooth UI sign-ins (PKCE state → verifier). The web
+    /// UI's `GET /auth/login` mints one; `GET /auth/callback` consumes it
+    /// single-use. See [`crate::auth_login`]. Pearl th-bc624a.
+    pub pending_logins: crate::auth_login::PendingLogins,
+    /// Shared HTTP client for outbound calls (currently the `/auth/callback`
+    /// token exchange). Reused so we don't spin up a fresh connection pool
+    /// per request.
+    pub http: reqwest::Client,
 }
 
 impl AppState {
@@ -346,6 +354,8 @@ impl AppState {
             host_token,
             ui_pending: Arc::new(Mutex::new(HashMap::new())),
             ext_host: Arc::new(std::sync::RwLock::new(None)),
+            pending_logins: crate::auth_login::PendingLogins::new(),
+            http: reqwest::Client::new(),
         }
     }
 
@@ -590,6 +600,12 @@ pub fn build_router(state: AppState) -> Router {
         // extensions + their slash commands; hot-reload one (`th ext reload`).
         .route("/api/ext", get(crate::sep::ext_list_handler))
         .route("/api/ext/reload", post(crate::sep::ext_reload_handler))
+        // Big Smooth UI sign-in (pearl th-bc624a) — click-to-login the
+        // daemon's own `th` into Smoo AI over the web UI (PKCE routed
+        // through the daemon; no SSH-and-`th auth login` needed).
+        .route("/auth/login", get(crate::auth_login::login_handler))
+        .route("/auth/callback", get(crate::auth_login::callback_handler))
+        .route("/api/auth/status", get(crate::auth_login::status_handler))
         // WebSocket — primary real-time channel
         .route("/ws", get(ws_handler))
         // Embedded web UI (SPA fallback — must be last)

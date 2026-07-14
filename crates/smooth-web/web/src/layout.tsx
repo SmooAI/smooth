@@ -1,32 +1,60 @@
-import { Link, Outlet, useLocation } from "react-router-dom";
-import {
-    LayoutDashboard,
-    Circle,
-    Bot,
-    MessageSquare,
-    Network,
-    ChevronRight,
-} from "lucide-react";
-import { useProject } from "./context";
-import { Select } from "./components/ui/select";
-import { UiRelay } from "./components/UiRelay";
-import {
-    SidebarProvider,
-    Sidebar,
-    SidebarHeader,
-    SidebarContent,
-    SidebarTrigger,
-    SidebarInset,
-    useSidebar,
-} from "./components/ui/sidebar";
+import { LayoutDashboard, Circle, Bot, MessageSquare, Network, ChevronRight, LogIn, UserCheck } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Link, Outlet, useLocation } from 'react-router-dom';
+
+import { api } from './api';
+import { Select } from './components/ui/select';
+import { SidebarProvider, Sidebar, SidebarHeader, SidebarContent, SidebarTrigger, SidebarInset, useSidebar } from './components/ui/sidebar';
+import { UiRelay } from './components/UiRelay';
+import { useProject } from './context';
 
 const NAV = [
-    { path: "/", label: "Dashboard", section: "Overview", icon: LayoutDashboard },
-    { path: "/pearls", label: "Pearls", section: "Work", icon: Circle },
-    { path: "/operators", label: "Operators", section: "Work", icon: Bot },
-    { path: "/chat", label: "Chat", section: "Tools", icon: MessageSquare },
-    { path: "/system", label: "System", section: "Settings", icon: Network },
+    { path: '/', label: 'Dashboard', section: 'Overview', icon: LayoutDashboard },
+    { path: '/pearls', label: 'Pearls', section: 'Work', icon: Circle },
+    { path: '/operators', label: 'Operators', section: 'Work', icon: Bot },
+    { path: '/chat', label: 'Chat', section: 'Tools', icon: MessageSquare },
+    { path: '/system', label: 'System', section: 'Settings', icon: Network },
 ];
+
+type AuthState = { loggedIn: boolean; user: string | null; orgId: string | null };
+
+// Smoo AI sign-in affordance. Polls the daemon's /api/auth/status on
+// load; if `th` isn't logged in, offers a plain anchor to /auth/login so
+// the browser follows the daemon's 302 into the PKCE flow (no SSH needed).
+function AuthStatus() {
+    const [auth, setAuth] = useState<AuthState | null>(null);
+
+    useEffect(() => {
+        let alive = true;
+        api<AuthState>('/api/auth/status')
+            .then((a) => alive && setAuth(a))
+            .catch(() => alive && setAuth({ loggedIn: false, user: null, orgId: null }));
+        return () => {
+            alive = false;
+        };
+    }, []);
+
+    if (!auth) return null;
+
+    if (auth.loggedIn) {
+        return (
+            <div className="flex items-center gap-2 px-1 text-xs text-muted-foreground">
+                <UserCheck size={14} className="text-primary shrink-0" />
+                <span className="truncate">Signed in{auth.user ? ` as ${auth.user}` : ''}</span>
+            </div>
+        );
+    }
+
+    return (
+        <a
+            href="/auth/login"
+            className="flex items-center gap-2 px-3 py-2 rounded-md text-sm text-primary font-medium bg-primary/10 hover:bg-primary/20 border border-primary/20 transition-colors"
+        >
+            <LogIn size={16} />
+            Sign in to Smoo AI
+        </a>
+    );
+}
 
 function Header() {
     const location = useLocation();
@@ -42,29 +70,15 @@ function Header() {
                     <div className="h-4 w-px bg-border mx-1" />
                     {/* Breadcrumbs */}
                     <nav className="flex items-center gap-1 text-sm">
-                        <span className="text-muted-foreground hidden md:inline">
-                            Smooth
-                        </span>
-                        <ChevronRight
-                            size={14}
-                            className="text-muted-foreground/50 hidden md:inline"
-                        />
-                        <span className="text-muted-foreground hidden md:inline">
-                            {currentNav.section}
-                        </span>
-                        <ChevronRight
-                            size={14}
-                            className="text-muted-foreground/50 hidden md:inline"
-                        />
+                        <span className="text-muted-foreground hidden md:inline">Smooth</span>
+                        <ChevronRight size={14} className="text-muted-foreground/50 hidden md:inline" />
+                        <span className="text-muted-foreground hidden md:inline">{currentNav.section}</span>
+                        <ChevronRight size={14} className="text-muted-foreground/50 hidden md:inline" />
                         <span className="font-medium">{currentNav.label}</span>
                     </nav>
                 </div>
                 {/* Logo — shows when sidebar is closed */}
-                <img
-                    src="/logo.svg"
-                    alt="Smoo AI"
-                    className={`h-7 ${isSidebarOpen ? "hidden" : "md:hidden"}`}
-                />
+                <img src="/logo.svg" alt="Smoo AI" className={`h-7 ${isSidebarOpen ? 'hidden' : 'md:hidden'}`} />
             </div>
         </header>
     );
@@ -84,13 +98,8 @@ export function Layout() {
 
                     {projects.length > 0 && (
                         <div className="mt-2">
-                            <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1.5 block px-1">
-                                Project
-                            </label>
-                            <Select
-                                value={selectedProject ?? ""}
-                                onChange={(e) => setSelectedProject(e.target.value)}
-                            >
+                            <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1.5 block px-1">Project</label>
+                            <Select value={selectedProject ?? ''} onChange={(e) => setSelectedProject(e.target.value)}>
                                 {projects.map((p) => (
                                     <option key={p.path} value={p.path}>
                                         {p.name}
@@ -99,12 +108,14 @@ export function Layout() {
                             </Select>
                         </div>
                     )}
+
+                    <div className="mt-2">
+                        <AuthStatus />
+                    </div>
                 </SidebarHeader>
 
                 <SidebarContent>
-                    <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground px-3 mb-2">
-                        Smooth
-                    </div>
+                    <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground px-3 mb-2">Smooth</div>
                     {NAV.map(({ path, label, icon: Icon }) => {
                         const active = location.pathname === path;
                         return (
@@ -112,10 +123,10 @@ export function Layout() {
                                 key={path}
                                 to={path}
                                 className={
-                                    "flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors " +
+                                    'flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ' +
                                     (active
-                                        ? "text-primary font-semibold bg-primary/10 border-l-2 border-primary"
-                                        : "text-muted-foreground hover:text-foreground hover:bg-sidebar-accent border-l-2 border-transparent")
+                                        ? 'text-primary font-semibold bg-primary/10 border-l-2 border-primary'
+                                        : 'text-muted-foreground hover:text-foreground hover:bg-sidebar-accent border-l-2 border-transparent')
                                 }
                             >
                                 <Icon size={16} />
