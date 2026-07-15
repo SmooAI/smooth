@@ -26,6 +26,7 @@ pub mod observability;
 pub mod products;
 pub mod profile;
 pub mod smooth_operator;
+pub mod teams;
 pub mod testing;
 pub mod user_client;
 pub mod websearch;

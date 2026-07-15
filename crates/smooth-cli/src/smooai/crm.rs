@@ -89,6 +89,60 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: AssocCmd,
     },
+    /// Set a reminder on a CRM entity: `remind contact:jane@acme.com --at tomorrow`.
+    /// Use `remind cancel <id>` to cancel one.
+    Remind {
+        /// Entity ref `TYPE:REF` (e.g. `contact:jane@acme.com`, `deal:"Acme renewal"`,
+        /// `company:<uuid>`) — or the literal `cancel` to cancel a reminder by id.
+        target: String,
+        /// With `cancel`: the reminder id to cancel.
+        id: Option<String>,
+        /// When to fire — `tomorrow`, `"next week"`, `"in 3 days"`, `2026-08-01`, or full RFC3339.
+        #[arg(long)]
+        at: Option<String>,
+        /// Optional note shown with the reminder.
+        #[arg(long)]
+        note: Option<String>,
+        /// Assign to a member (email or user-id uuid). Defaults to you.
+        #[arg(long)]
+        assignee: Option<String>,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// CRM reminders — list your due reminders, or a single entity's.
+    #[command(visible_alias = "reminder")]
+    Reminders {
+        #[command(subcommand)]
+        cmd: RemindersCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum RemindersCmd {
+    /// List reminders — your own pending ones (`--mine`) or a single entity's (`--entity`).
+    List {
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// Your own pending reminders, soonest-due first.
+        #[arg(long)]
+        mine: bool,
+        /// A single entity's reminders — `TYPE:REF` (e.g. `contact:jane@acme.com`).
+        #[arg(long)]
+        entity: Option<String>,
+        /// Print raw JSON instead of the table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Cancel (soft-delete) a reminder by id.
+    Cancel {
+        /// The reminder id from `th api crm reminders list`.
+        id: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -733,12 +787,21 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
         Cmd::Timeline { deal_id, org, json } => timeline(deal_id, org, json).await,
         Cmd::Invoices { cmd } => invoices(cmd).await,
         Cmd::Assoc { cmd } => associations(cmd).await,
+        Cmd::Remind {
+            target,
+            id,
+            at,
+            note,
+            assignee,
+            org,
+        } => remind(target, id, at, note, assignee, org).await,
+        Cmd::Reminders { cmd } => reminders(cmd).await,
     }
 }
 
 /// Resolve the org id for user-authenticated calls. The user session
 /// doesn't persist an active org, so this is `--org` flag → `SMOOAI_ORG_ID`.
-fn resolve_org(override_org: Option<String>) -> Result<String> {
+pub fn resolve_org(override_org: Option<String>) -> Result<String> {
     if let Some(o) = override_org.filter(|s| !s.trim().is_empty()) {
         return Ok(o);
     }
@@ -2792,11 +2855,272 @@ fn render_associations(entity_type: &str, reference: &str, rows: &[Value]) {
     println!();
 }
 
+// ---------------------------------------------------------------------------
+// Reminders — SMOODEV-2646.
+//
+// "Remind me about this <entity> at <time>" against any CRM object. A Temporal
+// cron delivers due reminders to the assignee. Endpoints (auth: user/m2m):
+//   POST   /crm/reminders {entityType,entityId,remindAt,note?,assigneeUserId?}
+//   GET    /crm/reminders?mine=true | ?entityType=&entityId=
+//   DELETE /crm/reminders/:id   (soft cancel)
+// ---------------------------------------------------------------------------
+
+/// Entity kinds a reminder can target — mirrors the api-prime handler's list.
+const REMINDER_ENTITY_TYPES: [&str; 7] = ["contact", "company", "deal", "task", "proposal", "funnel", "custom_object"];
+
+#[allow(clippy::too_many_arguments)]
+async fn remind(target: String, id: Option<String>, at: Option<String>, note: Option<String>, assignee: Option<String>, org: Option<String>) -> Result<()> {
+    let client = UserClient::from_user_session().await?;
+    let org = resolve_org(org)?;
+
+    // `remind cancel <id>` shorthand — same soft-cancel as `reminders cancel`.
+    if target.eq_ignore_ascii_case("cancel") {
+        let rid = id.filter(|s| !s.trim().is_empty()).context("`remind cancel` needs a reminder id")?;
+        return cancel_reminder(&client, &org, &rid).await;
+    }
+
+    let at = at
+        .filter(|s| !s.trim().is_empty())
+        .context("--at is required (e.g. --at tomorrow, --at \"in 3 days\", --at 2026-08-01)")?;
+    let remind_at = parse_when(&at, chrono::Utc::now())?;
+    let (entity_type, entity_id) = resolve_entity_ref(&client, &org, &target).await?;
+
+    let mut body = json!({
+        "entityType": entity_type,
+        "entityId": entity_id,
+        "remindAt": remind_at.to_rfc3339(),
+    });
+    if let Some(n) = note.filter(|s| !s.trim().is_empty()) {
+        body["note"] = json!(n);
+    }
+    if let Some(a) = assignee.filter(|s| !s.trim().is_empty()) {
+        body["assigneeUserId"] = json!(resolve_assignee_id(&client, &org, &a).await?);
+    }
+
+    let r = client
+        .post(&format!("/organizations/{org}/crm/reminders"), &body)
+        .await
+        .context("POST reminder")?;
+    let rid = r.get("id").and_then(Value::as_str).unwrap_or("?");
+    println!(
+        "  {} reminder {} set on {} for {}",
+        "⏰".green(),
+        rid.dimmed(),
+        format!("{entity_type}:{entity_id}").bold(),
+        remind_at.to_rfc3339().cyan()
+    );
+    Ok(())
+}
+
+async fn reminders(cmd: RemindersCmd) -> Result<()> {
+    let client = UserClient::from_user_session().await?;
+    match cmd {
+        RemindersCmd::List { org, mine, entity, json } => {
+            let org = resolve_org(org)?;
+            let path = if mine {
+                format!("/organizations/{org}/crm/reminders?mine=true")
+            } else if let Some(e) = entity.filter(|s| !s.trim().is_empty()) {
+                let (entity_type, entity_id) = resolve_entity_ref(&client, &org, &e).await?;
+                format!("/organizations/{org}/crm/reminders?entityType={entity_type}&entityId={entity_id}")
+            } else {
+                anyhow::bail!("pass --mine (your reminders) or --entity <TYPE:REF> (one entity's)");
+            };
+            let body = client.get(&path).await.context("GET reminders")?;
+            if json {
+                print_json(&body);
+            } else {
+                render_reminders(&body);
+            }
+        }
+        RemindersCmd::Cancel { id, org } => {
+            let org = resolve_org(org)?;
+            cancel_reminder(&client, &org, &id).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn cancel_reminder(client: &UserClient, org: &str, id: &str) -> Result<()> {
+    client
+        .delete(&format!("/organizations/{org}/crm/reminders/{id}"))
+        .await
+        .context("DELETE reminder")?;
+    println!("  {} cancelled reminder {}", "🗑".red(), id.dimmed());
+    Ok(())
+}
+
+/// Split + validate a `TYPE:REF` entity ref (no network). Returns the lowercased
+/// entity kind and the raw reference (uuid or human name/email).
+fn split_entity_ref(target: &str) -> Result<(String, String)> {
+    let (kind, reference) = target
+        .split_once(':')
+        .context("entity must be TYPE:REF, e.g. contact:jane@acme.com or deal:<uuid>")?;
+    let kind = kind.trim().to_lowercase();
+    let reference = reference.trim().to_string();
+    if reference.is_empty() {
+        anyhow::bail!("entity ref '{target}' has no REF after the ':'");
+    }
+    if !REMINDER_ENTITY_TYPES.contains(&kind.as_str()) {
+        anyhow::bail!("unknown entity type '{kind}' — expected one of {}", REMINDER_ENTITY_TYPES.join(", "));
+    }
+    Ok((kind, reference))
+}
+
+/// Resolve a `TYPE:REF` entity ref into `(entityType, entityId)`. REF is a uuid
+/// (used directly) or, for contact/company/deal, a human name/email resolved
+/// against the org. The other kinds require a uuid (no CLI resolver exists).
+async fn resolve_entity_ref(client: &UserClient, org: &str, target: &str) -> Result<(String, String)> {
+    let (kind, reference) = split_entity_ref(target)?;
+    let id = if looks_like_uuid(&reference) {
+        reference
+    } else {
+        match kind.as_str() {
+            "contact" => resolve_contact_id(client, org, &reference).await?,
+            "company" => resolve_company_id(client, org, &reference).await?,
+            "deal" => resolve_deal_id(client, org, &reference).await?,
+            other => anyhow::bail!("pass a uuid for {other} (name resolution only supports contact/company/deal)"),
+        }
+    };
+    Ok((kind, id))
+}
+
+/// Resolve `--assignee` (email or user-id uuid) to an `auth.users` id. A uuid is
+/// used directly; an email is matched against the org members' `userEmail`.
+async fn resolve_assignee_id(client: &UserClient, org: &str, s: &str) -> Result<String> {
+    if looks_like_uuid(s) {
+        return Ok(s.to_string());
+    }
+    let body = client.get(&format!("/organizations/{org}/members")).await.context("GET members")?;
+    let needle = s.trim().to_lowercase();
+    body.get("members")
+        .and_then(Value::as_array)
+        .and_then(|arr| {
+            arr.iter().find_map(|m| {
+                let email = m.get("userEmail").and_then(Value::as_str)?.trim().to_lowercase();
+                (email == needle).then(|| m.get("userId").and_then(Value::as_str).map(str::to_string)).flatten()
+            })
+        })
+        .with_context(|| format!("no org member matches '{s}' — run `th api members list`"))
+}
+
+/// Parse a human-ish `--at` value into an absolute UTC instant, relative to
+/// `now`. Accepts (in order): RFC3339; a bare `YYYY-MM-DD`; the keywords
+/// `now`/`today`/`tomorrow`/`next week`/`next month`; `in <N> <unit>` and the
+/// shorthand `<N><unit>` where unit ∈ m/h/d/w (minutes/hours/days/weeks).
+///
+/// ponytail: bare dates and day-granularity keywords land at 09:00 UTC — a
+/// fixed, documented default rather than guessing the user's timezone. Pass full
+/// RFC3339 when you need an exact instant.
+fn parse_when(input: &str, now: chrono::DateTime<chrono::Utc>) -> Result<chrono::DateTime<chrono::Utc>> {
+    let s = input.trim();
+    let lower = s.to_lowercase();
+
+    // 1. Full RFC3339 — exact, honored as-is (normalized to UTC).
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Ok(dt.with_timezone(&chrono::Utc));
+    }
+
+    // 2. Bare calendar date → 09:00:00 UTC that day.
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        let at_nine = date.and_time(chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap());
+        return Ok(chrono::DateTime::from_naive_utc_and_offset(at_nine, chrono::Utc));
+    }
+
+    // 3. Keywords.
+    match lower.as_str() {
+        "now" => return Ok(now),
+        "today" => return Ok(at_hour(now, 9)),
+        "tomorrow" => return Ok(at_hour(now + chrono::Duration::days(1), 9)),
+        "next week" => return Ok(at_hour(now + chrono::Duration::weeks(1), 9)),
+        "next month" => return Ok(at_hour(now + chrono::Duration::days(30), 9)),
+        _ => {}
+    }
+
+    // 4. `in <N> <unit>` or shorthand `<N><unit>`.
+    if let Some(dur) = parse_relative(&lower) {
+        return Ok(now + dur);
+    }
+
+    anyhow::bail!("could not parse --at '{input}' — try `tomorrow`, `next week`, `in 3 days`, `2h`, `2026-08-01`, or full RFC3339")
+}
+
+/// Snap a UTC datetime to `hour:00:00` on its own day.
+fn at_hour(dt: chrono::DateTime<chrono::Utc>, hour: u32) -> chrono::DateTime<chrono::Utc> {
+    let day = dt.date_naive().and_time(chrono::NaiveTime::from_hms_opt(hour, 0, 0).unwrap());
+    chrono::DateTime::from_naive_utc_and_offset(day, chrono::Utc)
+}
+
+/// Parse `in <N> <unit>` or the shorthand `<N><unit>` into a Duration. Units:
+/// m/min(s)/minute(s), h/hr(s)/hour(s), d/day(s), w/wk(s)/week(s). None on any
+/// other shape (negative counts included).
+fn parse_relative(lower: &str) -> Option<chrono::Duration> {
+    let body = lower.strip_prefix("in ").map(str::trim).unwrap_or(lower);
+    let (num_str, unit) = match body.split_once(char::is_whitespace) {
+        Some((n, u)) => (n.trim(), u.trim()),
+        None => {
+            // shorthand: leading digits then a unit suffix (e.g. "3d", "30m").
+            let split = body.find(|c: char| !c.is_ascii_digit())?;
+            (&body[..split], body[split..].trim())
+        }
+    };
+    let n: i64 = num_str.parse().ok()?;
+    if n < 0 {
+        return None;
+    }
+    match unit {
+        "m" | "min" | "mins" | "minute" | "minutes" => Some(chrono::Duration::minutes(n)),
+        "h" | "hr" | "hrs" | "hour" | "hours" => Some(chrono::Duration::hours(n)),
+        "d" | "day" | "days" => Some(chrono::Duration::days(n)),
+        "w" | "wk" | "wks" | "week" | "weeks" => Some(chrono::Duration::weeks(n)),
+        _ => None,
+    }
+}
+
+fn render_reminders(body: &Value) {
+    let items = body.as_array().cloned().unwrap_or_default();
+    println!();
+    println!("  {} {}", "Reminders".bold(), format!("({})", items.len()).dimmed());
+    if items.is_empty() {
+        println!("\n  {}\n", "none".dimmed());
+        return;
+    }
+    let (h_when, h_status, h_entity) = (format!("{:<26}", "WHEN"), format!("{:<9}", "STATUS"), format!("{:<14}", "ENTITY"));
+    println!();
+    println!("  {}  {}  {}  {}", h_when.dimmed(), h_status.dimmed(), h_entity.dimmed(), "NOTE".dimmed());
+    for r in &items {
+        let when = r.get("remindAt").and_then(Value::as_str).unwrap_or("—");
+        let etype = r.get("entityType").and_then(Value::as_str).unwrap_or("—");
+        let note = r.get("note").and_then(Value::as_str).unwrap_or("");
+        println!(
+            "  {:<26}  {}  {:<14}  {}",
+            truncate(when, 26),
+            reminder_status(r),
+            truncate(etype, 14),
+            truncate(note, 40).dimmed()
+        );
+    }
+    println!();
+}
+
+/// A reminder's lifecycle state from its `sentAt` / `cancelledAt` stamps,
+/// padded + colored for the table.
+fn reminder_status(r: &Value) -> String {
+    let present = |k: &str| r.get(k).map(|v| !v.is_null()).unwrap_or(false);
+    if present("cancelledAt") {
+        format!("{:<9}", "cancelled").red().to_string()
+    } else if present("sentAt") {
+        format!("{:<9}", "sent").green().to_string()
+    } else {
+        format!("{:<9}", "pending").cyan().to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         extract_timeline_items, fmt_cents, group_thousands, image_content_type, is_clear_token, is_overdue, looks_like_uuid, norm_email, norm_phone,
-        normalize_entity_type, own_image_id, parent_row_points_up, parse_entity_ref, preview_body, timeline_glyph, EntityRef, ImageEntity,
+        normalize_entity_type, own_image_id, parent_row_points_up, parse_entity_ref, parse_relative, parse_when, preview_body, reminder_status,
+        split_entity_ref, timeline_glyph, EntityRef, ImageEntity,
     };
     use serde_json::json;
 
@@ -3002,5 +3326,96 @@ mod tests {
     fn phone_too_short_is_none() {
         assert_eq!(norm_phone(&json!({ "phone": "12345" })), None);
         assert_eq!(norm_phone(&json!({})), None);
+    }
+
+    // ---- reminders -------------------------------------------------------
+
+    #[test]
+    fn entity_ref_splits_and_validates_type() {
+        let (kind, r) = split_entity_ref("contact:jane@acme.com").unwrap();
+        assert_eq!(kind, "contact");
+        assert_eq!(r, "jane@acme.com");
+        // Type is lowercased; ref is trimmed.
+        let (kind, r) = split_entity_ref("  Deal : Acme renewal ").unwrap();
+        assert_eq!(kind, "deal");
+        assert_eq!(r, "Acme renewal");
+        // All seven kinds accepted.
+        for k in ["contact", "company", "deal", "task", "proposal", "funnel", "custom_object"] {
+            assert!(split_entity_ref(&format!("{k}:x")).is_ok(), "{k} should be valid");
+        }
+    }
+
+    #[test]
+    fn entity_ref_rejects_bad_shapes() {
+        assert!(split_entity_ref("jane@acme.com").is_err()); // no ':'
+        assert!(split_entity_ref("contact:").is_err()); // empty ref
+        assert!(split_entity_ref("widget:x").is_err()); // unknown type
+    }
+
+    #[test]
+    fn parse_when_rfc3339_is_honored_exactly() {
+        let now = "2026-07-15T00:00:00Z".parse().unwrap();
+        let got = parse_when("2026-08-01T14:30:00Z", now).unwrap();
+        assert_eq!(got.to_rfc3339(), "2026-08-01T14:30:00+00:00");
+        // A non-UTC offset is normalized to UTC.
+        let got = parse_when("2026-08-01T09:00:00-05:00", now).unwrap();
+        assert_eq!(got.to_rfc3339(), "2026-08-01T14:00:00+00:00");
+    }
+
+    #[test]
+    fn parse_when_bare_date_lands_at_0900_utc() {
+        let now = "2026-07-15T00:00:00Z".parse().unwrap();
+        let got = parse_when("2026-08-01", now).unwrap();
+        assert_eq!(got.to_rfc3339(), "2026-08-01T09:00:00+00:00");
+    }
+
+    #[test]
+    fn parse_when_keywords_are_relative_to_now() {
+        let now = "2026-07-15T12:34:00Z".parse().unwrap();
+        assert_eq!(parse_when("now", now).unwrap(), now);
+        // tomorrow / next week snap to 09:00 UTC on their day.
+        assert_eq!(parse_when("tomorrow", now).unwrap().to_rfc3339(), "2026-07-16T09:00:00+00:00");
+        assert_eq!(parse_when("Next Week", now).unwrap().to_rfc3339(), "2026-07-22T09:00:00+00:00");
+        assert_eq!(parse_when("today", now).unwrap().to_rfc3339(), "2026-07-15T09:00:00+00:00");
+    }
+
+    #[test]
+    fn parse_when_relative_durations() {
+        let now = "2026-07-15T12:00:00Z".parse().unwrap();
+        assert_eq!(parse_when("in 3 days", now).unwrap().to_rfc3339(), "2026-07-18T12:00:00+00:00");
+        assert_eq!(parse_when("in 2 hours", now).unwrap().to_rfc3339(), "2026-07-15T14:00:00+00:00");
+        // shorthand
+        assert_eq!(parse_when("30m", now).unwrap().to_rfc3339(), "2026-07-15T12:30:00+00:00");
+        assert_eq!(parse_when("2w", now).unwrap().to_rfc3339(), "2026-07-29T12:00:00+00:00");
+    }
+
+    #[test]
+    fn parse_when_rejects_garbage() {
+        let now = "2026-07-15T12:00:00Z".parse().unwrap();
+        assert!(parse_when("someday", now).is_err());
+        assert!(parse_when("in -3 days", now).is_err()); // negative
+        assert!(parse_when("3 fortnights", now).is_err()); // unknown unit
+    }
+
+    #[test]
+    fn parse_relative_unit_aliases() {
+        assert_eq!(parse_relative("in 1 minute"), Some(chrono::Duration::minutes(1)));
+        assert_eq!(parse_relative("5 mins"), Some(chrono::Duration::minutes(5)));
+        assert_eq!(parse_relative("2 hrs"), Some(chrono::Duration::hours(2)));
+        assert_eq!(parse_relative("1 day"), Some(chrono::Duration::days(1)));
+        assert_eq!(parse_relative("3w"), Some(chrono::Duration::weeks(3)));
+        assert_eq!(parse_relative("nope"), None);
+    }
+
+    #[test]
+    fn reminder_status_reads_lifecycle_stamps() {
+        assert!(reminder_status(&json!({})).contains("pending"));
+        assert!(reminder_status(&json!({ "sentAt": "2026-07-01T00:00:00Z" })).contains("sent"));
+        assert!(reminder_status(&json!({ "cancelledAt": "2026-07-01T00:00:00Z" })).contains("cancelled"));
+        // cancelled wins over sent.
+        let both = json!({ "sentAt": "2026-07-01T00:00:00Z", "cancelledAt": "2026-07-02T00:00:00Z" });
+        assert!(reminder_status(&both).contains("cancelled"));
+        // explicit null stamps read as pending.
+        assert!(reminder_status(&json!({ "sentAt": null, "cancelledAt": null })).contains("pending"));
     }
 }

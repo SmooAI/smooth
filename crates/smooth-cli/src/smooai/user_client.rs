@@ -98,6 +98,19 @@ impl UserClient {
         Self::body(resp, "PATCH", &url).await
     }
 
+    pub async fn put(&self, path: &str, body: &Value) -> Result<Value> {
+        let url = format!("{}{path}", self.base);
+        let resp = self
+            .http
+            .put(&url)
+            .bearer_auth(&self.bearer)
+            .json(body)
+            .send()
+            .await
+            .with_context(|| format!("PUT {url}"))?;
+        Self::body(resp, "PUT", &url).await
+    }
+
     pub async fn delete(&self, path: &str) -> Result<Value> {
         let url = format!("{}{path}", self.base);
         let resp = self

@@ -140,6 +140,21 @@ th api members list --org <id>                     # list seats
 th api members invite '{"email":"x@y","role":"admin"}'
 th api members invitations
 th api members revoke <id> / resend <id>
+# Teams (RBAC groupings that hold roles — SMOODEV-2645). Resolve teams by name
+# or id, members by email, roles by name. set-members/set-roles are replace-all.
+th api teams list                                  # teams + member/role counts
+th api teams create "Sales" --description "..."
+th api teams rename "Sales" "Revenue"
+th api teams set-members "Revenue" jane@acme.com bob@acme.com
+th api teams set-roles "Revenue" admin "Sales Rep"
+th api teams delete "Revenue"
+# CRM reminders (SMOODEV-2646). Target any CRM entity as TYPE:REF (contact,
+# company, deal by name/email/uuid; task/proposal/funnel/custom_object by uuid).
+# --at parses tomorrow / "next week" / "in 3 days" / 2h / 2026-08-01 / RFC3339.
+th api crm remind contact:jane@acme.com --at tomorrow --note "follow up"
+th api crm reminders list --mine                   # your pending, soonest first
+th api crm reminders list --entity deal:"Acme renewal"
+th api crm remind cancel <reminder-id>             # soft-cancel (also `reminders cancel`)
 # Parent/child org relationships (client-portal model). Parent defaults to
 # the active org; --type defaults to `manages` (the platform convention).
 th admin org link-child <child-org-id>             # link under active org
