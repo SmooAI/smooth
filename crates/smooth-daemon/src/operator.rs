@@ -287,6 +287,27 @@ fn resolve_gateway_config() -> ServerConfig {
     config
 }
 
+/// Build the LLM config the narc judge uses to adjudicate flagged tool calls:
+/// the daemon's resolved gateway, pinned to the fast model ([`FAST_MODEL`]).
+/// Returns `None` when no gateway key is available — narc then degrades to a
+/// regex-only hook (detectors + redaction, no LLM escalation) instead of
+/// crashing the daemon.
+fn narc_judge_config() -> Option<smooth_operator::llm::LlmConfig> {
+    let cfg = resolve_gateway_config();
+    let key = cfg.gateway_key.filter(|k| !k.trim().is_empty())?;
+    Some(smooth_operator::llm::LlmConfig {
+        api_url: cfg.gateway_url,
+        api_key: key,
+        // The judge is a cheap classifier — the snappy fast model, not the
+        // coding-route default. Small token budget: it returns one JSON line.
+        model: FAST_MODEL.to_owned(),
+        max_tokens: 512,
+        temperature: 0.0,
+        retry_policy: smooth_operator::llm::RetryPolicy::default(),
+        api_format: smooth_operator::llm::ApiFormat::OpenAiCompat,
+    })
+}
+
 /// Boot the operator's local deployment flavor on `addr`, gated by an
 /// auto-provisioned [`LocalTokenVerifier`], and serve until Ctrl-C.
 ///
@@ -331,6 +352,18 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         // agent. The widget + SDK clients carry the token, so they're unaffected.
         .strict_auth(true)
         .tools(provider)
+        // th-3119e3 + th-515a13: re-home the security model onto the operator's
+        // per-turn registry as two host `ToolHook`s — the auto-mode permission
+        // gate FIRST (it can allow/deny/ask before anything else runs), then
+        // narc surveillance (secret + prompt-injection detection, LLM-judge
+        // escalation, and secret redaction from results). The builder installs
+        // these ahead of the per-agent auth + confirmation hooks, so they get
+        // first say on every call. narc degrades to regex-only when no gateway
+        // key is configured.
+        .tool_hooks(vec![
+            Arc::new(crate::hooks::AutoModeHook::from_env()) as Arc<dyn smooth_operator::tool::ToolHook>,
+            Arc::new(crate::hooks::NarcHook::new(narc_judge_config())),
+        ])
         // The agent's personality: "Big Smooth", the user's personal assistant —
         // NOT the operator's stock customer-support persona, and no reasoning
         // narration (th-5f059b).

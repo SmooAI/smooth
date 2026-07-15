@@ -4854,6 +4854,7 @@ dependencies = [
  "futures-util",
  "http-body-util",
  "rand 0.8.5",
+ "regex",
  "reqwest",
  "rusqlite",
  "serde",
@@ -4922,8 +4923,8 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator"
-version = "1.22.6"
-source = "git+https://github.com/SmooAI/smooth-operator.git?rev=487d10bc#487d10bc946933f070ff940aa5f8039cffc2f7f0"
+version = "1.22.13"
+source = "git+https://github.com/SmooAI/smooth-operator.git?rev=56617729#56617729ec1c1f21cefa096aa6da229b58e3c96c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4952,8 +4953,8 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-adapter-memory"
-version = "1.22.6"
-source = "git+https://github.com/SmooAI/smooth-operator.git?rev=487d10bc#487d10bc946933f070ff940aa5f8039cffc2f7f0"
+version = "1.22.13"
+source = "git+https://github.com/SmooAI/smooth-operator.git?rev=56617729#56617729ec1c1f21cefa096aa6da229b58e3c96c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4964,8 +4965,9 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-core"
-version = "0.16.0"
-source = "git+https://github.com/SmooAI/smooth-operator-core.git?rev=d03fa10#d03fa1087d8b81689322409b885b0467fdbc8c7c"
+version = "0.16.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d04127c32b5bd73ebb0c85084bfe36a2f203c94a7cda919a21f44769fbbc1495"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4991,8 +4993,8 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-ingestion"
-version = "1.22.6"
-source = "git+https://github.com/SmooAI/smooth-operator.git?rev=487d10bc#487d10bc946933f070ff940aa5f8039cffc2f7f0"
+version = "1.22.13"
+source = "git+https://github.com/SmooAI/smooth-operator.git?rev=56617729#56617729ec1c1f21cefa096aa6da229b58e3c96c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5012,8 +5014,8 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-server"
-version = "1.22.6"
-source = "git+https://github.com/SmooAI/smooth-operator.git?rev=487d10bc#487d10bc946933f070ff940aa5f8039cffc2f7f0"
+version = "1.22.13"
+source = "git+https://github.com/SmooAI/smooth-operator.git?rev=56617729#56617729ec1c1f21cefa096aa6da229b58e3c96c"
 dependencies = [
  "anyhow",
  "async-trait",

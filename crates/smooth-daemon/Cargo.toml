@@ -74,6 +74,9 @@ smooai-client-shared.workspace = true
 base64 = "0.22"
 sha2 = "0.10"
 rand = "0.8"
+# th-3119e3: re-homed narc surveillance detectors (secret + prompt-injection
+# regexes) run in-process as a ToolHook on the operator's registry.
+regex = "1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

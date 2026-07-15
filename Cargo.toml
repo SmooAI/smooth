@@ -201,17 +201,15 @@ prost-types = "0.13"
 # unrelated break. The multimodal commits are ALSO merged to core main (PRs #58/#62)
 # — flip this to a core-main rev once smooth absorbs th-10eb50. Keep the
 # `multimodal-content-model` remote branch alive until then (it anchors this rev).
-# Engine migrated b43c04fe -> d03fa10 (th-7225f9): the chat-first Big Smooth
-# daemon runs on smooth-operator-server @ 487d10bc, which is built against core
-# d03fa10 (0.16.0). One core rev per workspace, so the whole repo pins d03fa10.
-# This absorbs th-10eb50 (the `post_call(&mut ToolResult)` redaction-seam
-# signature). The old-cast crates that implemented the OLD post_call signature
-# (smooth-bigsmooth/narc/scribe/archivist/operative/bench/tunnel) are dropped in
-# this same change — their narc-judge/auto-mode re-home onto the new engine as
-# ToolHooks in a follow-up.
-smooth-operator = { git = "https://github.com/SmooAI/smooth-operator-core.git", rev = "d03fa10", package = "smooai-smooth-operator-core" }
-smooth-operator-server = { git = "https://github.com/SmooAI/smooth-operator.git", rev = "487d10bc", package = "smooai-smooth-operator-server", default-features = false }
-smooth-operator-svc = { git = "https://github.com/SmooAI/smooth-operator.git", rev = "487d10bc", package = "smooai-smooth-operator", default-features = false }
+# Engine on core 0.16.2 (crates.io). The chat-first Big Smooth daemon runs on
+# smooth-operator-server @ 56617729 (th-1f694a: the `tool_hooks` builder seam on
+# LocalServer), which is built against published core 0.16.2 — so the whole repo
+# pins 0.16.2 to keep one core version across the graph. Absorbs th-10eb50 (the
+# `post_call(&mut ToolResult)` redaction seam). narc-judge + auto-mode re-home
+# onto this engine as ToolHooks via the new `.tool_hooks(…)` seam (th-3119e3).
+smooth-operator = { version = "0.16.2", package = "smooai-smooth-operator-core" }
+smooth-operator-server = { git = "https://github.com/SmooAI/smooth-operator.git", rev = "56617729", package = "smooai-smooth-operator-server", default-features = false }
+smooth-operator-svc = { git = "https://github.com/SmooAI/smooth-operator.git", rev = "56617729", package = "smooai-smooth-operator", default-features = false }
 # smooth-owned coding-harness extensions to the generic engine (re-homed from
 # the engine when it went generic at 0.14.0). See crates/smooth-cast.
 smooth-cast = { version = "0.22.0", path = "crates/smooth-cast", package = "smooai-smooth-cast" }

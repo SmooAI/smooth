@@ -28,6 +28,7 @@
 
 pub mod auth_login;
 pub mod config;
+pub mod hooks;
 pub mod operator;
 mod operator_storage;
 pub mod push;
