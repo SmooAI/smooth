@@ -345,7 +345,15 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         // composer's autocomplete resolves files + paths in the workspace.
         // …and the Web Push routes (/push/key, /push/subscribe, /push/test) so an
         // installed PWA can be reached on the user's phone (th-* push).
-        .serve_routes(crate::search::search_router(workspace).merge(crate::push::push_router()))
+        // …and the "Sign in with Smoo" browser OAuth2 + PKCE routes (/auth/login,
+        // /auth/callback, /api/auth/status) so a user viewing the UI can log `th`
+        // into Smoo AI by clicking a button — Big Smooth then acts on their org via
+        // th-backed extensions (th-bc624a).
+        .serve_routes(
+            crate::search::search_router(workspace)
+                .merge(crate::push::push_router())
+                .merge(crate::auth_login::auth_router()),
+        )
         .spawn()
         .await
         .context("spawning the local-flavor operator")?;

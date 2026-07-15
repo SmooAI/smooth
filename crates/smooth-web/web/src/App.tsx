@@ -22,6 +22,7 @@ import {
     type Status,
     type ConversationSummary,
 } from './operator';
+import { SmooSignIn } from './SmooSignIn';
 import { useMentionSearch, activeMention, type MentionResult } from './useMentionSearch';
 import { usePush } from './usePush';
 
@@ -220,21 +221,25 @@ export default function App() {
             >
                 <Menu size={18} />
             </button>
+            {/* Sign in with Smoo: log `th` into Smoo AI (browser OAuth2 + PKCE) so Big
+                Smooth can act on the user's org via th-backed extensions (th-bc624a). */}
+            <SmooSignIn />
             {/* Push to phone: enroll this device so Big Smooth can reach it with the
-                tab closed. Hidden when the browser can't do Web Push, or once enabled. */}
+                tab closed. Hidden when the browser can't do Web Push, or once enabled.
+                Sits a row below the sign-in pill so they stack, not overlap. */}
             {push.supported && !push.enabled && (
                 <button
                     onClick={() => void push.enable()}
                     disabled={push.busy}
                     title="Get notified on this device"
-                    className="fixed top-4 right-4 z-10 flex items-center gap-1.5 rounded-full bg-panel/80 px-3 py-1.5 text-xs text-(--color-muted-foreground) opacity-70 transition hover:opacity-100 disabled:opacity-40"
+                    className="fixed top-14 right-4 z-10 flex items-center gap-1.5 rounded-full bg-panel/80 px-3 py-1.5 text-xs text-(--color-muted-foreground) opacity-70 transition hover:opacity-100 disabled:opacity-40"
                 >
                     <Bell className="size-3.5" /> {push.busy ? 'Enabling…' : 'Notify me'}
                 </button>
             )}
             {push.enabled && (
                 <div
-                    className="fixed top-4 right-4 z-10 flex items-center gap-1.5 text-xs text-(--color-online) opacity-60"
+                    className="fixed top-14 right-4 z-10 flex items-center gap-1.5 text-xs text-(--color-online) opacity-60"
                     title="Notifications on for this device"
                 >
                     <BellRing className="size-3.5" />

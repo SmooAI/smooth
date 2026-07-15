@@ -26,6 +26,7 @@
 //! `serve_persistent` agent loop + its server/wire/runner/coordinator/scheduler/
 //! permission/sqlite modules were deleted once the operator path reached parity.
 
+pub mod auth_login;
 pub mod config;
 pub mod operator;
 mod operator_storage;
