@@ -2731,17 +2731,19 @@ async fn assoc_unlink(client: &UserClient, org: &str, from: &str, to: &str, asso
     Ok(())
 }
 
+/// True when a `parent`-typed row is the queried company's OWN parent link
+/// (not one of its children). Parent links are stored child —parent→ parent, so
+/// querying the child returns its parent with `direction == "source"`; its
+/// children come back with `direction == "target"`. A row missing `direction`
+/// is treated as the parent (a company has at most one).
+fn parent_row_points_up(row: &Value) -> bool {
+    row.get("direction").and_then(Value::as_str).is_none_or(|d| d == "source")
+}
+
 /// Delete the company's `parent` association (a company has at most one).
 async fn clear_company_parent(client: &UserClient, org: &str, company_id: &str) -> Result<()> {
     let rows = get_associations(client, org, "company", company_id, Some("company"), Some("parent")).await?;
-    // A company's own parent link is the OUTGOING one; incoming rows are its
-    // children. ponytail: assumes direction=="outgoing" means "this entity is the
-    // child" — the associations API isn't deployed yet (SmooAI/smooai#3068); if a
-    // row omits `direction` we treat it as the parent (a company has one parent).
-    let parents: Vec<&Value> = rows
-        .iter()
-        .filter(|r| r.get("direction").and_then(Value::as_str).is_none_or(|d| d == "outgoing"))
-        .collect();
+    let parents: Vec<&Value> = rows.iter().filter(|r| parent_row_points_up(r)).collect();
     if parents.is_empty() {
         println!("  {} no parent set", "•".dimmed());
         return Ok(());
@@ -2794,9 +2796,19 @@ fn render_associations(entity_type: &str, reference: &str, rows: &[Value]) {
 mod tests {
     use super::{
         extract_timeline_items, fmt_cents, group_thousands, image_content_type, is_clear_token, is_overdue, looks_like_uuid, norm_email, norm_phone,
-        normalize_entity_type, own_image_id, parse_entity_ref, preview_body, timeline_glyph, EntityRef, ImageEntity,
+        normalize_entity_type, own_image_id, parent_row_points_up, parse_entity_ref, preview_body, timeline_glyph, EntityRef, ImageEntity,
     };
     use serde_json::json;
+
+    #[test]
+    fn parent_row_points_up_only_for_source_direction() {
+        // Querying the child, its parent row comes back as direction=="source".
+        assert!(parent_row_points_up(&json!({ "direction": "source", "otherEntityId": "parent-co" })));
+        // Its children come back as "target" — not the child's own parent.
+        assert!(!parent_row_points_up(&json!({ "direction": "target", "otherEntityId": "child-co" })));
+        // Missing direction → treat as the parent (a company has at most one).
+        assert!(parent_row_points_up(&json!({ "otherEntityId": "parent-co" })));
+    }
 
     #[test]
     fn entity_ref_parses_type_and_ref() {
