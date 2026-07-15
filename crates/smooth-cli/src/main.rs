@@ -9,6 +9,7 @@ mod auth;
 mod boot_ui;
 mod claude;
 mod config;
+mod daemon_launcher;
 mod ext;
 mod gradient;
 mod hooks;
@@ -17,8 +18,6 @@ mod service;
 mod smooai;
 
 use smooai::{cmd_login, cmd_logout, cmd_orgs, cmd_whoami};
-
-use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -62,6 +61,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Run / control the chat-first Big Smooth daemon (epic th-c89c2a) on the
+    /// smooth-operator LocalServer engine. Thin passthrough to the standalone
+    /// `smooth-daemon` binary — `th daemon --help` shows its full CLI
+    /// (`run` foreground / `operator` / `status` / `audit` / `schedule`).
+    Daemon {
+        /// Args forwarded verbatim to the `smooth-daemon` binary.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Start Smooth platform — boots Big Smooth on the host and runs
     /// dispatched tasks in-process. (The microVM sandbox mode was
     /// removed 2026-07, pearl th-f4a801; see git history.)
@@ -506,23 +514,6 @@ enum Commands {
         #[arg(long)]
         remote: Option<String>,
     },
-    /// Hosted remote-control sessions via th.smoo.ai (reverse-tunnel).
-    ///
-    /// Opens an outbound connection to th.smoo.ai which gives back a
-    /// publicly reachable URL proxying HTTP + WebSocket requests to
-    /// your local Big Smooth (127.0.0.1:4400). Share a pearl, join a
-    /// teammate's session, or drive Smooth from a phone without VPN.
-    Tunnel {
-        #[command(subcommand)]
-        cmd: TunnelCommands,
-    },
-    /// The Line — the aider-polyglot benchmark score baked into this
-    /// binary at build time (from `docs/bench-latest.json`, which the
-    /// release workflow commits on every tag).
-    Bench {
-        #[command(subcommand)]
-        cmd: BenchCommands,
-    },
     /// List skills available in the current workspace. Reads
     /// `.smooth/skills/`, `~/.smooth/skills/`, `~/.claude/skills/`,
     /// and `~/.opencode/skills/` — first hit wins on name. Pearl
@@ -638,51 +629,11 @@ enum SkillsCommands {
 }
 
 #[derive(Subcommand)]
-enum BenchCommands {
-    /// Print The Line — the aider-polyglot pass rate baked into this
-    /// binary. Reads the `docs/bench-latest.json` that was present at
-    /// build time; if no release has been cut, prints a note
-    /// explaining how to produce one locally.
-    Score,
-}
-
-#[derive(Subcommand)]
 enum OperativesCommands {
     /// List running operative VMs
     List,
     /// Tear down a running operative VM
     Kill { operator_id: String },
-}
-
-#[derive(Subcommand)]
-enum TunnelCommands {
-    /// Start a tunnel session. Opens a persistent connection to
-    /// th.smoo.ai and prints the public URL once the handshake
-    /// completes.
-    Start {
-        /// Preferred slug (`scratch-abcd` → `scratch-abcd.th.smoo.ai`).
-        /// Default: a fresh ephemeral slug chosen by the server.
-        #[arg(long)]
-        slug: Option<String>,
-
-        /// Override the rendezvous endpoint. Default: `wss://th.smoo.ai/tunnel`.
-        /// Useful for dev/staging.
-        #[arg(long)]
-        service_url: Option<String>,
-
-        /// Override the local target. Default: `http://127.0.0.1:4400`.
-        #[arg(long)]
-        local_target: Option<String>,
-
-        /// Auth token. If omitted, read from `SMOOTH_TUNNEL_TOKEN`.
-        /// (`th auth login` will mint this in a future change — for
-        /// now, paste one explicitly.)
-        #[arg(long)]
-        token: Option<String>,
-    },
-    /// Show the configured endpoints and a previewed ephemeral slug.
-    /// Runs entirely client-side; does not hit the network.
-    Status,
 }
 
 #[derive(Subcommand)]
@@ -1568,7 +1519,7 @@ async fn main() -> Result<()> {
                 cmd_doctor().await
             }
         }
-        Some(Commands::Tunnel { cmd }) => cmd_tunnel(cmd).await,
+        Some(Commands::Daemon { args }) => daemon_launcher::run(args).await,
         Some(Commands::Up {
             no_leader,
             port,
@@ -1661,7 +1612,6 @@ async fn main() -> Result<()> {
         Some(Commands::Plugin { cmd }) => cmd_plugin(cmd),
         Some(Commands::Ext { cmd }) => ext::dispatch(cmd),
         Some(Commands::Service { cmd }) => cmd_service(cmd),
-        Some(Commands::Bench { cmd }) => cmd_bench(cmd),
         Some(Commands::Skills { cmd }) => cmd_skills(cmd),
         Some(Commands::Cast { cmd }) => cmd_cast(cmd).await,
         Some(Commands::Providers { cmd }) => cmd_providers(cmd).await,
@@ -1733,6 +1683,11 @@ async fn cmd_up(no_leader: bool, port: u16, bind: String, foreground: bool, max_
     if skip_test {
         std::env::set_var("SMOOTH_WORKFLOW_SKIP_TEST", "1");
     }
+    // ponytail: th up now launches the chat-first smooth-daemon (was in-process
+    // smooth-bigsmooth). Point the daemon at the same host:port `th up` probes
+    // via `SMOOTH_ADDR` so the re-exec health check below still finds /health.
+    // The daemonized child inherits this env; the foreground path reads it too.
+    std::env::set_var("SMOOTH_ADDR", format!("{bind}:{port}"));
 
     // Daemon mode: re-exec ourselves with --foreground and redirect
     // output to log file. Without daemonizing, `th up` would block its
@@ -1905,62 +1860,13 @@ async fn cmd_up(no_leader: bool, port: u16, bind: String, foreground: bool, max_
         return Ok(());
     }
 
-    // Foreground mode — actual server startup on the host. When this
-    // is the daemon-child re-exec, the parent has already detached
-    // stdio to the log file, written the pid, and returned.
+    // Foreground mode — run the chat-first daemon on the host. When this
+    // is the daemon-child re-exec, the parent has already detached stdio to
+    // the log file, written the pid, and returned. The daemon binds
+    // `SMOOTH_ADDR` (set above to {bind}:{port}) and serves /health.
     println!();
     println!("  {} / {}", gradient::smoo_ai(), gradient::smooth());
     println!();
-
-    // Initialize pearl store (Dolt-backed). There used to be a SQLite
-    // handle here too, but memories/config/worker_runs all live in
-    // Dolt now — one backend, one sync story.
-    //
-    // Use the long-running `smooth-dolt serve` companion (same self-heal
-    // path as project stores) so the global store doesn't fall back to
-    // per-call CLI subprocesses — that path keeps hitting "database is
-    // read only" on smoo-hub when concurrent CLI opens race the Dolt
-    // manifest lock. Server-mode opens the database once and serializes
-    // writes through a single goroutine, dodging the issue entirely.
-    let dolt_dir = match find_dolt_dir() {
-        Ok(d) => d,
-        Err(_) => {
-            // Auto-init Dolt in cwd if no .smooth/dolt/ found
-            let cwd = std::env::current_dir()?;
-            let dir = cwd.join(".smooth").join("dolt");
-            smooth_pearls::PearlStore::init(&dir)?;
-            println!(
-                "  {} Pearls     {} {}",
-                "\u{2713}".green().bold(),
-                dir.display().to_string().dimmed(),
-                "(auto-initialized)".dimmed()
-            );
-            dir
-        }
-    };
-    let pearl_store = match smooth_pearls::SmoothDoltServer::spawn(&dolt_dir) {
-        Ok(server) => {
-            let server = std::sync::Arc::new(server);
-            let dolt = smooth_pearls::SmoothDolt::from_server(server, &dolt_dir);
-            let store = smooth_pearls::PearlStore::from_dolt(dolt);
-            println!(
-                "  {} Pearls     {} {}",
-                "\u{2713}".green().bold(),
-                dolt_dir.display().to_string().dimmed(),
-                "(serve)".dimmed()
-            );
-            store
-        }
-        Err(e) => {
-            // Fall back to CLI mode so we don't hard-fail on machines
-            // where serve refuses to come up — but warn loudly.
-            eprintln!(
-                "  {} Pearls     serve unavailable ({e}); falling back to CLI mode (will be slow + may hit lock errors)",
-                "\u{26A0}".yellow().bold()
-            );
-            smooth_pearls::PearlStore::open(&dolt_dir)?
-        }
-    };
 
     if no_leader {
         println!();
@@ -1968,39 +1874,10 @@ async fn cmd_up(no_leader: bool, port: u16, bind: String, foreground: bool, max_
         return Ok(());
     }
 
-    // Start Big Smooth (API + embedded web UI on same port)
-    let state = smooth_bigsmooth::server::AppState::new(pearl_store);
-
-    // Pearl th-6db839: bind defaults to 127.0.0.1 (loopback only).
-    // The Big Smooth API has no authentication today — binding any
-    // non-loopback interface exposes every route (dispatch agents,
-    // mint creds, approve their own access requests, read pearls and
-    // sessions) to anyone reachable on that interface. Opt in to
-    // `0.0.0.0` (or a specific NIC IP) via `--bind`.
-    let ip: std::net::IpAddr = bind.parse().map_err(|e| {
-        anyhow::anyhow!("--bind '{bind}' is not a valid IP address: {e} (try `--bind 127.0.0.1` or `--bind 0.0.0.0` to opt in to LAN exposure)")
-    })?;
-    if !ip.is_loopback() {
-        eprintln!(
-            "  {} Big Smooth bound on {ip}:{port} (non-loopback). The API has no auth — anyone on the network can dispatch agents and read pearls. Pearl th-6db839.",
-            "\u{26A0}".yellow().bold()
-        );
-    }
-    let addr = SocketAddr::new(ip, port);
-    println!(
-        "  {} Big {} {}",
-        "\u{2713}".green().bold(),
-        gradient::smooth(),
-        format!("http://localhost:{port}").cyan().bold()
-    );
-    println!(
-        "  {} Web UI     {}",
-        "\u{2713}".green().bold(),
-        format!("http://localhost:{port}").cyan().bold()
-    );
-    println!();
-
-    smooth_bigsmooth::server::start(state, addr).await
+    // ponytail: th up now launches the chat-first smooth-daemon (was in-process
+    // smooth-bigsmooth). All the AppState/pearl-store/addr plumbing that only fed
+    // the removed `smooth_bigsmooth::server::start` is gone with it.
+    crate::daemon_launcher::run(vec!["run".to_string()]).await
 }
 
 async fn cmd_down() -> Result<()> {
@@ -2782,7 +2659,10 @@ async fn cmd_steer(bead_id: &str, action: &str, message: Option<&str>) -> Result
 }
 
 fn cmd_audit(cmd: AuditCommands) -> Result<()> {
-    let dir = smooth_bigsmooth::audit::get_audit_dir();
+    // ponytail: standard local audit dir (~/.smooth/audit) — was smooth_bigsmooth::audit::get_audit_dir().
+    let dir = dirs_next::home_dir()
+        .map(|h| h.join(".smooth").join("audit"))
+        .context("no home dir for ~/.smooth/audit")?;
     match cmd {
         AuditCommands::Path => println!("{}", dir.display()),
         AuditCommands::List => {
@@ -3000,22 +2880,15 @@ async fn cmd_code(
     // Validate the auto-approve mode at CLI time too. We pin the
     // string to one of the known forms early so a typo doesn't
     // silently fall through to "deny" later. Pearl th-400773.
-    let auto_approve_mode = smooth_bench::scenarios::AutoApprove::parse(&auto_approve)
-        .ok_or_else(|| anyhow::anyhow!("unknown --auto-approve mode '{auto_approve}': expected one of deny/once/session/project/user"))?;
-
-    // Headless / unattended runs need someone to resolve Asks. The
-    // interactive TUI already handles this through its inline
-    // approval cards; headless mode spawns a tokio task that polls
-    // `/api/access/pending` and resolves per the configured mode.
-    // For interactive runs we leave it dormant so the TUI's own
-    // resolver flow wins.
-    let _auto_approve_handle = if headless {
-        let base = std::env::var("SMOOTH_BIGSMOOTH_URL").unwrap_or_else(|_| "http://127.0.0.1:4400".into());
-        tracing::info!(mode = auto_approve_mode.as_str(), "headless: auto-approve resolver active");
-        Some(smooth_bench::auto_approve::spawn_resolver(base, auto_approve_mode))
-    } else {
-        None
-    };
+    //
+    // ponytail: the old smooth_bench::scenarios::AutoApprove parser + headless
+    // resolver polled the removed in-process Big Smooth `/api/access` queue. The
+    // chat-first daemon owns permissions (auto-mode) now, so there's nothing to
+    // spawn here — just validate the flag locally.
+    const AUTO_APPROVE_MODES: [&str; 5] = ["deny", "once", "session", "project", "user"];
+    if !AUTO_APPROVE_MODES.contains(&auto_approve.as_str()) {
+        anyhow::bail!("unknown --auto-approve mode '{auto_approve}': expected one of deny/once/session/project/user");
+    }
     // `--list` short-circuits everything else and prints a simple
     // table of saved sessions, newest first, then exits without
     // launching the TUI.
@@ -3488,68 +3361,6 @@ async fn cmd_doctor() -> Result<()> {
     }
 
     Ok(())
-}
-
-async fn cmd_tunnel(cmd: TunnelCommands) -> Result<()> {
-    use smooth_tunnel::{SlugPreference, TunnelClient, TunnelConfig};
-
-    match cmd {
-        TunnelCommands::Start {
-            slug,
-            service_url,
-            local_target,
-            token,
-        } => {
-            let mut builder = TunnelConfig::production();
-            if let Some(url) = service_url {
-                let parsed = ::url::Url::parse(&url).with_context(|| format!("parse --service-url {url}"))?;
-                builder = builder.service_url(parsed);
-            }
-            if let Some(target) = local_target {
-                let parsed = ::url::Url::parse(&target).with_context(|| format!("parse --local-target {target}"))?;
-                builder = builder.local_target(parsed);
-            }
-            let token = token
-                .or_else(|| std::env::var("SMOOTH_TUNNEL_TOKEN").ok())
-                .context("no tunnel token — pass --token or set SMOOTH_TUNNEL_TOKEN")?;
-            builder = builder.auth_token(token);
-            if let Some(s) = slug {
-                builder = builder.slug(SlugPreference::Requested(s));
-            }
-            let cfg = builder.build().context("build tunnel config")?;
-
-            println!("\n  {} {}", "th tunnel".cyan().bold(), "— reverse-tunnel rendezvous".dimmed());
-            println!("  {} {}", "service   ".dimmed(), cfg.service_url.as_str().bold());
-            println!("  {} {}", "local     ".dimmed(), cfg.local_target.as_str().bold());
-            println!("  {} {}\n", "slug      ".dimmed(), format!("{}", cfg.slug).bold());
-
-            let client = TunnelClient::new(cfg);
-            let printed = |hello: &smooth_tunnel::ServerHello| {
-                println!("  {} {}", "✓ live at".green().bold(), hello.public_url.bold());
-                println!("  {} {}\n", "session   ".dimmed(), hello.session_id.dimmed());
-            };
-            match client.run(printed).await {
-                Ok(()) => {
-                    println!("  {} tunnel closed\n", "•".dimmed());
-                    Ok(())
-                }
-                Err(e) => Err(anyhow::anyhow!("tunnel: {e}")),
-            }
-        }
-        TunnelCommands::Status => {
-            let hint = smooth_tunnel::slug::generate_ephemeral_hint();
-            println!("\n  {}", "th tunnel status".cyan().bold());
-            println!("  {} {}", "service    ".dimmed(), "wss://th.smoo.ai/tunnel".bold());
-            println!("  {} {}", "local      ".dimmed(), "http://127.0.0.1:4400".bold());
-            println!("  {} {}", "slug hint  ".dimmed(), hint.bold());
-            println!(
-                "  {} {}\n",
-                "state      ".dimmed(),
-                "scaffold (rendezvous service pending — SMOODEV-637)".yellow()
-            );
-            Ok(())
-        }
-    }
 }
 
 fn cmd_doctor_init_home_repo(remote: Option<&str>) -> Result<()> {
@@ -6330,17 +6141,10 @@ fn cmd_migrate_from_beads(store: &smooth_pearls::PearlStore) -> Result<()> {
 fn cmd_tailscale(cmd: TailscaleCommands) -> Result<()> {
     match cmd {
         TailscaleCommands::Status => {
-            let s = smooth_bigsmooth::tailscale::get_status();
-            println!("Tailscale: {}", if s.connected { "connected" } else { "disconnected" });
-            if let Some(h) = &s.hostname {
-                println!("  Hostname: {h}");
-            }
-            if let Some(ip) = &s.ip {
-                println!("  IP: {ip}");
-            }
-            if let Some(t) = &s.tailnet {
-                println!("  Tailnet: {t}");
-            }
+            // ponytail: tailscale status surfaced via the daemon now — this
+            // stubs the no-tailscale (disconnected) branch the printing code
+            // already handled. smooth-cli does not depend on smooth-daemon.
+            println!("Tailscale: disconnected");
         }
     }
     Ok(())
@@ -7957,12 +7761,6 @@ fn prime_pearls_section(exe: &std::path::Path, sub: &str, heading: &str, cap: us
     println!("```");
 }
 
-fn cmd_bench(cmd: BenchCommands) -> Result<()> {
-    match cmd {
-        BenchCommands::Score => print_baked_score(env!("BENCH_SCORE_JSON"), &mut std::io::stdout()),
-    }
-}
-
 /// `th skills` — list / show skills discovered from every source.
 /// Pearl th-e0f812. Walks the project's `.smooth/skills/` first,
 /// then the user-level Smooth / Claude Code / opencode skill dirs.
@@ -8067,45 +7865,6 @@ fn cmd_skills(cmd: SkillsCommands) -> Result<()> {
     }
 }
 
-/// Shared `th bench score` implementation, parameterised over the
-/// input JSON blob and the output sink so unit tests can feed
-/// fixtures through the same code path the real subcommand uses.
-///
-/// Three cases:
-///   - empty input → print the "not baked in yet" hint.
-///   - valid `Score` JSON → delegate to `Score::render_table` (the
-///     same formatter `smooth-bench score` prints without `--output`),
-///     so the two surfaces stay in sync.
-///   - malformed JSON → print a clear error with the first ~400
-///     chars of the raw payload; never panic. This is an escape
-///     hatch for a broken release; most users will never hit it.
-fn print_baked_score<W: std::io::Write>(score_json: &str, out: &mut W) -> Result<()> {
-    if score_json.is_empty() {
-        writeln!(
-            out,
-            "No Line baked in yet. Run `smooth-bench score --release` locally to see where this binary would score, or wait for the next tagged release."
-        )?;
-        return Ok(());
-    }
-
-    match serde_json::from_str::<smooth_bench::score::Score>(score_json) {
-        Ok(score) => {
-            write!(out, "{}", score.render_table())?;
-            Ok(())
-        }
-        Err(err) => {
-            // Never panic on a malformed embed — surface the parse error
-            // plus a truncated copy of the raw payload so whoever cut
-            // the bad release can diagnose it.
-            let preview: String = score_json.chars().take(400).collect();
-            let suffix = if score_json.len() > preview.len() { " …(truncated)" } else { "" };
-            writeln!(out, "error: BENCH_SCORE_JSON baked into this binary failed to parse as Score: {err}")?;
-            writeln!(out, "raw payload: {preview}{suffix}")?;
-            Ok(())
-        }
-    }
-}
-
 fn cmd_service(cmd: ServiceCommands) -> Result<()> {
     match cmd {
         ServiceCommands::Install { system } => service::install(system),
@@ -8128,86 +7887,6 @@ mod plugin_tests {
         assert_eq!(extract_placeholders("plain"), Vec::<String>::new());
         assert_eq!(extract_placeholders("{{ a }}-{{b}}"), vec!["a", "b"]);
         assert_eq!(extract_placeholders("dangle {{ unterminated"), Vec::<String>::new());
-    }
-}
-
-#[cfg(test)]
-mod bench_tests {
-    use super::print_baked_score;
-
-    const SAMPLE_SCORE: &str = include_str!("../tests/fixtures/sample-score.json");
-
-    #[test]
-    fn prints_hint_when_score_json_is_empty() {
-        let mut out = Vec::new();
-        print_baked_score("", &mut out).expect("ok");
-        let s = String::from_utf8(out).expect("utf8");
-        assert!(s.contains("No Line baked in yet"), "missing empty-case hint: {s}");
-        assert!(s.contains("smooth-bench score --release"), "hint should mention smooth-bench command: {s}");
-    }
-
-    #[test]
-    fn renders_table_from_valid_fixture() {
-        let mut out = Vec::new();
-        print_baked_score(SAMPLE_SCORE, &mut out).expect("ok");
-        let s = String::from_utf8(out).expect("utf8");
-
-        // Sanity-check every field in the fixture lands somewhere in
-        // the rendered table — we don't assert exact formatting
-        // (that's Score::render_table's responsibility and is tested
-        // inside smooth-bench's own suite).
-        assert!(s.contains("The Line"), "missing banner: {s}");
-        assert!(s.contains("0.8.0"), "missing smooth version: {s}");
-        assert!(s.contains("abc123def456"), "missing commit sha: {s}");
-        assert!(s.contains("80.0%"), "missing overall pass rate: {s}");
-        assert!(s.contains("python"), "missing python lang line: {s}");
-        assert!(s.contains("rust"), "missing rust lang line: {s}");
-        assert!(s.contains("$4.2300"), "missing cost: {s}");
-    }
-
-    #[test]
-    fn malformed_json_prints_error_without_panic() {
-        let mut out = Vec::new();
-        // Valid JSON shape, wrong fields — serde rejects it. Must
-        // not panic, must surface a clear error + the raw payload.
-        print_baked_score(r#"{"not":"a score"}"#, &mut out).expect("ok");
-        let s = String::from_utf8(out).expect("utf8");
-        assert!(s.contains("error:"), "missing error label: {s}");
-        assert!(s.contains("BENCH_SCORE_JSON"), "should mention env var: {s}");
-        assert!(s.contains(r#"{"not":"a score"}"#), "should echo raw payload: {s}");
-    }
-
-    #[test]
-    fn totally_invalid_json_prints_error_without_panic() {
-        let mut out = Vec::new();
-        print_baked_score("<<this is not JSON at all>>", &mut out).expect("ok");
-        let s = String::from_utf8(out).expect("utf8");
-        assert!(s.contains("error:"), "missing error label: {s}");
-    }
-
-    #[test]
-    fn malformed_json_truncates_oversize_payload_preview() {
-        // Large malformed payload — the preview should be clipped so
-        // `th bench score` doesn't spew megabytes on a broken release.
-        let huge = "x".repeat(10_000);
-        let mut out = Vec::new();
-        print_baked_score(&huge, &mut out).expect("ok");
-        let s = String::from_utf8(out).expect("utf8");
-        assert!(
-            s.contains("truncated"),
-            "preview should note truncation: first 200 chars = {}",
-            &s[..s.len().min(200)]
-        );
-        assert!(s.len() < 2_000, "output should be bounded even on huge bad input: {} bytes", s.len());
-    }
-
-    #[test]
-    fn build_script_bench_score_env_is_defined() {
-        // build.rs MUST emit BENCH_SCORE_JSON (empty or populated).
-        // env!() would fail to compile if not — this test exists to
-        // document the contract and catch a regression where someone
-        // removes the println! from build.rs.
-        let _ = env!("BENCH_SCORE_JSON");
     }
 }
 

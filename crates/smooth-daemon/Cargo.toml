@@ -1,0 +1,91 @@
+[package]
+name = "smooai-smooth-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Big Smooth, reborn — the always-on, single-tenant personal-agent daemon on smooth-operator (EPIC th-c89c2a)"
+
+[lib]
+name = "smooth_daemon"
+
+# The always-on daemon binary. Runnable standalone (`smooth-daemon`); later
+# wired behind `th up` / `th service` (a separate, cross-crate pearl).
+[[bin]]
+name = "smooth-daemon"
+path = "src/main.rs"
+
+# th-f30175: Phase 0 scaffold. The always-on daemon is a clean rewrite of
+# smooth-bigsmooth on the smooth-operator engine, dropping the microsandbox
+# substrate in favour of a kernel OS-sandbox + egress proxy + auto-mode
+# permission engine. It lives ALONGSIDE smooth-bigsmooth so `th up` keeps
+# working on the old path until the new daemon reaches parity. Dependencies are
+# intentionally lean here; Phase 1 (th-64fbe8) adds the axum server, session
+# store, and SessionRunCoordinator wiring.
+[dependencies]
+smooth-operator.workspace = true
+# EPIC th-c89c2a: the OPERATOR (local deployment flavor) embedded in-process —
+# the daemon hosts smooth-operator's LocalServer (canonical WS protocol +
+# official widget + SDK clients) instead of the bespoke /ws. Lean (no cloud).
+smooth-operator-server.workspace = true
+smooth-operator-svc.workspace = true
+smooth-tools.workspace = true
+# EPIC th-c89c2a (th-a28904): the daemon serves the smooth-web SPA same-origin at
+# its own `http://127.0.0.1:8787/` (token injected into index.html) instead of the
+# operator's stock widget — so the control surface is reachable with no
+# `?api`/`?token` query string.
+smooth-web.workspace = true
+smooth-policy.workspace = true
+# th-08e05a (EPIC th-c89c2a): the egress boundary — the daemon starts goalie's
+# in-process forward proxy (exact-host allowlist) and routes the bash tool's
+# network through it.
+smooth-goalie.workspace = true
+# surface) via rust-embed.
+# th-bd0e22 (EPIC th-c89c2a): durable persistence for the daemon's per-instance
+# runtime state (events, sessions). SQLite (not Dolt) — this is ephemeral local
+# state, not team-synced work items; rusqlite is bundled (no external binary).
+rusqlite.workspace = true
+axum = { workspace = true, features = ["ws"] }
+tokio.workspace = true
+tokio-stream.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+async-trait.workspace = true
+dirs-next.workspace = true
+# The standalone `smooth-daemon` binary owns the full daemon CLI (run / operator
+# / status / audit / schedule), so the `th` CLI can stay lean and just
+# spawn this binary rather than statically linking the operator runtime.
+clap = { workspace = true, features = ["derive"] }
+reqwest = { workspace = true, features = ["json"] }
+web-push = "0.11"
+# th-bc624a: "Sign in with Smoo" browser OAuth2 + PKCE from the web UI. Persists a
+# user session via smooai-client-shared's CredentialsStore (the same file `th`
+# reads), so Big Smooth can act on the user's Smoo org via th-backed extensions.
+smooai-client-shared.workspace = true
+base64 = "0.22"
+sha2 = "0.10"
+rand = "0.8"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+# Real end-to-end WebSocket smoke tests against the daemon's axum server.
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+# Temp DBs for the SQLite persistence tests.
+tempfile.workspace = true
+# `ServiceExt::oneshot` for router-level auth-middleware tests.
+tower = { workspace = true, features = ["util"] }
+# Collect response bodies in the `/search` router tests.
+http-body-util.workspace = true
+
+[lints]
+workspace = true

@@ -16,6 +16,14 @@ axum-extra.workspace = true
 rust-embed = { workspace = true }
 tower.workspace = true
 mime_guess = "2"
+# JSON-encode the injected `window.__SMOOTH_TOKEN__` value so quoting is safe.
+serde_json.workspace = true
+
+[dev-dependencies]
+# Drive `web_router_with_token` in-process to assert the injected token global.
+tokio = { workspace = true, features = ["macros", "rt"] }
+tower = { workspace = true, features = ["util"] }
+http-body-util = "0.1"
 
 [lints]
 workspace = true

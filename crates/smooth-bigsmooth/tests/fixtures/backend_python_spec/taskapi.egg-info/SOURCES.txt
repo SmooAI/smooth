@@ -1,8 +1,0 @@
-pyproject.toml
-taskapi.py
-taskapi.egg-info/PKG-INFO
-taskapi.egg-info/SOURCES.txt
-taskapi.egg-info/dependency_links.txt
-taskapi.egg-info/requires.txt
-taskapi.egg-info/top_level.txt
-tests/test_api.py

@@ -15,11 +15,7 @@ smooth-operator.workspace = true
 # skills discovery + the chief/intent_classifier cast roles (re-homed from the
 # engine at 0.14.0)
 smooth-cast.workspace = true
-# Direct dep so the TUI can consume the auto-mode wire types
-# (PendingAccessRequest, AccessEvent, …) without taking a dep on
-# smooth-bigsmooth — keeps the dep graph from forming a TUI → server
-# coupling.
-smooth-narc = { path = "../smooth-narc", package = "smooai-smooth-narc" }
+# Pearl store types for the `@` picker (PearlQuery / PearlStore / PearlStatus).
 smooth-pearls.workspace = true
 # SEP extension trust store (re-exported from sep_host; shared with the operative).
 smooth-policy.workspace = true
@@ -45,12 +41,6 @@ tokio-tungstenite.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-# Auto-mode end-to-end test wires the TUI's SSE subscriber against the
-# real AccessStore + the four /api/access routes. Spinning an axum
-# server in-test is cheaper than mocking the wire format.
-smooth-bigsmooth = { path = "../smooth-bigsmooth", package = "smooai-smooth-bigsmooth" }
-axum.workspace = true
-tokio-stream = { version = "0.1", features = ["sync"] }
 
 [lints]
 workspace = true
