@@ -20,6 +20,8 @@ smooth-code.workspace = true
 smooth-diver.workspace = true
 smooth-pearls.workspace = true
 smooth-operator.workspace = true
+# `th ext` (SEP extension trust store: hash_extension + TrustStore)
+smooth-policy.workspace = true
 # skills discovery + the smooth cast roles (re-homed from the engine at 0.14.0)
 smooth-cast.workspace = true
 smooth-api-client.workspace = true

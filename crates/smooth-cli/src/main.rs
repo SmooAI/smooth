@@ -7,6 +7,7 @@ mod admin;
 mod auth;
 mod config;
 mod daemon_launcher;
+mod ext;
 mod gradient;
 mod hooks;
 mod mcp_config;
@@ -94,6 +95,14 @@ enum Commands {
     Admin {
         #[command(subcommand)]
         cmd: admin::AdminCommands,
+    },
+    /// SEP extensions (subprocess tools/hooks/UI via the Smooth Extension
+    /// Protocol). Install a local/npm/git extension into `~/.smooth/extensions`,
+    /// list/trust/update/remove installed ones. Trusted extensions load into
+    /// Big Smooth's chat turns (gated by `SMOOTH_EXTENSIONS_ALLOW`).
+    Ext {
+        #[command(subcommand)]
+        cmd: ext::ExtCommands,
     },
     /// Smoo AI platform API — REST-style verbs backed by `api.smoo.ai`.
     /// Login + orgs + agents + keys + members + knowledge + jobs +
@@ -1062,6 +1071,7 @@ async fn main() -> Result<()> {
         Some(Commands::Model { cmd }) => cmd_model(cmd).await,
         Some(Commands::Auth { cmd }) => auth::dispatch(cmd).await,
         Some(Commands::Admin { cmd }) => admin::dispatch(cmd).await,
+        Some(Commands::Ext { cmd }) => ext::dispatch(cmd),
         Some(Commands::Api { cmd }) => match cmd {
             ApiCommands::Login { client_id, client_secret } => cmd_login(client_id, client_secret).await,
             ApiCommands::Logout => cmd_logout().await,

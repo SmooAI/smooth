@@ -22,6 +22,9 @@ toml.workspace = true
 globset.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
+anyhow.workspace = true
+sha2 = "0.10"
+dirs-next.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

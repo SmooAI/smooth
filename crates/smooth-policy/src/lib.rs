@@ -5,6 +5,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 
 pub mod auto_mode;
+pub mod ext_trust;
 pub mod smooth_alias;
 
 // ---------------------------------------------------------------------------

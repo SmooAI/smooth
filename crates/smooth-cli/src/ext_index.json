@@ -1,0 +1,12 @@
+{
+    "$comment": "Curated SEP extension marketplace index shipped in the th binary. `th ext search` matches this list AND live npm packages tagged with the `smooth-extension` keyword. Add real, installable entries here as they publish; `kind` is `extension` (installable via `th ext install <source>`) or `scaffold` (run `source` as a command).",
+    "extensions": [
+        {
+            "name": "create-smooth-extension",
+            "description": "Scaffold a new SEP extension project — tool, permission-gate, command, or provider-less template.",
+            "source": "npm create smooth-extension",
+            "keywords": ["scaffold", "starter", "template", "sdk", "create"],
+            "kind": "scaffold"
+        }
+    ]
+}
