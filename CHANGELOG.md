@@ -1,5 +1,30 @@
 # @smooai/smooth
 
+## 0.21.0
+
+### Minor Changes
+
+- 5865150: Big Smooth UI sign-in: add `GET /auth/login`, `GET /auth/callback`, and
+  `GET /api/auth/status` so a user viewing the Big Smooth web UI remotely
+  (e.g. over tailscale) can log `th` into Smoo AI by clicking a button
+  instead of SSHing in to run `th auth login`. Runs the browser OAuth2 +
+  PKCE flow through the daemon itself — the callback URL is derived from
+  the request's `Host` + `X-Forwarded-Proto`, the PKCE verifier is held in
+  a single-use, 10-minute-TTL in-memory store, and the resulting user
+  session is persisted to `~/.smooth/auth/smooai-user.json` (the same file
+  `th`'s user-authed API calls read). The web sidebar shows "Signed in as
+  …" or a "Sign in to Smoo AI" button accordingly.
+- 50f1aa5: `th api crm assoc` — CRM entity associations from the CLI (SMOODEV-2644).
+  Adds `assoc link`/`unlink`/`list`/`set-type`/`set-label`, where entities are
+  given as `TYPE:REF` operands (e.g. `contact:jane@x.com`, `company:Acme`,
+  `deal:"Big Deal"`, or `task:<uuid>`) — contact/company/deal refs resolve by
+  name/email/title via the existing resolvers, other types accept a uuid.
+  Also adds thin sugar wrappers over the legacy FKs: `contacts set-company`,
+  `deals set-contact`, `deals set-company`, and `companies set-parent` (each
+  accepting `none`/`-` to clear). Backed by the native api-prime associations
+  endpoints from SmooAI/smooai#3068; the commands 404 against prod until that
+  deploys.
+
 ## 0.20.0
 
 ### Minor Changes
