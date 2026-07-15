@@ -28,6 +28,7 @@ pub mod permission;
 pub mod read;
 pub mod remember;
 pub mod sandbox;
+pub mod th;
 mod util;
 pub mod walk;
 pub mod write;
@@ -39,6 +40,7 @@ pub use path::resolve_workspace_path;
 pub use read::{ListFilesTool, ReadFileTool};
 pub use remember::RememberTool;
 pub use sandbox::{SandboxPolicy, SandboxedCommand};
+pub use th::ThTool;
 pub use write::{EditFileTool, WriteFileTool};
 
 /// Register the default tool set on `registry`, all confined to `workspace`.
@@ -75,6 +77,7 @@ pub fn default_tools_with_proxy(workspace: PathBuf, proxy: Option<String>) -> Ve
         Arc::new(GrepTool { workspace: workspace.clone() }),
         Arc::new(WriteFileTool { workspace: workspace.clone() }),
         Arc::new(EditFileTool { workspace: workspace.clone() }),
+        Arc::new(ThTool { workspace: workspace.clone() }),
         Arc::new(BashTool { workspace, proxy }),
     ]
 }
@@ -89,7 +92,7 @@ mod tests {
         let mut registry = ToolRegistry::new();
         register_default_tools(&mut registry, PathBuf::from("/tmp"));
         let names: Vec<String> = registry.schemas().into_iter().map(|s| s.name).collect();
-        for expected in ["read_file", "list_files", "grep", "write_file", "edit_file", "bash"] {
+        for expected in ["read_file", "list_files", "grep", "write_file", "edit_file", "th", "bash"] {
             assert!(names.iter().any(|n| n == expected), "missing {expected} in {names:?}");
         }
     }
@@ -98,7 +101,7 @@ mod tests {
     fn default_tools_vec_has_the_full_set_with_proxy_wired() {
         let tools = default_tools_with_proxy(PathBuf::from("/tmp"), Some("127.0.0.1:4419".into()));
         let names: Vec<String> = tools.iter().map(|t| t.schema().name).collect();
-        for expected in ["read_file", "list_files", "grep", "write_file", "edit_file", "bash"] {
+        for expected in ["read_file", "list_files", "grep", "write_file", "edit_file", "th", "bash"] {
             assert!(names.iter().any(|n| n == expected), "missing {expected} in {names:?}");
         }
         // The bash tool carries the proxy so its egress routes through goalie.
