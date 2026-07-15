@@ -1,30 +1,16 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { BrowserRouter, Route, Routes } from 'react-router-dom';
 
 import './globals.css';
-import { ProjectProvider } from './context';
-import { Layout } from './layout';
-import { DashboardPage } from './pages/dashboard';
-import { PearlsPage } from './pages/pearls';
-import { OperatorsPage } from './pages/operators';
-import { ChatPage } from './pages/chat';
-import { SystemPage } from './pages/system';
+import App from './App';
+import { PWAUpdater } from './PWAUpdater';
 
+// smooth-web is the operator's control surface — a thin client on the canonical
+// WS protocol (EPIC th-c89c2a, th-f1a1f0). No more backend-detection split: the
+// operator daemon is the one backend.
 createRoot(document.getElementById('root')!).render(
     <StrictMode>
-        <BrowserRouter>
-            <ProjectProvider>
-                <Routes>
-                    <Route element={<Layout />}>
-                        <Route path="/" element={<DashboardPage />} />
-                        <Route path="/pearls" element={<PearlsPage />} />
-                        <Route path="/operators" element={<OperatorsPage />} />
-                        <Route path="/chat" element={<ChatPage />} />
-                        <Route path="/system" element={<SystemPage />} />
-                    </Route>
-                </Routes>
-            </ProjectProvider>
-        </BrowserRouter>
+        <App />
+        <PWAUpdater />
     </StrictMode>,
 );

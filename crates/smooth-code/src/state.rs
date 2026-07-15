@@ -369,13 +369,7 @@ pub struct AppState {
     pub model_picker: ModelPickerState,
     /// Startup health check status.
     pub health_status: HealthStatus,
-    /// Inline Claude-Code-style permission prompts surfaced when
-    /// Safehouse Narc returns `Ask`. Populated by the SSE subscriber
-    /// in [`crate::auto_mode`]. Rendered inline at the bottom of the
-    /// chat; key handlers (`o` / `s` / `p` / `u` / `d` / `D`) resolve
-    /// the most recently filed open prompt by POSTing to
-    /// `/api/access/{approve,deny}`.
-    pub permission_prompts: Vec<crate::auto_mode::PermissionPromptState>,
+    // ponytail: narc TUI removed with the old-cast crate; re-home onto the new engine's NarcHook later (th-3119e3)
     /// Conversation sidebar overlay state — lists saved sessions for
     /// resume / new-chat. Toggled with Ctrl+B.
     pub session_picker: crate::session_picker::SessionPickerState,
@@ -418,7 +412,6 @@ impl AppState {
             git_state: None,
             model_picker: ModelPickerState::new(),
             health_status: HealthStatus::default(),
-            permission_prompts: Vec::new(),
             session_picker: crate::session_picker::SessionPickerState::new(),
         }
     }
