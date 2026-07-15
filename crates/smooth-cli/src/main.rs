@@ -778,6 +778,13 @@ enum ApiCommands {
         #[command(subcommand)]
         cmd: smooai::members::Cmd,
     },
+    /// Smoo AI org teams — RBAC groupings of members that hold roles
+    /// (list / create / rename / delete / set-members / set-roles).
+    #[command(visible_alias = "team")]
+    Teams {
+        #[command(subcommand)]
+        cmd: smooai::teams::Cmd,
+    },
     /// Smoo AI CRM — the revenue engine: contacts, companies, deals,
     /// pipeline forecast, stages, tasks, conversations, timeline & invoices.
     /// Authenticates as the logged-in user (`th auth login`), so writes
@@ -1594,6 +1601,7 @@ async fn main() -> Result<()> {
             ApiCommands::Agents { cmd } => smooai::agents::cmd(cmd).await,
             ApiCommands::Keys { cmd } => smooai::keys::cmd(cmd).await,
             ApiCommands::Members { cmd } => smooai::members::cmd(cmd).await,
+            ApiCommands::Teams { cmd } => smooai::teams::cmd(cmd).await,
             ApiCommands::Crm { cmd } => smooai::crm::cmd(cmd).await,
             ApiCommands::SmoothOperator { cmd } => smooai::smooth_operator::cmd(cmd).await,
             ApiCommands::Knowledge { cmd } => smooai::knowledge::cmd(cmd).await,
