@@ -83,6 +83,12 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: InvoicesCmd,
     },
+    /// Associations — link entities (contacts, companies, deals, …) to each other.
+    #[command(visible_aliases = ["associations", "association", "links"])]
+    Assoc {
+        #[command(subcommand)]
+        cmd: AssocCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -150,6 +156,17 @@ pub enum CompaniesCmd {
     RemoveImage {
         /// The company id from `th api crm companies list`.
         company_id: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Set (or clear) the company's parent (a `parent` association to another
+    /// company). PARENT is a uuid, name, or `none`/`-` to clear.
+    SetParent {
+        /// The child company — id or name.
+        company: String,
+        /// The parent company — id or name, or `none`/`-` to clear.
+        parent: String,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
@@ -231,6 +248,26 @@ pub enum DealsCmd {
     RemoveImage {
         /// The deal id from `th api crm deals list`.
         deal_id: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Set (or clear) the deal's primary contact. Writes the legacy `contactId` FK.
+    SetContact {
+        /// The deal — id or title.
+        deal: String,
+        /// The contact — id, email, or name, or `none`/`-` to clear.
+        contact: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Set (or clear) the deal's company. Writes the legacy `companyId` FK.
+    SetCompany {
+        /// The deal — id or title.
+        deal: String,
+        /// The company — id or name, or `none`/`-` to clear.
+        company: String,
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
@@ -600,6 +637,88 @@ pub enum ContactsCmd {
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
     },
+    /// Set (or clear) the contact's company. COMPANY is a uuid, name, or
+    /// `none`/`-` to unlink. Writes through the legacy `companyId` FK.
+    SetCompany {
+        /// The contact — id, email, or name.
+        contact: String,
+        /// The company — id or name, or `none`/`-` to clear.
+        company: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AssocCmd {
+    /// Link two entities. FROM/TO are `TYPE:REF` (e.g. `contact:jane@x.com`,
+    /// `company:Acme`, `deal:"Big Deal"`, or `task:<uuid>`).
+    Link {
+        /// Source entity as `TYPE:REF`.
+        from: String,
+        /// Target entity as `TYPE:REF`.
+        to: String,
+        /// Association type (free text; system values: primary, parent, related). Defaults to related.
+        #[arg(long = "as")]
+        association_type: Option<String>,
+        /// Human-readable label for the association.
+        #[arg(long)]
+        label: Option<String>,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Remove the link between two entities (both as `TYPE:REF`).
+    Unlink {
+        /// Source entity as `TYPE:REF`.
+        from: String,
+        /// Target entity as `TYPE:REF`.
+        to: String,
+        /// Only unlink this association type (required when several types link the pair).
+        #[arg(long = "as")]
+        association_type: Option<String>,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// List an entity's associations. ENTITY is `TYPE:REF`.
+    List {
+        /// The entity as `TYPE:REF`.
+        entity: String,
+        /// Filter to associations whose other entity is this type.
+        #[arg(long = "type")]
+        other_type: Option<String>,
+        /// Filter to this association type.
+        #[arg(long = "as")]
+        association_type: Option<String>,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// Print raw JSON instead of the table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Change an association's type, by association id.
+    SetType {
+        /// The association id from `th api crm assoc list`.
+        association_id: String,
+        /// The new association type (free text).
+        association_type: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Change an association's label, by association id.
+    SetLabel {
+        /// The association id from `th api crm assoc list`.
+        association_id: String,
+        /// The new label.
+        label: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
 }
 
 pub async fn cmd(cmd: Cmd) -> Result<()> {
@@ -613,6 +732,7 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
         Cmd::Conversations { cmd } => conversations(cmd).await,
         Cmd::Timeline { deal_id, org, json } => timeline(deal_id, org, json).await,
         Cmd::Invoices { cmd } => invoices(cmd).await,
+        Cmd::Assoc { cmd } => associations(cmd).await,
     }
 }
 
@@ -682,6 +802,21 @@ async fn contacts(cmd: ContactsCmd) -> Result<()> {
             let org = resolve_org(org)?;
             remove_image(&client, &org, ImageEntity::Contact, &contact_id).await?;
         }
+        ContactsCmd::SetCompany { contact, company, org } => {
+            let org = resolve_org(org)?;
+            let contact_id = resolve_contact_id(&client, &org, &contact).await?;
+            let body = if is_clear_token(&company) {
+                json!({ "companyId": Value::Null })
+            } else {
+                json!({ "companyId": resolve_company_id(&client, &org, &company).await? })
+            };
+            print_json(
+                &client
+                    .patch(&format!("/organizations/{org}/crm/contacts/{contact_id}"), &body)
+                    .await
+                    .context("PATCH contact company")?,
+            );
+        }
     }
     Ok(())
 }
@@ -736,6 +871,27 @@ async fn companies(cmd: CompaniesCmd) -> Result<()> {
         CompaniesCmd::RemoveImage { company_id, org } => {
             let org = resolve_org(org)?;
             remove_image(&client, &org, ImageEntity::Company, &company_id).await?;
+        }
+        CompaniesCmd::SetParent { company, parent, org } => {
+            let org = resolve_org(org)?;
+            let company_id = resolve_company_id(&client, &org, &company).await?;
+            if is_clear_token(&parent) {
+                clear_company_parent(&client, &org, &company_id).await?;
+            } else {
+                let parent_id = resolve_company_id(&client, &org, &parent).await?;
+                let body = json!({
+                    "sourceType": "company",
+                    "sourceId": company_id,
+                    "targetType": "company",
+                    "targetId": parent_id,
+                    "associationType": "parent",
+                });
+                let row = client
+                    .post(&format!("/organizations/{org}/crm/associations"), &body)
+                    .await
+                    .context("POST parent association")?;
+                print_json(&row);
+            }
         }
     }
     Ok(())
@@ -865,6 +1021,36 @@ async fn deals(cmd: DealsCmd) -> Result<()> {
         DealsCmd::RemoveImage { deal_id, org } => {
             let org = resolve_org(org)?;
             remove_image(&client, &org, ImageEntity::Deal, &deal_id).await?;
+        }
+        DealsCmd::SetContact { deal, contact, org } => {
+            let org = resolve_org(org)?;
+            let deal_id = resolve_deal_id(&client, &org, &deal).await?;
+            let body = if is_clear_token(&contact) {
+                json!({ "contactId": Value::Null })
+            } else {
+                json!({ "contactId": resolve_contact_id(&client, &org, &contact).await? })
+            };
+            print_json(
+                &client
+                    .patch(&format!("/organizations/{org}/crm/deals/{deal_id}"), &body)
+                    .await
+                    .context("PATCH deal contact")?,
+            );
+        }
+        DealsCmd::SetCompany { deal, company, org } => {
+            let org = resolve_org(org)?;
+            let deal_id = resolve_deal_id(&client, &org, &deal).await?;
+            let body = if is_clear_token(&company) {
+                json!({ "companyId": Value::Null })
+            } else {
+                json!({ "companyId": resolve_company_id(&client, &org, &company).await? })
+            };
+            print_json(
+                &client
+                    .patch(&format!("/organizations/{org}/crm/deals/{deal_id}"), &body)
+                    .await
+                    .context("PATCH deal company")?,
+            );
         }
     }
     Ok(())
@@ -2311,13 +2497,380 @@ fn remember(email_to_id: &mut HashMap<String, String>, phone_to_id: &mut HashMap
     }
 }
 
+// ---------------------------------------------------------------------------
+// Associations — link entities to each other (SMOODEV-2644).
+//
+// Backed by the native api-prime associations endpoints (SmooAI/smooai#3068):
+//   GET/POST   /organizations/{org}/crm/associations
+//   PATCH/DELETE /organizations/{org}/crm/associations/{id}
+// FROM/TO operands are `TYPE:REF` (e.g. `contact:jane@x.com`, `company:Acme`,
+// `deal:"Big Deal"`, or `task:<uuid>`). contact/company/deal refs resolve by
+// name/email/title via the existing resolvers; other types accept a uuid only.
+// ---------------------------------------------------------------------------
+
+/// Sentinel operands that clear a link instead of setting one.
+fn is_clear_token(s: &str) -> bool {
+    let t = s.trim();
+    t == "--" || t == "-" || t.eq_ignore_ascii_case("none")
+}
+
+/// A parsed `TYPE:REF` operand, e.g. `contact:jane@x.com` or `company:Acme`.
+#[derive(Debug, PartialEq, Eq)]
+struct EntityRef {
+    entity_type: String,
+    reference: String,
+}
+
+/// Parse a `TYPE:REF` operand. Splits on the FIRST colon so a REF may itself
+/// contain colons; TYPE is normalized, REF is trimmed of surrounding quotes.
+fn parse_entity_ref(s: &str) -> Result<EntityRef> {
+    let (ty, reference) = s
+        .split_once(':')
+        .with_context(|| format!("expected TYPE:REF (e.g. contact:jane@x.com, company:Acme, deal:\"Big Deal\") — got '{s}'"))?;
+    let entity_type = normalize_entity_type(ty)?;
+    let reference = reference.trim().trim_matches('"').trim().to_string();
+    if reference.is_empty() {
+        anyhow::bail!("empty reference in '{s}' — expected TYPE:REF");
+    }
+    Ok(EntityRef { entity_type, reference })
+}
+
+/// Canonical entity type: lowercased, singularized, validated against the
+/// association vocabulary.
+fn normalize_entity_type(s: &str) -> Result<String> {
+    let t = s.trim().to_lowercase();
+    let norm = match t.as_str() {
+        "contact" | "contacts" => "contact",
+        "company" | "companies" => "company",
+        "deal" | "deals" => "deal",
+        "task" | "tasks" => "task",
+        "proposal" | "proposals" => "proposal",
+        "funnel" | "funnels" => "funnel",
+        "custom_object" | "custom-object" | "custom_objects" | "customobject" => "custom_object",
+        other => anyhow::bail!("unknown entity type '{other}' — expected one of contact|company|deal|task|proposal|funnel|custom_object"),
+    };
+    Ok(norm.to_string())
+}
+
+/// Resolve a `TYPE:REF` to a concrete entity id. contact/company/deal resolve
+/// by name/email/title (or uuid); every other type accepts a uuid only.
+async fn resolve_entity_id(client: &UserClient, org: &str, er: &EntityRef) -> Result<String> {
+    match er.entity_type.as_str() {
+        "contact" => resolve_contact_id(client, org, &er.reference).await,
+        "company" => resolve_company_id(client, org, &er.reference).await,
+        "deal" => resolve_deal_id(client, org, &er.reference).await,
+        other => {
+            if looks_like_uuid(&er.reference) {
+                Ok(er.reference.clone())
+            } else {
+                anyhow::bail!("{other} references must be a uuid (no name lookup for {other} yet) — got '{}'", er.reference)
+            }
+        }
+    }
+}
+
+/// GET an entity's associations, optionally filtered by the other side's type
+/// and/or the association type.
+async fn get_associations(
+    client: &UserClient,
+    org: &str,
+    entity_type: &str,
+    entity_id: &str,
+    other_type: Option<&str>,
+    association_type: Option<&str>,
+) -> Result<Vec<Value>> {
+    let mut path = format!("/organizations/{org}/crm/associations?entityType={entity_type}&entityId={entity_id}");
+    if let Some(t) = other_type {
+        path.push_str(&format!("&otherType={t}"));
+    }
+    if let Some(a) = association_type.filter(|a| !a.trim().is_empty()) {
+        path.push_str(&format!("&associationType={}", urlencoding::encode(a.trim())));
+    }
+    let body = client.get(&path).await.context("GET associations")?;
+    Ok(body.as_array().cloned().unwrap_or_default())
+}
+
+async fn associations(cmd: AssocCmd) -> Result<()> {
+    let client = UserClient::from_user_session().await?;
+    match cmd {
+        AssocCmd::Link {
+            from,
+            to,
+            association_type,
+            label,
+            org,
+        } => {
+            let org = resolve_org(org)?;
+            let from_ref = parse_entity_ref(&from)?;
+            let to_ref = parse_entity_ref(&to)?;
+            let source_id = resolve_entity_id(&client, &org, &from_ref).await?;
+            let target_id = resolve_entity_id(&client, &org, &to_ref).await?;
+            let mut body = json!({
+                "sourceType": from_ref.entity_type,
+                "sourceId": source_id,
+                "targetType": to_ref.entity_type,
+                "targetId": target_id,
+            });
+            if let Some(a) = association_type.filter(|s| !s.trim().is_empty()) {
+                body["associationType"] = json!(a.trim());
+            }
+            if let Some(l) = label.filter(|s| !s.trim().is_empty()) {
+                body["label"] = json!(l);
+            }
+            let row = client
+                .post(&format!("/organizations/{org}/crm/associations"), &body)
+                .await
+                .context("POST association")?;
+            print_json(&row);
+        }
+        AssocCmd::Unlink {
+            from,
+            to,
+            association_type,
+            org,
+        } => {
+            let org = resolve_org(org)?;
+            assoc_unlink(&client, &org, &from, &to, association_type).await?;
+        }
+        AssocCmd::List {
+            entity,
+            other_type,
+            association_type,
+            org,
+            json,
+        } => {
+            let org = resolve_org(org)?;
+            let er = parse_entity_ref(&entity)?;
+            let id = resolve_entity_id(&client, &org, &er).await?;
+            let other = match other_type {
+                Some(t) => Some(normalize_entity_type(&t)?),
+                None => None,
+            };
+            let rows = get_associations(&client, &org, &er.entity_type, &id, other.as_deref(), association_type.as_deref()).await?;
+            if json {
+                print_json(&Value::Array(rows));
+            } else {
+                render_associations(&er.entity_type, &er.reference, &rows);
+            }
+        }
+        AssocCmd::SetType {
+            association_id,
+            association_type,
+            org,
+        } => {
+            let org = resolve_org(org)?;
+            let body = json!({ "associationType": association_type.trim() });
+            print_json(
+                &client
+                    .patch(&format!("/organizations/{org}/crm/associations/{association_id}"), &body)
+                    .await
+                    .context("PATCH association type")?,
+            );
+        }
+        AssocCmd::SetLabel { association_id, label, org } => {
+            let org = resolve_org(org)?;
+            let body = json!({ "label": label });
+            print_json(
+                &client
+                    .patch(&format!("/organizations/{org}/crm/associations/{association_id}"), &body)
+                    .await
+                    .context("PATCH association label")?,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// GET the FROM entity's associations, keep the ones whose other side is the TO
+/// entity, then DELETE them. Errors (listing the types) when several
+/// association types link the pair and `--as` wasn't given.
+async fn assoc_unlink(client: &UserClient, org: &str, from: &str, to: &str, association_type: Option<String>) -> Result<()> {
+    let from_ref = parse_entity_ref(from)?;
+    let to_ref = parse_entity_ref(to)?;
+    let from_id = resolve_entity_id(client, org, &from_ref).await?;
+    let to_id = resolve_entity_id(client, org, &to_ref).await?;
+    let rows = get_associations(
+        client,
+        org,
+        &from_ref.entity_type,
+        &from_id,
+        Some(&to_ref.entity_type),
+        association_type.as_deref(),
+    )
+    .await?;
+    let matches: Vec<&Value> = rows
+        .iter()
+        .filter(|r| r.get("otherEntityId").and_then(Value::as_str) == Some(to_id.as_str()))
+        .collect();
+    if matches.is_empty() {
+        anyhow::bail!("no association links {from} to {to}");
+    }
+    if association_type.is_none() {
+        let mut types: Vec<String> = matches
+            .iter()
+            .filter_map(|r| r.get("associationType").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect();
+        types.sort();
+        types.dedup();
+        if types.len() > 1 {
+            anyhow::bail!(
+                "{from} and {to} are linked by multiple association types ({}) — pass --as <type> to choose",
+                types.join(", ")
+            );
+        }
+    }
+    for m in &matches {
+        let id = m.get("id").and_then(Value::as_str).context("association row missing id")?;
+        client
+            .delete(&format!("/organizations/{org}/crm/associations/{id}"))
+            .await
+            .context("DELETE association")?;
+        println!("  {} unlinked {} {} {}", "✓".green(), from.bold(), "⇹".dimmed(), to.bold());
+    }
+    Ok(())
+}
+
+/// True when a `parent`-typed row is the queried company's OWN parent link
+/// (not one of its children). Parent links are stored child —parent→ parent, so
+/// querying the child returns its parent with `direction == "source"`; its
+/// children come back with `direction == "target"`. A row missing `direction`
+/// is treated as the parent (a company has at most one).
+fn parent_row_points_up(row: &Value) -> bool {
+    row.get("direction").and_then(Value::as_str).is_none_or(|d| d == "source")
+}
+
+/// Delete the company's `parent` association (a company has at most one).
+async fn clear_company_parent(client: &UserClient, org: &str, company_id: &str) -> Result<()> {
+    let rows = get_associations(client, org, "company", company_id, Some("company"), Some("parent")).await?;
+    let parents: Vec<&Value> = rows.iter().filter(|r| parent_row_points_up(r)).collect();
+    if parents.is_empty() {
+        println!("  {} no parent set", "•".dimmed());
+        return Ok(());
+    }
+    for p in &parents {
+        let id = p.get("id").and_then(Value::as_str).context("parent association missing id")?;
+        client
+            .delete(&format!("/organizations/{org}/crm/associations/{id}"))
+            .await
+            .context("DELETE parent association")?;
+        println!("  {} cleared parent", "✓".green());
+    }
+    Ok(())
+}
+
+fn render_associations(entity_type: &str, reference: &str, rows: &[Value]) {
+    println!();
+    println!("  {} {}", "Associations".bold(), format!("{entity_type}:{reference}").dimmed());
+    if rows.is_empty() {
+        println!("\n  {}\n", "no associations".dimmed());
+        return;
+    }
+    let (h_type, h_label, h_other) = (format!("{:<12}", "TYPE"), format!("{:<16}", "LABEL"), format!("{:<32}", "OTHER"));
+    println!();
+    println!("  {}  {}  {}  {}", h_type.dimmed(), h_label.dimmed(), h_other.dimmed(), "ID".dimmed());
+    for r in rows {
+        let atype = r.get("associationType").and_then(Value::as_str).unwrap_or("related");
+        let label = r.get("label").and_then(Value::as_str).unwrap_or("");
+        let other_type = r.get("otherEntityType").and_then(Value::as_str).unwrap_or("?");
+        let other_label = r.get("otherEntityLabel").and_then(Value::as_str).unwrap_or("?");
+        let sub = r.get("otherEntitySublabel").and_then(Value::as_str).unwrap_or("");
+        let id = r.get("id").and_then(Value::as_str).unwrap_or("?");
+        let other = if sub.is_empty() {
+            format!("{other_type}:{other_label}")
+        } else {
+            format!("{other_type}:{other_label} ({sub})")
+        };
+        println!(
+            "  {:<12}  {:<16}  {:<32}  {}",
+            truncate(atype, 12),
+            truncate(label, 16),
+            truncate(&other, 32),
+            id.dimmed()
+        );
+    }
+    println!();
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_timeline_items, fmt_cents, group_thousands, image_content_type, is_overdue, looks_like_uuid, norm_email, norm_phone, own_image_id,
-        preview_body, timeline_glyph, ImageEntity,
+        extract_timeline_items, fmt_cents, group_thousands, image_content_type, is_clear_token, is_overdue, looks_like_uuid, norm_email, norm_phone,
+        normalize_entity_type, own_image_id, parent_row_points_up, parse_entity_ref, preview_body, timeline_glyph, EntityRef, ImageEntity,
     };
     use serde_json::json;
+
+    #[test]
+    fn parent_row_points_up_only_for_source_direction() {
+        // Querying the child, its parent row comes back as direction=="source".
+        assert!(parent_row_points_up(&json!({ "direction": "source", "otherEntityId": "parent-co" })));
+        // Its children come back as "target" — not the child's own parent.
+        assert!(!parent_row_points_up(&json!({ "direction": "target", "otherEntityId": "child-co" })));
+        // Missing direction → treat as the parent (a company has at most one).
+        assert!(parent_row_points_up(&json!({ "otherEntityId": "parent-co" })));
+    }
+
+    #[test]
+    fn entity_ref_parses_type_and_ref() {
+        assert_eq!(
+            parse_entity_ref("contact:jane@x.com").unwrap(),
+            EntityRef {
+                entity_type: "contact".into(),
+                reference: "jane@x.com".into(),
+            }
+        );
+        // Plural type normalizes to singular; surrounding quotes are stripped.
+        assert_eq!(
+            parse_entity_ref("companies:\"Acme Corp\"").unwrap(),
+            EntityRef {
+                entity_type: "company".into(),
+                reference: "Acme Corp".into(),
+            }
+        );
+        // A uuid ref passes through untouched.
+        assert_eq!(
+            parse_entity_ref("deal:660e8400-e29b-41d4-a716-446655440000").unwrap().reference,
+            "660e8400-e29b-41d4-a716-446655440000"
+        );
+    }
+
+    #[test]
+    fn entity_ref_splits_on_first_colon_only() {
+        // A title containing a colon keeps everything after the first colon.
+        let er = parse_entity_ref("deal:Q3: Big Deal").unwrap();
+        assert_eq!(er.entity_type, "deal");
+        assert_eq!(er.reference, "Q3: Big Deal");
+    }
+
+    #[test]
+    fn entity_ref_rejects_bad_input() {
+        // No colon at all.
+        assert!(parse_entity_ref("justaname").is_err());
+        // Empty reference.
+        assert!(parse_entity_ref("contact:").is_err());
+        // Unknown type.
+        assert!(parse_entity_ref("widget:x").is_err());
+    }
+
+    #[test]
+    fn entity_type_normalizes_singular_and_plural() {
+        assert_eq!(normalize_entity_type("Contacts").unwrap(), "contact");
+        assert_eq!(normalize_entity_type("company").unwrap(), "company");
+        assert_eq!(normalize_entity_type("DEALS").unwrap(), "deal");
+        assert_eq!(normalize_entity_type("custom-object").unwrap(), "custom_object");
+        assert!(normalize_entity_type("nope").is_err());
+    }
+
+    #[test]
+    fn clear_token_recognizes_sentinels() {
+        assert!(is_clear_token("--"));
+        assert!(is_clear_token("-"));
+        assert!(is_clear_token("none"));
+        assert!(is_clear_token("None"));
+        assert!(is_clear_token("  none  "));
+        assert!(!is_clear_token("Acme"));
+        assert!(!is_clear_token(""));
+    }
 
     #[test]
     fn image_content_type_maps_allowed_and_rejects_others() {
