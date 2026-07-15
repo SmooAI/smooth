@@ -104,6 +104,33 @@ enum Commands {
         #[command(subcommand)]
         cmd: ext::ExtCommands,
     },
+    /// Scrape a web page through Smoo's in-house crawler (ADR-035) — a real
+    /// browser UA + JS render, so it gets pages a plain fetch 403s on.
+    Crawl {
+        #[command(subcommand)]
+        cmd: smooai::crawl::Cmd,
+    },
+    /// Smoo AI agentic web search (ADR-088) — `th search <query>` returns ranked
+    /// results (+ optional `--answer`), served by Smoo's own search stack. Full
+    /// options when logged in; an anonymous free tier otherwise.
+    Search {
+        #[command(flatten)]
+        args: smooai::websearch::SearchArgs,
+    },
+    /// Deprecated alias for `th search` (the `th web-search search <query>` form
+    /// shipped in v0.18.0). Use `th search` instead.
+    #[command(name = "web-search", hide = true)]
+    WebSearch {
+        #[command(subcommand)]
+        cmd: smooai::websearch::Cmd,
+    },
+    /// Smoo AI knowledge documents + semantic search over the org's own knowledge
+    /// base (`th knowledge search <query>`). Same surface as `th api knowledge`,
+    /// promoted to top-level for agent use.
+    Knowledge {
+        #[command(subcommand)]
+        cmd: smooai::knowledge::Cmd,
+    },
     /// Smoo AI platform API — REST-style verbs backed by `api.smoo.ai`.
     /// Login + orgs + agents + keys + members + knowledge + jobs +
     /// products + profile + testing live under here. Config has its
@@ -1072,6 +1099,10 @@ async fn main() -> Result<()> {
         Some(Commands::Auth { cmd }) => auth::dispatch(cmd).await,
         Some(Commands::Admin { cmd }) => admin::dispatch(cmd).await,
         Some(Commands::Ext { cmd }) => ext::dispatch(cmd),
+        Some(Commands::Crawl { cmd }) => smooai::crawl::cmd(cmd).await,
+        Some(Commands::Search { args }) => smooai::websearch::run(args).await,
+        Some(Commands::WebSearch { cmd }) => smooai::websearch::cmd(cmd).await,
+        Some(Commands::Knowledge { cmd }) => smooai::knowledge::cmd(cmd).await,
         Some(Commands::Api { cmd }) => match cmd {
             ApiCommands::Login { client_id, client_secret } => cmd_login(client_id, client_secret).await,
             ApiCommands::Logout => cmd_logout().await,

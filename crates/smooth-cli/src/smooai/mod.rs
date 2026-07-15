@@ -10,11 +10,13 @@
 //! and call this helper.
 
 pub mod agents;
+pub mod crawl;
 pub mod crm;
 pub mod jobs;
 pub mod keys;
 pub mod knowledge;
 pub mod members;
+pub mod websearch;
 pub mod observability;
 pub mod products;
 pub mod profile;
