@@ -43,13 +43,14 @@ use std::time::{Duration, Instant};
 use axum::extract::{RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use base64::Engine;
 use rand::RngCore;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use smooai_client_shared::auth::storage::{CredentialKind, Credentials, CredentialsStore};
+use tokio::sync::Semaphore;
 
 /// How long a mint-a-login stays valid before we forget its verifier.
 /// 10 minutes is generous for a human sign-in + org pick, short enough
@@ -59,10 +60,21 @@ use smooai_client_shared::auth::storage::{CredentialKind, Credentials, Credentia
 #[allow(clippy::duration_suboptimal_units)]
 const PENDING_TTL: Duration = Duration::from_secs(600);
 
+/// Max concurrent in-flight device logins. Each `/auth/device/start` holds
+/// a slot for the full lifetime of its background poll loop (up to
+/// `expires_in`, ~900s). A personal daemon has one human clicking a button;
+/// 3 covers a couple of stale/abandoned tabs. Over-cap → 429, so an
+/// unauthenticated caller on the tailnet can't spawn unbounded 900s loops
+/// that hammer the daemon + smoo.ai (resource-amplification DoS). th-ea7b54.
+const MAX_PENDING_DEVICE_LOGINS: usize = 3;
+
 // ── env-overridable smoo.ai endpoints (copied from smooth-cli auth::login) ──
 
 const DEFAULT_CLI_LOGIN_URL: &str = "https://smoo.ai/cli-login";
 const DEFAULT_CLI_TOKEN_URL: &str = "https://smoo.ai/api/token";
+/// Device Authorization Grant (RFC 8628) endpoint + public client id.
+const DEFAULT_CLI_DEVICE_URL: &str = "https://smoo.ai/api/device/code";
+const DEFAULT_DEVICE_CLIENT_ID: &str = "bigsmooth-daemon";
 
 fn cli_login_url() -> String {
     std::env::var("SMOOAI_CLI_LOGIN_URL").unwrap_or_else(|_| DEFAULT_CLI_LOGIN_URL.to_string())
@@ -72,16 +84,39 @@ fn cli_token_url() -> String {
     std::env::var("SMOOAI_CLI_TOKEN_URL").unwrap_or_else(|_| DEFAULT_CLI_TOKEN_URL.to_string())
 }
 
+fn cli_device_url() -> String {
+    std::env::var("SMOOAI_CLI_DEVICE_URL").unwrap_or_else(|_| DEFAULT_CLI_DEVICE_URL.to_string())
+}
+
+fn device_client_id() -> String {
+    std::env::var("SMOOAI_DEVICE_CLIENT_ID").unwrap_or_else(|_| DEFAULT_DEVICE_CLIENT_ID.to_string())
+}
+
 // ── router state ────────────────────────────────────────────────────
 
 /// Self-contained state for the sign-in router: the in-flight PKCE
 /// pending-logins map + a shared HTTP client for the token exchange.
 /// Owned by the router via `.with_state(...)`, so this module needs no
 /// daemon `AppState`.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AuthState {
     pending_logins: PendingLogins,
     http: reqwest::Client,
+    /// Bounds concurrent in-flight device logins (see
+    /// [`MAX_PENDING_DEVICE_LOGINS`]). Each spawned poll loop holds one
+    /// permit for its whole lifetime; dropping the permit (task ends on
+    /// success/expiry/error) releases the slot.
+    device_slots: Arc<Semaphore>,
+}
+
+impl Default for AuthState {
+    fn default() -> Self {
+        Self {
+            pending_logins: PendingLogins::default(),
+            http: reqwest::Client::default(),
+            device_slots: Arc::new(Semaphore::new(MAX_PENDING_DEVICE_LOGINS)),
+        }
+    }
 }
 
 /// Build the sign-in router: `GET /auth/login`, `GET /auth/callback`,
@@ -91,6 +126,7 @@ pub fn auth_router() -> Router {
     Router::new()
         .route("/auth/login", get(login_handler))
         .route("/auth/callback", get(callback_handler))
+        .route("/auth/device/start", post(device_start_handler))
         .route("/api/auth/status", get(status_handler))
         .with_state(AuthState::default())
 }
@@ -314,6 +350,273 @@ async fn exchange_code(http: &reqwest::Client, token_url: &str, code: &str, veri
         anyhow::bail!("token exchange returned HTTP {status}: {text}");
     }
     Ok(serde_json::from_str::<TokenExchangeResponse>(&text)?)
+}
+
+// ── device authorization grant (RFC 8628) ──────────────────────────
+//
+// Additive to the redirect flow above: lets a browser on the tailnet
+// sign the daemon into a Smoo org with no redirect_uri. The UI POSTs
+// `/auth/device/start`; we ask smoo.ai for a device+user code, hand the
+// user code back to the browser, and poll the token endpoint in the
+// background until the user approves. `/api/auth/status` (already polled
+// by the UI every 5s) flips to logged-in once the loop persists creds —
+// so no separate status route is needed. Pearl th-ea7b54.
+
+/// smoo.ai's device-authorization response. Extra fields ignored.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct DeviceAuthResponse {
+    device_code: String,
+    user_code: String,
+    verification_uri: String,
+    #[serde(default)]
+    verification_uri_complete: Option<String>,
+    expires_in: u64,
+    #[serde(default = "default_poll_interval")]
+    interval: u64,
+}
+
+/// RFC 8628 §3.2 default poll interval when the server omits one.
+fn default_poll_interval() -> u64 {
+    5
+}
+
+/// What the UI gets back from `/auth/device/start`. NEVER carries the
+/// `device_code` — that's the daemon's secret for polling.
+#[derive(Debug, Serialize)]
+struct DeviceStartResponse {
+    user_code: String,
+    verification_uri: String,
+    verification_uri_complete: String,
+}
+
+impl DeviceStartResponse {
+    /// `verification_uri_complete` falls back to the bare
+    /// `verification_uri` when smoo.ai doesn't embed the code.
+    fn from_device_auth(d: &DeviceAuthResponse) -> Self {
+        Self {
+            user_code: d.user_code.clone(),
+            verification_uri: d.verification_uri.clone(),
+            verification_uri_complete: d.verification_uri_complete.clone().unwrap_or_else(|| d.verification_uri.clone()),
+        }
+    }
+}
+
+/// Outcome of one device-grant poll. `Success` boxes the token payload
+/// so the enum stays small (clippy::large_enum_variant).
+#[derive(Debug)]
+enum DevicePollOutcome {
+    Success(Box<TokenExchangeResponse>),
+    /// User hasn't approved yet — keep polling at the current interval.
+    Pending,
+    /// Server asked us to back off — widen the interval, keep polling.
+    SlowDown,
+    /// The device code expired before approval — terminal.
+    Expired,
+    /// User denied the request — terminal.
+    Denied,
+    /// Anything we can't safely continue on — terminal, fail closed.
+    Other(String),
+}
+
+/// Map an HTTP result body to a poll outcome. Pure + total so the poll
+/// state machine is unit-testable without a network. On a 2xx we parse
+/// tokens; on a non-2xx we read the RFC 8628 `error` code; a parse
+/// failure fails closed as `Other` rather than looping forever.
+fn map_device_poll(is_success: bool, body: &str) -> DevicePollOutcome {
+    #[derive(serde::Deserialize)]
+    struct ErrBody {
+        error: String,
+    }
+    if is_success {
+        return match serde_json::from_str::<TokenExchangeResponse>(body) {
+            Ok(tokens) => DevicePollOutcome::Success(Box::new(tokens)),
+            Err(e) => DevicePollOutcome::Other(format!("could not parse token response: {e}")),
+        };
+    }
+    match serde_json::from_str::<ErrBody>(body) {
+        Ok(e) => match e.error.as_str() {
+            "authorization_pending" => DevicePollOutcome::Pending,
+            "slow_down" => DevicePollOutcome::SlowDown,
+            "expired_token" => DevicePollOutcome::Expired,
+            "access_denied" => DevicePollOutcome::Denied,
+            other => DevicePollOutcome::Other(format!("device authorization error: {other}")),
+        },
+        Err(e) => DevicePollOutcome::Other(format!("could not parse error response: {e}")),
+    }
+}
+
+/// One device-grant poll against the token endpoint. A network/transport
+/// error is surfaced as `Other` (terminal) — we can't distinguish it from
+/// a real failure, so fail closed rather than hammer the endpoint.
+async fn device_poll_exchange(http: &reqwest::Client, token_url: &str, device_code: &str, client_id: &str) -> DevicePollOutcome {
+    let form = [
+        ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+        ("device_code", device_code),
+        ("client_id", client_id),
+    ];
+    let resp = match http.post(token_url).form(&form).send().await {
+        Ok(r) => r,
+        Err(e) => return DevicePollOutcome::Other(format!("device poll request failed: {e}")),
+    };
+    let is_success = resp.status().is_success();
+    let body = resp.text().await.unwrap_or_default();
+    map_device_poll(is_success, &body)
+}
+
+/// Background poll loop: sleep `interval`, poll, react, repeat until the
+/// user approves (persist creds), a terminal outcome, or `expires_in`.
+/// Never returns anything — logs and stops. NEVER logs the device_code.
+async fn run_device_poll(http: reqwest::Client, device_code: String, interval: u64, expires_in: u64) {
+    let client_id = device_client_id();
+    let token_url = cli_token_url();
+    let deadline = Instant::now() + Duration::from_secs(expires_in);
+    let mut interval = interval.max(1);
+    loop {
+        if Instant::now() >= deadline {
+            tracing::warn!("device login: code expired before approval");
+            return;
+        }
+        tokio::time::sleep(Duration::from_secs(interval)).await;
+        match device_poll_exchange(&http, &token_url, &device_code, &client_id).await {
+            DevicePollOutcome::Success(tokens) => {
+                match persist_credentials(&tokens, tokens.org_id.clone()) {
+                    Ok(who) => tracing::info!(user = %who, "device login: signed in"),
+                    Err(e) => tracing::error!(error = %e, "device login: signed in but saving the session failed"),
+                }
+                return;
+            }
+            DevicePollOutcome::Pending => {}
+            DevicePollOutcome::SlowDown => interval += 5,
+            DevicePollOutcome::Expired => {
+                tracing::warn!("device login: token expired");
+                return;
+            }
+            DevicePollOutcome::Denied => {
+                tracing::info!("device login: user denied the request");
+                return;
+            }
+            DevicePollOutcome::Other(msg) => {
+                tracing::warn!(reason = %msg, "device login: stopping poll");
+                return;
+            }
+        }
+    }
+}
+
+/// `POST /auth/device/start` — ask smoo.ai for a device+user code, spawn
+/// the background poll loop, and hand the browser the user-facing bits.
+/// The `device_code` never leaves the daemon.
+///
+/// Guarded two ways (th-ea7b54): a same-origin check (the routes are
+/// otherwise ungated, so a CSRF page in the user's browser or a random
+/// tailnet peer must not be able to trigger a login), and a bounded
+/// [`Semaphore`] cap so an accepted caller can't spawn unbounded 900s poll
+/// loops.
+async fn device_start_handler(State(state): State<AuthState>, headers: HeaderMap) -> Response {
+    // CSRF/SSRF guard: reject anything that isn't the daemon's own SPA.
+    if !is_same_origin(&headers) {
+        tracing::warn!("device start: rejected cross-origin / unattributable request");
+        return device_start_json_error(StatusCode::FORBIDDEN, "forbidden");
+    }
+    // Cap concurrent in-flight logins. Acquire the slot BEFORE the smoo.ai
+    // round-trip so it also bounds the request fan-out; the permit is held
+    // as a local (released on every early-return error path) and only moved
+    // into the poll task on success.
+    let permit = match Arc::clone(&state.device_slots).try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => {
+            tracing::warn!("device start: too many pending logins in flight");
+            return device_start_json_error(StatusCode::TOO_MANY_REQUESTS, "too_many_pending_logins");
+        }
+    };
+
+    let client_id = device_client_id();
+    let form = [("client_id", client_id.as_str())];
+    let resp = match state.http.post(cli_device_url()).form(&form).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "device start: request to smoo.ai failed");
+            return device_start_error("Could not reach Smoo AI to start sign-in. Please try again.");
+        }
+    };
+    if !resp.status().is_success() {
+        let status = resp.status();
+        tracing::warn!(%status, "device start: smoo.ai returned non-success");
+        return device_start_error("Smoo AI could not start the sign-in. Please try again.");
+    }
+    let body = resp.text().await.unwrap_or_default();
+    let dev = match serde_json::from_str::<DeviceAuthResponse>(&body) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(error = %e, "device start: could not parse device-auth response");
+            return device_start_error("Smoo AI sent an unexpected response. Please try again.");
+        }
+    };
+
+    let ui = DeviceStartResponse::from_device_auth(&dev);
+
+    // Poll in the background; the UI learns success via /api/auth/status.
+    // The permit rides along and is dropped when the task ends (success,
+    // expiry, or error), releasing the slot on ALL exit paths.
+    let http = state.http.clone();
+    tokio::spawn(async move {
+        let _permit = permit;
+        run_device_poll(http, dev.device_code, dev.interval, dev.expires_in).await;
+    });
+
+    (StatusCode::OK, [(axum::http::header::CACHE_CONTROL, "no-store")], Json(ui)).into_response()
+}
+
+/// Same-origin guard for the browser-triggered device-login POST. Not full
+/// auth: the SPA's own `fetch` carries an `Origin` (or, failing that,
+/// `Referer`) whose authority must equal the daemon's own `Host`. A
+/// malicious page in the user's browser gets a cross-origin `Origin` →
+/// rejected; a request that carries neither header can't be shown
+/// same-origin → rejected (fail closed).
+///
+// ponytail: origin/host-match only — a raw tailnet peer with curl can still
+// forge these headers. The concurrency cap bounds the blast radius; if the
+// auth routes ever need real per-request auth, gate them behind the
+// LocalTokenVerifier like `/ws`.
+fn is_same_origin(headers: &HeaderMap) -> bool {
+    let Some(host) = headers.get(axum::http::header::HOST).and_then(|v| v.to_str().ok()).map(str::trim) else {
+        return false;
+    };
+    if host.is_empty() {
+        return false;
+    }
+    let source = headers
+        .get(axum::http::header::ORIGIN)
+        .or_else(|| headers.get(axum::http::header::REFERER))
+        .and_then(|v| v.to_str().ok());
+    let Some(source) = source else {
+        return false;
+    };
+    authority_of(source).is_some_and(|a| a == host)
+}
+
+/// Extract the `host[:port]` authority from a URL like
+/// `https://host:8443/path`. Minimal — just enough to compare against the
+/// `Host` header (the authority ends at the first `/`, `?`, or `#`).
+fn authority_of(url: &str) -> Option<&str> {
+    let after_scheme = url.split_once("://")?.1;
+    let end = after_scheme.find(['/', '?', '#']).unwrap_or(after_scheme.len());
+    let authority = &after_scheme[..end];
+    (!authority.is_empty()).then_some(authority)
+}
+
+/// A JSON error body + 502 for the start route (the UI shows a retry).
+fn device_start_error(message: &str) -> Response {
+    device_start_json_error(StatusCode::BAD_GATEWAY, message)
+}
+
+/// A `{ "error": message }` JSON body at `status`.
+fn device_start_json_error(status: StatusCode, message: &str) -> Response {
+    #[derive(Serialize)]
+    struct Err<'a> {
+        error: &'a str,
+    }
+    (status, Json(Err { error: message })).into_response()
 }
 
 // ── redirect_uri derivation ─────────────────────────────────────────
@@ -700,5 +1003,200 @@ mod tests {
     #[test]
     fn html_escape_neutralizes_markup() {
         assert_eq!(html_escape("<script>&\"</script>"), "&lt;script&gt;&amp;&quot;&lt;/script&gt;");
+    }
+
+    // ── device authorization grant (th-ea7b54) ──────────────────────
+
+    #[test]
+    fn device_auth_response_parses_full() {
+        let json = r#"{
+            "device_code": "dc-secret",
+            "user_code": "WXYZ-1234",
+            "verification_uri": "https://smoo.ai/device",
+            "verification_uri_complete": "https://smoo.ai/device?code=WXYZ-1234",
+            "expires_in": 900,
+            "interval": 7
+        }"#;
+        let d: DeviceAuthResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(d.device_code, "dc-secret");
+        assert_eq!(d.user_code, "WXYZ-1234");
+        assert_eq!(d.verification_uri, "https://smoo.ai/device");
+        assert_eq!(d.verification_uri_complete.as_deref(), Some("https://smoo.ai/device?code=WXYZ-1234"));
+        assert_eq!(d.expires_in, 900);
+        assert_eq!(d.interval, 7);
+    }
+
+    #[test]
+    fn device_auth_response_defaults_interval() {
+        // No `interval`, no `verification_uri_complete` → RFC defaults.
+        let json = r#"{"device_code":"dc","user_code":"UC","verification_uri":"https://smoo.ai/device","expires_in":600}"#;
+        let d: DeviceAuthResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(d.interval, 5);
+        assert!(d.verification_uri_complete.is_none());
+    }
+
+    #[test]
+    fn device_start_response_hides_device_code_and_falls_back_uri() {
+        let d = DeviceAuthResponse {
+            device_code: "SUPER-SECRET-dc".into(),
+            user_code: "UC-42".into(),
+            verification_uri: "https://smoo.ai/device".into(),
+            verification_uri_complete: None,
+            expires_in: 600,
+            interval: 5,
+        };
+        let ui = DeviceStartResponse::from_device_auth(&d);
+        // Missing complete URI falls back to the bare one.
+        assert_eq!(ui.verification_uri_complete, "https://smoo.ai/device");
+        let body = serde_json::to_string(&ui).unwrap();
+        assert!(body.contains("UC-42"), "user_code should be present: {body}");
+        assert!(!body.contains("SUPER-SECRET-dc"), "device_code must NOT leak to the browser: {body}");
+        assert!(!body.to_lowercase().contains("device_code"), "no device_code field: {body}");
+    }
+
+    #[test]
+    fn map_device_poll_pending() {
+        assert!(matches!(
+            map_device_poll(false, r#"{"error":"authorization_pending"}"#),
+            DevicePollOutcome::Pending
+        ));
+    }
+
+    #[test]
+    fn map_device_poll_slow_down() {
+        assert!(matches!(map_device_poll(false, r#"{"error":"slow_down"}"#), DevicePollOutcome::SlowDown));
+    }
+
+    #[test]
+    fn map_device_poll_expired() {
+        assert!(matches!(map_device_poll(false, r#"{"error":"expired_token"}"#), DevicePollOutcome::Expired));
+    }
+
+    #[test]
+    fn map_device_poll_denied() {
+        assert!(matches!(map_device_poll(false, r#"{"error":"access_denied"}"#), DevicePollOutcome::Denied));
+    }
+
+    #[test]
+    fn map_device_poll_unknown_error_is_other() {
+        assert!(matches!(map_device_poll(false, r#"{"error":"teapot"}"#), DevicePollOutcome::Other(_)));
+    }
+
+    #[test]
+    fn map_device_poll_unparseable_error_fails_closed() {
+        // A non-2xx body we can't parse must be terminal, not a loop.
+        assert!(matches!(map_device_poll(false, "not json"), DevicePollOutcome::Other(_)));
+    }
+
+    #[test]
+    fn map_device_poll_success_parses_tokens() {
+        let body = r#"{"access_token":"AT","refresh_token":"RT","expires_in":3600,"org_id":"org_1","email":"a@b.co"}"#;
+        match map_device_poll(true, body) {
+            DevicePollOutcome::Success(t) => {
+                assert_eq!(t.access_token, "AT");
+                assert_eq!(t.org_id.as_deref(), Some("org_1"));
+                assert_eq!(t.email.as_deref(), Some("a@b.co"));
+            }
+            other => panic!("expected Success, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_device_poll_success_with_bad_body_fails_closed() {
+        assert!(matches!(map_device_poll(true, "{}"), DevicePollOutcome::Other(_)));
+    }
+
+    // ── security hardening: origin guard + concurrency cap (th-ea7b54) ──
+
+    #[test]
+    fn same_origin_accepts_matching_origin() {
+        let h = hdrs(&[("host", "smoo-hub:8443"), ("origin", "https://smoo-hub:8443")]);
+        assert!(is_same_origin(&h));
+    }
+
+    #[test]
+    fn same_origin_accepts_matching_referer_when_no_origin() {
+        let h = hdrs(&[("host", "smoo-hub:8443"), ("referer", "https://smoo-hub:8443/auth")]);
+        assert!(is_same_origin(&h));
+    }
+
+    #[test]
+    fn same_origin_rejects_cross_origin() {
+        // A malicious page in the user's browser: its Origin is its own host.
+        let h = hdrs(&[("host", "smoo-hub:8443"), ("origin", "https://evil.example")]);
+        assert!(!is_same_origin(&h));
+    }
+
+    #[test]
+    fn same_origin_rejects_cross_origin_referer() {
+        let h = hdrs(&[("host", "smoo-hub:8443"), ("referer", "https://evil.example/x")]);
+        assert!(!is_same_origin(&h));
+    }
+
+    #[test]
+    fn same_origin_rejects_when_no_origin_or_referer() {
+        // Fail closed: nothing proves same-origin (e.g. a raw curl).
+        let h = hdrs(&[("host", "smoo-hub:8443")]);
+        assert!(!is_same_origin(&h));
+    }
+
+    #[test]
+    fn same_origin_rejects_without_host() {
+        let h = hdrs(&[("origin", "https://smoo-hub:8443")]);
+        assert!(!is_same_origin(&h));
+    }
+
+    #[test]
+    fn same_origin_origin_wins_over_referer() {
+        // Present-but-mismatched Origin is used even if Referer would match —
+        // we can't downgrade to the weaker signal.
+        let h = hdrs(&[
+            ("host", "smoo-hub:8443"),
+            ("origin", "https://evil.example"),
+            ("referer", "https://smoo-hub:8443/x"),
+        ]);
+        assert!(!is_same_origin(&h));
+    }
+
+    #[test]
+    fn authority_of_parses_host_port() {
+        assert_eq!(authority_of("https://h:8443/auth/callback"), Some("h:8443"));
+        assert_eq!(authority_of("http://host"), Some("host"));
+        assert_eq!(authority_of("https://host?q=1"), Some("host"));
+        assert_eq!(authority_of("https://host#frag"), Some("host"));
+        assert_eq!(authority_of("not-a-url"), None);
+        assert_eq!(authority_of("https://"), None);
+    }
+
+    #[test]
+    fn device_slots_cap_blocks_when_full_and_releases_on_drop() {
+        // Mirrors the handler's guard: hold MAX permits, next acquire fails,
+        // dropping one frees a slot again.
+        let sem = Arc::new(Semaphore::new(MAX_PENDING_DEVICE_LOGINS));
+        let mut held = Vec::new();
+        for _ in 0..MAX_PENDING_DEVICE_LOGINS {
+            held.push(Arc::clone(&sem).try_acquire_owned().expect("under cap"));
+        }
+        // Over cap → no slot (the handler returns 429 here).
+        assert!(Arc::clone(&sem).try_acquire_owned().is_err(), "should be at cap");
+        // A finished poll loop drops its permit → slot freed.
+        held.pop();
+        assert!(Arc::clone(&sem).try_acquire_owned().is_ok(), "slot released on drop");
+    }
+
+    #[test]
+    fn device_client_id_and_url_defaults_and_overrides() {
+        // Defaults when unset.
+        std::env::remove_var("SMOOAI_DEVICE_CLIENT_ID");
+        std::env::remove_var("SMOOAI_CLI_DEVICE_URL");
+        assert_eq!(device_client_id(), "bigsmooth-daemon");
+        assert_eq!(cli_device_url(), "https://smoo.ai/api/device/code");
+        // Env override wins.
+        std::env::set_var("SMOOAI_DEVICE_CLIENT_ID", "custom-client");
+        std::env::set_var("SMOOAI_CLI_DEVICE_URL", "https://example.test/device");
+        assert_eq!(device_client_id(), "custom-client");
+        assert_eq!(cli_device_url(), "https://example.test/device");
+        std::env::remove_var("SMOOAI_DEVICE_CLIENT_ID");
+        std::env::remove_var("SMOOAI_CLI_DEVICE_URL");
     }
 }
