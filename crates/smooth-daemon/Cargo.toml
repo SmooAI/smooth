@@ -31,6 +31,11 @@ smooth-operator.workspace = true
 smooth-operator-server.workspace = true
 smooth-operator-svc.workspace = true
 smooth-tools.workspace = true
+# th-daemon-skills: skill discovery + the normalized `Skill` type. smooth-cast is
+# lean (smooth-operator + smooth-policy + serde/yaml/dirs — all already in this
+# crate's tree, no TUI/ratatui), so the daemon reuses its canonical skills
+# catalog directly rather than re-implementing discovery.
+smooth-cast.workspace = true
 # EPIC th-c89c2a (th-a28904): the daemon serves the smooth-web SPA same-origin at
 # its own `http://127.0.0.1:8787/` (token injected into index.html) instead of the
 # operator's stock widget — so the control surface is reachable with no

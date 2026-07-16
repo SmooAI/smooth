@@ -19,7 +19,12 @@ name = "smooth_tools"
 smooth-operator.workspace = true
 smooth-policy.workspace = true
 dirs-next.workspace = true
+serde = { workspace = true }
 serde_json.workspace = true
+# th-daemon-skills: the `create_skill` tool serializes SKILL.md YAML frontmatter
+# with serde_yml (the same parser the skills catalog reads back), so escaping is
+# correct for descriptions/triggers containing YAML metacharacters.
+serde_yml.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
@@ -32,6 +37,9 @@ tracing.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+# th-daemon-skills: round-trip test — a SKILL.md written by `create_skill` must
+# parse back cleanly through the canonical skills parser.
+smooth-cast.workspace = true
 
 [lints]
 workspace = true

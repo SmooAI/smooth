@@ -22,6 +22,7 @@ use smooth_operator::{Tool, ToolRegistry};
 
 pub mod bash;
 pub mod crawl;
+pub mod create_skill;
 pub mod grep;
 pub mod guard;
 pub mod knowledge_search;
@@ -38,6 +39,7 @@ pub mod write;
 
 pub use bash::BashTool;
 pub use crawl::CrawlTool;
+pub use create_skill::CreateSkillTool;
 pub use grep::GrepTool;
 pub use guard::is_circuit_breaker;
 pub use knowledge_search::KnowledgeSearchTool;
@@ -90,6 +92,9 @@ pub fn default_tools_with_proxy(workspace: PathBuf, proxy: Option<String>) -> Ve
         Arc::new(KnowledgeSearchTool { workspace: workspace.clone() }),
         Arc::new(CrawlTool { workspace: workspace.clone() }),
         Arc::new(ThTool { workspace: workspace.clone() }),
+        // Lets Big Smooth author its own reusable skills (writes
+        // ~/.smooth/skills/<name>/SKILL.md; workspace-independent).
+        Arc::new(CreateSkillTool),
         Arc::new(BashTool { workspace, proxy }),
     ]
 }
@@ -114,6 +119,7 @@ mod tests {
             "knowledge_search",
             "crawl",
             "th",
+            "create_skill",
             "bash",
         ] {
             assert!(names.iter().any(|n| n == expected), "missing {expected} in {names:?}");
@@ -134,6 +140,7 @@ mod tests {
             "knowledge_search",
             "crawl",
             "th",
+            "create_skill",
             "bash",
         ] {
             assert!(names.iter().any(|n| n == expected), "missing {expected} in {names:?}");
