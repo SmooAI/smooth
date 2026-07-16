@@ -50,6 +50,7 @@ use rand::RngCore;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use smooai_client_shared::auth::storage::{CredentialKind, Credentials, CredentialsStore};
+use tokio::sync::Semaphore;
 
 /// How long a mint-a-login stays valid before we forget its verifier.
 /// 10 minutes is generous for a human sign-in + org pick, short enough
@@ -58,6 +59,14 @@ use smooai_client_shared::auth::storage::{CredentialKind, Credentials, Credentia
 // stable spelling — silence the pedantic "use a larger unit" nudge.
 #[allow(clippy::duration_suboptimal_units)]
 const PENDING_TTL: Duration = Duration::from_secs(600);
+
+/// Max concurrent in-flight device logins. Each `/auth/device/start` holds
+/// a slot for the full lifetime of its background poll loop (up to
+/// `expires_in`, ~900s). A personal daemon has one human clicking a button;
+/// 3 covers a couple of stale/abandoned tabs. Over-cap → 429, so an
+/// unauthenticated caller on the tailnet can't spawn unbounded 900s loops
+/// that hammer the daemon + smoo.ai (resource-amplification DoS). th-ea7b54.
+const MAX_PENDING_DEVICE_LOGINS: usize = 3;
 
 // ── env-overridable smoo.ai endpoints (copied from smooth-cli auth::login) ──
 
@@ -89,10 +98,25 @@ fn device_client_id() -> String {
 /// pending-logins map + a shared HTTP client for the token exchange.
 /// Owned by the router via `.with_state(...)`, so this module needs no
 /// daemon `AppState`.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AuthState {
     pending_logins: PendingLogins,
     http: reqwest::Client,
+    /// Bounds concurrent in-flight device logins (see
+    /// [`MAX_PENDING_DEVICE_LOGINS`]). Each spawned poll loop holds one
+    /// permit for its whole lifetime; dropping the permit (task ends on
+    /// success/expiry/error) releases the slot.
+    device_slots: Arc<Semaphore>,
+}
+
+impl Default for AuthState {
+    fn default() -> Self {
+        Self {
+            pending_logins: PendingLogins::default(),
+            http: reqwest::Client::default(),
+            device_slots: Arc::new(Semaphore::new(MAX_PENDING_DEVICE_LOGINS)),
+        }
+    }
 }
 
 /// Build the sign-in router: `GET /auth/login`, `GET /auth/callback`,
@@ -482,7 +506,30 @@ async fn run_device_poll(http: reqwest::Client, device_code: String, interval: u
 /// `POST /auth/device/start` — ask smoo.ai for a device+user code, spawn
 /// the background poll loop, and hand the browser the user-facing bits.
 /// The `device_code` never leaves the daemon.
-async fn device_start_handler(State(state): State<AuthState>) -> Response {
+///
+/// Guarded two ways (th-ea7b54): a same-origin check (the routes are
+/// otherwise ungated, so a CSRF page in the user's browser or a random
+/// tailnet peer must not be able to trigger a login), and a bounded
+/// [`Semaphore`] cap so an accepted caller can't spawn unbounded 900s poll
+/// loops.
+async fn device_start_handler(State(state): State<AuthState>, headers: HeaderMap) -> Response {
+    // CSRF/SSRF guard: reject anything that isn't the daemon's own SPA.
+    if !is_same_origin(&headers) {
+        tracing::warn!("device start: rejected cross-origin / unattributable request");
+        return device_start_json_error(StatusCode::FORBIDDEN, "forbidden");
+    }
+    // Cap concurrent in-flight logins. Acquire the slot BEFORE the smoo.ai
+    // round-trip so it also bounds the request fan-out; the permit is held
+    // as a local (released on every early-return error path) and only moved
+    // into the poll task on success.
+    let permit = match Arc::clone(&state.device_slots).try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => {
+            tracing::warn!("device start: too many pending logins in flight");
+            return device_start_json_error(StatusCode::TOO_MANY_REQUESTS, "too_many_pending_logins");
+        }
+    };
+
     let client_id = device_client_id();
     let form = [("client_id", client_id.as_str())];
     let resp = match state.http.post(cli_device_url()).form(&form).send().await {
@@ -509,18 +556,67 @@ async fn device_start_handler(State(state): State<AuthState>) -> Response {
     let ui = DeviceStartResponse::from_device_auth(&dev);
 
     // Poll in the background; the UI learns success via /api/auth/status.
-    tokio::spawn(run_device_poll(state.http.clone(), dev.device_code, dev.interval, dev.expires_in));
+    // The permit rides along and is dropped when the task ends (success,
+    // expiry, or error), releasing the slot on ALL exit paths.
+    let http = state.http.clone();
+    tokio::spawn(async move {
+        let _permit = permit;
+        run_device_poll(http, dev.device_code, dev.interval, dev.expires_in).await;
+    });
 
     (StatusCode::OK, [(axum::http::header::CACHE_CONTROL, "no-store")], Json(ui)).into_response()
 }
 
+/// Same-origin guard for the browser-triggered device-login POST. Not full
+/// auth: the SPA's own `fetch` carries an `Origin` (or, failing that,
+/// `Referer`) whose authority must equal the daemon's own `Host`. A
+/// malicious page in the user's browser gets a cross-origin `Origin` →
+/// rejected; a request that carries neither header can't be shown
+/// same-origin → rejected (fail closed).
+///
+// ponytail: origin/host-match only — a raw tailnet peer with curl can still
+// forge these headers. The concurrency cap bounds the blast radius; if the
+// auth routes ever need real per-request auth, gate them behind the
+// LocalTokenVerifier like `/ws`.
+fn is_same_origin(headers: &HeaderMap) -> bool {
+    let Some(host) = headers.get(axum::http::header::HOST).and_then(|v| v.to_str().ok()).map(str::trim) else {
+        return false;
+    };
+    if host.is_empty() {
+        return false;
+    }
+    let source = headers
+        .get(axum::http::header::ORIGIN)
+        .or_else(|| headers.get(axum::http::header::REFERER))
+        .and_then(|v| v.to_str().ok());
+    let Some(source) = source else {
+        return false;
+    };
+    authority_of(source).is_some_and(|a| a == host)
+}
+
+/// Extract the `host[:port]` authority from a URL like
+/// `https://host:8443/path`. Minimal — just enough to compare against the
+/// `Host` header (the authority ends at the first `/`, `?`, or `#`).
+fn authority_of(url: &str) -> Option<&str> {
+    let after_scheme = url.split_once("://")?.1;
+    let end = after_scheme.find(['/', '?', '#']).unwrap_or(after_scheme.len());
+    let authority = &after_scheme[..end];
+    (!authority.is_empty()).then_some(authority)
+}
+
 /// A JSON error body + 502 for the start route (the UI shows a retry).
 fn device_start_error(message: &str) -> Response {
+    device_start_json_error(StatusCode::BAD_GATEWAY, message)
+}
+
+/// A `{ "error": message }` JSON body at `status`.
+fn device_start_json_error(status: StatusCode, message: &str) -> Response {
     #[derive(Serialize)]
     struct Err<'a> {
         error: &'a str,
     }
-    (StatusCode::BAD_GATEWAY, Json(Err { error: message })).into_response()
+    (status, Json(Err { error: message })).into_response()
 }
 
 // ── redirect_uri derivation ─────────────────────────────────────────
@@ -1008,6 +1104,84 @@ mod tests {
     #[test]
     fn map_device_poll_success_with_bad_body_fails_closed() {
         assert!(matches!(map_device_poll(true, "{}"), DevicePollOutcome::Other(_)));
+    }
+
+    // ── security hardening: origin guard + concurrency cap (th-ea7b54) ──
+
+    #[test]
+    fn same_origin_accepts_matching_origin() {
+        let h = hdrs(&[("host", "smoo-hub:8443"), ("origin", "https://smoo-hub:8443")]);
+        assert!(is_same_origin(&h));
+    }
+
+    #[test]
+    fn same_origin_accepts_matching_referer_when_no_origin() {
+        let h = hdrs(&[("host", "smoo-hub:8443"), ("referer", "https://smoo-hub:8443/auth")]);
+        assert!(is_same_origin(&h));
+    }
+
+    #[test]
+    fn same_origin_rejects_cross_origin() {
+        // A malicious page in the user's browser: its Origin is its own host.
+        let h = hdrs(&[("host", "smoo-hub:8443"), ("origin", "https://evil.example")]);
+        assert!(!is_same_origin(&h));
+    }
+
+    #[test]
+    fn same_origin_rejects_cross_origin_referer() {
+        let h = hdrs(&[("host", "smoo-hub:8443"), ("referer", "https://evil.example/x")]);
+        assert!(!is_same_origin(&h));
+    }
+
+    #[test]
+    fn same_origin_rejects_when_no_origin_or_referer() {
+        // Fail closed: nothing proves same-origin (e.g. a raw curl).
+        let h = hdrs(&[("host", "smoo-hub:8443")]);
+        assert!(!is_same_origin(&h));
+    }
+
+    #[test]
+    fn same_origin_rejects_without_host() {
+        let h = hdrs(&[("origin", "https://smoo-hub:8443")]);
+        assert!(!is_same_origin(&h));
+    }
+
+    #[test]
+    fn same_origin_origin_wins_over_referer() {
+        // Present-but-mismatched Origin is used even if Referer would match —
+        // we can't downgrade to the weaker signal.
+        let h = hdrs(&[
+            ("host", "smoo-hub:8443"),
+            ("origin", "https://evil.example"),
+            ("referer", "https://smoo-hub:8443/x"),
+        ]);
+        assert!(!is_same_origin(&h));
+    }
+
+    #[test]
+    fn authority_of_parses_host_port() {
+        assert_eq!(authority_of("https://h:8443/auth/callback"), Some("h:8443"));
+        assert_eq!(authority_of("http://host"), Some("host"));
+        assert_eq!(authority_of("https://host?q=1"), Some("host"));
+        assert_eq!(authority_of("https://host#frag"), Some("host"));
+        assert_eq!(authority_of("not-a-url"), None);
+        assert_eq!(authority_of("https://"), None);
+    }
+
+    #[test]
+    fn device_slots_cap_blocks_when_full_and_releases_on_drop() {
+        // Mirrors the handler's guard: hold MAX permits, next acquire fails,
+        // dropping one frees a slot again.
+        let sem = Arc::new(Semaphore::new(MAX_PENDING_DEVICE_LOGINS));
+        let mut held = Vec::new();
+        for _ in 0..MAX_PENDING_DEVICE_LOGINS {
+            held.push(Arc::clone(&sem).try_acquire_owned().expect("under cap"));
+        }
+        // Over cap → no slot (the handler returns 429 here).
+        assert!(Arc::clone(&sem).try_acquire_owned().is_err(), "should be at cap");
+        // A finished poll loop drops its permit → slot freed.
+        held.pop();
+        assert!(Arc::clone(&sem).try_acquire_owned().is_ok(), "slot released on drop");
     }
 
     #[test]
