@@ -85,6 +85,7 @@ use smooth_operator_server::local::LocalServer;
 use smooth_operator_server::ServerConfig;
 use smooth_operator_svc::auth::LocalTokenVerifier;
 use smooth_operator_svc::{ToolProvider, ToolProviderContext};
+use smooth_tools::SessionCwd;
 
 /// A [`ToolProvider`] that hands the operator the daemon's kernel-sandboxed tool
 /// set on every turn (the operator's `#68` injection seam): the
@@ -92,25 +93,45 @@ use smooth_operator_svc::{ToolProvider, ToolProviderContext};
 /// through the goalie proxy. This is where the daemon's kernel-enforced security
 /// re-homes onto the operator's per-turn registry.
 struct SandboxedToolProvider {
-    workspace: PathBuf,
+    /// The session-scoped cwd store. The workspace root every conversation
+    /// falls back to is `cwd.root()`; a `/cd` or `cd` tool call narrows it.
+    cwd: SessionCwd,
     proxy: Option<String>,
 }
 
 #[async_trait]
 impl ToolProvider for SandboxedToolProvider {
-    async fn tools_for(&self, _ctx: &ToolProviderContext) -> Vec<Arc<dyn Tool>> {
-        smooth_tools::default_tools_with_proxy(self.workspace.clone(), self.proxy.clone())
+    async fn tools_for(&self, ctx: &ToolProviderContext) -> Vec<Arc<dyn Tool>> {
+        // Resolve THIS conversation's cwd (root when unset) and confine the
+        // per-turn fs/grep/bash tools to it, so a runtime `/cd` scopes the whole
+        // tool set. The `cd` tool is injected here (not in the generic
+        // `default_tools_with_proxy`) because it needs the session store handle
+        // + the turn's conversation id, which only the provider has.
+        let session = ctx.conversation_id.clone().unwrap_or_default();
+        let dir = self.cwd.get(&session);
+        let mut tools = smooth_tools::default_tools_with_proxy(dir.clone(), self.proxy.clone());
+        tools.push(Arc::new(smooth_tools::CdTool::new(self.cwd.clone(), session, dir)) as Arc<dyn Tool>);
+        tools
     }
 }
 
 /// The local flavor's tool provider — the daemon's kernel-sandboxed tool set.
 ///
-/// Workspace-confined fs/grep + an OS-sandboxed `bash` routed through `proxy`.
-/// Exposed so an integration/e2e test can install it on a `LocalServer` exactly
-/// the way [`serve_local_flavor`] does.
+/// Workspace-confined fs/grep + an OS-sandboxed `bash` routed through `proxy`,
+/// plus the `cd` tool. Confinement follows the conversation's session cwd
+/// (defaulting to `workspace`). Exposed so an integration/e2e test can install
+/// it on a `LocalServer` exactly the way [`serve_local_flavor`] does.
 #[must_use]
 pub fn local_tool_provider(workspace: PathBuf, proxy: Option<String>) -> Arc<dyn ToolProvider> {
-    Arc::new(SandboxedToolProvider { workspace, proxy })
+    local_tool_provider_with_cwd(SessionCwd::new(workspace), proxy)
+}
+
+/// Like [`local_tool_provider`], but takes an existing [`SessionCwd`] so the
+/// daemon can share ONE store between the tool provider and the
+/// `/api/session/cwd` route (the UI's `/cd`).
+#[must_use]
+pub fn local_tool_provider_with_cwd(cwd: SessionCwd, proxy: Option<String>) -> Arc<dyn ToolProvider> {
+    Arc::new(SandboxedToolProvider { cwd, proxy })
 }
 
 /// The workspace the local flavor's filesystem + shell tools are confined to:
@@ -391,7 +412,11 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         egress = egress_proxy.as_deref().unwrap_or("unrestricted"),
         "local-flavor sandboxed tools wired (per-turn via ToolProvider)",
     );
-    let provider = local_tool_provider(workspace.clone(), egress_proxy);
+    // One session-cwd store, shared by the tool provider (per-turn tool
+    // confinement + the `cd` tool) and the `/api/session/cwd` route (the UI's
+    // `/cd`). Rooted at the workspace; every conversation defaults to it.
+    let session_cwd = SessionCwd::new(workspace.clone());
+    let provider = local_tool_provider_with_cwd(session_cwd.clone(), egress_proxy);
     // Durable local storage: the operator local flavor is in-memory by default,
     // which loses every conversation/session on restart. Inject a sqlite-backed
     // adapter (via the operator's `storage()` seam) so the always-on daemon
@@ -446,7 +471,10 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         .serve_routes(
             crate::search::search_router(workspace)
                 .merge(crate::push::push_router())
-                .merge(crate::auth_login::auth_router()),
+                .merge(crate::auth_login::auth_router())
+                // GET/POST /api/session/cwd — the UI's `/cd` + `/pwd`. Sets/reads
+                // a conversation's cwd in the SAME store the tool provider reads.
+                .merge(crate::cwd_route::cwd_router(session_cwd)),
         )
         .spawn()
         .await

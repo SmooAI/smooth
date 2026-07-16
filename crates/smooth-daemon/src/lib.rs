@@ -28,6 +28,7 @@
 
 pub mod auth_login;
 pub mod config;
+pub mod cwd_route;
 pub mod hooks;
 pub mod operator;
 mod operator_storage;
@@ -37,7 +38,7 @@ pub mod scheduler;
 pub mod search;
 pub mod tailscale;
 
-pub use operator::{local_tool_provider, serve_local_flavor};
+pub use operator::{local_tool_provider, local_tool_provider_with_cwd, serve_local_flavor};
 pub use schedule::{InMemoryScheduleStore, Schedule, ScheduleKind, ScheduleStore, SqliteScheduleStore};
 pub use scheduler::{spawn_scheduler, tick, OperatorTurnDriver, TurnDriver};
 pub use tailscale::TailscaleServe;
