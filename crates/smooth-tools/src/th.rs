@@ -99,33 +99,45 @@ impl Tool for ThTool {
             .get("cwd")
             .and_then(Value::as_str)
             .map_or_else(|| self.workspace.clone(), PathBuf::from);
-
-        let bin = resolve_th()
-            .ok_or_else(|| anyhow::anyhow!("could not find the `th` binary (looked at SMOOTH_TH_BIN, next to the executable, ~/.cargo/bin/th, and PATH)"))?;
-
-        let mut cmd = tokio::process::Command::new(&bin);
-        cmd.args(&args)
-            .current_dir(&cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-
-        let output = cmd
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("failed to spawn `th`: {e}"))?
-            .wait_with_output()
-            .await
-            .map_err(|e| anyhow::anyhow!("`th` error: {e}"))?;
-
-        let code = output.status.code().map_or_else(|| "killed by signal".to_owned(), |c| c.to_string());
-        let stdout = truncate(&String::from_utf8_lossy(&output.stdout));
-        let stderr = truncate(&String::from_utf8_lossy(&output.stderr));
-        Ok(format!(
-            "$ th {}\nexit code: {code}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
-            args.join(" ")
-        ))
+        run_th(&args, &cwd).await
     }
+}
+
+/// Resolve and run the `th` binary with `args` in `cwd`, returning a formatted
+/// `$ th … / exit code / stdout / stderr` string (streams truncated at
+/// [`OUTPUT_CAP`]). Shared by [`ThTool`] and the typed convenience tools
+/// (`web_search`, …) that shell specific `th` subcommands. No shell — argv only.
+pub(crate) async fn run_th(args: &[String], cwd: &std::path::Path) -> anyhow::Result<String> {
+    let bin = resolve_th()
+        .ok_or_else(|| anyhow::anyhow!("could not find the `th` binary (looked at SMOOTH_TH_BIN, next to the executable, ~/.cargo/bin/th, and PATH)"))?;
+
+    let mut cmd = tokio::process::Command::new(&bin);
+    cmd.args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    let output = cmd
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("failed to spawn `th`: {e}"))?
+        .wait_with_output()
+        .await
+        .map_err(|e| anyhow::anyhow!("`th` error: {e}"))?;
+
+    let code = output.status.code().map_or_else(|| "killed by signal".to_owned(), |c| c.to_string());
+    let stdout = truncate(&String::from_utf8_lossy(&output.stdout));
+    let stderr = truncate(&String::from_utf8_lossy(&output.stderr));
+    Ok(format!(
+        "$ th {}\nexit code: {code}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+        args.join(" ")
+    ))
+}
+
+/// Locate the `th` binary (see [`resolve_th`]). Exposed for sibling typed tools.
+pub(crate) fn th_is_resolvable() -> bool {
+    resolve_th().is_some()
 }
 
 /// Extract the required `args` array as a `Vec<String>`, rejecting non-string
