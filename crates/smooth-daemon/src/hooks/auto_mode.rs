@@ -14,6 +14,14 @@
 //! skips the gate entirely (surveillance still runs); `deny` is the headless
 //! posture where anything not explicitly allowed is denied.
 //!
+//! ## Default posture (allow-benign, deny-dangerous)
+//!
+//! On first run with no `~/.smooth/permissions.toml`, [`load_rules`] writes a
+//! documented [`STARTER_PERMISSIONS`] starter (`default = "allow"` + a static
+//! deny list of clearly-dangerous ops) and adopts it. So out of the box the gate
+//! runs benign calls without prompting and blocks only the dangerous ones — narc
+//! (Gate 2) is the semantic backstop for context-dependent danger.
+//!
 //! ## Tool-name bridge
 //!
 //! The rule matchers use Claude-Code capability names (`Bash`, `Read`,
@@ -23,7 +31,7 @@
 //! Claude-Code syntax matches. Shell tools route through
 //! [`PermissionRules::decide_bash`] (compound-command aware).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use smooth_operator::tool::{ToolCall, ToolHook};
@@ -69,18 +77,81 @@ fn rules_path() -> PathBuf {
     dirs_next::home_dir().map_or_else(|| PathBuf::from("permissions.toml"), |h| h.join(".smooth").join("permissions.toml"))
 }
 
-/// Load `~/.smooth/permissions.toml` if present, else the fail-safe default
-/// (every call `ask`s). A malformed file logs and falls back to the default.
-//
-// ponytail: no invented baseline allow-list. With the default (empty) rule set
-// every call is `ask`, so in the default `ask` mode the gate denies everything
-// until the operator supplies a permissions.toml OR runs with
-// SMOOTH_AUTO_MODE=bypass / accept-edits. That is the fail-closed posture the
-// security model wants; a usable default allow-list is the operator's call (or a
-// follow-up once th-1f7fd7 lands the interactive queue).
+/// The starter `permissions.toml` written on first run when none exists. Posture:
+/// **allow everything, deny only clearly-dangerous ops** — narc (Gate 2) is the
+/// semantic backstop for context-dependent danger (`rm -rf`, `curl | sh`, …).
+/// Single source of truth for both the on-disk write and the read-only fallback.
+const STARTER_PERMISSIONS: &str = r#"# Big Smooth auto-mode (Gate 1). Posture: ALLOW everything, block ONLY dangerous ops.
+# narc (Gate 2, the LLM safety judge) independently blocks context-dependent danger —
+# `rm -rf`, `curl | sh`, secret exfiltration, prompt injection. This static deny list
+# covers operations that are catastrophic in ALL forms + writes to sensitive paths.
+# Everything benign (read/list/grep/web_search/knowledge_search/th/most bash) runs
+# without prompting. Edit this file to tighten or loosen the policy.
+default = "allow"
+
+deny = [
+    # Privilege escalation & machine control
+    "Bash(sudo:*)",
+    "Bash(su:*)",
+    "Bash(shutdown:*)",
+    "Bash(reboot:*)",
+    "Bash(halt:*)",
+    "Bash(poweroff:*)",
+    # Disk / filesystem destroyers
+    "Bash(dd:*)",
+    "Bash(mkfs:*)",
+    "Bash(diskutil:*)",
+    "Bash(fdisk:*)",
+    # macOS persistence / kernel / firmware
+    "Bash(launchctl:*)",
+    "Bash(kextload:*)",
+    "Bash(nvram:*)",
+    "Bash(crontab:*)",
+    # Writes to system + credential locations
+    "Write(/etc/**)",
+    "Write(/System/**)",
+    "Write(/usr/**)",
+    "Write(/bin/**)",
+    "Write(/sbin/**)",
+    "Write(/Library/**)",
+    "Write(**/.ssh/**)",
+    "Write(**/.aws/**)",
+    "Write(**/Library/LaunchAgents/**)",
+    "Write(**/.smooth/auth/**)",
+]
+"#;
+
+/// Atomically write the starter policy to `path` (temp file + rename), creating
+/// the parent dir if needed. Best-effort atomicity; the temp lives beside the
+/// target so the rename stays on the same filesystem.
+fn write_starter(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, STARTER_PERMISSIONS)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Load the permission rule set from `~/.smooth/permissions.toml`.
 fn load_rules() -> PermissionRules {
-    let path = rules_path();
-    match std::fs::read_to_string(&path) {
+    load_rules_at(&rules_path())
+}
+
+/// Load rules from `path`, or on **first run** (file absent) write + adopt the
+/// documented [`STARTER_PERMISSIONS`] starter (posture: allow-benign, deny-dangerous)
+/// so the default is a transparent on-disk file the operator can audit and edit —
+/// not a hidden in-code default.
+///
+/// - **Present + valid** → load it (respects user edits; never overwritten).
+/// - **Present + malformed** → fail-safe default (all `ask`). A broken user edit
+///   still fails closed rather than getting clobbered.
+/// - **Absent** → write the starter atomically, then load the embedded starter.
+///   If the write fails (read-only fs, perms), still adopt the embedded starter
+///   in-memory so the running daemon gets the intended posture — never the old
+///   all-`ask` default.
+fn load_rules_at(path: &Path) -> PermissionRules {
+    match std::fs::read_to_string(path) {
         Ok(toml) => match PermissionRules::from_toml(&toml) {
             Ok(rules) => {
                 tracing::info!(path = %path.display(), "auto-mode: loaded permission rules");
@@ -91,8 +162,18 @@ fn load_rules() -> PermissionRules {
                 PermissionRules::default()
             }
         },
-        // Missing file is the normal case — fail-safe default.
-        Err(_) => PermissionRules::default(),
+        // Missing file → adopt the documented starter (allow-benign, deny-dangerous).
+        Err(_) => {
+            match write_starter(path) {
+                Ok(()) => tracing::info!(path = %path.display(), "auto-mode: no permissions.toml — wrote starter policy (allow-benign, deny-dangerous)"),
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "auto-mode: could not persist starter permissions.toml — using embedded starter policy in-memory");
+                }
+            }
+            // The starter is compile-time constant and covered by tests, so a parse
+            // failure here is a build error, not a runtime one.
+            PermissionRules::from_toml(STARTER_PERMISSIONS).expect("embedded STARTER_PERMISSIONS must parse")
+        }
     }
 }
 
@@ -304,5 +385,73 @@ mod tests {
         assert_eq!(cap, "Some_mcp_tool", "unknown tool capitalizes its name");
         assert_eq!(arg, "");
         assert!(!is_shell);
+    }
+
+    #[test]
+    fn starter_policy_parses_allows_benign_denies_dangerous() {
+        let r = PermissionRules::from_toml(STARTER_PERMISSIONS).expect("starter policy parses");
+        // default = allow ⇒ benign / unknown ops proceed without prompting.
+        assert_eq!(r.decide_bash("ls -la"), Decision::Allow, "benign bash allowed");
+        assert_eq!(r.decide("Read", "/x"), Decision::Allow, "read allowed");
+        assert_eq!(r.decide("Some_mcp_tool", ""), Decision::Allow, "unknown tool → default allow");
+        // Dangerous ops are denied.
+        assert_eq!(r.decide_bash("sudo rm -rf /"), Decision::Deny, "sudo denied");
+        assert_eq!(r.decide_bash("dd if=/dev/zero of=/dev/disk0"), Decision::Deny, "dd denied");
+        assert_eq!(r.decide("Write", "/etc/hosts"), Decision::Deny, "write to /etc denied");
+        assert_eq!(r.decide("Write", "/home/me/.ssh/id_rsa"), Decision::Deny, "write to .ssh denied");
+    }
+
+    #[test]
+    fn load_rules_writes_starter_when_absent_then_loads_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("permissions.toml");
+        assert!(!path.exists(), "precondition: file absent");
+
+        let rules = load_rules_at(&path);
+
+        assert!(path.exists(), "starter written to disk");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            STARTER_PERMISSIONS,
+            "on-disk content is the starter verbatim"
+        );
+        // Loaded rules carry the allow-benign, deny-dangerous posture.
+        assert_eq!(rules.decide("Read", "/x"), Decision::Allow, "loaded starter allows benign");
+        assert_eq!(rules.decide_bash("sudo x"), Decision::Deny, "loaded starter denies dangerous");
+    }
+
+    #[test]
+    fn load_rules_does_not_clobber_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("permissions.toml");
+        let custom = "default = \"deny\"\n";
+        std::fs::write(&path, custom).unwrap();
+
+        let rules = load_rules_at(&path);
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), custom, "existing file left untouched");
+        // The user's default=deny is honoured, proving we loaded their file, not the starter.
+        assert_eq!(
+            rules.decide("Read", "/x"),
+            Decision::Deny,
+            "existing default=deny loaded, not the starter's allow"
+        );
+    }
+
+    #[test]
+    fn load_rules_malformed_file_fails_safe_to_all_ask() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("permissions.toml");
+        std::fs::write(&path, "default = \"not-a-decision\"\n").unwrap();
+
+        let rules = load_rules_at(&path);
+
+        // Fail-safe default: no starter clobber, everything asks.
+        assert_eq!(rules.decide("Read", "/x"), Decision::Ask, "malformed → fail-safe all-ask");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "default = \"not-a-decision\"\n",
+            "malformed file not clobbered"
+        );
     }
 }
