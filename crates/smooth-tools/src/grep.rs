@@ -2,6 +2,7 @@
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use globset::{Glob, GlobSetBuilder};
@@ -18,6 +19,13 @@ use crate::util::req_str;
 const MATCH_CAP: usize = 250;
 /// Max characters per matched line before truncation.
 const LINE_CAP: usize = 200;
+/// Max filesystem entries to *examine* before giving up. Dirs are pruned
+/// ([`crate::walk::pruned_walk`]), but a zero-match pattern over a huge non-git
+/// tree (e.g. `$HOME`) would still walk everything — this bounds it.
+const SCAN_BUDGET: usize = 100_000;
+/// Wall-clock ceiling on a single search. Backstops the entry budget for the
+/// pathological "few enormous files" case where per-file search dominates.
+const DEADLINE: Duration = Duration::from_secs(10);
 
 /// `grep` tool — uses the `ripgrep` libraries (no shelling out).
 pub struct GrepTool {
@@ -54,13 +62,20 @@ impl Tool for GrepTool {
         let root = resolve_workspace_path(&self.workspace, &rel)?;
         let base = self.workspace.clone();
 
-        tokio::task::spawn_blocking(move || grep_blocking(&base, &root, &pattern, include.as_deref()))
+        tokio::task::spawn_blocking(move || grep_blocking(&base, &root, &pattern, include.as_deref(), SCAN_BUDGET, DEADLINE))
             .await
             .map_err(|e| anyhow::anyhow!("grep task panicked: {e}"))?
     }
 }
 
-fn grep_blocking(base: &std::path::Path, root: &std::path::Path, pattern: &str, include: Option<&str>) -> anyhow::Result<String> {
+fn grep_blocking(
+    base: &std::path::Path,
+    root: &std::path::Path,
+    pattern: &str,
+    include: Option<&str>,
+    scan_budget: usize,
+    deadline: Duration,
+) -> anyhow::Result<String> {
     let matcher = RegexMatcher::new(pattern).map_err(|e| anyhow::anyhow!("invalid regex `{pattern}`: {e}"))?;
 
     let include_set = match include {
@@ -76,8 +91,16 @@ fn grep_blocking(base: &std::path::Path, root: &std::path::Path, pattern: &str, 
     let mut searcher = Searcher::new();
     let mut results: Vec<String> = Vec::new();
     let mut capped = false;
+    let mut stopped_early = false;
+    let start = Instant::now();
+    let mut examined = 0usize;
 
     'walk: for entry in crate::walk::pruned_walk(root).flatten() {
+        examined += 1;
+        if examined > scan_budget || start.elapsed() > deadline {
+            stopped_early = true;
+            break;
+        }
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
         }
@@ -118,12 +141,20 @@ fn grep_blocking(base: &std::path::Path, root: &std::path::Path, pattern: &str, 
     }
 
     if results.is_empty() {
+        if stopped_early {
+            return Ok("no matches found — search stopped early (too many files / timed out); narrow the path or pattern".to_owned());
+        }
         return Ok("no matches found".to_owned());
     }
     let mut out = results.join("\n");
     out.push('\n');
     if capped {
         let _ = writeln!(out, "... (showing first {MATCH_CAP} matches)");
+    } else if stopped_early {
+        let _ = writeln!(
+            out,
+            "... (search stopped early — too many files / timed out; results may be incomplete — narrow the path or pattern)"
+        );
     }
     Ok(out)
 }
@@ -181,5 +212,56 @@ mod tests {
         };
         let err = tool.execute(json!({"pattern": "("})).await.unwrap_err();
         assert!(err.to_string().contains("invalid regex"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn prunes_node_modules_without_git() {
+        // No .git anywhere — prune must still skip node_modules by name.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tokio::fs::create_dir_all(root.join("src")).await.unwrap();
+        tokio::fs::write(root.join("src/a.rs"), "let needle = 1;\n").await.unwrap();
+        tokio::fs::create_dir_all(root.join("node_modules/pkg")).await.unwrap();
+        tokio::fs::write(root.join("node_modules/pkg/index.js"), "var needle = 2;\n").await.unwrap();
+
+        let tool = GrepTool { workspace: root.to_path_buf() };
+        let out = tool.execute(json!({"pattern": "needle"})).await.unwrap();
+        assert!(out.contains("src/a.rs"), "source match found: {out}");
+        assert!(!out.contains("node_modules"), "node_modules must be pruned even with no .git: {out}");
+    }
+
+    #[tokio::test]
+    async fn caps_and_notes_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = "needle\n".repeat(MATCH_CAP + 50);
+        tokio::fs::write(dir.path().join("many.txt"), big).await.unwrap();
+        let tool = GrepTool {
+            workspace: dir.path().to_path_buf(),
+        };
+        let out = tool.execute(json!({"pattern": "needle"})).await.unwrap();
+        assert!(out.contains(&format!("showing first {MATCH_CAP} matches")), "truncation note present: {out}");
+        // Body line count == MATCH_CAP (the extra line is the note).
+        assert_eq!(out.lines().filter(|l| l.contains("many.txt:")).count(), MATCH_CAP, "{out}");
+    }
+
+    #[test]
+    fn early_stop_on_budget_exhaustion() {
+        // A tiny scan budget must halt the walk and emit the early-stop note
+        // instead of walking the whole tree (the no-hang guarantee).
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..20 {
+            std::fs::write(dir.path().join(format!("f{i}.txt")), "needle\n").unwrap();
+        }
+        let out = grep_blocking(dir.path(), dir.path(), "needle", None, 1, DEADLINE).unwrap();
+        assert!(out.contains("stopped early"), "budget exhaustion must note early stop: {out}");
+    }
+
+    #[test]
+    fn early_stop_on_deadline() {
+        // A zero deadline stops on the first loop iteration — same no-hang path.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "needle\n").unwrap();
+        let out = grep_blocking(dir.path(), dir.path(), "needle", None, SCAN_BUDGET, Duration::ZERO).unwrap();
+        assert!(out.contains("stopped early"), "deadline must note early stop: {out}");
     }
 }
