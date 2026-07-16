@@ -43,7 +43,7 @@
 - `th pearls create --title="Summary" --description="Why this exists and what needs doing" --type=task|bug|feature --priority=2`
   - Priority: 0–4 (0 = critical, 2 = medium, 4 = backlog). Not "high"/"low".
 - `th pearls update <id> --status=in_progress` — claim work
-- `th pearls update <id> --title/--description/--notes` — edit fields
+- `th pearls update <id> --title/--description/--priority/--assign` — edit fields
 - `th pearls close <id>` — mark complete
 - `th pearls close <id1> <id2> ...` — batch close
 - When creating many related pearls, run the creates in parallel.
