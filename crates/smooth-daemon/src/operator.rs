@@ -122,6 +122,63 @@ fn workspace_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Char budget for the skills index injected into the persona. Names +
+/// descriptions + triggers + paths only (bodies load on demand via `read_file`),
+/// so this stays small even with a large skill library.
+const SKILLS_SECTION_BUDGET: usize = 4000;
+
+/// Render the "Available skills" persona section from discovered skills —
+/// progressive disclosure: name + description + triggers + the SKILL.md PATH,
+/// and the instruction to `read_file` the body on demand. Bodies are NOT dumped
+/// into the prompt. Skills whose SKILL.md isn't a real on-disk file (e.g. the
+/// embedded `create-skill` builtin, which `read_file` can't load) are dropped.
+/// Returns `None` when there's nothing to show, so the persona stays clean.
+fn render_skills_section(skills: &[smooth_cast::skills::Skill]) -> Option<String> {
+    use std::fmt::Write as _;
+    let readable: Vec<&smooth_cast::skills::Skill> = skills.iter().filter(|s| s.path.is_file()).collect();
+    if readable.is_empty() {
+        return None;
+    }
+    let mut out = String::from(
+        "\n\n# Available skills\n\n\
+You have reusable SKILLS — recipes that encode the right way to do a task. Before improvising a \
+multi-step workflow, scan this list. When a user request matches a skill, READ its SKILL.md with the \
+`read_file` tool, then follow those instructions exactly — do NOT guess a skill's steps.\n\n",
+    );
+    let mut shown = 0usize;
+    for s in readable {
+        let triggers = if s.triggers.is_empty() {
+            String::new()
+        } else {
+            format!(" (triggers: {})", s.triggers.join(", "))
+        };
+        let line = format!("- {}: {}{}\n  SKILL.md: {}\n", s.name, s.description, triggers, s.path.display());
+        // Always show at least one, even if it alone blows the budget.
+        if shown > 0 && out.len() + line.len() > SKILLS_SECTION_BUDGET {
+            break;
+        }
+        out.push_str(&line);
+        shown += 1;
+    }
+    if shown < skills.len() {
+        let _ = writeln!(out, "- …and {} more (run `th skills list` to see all)", skills.len() - shown);
+    }
+    Some(out)
+}
+
+/// Build the effective persona for `workspace`: [`BIG_SMOOTH_PERSONA`] plus an
+/// "Available skills" index discovered from the project/user/claude skill dirs +
+/// builtins. Discovery is resilient — a malformed SKILL.md is skipped with a
+/// warning inside `discover`, never crashing. When no skills are found the base
+/// persona is returned unchanged (no noise).
+fn persona_with_skills(workspace: &Path) -> String {
+    let skills = smooth_cast::skills::discover(workspace);
+    match render_skills_section(&skills) {
+        Some(section) => format!("{BIG_SMOOTH_PERSONA}{section}"),
+        None => BIG_SMOOTH_PERSONA.to_owned(),
+    }
+}
+
 /// Resolve the path to the local operator token (`~/.smooth/operator-token`).
 fn token_path() -> PathBuf {
     dirs_next::home_dir().map_or_else(|| PathBuf::from("operator-token"), |h| h.join(".smooth").join("operator-token"))
@@ -324,6 +381,10 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     // SMOOTH_EGRESS_ALLOWLIST is configured). This is where the daemon's
     // kernel-enforced security re-homes onto the operator's tool registry.
     let workspace = workspace_dir();
+    // Discover skills once at agent-build time and fold their index into the
+    // persona (progressive disclosure — the agent `read_file`s a SKILL.md body
+    // only when a request matches). Empty discovery leaves the persona untouched.
+    let persona = persona_with_skills(&workspace);
     let egress_proxy = crate::start_egress_proxy();
     tracing::info!(
         workspace = %workspace.display(),
@@ -366,8 +427,8 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         ])
         // The agent's personality: "Big Smooth", the user's personal assistant —
         // NOT the operator's stock customer-support persona, and no reasoning
-        // narration (th-5f059b).
-        .persona(BIG_SMOOTH_PERSONA)
+        // narration (th-5f059b) — plus the discovered "Available skills" index.
+        .persona(persona.as_str())
         // Serve the smooth-web SPA same-origin at `/`, with the auth token injected
         // into its index.html so the browser connects to `/ws?token=…` (validated
         // by the verifier above) — no `?api`/`?token` query string needed
@@ -445,6 +506,72 @@ mod tests {
         assert!(p.contains("never restate"), "forbids restating the question");
         // Does not gratuitously volunteer the org knowledge base.
         assert!(p.contains("unless the user explicitly asks about organization"), "org-knowledge is opt-in");
+    }
+
+    const SAMPLE_SKILL: &str =
+        "---\nname: add-show\ndescription: Add a show to the watchlist\ntriggers:\n  - add show\n  - add movie\n---\n\n# add-show\n\nDo the thing.\n";
+
+    #[test]
+    fn skills_section_indexes_discovered_project_skill() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join(".smooth/skills/add-show");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), SAMPLE_SKILL).unwrap();
+
+        let persona = persona_with_skills(tmp.path());
+        assert!(persona.starts_with(BIG_SMOOTH_PERSONA), "base persona kept as the prefix");
+        assert!(persona.contains("# Available skills"), "section header present");
+        assert!(persona.contains("add-show"), "skill name listed");
+        assert!(persona.contains("Add a show to the watchlist"), "description listed");
+        assert!(persona.contains("triggers: add show, add movie"), "triggers listed");
+        assert!(persona.contains("read_file"), "instructs read_file for progressive disclosure");
+        assert!(persona.contains(&skill_dir.join("SKILL.md").display().to_string()), "SKILL.md path listed");
+        // Body must NOT leak into the persona (progressive disclosure).
+        assert!(!persona.contains("Do the thing."), "skill body must not be dumped into the persona");
+    }
+
+    #[test]
+    fn skills_section_is_none_when_no_readable_skills() {
+        // Empty slice → nothing to inject.
+        assert!(render_skills_section(&[]).is_none());
+        // A skill whose SKILL.md isn't a real on-disk file (e.g. the embedded
+        // builtin) is dropped — read_file couldn't load it anyway.
+        let virtual_skill = smooth_cast::skills::parse_skill_string(
+            SAMPLE_SKILL,
+            std::path::Path::new("<builtin>/add-show/SKILL.md"),
+            smooth_cast::skills::SkillSource::Builtin,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(render_skills_section(&[virtual_skill]).is_none(), "virtual/unreadable skills are dropped");
+    }
+
+    #[test]
+    fn render_skills_section_returns_none_for_empty_so_persona_stays_clean() {
+        // The None-branch of persona_with_skills: no readable skills → no section,
+        // so the base persona is returned unchanged. Tested hermetically here (the
+        // discover() path reads the real ~/.claude / ~/.smooth skill dirs, which
+        // aren't controllable in a unit test).
+        assert!(render_skills_section(&[]).is_none());
+    }
+
+    #[test]
+    fn discovery_skips_malformed_skill_but_keeps_valid_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Valid skill (frontmatter name = "good").
+        let good = tmp.path().join(".smooth/skills/good");
+        std::fs::create_dir_all(&good).unwrap();
+        std::fs::write(good.join("SKILL.md"), "---\nname: good\ndescription: a valid skill\n---\n\nbody\n").unwrap();
+        // Malformed skill — opened frontmatter, never closed. `discover` skips it
+        // with a warning instead of crashing the turn.
+        let bad = tmp.path().join(".smooth/skills/bad");
+        std::fs::create_dir_all(&bad).unwrap();
+        std::fs::write(bad.join("SKILL.md"), "---\nname: bad\ndescription: broken\n\nno close marker").unwrap();
+
+        let skills = smooth_cast::skills::discover(tmp.path());
+        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"good"), "valid skill survives: {names:?}");
+        assert!(!names.contains(&"bad"), "malformed skill is skipped: {names:?}");
     }
 
     #[test]
