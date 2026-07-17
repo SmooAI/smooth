@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Big Smooth daemon launchd agent for smoo-hub.
+
+  Runs `smooth-daemon run` bound to 127.0.0.1:8788 (tailscale-served at :8443)
+  as a KeepAlive agent so it survives reboots and auto-respawns on crash —
+  replacing the fragile hand-started `nohup` process.
+
+  Install:
+    cp scripts/smoo-hub/com.smooai.smooth-daemon.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) \
+       ~/Library/LaunchAgents/com.smooai.smooth-daemon.plist
+    launchctl enable gui/$(id -u)/com.smooai.smooth-daemon
+
+  Uninstall:
+    launchctl bootout gui/$(id -u)/com.smooai.smooth-daemon
+    rm ~/Library/LaunchAgents/com.smooai.smooth-daemon.plist
+
+  See `scripts/smoo-hub/install-smooth-daemon.sh` for an automated install,
+  and `com.smooai.smoohub.docker-watchdog.plist` in the smooai repo for the
+  sibling pattern this mirrors.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTD/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.smooai.smooth-daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/brentrager/smooth-daemon</string>
+        <string>run</string>
+    </array>
+
+    <!-- Respawn on crash + start at boot/login. ThrottleInterval keeps a
+         crash-loop from hammering the CPU. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/brentrager</string>
+
+    <!-- Match the working runtime config exactly. SMOOTH_WORKSPACE is the
+         narrow /Users/brentrager/dev — NOT the broad $HOME value that made
+         grep walk all of home and hang. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/brentrager</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>SMOOTH_ADDR</key>
+        <string>127.0.0.1:8788</string>
+        <key>SMOOTH_TAILSCALE_HTTPS_PORT</key>
+        <string>8443</string>
+        <key>SMOOTH_WORKSPACE</key>
+        <string>/Users/brentrager/dev</string>
+        <key>SMOOTH_OPERATOR_DB</key>
+        <string>/Users/brentrager/.smooth/operator.db</string>
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/brentrager/.smooth/daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/brentrager/.smooth/daemon.err</string>
+</dict>
+</plist>
