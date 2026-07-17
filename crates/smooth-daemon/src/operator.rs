@@ -365,6 +365,107 @@ fn narc_judge_config() -> Option<smooth_operator::llm::LlmConfig> {
     })
 }
 
+/// The daemon's embedded **deny policy** — the declarative half of the engine's
+/// permission gate ([`smooth_operator::deny_policy::DenyPolicy`]). Big Smooth's
+/// posture is *allow benign, block only dangerous*: the gate runs in
+/// [`AutoMode::Bypass`] (allow everything past the built-in circuit-breakers),
+/// and this list is the explicit dangerous-op deny tier layered on top. A match
+/// here is a hard circuit-breaker — `Bypass` cannot downgrade it and no grant
+/// can waive it.
+///
+/// Ported verbatim from the retired `hooks::auto_mode::STARTER_PERMISSIONS`
+/// deny-list (th-3119e3 / th-515a13), re-expressed in the engine's `DenyPolicy`
+/// TOML shape:
+///   - `[bash] deny_patterns` — matched against each sudo/wrapper-stripped
+///     subcommand of a compound command. The engine anchors a pattern with no
+///     trailing `*` by appending one, so a bare bin name (`"reboot"`) becomes
+///     `reboot*` and matches the command run bare OR with args (and
+///     `"mkfs"` matches `mkfs.ext4 …`). The two ambiguous short tokens (`sudo`,
+///     `su`) keep a trailing space (`"su "` → `su *`) so they don't over-match
+///     benign `subl`/`supervisorctl`/… — at the cost of not matching a bare,
+///     argument-less `su`. Note the engine also strips a leading `sudo`, so
+///     `sudo reboot` is caught by the underlying `reboot` pattern; a bare
+///     `sudo <benign>` falls through to Bypass (consistent with allow-benign).
+///   - `[paths] deny` — write/read path **globs** (`*`/`**` match any run,
+///     including `/`).
+const DENY_POLICY_TOML: &str = r#"# Big Smooth deny policy (engine circuit-breaker tier). Posture: ALLOW benign,
+# block ONLY dangerous ops. The gate runs in Bypass; these are the explicit
+# hard-denies layered on top of the engine's built-in circuit-breakers. narc
+# (the second tool_hook, an LLM safety judge) independently blocks
+# context-dependent danger (rm -rf, curl | sh, secret exfil, prompt injection).
+#
+# Bare bin names anchor to `<bin>*` (match bare or with args). `sudo`/`su` keep a
+# trailing space so they don't over-match benign `subl`/`supervisorctl`/`sum`.
+
+[bash]
+deny_patterns = [
+    # Privilege escalation & machine control
+    "sudo ",
+    "su ",
+    "shutdown",
+    "reboot",
+    "halt",
+    "poweroff",
+    # Disk / filesystem destroyers
+    "dd",
+    "mkfs",
+    "diskutil",
+    "fdisk",
+    # macOS persistence / kernel / firmware
+    "launchctl",
+    "kextload",
+    "nvram",
+    "crontab",
+]
+
+[paths]
+# Writes (and reads) to system + credential locations.
+deny = [
+    "/etc/**",
+    "/System/**",
+    "/usr/**",
+    "/bin/**",
+    "/sbin/**",
+    "/Library/**",
+    "**/.ssh/**",
+    "**/.aws/**",
+    "**/Library/LaunchAgents/**",
+    "**/.smooth/auth/**",
+]
+"#;
+
+/// Build the daemon's embedded [`DenyPolicy`] from [`DENY_POLICY_TOML`]. The
+/// TOML is a compile-time constant covered by tests, so a parse failure is a
+/// build/test error, never a runtime one.
+#[allow(
+    clippy::expect_used,
+    reason = "DENY_POLICY_TOML is a compile-time const covered by deny_policy_toml_parses — a parse failure is a build/test error, not runtime"
+)]
+fn default_deny_policy() -> smooth_operator::deny_policy::DenyPolicy {
+    smooth_operator::deny_policy::DenyPolicy::from_toml(DENY_POLICY_TOML).expect("embedded DENY_POLICY_TOML must parse")
+}
+
+/// The permission [`AutoMode`] the daemon runs the gate in. Big Smooth's posture
+/// is *allow benign, block dangerous*, so the default is [`AutoMode::Bypass`]
+/// (allow everything past the built-in circuit-breakers + the embedded
+/// [`default_deny_policy`]). An explicit `SMOOTH_AUTO_MODE` overrides it (e.g.
+/// `ask` / `accept-edits` / `deny`) — mirroring the env override the retired
+/// `AutoModeHook` honored.
+fn permission_mode() -> smooth_operator::permission::AutoMode {
+    match std::env::var("SMOOTH_AUTO_MODE") {
+        Ok(v) if !v.trim().is_empty() => smooth_operator::permission::AutoMode::from_env_value(Some(&v)),
+        _ => smooth_operator::permission::AutoMode::Bypass,
+    }
+}
+
+/// Build the engine's permission gate hook: [`permission_mode`] (Bypass by
+/// default) + the embedded [`default_deny_policy`] as the circuit-breaker deny
+/// tier. Installed FIRST on the operator's tool registry so a policy deny
+/// short-circuits before narc or the tool itself runs.
+fn permission_hook() -> smooth_operator::permission::PermissionHook {
+    smooth_operator::permission::PermissionHook::new(permission_mode()).with_deny_policy(Arc::new(default_deny_policy()))
+}
+
 /// Boot the operator's local deployment flavor on `addr`, gated by an
 /// auto-provisioned [`LocalTokenVerifier`], and serve until Ctrl-C.
 ///
@@ -413,16 +514,18 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         // agent. The widget + SDK clients carry the token, so they're unaffected.
         .strict_auth(true)
         .tools(provider)
-        // th-3119e3 + th-515a13: re-home the security model onto the operator's
-        // per-turn registry as two host `ToolHook`s — the auto-mode permission
-        // gate FIRST (it can allow/deny/ask before anything else runs), then
-        // narc surveillance (secret + prompt-injection detection, LLM-judge
-        // escalation, and secret redaction from results). The builder installs
-        // these ahead of the per-agent auth + confirmation hooks, so they get
-        // first say on every call. narc degrades to regex-only when no gateway
-        // key is configured.
+        // th-daemon-denypolicy: re-home the security model onto the operator's
+        // per-turn registry as two host `ToolHook`s — the ENGINE'S permission
+        // gate FIRST (core 1.7.0 `permission::PermissionHook`, Bypass posture +
+        // the embedded declarative `DenyPolicy` circuit-breaker deny tier: allow
+        // benign, block dangerous), then narc surveillance (secret +
+        // prompt-injection detection, LLM-judge escalation, secret redaction from
+        // results). This retires the daemon's duplicate `AutoModeHook` in favor
+        // of the engine's DenyPolicy-backed hook. The builder installs these
+        // ahead of the per-agent auth + confirmation hooks, so they get first say
+        // on every call. narc degrades to regex-only when no gateway key is set.
         .tool_hooks(vec![
-            Arc::new(crate::hooks::AutoModeHook::from_env()) as Arc<dyn smooth_operator::tool::ToolHook>,
+            Arc::new(permission_hook()) as Arc<dyn smooth_operator::tool::ToolHook>,
             Arc::new(crate::hooks::NarcHook::new(narc_judge_config())),
         ])
         // The agent's personality: "Big Smooth", the user's personal assistant —
@@ -506,6 +609,114 @@ mod tests {
         assert!(p.contains("never restate"), "forbids restating the question");
         // Does not gratuitously volunteer the org knowledge base.
         assert!(p.contains("unless the user explicitly asks about organization"), "org-knowledge is opt-in");
+    }
+
+    // ── deny policy + permission gate ─────────────────────────────────────
+
+    use smooth_operator::permission::{AutoMode, PermissionHook};
+    use smooth_operator::tool::{ToolCall, ToolHook};
+
+    fn bash_call(cmd: &str) -> ToolCall {
+        ToolCall {
+            id: "c1".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({ "command": cmd }),
+        }
+    }
+
+    fn write_call(path: &str) -> ToolCall {
+        ToolCall {
+            id: "c1".into(),
+            name: "write_file".into(),
+            arguments: serde_json::json!({ "path": path, "content": "x" }),
+        }
+    }
+
+    #[test]
+    fn deny_policy_toml_parses() {
+        // A parse failure would be a build/test error, not a runtime one — this
+        // pins that guarantee.
+        let policy = default_deny_policy();
+        assert!(!policy.is_empty(), "embedded deny policy has rules");
+    }
+
+    #[test]
+    fn deny_policy_blocks_dangerous_bash() {
+        let policy = default_deny_policy();
+        // Directly-listed dangerous bins.
+        for cmd in [
+            "su - root",
+            "shutdown -h now",
+            "reboot",
+            "dd if=/dev/zero of=/dev/disk0",
+            "mkfs.ext4 /dev/sda1",
+            "launchctl load x",
+            "crontab -e",
+        ] {
+            assert!(policy.evaluate(&bash_call(cmd)).is_some(), "deny policy must block: {cmd}");
+        }
+        // sudo is stripped by the engine, so a sudo-prefixed dangerous op is
+        // caught by the UNDERLYING pattern (reboot), not the `sudo ` pattern.
+        assert!(
+            policy.evaluate(&bash_call("sudo reboot")).is_some(),
+            "sudo <dangerous> blocked via underlying pattern"
+        );
+    }
+
+    #[test]
+    fn deny_policy_blocks_sensitive_path_writes() {
+        let policy = default_deny_policy();
+        for path in [
+            "/etc/hosts",
+            "/System/x",
+            "/usr/bin/x",
+            "/home/me/.ssh/id_rsa",
+            "/home/me/.aws/credentials",
+            "/home/me/.smooth/auth/smooai.json",
+        ] {
+            assert!(policy.evaluate(&write_call(path)).is_some(), "deny policy must block write to: {path}");
+        }
+    }
+
+    #[test]
+    fn deny_policy_allows_benign() {
+        let policy = default_deny_policy();
+        assert!(policy.evaluate(&bash_call("ls -la")).is_none(), "benign bash falls through");
+        assert!(policy.evaluate(&bash_call("git status")).is_none(), "git status falls through");
+        assert!(policy.evaluate(&write_call("src/main.rs")).is_none(), "benign workspace write falls through");
+    }
+
+    #[tokio::test]
+    async fn permission_hook_bypass_plus_deny_policy_is_allow_benign_block_dangerous() {
+        // The daemon's exact wiring: Bypass mode + the embedded deny policy.
+        let hook = PermissionHook::new(AutoMode::Bypass).with_deny_policy(Arc::new(default_deny_policy()));
+        // Benign runs (Bypass allows everything past circuit-breakers/deny-policy).
+        assert!(hook.pre_call(&bash_call("ls")).await.is_ok(), "benign bash allowed under Bypass");
+        assert!(hook.pre_call(&write_call("src/lib.rs")).await.is_ok(), "benign write allowed under Bypass");
+        // Deny-policy is circuit-breaker tier — Bypass cannot downgrade it.
+        assert!(
+            hook.pre_call(&bash_call("shutdown -h now")).await.is_err(),
+            "deny policy blocks dangerous op even under Bypass"
+        );
+        assert!(
+            hook.pre_call(&write_call("/etc/hosts")).await.is_err(),
+            "deny policy blocks /etc write even under Bypass"
+        );
+    }
+
+    #[test]
+    fn permission_mode_defaults_to_bypass_and_honors_env() {
+        std::env::remove_var("SMOOTH_AUTO_MODE");
+        assert_eq!(permission_mode(), AutoMode::Bypass, "unset → Bypass (allow benign, block dangerous)");
+        std::env::set_var("SMOOTH_AUTO_MODE", "  ");
+        assert_eq!(permission_mode(), AutoMode::Bypass, "blank → Bypass");
+        std::env::set_var("SMOOTH_AUTO_MODE", "ask");
+        assert_eq!(permission_mode(), AutoMode::Ask, "explicit ask honored");
+        std::env::set_var("SMOOTH_AUTO_MODE", "deny");
+        assert_eq!(permission_mode(), AutoMode::DenyUnmatched, "explicit deny honored");
+        std::env::set_var("SMOOTH_AUTO_MODE", "accept-edits");
+        assert_eq!(permission_mode(), AutoMode::AcceptEdits, "explicit accept-edits honored");
+        std::env::remove_var("SMOOTH_AUTO_MODE");
     }
 
     const SAMPLE_SKILL: &str =
