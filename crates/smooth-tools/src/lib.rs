@@ -21,8 +21,10 @@ use std::sync::Arc;
 use smooth_operator::{Tool, ToolRegistry};
 
 pub mod bash;
+pub mod cd;
 pub mod crawl;
 pub mod create_skill;
+pub mod cwd;
 pub mod grep;
 pub mod guard;
 pub mod knowledge_search;
@@ -38,8 +40,10 @@ pub mod web_search;
 pub mod write;
 
 pub use bash::BashTool;
+pub use cd::CdTool;
 pub use crawl::CrawlTool;
 pub use create_skill::CreateSkillTool;
+pub use cwd::SessionCwd;
 pub use grep::GrepTool;
 pub use guard::is_circuit_breaker;
 pub use knowledge_search::KnowledgeSearchTool;
