@@ -218,6 +218,11 @@ export function useOperator(): OperatorApi {
     const sessionRef = useRef<string | null>(null);
     const targetRef = useRef(resolveTarget());
     const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    // Mirror the active conversation id into a ref so `sendMessage` (which
+    // doesn't re-bind on it) can key the `/cd` route to THIS conversation — the
+    // same id the operator threads into the tools' per-turn context.
+    const activeConvRef = useRef<string | null>(null);
+    activeConvRef.current = activeConversationId;
 
     // Mutate the in-flight assistant message (the last streaming one).
     const patchStreaming = useCallback((fn: (m: ChatMessage) => ChatMessage) => {
@@ -438,10 +443,57 @@ export function useOperator(): OperatorApi {
         };
     }, [handle, send]);
 
+    // Push a local system line into the transcript (never sent to the LLM).
+    const pushSystem = useCallback((content: string) => {
+        setMessages((prev) => [...prev, { id: nextId('sys'), role: 'system', content, reasoning: '', tools: [], blocks: [], streaming: false }]);
+    }, []);
+
+    // `/cd <path>` + `/pwd` — scope this conversation's working directory. These
+    // are handled here (NOT sent as a chat turn): the operator's LocalServer owns
+    // the WS message path, so slash commands can't be intercepted server-side.
+    // We POST/GET the daemon's `/api/session/cwd` route (same store the agent's
+    // `cd` tool writes) keyed by the active conversation id, and echo the result.
+    const cwdCommand = useCallback(
+        async (body: string) => {
+            const { http, token } = targetRef.current;
+            const session = activeConvRef.current ?? '';
+            const authHeader: Record<string, string> = token ? { authorization: `Bearer ${token}` } : {};
+            try {
+                if (body === '/pwd' || body.startsWith('/pwd ')) {
+                    const r = await fetch(`${http}/api/session/cwd?session=${encodeURIComponent(session)}`, { headers: authHeader });
+                    const d = await r.json();
+                    pushSystem(`📁 ${d.cwd}`);
+                    return;
+                }
+                const path = body.slice('/cd'.length).trim();
+                const r = await fetch(`${http}/api/session/cwd`, {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json', ...authHeader },
+                    body: JSON.stringify({ session, path }),
+                });
+                if (r.ok) {
+                    const d = await r.json();
+                    pushSystem(path ? `📁 Working directory set to ${d.cwd}` : `📁 Working directory reset to ${d.cwd}`);
+                } else {
+                    pushSystem(`⚠️ ${(await r.text()) || 'could not change directory'}`);
+                }
+            } catch (e) {
+                pushSystem(`⚠️ ${String(e)}`);
+            }
+        },
+        [pushSystem],
+    );
+
     const sendMessage = useCallback(
         (text: string, attachments: Attachment[] = []) => {
             const body = text.trim();
             if ((!body && attachments.length === 0) || !sessionRef.current) return;
+            // Intercept the local working-directory commands before they become a
+            // chat turn.
+            if (body === '/cd' || body.startsWith('/cd ') || body === '/pwd' || body.startsWith('/pwd ')) {
+                void cwdCommand(body);
+                return;
+            }
             setMessages((prev) => [
                 ...prev,
                 {
@@ -468,7 +520,7 @@ export function useOperator(): OperatorApi {
             if (attachments.length) frame.images = attachments.map((a) => a.dataUrl);
             send(frame);
         },
-        [send],
+        [send, cwdCommand],
     );
 
     const respond = useCallback(

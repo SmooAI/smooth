@@ -13,14 +13,19 @@ use std::path::Path;
 
 use ignore::{Walk, WalkBuilder};
 
-/// Directory names always pruned: version-control internals and
-/// build/dependency caches. They explode entry counts and never hold the
-/// source a user is asking about. `.git` itself is never in `.gitignore`, and
-/// `node_modules`/`target` only are when the repo bothered to list them.
+/// Directory names always pruned: version-control internals, build output, and
+/// dependency/tooling caches. They explode entry counts and never hold the
+/// source a user is asking about. `.gitignore` covers most of these *inside* a
+/// repo, but the daemon can run with a non-git workspace root (e.g. `$HOME`),
+/// where nothing is ignored and `~/Library`, `~/.cargo`, `~/.rustup`, `~/.cache`
+/// would otherwise be walked in full. Pruning by name is the cross-tree guard
+/// that holds regardless of git. `.git` itself is never in `.gitignore`.
 const PRUNE_DIRS: &[&str] = &[
+    // version control
     ".git",
     ".hg",
     ".svn",
+    // dependency dirs
     "node_modules",
     "target",
     ".venv",
@@ -28,9 +33,21 @@ const PRUNE_DIRS: &[&str] = &[
     "__pycache__",
     ".mypy_cache",
     ".pytest_cache",
+    // build output
+    "dist",
+    "build",
     ".next",
     ".turbo",
     ".gradle",
+    // home-level tooling caches (the $HOME-walk killers)
+    ".cargo",
+    ".rustup",
+    ".cache",
+    ".npm",
+    ".pnpm-store",
+    // macOS
+    "Library",
+    ".Trash",
 ];
 
 /// Whether a walked entry is a directory whose name is in [`PRUNE_DIRS`].
@@ -59,6 +76,9 @@ mod tests {
         std::fs::write(root.join(".git/objects/deadbeef"), "obj").unwrap();
         std::fs::create_dir_all(root.join("node_modules/left-pad")).unwrap();
         std::fs::write(root.join("node_modules/left-pad/index.js"), "x").unwrap();
+        // Home-level tooling cache — pruned even outside a git repo.
+        std::fs::create_dir_all(root.join(".cargo/registry")).unwrap();
+        std::fs::write(root.join(".cargo/registry/crate.rs"), "x").unwrap();
         std::fs::write(root.join(".envrc"), "export X=1").unwrap();
         std::fs::write(root.join("main.rs"), "fn main(){}").unwrap();
 
@@ -74,5 +94,6 @@ mod tests {
             !names.iter().any(|n| n.contains("node_modules/")),
             "must not descend into node_modules: {names:?}"
         );
+        assert!(!names.iter().any(|n| n.contains(".cargo/")), "must not descend into .cargo: {names:?}");
     }
 }

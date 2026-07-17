@@ -56,7 +56,7 @@ pub fn resolve_workspace_path(base: &Path, rel: &str) -> anyhow::Result<PathBuf>
 /// Collapse `.` and `..` components lexically. Does NOT follow symlinks or
 /// require the path to exist. A leading `..` that can't be popped is kept so
 /// the prefix check in [`resolve_workspace_path`] catches the escape.
-fn lexical_normalize(path: &Path) -> PathBuf {
+pub(crate) fn lexical_normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
         match component {

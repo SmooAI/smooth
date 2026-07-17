@@ -679,7 +679,11 @@ function ToolChip({ t, awaiting }: { t: ToolCall; awaiting: boolean }) {
 // `/smooth-mode <preset>` (bare → lists presets with cost badges); it switches
 // the active model and never sends a chat message. (th-f512b1)
 
-const SLASH_COMMANDS = [{ name: 'smooth-mode', hint: 'switch the active model' }];
+const SLASH_COMMANDS = [
+    { name: 'smooth-mode', hint: 'switch the active model' },
+    { name: 'cd', hint: 'scope the working directory' },
+    { name: 'pwd', hint: 'show the working directory' },
+];
 
 // ── @ mentions ───────────────────────────────────────────────────────────────
 // A twin of the slash popup, but mid-text: type `@`, get workspace files / paths
