@@ -112,13 +112,22 @@ impl SmoothApiClient {
     /// Re-mint the access_token via `client_credentials` if the
     /// stored token has expired (or is about to expire — the
     /// `Credentials::is_expired` 60-second safety margin applies).
-    /// No-op when the token is still fresh, or when there are no
-    /// stored client_credentials to re-exchange with (in which case
-    /// the next call will 401 and the user has to re-run
-    /// `th api login`).
+    /// No-op when the token is still fresh.
     ///
-    /// Also rebuilds `self.http` with the new Authorization header
-    /// so subsequent calls send the fresh token.
+    /// **M2M only, by design.** Supabase *user* sessions refresh
+    /// against a different endpoint and rotate their refresh token on
+    /// every exchange, with only a 10-second reuse grace — so exactly
+    /// one component may write that file. That owner is
+    /// `smooth-cli`'s `auth::refresh` choke point, which also holds
+    /// the wider `Credentials` shape (this crate's type has no `kind`
+    /// discriminator and would downgrade a user session to M2M on
+    /// save). This method therefore reports a user session it can't
+    /// refresh rather than growing a second refresher for it — pearl
+    /// th-2273b8.
+    ///
+    /// # Errors
+    /// The token is expired and carries no `client_id`/`client_secret`
+    /// to re-exchange with, or the grant itself failed.
     pub async fn ensure_fresh_token(&self) -> anyhow::Result<()> {
         let snapshot = self.credentials();
         let Some(creds) = snapshot else { return Ok(()) };
@@ -126,10 +135,7 @@ impl SmoothApiClient {
             return Ok(());
         }
         let (Some(cid), Some(csecret)) = (creds.client_id.clone(), creds.client_secret.clone()) else {
-            // Token expired but we have no way to re-mint it. Let the
-            // next request 401 with the real server's "invalid token"
-            // message; that's clearer than a synthetic error here.
-            return Ok(());
+            anyhow::bail!("session expired and has no client credentials to re-mint from — run `th auth login` again");
         };
         let bare = reqwest::Client::builder().user_agent(user_agent()).build()?;
         let fresh = crate::auth::client_credentials_grant(&bare, &cid, &csecret)
