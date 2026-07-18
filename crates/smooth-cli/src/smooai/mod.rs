@@ -54,8 +54,8 @@ pub async fn require_authed() -> Result<SmoothApiClient> {
     // (`assertMachineTokenAuthorizedForOrg` passes Supabase auth). Fall back to
     // the M2M session (`smooai.json`) otherwise. `SmoothApiClient::from_disk`'s
     // own store is hard-wired to the M2M file, hence the explicit user-store load
-    // here. (An EXPIRED user JWT isn't Supabase-refreshed here — it falls through
-    // to M2M / a re-login prompt.)
+    // here. An expired user JWT IS Supabase-refreshed (pearl th-2273b8) — it only
+    // falls through to M2M when there's no session or no refresh material.
     if let Some(client) = try_user_session().await {
         return Ok(client);
     }
@@ -78,25 +78,51 @@ pub async fn require_authed() -> Result<SmoothApiClient> {
 }
 
 /// Build an authed client from the user JWT at `~/.smooth/auth/smooai-user.json`,
-/// or `None` if it's absent/unreadable/expired so the caller falls back to M2M.
+/// or `None` if it's absent/unreadable, or expired with no way to refresh — in
+/// which case the caller falls back to M2M.
+///
+/// An expired session is refreshed through [`crate::auth::refresh`] (the shared
+/// choke point), which persists the rotated refresh token via the client-shared
+/// store. That store — not `smooth_api_client`'s — has to own the write: its
+/// `Credentials` carries the `kind` discriminator, and round-tripping a user
+/// session through the api-client's narrower type would silently downgrade it
+/// to `M2m` on disk. Pearl th-2273b8.
 async fn try_user_session() -> Option<SmoothApiClient> {
+    let http = reqwest::Client::builder()
+        .user_agent(format!("th/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .ok()?;
     for path in user_jwt_candidates() {
         if !path.exists() {
             continue;
         }
-        let store = CredentialsStore::at(&path);
-        let Ok(Some(creds)) = store.load() else { continue };
-        let Ok(client) = SmoothApiClient::new(smooth_api_client::base_url(), Some(creds), store) else {
+        let shared_store = smooai_client_shared::auth::storage::CredentialsStore::at(&path);
+        let Ok(creds) = crate::auth::refresh::fresh_user_credentials_from(&http, &shared_store).await else {
             continue;
         };
-        // No-op for a user JWT (no client_secret to re-mint), but harmless.
-        client.ensure_fresh_token().await.ok();
-        // is_authenticated() is false for an expired session → try the next candidate.
+        let Ok(client) = SmoothApiClient::new(smooth_api_client::base_url(), Some(to_api_credentials(&creds)), CredentialsStore::at(&path)) else {
+            continue;
+        };
         if client.is_authenticated() {
             return Some(client);
         }
     }
     None
+}
+
+/// Narrow a client-shared session to the `smooth_api_client` shape. Read-only
+/// direction only — see [`try_user_session`] for why the reverse is unsafe.
+fn to_api_credentials(creds: &smooai_client_shared::auth::storage::Credentials) -> smooth_api_client::Credentials {
+    smooth_api_client::Credentials {
+        access_token: creds.access_token.clone(),
+        refresh_token: creds.refresh_token.clone(),
+        expires_at: creds.expires_at,
+        user: creds.user.clone(),
+        active_org_id: creds.active_org_id.clone(),
+        client_id: creds.client_id.clone(),
+        client_secret: creds.client_secret.clone(),
+        created_at: creds.created_at,
+    }
 }
 
 /// Candidate paths for the user JWT, in priority order. `th auth login` writes the
