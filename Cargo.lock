@@ -4703,7 +4703,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 [[package]]
 name = "smooai-client-shared"
 version = "0.1.0"
-source = "git+https://github.com/SmooAI/client-shared.git?rev=7309040afe15e20e7439cb9201cceed826cd2347#7309040afe15e20e7439cb9201cceed826cd2347"
+source = "git+https://github.com/SmooAI/client-shared.git?rev=a21c06b6ebd94a63b22f6637b3b239b0c6f212a3#a21c06b6ebd94a63b22f6637b3b239b0c6f212a3"
 dependencies = [
  "anyhow",
  "axum 0.7.9",

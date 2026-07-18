@@ -12,6 +12,10 @@ interface AuthStatus {
     loggedIn: boolean;
     user: string | null;
     orgId: string | null;
+    // th-cbf613: loggedIn is now expiry-aware. `expired` means a session is on
+    // disk but dead — the daemon's heartbeat couldn't renew it and a human has
+    // to sign in again.
+    expired?: boolean;
 }
 
 interface DeviceStart {
@@ -95,10 +99,14 @@ export function SmooSignIn() {
     return (
         <button
             onClick={startSignIn}
-            title="Sign in with Smoo AI so Big Smooth can act on your org"
+            title={
+                status.expired
+                    ? `Your Smoo AI session${status.user ? ` (${status.user})` : ''} expired and could not be renewed — sign in again`
+                    : 'Sign in with Smoo AI so Big Smooth can act on your org'
+            }
             className={`${PILL} text-(--color-muted-foreground) opacity-70 transition hover:opacity-100`}
         >
-            <Sparkles className="size-3.5" /> {error ? 'Sign-in failed — retry' : 'Sign in with Smoo'}
+            <Sparkles className="size-3.5" /> {error ? 'Sign-in failed — retry' : status.expired ? 'Session expired — sign in' : 'Sign in with Smoo'}
         </button>
     );
 }

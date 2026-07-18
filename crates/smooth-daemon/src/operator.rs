@@ -508,6 +508,10 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     // only when a request matches). Empty discovery leaves the persona untouched.
     let persona = persona_with_skills(&workspace);
     let egress_proxy = crate::start_egress_proxy();
+    // Keep the signed-in Smoo AI session alive. The access token lives ~1h;
+    // without this the daemon holds a dead token and every api.smoo.ai call
+    // 401s until a human re-runs sign-in (th-cbf613).
+    crate::auth_login::spawn_credential_heartbeat();
     tracing::info!(
         workspace = %workspace.display(),
         egress = egress_proxy.as_deref().unwrap_or("unrestricted"),
