@@ -236,7 +236,7 @@ smooth-goalie = { version = "0.22.0", path = "crates/smooth-goalie", package = "
 # bump the rev when client-shared changes.
 # Pearls: th-33d57b (scaffolded), th-0398c1 (auth module),
 # th-abc4e2 (wires `th admin login`).
-smooai-client-shared = { git = "https://github.com/SmooAI/client-shared.git", rev = "7309040afe15e20e7439cb9201cceed826cd2347", features = ["auth"] }
+smooai-client-shared = { git = "https://github.com/SmooAI/client-shared.git", rev = "a21c06b6ebd94a63b22f6637b3b239b0c6f212a3", features = ["auth"] }
 
 # The house HTTP client — resilient reqwest wrapper (retries, timeout,
 # rate-limit, circuit breaker). The tunnel's local-target proxy uses it
