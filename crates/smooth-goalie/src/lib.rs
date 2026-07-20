@@ -1,10 +1,17 @@
-//! Smooth Goalie — in-VM HTTP forward proxy. Delegates every access decision
-//! to Wonk and writes JSON-lines audit entries for every allowed or blocked
+//! Smooth Goalie — HTTP forward proxy. Decides every request against an
+//! allowlist and writes JSON-lines audit entries for every allowed or blocked
 //! request.
 //!
-//! This library surface exists so integration tests (and, in the future, an
-//! in-process use of Goalie by Big Smooth for local-only agents) can spin up
-//! the proxy without going through the `smooth-goalie` binary.
+//! **How it is used today:** `smooth-daemon`'s `start_egress_proxy` runs
+//! [`run_proxy_local`] in-process with an [`EgressAllowlist`] and an
+//! [`AuditLogger`]. That loopback proxy is the daemon's **egress boundary** —
+//! `smooth-tools`' kernel sandbox denies direct outbound network and points
+//! `HTTP(S)_PROXY` at it, so off-box traffic must clear the allowlist here.
+//!
+//! The [`wonk`] delegation path and the `smooth-goalie` binary are leftovers
+//! from the removed microVM stack (2026-07, pearl th-f4a801), where Goalie ran
+//! inside the VM and asked Wonk for each decision. Nothing in the tree drives
+//! that path now. New callers want [`run_proxy_local`] / [`run_proxy_with`].
 
 pub mod allowlist;
 pub mod audit;

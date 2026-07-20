@@ -224,10 +224,12 @@ jobs:
 
             - name: Install macOS build deps
               if: runner.os == 'macOS'
-              # protobuf: smooth-narc's prost build.rs needs `protoc` (the
-              # Linux step above installs it via apt; macOS runners have
-              # neither protoc nor it on PATH, so the cross-platform binary
-              # build failed with "Could not find protoc"). Pearl th-14bddf.
+              # protobuf: originally for smooth-narc's prost build.rs, which
+              # failed the macOS cross-platform build with "Could not find
+              # protoc" (pearl th-14bddf). That crate went with the microVM
+              # stack (2026-07/th-f4a801) and no build.rs in the tree shells
+              # out to protoc today — kept as cheap insurance because a
+              # release build is the worst place to discover otherwise.
               run: brew install protobuf
 
             - name: Install pnpm

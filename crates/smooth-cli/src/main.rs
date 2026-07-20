@@ -1950,7 +1950,7 @@ async fn cmd_status() -> Result<()> {
             let (icon, label) = status_indicator(db_status);
             println!("  {icon} {:<16} {} {}", "Dolt store", label, "(pearls + config)".dimmed());
 
-            // Smooth operatives (sandboxed AI agents in microVMs)
+            // Smooth operatives (in-process agent turns; bash under the kernel sandbox)
             let sandbox_status = body["sandbox"].as_str().or_else(|| body["sandboxes"].as_str()).unwrap_or("healthy");
             let active = body["sandbox_active"].as_u64().or_else(|| body["sandboxes_active"].as_u64()).unwrap_or(0);
             let max = body["sandbox_max"].as_u64().or_else(|| body["sandboxes_max"].as_u64()).unwrap_or(3);
@@ -2826,7 +2826,7 @@ fn print_explainer() {
     println!("{}", "What it does".bold().bright_yellow());
     println!("  • Interactive AI coding TUI                 {}", "th code".bright_cyan());
     println!(
-        "  • microVM orchestration via Big {} + cast  {}",
+        "  • Always-on agent daemon: Big {}            {}",
         gradient::smooth(),
         "th up / th down / th status".bright_cyan()
     );
@@ -3027,34 +3027,30 @@ async fn cmd_code(
         }
     }
 
-    // Check if Big Smooth is running. If not, boot the Safehouse —
-    // the same daemonized sandboxed path `th up` takes. This is the
-    // only auto-start path; we never start a bare in-process Big
-    // Smooth on the host, because that bypasses every guarantee of
-    // the Safehouse (microsandbox isolation, in-VM cast, SAFEHOUSE_MODE
-    // dispatch routing). See ADR-001 + ADR-003 + the user-facing rule
-    // that this is dev tooling, not a release artifact — no fallback
-    // to the legacy host-bind path.
+    // Check if Big Smooth is running. If not, boot it via the same
+    // daemonized path `th up` takes — one auto-start route, so the
+    // daemon always comes up with the same env, log file, and pid file
+    // regardless of which command triggered it.
     let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(2)).build()?;
     let health = client.get("http://localhost:4400/health").send().await;
 
     if health.is_err() || !health.as_ref().is_ok_and(|r| r.status().is_success()) {
         // Pearl th-7840d8 — animated boot indicator (was a bare
-        // `Starting Smooth...`). The Safehouse daemonization
-        // happens in the background via `th up`; the parent polls
-        // `/health` and advances steps based on observable signals.
+        // `Starting Smooth...`). Daemonization happens in the
+        // background via `th up`; the parent polls `/health` and
+        // advances steps based on observable signals. Labels match the
+        // `th up` path so both cold-start routes look identical.
         let indicator = boot_ui::BootIndicator::new();
-        let step_vm = indicator.step("starting Safehouse microVM");
-        let step_cast = indicator.step("cast online (wonk · goalie · narc · scribe · archivist · diver · groove)");
-        let step_runner = indicator.step("operative pool warm");
+        let step_vm = indicator.step("starting Big Smooth");
+        let step_cast = indicator.step("dolt store online");
+        let step_runner = indicator.step("dispatch ready");
         let step_health = indicator.step("health check");
 
-        // Re-exec ourselves as `th up` so the Safehouse daemonizes
-        // exactly the way it would if the user had typed `th up`.
-        // The child detaches its stdio to ~/.smooth/smooth.log,
-        // writes ~/.smooth/smooth.pid, returns immediately, and the
-        // safehouse microVM keeps running in the background until
-        // `th down`.
+        // Re-exec ourselves as `th up` so Big Smooth daemonizes exactly
+        // the way it would if the user had typed `th up`. The child
+        // detaches its stdio to ~/.smooth/smooth.log, writes
+        // ~/.smooth/smooth.pid, returns immediately, and the daemon
+        // keeps running in the background until `th down`.
         let exe = std::env::current_exe()?;
         let status = std::process::Command::new(exe)
             .arg("up")
@@ -3062,7 +3058,7 @@ async fn cmd_code(
             .stderr(std::process::Stdio::null())
             .stdin(std::process::Stdio::null())
             .status()
-            .context("spawn `th up` to boot the Safehouse")?;
+            .context("spawn `th up` to boot Big Smooth")?;
         if !status.success() {
             // The daemon spawn itself failed before the VM ever
             // got off the ground. Mark every step failed so the
@@ -3081,11 +3077,10 @@ async fn cmd_code(
         // the four steps.
         //
         // The signals we can actually probe from the host:
-        //   * VM up: TCP connect to localhost:4400 succeeds (port
-        //     forward is plumbed).
-        //   * cast online + runner pool: implied once /health
-        //     responds; the safehouse only flips the listener on
-        //     after its internal init is done.
+        //   * daemon up: TCP connect to localhost:4400 succeeds.
+        //   * store + dispatch ready: implied once /health responds;
+        //     the daemon only flips the listener on after its internal
+        //     init is done.
         //
         // So we drive step_vm off the TCP probe, and once /health
         // returns 200 we cascade the remaining three. This is
@@ -3111,14 +3106,14 @@ async fn cmd_code(
             step_runner.fail("not reached");
             step_health.fail("not reached");
             indicator.finish();
-            anyhow::bail!("Safehouse microVM never opened :4400 — check ~/.smooth/smooth.log");
+            anyhow::bail!("Big Smooth never opened :4400 — check ~/.smooth/smooth.log");
         }
         step_vm.ok();
 
-        // Step 2 + 3: wait for /health to respond at all (any
-        // response means the safehouse listener is up; the cast +
-        // runner-pool init is what's gating that listener flipping
-        // on). We split them visually for the receipt.
+        // Step 2 + 3: wait for /health to respond at all (any response
+        // means the daemon's listener is up; store + dispatch init is
+        // what gates that listener flipping on). We split them
+        // visually for the receipt.
         let cast_deadline = std::time::Instant::now() + TIMEOUT_PER_STEP;
         let mut listener_up = false;
         while std::time::Instant::now() < cast_deadline {
@@ -3133,7 +3128,7 @@ async fn cmd_code(
             step_runner.fail("not reached");
             step_health.fail("not reached");
             indicator.finish();
-            anyhow::bail!("Safehouse :4400 accepted TCP but never answered HTTP — check ~/.smooth/smooth.log");
+            anyhow::bail!("Big Smooth :4400 accepted TCP but never answered HTTP — check ~/.smooth/smooth.log");
         }
         step_cast.ok();
         step_runner.ok();
@@ -3152,7 +3147,7 @@ async fn cmd_code(
         if !ready {
             step_health.fail("timeout");
             indicator.finish();
-            anyhow::bail!("Safehouse booted but :4400 never became healthy — check ~/.smooth/smooth.log");
+            anyhow::bail!("Big Smooth booted but :4400 never became healthy — check ~/.smooth/smooth.log");
         }
         step_health.ok();
         indicator.finish();

@@ -10,19 +10,19 @@ description = "Big Smooth, reborn — the always-on, single-tenant personal-agen
 [lib]
 name = "smooth_daemon"
 
-# The always-on daemon binary. Runnable standalone (`smooth-daemon`); later
-# wired behind `th up` / `th service` (a separate, cross-crate pearl).
+# The always-on daemon binary — Big Smooth. Runnable standalone
+# (`smooth-daemon`); `th daemon` is a passthrough to it and `th up` launches it.
+# Deliberately NOT linked into `th`: most users install the CLI for
+# api/jira/pearls/config and shouldn't pay for axum + the engine + the widget
+# bundle (see crates/smooth-cli/src/daemon_launcher.rs).
 [[bin]]
 name = "smooth-daemon"
 path = "src/main.rs"
 
-# th-f30175: Phase 0 scaffold. The always-on daemon is a clean rewrite of
-# smooth-bigsmooth on the smooth-operator engine, dropping the microsandbox
-# substrate in favour of a kernel OS-sandbox + egress proxy + auto-mode
-# permission engine. It lives ALONGSIDE smooth-bigsmooth so `th up` keeps
-# working on the old path until the new daemon reaches parity. Dependencies are
-# intentionally lean here; Phase 1 (th-64fbe8) adds the axum server, session
-# store, and SessionRunCoordinator wiring.
+# th-f30175: the always-on daemon replaced smooth-bigsmooth (deleted with the
+# microVM stack, 2026-07/th-f4a801). It runs on the smooth-operator engine, with
+# security from a kernel OS-sandbox + egress proxy + the engine's permission
+# hook rather than a microVM substrate.
 [dependencies]
 smooth-operator.workspace = true
 # EPIC th-c89c2a: the OPERATOR (local deployment flavor) embedded in-process —

@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
-exclude = ["crates/smooth-bigsmooth/tests/fixtures"]
 
 [workspace.package]
 version = "0.22.0"
@@ -36,12 +35,13 @@ axum-extra = { version = "0.10", features = ["typed-header"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
 
-# Database — pinned to 0.32 so `libsqlite3-sys 0.30` is the single version in
-# the tree. `microsandbox` (via sea-orm → sqlx → libsqlite3-sys 0.30) and
-# `rusqlite` both link the `sqlite3` native library, so their versions must
-# unify. rusqlite 0.32 uses the same APIs we care about (Connection, params!,
-# query, prepare, Row, types::ToSql).
-rusqlite = { version = "0.32", features = ["bundled"] }
+# Database — `smooth-daemon`'s durable local storage (schedules, operator
+# state). `bundled` compiles SQLite into the binary, so there is no system
+# `sqlite3` to match. rusqlite is the only crate in the tree that links it
+# (`cargo tree -i libsqlite3-sys`); the old 0.32 pin existed to unify with
+# microsandbox's sea-orm → sqlx → libsqlite3-sys 0.30, and died with the
+# microVM stack (2026-07, pearl th-f4a801).
+rusqlite = { version = "0.40", features = ["bundled"] }
 # SMOODEV-1468: sync Postgres checkpoint store (smooth-operator `postgres` feature)
 # + testcontainers-backed integration tests. Sync `postgres` crate (not async
 # sqlx) because the CheckpointStore trait is synchronous, mirroring rusqlite.
@@ -69,15 +69,15 @@ serde_json = "1"
 serde_yml = "0.0.12"
 
 # HTTP client
-# Use rustls-tls-webpki-roots so the crate ships its own CA bundle (no system
-# certs needed). This is critical for smooth-operative running inside
-# alpine microVMs which don't have ca-certificates installed by default.
+# Use rustls-tls-webpki-roots so the crate ships its own CA bundle rather than
+# reading the system trust store — `th` is distributed as a standalone binary
+# and must work on hosts with no `ca-certificates` installed.
 #
-# `hickory-dns` enables a pure-Rust DNS resolver instead of getaddrinfo. This
-# is critical for the in-VM runner because alpine's musl getaddrinfo has been
-# observed to return EAI_AGAIN against microsandbox's intercepted DNS — the
-# pure-Rust hickory resolver reads /etc/resolv.conf and sends UDP queries
-# directly, which the microsandbox DNS interceptor handles correctly.
+# `hickory-dns` swaps getaddrinfo for a pure-Rust resolver that reads
+# /etc/resolv.conf and sends UDP queries itself. Originally needed because
+# alpine musl's getaddrinfo returned EAI_AGAIN against the microVM's
+# intercepted DNS (that stack is gone, 2026-07/th-f4a801); kept because it
+# keeps resolution independent of the host's libc and NSS config.
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-webpki-roots", "charset", "http2", "hickory-dns"] }
 
 # File search

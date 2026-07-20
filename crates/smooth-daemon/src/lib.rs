@@ -3,9 +3,10 @@
 //! `smooth-daemon` runs **smooth-operator's local deployment flavor** as its
 //! one and only agent runtime. It targets a **single trusted operator**
 //! self-hosting their own instance (hermes-style) on a personal machine
-//! reachable over SSH/Tailscale — NOT a multi-tenant service. The microsandbox
-//! microVM substrate is gone; security is a kernel-enforced OS sandbox on tool
-//! subprocesses + an egress allowlist proxy (EPIC th-c89c2a).
+//! reachable over SSH/Tailscale — NOT a multi-tenant service. Security is a
+//! kernel-enforced OS sandbox on tool subprocesses + an egress allowlist proxy
+//! (EPIC th-c89c2a); the microVM substrate it replaced was removed in 2026-07
+//! (pearl th-f4a801).
 //!
 //! # Shape — one operator, one protocol (the north star)
 //!

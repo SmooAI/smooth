@@ -6,7 +6,7 @@
 //! operator (axum + the engine + adapters + the widget bundle). The daemon is a
 //! separate artifact, resolved at first use and (if absent) downloaded from the
 //! GitHub release — the same "auxiliary native binary" shape `th` already uses
-//! for `smooth-dolt` / `smooth-operative`.
+//! for `smooth-dolt`.
 //!
 //! `th daemon <args…>` is a **pure passthrough**: the args are forwarded to
 //! `smooth-daemon <args…>`, which owns the full daemon CLI (`run` / `operator` /

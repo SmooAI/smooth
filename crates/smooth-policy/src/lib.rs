@@ -35,8 +35,12 @@ pub type Result<T> = std::result::Result<T, PolicyError>;
 
 /// Maps a guest (in-VM) path prefix to the corresponding host path.
 ///
-/// Wonk uses these mappings to translate guest paths before checking
-/// filesystem deny patterns, which are expressed in host-relative terms.
+/// **Vestigial.** Wonk used these mappings to translate guest paths before
+/// checking host-relative filesystem deny patterns. The microVM stack (and
+/// Wonk) went away in 2026-07 (pearl th-f4a801); nothing translates paths
+/// today because tools run on the host. Kept because `Policy` serializes a
+/// `mounts` table and dropping the field would break parsing of existing
+/// policy TOML.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct MountMapping {
     pub guest_path: String,

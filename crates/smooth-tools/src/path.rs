@@ -1,6 +1,5 @@
 //! Workspace path confinement — the security floor for every filesystem tool.
 //!
-//! Replicated from `smooth-operative/src/tool_support.rs::resolve_workspace_path`.
 //! Every tool that touches the filesystem MUST route user-supplied paths
 //! through [`resolve_workspace_path`] so a prompt-injected agent can't read or
 //! write outside the workspace. The confinement is **lexical** (no
