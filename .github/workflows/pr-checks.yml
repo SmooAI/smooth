@@ -41,8 +41,20 @@ jobs:
                     # Unix-socket dolt server, tailscale). Excluded explicitly
                     # rather than silently skipped; making it build on Windows
                     # means vendoring OpenSSL and is its own piece of work.
+                    #
+                    # smooth-diver's e2e and six smooth-pearls test modules
+                    # drive a real pearl store, which shells out to the
+                    # smooth-dolt binary — a CGO Go binary needing ICU, with no
+                    # Windows build (see the skipped build step above). They are
+                    # filtered out by name rather than passing vacuously. The
+                    # rest of smooth-pearls (dolt.rs, registry, the non-Unix
+                    # dolt_server stub) still runs here.
                     - os: windows-latest
-                      test_args: '--workspace --exclude smooai-smooth-daemon'
+                      test_args: >-
+                          --workspace
+                          --exclude smooai-smooth-daemon
+                          --exclude smooai-smooth-diver
+                          -E 'not (package(smooai-smooth-pearls) & test(/^(agents|memory|memory_tools|messaging|store|tools)::/))'
         steps:
             - uses: actions/checkout@v4
 
@@ -102,7 +114,10 @@ jobs:
             - name: Build examples (needed by cross-process file-lock test, pearl th-9799fa)
               run: cargo build --examples --workspace
 
+            # bash on both legs so the filter expression quotes predictably
+            # (pwsh would need its own escaping for the `&` and parentheses).
             - name: Test
+              shell: bash
               run: cargo nextest run --profile ci ${{ matrix.test_args }}
               env:
                   NEXTEST_EXPERIMENTAL_LIBTEST_JSON: 1
