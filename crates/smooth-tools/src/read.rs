@@ -151,8 +151,12 @@ fn list_files_blocking(base: &std::path::Path, pattern: &str) -> anyhow::Result<
     // and an absolute pattern was treated as relative, matching nothing
     // (pearl th-a165b4). Globs are built with `/` — globset normalizes
     // separators when matching.
+    // `has_root()` as well as `is_absolute()`: on Windows a drive-less rooted
+    // path like `/etc/*` is NOT absolute, so `is_absolute()` alone would let it
+    // fall through to the relative branch and quietly match nothing instead of
+    // being refused as outside the workspace. On Unix the two are equivalent.
     let pattern_path = std::path::Path::new(pattern);
-    let mut rel_pattern: String = if pattern_path.is_absolute() {
+    let mut rel_pattern: String = if pattern_path.is_absolute() || pattern_path.has_root() {
         match pattern_path.strip_prefix(base) {
             Ok(stripped) => stripped.to_string_lossy().replace('\\', "/"),
             Err(_) => return Ok(format!("no files match `{pattern}` (path is outside the workspace)")),
