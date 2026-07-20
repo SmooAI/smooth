@@ -30,7 +30,19 @@ jobs:
             # Windows-only or universal is the whole point of the matrix.
             fail-fast: false
             matrix:
-                os: [ubuntu-latest, windows-latest]
+                include:
+                    - os: ubuntu-latest
+                      test_args: ''
+                    # smooth-daemon depends on web-push -> ece -> openssl-sys,
+                    # which finds no OpenSSL on windows-latest (no vcpkg tree,
+                    # no OPENSSL_DIR). It is a leaf crate — nothing in the
+                    # workspace depends on it, `th` included — and it is a
+                    # Unix-only service anyway (launchd/systemd installers,
+                    # Unix-socket dolt server, tailscale). Excluded explicitly
+                    # rather than silently skipped; making it build on Windows
+                    # means vendoring OpenSSL and is its own piece of work.
+                    - os: windows-latest
+                      test_args: '--workspace --exclude smooai-smooth-daemon'
         steps:
             - uses: actions/checkout@v4
 
@@ -91,7 +103,7 @@ jobs:
               run: cargo build --examples --workspace
 
             - name: Test
-              run: cargo nextest run --profile ci
+              run: cargo nextest run --profile ci ${{ matrix.test_args }}
               env:
                   NEXTEST_EXPERIMENTAL_LIBTEST_JSON: 1
 
