@@ -1351,16 +1351,10 @@ impl ConfigClient {
         } else {
             CredentialsStore::default_user().context("locate ~/.smooth/auth/smooai-user.json")?
         };
-        let creds = match store.load().context("read credentials")? {
-            Some(c) => c,
-            None => {
-                let hint = if m2m {
-                    "not logged in — run `th auth login --m2m` (or `th api login`) first"
-                } else {
-                    "not logged in as a user — run `th auth login` first, or pass --m2m to use the M2M session"
-                };
-                anyhow::bail!(hint);
-            }
+        let hint = if m2m {
+            "not logged in — run `th auth login --m2m` (or `th api login`) first"
+        } else {
+            "not logged in as a user — run `th auth login` first, or pass --m2m to use the M2M session"
         };
 
         let http = reqwest::Client::builder()
@@ -1368,32 +1362,11 @@ impl ConfigClient {
             .build()
             .context("build HTTP client")?;
 
-        // Auto-refresh expired creds. Two paths:
-        //
-        // - M2M: re-mint via `client_credentials_grant` (same shape
-        //   as `SmoothApiClient::ensure_fresh_token`).
-        // - User: exchange the stored Supabase `refresh_token` for a
-        //   fresh access_token at `{supabase}/auth/v1/token`. The
-        //   refresh helper itself lives in `client-shared`'s
-        //   `auth::refresh` module but isn't `pub`-exported, so we
-        //   inline a minimal version here.
-        let creds = if creds.is_expired() {
-            let refreshed = if m2m {
-                crate::auth::refresh::refresh_m2m_session(&http, &creds)
-                    .await
-                    .context("auto-refresh M2M client_credentials grant")?
-            } else if creds.refresh_token.is_some() {
-                crate::auth::refresh::refresh_user_session(&http, &creds)
-                    .await
-                    .context("auto-refresh user session")?
-            } else {
-                anyhow::bail!("session expired — re-run `th auth login`");
-            };
-            store.save(&refreshed).context("persist refreshed credentials")?;
-            refreshed
-        } else {
-            creds
-        };
+        // Auto-refresh via the shared choke point — it picks the M2M
+        // re-mint vs the Supabase refresh_token grant and persists the
+        // rotated token (pearl th-2273b8; this used to be a hand-rolled
+        // copy of the same branch).
+        let creds = crate::auth::refresh::fresh_credentials_from(&http, &store, hint).await?;
 
         Ok(Self {
             base_url: std::env::var("SMOOAI_API_URL").unwrap_or_else(|_| "https://api.smoo.ai".to_string()),

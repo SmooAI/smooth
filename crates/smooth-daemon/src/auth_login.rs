@@ -19,7 +19,11 @@
 //!    file `th`'s user-authed API calls read via
 //!    `CredentialsStore::default_user()`).
 //! 4. `GET /api/auth/status` — the UI polls this to render "Signed in as
-//!    …" vs a sign-in button.
+//!    …" vs a sign-in button. Expiry-aware: a present-but-dead session
+//!    reports `loggedIn: false` + `expired: true`, not "signed in".
+//! 5. [`spawn_credential_heartbeat`] — a background task that renews the
+//!    session against Supabase before its ~1h access token expires, so
+//!    the daemon doesn't silently rot into 401s (th-cbf613).
 //!
 //! ponytail: duplicated from smooth-cli auth::{browser_login,pkce} (and
 //! from smooth-bigsmooth's auth_login); extract to a shared crate if a
@@ -49,6 +53,7 @@ use base64::Engine;
 use rand::RngCore;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use smooai_client_shared::auth::refresh;
 use smooai_client_shared::auth::storage::{CredentialKind, Credentials, CredentialsStore};
 use tokio::sync::Semaphore;
 
@@ -90,6 +95,35 @@ fn cli_device_url() -> String {
 
 fn device_client_id() -> String {
     std::env::var("SMOOAI_DEVICE_CLIENT_ID").unwrap_or_else(|_| DEFAULT_DEVICE_CLIENT_ID.to_string())
+}
+
+// ── Supabase endpoints (session refresh) ────────────────────────────
+//
+// `smoo.ai/api/token` implements only `authorization_code` + the device
+// grant — it 400s `unsupported_grant_type` on a refresh. But the session
+// it mints IS a real Supabase session (admin `generateLink` → `verifyOtp`),
+// so the stored `refresh_token` is a genuine Supabase refresh token and the
+// renewal goes **direct to Supabase**. Same constants + env-var names
+// `th auth login` uses (smooth-cli `auth::{supabase_url, supabase_anon_key}`),
+// duplicated rather than shared because smooth-daemon doesn't depend on
+// smooth-cli.
+//
+// ponytail: env vars, not `@smooai/config`. The house rule prefers config
+// keys, but the four endpoints above are already
+// `std::env::var(..).unwrap_or_else(default)` and matching them beats being
+// the one odd knob — worth revisiting for all six together.
+
+const DEFAULT_SUPABASE_URL: &str = "https://db.smoo.ai";
+/// The **anon** (publishable) key — the same one every customer-website JS
+/// bundle ships. Not a secret; the service-role key is never touched here.
+const DEFAULT_SUPABASE_ANON_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhycWJxZ290Z2hpdGNmdW91a2RrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDEwNDEyODksImV4cCI6MjA1NjYxNzI4OX0.KHwbyjdrBhCiP6Na8aY8b3fA6RNkCqJ4m-dmY4AOdmw";
+
+fn supabase_url() -> String {
+    std::env::var("SMOOAI_SUPABASE_URL").unwrap_or_else(|_| DEFAULT_SUPABASE_URL.to_string())
+}
+
+fn supabase_anon_key() -> String {
+    std::env::var("SMOOAI_SUPABASE_ANON_KEY").unwrap_or_else(|_| DEFAULT_SUPABASE_ANON_KEY.to_string())
 }
 
 // ── router state ────────────────────────────────────────────────────
@@ -742,29 +776,173 @@ fn persist_credentials(tokens: &TokenExchangeResponse, callback_org_id: Option<S
 
 #[derive(Serialize)]
 pub struct AuthStatus {
+    /// `true` only when a session exists **and** its access token is still
+    /// usable. A present-but-expired file is NOT logged in — reporting it
+    /// as such is the bug this replaces (th-cbf613).
     #[serde(rename = "loggedIn")]
     logged_in: bool,
     user: Option<String>,
     #[serde(rename = "orgId")]
     org_id: Option<String>,
+    /// Access-token expiry, so the UI can show how much runway is left.
+    #[serde(rename = "expiresAt", skip_serializing_if = "Option::is_none")]
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Inside the 5-minute pre-expiry window but not dead yet — the
+    /// heartbeat should be renewing it about now.
+    stale: bool,
+    /// Session on disk but past expiry: the heartbeat couldn't renew it
+    /// (revoked/expired refresh token) and the operator must sign in again.
+    expired: bool,
 }
 
-/// `GET /api/auth/status` — report whether `th` currently has a user
-/// session. Never errors on a missing file (that's the logged-out state).
-async fn status_handler() -> Json<AuthStatus> {
-    let creds = CredentialsStore::default_user().ok().and_then(|s| s.load().ok().flatten());
-    match creds {
-        Some(c) => Json(AuthStatus {
-            logged_in: true,
-            user: c.user,
-            org_id: c.active_org_id,
-        }),
-        None => Json(AuthStatus {
+/// Derive the reported status from whatever is on disk. Pure so the
+/// expiry logic is testable without a filesystem or a clock injection.
+fn auth_status(creds: Option<Credentials>) -> AuthStatus {
+    let Some(c) = creds else {
+        return AuthStatus {
             logged_in: false,
             user: None,
             org_id: None,
-        }),
+            expires_at: None,
+            stale: false,
+            expired: false,
+        };
+    };
+    let expired = c.is_expired();
+    let stale = !expired && refresh::should_refresh(&c);
+    AuthStatus {
+        logged_in: !expired,
+        // Keep identity even when expired so the UI can say *who* needs
+        // to sign in again.
+        user: c.user,
+        org_id: c.active_org_id,
+        expires_at: c.expires_at,
+        stale,
+        expired,
     }
+}
+
+/// `GET /api/auth/status` — report whether `th` currently has a *usable*
+/// user session. Never errors on a missing file (that's logged-out).
+async fn status_handler() -> Json<AuthStatus> {
+    Json(auth_status(CredentialsStore::default_user().ok().and_then(|s| s.load().ok().flatten())))
+}
+
+// ── credential heartbeat (th-cbf613) ────────────────────────────────
+
+/// How often the heartbeat re-reads the credentials file. `should_refresh`
+/// opens a 5-minute pre-expiry window, so a 60s tick gets ~5 attempts
+/// inside it — a transient Supabase blip retries a minute later and still
+/// lands before the token dies. A tick that has nothing to do is one small
+/// file read, so the idle cost doesn't argue for a longer interval.
+#[allow(clippy::duration_suboptimal_units)]
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+
+/// What a single heartbeat tick should do, given the credentials on disk.
+/// Split out from the I/O so every branch is unit-testable without
+/// touching Supabase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeartbeatAction {
+    /// No session on disk — nothing to keep alive.
+    NotLoggedIn,
+    /// Not a user session (M2M `client_credentials` has no refresh token;
+    /// it must be re-minted from client_id/secret — out of scope here).
+    NotUserSession,
+    /// Token has plenty of runway; do nothing.
+    Fresh,
+    /// Due for renewal but carries no refresh token — a human must sign
+    /// in again. Visible, not silent.
+    NoRefreshToken,
+    /// Inside the refresh window: exchange the refresh token.
+    Refresh,
+}
+
+fn heartbeat_action(creds: Option<&Credentials>) -> HeartbeatAction {
+    let Some(c) = creds else { return HeartbeatAction::NotLoggedIn };
+    if c.kind != CredentialKind::User {
+        return HeartbeatAction::NotUserSession;
+    }
+    if !refresh::should_refresh(c) {
+        return HeartbeatAction::Fresh;
+    }
+    if c.refresh_token.is_none() {
+        return HeartbeatAction::NoRefreshToken;
+    }
+    HeartbeatAction::Refresh
+}
+
+/// One heartbeat tick against an explicit store + Supabase endpoint.
+/// Returns the action it took so the caller can log only on transitions.
+/// Errors are returned, never swallowed. Endpoints are parameters (not
+/// read from env in here) so tests can point at a dead port without
+/// racing other tests over a process-global env var.
+async fn heartbeat_tick(http: &reqwest::Client, store: &CredentialsStore, supabase_url: &str, anon_key: &str) -> anyhow::Result<HeartbeatAction> {
+    let creds = store.load()?;
+    let action = heartbeat_action(creds.as_ref());
+    if action == HeartbeatAction::Refresh {
+        let previous = creds.expect("Refresh implies credentials were loaded");
+        let renewed = refresh::refresh_session(http, supabase_url, anon_key, &previous).await?;
+        // Supabase ROTATES the refresh token — persisting is mandatory,
+        // not an optimization: skip it and the next tick presents a
+        // revoked token and the session dies.
+        store.save(&renewed)?;
+        tracing::info!(expires_at = ?renewed.expires_at, "credential heartbeat: session renewed");
+    }
+    Ok(action)
+}
+
+/// Spawn the background credential heartbeat: every [`HEARTBEAT_INTERVAL`],
+/// renew the user session if it's inside the pre-expiry window.
+///
+/// Without this the daemon holds a ~1h token forever and every
+/// `api.smoo.ai` call 401s until a human re-runs sign-in. Failures are
+/// logged at warn/error and surface to the UI via `/api/auth/status`
+/// (`expired: true`) — a heartbeat that fails quietly is worse than none.
+pub fn spawn_credential_heartbeat() {
+    tokio::spawn(async move {
+        let http = reqwest::Client::default();
+        // Only log on a change of state, so a long-idle daemon doesn't
+        // emit the same line every minute for hours.
+        let mut last: Option<HeartbeatAction> = None;
+        let mut last_error: Option<String> = None;
+        loop {
+            let store = match CredentialsStore::default_user() {
+                Ok(store) => store,
+                Err(e) => {
+                    tracing::error!(error = %e, "credential heartbeat: cannot locate the credentials store — session will not be renewed");
+                    return;
+                }
+            };
+            match heartbeat_tick(&http, &store, &supabase_url(), &supabase_anon_key()).await {
+                Ok(action) => {
+                    last_error = None;
+                    if last != Some(action) {
+                        match action {
+                            HeartbeatAction::NoRefreshToken => {
+                                tracing::warn!("credential heartbeat: session is expiring and has no refresh token — sign in again")
+                            }
+                            HeartbeatAction::NotUserSession => tracing::warn!("credential heartbeat: stored session is not a user session — not renewing"),
+                            HeartbeatAction::NotLoggedIn | HeartbeatAction::Fresh | HeartbeatAction::Refresh => {
+                                tracing::debug!(?action, "credential heartbeat");
+                            }
+                        }
+                        last = Some(action);
+                    }
+                }
+                Err(e) => {
+                    // Never log token material — this is the upstream
+                    // status/message plus our own context, no secrets.
+                    let msg = format!("{e:#}");
+                    if last_error.as_ref() != Some(&msg) {
+                        tracing::error!(error = %msg, "credential heartbeat: session renewal FAILED — sign in again (`/api/auth/status` now reports expired)");
+                        last_error = Some(msg);
+                    }
+                    last = None;
+                }
+            }
+            tokio::time::sleep(HEARTBEAT_INTERVAL).await;
+        }
+    });
 }
 
 // ── small HTML helpers ──────────────────────────────────────────────
@@ -1198,5 +1376,164 @@ mod tests {
         assert_eq!(cli_device_url(), "https://example.test/device");
         std::env::remove_var("SMOOAI_DEVICE_CLIENT_ID");
         std::env::remove_var("SMOOAI_CLI_DEVICE_URL");
+    }
+
+    // ── status expiry + heartbeat (th-cbf613) ───────────────────────
+
+    /// A user session expiring `mins` from now (negative = already past).
+    fn user_creds(mins: i64, refresh_token: Option<&str>) -> Credentials {
+        Credentials {
+            access_token: "tok".into(),
+            refresh_token: refresh_token.map(str::to_string),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(mins)),
+            user: Some("brent@smoo.ai".into()),
+            active_org_id: Some("org_abc".into()),
+            client_id: None,
+            client_secret: None,
+            kind: CredentialKind::User,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn status_logged_out_when_no_credentials() {
+        let s = auth_status(None);
+        assert!(!s.logged_in);
+        assert!(!s.stale && !s.expired);
+        assert!(s.user.is_none() && s.expires_at.is_none());
+    }
+
+    #[test]
+    fn status_fresh_session_is_logged_in_and_not_stale() {
+        let s = auth_status(Some(user_creds(45, Some("rtok"))));
+        assert!(s.logged_in);
+        assert!(!s.stale, "45 min of runway is outside the 5-min window");
+        assert!(!s.expired);
+        assert_eq!(s.user.as_deref(), Some("brent@smoo.ai"));
+        assert_eq!(s.org_id.as_deref(), Some("org_abc"));
+        assert!(s.expires_at.is_some());
+    }
+
+    #[test]
+    fn status_near_expiry_is_stale_but_still_logged_in() {
+        // Inside `should_refresh`'s 5-min window, outside `is_expired`'s 60s.
+        let s = auth_status(Some(user_creds(3, Some("rtok"))));
+        assert!(s.logged_in, "3 min of runway is still usable");
+        assert!(s.stale);
+        assert!(!s.expired);
+    }
+
+    #[test]
+    fn status_expired_session_is_not_logged_in() {
+        // The bug this fixes: the file exists, so the old handler said
+        // `loggedIn: true` while holding a dead token.
+        let s = auth_status(Some(user_creds(-30, Some("rtok"))));
+        assert!(!s.logged_in);
+        assert!(s.expired);
+        assert!(!s.stale, "expired is reported as expired, not stale");
+        assert_eq!(s.user.as_deref(), Some("brent@smoo.ai"), "identity kept so the UI can say who must re-auth");
+    }
+
+    #[test]
+    fn status_without_expiry_is_logged_in() {
+        // No `expires_at` → we can't prove it's dead; report usable (this
+        // matches `is_expired`/`should_refresh`, which both say "no").
+        let mut c = user_creds(0, Some("rtok"));
+        c.expires_at = None;
+        let s = auth_status(Some(c));
+        assert!(s.logged_in);
+        assert!(!s.stale && !s.expired);
+        assert!(s.expires_at.is_none());
+    }
+
+    #[test]
+    fn heartbeat_skips_when_logged_out() {
+        assert_eq!(heartbeat_action(None), HeartbeatAction::NotLoggedIn);
+    }
+
+    #[test]
+    fn heartbeat_skips_fresh_session() {
+        assert_eq!(heartbeat_action(Some(&user_creds(45, Some("rtok")))), HeartbeatAction::Fresh);
+    }
+
+    #[test]
+    fn heartbeat_refreshes_inside_the_window() {
+        assert_eq!(heartbeat_action(Some(&user_creds(3, Some("rtok")))), HeartbeatAction::Refresh);
+    }
+
+    #[test]
+    fn heartbeat_refreshes_already_expired_session() {
+        // Still worth attempting — the refresh token outlives the access
+        // token (30-day per-session lifetime), so this usually recovers.
+        assert_eq!(heartbeat_action(Some(&user_creds(-30, Some("rtok")))), HeartbeatAction::Refresh);
+    }
+
+    #[test]
+    fn heartbeat_flags_missing_refresh_token() {
+        assert_eq!(heartbeat_action(Some(&user_creds(3, None))), HeartbeatAction::NoRefreshToken);
+    }
+
+    #[test]
+    fn heartbeat_never_touches_m2m_credentials() {
+        // client_credentials has no refresh token; re-minting it from
+        // client_id/secret is a different flow and out of scope here.
+        let mut c = user_creds(3, Some("rtok"));
+        c.kind = CredentialKind::M2m;
+        assert_eq!(heartbeat_action(Some(&c)), HeartbeatAction::NotUserSession);
+    }
+
+    #[test]
+    fn supabase_endpoints_default_and_honor_env_overrides() {
+        std::env::remove_var("SMOOAI_SUPABASE_URL");
+        std::env::remove_var("SMOOAI_SUPABASE_ANON_KEY");
+        assert_eq!(supabase_url(), "https://db.smoo.ai");
+        assert!(supabase_anon_key().starts_with("eyJ"), "baked-in anon key should be a JWT");
+        std::env::set_var("SMOOAI_SUPABASE_URL", "http://127.0.0.1:54331");
+        std::env::set_var("SMOOAI_SUPABASE_ANON_KEY", "local-anon");
+        assert_eq!(supabase_url(), "http://127.0.0.1:54331");
+        assert_eq!(supabase_anon_key(), "local-anon");
+        std::env::remove_var("SMOOAI_SUPABASE_URL");
+        std::env::remove_var("SMOOAI_SUPABASE_ANON_KEY");
+    }
+
+    /// Discard port — nothing listens, so no test ever leaves the box.
+    const UNREACHABLE_SUPABASE: &str = "http://127.0.0.1:9";
+
+    fn store_with(dir: &std::path::Path, creds: Option<&Credentials>) -> CredentialsStore {
+        let store = CredentialsStore::at(dir.join("smooai-user.json"));
+        if let Some(c) = creds {
+            store.save(c).unwrap();
+        }
+        store
+    }
+
+    #[tokio::test]
+    async fn tick_on_empty_store_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with(dir.path(), None);
+        let action = heartbeat_tick(&reqwest::Client::default(), &store, UNREACHABLE_SUPABASE, "anon").await.unwrap();
+        assert_eq!(action, HeartbeatAction::NotLoggedIn);
+    }
+
+    #[tokio::test]
+    async fn tick_leaves_a_fresh_session_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with(dir.path(), Some(&user_creds(45, Some("rtok"))));
+        let action = heartbeat_tick(&reqwest::Client::default(), &store, UNREACHABLE_SUPABASE, "anon").await.unwrap();
+        assert_eq!(action, HeartbeatAction::Fresh);
+        // Untouched means untouched — same token still on disk.
+        assert_eq!(store.load().unwrap().unwrap().access_token, "tok");
+    }
+
+    #[tokio::test]
+    async fn tick_surfaces_a_failed_refresh_as_an_error() {
+        // A failing refresh must return Err (→ logged at error, and the
+        // still-stale file keeps `/api/auth/status` honest), not swallow.
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with(dir.path(), Some(&user_creds(-30, Some("rtok"))));
+        let result = heartbeat_tick(&reqwest::Client::default(), &store, UNREACHABLE_SUPABASE, "anon").await;
+        assert!(result.is_err(), "a failed renewal must not be swallowed");
+        // And the stale credentials are left alone rather than clobbered.
+        assert_eq!(store.load().unwrap().unwrap().access_token, "tok");
     }
 }
