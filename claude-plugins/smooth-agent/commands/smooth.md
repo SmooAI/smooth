@@ -15,8 +15,8 @@ all work as **pearls**.
 Current farm (live now):
 !`th claude ls 2>/dev/null || echo "(no sessions; th claude not installed?)"`
 
-Mail waiting:
-!`th msg inbox --pull --agent big-smooth 2>/dev/null | head -40 || echo "(none)"`
+Mail waiting (local read — no `--pull`, which contends on the shared Dolt lock):
+!`th msg inbox --agent big-smooth 2>/dev/null | head -40 || echo "(none)"`
 
 ## Interpret the request
 
@@ -42,11 +42,14 @@ Mode = first word of `$ARGUMENTS`; the rest are its args. Dispatch:
 
 - **`mail <to> <body>`** — Steer a worker / broadcast over th-mail:
   `th msg send --to <to|all> --from big-smooth --body "<body>"`. Read replies with
-  `th msg inbox --pull --agent big-smooth`; thread with `th msg thread <id>`.
+  `th msg inbox --agent big-smooth`; thread with `th msg thread <id>`. Only add
+  `--pull` for genuinely cross-machine agents — it writes to the shared Dolt
+  store and repeated pulls wedge every agent's mailbox.
 
-- **`ls`** — `th claude ls`. **`attach <id>`** — tell the user to run
-  `th claude attach <id>` themselves (attaching replaces the current process, so
-  you can't do it for them); `Ctrl-b d` detaches.
+- **`ls`** — `th claude ls` (`--json` for machine-readable). **`attach <id>`** —
+  tell the user to run `th claude attach <id>` themselves (attaching replaces the
+  current process, so you can't do it for them); `Ctrl-b d` detaches. For a live
+  dashboard with flip-mode keys, point them at `th claude tui`.
 
 ## Operating rules
 
