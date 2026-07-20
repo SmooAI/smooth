@@ -8,6 +8,12 @@
 
 pub mod agents;
 pub mod dolt;
+/// The real server talks over a Unix domain socket; non-Unix targets get
+/// a stub that declines to attach, so pearls fall back to CLI mode.
+#[cfg(unix)]
+pub mod dolt_server;
+#[cfg(not(unix))]
+#[path = "dolt_server_stub.rs"]
 pub mod dolt_server;
 pub mod memory;
 pub mod memory_tools;

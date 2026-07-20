@@ -146,11 +146,20 @@ fn list_files_blocking(base: &std::path::Path, pattern: &str) -> anyhow::Result<
     // Accept an absolute-within-workspace pattern by making it workspace-relative
     // (globs match against paths relative to `base`). Absolute-but-outside ⇒
     // nothing to list. The agent naturally emits absolute paths (th-c89c2a).
-    let base_str = base.to_string_lossy();
-    let mut rel_pattern: String = if pattern.starts_with('/') {
-        match pattern.strip_prefix(base_str.as_ref()) {
-            Some(stripped) => stripped.trim_start_matches('/').to_string(),
-            None => return Ok(format!("no files match `{pattern}` (path is outside the workspace)")),
+    // Detect absoluteness with `Path`, not `starts_with('/')`: a Windows
+    // absolute path is `D:\ws\src/*.rs`, so the string check never fired there
+    // and an absolute pattern was treated as relative, matching nothing
+    // (pearl th-a165b4). Globs are built with `/` — globset normalizes
+    // separators when matching.
+    // `has_root()` as well as `is_absolute()`: on Windows a drive-less rooted
+    // path like `/etc/*` is NOT absolute, so `is_absolute()` alone would let it
+    // fall through to the relative branch and quietly match nothing instead of
+    // being refused as outside the workspace. On Unix the two are equivalent.
+    let pattern_path = std::path::Path::new(pattern);
+    let mut rel_pattern: String = if pattern_path.is_absolute() || pattern_path.has_root() {
+        match pattern_path.strip_prefix(base) {
+            Ok(stripped) => stripped.to_string_lossy().replace('\\', "/"),
+            Err(_) => return Ok(format!("no files match `{pattern}` (path is outside the workspace)")),
         }
     } else {
         pattern.to_string()
@@ -233,6 +242,14 @@ mod tests {
         dir
     }
 
+    /// Listings carry native path separators, so Windows reports
+    /// `src\main.rs` where Unix reports `src/main.rs`. Normalize to `/` so the
+    /// assertions read the same on both platforms (pearl th-a165b4) — the
+    /// separator is not what these tests are about.
+    fn norm(s: &str) -> String {
+        s.replace('\\', "/")
+    }
+
     #[tokio::test]
     async fn read_file_numbers_lines() {
         let dir = workspace_with_files().await;
@@ -271,7 +288,7 @@ mod tests {
         let tool = ListFilesTool {
             workspace: dir.path().to_path_buf(),
         };
-        let out = tool.execute(json!({"pattern": "**/*.rs"})).await.unwrap();
+        let out = norm(&tool.execute(json!({"pattern": "**/*.rs"})).await.unwrap());
         assert!(out.contains("src/main.rs"), "{out}");
         assert!(!out.contains("README.md"), "glob should exclude non-rs: {out}");
     }
@@ -282,7 +299,7 @@ mod tests {
         let tool = ListFilesTool {
             workspace: dir.path().to_path_buf(),
         };
-        let out = tool.execute(json!({})).await.unwrap();
+        let out = norm(&tool.execute(json!({})).await.unwrap());
         assert!(out.contains("README.md") && out.contains("src/main.rs"), "{out}");
     }
 
@@ -302,7 +319,7 @@ mod tests {
             workspace: dir.path().to_path_buf(),
         };
         let abs = format!("{}/src/*.rs", dir.path().display());
-        let out = tool.execute(json!({ "pattern": abs })).await.unwrap();
+        let out = norm(&tool.execute(json!({ "pattern": abs })).await.unwrap());
         assert!(out.contains("src/main.rs"), "abs-in-workspace should match: {out}");
     }
 
@@ -313,7 +330,7 @@ mod tests {
         let tool = ListFilesTool {
             workspace: dir.path().to_path_buf(),
         };
-        let out = tool.execute(json!({ "pattern": "src" })).await.unwrap();
+        let out = norm(&tool.execute(json!({ "pattern": "src" })).await.unwrap());
         assert!(out.contains("src/main.rs"), "bare dir should list contents: {out}");
     }
 

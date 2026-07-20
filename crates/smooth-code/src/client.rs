@@ -561,6 +561,15 @@ mod tests {
         assert!(!client.is_connected());
     }
 
+    // Both `connect_with_retry` tests below aim a connection at a closed
+    // loopback port and rely on it failing fast. That holds on Unix, which
+    // answers with an immediate ECONNREFUSED, but not on Windows: the stack
+    // silently drops the SYN there and each attempt burns the full TCP
+    // connect timeout (measured at ~213s per attempt on windows-latest, so
+    // 641s for the 3-attempt case — pearl th-a165b4). The behaviour under
+    // test is platform-independent and covered on Unix; running them on
+    // Windows would add ~14 minutes to every CI run to assert the same thing.
+    #[cfg(unix)]
     #[tokio::test]
     async fn connect_with_retry_max_attempts_zero_falls_back_to_single_shot() {
         // pearl th-461ab9: bench-side mirror of OperativeClient's
@@ -579,6 +588,8 @@ mod tests {
         assert!(result.is_err(), "max_attempts=0 must surface the same error as single-shot connect()");
     }
 
+    // Unix-only for the same reason as the test above.
+    #[cfg(unix)]
     #[tokio::test]
     async fn connect_with_retry_returns_last_error_after_exhausting_attempts() {
         // pearl th-461ab9: confirm we don't hang when every attempt fails.

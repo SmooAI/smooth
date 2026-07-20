@@ -1438,7 +1438,12 @@ fn copy_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
                 #[cfg(unix)]
                 std::os::unix::fs::symlink(&target, &to)?;
                 #[cfg(not(unix))]
-                std::fs::copy(&from, &to)?;
+                {
+                    // Creating a symlink needs elevation on Windows, so copy
+                    // the contents through rather than recreating the link.
+                    let _ = target;
+                    std::fs::copy(&from, &to)?;
+                }
             }
         } else {
             std::fs::copy(&from, &to)?;

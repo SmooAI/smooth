@@ -128,27 +128,24 @@ fn build(policy: &SandboxPolicy, command: &str) -> Command {
 /// `.git/hooks` (which would re-enter execution outside the sandbox).
 #[cfg(target_os = "macos")]
 fn macos_profile(policy: &SandboxPolicy) -> String {
-    // Canonicalize so the profile paths match what the kernel enforces (macOS
-    // symlinks /tmp → /private/tmp, /var/folders → /private/var/folders).
-    let ws_path = std::fs::canonicalize(&policy.workspace).unwrap_or_else(|_| policy.workspace.clone());
-    let ws = ws_path.display();
-    let mut p = format!(
+    // Personal-assistant posture (th-sandbox-personal): Big Smooth is a trusted
+    // agent on the operator's own machine, so writes are allowed by default
+    // (edit `~/.zshrc`, `~/.config`, dotfiles — a jailed assistant is useless).
+    // Safety is behavioural: the deny-policy circuit-breakers + the Narc LLM
+    // judge gate dangerous *actions*. The kernel keeps only the guarantees that
+    // must hold even against a fully-hijacked shell: no exfil/overwrite of the
+    // crown-jewel credential dirs (below), no planting a launch agent, and no
+    // re-entering execution via `.git/hooks`/`.git/config`. SBPL is
+    // last-match-wins, so these targeted denies override the opening allow.
+    // Git re-entry is denied in EVERY repo, not just the workspace: now that
+    // writes are allowed by default, a workspace-scoped deny would leave a hook
+    // plantable in any other checkout on the machine. The profile therefore no
+    // longer needs the workspace path at all.
+    let mut p = String::from(
         "(version 1)\n\
          (allow default)\n\
-         (deny file-write*)\n\
-         (allow file-write*\n\
-         \x20  (subpath \"{ws}\")\n\
-         \x20  (subpath \"/tmp\")\n\
-         \x20  (subpath \"/private/tmp\")\n\
-         \x20  (subpath \"/private/var/folders\")\n\
-         \x20  (literal \"/dev/null\")\n\
-         \x20  (literal \"/dev/stdout\")\n\
-         \x20  (literal \"/dev/stderr\")\n\
-         \x20  (literal \"/dev/dtracehelper\")\n\
-         \x20  (regex #\"^/dev/tty\")\n\
-         \x20  (regex #\"^/dev/fd/\"))\n\
-         (deny file-write* (subpath \"{ws}/.git/hooks\"))\n\
-         (deny file-write* (literal \"{ws}/.git/config\"))\n"
+         (deny file-write* (regex #\"/\\.git/hooks/\"))\n\
+         (deny file-write* (regex #\"/\\.git/config$\"))\n",
     );
     if let Some(home) = &policy.home {
         use std::fmt::Write as _;
@@ -167,6 +164,25 @@ fn macos_profile(policy: &SandboxPolicy) -> String {
              \x20  (literal \"{h}/.netrc\")\n\
              \x20  (literal \"{h}/.smooth/providers.json\")\n\
              \x20  (subpath \"{h}/.smooth/auth\"))\n"
+        );
+        // Crown-jewel WRITE deny: even with writes allowed by default, a
+        // hijacked shell must not overwrite credentials or plant persistence.
+        // Mirrors the read-deny set + `~/Library/LaunchAgents` (a login-agent
+        // written here would later execute OUTSIDE the sandbox).
+        let _ = write!(
+            p,
+            "(deny file-write*\n\
+             \x20  (subpath \"{h}/.ssh\")\n\
+             \x20  (subpath \"{h}/.aws\")\n\
+             \x20  (subpath \"{h}/.config/gh\")\n\
+             \x20  (subpath \"{h}/.config/gcloud\")\n\
+             \x20  (subpath \"{h}/.kube\")\n\
+             \x20  (subpath \"{h}/.docker\")\n\
+             \x20  (subpath \"{h}/.gnupg\")\n\
+             \x20  (literal \"{h}/.netrc\")\n\
+             \x20  (subpath \"{h}/.smooth/auth\")\n\
+             \x20  (literal \"{h}/.smooth/providers.json\")\n\
+             \x20  (subpath \"{h}/Library/LaunchAgents\"))\n"
         );
     }
     if policy.proxy.is_some() {
@@ -260,19 +276,25 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn write_outside_workspace_is_denied() {
+        async fn home_writes_allowed_but_crown_jewels_denied() {
             let dir = tempfile::tempdir().unwrap();
-            let outside = tempfile::tempdir().unwrap(); // a different tree
             let policy = SandboxPolicy::for_workspace(dir.path().to_path_buf());
-            // Try to write into a sibling temp dir that is NOT the workspace and
-            // NOT under /tmp's allowed prefixes for THIS workspace... actually
-            // tempdirs are under /var/folders (allowed). Use $HOME instead.
-            let target = format!("{}/smooth-sandbox-escape-test.txt", std::env::var("HOME").unwrap());
-            let _ = std::fs::remove_file(&target);
-            let (code, out) = run(&policy, &format!("echo escaped > '{target}'")).await;
-            assert_ne!(code, 0, "writing to $HOME should be denied: {out}");
-            assert!(!std::path::Path::new(&target).exists(), "escape file must not exist");
-            let _ = (outside,);
+            let home = std::env::var("HOME").unwrap();
+            // Personal-assistant posture: a benign $HOME write (a dotfile-style
+            // path) now SUCCEEDS — an assistant that can't touch ~/.zshrc is useless.
+            let benign = format!("{home}/.smooth-sandbox-benign-test.txt");
+            let _ = std::fs::remove_file(&benign);
+            let (code, out) = run(&policy, &format!("echo ok > '{benign}'")).await;
+            assert_eq!(code, 0, "benign $HOME write should be allowed: {out}");
+            assert!(std::path::Path::new(&benign).exists(), "benign $HOME file should exist");
+            let _ = std::fs::remove_file(&benign);
+            // But the crown jewels stay KERNEL-denied even with writes allowed by
+            // default — a hijacked shell still can't overwrite ~/.ssh.
+            let jewel = format!("{home}/.ssh/smooth-sandbox-escape-test");
+            let _ = std::fs::remove_file(&jewel);
+            let (jcode, jout) = run(&policy, &format!("mkdir -p '{home}/.ssh' 2>/dev/null; echo escaped > '{jewel}'")).await;
+            assert_ne!(jcode, 0, "writing under ~/.ssh must be denied: {jout}");
+            assert!(!std::path::Path::new(&jewel).exists(), "crown-jewel write must not land");
         }
 
         #[tokio::test]
@@ -300,6 +322,32 @@ mod tests {
             assert!(out.contains("DONE"));
             assert!(!dir.path().join(".git/hooks/post-checkout").exists(), "planted hook must not exist: {out}");
             assert!(!dir.path().join(".git/config").exists(), "git config must not be writable: {out}");
+        }
+
+        #[tokio::test]
+        async fn git_hooks_denied_in_repos_outside_the_workspace_too() {
+            // Regression for the personal-assistant posture: writes are allowed by
+            // default, so a workspace-scoped hook deny would leave every OTHER
+            // checkout on the machine plantable. The deny is a path regex, not a
+            // workspace subpath — prove it holds in an unrelated repo.
+            let dir = tempfile::tempdir().unwrap();
+            let other = tempfile::tempdir().unwrap();
+            let policy = SandboxPolicy::for_workspace(dir.path().to_path_buf());
+            let hook = other.path().join(".git/hooks/post-checkout");
+            let cfg = other.path().join(".git/config");
+            let (_c, out) = run(
+                &policy,
+                &format!(
+                    "mkdir -p '{h}' 2>&1; echo evil > '{hook}' 2>&1; echo '[core]' > '{cfg}' 2>&1; echo DONE",
+                    h = other.path().join(".git/hooks").display(),
+                    hook = hook.display(),
+                    cfg = cfg.display(),
+                ),
+            )
+            .await;
+            assert!(out.contains("DONE"));
+            assert!(!hook.exists(), "hook in an unrelated repo must not be plantable: {out}");
+            assert!(!cfg.exists(), "git config in an unrelated repo must not be writable: {out}");
         }
 
         #[tokio::test]

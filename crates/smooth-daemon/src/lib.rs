@@ -33,6 +33,7 @@ pub mod cwd_route;
 pub mod hooks;
 pub mod operator;
 mod operator_storage;
+pub mod org_auth;
 pub mod push;
 pub mod schedule;
 pub mod scheduler;
