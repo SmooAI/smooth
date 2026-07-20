@@ -8,8 +8,10 @@
 //!
 //! **Auth:** the local flavor enables the operator's **strict-auth** mode, so a
 //! `/ws` connection with a missing/invalid token is **rejected** (HTTP 401),
-//! not degraded to anonymous. So the [`LocalTokenVerifier`] genuinely gates
-//! connections — a stray local process or tailnet peer can't drive the agent.
+//! not degraded to anonymous. So the [`SmooOrgVerifier`](crate::org_auth::SmooOrgVerifier)
+//! genuinely gates connections — a stray local process or tailnet peer can't
+//! drive the agent — and stamps each connection with the operator's real Smoo
+//! org (th-0c63cc).
 //! (Default operator behavior is still lenient/anonymous for the embeddable
 //! widget's public flow; the local flavor opts into strict.)
 //!
@@ -83,8 +85,9 @@ use async_trait::async_trait;
 use smooth_operator::Tool;
 use smooth_operator_server::local::LocalServer;
 use smooth_operator_server::ServerConfig;
-use smooth_operator_svc::auth::LocalTokenVerifier;
 use smooth_operator_svc::{ToolProvider, ToolProviderContext};
+
+use crate::org_auth::SmooOrgVerifier;
 use smooth_tools::SessionCwd;
 
 /// A [`ToolProvider`] that hands the operator the daemon's kernel-sandboxed tool
@@ -537,7 +540,13 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         // in a plain terminal without exporting a key.
         .config(resolve_gateway_config())
         .storage(storage)
-        .auth(Arc::new(LocalTokenVerifier::new(token.clone())))
+        // Same local-token gate as the engine's `LocalTokenVerifier`, but the
+        // principal carries the operator's REAL Smoo org (read fresh from the
+        // signed-in session on every connection) instead of the hardcoded
+        // `"local"` placeholder — org-scoped tools (web search, knowledge,
+        // scraping) need a real org to work at all (th-0c63cc). Signed out, it
+        // falls back to `"local"` and behaves exactly as before.
+        .auth(Arc::new(SmooOrgVerifier::new(token.clone())))
         // Reject (don't degrade to anonymous) any `/ws` connection without a
         // valid token — so a stray local process / tailnet peer can't drive the
         // agent. The widget + SDK clients carry the token, so they're unaffected.
