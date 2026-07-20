@@ -1,0 +1,46 @@
+name: Windows probe (temporary)
+
+on:
+    push:
+        branches: [th-a165b4-windows-ci]
+    workflow_dispatch:
+
+jobs:
+    probe:
+        name: Windows cargo check probe
+        runs-on: windows-latest
+        timeout-minutes: 60
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: dtolnay/rust-toolchain@stable
+
+            - uses: Swatinem/rust-cache@v2
+
+            - name: Install protoc
+              uses: arduino/setup-protoc@v3
+              with:
+                  repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+            - uses: pnpm/action-setup@v4
+
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+
+            - name: Build web UI (rust-embed needs web/dist)
+              run: |
+                  cd crates/smooth-web/web
+                  pnpm install --no-frozen-lockfile
+                  pnpm build
+              shell: bash
+
+            - name: Probe — smooth-cli
+              continue-on-error: true
+              run: cargo check -p smooai-smooth-cli --message-format short 2>&1 | Select-String -Pattern "^error|error\[" | Select-Object -First 200
+              shell: pwsh
+
+            - name: Probe — whole workspace
+              continue-on-error: true
+              run: cargo check --workspace --message-format short 2>&1 | Select-String -Pattern "^error|error\[" | Select-Object -First 300
+              shell: pwsh
