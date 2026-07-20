@@ -217,7 +217,10 @@ export default function App() {
                 onClick={() => setSidebarOpen((o) => !o)}
                 aria-label={sidebarOpen ? 'Close conversations' : 'Open conversations'}
                 title="Conversations"
-                className="fixed top-3.5 left-4 z-50 grid size-9 place-items-center rounded-xl bg-panel/70 text-(--color-muted-foreground) backdrop-blur transition hover:text-foreground"
+                /* top offset clears the iOS status bar / Dynamic Island: at a bare
+                   `top-3.5` the button lands *under* the clock in an installed PWA
+                   and can't be tapped at all (th-086d97). */
+                className="fixed top-[calc(env(safe-area-inset-top)+0.875rem)] left-4 z-50 grid size-9 place-items-center rounded-xl bg-panel/70 text-(--color-muted-foreground) backdrop-blur transition hover:text-foreground"
             >
                 <Menu size={18} />
             </button>
@@ -232,14 +235,14 @@ export default function App() {
                     onClick={() => void push.enable()}
                     disabled={push.busy}
                     title="Get notified on this device"
-                    className="fixed top-14 right-4 z-10 flex items-center gap-1.5 rounded-full bg-panel/80 px-3 py-1.5 text-xs text-(--color-muted-foreground) opacity-70 transition hover:opacity-100 disabled:opacity-40"
+                    className="fixed top-[calc(env(safe-area-inset-top)+3.5rem)] right-4 z-10 flex items-center gap-1.5 rounded-full bg-panel/80 px-3 py-1.5 text-xs text-(--color-muted-foreground) opacity-70 transition hover:opacity-100 disabled:opacity-40"
                 >
                     <Bell className="size-3.5" /> {push.busy ? 'Enabling…' : 'Notify me'}
                 </button>
             )}
             {push.enabled && (
                 <div
-                    className="fixed top-14 right-4 z-10 flex items-center gap-1.5 text-xs text-(--color-online) opacity-60"
+                    className="fixed top-[calc(env(safe-area-inset-top)+3.5rem)] right-4 z-10 flex items-center gap-1.5 text-xs text-(--color-online) opacity-60"
                     title="Notifications on for this device"
                 >
                     <BellRing className="size-3.5" />
@@ -317,8 +320,9 @@ function Sidebar({
             <aside
                 className={`fixed top-0 left-0 z-40 flex h-dvh w-72 flex-col border-r border-border bg-panel/85 backdrop-blur-xl transition-transform duration-200 ${open ? 'translate-x-0' : '-translate-x-full'}`}
             >
-                {/* pt-16 clears the floating menu button that overlaps this corner. */}
-                <div className="flex items-center gap-2 px-4 pt-16 pb-3">
+                {/* pt clears the floating menu button that overlaps this corner, plus the
+                    iOS status bar so the title isn't tucked under the clock. */}
+                <div className="flex items-center gap-2 px-4 pt-[calc(env(safe-area-inset-top)+4rem)] pb-3">
                     <a href="https://smoo.ai" target="_blank" rel="noreferrer" title="Smooth by Smoo AI" className="opacity-70 transition hover:opacity-100">
                         <img src="/smooth-icon.svg" alt="Smooth" className="size-5" />
                     </a>
