@@ -233,7 +233,7 @@ mod tests {
         tokio::fs::write(root.join("node_modules/pkg/index.js"), "var needle = 2;\n").await.unwrap();
 
         let tool = GrepTool { workspace: root.to_path_buf() };
-        let out = tool.execute(json!({"pattern": "needle"})).await.unwrap();
+        let out = norm(&tool.execute(json!({"pattern": "needle"})).await.unwrap());
         assert!(out.contains("src/a.rs"), "source match found: {out}");
         assert!(!out.contains("node_modules"), "node_modules must be pruned even with no .git: {out}");
     }
