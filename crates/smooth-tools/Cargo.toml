@@ -10,11 +10,10 @@ description = "Reusable agent tools (filesystem, grep, bash) with workspace-scop
 [lib]
 name = "smooth_tools"
 
-# th-ed6604: clean reimplementations of the core agent tools the smooth-operative
-# binary defines inline, packaged as a lib the smooth-daemon (and, later,
-# smooth-operative) can register on a ToolRegistry. The workspace-path scoping
-# (path.rs) mirrors smooth-operative/src/tool_support.rs::resolve_workspace_path
-# exactly — it is security-critical and exhaustively tested here.
+# th-ed6604: the core agent tools as a lib any host can register on a
+# ToolRegistry — today that's the smooth-daemon. The workspace-path scoping
+# (path.rs) and the kernel OS sandbox (sandbox.rs) are security-critical and
+# exhaustively tested here.
 [dependencies]
 smooth-operator.workspace = true
 smooth-policy.workspace = true

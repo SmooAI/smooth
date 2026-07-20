@@ -3,15 +3,15 @@
 //! Pearl th-7840d8 — replaces the bare `println!("Starting Smooth...")`
 //! cold-boot line (and the matching path inside `th up`) with a
 //! per-step spinner cascade so the user can see what's happening
-//! while the Safehouse microVM and in-VM cast services come up.
+//! while Big Smooth (the daemon) comes up.
 //!
 //! Visuals:
 //!
 //! ```text
 //! ✻ Smooth booting
-//!   ⠋ starting Safehouse microVM…
-//!   ⠋ cast online (wonk · goalie · narc · scribe · archivist · diver · groove)…
-//!   ⠋ operative pool warm…
+//!   ⠋ starting Big Smooth…
+//!   ⠋ dolt store online…
+//!   ⠋ dispatch ready…
 //!   ⠋ health check…
 //! ```
 //!
@@ -160,7 +160,7 @@ mod tests {
     #[test]
     fn step_ok_completes_cleanly() {
         let ind = BootIndicator::new();
-        let step = ind.step("starting Safehouse microVM");
+        let step = ind.step("starting Big Smooth");
         // No real work — just check the lifecycle.
         step.ok();
         ind.finish();
@@ -179,9 +179,9 @@ mod tests {
     #[test]
     fn multiple_steps_finalize_in_arbitrary_order() {
         let ind = BootIndicator::new();
-        let s1 = ind.step("starting Safehouse microVM");
-        let s2 = ind.step("cast online (wonk · goalie · narc · scribe · archivist · diver · groove)");
-        let s3 = ind.step("operative pool warm");
+        let s1 = ind.step("starting Big Smooth");
+        let s2 = ind.step("dolt store online");
+        let s3 = ind.step("dispatch ready");
         let s4 = ind.step("health check");
 
         // Finalize out of order to confirm the API doesn't require
@@ -198,8 +198,8 @@ mod tests {
     #[test]
     fn step_update_is_safe() {
         let ind = BootIndicator::new();
-        let step = ind.step("cast online");
-        step.update("cast online (3/7 services up)");
+        let step = ind.step("dolt store online");
+        step.update("dolt store online (pearls)");
         step.ok();
         ind.finish();
     }
@@ -208,7 +208,7 @@ mod tests {
     #[test]
     fn indicator_drops_without_finish_call() {
         let ind = BootIndicator::new();
-        let step = ind.step("starting Safehouse microVM");
+        let step = ind.step("starting Big Smooth");
         step.ok();
         // No ind.finish() — Drop should handle it.
     }

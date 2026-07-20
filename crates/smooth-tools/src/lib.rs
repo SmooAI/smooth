@@ -1,8 +1,7 @@
 //! `smooth-tools` — reusable agent tools with workspace-confined paths.
 //!
-//! Clean reimplementations of the core tools the `smooth-operative` binary
-//! defines inline, packaged so the `smooth-daemon` (and, later, the operative
-//! itself) can register them on a [`ToolRegistry`] with one call
+//! The core agent tool set, packaged so a host — today the `smooth-daemon` —
+//! can register them all on a [`ToolRegistry`] with one call
 //! ([`register_default_tools`]).
 //!
 //! Every filesystem tool routes user paths through

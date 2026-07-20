@@ -8,7 +8,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Smooth Goalie — in-VM HTTP forward proxy, delegates access decisions to Wonk"
+description = "Smooth Goalie — HTTP forward proxy with an exact-host allowlist and audit log; the daemon's egress boundary"
 readme = "README.md"
 
 [lib]

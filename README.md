@@ -305,8 +305,8 @@ See [`docs/extending.md`](docs/extending.md) for the full guide.
 ### Run a pearl (`th run`)
 
 Dispatch a pearl (or ad-hoc prompt) to a Smooth operative. Big Smooth
-(`th up`) execs the operative as a host subprocess against your current
-directory and streams agent events to stdout.
+(`th up`) runs the agent turn against your current directory and streams
+agent events to stdout.
 
 ```bash
 # First ready pearl
@@ -323,39 +323,13 @@ th operatives list
 th operatives kill <operator-id>
 ```
 
-> The `--image`, `--memory-mb`, and `--keep-alive` flags (and the
-> `smooai/smooth-operative` microVM image) went away with the microVM
-> stack, 2026-07 (pearl `th-f4a801`). The operative now runs directly on
-> the host and uses your real toolchain — no per-VM image or cache mount.
-
-Build locally:
-
-```bash
-scripts/build-smooth-operative-image.sh
-```
-
-Override via `--image` or `SMOOTH_OPERATIVE_IMAGE` env if you want a
-custom variant (e.g. a version pinned for CI reproducibility).
-
-**Microsandbox image resolution.** Locally-built images live in
-your Docker Desktop image store; `microsandbox` pulls from registries
-by default, so if its pull can't see your local build, push it
-first (`docker push smooai/smooth-operative:0.2.0`) or set
-`SMOOTH_OPERATIVE_IMAGE` to something microsandbox can reach.
-
-**Project cache.** Each workspace path hashes to its own cache,
-mounted at `/opt/smooth/cache` inside the VM. Subsequent runs on the
-same repo share mise installs + language stores (pnpm-store, cargo
-registry, uv cache, etc.). Backed by a first-class microsandbox
-Volume by default (`~/.microsandbox/volumes/smooth-cache-<key>/`);
-set `SMOOTH_USE_VOLUMES=0` to fall back to the legacy bind-mount
-(`~/.smooth/project-cache/<key>/`). Manage with:
-
-```bash
-th cache list                     # shows entries from both backends, tagged
-th cache prune --older-than 30    # evict caches idle > N days
-th cache clear /path/to/project   # remove entry for a specific workspace
-```
+> The `--image`, `--memory-mb`, and `--keep-alive` flags, the
+> `smooai/smooth-operative` microVM image, the image-build script, and
+> the per-workspace VM cache (`th cache`) all went away with the microVM
+> stack, 2026-07 (pearl `th-f4a801`). Work now runs directly on the host
+> against your real toolchain — no image, no cache mount. `bash` tool
+> calls are confined by the kernel OS sandbox and egress goes through the
+> allowlist proxy.
 
 ### Background service
 
@@ -509,24 +483,26 @@ See [`docs/extending.md`](docs/extending.md) and [`SECURITY.md`](SECURITY.md).
 ```
 smooth/
 ├── crates/
-│   ├── smooth-cli/               # Binary — clap CLI, the `th` entry point
-│   ├── smooth-bigsmooth/         # Library — orchestrator, policy gen, session mgmt, in-process dispatch
-│   ├── smooth-operator/          # Library — Rust-native AI agent framework
-│   ├── smooth-operative/   # Binary — agent loop for a dispatched pearl (host subprocess)
+│   ├── smooth-cli/               # Binary `th` — clap CLI, the entry point
+│   ├── smooth-daemon/            # Binary + lib — Big Smooth, the always-on agent daemon
+│   ├── smooth-tools/             # Library — agent tools + the kernel OS sandbox
 │   ├── smooth-policy/            # Library — shared policy types, TOML parsing
-│   ├── smooth-narc/              # Library — tool surveillance + secret detection
-│   ├── smooth-scribe/            # Library — structured logging
-│   #  (removed 2026-07, pearl th-f4a801: smooth-bootstrap-bill, smooth-wonk,
-│   #   smooth-goalie, smooth-host-stub, smooth-credential-helper — see git history)
-│   ├── smooth-archivist/         # Library — central log aggregator
+│   ├── smooth-goalie/            # Library + bin — HTTP forward proxy (egress boundary)
 │   ├── smooth-pearls/            # Library — Dolt-backed pearl tracker
-│   ├── smooth-plugin/            # Library — CLI-wrapper plugin manifests
+│   ├── smooth-cast/              # Library — coding-harness cast roles, skills, workflow
+│   ├── smooth-code/              # Library — `th code` ratatui coding TUI
 │   ├── smooth-diver/             # Library — pearl lifecycle manager + Jira sync
-│   ├── smooth-tunnel/            # Library — th.smoo.ai reverse-tunnel client
-│   ├── smooth-bench/             # Binary — coding-benchmark harness (aider-polyglot, SWE-bench, …)
-│   ├── smooth-code/              # Library — ratatui terminal dashboard
+│   ├── smooth-tmux/              # Library — tmux driver (supervises Claude Code)
+│   ├── smooth-api-client/        # Library — generated api.smoo.ai client + auth
 │   └── smooth-web/               # Library — embedded Vite SPA
 │       └── web/                  # React + Vite source
+│
+│   # The agent engine `smooth-operator` is NOT in this workspace — it lives in
+│   # the separate SmooAI/smooth-operator repo and is consumed as a dependency.
+│   # Removed 2026-07 (pearl th-f4a801, see git history): smooth-bigsmooth,
+│   # smooth-operative, smooth-narc, smooth-scribe, smooth-archivist,
+│   # smooth-wonk, smooth-bootstrap-bill, smooth-host-stub,
+│   # smooth-credential-helper.
 ├── Cargo.toml                    # Workspace root
 ├── rustfmt.toml                  # Format config
 └── install.sh                    # Curl installer

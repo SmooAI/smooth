@@ -1,11 +1,10 @@
 //! SEP extension trust store — the content-hashed allow-list that decides which
 //! discovered extensions a host may load.
 //!
-//! Lives in `smooth-policy` (a leaf crate) so **both** frontends that host
-//! extensions can share one trust surface: `smooth-code` (the TUI, which writes
-//! it via `th ext trust`) and `smooth-operative` (the dispatched worker, which
-//! reads it to load only pre-trusted extensions in an unattended run). Keeping it
-//! here avoids the operative depending on the TUI crate.
+//! Lives in `smooth-policy` (a leaf crate) so every host that loads extensions
+//! shares one trust surface without depending on the TUI crate: `smooth-code`
+//! writes it via `th ext trust`, and unattended hosts read it to load only
+//! pre-trusted extensions.
 //!
 //! Trust is keyed by extension name and pinned to the content hash of the
 //! extension's `extension.toml` at the moment trust was granted; any change to
