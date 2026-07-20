@@ -13,6 +13,10 @@ Code worker sessions in tmux, coordinate them over
   pings, and hand off work over `th msg`/`th agent`.
 - **`pearls-flow`** skill — teaches a worker to track work as pearls
   (`th pearls`).
+- **`smooth-operator`** skill — drives the org's dashboard agent from the CLI
+  (`th api smooth-operator chat|confirm|history`) for org actions (email, CRM,
+  analytics, knowledge) rather than code changes. Needs a `th auth login` user
+  session; it 401s under an M2M client.
 - **SessionStart hook** — auto-registers **every** session on the th-mail bus so
   Big Smooth and other agents can reach it. `th claude run` workers register under
   their `SMOOTH_AGENT_HANDLE`; a plain `claude` session registers under a stable
@@ -61,10 +65,15 @@ Each worker runs in a tmux session shared between Big Smooth and you. A per-sess
 - `paused` — the supervisor stands down and only watches.
 
 Flip with `/smooth drive <id>` / `/smooth manual <id>` or `th claude mode <id> <mode>`.
+`th claude tui` is the live dashboard — every session's pane plus keys to flip
+mode and attach.
 
 ## Note on scale (subscription ToS)
 
-This drives Claude Code **subscription** auth. Backoff-and-resume that honors the
-limit is fine; a large unattended fleet to maximize a flat-rate plan is the gray
-zone — keep the worker count tasteful. True fleet scale belongs on the metered
-API + smooth-operator.
+This drives Claude Code **subscription** auth. The supervisor **stops** when the
+account hits a real usage/quota limit — it does not wait it out or auto-resume.
+As of `th` 0.22 it no longer retries the transient 429 throttle either (pearl
+th-2d5c45): Claude Code retries that internally, so a supervisor-side
+backoff-and-resend only risked double-sending a prompt. A large unattended fleet
+to maximize a flat-rate plan is the gray zone — keep the worker count tasteful.
+True fleet scale belongs on the metered API + smooth-operator.
