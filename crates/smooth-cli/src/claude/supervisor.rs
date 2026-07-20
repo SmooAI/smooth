@@ -1,11 +1,13 @@
 //! The 1:1 supervisor loop: launch a Claude Code TUI in an isolated tmux
-//! session and keep it alive. On the account-wide rate-limit throttle,
-//! back off with jitter (via the shared [`RateLimitGovernor`]) and resend
-//! the last message until it lands.
+//! session, send the initial prompt, and watch the pane until it exits or
+//! the account hits its usage/quota limit.
+//!
+//! The transient server throttle is *not* handled here — Claude Code
+//! retries it internally, so a supervisor-side backoff-and-resend only
+//! risked double-sending a prompt on top of a recovering model.
 //!
 //! This is the degenerate case of every topology — one supervisor, one
-//! session, one governor. The 1:N farm reuses the same pieces with one
-//! `Arc<RateLimitGovernor>` shared across N supervisors.
+//! session. The 1:N farm reuses the same pieces across N supervisors.
 //!
 //! The blocking loop touches tmux, so it is exercised by the live smoke
 //! test; the pure decision (`action_for`) and helpers are unit tested
@@ -26,14 +28,8 @@ use owo_colors::OwoColorize;
 use smooth_tmux::TmuxDriver;
 
 use super::control;
-use super::detect::{detect_state, extract_last_user_message, PaneState};
-use super::governor::RateLimitGovernor;
+use super::detect::{detect_state, PaneState};
 use super::registry::{self, SessionEntry};
-
-/// How long to wait after a resend before re-evaluating the pane, so the
-/// supervisor doesn't re-detect the stale throttle line (still on screen)
-/// and resend on top of itself before the model has reacted.
-const RESEND_SETTLE: Duration = Duration::from_secs(8);
 
 /// Options for one supervised run.
 pub struct RunOpts {
@@ -55,11 +51,9 @@ pub struct RunOpts {
 /// be tested without a live session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SuperviseAction {
-    /// Transient throttle — back off and resend the last message.
-    Rescue,
-    /// Real quota limit — backing off won't help; stop and hand back.
+    /// Real quota limit — waiting won't help; stop and hand back.
     GiveUp,
-    /// Working / idle / approval / unknown — keep watching.
+    /// Working / idle / approval / error / unknown — keep watching.
     Wait,
 }
 
@@ -67,7 +61,6 @@ pub enum SuperviseAction {
 #[must_use]
 pub fn action_for(state: PaneState) -> SuperviseAction {
     match state {
-        PaneState::RateLimited => SuperviseAction::Rescue,
         PaneState::UsageLimit => SuperviseAction::GiveUp,
         _ => SuperviseAction::Wait,
     }
@@ -83,7 +76,7 @@ pub fn short_id() -> String {
 }
 
 /// Sleep up to `dur`, returning early if `stop` is set. Polls in small
-/// steps so Ctrl-C is responsive even during a long backoff.
+/// steps so Ctrl-C stays responsive.
 fn sleep_interruptible(dur: Duration, stop: &AtomicBool) {
     let step = Duration::from_millis(200);
     let deadline = Instant::now() + dur;
@@ -142,7 +135,6 @@ pub fn supervise_blocking(opts: RunOpts, stop: Arc<AtomicBool>) -> Result<()> {
 
     // Wait for the TUI to render, then send the initial prompt — but only
     // if Big Smooth is driving. In Manual/Paused the human owns input.
-    let mut last_message = opts.initial_prompt.clone();
     if let Some(prompt) = &opts.initial_prompt {
         if control::read_mode(&id).drives() {
             let _ = driver.wait_for_idle(Duration::from_secs(1), Duration::from_millis(300), Duration::from_secs(20));
@@ -150,8 +142,6 @@ pub fn supervise_blocking(opts: RunOpts, stop: Arc<AtomicBool>) -> Result<()> {
             println!("  {} sent initial prompt", "→".green());
         }
     }
-
-    let governor = RateLimitGovernor::new();
 
     loop {
         if stop.load(Ordering::SeqCst) {
@@ -163,56 +153,10 @@ pub fn supervise_blocking(opts: RunOpts, stop: Arc<AtomicBool>) -> Result<()> {
             break;
         }
 
-        let mode = control::read_mode(&id);
         let visible = driver.capture_visible().unwrap_or_default();
-        match action_for(detect_state(&visible)) {
-            SuperviseAction::Rescue if !mode.rescues() => {
-                // Paused: the human asked us to stand down entirely — don't
-                // resend even on a rate-limit.
-            }
-            SuperviseAction::Rescue => {
-                // Prefer the message we sent; fall back to scraping the
-                // last user turn out of full scrollback.
-                let msg = last_message
-                    .clone()
-                    .or_else(|| extract_last_user_message(&driver.capture().unwrap_or_default()));
-                let wait = governor.record_rate_limit();
-                println!(
-                    "  {} rate limited (#{}) — backing off {}",
-                    "⏳".yellow(),
-                    governor.consecutive(),
-                    fmt_dur(wait).yellow()
-                );
-                sleep_interruptible(wait, &stop);
-                if stop.load(Ordering::SeqCst) {
-                    continue;
-                }
-                match &msg {
-                    Some(m) => {
-                        driver.send(m)?;
-                        last_message = Some(m.clone());
-                        println!("  {} resent last message", "↻".green());
-                    }
-                    None => {
-                        println!("  {} couldn't determine the last message — attach and resend manually", "⚠".red());
-                    }
-                }
-                // Let the model react before re-evaluating.
-                sleep_interruptible(RESEND_SETTLE, &stop);
-            }
-            SuperviseAction::GiveUp => {
-                println!(
-                    "  {} usage/quota limit reached — backing off won't help; leaving the session for you",
-                    "🛑".red()
-                );
-                break;
-            }
-            SuperviseAction::Wait => {
-                if governor.consecutive() > 0 {
-                    governor.record_success();
-                    println!("  {} recovered — backoff reset", "✓".green());
-                }
-            }
+        if action_for(detect_state(&visible)) == SuperviseAction::GiveUp {
+            println!("  {} usage/quota limit reached — waiting won't help; leaving the session for you", "🛑".red());
+            break;
         }
 
         sleep_interruptible(opts.poll, &stop);
@@ -221,22 +165,12 @@ pub fn supervise_blocking(opts: RunOpts, stop: Arc<AtomicBool>) -> Result<()> {
     Ok(())
 }
 
-fn fmt_dur(d: Duration) -> String {
-    let secs = d.as_secs();
-    if secs >= 60 {
-        format!("{}m{}s", secs / 60, secs % 60)
-    } else {
-        format!("{secs}s")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn action_mapping() {
-        assert_eq!(action_for(PaneState::RateLimited), SuperviseAction::Rescue);
         assert_eq!(action_for(PaneState::UsageLimit), SuperviseAction::GiveUp);
         assert_eq!(action_for(PaneState::Working), SuperviseAction::Wait);
         assert_eq!(action_for(PaneState::Idle), SuperviseAction::Wait);
@@ -268,11 +202,5 @@ mod tests {
         let start = Instant::now();
         sleep_interruptible(Duration::from_millis(300), &stop);
         assert!(start.elapsed() >= Duration::from_millis(250));
-    }
-
-    #[test]
-    fn fmt_dur_formats_minutes() {
-        assert_eq!(fmt_dur(Duration::from_secs(45)), "45s");
-        assert_eq!(fmt_dur(Duration::from_secs(125)), "2m5s");
     }
 }

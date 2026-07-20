@@ -24,7 +24,8 @@ interface DeviceStart {
     verification_uri_complete: string;
 }
 
-const PILL = 'fixed top-4 right-4 z-10 flex items-center gap-1.5 rounded-full bg-panel/80 px-3 py-1.5 text-xs';
+// top offset clears the iOS status bar in an installed PWA (th-086d97).
+const PILL = 'fixed top-[calc(env(safe-area-inset-top)+1rem)] right-4 z-10 flex items-center gap-1.5 rounded-full bg-panel/80 px-3 py-1.5 text-xs';
 
 export function SmooSignIn() {
     const [status, setStatus] = useState<AuthStatus | null>(null);

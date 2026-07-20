@@ -40,9 +40,10 @@ EOF
 # --- auth.smoo.ai token endpoint -----------------------------------------------
 if echo "$CMD" | grep -qE 'curl[^|;&]+auth\.smoo\.ai/token'; then
     emit "raw curl against auth.smoo.ai/token" \
-        "Use \`th api login\` (or \`SMOOAI_CLIENT_ID=… SMOOAI_CLIENT_SECRET=… th api login\`).
+        "Use \`th auth login --m2m\` (or \`SMOOAI_CLIENT_ID=… SMOOAI_CLIENT_SECRET=… th auth login --m2m\`).
 It exchanges client_credentials for a JWT and stores it at ~/.smooth/auth/smooai.json
-so subsequent \`th api …\` calls just work."
+so subsequent \`th api …\` calls just work. For a human session run plain \`th auth login\`
+(browser OAuth2 + PKCE). \`th api login\` still resolves but is DEPRECATED."
     exit 1
 fi
 
@@ -51,21 +52,22 @@ if echo "$CMD" | grep -qE 'curl[^|;&]+api\.smoo\.ai'; then
     emit "raw curl against api.smoo.ai" \
         "Use \`th api …\` — it handles auth-header injection, JWT refresh, JSON pretty-printing,
 and pagination. Quick map:
-  /organizations/<id>/agents       → th api agents list [--org <id>]
-  /organizations/<id>/knowledge    → th api knowledge list
-  /organizations/<id>/config/…     → th api config (schemas|environments|values|feature-flag)
+  /organizations/<id>/agents       → th api agents list [--org-id <id>]
+  /organizations/<id>/knowledge    → th api knowledge list   (or top-level th knowledge)
+  /organizations/<id>/config/…     → th config (get|set|list|feature-flag|push|pull)
   /organizations/<id>/jobs         → th api jobs list
   /organizations/<id>/members      → th api members list
-  /organizations/<id>/auth-clients → th api keys list      (dashboard auth required)
-  /admin/…                         → th admin … (planned — see pearl th-feebd2)
-Full surface: th api help"
+  /organizations/<id>/auth-clients → th api keys list        (user session required)
+  /admin/…                         → th admin … (needs a build with --features admin)
+Full surface: th api --help"
     exit 1
 fi
 
 # --- atlassian.net Jira REST ----------------------------------------------------
 if echo "$CMD" | grep -qE 'curl[^|;&]+atlassian\.net/rest/api'; then
     emit "raw curl against Jira REST" \
-        "For read paths use \`th jira sync --pull\` followed by \`th pearls list / show\`.
+        "For read paths use \`th jira sync\` (bidirectional, no flags) followed by
+\`th pearls list / show\`. \`th jira status\` shows the current sync state.
 Write verbs (create issue, transition status) aren't wrapped yet — if that's what
 you need, this is the case where the override is fine. File a pearl on the smooth
 repo so the next person doesn't have to curl."

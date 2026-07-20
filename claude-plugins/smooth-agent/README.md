@@ -1,7 +1,7 @@
 # smooth-agent
 
-A Claude Code plugin for **Big Smooth orchestration** — drive Claude Code worker
-sessions that survive the account-wide rate-limit throttle, coordinate them over
+A Claude Code plugin for **Big Smooth orchestration** — drive supervised Claude
+Code worker sessions in tmux, coordinate them over
 **th-mail**, and track work as **pearls**. Part of the `smooth` marketplace
 (`SmooAI/smooth`).
 
@@ -13,6 +13,10 @@ sessions that survive the account-wide rate-limit throttle, coordinate them over
   pings, and hand off work over `th msg`/`th agent`.
 - **`pearls-flow`** skill — teaches a worker to track work as pearls
   (`th pearls`).
+- **`smooth-operator`** skill — drives the org's dashboard agent from the CLI
+  (`th api smooth-operator chat|confirm|history`) for org actions (email, CRM,
+  analytics, knowledge) rather than code changes. Needs a `th auth login` user
+  session; it 401s under an M2M client.
 - **SessionStart hook** — auto-registers **every** session on the th-mail bus so
   Big Smooth and other agents can reach it. `th claude run` workers register under
   their `SMOOTH_AGENT_HANDLE`; a plain `claude` session registers under a stable
@@ -38,8 +42,8 @@ sessions that survive the account-wide rate-limit throttle, coordinate them over
 ## Requires
 
 The `th` CLI (built from `SmooAI/smooth`) with the `th claude` engine, plus
-`tmux` on `PATH`. The plugin is a thin recipe layer; the supervision, rate-limit
-governor, and session control live in `th claude` (the binary).
+`tmux` on `PATH`. The plugin is a thin recipe layer; the supervision and session
+control live in `th claude` (the binary).
 
 ## Install
 
@@ -56,16 +60,20 @@ Then `th claude run "<task>"` launches a supervised, plugin-active worker, and
 Each worker runs in a tmux session shared between Big Smooth and you. A per-session
 **mode** arbitrates who types:
 
-- `driving` — Big Smooth sends input + rescues rate-limits.
-- `manual` — you drive (`th claude attach <id>`); the supervisor only rescues
-  your throttled turns.
-- `paused` — the supervisor stands down.
+- `driving` — Big Smooth sends input.
+- `manual` — you drive (`th claude attach <id>`); the supervisor sends nothing.
+- `paused` — the supervisor stands down and only watches.
 
 Flip with `/smooth drive <id>` / `/smooth manual <id>` or `th claude mode <id> <mode>`.
+`th claude tui` is the live dashboard — every session's pane plus keys to flip
+mode and attach.
 
 ## Note on scale (subscription ToS)
 
-This drives Claude Code **subscription** auth. Backoff-and-resume that honors the
-limit is fine; a large unattended fleet to maximize a flat-rate plan is the gray
-zone — keep the worker count tasteful. True fleet scale belongs on the metered
-API + smooth-operator.
+This drives Claude Code **subscription** auth. The supervisor **stops** when the
+account hits a real usage/quota limit — it does not wait it out or auto-resume.
+As of `th` 0.22 it no longer retries the transient 429 throttle either (pearl
+th-2d5c45): Claude Code retries that internally, so a supervisor-side
+backoff-and-resend only risked double-sending a prompt. A large unattended fleet
+to maximize a flat-rate plan is the gray zone — keep the worker count tasteful.
+True fleet scale belongs on the metered API + smooth-operator.

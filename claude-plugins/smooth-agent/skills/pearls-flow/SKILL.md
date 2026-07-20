@@ -22,11 +22,13 @@ th pearls close <id>                         # when the work is committed/pushed
 ## Create work
 
 ```bash
-th pearls create --title="<summary>" --description="<why + what>" --type=task|bug|feature --priority=2
+th pearls create --title="<summary>" --description="<why + what>" --type=task|bug|feature --priority=2 --label=<label>
 ```
 
-Priority is **0–4** (0 = critical, 2 = medium, 4 = backlog) — not "high"/"low".
-Add dependencies with `th pearls dep add <issue> <depends-on>`.
+Priority is **0–4** (0 = critical, 1 = high, 2 = medium, 3 = low, 4 = backlog) —
+not "high"/"low". `--label` is **singular** — one label per flag. To label an
+existing pearl use `th pearls label <id> add <label>`; `th pearls update` has no
+label flag. Add dependencies with `th pearls dep add <issue> <depends-on>`.
 
 ## Rules
 
@@ -36,4 +38,7 @@ Add dependencies with `th pearls dep add <issue> <depends-on>`.
 - When you finish, report to the orchestrator over th-mail (see the
   `agent-comms` skill): `th msg send --to big-smooth --from "$SMOOTH_AGENT_HANDLE"
   --body "closed pearl <id>: <what>"`.
-- Avoid interactive editor flows (`th pearls edit`) — they block on `$EDITOR`.
+- Every flag above is non-interactive by design — pass `--title` / `--description`
+  / `--status` rather than looking for an `$EDITOR` flow (there isn't one).
+- `th pearls prime` prints open/in-progress pearls plus recent project memories —
+  load it at session start to pick up where the last session left off.

@@ -376,9 +376,9 @@ enum Commands {
     },
     /// Open the Smooth web dashboard in your browser.
     Web,
-    /// Supervise Claude Code sessions running inside tmux. On the
-    /// account-wide rate-limit throttle, back off with jitter and resend
-    /// the last message until it lands. `run` / `ls` / `attach`.
+    /// Supervise Claude Code sessions running inside tmux: launch, send a
+    /// prompt, and keep the session alive until it exits or the account
+    /// hits its usage limit. `run` / `ls` / `attach`.
     Claude {
         #[command(subcommand)]
         cmd: claude::ClaudeCommands,

@@ -47,8 +47,11 @@ if [[ "$TOOL_NAME" == "Edit" || "$TOOL_NAME" == "Write" ]]; then
     if is_in_worktree "$FILE_PATH"; then
         exit 0
     fi
-    # Allow changes to .claude/, .beads/, .changeset/, CLAUDE.md, memory files
-    if [[ "$FILE_PATH" == *"/.claude/"* || "$FILE_PATH" == *"/.beads/"* || "$FILE_PATH" == *"/.changeset/"* || "$FILE_PATH" == *"CLAUDE.md"* || "$FILE_PATH" == *"/memory/"* ]]; then
+    # Allow changes to the tracker/config dirs that are not source code:
+    # .claude/, .smooth/ (pearl store — gitignored; .beads/ is its dead
+    # predecessor, kept for repos that haven't migrated), .changeset/,
+    # CLAUDE.md, memory files.
+    if [[ "$FILE_PATH" == *"/.claude/"* || "$FILE_PATH" == *"/.smooth/"* || "$FILE_PATH" == *"/.beads/"* || "$FILE_PATH" == *"/.changeset/"* || "$FILE_PATH" == *"CLAUDE.md"* || "$FILE_PATH" == *"/memory/"* ]]; then
         exit 0
     fi
     # Allow edits to files outside this repo entirely
