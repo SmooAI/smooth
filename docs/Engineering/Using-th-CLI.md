@@ -607,11 +607,15 @@ th inbox                                           # messages requiring attentio
 
 ### Claude session supervision (`th claude`)
 
-Drive a Claude Code TUI inside an isolated tmux session and keep it alive
-through the account-wide rate-limit throttle ("Server is temporarily limiting
-requests · Rate limited"). When that throttle fires, the supervisor backs off
-with **full jitter** and **resends the last message** until it lands — instead
-of leaving the turn dead on the screen.
+Drive a Claude Code TUI inside an isolated tmux session, hand it a prompt, and
+keep the session alive and inspectable for as long as the supervisor runs.
+
+> **No 429 auto-retry.** The supervisor used to detect the transient throttle
+> ("Server is temporarily limiting requests · Rate limited"), back off with
+> jitter, and resend the last message. Claude Code now retries that throttle
+> internally, so the rescue was removed (pearl th-2d5c45) — it was dead weight
+> that could double-send a prompt on top of a model already recovering. The
+> **real usage/quota limit is still detected** and still stops the supervisor.
 
 ```bash
 th claude run                                      # launch + supervise an interactive session (attach to drive it)
@@ -630,28 +634,24 @@ driving/manual/paused, `a`/`enter` attach, `r` refresh, `q` quit. It's the
 "switch between Big Smooth driving and the session itself" surface. The same
 control is scriptable via `th claude mode`:
 
-- `driving` — Big Smooth sends input + rescues rate-limits.
-- `manual` — you drive (attach); the supervisor only rescues *your* throttled turn.
-- `paused` — the supervisor stands down.
+- `driving` — Big Smooth sends the session's input.
+- `manual` — you drive (attach); the supervisor sends nothing.
+- `paused` — the supervisor stands down and only watches.
 
 How it decides what to do, per poll of the **visible** pane:
 
-- **`temporarily limiting requests` / `Rate limited`** → back off via the shared
-  governor and resend the last message (the one it sent, or — if it's babysitting
-  a session it didn't launch — the last user turn scraped from scrollback).
-- **real `usage limit` / quota** → stop and hand the session back; backing off
+- **real `usage limit` / quota** → stop and hand the session back; waiting
   won't help until reset.
-- **`esc to interrupt` (working)** → the model is streaming; do nothing (this
-  live signal wins over a stale throttle line still on screen).
+- **everything else** (working, idle, awaiting approval, error) → keep
+  watching. The transient throttle falls in here: Claude Code retries it
+  itself, so the supervisor stays out of the way.
 
 The session lives as long as the supervisor runs; `Ctrl-C` stops it cleanly.
-The rate-limit governor is **pool-aware**: it's the same primitive the planned
-1→N farm (one Big Smooth leading N sessions) and N→1 supervisors share, so a 429
-on any session backs off the whole pool rather than thundering the herd. Pearls
-th-49de8d (driver) / th-a43375 (attach picker). Requires `tmux` on `PATH`.
+Pearls th-49de8d (driver) / th-a43375 (attach picker) / th-2d5c45 (429 rescue
+removal). Requires `tmux` on `PATH`.
 
 > **Subscription/ToS note:** this drives your own Claude Code subscription auth.
-> Backoff-and-resume that *honors* the limit is fine; running a large unattended
+> Supervising a session you're present for is fine; running a large unattended
 > fleet to maximize a flat-rate plan is the gray zone — keep concurrency
 > tasteful, and use the metered API + smooth-operator for true fleet scale.
 
