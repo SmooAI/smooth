@@ -19,12 +19,10 @@ use super::registry::registry_dir;
 /// Who currently has input authority over a supervised session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
-    /// Big Smooth drives: the supervisor sends task input + steering and
-    /// rescues rate-limits.
+    /// Big Smooth drives: the supervisor sends task input + steering.
     #[default]
     Driving,
-    /// The human drives (attached): the supervisor sends no task input but
-    /// still rescues the human's own rate-limited turn.
+    /// The human drives (attached): the supervisor sends no task input.
     Manual,
     /// The supervisor only watches: no sending at all.
     Paused,
@@ -35,12 +33,6 @@ impl Mode {
     #[must_use]
     pub fn drives(self) -> bool {
         matches!(self, Mode::Driving)
-    }
-
-    /// May the supervisor resend on a rate-limit?
-    #[must_use]
-    pub fn rescues(self) -> bool {
-        matches!(self, Mode::Driving | Mode::Manual)
     }
 
     /// Lowercase wire form.
@@ -132,9 +124,9 @@ mod tests {
 
     #[test]
     fn authority_semantics() {
-        assert!(Mode::Driving.drives() && Mode::Driving.rescues());
-        assert!(!Mode::Manual.drives() && Mode::Manual.rescues());
-        assert!(!Mode::Paused.drives() && !Mode::Paused.rescues());
+        assert!(Mode::Driving.drives());
+        assert!(!Mode::Manual.drives());
+        assert!(!Mode::Paused.drives());
     }
 
     #[test]

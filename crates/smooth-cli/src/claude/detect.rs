@@ -6,20 +6,20 @@
 //!
 //! These are heuristics against a TUI we don't control, so the patterns
 //! are intentionally broad and the matching is case-insensitive. The
-//! supervisor treats [`PaneState::RateLimited`] as "wait per the
-//! governor and resend the last message" and is conservative about
-//! everything else.
+//! supervisor stops on [`PaneState::UsageLimit`] and is conservative
+//! about everything else.
+//!
+//! The transient server throttle ("temporarily limiting requests") is
+//! deliberately *not* a state here: Claude Code retries it internally,
+//! so it needs no supervisor reaction.
 
 /// What the pane appears to be doing right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneState {
     /// The model is actively working (an interrupt hint is visible).
     Working,
-    /// The transient server throttle fired ("temporarily limiting
-    /// requests" / "Rate limited"). This is the one we auto-retry.
-    RateLimited,
     /// The account hit its real usage/quota limit (resets at a time).
-    /// NOT auto-retried — backing off won't help until reset.
+    /// Backing off won't help until reset, so the supervisor gives up.
     UsageLimit,
     /// Claude is asking the human to approve a tool/edit.
     AwaitingApproval,
@@ -31,26 +31,7 @@ pub enum PaneState {
     Unknown,
 }
 
-impl PaneState {
-    /// Whether the supervisor should wait-and-resend for this state.
-    #[must_use]
-    pub fn is_retryable_rate_limit(self) -> bool {
-        matches!(self, PaneState::RateLimited)
-    }
-}
-
-/// Substrings (lowercased) that mark the transient server throttle.
-const RATE_LIMIT_MARKERS: &[&str] = &[
-    "temporarily limiting requests",
-    "rate limited",
-    "(not your usage limit)",
-    "overloaded_error",
-    "529",
-];
-
-/// Substrings (lowercased) that mark a real usage/quota limit. Checked
-/// BEFORE the throttle markers so "usage limit" never reads as the
-/// retryable throttle.
+/// Substrings (lowercased) that mark a real usage/quota limit.
 const USAGE_LIMIT_MARKERS: &[&str] = &[
     "usage limit reached",
     "approaching usage limit",
@@ -80,16 +61,12 @@ fn contains_any(haystack: &str, needles: &[&str]) -> bool {
 
 /// Classify the pane. **Intended to run on the *visible* pane** (not full
 /// scrollback): an error line that has scrolled into history would
-/// otherwise make every later capture read as `RateLimited` forever.
+/// otherwise make every later capture read as `Errored` forever.
 ///
-/// Order matters and is deliberate:
-/// 1. `Working` first — the "esc to interrupt" hint only renders while
-///    the model is actively streaming, so it is the most reliable *live*
-///    signal. If it is present we are working, even if an older
-///    rate-limit line is still visible above it; resending then would be
-///    wrong.
-/// 2. `UsageLimit` before `RateLimited` — the real quota limit must never
-///    be mistaken for the retryable throttle.
+/// `Working` is checked first — the "esc to interrupt" hint only renders
+/// while the model is actively streaming, so it is the most reliable
+/// *live* signal. If it is present we are working, even if an older
+/// error line is still visible above it.
 #[must_use]
 pub fn detect_state(pane: &str) -> PaneState {
     let lower = pane.to_lowercase();
@@ -97,12 +74,8 @@ pub fn detect_state(pane: &str) -> PaneState {
     if contains_any(&lower, WORKING_MARKERS) {
         return PaneState::Working;
     }
-    // Real quota limit before the throttle — must never be confused.
     if contains_any(&lower, USAGE_LIMIT_MARKERS) {
         return PaneState::UsageLimit;
-    }
-    if contains_any(&lower, RATE_LIMIT_MARKERS) {
-        return PaneState::RateLimited;
     }
     if contains_any(&lower, APPROVAL_MARKERS) {
         return PaneState::AwaitingApproval;
@@ -119,79 +92,31 @@ pub fn detect_state(pane: &str) -> PaneState {
     PaneState::Unknown
 }
 
-/// Best-effort extraction of the most recent **user** message from the
-/// captured pane. Claude Code renders submitted user turns with a `>`
-/// gutter; we collect the last contiguous run of `>`-prefixed lines.
-///
-/// This is a fallback for the "attach to a session I didn't launch"
-/// case — when the supervisor launched the task itself it already knows
-/// the prompt and should prefer that. Returns `None` when no user turn
-/// is recognizable.
-#[must_use]
-pub fn extract_last_user_message(pane: &str) -> Option<String> {
-    // Walk lines bottom-up; capture the last block of gutter lines.
-    let lines: Vec<&str> = pane.lines().collect();
-    let mut block: Vec<String> = Vec::new();
-    let mut seen_gutter = false;
-    for raw in lines.iter().rev() {
-        let line = raw.trim_end();
-        let trimmed = line.trim_start();
-        if let Some(rest) = gutter_content(trimmed) {
-            seen_gutter = true;
-            block.push(rest.to_string());
-            continue;
-        }
-        if seen_gutter {
-            // We were in a user block and hit a non-gutter line — the
-            // block is complete.
-            break;
-        }
-    }
-    if block.is_empty() {
-        return None;
-    }
-    block.reverse();
-    let joined = block.join("\n").trim().to_string();
-    if joined.is_empty() {
-        None
-    } else {
-        Some(joined)
-    }
-}
-
-/// If `line` is a Claude Code user-gutter line (`>` or `│ >`), return the
-/// content after the gutter. Distinguishes the user gutter from shell
-/// prompts by requiring the `>` to be followed by a space and content.
-fn gutter_content(line: &str) -> Option<&str> {
-    // Common renderings: "> text", "│ > text", "> text │".
-    let stripped = line.strip_prefix("│ ").unwrap_or(line);
-    let after = stripped.strip_prefix("> ").or_else(|| stripped.strip_prefix(">"))?;
-    // Trim a trailing box border if present.
-    let content = after.trim_end_matches([' ', '│']).trim();
-    if content.is_empty() {
-        None
-    } else {
-        Some(content)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn rate_limit_is_detected() {
-        let pane = "Ran 1 shell command\n\n● API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited";
-        assert_eq!(detect_state(pane), PaneState::RateLimited);
-        assert!(detect_state(pane).is_retryable_rate_limit());
+    fn usage_limit_is_detected() {
+        let pane = "You've reached your usage limit. limit will reset at 4pm.";
+        assert_eq!(detect_state(pane), PaneState::UsageLimit);
     }
 
     #[test]
-    fn usage_limit_wins_over_rate_limit_wording() {
-        // Even if both appear, the real quota limit must not be retried.
+    fn usage_limit_survives_rate_limit_wording() {
+        // The transient throttle is Claude Code's own problem now, but a
+        // pane mentioning both must still read as the real quota limit —
+        // that's the one the supervisor stops on.
         let pane = "You've reached your usage limit. limit will reset at 4pm. (rate limited)";
         assert_eq!(detect_state(pane), PaneState::UsageLimit);
-        assert!(!detect_state(pane).is_retryable_rate_limit());
+    }
+
+    #[test]
+    fn transient_throttle_is_not_a_usage_limit() {
+        // Claude Code retries this itself — it must never read as the
+        // quota limit and stop the supervisor.
+        let pane = "● API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited";
+        assert_ne!(detect_state(pane), PaneState::UsageLimit);
     }
 
     #[test]
@@ -207,11 +132,10 @@ mod tests {
     }
 
     #[test]
-    fn live_working_beats_stale_rate_limit_on_screen() {
-        // After a successful resend the model streams again while the old
-        // throttle line is still visible. The live interrupt hint must win
-        // so the supervisor does NOT resend on top of working output.
-        let pane = "● API Error: temporarily limiting requests · Rate limited\n● Thinking…\n  (esc to interrupt · 200 tokens)";
+    fn live_working_beats_stale_error_on_screen() {
+        // Once the model recovers it streams again while the old error
+        // line is still visible; the live interrupt hint must win.
+        let pane = "● API Error: something went wrong\n● Thinking…\n  (esc to interrupt · 200 tokens)";
         assert_eq!(detect_state(pane), PaneState::Working);
     }
 
@@ -228,36 +152,6 @@ mod tests {
 
     #[test]
     fn case_insensitive() {
-        assert_eq!(detect_state("RATE LIMITED"), PaneState::RateLimited);
-    }
-
-    #[test]
-    fn extract_simple_user_message() {
-        let pane = "● done thinking\n\n> fix the flaky test in foo\n\n● Working…";
-        // The last gutter block is the user message.
-        assert_eq!(extract_last_user_message(pane).as_deref(), Some("fix the flaky test in foo"));
-    }
-
-    #[test]
-    fn extract_multiline_user_message() {
-        let pane = "● earlier\n> line one\n> line two\n● response";
-        assert_eq!(extract_last_user_message(pane).as_deref(), Some("line one\nline two"));
-    }
-
-    #[test]
-    fn extract_handles_box_gutters() {
-        let pane = "● prior\n│ > do the thing │\n● ok";
-        assert_eq!(extract_last_user_message(pane).as_deref(), Some("do the thing"));
-    }
-
-    #[test]
-    fn extract_picks_the_last_block() {
-        let pane = "> first question\n● answer\n> second question\n● working";
-        assert_eq!(extract_last_user_message(pane).as_deref(), Some("second question"));
-    }
-
-    #[test]
-    fn extract_none_when_no_user_turn() {
-        assert_eq!(extract_last_user_message("● only assistant output\nno gutter here"), None);
+        assert_eq!(detect_state("USAGE LIMIT REACHED"), PaneState::UsageLimit);
     }
 }

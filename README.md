@@ -413,7 +413,7 @@ Add it to the repo's `.claude/settings.json`:
 
 | Invoke | What it does |
 |---|---|
-| `/smooth` | Drive **Big Smooth** — spin up tmux-supervised Claude Code workers that survive the account-wide rate-limit throttle, coordinate over th-mail, and track work in pearls (`run` / `add-agent` / `drive` / `manual` / `mail` / `status`). |
+| `/smooth` | Drive **Big Smooth** — spin up tmux-supervised Claude Code workers running in parallel, coordinate over th-mail, and track work in pearls (`run` / `add-agent` / `drive` / `manual` / `mail` / `status`). |
 | `org-copilot` | Drive your Smoo AI org's dashboard agent from the CLI (`th api copilot`) — CRM lookups, analytics, knowledge base, draft + send email, with confirm-before-send. |
 | `agent-comms` | Talk to Big Smooth and other agents over th-mail (`th agent` / `th msg`) — report status, answer pings, hand off work. Reliable because the session **auto-registers** on the bus (see Session hooks below). |
 | `pearls-flow` | Track work as pearls — create before you code, claim it, close it on push. |

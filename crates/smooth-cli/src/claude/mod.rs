@@ -1,16 +1,15 @@
 //! `th claude` — supervise Claude Code sessions running inside tmux.
 //!
-//! v1 ships the 1:1 topology: launch a session, auto-detect the last
-//! message, and on the account-wide rate-limit throttle back off with
-//! jitter and resend until it lands. Attach to drive it interactively.
+//! v1 ships the 1:1 topology: launch a session, send it a prompt, and
+//! watch the pane until it exits or the account hits its usage limit.
+//! Attach to drive it interactively.
 //!
 //! The pieces are built so the 1:N farm (one Big Smooth leading N
-//! sessions on a shared governor) and N:1 / mixed topologies are later
-//! wirings of the same `supervisor` + `governor` + `registry`.
+//! sessions) and N:1 / mixed topologies are later wirings of the same
+//! `supervisor` + `registry`.
 
 pub mod control;
 pub mod detect;
-pub mod governor;
 pub mod registry;
 pub mod supervisor;
 pub mod tui;
@@ -29,9 +28,8 @@ use supervisor::RunOpts;
 #[derive(Debug, Subcommand)]
 pub enum ClaudeCommands {
     /// Launch a Claude Code session in a supervised tmux session and keep
-    /// it alive: on the account-wide rate-limit throttle ("temporarily
-    /// limiting requests"), back off with jitter and resend the last
-    /// message until it lands. Attach with `th claude attach <id>` to
+    /// it alive, stopping only when the session exits or the account hits
+    /// its usage/quota limit. Attach with `th claude attach <id>` to
     /// drive it; the session lives as long as this supervisor runs.
     Run {
         /// Initial prompt to send once the TUI is ready. Omit to just
@@ -63,10 +61,9 @@ pub enum ClaudeCommands {
         /// Session id (or unique prefix) from `th claude ls`.
         id: String,
     },
-    /// Set who drives a session: `driving` (Big Smooth sends input +
-    /// rescues rate-limits), `manual` (you drive; the supervisor only
-    /// rescues your throttled turns), or `paused` (supervisor stands
-    /// down). Lets you hand control back and forth without killing the
+    /// Set who drives a session: `driving` (Big Smooth sends input),
+    /// `manual` (you drive), or `paused` (supervisor stands down and only
+    /// watches). Lets you hand control back and forth without killing the
     /// session.
     Mode {
         /// Session id (or unique prefix) from `th claude ls`.

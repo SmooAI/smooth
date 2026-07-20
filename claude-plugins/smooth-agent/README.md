@@ -1,7 +1,7 @@
 # smooth-agent
 
-A Claude Code plugin for **Big Smooth orchestration** — drive Claude Code worker
-sessions that survive the account-wide rate-limit throttle, coordinate them over
+A Claude Code plugin for **Big Smooth orchestration** — drive supervised Claude
+Code worker sessions in tmux, coordinate them over
 **th-mail**, and track work as **pearls**. Part of the `smooth` marketplace
 (`SmooAI/smooth`).
 
@@ -38,8 +38,8 @@ sessions that survive the account-wide rate-limit throttle, coordinate them over
 ## Requires
 
 The `th` CLI (built from `SmooAI/smooth`) with the `th claude` engine, plus
-`tmux` on `PATH`. The plugin is a thin recipe layer; the supervision, rate-limit
-governor, and session control live in `th claude` (the binary).
+`tmux` on `PATH`. The plugin is a thin recipe layer; the supervision and session
+control live in `th claude` (the binary).
 
 ## Install
 
@@ -56,10 +56,9 @@ Then `th claude run "<task>"` launches a supervised, plugin-active worker, and
 Each worker runs in a tmux session shared between Big Smooth and you. A per-session
 **mode** arbitrates who types:
 
-- `driving` — Big Smooth sends input + rescues rate-limits.
-- `manual` — you drive (`th claude attach <id>`); the supervisor only rescues
-  your throttled turns.
-- `paused` — the supervisor stands down.
+- `driving` — Big Smooth sends input.
+- `manual` — you drive (`th claude attach <id>`); the supervisor sends nothing.
+- `paused` — the supervisor stands down and only watches.
 
 Flip with `/smooth drive <id>` / `/smooth manual <id>` or `th claude mode <id> <mode>`.
 
