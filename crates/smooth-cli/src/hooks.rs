@@ -6,6 +6,7 @@
 //! to execute pearl-specific logic.
 
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -155,6 +156,9 @@ pub fn install(repo_root: Option<&Path>) -> Result<InstallOutcome> {
     for (name, content) in HOOK_TEMPLATES {
         let path = hooks_dir.join(name);
         fs::write(&path, content).with_context(|| format!("write hook {name}"))?;
+        // Git for Windows ignores the exec bit and runs hooks through its
+        // bundled sh, so there is nothing to chmod there.
+        #[cfg(unix)]
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).with_context(|| format!("chmod hook {name}"))?;
     }
 
@@ -486,7 +490,10 @@ mod tests {
         // After install: ok
         assert!(check(Some(root)).is_ok());
 
-        // Verify executable permissions
+        // Verify executable permissions. Unix-only: `install` skips the
+        // chmod on Windows (Git for Windows ignores the exec bit), and
+        // `Permissions::mode()` does not exist there.
+        #[cfg(unix)]
         for (name, _) in HOOK_TEMPLATES {
             let path = hooks_dir.join(name);
             let meta = std::fs::metadata(&path).expect("stat hook");

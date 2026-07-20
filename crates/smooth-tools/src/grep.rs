@@ -172,13 +172,21 @@ mod tests {
         dir
     }
 
+    /// Match locations carry native path separators, so Windows reports
+    /// `src\a.rs` where Unix reports `src/a.rs`. Normalize to `/` so the
+    /// assertions below express intent once and hold on both (pearl
+    /// th-a165b4) — the separator is not what these tests are about.
+    fn norm(s: &str) -> String {
+        s.replace('\\', "/")
+    }
+
     #[tokio::test]
     async fn finds_matches_with_location() {
         let dir = workspace().await;
         let tool = GrepTool {
             workspace: dir.path().to_path_buf(),
         };
-        let out = tool.execute(json!({"pattern": "needle"})).await.unwrap();
+        let out = norm(&tool.execute(json!({"pattern": "needle"})).await.unwrap());
         assert!(out.contains("src/a.rs:2:let needle = 1;"), "{out}");
         assert!(out.contains("src/b.txt:1:needle here too"), "{out}");
     }
@@ -189,7 +197,7 @@ mod tests {
         let tool = GrepTool {
             workspace: dir.path().to_path_buf(),
         };
-        let out = tool.execute(json!({"pattern": "needle", "include": "*.rs"})).await.unwrap();
+        let out = norm(&tool.execute(json!({"pattern": "needle", "include": "*.rs"})).await.unwrap());
         assert!(out.contains("src/a.rs"), "{out}");
         assert!(!out.contains("b.txt"), "include should exclude txt: {out}");
     }
@@ -225,7 +233,7 @@ mod tests {
         tokio::fs::write(root.join("node_modules/pkg/index.js"), "var needle = 2;\n").await.unwrap();
 
         let tool = GrepTool { workspace: root.to_path_buf() };
-        let out = tool.execute(json!({"pattern": "needle"})).await.unwrap();
+        let out = norm(&tool.execute(json!({"pattern": "needle"})).await.unwrap());
         assert!(out.contains("src/a.rs"), "source match found: {out}");
         assert!(!out.contains("node_modules"), "node_modules must be pruned even with no .git: {out}");
     }

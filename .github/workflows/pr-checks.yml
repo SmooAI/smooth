@@ -17,14 +17,58 @@ env:
 
 jobs:
     rust:
-        name: Rust checks
-        runs-on: ubuntu-latest
-        timeout-minutes: 30
+        # Pearl th-a165b4: Windows joins the test matrix so cross-platform
+        # breakage is caught at PR time rather than at release time. Linux
+        # stays the canonical gate — it alone runs fmt/clippy/release-build
+        # (those are platform-independent, so duplicating them just burns
+        # Windows minutes, which bill at 2x).
+        name: Rust checks (${{ matrix.os }})
+        runs-on: ${{ matrix.os }}
+        timeout-minutes: 45
+        strategy:
+            # Report both platforms on a failure — knowing whether a break is
+            # Windows-only or universal is the whole point of the matrix.
+            fail-fast: false
+            matrix:
+                include:
+                    - os: ubuntu-latest
+                      test_args: ''
+                    # smooth-daemon depends on web-push -> ece -> openssl-sys,
+                    # which finds no OpenSSL on windows-latest (no vcpkg tree,
+                    # no OPENSSL_DIR). It is a leaf crate — nothing in the
+                    # workspace depends on it, `th` included — and it is a
+                    # Unix-only service anyway (launchd/systemd installers,
+                    # Unix-socket dolt server, tailscale). Excluded explicitly
+                    # rather than silently skipped; making it build on Windows
+                    # means vendoring OpenSSL and is its own piece of work.
+                    #
+                    # smooth-diver's e2e and six smooth-pearls test modules
+                    # drive a real pearl store, which shells out to the
+                    # smooth-dolt binary — a CGO Go binary needing ICU, with no
+                    # Windows build (see the skipped build step above). They are
+                    # filtered out by name rather than passing vacuously. The
+                    # rest of smooth-pearls (dolt.rs, registry, the non-Unix
+                    # dolt_server stub) still runs here.
+                    - os: windows-latest
+                      test_args: >-
+                          --workspace
+                          --exclude smooai-smooth-daemon
+                          --exclude smooai-smooth-diver
+                          -E 'not (package(smooai-smooth-pearls) & test(/^(agents|memory|memory_tools|messaging|store|tools)::/))'
         steps:
             - uses: actions/checkout@v4
 
             - name: Install system dependencies
+              if: runner.os == 'Linux'
               run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libcap-ng-dev libicu-dev pkg-config protobuf-compiler
+
+            # No apt on Windows — protoc is the only native build-time tool the
+            # workspace needs there (tonic-build in smooth-scribe et al.).
+            - name: Install protoc
+              if: runner.os == 'Windows'
+              uses: arduino/setup-protoc@v3
+              with:
+                  repo-token: ${{ secrets.GITHUB_TOKEN }}
 
             - uses: dtolnay/rust-toolchain@stable
               with:
@@ -39,21 +83,28 @@ jobs:
                   node-version: 22
 
             - name: Build web UI
+              shell: bash
               run: |
                   cd crates/smooth-web/web
                   pnpm install --no-frozen-lockfile
                   pnpm build
 
+            # smooth-dolt is a CGO Go binary requiring ICU; it has no Windows
+            # build. Pearl-store tests that need it skip explicitly there —
+            # see SMOOTH_DOLT_UNAVAILABLE handling in smooth-pearls.
             - name: Build smooth-dolt (embedded Dolt for pearl memory tests)
+              if: runner.os == 'Linux'
               run: bash scripts/build-smooth-dolt.sh
 
             - name: Install nextest
               uses: taiki-e/install-action@nextest
 
             - name: Format check
+              if: runner.os == 'Linux'
               run: cargo fmt --check
 
             - name: Clippy
+              if: runner.os == 'Linux'
               # Honor the lint levels declared in [workspace.lints]: clippy::all
               # (deny) + unused_must_use/unsafe_code fail the build; pedantic and
               # nursery are advisory `warn` by design, so a blanket `-D warnings`
@@ -63,13 +114,18 @@ jobs:
             - name: Build examples (needed by cross-process file-lock test, pearl th-9799fa)
               run: cargo build --examples --workspace
 
+            # bash on both legs so the filter expression quotes predictably
+            # (pwsh would need its own escaping for the `&` and parentheses).
             - name: Test
-              run: cargo nextest run --profile ci
+              shell: bash
+              run: cargo nextest run --profile ci ${{ matrix.test_args }}
               env:
                   NEXTEST_EXPERIMENTAL_LIBTEST_JSON: 1
 
+            # One report per PR — publishing from both legs would double every
+            # entry in the check summary.
             - name: Publish test report
-              if: always()
+              if: always() && runner.os == 'Linux'
               uses: ctrf-io/github-test-reporter@v1
               with:
                   report-path: target/nextest/ci/junit.xml
@@ -77,6 +133,7 @@ jobs:
               continue-on-error: true
 
             - name: Build
+              if: runner.os == 'Linux'
               run: cargo build --release -p smooai-smooth-cli
 
     web:

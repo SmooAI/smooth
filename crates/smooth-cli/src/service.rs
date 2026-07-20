@@ -13,11 +13,15 @@
 //! instead of installing — system-level installs need sudo / Administrator
 //! and vary more across distros, so we don't try to automate them.
 
+// Both only feed the launchd/systemd submodules below; the Windows
+// Task Scheduler path names its task `windows::TASK_NAME` instead.
+#[cfg(unix)]
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use owo_colors::OwoColorize;
 
+#[cfg(unix)]
 pub const LABEL: &str = "com.smooai.smooth";
 
 pub fn install(system: bool) -> Result<()> {
@@ -472,7 +476,7 @@ WantedBy=default.target
 
 #[cfg(target_os = "windows")]
 mod windows {
-    use super::{Context, OwoColorize, PathBuf, Result, LABEL};
+    use super::{Context, OwoColorize, Result};
 
     pub const TASK_NAME: &str = "SmoothAI";
 

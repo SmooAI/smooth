@@ -189,12 +189,29 @@ fn attach(id: &str) -> Result<()> {
         }
     };
 
+    let mut cmd = std::process::Command::new("tmux");
+    cmd.args(["-L", &entry.socket, "attach", "-t", &entry.session]);
+
     // Hand the terminal over to tmux by replacing this process.
-    use std::os::unix::process::CommandExt;
-    let err = std::process::Command::new("tmux")
-        .args(["-L", &entry.socket, "attach", "-t", &entry.session])
-        .exec();
-    Err(anyhow!("failed to exec `tmux attach` for session {}: {err}", entry.session))
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = cmd.exec();
+        Err(anyhow!("failed to exec `tmux attach` for session {}: {err}", entry.session))
+    }
+    // No `exec` on Windows — run tmux as a child and inherit its exit
+    // status instead. (tmux itself only exists there under WSL/msys.)
+    #[cfg(not(unix))]
+    {
+        let status = cmd
+            .status()
+            .with_context(|| format!("failed to run `tmux attach` for session {}", entry.session))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(anyhow!("`tmux attach` for session {} exited with {status}", entry.session))
+        }
+    }
 }
 
 #[cfg(test)]

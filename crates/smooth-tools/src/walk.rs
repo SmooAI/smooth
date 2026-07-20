@@ -82,9 +82,13 @@ mod tests {
         std::fs::write(root.join(".envrc"), "export X=1").unwrap();
         std::fs::write(root.join("main.rs"), "fn main(){}").unwrap();
 
+        // Normalize to `/`: the "must not descend" assertions below look for
+        // `".git/"` and friends, which on Windows would be spelled `".git\"`,
+        // making every one of them pass vacuously — a false green rather than
+        // a real check (pearl th-a165b4).
         let names: Vec<String> = pruned_walk(root)
             .flatten()
-            .filter_map(|e| e.path().strip_prefix(root).ok().map(|p| p.display().to_string()))
+            .filter_map(|e| e.path().strip_prefix(root).ok().map(|p| p.display().to_string().replace('\\', "/")))
             .collect();
 
         assert!(names.iter().any(|n| n == "main.rs"), "source file listed: {names:?}");

@@ -698,7 +698,13 @@ mod sync_timeout_tests {
     }
 }
 
-#[cfg(test)]
+// Unix-only: every test here drives a real `/bin/sh` child with POSIX shell
+// syntax (`$((i+1))`, `&` backgrounding) to exercise the timeout/kill paths.
+// Windows has no `/bin/sh`, so the spawn fails before the behaviour under test
+// is reached — and the two tests that assert an *error* would then pass for
+// entirely the wrong reason (pearl th-a165b4). `run_cli_timed` itself is
+// cross-platform; it is this harness that is POSIX-bound.
+#[cfg(all(test, unix))]
 mod run_cli_timed_tests {
     use super::SmoothDolt;
     use std::path::PathBuf;
