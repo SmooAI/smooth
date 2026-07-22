@@ -14,6 +14,7 @@ mod ext;
 mod gradient;
 mod hooks;
 mod mcp_config;
+mod mcp_serve;
 mod operator_serve;
 mod service;
 mod smooai;
@@ -921,6 +922,15 @@ enum McpCommands {
         /// Default name (`budget-aware-mcp`, …). Omit to install every default.
         name: Option<String>,
     },
+    /// Run `th` ITSELF as an MCP server over stdio, exposing th's
+    /// high-value surfaces (pearls, memory, …) as MCP tools so Claude
+    /// Desktop / Cursor / Windsurf / VS Code can drive them. This is the
+    /// inverse of the client commands above: they register OTHER servers
+    /// for the operator; this turns `th` into a server other hosts consume.
+    ///
+    /// Speaks JSON-RPC on stdout — do not mix with other output. Point a
+    /// host's `mcpServers` config at `th mcp serve`.
+    Serve,
 }
 
 #[derive(Subcommand)]
@@ -1654,6 +1664,8 @@ async fn main() -> Result<()> {
         Some(Commands::Access { cmd }) => cmd_access(cmd).await,
         Some(Commands::Jira { cmd }) => cmd_jira(cmd).await,
         Some(Commands::Routing { cmd }) => cmd_routing(cmd).await,
+        // `serve` is async (runs the MCP server); the rest are sync config ops.
+        Some(Commands::Mcp { cmd: McpCommands::Serve }) => mcp_serve::serve_stdio().await,
         Some(Commands::Mcp { cmd }) => cmd_mcp(cmd),
         Some(Commands::Plugin { cmd }) => cmd_plugin(cmd),
         Some(Commands::Ext { cmd }) => ext::dispatch(cmd),
@@ -7522,6 +7534,9 @@ fn cmd_mcp(cmd: McpCommands) -> Result<()> {
             println!();
             Ok(())
         }
+        // Handled in the async dispatch (it runs the MCP server); never reaches
+        // this sync path.
+        McpCommands::Serve => unreachable!("`th mcp serve` is dispatched asynchronously"),
     }
 }
 

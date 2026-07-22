@@ -554,6 +554,18 @@ For agents collaborating across **different clones/machines** of the same repo, 
 
 `th pearls init` injects an **Agent Messaging** section into the repo's `AGENTS.md` (idempotent, between `<!-- th:agent-messaging:* -->` markers) so any harness that reads `AGENTS.md` learns to register + poll without bespoke wiring. Set `$SMOOTH_HARNESS` so `th agent list` shows what tool each agent is. Read/unread is tracked per message via `read_at`; `to = all` broadcasts share read-state (MVP simplification).
 
+### `th` as an MCP server — `th mcp serve` (epic th-63e572)
+
+`th mcp` has two halves. The `add`/`list`/`remove`/`defaults`/`install` subcommands are a **client** manager — they register *other* MCP servers (Playwright, GitHub, …) for the operator to consume, writing `~/.smooth/mcp.toml`. `th mcp serve` is the **inverse**: it runs `th` *itself* as a stdio MCP **server**, exposing th's surfaces as MCP tools so Claude Desktop / Cursor / Windsurf / VS Code can drive them.
+
+```jsonc
+// Claude Desktop / Cursor / Windsurf: ~/.cursor/mcp.json etc.
+{ "mcpServers": { "smooth": { "command": "th", "args": ["mcp", "serve"] } } }
+// VS Code (Copilot) uses "servers" (not "mcpServers") — otherwise identical.
+```
+
+`th mcp serve` speaks JSON-RPC on stdout (built on the `rmcp` SDK) — **do not mix other output onto stdout**; the tools log only to stderr. It acts on the pearl store in the workspace the host launches it in. Today it exposes the local, no-login surfaces (`pearls_ready`, `pearls_create`); memory and the gated org surfaces (`th api smooth-operator` = the org agent, knowledge, LLM gateway) layer on next, behind the Sign-in-with-Smoo conversion moment. The same tool layer is what a hosted Streamable-HTTP server at `mcp.smoo.ai` will reuse for the zero-install Claude Desktop connector. Package the stdio binary as a `.mcpb` Desktop Extension for one-click install (pearl th-7f31e2).
+
 ### SEP extensions — `th ext` (SEP Phase 3, pearl th-f288ae)
 
 SEP (the Smooth Extension Protocol) extensions are long-lived subprocesses that speak JSON-RPC over stdio to a Smooth host, contributing tools, hooks, event subscriptions, and UI. `th ext` manages the ones installed on this machine; the engine (`smooai-smooth-operator-core`) discovers and loads them, and the frontend renders their `ui/request`s.
