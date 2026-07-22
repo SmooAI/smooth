@@ -14,6 +14,7 @@ mod ext;
 mod gradient;
 mod hooks;
 mod mcp_config;
+mod operator_serve;
 mod service;
 mod smooai;
 
@@ -69,6 +70,11 @@ enum Commands {
         /// Args forwarded verbatim to the `smooth-daemon` binary.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+    /// smooth-operator engine dev tools — dogfood each polyglot LocalServer.
+    Operator {
+        #[command(subcommand)]
+        cmd: OperatorCommands,
     },
     /// Start Smooth platform — boots Big Smooth on the host and runs
     /// dispatched tasks in-process. (The microVM sandbox mode was
@@ -964,6 +970,29 @@ enum ModelCommands {
 }
 
 #[derive(Subcommand)]
+enum OperatorCommands {
+    /// Boot one of the 5 polyglot smooth-operator LocalServer implementations
+    /// behind a uniform env contract (pearl th-3f46fd). Dogfooding tool: the
+    /// servers live in the sibling `smooth-operator` repo (override with
+    /// `SMOOTH_OPERATOR_REPO`; default `~/dev/smooai/smooth-operator`). Every
+    /// engine inherits `SMOOAI_GATEWAY_URL` / `SMOOAI_GATEWAY_KEY` /
+    /// `SMOOTH_PERSONA` / `SMOOAI_MODEL` (default `deepseek-v4-flash`).
+    ///
+    /// Per-engine notes: `rust` runs `th daemon` (the only runnable Rust
+    /// server; carries daemon narc/storage/persona extras). `python` bind is
+    /// hardcoded 127.0.0.1:8787 upstream — `--port` is ignored. `ts` is
+    /// auto-built (`pnpm install && pnpm build`) if `dist/main.js` is missing.
+    Serve {
+        /// Which LocalServer implementation to boot.
+        #[arg(long)]
+        lang: operator_serve::Lang,
+        /// Port to bind (default 8799; ignored for `python`).
+        #[arg(long)]
+        port: Option<u16>,
+    },
+}
+
+#[derive(Subcommand)]
 enum ProjectCommands {
     /// Create a project
     Create { name: String, description: Option<String> },
@@ -1534,6 +1563,9 @@ async fn main() -> Result<()> {
             }
         }
         Some(Commands::Daemon { args }) => daemon_launcher::run(args).await,
+        Some(Commands::Operator { cmd }) => match cmd {
+            OperatorCommands::Serve { lang, port } => operator_serve::serve(lang, port),
+        },
         Some(Commands::Up {
             no_leader,
             port,
