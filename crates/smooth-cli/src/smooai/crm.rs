@@ -158,6 +158,12 @@ pub enum CompaniesCmd {
         /// Maximum number of companies to return.
         #[arg(long, default_value = "50")]
         limit: u32,
+        /// Skip the first N companies (page offset).
+        #[arg(long, default_value = "0")]
+        offset: u32,
+        /// Fetch every page (ignores --limit/--offset).
+        #[arg(long)]
+        all: bool,
         /// Print raw JSON instead of the table.
         #[arg(long)]
         json: bool,
@@ -240,6 +246,12 @@ pub enum DealsCmd {
         /// Maximum number of deals to return.
         #[arg(long, default_value = "50")]
         limit: u32,
+        /// Skip the first N deals (page offset).
+        #[arg(long, default_value = "0")]
+        offset: u32,
+        /// Fetch every page (ignores --limit/--offset; the stage filter is not applied in --all mode).
+        #[arg(long)]
+        all: bool,
         /// Print raw JSON instead of the pipeline view.
         #[arg(long)]
         json: bool,
@@ -627,6 +639,12 @@ pub enum ContactsCmd {
         /// Maximum number of contacts to return.
         #[arg(long, default_value = "50")]
         limit: u32,
+        /// Skip the first N contacts (page offset).
+        #[arg(long, default_value = "0")]
+        offset: u32,
+        /// Fetch every page (ignores --limit/--offset).
+        #[arg(long)]
+        all: bool,
     },
     /// Get a single contact by id.
     Get {
@@ -816,13 +834,25 @@ pub fn resolve_org(override_org: Option<String>) -> Result<String> {
 async fn contacts(cmd: ContactsCmd) -> Result<()> {
     let client = UserClient::from_user_session().await?;
     match cmd {
-        ContactsCmd::List { org, search, limit } => {
+        ContactsCmd::List {
+            org,
+            search,
+            limit,
+            offset,
+            all,
+        } => {
             let org = resolve_org(org)?;
-            let mut path = format!("/organizations/{org}/crm/contacts?limit={limit}");
-            if let Some(s) = search.filter(|s| !s.trim().is_empty()) {
-                path.push_str(&format!("&search={}", urlencoding::encode(&s)));
+            let search = search.filter(|s| !s.trim().is_empty());
+            if all {
+                let rows = fetch_all_resource(&client, &org, "contacts", search.as_deref(), std::time::Duration::from_millis(350)).await?;
+                print_json(&Value::Array(rows));
+            } else {
+                let mut path = format!("/organizations/{org}/crm/contacts?limit={limit}&offset={offset}");
+                if let Some(s) = &search {
+                    path.push_str(&format!("&search={}", urlencoding::encode(s)));
+                }
+                print_json(&client.get(&path).await.context("GET contacts")?);
             }
-            print_json(&client.get(&path).await.context("GET contacts")?);
         }
         ContactsCmd::Get { contact_id, org } => {
             let org = resolve_org(org)?;
@@ -891,17 +921,30 @@ async fn contacts(cmd: ContactsCmd) -> Result<()> {
 async fn companies(cmd: CompaniesCmd) -> Result<()> {
     let client = UserClient::from_user_session().await?;
     match cmd {
-        CompaniesCmd::List { org, search, limit, json } => {
+        CompaniesCmd::List {
+            org,
+            search,
+            limit,
+            offset,
+            all,
+            json,
+        } => {
             let org = resolve_org(org)?;
-            let mut path = format!("/organizations/{org}/crm/companies?limit={limit}");
-            if let Some(s) = search.filter(|s| !s.trim().is_empty()) {
-                path.push_str(&format!("&search={}", urlencoding::encode(&s)));
-            }
-            let body = client.get(&path).await.context("GET companies")?;
-            if json {
-                print_json(&body);
+            let search = search.filter(|s| !s.trim().is_empty());
+            if all {
+                let rows = fetch_all_resource(&client, &org, "companies", search.as_deref(), std::time::Duration::from_millis(350)).await?;
+                print_json(&Value::Array(rows));
             } else {
-                render_companies(&body);
+                let mut path = format!("/organizations/{org}/crm/companies?limit={limit}&offset={offset}");
+                if let Some(s) = &search {
+                    path.push_str(&format!("&search={}", urlencoding::encode(s)));
+                }
+                let body = client.get(&path).await.context("GET companies")?;
+                if json {
+                    print_json(&body);
+                } else {
+                    render_companies(&body);
+                }
             }
         }
         CompaniesCmd::Show { company_id, org } => {
@@ -1040,17 +1083,32 @@ fn render_companies(body: &Value) {
 async fn deals(cmd: DealsCmd) -> Result<()> {
     let client = UserClient::from_user_session().await?;
     match cmd {
-        DealsCmd::List { org, stage, limit, json } => {
+        DealsCmd::List {
+            org,
+            stage,
+            limit,
+            offset,
+            all,
+            json,
+        } => {
             let org = resolve_org(org)?;
-            let mut path = format!("/organizations/{org}/crm/deals?limit={limit}");
-            if let Some(s) = stage.filter(|s| !s.trim().is_empty()) {
-                path.push_str(&format!("&stage={}", urlencoding::encode(&s)));
-            }
-            let body = client.get(&path).await.context("GET deals")?;
-            if json {
-                print_json(&body);
+            if all {
+                // The deals endpoint filters by `stage`, not `search`, so the
+                // shared paginator (which only knows `search`) can't apply it —
+                // --all pulls every deal regardless of the stage flag.
+                let rows = fetch_all_resource(&client, &org, "deals", None, std::time::Duration::from_millis(350)).await?;
+                print_json(&Value::Array(rows));
             } else {
-                render_deals(&body);
+                let mut path = format!("/organizations/{org}/crm/deals?limit={limit}&offset={offset}");
+                if let Some(s) = stage.filter(|s| !s.trim().is_empty()) {
+                    path.push_str(&format!("&stage={}", urlencoding::encode(&s)));
+                }
+                let body = client.get(&path).await.context("GET deals")?;
+                if json {
+                    print_json(&body);
+                } else {
+                    render_deals(&body);
+                }
             }
         }
         DealsCmd::Show { deal_id, org } => {
@@ -2400,14 +2458,19 @@ fn norm_phone(v: &Value) -> Option<String> {
     }
 }
 
-/// Fetch every contact in the org, paging in blocks of 200. Paces between
-/// pages so the existing-contacts scan doesn't itself trip the rate limit.
-async fn fetch_all(client: &UserClient, org: &str, rate: std::time::Duration) -> Result<Vec<Value>> {
+/// Fetch every row of a CRM resource in the org, paging in blocks of 200
+/// (the API's max page size) until a short page. Paces between pages so a
+/// full scan doesn't itself trip the 100-req/60s rate limit. Adds
+/// `&search=` (url-encoded) when a search term is given.
+async fn fetch_all_resource(client: &UserClient, org: &str, resource: &str, search: Option<&str>, rate: std::time::Duration) -> Result<Vec<Value>> {
     let mut all = Vec::new();
     let mut offset = 0u32;
     loop {
-        let path = format!("/organizations/{org}/crm/contacts?limit=200&offset={offset}");
-        let body = client.get(&path).await.with_context(|| format!("GET contacts (offset {offset})"))?;
+        let mut path = format!("/organizations/{org}/crm/{resource}?limit=200&offset={offset}");
+        if let Some(s) = search {
+            path.push_str(&format!("&search={}", urlencoding::encode(s)));
+        }
+        let body = client.get(&path).await.with_context(|| format!("GET {resource} (offset {offset})"))?;
         let page = body.as_array().cloned().unwrap_or_default();
         let n = page.len();
         all.extend(page);
@@ -2418,6 +2481,11 @@ async fn fetch_all(client: &UserClient, org: &str, rate: std::time::Duration) ->
         tokio::time::sleep(rate).await;
     }
     Ok(all)
+}
+
+/// Fetch every contact in the org — the import scan's existing-contacts pull.
+async fn fetch_all(client: &UserClient, org: &str, rate: std::time::Duration) -> Result<Vec<Value>> {
+    fetch_all_resource(client, org, "contacts", None, rate).await
 }
 
 /// A single write to perform.
