@@ -476,6 +476,36 @@ impl PearlStore {
         Ok(pearl)
     }
 
+    /// Populate `.labels` for a whole batch of pearls in a SINGLE Dolt query.
+    ///
+    /// The per-pearl [`load_pearl_with_labels`](Self::load_pearl_with_labels)
+    /// path is an N+1: every list-style query (`ready`/`list`/`blocked`/…) then
+    /// cold-boots Dolt once per row just to fetch labels, which dominated
+    /// session-start latency (`th prime` → `th pearls ready` ≈ 5.7s for ~40
+    /// open pearls). One `WHERE pearl_id IN (…)` collapses that to 2 queries
+    /// total. Order of `pearls` is preserved; labels come back label-sorted.
+    fn attach_labels(&self, mut pearls: Vec<Pearl>) -> Result<Vec<Pearl>> {
+        if pearls.is_empty() {
+            return Ok(pearls);
+        }
+        let in_list = pearls.iter().map(|p| format!("'{}'", sql_escape(&p.id))).collect::<Vec<_>>().join(",");
+        let rows = self.dolt.sql(&format!(
+            "SELECT pearl_id, label FROM pearl_labels WHERE pearl_id IN ({in_list}) ORDER BY label"
+        ))?;
+        let mut by_id: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+        for r in &rows {
+            if let (Some(pid), Some(label)) = (r["pearl_id"].as_str(), r["label"].as_str()) {
+                by_id.entry(pid.to_string()).or_default().push(label.to_string());
+            }
+        }
+        for p in &mut pearls {
+            if let Some(labels) = by_id.remove(&p.id) {
+                p.labels = labels;
+            }
+        }
+        Ok(pearls)
+    }
+
     // ── Dolt version control ────────────────────────────────────────────
 
     /// View the Dolt commit log.
@@ -576,12 +606,8 @@ impl PearlStore {
         }
 
         let rows = self.dolt.sql(&sql)?;
-        let mut result = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let pearl = Self::parse_pearl(row)?;
-            result.push(self.load_pearl_with_labels(pearl)?);
-        }
-        Ok(result)
+        let pearls = rows.iter().map(Self::parse_pearl).collect::<Result<Vec<_>>>()?;
+        self.attach_labels(pearls)
     }
 
     /// Update a pearl with partial changes. Records history for each changed field.
@@ -800,12 +826,8 @@ impl PearlStore {
              WHERE d.pearl_id = '{}' AND d.dep_type = 'blocks' AND p.status != 'closed'",
             sql_escape(id),
         ))?;
-        let mut result = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let pearl = Self::parse_pearl(row)?;
-            result.push(self.load_pearl_with_labels(pearl)?);
-        }
-        Ok(result)
+        let pearls = rows.iter().map(Self::parse_pearl).collect::<Result<Vec<_>>>()?;
+        self.attach_labels(pearls)
     }
 
     /// Get all dependencies for a pearl.
@@ -907,12 +929,8 @@ impl PearlStore {
              ) \
              ORDER BY p.priority ASC, p.created_at DESC",
         )?;
-        let mut result = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let pearl = Self::parse_pearl(row)?;
-            result.push(self.load_pearl_with_labels(pearl)?);
-        }
-        Ok(result)
+        let pearls = rows.iter().map(Self::parse_pearl).collect::<Result<Vec<_>>>()?;
+        self.attach_labels(pearls)
     }
 
     /// Scheduled pearls whose time has arrived: `scheduled_at <= now` and not
@@ -929,12 +947,8 @@ impl PearlStore {
              WHERE p.scheduled_at IS NOT NULL AND p.scheduled_at <= '{now}' AND p.status != 'closed' \
              ORDER BY p.scheduled_at ASC",
         ))?;
-        let mut result = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let pearl = Self::parse_pearl(row)?;
-            result.push(self.load_pearl_with_labels(pearl)?);
-        }
-        Ok(result)
+        let pearls = rows.iter().map(Self::parse_pearl).collect::<Result<Vec<_>>>()?;
+        self.attach_labels(pearls)
     }
 
     /// Pearls that have unresolved blocking dependencies.
@@ -946,12 +960,8 @@ impl PearlStore {
              WHERE d.dep_type = 'blocks' AND blocker.status != 'closed' AND p.status != 'closed' \
              ORDER BY p.priority ASC",
         )?;
-        let mut result = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let pearl = Self::parse_pearl(row)?;
-            result.push(self.load_pearl_with_labels(pearl)?);
-        }
-        Ok(result)
+        let pearls = rows.iter().map(Self::parse_pearl).collect::<Result<Vec<_>>>()?;
+        self.attach_labels(pearls)
     }
 
     /// Full-text search on title and description (LIKE-based).
@@ -960,12 +970,8 @@ impl PearlStore {
         let rows = self.dolt.sql(&format!(
             "SELECT * FROM pearls WHERE title LIKE '%{pattern}%' OR description LIKE '%{pattern}%' ORDER BY priority ASC, created_at DESC",
         ))?;
-        let mut result = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let pearl = Self::parse_pearl(row)?;
-            result.push(self.load_pearl_with_labels(pearl)?);
-        }
-        Ok(result)
+        let pearls = rows.iter().map(Self::parse_pearl).collect::<Result<Vec<_>>>()?;
+        self.attach_labels(pearls)
     }
 
     /// Aggregate stats across all pearls.
@@ -1497,5 +1503,27 @@ mod tests {
         // Idempotent second pass: no "duplicate column" error.
         PearlStore::migrate_schema(&store.dolt).expect("migrate idempotent on healed store");
         assert!(PearlStore::column_exists(&store.dolt, "pearls", "scheduled_at").expect("still present"));
+    }
+
+    #[test]
+    fn list_batch_loads_labels_per_pearl() {
+        // Regression for th-2e1ad2: list-style queries batch-load labels in one
+        // query instead of N+1. Verify each pearl gets exactly its own labels
+        // (no cross-contamination) and a label-less pearl stays empty.
+        let Some(store) = test_store() else { return };
+        let a = store.create(&new_task("alpha")).unwrap();
+        let b = store.create(&new_task("bravo")).unwrap();
+        let _c = store.create(&new_task("charlie")).unwrap(); // no labels
+        store.add_label(&a.id, "backend").unwrap();
+        store.add_label(&a.id, "auth").unwrap();
+        store.add_label(&b.id, "frontend").unwrap();
+
+        let all = store.list(&PearlQuery::new()).unwrap();
+        let get = |id: &str| all.iter().find(|p| p.id == id).unwrap().labels.clone();
+
+        // add_label uses ORDER BY label → alphabetical.
+        assert_eq!(get(&a.id), vec!["auth".to_string(), "backend".to_string()]);
+        assert_eq!(get(&b.id), vec!["frontend".to_string()]);
+        assert!(get(&_c.id).is_empty(), "unlabelled pearl must have no labels");
     }
 }
