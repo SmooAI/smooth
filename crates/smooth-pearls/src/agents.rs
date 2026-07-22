@@ -103,6 +103,47 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Rename an agent handle, carrying its mail with it. Used when a
+    /// session boots under an auto-generated placeholder (`cc-<repo>-<sid>`)
+    /// and later renames itself to something task-meaningful. Rewrites the
+    /// roster row *and* every message addressed to/from `old`, so the
+    /// renamed session keeps its inbox and thread history.
+    ///
+    /// # Errors
+    /// Returns an error if `new` is empty, if `old` isn't registered, if an
+    /// agent already exists under `new` (would merge two identities), or if
+    /// a Dolt write fails.
+    pub fn rename(&self, old: &str, new: &str) -> Result<()> {
+        let old = old.trim();
+        let new = new.trim();
+        if new.is_empty() {
+            anyhow::bail!("new agent name must not be empty");
+        }
+        if old == new {
+            return Ok(());
+        }
+        if self.get(old)?.is_none() {
+            anyhow::bail!("agent '{old}' is not registered");
+        }
+        if self.get(new)?.is_some() {
+            anyhow::bail!("agent '{new}' already exists — pick a different handle");
+        }
+        let (old_e, new_e) = (sql_escape(old), sql_escape(new));
+        self.dolt
+            .exec(&format!(
+                "UPDATE agents SET name = '{new_e}', last_seen = NOW(), status = 'online' WHERE name = '{old_e}'"
+            ))
+            .context("rename agent row")?;
+        // Carry the mail so the renamed handle keeps its inbox + sent history.
+        self.dolt
+            .exec(&format!("UPDATE messages SET to_agent = '{new_e}' WHERE to_agent = '{old_e}'"))
+            .context("rename inbound mail")?;
+        self.dolt
+            .exec(&format!("UPDATE messages SET from_agent = '{new_e}' WHERE from_agent = '{old_e}'"))
+            .context("rename outbound mail")?;
+        Ok(())
+    }
+
     /// Mark an agent's status (e.g. `offline` on graceful shutdown).
     ///
     /// # Errors
@@ -206,5 +247,70 @@ mod tests {
         let (_t, s) = store();
         let reg = AgentRegistry::new(s.dolt().clone());
         assert!(reg.get("nobody").unwrap().is_none());
+    }
+
+    #[test]
+    fn rename_moves_row_and_carries_mail() {
+        let (_t, s) = store();
+        let reg = AgentRegistry::new(s.dolt().clone());
+        let mb = crate::Mailbox::new(s.dolt().clone());
+        reg.register("cc-smooth-a21c", "claude-code", Some(7)).unwrap();
+        reg.register("peer", "shell", None).unwrap();
+        // Mail both directions across the placeholder handle.
+        mb.send("peer", "cc-smooth-a21c", "hi there", None).unwrap();
+        mb.send("cc-smooth-a21c", "peer", "hi back", None).unwrap();
+
+        reg.rename("cc-smooth-a21c", "fix-auth").unwrap();
+
+        // Roster row moved, old handle gone, harness/pid preserved.
+        assert!(reg.get("cc-smooth-a21c").unwrap().is_none());
+        let got = reg.get("fix-auth").unwrap().expect("renamed present");
+        assert_eq!(got.harness, "claude-code");
+        assert_eq!(got.pid, Some(7));
+        assert_eq!(got.status, "online");
+
+        // Inbox follows the rename.
+        let inbox = mb.inbox("fix-auth", false, 50).unwrap();
+        assert_eq!(inbox.len(), 1, "inbound mail should re-address to the new handle");
+        assert_eq!(inbox[0].body, "hi there");
+        let peer_inbox = mb.inbox("peer", false, 50).unwrap();
+        assert_eq!(peer_inbox.len(), 1);
+        assert_eq!(peer_inbox[0].from_agent, "fix-auth", "outbound mail should show the new sender");
+    }
+
+    #[test]
+    fn rename_to_existing_handle_rejected() {
+        let (_t, s) = store();
+        let reg = AgentRegistry::new(s.dolt().clone());
+        reg.register("a", "shell", None).unwrap();
+        reg.register("b", "shell", None).unwrap();
+        assert!(reg.rename("a", "b").is_err(), "must not merge two identities");
+        // Both untouched.
+        assert!(reg.get("a").unwrap().is_some());
+        assert!(reg.get("b").unwrap().is_some());
+    }
+
+    #[test]
+    fn rename_unknown_source_rejected() {
+        let (_t, s) = store();
+        let reg = AgentRegistry::new(s.dolt().clone());
+        assert!(reg.rename("ghost", "whatever").is_err());
+    }
+
+    #[test]
+    fn rename_empty_target_rejected() {
+        let (_t, s) = store();
+        let reg = AgentRegistry::new(s.dolt().clone());
+        reg.register("a", "shell", None).unwrap();
+        assert!(reg.rename("a", "   ").is_err());
+    }
+
+    #[test]
+    fn rename_noop_when_same() {
+        let (_t, s) = store();
+        let reg = AgentRegistry::new(s.dolt().clone());
+        reg.register("a", "shell", None).unwrap();
+        reg.rename("a", "a").unwrap();
+        assert!(reg.get("a").unwrap().is_some());
     }
 }

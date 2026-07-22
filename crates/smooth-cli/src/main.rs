@@ -1287,6 +1287,20 @@ enum AgentCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Rename an agent handle, carrying its inbox and sent mail with it.
+    /// Used to promote an auto-generated startup placeholder
+    /// (`cc-<repo>-<sid>`) to a task-meaningful handle.
+    Rename {
+        /// Current handle to rename.
+        #[arg(long)]
+        from: String,
+        /// New handle.
+        #[arg(long)]
+        to: String,
+        /// Don't push to the repo's remote after renaming.
+        #[arg(long)]
+        no_push: bool,
+    },
     /// Mark this (or a named) agent offline.
     Offline {
         #[arg(long)]
@@ -3910,6 +3924,14 @@ async fn cmd_agent(cmd: AgentCommands) -> Result<()> {
                     );
                 }
             }
+        }
+        AgentCommands::Rename { from, to, no_push } => {
+            reg.rename(&from, &to)?;
+            commit_messaging_state(&store, &dolt_dir, &format!("agent rename {from} -> {to}"));
+            if !no_push {
+                sync_push_pearl_state(&dolt_dir);
+            }
+            println!("{} {} renamed to {}", "✓".green().bold(), from.dimmed(), to.green().bold());
         }
         AgentCommands::Offline { name } => {
             let name = name.unwrap_or_else(default_agent_name);

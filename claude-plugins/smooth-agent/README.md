@@ -17,11 +17,23 @@ Code worker sessions in tmux, coordinate them over
   (`th api smooth-operator chat|confirm|history`) for org actions (email, CRM,
   analytics, knowledge) rather than code changes. Needs a `th auth login` user
   session; it 401s under an M2M client.
-- **SessionStart hook** — auto-registers **every** session on the th-mail bus so
-  Big Smooth and other agents can reach it. `th claude run` workers register under
-  their `SMOOTH_AGENT_HANDLE`; a plain `claude` session registers under a stable
-  per-repo handle (`<user>@<host>/<repo>`). No `th` on PATH → the hook is a no-op
-  and the rest of the plugin still works.
+- **Auto-onboarding to th-mail** — **every** Claude Code session lands on the
+  bus so Big Smooth and other agents can reach it, via two hooks:
+    - `register-agent.sh` (SessionStart) registers the session. `th claude run`
+      workers register under their (already-meaningful) `SMOOTH_AGENT_HANDLE`; a
+      plain `claude` session registers under a **placeholder** handle derived
+      from the session (`cc-<cwd-basename>-<sid4>`, e.g.
+      `cc-smooth-th-e651bc-agent-onboard-a21c`) with `--no-push` (registration
+      fires on every start; skipping the Dolt remote push keeps it cheap).
+    - `on-first-prompt.sh` (UserPromptSubmit) fires **once**, after the first
+      prompt, nudging a placeholder session to rename itself to a task-meaningful
+      handle: `th agent rename --from <placeholder> --to <new>` (carries its mail
+      over). Workers are never nudged.
+  Registration is always-on and safe; the hooks do **not** auto-start a
+  background `th msg watch` (Dolt is single-writer — many always-on watchers
+  cause "database is read only"). Background mail-watching stays **opt-in** via
+  the `/th-mail` skill. No `th` on PATH → the hooks are a no-op and the rest of
+  the plugin still works.
 - **Shared repo guardrail hooks** — the SmooAI worktree/pearls guardrails that
   used to be hand-copied into every repo's `.claude/hooks/`, now one source of
   truth (pearl th-44bace). All derive the repo/main-worktree from git at runtime,

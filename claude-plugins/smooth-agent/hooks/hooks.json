@@ -20,6 +20,16 @@
                 ]
             }
         ],
+        "UserPromptSubmit": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/on-first-prompt.sh"
+                    }
+                ]
+            }
+        ],
         "PreToolUse": [
             {
                 "matcher": "Edit|Write",
