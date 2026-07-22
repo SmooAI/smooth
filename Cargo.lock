@@ -4748,6 +4748,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "smooai-smooth-bench"
+version = "0.22.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum 0.8.8",
+ "chrono",
+ "clap",
+ "dirs-next",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "smooai-smooth-cast",
+ "smooai-smooth-code",
+ "smooai-smooth-operator-core",
+ "smooai-smooth-pearls",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "smooai-smooth-cast"
 version = "0.22.0"
 dependencies = [
