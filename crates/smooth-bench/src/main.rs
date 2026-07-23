@@ -19,7 +19,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use smooth_bench::curated::CuratedList;
-use smooth_bench::engine::{run_engine_matrix, Engine, EngineEnv, EngineMatrixRun, ProcessBooter};
+use smooth_bench::engine::{run_engine_matrix, Engine, EngineEnv, EngineMatrixRun, Isolation, MicroVmBooter, ProcessBooter};
 use smooth_bench::sweep::{current_commit_sha, StdoutObserver, SweepConfig, SweepGate};
 use smooth_bench::{print_summary, run_aider_polyglot, BenchOpts, PolyglotLang};
 
@@ -101,6 +101,14 @@ struct ScoreArgs {
     #[arg(long, default_value_t = 300)]
     boot_timeout_s: u64,
 
+    /// Where the engine runs. `host` (default) spawns it as a host
+    /// process. `microvm` boots the linux `smooth-daemon` inside a
+    /// microsandbox microVM per task — default-deny egress except the
+    /// LLM gateway, only the task's scratch dir mounted in. `microvm`
+    /// requires `--engine rust`. Pearl th-a63c22.
+    #[arg(long, default_value = "host", value_parser = parse_isolation)]
+    isolation: Isolation,
+
     /// Output path. If given, JSON-lines records are written there and
     /// the summary table still prints to stdout; otherwise both go to
     /// stdout.
@@ -110,6 +118,10 @@ struct ScoreArgs {
 
 fn parse_engine(s: &str) -> Result<Engine, String> {
     Engine::from_name(s).ok_or_else(|| format!("unknown engine {s:?} (valid: rust, go, ts, python, dotnet)"))
+}
+
+fn parse_isolation(s: &str) -> Result<Isolation, String> {
+    Isolation::from_name(s).ok_or_else(|| format!("unknown isolation {s:?} (valid: host, microvm)"))
 }
 
 #[tokio::main]
@@ -197,11 +209,26 @@ async fn run_score(args: ScoreArgs) -> Result<()> {
         },
     };
 
-    let mut booter = ProcessBooter::new(repo, env);
-    booter.ready_timeout = Duration::from_secs(args.boot_timeout_s);
+    args.isolation.check_engines(&engines)?;
 
     let mut observer = StdoutObserver;
-    let run = run_engine_matrix(&curated, &booter, &engines, &models, &cfg, &mut observer).await?;
+    let run = match args.isolation {
+        Isolation::Host => {
+            let mut booter = ProcessBooter::new(repo, env);
+            booter.ready_timeout = Duration::from_secs(args.boot_timeout_s);
+            run_engine_matrix(&curated, &booter, &engines, &models, &cfg, &mut observer).await?
+        }
+        Isolation::MicroVm => {
+            // The microVM backend needs the SMOOTH repo (for
+            // `scripts/msb-spike/`), not the smooth-operator one.
+            let smooth_repo = std::env::var_os("SMOOTH_REPO")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join(".."));
+            let mut booter = MicroVmBooter::new(smooth_repo, env);
+            booter.ready_timeout = Duration::from_secs(args.boot_timeout_s);
+            run_engine_matrix(&curated, &booter, &engines, &models, &cfg, &mut observer).await?
+        }
+    };
 
     emit(&run, args.output.as_deref())?;
 

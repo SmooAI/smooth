@@ -399,6 +399,325 @@ fn wait_for_port(addr: SocketAddr, timeout: Duration) -> Result<()> {
     anyhow::bail!("timed out after {timeout:?} waiting for {addr}")
 }
 
+// ---------------------------------------------------------------------------
+// microVM isolation backend (pearl th-a63c22)
+// ---------------------------------------------------------------------------
+
+/// Where a scored task's engine runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Isolation {
+    /// Engine runs as a host process (today's behaviour).
+    #[default]
+    Host,
+    /// Engine runs inside a microsandbox microVM: default-deny egress,
+    /// only the task workspace bind-mounted in.
+    MicroVm,
+}
+
+impl Isolation {
+    pub fn from_name(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "host" => Some(Self::Host),
+            "microvm" | "micro-vm" | "vm" => Some(Self::MicroVm),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::MicroVm => "microvm",
+        }
+    }
+
+    /// microVM isolation boots the linux `smooth-daemon` — the only
+    /// engine with a VM-bootable binary. The polyglot servers ship no
+    /// tools anyway (pearl th-82ad57), so combining them with `microvm`
+    /// is always a mistake worth erroring on.
+    ///
+    /// # Errors
+    /// Errors when `microvm` is paired with any non-rust engine.
+    pub fn check_engines(self, engines: &[Engine]) -> Result<()> {
+        if self == Self::MicroVm {
+            if let Some(bad) = engines.iter().find(|e| **e != Engine::Rust) {
+                anyhow::bail!(
+                    "--isolation microvm supports only --engine rust (got {}); the polyglot engines have no VM-bootable binary and ship no tools (pearl th-82ad57)",
+                    bad.as_str()
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Everything that varies per microVM task boot. Split out from
+/// [`msb_run_args`] so the invocation shape is asserted in tests without
+/// spawning anything.
+#[derive(Debug, Clone)]
+pub struct MsbSpec<'a> {
+    /// Unique sandbox name — `msb stop`/`remove` key at teardown.
+    pub name: &'a str,
+    /// Host dir holding the linux `smooth-daemon`, mounted at `/opt`.
+    pub bin_dir: &'a Path,
+    /// The task's scratch dir, mounted at `/work` (the daemon's workspace).
+    pub workspace: &'a Path,
+    /// Host dir mounted at `/var/log/smooth`; the daemon's stdout/stderr
+    /// is redirected there because attached `msb run` pipes no guest
+    /// output (pearl th-64fd98).
+    pub log_dir: &'a Path,
+    pub host_port: u16,
+    pub guest_port: u16,
+    pub token: &'a str,
+    pub model: &'a str,
+    pub gateway_url: &'a str,
+    pub gateway_key: Option<&'a str>,
+    /// The daemon is a glibc binary — `debian`, never alpine.
+    pub image: &'a str,
+}
+
+/// Host of the LLM gateway, i.e. the one hole punched in the VM's
+/// default-deny egress policy.
+fn gateway_host(url: &str) -> &str {
+    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let hostport = after_scheme.split('/').next().unwrap_or(after_scheme);
+    // ponytail: no url crate — gateway URLs here are always `scheme://host[:port]/…`.
+    hostport.rsplit_once(':').map_or(hostport, |(h, _)| h)
+}
+
+/// The full `msb` argv for one task's microVM. Verified shape (msb 0.4.6,
+/// libkrun, macOS arm64) — see `scripts/msb-spike/run-daemon-vm.sh`.
+///
+/// Deliberately **attached**: `-d/--detach` silently ignores the command
+/// after `--` and boots the image entrypoint instead, and `msb exec` into
+/// a detached sandbox hangs in 0.4.6. The caller backgrounds this child
+/// and reaps it via [`MsbGuard`].
+pub fn msb_run_args(spec: &MsbSpec<'_>) -> Vec<String> {
+    let host = gateway_host(spec.gateway_url);
+    let mut a: Vec<String> = vec![
+        "run".into(),
+        "--name".into(),
+        spec.name.into(),
+        "-p".into(),
+        format!("{}:{}", spec.host_port, spec.guest_port),
+        "-v".into(),
+        format!("{}:/opt", spec.bin_dir.display()),
+        "-v".into(),
+        format!("{}:/work", spec.workspace.display()),
+        "-v".into(),
+        format!("{}:/var/log/smooth", spec.log_dir.display()),
+        "-e".into(),
+        format!("SMOOTH_ADDR=0.0.0.0:{}", spec.guest_port),
+        "-e".into(),
+        "SMOOTH_WORKSPACE=/work".into(),
+        "-e".into(),
+        format!("SMOOTH_LOCAL_TOKEN={}", spec.token),
+        "-e".into(),
+        format!("SMOOAI_GATEWAY_URL={}", spec.gateway_url),
+        "-e".into(),
+        format!("SMOOAI_MODEL={}", spec.model),
+        // The daemon's own model pin. `SMOOAI_MODEL` alone is NOT enough:
+        // `resolve_gateway_config` only honours `SMOOTH_AGENT_MODEL`, so
+        // without this the VM silently ran the upstream default
+        // (claude-haiku-4-5) instead of `--model`.
+        "-e".into(),
+        format!("SMOOTH_AGENT_MODEL={}", spec.model),
+        "-e".into(),
+        "SMOOTH_OPERATOR_DB=/tmp/operator-storage.db".into(),
+        "-e".into(),
+        "SMOOTH_TAILSCALE_SERVE=0".into(),
+        "-e".into(),
+        "HOME=/root".into(),
+        "-e".into(),
+        format!("RUST_LOG={}", std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into())),
+        "--net-default-egress".into(),
+        "deny".into(),
+        "--net-rule".into(),
+        format!("allow@{host}:tcp:443"),
+    ];
+    if let Some(key) = spec.gateway_key {
+        a.push("--secret".into());
+        a.push(format!("SMOOAI_GATEWAY_KEY={key}@{host}"));
+    }
+    a.push(spec.image.into());
+    a.push("--".into());
+    a.push("/bin/sh".into());
+    a.push("-c".into());
+    a.push("exec /opt/smooth-daemon >> /var/log/smooth/daemon.log 2>&1".into());
+    a
+}
+
+/// Kills the attached `msb run` child and removes the sandbox, so a
+/// sweep can't leak VMs across tasks.
+struct MsbGuard {
+    name: String,
+    child: Child,
+}
+
+impl Drop for MsbGuard {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = Command::new("msb")
+            .args(["remove", "-f", "-q", &self.name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+/// microVM booter: every task boots the LINUX `smooth-daemon` inside its
+/// own microsandbox microVM with the task's scratch dir bind-mounted at
+/// `/work` and egress denied except the LLM gateway.
+pub struct MicroVmBooter {
+    /// smooth repo root (holds `scripts/msb-spike/`).
+    pub repo_root: PathBuf,
+    pub env: EngineEnv,
+    pub ready_timeout: Duration,
+}
+
+impl MicroVmBooter {
+    pub fn new(repo_root: PathBuf, env: EngineEnv) -> Self {
+        Self {
+            repo_root,
+            env,
+            ready_timeout: Duration::from_secs(300),
+        }
+    }
+}
+
+#[async_trait]
+impl EngineBooter for MicroVmBooter {
+    async fn boot(&self, engine: Engine, model: &str) -> Result<BootedEngine> {
+        Isolation::MicroVm.check_engines(&[engine])?;
+        // Build once, up front — never per task (~163s cold, cached after).
+        let bin_dir = ensure_linux_daemon(&self.repo_root)?;
+        Ok(BootedEngine {
+            runner: Box::new(MicroVmTaskRunner {
+                model: model.to_string(),
+                bin_dir,
+                env: self.env.clone(),
+                ready_timeout: self.ready_timeout,
+            }),
+            url: String::new(),
+            _guard: Box::new(()),
+        })
+    }
+}
+
+/// Ensure `scripts/msb-spike/vmbin/smooth-daemon` exists, building it in
+/// the container builder if not. Returns the dir to mount at `/opt`.
+/// Cached by the binary's own existence — the build never touches the
+/// host `~/.cargo` or `./target`, so it can't poison macOS builds.
+fn ensure_linux_daemon(repo_root: &Path) -> Result<PathBuf> {
+    let spike = repo_root.join("scripts").join("msb-spike");
+    let bin_dir = spike.join("vmbin");
+    if bin_dir.join("smooth-daemon").exists() {
+        return Ok(bin_dir);
+    }
+    eprintln!("microvm: building the linux smooth-daemon (first run, ~3min) …");
+    let status = Command::new(spike.join("build-linux-daemon.sh"))
+        .current_dir(&spike)
+        .status()
+        .context("running scripts/msb-spike/build-linux-daemon.sh (is docker running?)")?;
+    anyhow::ensure!(status.success(), "build-linux-daemon.sh failed");
+    anyhow::ensure!(bin_dir.join("smooth-daemon").exists(), "build-linux-daemon.sh produced no vmbin/smooth-daemon");
+    Ok(bin_dir)
+}
+
+/// Poll until `addr` answers an HTTP request (any status — the daemon's
+/// strict-auth 401 counts) or `timeout` elapses. A plain TCP connect is
+/// NOT a readiness signal through msb's port forwarder: it accepts as
+/// soon as the VM starts, before the guest has bound anything.
+fn wait_for_http(addr: SocketAddr, timeout: Duration) -> Result<()> {
+    use std::io::{Read, Write};
+    let start = Instant::now();
+    let mut last = "no connection".to_string();
+    while start.elapsed() < timeout {
+        if let Ok(mut s) = TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
+            let _ = s.set_read_timeout(Some(Duration::from_secs(3)));
+            if s.write_all(b"GET / HTTP/1.0\r\n\r\n").is_ok() {
+                let mut buf = [0u8; 16];
+                match s.read(&mut buf) {
+                    Ok(n) if buf[..n].starts_with(b"HTTP/") => return Ok(()),
+                    Ok(n) => last = format!("{n} non-HTTP bytes"),
+                    Err(e) => last = e.to_string(),
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    anyhow::bail!("timed out after {timeout:?} waiting for an HTTP response from {addr} (last: {last})")
+}
+
+/// Ask the OS for a free loopback port.
+// ponytail: classic bind-and-release race; the window is microseconds and
+// each sandbox owns a fresh port. Switch to a reserved-range allocator if
+// parallel sweeps ever collide.
+fn free_port() -> Result<u16> {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").context("allocating a free host port")?;
+    Ok(l.local_addr()?.port())
+}
+
+/// Per-task runner for microVM isolation.
+struct MicroVmTaskRunner {
+    model: String,
+    bin_dir: PathBuf,
+    env: EngineEnv,
+    ready_timeout: Duration,
+}
+
+#[async_trait]
+impl TaskRunner for MicroVmTaskRunner {
+    async fn run_one(&self, lang: crate::PolyglotLang, task: &str, opts: &crate::BenchOpts) -> Result<TaskOutcome> {
+        let setup = crate::prepare_task(lang, task)?;
+        let host_port = free_port()?;
+        let token = uuid::Uuid::new_v4().simple().to_string();
+        let name = format!("smooth-bench-{}", &token[..8]);
+        // Log dir sits beside the workspace (not in it) so the VM's logs
+        // never land in the scored task dir.
+        let log_dir = setup.run_dir.join("vmlog");
+        std::fs::create_dir_all(&log_dir).with_context(|| format!("mkdir {}", log_dir.display()))?;
+
+        let gateway_url = self.env.gateway_url.clone().unwrap_or_else(|| "https://llm.smoo.ai/v1".to_string());
+        let args = msb_run_args(&MsbSpec {
+            name: &name,
+            bin_dir: &self.bin_dir,
+            workspace: &setup.work_dir,
+            log_dir: &log_dir,
+            host_port,
+            guest_port: 8791,
+            token: &token,
+            model: &self.model,
+            gateway_url: &gateway_url,
+            gateway_key: self.env.gateway_key.as_deref(),
+            image: "debian",
+        });
+
+        let msb_log = std::fs::File::create(log_dir.join("msb.log")).context("creating msb.log")?;
+        let child = Command::new("msb")
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(msb_log.try_clone()?))
+            .stderr(Stdio::from(msb_log))
+            .process_group(0)
+            .spawn()
+            .context("spawning `msb run` (is microsandbox installed?)")?;
+        let _guard = MsbGuard { name: name.clone(), child };
+
+        let addr: SocketAddr = format!("127.0.0.1:{host_port}").parse().context("microvm host addr")?;
+        // NOT `wait_for_port`: msb's host-side forwarder accepts TCP the
+        // moment the VM starts, long before the guest binds — a TCP probe
+        // returns instantly and the driver then dies with "Handshake not
+        // finished". Probe at the HTTP layer instead.
+        wait_for_http(addr, self.ready_timeout).with_context(|| format!("microVM {name} never served HTTP on {addr}; see {}", log_dir.display()))?;
+
+        let url = format!("http://127.0.0.1:{host_port}");
+        let result = crate::run_prepared(lang, task, &setup, &url, Some(&token), opts).await?;
+        // `_guard` drops here → child killed + `msb remove -f` → no leak.
+        Ok(crate::sweep::outcome_from_result(&result))
+    }
+}
+
 /// One engine×model sweep result — the [`Score`] flattened onto its
 /// engine + model provenance. Serialised as one JSON-lines record.
 #[derive(Debug, Clone, Serialize)]
@@ -573,6 +892,169 @@ mod tests {
         ports.sort_unstable();
         ports.dedup();
         assert_eq!(ports.len(), 5, "each engine gets its own port");
+    }
+
+    fn spec_args(key: Option<&str>) -> Vec<String> {
+        msb_run_args(&MsbSpec {
+            name: "smooth-bench-abcd1234",
+            bin_dir: Path::new("/repo/scripts/msb-spike/vmbin"),
+            workspace: Path::new("/scratch/run/leap"),
+            log_dir: Path::new("/scratch/run/vmlog"),
+            host_port: 51234,
+            guest_port: 8791,
+            token: "tok123",
+            model: "deepseek-v4-flash",
+            gateway_url: "https://llm.smoo.ai/v1",
+            gateway_key: key,
+            image: "debian",
+        })
+    }
+
+    /// Assert `flag` is immediately followed by `value` somewhere in `args`.
+    fn has_pair(args: &[String], flag: &str, value: &str) -> bool {
+        args.windows(2).any(|w| w[0] == flag && w[1] == value)
+    }
+
+    #[test]
+    fn msb_invocation_carries_mounts_ports_egress_and_secret() {
+        let a = spec_args(Some("sk-live-xyz"));
+
+        assert_eq!(a[0], "run");
+        assert!(has_pair(&a, "--name", "smooth-bench-abcd1234"));
+        // Host port is the allocated one; guest port is what the daemon binds.
+        assert!(has_pair(&a, "-p", "51234:8791"));
+        assert!(has_pair(&a, "-e", "SMOOTH_ADDR=0.0.0.0:8791"));
+
+        // Three mounts: binary at /opt, task scratch at /work, logs out.
+        assert!(has_pair(&a, "-v", "/repo/scripts/msb-spike/vmbin:/opt"));
+        assert!(has_pair(&a, "-v", "/scratch/run/leap:/work"));
+        assert!(has_pair(&a, "-v", "/scratch/run/vmlog:/var/log/smooth"));
+        assert!(has_pair(&a, "-e", "SMOOTH_WORKSPACE=/work"));
+
+        // Daemon needs these or it won't come up / won't authenticate.
+        assert!(has_pair(&a, "-e", "SMOOTH_LOCAL_TOKEN=tok123"));
+        assert!(has_pair(&a, "-e", "SMOOAI_GATEWAY_URL=https://llm.smoo.ai/v1"));
+        // BOTH model vars: the daemon's `resolve_gateway_config` only reads
+        // SMOOTH_AGENT_MODEL, so SMOOAI_MODEL alone silently ran the
+        // upstream default model instead of `--model`.
+        assert!(has_pair(&a, "-e", "SMOOAI_MODEL=deepseek-v4-flash"));
+        assert!(has_pair(&a, "-e", "SMOOTH_AGENT_MODEL=deepseek-v4-flash"));
+        assert!(has_pair(&a, "-e", "SMOOTH_OPERATOR_DB=/tmp/operator-storage.db"));
+        assert!(has_pair(&a, "-e", "SMOOTH_TAILSCALE_SERVE=0"));
+        assert!(has_pair(&a, "-e", "HOME=/root"));
+
+        // Default-deny egress with exactly one hole: the gateway host.
+        assert!(has_pair(&a, "--net-default-egress", "deny"));
+        assert!(has_pair(&a, "--net-rule", "allow@llm.smoo.ai:tcp:443"));
+        assert_eq!(a.iter().filter(|s| *s == "--net-rule").count(), 1, "exactly one egress hole");
+
+        // Secret is host-scoped so it can't leak to another destination.
+        assert!(has_pair(&a, "--secret", "SMOOAI_GATEWAY_KEY=sk-live-xyz@llm.smoo.ai"));
+
+        // glibc binary → debian, and the command lands AFTER `--`
+        // (attached mode; `-d` would silently drop it).
+        assert!(!a.contains(&"-d".to_string()) && !a.contains(&"--detach".to_string()));
+        let dashdash = a.iter().position(|s| s == "--").expect("`--` separator present");
+        assert_eq!(a[dashdash - 1], "debian");
+        assert_eq!(
+            &a[dashdash + 1..],
+            ["/bin/sh", "-c", "exec /opt/smooth-daemon >> /var/log/smooth/daemon.log 2>&1"]
+        );
+    }
+
+    #[test]
+    fn msb_invocation_omits_secret_when_no_key() {
+        let a = spec_args(None);
+        assert!(!a.iter().any(|s| s == "--secret"));
+        // …but still denies egress by default.
+        assert!(has_pair(&a, "--net-default-egress", "deny"));
+    }
+
+    /// Regression: a bare TCP listener that never speaks HTTP must NOT
+    /// read as ready — that's exactly what msb's port forwarder looks
+    /// like before the guest binds, and treating it as ready killed
+    /// every microVM task with "Handshake not finished".
+    #[test]
+    fn wait_for_http_rejects_a_silent_tcp_listener() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        // Accept and say nothing, like the forwarder does.
+        std::thread::spawn(move || while l.accept().is_ok() {});
+        let err = wait_for_http(addr, Duration::from_millis(1200)).unwrap_err().to_string();
+        assert!(err.contains("timed out"), "silent listener must not read as ready: {err}");
+    }
+
+    #[test]
+    fn wait_for_http_accepts_any_http_status() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut s, _)) = l.accept() {
+                use std::io::Write;
+                // Strict-auth 401 still means "the engine is up".
+                let _ = s.write_all(b"HTTP/1.1 401 Unauthorized\r\n\r\n");
+            }
+        });
+        wait_for_http(addr, Duration::from_secs(5)).unwrap();
+    }
+
+    #[test]
+    fn gateway_host_strips_scheme_port_and_path() {
+        assert_eq!(gateway_host("https://llm.smoo.ai/v1"), "llm.smoo.ai");
+        assert_eq!(gateway_host("http://localhost:11434/v1"), "localhost");
+        assert_eq!(gateway_host("llm.smoo.ai"), "llm.smoo.ai");
+    }
+
+    #[test]
+    fn isolation_parsing_round_trips_and_rejects_junk() {
+        assert_eq!(Isolation::from_name("host"), Some(Isolation::Host));
+        assert_eq!(Isolation::from_name("microvm"), Some(Isolation::MicroVm));
+        assert_eq!(Isolation::from_name("MicroVM"), Some(Isolation::MicroVm));
+        assert_eq!(Isolation::from_name("docker"), None);
+        assert_eq!(Isolation::default(), Isolation::Host);
+        for i in [Isolation::Host, Isolation::MicroVm] {
+            assert_eq!(Isolation::from_name(i.as_str()), Some(i));
+        }
+    }
+
+    #[test]
+    fn microvm_isolation_only_accepts_the_rust_engine() {
+        assert!(Isolation::MicroVm.check_engines(&[Engine::Rust]).is_ok());
+        for bad in [Engine::Go, Engine::Ts, Engine::Python, Engine::Dotnet] {
+            let err = Isolation::MicroVm.check_engines(&[Engine::Rust, bad]).unwrap_err().to_string();
+            assert!(err.contains("--engine rust"), "actionable error, got: {err}");
+            assert!(err.contains(bad.as_str()), "names the offending engine, got: {err}");
+        }
+        // host isolation keeps working for every engine.
+        assert!(Isolation::Host.check_engines(&Engine::ALL).is_ok());
+    }
+
+    /// The isolation flag picks a booter without disturbing the matrix
+    /// seam: a microVM-gated engine set still runs through the same
+    /// `run_engine_matrix` path the fake booter exercises.
+    #[tokio::test]
+    async fn microvm_gate_passes_rust_only_matrix_through_the_booter_seam() {
+        let curated = CuratedList::default_embedded().unwrap();
+        let engines = [Engine::Rust];
+        Isolation::MicroVm.check_engines(&engines).unwrap();
+
+        let booter = FakeBooter {
+            booted: Mutex::new(Vec::new()),
+        };
+        let run = run_engine_matrix(
+            &curated,
+            &booter,
+            &engines,
+            &vec!["deepseek-v4-flash".to_string()],
+            &pr_one_per_lang(),
+            &mut crate::sweep::StdoutObserver,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(run.results.len(), 1);
+        assert_eq!(run.results[0].engine, "rust");
+        assert_eq!(booter.booted.lock().unwrap().len(), 1);
     }
 
     /// A canned runner: solved/cost/duration keyed by language, so the
