@@ -28,67 +28,22 @@ pub struct TaskOutcome {
     pub solved: bool,
     pub cost_usd: f64,
     pub duration_ms: u64,
-    /// True when the dispatch hit `SMOOTH_BENCH_CHAT_HTTP_TIMEOUT_S`
-    /// before the operator made meaningful progress — typically the
-    /// chat-agent never returned a pearl id within the HTTP timeout
-    /// window and the polyglot starter happens to satisfy the test
-    /// suite for that exercise. These shouldn't count as real PASSes
-    /// in the headline number even though the test runner reports
-    /// solved=true. Detection: duration is exactly the chat HTTP
-    /// timeout (within 100 ms) AND cost_usd is 0 (no LLM rounds
-    /// completed) AND no LLM error was surfaced.
+    /// True when the harness can't tell whether a real attempt was made
+    /// (starter code that happens to satisfy the suite with no model
+    /// work). The canonical driver runs the turn to completion before
+    /// scoring, so this is always `false` today — the field is retained
+    /// for the aggregate `Score` shape and future re-detection.
     pub inconclusive: bool,
 }
 
 /// Injection point for the per-task runner. Production implementation
-/// (`PolyglotTaskRunner`) calls `run_aider_polyglot`; unit tests
-/// provide a canned-response implementation to exercise aggregation +
-/// budget-cap logic without hitting the network.
+/// (`engine::EngineTaskRunner`) boots an engine with its workspace at the
+/// task's scratch dir and drives one canonical turn; unit tests provide a
+/// canned-response implementation to exercise aggregation + budget-cap
+/// logic without hitting the network.
 #[async_trait]
 pub trait TaskRunner: Send + Sync {
     async fn run_one(&self, lang: PolyglotLang, task: &str, opts: &BenchOpts) -> anyhow::Result<TaskOutcome>;
-}
-
-/// The real runner: shells out to `run_aider_polyglot`.
-pub struct PolyglotTaskRunner;
-
-#[async_trait]
-impl TaskRunner for PolyglotTaskRunner {
-    async fn run_one(&self, lang: PolyglotLang, task: &str, opts: &BenchOpts) -> anyhow::Result<TaskOutcome> {
-        let res = crate::run_aider_polyglot(lang, task, opts).await?;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
-        let duration_ms: u64 = (res.duration_s * 1000.0).max(0.0) as u64;
-
-        // Detect HTTP-timeout starter passes. The chat-driver sets
-        // SMOOTH_BENCH_CHAT_HTTP_TIMEOUT_S (default 300 s) on the
-        // reqwest client; when that timeout fires before the chat-agent
-        // returns a pearl id, the bench bails and runs the test against
-        // the unmodified workspace. Some polyglot exercises happen to
-        // pass without modification (rust/accumulate stub returns the
-        // input list, etc.); these PASSes shouldn't pollute the
-        // headline.
-        //
-        // Heuristic: duration ≈ HTTP timeout (within 100 ms),
-        // cost_usd is 0 (no LLM rounds completed), and the test runner
-        // declared solved=true. The cost==0 check excludes real solves
-        // that happened to take the same wall time by coincidence —
-        // unless the cost-tracker propagation bug masks them, which
-        // we accept as conservative classification.
-        let http_timeout_secs: u64 = std::env::var("SMOOTH_BENCH_CHAT_HTTP_TIMEOUT_S")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(300);
-        let http_timeout_ms = http_timeout_secs * 1000;
-        let near_timeout = duration_ms.saturating_sub(http_timeout_ms) < 100 && http_timeout_ms.saturating_sub(duration_ms) < 100;
-        let inconclusive = res.solved && near_timeout && res.cost_usd <= 0.0;
-
-        Ok(TaskOutcome {
-            solved: res.solved,
-            cost_usd: res.cost_usd,
-            duration_ms,
-            inconclusive,
-        })
-    }
 }
 
 /// Map a raw single-task result into a `TaskOutcome`. Helpful for

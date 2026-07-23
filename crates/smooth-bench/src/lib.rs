@@ -11,10 +11,9 @@
 //!      (Cloned on first use; reused after — the benchmark repo is static.)
 //!   2. Copy the task's source + test + instruction files into a fresh
 //!      scratch run dir at `~/.smooth/bench-runs/<run-id>/work/`.
-//!   3. Invoke `th code --headless` against Big Smooth over WebSocket,
-//!      capturing tool calls + cost via Big Smooth's chat-agent (default)
-//!      or [`smooth_code::headless::run_headless_capture`] (legacy, gated
-//!      by `SMOOTH_BENCH_LEGACY_DIRECT=1`).
+//!   3. Boot a smooth-operator `LocalServer` engine with its workspace
+//!      pointed at the scratch dir and drive one canonical-protocol turn
+//!      ([`canonical_driver`]), capturing tool results (+ best-effort cost).
 //!   4. Run the language's test command in the scratch dir, count
 //!      pass/fail.
 //!   5. Write `result.json` and print a one-line summary.
@@ -30,7 +29,7 @@ use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
 
 pub mod auto_approve;
-pub mod chat_driver;
+pub mod canonical_driver;
 pub mod curated;
 pub mod engine;
 pub mod lang_detect;
@@ -285,59 +284,54 @@ pub async fn finalize_and_score(lang: PolyglotLang, setup: &TaskSetup) -> anyhow
 /// 504-interrupted run still produces a scored result.
 pub async fn run_aider_polyglot(lang: PolyglotLang, task: &str, opts: &BenchOpts) -> anyhow::Result<BenchResult> {
     let setup = prepare_task(lang, task)?;
+    // Drive against the engine already listening at `opts.big_smooth_url`
+    // (the single-task CLI path — the caller booted / is running the engine
+    // itself). The sweep path boots an engine per task with its workspace
+    // pointed at `setup.work_dir` and calls `run_prepared` directly.
+    run_prepared(lang, task, &setup, &opts.big_smooth_url, None, opts).await
+}
+
+/// Read the per-turn deadline from `SMOOTH_BENCH_DEADLINE_S` (default 1800s).
+#[must_use]
+pub fn turn_deadline() -> std::time::Duration {
+    std::time::Duration::from_secs(std::env::var("SMOOTH_BENCH_DEADLINE_S").ok().and_then(|v| v.parse().ok()).unwrap_or(1800))
+}
+
+/// Drive one prepared task through the canonical LocalServer protocol at
+/// `url`, then strip agent-added tests, run the test command, and write
+/// `result.json`. Shared by the single-task CLI path and the per-task
+/// engine-booting sweep runner so both score identically.
+///
+/// `token` is the operator auth token (the rust daemon runs strict-auth);
+/// omit for the anonymous polyglot servers.
+///
+/// # Errors
+/// Setup-adjacent failures (scoring, forensic writes) propagate; a driver
+/// error is captured in `llm_error` so an interrupted turn still scores.
+pub async fn run_prepared(lang: PolyglotLang, task: &str, setup: &TaskSetup, url: &str, token: Option<&str>, opts: &BenchOpts) -> anyhow::Result<BenchResult> {
     let run = setup.run_dir.clone();
-    let work_dir = setup.work_dir.clone();
     let prompt = setup.prompt.clone();
 
     let t0 = Instant::now();
-
-    // Routing: by default the bench runs through Big Smooth's chat-agent
-    // (see Phase 7 in `~/.claude/plans/sorted-orbiting-hummingbird.md`).
-    // The chat-agent creates a pearl and dispatches a teammate on it; we
-    // poll for completion. `SMOOTH_BENCH_LEGACY_DIRECT=1` falls back to
-    // the old `run_headless_capture` direct WS dispatch for diagnostics.
-    let legacy_direct = std::env::var("SMOOTH_BENCH_LEGACY_DIRECT")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    let deadline = std::time::Duration::from_secs(std::env::var("SMOOTH_BENCH_DEADLINE_S").ok().and_then(|v| v.parse().ok()).unwrap_or(1800));
-
-    let (cost_usd, tool_calls, llm_error) = if legacy_direct {
-        match smooth_code::headless::run_headless_capture(&opts.big_smooth_url, work_dir.clone(), prompt.clone(), opts.model.clone(), opts.budget_usd).await {
-            Ok(out) => (
-                out.cost,
-                out.tool_calls
-                    .into_iter()
-                    .map(|t| ToolCallRecord {
-                        name: t.name,
-                        success: t.success,
-                    })
-                    .collect(),
-                None,
-            ),
-            Err(e) => (0.0, Vec::new(), Some(e.to_string())),
-        }
-    } else {
-        match crate::chat_driver::run_via_chat_agent(&opts.big_smooth_url, &work_dir, &prompt, opts.budget_usd, deadline).await {
-            Ok(out) => (
-                out.cost,
-                out.tool_calls
-                    .into_iter()
-                    .map(|t| ToolCallRecord {
-                        name: t.name,
-                        success: t.success,
-                    })
-                    .collect(),
-                None,
-            ),
-            Err(e) => (0.0, Vec::new(), Some(e.to_string())),
-        }
+    let (cost_usd, tool_calls, llm_error) = match crate::canonical_driver::run_via_canonical(url, &prompt, token, turn_deadline()).await {
+        Ok(out) => (
+            out.cost,
+            out.tool_calls
+                .into_iter()
+                .map(|t| ToolCallRecord {
+                    name: t.name,
+                    success: t.success,
+                })
+                .collect(),
+            None,
+        ),
+        Err(e) => (0.0, Vec::new(), Some(e.to_string())),
     };
-
     let duration_s = t0.elapsed().as_secs_f64();
 
     // Delete agent-added test files and run the test command. Shared
     // tail with the score-tui path so both surface identical scores.
-    let (test_stdout, counts) = finalize_and_score(lang, &setup).await?;
+    let (test_stdout, counts) = finalize_and_score(lang, setup).await?;
 
     let result = BenchResult {
         run_id: run.file_name().and_then(|s| s.to_str()).unwrap_or("unknown").to_string(),

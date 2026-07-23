@@ -25,7 +25,7 @@ use serde::Serialize;
 
 use crate::curated::CuratedList;
 use crate::score::Score;
-use crate::sweep::{run_sweep, PolyglotTaskRunner, SweepConfig, SweepObserver, SweepRun, TaskRunner};
+use crate::sweep::{run_sweep, SweepConfig, SweepObserver, SweepRun, TaskOutcome, TaskRunner};
 
 /// The five polyglot smooth-operator engine implementations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,61 +77,106 @@ impl Engine {
     }
 
     /// The spawn recipe for this engine's LocalServer at `port`, rooted
-    /// at the smooth-operator `repo`. Pure data — mirrors the `serve()`
-    /// cases in `scripts/operator-serve.sh` so the mapping is unit-
-    /// testable without spawning anything. Gateway / persona / model
-    /// env is layered on at spawn time (see [`ProcessBooter`]), not here.
-    pub fn boot_command(self, repo: &Path, port: u16) -> BootCommand {
+    /// at the smooth-operator `repo`, with its workspace pointed at
+    /// `workspace` (the task's scratch dir). Pure data — mirrors the
+    /// `serve()` cases in `scripts/operator-serve.sh` so the mapping is
+    /// unit-testable without spawning anything. Gateway / persona / model
+    /// env (and the rust daemon's auth token) is layered on at spawn time
+    /// (see [`spawn_engine`]), not here.
+    ///
+    /// **Workspace wiring** — the agent must edit files in the task's
+    /// scratch dir, so the engine's file tools have to be rooted there:
+    /// - **rust** reads `SMOOTH_WORKSPACE`.
+    /// - **go / ts / python / dotnet** have no workspace env; their file
+    ///   tools key off the process cwd, so we launch them with
+    ///   `cwd = workspace`. Because that means the process is no longer
+    ///   started from its own project dir, the launcher args carry an
+    ///   **absolute** path back to the server (the go package, the ts
+    ///   bundle, `--project` for python/dotnet) so the toolchain still
+    ///   resolves the module while the child runs in `workspace`.
+    pub fn boot_command(self, repo: &Path, port: u16, workspace: &Path) -> BootCommand {
         let bind = format!("127.0.0.1:{port}");
+        let ws = workspace.to_path_buf();
         match self {
-            // The one runnable Rust LocalServer is the daemon itself.
+            // The one runnable Rust LocalServer is the daemon itself; it
+            // confines its fs/shell tools to SMOOTH_WORKSPACE.
             Self::Rust => BootCommand {
                 program: "th".into(),
                 args: vec!["daemon".into()],
                 cwd: None,
-                bind_env: vec![("SMOOTH_ADDR".into(), bind)],
+                env: vec![("SMOOTH_ADDR".into(), bind), ("SMOOTH_WORKSPACE".into(), ws.display().to_string())],
             },
             Self::Go => BootCommand {
-                program: "go".into(),
-                args: vec!["run".into(), "./cmd/serve".into()],
-                cwd: Some(repo.join("go").join("server")),
-                bind_env: vec![("SMOOTH_OPERATOR_BIND".into(), bind)],
+                // `go run` resolves modules from the *cwd*, not the package
+                // path, so it can't launch from `workspace`. Instead we run a
+                // binary prebuilt by `prepare_engine` (see [`go_serve_bin`])
+                // with cwd = workspace so the file tools root there.
+                program: go_serve_bin().display().to_string(),
+                args: vec![],
+                cwd: Some(ws),
+                env: vec![("SMOOTH_OPERATOR_BIND".into(), bind)],
             },
             Self::Ts => BootCommand {
                 program: "node".into(),
-                args: vec!["dist/main.js".into()],
-                cwd: Some(repo.join("typescript").join("server")),
-                bind_env: vec![
+                // node resolves imports/node_modules from the bundle's own
+                // dir, so an absolute path to dist/main.js runs fine with
+                // cwd = workspace.
+                args: vec![repo.join("typescript").join("server").join("dist").join("main.js").display().to_string()],
+                cwd: Some(ws),
+                env: vec![
                     ("SMOOTH_OPERATOR_HOST".into(), "127.0.0.1".into()),
                     ("SMOOTH_OPERATOR_PORT".into(), port.to_string()),
                 ],
             },
             Self::Python => BootCommand {
                 program: "uv".into(),
-                args: vec!["run".into(), "python".into(), "-m".into(), "smooth_operator_server".into()],
-                cwd: Some(repo.join("python").join("server")),
-                // Bind is hardcoded 127.0.0.1:8787 upstream — no bind env.
-                bind_env: vec![],
+                // --project pins the server's pyproject/venv; cwd = workspace
+                // roots the file tools. Bind is hardcoded 127.0.0.1:8787.
+                args: vec![
+                    "run".into(),
+                    "--project".into(),
+                    repo.join("python").join("server").display().to_string(),
+                    "python".into(),
+                    "-m".into(),
+                    "smooth_operator_server".into(),
+                ],
+                cwd: Some(ws),
+                env: vec![],
             },
             Self::Dotnet => BootCommand {
                 program: "dotnet".into(),
-                args: vec!["run".into()],
-                cwd: Some(repo.join("dotnet").join("server").join("host")),
-                bind_env: vec![("ASPNETCORE_URLS".into(), format!("http://{bind}"))],
+                // --project builds/runs the host project from anywhere; cwd =
+                // workspace roots the file tools.
+                args: vec![
+                    "run".into(),
+                    "--project".into(),
+                    repo.join("dotnet").join("server").join("host").display().to_string(),
+                ],
+                cwd: Some(ws),
+                env: vec![("ASPNETCORE_URLS".into(), format!("http://{bind}"))],
             },
         }
     }
 }
 
+/// Where `prepare_engine` builds the Go server binary. Outside both repos
+/// (a stable temp path) so building it never dirties the smooth-operator
+/// checkout; deterministic within a process so [`Engine::boot_command`]
+/// and the unit test agree.
+fn go_serve_bin() -> PathBuf {
+    std::env::temp_dir().join("smooth-bench-go-operator-serve")
+}
+
 /// A fully-resolved spawn recipe. `program` + `args` run in `cwd` with
-/// `bind_env` (plus the shared gateway/persona/model env) in the
+/// `env` (bind + workspace, plus the shared gateway/persona/model env and
+/// the rust daemon's auth token layered on at spawn time) in the
 /// environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootCommand {
     pub program: String,
     pub args: Vec<String>,
     pub cwd: Option<PathBuf>,
-    pub bind_env: Vec<(String, String)>,
+    pub env: Vec<(String, String)>,
 }
 
 /// The LLM-gateway + persona env every engine reads, per the uniform
@@ -197,59 +242,135 @@ impl ProcessBooter {
 #[async_trait]
 impl EngineBooter for ProcessBooter {
     async fn boot(&self, engine: Engine, model: &str) -> Result<BootedEngine> {
-        let port = engine.default_port();
-        let cmd = engine.boot_command(&self.repo, port);
-        prepare_engine(engine, &cmd)?;
-
-        let mut command = Command::new(&cmd.program);
-        command.args(&cmd.args);
-        if let Some(cwd) = &cmd.cwd {
-            command.current_dir(cwd);
-        }
-        for (k, v) in &cmd.bind_env {
-            command.env(k, v);
-        }
-        command.env("SMOOAI_MODEL", model);
-        if let Some(u) = &self.env.gateway_url {
-            command.env("SMOOAI_GATEWAY_URL", u);
-        }
-        if let Some(k) = &self.env.gateway_key {
-            command.env("SMOOAI_GATEWAY_KEY", k);
-        }
-        if let Some(p) = &self.env.persona {
-            command.env("SMOOTH_PERSONA", p);
-        }
-        // New process group so we can reap `go run` / `dotnet run` children.
-        command.process_group(0);
-        command.stdout(Stdio::null()).stderr(Stdio::null());
-
-        let child = command
-            .spawn()
-            .with_context(|| format!("spawning {} engine ({} {:?})", engine.as_str(), cmd.program, cmd.args))?;
-        let guard = KillOnDrop(child);
-
-        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().context("engine bind addr")?;
-        wait_for_port(addr, self.ready_timeout).with_context(|| format!("{} engine never opened {addr}", engine.as_str()))?;
-
+        // The OS process is booted PER TASK (with its workspace pointed at
+        // that task's scratch dir) inside the returned runner — not here.
+        // `boot` just hands back a runner carrying the boot config.
         Ok(BootedEngine {
-            runner: Box::new(PolyglotTaskRunner),
-            url: format!("http://127.0.0.1:{port}"),
-            _guard: Box::new(guard),
+            runner: Box::new(EngineTaskRunner {
+                engine,
+                model: model.to_string(),
+                repo: self.repo.clone(),
+                env: self.env.clone(),
+                ready_timeout: self.ready_timeout,
+            }),
+            url: String::new(),
+            _guard: Box::new(()),
         })
     }
 }
 
+/// The production per-task runner: for each task it prepares the scratch
+/// dir, boots the engine with `workspace = work_dir`, drives one canonical
+/// turn, scores, and tears the engine down before the next task.
+pub struct EngineTaskRunner {
+    pub engine: Engine,
+    pub model: String,
+    pub repo: PathBuf,
+    pub env: EngineEnv,
+    pub ready_timeout: Duration,
+}
+
+#[async_trait]
+impl TaskRunner for EngineTaskRunner {
+    async fn run_one(&self, lang: crate::PolyglotLang, task: &str, opts: &crate::BenchOpts) -> Result<TaskOutcome> {
+        let setup = crate::prepare_task(lang, task)?;
+        let port = self.engine.default_port();
+        let (url, token, _guard) = spawn_engine(self.engine, &self.model, &setup.work_dir, &self.repo, &self.env, self.ready_timeout, port)?;
+        let result = crate::run_prepared(lang, task, &setup, &url, token.as_deref(), opts).await?;
+        // `_guard` drops here → the engine (and its children) are reaped
+        // before the next task boots on the same port.
+        Ok(crate::sweep::outcome_from_result(&result))
+    }
+}
+
+/// Boot one engine LocalServer with its workspace pointed at `workspace`,
+/// waiting for its port to accept TCP. Returns the base URL, the auth
+/// token (the rust daemon runs strict-auth; `None` for the anonymous
+/// polyglot servers), and a teardown guard that kills the process (and
+/// its children) on drop.
+///
+/// # Errors
+/// Errors on prep failure, spawn failure, or if the port never listens
+/// within `ready_timeout`.
+#[allow(clippy::too_many_arguments)]
+fn spawn_engine(
+    engine: Engine,
+    model: &str,
+    workspace: &Path,
+    repo: &Path,
+    env: &EngineEnv,
+    ready_timeout: Duration,
+    port: u16,
+) -> Result<(String, Option<String>, KillOnDrop)> {
+    prepare_engine(engine, repo)?;
+    let cmd = engine.boot_command(repo, port, workspace);
+
+    let mut command = Command::new(&cmd.program);
+    command.args(&cmd.args);
+    if let Some(cwd) = &cmd.cwd {
+        command.current_dir(cwd);
+    }
+    for (k, v) in &cmd.env {
+        command.env(k, v);
+    }
+    command.env("SMOOAI_MODEL", model);
+    if let Some(u) = &env.gateway_url {
+        command.env("SMOOAI_GATEWAY_URL", u);
+    }
+    if let Some(k) = &env.gateway_key {
+        command.env("SMOOAI_GATEWAY_KEY", k);
+    }
+    if let Some(p) = &env.persona {
+        command.env("SMOOTH_PERSONA", p);
+    }
+    // The rust daemon runs strict-auth; hand it a known token so the driver
+    // can authenticate. The polyglot servers are anonymous (token = None).
+    let token = if engine == Engine::Rust {
+        let t = uuid::Uuid::new_v4().simple().to_string();
+        command.env("SMOOTH_LOCAL_TOKEN", &t);
+        Some(t)
+    } else {
+        None
+    };
+    // New process group so we can reap `go run` / `dotnet run` children.
+    command.process_group(0);
+    command.stdout(Stdio::null()).stderr(Stdio::null());
+
+    let child = command
+        .spawn()
+        .with_context(|| format!("spawning {} engine ({} {:?})", engine.as_str(), cmd.program, cmd.args))?;
+    let guard = KillOnDrop(child);
+
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().context("engine bind addr")?;
+    wait_for_port(addr, ready_timeout).with_context(|| format!("{} engine never opened {addr}", engine.as_str()))?;
+
+    Ok((format!("http://127.0.0.1:{port}"), token, guard))
+}
+
 /// Best-effort pre-spawn prep the shell script does inline: the TS
-/// server needs a `dist/` build, the Python server a synced venv.
-fn prepare_engine(engine: Engine, cmd: &BootCommand) -> Result<()> {
-    let Some(cwd) = &cmd.cwd else { return Ok(()) };
+/// server needs a `dist/` build, the Python server a synced venv. Keyed
+/// off the engine's project dir under `repo` (independent of where the
+/// server is later launched from).
+fn prepare_engine(engine: Engine, repo: &Path) -> Result<()> {
     match engine {
-        Engine::Ts if !cwd.join("dist").join("main.js").exists() => {
-            run_prep(cwd, "pnpm", &["install", "--silent"])?;
-            run_prep(cwd, "pnpm", &["build"])?;
+        Engine::Go => {
+            // Build the server binary once (incremental after the first —
+            // Go's build cache keys off content, not cwd) so it can be
+            // launched from the task workspace. `go run` can't, because it
+            // resolves the module from cwd.
+            let dir = repo.join("go").join("server");
+            let bin = go_serve_bin();
+            run_prep(&dir, "go", &["build", "-o", &bin.display().to_string(), "./cmd/serve"])?;
+        }
+        Engine::Ts => {
+            let dir = repo.join("typescript").join("server");
+            if !dir.join("dist").join("main.js").exists() {
+                run_prep(&dir, "pnpm", &["install", "--silent"])?;
+                run_prep(&dir, "pnpm", &["build"])?;
+            }
         }
         Engine::Python => {
-            run_prep(cwd, "uv", &["sync", "--quiet"])?;
+            run_prep(&repo.join("python").join("server"), "uv", &["sync", "--quiet"])?;
         }
         _ => {}
     }
@@ -378,7 +499,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    use crate::sweep::{SweepGate, TaskOutcome};
+    use crate::sweep::SweepGate;
     use crate::{BenchOpts, PolyglotLang};
 
     #[test]
@@ -395,44 +516,55 @@ mod tests {
     #[test]
     fn boot_command_mapping_matches_operator_serve() {
         let repo = Path::new("/repo");
+        let ws = Path::new("/scratch/task-work");
 
-        let rust = Engine::Rust.boot_command(repo, 8791);
+        // rust: workspace via env, no cwd override (daemon confines to SMOOTH_WORKSPACE).
+        let rust = Engine::Rust.boot_command(repo, 8791, ws);
         assert_eq!(rust.program, "th");
         assert_eq!(rust.args, ["daemon"]);
         assert_eq!(rust.cwd, None);
-        assert_eq!(rust.bind_env, [("SMOOTH_ADDR".to_string(), "127.0.0.1:8791".to_string())]);
-
-        let go = Engine::Go.boot_command(repo, 8792);
-        assert_eq!(go.program, "go");
-        assert_eq!(go.args, ["run", "./cmd/serve"]);
-        assert_eq!(go.cwd, Some(PathBuf::from("/repo/go/server")));
-        assert_eq!(go.bind_env, [("SMOOTH_OPERATOR_BIND".to_string(), "127.0.0.1:8792".to_string())]);
-
-        let ts = Engine::Ts.boot_command(repo, 8793);
-        assert_eq!(ts.program, "node");
-        assert_eq!(ts.args, ["dist/main.js"]);
-        assert_eq!(ts.cwd, Some(PathBuf::from("/repo/typescript/server")));
         assert_eq!(
-            ts.bind_env,
+            rust.env,
+            [
+                ("SMOOTH_ADDR".to_string(), "127.0.0.1:8791".to_string()),
+                ("SMOOTH_WORKSPACE".to_string(), "/scratch/task-work".to_string()),
+            ]
+        );
+
+        // go/ts/python/dotnet: cwd = workspace. Go runs a prebuilt binary
+        // (go run can't launch from a foreign cwd); the rest use an absolute
+        // path back to the server.
+        let go = Engine::Go.boot_command(repo, 8792, ws);
+        assert_eq!(go.program, go_serve_bin().display().to_string());
+        assert!(go.args.is_empty());
+        assert_eq!(go.cwd, Some(PathBuf::from("/scratch/task-work")));
+        assert_eq!(go.env, [("SMOOTH_OPERATOR_BIND".to_string(), "127.0.0.1:8792".to_string())]);
+
+        let ts = Engine::Ts.boot_command(repo, 8793, ws);
+        assert_eq!(ts.program, "node");
+        assert_eq!(ts.args, ["/repo/typescript/server/dist/main.js"]);
+        assert_eq!(ts.cwd, Some(PathBuf::from("/scratch/task-work")));
+        assert_eq!(
+            ts.env,
             [
                 ("SMOOTH_OPERATOR_HOST".to_string(), "127.0.0.1".to_string()),
                 ("SMOOTH_OPERATOR_PORT".to_string(), "8793".to_string()),
             ]
         );
 
-        let py = Engine::Python.boot_command(repo, 9999);
+        let py = Engine::Python.boot_command(repo, 9999, ws);
         assert_eq!(py.program, "uv");
-        assert_eq!(py.args, ["run", "python", "-m", "smooth_operator_server"]);
-        assert_eq!(py.cwd, Some(PathBuf::from("/repo/python/server")));
-        assert!(py.bind_env.is_empty(), "python bind is hardcoded upstream");
+        assert_eq!(py.args, ["run", "--project", "/repo/python/server", "python", "-m", "smooth_operator_server"]);
+        assert_eq!(py.cwd, Some(PathBuf::from("/scratch/task-work")));
+        assert!(py.env.is_empty(), "python bind is hardcoded upstream");
         // Python's port is fixed regardless of what's requested.
         assert_eq!(Engine::Python.default_port(), 8787);
 
-        let net = Engine::Dotnet.boot_command(repo, 8795);
+        let net = Engine::Dotnet.boot_command(repo, 8795, ws);
         assert_eq!(net.program, "dotnet");
-        assert_eq!(net.args, ["run"]);
-        assert_eq!(net.cwd, Some(PathBuf::from("/repo/dotnet/server/host")));
-        assert_eq!(net.bind_env, [("ASPNETCORE_URLS".to_string(), "http://127.0.0.1:8795".to_string())]);
+        assert_eq!(net.args, ["run", "--project", "/repo/dotnet/server/host"]);
+        assert_eq!(net.cwd, Some(PathBuf::from("/scratch/task-work")));
+        assert_eq!(net.env, [("ASPNETCORE_URLS".to_string(), "http://127.0.0.1:8795".to_string())]);
     }
 
     #[test]
