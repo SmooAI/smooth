@@ -53,24 +53,10 @@ wsmini)
     file "$OUT/wsmini"
     ;;
 daemon)
-    # RECOMMENDED path for the real engine. Produces a glibc binary, so boot it
-    # in a debian/ubuntu microVM (NOT alpine).
-    # Note: mounts a container-local cargo cache volume so the host's
-    # ~/.cargo is never written to by a linux container.
-    docker run --rm --platform linux/arm64 \
-        -v "$REPO:/src" \
-        -v smooth-msb-spike-cargo:/usr/local/cargo/registry \
-        -w /src \
-        rust:bookworm \
-        bash -c '
-            set -e
-            apt-get update -qq
-            apt-get install -y -qq pkg-config libssl-dev libcurl4-openssl-dev protobuf-compiler
-            cargo build --release -p smooai-smooth-daemon --bin smooth-daemon
-        '
-    cp "$REPO/target/release/smooth-daemon" "$OUT/smooth-daemon"
-    file "$OUT/smooth-daemon"
-    echo "NOTE: glibc binary — boot with IMAGE=debian, not alpine."
+    # DONE — the container build landed as its own script (cached builder image
+    # + named cargo volumes, so it never touches the host's ~/.cargo or ./target).
+    # Verified 2026-07-23: 163s cold, 30MB aarch64 glibc ELF, no dep failures.
+    exec "$HERE/build-linux-daemon.sh" "${@:2}"
     ;;
 *)
     echo "usage: $0 [wsmini|daemon]" >&2
