@@ -1045,7 +1045,7 @@ mod tests {
             &curated,
             &booter,
             &engines,
-            &vec!["deepseek-v4-flash".to_string()],
+            &["deepseek-v4-flash".to_string()],
             &pr_one_per_lang(),
             &mut crate::sweep::StdoutObserver,
         )
