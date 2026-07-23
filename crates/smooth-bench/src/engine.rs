@@ -14,6 +14,10 @@
 //! [`ProcessBooter`] spawns the real engine and waits for its port.
 
 use std::net::{SocketAddr, TcpStream};
+// Unix-only: used for `process_group` below. Windows has no equivalent and the
+// bench only ever runs on unix (the engines need unix toolchains), but the crate
+// must still COMPILE on windows for CI. (th-4c3e2d)
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -333,6 +337,8 @@ fn spawn_engine(
         None
     };
     // New process group so we can reap `go run` / `dotnet run` children.
+    // Unix-only; windows has no equivalent (see the cfg'd import above).
+    #[cfg(unix)]
     command.process_group(0);
     command.stdout(Stdio::null()).stderr(Stdio::null());
 
