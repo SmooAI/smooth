@@ -666,55 +666,130 @@ struct MicroVmTaskRunner {
     ready_timeout: Duration,
 }
 
+/// Boot one microVM with `workspace` bind-mounted at `/work` and the VM's
+/// stdout/stderr redirected into `log_dir`. Shared by the polyglot sweep
+/// (per task) and the agentic bench (per scenario) so both get identical
+/// isolation — default-deny egress, only the gateway allowed.
+///
+/// # Errors
+/// Errors when `msb` can't be spawned or the guest never serves HTTP.
+fn boot_microvm(bin_dir: &Path, workspace: &Path, log_dir: &Path, model: &str, env: &EngineEnv, ready_timeout: Duration) -> Result<BootedServer> {
+    let host_port = free_port()?;
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    let name = format!("smooth-bench-{}", &token[..8]);
+    std::fs::create_dir_all(log_dir).with_context(|| format!("mkdir {}", log_dir.display()))?;
+
+    let gateway_url = env.gateway_url.clone().unwrap_or_else(|| "https://llm.smoo.ai/v1".to_string());
+    let args = msb_run_args(&MsbSpec {
+        name: &name,
+        bin_dir,
+        workspace,
+        log_dir,
+        host_port,
+        guest_port: 8791,
+        token: &token,
+        model,
+        gateway_url: &gateway_url,
+        gateway_key: env.gateway_key.as_deref(),
+        image: "debian",
+    });
+
+    let msb_log = std::fs::File::create(log_dir.join("msb.log")).context("creating msb.log")?;
+    let child = Command::new("msb")
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(msb_log.try_clone()?))
+        .stderr(Stdio::from(msb_log))
+        .process_group(0)
+        .spawn()
+        .context("spawning `msb run` (is microsandbox installed?)")?;
+    let guard = MsbGuard { name: name.clone(), child };
+
+    let addr: SocketAddr = format!("127.0.0.1:{host_port}").parse().context("microvm host addr")?;
+    // NOT `wait_for_port`: msb's host-side forwarder accepts TCP the
+    // moment the VM starts, long before the guest binds — a TCP probe
+    // returns instantly and the driver then dies with "Handshake not
+    // finished". Probe at the HTTP layer instead.
+    wait_for_http(addr, ready_timeout).with_context(|| format!("microVM {name} never served HTTP on {addr}; see {}", log_dir.display()))?;
+
+    Ok(BootedServer {
+        url: format!("http://127.0.0.1:{host_port}"),
+        token: Some(token),
+        _guard: Box::new(guard),
+    })
+}
+
 #[async_trait]
 impl TaskRunner for MicroVmTaskRunner {
     async fn run_one(&self, lang: crate::PolyglotLang, task: &str, opts: &crate::BenchOpts) -> Result<TaskOutcome> {
         let setup = crate::prepare_task(lang, task)?;
-        let host_port = free_port()?;
-        let token = uuid::Uuid::new_v4().simple().to_string();
-        let name = format!("smooth-bench-{}", &token[..8]);
         // Log dir sits beside the workspace (not in it) so the VM's logs
         // never land in the scored task dir.
         let log_dir = setup.run_dir.join("vmlog");
-        std::fs::create_dir_all(&log_dir).with_context(|| format!("mkdir {}", log_dir.display()))?;
-
-        let gateway_url = self.env.gateway_url.clone().unwrap_or_else(|| "https://llm.smoo.ai/v1".to_string());
-        let args = msb_run_args(&MsbSpec {
-            name: &name,
-            bin_dir: &self.bin_dir,
-            workspace: &setup.work_dir,
-            log_dir: &log_dir,
-            host_port,
-            guest_port: 8791,
-            token: &token,
-            model: &self.model,
-            gateway_url: &gateway_url,
-            gateway_key: self.env.gateway_key.as_deref(),
-            image: "debian",
-        });
-
-        let msb_log = std::fs::File::create(log_dir.join("msb.log")).context("creating msb.log")?;
-        let child = Command::new("msb")
-            .args(&args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(msb_log.try_clone()?))
-            .stderr(Stdio::from(msb_log))
-            .process_group(0)
-            .spawn()
-            .context("spawning `msb run` (is microsandbox installed?)")?;
-        let _guard = MsbGuard { name: name.clone(), child };
-
-        let addr: SocketAddr = format!("127.0.0.1:{host_port}").parse().context("microvm host addr")?;
-        // NOT `wait_for_port`: msb's host-side forwarder accepts TCP the
-        // moment the VM starts, long before the guest binds — a TCP probe
-        // returns instantly and the driver then dies with "Handshake not
-        // finished". Probe at the HTTP layer instead.
-        wait_for_http(addr, self.ready_timeout).with_context(|| format!("microVM {name} never served HTTP on {addr}; see {}", log_dir.display()))?;
-
-        let url = format!("http://127.0.0.1:{host_port}");
-        let result = crate::run_prepared(lang, task, &setup, &url, Some(&token), opts).await?;
-        // `_guard` drops here → child killed + `msb remove -f` → no leak.
+        let booted = boot_microvm(&self.bin_dir, &setup.work_dir, &log_dir, &self.model, &self.env, self.ready_timeout)?;
+        let result = crate::run_prepared(lang, task, &setup, &booted.url, booted.token.as_deref(), opts).await?;
+        // `booted` drops here → child killed + `msb remove -f` → no leak.
         Ok(crate::sweep::outcome_from_result(&result))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Workspace-rooted boot seam (pearl th-300d7d — the agentic bench)
+// ---------------------------------------------------------------------------
+
+/// A booted engine serving at `url`, with its file/shell tools rooted at
+/// a caller-chosen workspace dir. The teardown guard reaps the process
+/// (host) or the sandbox (microVM) on drop.
+pub struct BootedServer {
+    pub url: String,
+    /// Auth token for the driver — `Some` for the rust daemon (strict
+    /// auth), `None` for the anonymous polyglot servers.
+    pub token: Option<String>,
+    _guard: Box<dyn Send + Sync>,
+}
+
+impl BootedServer {
+    /// Construct a `BootedServer` around an arbitrary teardown guard.
+    /// Exists so tests (and future booters outside this module) can
+    /// stand one up without spawning anything.
+    pub fn new(url: String, token: Option<String>, guard: Box<dyn Send + Sync>) -> Self {
+        Self { url, token, _guard: guard }
+    }
+}
+
+/// Boot an engine whose tools are rooted at an arbitrary workspace.
+///
+/// The polyglot sweep boots per *task* behind the polyglot-shaped
+/// [`TaskRunner`]; the agentic bench boots per *scenario* and needs the
+/// workspace seam directly. Both production booters implement this over
+/// the exact same spawn paths the sweep uses.
+#[async_trait]
+pub trait WorkspaceBooter: Send + Sync {
+    /// Boot `engine` under `model` with `workspace` as its root.
+    /// `log_dir` receives engine/VM logs and must sit OUTSIDE `workspace`
+    /// so it can't pollute the scored state.
+    async fn boot_workspace(&self, engine: Engine, model: &str, workspace: &Path, log_dir: &Path) -> Result<BootedServer>;
+}
+
+#[async_trait]
+impl WorkspaceBooter for ProcessBooter {
+    async fn boot_workspace(&self, engine: Engine, model: &str, workspace: &Path, _log_dir: &Path) -> Result<BootedServer> {
+        let port = engine.default_port();
+        let (url, token, guard) = spawn_engine(engine, model, workspace, &self.repo, &self.env, self.ready_timeout, port)?;
+        Ok(BootedServer {
+            url,
+            token,
+            _guard: Box::new(guard),
+        })
+    }
+}
+
+#[async_trait]
+impl WorkspaceBooter for MicroVmBooter {
+    async fn boot_workspace(&self, engine: Engine, model: &str, workspace: &Path, log_dir: &Path) -> Result<BootedServer> {
+        Isolation::MicroVm.check_engines(&[engine])?;
+        let bin_dir = ensure_linux_daemon(&self.repo_root)?;
+        boot_microvm(&bin_dir, workspace, log_dir, model, &self.env, self.ready_timeout)
     }
 }
 

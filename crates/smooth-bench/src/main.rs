@@ -18,8 +18,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use smooth_bench::agentic::{default_scenarios, parse_scenarios, run_agentic, AgenticOpts};
 use smooth_bench::curated::CuratedList;
-use smooth_bench::engine::{run_engine_matrix, Engine, EngineEnv, EngineMatrixRun, Isolation, MicroVmBooter, ProcessBooter};
+use smooth_bench::engine::{run_engine_matrix, Engine, EngineEnv, EngineMatrixRun, Isolation, MicroVmBooter, ProcessBooter, WorkspaceBooter};
 use smooth_bench::sweep::{current_commit_sha, StdoutObserver, SweepConfig, SweepGate};
 use smooth_bench::{print_summary, run_aider_polyglot, BenchOpts, PolyglotLang};
 
@@ -58,6 +59,60 @@ enum Commands {
     /// `scripts/operator-serve.sh` does, runs the tasks, tears it down.
     /// Pearl th-4c3e2d.
     Score(ScoreArgs),
+
+    /// Agentic / workflow benchmark: does the agent take the right
+    /// ACTIONS through a multi-step tool workflow? Each scenario seeds a
+    /// workspace, boots the engine rooted there, drives one turn with the
+    /// user's goal, and scores the resulting state (deterministic
+    /// assertions, or an LLM judge for open-ended goals).
+    ///
+    /// Scenarios never touch real services: the default microVM isolation
+    /// denies all egress except the LLM gateway, and every "external
+    /// system" is a JSON state file in the mounted workspace.
+    /// Pearl th-300d7d.
+    Agentic(AgenticArgs),
+}
+
+#[derive(Parser, Debug)]
+struct AgenticArgs {
+    /// Engine to benchmark. Default: rust (the only engine that ships
+    /// tools, and the only one with a VM-bootable binary).
+    #[arg(long, default_value = "rust", value_parser = parse_engine)]
+    engine: Engine,
+
+    /// Model the agent runs under. Default: deepseek-v4-flash.
+    #[arg(long, default_value = "deepseek-v4-flash")]
+    model: String,
+
+    /// Where the engine runs. Default `microvm` — scenarios mutate a
+    /// workspace and must not be able to reach anything real.
+    #[arg(long, default_value = "microvm", value_parser = parse_isolation)]
+    isolation: Isolation,
+
+    /// Cheap model used to grade `kind = "judge"` scenarios.
+    #[arg(long, default_value = "deepseek-v4-flash")]
+    judge_model: String,
+
+    /// Scenario TOML to run instead of the embedded suite.
+    #[arg(long)]
+    scenarios: Option<PathBuf>,
+
+    /// Run only the scenario(s) with these ids. Repeatable.
+    #[arg(long = "only")]
+    only: Vec<String>,
+
+    /// smooth-operator repo root (host isolation only — where the
+    /// polyglot engine servers live).
+    #[arg(long)]
+    repo: Option<PathBuf>,
+
+    /// Per-scenario boot timeout in seconds.
+    #[arg(long, default_value_t = 300)]
+    boot_timeout_s: u64,
+
+    /// Write JSON-lines here; the table still prints to stdout.
+    #[arg(long)]
+    output: Option<PathBuf>,
 }
 
 #[derive(Parser, Debug)]
@@ -152,7 +207,90 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Score(args) => run_score(args).await,
+        Commands::Agentic(args) => run_agentic_cmd(args).await,
     }
+}
+
+/// Resolve the smooth repo root (holds `scripts/msb-spike/`) for the
+/// microVM booter. Same resolution `score --isolation microvm` uses.
+fn smooth_repo_root() -> PathBuf {
+    std::env::var_os("SMOOTH_REPO").map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join(".."), PathBuf::from)
+}
+
+async fn run_agentic_cmd(args: AgenticArgs) -> Result<()> {
+    args.isolation.check_engines(&[args.engine])?;
+
+    let mut scenarios = match &args.scenarios {
+        Some(p) => {
+            let text = std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
+            parse_scenarios(&text)?
+        }
+        None => default_scenarios()?,
+    };
+    if !args.only.is_empty() {
+        scenarios.retain(|s| args.only.contains(&s.id));
+        anyhow::ensure!(!scenarios.is_empty(), "--only matched no scenarios (have: {:?})", args.only);
+    }
+
+    let env = EngineEnv {
+        gateway_url: std::env::var("SMOOAI_GATEWAY_URL").ok(),
+        gateway_key: std::env::var("SMOOAI_GATEWAY_KEY").ok(),
+        persona: std::env::var("SMOOTH_PERSONA").ok(),
+    };
+    if env.gateway_key.is_none() {
+        eprintln!("warning: SMOOAI_GATEWAY_KEY is unset — the agent will boot but every turn errors; scenarios will be INCONCLUSIVE");
+    }
+
+    let run_root = smooth_bench::runs_root()?.join(format!("agentic-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]));
+    std::fs::create_dir_all(&run_root).with_context(|| format!("mkdir {}", run_root.display()))?;
+    eprintln!("agentic: scratch at {}", run_root.display());
+
+    let opts = AgenticOpts {
+        engine: args.engine,
+        model: args.model.clone(),
+        isolation: args.isolation,
+        judge_model: args.judge_model.clone(),
+        gateway_url: env.gateway_url.clone().unwrap_or_else(|| "https://llm.smoo.ai/v1".to_string()),
+        gateway_key: env.gateway_key.clone(),
+        runs_root: run_root,
+    };
+
+    let booter: Box<dyn WorkspaceBooter> = match args.isolation {
+        Isolation::Host => {
+            let repo = args
+                .repo
+                .or_else(|| std::env::var_os("SMOOTH_OPERATOR_REPO").map(PathBuf::from))
+                .or_else(|| dirs_next::home_dir().map(|h| h.join("dev").join("smooai").join("smooth-operator")))
+                .context("could not resolve smooth-operator repo root")?;
+            let mut b = ProcessBooter::new(repo, env);
+            b.ready_timeout = Duration::from_secs(args.boot_timeout_s);
+            Box::new(b)
+        }
+        Isolation::MicroVm => {
+            let mut b = MicroVmBooter::new(smooth_repo_root(), env);
+            b.ready_timeout = Duration::from_secs(args.boot_timeout_s);
+            Box::new(b)
+        }
+    };
+
+    let run = run_agentic(&scenarios, booter.as_ref(), &opts).await?;
+
+    let jsonl = run.to_jsonl()?;
+    if let Some(path) = args.output.as_deref() {
+        std::fs::write(path, &jsonl).with_context(|| format!("writing JSON-lines to {}", path.display()))?;
+        eprintln!("wrote {}", path.display());
+    } else {
+        print!("{jsonl}");
+    }
+    println!();
+    print!("{}", run.render_table());
+
+    // Non-zero when anything didn't pass — CI (and a human) should notice
+    // an INCONCLUSIVE just as much as a FAIL.
+    if run.passed() < run.results.len() {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 async fn run_score(args: ScoreArgs) -> Result<()> {
@@ -221,10 +359,7 @@ async fn run_score(args: ScoreArgs) -> Result<()> {
         Isolation::MicroVm => {
             // The microVM backend needs the SMOOTH repo (for
             // `scripts/msb-spike/`), not the smooth-operator one.
-            let smooth_repo = std::env::var_os("SMOOTH_REPO")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join(".."));
-            let mut booter = MicroVmBooter::new(smooth_repo, env);
+            let mut booter = MicroVmBooter::new(smooth_repo_root(), env);
             booter.ready_timeout = Duration::from_secs(args.boot_timeout_s);
             run_engine_matrix(&curated, &booter, &engines, &models, &cfg, &mut observer).await?
         }

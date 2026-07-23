@@ -39,6 +39,11 @@ pub struct CanonicalOutput {
     /// One record per tool *result* observed on the stream (success is
     /// the negation of the engine's `isError` flag).
     pub tool_calls: Vec<CanonicalToolCall>,
+    /// The assistant's spoken answer, reassembled from `stream_token`
+    /// events. Empty for engines that don't stream tokens. The agentic
+    /// bench feeds this to the LLM judge as evidence; the polyglot bench
+    /// ignores it (it scores the workspace, not the prose).
+    pub text: String,
 }
 
 /// A single tool result observed during the turn.
@@ -106,6 +111,7 @@ async fn drive_once(url: &str, prompt: &str, token: Option<&str>) -> Result<Cano
             }
             Event::Error(m) => anyhow::bail!("operator error on turn: {m}"),
             Event::ToolResult { name, success } => out.tool_calls.push(CanonicalToolCall { name, success }),
+            Event::Token(t) => out.text.push_str(&t),
             _ => {}
         }
     }
@@ -123,7 +129,9 @@ enum Event {
     Error(String),
     /// A `stream_chunk` carrying a tool result.
     ToolResult { name: String, success: bool },
-    /// Anything else (pongs, stream tokens, tool-call chunks, acks).
+    /// One `stream_token` of the assistant's spoken answer.
+    Token(String),
+    /// Anything else (pongs, reasoning tokens, tool-call chunks, acks).
     Other,
 }
 
@@ -143,6 +151,18 @@ fn classify(v: &Value) -> Event {
                 .unwrap_or("unknown operator error")
                 .to_string(),
         ),
+        // The answer streams as top-level `token` (see the web client's
+        // `operator.ts`); a couple of engines nest it under `data`.
+        // `stream_reasoning` deliberately falls through to `Other` —
+        // thinking is not the answer.
+        Some("stream_token") => match v
+            .get("token")
+            .and_then(Value::as_str)
+            .or_else(|| v.pointer("/data/token").and_then(Value::as_str))
+        {
+            Some(t) => Event::Token(t.to_string()),
+            None => Event::Other,
+        },
         Some("stream_chunk") => match v.pointer("/data/state/rawResponse/toolResult") {
             Some(tr) => Event::ToolResult {
                 name: tr.get("name").and_then(Value::as_str).unwrap_or("unknown").to_string(),
@@ -299,8 +319,21 @@ mod tests {
     }
 
     #[test]
-    fn classify_stream_token_is_other() {
-        let v = json!({"type":"stream_token","data":{"token":"hello"}});
+    fn classify_stream_token_yields_the_answer_text() {
+        // Top-level `token` is the shape the daemon emits.
+        let v = json!({"type":"stream_token","token":"hello"});
+        assert!(matches!(classify(&v), Event::Token(t) if t == "hello"));
+        // Nested under `data` also accepted.
+        let nested = json!({"type":"stream_token","data":{"token":" world"}});
+        assert!(matches!(classify(&nested), Event::Token(t) if t == " world"));
+        // A token-less frame is not an empty answer, it's noise.
+        assert!(matches!(classify(&json!({"type":"stream_token"})), Event::Other));
+    }
+
+    #[test]
+    fn classify_stream_reasoning_is_not_the_answer() {
+        // Thinking rides its own channel and must never land in `text`.
+        let v = json!({"type":"stream_reasoning","token":"hmm let me think"});
         assert!(matches!(classify(&v), Event::Other));
     }
 

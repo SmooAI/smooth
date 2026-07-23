@@ -28,10 +28,12 @@ use std::time::Instant;
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
 
+pub mod agentic;
 pub mod auto_approve;
 pub mod canonical_driver;
 pub mod curated;
 pub mod engine;
+pub mod judge;
 pub mod lang_detect;
 pub mod scenarios;
 pub mod score;
