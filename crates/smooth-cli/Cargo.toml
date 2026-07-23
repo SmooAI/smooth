@@ -87,6 +87,7 @@ base64 = "0.22"
 tempfile = "3"
 rmcp = { workspace = true, features = ["server", "macros", "transport-io"] }
 schemars = "1"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 
 [dev-dependencies]
 # Pearl th-abc4e2: admin::tests verify the baked-in Supabase anon
