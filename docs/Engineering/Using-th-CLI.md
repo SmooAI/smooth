@@ -402,18 +402,25 @@ th api smooth-operator chat "..." --json                                       #
 th api smooth-operator history <conversation-id>                               # message history
 ```
 
-Destructive tools (e.g. `email.send`) **never auto-run** — a turn that triggers
-one returns a `pendingAction` and pauses. `chat` resolves it with a y/N prompt
-on a TTY, or the up-front `--confirm` / `--no-confirm` flag for
-non-interactive/agent use. With **no flag on a non-TTY** it prints the pending
-action and stops rather than guessing — `--no-confirm` is never a silent
-default. To inspect first, then approve without resending the message:
+> **Transport (SMOODEV-2673).** The buffered REST `chat`/`confirm` routes were
+> **deleted**. `chat` now mints a short-lived socket token
+> (`POST /organizations/{org}/smooth-operator/token`) and runs one turn over the
+> **SEP WebSocket** (`wss://smooth-operator.smoo.ai/ws`) —
+> `create_conversation_session` (resume by id) → `send_message` → await
+> `eventual_response`. Implementation: `crates/smooth-cli/src/smooai/smooth_operator_ws.rs`
+> (hand-rolled: the `smooth-operator` crates are server-side and ship no Rust client).
+
+Destructive tools (e.g. `email.send`) **never auto-run**. The socket *parks the
+turn mid-flight* (`write_confirmation_required`) and takes the decision
+**inline**, so approval is a flag on `chat` rather than a second command:
+without `--confirm` the action is declined and reported ("I did NOT do this
+without your approval"), and the turn still completes. The old
+`th api smooth-operator confirm` subcommand is **retired** — it now prints an
+explanation pointing at `--confirm`.
 
 ```bash
-th api smooth-operator chat "Send jane@acme.com the follow-up"     # pauses, prints the pending email.send
-th api smooth-operator confirm <conversation-id> --approve         # run it
-th api smooth-operator confirm <conversation-id> --decline         # or drop it
-th api smooth-operator chat "Send jane@acme.com the follow-up" --confirm   # one-shot, when already authorized
+th api smooth-operator chat "Send jane@acme.com the follow-up"             # drafts; declines the send, tells you
+th api smooth-operator chat "Send jane@acme.com the follow-up" --confirm   # allows the send this turn
 ```
 
 Responses are buffered JSON (token streaming is phase 2). Every tool run is
@@ -567,7 +574,7 @@ For agents collaborating across **different clones/machines** of the same repo, 
 `th mcp serve` speaks JSON-RPC on stdout (built on the `rmcp` SDK) — **do not mix other output onto stdout**; the tools log only to stderr. It exposes two tiers:
 
 - **Local — free, no sign-in.** `pearls_ready` / `pearls_create` act on the pearl store of the workspace the host launched the server in; `remember` / `recall` keep local notes.
-- **Your business — behind Sign in with Smoo (`th auth login`).** `ask_business` is the star: one turn of **Smooth Operator**, the org agent (the same user-only `POST /organizations/{org}/smooth-operator/chat` the `th api smooth-operator` CLI drives) — ask about revenue/CRM/knowledge and draft, or with **explicit approval**, send email. It resolves your active org automatically, and never sends or takes a destructive action without approval: when it pauses on one, it returns the pending action + a `conversation_id`; approve by calling `ask_business` again with `approve=true` and that id. `knowledge_search` is a fast read of the org knowledge base. Both gate on the user session (they 401 under M2M), so unauthenticated calls return a clear "run `th auth login`" message rather than failing opaquely.
+- **Your business — behind Sign in with Smoo (`th auth login`).** `ask_business` is the star: one turn of **Smooth Operator**, the org agent, over the SEP WebSocket (the same transport the `th api smooth-operator` CLI now drives) — ask about revenue/CRM/knowledge and draft, or with **explicit approval**, send email. It resolves your active org automatically, and never sends or takes a destructive action without approval: when it pauses on one, it returns the pending action + a `conversation_id`; approve by calling `ask_business` again with `approve=true` and that id. `knowledge_search` is a fast read of the org knowledge base. Both gate on the user session (they 401 under M2M), so unauthenticated calls return a clear "run `th auth login`" message rather than failing opaquely.
 
 The `.mcpb` **Desktop Extension** for one-click install lives in `packaging/mcpb/` (`build-mcpb.sh` stages the `th` binary + manifest and runs `npx @anthropic-ai/mcpb pack`). The same tool layer is what a hosted Streamable-HTTP server at `mcp.smoo.ai` will reuse for the zero-install Claude Desktop connector (pearl th-794b1e).
 

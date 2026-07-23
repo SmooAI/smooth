@@ -4,34 +4,32 @@
 //! 401 under an M2M client) — every tool run is audit-logged against the
 //! real person. Pearl th-f15107; smooai PR #2383.
 //!
-//! Three subcommands mirror the three routes:
-//!   chat     POST /organizations/{org}/smooth-operator/chat      {message, conversationId?}
-//!   confirm  POST /organizations/{org}/smooth-operator/confirm   {conversationId, approve}
-//!   history  GET  /organizations/{org}/smooth-operator/conversations/{id}
+//! **Transport (SMOODEV-2673):** the buffered REST chat/confirm routes were
+//! deleted; the operator is now driven over its **SEP WebSocket**. `chat` mints
+//! a short-lived socket token and runs one turn via
+//! [`crate::smooai::smooth_operator_ws::operator_turn`]. Destructive tools park
+//! the turn mid-flight and are confirmed **inline** on the same socket, so
+//! approval is a flag on `chat` (`--confirm`) rather than a follow-up command —
+//! the old `confirm` subcommand is retired and now explains the change.
+//! Without `--confirm`, destructive actions are declined and reported, never
+//! silently run.
 //!
-//! Responses are buffered JSON (`SmoothOperatorTurnResult`) — token streaming is
-//! phase 2 on the smooai side. A turn may return a `pendingAction`: a
-//! destructive tool (e.g. `email.send`) the loop paused on. `chat` resolves
-//! it inline — a y/N prompt on a TTY, or the up-front `--confirm`/
-//! `--no-confirm` flag for non-interactive/agent use. `--no-confirm` is
-//! never a default: without a flag on a non-TTY we print the pending action
-//! and stop rather than silently approving or declining.
-
-use std::io::IsTerminal;
+//!   chat     SEP WS  wss://smooth-operator.smoo.ai/ws  (token from api-prime)
+//!   history  GET     /organizations/{org}/smooth-operator/conversations/{id}
 
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use owo_colors::OwoColorize;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
 
 use super::print_json;
 use crate::smooai::user_client::UserClient;
 
 #[derive(Subcommand)]
 pub enum Cmd {
-    /// Send a message to the org smooth-operator and print its reply. Resolves any
-    /// destructive-action confirmation inline (TTY prompt or `--confirm`/`--no-confirm`).
+    /// Send a message to the org smooth-operator and print its reply. Runs one
+    /// turn over the SEP WebSocket; destructive actions run only with `--confirm`.
     Chat {
         /// The message to send to the smooth-operator.
         message: String,
@@ -51,8 +49,8 @@ pub enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Approve or decline the destructive action a prior `chat` turn paused on,
-    /// without resending the message. Use this to inspect first, then decide.
+    /// RETIRED — the operator now confirms destructive actions inline during the
+    /// turn. Use `chat --confirm` instead; this command explains the change.
     Confirm {
         /// The conversation id from the `chat` turn that returned a pendingAction.
         conversation_id: String,
@@ -82,36 +80,7 @@ pub enum Cmd {
     },
 }
 
-// ---- API response shapes (subset of smooai SmoothOperatorTurnResult / SmoothOperatorHistory) ----
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TurnResult {
-    conversation_id: String,
-    #[serde(default)]
-    reply: String,
-    #[serde(default)]
-    tool_calls: Vec<ToolCall>,
-    #[serde(default)]
-    pending_action: Option<PendingAction>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ToolCall {
-    name: String,
-    /// `ran` | `pending` | `error`.
-    #[serde(default)]
-    status: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PendingAction {
-    name: String,
-    #[serde(default)]
-    summary: String,
-}
+// ---- API response shapes (subset of smooai SmoothOperatorHistory) ----
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -129,35 +98,6 @@ struct HistoryMessage {
     content: String,
     #[serde(default)]
     tool_name: Option<String>,
-}
-
-/// What to do with a `pendingAction`, given the flags and whether we're on a TTY.
-#[derive(Debug, PartialEq, Eq)]
-enum Decision {
-    Approve,
-    Decline,
-    /// Ask the user interactively (TTY only).
-    Prompt,
-    /// Non-TTY with no flag — refuse to guess; print the action and stop.
-    NeedFlag,
-}
-
-/// Pure confirm-flag resolution. clap already rejects `--confirm --no-confirm`
-/// together, so the `(true, true)` arm can't be reached in practice.
-fn decide(confirm: bool, no_confirm: bool, is_tty: bool) -> Decision {
-    match (confirm, no_confirm) {
-        (true, _) => Decision::Approve,
-        (_, true) => Decision::Decline,
-        _ if is_tty => Decision::Prompt,
-        _ => Decision::NeedFlag,
-    }
-}
-
-/// One compact line per tool call, e.g. `ran crm.search_contacts`. The status
-/// (`ran`/`pending`/`error`) reads as the verb. Glyph-free so it's cheap to
-/// test; the print path colors the leading verb.
-fn tool_call_line(tc: &ToolCall) -> String {
-    format!("{} {}", tc.status, tc.name)
 }
 
 fn resolve_org(override_org: Option<String>) -> Result<String> {
@@ -182,121 +122,40 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             confirm,
             no_confirm,
             json,
-        } => chat(&client, resolve_org(org)?, message, conversation, confirm, no_confirm, json).await,
-        Cmd::Confirm {
-            conversation_id,
-            approve,
-            decline,
-            org,
-            json,
-        } => {
-            if !approve && !decline {
-                anyhow::bail!("pass `--approve` or `--decline`");
-            }
-            confirm(&client, &resolve_org(org)?, &conversation_id, approve, json).await
-        }
+        } => chat(resolve_org(org)?, message, conversation, confirm, no_confirm, json).await,
+        // The separate confirm round-trip is obsolete: the SEP WebSocket parks
+        // the turn and takes the approval inline, so approval is a flag on
+        // `chat` now rather than a follow-up command.
+        Cmd::Confirm { .. } => anyhow::bail!(
+            "`confirm` is obsolete — the operator now confirms destructive actions inline over its WebSocket transport. \
+             Re-run the ask with `th api smooth-operator chat \"…\" --confirm` to approve actions during the turn."
+        ),
         Cmd::History { conversation_id, org, json } => history(&client, &resolve_org(org)?, &conversation_id, json).await,
     }
 }
 
-async fn chat(client: &UserClient, org: String, message: String, conversation: Option<String>, confirm_flag: bool, no_confirm: bool, json: bool) -> Result<()> {
-    let mut body = json!({ "message": message });
-    if let Some(cid) = conversation.filter(|s| !s.trim().is_empty()) {
-        body["conversationId"] = Value::String(cid);
-    }
-    let raw = client
-        .post(&format!("/organizations/{org}/smooth-operator/chat"), &body)
+/// One operator turn over the SEP WebSocket. The buffered REST chat route was
+/// deleted in SMOODEV-2673; `operator_turn` mints the socket token and drives
+/// the session. `--confirm` approves destructive tools inline; otherwise they
+/// are declined and reported.
+async fn chat(org: String, message: String, conversation: Option<String>, confirm_flag: bool, no_confirm: bool, json: bool) -> Result<()> {
+    let approve = confirm_flag && !no_confirm;
+    let turn = crate::smooai::smooth_operator_ws::operator_turn(&org, &message, conversation.as_deref().filter(|s| !s.trim().is_empty()), approve)
         .await
-        .context("POST smooth-operator chat")?;
-    resolve_turn(client, &org, raw, confirm_flag, no_confirm, json).await
-}
-
-async fn confirm(client: &UserClient, org: &str, conversation_id: &str, approve: bool, json: bool) -> Result<()> {
-    let raw = post_confirm(client, org, conversation_id, approve).await?;
+        .context("smooth-operator turn")?;
     if json {
-        print_json(&raw);
-        return Ok(());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "reply": turn.reply,
+                "conversationId": turn.conversation_id,
+                "declined": turn.declined,
+            }))?
+        );
+    } else {
+        println!("{}", crate::smooai::smooth_operator_ws::render_operator_turn(&turn));
     }
-    render_turn(&parse_turn(&raw)?);
     Ok(())
-}
-
-async fn post_confirm(client: &UserClient, org: &str, conversation_id: &str, approve: bool) -> Result<Value> {
-    let body = json!({ "conversationId": conversation_id, "approve": approve });
-    client
-        .post(&format!("/organizations/{org}/smooth-operator/confirm"), &body)
-        .await
-        .context("POST smooth-operator confirm")
-}
-
-/// Render a turn, then keep resolving any `pendingAction` (a turn can pause on
-/// several destructive tools) until the loop settles or we hit a non-TTY with
-/// no decision flag.
-async fn resolve_turn(client: &UserClient, org: &str, raw: Value, confirm_flag: bool, no_confirm: bool, json: bool) -> Result<()> {
-    if json {
-        print_json(&raw);
-        // In JSON mode we don't auto-confirm — the caller inspects the
-        // pendingAction and drives `confirm` itself.
-        return Ok(());
-    }
-    let mut turn = parse_turn(&raw)?;
-    loop {
-        render_turn(&turn);
-        let Some(pending) = turn.pending_action.as_ref() else { return Ok(()) };
-        let approve = match decide(confirm_flag, no_confirm, std::io::stdin().is_terminal()) {
-            Decision::Approve => true,
-            Decision::Decline => false,
-            Decision::Prompt => prompt_confirm(pending)?,
-            Decision::NeedFlag => {
-                println!(
-                    "  {} pending action needs a decision — re-run with {} or {}, or `th api smooth-operator confirm {} --approve|--decline`",
-                    "!".yellow().bold(),
-                    "--confirm".bold(),
-                    "--no-confirm".bold(),
-                    turn.conversation_id.cyan(),
-                );
-                return Ok(());
-            }
-        };
-        let raw = post_confirm(client, org, &turn.conversation_id, approve).await?;
-        turn = parse_turn(&raw)?;
-    }
-}
-
-fn prompt_confirm(pending: &PendingAction) -> Result<bool> {
-    dialoguer::Confirm::new()
-        .with_prompt(format!("Approve {} — {}?", pending.name, pending.summary))
-        .default(false)
-        .interact()
-        .context("read confirmation")
-}
-
-fn parse_turn(raw: &Value) -> Result<TurnResult> {
-    serde_json::from_value(raw.clone()).context("parse smooth-operator turn result")
-}
-
-fn render_turn(turn: &TurnResult) {
-    println!();
-    for tc in &turn.tool_calls {
-        let line = tool_call_line(tc);
-        let glyph = match tc.status.as_str() {
-            "error" => "✗".red().to_string(),
-            "pending" => "…".yellow().to_string(),
-            _ => "✓".green().to_string(),
-        };
-        println!("  {} {}", glyph, line.dimmed());
-    }
-    if !turn.reply.trim().is_empty() {
-        if !turn.tool_calls.is_empty() {
-            println!();
-        }
-        println!("{}", turn.reply);
-    }
-    if let Some(p) = &turn.pending_action {
-        println!();
-        println!("  {} {} — {}", "⚠".yellow().bold(), p.name.bold(), p.summary);
-    }
-    println!();
 }
 
 async fn history(client: &UserClient, org: &str, conversation_id: &str, json: bool) -> Result<()> {
@@ -330,73 +189,11 @@ async fn history(client: &UserClient, org: &str, conversation_id: &str, json: bo
 
 #[cfg(test)]
 mod tests {
-    use super::{decide, resolve_org, tool_call_line, Decision, ToolCall};
-
-    fn tc(name: &str, status: &str) -> ToolCall {
-        ToolCall {
-            name: name.into(),
-            status: status.into(),
-        }
-    }
-
-    #[test]
-    fn confirm_flag_wins_over_tty() {
-        assert_eq!(decide(true, false, true), Decision::Approve);
-        assert_eq!(decide(true, false, false), Decision::Approve);
-    }
-
-    #[test]
-    fn no_confirm_flag_declines() {
-        assert_eq!(decide(false, true, true), Decision::Decline);
-        assert_eq!(decide(false, true, false), Decision::Decline);
-    }
-
-    #[test]
-    fn tty_with_no_flag_prompts() {
-        assert_eq!(decide(false, false, true), Decision::Prompt);
-    }
-
-    #[test]
-    fn non_tty_with_no_flag_refuses_to_guess() {
-        // The safety guarantee: never auto-approve or auto-decline for an agent.
-        assert_eq!(decide(false, false, false), Decision::NeedFlag);
-    }
-
-    #[test]
-    fn tool_call_line_is_compact_verb_plus_name() {
-        assert_eq!(tool_call_line(&tc("crm.search_contacts", "ran")), "ran crm.search_contacts");
-        assert_eq!(tool_call_line(&tc("email.send", "pending")), "pending email.send");
-        assert_eq!(tool_call_line(&tc("crm.create_contact", "error")), "error crm.create_contact");
-        // Unknown status is passed through, not dropped.
-        assert_eq!(tool_call_line(&tc("x.y", "weird")), "weird x.y");
-    }
+    use super::resolve_org;
 
     #[test]
     fn resolve_org_prefers_flag_then_env() {
         assert_eq!(resolve_org(Some("org-flag".into())).unwrap(), "org-flag");
         assert!(resolve_org(Some("   ".into())).is_err() || resolve_org(None).is_err());
-    }
-
-    #[test]
-    fn parse_turn_reads_camelcase_and_defaults() {
-        // Full shape.
-        let full = serde_json::json!({
-            "conversationId": "c1",
-            "reply": "found 3",
-            "toolCalls": [{ "name": "crm.search_contacts", "input": {}, "status": "ran" }],
-            "pendingAction": { "toolCallId": "t1", "name": "email.send", "input": {}, "summary": "send to jane" }
-        });
-        let t = super::parse_turn(&full).unwrap();
-        assert_eq!(t.conversation_id, "c1");
-        assert_eq!(t.tool_calls.len(), 1);
-        assert_eq!(t.pending_action.unwrap().name, "email.send");
-
-        // Minimal shape — only conversationId; the rest default.
-        let min = serde_json::json!({ "conversationId": "c2" });
-        let t = super::parse_turn(&min).unwrap();
-        assert_eq!(t.conversation_id, "c2");
-        assert!(t.reply.is_empty());
-        assert!(t.tool_calls.is_empty());
-        assert!(t.pending_action.is_none());
     }
 }
