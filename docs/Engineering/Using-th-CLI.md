@@ -564,7 +564,12 @@ For agents collaborating across **different clones/machines** of the same repo, 
 // VS Code (Copilot) uses "servers" (not "mcpServers") — otherwise identical.
 ```
 
-`th mcp serve` speaks JSON-RPC on stdout (built on the `rmcp` SDK) — **do not mix other output onto stdout**; the tools log only to stderr. It acts on the pearl store in the workspace the host launches it in. Today it exposes the local, no-login surfaces (`pearls_ready`, `pearls_create`); memory and the gated org surfaces (`th api smooth-operator` = the org agent, knowledge, LLM gateway) layer on next, behind the Sign-in-with-Smoo conversion moment. The same tool layer is what a hosted Streamable-HTTP server at `mcp.smoo.ai` will reuse for the zero-install Claude Desktop connector. Package the stdio binary as a `.mcpb` Desktop Extension for one-click install (pearl th-7f31e2).
+`th mcp serve` speaks JSON-RPC on stdout (built on the `rmcp` SDK) — **do not mix other output onto stdout**; the tools log only to stderr. It exposes two tiers:
+
+- **Local — free, no sign-in.** `pearls_ready` / `pearls_create` act on the pearl store of the workspace the host launched the server in; `remember` / `recall` keep local notes.
+- **Your business — behind Sign in with Smoo (`th auth login`).** `ask_business` is the star: one turn of **Smooth Operator**, the org agent (the same user-only `POST /organizations/{org}/smooth-operator/chat` the `th api smooth-operator` CLI drives) — ask about revenue/CRM/knowledge and draft, or with **explicit approval**, send email. It resolves your active org automatically, and never sends or takes a destructive action without approval: when it pauses on one, it returns the pending action + a `conversation_id`; approve by calling `ask_business` again with `approve=true` and that id. `knowledge_search` is a fast read of the org knowledge base. Both gate on the user session (they 401 under M2M), so unauthenticated calls return a clear "run `th auth login`" message rather than failing opaquely.
+
+The `.mcpb` **Desktop Extension** for one-click install lives in `packaging/mcpb/` (`build-mcpb.sh` stages the `th` binary + manifest and runs `npx @anthropic-ai/mcpb pack`). The same tool layer is what a hosted Streamable-HTTP server at `mcp.smoo.ai` will reuse for the zero-install Claude Desktop connector (pearl th-794b1e).
 
 ### SEP extensions — `th ext` (SEP Phase 3, pearl th-f288ae)
 

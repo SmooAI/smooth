@@ -1,0 +1,21 @@
+[package]
+name = "wsmini"
+version = "0.0.0"
+edition = "2021"
+
+[[bin]]
+name = "wsmini"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+futures-util = "0.3"
+serde_json = "1"
+
+[profile.release]
+opt-level = "z"
+strip = true
+
+# Standalone: do NOT join the parent smooth workspace.
+[workspace]

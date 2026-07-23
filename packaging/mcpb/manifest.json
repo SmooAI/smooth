@@ -1,0 +1,60 @@
+{
+    "manifest_version": "0.2",
+    "name": "smooth",
+    "display_name": "Smooth — talk to your business",
+    "version": "0.22.0",
+    "description": "Talk to your business. Smoo AI's `th` CLI as an MCP server. Local work-tracking (pearls) and notes (memory) work out of the box; org tools — the Smooth Operator agent and knowledge search — unlock after Sign in with Smoo (`th auth login`).",
+    "author": {
+        "name": "SmooAI",
+        "email": "brent@smoo.ai"
+    },
+    "homepage": "https://smoo.ai",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/SmooAI/smooth"
+    },
+    "keywords": ["smoo", "smooth", "pearls", "work-tracking", "agents"],
+    "license": "UNLICENSED",
+    "server": {
+        "type": "binary",
+        "entry_point": "server/th",
+        "mcp_config": {
+            "command": "server/th",
+            "args": ["mcp", "serve"],
+            "platform_overrides": {
+                "win32": {
+                    "command": "server/th.exe"
+                }
+            }
+        }
+    },
+    "tools": [
+        {
+            "name": "pearls_ready",
+            "description": "List work items (pearls) that are ready to work on now — open, unblocked, highest priority first."
+        },
+        {
+            "name": "pearls_create",
+            "description": "Create a new work item (pearl). Returns the new pearl id."
+        },
+        {
+            "name": "remember",
+            "description": "Save a note to local memory (kept in this workspace). Free — no sign-in."
+        },
+        {
+            "name": "recall",
+            "description": "List recent notes from local memory. Free — no sign-in."
+        },
+        {
+            "name": "knowledge_search",
+            "description": "Search your Smoo org's knowledge base and return the most relevant passages. Requires Sign in with Smoo (`th auth login`)."
+        },
+        {
+            "name": "ask_business",
+            "description": "Talk to your business in plain language. Smooth Operator (the agent on your Smoo org) answers questions about revenue/CRM/knowledge and can draft — and, with your approval, send — email. Needs Sign in with Smoo (`th auth login`)."
+        }
+    ],
+    "compatibility": {
+        "platforms": ["darwin", "linux", "win32"]
+    }
+}

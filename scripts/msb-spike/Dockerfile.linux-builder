@@ -1,0 +1,27 @@
+# Pearl th-a63c22 — builder image for the LINUX aarch64 `smooth-daemon`.
+#
+# Why a container instead of cross-compiling: openssl-sys enters the dep graph
+# from two roots (web-push->isahc->curl->openssl-sys, and
+# reqwest->hyper-tls->native-tls->openssl-sys). The reqwest root is enabled by
+# the external git crates via cargo feature unification, so it is NOT locally
+# fixable. Inside linux, both are one apt-get away and NOTHING in the tree
+# changes. Both git deps are public — no credential plumbing.
+#
+# This image holds ONLY the toolchain + system libs, so the apt layer is cached
+# forever. Source is bind-mounted and cargo registry/target live in named
+# volumes (see build-linux-daemon.sh) — that's what makes rebuilds incremental.
+FROM rust:bookworm
+
+RUN apt-get update -qq \
+    && apt-get install -y -qq --no-install-recommends \
+        pkg-config \
+        libssl-dev \
+        libcurl4-openssl-dev \
+        protobuf-compiler \
+        cmake \
+        clang \
+    && rm -rf /var/lib/apt/lists/*
+
+# Registry + git checkouts + target all land on mounted volumes.
+ENV CARGO_TARGET_DIR=/target
+WORKDIR /src
