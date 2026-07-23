@@ -223,7 +223,7 @@ impl SmoothMcp {
     /// MCP error if not signed in to Smoo, no active org, or the request fails.
     #[tool(
         name = "knowledge_search",
-        description = "Search your Smoo org's knowledge base and return the most relevant passages. Requires Sign in with Smoo (`th auth login`).",
+        description = "Search your Smoo org's knowledge base and return the most relevant passages. Requires a signed-in Smoo session (`th auth login`, or an M2M key via `th api login`).",
         annotations(read_only_hint = true)
     )]
     pub async fn knowledge_search(&self, params: Parameters<KnowledgeSearchArgs>) -> Result<String, ErrorData> {
@@ -296,6 +296,19 @@ impl SmoothMcp {
             client.post(&format!("/organizations/{org}/smooth-operator/chat"), &body).await
         }
         .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        // Defense-in-depth on the approval path: a paused action with no
+        // conversation id can't be approved, so fail loudly rather than emit a
+        // send-prompt the user can never act on. (The API always returns one;
+        // this only fires on a contract violation.)
+        let paused = turn.get("pendingAction").is_some_and(|v| !v.is_null());
+        let has_cid = turn.get("conversationId").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty());
+        if paused && !has_cid {
+            return Err(ErrorData::internal_error(
+                "The operator paused on an action but returned no conversation id, so it can't be approved. Try again.".to_string(),
+                None,
+            ));
+        }
 
         Ok(render_turn(&turn))
     }
