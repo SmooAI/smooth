@@ -101,6 +101,13 @@ struct AgenticArgs {
     #[arg(long = "only")]
     only: Vec<String>,
 
+    /// Run each scenario N times and report a pass RATE instead of a
+    /// single anecdote — agent behaviour is stochastic. Trials run
+    /// sequentially (one microVM + port at a time), each in its own
+    /// freshly seeded work dir. Default 1.
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
+    trials: u32,
+
     /// smooth-operator repo root (host isolation only — where the
     /// polyglot engine servers live).
     #[arg(long)]
@@ -253,6 +260,7 @@ async fn run_agentic_cmd(args: AgenticArgs) -> Result<()> {
         gateway_url: env.gateway_url.clone().unwrap_or_else(|| "https://llm.smoo.ai/v1".to_string()),
         gateway_key: env.gateway_key.clone(),
         runs_root: run_root,
+        trials: args.trials as usize,
     };
 
     let booter: Box<dyn WorkspaceBooter> = match args.isolation {
@@ -285,9 +293,10 @@ async fn run_agentic_cmd(args: AgenticArgs) -> Result<()> {
     println!();
     print!("{}", run.render_table());
 
-    // Non-zero when anything didn't pass — CI (and a human) should notice
-    // an INCONCLUSIVE just as much as a FAIL.
-    if run.passed() < run.results.len() {
+    // Non-zero when any scenario didn't pass every conclusive trial — CI
+    // (and a human) should notice an INCONCLUSIVE or a FLAKY just as much
+    // as a FAIL.
+    if run.passed() < run.scenario_count() {
         std::process::exit(1);
     }
     Ok(())

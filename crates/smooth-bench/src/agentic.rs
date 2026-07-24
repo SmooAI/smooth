@@ -214,11 +214,13 @@ impl Verdict {
     }
 }
 
-/// One scenario's result. Serialised as one JSON-lines record, carrying
-/// the engine/model/isolation dimensions so runs are comparable.
+/// One TRIAL's result. Serialised as one JSON-lines record, carrying the
+/// engine/model/isolation dimensions so runs are comparable.
 #[derive(Debug, Clone, Serialize)]
 pub struct ScenarioOutcome {
     pub id: String,
+    /// 0-based trial number. With `--trials 1` this is always 0.
+    pub trial_index: usize,
     pub engine: String,
     pub model: String,
     pub isolation: String,
@@ -234,38 +236,153 @@ pub struct ScenarioOutcome {
     pub work_dir: PathBuf,
 }
 
-/// A whole agentic run.
+/// One scenario's result across all its trials. This is the record that
+/// turns "the agent wiped the file" into "the agent wiped the file in
+/// 3/5 runs".
+#[derive(Debug, Clone, Serialize)]
+pub struct ScenarioAggregate {
+    pub id: String,
+    pub engine: String,
+    pub model: String,
+    pub isolation: String,
+    pub check_kind: String,
+    pub trials: usize,
+    pub passed: usize,
+    pub failed: usize,
+    pub inconclusive: usize,
+    /// Trials that returned a real verdict — the denominator.
+    pub conclusive: usize,
+    /// `passed / conclusive`; 0.0 when nothing was conclusive.
+    pub pass_rate: f64,
+    /// PASS only when every conclusive trial passed. All-inconclusive is
+    /// INCONCLUSIVE, never 0%.
+    pub verdict: Verdict,
+    /// Trials disagreed — the interesting signal, so it gets its own bit
+    /// rather than being averaged away.
+    pub flaky: bool,
+    /// Summed over trials.
+    pub duration_ms: u64,
+    pub cost_usd: f64,
+    /// Distinct tool names seen across trials, in first-seen order.
+    pub tools: Vec<String>,
+    /// Distinct rationales across trials, in first-seen order.
+    pub rationales: Vec<String>,
+    pub work_dirs: Vec<PathBuf>,
+}
+
+/// Fold one scenario's trials into a single aggregate.
+///
+/// # Panics
+/// Panics on an empty slice — callers group by id, so a group always has
+/// at least one trial.
+#[must_use]
+#[allow(clippy::cast_precision_loss, reason = "trial counts are single digits; f64 is exact well past that")]
+pub fn aggregate_trials(trials: &[ScenarioOutcome]) -> ScenarioAggregate {
+    assert!(!trials.is_empty(), "aggregate_trials called with no trials");
+    let first = &trials[0];
+    let passed = trials.iter().filter(|t| t.verdict == Verdict::Pass).count();
+    let failed = trials.iter().filter(|t| t.verdict == Verdict::Fail).count();
+    let inconclusive = trials.iter().filter(|t| t.verdict == Verdict::Inconclusive).count();
+    let conclusive = passed + failed;
+
+    // All-inconclusive is missing data, not a 0% score.
+    let verdict = if conclusive == 0 {
+        Verdict::Inconclusive
+    } else if passed == conclusive {
+        Verdict::Pass
+    } else {
+        Verdict::Fail
+    };
+
+    ScenarioAggregate {
+        id: first.id.clone(),
+        engine: first.engine.clone(),
+        model: first.model.clone(),
+        isolation: first.isolation.clone(),
+        check_kind: first.check_kind.clone(),
+        trials: trials.len(),
+        passed,
+        failed,
+        inconclusive,
+        conclusive,
+        pass_rate: if conclusive == 0 { 0.0 } else { passed as f64 / conclusive as f64 },
+        verdict,
+        flaky: passed > 0 && failed > 0,
+        duration_ms: trials.iter().map(|t| t.duration_ms).sum(),
+        cost_usd: trials.iter().map(|t| t.cost_usd).sum(),
+        tools: dedup_in_order(trials.iter().flat_map(|t| t.tools.iter().cloned())),
+        rationales: dedup_in_order(trials.iter().map(|t| t.rationale.trim().to_string()).filter(|r| !r.is_empty())),
+        work_dirs: trials.iter().map(|t| t.work_dir.clone()).collect(),
+    }
+}
+
+fn dedup_in_order<I: IntoIterator<Item = String>>(items: I) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    items.into_iter().filter(|s| seen.insert(s.clone())).collect()
+}
+
+/// A whole agentic run: one `ScenarioOutcome` per scenario per trial.
 #[derive(Debug, Clone, Serialize)]
 pub struct AgenticRun {
     pub engine: String,
     pub model: String,
     pub isolation: String,
     pub judge_model: String,
+    /// Trials requested per scenario.
+    pub trials: usize,
     pub ran_at: chrono::DateTime<chrono::Utc>,
     pub results: Vec<ScenarioOutcome>,
 }
 
 impl AgenticRun {
-    /// Scenarios that returned a real verdict (PASS or FAIL).
+    /// Per-scenario aggregates, in first-seen scenario order.
+    #[must_use]
+    pub fn aggregates(&self) -> Vec<ScenarioAggregate> {
+        let mut order: Vec<&str> = Vec::new();
+        let mut groups: BTreeMap<&str, Vec<ScenarioOutcome>> = BTreeMap::new();
+        for r in &self.results {
+            if !groups.contains_key(r.id.as_str()) {
+                order.push(r.id.as_str());
+            }
+            groups.entry(r.id.as_str()).or_default().push(r.clone());
+        }
+        order.into_iter().map(|id| aggregate_trials(&groups[id])).collect()
+    }
+
+    /// Scenarios (not trials) that returned a real verdict.
     #[must_use]
     pub fn conclusive(&self) -> usize {
-        self.results.iter().filter(|r| r.verdict != Verdict::Inconclusive).count()
+        self.aggregates().iter().filter(|a| a.verdict != Verdict::Inconclusive).count()
     }
 
     #[must_use]
     pub fn passed(&self) -> usize {
-        self.results.iter().filter(|r| r.verdict == Verdict::Pass).count()
+        self.aggregates().iter().filter(|a| a.verdict == Verdict::Pass).count()
     }
 
     #[must_use]
     pub fn inconclusive(&self) -> usize {
-        self.results.iter().filter(|r| r.verdict == Verdict::Inconclusive).count()
+        self.aggregates().iter().filter(|a| a.verdict == Verdict::Inconclusive).count()
     }
 
-    /// Pass rate over **conclusive** scenarios only. An inconclusive
-    /// scenario is missing data, not a failure — folding it into the
-    /// denominator would let a broken judge quietly tank the number.
-    /// 0 conclusive → 0.0 (never NaN; these get serialised and compared).
+    /// Scenarios whose trials disagreed.
+    #[must_use]
+    pub fn flaky(&self) -> usize {
+        self.aggregates().iter().filter(|a| a.flaky).count()
+    }
+
+    /// How many distinct scenarios ran.
+    #[must_use]
+    pub fn scenario_count(&self) -> usize {
+        self.aggregates().len()
+    }
+
+    /// Pass rate over **conclusive** scenarios only (a scenario passes
+    /// only when every one of its conclusive trials passed). An
+    /// inconclusive scenario is missing data, not a failure — folding it
+    /// into the denominator would let a broken judge quietly tank the
+    /// number. 0 conclusive → 0.0 (never NaN; these get serialised and
+    /// compared).
     #[must_use]
     #[allow(clippy::cast_precision_loss, reason = "scenario counts are single digits; f64 is exact well past that")]
     pub fn pass_rate(&self) -> f64 {
@@ -283,15 +400,18 @@ impl AgenticRun {
     }
 
     /// One JSON object per line — the streaming record format, matching
-    /// `EngineMatrixRun::to_jsonl`.
+    /// `EngineMatrixRun::to_jsonl`. One `record: "trial"` line per trial,
+    /// then one `record: "scenario"` aggregate per scenario.
     ///
     /// # Errors
     /// Propagates a `serde_json` failure if a record can't be serialised.
     pub fn to_jsonl(&self) -> Result<String> {
         let mut out = String::new();
         for r in &self.results {
-            out.push_str(&serde_json::to_string(r).context("serialising ScenarioOutcome")?);
-            out.push('\n');
+            out.push_str(&tagged_line("trial", r)?);
+        }
+        for a in &self.aggregates() {
+            out.push_str(&tagged_line("scenario", a)?);
         }
         Ok(out)
     }
@@ -309,22 +429,32 @@ impl AgenticRun {
         let _ = writeln!(out, "  engine/model:  {} / {}", self.engine, self.model);
         let _ = writeln!(out, "  isolation:     {}", self.isolation);
         let _ = writeln!(out, "  judge model:   {}", self.judge_model);
+        let _ = writeln!(out, "  trials:        {} per scenario", self.trials);
         let _ = writeln!(out, "  ran at:        {}", self.ran_at.to_rfc3339());
         let _ = writeln!(out);
-        let _ = writeln!(out, "  scenario                  check          verdict        time     $cost  tools");
-        for r in &self.results {
+        let _ = writeln!(
+            out,
+            "  scenario                  check          verdict         trials  flaky   time     $cost  tools"
+        );
+        for a in &self.aggregates() {
             let _ = writeln!(
                 out,
-                "  {id:<25} {kind:<14} {verdict:<14} {secs:>5.1}s  {cost:>7.4}  {tools}",
-                id = r.id,
-                kind = r.check_kind,
-                verdict = r.verdict.as_str(),
-                secs = r.duration_ms as f64 / 1000.0,
-                cost = r.cost_usd,
-                tools = if r.tools.is_empty() { "-".to_string() } else { r.tools.join(",") },
+                "  {id:<25} {kind:<14} {verdict:<15} {passed}/{conclusive:<5} {flaky:<6} {secs:>5.1}s  {cost:>7.4}  {tools}",
+                id = a.id,
+                kind = a.check_kind,
+                verdict = a.verdict.as_str(),
+                passed = a.passed,
+                conclusive = a.conclusive,
+                flaky = if a.flaky { "⚠ FLAKY" } else { "-" },
+                secs = a.duration_ms as f64 / 1000.0,
+                cost = a.cost_usd,
+                tools = if a.tools.is_empty() { "-".to_string() } else { a.tools.join(",") },
             );
-            if !r.rationale.trim().is_empty() {
-                let _ = writeln!(out, "      ↳ {}", r.rationale.trim());
+            if a.inconclusive > 0 {
+                let _ = writeln!(out, "      ↳ {} of {} trial(s) INCONCLUSIVE, excluded from the rate", a.inconclusive, a.trials);
+            }
+            for r in &a.rationales {
+                let _ = writeln!(out, "      ↳ {r}");
             }
         }
         let _ = writeln!(out);
@@ -340,9 +470,26 @@ impl AgenticRun {
                 String::new()
             }
         );
+        if self.flaky() > 0 {
+            let _ = writeln!(
+                out,
+                "  ⚠ {} FLAKY scenario(s) — trials disagreed; the rate, not the last run, is the fact",
+                self.flaky()
+            );
+        }
         let _ = writeln!(out, "  total cost: ${:.4}", self.total_cost_usd());
         out
     }
+}
+
+/// Serialise `value` as one JSON-lines record tagged with `record`, so a
+/// consumer can tell a per-trial row from a per-scenario aggregate.
+fn tagged_line<T: Serialize>(record: &str, value: &T) -> Result<String> {
+    let mut v = serde_json::to_value(value).context("serialising an agentic record")?;
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("record".to_string(), serde_json::Value::String(record.to_string()));
+    }
+    Ok(format!("{}\n", serde_json::to_string(&v).context("serialising an agentic record")?))
 }
 
 /// Result of evaluating one assertion.
@@ -457,39 +604,60 @@ pub struct AgenticOpts {
     pub judge_model: String,
     pub gateway_url: String,
     pub gateway_key: Option<String>,
-    /// Root for scenario scratch dirs (each gets `<root>/<id>/work`).
+    /// Root for scenario scratch dirs (each trial gets
+    /// `<root>/<id>/trial-<i>/work`).
     pub runs_root: PathBuf,
+    /// How many times to run each scenario. Agent behaviour is
+    /// stochastic, so one run is an anecdote; N runs is a rate.
+    pub trials: usize,
 }
 
-/// Run every scenario: seed the workspace, boot the engine rooted there,
-/// drive one canonical turn with the scenario prompt, then score.
+/// Run every scenario `opts.trials` times: seed a fresh workspace, boot
+/// the engine rooted there, drive one canonical turn with the scenario
+/// prompt, then score.
 ///
-/// A boot or transport failure marks that scenario `INCONCLUSIVE` and the
+/// Trials run **sequentially** — each one boots a microVM and grabs a
+/// port; overlapping them would fight over both.
+///
+/// A boot or transport failure marks that trial `INCONCLUSIVE` and the
 /// run continues — one dead VM doesn't abort the suite.
 ///
 /// # Errors
 /// Errors only when the scratch dirs can't be created; everything else is
-/// captured as a per-scenario verdict.
+/// captured as a per-trial verdict.
 pub async fn run_agentic<B: WorkspaceBooter + ?Sized>(scenarios: &[Scenario], booter: &B, opts: &AgenticOpts) -> Result<AgenticRun> {
-    let mut results = Vec::with_capacity(scenarios.len());
+    let trials = opts.trials.max(1);
+    let mut results = Vec::with_capacity(scenarios.len() * trials);
     for s in scenarios {
-        eprintln!("agentic: {} …", s.id);
-        results.push(run_one(s, booter, opts).await);
+        for trial in 0..trials {
+            if trials == 1 {
+                eprintln!("agentic: {} …", s.id);
+            } else {
+                eprintln!("agentic: {} (trial {}/{}) …", s.id, trial + 1, trials);
+            }
+            results.push(run_one(s, trial, booter, opts).await);
+        }
     }
     Ok(AgenticRun {
         engine: opts.engine.as_str().to_string(),
         model: opts.model.clone(),
         isolation: opts.isolation.as_str().to_string(),
         judge_model: opts.judge_model.clone(),
+        trials,
         ran_at: chrono::Utc::now(),
         results,
     })
 }
 
-/// Run + score one scenario. Never returns `Err` — every failure mode is
-/// a verdict, because a suite that aborts halfway tells you nothing.
-async fn run_one<B: WorkspaceBooter + ?Sized>(s: &Scenario, booter: &B, opts: &AgenticOpts) -> ScenarioOutcome {
-    let base = opts.runs_root.join(&s.id);
+/// Run + score one trial of one scenario. Never returns `Err` — every
+/// failure mode is a verdict, because a suite that aborts halfway tells
+/// you nothing.
+///
+/// Each trial gets its OWN work dir, re-seeded from scratch, so trial N
+/// can never observe trial N-1's mutations (and both survive for
+/// post-hoc inspection).
+async fn run_one<B: WorkspaceBooter + ?Sized>(s: &Scenario, trial_index: usize, booter: &B, opts: &AgenticOpts) -> ScenarioOutcome {
+    let base = trial_dir(&opts.runs_root, &s.id, trial_index);
     let work = base.join("work");
     // Logs sit OUTSIDE the workspace so VM output can't pollute the
     // scored state (or get read back by the agent).
@@ -497,6 +665,7 @@ async fn run_one<B: WorkspaceBooter + ?Sized>(s: &Scenario, booter: &B, opts: &A
 
     let mut outcome = ScenarioOutcome {
         id: s.id.clone(),
+        trial_index,
         engine: opts.engine.as_str().to_string(),
         model: opts.model.clone(),
         isolation: opts.isolation.as_str().to_string(),
@@ -580,6 +749,12 @@ async fn run_one<B: WorkspaceBooter + ?Sized>(s: &Scenario, booter: &B, opts: &A
     outcome
 }
 
+/// Scratch dir for one trial. Distinct per trial so trials can't alias
+/// each other's state and every one survives for post-hoc inspection.
+fn trial_dir(runs_root: &Path, id: &str, trial_index: usize) -> PathBuf {
+    runs_root.join(id).join(format!("trial-{trial_index}"))
+}
+
 /// Create the workspace and write the scenario's setup files. Returns
 /// path → content so `unchanged` assertions can compare exactly.
 fn seed_workspace(s: &Scenario, work: &Path) -> Result<BTreeMap<String, String>> {
@@ -643,8 +818,13 @@ mod tests {
     use super::*;
 
     fn outcome(id: &str, verdict: Verdict, cost: f64) -> ScenarioOutcome {
+        trial(id, 0, verdict, cost)
+    }
+
+    fn trial(id: &str, trial_index: usize, verdict: Verdict, cost: f64) -> ScenarioOutcome {
         ScenarioOutcome {
             id: id.into(),
+            trial_index,
             engine: "rust".into(),
             model: "deepseek-v4-flash".into(),
             isolation: "microvm".into(),
@@ -654,19 +834,33 @@ mod tests {
             duration_ms: 1234,
             cost_usd: cost,
             tools: vec!["read_file".into()],
-            work_dir: PathBuf::from("/tmp/x"),
+            work_dir: PathBuf::from(format!("/tmp/x/trial-{trial_index}")),
         }
     }
 
     fn run_with(results: Vec<ScenarioOutcome>) -> AgenticRun {
+        run_with_trials(1, results)
+    }
+
+    fn run_with_trials(trials: usize, results: Vec<ScenarioOutcome>) -> AgenticRun {
         AgenticRun {
             engine: "rust".into(),
             model: "deepseek-v4-flash".into(),
             isolation: "microvm".into(),
             judge_model: "deepseek-v4-flash".into(),
+            trials,
             ran_at: chrono::Utc::now(),
             results,
         }
+    }
+
+    /// N trials of one scenario, `pass` of them passing, `fail` failing,
+    /// the rest inconclusive.
+    fn trials_of(id: &str, pass: usize, fail: usize, inconclusive: usize) -> Vec<ScenarioOutcome> {
+        let verdicts = std::iter::repeat_n(Verdict::Pass, pass)
+            .chain(std::iter::repeat_n(Verdict::Fail, fail))
+            .chain(std::iter::repeat_n(Verdict::Inconclusive, inconclusive));
+        verdicts.enumerate().map(|(i, v)| trial(id, i, v, 0.01)).collect()
     }
 
     // ---- scenario parsing ------------------------------------------------
@@ -1096,7 +1290,8 @@ rubric = "r"
     fn jsonl_carries_one_record_per_scenario_with_all_dimensions() {
         let run = run_with(vec![outcome("a", Verdict::Pass, 0.01), outcome("b", Verdict::Fail, 0.02)]);
         let jsonl = run.to_jsonl().unwrap();
-        assert_eq!(jsonl.lines().count(), 2);
+        // 2 trials + 2 single-trial aggregates.
+        assert_eq!(jsonl.lines().count(), 4);
         for line in jsonl.lines() {
             let v: serde_json::Value = serde_json::from_str(line).unwrap();
             for key in ["id", "engine", "model", "isolation", "check_kind", "verdict", "cost_usd", "tools"] {
@@ -1128,5 +1323,152 @@ rubric = "r"
         let run = run_with(vec![outcome("a", Verdict::Pass, 0.0)]);
         let t = run.render_table();
         assert!(!t.contains("INCONCLUSIVE"), "{t}");
+    }
+
+    // ---- multi-trial aggregation -----------------------------------------
+
+    #[test]
+    fn all_trials_passing_is_a_pass_and_not_flaky() {
+        let a = aggregate_trials(&trials_of("watchlist-add", 5, 0, 0));
+        assert_eq!(a.verdict, Verdict::Pass);
+        assert_eq!((a.passed, a.conclusive, a.trials), (5, 5, 5));
+        assert_eq!(a.pass_rate, 1.0);
+        assert!(!a.flaky);
+        assert!((a.cost_usd - 0.05).abs() < 1e-9, "costs sum across trials");
+        assert_eq!(a.duration_ms, 5 * 1234, "durations sum across trials");
+    }
+
+    #[test]
+    fn all_trials_failing_is_a_fail_and_not_flaky() {
+        let a = aggregate_trials(&trials_of("unapproved-delete", 0, 5, 0));
+        assert_eq!(a.verdict, Verdict::Fail);
+        assert_eq!((a.passed, a.failed, a.conclusive), (0, 5, 5));
+        assert_eq!(a.pass_rate, 0.0);
+        assert!(!a.flaky, "consistent failure is not flaky, it is a fact");
+    }
+
+    /// The signal the whole feature exists for: a scenario that passes
+    /// some trials and fails others is a DIFFERENT fact from one that
+    /// always passes, and must not be averaged into anonymity.
+    #[test]
+    fn mixed_trials_are_a_fail_and_are_flagged_flaky() {
+        let a = aggregate_trials(&trials_of("unapproved-delete", 1, 4, 0));
+        assert!(a.flaky, "1 pass / 4 fail is the flaky case");
+        assert_eq!(a.verdict, Verdict::Fail, "any failing trial fails the scenario");
+        assert!((a.pass_rate - 0.2).abs() < 1e-9);
+
+        let run = run_with_trials(5, trials_of("unapproved-delete", 1, 4, 0));
+        assert_eq!(run.flaky(), 1);
+        let t = run.render_table();
+        assert!(t.contains("FLAKY"), "flaky must be visible in the table: {t}");
+        assert!(t.contains("1/5"), "the table shows passes/conclusive: {t}");
+    }
+
+    #[test]
+    fn inconclusive_trials_are_excluded_from_the_denominator() {
+        let a = aggregate_trials(&trials_of("judged", 3, 0, 2));
+        assert_eq!((a.trials, a.conclusive, a.inconclusive), (5, 3, 2));
+        assert_eq!(a.pass_rate, 1.0, "2 dead VMs must not tank a 3/3 pass rate");
+        assert_eq!(a.verdict, Verdict::Pass);
+        assert!(!a.flaky, "pass+inconclusive is missing data, not disagreement");
+        assert!(
+            run_with_trials(5, trials_of("judged", 3, 0, 2))
+                .render_table()
+                .contains("2 of 5 trial(s) INCONCLUSIVE"),
+            "the excluded trials must still be surfaced"
+        );
+    }
+
+    #[test]
+    fn all_inconclusive_trials_make_the_scenario_inconclusive_not_zero_percent() {
+        let a = aggregate_trials(&trials_of("judged", 0, 0, 5));
+        assert_eq!(a.verdict, Verdict::Inconclusive, "no data is not a 0% score");
+        assert_eq!(a.conclusive, 0);
+        assert_eq!(a.pass_rate, 0.0);
+        assert!(!a.pass_rate.is_nan());
+        assert!(!a.flaky);
+
+        // …and it stays out of the run-level denominator too.
+        let run = run_with_trials(5, [trials_of("ok", 5, 0, 0), trials_of("judged", 0, 0, 5)].concat());
+        assert_eq!((run.passed(), run.conclusive(), run.inconclusive()), (1, 1, 1));
+        assert_eq!(run.pass_rate(), 1.0);
+        assert_eq!(run.scenario_count(), 2);
+    }
+
+    #[test]
+    fn jsonl_carries_one_record_per_trial_plus_a_scenario_aggregate() {
+        let run = run_with_trials(3, [trials_of("a", 2, 1, 0), trials_of("b", 0, 0, 3)].concat());
+        let lines: Vec<serde_json::Value> = run.to_jsonl().unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+
+        let trials: Vec<&serde_json::Value> = lines.iter().filter(|v| v["record"] == "trial").collect();
+        assert_eq!(trials.len(), 6, "one record per scenario per trial");
+        // trial_index is present, 0-based, and per scenario.
+        let a_idx: Vec<u64> = trials.iter().filter(|v| v["id"] == "a").map(|v| v["trial_index"].as_u64().unwrap()).collect();
+        assert_eq!(a_idx, vec![0, 1, 2]);
+        // The engine/model/isolation dimensions survive on every trial.
+        for t in &trials {
+            for key in ["id", "engine", "model", "isolation", "check_kind", "verdict", "cost_usd"] {
+                assert!(t.get(key).is_some(), "trial record missing {key}: {t}");
+            }
+        }
+
+        let aggs: Vec<&serde_json::Value> = lines.iter().filter(|v| v["record"] == "scenario").collect();
+        assert_eq!(aggs.len(), 2, "one aggregate per scenario");
+        assert_eq!(aggs[0]["id"], "a");
+        assert_eq!(aggs[0]["passed"], 2);
+        assert_eq!(aggs[0]["conclusive"], 3);
+        assert_eq!(aggs[0]["flaky"], true);
+        assert_eq!(aggs[0]["verdict"], "FAIL");
+        assert_eq!(aggs[1]["verdict"], "INCONCLUSIVE");
+        assert_eq!(aggs[1]["conclusive"], 0);
+    }
+
+    #[test]
+    fn aggregates_keep_scenario_order_and_dedupe_tools_and_rationales() {
+        let run = run_with_trials(2, [trials_of("zzz", 2, 0, 0), trials_of("aaa", 2, 0, 0)].concat());
+        let aggs = run.aggregates();
+        let ids: Vec<&str> = aggs.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, vec!["zzz", "aaa"], "first-seen order, not sorted");
+        // Both trials share one tool and one rationale — collapse them.
+        assert_eq!(aggs[0].tools, vec!["read_file"]);
+        assert_eq!(aggs[0].rationales, vec!["because"]);
+    }
+
+    /// Each trial gets its own directory, and re-seeding one leaves the
+    /// others untouched — the property that makes trial N independent of
+    /// trial N-1's mutations.
+    #[test]
+    fn per_trial_seeding_produces_independent_work_dirs() {
+        let root = tempfile::tempdir().unwrap();
+        let s = Scenario {
+            id: "unapproved-delete".into(),
+            description: String::new(),
+            prompt: "p".into(),
+            setup: vec![SetupFile {
+                path: "customers.json".into(),
+                content: "[{\"id\":\"cus-1\"}]".into(),
+            }],
+            check: Check::Judge { rubric: "r".into() },
+        };
+
+        let dirs: Vec<PathBuf> = (0..3).map(|i| trial_dir(root.path(), &s.id, i).join("work")).collect();
+        assert_eq!(dirs.iter().collect::<std::collections::HashSet<_>>().len(), 3, "no two trials alias");
+        assert!(dirs[1].ends_with("unapproved-delete/trial-1/work"), "{:?}", dirs[1]);
+
+        // Trial 0 runs and the "agent" wipes the file.
+        seed_workspace(&s, &dirs[0]).unwrap();
+        std::fs::write(dirs[0].join("customers.json"), "[]").unwrap();
+        std::fs::write(dirs[0].join("refusal.md"), "leftover").unwrap();
+
+        // Trial 1 seeds fresh — it must not see trial 0's damage.
+        seed_workspace(&s, &dirs[1]).unwrap();
+        assert_eq!(std::fs::read_to_string(dirs[1].join("customers.json")).unwrap(), "[{\"id\":\"cus-1\"}]");
+        assert!(!dirs[1].join("refusal.md").exists(), "trial 1 must not inherit trial 0's files");
+        // …and trial 0's dir survives for post-hoc inspection.
+        assert_eq!(std::fs::read_to_string(dirs[0].join("customers.json")).unwrap(), "[]");
+
+        // Re-running the SAME trial dir wipes it (the stale-state guard).
+        seed_workspace(&s, &dirs[0]).unwrap();
+        assert!(!dirs[0].join("refusal.md").exists());
     }
 }
