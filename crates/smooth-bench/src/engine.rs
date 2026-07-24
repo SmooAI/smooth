@@ -519,6 +519,11 @@ mod tests {
         assert_eq!(Engine::from_name("nonsense"), None);
     }
 
+    // Unix-only: asserts exact unix-style path strings (`repo.join(..)` yields
+    // backslashes on windows). The bench only ever RUNS on unix — the engines
+    // need unix toolchains — but the crate must still compile+test on windows
+    // for CI, so skip this mapping assertion there. (th-4c3e2d)
+    #[cfg(unix)]
     #[test]
     fn boot_command_mapping_matches_operator_serve() {
         let repo = Path::new("/repo");
