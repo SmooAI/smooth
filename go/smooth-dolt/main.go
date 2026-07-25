@@ -24,7 +24,9 @@ package main
 
 import (
 	"bufio"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -554,25 +556,58 @@ type serveResponse struct {
 	RowsAffected int64                    `json:"rows_affected,omitempty"`
 }
 
-func cmdServe(dataDir, socketPath string) {
-	// Best-effort cleanup of any stale socket from a previous run.
-	_ = os.Remove(socketPath)
+// randomToken returns a 48-hex-char (24-byte) cryptographically-random
+// connection token written into the rendezvous file and required as the
+// first line of every client connection.
+func randomToken() (string, error) {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// writeRendezvous writes `<port>\n<token>\n` to path with 0600 perms so
+// only the owning user can learn where the loopback server listens and
+// how to authenticate to it.
+func writeRendezvous(path string, port int, token string) error {
+	return os.WriteFile(path, []byte(fmt.Sprintf("%d\n%s\n", port, token)), 0o600)
+}
+
+// cmdServe listens on an ephemeral TCP loopback port and answers the
+// JSON-line pearl protocol. `rendezvousPath` (the `--socket` flag, kept
+// for back-compat) is now a plain 0600 file carrying `<port>\n<token>\n`
+// so a client can discover where to connect and authenticate. We use TCP
+// loopback rather than a Unix socket because the Rust client must run on
+// Windows too, where AF_UNIX isn't available in std (pearl th-5f35a5).
+// Security: bind is loopback-only (no network exposure), the rendezvous
+// file is 0600 (only the owner learns the port+token), and every
+// connection must present the token as its first line — so a local port
+// scanner that stumbles onto the ephemeral port still can't drive the DB.
+func cmdServe(dataDir, rendezvousPath string) {
+	// Best-effort cleanup of any stale rendezvous file from a previous run.
+	_ = os.Remove(rendezvousPath)
 
 	// Goroutine-dump path: SIGUSR1 → write all goroutine stacks
 	// (with file:line for each frame) here. Lets us debug a hung
 	// serve from outside the process even when stderr is /dev/null.
-	dumpPath := filepath.Join(filepath.Dir(socketPath), "goroutines.txt")
+	dumpPath := filepath.Join(filepath.Dir(rendezvousPath), "goroutines.txt")
 
-	listener, err := net.Listen("unix", socketPath)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		fatal("listen unix: " + err.Error())
+		fatal("listen tcp loopback: " + err.Error())
 	}
-	// Restrict socket to owner only — pearl data is sensitive.
-	if err := os.Chmod(socketPath, 0o600); err != nil {
+	port := listener.Addr().(*net.TCPAddr).Port
+	token, err := randomToken()
+	if err != nil {
 		_ = listener.Close()
-		fatal("chmod socket: " + err.Error())
+		fatal("generate token: " + err.Error())
 	}
-	defer func() { _ = os.Remove(socketPath) }()
+	if err := writeRendezvous(rendezvousPath, port, token); err != nil {
+		_ = listener.Close()
+		fatal("write rendezvous file: " + err.Error())
+	}
+	defer func() { _ = os.Remove(rendezvousPath) }()
 
 	db := openDB(dataDir)
 	defer db.Close()
@@ -584,7 +619,7 @@ func cmdServe(dataDir, socketPath string) {
 	// work — they just queue at the DB layer.
 	var dbMu sync.Mutex
 
-	// Trap shutdown signals so we can clean up the socket file.
+	// Trap shutdown signals so we can clean up the rendezvous file.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
@@ -592,12 +627,12 @@ func cmdServe(dataDir, socketPath string) {
 		_ = listener.Close()
 	}()
 
-	// SIGUSR1 → dump all goroutine stacks to <socket-dir>/goroutines.txt.
+	// SIGUSR1 → dump all goroutine stacks to <dir>/goroutines.txt.
 	// Diagnostic hook for hangs where stderr was redirected to /dev/null.
 	// Unix-only (Windows has no SIGUSR1); see goroutinedump_*.go.
 	installGoroutineDump(dumpPath)
 
-	fmt.Fprintf(os.Stderr, "smooth-dolt: serve %s on %s\n", dataDir, socketPath)
+	fmt.Fprintf(os.Stderr, "smooth-dolt: serve %s on 127.0.0.1:%d\n", dataDir, port)
 
 	for {
 		conn, err := listener.Accept()
@@ -605,16 +640,24 @@ func cmdServe(dataDir, socketPath string) {
 			// Listener closed via signal handler — clean exit.
 			return
 		}
-		go handleServeConn(conn, db, &dbMu)
+		go handleServeConn(conn, db, &dbMu, token)
 	}
 }
 
-func handleServeConn(conn net.Conn, db *sql.DB, dbMu *sync.Mutex) {
+func handleServeConn(conn net.Conn, db *sql.DB, dbMu *sync.Mutex, token string) {
 	defer conn.Close()
 	scanner := bufio.NewScanner(conn)
 	// Pearl descriptions can be long; allow ~16MB request lines.
 	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
 	encoder := json.NewEncoder(conn)
+
+	// First line must be the auth token. Loopback bind + the 0600
+	// rendezvous file already keep other users out; the token stops a
+	// stray local connection to the ephemeral port from driving the DB.
+	if !scanner.Scan() || scanner.Text() != token {
+		_ = encoder.Encode(serveResponse{OK: false, Error: "auth failed"})
+		return
+	}
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
