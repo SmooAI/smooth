@@ -345,9 +345,18 @@ impl SmoothDolt {
                 op(server)
             }
             Err(e) if is_lock_wedge_err(&e) => {
-                tracing::warn!(error = %e, "smooth-dolt op looked like a lock wedge (db read-only); force-respawning + retrying once");
-                server.force_respawn().context("self-heal: force_respawn")?;
-                op(server)
+                tracing::warn!(error = %e, "smooth-dolt op hit db-read-only lock flap; force-respawn once + backoff-retry");
+                // Recover once (force-respawn a wedged child), then back
+                // off + retry to wait out a live peer's push — same shared
+                // path CLI mode uses.
+                retry_on_lock_flap(
+                    || op(server),
+                    || {
+                        if let Err(re) = server.force_respawn() {
+                            tracing::warn!(error = %re, "force_respawn during lock-flap recovery failed");
+                        }
+                    },
+                )
             }
             Err(e) => Err(e),
         }
@@ -575,32 +584,24 @@ impl SmoothDolt {
     /// instead of stderr — operators can re-run the underlying CLI for
     /// detail.
     fn run_cli(&self, args: &[&str]) -> Result<String> {
-        match self.run_cli_once(args) {
-            Ok(v) => Ok(v),
-            Err(e) if is_lock_wedge_err(&e) => {
-                // Pearl th-49e37b: in CLI mode the server-mode
-                // self-heal in `run_with_self_heal` doesn't fire, so
-                // the read-only error propagates straight up. The
-                // root cause we see most often is an orphaned
-                // `smooth-dolt serve` that's still holding the LOCK
-                // file even though its socket file (the way
-                // `try_attach_handle` finds it) has been cleaned up
-                // — process is reparented to init, no one will ever
-                // close it. Detect, kill, retry once.
-                match auto_doctor_clear_orphan_server(&self.data_dir) {
-                    Ok(cleared) if cleared > 0 => {
-                        tracing::warn!(
-                            data_dir = %self.data_dir.display(),
-                            cleared,
-                            "smooth-dolt CLI hit read-only; cleared orphaned `smooth-dolt serve` PID(s) and retrying once"
-                        );
-                        self.run_cli_once(args)
-                    }
-                    _ => Err(e),
+        // On the read-only lock-flap: recover once (Pearl th-49e37b — the
+        // common CLI-mode cause is an orphaned `smooth-dolt serve` still
+        // holding the LOCK after its socket was cleaned up; reap it), then
+        // back off + retry to wait out a live peer's push. Both handled by
+        // the shared `retry_on_lock_flap`.
+        retry_on_lock_flap(
+            || self.run_cli_once(args),
+            || match auto_doctor_clear_orphan_server(&self.data_dir) {
+                Ok(cleared) if cleared > 0 => {
+                    tracing::warn!(
+                        data_dir = %self.data_dir.display(),
+                        cleared,
+                        "smooth-dolt CLI hit read-only; cleared orphaned `smooth-dolt serve` PID(s)"
+                    );
                 }
-            }
-            Err(e) => Err(e),
-        }
+                _ => {}
+            },
+        )
     }
 
     /// One-shot CLI invocation. Wrapped by `run_cli` with the
@@ -656,10 +657,23 @@ impl SmoothDolt {
     /// Killing the child releases its hold on the noms LOCK, so local
     /// writes recover immediately; the sync itself can be retried later.
     fn run_cli_timed(&self, args: &[&str], timeout: Option<Duration>) -> Result<String> {
+        // Untimed path shares run_cli's flap retry.
         let Some(timeout) = timeout else {
-            return self.run_cli_once(args);
+            return self.run_cli(args);
         };
+        // Timed remote sync (push/pull): wait out a read-only flap too, so
+        // a pull racing a peer's push doesn't fail fast. A stalled sync
+        // returns a distinct `is_sync_timeout_err` (not a lock-wedge), so
+        // that path is untouched by this retry.
+        retry_on_lock_flap(
+            || self.run_cli_timed_once(args, timeout),
+            || {
+                let _ = auto_doctor_clear_orphan_server(&self.data_dir);
+            },
+        )
+    }
 
+    fn run_cli_timed_once(&self, args: &[&str], timeout: Duration) -> Result<String> {
         let child = Command::new(&self.bin)
             .args(args)
             .stdin(Stdio::null())
@@ -1118,6 +1132,85 @@ fn is_lock_wedge_err(e: &anyhow::Error) -> bool {
     .any(|needle| s.contains(needle))
 }
 
+/// First backoff delay after a read-only lock-flap. Kept small — most
+/// flaps clear within one or two hundred ms (the peer's push commit).
+const LOCK_FLAP_BASE_DELAY: Duration = Duration::from_millis(50);
+
+/// Per-attempt backoff ceiling. Doubling from the base tops out here so a
+/// long-running peer push doesn't stretch individual waits past ~1.5s.
+const LOCK_FLAP_MAX_DELAY: Duration = Duration::from_millis(1500);
+
+/// Total wallclock budget for waiting out a read-only flap before giving
+/// up with a clear error. Generous enough to outlast a normal incremental
+/// peer push (~10s) with headroom; a genuinely stuck store surfaces the
+/// error (and the `th pearls doctor --reap` hint) rather than hanging
+/// forever. Override with `SMOOTH_DOLT_LOCK_RETRY_BUDGET_SECS`.
+const DEFAULT_LOCK_FLAP_BUDGET_SECS: u64 = 30;
+
+fn lock_flap_budget() -> Duration {
+    std::env::var("SMOOTH_DOLT_LOCK_RETRY_BUDGET_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map_or(Duration::from_secs(DEFAULT_LOCK_FLAP_BUDGET_SECS), Duration::from_secs)
+}
+
+/// Jitter a backoff delay to `[0.5, 1.5) × delay`, decorrelating
+/// concurrent retriers so N agents that flapped at the same instant don't
+/// all wake and re-collide in lockstep. Seeded from wall-clock subsec
+/// nanos — no `rand` dependency needed; jitter quality is ample here.
+fn jittered(delay: Duration) -> Duration {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let frac = f64::from(nanos) / 1_000_000_000.0; // [0, 1)
+    delay.mul_f64(0.5 + frac)
+}
+
+/// The single place the transient "database is read only" lock-flap is
+/// handled. Every dolt write funnels through here (CLI `run_cli` /
+/// `run_cli_timed` and server `run_with_self_heal`), replacing the two
+/// former one-shot ad-hoc retries.
+///
+/// The flap has two causes and this covers both:
+///   1. A **stuck local holder** — an orphaned `smooth-dolt serve` or a
+///      wedged in-process child pinning the noms LOCK. `recover` runs
+///      ONCE on the first flap to clear it (CLI: reap the orphan; server:
+///      force-respawn), after which the retry succeeds.
+///   2. A **live peer** — another agent's push briefly holding the
+///      single-writer lock. `recover` finds nothing to clear, so we back
+///      off with jitter and retry until the peer's commit lands.
+///
+/// Non-lock errors (syntax, transport, corruption) propagate immediately.
+/// Bounded by [`lock_flap_budget`]; on exhaustion the read-only error is
+/// returned with a doctor hint rather than hanging forever.
+fn retry_on_lock_flap<T>(mut op: impl FnMut() -> Result<T>, mut recover: impl FnMut()) -> Result<T> {
+    let deadline = std::time::Instant::now() + lock_flap_budget();
+    let mut delay = LOCK_FLAP_BASE_DELAY;
+    let mut recovered = false;
+    let mut attempts = 0u32;
+    loop {
+        match op() {
+            Ok(v) => return Ok(v),
+            Err(e) if is_lock_wedge_err(&e) => {
+                attempts += 1;
+                if !recovered {
+                    recover();
+                    recovered = true;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(e.context(format!(
+                        "dolt store stayed read-only after {attempts} attempt(s) over {:?}; another writer may be stuck — try `th pearls doctor --reap`",
+                        lock_flap_budget()
+                    )));
+                }
+                std::thread::sleep(jittered(delay));
+                delay = std::cmp::min(delay.saturating_mul(2), LOCK_FLAP_MAX_DELAY);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// Decision for a single process found holding the noms LOCK. The
 /// classification is a PURE function of the holder's own command line
 /// and (when relevant) its parent's command line, so it's exhaustively
@@ -1512,6 +1605,74 @@ pub fn find_repo_dolt_dir(start_dir: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod lock_flap_tests {
+    use super::{jittered, retry_on_lock_flap, LOCK_FLAP_BASE_DELAY, LOCK_FLAP_MAX_DELAY};
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    const WEDGE: &str = "smooth-dolt: exec: Error 1105: cannot update manifest: database is read only";
+
+    #[test]
+    fn retries_the_flap_then_succeeds_and_recovers_once() {
+        let attempts = Cell::new(0u32);
+        let recovers = Cell::new(0u32);
+        let out: i32 = retry_on_lock_flap(
+            || {
+                let n = attempts.get();
+                attempts.set(n + 1);
+                if n < 2 {
+                    Err(anyhow::anyhow!(WEDGE)) // flap twice
+                } else {
+                    Ok(42)
+                }
+            },
+            || recovers.set(recovers.get() + 1),
+        )
+        .unwrap();
+        assert_eq!(out, 42);
+        assert_eq!(attempts.get(), 3, "should have retried past the two flaps");
+        assert_eq!(recovers.get(), 1, "recover must run exactly once, on the first flap");
+    }
+
+    #[test]
+    fn non_lock_error_propagates_immediately_without_recover() {
+        let attempts = Cell::new(0u32);
+        let recovers = Cell::new(0u32);
+        let res: anyhow::Result<i32> = retry_on_lock_flap(
+            || {
+                attempts.set(attempts.get() + 1);
+                Err(anyhow::anyhow!("syntax error near 'SELET'"))
+            },
+            || recovers.set(recovers.get() + 1),
+        );
+        assert!(res.is_err());
+        assert_eq!(attempts.get(), 1, "a non-lock error must not be retried");
+        assert_eq!(recovers.get(), 0, "recover must not run for non-lock errors");
+    }
+
+    #[test]
+    fn success_first_try_never_recovers() {
+        let recovers = Cell::new(0u32);
+        let out: i32 = retry_on_lock_flap(|| Ok(7), || recovers.set(recovers.get() + 1)).unwrap();
+        assert_eq!(out, 7);
+        assert_eq!(recovers.get(), 0);
+    }
+
+    #[test]
+    fn jitter_stays_within_half_to_one_and_a_half() {
+        for _ in 0..1000 {
+            let j = jittered(Duration::from_millis(100));
+            assert!(j >= Duration::from_millis(50) && j < Duration::from_millis(150), "jitter out of band: {j:?}");
+        }
+    }
+
+    #[test]
+    fn backoff_constants_are_sane() {
+        assert!(LOCK_FLAP_BASE_DELAY < LOCK_FLAP_MAX_DELAY);
+    }
 }
 
 #[cfg(test)]
