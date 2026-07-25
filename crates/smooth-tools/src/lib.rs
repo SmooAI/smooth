@@ -48,7 +48,7 @@ pub use guard::is_circuit_breaker;
 pub use knowledge_search::KnowledgeSearchTool;
 pub use path::resolve_workspace_path;
 pub use read::{ListFilesTool, ReadFileTool};
-pub use remember::RememberTool;
+pub use remember::{RecallTool, RememberTool};
 pub use sandbox::{SandboxPolicy, SandboxedCommand};
 pub use th::ThTool;
 pub use web_search::WebSearchTool;
