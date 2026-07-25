@@ -84,7 +84,11 @@ th api orgs|agents|smooth-operator|knowledge|jobs|members|config|keys|observabil
 th admin onboard-customer / mint-key / set-secret / org list|show
 
 # Jira — replaces curl -u "$JIRA_EMAIL:$JIRA_API_TOKEN" .../rest/api/3/...
-th jira sync / status
+# sync is reconcile-only by default (close pearls done in Jira, transition
+# Jira tickets whose pearls are all closed); creating anything is opt-in:
+# --pull (Jira→pearls), --push (pearls→Jira), --dry-run previews the plan.
+# Config = env vars: JIRA_URL, JIRA_PROJECT, JIRA_EMAIL, JIRA_API_TOKEN.
+th jira sync [--dry-run] [--pull] [--push] / status
 
 # Pearls (the only spelling — no `th issues` / `th beads` aliases)
 th pearls create / ready / list / show / update / close / push / pull

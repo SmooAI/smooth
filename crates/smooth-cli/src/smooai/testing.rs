@@ -36,6 +36,60 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: RunsCmd,
     },
+    /// Code coverage — upload parsed LCOV summaries and diff branches
+    /// against a baseline (SMOODEV-2721).
+    Coverage {
+        #[command(subcommand)]
+        cmd: CoverageCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum CoverageCmd {
+    /// Parse an LCOV file and upload its summary (totals + per-file) for a
+    /// scope. LCOV is the interchange every ecosystem's coverage tool emits
+    /// (vitest/v8, cargo-llvm-cov, coverage.py, coverlet), so this one
+    /// command covers all languages.
+    Report {
+        /// Path to an lcov.info file.
+        file: String,
+        /// Scope the coverage belongs to — the package path within the repo
+        /// (e.g. `packages/db`, `python`, `rust/api-prime`).
+        #[arg(long)]
+        scope: String,
+        /// Branch name (defaults to $GITHUB_HEAD_REF, then $GITHUB_REF_NAME).
+        #[arg(long)]
+        branch: Option<String>,
+        /// Commit sha (defaults to $GITHUB_SHA).
+        #[arg(long)]
+        commit: Option<String>,
+        /// Associate with an existing test run id.
+        #[arg(long)]
+        run_id: Option<String>,
+        /// Drop per-file detail (totals only). Also applied automatically
+        /// above 5000 files (the API's cap).
+        #[arg(long)]
+        no_files: bool,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Compare a branch's latest per-scope coverage against a base branch
+    /// (default `main`). Always exits 0 — the diff is a signal, not a gate.
+    Diff {
+        /// Head branch (defaults to $GITHUB_HEAD_REF, then $GITHUB_REF_NAME).
+        #[arg(long)]
+        branch: Option<String>,
+        /// Base branch to diff against.
+        #[arg(long, default_value = "main")]
+        base: String,
+        /// Output format: `table` (terminal) or `md` (GitHub-flavored table).
+        #[arg(long, default_value = "table")]
+        format: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -502,8 +556,240 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
                 }
             }
         },
+        Cmd::Coverage { cmd } => match cmd {
+            CoverageCmd::Report {
+                file,
+                scope,
+                branch,
+                commit,
+                run_id,
+                no_files,
+                org,
+            } => {
+                let o = require_active_org(&client, org)?;
+                let branch = branch
+                    .or_else(|| env_nonempty("GITHUB_HEAD_REF"))
+                    .or_else(|| env_nonempty("GITHUB_REF_NAME"))
+                    .context("--branch is required outside GitHub Actions (no GITHUB_HEAD_REF/GITHUB_REF_NAME)")?;
+                let commit = commit
+                    .or_else(|| env_nonempty("GITHUB_SHA"))
+                    .context("--commit is required outside GitHub Actions (no GITHUB_SHA)")?;
+
+                let raw = std::fs::read_to_string(&file).with_context(|| format!("read {file}"))?;
+                let cov = parse_lcov(&raw).with_context(|| format!("parse lcov {file}"))?;
+
+                let mut body = serde_json::Map::new();
+                body.insert("scope".into(), json!(scope));
+                body.insert("branch".into(), json!(branch));
+                body.insert("commitSha".into(), json!(commit));
+                body.insert("linesCovered".into(), json!(cov.lines_hit));
+                body.insert("linesTotal".into(), json!(cov.lines_found));
+                if cov.branches_found > 0 {
+                    body.insert("branchesCovered".into(), json!(cov.branches_hit));
+                    body.insert("branchesTotal".into(), json!(cov.branches_found));
+                }
+                if cov.functions_found > 0 {
+                    body.insert("functionsCovered".into(), json!(cov.functions_hit));
+                    body.insert("functionsTotal".into(), json!(cov.functions_found));
+                }
+                if let Some(v) = run_id {
+                    body.insert("testRunId".into(), json!(v));
+                }
+                // The API caps per-file detail at 5000 entries — drop rather than 400.
+                if !no_files && cov.files.len() <= 5000 {
+                    let files: serde_json::Map<String, Value> = cov
+                        .files
+                        .iter()
+                        .map(|f| {
+                            (
+                                f.path.clone(),
+                                json!([f.lines_hit, f.lines_found, f.branches_hit, f.branches_found, f.functions_hit, f.functions_found]),
+                            )
+                        })
+                        .collect();
+                    body.insert("files".into(), Value::Object(files));
+                } else if cov.files.len() > 5000 {
+                    eprintln!("coverage report: {} files > 5000 — uploading totals only", cov.files.len());
+                }
+
+                print_json(
+                    &client
+                        .post(&format!("/organizations/{o}/testing/coverage"), Some(&Value::Object(body)))
+                        .await
+                        .context("POST coverage report")?,
+                );
+            }
+            CoverageCmd::Diff { branch, base, format, org } => {
+                let o = require_active_org(&client, org)?;
+                let branch = branch
+                    .or_else(|| env_nonempty("GITHUB_HEAD_REF"))
+                    .or_else(|| env_nonempty("GITHUB_REF_NAME"))
+                    .context("--branch is required outside GitHub Actions (no GITHUB_HEAD_REF/GITHUB_REF_NAME)")?;
+
+                let head = fetch_latest(&client, &o, &branch).await?;
+                let base_rows = fetch_latest(&client, &o, &base).await?;
+                let table = render_coverage_diff(&head, &base_rows, &branch, &base, format == "md");
+                println!("{table}");
+            }
+        },
     }
     Ok(())
+}
+
+/// GET the latest-per-scope coverage rows for a branch (the baseline query).
+async fn fetch_latest(client: &SmoothApiClient, org: &str, branch: &str) -> Result<Vec<Value>> {
+    let v = client
+        .get(&format!(
+            "/organizations/{org}/testing/coverage?latest=true&branch={}",
+            urlencoding::encode(branch)
+        ))
+        .await
+        .with_context(|| format!("GET latest coverage for {branch}"))?;
+    Ok(v.as_array().cloned().unwrap_or_default())
+}
+
+// ── LCOV parsing (SMOODEV-2721) ──
+
+/// Per-file coverage counters accumulated from one lcov `SF:`…`end_of_record`.
+#[derive(Debug, Default, Clone)]
+struct LcovFile {
+    path: String,
+    lines_hit: u64,
+    lines_found: u64,
+    branches_hit: u64,
+    branches_found: u64,
+    functions_hit: u64,
+    functions_found: u64,
+    // DA-derived fallback when LF/LH are absent (some emitters skip them).
+    da_found: u64,
+    da_hit: u64,
+    saw_lf: bool,
+}
+
+#[derive(Debug, Default)]
+struct LcovSummary {
+    files: Vec<LcovFile>,
+    lines_hit: u64,
+    lines_found: u64,
+    branches_hit: u64,
+    branches_found: u64,
+    functions_hit: u64,
+    functions_found: u64,
+}
+
+/// Parse an LCOV file into per-file + total counters. Tracks `SF:` records;
+/// prefers `LF:`/`LH:` and falls back to counting `DA:` lines when absent.
+fn parse_lcov(text: &str) -> Result<LcovSummary> {
+    let mut summary = LcovSummary::default();
+    let mut current: Option<LcovFile> = None;
+
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(path) = line.strip_prefix("SF:") {
+            current = Some(LcovFile {
+                path: path.trim().to_string(),
+                ..Default::default()
+            });
+        } else if let Some(f) = current.as_mut() {
+            if let Some(v) = line.strip_prefix("LF:") {
+                f.lines_found = v.trim().parse().unwrap_or(0);
+                f.saw_lf = true;
+            } else if let Some(v) = line.strip_prefix("LH:") {
+                f.lines_hit = v.trim().parse().unwrap_or(0);
+            } else if let Some(v) = line.strip_prefix("BRF:") {
+                f.branches_found = v.trim().parse().unwrap_or(0);
+            } else if let Some(v) = line.strip_prefix("BRH:") {
+                f.branches_hit = v.trim().parse().unwrap_or(0);
+            } else if let Some(v) = line.strip_prefix("FNF:") {
+                f.functions_found = v.trim().parse().unwrap_or(0);
+            } else if let Some(v) = line.strip_prefix("FNH:") {
+                f.functions_hit = v.trim().parse().unwrap_or(0);
+            } else if let Some(v) = line.strip_prefix("DA:") {
+                f.da_found += 1;
+                if v.split(',').nth(1).and_then(|c| c.trim().parse::<u64>().ok()).is_some_and(|c| c > 0) {
+                    f.da_hit += 1;
+                }
+            } else if line == "end_of_record" {
+                let mut f = current.take().expect("current file present at end_of_record");
+                if !f.saw_lf {
+                    f.lines_found = f.da_found;
+                    f.lines_hit = f.da_hit;
+                }
+                summary.lines_hit += f.lines_hit;
+                summary.lines_found += f.lines_found;
+                summary.branches_hit += f.branches_hit;
+                summary.branches_found += f.branches_found;
+                summary.functions_hit += f.functions_hit;
+                summary.functions_found += f.functions_found;
+                summary.files.push(f);
+            }
+        }
+    }
+    anyhow::ensure!(!summary.files.is_empty(), "no SF:/end_of_record records found — is this an LCOV file?");
+    Ok(summary)
+}
+
+/// Render the branch-vs-base coverage table. `md` emits a GitHub-flavored
+/// table; otherwise a plain terminal table. Scopes are the union of both
+/// sides; a scope missing from base shows `new`, missing from head `gone`.
+fn render_coverage_diff(head: &[Value], base: &[Value], branch: &str, base_name: &str, md: bool) -> String {
+    fn pct(row: &Value, covered: &str, total: &str) -> Option<f64> {
+        let c = row.get(covered)?.as_i64()?;
+        let t = row.get(total)?.as_i64()?;
+        (t > 0).then(|| c as f64 / t as f64 * 100.0)
+    }
+    fn fmt(p: Option<f64>) -> String {
+        p.map_or("—".to_string(), |v| format!("{v:.1}%"))
+    }
+    let by_scope = |rows: &[Value]| -> std::collections::BTreeMap<String, Value> {
+        rows.iter().filter_map(|r| Some((r.get("scope")?.as_str()?.to_string(), r.clone()))).collect()
+    };
+    let head_map = by_scope(head);
+    let base_map = by_scope(base);
+    let scopes: std::collections::BTreeSet<&String> = head_map.keys().chain(base_map.keys()).collect();
+
+    let mut out = String::new();
+    if md {
+        out.push_str(&format!("**Coverage — `{branch}` vs `{base_name}`**\n\n"));
+        out.push_str("| Scope | Lines | Δ vs base | Branches | Functions |\n|---|---:|---:|---:|---:|\n");
+    } else {
+        out.push_str(&format!("Coverage — {branch} vs {base_name}\n"));
+        out.push_str(&format!("{:<40} {:>8} {:>10} {:>9} {:>10}\n", "Scope", "Lines", "Δ", "Branches", "Functions"));
+    }
+    for scope in scopes {
+        let h = head_map.get(scope);
+        let b = base_map.get(scope);
+        let (lines, delta, branches, functions) = match (h, b) {
+            (Some(h), Some(b)) => {
+                let hl = pct(h, "linesCovered", "linesTotal");
+                let bl = pct(b, "linesCovered", "linesTotal");
+                let delta = match (hl, bl) {
+                    (Some(hv), Some(bv)) => format!("{:+.1}", hv - bv),
+                    _ => "—".to_string(),
+                };
+                (
+                    fmt(hl),
+                    delta,
+                    fmt(pct(h, "branchesCovered", "branchesTotal")),
+                    fmt(pct(h, "functionsCovered", "functionsTotal")),
+                )
+            }
+            (Some(h), None) => (
+                fmt(pct(h, "linesCovered", "linesTotal")),
+                "new".to_string(),
+                fmt(pct(h, "branchesCovered", "branchesTotal")),
+                fmt(pct(h, "functionsCovered", "functionsTotal")),
+            ),
+            (None, Some(b)) => (fmt(pct(b, "linesCovered", "linesTotal")), "gone".to_string(), "—".to_string(), "—".to_string()),
+            (None, None) => continue,
+        };
+        if md {
+            out.push_str(&format!("| `{scope}` | {lines} | {delta} | {branches} | {functions} |\n"));
+        } else {
+            out.push_str(&format!("{scope:<40} {lines:>8} {delta:>10} {branches:>9} {functions:>10}\n"));
+        }
+    }
+    out
 }
 
 /// Create a run, submit its results, and print the completed run. On a
@@ -753,5 +1039,53 @@ mod tests {
     fn default_run_name_strips_dir_and_extension() {
         assert_eq!(default_run_name("path/to/ctrf-report.json"), "ctrf-report");
         assert_eq!(default_run_name("junit.xml"), "junit");
+    }
+
+    const LCOV_FULL: &str =
+        "TN:\nSF:src/a.rs\nFNF:4\nFNH:3\nDA:1,1\nDA:2,0\nLF:10\nLH:7\nBRF:6\nBRH:2\nend_of_record\nSF:src/b.rs\nDA:1,5\nDA:2,0\nDA:3,1\nend_of_record\n";
+
+    #[test]
+    fn parse_lcov_sums_lf_lh_and_derives_from_da_when_absent() {
+        let s = parse_lcov(LCOV_FULL).expect("parse");
+        assert_eq!(s.files.len(), 2);
+        // a.rs uses LF/LH (10/7) — the DA lines must NOT override them.
+        let a = &s.files[0];
+        assert_eq!((a.lines_hit, a.lines_found), (7, 10));
+        assert_eq!((a.branches_hit, a.branches_found), (2, 6));
+        assert_eq!((a.functions_hit, a.functions_found), (3, 4));
+        // b.rs has no LF/LH — derived from DA: 3 lines, 2 hit.
+        let b = &s.files[1];
+        assert_eq!((b.lines_hit, b.lines_found), (2, 3));
+        // Totals sum both files.
+        assert_eq!((s.lines_hit, s.lines_found), (9, 13));
+        assert_eq!((s.branches_hit, s.branches_found), (2, 6));
+    }
+
+    #[test]
+    fn parse_lcov_rejects_non_lcov_input() {
+        assert!(parse_lcov("{\"not\": \"lcov\"}").is_err());
+        assert!(parse_lcov("").is_err());
+    }
+
+    fn cov_row(scope: &str, covered: i64, total: i64) -> Value {
+        json!({ "scope": scope, "linesCovered": covered, "linesTotal": total })
+    }
+
+    #[test]
+    fn render_coverage_diff_md_marks_deltas_new_and_gone() {
+        let head = vec![cov_row("packages/db", 80, 100), cov_row("python", 5, 100)];
+        let base = vec![cov_row("packages/db", 70, 100), cov_row("rust/api-prime", 90, 100)];
+        let md = render_coverage_diff(&head, &base, "feat", "main", true);
+        assert!(md.contains("| `packages/db` | 80.0% | +10.0 |"), "delta row: {md}");
+        assert!(md.contains("| `python` | 5.0% | new |"), "new row: {md}");
+        assert!(md.contains("| `rust/api-prime` | 90.0% | gone |"), "gone row: {md}");
+        assert!(md.starts_with("**Coverage — `feat` vs `main`**"));
+    }
+
+    #[test]
+    fn render_coverage_diff_handles_zero_totals_as_dash() {
+        let head = vec![cov_row("empty", 0, 0)];
+        let md = render_coverage_diff(&head, &[], "feat", "main", true);
+        assert!(md.contains("| `empty` | — | new |"), "zero-total row: {md}");
     }
 }

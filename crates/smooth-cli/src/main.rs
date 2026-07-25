@@ -1022,8 +1022,20 @@ enum DbCommands {
 
 #[derive(Subcommand)]
 enum JiraCommands {
-    /// Sync with Jira
-    Sync,
+    /// Reconcile pearls ↔ Jira: close pearls whose Jira tickets are Done, and
+    /// transition Jira tickets to Done once every referencing pearl is closed.
+    /// Creating anything is opt-in via --pull / --push.
+    Sync {
+        /// Print the plan without changing anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Also create a local pearl for every open Jira ticket no pearl references
+        #[arg(long)]
+        pull: bool,
+        /// Also create a Jira ticket for every active pearl without an issue key in its title
+        #[arg(long)]
+        push: bool,
+    },
     /// Show Jira status
     Status,
 }
@@ -3557,7 +3569,7 @@ llm-errors/
 async fn cmd_jira(cmd: JiraCommands) -> Result<()> {
     match cmd {
         JiraCommands::Status => cmd_jira_status().await,
-        JiraCommands::Sync => cmd_jira_sync().await,
+        JiraCommands::Sync { dry_run, pull, push } => cmd_jira_sync(dry_run, pull, push).await,
     }
 }
 
@@ -3623,7 +3635,9 @@ async fn cmd_jira_status() -> Result<()> {
     Ok(())
 }
 
-async fn cmd_jira_sync() -> Result<()> {
+async fn cmd_jira_sync(dry_run: bool, pull: bool, push: bool) -> Result<()> {
+    use smooth_diver::jira::{plan_sync, SyncPearl};
+
     let Some(config) = smooth_diver::jira::JiraConfig::from_env() else {
         anyhow::bail!("Jira not configured. Set JIRA_URL, JIRA_PROJECT, JIRA_EMAIL, JIRA_API_TOKEN env vars.");
     };
@@ -3634,61 +3648,114 @@ async fn cmd_jira_sync() -> Result<()> {
     }
 
     let store = open_pearl_store()?;
-    println!("{}", "Syncing pearls ↔ Jira...".bold().cyan());
+    println!("{}", "Reconciling pearls ↔ Jira...".bold().cyan());
 
-    // --- Pull: Jira → Pearls (create local pearls for Jira tickets) ---
-    let http = reqwest::Client::new();
-    let mut jira_issues: Vec<serde_json::Value> = Vec::new();
-    let mut next_page: Option<String> = None;
-    loop {
-        let mut url = format!(
-            "{}/rest/api/3/search/jql?jql=project%3D{}+AND+status+!%3D+Done+ORDER+BY+key+DESC&maxResults=100&fields=key,summary,status,description",
-            config.url, config.project
+    let jira_issues = client.list_project_issues().await?;
+    let all_pearls = store.list(&smooth_pearls::PearlQuery::new().with_limit(0))?;
+    let sync_pearls: Vec<SyncPearl> = all_pearls
+        .iter()
+        .map(|p| SyncPearl {
+            id: p.id.clone(),
+            status: p.status.as_str().to_string(),
+            title: p.title.clone(),
+        })
+        .collect();
+    let plan = plan_sync(&sync_pearls, &jira_issues, &config.project);
+
+    println!(
+        "  {} pearl(s), {} Jira issue(s) → close {} pearl(s), transition {} ticket(s) to Done",
+        sync_pearls.len(),
+        jira_issues.len(),
+        plan.close_pearls.len().to_string().green(),
+        plan.transition_keys.len().to_string().green(),
+    );
+    if !pull && !plan.untracked_jira.is_empty() {
+        println!(
+            "  {} open Jira ticket(s) have no pearl — pass --pull to create pearls for them",
+            plan.untracked_jira.len().to_string().yellow()
         );
-        if let Some(ref token) = next_page {
-            url.push_str(&format!("&nextPageToken={token}"));
-        }
-        let resp = http.get(&url).basic_auth(&config.email, Some(&config.api_token)).send().await?;
-        let body: serde_json::Value = resp.json().await?;
-        if let Some(issues) = body["issues"].as_array() {
-            jira_issues.extend(issues.iter().cloned());
-        }
-        if body["isLast"].as_bool().unwrap_or(true) {
-            break;
-        }
-        next_page = body["nextPageToken"].as_str().map(String::from);
+    }
+    if !push && !plan.unkeyed_pearls.is_empty() {
+        println!(
+            "  {} active pearl(s) have no Jira key — pass --push to create tickets for them",
+            plan.unkeyed_pearls.len().to_string().yellow()
+        );
     }
 
-    // Get all open pearls
-    let open_pearls = store.list(&smooth_pearls::PearlQuery::new())?;
-
-    // Find Jira tickets not yet tracked as pearls (by title prefix match)
-    let mut pulled = 0u32;
-    for issue in &jira_issues {
-        let key = issue["key"].as_str().unwrap_or("");
-        let summary = issue["fields"]["summary"].as_str().unwrap_or("");
-
-        // Check if any pearl already has this Jira key in its title
-        let already_tracked = open_pearls.iter().any(|p| p.title.contains(key));
-        if already_tracked {
-            continue;
+    if dry_run {
+        for pearl in &plan.close_pearls {
+            println!("  {} would close {} ({})", "◌".cyan(), pearl.id, pearl.title);
         }
+        for key in &plan.transition_keys {
+            println!("  {} would transition {} → Done", "◌".cyan(), key);
+        }
+        if pull {
+            for key in &plan.untracked_jira {
+                println!("  {} would create pearl for {}", "◌".cyan(), key);
+            }
+        }
+        if push {
+            for pearl in &plan.unkeyed_pearls {
+                println!("  {} would create Jira ticket for {} ({})", "◌".cyan(), pearl.id, pearl.title);
+            }
+        }
+        println!("{}", "dry run — nothing changed".yellow());
+        return Ok(());
+    }
 
-        // Create a pearl for this Jira ticket
-        let title = format!("{key}: {summary}");
-        let desc = issue["fields"]["description"]
-            .as_object()
-            .and_then(|d| d["content"].as_array())
-            .and_then(|a| a.first())
-            .and_then(|p| p["content"].as_array())
-            .and_then(|a| a.first())
-            .and_then(|t| t["text"].as_str())
-            .unwrap_or("")
-            .to_string();
+    // Close pearls whose Jira work is Done.
+    let close_ids: Vec<&str> = plan.close_pearls.iter().map(|p| p.id.as_str()).collect();
+    let closed = if close_ids.is_empty() { 0 } else { store.close(&close_ids)? };
+    for pearl in &plan.close_pearls {
+        println!("  {} closed {} ({})", "✓".green(), pearl.id, pearl.title);
+    }
 
+    // Transition Jira tickets whose pearls are all closed.
+    let mut transitioned = 0u32;
+    for key in &plan.transition_keys {
+        match client.transition_ticket(key, "done").await {
+            Ok(()) => {
+                println!("  {} {} → Done", "✓".green(), key);
+                transitioned += 1;
+            }
+            Err(e) => eprintln!("  {} {} transition failed: {e}", "✗".red(), key),
+        }
+    }
+
+    // Opt-in: Jira → pearls.
+    let pulled = if pull {
+        jira_sync_pull(&store, &jira_issues, &plan.untracked_jira)
+    } else {
+        0
+    };
+
+    // Opt-in: pearls → Jira.
+    let pushed = if push {
+        jira_sync_push(&store, &client, &all_pearls, &plan.unkeyed_pearls).await
+    } else {
+        0
+    };
+
+    println!();
+    println!(
+        "{} pearl(s) closed, {} ticket(s) transitioned, {} pulled, {} pushed",
+        closed.to_string().green(),
+        transitioned.to_string().green(),
+        pulled.to_string().cyan(),
+        pushed.to_string().cyan(),
+    );
+
+    Ok(())
+}
+
+/// Create local pearls for open Jira tickets nothing references (`th jira sync --pull`).
+fn jira_sync_pull(store: &smooth_pearls::PearlStore, jira_issues: &[smooth_diver::jira::JiraIssue], untracked: &[String]) -> u32 {
+    let mut pulled = 0u32;
+    for key in untracked {
+        let Some(issue) = jira_issues.iter().find(|i| &i.key == key) else { continue };
         let new = smooth_pearls::NewPearl {
-            title,
-            description: desc,
+            title: format!("{}: {}", issue.key, issue.summary),
+            description: issue.description.clone().unwrap_or_default(),
             pearl_type: smooth_pearls::PearlType::Task,
             priority: smooth_pearls::Priority::Medium,
             assigned_to: None,
@@ -3700,73 +3767,40 @@ async fn cmd_jira_sync() -> Result<()> {
                 println!("  {} {} → {}", "↓".cyan(), key, pearl.id);
                 pulled += 1;
             }
-            Err(e) => {
-                eprintln!("  {} {} failed: {e}", "✗".red(), key);
-            }
+            Err(e) => eprintln!("  {} {} failed: {e}", "✗".red(), key),
         }
     }
+    pulled
+}
 
-    // --- Push: Pearls → Jira (create Jira tickets for pearls without SMOODEV prefix) ---
+/// Create Jira tickets for active pearls with no issue key (`th jira sync --push`).
+async fn jira_sync_push(
+    store: &smooth_pearls::PearlStore,
+    client: &smooth_diver::jira::JiraClient,
+    all_pearls: &[smooth_pearls::Pearl],
+    unkeyed: &[smooth_diver::jira::SyncPearl],
+) -> u32 {
     let mut pushed = 0u32;
-    for pearl in &open_pearls {
-        // Skip if already has a Jira key in title
-        if pearl.title.starts_with("SMOODEV-") {
-            continue;
-        }
-
-        match client.create_ticket(&pearl.title, &pearl.description).await {
+    for sync_pearl in unkeyed {
+        let description = all_pearls
+            .iter()
+            .find(|p| p.id == sync_pearl.id)
+            .map(|p| p.description.clone())
+            .unwrap_or_default();
+        match client.create_ticket(&sync_pearl.title, &description).await {
             Ok(ticket) => {
-                // Update pearl title with Jira key
-                let new_title = format!("{}: {}", ticket.key, pearl.title);
                 let update = smooth_pearls::PearlUpdate {
-                    title: Some(new_title),
+                    title: Some(format!("{}: {}", ticket.key, sync_pearl.title)),
                     ..Default::default()
                 };
-                let _ = store.update(&pearl.id, &update);
-                println!("  {} {} → {}", "↑".green(), pearl.id, ticket.key);
+                let _ = store.update(&sync_pearl.id, &update);
+                println!("  {} {} → {}", "↑".green(), sync_pearl.id, ticket.key);
                 pushed += 1;
             }
-            Err(e) => {
-                eprintln!("  {} {} failed: {e}", "✗".red(), pearl.id);
-            }
+            Err(e) => eprintln!("  {} {} failed: {e}", "✗".red(), sync_pearl.id),
         }
     }
-
-    // --- Close: Transition Jira tickets to Done for closed pearls ---
-    let closed_pearls = store.list(&smooth_pearls::PearlQuery::new().with_status(smooth_pearls::PearlStatus::Closed))?;
-    let mut transitioned = 0u32;
-    for pearl in &closed_pearls {
-        // Extract SMOODEV-XXX from title
-        let jira_key = pearl.title.split(':').next().filter(|k| k.starts_with("SMOODEV-")).map(str::trim);
-
-        let Some(key) = jira_key else { continue };
-
-        // Check if Jira ticket is still open
-        let is_open = jira_issues.iter().any(|i| i["key"].as_str() == Some(key));
-        if !is_open {
-            continue;
-        }
-
-        match client.transition_ticket(key, "done").await {
-            Ok(()) => {
-                println!("  {} {} → Done", "✓".green(), key);
-                transitioned += 1;
-            }
-            Err(e) => {
-                eprintln!("  {} {} transition failed: {e}", "✗".red(), key);
-            }
-        }
-    }
-
-    println!();
-    println!(
-        "{} pulled, {} pushed, {} transitioned",
-        pulled.to_string().cyan(),
-        pushed.to_string().green(),
-        transitioned.to_string().green()
-    );
-
-    Ok(())
+    pushed
 }
 
 // ── Pearls ─────────────────────────────────────────────────────────
