@@ -233,7 +233,21 @@ pub struct ScenarioOutcome {
     pub cost_usd: f64,
     /// Names of the tools the agent actually called, in order.
     pub tools: Vec<String>,
+    #[serde(serialize_with = "ser_path_slash")]
     pub work_dir: PathBuf,
+}
+
+/// Serialize a path with `/` separators so JSONL records are byte-identical
+/// across OSes (Windows serde would otherwise emit `\`). No-op on unix.
+fn ser_path_slash<S: serde::Serializer>(p: &Path, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&p.to_string_lossy().replace('\\', "/"))
+}
+
+/// Slice variant of [`ser_path_slash`] for the aggregate's `work_dirs`.
+fn ser_paths_slash<S: serde::Serializer>(ps: &[PathBuf], s: S) -> Result<S::Ok, S::Error> {
+    use serde::Serialize;
+    let v: Vec<String> = ps.iter().map(|p| p.to_string_lossy().replace('\\', "/")).collect();
+    v.serialize(s)
 }
 
 /// One scenario's result across all its trials. This is the record that
@@ -267,6 +281,7 @@ pub struct ScenarioAggregate {
     pub tools: Vec<String>,
     /// Distinct rationales across trials, in first-seen order.
     pub rationales: Vec<String>,
+    #[serde(serialize_with = "ser_paths_slash")]
     pub work_dirs: Vec<PathBuf>,
 }
 
@@ -777,6 +792,19 @@ fn seed_workspace(s: &Scenario, work: &Path) -> Result<BTreeMap<String, String>>
     Ok(seeded)
 }
 
+/// Render a relative path with `/` separators on every OS. Windows'
+/// native separator is `\`; judge evidence / JSONL must be canonical
+/// (byte-identical cross-platform), so we rebuild from components.
+fn to_slash(rel: &Path) -> String {
+    rel.components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// Flatten the workspace into `path:\n<contents>` blocks for the judge.
 /// Bounded per file and in total — evidence, not an archive.
 fn dump_workspace(work: &Path) -> String {
@@ -787,7 +815,10 @@ fn dump_workspace(work: &Path) -> String {
     let mut out = String::new();
     for rel in files.iter().take(40) {
         let body = std::fs::read_to_string(work.join(rel)).unwrap_or_else(|e| format!("<unreadable: {e}>"));
-        let _ = writeln!(out, "--- {}\n{}", rel.display(), crate::judge::truncate(&body, 4_000));
+        // Judge evidence is canonical — render `/` on every OS so the dump
+        // (and any judge/JSONL consumer of it) is byte-identical cross-platform.
+        // Windows' `Path::display()` would emit `sub\b.md`; normalize to `sub/b.md`.
+        let _ = writeln!(out, "--- {}\n{}", to_slash(rel), crate::judge::truncate(&body, 4_000));
     }
     if out.is_empty() {
         "(the workspace is empty)".to_string()

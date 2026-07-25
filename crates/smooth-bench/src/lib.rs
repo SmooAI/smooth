@@ -529,7 +529,9 @@ fn rewrite_junit_skips(dir: &Path) -> anyhow::Result<()> {
         }
         // Only touch test files — avoid stripping a @Disabled the
         // project uses legitimately in prod code.
-        let s = path.to_string_lossy();
+        // Normalize `\` → `/` so the `/test/` substring check holds on Windows
+        // (real walked paths use the OS separator).
+        let s = path.to_string_lossy().replace('\\', "/");
         if !s.contains("/test/") && !s.ends_with("Test.java") {
             continue;
         }
@@ -662,7 +664,9 @@ fn is_test_file(lang: PolyglotLang, rel: &Path) -> bool {
         Some(n) => n,
         None => return false,
     };
-    let rel_str = rel.to_string_lossy();
+    // Normalize `\` → `/` so `tests/` / `/test/` prefix+substring checks hold
+    // on Windows, where real walked paths carry the OS separator.
+    let rel_str = rel.to_string_lossy().replace('\\', "/");
     match lang {
         PolyglotLang::Python => {
             // pytest discovery patterns: `test_*.py`, `*_test.py`, and
