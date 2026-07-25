@@ -348,21 +348,22 @@ func cmdClone(remoteURL, dataDir string) {
 	if _, err := db.Exec("CALL DOLT_REMOTE('add', 'origin', ?)", remoteURL); err != nil {
 		fatal("dolt_remote add: " + err.Error())
 	}
-	if _, err := db.Exec("CALL DOLT_PULL('origin', 'main')"); err != nil {
-		fatal("dolt_pull: " + err.Error())
+	// Fetch (not pull): the init root is always unrelated to the remote's
+	// root, and DOLT_PULL refuses unrelated histories — older dolt silently
+	// kept the empty init commit (pearl th-3f6657), newer dolt hard-errors
+	// with "no common ancestor". Fetch has no merge step, so it works on
+	// both; the reset below aligns `main` with the fetched remote head.
+	if _, err := db.Exec("CALL DOLT_FETCH('origin', 'main')"); err != nil {
+		fatal("dolt_fetch: " + err.Error())
 	}
 
-	// After the pull, local `main` can still point at the fresh init
-	// commit cmdInit just made. DOLT_PULL fetches the remote chunks into
-	// remotes/origin/main but refuses to merge unrelated histories — and
-	// the init root is always unrelated to the remote's root — so `main`
-	// silently keeps the empty init commit while the data sits in the
-	// remote-tracking branch. Every fresh bootstrap clone hits this:
-	// the store looks empty ("table not found: pearls") despite holding
-	// the full pulled history on disk. Force `main` onto the pulled
-	// remote head so the clone actually reflects the remote. No-op when
-	// the remote branch is absent (a genuinely empty remote). Pearl
-	// th-3f6657.
+	// After the fetch, local `main` still points at the fresh init commit
+	// cmdInit just made while the data sits in the remote-tracking branch.
+	// Every fresh bootstrap clone hits this: the store looks empty
+	// ("table not found: pearls") despite holding the full pulled history
+	// on disk. Force `main` onto the fetched remote head so the clone
+	// actually reflects the remote. No-op when the remote branch is
+	// absent (a genuinely empty remote).
 	var remoteHead sql.NullString
 	row := db.QueryRow("SELECT hash FROM dolt_remote_branches WHERE name = 'remotes/origin/main' LIMIT 1")
 	if err := row.Scan(&remoteHead); err != nil && err != sql.ErrNoRows {
