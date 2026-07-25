@@ -47,6 +47,15 @@ Code worker sessions in tmux, coordinate them over
       footguns.
     - `enforce-pearls-labels.sh` (PostToolUse Bash) — reminds to label a
       `th pearls create`.
+    - `pearls-store-guard.sh` (PreToolUse Bash) — nudges away from the patterns
+      that wedge the Dolt pearl store read-only (hand-deleting `.smooth/dolt`
+      internals, raw `dolt` writes that bypass the single-writer server,
+      backgrounded pearl/msg watchers). Override with `# pearls-guard:ack`.
+
+  Skills:
+    - `windows-build-box` — spin up a throwaway Windows EC2 build box over SSM
+      (no RDP) to build/test on Windows faster than CI round-trips, then tear it
+      down. Self-contained (`winrun.sh` ships beside the SKILL).
 
   Enable per-repo in `.claude/settings.json` (`enabledPlugins`) and delete the
   local `.claude/hooks/` copies — see the repo's own settings for the pattern.
