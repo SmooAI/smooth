@@ -34,6 +34,13 @@ const updates = [
         apply(content) {
             let next = content;
 
+            // An EXTERNAL workspace.dependencies entry whose version must NOT be
+            // synced to the workspace version: the crates.io operator-core dep
+            // (name-matched — it has no `git =`), or any git dep (its version
+            // lives at the pinned rev, not the workspace). See steps 2 & 3.
+            const isExternalDep = (s) =>
+                s.includes("smooai-smooth-operator-core") || /\bgit\s*=/.test(s);
+
             // 1. workspace.package.version
             const workspacePattern =
                 /(\[workspace\.package\]\s*\nversion\s*=\s*")([^"]+)(")/;
@@ -49,16 +56,20 @@ const updates = [
             //    crates carry matching requirements. Lines without a version
             //    key are left alone — we add them in step 3.
             //
-            //    EXCEPTION: `smooth-operator` is the EXTERNAL engine crate
-            //    (`smooai-smooth-operator-core`), published from its own repo at
-            //    its own cadence — NOT a workspace member. Bumping its
-            //    requirement to the workspace version points at a release that
-            //    doesn't exist (e.g. workspace 0.14.1 vs operator-core 0.14.0)
-            //    and breaks `cargo` resolution. Skip any dep line pinning it.
-            //    Pearl th-1ee32b.
+            //    EXCEPTION: EXTERNAL deps published from another repo at their
+            //    own cadence — NOT workspace members — must keep their own
+            //    version, or `cargo` resolution breaks (workspace X.Y.Z vs the
+            //    external crate's real release). Two shapes to skip:
+            //      - `smooth-operator` = crates.io dep pinning
+            //        `smooai-smooth-operator-core` (no `git =`, name-matched).
+            //      - `smooth-operator-server`/`-svc` = GIT deps (pinned by rev);
+            //        their crate version at the rev (e.g. 1.23.1) is unrelated
+            //        to the workspace version — matched by the `git =` key so
+            //        ANY external git dep is covered, not just these two.
+            //    Pearl th-1ee32b (git-dep twin the core-only guard missed).
             const depLinePattern = /^(smooth-[a-z-]+\s*=\s*\{[^}\n]*\})$/gm;
             next = next.replace(depLinePattern, (line) => {
-                if (line.includes("smooai-smooth-operator-core")) {
+                if (isExternalDep(line)) {
                     return line;
                 }
                 return line.replace(
@@ -71,20 +82,19 @@ const updates = [
             //    one yet. Match "smooth-X = { path = "crates/smooth-X", ... }"
             //    and splice `version = "X.Y.Z",` in right after the opening brace.
             //
-            //    SAME EXCEPTION as step 2: `smooth-operator` points at the
-            //    EXTERNAL `smooai-smooth-operator-core` and carries no version
-            //    key on purpose. Step 2 skips it, but this pass targets exactly
-            //    the version-less lines it left alone — so without this guard it
-            //    re-injects the bad `version = "<workspace>"` step 2 avoids,
-            //    pinning a release that doesn't exist and breaking `cargo`
-            //    resolution. Pearl th-1ee32b (this is the twin the first fix
-            //    missed).
+            //    SAME EXCEPTION as step 2: skip EXTERNAL deps (crates.io
+            //    operator-core AND the operator git deps). This pass targets
+            //    exactly the version-less lines step 2 left alone, so without
+            //    the guard it injects `version = "<workspace>"` onto the git
+            //    deps — pinning an operator release that doesn't exist at the
+            //    rev and breaking `cargo` resolution (the 0.23.0-vs-1.23.1
+            //    failure). Pearl th-1ee32b.
             const addVersionPattern =
                 /^(smooth-[a-z-]+\s*=\s*\{)(?!([^}\n]*\bversion\b))([^}\n]*)(\})/gm;
             next = next.replace(
                 addVersionPattern,
                 (match, pre, _v, body, close) => {
-                    if (body.includes("smooai-smooth-operator-core")) {
+                    if (isExternalDep(body)) {
                         return match;
                     }
                     const trimmed = body.trimStart();
