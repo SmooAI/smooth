@@ -24,6 +24,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -38,6 +39,7 @@ import (
 	"syscall"
 
 	_ "github.com/dolthub/driver"
+	gmssql "github.com/dolthub/go-mysql-server/sql"
 )
 
 func main() {
@@ -262,13 +264,7 @@ func cmdSQL(dataDir string, query string) {
 		}
 		row := make(map[string]interface{})
 		for i, col := range cols {
-			v := values[i]
-			// Convert []byte to string for JSON output.
-			if b, ok := v.([]byte); ok {
-				row[col] = string(b)
-			} else {
-				row[col] = v
-			}
+			row[col] = normalizeValue(values[i])
 		}
 		results = append(results, row)
 	}
@@ -694,16 +690,28 @@ func doSQL(db *sql.DB, dbMu *sync.Mutex, id, query string) serveResponse {
 		}
 		row := make(map[string]interface{}, len(cols))
 		for i, col := range cols {
-			v := values[i]
-			if b, ok := v.([]byte); ok {
-				row[col] = string(b)
-			} else {
-				row[col] = v
-			}
+			row[col] = normalizeValue(values[i])
 		}
 		results = append(results, row)
 	}
 	return serveResponse{ID: id, OK: true, Data: results}
+}
+
+// normalizeValue converts a scanned driver value into a JSON-friendly type.
+// Newer dolt returns large TEXT/BLOB values as lazy out-of-band wrappers
+// (val.TextStorage, a gms sql.AnyWrapper) that the dolt driver passes through
+// un-unwrapped — without this, big pearl titles/descriptions encode as
+// {"Buf":null,"Addr":[...]} instead of their string contents.
+func normalizeValue(v interface{}) interface{} {
+	if w, ok := v.(gmssql.AnyWrapper); ok {
+		if uv, err := w.UnwrapAny(context.Background()); err == nil {
+			v = uv
+		}
+	}
+	if b, ok := v.([]byte); ok {
+		return string(b)
+	}
+	return v
 }
 
 func doExec(db *sql.DB, dbMu *sync.Mutex, id, stmt string) serveResponse {

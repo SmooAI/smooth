@@ -2,7 +2,10 @@ module github.com/SmooAI/smooth/go/smooth-dolt
 
 go 1.26.2
 
-require github.com/dolthub/driver v1.88.1
+require (
+	github.com/dolthub/driver v1.88.1
+	github.com/dolthub/go-mysql-server v0.20.1-0.20260722221430-72b291a45818
+)
 
 require (
 	cel.dev/expr v0.25.1 // indirect
@@ -61,7 +64,6 @@ require (
 	github.com/dolthub/flatbuffers/v23 v23.3.3-dh.2 // indirect
 	github.com/dolthub/fslock v0.0.5 // indirect
 	github.com/dolthub/go-icu-regex v0.0.0-20260610153742-72563bc7ca83 // indirect
-	github.com/dolthub/go-mysql-server v0.20.1-0.20260722221430-72b291a45818 // indirect
 	github.com/dolthub/gozstd v0.0.0-20240423170813-23a2903bca63 // indirect
 	github.com/dolthub/ishell v0.0.0-20260414231531-5f031e3e9037 // indirect
 	github.com/dolthub/jsonpath v0.0.2-0.20240227200619-19675ab05c71 // indirect
