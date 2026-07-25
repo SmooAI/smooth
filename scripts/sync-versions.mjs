@@ -114,17 +114,23 @@ const updates = [
             // 933b927). The old regex matched `smooth-*` only and silently
             // missed every crate.
             //
-            // EXCEPTION: `smooai-smooth-operator-core` is the EXTERNAL engine
-            // crate (published from its own repo); its locked version must
-            // track its real crates.io release, NOT the workspace version.
-            // Bumping its lock entry to a workspace version that was never
-            // published breaks `cargo` resolution ("locked to 0.14.1 …
-            // candidate 0.14.0"). Skip it — same root cause as the Cargo.toml
-            // dep skip above. Pearl th-1ee32b.
+            // EXCEPTION: the EXTERNAL operator crates published from the
+            // smooth-operator repo — their locked versions track that repo, NOT
+            // the workspace version. Bumping a lock entry to a workspace version
+            // that source never published breaks `cargo` resolution under
+            // `--locked` ("= "*" locked to 0.23.0 … candidate 1.23.1"). Three
+            // package names, matched exactly:
+            //   - `smooai-smooth-operator-core`   (crates.io engine)
+            //   - `smooai-smooth-operator-server` (git dep)
+            //   - `smooai-smooth-operator`        (git dep, the svc crate)
+            // The Cargo.toml dep skip (above) keys on `git =`, but lock entries
+            // carry `source` on a separate line outside this 2-line match, so
+            // here we skip by exact name. Pearl th-1ee32b (the lock twin the
+            // git-dep Cargo.toml fix in #260 left behind).
             const pattern =
                 /(name = "smooai-smooth-[^"]+"\nversion = ")([^"]+)(")/g;
             return content.replace(pattern, (match, pre, _ver, post) => {
-                if (pre.includes("smooai-smooth-operator-core")) {
+                if (/name = "smooai-smooth-operator(-core|-server)?"\n/.test(pre)) {
                     return match;
                 }
                 return `${pre}${version}${post}`;
