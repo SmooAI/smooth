@@ -25,7 +25,7 @@ use chrono::Utc;
 use rusqlite::Connection;
 use serde::Serialize;
 
-use smooth_operator::{CheckpointStore, InMemoryKnowledge, KnowledgeBase, MemoryCheckpointStore};
+use smooth_operator::{CheckpointStore, InMemoryKnowledge, KnowledgeBase, Memory, MemoryCheckpointStore, MemoryEntry};
 use smooth_operator_svc::access_control::{AccessContext, AclKnowledgeStore};
 use smooth_operator_svc::adapter::{ConversationUpdate, MessagePage, MessageQuery, SessionUpdate, StorageAdapter};
 use smooth_operator_svc::domain::{Conversation, Message, Participant, Session};
@@ -45,7 +45,14 @@ struct Tables {
 /// Sqlite-backed durable storage adapter (write-through over an in-memory layout).
 pub struct SqliteStorageAdapter {
     tables: RwLock<Tables>,
-    db: Mutex<Connection>,
+    /// Shared so the durable [`SqliteMemory`] handle ([`Self::memory`]) writes
+    /// through the SAME connection — one sqlite file for all the daemon's
+    /// durable state (conversations/sessions AND agent memories).
+    db: Arc<Mutex<Connection>>,
+    /// Durable agent memories (the `remember` tool's backend, hydrated on open).
+    /// Kept beside `tables` because the engine's `Memory` trait is its own slice,
+    /// not part of `StorageAdapter` at the pinned engine rev — see [`Self::memory`].
+    memories: Arc<RwLock<Vec<MemoryEntry>>>,
     checkpoints: Arc<MemoryCheckpointStore>,
     knowledge: AclKnowledgeStore,
 }
@@ -72,12 +79,14 @@ impl SqliteStorageAdapter {
         )?;
 
         let mut tables = Tables::default();
+        let mut memories: Vec<MemoryEntry> = Vec::new();
         {
             let mut stmt = db.prepare("SELECT entity, id, json FROM kv ORDER BY rowid")?;
             let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
             for row in rows {
                 let (entity, id, json) = row?;
                 match entity.as_str() {
+                    "memory" => memories.push(serde_json::from_str(&json)?),
                     "conversation" => {
                         let c: Conversation = serde_json::from_str(&json)?;
                         tables.message_order.entry(c.id.clone()).or_default();
@@ -103,7 +112,8 @@ impl SqliteStorageAdapter {
 
         Ok(Self {
             tables: RwLock::new(tables),
-            db: Mutex::new(db),
+            db: Arc::new(Mutex::new(db)),
+            memories: Arc::new(RwLock::new(memories)),
             checkpoints: Arc::new(MemoryCheckpointStore::new()),
             knowledge: AclKnowledgeStore::new(Arc::new(InMemoryKnowledge::new())),
         })
@@ -111,11 +121,87 @@ impl SqliteStorageAdapter {
 
     /// Write-through one entity as a JSON blob (idempotent replace on `entity,id`).
     fn persist(&self, entity: &str, id: &str, value: &impl Serialize) -> Result<()> {
-        let json = serde_json::to_string(value)?;
-        self.db.lock().map_err(|e| anyhow!("db lock poisoned: {e}"))?.execute(
-            "INSERT OR REPLACE INTO kv(entity, id, json) VALUES(?1, ?2, ?3)",
-            rusqlite::params![entity, id, json],
-        )?;
+        persist_kv(&self.db, entity, id, value)
+    }
+
+    /// The durable agent-memory backend (the `remember` tool's store, and the
+    /// engine's auto-recall source once the engine exposes a seam to inject it).
+    ///
+    /// Shares this adapter's sqlite connection + the hydrated in-memory vector,
+    /// so a `store` is durable immediately and a `recall` sees it after a
+    /// restart. Returned as `Arc<dyn Memory>` — exactly the shape both the
+    /// `remember` tool and (future) `AgentConfig::with_memory` consume.
+    #[must_use]
+    pub fn memory(&self) -> Arc<dyn Memory> {
+        Arc::new(SqliteMemory {
+            db: Arc::clone(&self.db),
+            memories: Arc::clone(&self.memories),
+        })
+    }
+}
+
+/// Write-through one entity as a JSON blob (idempotent replace on `entity,id`).
+/// Free fn so both the adapter and [`SqliteMemory`] share the exact write path.
+fn persist_kv(db: &Mutex<Connection>, entity: &str, id: &str, value: &impl Serialize) -> Result<()> {
+    let json = serde_json::to_string(value)?;
+    db.lock().map_err(|e| anyhow!("db lock poisoned: {e}"))?.execute(
+        "INSERT OR REPLACE INTO kv(entity, id, json) VALUES(?1, ?2, ?3)",
+        rusqlite::params![entity, id, json],
+    )?;
+    Ok(())
+}
+
+/// Durable [`Memory`] backend over the operator storage db (write-through on
+/// `store`/`forget`, keyword recall over the in-memory vector). Memories persist
+/// in the shared `kv` table under `entity = "memory"`, so they survive a daemon
+/// restart — the whole point of th-6d1692. Recall mirrors the engine's
+/// `InMemoryMemory` keyword-scoring so injected reminders rank identically.
+struct SqliteMemory {
+    db: Arc<Mutex<Connection>>,
+    memories: Arc<RwLock<Vec<MemoryEntry>>>,
+}
+
+impl Memory for SqliteMemory {
+    fn store(&self, entry: MemoryEntry) -> Result<()> {
+        // Durable FIRST, then the in-memory index — so a write that reaches the
+        // caller's "Remembered" ack is already on disk.
+        persist_kv(&self.db, "memory", &entry.id, &entry)?;
+        self.memories.write().map_err(|e| anyhow!("memory lock poisoned: {e}"))?.push(entry);
+        Ok(())
+    }
+
+    fn recall(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+        let query_words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+        if query_words.is_empty() {
+            return Ok(Vec::new());
+        }
+        let entries = self.memories.read().map_err(|e| anyhow!("memory lock poisoned: {e}"))?;
+        let mut scored: Vec<(f32, MemoryEntry)> = entries
+            .iter()
+            .filter_map(|entry| {
+                let content_lower = entry.content.to_lowercase();
+                let matching = query_words.iter().filter(|w| content_lower.contains(w.as_str())).count();
+                if matching == 0 {
+                    return None;
+                }
+                #[allow(clippy::cast_precision_loss, reason = "word counts are tiny; f32 is exact here")]
+                let score = matching as f32 / query_words.len() as f32;
+                let mut recalled = entry.clone();
+                recalled.relevance = score;
+                Some((score, recalled))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+        Ok(scored.into_iter().map(|(_, entry)| entry).collect())
+    }
+
+    fn forget(&self, id: &str) -> Result<()> {
+        self.db
+            .lock()
+            .map_err(|e| anyhow!("db lock poisoned: {e}"))?
+            .execute("DELETE FROM kv WHERE entity = 'memory' AND id = ?1", rusqlite::params![id])?;
+        self.memories.write().map_err(|e| anyhow!("memory lock poisoned: {e}"))?.retain(|e| e.id != id);
         Ok(())
     }
 }
@@ -366,5 +452,92 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let a = SqliteStorageAdapter::open(&dir.path().join("empty.db")).unwrap();
         assert!(a.get_conversation("nope").await.unwrap().is_none());
+    }
+
+    // ── durable agent memory (th-6d1692) ─────────────────────────────────────
+
+    /// Cross-PROCESS restart proof (run explicitly, not in the default suite):
+    ///   PHASE=write  → store a memory to $DB, exit (simulates daemon stop).
+    ///   PHASE=recall → reopen $DB in a fresh process, recall, print the hit.
+    /// Between the two, `sqlite3 $DB` (a third process) can read the row on disk.
+    #[test]
+    #[ignore = "manual cross-process durability proof; driven by env vars"]
+    fn proof_cross_process_memory_durability() {
+        use smooth_operator::MemoryType;
+        let path = std::path::PathBuf::from(std::env::var("DB").expect("set DB"));
+        match std::env::var("PHASE").as_deref() {
+            Ok("write") => {
+                let a = SqliteStorageAdapter::open(&path).unwrap();
+                a.memory()
+                    .store(MemoryEntry::new("always add new shows to the smoo-hub watchlist", MemoryType::User))
+                    .unwrap();
+                println!("WROTE memory to {}", path.display());
+            }
+            Ok("recall") => {
+                let b = SqliteStorageAdapter::open(&path).unwrap();
+                let hits = b.memory().recall("smoo-hub watchlist shows", 5).unwrap();
+                assert_eq!(hits.len(), 1, "memory recalled in a fresh process after restart");
+                println!("RECALLED after restart: [{:?}] {}", hits[0].memory_type, hits[0].content);
+            }
+            other => panic!("set PHASE=write|recall (got {other:?})"),
+        }
+    }
+
+    #[test]
+    fn memory_survives_restart_and_is_recallable() {
+        use smooth_operator::MemoryType;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("op.db");
+        let id;
+        // Write a memory, then drop the adapter (closing the sqlite connection).
+        {
+            let a = SqliteStorageAdapter::open(&path).unwrap();
+            let mem = a.memory();
+            let entry = MemoryEntry::new("the user deploys via GitHub Actions", MemoryType::Project);
+            id = entry.id.clone();
+            mem.store(entry).unwrap();
+            // Recallable before restart.
+            assert_eq!(mem.recall("github actions", 5).unwrap().len(), 1);
+        }
+        // Reopen the SAME file: memories hydrate from sqlite — the key assertion.
+        let b = SqliteStorageAdapter::open(&path).unwrap();
+        let mem = b.memory();
+        let hits = mem.recall("github actions deploy", 5).unwrap();
+        assert_eq!(hits.len(), 1, "memory written before restart is recalled after restart");
+        assert_eq!(hits[0].id, id);
+        assert!(hits[0].content.contains("GitHub Actions"));
+        assert_eq!(hits[0].memory_type, MemoryType::Project);
+        assert!(hits[0].relevance > 0.0, "recall scores relevance");
+    }
+
+    #[test]
+    fn memory_forget_is_durable() {
+        use smooth_operator::MemoryType;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("op.db");
+        let id;
+        {
+            let a = SqliteStorageAdapter::open(&path).unwrap();
+            let mem = a.memory();
+            let entry = MemoryEntry::new("ephemeral fact", MemoryType::ShortTerm);
+            id = entry.id.clone();
+            mem.store(entry).unwrap();
+            mem.forget(&id).unwrap();
+            assert!(mem.recall("ephemeral", 5).unwrap().is_empty());
+        }
+        // The forget persisted: the reopened store has no trace of it.
+        let b = SqliteStorageAdapter::open(&path).unwrap();
+        assert!(b.memory().recall("ephemeral", 5).unwrap().is_empty(), "forget survives restart");
+    }
+
+    #[test]
+    fn memory_recall_empty_query_returns_nothing() {
+        use smooth_operator::MemoryType;
+        let dir = tempfile::tempdir().unwrap();
+        let a = SqliteStorageAdapter::open(&dir.path().join("op.db")).unwrap();
+        let mem = a.memory();
+        mem.store(MemoryEntry::new("some fact", MemoryType::User)).unwrap();
+        assert!(mem.recall("   ", 5).unwrap().is_empty(), "blank query recalls nothing");
+        assert!(mem.recall("nonexistent term", 5).unwrap().is_empty(), "no keyword match recalls nothing");
     }
 }

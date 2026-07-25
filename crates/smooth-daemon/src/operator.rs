@@ -82,7 +82,7 @@ const FAST_MODEL: &str = "groq-gpt-oss-120b";
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use smooth_operator::Tool;
+use smooth_operator::{Memory, Tool};
 use smooth_operator_server::local::LocalServer;
 use smooth_operator_server::ServerConfig;
 use smooth_operator_svc::{ToolProvider, ToolProviderContext};
@@ -100,6 +100,10 @@ struct SandboxedToolProvider {
     /// falls back to is `cwd.root()`; a `/cd` or `cd` tool call narrows it.
     cwd: SessionCwd,
     proxy: Option<String>,
+    /// The durable memory backend the `remember`/`recall` tools share, so a fact
+    /// saved in one session survives a daemon restart and is retrievable in the
+    /// next (th-6d1692). Shared with the storage db in `serve_local_flavor`.
+    memory: Arc<dyn Memory>,
 }
 
 #[async_trait]
@@ -114,6 +118,16 @@ impl ToolProvider for SandboxedToolProvider {
         let dir = self.cwd.get(&session);
         let mut tools = smooth_tools::default_tools_with_proxy(dir.clone(), self.proxy.clone());
         tools.push(Arc::new(smooth_tools::CdTool::new(self.cwd.clone(), session, dir)) as Arc<dyn Tool>);
+        // Durable cross-session memory: `remember` writes, `recall` reads — both
+        // over the same shared backend, injected here (not in the generic
+        // `default_tools_with_proxy`) because they need the daemon's `Memory`
+        // handle, which only the provider holds.
+        tools.push(Arc::new(smooth_tools::RememberTool {
+            memory: Arc::clone(&self.memory),
+        }) as Arc<dyn Tool>);
+        tools.push(Arc::new(smooth_tools::RecallTool {
+            memory: Arc::clone(&self.memory),
+        }) as Arc<dyn Tool>);
         tools
     }
 }
@@ -124,17 +138,30 @@ impl ToolProvider for SandboxedToolProvider {
 /// plus the `cd` tool. Confinement follows the conversation's session cwd
 /// (defaulting to `workspace`). Exposed so an integration/e2e test can install
 /// it on a `LocalServer` exactly the way [`serve_local_flavor`] does.
+///
+/// Uses an **ephemeral** in-memory `remember`/`recall` backend — fine for tests
+/// and ad-hoc use. The always-on daemon uses [`local_tool_provider_with_memory`]
+/// with the durable sqlite-backed store so memories survive restarts.
 #[must_use]
 pub fn local_tool_provider(workspace: PathBuf, proxy: Option<String>) -> Arc<dyn ToolProvider> {
-    local_tool_provider_with_cwd(SessionCwd::new(workspace), proxy)
+    local_tool_provider_with_memory(SessionCwd::new(workspace), proxy, Arc::new(smooth_operator::InMemoryMemory::new()))
 }
 
 /// Like [`local_tool_provider`], but takes an existing [`SessionCwd`] so the
 /// daemon can share ONE store between the tool provider and the
-/// `/api/session/cwd` route (the UI's `/cd`).
+/// `/api/session/cwd` route (the UI's `/cd`). Ephemeral memory backend — see
+/// [`local_tool_provider_with_memory`] for the durable one.
 #[must_use]
 pub fn local_tool_provider_with_cwd(cwd: SessionCwd, proxy: Option<String>) -> Arc<dyn ToolProvider> {
-    Arc::new(SandboxedToolProvider { cwd, proxy })
+    local_tool_provider_with_memory(cwd, proxy, Arc::new(smooth_operator::InMemoryMemory::new()))
+}
+
+/// The full seam: a tool provider sharing an explicit [`Memory`] backend with
+/// the `remember`/`recall` tools. `serve_local_flavor` passes the durable
+/// sqlite-backed store here so cross-session memory persists (th-6d1692).
+#[must_use]
+pub fn local_tool_provider_with_memory(cwd: SessionCwd, proxy: Option<String>, memory: Arc<dyn Memory>) -> Arc<dyn ToolProvider> {
+    Arc::new(SandboxedToolProvider { cwd, proxy, memory })
 }
 
 /// The workspace the local flavor's filesystem + shell tools are confined to:
@@ -520,11 +547,6 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
         egress = egress_proxy.as_deref().unwrap_or("unrestricted"),
         "local-flavor sandboxed tools wired (per-turn via ToolProvider)",
     );
-    // One session-cwd store, shared by the tool provider (per-turn tool
-    // confinement + the `cd` tool) and the `/api/session/cwd` route (the UI's
-    // `/cd`). Rooted at the workspace; every conversation defaults to it.
-    let session_cwd = SessionCwd::new(workspace.clone());
-    let provider = local_tool_provider_with_cwd(session_cwd.clone(), egress_proxy);
     // Durable local storage: the operator local flavor is in-memory by default,
     // which loses every conversation/session on restart. Inject a sqlite-backed
     // adapter (via the operator's `storage()` seam) so the always-on daemon
@@ -532,6 +554,25 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
     let storage_path = operator_storage_path();
     let storage = Arc::new(crate::operator_storage::SqliteStorageAdapter::open(&storage_path)?);
     tracing::info!(db = %storage_path.display(), "operator durable storage");
+    // The DURABLE agent-memory backend lives in the same sqlite db (th-6d1692).
+    // The `remember`/`recall` tools share it, so a fact saved in one session is
+    // recalled in the next — even across a restart.
+    //
+    // ponytail: the engine's AUTO-recall (`AgentConfig::with_memory` +
+    // `build_context_injection`) exists in smooth-operator-core, but at the
+    // pinned server rev there is NO seam to inject a `Memory` into the per-turn
+    // agent — `LocalServerBuilder`, `StorageAdapter`, `AppState`, and the runner
+    // never set `config.memory` (verified on the pin AND upstream main). So we
+    // give the agent the explicit `recall` tool instead. When the engine adds a
+    // seam (`StorageAdapter::memory()` → `config.with_memory(storage.memory())`,
+    // or `LocalServerBuilder::memory(...)`), wire `storage.memory()` there and
+    // auto-recall lights up for free — same backend, no data migration.
+    let memory = storage.memory();
+    // One session-cwd store, shared by the tool provider (per-turn tool
+    // confinement + the `cd` tool) and the `/api/session/cwd` route (the UI's
+    // `/cd`). Rooted at the workspace; every conversation defaults to it.
+    let session_cwd = SessionCwd::new(workspace.clone());
+    let provider = local_tool_provider_with_memory(session_cwd.clone(), egress_proxy, memory);
 
     let server = LocalServer::builder()
         .addr(addr)
@@ -637,6 +678,42 @@ pub async fn serve_local_flavor(addr: SocketAddr) -> Result<()> {
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "unwrap/expect are the idiom for test assertions")]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn provider_registers_remember_and_recall_tools() {
+        use smooth_operator_svc::access_control::AccessContext;
+        // The durable-memory tool set must reach the agent — the whole point of
+        // th-6d1692 (before this, the daemon never registered `remember`).
+        let provider = local_tool_provider(std::env::temp_dir(), None);
+        let ctx = ToolProviderContext::new(Some("org-1".into()), AccessContext::anonymous()).with_conversation_id("conv-1");
+        let names: Vec<String> = provider.tools_for(&ctx).await.iter().map(|t| t.schema().name).collect();
+        assert!(names.iter().any(|n| n == "remember"), "remember registered: {names:?}");
+        assert!(names.iter().any(|n| n == "recall"), "recall registered: {names:?}");
+        // The rest of the sandboxed set is still there (didn't clobber anything).
+        assert!(names.iter().any(|n| n == "bash"), "bash still registered: {names:?}");
+        assert!(names.iter().any(|n| n == "cd"), "cd still registered: {names:?}");
+    }
+
+    #[tokio::test]
+    async fn provider_memory_is_shared_write_visible_to_recall() {
+        use smooth_operator_svc::access_control::AccessContext;
+        // remember → recall must round-trip through the SAME backend the provider
+        // hands both tools. Uses the durable adapter so this also exercises the
+        // real store the daemon runs with.
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(crate::operator_storage::SqliteStorageAdapter::open(&dir.path().join("op.db")).unwrap());
+        let provider = local_tool_provider_with_memory(SessionCwd::new(std::env::temp_dir()), None, storage.memory());
+        let ctx = ToolProviderContext::new(Some("org-1".into()), AccessContext::anonymous()).with_conversation_id("conv-1");
+        let tools = provider.tools_for(&ctx).await;
+        let remember = tools.iter().find(|t| t.schema().name == "remember").unwrap();
+        let recall = tools.iter().find(|t| t.schema().name == "recall").unwrap();
+        remember
+            .execute(serde_json::json!({"content": "the user's name is Brent", "type": "user"}))
+            .await
+            .unwrap();
+        let out = recall.execute(serde_json::json!({"query": "user name"})).await.unwrap();
+        assert!(out.contains("Brent"), "recall surfaces the remembered fact: {out}");
+    }
 
     #[test]
     fn big_smooth_persona_is_personal_and_no_reasoning() {
