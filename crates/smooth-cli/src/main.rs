@@ -777,6 +777,13 @@ enum ApiCommands {
         #[command(subcommand)]
         cmd: smooai::jobs::Cmd,
     },
+    /// Smoo AI main-dashboard widget layout — get / add / remove widgets
+    /// on your `/apps` dashboard (per user + org; widget ids from `th
+    /// widgets list`).
+    Dashboard {
+        #[command(subcommand)]
+        cmd: smooai::dashboard::Cmd,
+    },
     /// Smoo AI org integrations (SendGrid email).
     #[command(visible_alias = "integration")]
     Integrations {
@@ -1626,6 +1633,7 @@ async fn main() -> Result<()> {
             ApiCommands::Knowledge { cmd } => smooai::knowledge::cmd(cmd).await,
             ApiCommands::Files { cmd } => smooai::files::cmd(cmd).await,
             ApiCommands::Jobs { cmd } => smooai::jobs::cmd(cmd).await,
+            ApiCommands::Dashboard { cmd } => smooai::dashboard::cmd(cmd).await,
             ApiCommands::Integrations { cmd } => smooai::integrations::cmd(cmd).await,
             ApiCommands::Products { cmd } => smooai::products::cmd(cmd).await,
             ApiCommands::Booking { cmd } => smooai::booking::cmd(cmd).await,
