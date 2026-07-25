@@ -430,6 +430,26 @@ impl BigSmoothClient {
 
     /// Ensure Big Smooth is running, starting it if needed.
     async fn ensure_server(&self) -> anyhow::Result<()> {
+        // A live socket at the target address IS the readiness signal for an
+        // externally-managed engine. The polyglot smooth-operator LocalServers
+        // (go/ts/python/dotnet) serve `/ws` but no `/health`, so the HTTP probe
+        // below would wrongly conclude "not started" and try to `th up` a Rust
+        // daemon — never reaching the real WS connect. Short-circuit on a live
+        // socket first; the `/health`+autostart path still runs for `th code`
+        // when nothing is listening yet. (bench engine axis, th-4c3e2d)
+        {
+            use std::net::ToSocketAddrs;
+            if let Some(addr) = self.url.split("://").nth(1).and_then(|s| s.split('/').next()) {
+                if let Ok(mut it) = addr.to_socket_addrs() {
+                    if let Some(sa) = it.next() {
+                        if std::net::TcpStream::connect_timeout(&sa, Duration::from_secs(2)).is_ok() {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+
         let health_url = format!("{}/health", self.url);
         let client = reqwest::Client::builder().timeout(Duration::from_secs(2)).build()?;
 
