@@ -1,8 +1,13 @@
-//! `remember` — let the agent save a durable memory.
+//! `remember` / `recall` — let the agent save and retrieve durable memories.
 //!
-//! Closes the loop with the engine's auto-recall: this tool writes to the
-//! daemon's `Memory` backend, and the engine injects relevant entries ahead of
-//! later user messages (in this and future sessions).
+//! `remember` writes to the daemon's `Memory` backend. Where the engine wires
+//! `AgentConfig::with_memory`, it auto-recalls relevant entries ahead of a turn;
+//! at the daemon's pinned engine rev there is **no server-side seam to inject
+//! that backend** (the `LocalServerBuilder` / `StorageAdapter` / runner never
+//! set `config.memory`), so `recall` is the explicit companion tool that lets
+//! the agent pull memories back across sessions and restarts until that seam
+//! lands. Both operate on the same shared backend, so a `remember` in one
+//! session is `recall`-able in the next.
 
 use std::sync::Arc;
 
@@ -69,6 +74,64 @@ impl Tool for RememberTool {
     }
 }
 
+/// `recall` tool — retrieve durable memories relevant to a query.
+///
+/// Reads the same `Memory` backend the `remember` tool writes to — the read
+/// half of cross-session memory. The engine's automatic recall isn't wired at
+/// the daemon's pinned rev, so the agent calls this explicitly when a user
+/// question might turn on something it was told to remember earlier.
+pub struct RecallTool {
+    /// The backend queried — shared with [`RememberTool`] so writes are visible.
+    pub memory: Arc<dyn Memory>,
+}
+
+#[async_trait]
+impl Tool for RecallTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "recall".into(),
+            description: "Retrieve durable memories you saved earlier (with `remember`) that are relevant to a query. \
+                          Call this when a user's request might depend on a stable fact, past decision, project state, or \
+                          preference you were told before — especially at the start of a new session. Returns the most \
+                          relevant saved memories."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "What to look for, in a few keywords or a short phrase." },
+                    "limit": { "type": "integer", "description": "Max memories to return (default 5).", "minimum": 1, "maximum": 25 }
+                },
+                "required": ["query"]
+            }),
+        }
+    }
+
+    fn is_concurrent_safe(&self) -> bool {
+        true
+    }
+
+    async fn execute(&self, arguments: Value) -> anyhow::Result<String> {
+        use std::fmt::Write as _;
+        let query = req_str(&arguments, "query")?;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped small positive limit")]
+        let limit = arguments.get("limit").and_then(Value::as_u64).map_or(5, |n| n.clamp(1, 25) as usize);
+        let hits = self.memory.recall(&query, limit)?;
+        if hits.is_empty() {
+            return Ok(format!("No saved memories match \"{query}\"."));
+        }
+        let mut out = format!("Recalled {} memory(ies) for \"{query}\":\n", hits.len());
+        for m in &hits {
+            let freshness = if m.memory_type.needs_freshness_check() {
+                " (verify it's still current before acting)"
+            } else {
+                ""
+            };
+            let _ = writeln!(out, "- ({:?}, relevance={:.2}): {}{}", m.memory_type, m.relevance, m.content, freshness);
+        }
+        Ok(out)
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "unwrap/expect are the idiom for test assertions")]
 mod tests {
@@ -107,5 +170,48 @@ mod tests {
             memory: Arc::new(InMemoryMemory::new()),
         };
         assert!(tool.execute(json!({"type": "user"})).await.is_err(), "missing content is an error");
+    }
+
+    #[tokio::test]
+    async fn remember_then_recall_round_trips_on_shared_backend() {
+        let memory: Arc<dyn Memory> = Arc::new(InMemoryMemory::new());
+        let remember = RememberTool { memory: Arc::clone(&memory) };
+        let recall = RecallTool { memory: Arc::clone(&memory) };
+        remember
+            .execute(json!({"content": "always add new shows to the smoo-hub watchlist", "type": "user"}))
+            .await
+            .unwrap();
+        let out = recall.execute(json!({"query": "smoo-hub watchlist shows"})).await.unwrap();
+        assert!(out.contains("Recalled 1 memory"), "{out}");
+        assert!(out.contains("smoo-hub watchlist"), "{out}");
+        assert!(out.contains("(User"), "renders the memory type: {out}");
+    }
+
+    #[tokio::test]
+    async fn recall_reports_no_match() {
+        let recall = RecallTool {
+            memory: Arc::new(InMemoryMemory::new()),
+        };
+        let out = recall.execute(json!({"query": "anything"})).await.unwrap();
+        assert!(out.contains("No saved memories match"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn recall_appends_freshness_nudge_for_time_sensitive_types() {
+        let memory: Arc<dyn Memory> = Arc::new(InMemoryMemory::new());
+        RememberTool { memory: Arc::clone(&memory) }
+            .execute(json!({"content": "the dashboard lives at grafana example", "type": "reference"}))
+            .await
+            .unwrap();
+        let out = RecallTool { memory }.execute(json!({"query": "grafana dashboard"})).await.unwrap();
+        assert!(out.contains("verify it's still current"), "reference memory nudges freshness: {out}");
+    }
+
+    #[tokio::test]
+    async fn recall_requires_query() {
+        let recall = RecallTool {
+            memory: Arc::new(InMemoryMemory::new()),
+        };
+        assert!(recall.execute(json!({"limit": 5})).await.is_err(), "missing query is an error");
     }
 }

@@ -111,6 +111,105 @@ fn parse_query_timeout(raw: &str) -> Option<Duration> {
     }
 }
 
+/// Derive a stable, human-readable cache key (`owner_repo`) from a Dolt
+/// git remote URL like `git+ssh://git@github.com/SmooAI/smooth.git`.
+/// Returns `None` for anything that doesn't have at least an `owner/repo`
+/// tail, so callers fall back to the per-worktree cache (no sharing).
+fn shared_cache_key_from_url(url: &str) -> Option<String> {
+    let trimmed = url.trim().trim_end_matches('/');
+    let path = trimmed.rsplit(['@', '/']).take(2).collect::<Vec<_>>();
+    // rsplit yields [repo, owner]; need both to key uniquely per repo.
+    let (repo, owner) = (path.first()?, path.get(1)?);
+    let repo = repo.strip_suffix(".git").unwrap_or(repo);
+    if repo.is_empty() || owner.is_empty() {
+        return None;
+    }
+    let sanitize = |s: &str| s.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect::<String>();
+    Some(format!("{}_{}", sanitize(owner), sanitize(repo)))
+}
+
+/// Read `origin` from a pearl store's `.dolt/repo_state.json`.
+fn origin_remote_url(dot_dolt: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(dot_dolt.join("repo_state.json")).ok()?;
+    let json: Value = serde_json::from_str(&raw).ok()?;
+    json.get("remotes")?.get("origin")?.get("url")?.as_str().map(str::to_owned)
+}
+
+/// Point this worktree's git-remote cache at ONE shared, persistent
+/// per-machine cache under `~/.smooth/git-remote-cache/<owner_repo>/`
+/// (pearl th-20f330).
+///
+/// Dolt hardcodes the git-remote cache to the per-worktree DB dir
+/// (`<db>/.dolt/git-remote-cache`, see dolt `DoltEnv::GitCacheRoot`), so
+/// every fresh worktree / fresh clone starts cold and re-fetches the
+/// FULL `refs/dolt/data` history from scratch — hundreds of MB, byte-
+/// silent, while holding the single-writer noms LOCK, which wedges every
+/// other agent read-only. Symlinking the per-worktree cache dir to a
+/// shared location keyed by remote URL means the first bootstrap on a
+/// machine is the ONLY cold fetch; every later worktree and sync is
+/// incremental (seconds). Keeps all data in the repos — this only moves
+/// the *cache*, never the store.
+///
+/// Best-effort: any error leaves the per-worktree cache in place (correct,
+/// just slower). Unix-only symlink; on other platforms this is a no-op and
+/// the per-worktree cache stands until the single-writer server (th-5f35a5)
+/// lands the Windows path.
+fn ensure_shared_git_cache(data_dir: &Path) {
+    let Some(home) = dirs_next::home_dir() else { return };
+    link_shared_git_cache(data_dir, &home.join(".smooth").join("git-remote-cache"));
+}
+
+/// Core of [`ensure_shared_git_cache`], with the shared-cache root passed
+/// in so it's testable without touching the real `$HOME`.
+fn link_shared_git_cache(data_dir: &Path, shared_root: &Path) {
+    let dot_dolt = data_dir.join(".dolt");
+    if !dot_dolt.is_dir() {
+        return; // store not initialized yet — dolt will create .dolt first
+    }
+    let Some(key) = origin_remote_url(&dot_dolt).as_deref().and_then(shared_cache_key_from_url) else {
+        return; // no usable remote → nothing to share against
+    };
+    let shared = shared_root.join(&key);
+    let local = dot_dolt.join("git-remote-cache");
+
+    // Already linked to the shared target — the common steady-state case.
+    if std::fs::read_link(&local).is_ok_and(|t| t == shared) {
+        return;
+    }
+    if std::fs::create_dir_all(&shared).is_err() {
+        return;
+    }
+
+    match std::fs::symlink_metadata(&local) {
+        Ok(md) if md.file_type().is_symlink() => {
+            let _ = std::fs::remove_file(&local); // stale symlink → repoint below
+        }
+        Ok(md) if md.is_dir() => {
+            let shared_empty = std::fs::read_dir(&shared).is_ok_and(|mut d| d.next().is_none());
+            let local_empty = std::fs::read_dir(&local).map_or(true, |mut d| d.next().is_none());
+            if shared_empty && !local_empty {
+                // Migrate this worktree's warm cache into the shared slot once.
+                let _ = std::fs::remove_dir(&shared);
+                if std::fs::rename(&local, &shared).is_err() {
+                    let _ = std::fs::create_dir_all(&shared); // cross-device: give up sharing, keep local cold-safe
+                    return;
+                }
+            } else if std::fs::remove_dir_all(&local).is_err() {
+                return; // shared already warm; couldn't drop the redundant local copy
+            }
+        }
+        Ok(_) => {
+            let _ = std::fs::remove_file(&local); // unexpected non-dir file
+        }
+        Err(_) => {} // doesn't exist yet → just create the symlink
+    }
+
+    #[cfg(unix)]
+    let _ = std::os::unix::fs::symlink(&shared, &local);
+    #[cfg(windows)]
+    let _ = std::os::windows::fs::symlink_dir(&shared, &local);
+}
+
 /// Escape a string for splicing into a single-quoted SQL string literal
 /// sent to `smooth-dolt exec`/`sql` (no prepared statements on this path).
 ///
@@ -377,6 +476,10 @@ impl SmoothDolt {
         if let Some(server) = &self.server {
             return Self::run_with_self_heal(server, |s| s.with_client(|c| c.dolt("push")));
         }
+        // Redirect the git-remote cache to the shared per-machine slot
+        // before dolt opens it, so this push reuses the warm cache instead
+        // of a cold full-history fetch (pearl th-20f330).
+        ensure_shared_git_cache(&self.data_dir);
         let mut args: Vec<&str> = vec!["push"];
         let data_dir = self.data_dir_str();
         args.push(&data_dir);
@@ -400,6 +503,8 @@ impl SmoothDolt {
         if let Some(server) = &self.server {
             return Self::run_with_self_heal(server, |s| s.with_client(|c| c.dolt("pull")));
         }
+        // Warm-cache redirect before the remote op (pearl th-20f330).
+        ensure_shared_git_cache(&self.data_dir);
         // Bounded like push — a stalled pull holds the same LOCK.
         self.run_cli_timed(&["pull", &self.data_dir_str()], sync_timeout())
     }
@@ -654,6 +759,74 @@ fn wait_child_draining(mut child: std::process::Child, timeout: Option<Duration>
 pub fn is_sync_timeout_err(e: &anyhow::Error) -> bool {
     let s = format!("{e:#}").to_lowercase();
     s.contains("timed out after") && s.contains("remote sync stalled")
+}
+
+#[cfg(test)]
+mod shared_git_cache_tests {
+    use super::{link_shared_git_cache, shared_cache_key_from_url};
+    use std::fs;
+
+    #[test]
+    fn key_from_common_remote_url_shapes() {
+        assert_eq!(
+            shared_cache_key_from_url("git+ssh://git@github.com/SmooAI/smooth.git").as_deref(),
+            Some("SmooAI_smooth")
+        );
+        assert_eq!(
+            shared_cache_key_from_url("git+ssh://git@github.com/SmooAI/smooai.git").as_deref(),
+            Some("SmooAI_smooai")
+        );
+        assert_eq!(shared_cache_key_from_url("https://github.com/SmooAI/smooth").as_deref(), Some("SmooAI_smooth"));
+        // Same repo, trailing slash → same key (all worktrees share one cache).
+        assert_eq!(
+            shared_cache_key_from_url("git+ssh://git@github.com/SmooAI/smooth.git/"),
+            shared_cache_key_from_url("git+ssh://git@github.com/SmooAI/smooth.git")
+        );
+        // Different repos → different keys.
+        assert_ne!(
+            shared_cache_key_from_url("...github.com/SmooAI/smooth.git"),
+            shared_cache_key_from_url("...github.com/SmooAI/smooai.git")
+        );
+        // Garbage with no owner/repo tail → no sharing.
+        assert_eq!(shared_cache_key_from_url("nonsense"), None);
+    }
+
+    /// Build a fake initialized store with an `origin` remote and return its data dir.
+    fn fake_store(root: &std::path::Path, url: &str) -> std::path::PathBuf {
+        let data = root.join("wt").join(".smooth").join("dolt").join("pearls");
+        let dot_dolt = data.join(".dolt");
+        fs::create_dir_all(&dot_dolt).unwrap();
+        fs::write(dot_dolt.join("repo_state.json"), format!(r#"{{"remotes":{{"origin":{{"url":"{url}"}}}}}}"#)).unwrap();
+        data
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_fresh_worktree_to_shared_and_migrates_warm_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let shared_root = tmp.path().join("shared");
+        let data = fake_store(tmp.path(), "git+ssh://git@github.com/SmooAI/smooth.git");
+        let local = data.join(".dolt").join("git-remote-cache");
+
+        // (1) No local cache yet → creates a symlink into the shared slot.
+        link_shared_git_cache(&data, &shared_root);
+        assert!(fs::symlink_metadata(&local).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_link(&local).unwrap(), shared_root.join("SmooAI_smooth"));
+
+        // (2) Idempotent: a second call is a no-op, link unchanged.
+        link_shared_git_cache(&data, &shared_root);
+        assert_eq!(fs::read_link(&local).unwrap(), shared_root.join("SmooAI_smooth"));
+
+        // (3) A warm real-dir cache migrates its contents into the shared slot.
+        let data2 = fake_store(&tmp.path().join("second"), "git+ssh://git@github.com/SmooAI/smooth.git");
+        let local2 = data2.join(".dolt").join("git-remote-cache");
+        fs::remove_dir_all(&shared_root).ok(); // start clean so migration path is exercised
+        fs::create_dir_all(&local2).unwrap();
+        fs::write(local2.join("warm.pack"), b"cached").unwrap();
+        link_shared_git_cache(&data2, &shared_root);
+        assert!(fs::symlink_metadata(&local2).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read(shared_root.join("SmooAI_smooth").join("warm.pack")).unwrap(), b"cached");
+    }
 }
 
 #[cfg(test)]

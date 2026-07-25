@@ -50,6 +50,10 @@
                     {
                         "type": "command",
                         "command": "${CLAUDE_PLUGIN_ROOT}/hooks/th-curl-hint.sh"
+                    },
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_PLUGIN_ROOT}/hooks/pearls-store-guard.sh"
                     }
                 ]
             }

@@ -32,7 +32,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime/pprof"
 	"strconv"
 	"strings"
 	"sync"
@@ -592,18 +591,8 @@ func cmdServe(dataDir, socketPath string) {
 
 	// SIGUSR1 → dump all goroutine stacks to <socket-dir>/goroutines.txt.
 	// Diagnostic hook for hangs where stderr was redirected to /dev/null.
-	dumpCh := make(chan os.Signal, 1)
-	signal.Notify(dumpCh, syscall.SIGUSR1)
-	go func() {
-		for range dumpCh {
-			f, err := os.Create(dumpPath)
-			if err != nil {
-				continue
-			}
-			_ = pprof.Lookup("goroutine").WriteTo(f, 2) // 2 = full frames
-			_ = f.Close()
-		}
-	}()
+	// Unix-only (Windows has no SIGUSR1); see goroutinedump_*.go.
+	installGoroutineDump(dumpPath)
 
 	fmt.Fprintf(os.Stderr, "smooth-dolt: serve %s on %s\n", dataDir, socketPath)
 

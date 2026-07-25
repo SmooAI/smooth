@@ -1076,9 +1076,14 @@ mod tests {
     fn wait_for_http_accepts_any_http_status() {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap();
+        // Loop-accept and drain the request before replying. A one-shot
+        // reply-then-close server races on Windows: closing before the
+        // client's request write completes surfaces as WSAECONNRESET, and the
+        // client's retry then finds an already-consumed (dead) listener.
         std::thread::spawn(move || {
-            if let Ok((mut s, _)) = l.accept() {
-                use std::io::Write;
+            while let Ok((mut s, _)) = l.accept() {
+                use std::io::{Read, Write};
+                let _ = s.read(&mut [0u8; 64]);
                 // Strict-auth 401 still means "the engine is up".
                 let _ = s.write_all(b"HTTP/1.1 401 Unauthorized\r\n\r\n");
             }
