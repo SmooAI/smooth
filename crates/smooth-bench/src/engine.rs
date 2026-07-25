@@ -701,14 +701,16 @@ fn boot_microvm(bin_dir: &Path, workspace: &Path, log_dir: &Path, model: &str, e
     });
 
     let msb_log = std::fs::File::create(log_dir.join("msb.log")).context("creating msb.log")?;
-    let child = Command::new("msb")
-        .args(&args)
+    let mut cmd = Command::new("msb");
+    cmd.args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::from(msb_log.try_clone()?))
-        .stderr(Stdio::from(msb_log))
-        .process_group(0)
-        .spawn()
-        .context("spawning `msb run` (is microsandbox installed?)")?;
+        .stderr(Stdio::from(msb_log));
+    // New process group so the guard can reap msb's children on drop. Unix-only
+    // (microsandbox is unix-only anyway; the crate must still COMPILE on windows).
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let child = cmd.spawn().context("spawning `msb run` (is microsandbox installed?)")?;
     let guard = MsbGuard { name: name.clone(), child };
 
     let addr: SocketAddr = format!("127.0.0.1:{host_port}").parse().context("microvm host addr")?;
