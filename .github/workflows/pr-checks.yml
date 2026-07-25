@@ -89,12 +89,23 @@ jobs:
                   pnpm install --no-frozen-lockfile
                   pnpm build
 
-            # smooth-dolt is a CGO Go binary requiring ICU; it has no Windows
-            # build. Pearl-store tests that need it skip explicitly there —
-            # see SMOOTH_DOLT_UNAVAILABLE handling in smooth-pearls.
+            # smooth-dolt is a CGO Go binary. On Linux/macOS the gozstd +
+            # go-icu-regex CGO deps want ICU (build-smooth-dolt.sh points CGO
+            # at Homebrew/apt ICU). On Windows the `gms_pure_go` build tag drops
+            # the ICU path entirely, so only a C compiler (mingw gcc, present on
+            # the runner) is needed — proven on a Windows SSM box, see
+            # docs/Operations/Windows-Build-Box-Runbook.md. Pearl-store *tests*
+            # still skip on Windows (they need the Unix-socket dolt server; the
+            # TCP transport is pearl th-5f35a5) — but the binary must keep
+            # compiling so it can't silently regress with another unix-only call.
             - name: Build smooth-dolt (embedded Dolt for pearl memory tests)
               if: runner.os == 'Linux'
               run: bash scripts/build-smooth-dolt.sh
+
+            - name: Build smooth-dolt (Windows — CGO via mingw, gms_pure_go drops ICU)
+              if: runner.os == 'Windows'
+              shell: bash
+              run: cd go/smooth-dolt && CGO_ENABLED=1 go build -tags gms_pure_go -o smooth-dolt.exe .
 
             - name: Install nextest
               uses: taiki-e/install-action@nextest
