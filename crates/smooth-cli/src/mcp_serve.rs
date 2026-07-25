@@ -16,11 +16,13 @@
 //! - **Local, free, no sign-in**: `pearls_ready` / `pearls_create` (the
 //!   workspace pearl store) and `remember` / `recall` (local memory).
 //! - **Your business, behind Sign in with Smoo (`th auth login`)**:
-//!   `ask_business` — one turn of the Smooth Operator org agent (the same
-//!   user-only `POST /organizations/{org}/smooth-operator/chat` the
-//!   `th api smooth-operator` CLI drives), which never sends or takes a
-//!   destructive action without explicit approval; and `knowledge_search` —
-//!   a fast read of the org knowledge base.
+//!   `ask_business` — one turn of the Smooth Operator org agent over its SEP
+//!   WebSocket transport (see `smooai::smooth_operator_ws`), which never sends
+//!   or takes a destructive action unless the caller passes `approve: true`;
+//!   and `knowledge_search` — a fast read of the org knowledge base.
+//! - **Org admin only**: `operator_tools` / `operator_tools_set` — see and
+//!   change which tools the org's operator may use at all (th-8b7d36), so the
+//!   operator can be configured from the same chat that drives it.
 
 use anyhow::Result;
 use rmcp::{
@@ -37,8 +39,6 @@ use serde::Deserialize;
 use serde_json::json;
 
 use smooth_pearls::{MemoryStore, NewPearl, PearlType, Priority};
-
-use crate::smooai::user_client::UserClient;
 
 /// The Smooth MCP server. Stateless beyond the tool router — each tool opens
 /// the pearl store fresh (matching `th pearls` CLI semantics), so the server
@@ -100,18 +100,37 @@ pub struct KnowledgeSearchArgs {
     pub max_results: Option<u64>,
 }
 
+/// Arguments for `operator_tools`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct OperatorToolsArgs {
+    /// Act on a specific org id. Defaults to your active org.
+    #[serde(default)]
+    pub org: Option<String>,
+}
+
+/// Arguments for `operator_tools_set`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct OperatorToolsSetArgs {
+    /// Dotted tool id to change, e.g. `email.send` (see `operator_tools`).
+    pub tool_id: String,
+    /// True to let the operator use it; false to turn it off for the whole org.
+    pub enabled: bool,
+    /// Act on a specific org id. Defaults to your active org.
+    #[serde(default)]
+    pub org: Option<String>,
+}
+
 /// Arguments for `ask_business` — one turn of the Smooth Operator org agent.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AskBusinessArgs {
-    /// What to ask or tell your business, in plain language. Omit only when
-    /// approving a pending action (set `approve` + `conversation_id` instead).
-    #[serde(default)]
+    /// What to ask or tell your business, in plain language.
     pub message: Option<String>,
-    /// Continue an existing conversation (returned by a previous call).
+    /// Continue an existing conversation (pass back the id a previous call returned).
     #[serde(default)]
     pub conversation_id: Option<String>,
-    /// Approve (true) or decline (false) an action the operator paused on.
-    /// Requires `conversation_id`. The operator never sends/acts without this.
+    /// Allow the operator to take destructive actions this turn — send email,
+    /// write to the CRM/knowledge base. Default false: it declines them and
+    /// tells you what it would have done, so you can re-run with approve=true.
     #[serde(default)]
     pub approve: Option<bool>,
     /// Act on a specific org id. Defaults to your active org.
@@ -254,63 +273,78 @@ impl SmoothMcp {
     /// Talk to your business — one turn of the Smooth Operator org agent.
     ///
     /// The agent runs on your live Smoo org (CRM, inbox, knowledge, analytics)
-    /// and answers in plain language. It never sends email or takes a
-    /// destructive action without explicit approval: when it pauses on one,
-    /// this returns the pending action and a `conversation_id`; approve it by
-    /// calling again with `approve: true` and that `conversation_id`.
+    /// and answers in plain language, over its SEP WebSocket transport. It never
+    /// sends email or takes a destructive action unless you pass `approve: true`
+    /// — otherwise it declines the action, tells you what it would have done, and
+    /// returns a `conversation_id` so you can re-run with `approve: true` to
+    /// allow it (and continue the same thread).
     ///
     /// # Errors
     /// MCP error if not signed in to Smoo (user session), no active org, no
-    /// `message`/approval given, or the request fails.
+    /// `message`, or the operator call fails.
     #[tool(
         name = "ask_business",
-        description = "Talk to your business in plain language. Smooth Operator (the agent on your Smoo org) answers questions about revenue/CRM/knowledge and can draft — and, with your approval, send — email. Needs Sign in with Smoo (`th auth login`). To approve a paused action, call again with approve=true and the conversation_id it returned."
+        description = "Talk to your business in plain language. Smooth Operator (the agent on your Smoo org) answers questions about revenue/CRM/knowledge and can draft — and, only when you pass approve=true, send — email or other writes. Needs Sign in with Smoo (`th auth login`). Continue a thread by passing back the conversation_id it returns."
     )]
     pub async fn ask_business(&self, params: Parameters<AskBusinessArgs>) -> Result<String, ErrorData> {
         let a = params.0;
-        // `from_user_session` IS the gate: the org agent is a user-only route and
-        // 401s under M2M, so this errors (with a login hint) when there's no
-        // Smoo user session.
-        let client = UserClient::from_user_session().await.map_err(|e| sign_in_err(&e))?;
+        let message = a
+            .message
+            .as_deref()
+            .filter(|m| !m.trim().is_empty())
+            .ok_or_else(|| ErrorData::invalid_params("Provide `message` to ask your business.".to_string(), None))?;
         let org = crate::active_org::resolve(a.org).map_err(|e| ErrorData::invalid_request(format!("No active Smoo org. {e}"), None))?;
 
-        let turn = if let (Some(approve), Some(cid)) = (a.approve, a.conversation_id.as_deref()) {
-            // Resolve a paused action the operator asked us to confirm.
-            client
-                .post(
-                    &format!("/organizations/{org}/smooth-operator/confirm"),
-                    &json!({ "conversationId": cid, "approve": approve }),
-                )
-                .await
-        } else {
-            let message = a.message.as_deref().filter(|m| !m.trim().is_empty()).ok_or_else(|| {
-                ErrorData::invalid_params(
-                    "Provide `message` to ask, or `approve` + `conversation_id` to resolve a pending action.".to_string(),
-                    None,
-                )
-            })?;
-            let mut body = json!({ "message": message });
-            if let Some(cid) = &a.conversation_id {
-                body["conversationId"] = json!(cid);
-            }
-            client.post(&format!("/organizations/{org}/smooth-operator/chat"), &body).await
-        }
-        .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        // The user session is minted into the SEP token inside `operator_turn`;
+        // it errors (with a `th auth login` hint) when there's no Smoo session.
+        // `approve` gates destructive tools inline: false (default) declines +
+        // surfaces; true allows them this turn.
+        let turn = crate::smooai::smooth_operator_ws::operator_turn(&org, message, a.conversation_id.as_deref(), a.approve.unwrap_or(false))
+            .await
+            .map_err(|e| ErrorData::internal_error(format!("{e:#}"), None))?;
 
-        // Defense-in-depth on the approval path: a paused action with no
-        // conversation id can't be approved, so fail loudly rather than emit a
-        // send-prompt the user can never act on. (The API always returns one;
-        // this only fires on a contract violation.)
-        let paused = turn.get("pendingAction").is_some_and(|v| !v.is_null());
-        let has_cid = turn.get("conversationId").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty());
-        if paused && !has_cid {
-            return Err(ErrorData::internal_error(
-                "The operator paused on an action but returned no conversation id, so it can't be approved. Try again.".to_string(),
-                None,
-            ));
-        }
+        Ok(crate::smooai::smooth_operator_ws::render_operator_turn(&turn))
+    }
 
-        Ok(render_turn(&turn))
+    /// The operator's tool catalog + which are enabled for the org.
+    ///
+    /// # Errors
+    /// MCP error if not signed in, not an org admin (the routes are admin-only),
+    /// no active org, or the request fails.
+    #[tool(
+        name = "operator_tools",
+        description = "List the tools your Smooth Operator can use and which are enabled for your org. Org admin only. Use operator_tools_set to change one.",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn operator_tools(&self, params: Parameters<OperatorToolsArgs>) -> Result<String, ErrorData> {
+        let org = crate::active_org::resolve(params.0.org).map_err(|e| ErrorData::invalid_request(format!("No active Smoo org. {e}"), None))?;
+        let tools = crate::smooai::smooth_operator::list_operator_tools(&org)
+            .await
+            .map_err(|e| ErrorData::internal_error(format!("{e:#}"), None))?;
+        Ok(crate::smooai::smooth_operator::render_tool_catalog(&tools))
+    }
+
+    /// Turn one operator tool on or off for the whole org.
+    ///
+    /// # Errors
+    /// MCP error for an unknown tool id, if not signed in, not an org admin, no
+    /// active org, or the request fails.
+    #[tool(
+        name = "operator_tools_set",
+        description = "Turn one Smooth Operator tool on or off for your whole org (e.g. disable email.send so the operator can never send mail). Org admin only. Changes what the AI is allowed to do — confirm with the user first."
+    )]
+    pub async fn operator_tools_set(&self, params: Parameters<OperatorToolsSetArgs>) -> Result<String, ErrorData> {
+        let a = params.0;
+        let org = crate::active_org::resolve(a.org).map_err(|e| ErrorData::invalid_request(format!("No active Smoo org. {e}"), None))?;
+        let tools = crate::smooai::smooth_operator::set_operator_tool(&org, &a.tool_id, a.enabled)
+            .await
+            .map_err(|e| ErrorData::internal_error(format!("{e:#}"), None))?;
+        let verb = if a.enabled { "Enabled" } else { "Disabled" };
+        Ok(format!(
+            "{verb} {}.\n\n{}",
+            a.tool_id,
+            crate::smooai::smooth_operator::render_tool_catalog(&tools)
+        ))
     }
 }
 
@@ -343,37 +377,6 @@ fn sign_in_err(e: &anyhow::Error) -> ErrorData {
     )
 }
 
-/// Render one Smooth Operator turn for the MCP client: the reply, any tools it
-/// used, an approval prompt for a paused action, and the conversation id so the
-/// caller can continue or approve.
-fn render_turn(turn: &serde_json::Value) -> String {
-    let reply = turn.get("reply").and_then(|v| v.as_str()).unwrap_or_default();
-    let cid = turn.get("conversationId").and_then(|v| v.as_str()).unwrap_or_default();
-
-    let mut out = String::new();
-    if !reply.is_empty() {
-        out.push_str(reply);
-        out.push('\n');
-    }
-    if let Some(tools) = turn.get("toolCalls").and_then(|v| v.as_array()).filter(|t| !t.is_empty()) {
-        let names: Vec<&str> = tools.iter().filter_map(|t| t.get("name").and_then(|v| v.as_str())).collect();
-        if !names.is_empty() {
-            let _ = writeln!(out, "\n_(used: {})_", names.join(", "));
-        }
-    }
-    if let Some(pa) = turn.get("pendingAction").filter(|v| !v.is_null()) {
-        let summary = pa.get("summary").and_then(|v| v.as_str()).unwrap_or("an action");
-        let _ = writeln!(
-            out,
-            "\n⏸ Needs your approval before it happens: {summary}\n   To approve, call ask_business again with approve=true and conversation_id=\"{cid}\" (or approve=false to decline)."
-        );
-    }
-    if !cid.is_empty() {
-        let _ = writeln!(out, "\n[conversation_id: {cid}]");
-    }
-    out.trim().to_string()
-}
-
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for SmoothMcp {
     fn get_info(&self) -> ServerInfo {
@@ -398,6 +401,10 @@ impl ServerHandler for SmoothMcp {
                  without approval; when it pauses on one, relay the pending action and approve only if the user \
                  says so (call `ask_business` again with approve=true and the returned conversation_id). \
                  `knowledge_search` is a fast read of the org knowledge base.\n\n\
+                 ORG ADMIN — `operator_tools` shows which tools the operator may use at all, and \
+                 `operator_tools_set` turns one on/off for the WHOLE org (e.g. disable `email.send` so it can \
+                 never send mail). That changes what the AI is allowed to do for everyone — always confirm with \
+                 the user before calling `operator_tools_set`, and expect a 403 if they aren't an org admin.\n\n\
                  When an org tool reports the user isn't signed in, tell them to run `th auth login` — don't retry blindly."
                     .to_string(),
             )
@@ -445,7 +452,16 @@ mod tests {
         // Tools are advertised — local (free) and org (gated) alike.
         let tools = client.list_tools(None).await.expect("list tools");
         let names: Vec<&str> = tools.tools.iter().map(|t| t.name.as_ref()).collect();
-        for expected in ["pearls_ready", "pearls_create", "remember", "recall", "knowledge_search", "ask_business"] {
+        for expected in [
+            "pearls_ready",
+            "pearls_create",
+            "remember",
+            "recall",
+            "knowledge_search",
+            "ask_business",
+            "operator_tools",
+            "operator_tools_set",
+        ] {
             assert!(names.contains(&expected), "missing {expected} in {names:?}");
         }
 
@@ -472,33 +488,5 @@ mod tests {
 
         client.cancel().await.expect("client shutdown");
         server.abort();
-    }
-
-    /// The turn renderer surfaces reply, tool calls, a pending-action approval
-    /// prompt, and the conversation id — the safety-critical "never send without
-    /// approval" path is a pure function, so test it directly.
-    #[test]
-    fn render_turn_surfaces_pending_action_and_conversation() {
-        let turn = serde_json::json!({
-            "conversationId": "c-42",
-            "reply": "Drafted the renewal.",
-            "toolCalls": [{ "name": "knowledge.search" }, { "name": "email.draft" }],
-            "pendingAction": { "name": "email.send", "summary": "send the renewal to Acme" }
-        });
-        let out = render_turn(&turn);
-        assert!(out.contains("Drafted the renewal."));
-        assert!(out.contains("knowledge.search") && out.contains("email.draft"));
-        assert!(out.contains("Needs your approval") && out.contains("send the renewal to Acme"));
-        assert!(out.contains("approve=true") && out.contains("c-42"));
-        assert!(out.contains("[conversation_id: c-42]"));
-    }
-
-    #[test]
-    fn render_turn_plain_reply_has_no_approval_prompt() {
-        let turn = serde_json::json!({ "conversationId": "c-1", "reply": "Revenue is up 12%." });
-        let out = render_turn(&turn);
-        assert!(out.contains("Revenue is up 12%."));
-        assert!(!out.contains("Needs your approval"));
-        assert!(out.contains("[conversation_id: c-1]"));
     }
 }

@@ -4,20 +4,18 @@
 //! 401 under an M2M client) — every tool run is audit-logged against the
 //! real person. Pearl th-f15107; smooai PR #2383.
 //!
-//! Three subcommands mirror the three routes:
-//!   chat     POST /organizations/{org}/smooth-operator/chat      {message, conversationId?}
-//!   confirm  POST /organizations/{org}/smooth-operator/confirm   {conversationId, approve}
-//!   history  GET  /organizations/{org}/smooth-operator/conversations/{id}
+//! **Transport (SMOODEV-2673):** the buffered REST chat/confirm routes were
+//! deleted; the operator is now driven over its **SEP WebSocket**. `chat` mints
+//! a short-lived socket token and runs one turn via
+//! [`crate::smooai::smooth_operator_ws::operator_turn`]. Destructive tools park
+//! the turn mid-flight and are confirmed **inline** on the same socket, so
+//! approval is a flag on `chat` (`--confirm`) rather than a follow-up command —
+//! the old `confirm` subcommand is retired and now explains the change.
+//! Without `--confirm`, destructive actions are declined and reported, never
+//! silently run.
 //!
-//! Responses are buffered JSON (`SmoothOperatorTurnResult`) — token streaming is
-//! phase 2 on the smooai side. A turn may return a `pendingAction`: a
-//! destructive tool (e.g. `email.send`) the loop paused on. `chat` resolves
-//! it inline — a y/N prompt on a TTY, or the up-front `--confirm`/
-//! `--no-confirm` flag for non-interactive/agent use. `--no-confirm` is
-//! never a default: without a flag on a non-TTY we print the pending action
-//! and stop rather than silently approving or declining.
-
-use std::io::IsTerminal;
+//!   chat     SEP WS  wss://smooth-operator.smoo.ai/ws  (token from api-prime)
+//!   history  GET     /organizations/{org}/smooth-operator/conversations/{id}
 
 use anyhow::{Context, Result};
 use clap::Subcommand;
@@ -30,8 +28,8 @@ use crate::smooai::user_client::UserClient;
 
 #[derive(Subcommand)]
 pub enum Cmd {
-    /// Send a message to the org smooth-operator and print its reply. Resolves any
-    /// destructive-action confirmation inline (TTY prompt or `--confirm`/`--no-confirm`).
+    /// Send a message to the org smooth-operator and print its reply. Runs one
+    /// turn over the SEP WebSocket; destructive actions run only with `--confirm`.
     Chat {
         /// The message to send to the smooth-operator.
         message: String,
@@ -51,8 +49,8 @@ pub enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Approve or decline the destructive action a prior `chat` turn paused on,
-    /// without resending the message. Use this to inspect first, then decide.
+    /// RETIRED — the operator now confirms destructive actions inline during the
+    /// turn. Use `chat --confirm` instead; this command explains the change.
     Confirm {
         /// The conversation id from the `chat` turn that returned a pendingAction.
         conversation_id: String,
@@ -69,6 +67,12 @@ pub enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// List or configure which tools the org's Smooth Operator may use.
+    /// **Org admin only** — this decides what your AI is allowed to do.
+    Tools {
+        #[command(subcommand)]
+        cmd: ToolsCmd,
+    },
     /// Print the message history of a smooth-operator conversation.
     History {
         /// The conversation id from a `chat` turn.
@@ -82,36 +86,34 @@ pub enum Cmd {
     },
 }
 
-// ---- API response shapes (subset of smooai SmoothOperatorTurnResult / SmoothOperatorHistory) ----
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TurnResult {
-    conversation_id: String,
-    #[serde(default)]
-    reply: String,
-    #[serde(default)]
-    tool_calls: Vec<ToolCall>,
-    #[serde(default)]
-    pending_action: Option<PendingAction>,
+#[derive(Subcommand)]
+pub enum ToolsCmd {
+    /// Show the operator's tool catalog and which are enabled for your org.
+    List {
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// Print raw JSON instead of the rendered view.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Turn a tool ON for the org (e.g. `email.send`).
+    Enable {
+        /// Dotted tool id, as shown by `tools list`.
+        tool_id: String,
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
+    /// Turn a tool OFF for the org — the operator can no longer use it at all.
+    Disable {
+        /// Dotted tool id, as shown by `tools list`.
+        tool_id: String,
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+    },
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ToolCall {
-    name: String,
-    /// `ran` | `pending` | `error`.
-    #[serde(default)]
-    status: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PendingAction {
-    name: String,
-    #[serde(default)]
-    summary: String,
-}
+// ---- API response shapes (subset of smooai SmoothOperatorHistory) ----
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -129,35 +131,6 @@ struct HistoryMessage {
     content: String,
     #[serde(default)]
     tool_name: Option<String>,
-}
-
-/// What to do with a `pendingAction`, given the flags and whether we're on a TTY.
-#[derive(Debug, PartialEq, Eq)]
-enum Decision {
-    Approve,
-    Decline,
-    /// Ask the user interactively (TTY only).
-    Prompt,
-    /// Non-TTY with no flag — refuse to guess; print the action and stop.
-    NeedFlag,
-}
-
-/// Pure confirm-flag resolution. clap already rejects `--confirm --no-confirm`
-/// together, so the `(true, true)` arm can't be reached in practice.
-fn decide(confirm: bool, no_confirm: bool, is_tty: bool) -> Decision {
-    match (confirm, no_confirm) {
-        (true, _) => Decision::Approve,
-        (_, true) => Decision::Decline,
-        _ if is_tty => Decision::Prompt,
-        _ => Decision::NeedFlag,
-    }
-}
-
-/// One compact line per tool call, e.g. `ran crm.search_contacts`. The status
-/// (`ran`/`pending`/`error`) reads as the verb. Glyph-free so it's cheap to
-/// test; the print path colors the leading verb.
-fn tool_call_line(tc: &ToolCall) -> String {
-    format!("{} {}", tc.status, tc.name)
 }
 
 fn resolve_org(override_org: Option<String>) -> Result<String> {
@@ -182,121 +155,45 @@ pub async fn cmd(cmd: Cmd) -> Result<()> {
             confirm,
             no_confirm,
             json,
-        } => chat(&client, resolve_org(org)?, message, conversation, confirm, no_confirm, json).await,
-        Cmd::Confirm {
-            conversation_id,
-            approve,
-            decline,
-            org,
-            json,
-        } => {
-            if !approve && !decline {
-                anyhow::bail!("pass `--approve` or `--decline`");
-            }
-            confirm(&client, &resolve_org(org)?, &conversation_id, approve, json).await
-        }
+        } => chat(resolve_org(org)?, message, conversation, confirm, no_confirm, json).await,
+        // The separate confirm round-trip is obsolete: the SEP WebSocket parks
+        // the turn and takes the approval inline, so approval is a flag on
+        // `chat` now rather than a follow-up command.
+        Cmd::Confirm { .. } => anyhow::bail!(
+            "`confirm` is obsolete — the operator now confirms destructive actions inline over its WebSocket transport. \
+             Re-run the ask with `th api smooth-operator chat \"…\" --confirm` to approve actions during the turn."
+        ),
+        Cmd::Tools { cmd } => match cmd {
+            ToolsCmd::List { org, json } => tools_list(&resolve_org(org)?, json).await,
+            ToolsCmd::Enable { tool_id, org } => tools_set(&resolve_org(org)?, &tool_id, true).await,
+            ToolsCmd::Disable { tool_id, org } => tools_set(&resolve_org(org)?, &tool_id, false).await,
+        },
         Cmd::History { conversation_id, org, json } => history(&client, &resolve_org(org)?, &conversation_id, json).await,
     }
 }
 
-async fn chat(client: &UserClient, org: String, message: String, conversation: Option<String>, confirm_flag: bool, no_confirm: bool, json: bool) -> Result<()> {
-    let mut body = json!({ "message": message });
-    if let Some(cid) = conversation.filter(|s| !s.trim().is_empty()) {
-        body["conversationId"] = Value::String(cid);
-    }
-    let raw = client
-        .post(&format!("/organizations/{org}/smooth-operator/chat"), &body)
+/// One operator turn over the SEP WebSocket. The buffered REST chat route was
+/// deleted in SMOODEV-2673; `operator_turn` mints the socket token and drives
+/// the session. `--confirm` approves destructive tools inline; otherwise they
+/// are declined and reported.
+async fn chat(org: String, message: String, conversation: Option<String>, confirm_flag: bool, no_confirm: bool, json: bool) -> Result<()> {
+    let approve = confirm_flag && !no_confirm;
+    let turn = crate::smooai::smooth_operator_ws::operator_turn(&org, &message, conversation.as_deref().filter(|s| !s.trim().is_empty()), approve)
         .await
-        .context("POST smooth-operator chat")?;
-    resolve_turn(client, &org, raw, confirm_flag, no_confirm, json).await
-}
-
-async fn confirm(client: &UserClient, org: &str, conversation_id: &str, approve: bool, json: bool) -> Result<()> {
-    let raw = post_confirm(client, org, conversation_id, approve).await?;
+        .context("smooth-operator turn")?;
     if json {
-        print_json(&raw);
-        return Ok(());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "reply": turn.reply,
+                "conversationId": turn.conversation_id,
+                "declined": turn.declined,
+            }))?
+        );
+    } else {
+        println!("{}", crate::smooai::smooth_operator_ws::render_operator_turn(&turn));
     }
-    render_turn(&parse_turn(&raw)?);
     Ok(())
-}
-
-async fn post_confirm(client: &UserClient, org: &str, conversation_id: &str, approve: bool) -> Result<Value> {
-    let body = json!({ "conversationId": conversation_id, "approve": approve });
-    client
-        .post(&format!("/organizations/{org}/smooth-operator/confirm"), &body)
-        .await
-        .context("POST smooth-operator confirm")
-}
-
-/// Render a turn, then keep resolving any `pendingAction` (a turn can pause on
-/// several destructive tools) until the loop settles or we hit a non-TTY with
-/// no decision flag.
-async fn resolve_turn(client: &UserClient, org: &str, raw: Value, confirm_flag: bool, no_confirm: bool, json: bool) -> Result<()> {
-    if json {
-        print_json(&raw);
-        // In JSON mode we don't auto-confirm — the caller inspects the
-        // pendingAction and drives `confirm` itself.
-        return Ok(());
-    }
-    let mut turn = parse_turn(&raw)?;
-    loop {
-        render_turn(&turn);
-        let Some(pending) = turn.pending_action.as_ref() else { return Ok(()) };
-        let approve = match decide(confirm_flag, no_confirm, std::io::stdin().is_terminal()) {
-            Decision::Approve => true,
-            Decision::Decline => false,
-            Decision::Prompt => prompt_confirm(pending)?,
-            Decision::NeedFlag => {
-                println!(
-                    "  {} pending action needs a decision — re-run with {} or {}, or `th api smooth-operator confirm {} --approve|--decline`",
-                    "!".yellow().bold(),
-                    "--confirm".bold(),
-                    "--no-confirm".bold(),
-                    turn.conversation_id.cyan(),
-                );
-                return Ok(());
-            }
-        };
-        let raw = post_confirm(client, org, &turn.conversation_id, approve).await?;
-        turn = parse_turn(&raw)?;
-    }
-}
-
-fn prompt_confirm(pending: &PendingAction) -> Result<bool> {
-    dialoguer::Confirm::new()
-        .with_prompt(format!("Approve {} — {}?", pending.name, pending.summary))
-        .default(false)
-        .interact()
-        .context("read confirmation")
-}
-
-fn parse_turn(raw: &Value) -> Result<TurnResult> {
-    serde_json::from_value(raw.clone()).context("parse smooth-operator turn result")
-}
-
-fn render_turn(turn: &TurnResult) {
-    println!();
-    for tc in &turn.tool_calls {
-        let line = tool_call_line(tc);
-        let glyph = match tc.status.as_str() {
-            "error" => "✗".red().to_string(),
-            "pending" => "…".yellow().to_string(),
-            _ => "✓".green().to_string(),
-        };
-        println!("  {} {}", glyph, line.dimmed());
-    }
-    if !turn.reply.trim().is_empty() {
-        if !turn.tool_calls.is_empty() {
-            println!();
-        }
-        println!("{}", turn.reply);
-    }
-    if let Some(p) = &turn.pending_action {
-        println!();
-        println!("  {} {} — {}", "⚠".yellow().bold(), p.name.bold(), p.summary);
-    }
-    println!();
 }
 
 async fn history(client: &UserClient, org: &str, conversation_id: &str, json: bool) -> Result<()> {
@@ -328,48 +225,150 @@ async fn history(client: &UserClient, org: &str, conversation_id: &str, json: bo
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{decide, resolve_org, tool_call_line, Decision, ToolCall};
+// ---- Operator tool config (per-org: which tools the operator may use) -------
 
-    fn tc(name: &str, status: &str) -> ToolCall {
-        ToolCall {
-            name: name.into(),
-            status: status.into(),
+/// One entry of the operator's tool catalog, as returned by
+/// `GET /organizations/{org}/smooth-operator/tools`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorTool {
+    /// Dotted tool name (`email.send`) — the id a write references.
+    pub id: String,
+    #[serde(default)]
+    pub description: String,
+    /// Requires human approval before it runs.
+    #[serde(default)]
+    pub destructive: bool,
+    /// The ORG's config: is this tool turned on? (Default on.)
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// Whether the requesting user's feature entitlements + permissions would
+    /// expose it at all. Effective exposure = `available && enabled`.
+    #[serde(default)]
+    pub available: bool,
+}
+
+const fn yes() -> bool {
+    true
+}
+
+fn parse_catalog(raw: &Value) -> Result<Vec<OperatorTool>> {
+    serde_json::from_value(raw.get("tools").cloned().unwrap_or(Value::Null)).context("parse smooth-operator tool catalog")
+}
+
+/// The org's operator tool catalog + current enabled state. Admin-only server-side.
+///
+/// # Errors
+/// Errors without a Smoo user session, if the caller isn't an org admin (403),
+/// or if the request fails.
+pub async fn list_operator_tools(org: &str) -> Result<Vec<OperatorTool>> {
+    let client = UserClient::from_user_session().await?;
+    let raw = client
+        .get(&format!("/organizations/{org}/smooth-operator/tools"))
+        .await
+        .context("GET smooth-operator tools")?;
+    parse_catalog(&raw)
+}
+
+/// Turn one tool on/off for the org, returning the authoritative new catalog.
+///
+/// **Read-modify-write, deliberately.** The PUT body is authoritative: the
+/// server persists only the disabled subset, so any tool *omitted* from the body
+/// is treated as ENABLED. Sending a one-entry body would therefore silently
+/// re-enable every other tool. We re-read the full catalog, flip just this one,
+/// and send all of it.
+///
+/// # Errors
+/// Errors on an unknown `tool_id`, without a Smoo user session, if the caller
+/// isn't an org admin (403), or if a request fails.
+pub async fn set_operator_tool(org: &str, tool_id: &str, enabled: bool) -> Result<Vec<OperatorTool>> {
+    let mut tools = list_operator_tools(org).await?;
+    if !tools.iter().any(|t| t.id == tool_id) {
+        anyhow::bail!("unknown tool `{tool_id}` — run `th api smooth-operator tools list` to see the catalog");
+    }
+    for t in &mut tools {
+        if t.id == tool_id {
+            t.enabled = enabled;
         }
     }
+    let body = json!({
+        "tools": tools.iter().map(|t| json!({ "toolId": t.id, "enabled": t.enabled })).collect::<Vec<_>>(),
+    });
+    let client = UserClient::from_user_session().await?;
+    let raw = client
+        .put(&format!("/organizations/{org}/smooth-operator/tools"), &body)
+        .await
+        .context("PUT smooth-operator tools")?;
+    parse_catalog(&raw)
+}
 
-    #[test]
-    fn confirm_flag_wins_over_tty() {
-        assert_eq!(decide(true, false, true), Decision::Approve);
-        assert_eq!(decide(true, false, false), Decision::Approve);
+/// First sentence/line of a tool description, capped — enough to explain the
+/// tool, short enough that a 45-tool catalog stays readable. Empty in, empty out.
+fn summarize(description: &str) -> String {
+    let first = description.split(['\n', '.']).map(str::trim).find(|s| !s.is_empty()).unwrap_or_default();
+    if first.is_empty() {
+        return String::new();
     }
+    let mut s: String = first.chars().take(70).collect();
+    if first.chars().count() > 70 {
+        s.push('…');
+    }
+    format!(" — {s}")
+}
 
-    #[test]
-    fn no_confirm_flag_declines() {
-        assert_eq!(decide(false, true, true), Decision::Decline);
-        assert_eq!(decide(false, true, false), Decision::Decline);
+/// Render the catalog as compact text (shared by the CLI and the MCP tool).
+#[must_use]
+pub fn render_tool_catalog(tools: &[OperatorTool]) -> String {
+    use std::fmt::Write as _;
+    let (on, off) = tools.iter().partition::<Vec<_>, _>(|t| t.enabled);
+    let mut out = format!("{} tool(s): {} enabled, {} disabled\n", tools.len(), on.len(), off.len());
+    for t in tools {
+        let state = if t.enabled { "on " } else { "OFF" };
+        let flags = match (t.destructive, t.available) {
+            (true, true) => " [needs approval]",
+            (true, false) => " [needs approval; unavailable to you]",
+            (false, false) => " [unavailable to you]",
+            (false, true) => "",
+        };
+        // A one-line gist so an MCP client can explain the tool without a
+        // second lookup; the full text is often a paragraph.
+        let gist = summarize(&t.description);
+        let _ = writeln!(out, "  {state}  {}{flags}{gist}", t.id);
     }
+    out.trim_end().to_string()
+}
 
-    #[test]
-    fn tty_with_no_flag_prompts() {
-        assert_eq!(decide(false, false, true), Decision::Prompt);
+async fn tools_list(org: &str, json_out: bool) -> Result<()> {
+    let tools = list_operator_tools(org).await?;
+    if json_out {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &json!({ "tools": tools.iter().map(|t| json!({"id": t.id, "enabled": t.enabled, "destructive": t.destructive, "available": t.available})).collect::<Vec<_>>() })
+            )?
+        );
+    } else {
+        println!("{}", render_tool_catalog(&tools));
     }
+    Ok(())
+}
 
-    #[test]
-    fn non_tty_with_no_flag_refuses_to_guess() {
-        // The safety guarantee: never auto-approve or auto-decline for an agent.
-        assert_eq!(decide(false, false, false), Decision::NeedFlag);
-    }
+async fn tools_set(org: &str, tool_id: &str, enabled: bool) -> Result<()> {
+    let tools = set_operator_tool(org, tool_id, enabled).await?;
+    let verb = if enabled {
+        "enabled".green().to_string()
+    } else {
+        "disabled".yellow().to_string()
+    };
+    println!("{verb} {}", tool_id.bold());
+    println!("{}", render_tool_catalog(&tools));
+    Ok(())
+}
 
-    #[test]
-    fn tool_call_line_is_compact_verb_plus_name() {
-        assert_eq!(tool_call_line(&tc("crm.search_contacts", "ran")), "ran crm.search_contacts");
-        assert_eq!(tool_call_line(&tc("email.send", "pending")), "pending email.send");
-        assert_eq!(tool_call_line(&tc("crm.create_contact", "error")), "error crm.create_contact");
-        // Unknown status is passed through, not dropped.
-        assert_eq!(tool_call_line(&tc("x.y", "weird")), "weird x.y");
-    }
+#[cfg(test)]
+mod tests {
+    use super::{parse_catalog, render_tool_catalog, resolve_org};
+    use serde_json::json;
 
     #[test]
     fn resolve_org_prefers_flag_then_env() {
@@ -378,25 +377,24 @@ mod tests {
     }
 
     #[test]
-    fn parse_turn_reads_camelcase_and_defaults() {
-        // Full shape.
-        let full = serde_json::json!({
-            "conversationId": "c1",
-            "reply": "found 3",
-            "toolCalls": [{ "name": "crm.search_contacts", "input": {}, "status": "ran" }],
-            "pendingAction": { "toolCallId": "t1", "name": "email.send", "input": {}, "summary": "send to jane" }
-        });
-        let t = super::parse_turn(&full).unwrap();
-        assert_eq!(t.conversation_id, "c1");
-        assert_eq!(t.tool_calls.len(), 1);
-        assert_eq!(t.pending_action.unwrap().name, "email.send");
+    fn parse_catalog_defaults_enabled_true() {
+        // `enabled` absent must mean ON — an absent org config means every tool
+        // is enabled, so defaulting to false would read as "everything is off".
+        let raw = json!({ "tools": [{ "id": "email.send" }] });
+        let tools = parse_catalog(&raw).unwrap();
+        assert_eq!(tools.len(), 1);
+        assert!(tools[0].enabled, "missing `enabled` must default to true");
+    }
 
-        // Minimal shape — only conversationId; the rest default.
-        let min = serde_json::json!({ "conversationId": "c2" });
-        let t = super::parse_turn(&min).unwrap();
-        assert_eq!(t.conversation_id, "c2");
-        assert!(t.reply.is_empty());
-        assert!(t.tool_calls.is_empty());
-        assert!(t.pending_action.is_none());
+    #[test]
+    fn render_marks_disabled_and_destructive() {
+        let raw = json!({ "tools": [
+            { "id": "crm.search_contacts", "enabled": true, "destructive": false, "available": true },
+            { "id": "email.send", "enabled": false, "destructive": true, "available": true },
+        ]});
+        let out = render_tool_catalog(&parse_catalog(&raw).unwrap());
+        assert!(out.contains("2 tool(s): 1 enabled, 1 disabled"));
+        assert!(out.contains("on   crm.search_contacts"));
+        assert!(out.contains("OFF  email.send [needs approval]"));
     }
 }
