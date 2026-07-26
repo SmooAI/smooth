@@ -430,6 +430,20 @@ impl SmoothDolt {
         self.run_cli_once(&["exec", &self.data_dir_str(), "-q", statement])
     }
 
+    /// Commit the working set only if it is dirty, so a clean store
+    /// doesn't accrue an empty commit per call (`commit` passes
+    /// `--allow-empty`). Returns whether a commit was made.
+    ///
+    /// Same shape as the `pre-commit` git hook's auto-commit — see
+    /// `smooth-cli`'s `run_pre_commit`.
+    pub fn commit_working_set(&self, message: &str) -> Result<bool> {
+        if self.status()?.trim().is_empty() {
+            return Ok(false);
+        }
+        self.commit(message)?;
+        Ok(true)
+    }
+
     /// Stage all changes and commit with a message.
     pub fn commit(&self, message: &str) -> Result<String> {
         if let Some(server) = &self.server {
@@ -508,7 +522,21 @@ impl SmoothDolt {
     }
 
     /// Pull from the configured Dolt remote.
+    ///
+    /// Commits the working set first. `DOLT_PULL` merges, and a merge
+    /// refuses to run while the working set is dirty — but callers
+    /// dirty it as a side effect of ordinary *reads*: `th msg inbox`
+    /// and the `th msg watch` poll loop heartbeat the `agents` table
+    /// without committing. Without this, `th pearls pull` bails with
+    /// "cannot merge with uncommitted changes" on every invocation,
+    /// and `watch` — which swallows pull errors — silently stops
+    /// receiving remote messages entirely. SMOODEV-2769.
+    ///
+    /// Best-effort: if the commit fails the pull still runs and
+    /// reports Dolt's own error, so this can only turn a previously
+    /// failing pull into a working one.
     pub fn pull(&self) -> Result<String> {
+        let _ = self.commit_working_set("auto-commit working set before pull");
         if let Some(server) = &self.server {
             return Self::run_with_self_heal(server, |s| s.with_client(|c| c.dolt("pull")));
         }
@@ -1690,6 +1718,42 @@ mod tests {
     fn find_repo_dolt_dir_returns_none_for_tmp() {
         let tmp = std::env::temp_dir();
         assert!(find_repo_dolt_dir(&tmp).is_none());
+    }
+
+    /// `pull` merges, and Dolt refuses to merge a dirty working set —
+    /// so `commit_working_set` has to actually clean it, and has to
+    /// stay quiet when there's nothing to clean (`commit` passes
+    /// `--allow-empty`, so an unconditional call would add an empty
+    /// commit per pull). SMOODEV-2769.
+    #[test]
+    fn commit_working_set_cleans_dirty_store_and_noops_when_clean() {
+        // Needs the real embedded engine; skip where it isn't built.
+        if find_smooth_dolt_binary().is_none() {
+            eprintln!("skipping: smooth-dolt binary not found");
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("pearls");
+        std::process::Command::new(find_smooth_dolt_binary().unwrap())
+            .args(["init", dir.to_str().unwrap()])
+            .status()
+            .expect("init");
+        let dolt = SmoothDolt::new(&dir).expect("open store");
+
+        // Clean store: nothing to commit.
+        assert!(!dolt.commit_working_set("noop").expect("status on clean store"));
+
+        // Dirty it the same way the agents heartbeat does — a write
+        // with no commit behind it.
+        dolt.exec("CREATE TABLE heartbeat (name VARCHAR(64) PRIMARY KEY)").expect("create table");
+        assert!(!dolt.status().expect("status").trim().is_empty(), "expected a dirty working set");
+
+        assert!(dolt.commit_working_set("clean it").expect("commit"));
+        assert!(
+            dolt.status().expect("status").trim().is_empty(),
+            "working set still dirty after commit_working_set — pull would bail with \
+             'cannot merge with uncommitted changes'"
+        );
     }
 }
 
