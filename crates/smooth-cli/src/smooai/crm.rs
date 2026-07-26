@@ -1131,7 +1131,7 @@ async fn deals(cmd: DealsCmd) -> Result<()> {
                 body["implementationCost"] = json!(u);
             }
             if let Some(s) = stage.filter(|s| !s.trim().is_empty()) {
-                body["stage"] = json!(s);
+                body["stage"] = json!(resolve_stage_name(&client, &org, &s).await?);
             }
             if let Some(d) = close_date.filter(|s| !s.trim().is_empty()) {
                 body["closeDate"] = json!(d);
@@ -1150,6 +1150,7 @@ async fn deals(cmd: DealsCmd) -> Result<()> {
         }
         DealsCmd::Move { deal_id, stage, org } => {
             let org = resolve_org(org)?;
+            let stage = resolve_stage_name(&client, &org, &stage).await?;
             client
                 .patch(&format!("/organizations/{org}/crm/deals/{deal_id}"), &json!({ "stage": stage }))
                 .await
@@ -1398,7 +1399,6 @@ async fn find_deal(client: &UserClient, org: &str, title: &str) -> Result<Option
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 async fn create_deal(
     client: &UserClient,
     org: &str,
@@ -1421,7 +1421,10 @@ async fn create_deal(
         );
         return Ok(());
     }
-    let stage = stage.filter(|s| !s.trim().is_empty());
+    let stage = match stage.filter(|s| !s.trim().is_empty()) {
+        Some(s) => Some(resolve_stage_name(client, org, &s).await?),
+        None => None,
+    };
     let mut body = json!({ "title": title });
     if let Some(v) = value {
         body["value"] = json!(v);
@@ -1492,6 +1495,46 @@ async fn resolve_contact_id(client: &UserClient, org: &str, s: &str) -> Result<S
     match found {
         Some(c) => c.get("id").and_then(Value::as_str).map(str::to_string).context("matched contact has no id"),
         None => anyhow::bail!("no contact matches '{s}' — create it first: `th api crm contacts create`"),
+    }
+}
+
+/// Resolve a free-text stage argument to the org's CANONICAL stage name,
+/// matching case-insensitively. Every deal write that sets a stage goes
+/// through here.
+///
+/// The board groups deals by the literal `deal.stage` string, so a value that
+/// doesn't match a `crm_stages` row silently orphans the deal: it renders in
+/// no column, and — having no stage row — carries no probability, so it
+/// contributes $0 to the forecast while still looking fine in `deals show`.
+/// A lowercase "proposal" next to the real "Proposal" cost a $13.6k deal its
+/// place on the board exactly this way.
+async fn resolve_stage_name(client: &UserClient, org: &str, s: &str) -> Result<String> {
+    let stages = client.get(&format!("/organizations/{org}/crm/stages")).await.context("GET stages")?;
+    let names: Vec<String> = stages
+        .as_array()
+        .map(|a| a.iter().filter_map(|st| st.get("name").and_then(Value::as_str).map(str::to_string)).collect())
+        .unwrap_or_default();
+    match_stage_name(&names, s)
+}
+
+/// The pure half of [`resolve_stage_name`] — canonical name for `s`, or an
+/// error naming the valid stages. Empty `names` (unseeded board) passes the
+/// value through rather than blocking every write.
+fn match_stage_name(names: &[String], s: &str) -> Result<String> {
+    let want = s.trim().to_lowercase();
+    if names.is_empty() {
+        return Ok(s.trim().to_string());
+    }
+    match names.iter().find(|n| n.trim().to_lowercase() == want) {
+        Some(canonical) => Ok(canonical.clone()),
+        None => anyhow::bail!(
+            "no pipeline stage named '{}' — the board has: {}.\n         \
+             A deal whose stage matches no column renders NOWHERE on the board and counts $0 \
+             toward the forecast. Add the stage first with `th crm stages create \"{}\"`.",
+            s.trim(),
+            names.join(", "),
+            s.trim()
+        ),
     }
 }
 
@@ -3231,8 +3274,8 @@ fn reminder_status(r: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_timeline_items, fmt_cents, group_thousands, image_content_type, is_clear_token, is_overdue, looks_like_uuid, norm_email, norm_phone,
-        normalize_entity_type, own_image_id, parent_row_points_up, parse_entity_ref, parse_relative, parse_when, preview_body, reminder_status,
+        extract_timeline_items, fmt_cents, group_thousands, image_content_type, is_clear_token, is_overdue, looks_like_uuid, match_stage_name, norm_email,
+        norm_phone, normalize_entity_type, own_image_id, parent_row_points_up, parse_entity_ref, parse_relative, parse_when, preview_body, reminder_status,
         split_entity_ref, timeline_glyph, EntityRef, ImageEntity,
     };
     use serde_json::json;
@@ -3530,5 +3573,21 @@ mod tests {
         assert!(reminder_status(&both).contains("cancelled"));
         // explicit null stamps read as pending.
         assert!(reminder_status(&json!({ "sentAt": null, "cancelledAt": null })).contains("pending"));
+    }
+
+    #[test]
+    fn match_stage_name_canonicalizes_and_rejects_orphans() {
+        let board: Vec<String> = ["Lead", "Qualified", "Proposal", "Closed Won"].iter().map(|s| s.to_string()).collect();
+        // The real bug: lowercase "proposal" wrote a stage matching no column,
+        // orphaning a $13.6k deal off the board at $0 weighted.
+        assert_eq!(match_stage_name(&board, "proposal").unwrap(), "Proposal");
+        assert_eq!(match_stage_name(&board, "  CLOSED WON ").unwrap(), "Closed Won");
+        assert_eq!(match_stage_name(&board, "Lead").unwrap(), "Lead");
+        // Unknown stage is refused, and the error names the valid columns.
+        let err = match_stage_name(&board, "Active").unwrap_err().to_string();
+        assert!(err.contains("no pipeline stage named 'Active'"), "{err}");
+        assert!(err.contains("Proposal"), "{err}");
+        // Unseeded board: nothing to validate against, value passes through.
+        assert_eq!(match_stage_name(&[], "whatever").unwrap(), "whatever");
     }
 }
