@@ -316,6 +316,14 @@ enum Commands {
         #[command(subcommand)]
         cmd: smooai::knowledge::Cmd,
     },
+    /// Smoo AI CRM — contacts, companies, deals (with `--value` / `--mrr` /
+    /// `--upfront` economics), tasks, notes, stages, pipeline forecast, and
+    /// import. Same commands as `th api crm`, promoted to the top level
+    /// alongside `th config` / `th testing`.
+    Crm {
+        #[command(subcommand)]
+        cmd: smooai::crm::Cmd,
+    },
     /// Run a pearl through a Smooth operative — dispatches to Big Smooth
     /// (`th up` must be running) and streams agent events to stdout.
     Run {
@@ -1674,6 +1682,7 @@ async fn main() -> Result<()> {
         Some(Commands::Crawl { cmd }) => smooai::crawl::cmd(cmd).await,
         Some(Commands::Search { args }) => smooai::websearch::run(args).await,
         Some(Commands::Knowledge { cmd }) => smooai::knowledge::cmd(cmd).await,
+        Some(Commands::Crm { cmd }) => smooai::crm::cmd(cmd).await,
         Some(Commands::WebSearch { cmd }) => smooai::websearch::cmd(cmd).await,
         Some(Commands::Llm { cmd }) => smooai::llm_gateway::cmd(cmd).await,
         Some(Commands::Notify {
@@ -8367,6 +8376,41 @@ mod org_cli_tests {
                 }
             })
         ));
+        // top-level promotion: `th crm deals …` ⇄ `th api crm deals …`,
+        // including the economics triple on `deals update`.
+        assert!(matches!(
+            Cli::try_parse_from(["th", "crm", "deals", "list"]).expect("th crm deals").command,
+            Some(Commands::Crm {
+                cmd: smooai::crm::Cmd::Deals { .. }
+            })
+        ));
+        match Cli::try_parse_from([
+            "th",
+            "crm",
+            "deals",
+            "update",
+            "some-deal",
+            "--value",
+            "13600",
+            "--mrr",
+            "550",
+            "--upfront",
+            "7000",
+        ])
+        .expect("th crm deals update")
+        .command
+        {
+            Some(Commands::Crm {
+                cmd: smooai::crm::Cmd::Deals {
+                    cmd: smooai::crm::DealsCmd::Update { value, mrr, upfront, .. },
+                },
+            }) => {
+                assert_eq!(value, Some(13600.0));
+                assert_eq!(mrr, Some(550.0));
+                assert_eq!(upfront, Some(7000.0));
+            }
+            _ => panic!("expected Crm/Deals/Update"),
+        }
         // nested testing: `th testing runs` ⇄ `th testing run`
         assert!(matches!(
             Cli::try_parse_from(["th", "testing", "run", "list"]).expect("testing run").command,

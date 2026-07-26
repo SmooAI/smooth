@@ -261,9 +261,15 @@ pub enum DealsCmd {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
-        /// Deal value in dollars (e.g. 5500).
+        /// Total deal value in dollars (e.g. 5500).
         #[arg(long)]
         value: Option<f64>,
+        /// Monthly recurring revenue in dollars (e.g. 550).
+        #[arg(long)]
+        mrr: Option<f64>,
+        /// Upfront / implementation cost in dollars (e.g. 7000).
+        #[arg(long, visible_alias = "implementation-cost")]
+        upfront: Option<f64>,
         /// Pipeline stage (free text, e.g. "closed_won", "discovery").
         #[arg(long)]
         stage: Option<String>,
@@ -273,6 +279,34 @@ pub enum DealsCmd {
         /// Link to a contact id.
         #[arg(long)]
         contact: Option<String>,
+        /// Close date (ISO-8601, e.g. 2026-07-02).
+        #[arg(long = "close-date")]
+        close_date: Option<String>,
+    },
+    /// Update a deal — only the flags you pass change. The economics
+    /// triple: `--value` (total), `--mrr` (monthly recurring), `--upfront`
+    /// (one-time implementation).
+    Update {
+        /// The deal — id or title.
+        deal: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// New deal title.
+        #[arg(long)]
+        title: Option<String>,
+        /// Total deal value in dollars.
+        #[arg(long)]
+        value: Option<f64>,
+        /// Monthly recurring revenue in dollars.
+        #[arg(long)]
+        mrr: Option<f64>,
+        /// Upfront / implementation cost in dollars.
+        #[arg(long, visible_alias = "implementation-cost")]
+        upfront: Option<f64>,
+        /// Pipeline stage (free text).
+        #[arg(long)]
+        stage: Option<String>,
         /// Close date (ISO-8601, e.g. 2026-07-02).
         #[arg(long = "close-date")]
         close_date: Option<String>,
@@ -1061,16 +1095,62 @@ async fn deals(cmd: DealsCmd) -> Result<()> {
             title,
             org,
             value,
+            mrr,
+            upfront,
             stage,
             company,
             contact,
             close_date,
         } => {
             let org = resolve_org(org)?;
-            create_deal(&client, &org, &title, value, stage, company, contact, close_date).await?;
+            create_deal(&client, &org, &title, value, mrr, upfront, stage, company, contact, close_date).await?;
+        }
+        DealsCmd::Update {
+            deal,
+            org,
+            title,
+            value,
+            mrr,
+            upfront,
+            stage,
+            close_date,
+        } => {
+            let org = resolve_org(org)?;
+            let deal_id = resolve_deal_id(&client, &org, &deal).await?;
+            let mut body = json!({});
+            if let Some(t) = title.filter(|s| !s.trim().is_empty()) {
+                body["title"] = json!(t);
+            }
+            if let Some(v) = value {
+                body["value"] = json!(v);
+            }
+            if let Some(m) = mrr {
+                body["mrr"] = json!(m);
+            }
+            if let Some(u) = upfront {
+                body["implementationCost"] = json!(u);
+            }
+            if let Some(s) = stage.filter(|s| !s.trim().is_empty()) {
+                body["stage"] = json!(resolve_stage_name(&client, &org, &s).await?);
+            }
+            if let Some(d) = close_date.filter(|s| !s.trim().is_empty()) {
+                body["closeDate"] = json!(d);
+            }
+            let empty = body.as_object().is_some_and(|o| o.is_empty());
+            anyhow::ensure!(
+                !empty,
+                "nothing to update — pass at least one of --title/--value/--mrr/--upfront/--stage/--close-date"
+            );
+            client
+                .patch(&format!("/organizations/{org}/crm/deals/{deal_id}"), &body)
+                .await
+                .context("PATCH deal")?;
+            println!("  {} updated deal {}", "↻".yellow(), deal_id.dimmed());
+            show_deal(&client, &org, &deal_id).await?;
         }
         DealsCmd::Move { deal_id, stage, org } => {
             let org = resolve_org(org)?;
+            let stage = resolve_stage_name(&client, &org, &stage).await?;
             client
                 .patch(&format!("/organizations/{org}/crm/deals/{deal_id}"), &json!({ "stage": stage }))
                 .await
@@ -1324,6 +1404,8 @@ async fn create_deal(
     org: &str,
     title: &str,
     value: Option<f64>,
+    mrr: Option<f64>,
+    upfront: Option<f64>,
     stage: Option<String>,
     company: Option<String>,
     contact: Option<String>,
@@ -1339,10 +1421,19 @@ async fn create_deal(
         );
         return Ok(());
     }
-    let stage = stage.filter(|s| !s.trim().is_empty());
+    let stage = match stage.filter(|s| !s.trim().is_empty()) {
+        Some(s) => Some(resolve_stage_name(client, org, &s).await?),
+        None => None,
+    };
     let mut body = json!({ "title": title });
     if let Some(v) = value {
         body["value"] = json!(v);
+    }
+    if let Some(m) = mrr {
+        body["mrr"] = json!(m);
+    }
+    if let Some(u) = upfront {
+        body["implementationCost"] = json!(u);
     }
     if let Some(s) = &stage {
         body["stage"] = json!(s);
@@ -1407,6 +1498,46 @@ async fn resolve_contact_id(client: &UserClient, org: &str, s: &str) -> Result<S
     }
 }
 
+/// Resolve a free-text stage argument to the org's CANONICAL stage name,
+/// matching case-insensitively. Every deal write that sets a stage goes
+/// through here.
+///
+/// The board groups deals by the literal `deal.stage` string, so a value that
+/// doesn't match a `crm_stages` row silently orphans the deal: it renders in
+/// no column, and — having no stage row — carries no probability, so it
+/// contributes $0 to the forecast while still looking fine in `deals show`.
+/// A lowercase "proposal" next to the real "Proposal" cost a $13.6k deal its
+/// place on the board exactly this way.
+async fn resolve_stage_name(client: &UserClient, org: &str, s: &str) -> Result<String> {
+    let stages = client.get(&format!("/organizations/{org}/crm/stages")).await.context("GET stages")?;
+    let names: Vec<String> = stages
+        .as_array()
+        .map(|a| a.iter().filter_map(|st| st.get("name").and_then(Value::as_str).map(str::to_string)).collect())
+        .unwrap_or_default();
+    match_stage_name(&names, s)
+}
+
+/// The pure half of [`resolve_stage_name`] — canonical name for `s`, or an
+/// error naming the valid stages. Empty `names` (unseeded board) passes the
+/// value through rather than blocking every write.
+fn match_stage_name(names: &[String], s: &str) -> Result<String> {
+    let want = s.trim().to_lowercase();
+    if names.is_empty() {
+        return Ok(s.trim().to_string());
+    }
+    match names.iter().find(|n| n.trim().to_lowercase() == want) {
+        Some(canonical) => Ok(canonical.clone()),
+        None => anyhow::bail!(
+            "no pipeline stage named '{}' — the board has: {}.\n         \
+             A deal whose stage matches no column renders NOWHERE on the board and counts $0 \
+             toward the forecast. Add the stage first with `th crm stages create \"{}\"`.",
+            s.trim(),
+            names.join(", "),
+            s.trim()
+        ),
+    }
+}
+
 /// Resolve a deal id from a uuid (used as-is) or a title (looked up).
 async fn resolve_deal_id(client: &UserClient, org: &str, s: &str) -> Result<String> {
     if looks_like_uuid(s) {
@@ -1424,6 +1555,18 @@ async fn show_deal(client: &UserClient, org: &str, deal_id: &str) -> Result<()> 
     println!("  {}", d.get("title").and_then(Value::as_str).unwrap_or("—").bold());
     println!("  {} {}", "Stage  ".dimmed(), stage_color(d.get("stage").and_then(Value::as_str).unwrap_or("")));
     println!("  {} {}", "Value  ".dimmed(), fmt_money(as_money(d.get("value"))).bold());
+    let mrr = as_money(d.get("mrr"));
+    let upfront = as_money(d.get("implementationCost"));
+    if let Some(m) = mrr {
+        println!("  {} {} / mo", "MRR    ".dimmed(), fmt_money(Some(m)));
+    }
+    if let Some(u) = upfront {
+        println!("  {} {}", "Upfront".dimmed(), fmt_money(Some(u)));
+    }
+    if mrr.is_some() || upfront.is_some() {
+        let year1 = upfront.unwrap_or(0.0) + mrr.unwrap_or(0.0) * 12.0;
+        println!("  {} {}", "Year 1 ".dimmed(), fmt_money(Some(year1)).bold());
+    }
     println!("  {} {}", "Close  ".dimmed(), short_date(d.get("closeDate")));
     if let Some(cid) = d.get("companyId").and_then(Value::as_str) {
         let name = client
@@ -1472,35 +1615,48 @@ fn contact_label(c: &Value) -> String {
 fn render_deals(body: &Value) {
     let deals = body.as_array().cloned().unwrap_or_default();
     let pipeline: f64 = deals.iter().filter_map(|d| as_money(d.get("value"))).sum();
+    let mrr_total: f64 = deals.iter().filter_map(|d| as_money(d.get("mrr"))).sum();
     println!();
     println!("  {}", "Deals".bold());
     println!(
-        "  {} {}     {} {}",
+        "  {} {}     {} {}     {} {} / mo",
         "Total".dimmed(),
         deals.len().to_string().bold(),
         "Pipeline".dimmed(),
-        fmt_money(Some(pipeline)).bold()
+        fmt_money(Some(pipeline)).bold(),
+        "MRR".dimmed(),
+        fmt_money(Some(mrr_total)).bold()
     );
     if deals.is_empty() {
         println!("\n  {}\n", "no deals yet".dimmed());
         return;
     }
-    let (h_title, h_stage, h_value, h_close) = (
+    let (h_title, h_stage, h_value, h_mrr, h_close) = (
         format!("{:<38}", "TITLE"),
         format!("{:<14}", "STAGE"),
         format!("{:>12}", "VALUE"),
+        format!("{:>10}", "MRR"),
         format!("{:<10}", "CLOSE"),
     );
     println!();
-    println!("  {}  {}  {}  {}", h_title.dimmed(), h_stage.dimmed(), h_value.dimmed(), h_close.dimmed());
+    println!(
+        "  {}  {}  {}  {}  {}",
+        h_title.dimmed(),
+        h_stage.dimmed(),
+        h_value.dimmed(),
+        h_mrr.dimmed(),
+        h_close.dimmed()
+    );
     for d in &deals {
         let title = truncate(d.get("title").and_then(Value::as_str).unwrap_or("—"), 38);
         let value = format!("{:>12}", fmt_money(as_money(d.get("value"))));
+        let mrr = format!("{:>10}", as_money(d.get("mrr")).map(|m| fmt_money(Some(m))).unwrap_or_else(|| "—".into()));
         println!(
-            "  {:<38}  {}  {}  {}",
+            "  {:<38}  {}  {}  {}  {}",
             title,
             stage_cell(d.get("stage").and_then(Value::as_str).unwrap_or(""), 14),
             value,
+            mrr,
             short_date(d.get("closeDate")),
         );
     }
@@ -3118,8 +3274,8 @@ fn reminder_status(r: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_timeline_items, fmt_cents, group_thousands, image_content_type, is_clear_token, is_overdue, looks_like_uuid, norm_email, norm_phone,
-        normalize_entity_type, own_image_id, parent_row_points_up, parse_entity_ref, parse_relative, parse_when, preview_body, reminder_status,
+        extract_timeline_items, fmt_cents, group_thousands, image_content_type, is_clear_token, is_overdue, looks_like_uuid, match_stage_name, norm_email,
+        norm_phone, normalize_entity_type, own_image_id, parent_row_points_up, parse_entity_ref, parse_relative, parse_when, preview_body, reminder_status,
         split_entity_ref, timeline_glyph, EntityRef, ImageEntity,
     };
     use serde_json::json;
@@ -3417,5 +3573,21 @@ mod tests {
         assert!(reminder_status(&both).contains("cancelled"));
         // explicit null stamps read as pending.
         assert!(reminder_status(&json!({ "sentAt": null, "cancelledAt": null })).contains("pending"));
+    }
+
+    #[test]
+    fn match_stage_name_canonicalizes_and_rejects_orphans() {
+        let board: Vec<String> = ["Lead", "Qualified", "Proposal", "Closed Won"].iter().map(|s| s.to_string()).collect();
+        // The real bug: lowercase "proposal" wrote a stage matching no column,
+        // orphaning a $13.6k deal off the board at $0 weighted.
+        assert_eq!(match_stage_name(&board, "proposal").unwrap(), "Proposal");
+        assert_eq!(match_stage_name(&board, "  CLOSED WON ").unwrap(), "Closed Won");
+        assert_eq!(match_stage_name(&board, "Lead").unwrap(), "Lead");
+        // Unknown stage is refused, and the error names the valid columns.
+        let err = match_stage_name(&board, "Active").unwrap_err().to_string();
+        assert!(err.contains("no pipeline stage named 'Active'"), "{err}");
+        assert!(err.contains("Proposal"), "{err}");
+        // Unseeded board: nothing to validate against, value passes through.
+        assert_eq!(match_stage_name(&[], "whatever").unwrap(), "whatever");
     }
 }
