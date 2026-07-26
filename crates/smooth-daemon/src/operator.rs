@@ -148,6 +148,36 @@ impl ToolProvider for SandboxedToolProvider {
         tools.push(Arc::new(smooth_tools::RecallTool {
             memory: Arc::clone(&self.memory),
         }) as Arc<dyn Tool>);
+        // Subagent delegation (th-1adf55): the engine's `send_sidekick` tool
+        // lets Big Smooth fan a self-contained subtask out to a `scout`
+        // (read-only) or `runner` (full) sidekick — each runs in its own
+        // isolated conversation and returns only a summary, so an expensive
+        // investigation stays out of the parent's context window (the
+        // context-window win of Claude Code's Task tool). Built from the
+        // engine's built-in cast + a snapshot of THIS turn's tool set (so the
+        // sidekick inherits the same kernel-sandboxed fs/grep/bash instances,
+        // filtered down to its role's clearance) + the daemon's gateway as the
+        // sidekick's LLM. Registered LAST so the snapshot it filters never
+        // contains `send_sidekick` itself — no recursive dispatch.
+        //
+        // ponytail: sidekick sub-calls still hit the load-bearing kernel
+        // sandbox (the tool Arcs are shared) but NOT the daemon's userspace
+        // deny-policy/narc hooks — those live on the LocalServer's per-turn
+        // registry, not the sidekick's inner one. Acceptable defense-in-depth
+        // gap for a first cut (the kernel layer is the load-bearing one); wire
+        // those onto the sidekick registry via the engine's hook seam if it
+        // grows teeth.
+        if let Some(factory) = gateway_llm_factory() {
+            let mut snapshot = smooth_operator::tool::ToolRegistry::new();
+            for tool in &tools {
+                snapshot.register_arc(Arc::clone(tool));
+            }
+            tools.push(Arc::new(smooth_operator::cast::DispatchSubagentTool::new(
+                Arc::new(smooth_operator::cast::Cast::builtin()),
+                snapshot,
+                factory,
+            )) as Arc<dyn Tool>);
+        }
         tools
     }
 }
@@ -434,6 +464,34 @@ fn narc_judge_config() -> Option<smooth_operator::llm::LlmConfig> {
         retry_policy: smooth_operator::llm::RetryPolicy::default(),
         api_format: smooth_operator::llm::ApiFormat::OpenAiCompat,
     })
+}
+
+/// Build the [`LlmConfigFactory`](smooth_operator::cast::LlmConfigFactory) the
+/// `send_sidekick` dispatch tool hands to spawned sidekicks: the daemon's
+/// resolved gateway (env `SMOOAI_GATEWAY_*`, else the user's `providers.json`),
+/// used for every routing slot (the built-in sidekicks route to the `Coding`
+/// slot). Returns `None` when no gateway key is available, so `tools_for`
+/// simply doesn't register the delegation tool — a sidekick with no model to
+/// run would only error. Mirrors [`narc_judge_config`]'s resolve-then-build
+/// shape, but keeps the coding model (not the cheap judge model) since a
+/// sidekick does real work.
+fn gateway_llm_factory() -> Option<smooth_operator::cast::LlmConfigFactory> {
+    let cfg = resolve_gateway_config();
+    let key = cfg.gateway_key.filter(|k| !k.trim().is_empty())?;
+    let url = cfg.gateway_url;
+    let model = cfg.model;
+    let max_tokens = cfg.max_tokens;
+    Some(Arc::new(move |_activity: smooth_operator::providers::Activity| {
+        Ok(smooth_operator::llm::LlmConfig {
+            api_url: url.clone(),
+            api_key: key.clone(),
+            model: model.clone(),
+            max_tokens,
+            temperature: 0.0,
+            retry_policy: smooth_operator::llm::RetryPolicy::default(),
+            api_format: smooth_operator::llm::ApiFormat::OpenAiCompat,
+        })
+    }))
 }
 
 /// The daemon's embedded **deny policy** — the declarative half of the engine's
@@ -733,6 +791,51 @@ mod tests {
             .unwrap();
         let out = recall.execute(serde_json::json!({"query": "user name"})).await.unwrap();
         assert!(out.contains("Brent"), "recall surfaces the remembered fact: {out}");
+    }
+
+    /// Serializes the tests that mutate the process-global `SMOOAI_GATEWAY_*`
+    /// vars. Cargo runs tests in parallel threads of ONE process, so without
+    /// this the two gateway tests race — one's `remove_var` can land between the
+    /// other's `set_var` and its assertion, failing it intermittently. Poison is
+    /// ignored (`into_inner`) so one failing test doesn't cascade into the other.
+    static GATEWAY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[tokio::test]
+    async fn provider_registers_send_sidekick_when_gateway_available() {
+        use smooth_operator_svc::access_control::AccessContext;
+        let _guard = GATEWAY_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The subagent-delegation tool (th-1adf55) must reach the agent when a
+        // gateway is resolvable, so Big Smooth can fan work out to a sidekick.
+        std::env::set_var("SMOOAI_GATEWAY_URL", "http://gateway.test/v1");
+        std::env::set_var("SMOOAI_GATEWAY_KEY", "test-key");
+        let provider = local_tool_provider(std::env::temp_dir(), None);
+        let ctx = ToolProviderContext::new(Some("org-1".into()), AccessContext::anonymous()).with_conversation_id("conv-1");
+        let names: Vec<String> = provider.tools_for(&ctx).await.iter().map(|t| t.schema().name).collect();
+        assert!(
+            names.iter().any(|n| n == "send_sidekick"),
+            "send_sidekick delegation tool registered: {names:?}"
+        );
+        // Didn't clobber the rest of the sandboxed set.
+        assert!(names.iter().any(|n| n == "bash"), "bash still registered: {names:?}");
+        assert!(names.iter().any(|n| n == "remember"), "remember still registered: {names:?}");
+        std::env::remove_var("SMOOAI_GATEWAY_URL");
+        std::env::remove_var("SMOOAI_GATEWAY_KEY");
+    }
+
+    #[test]
+    fn gateway_llm_factory_builds_config_from_env_gateway() {
+        let _guard = GATEWAY_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // With an env gateway key, the factory resolves a usable LlmConfig for
+        // the sidekick's routing slot (the built-ins route to `Coding`).
+        std::env::set_var("SMOOAI_GATEWAY_URL", "http://gw.test/v1");
+        std::env::set_var("SMOOAI_GATEWAY_KEY", "k-123");
+        let factory = gateway_llm_factory().expect("factory built when a gateway key is present");
+        let cfg = factory(smooth_operator::providers::Activity::Coding).expect("factory yields a config");
+        assert_eq!(cfg.api_url, "http://gw.test/v1");
+        assert_eq!(cfg.api_key, "k-123");
+        assert!(!cfg.model.is_empty(), "a model is set for the sidekick");
+        std::env::remove_var("SMOOAI_GATEWAY_URL");
+        std::env::remove_var("SMOOAI_GATEWAY_KEY");
     }
 
     #[test]
