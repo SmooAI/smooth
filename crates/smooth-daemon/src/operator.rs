@@ -800,6 +800,12 @@ mod tests {
     /// ignored (`into_inner`) so one failing test doesn't cascade into the other.
     static GATEWAY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    // Holding the guard across the `tools_for` await is the point: the env
+    // vars must stay put for the whole call, which is exactly what the lock
+    // exists to guarantee. Dropping it early to satisfy the lint would
+    // reintroduce the race documented above. No deadlock risk — the runtime
+    // is single-threaded and nothing else contends for this lock while awaiting.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn provider_registers_send_sidekick_when_gateway_available() {
         use smooth_operator_svc::access_control::AccessContext;
