@@ -22,6 +22,27 @@ use crate::util::req_str;
 /// Directory (relative to the workspace root) artifacts are written into.
 const ARTIFACT_DIR: &str = ".smooth-artifacts";
 
+/// Render an absolute path as a clickable `file://` URL.
+///
+/// Unix paths are already rooted at `/`, so `file://` + the path is a valid
+/// URL. Windows paths are NOT: `C:\dir\a.html` has no leading slash and uses
+/// backslashes, so the naive `file://C:\dir\a.html` is malformed and won't open.
+/// The correct form is `file:///C:/dir/a.html` — three slashes (empty authority
+/// + the drive-rooted path) and forward separators.
+fn file_url(path: &std::path::Path) -> String {
+    file_url_parts(&path.display().to_string(), cfg!(windows))
+}
+
+/// Pure core of [`file_url`], with the platform passed in so BOTH shapes are
+/// unit-testable from any host.
+fn file_url_parts(path: &str, windows: bool) -> String {
+    if windows {
+        format!("file:///{}", path.replace('\\', "/"))
+    } else {
+        format!("file://{path}")
+    }
+}
+
 /// `create_artifact` — write a self-contained `.html` artifact and return a link.
 pub struct ArtifactTool {
     /// Workspace root.
@@ -83,7 +104,11 @@ impl Tool for ArtifactTool {
             .map_err(|e| anyhow::anyhow!("cannot write artifact `{rel}`: {e}"))?;
 
         let abs = path.display();
-        Ok(format!("Wrote {} bytes to artifact {filename}.\nPath: {abs}\nOpen: file://{abs}", html.len()))
+        Ok(format!(
+            "Wrote {} bytes to artifact {filename}.\nPath: {abs}\nOpen: {}",
+            html.len(),
+            file_url(&path)
+        ))
     }
 }
 
@@ -105,13 +130,15 @@ mod tests {
         let html = "<!doctype html><html><body><h1>Report</h1></body></html>";
         let out = tool.execute(json!({"filename": "report.html", "html": html})).await.unwrap();
 
-        let written_path = dir.path().join(".smooth-artifacts/report.html");
+        // Nested joins (not "a/b") so the separator is native — on Windows a
+        // literal `/` here wouldn't match the backslashes the tool emits.
+        let written_path = dir.path().join(ARTIFACT_DIR).join("report.html");
         // Content round-trips.
         assert_eq!(tokio::fs::read_to_string(&written_path).await.unwrap(), html);
         // Result carries the absolute path and a clickable file:// URL.
         let abs = written_path.display().to_string();
         assert!(out.contains(&abs), "path missing in result: {out}");
-        assert!(out.contains(&format!("file://{abs}")), "file:// url missing in result: {out}");
+        assert!(out.contains(&file_url(&written_path)), "file:// url missing in result: {out}");
     }
 
     #[tokio::test]
@@ -121,7 +148,7 @@ mod tests {
             workspace: dir.path().to_path_buf(),
         };
         tool.execute(json!({"filename": "summary", "html": "<p>hi</p>"})).await.unwrap();
-        assert!(dir.path().join(".smooth-artifacts/summary.html").exists());
+        assert!(dir.path().join(ARTIFACT_DIR).join("summary.html").exists());
     }
 
     #[tokio::test]
@@ -132,6 +159,21 @@ mod tests {
         };
         // A traversal-y filename collapses to its basename inside the artifacts dir.
         tool.execute(json!({"filename": "../../etc/evil.html", "html": "<p>x</p>"})).await.unwrap();
-        assert!(dir.path().join(".smooth-artifacts/evil.html").exists());
+        assert!(dir.path().join(ARTIFACT_DIR).join("evil.html").exists());
+    }
+
+    /// Regression (Windows CI, pearl th-66b4c6): a Windows path must render as
+    /// `file:///C:/…` — three slashes, forward separators. The naive
+    /// `file://C:\…` is malformed and won't open in a browser.
+    #[test]
+    fn file_url_is_well_formed_on_both_platforms() {
+        assert_eq!(
+            file_url_parts(r"C:\Users\brent\.smooth-artifacts\report.html", true),
+            "file:///C:/Users/brent/.smooth-artifacts/report.html"
+        );
+        assert_eq!(
+            file_url_parts("/home/brent/.smooth-artifacts/report.html", false),
+            "file:///home/brent/.smooth-artifacts/report.html"
+        );
     }
 }
