@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use smooth_operator::{Tool, ToolRegistry};
 
+pub mod artifact;
 pub mod bash;
 pub mod cd;
 pub mod crawl;
@@ -38,6 +39,7 @@ pub mod walk;
 pub mod web_search;
 pub mod write;
 
+pub use artifact::ArtifactTool;
 pub use bash::BashTool;
 pub use cd::CdTool;
 pub use crawl::CrawlTool;
@@ -98,6 +100,8 @@ pub fn default_tools_with_proxy(workspace: PathBuf, proxy: Option<String>) -> Ve
         // Lets Big Smooth author its own reusable skills (writes
         // ~/.smooth/skills/<name>/SKILL.md; workspace-independent).
         Arc::new(CreateSkillTool),
+        // Self-contained HTML report/artifact tool (Claude Code Artifacts style).
+        Arc::new(ArtifactTool { workspace: workspace.clone() }),
         Arc::new(BashTool { workspace, proxy }),
     ]
 }
@@ -123,6 +127,7 @@ mod tests {
             "crawl",
             "th",
             "create_skill",
+            "create_artifact",
             "bash",
         ] {
             assert!(names.iter().any(|n| n == expected), "missing {expected} in {names:?}");
@@ -144,6 +149,7 @@ mod tests {
             "crawl",
             "th",
             "create_skill",
+            "create_artifact",
             "bash",
         ] {
             assert!(names.iter().any(|n| n == expected), "missing {expected} in {names:?}");
