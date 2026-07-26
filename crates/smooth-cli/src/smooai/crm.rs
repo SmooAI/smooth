@@ -261,9 +261,15 @@ pub enum DealsCmd {
         /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
         #[arg(long = "org-id", visible_alias = "org")]
         org: Option<String>,
-        /// Deal value in dollars (e.g. 5500).
+        /// Total deal value in dollars (e.g. 5500).
         #[arg(long)]
         value: Option<f64>,
+        /// Monthly recurring revenue in dollars (e.g. 550).
+        #[arg(long)]
+        mrr: Option<f64>,
+        /// Upfront / implementation cost in dollars (e.g. 7000).
+        #[arg(long, visible_alias = "implementation-cost")]
+        upfront: Option<f64>,
         /// Pipeline stage (free text, e.g. "closed_won", "discovery").
         #[arg(long)]
         stage: Option<String>,
@@ -273,6 +279,34 @@ pub enum DealsCmd {
         /// Link to a contact id.
         #[arg(long)]
         contact: Option<String>,
+        /// Close date (ISO-8601, e.g. 2026-07-02).
+        #[arg(long = "close-date")]
+        close_date: Option<String>,
+    },
+    /// Update a deal — only the flags you pass change. The economics
+    /// triple: `--value` (total), `--mrr` (monthly recurring), `--upfront`
+    /// (one-time implementation).
+    Update {
+        /// The deal — id or title.
+        deal: String,
+        /// Override the active org. Falls back to `SMOOAI_ORG_ID` then the credentials file's `active_org_id`.
+        #[arg(long = "org-id", visible_alias = "org")]
+        org: Option<String>,
+        /// New deal title.
+        #[arg(long)]
+        title: Option<String>,
+        /// Total deal value in dollars.
+        #[arg(long)]
+        value: Option<f64>,
+        /// Monthly recurring revenue in dollars.
+        #[arg(long)]
+        mrr: Option<f64>,
+        /// Upfront / implementation cost in dollars.
+        #[arg(long, visible_alias = "implementation-cost")]
+        upfront: Option<f64>,
+        /// Pipeline stage (free text).
+        #[arg(long)]
+        stage: Option<String>,
         /// Close date (ISO-8601, e.g. 2026-07-02).
         #[arg(long = "close-date")]
         close_date: Option<String>,
@@ -1061,13 +1095,55 @@ async fn deals(cmd: DealsCmd) -> Result<()> {
             title,
             org,
             value,
+            mrr,
+            upfront,
             stage,
             company,
             contact,
             close_date,
         } => {
             let org = resolve_org(org)?;
-            create_deal(&client, &org, &title, value, stage, company, contact, close_date).await?;
+            create_deal(&client, &org, &title, value, mrr, upfront, stage, company, contact, close_date).await?;
+        }
+        DealsCmd::Update {
+            deal,
+            org,
+            title,
+            value,
+            mrr,
+            upfront,
+            stage,
+            close_date,
+        } => {
+            let org = resolve_org(org)?;
+            let deal_id = resolve_deal_id(&client, &org, &deal).await?;
+            let mut body = json!({});
+            if let Some(t) = title.filter(|s| !s.trim().is_empty()) {
+                body["title"] = json!(t);
+            }
+            if let Some(v) = value {
+                body["value"] = json!(v);
+            }
+            if let Some(m) = mrr {
+                body["mrr"] = json!(m);
+            }
+            if let Some(u) = upfront {
+                body["implementationCost"] = json!(u);
+            }
+            if let Some(s) = stage.filter(|s| !s.trim().is_empty()) {
+                body["stage"] = json!(s);
+            }
+            if let Some(d) = close_date.filter(|s| !s.trim().is_empty()) {
+                body["closeDate"] = json!(d);
+            }
+            let empty = body.as_object().is_some_and(|o| o.is_empty());
+            anyhow::ensure!(!empty, "nothing to update — pass at least one of --title/--value/--mrr/--upfront/--stage/--close-date");
+            client
+                .patch(&format!("/organizations/{org}/crm/deals/{deal_id}"), &body)
+                .await
+                .context("PATCH deal")?;
+            println!("  {} updated deal {}", "↻".yellow(), deal_id.dimmed());
+            show_deal(&client, &org, &deal_id).await?;
         }
         DealsCmd::Move { deal_id, stage, org } => {
             let org = resolve_org(org)?;
@@ -1319,11 +1395,14 @@ async fn find_deal(client: &UserClient, org: &str, title: &str) -> Result<Option
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 async fn create_deal(
     client: &UserClient,
     org: &str,
     title: &str,
     value: Option<f64>,
+    mrr: Option<f64>,
+    upfront: Option<f64>,
     stage: Option<String>,
     company: Option<String>,
     contact: Option<String>,
@@ -1343,6 +1422,12 @@ async fn create_deal(
     let mut body = json!({ "title": title });
     if let Some(v) = value {
         body["value"] = json!(v);
+    }
+    if let Some(m) = mrr {
+        body["mrr"] = json!(m);
+    }
+    if let Some(u) = upfront {
+        body["implementationCost"] = json!(u);
     }
     if let Some(s) = &stage {
         body["stage"] = json!(s);
@@ -1424,6 +1509,18 @@ async fn show_deal(client: &UserClient, org: &str, deal_id: &str) -> Result<()> 
     println!("  {}", d.get("title").and_then(Value::as_str).unwrap_or("—").bold());
     println!("  {} {}", "Stage  ".dimmed(), stage_color(d.get("stage").and_then(Value::as_str).unwrap_or("")));
     println!("  {} {}", "Value  ".dimmed(), fmt_money(as_money(d.get("value"))).bold());
+    let mrr = as_money(d.get("mrr"));
+    let upfront = as_money(d.get("implementationCost"));
+    if let Some(m) = mrr {
+        println!("  {} {} / mo", "MRR    ".dimmed(), fmt_money(Some(m)));
+    }
+    if let Some(u) = upfront {
+        println!("  {} {}", "Upfront".dimmed(), fmt_money(Some(u)));
+    }
+    if mrr.is_some() || upfront.is_some() {
+        let year1 = upfront.unwrap_or(0.0) + mrr.unwrap_or(0.0) * 12.0;
+        println!("  {} {}", "Year 1 ".dimmed(), fmt_money(Some(year1)).bold());
+    }
     println!("  {} {}", "Close  ".dimmed(), short_date(d.get("closeDate")));
     if let Some(cid) = d.get("companyId").and_then(Value::as_str) {
         let name = client
@@ -1472,35 +1569,48 @@ fn contact_label(c: &Value) -> String {
 fn render_deals(body: &Value) {
     let deals = body.as_array().cloned().unwrap_or_default();
     let pipeline: f64 = deals.iter().filter_map(|d| as_money(d.get("value"))).sum();
+    let mrr_total: f64 = deals.iter().filter_map(|d| as_money(d.get("mrr"))).sum();
     println!();
     println!("  {}", "Deals".bold());
     println!(
-        "  {} {}     {} {}",
+        "  {} {}     {} {}     {} {} / mo",
         "Total".dimmed(),
         deals.len().to_string().bold(),
         "Pipeline".dimmed(),
-        fmt_money(Some(pipeline)).bold()
+        fmt_money(Some(pipeline)).bold(),
+        "MRR".dimmed(),
+        fmt_money(Some(mrr_total)).bold()
     );
     if deals.is_empty() {
         println!("\n  {}\n", "no deals yet".dimmed());
         return;
     }
-    let (h_title, h_stage, h_value, h_close) = (
+    let (h_title, h_stage, h_value, h_mrr, h_close) = (
         format!("{:<38}", "TITLE"),
         format!("{:<14}", "STAGE"),
         format!("{:>12}", "VALUE"),
+        format!("{:>10}", "MRR"),
         format!("{:<10}", "CLOSE"),
     );
     println!();
-    println!("  {}  {}  {}  {}", h_title.dimmed(), h_stage.dimmed(), h_value.dimmed(), h_close.dimmed());
+    println!(
+        "  {}  {}  {}  {}  {}",
+        h_title.dimmed(),
+        h_stage.dimmed(),
+        h_value.dimmed(),
+        h_mrr.dimmed(),
+        h_close.dimmed()
+    );
     for d in &deals {
         let title = truncate(d.get("title").and_then(Value::as_str).unwrap_or("—"), 38);
         let value = format!("{:>12}", fmt_money(as_money(d.get("value"))));
+        let mrr = format!("{:>10}", as_money(d.get("mrr")).map(|m| fmt_money(Some(m))).unwrap_or_else(|| "—".into()));
         println!(
-            "  {:<38}  {}  {}  {}",
+            "  {:<38}  {}  {}  {}  {}",
             title,
             stage_cell(d.get("stage").and_then(Value::as_str).unwrap_or(""), 14),
             value,
+            mrr,
             short_date(d.get("closeDate")),
         );
     }
