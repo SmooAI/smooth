@@ -126,6 +126,47 @@ pub enum ServerEvent {
 }
 
 // ---------------------------------------------------------------------------
+// Local auth token
+// ---------------------------------------------------------------------------
+
+/// Resolve the local Big Smooth auth token, mirroring the daemon's own order:
+/// `SMOOTH_LOCAL_TOKEN` (env) → `~/.smooth/operator-token`.
+///
+/// **Read-only on purpose.** The daemon *provisions* the token (generating and
+/// persisting it on first run); `th code` only ever consumes it — a client that
+/// minted its own would just send a value the server never accepts. `None`
+/// means "no token anywhere", and we then connect unauthenticated, which is
+/// correct for a server not running strict auth.
+fn local_token() -> Option<String> {
+    if let Ok(env_token) = std::env::var("SMOOTH_LOCAL_TOKEN") {
+        let env_token = env_token.trim().to_owned();
+        if !env_token.is_empty() {
+            return Some(env_token);
+        }
+    }
+    let path: PathBuf = dirs_next::home_dir()?.join(".smooth").join("operator-token");
+    let existing = std::fs::read_to_string(path).ok()?;
+    let existing = existing.trim().to_owned();
+    (!existing.is_empty()).then_some(existing)
+}
+
+/// Percent-encode a token for use in a query string.
+///
+/// The daemon's generated tokens are plain hex (nothing to escape), but
+/// `SMOOTH_LOCAL_TOKEN` is user-supplied: a raw `&`, `#`, or space would
+/// silently truncate the query and surface as a baffling 401. Unreserved
+/// characters pass through; everything else becomes `%XX`.
+fn percent_encode_token(token: &str) -> String {
+    token
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
+            other => format!("%{other:02X}"),
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // BigSmoothClient
 // ---------------------------------------------------------------------------
 
@@ -177,10 +218,28 @@ impl BigSmoothClient {
 
         let ws_url = self.url.replace("http://", "ws://").replace("https://", "wss://");
         let ws_url = format!("{ws_url}/ws");
+        // The daemon runs the operator's STRICT-auth local flavor: a `/ws`
+        // upgrade without a valid local token is rejected 401 (not degraded to
+        // anonymous). The token is accepted ONLY as a `token` query param — the
+        // upgrade path does not consult an `Authorization` header — so it goes
+        // on the URL. Without this every `th code` connect died on
+        // "401 Unauthorized" even with the daemon healthy.
+        let ws_url = match local_token() {
+            Some(token) => format!("{ws_url}?token={}", percent_encode_token(&token)),
+            None => ws_url,
+        };
 
         let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url).await.map_err(|e| {
             self.conn_mgr.disconnected();
-            anyhow::anyhow!("WebSocket connection failed: {e}")
+            let hint = if e.to_string().contains("401") {
+                "\nThe server is running but rejected the token. Big Smooth reads \
+                 `SMOOTH_LOCAL_TOKEN`, else `~/.smooth/operator-token` — make sure this shell \
+                 resolves the SAME token the running daemon did (a stale env var or a \
+                 regenerated token file causes this)."
+            } else {
+                ""
+            };
+            anyhow::anyhow!("WebSocket connection failed: {e}{hint}")
         })?;
 
         let (mut ws_sink, mut ws_source) = ws_stream.split();
@@ -663,4 +722,42 @@ mod tests {
         let received2 = rx.recv().await.expect("receive cancel");
         assert!(received2.contains(r#""task_id":"t-42"#));
     }
+
+    /// Regression (pearl th-6dd202): `th code` connected with NO auth while the
+    /// daemon runs the operator's strict-auth flavor, so every session died on
+    /// "401 Unauthorized". The token must ride the query string — verified
+    /// against a live daemon: no-auth=401, `Authorization: Bearer`=401,
+    /// `?token=<correct>`=101 Switching Protocols.
+    #[test]
+    fn token_is_percent_encoded_for_the_query_string() {
+        // Plain hex (what the daemon generates) passes through untouched.
+        assert_eq!(percent_encode_token("0a9f4c2b7e1d"), "0a9f4c2b7e1d");
+        // Unreserved characters are preserved.
+        assert_eq!(percent_encode_token("a-b.c_d~e"), "a-b.c_d~e");
+        // A user-supplied SMOOTH_LOCAL_TOKEN with query metacharacters would
+        // otherwise truncate the URL and surface as a baffling 401.
+        assert_eq!(percent_encode_token("a&b#c d"), "a%26b%23c%20d");
+        assert_eq!(percent_encode_token("p/q?r=s"), "p%2Fq%3Fr%3Ds");
+    }
+
+    /// The env var wins over the token file, and whitespace is trimmed — the
+    /// same resolution the daemon does when it provisions the token.
+    #[test]
+    fn local_token_prefers_env_and_trims() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prev = std::env::var("SMOOTH_LOCAL_TOKEN").ok();
+        std::env::set_var("SMOOTH_LOCAL_TOKEN", "  tok-from-env  ");
+        assert_eq!(local_token().as_deref(), Some("tok-from-env"));
+        // An empty/whitespace env var must NOT mask the file fallback.
+        std::env::set_var("SMOOTH_LOCAL_TOKEN", "   ");
+        assert_ne!(local_token().as_deref(), Some(""), "blank env must not resolve to an empty token");
+        match prev {
+            Some(v) => std::env::set_var("SMOOTH_LOCAL_TOKEN", v),
+            None => std::env::remove_var("SMOOTH_LOCAL_TOKEN"),
+        }
+    }
+
+    /// Serializes the tests that mutate the process-global SMOOTH_LOCAL_TOKEN;
+    /// cargo runs tests in parallel threads of one process.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }

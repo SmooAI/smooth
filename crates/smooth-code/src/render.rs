@@ -531,19 +531,37 @@ fn render_input(frame: &mut Frame, state: &AppState, area: Rect) {
     }
 }
 
+/// The presence glyph + style for a health state.
+///
+/// The SHAPE carries the state, not just the hue — under `NO_COLOR`, a
+/// monochrome terminal, or for the ~8% of users who can't separate green from
+/// amber, three identically-shaped dots said nothing. Filled = awake, half =
+/// degraded, hollow = unknown (smooth-glow-up: "encode state in FORM, not just
+/// color"). Extracted so that property is unit-testable.
+fn health_glyph(status: &HealthStatus) -> (&'static str, Style) {
+    match status {
+        HealthStatus::Healthy => ("\u{25cf}", Style::default().fg(theme::SUCCESS_GREEN)),
+        HealthStatus::Warnings(_) => ("\u{25d0}", Style::default().fg(theme::SMOO_ORANGE)),
+        HealthStatus::Unknown => ("\u{25cb}", Style::default().fg(theme::SMOO_GRAY_700)),
+    }
+}
+
+/// Padding that right-aligns the status bar's static keybindings against the
+/// terminal edge. Saturating: a narrow terminal collapses the gap to zero
+/// rather than panicking or wrapping the line.
+fn status_gap(width: u16, glyph_cols: usize, left: &str, right: &str) -> usize {
+    (width as usize).saturating_sub(glyph_cols + left.chars().count() + right.chars().count())
+}
+
 /// Render the bottom status bar.
 fn render_status(frame: &mut Frame, state: &AppState, area: Rect) {
     let branch_indicator = state
         .git_state
         .as_ref()
         .filter(|g| g.is_repo)
-        .map_or(String::new(), |g| format!("{} \u{2387} | ", g.branch));
+        .map_or(String::new(), |g| format!("{} \u{2387} · ", g.branch));
 
-    let (health_dot, health_style) = match state.health_status {
-        HealthStatus::Healthy => ("\u{25cf}", Style::default().fg(theme::SUCCESS_GREEN)),
-        HealthStatus::Warnings(_) => ("\u{25cf}", Style::default().fg(theme::SMOO_ORANGE)),
-        HealthStatus::Unknown => ("\u{25cf}", Style::default().fg(theme::SMOO_GRAY_700)),
-    };
+    let (health_dot, health_style) = health_glyph(&state.health_status);
 
     // When a workflow phase is active, prefix the status bar with
     // `<PHASE> · <alias> → <upstream>  |  <cycling phrase>`. The
@@ -557,7 +575,7 @@ fn render_status(frame: &mut Frame, state: &AppState, area: Rect) {
             let upstream_suffix = state.current_phase_upstream.as_deref().map_or(String::new(), |u| format!(" → {u}"));
             let phrases = crate::thesaurus::phrases_for(phase);
             let phrase = phrases[(state.phrase_idx / 30) % phrases.len()];
-            format!(" {phase} · {alias}{upstream_suffix} | {phrase} |")
+            format!("{phase} · {alias}{upstream_suffix} · {phrase} ·")
         })
         .unwrap_or_default();
 
@@ -584,19 +602,35 @@ fn render_status(frame: &mut Frame, state: &AppState, area: Rect) {
             .unwrap_or_else(|| state.agent_name.clone())
     };
 
+    // Presence leads. The health glyph is Big Smooth's "I'm awake" signal, so
+    // it opens the line instead of sitting buried mid-row between pipes.
+    // Live state (agent · model · tokens · spend) reads next in the normal
+    // status color; the static keybindings are chrome, so they're dimmer and
+    // pushed to the right edge. Alignment does the separating work that a wall
+    // of `|` was doing before (smooth-glow-up: "alignment beats ornament").
+    // Join only the segments that exist, so an absent phase/branch can't leave
+    // a double space gaping after the presence glyph.
     let status_left = format!(
-        "{phase_prefix} {branch_indicator}agent: {} | {} | tokens: {} | spend: {} | ",
+        " {}{}{}{} · {} · {} tok · {}",
+        phase_prefix,
+        if phase_prefix.is_empty() { "" } else { " " },
+        branch_indicator,
         state.agent_name,
         model_label,
         state.total_tokens,
         format_spend(state.total_cost_usd),
     );
-    let status_right = " | Ctrl+B chats | Ctrl+C quit ";
+    let status_right = "Ctrl+B chats · Ctrl+C quit ";
+
+    // Right-align the chrome by padding the gap. Status text is ASCII plus a
+    // couple of 1-column glyphs, so a char count is an accurate width here.
+    let gap = status_gap(area.width, 1, &status_left, status_right);
 
     let line = Line::from(vec![
-        Span::styled(status_left, theme::status_style()),
         Span::styled(health_dot, health_style),
-        Span::styled(status_right, theme::status_style()),
+        Span::styled(status_left, theme::status_style()),
+        Span::raw(" ".repeat(gap)),
+        Span::styled(status_right, theme::muted()),
     ]);
 
     let paragraph = Paragraph::new(line).alignment(Alignment::Left);
@@ -875,5 +909,35 @@ mod relative_time_tests {
     #[test]
     fn future_timestamps_clamp_to_now() {
         assert_eq!(relative_time(Utc::now() + Duration::hours(1)), "now");
+    }
+}
+
+#[cfg(test)]
+mod glow_tests {
+    use super::{health_glyph, status_gap};
+    use crate::state::HealthStatus;
+
+    /// smooth-glow-up: state must be readable without color. Three dots that
+    /// differ only by hue are invisible under NO_COLOR / to a colorblind user.
+    #[test]
+    fn health_glyph_shape_differs_per_state() {
+        let healthy = health_glyph(&HealthStatus::Healthy).0;
+        let warn = health_glyph(&HealthStatus::Warnings(2)).0;
+        let unknown = health_glyph(&HealthStatus::Unknown).0;
+        assert_ne!(healthy, warn, "healthy vs degraded must differ in SHAPE, not just color");
+        assert_ne!(warn, unknown, "degraded vs unknown must differ in SHAPE, not just color");
+        assert_ne!(healthy, unknown, "healthy vs unknown must differ in SHAPE, not just color");
+    }
+
+    #[test]
+    fn status_gap_right_aligns_and_never_underflows() {
+        // Wide terminal: gap fills exactly the space between the two segments.
+        assert_eq!(status_gap(40, 1, "left", "right"), 40 - 1 - 4 - 5);
+        // Exactly full: no gap, no panic.
+        assert_eq!(status_gap(10, 1, "left", "right"), 0);
+        // Narrower than the content (tiny terminal): saturates to 0 instead of
+        // underflowing — this is the case that would otherwise panic.
+        assert_eq!(status_gap(4, 1, "left", "right"), 0);
+        assert_eq!(status_gap(0, 1, "left", "right"), 0);
     }
 }
