@@ -26,6 +26,7 @@ pub mod notify;
 pub mod observability;
 pub mod products;
 pub mod profile;
+pub mod referrals;
 pub mod smooth_operator;
 pub mod smooth_operator_ws;
 pub mod teams;
