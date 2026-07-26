@@ -190,6 +190,13 @@ enum Commands {
         #[command(subcommand)]
         cmd: smooai::widgets::Cmd,
     },
+    /// Smoo AI main-dashboard widget layout — get / add / remove widgets on
+    /// your `/apps` dashboard (per user + org; widget ids from `th widgets
+    /// list`). First-class front door for `th api dashboard`.
+    Dashboard {
+        #[command(subcommand)]
+        cmd: smooai::dashboard::Cmd,
+    },
     /// Smoo AI in-house web crawler (ADR-035) — `th crawl scrape <url>`
     /// turns a page into clean markdown through the authed crawler
     /// service (real browser UA + JS render), so it gets pages a plain
@@ -1644,6 +1651,7 @@ async fn main() -> Result<()> {
         Some(Commands::Org { cmd }) => cmd_orgs(cmd).await,
         Some(Commands::Config { cmd }) => config::cmd(cmd).await,
         Some(Commands::Widgets { cmd }) => smooai::widgets::cmd(cmd).await,
+        Some(Commands::Dashboard { cmd }) => smooai::dashboard::cmd(cmd).await,
         Some(Commands::Crawl { cmd }) => smooai::crawl::cmd(cmd).await,
         Some(Commands::Search { args }) => smooai::websearch::run(args).await,
         Some(Commands::Knowledge { cmd }) => smooai::knowledge::cmd(cmd).await,

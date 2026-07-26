@@ -5096,7 +5096,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-adapter-memory"
-version = "0.24.0"
+version = "1.23.1"
 source = "git+https://github.com/SmooAI/smooth-operator.git?rev=9db9d319287e2ebcd3ab027e39971a0f51ef5b67#9db9d319287e2ebcd3ab027e39971a0f51ef5b67"
 dependencies = [
  "anyhow",
@@ -5136,7 +5136,7 @@ dependencies = [
 
 [[package]]
 name = "smooai-smooth-operator-ingestion"
-version = "0.24.0"
+version = "1.23.1"
 source = "git+https://github.com/SmooAI/smooth-operator.git?rev=9db9d319287e2ebcd3ab027e39971a0f51ef5b67#9db9d319287e2ebcd3ab027e39971a0f51ef5b67"
 dependencies = [
  "anyhow",
