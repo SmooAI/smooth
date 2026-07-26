@@ -301,6 +301,27 @@ impl StorageAdapter for SqliteStorageAdapter {
         self.persist("message", &message.id, &message)?;
         if let Some(conv_id) = &message.conversation_id {
             t.message_order.entry(conv_id.clone()).or_default().push(message.id.clone());
+            // th-503c80: the engine never calls `update_session` to maintain
+            // counts, so without this every session's messageCount stayed 0
+            // despite real messages. Bump every session bound to this
+            // conversation (normally exactly one) and write it through.
+            // ponytail: no tokenCount — the persisted Message carries no token
+            // data at this seam (analytics_json is None; see runner::persist_message).
+            let now = Utc::now();
+            let bumped: Vec<Session> = t
+                .sessions
+                .values_mut()
+                .filter(|s| &s.conversation_id == conv_id)
+                .map(|s| {
+                    s.message_count = Some(s.message_count.unwrap_or(0) + 1);
+                    s.last_activity_at = Some(now);
+                    s.updated_at = Some(now);
+                    s.clone()
+                })
+                .collect();
+            for s in bumped {
+                self.persist("session", &s.session_id, &s)?;
+            }
         }
         t.messages.insert(message.id.clone(), message.clone());
         Ok(message)
@@ -445,6 +466,50 @@ mod tests {
         assert!(b.get_conversation("conv-1").await.unwrap().is_some(), "conversation survived restart");
         assert!(b.get_session("sess-1").await.unwrap().is_some(), "session survived restart");
         assert_eq!(b.list_sessions_by_conversation("conv-1").await.unwrap().len(), 1);
+    }
+
+    fn msg(id: &str, conv: &str) -> Message {
+        use smooth_operator_svc::domain::{Direction, MessageContent};
+        Message {
+            id: id.into(),
+            external_id: None,
+            organization_id: None,
+            conversation_id: Some(conv.into()),
+            direction: Direction::Inbound,
+            content: MessageContent::from_text("hi"),
+            from: None,
+            to: None,
+            metadata_json: None,
+            analytics_json: None,
+            created_at: Utc::now(),
+            updated_at: None,
+        }
+    }
+
+    /// th-503c80: appending messages must bump the owning session's
+    /// messageCount, and the bump must survive a reopen.
+    #[tokio::test]
+    async fn append_message_increments_session_count_and_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("op.db");
+        {
+            let a = SqliteStorageAdapter::open(&path).unwrap();
+            a.create_conversation(conv("conv-1")).await.unwrap();
+            a.create_session(sess("sess-1", "conv-1")).await.unwrap();
+            for i in 0..3 {
+                a.append_message(msg(&format!("m-{i}"), "conv-1")).await.unwrap();
+            }
+            // A message on a different conversation must not touch this session.
+            a.append_message(msg("m-other", "conv-other")).await.unwrap();
+            assert_eq!(a.get_session("sess-1").await.unwrap().unwrap().message_count, Some(3));
+        }
+        // Reopen: the persisted count hydrates from sqlite.
+        let b = SqliteStorageAdapter::open(&path).unwrap();
+        assert_eq!(
+            b.get_session("sess-1").await.unwrap().unwrap().message_count,
+            Some(3),
+            "session messageCount survived restart"
+        );
     }
 
     #[tokio::test]
