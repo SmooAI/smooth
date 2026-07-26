@@ -268,6 +268,17 @@ enum Commands {
         #[command(subcommand)]
         cmd: smooai::testing::Cmd,
     },
+    /// Smoo AI referrals — the org's partner / advocate program.
+    /// `show` / `create` / `update` the program economics, `partners`
+    /// to manage who gets paid, `link` for a partner's shareable
+    /// `api.smoo.ai/r/<code>` URL, plus `attributions` / `visits` /
+    /// `commissions`. Same commands as `th api referrals`, promoted to
+    /// the top level alongside `th config`.
+    #[command(visible_alias = "referral")]
+    Referrals {
+        #[command(subcommand)]
+        cmd: smooai::referrals::Cmd,
+    },
     /// Smoo AI booking — the org's Google-Calendar booking page.
     /// `config get/set` availability + link handle, `types` for named
     /// event types, `slots` to see open times, `bookings` to list them,
@@ -802,6 +813,13 @@ enum ApiCommands {
     Products {
         #[command(subcommand)]
         cmd: smooai::products::Cmd,
+    },
+    /// Smoo AI referrals — partner program, partners, attributions,
+    /// commissions.
+    #[command(visible_alias = "referral")]
+    Referrals {
+        #[command(subcommand)]
+        cmd: smooai::referrals::Cmd,
     },
     /// Smoo AI booking — Google-Calendar availability config + link
     /// handle, named booking types, open slots, bookings, manual busy
@@ -1643,6 +1661,7 @@ async fn main() -> Result<()> {
             ApiCommands::Dashboard { cmd } => smooai::dashboard::cmd(cmd).await,
             ApiCommands::Integrations { cmd } => smooai::integrations::cmd(cmd).await,
             ApiCommands::Products { cmd } => smooai::products::cmd(cmd).await,
+            ApiCommands::Referrals { cmd } => smooai::referrals::cmd(cmd).await,
             ApiCommands::Booking { cmd } => smooai::booking::cmd(cmd).await,
             ApiCommands::Profile { cmd } => smooai::profile::cmd(cmd).await,
             ApiCommands::Testing { cmd } => smooai::testing::cmd(cmd).await,
@@ -1665,6 +1684,7 @@ async fn main() -> Result<()> {
             org,
         }) => smooai::notify::cmd(message, title, priority, url, org).await,
         Some(Commands::Testing { cmd }) => smooai::testing::cmd(cmd).await,
+        Some(Commands::Referrals { cmd }) => smooai::referrals::cmd(cmd).await,
         Some(Commands::Booking { cmd }) => smooai::booking::cmd(cmd).await,
         Some(Commands::Heypage { cmd }) => smooai::heypage::cmd(cmd).await,
         Some(Commands::Files { cmd }) => smooai::files::cmd(cmd).await,
