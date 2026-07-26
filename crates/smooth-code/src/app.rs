@@ -265,8 +265,10 @@ pub async fn run_with_session(
     // the "type a message" hint; for resumed sessions it announces
     // which session is back.
     if resume.is_none() {
-        let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
-        s.add_message(ChatMessage::system("Type a message to get started. /help for commands."));
+        // Nothing to say on a fresh session: the splash already renders
+        // "Type a message to get started. /help for commands." right above
+        // this, and adding it again as a `System:` message printed the same
+        // sentence twice on every cold start.
     } else {
         let title_display = resume
             .as_ref()
