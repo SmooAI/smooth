@@ -1,5 +1,99 @@
 # @smooai/smooth
 
+## 0.25.1
+
+### Patch Changes
+
+- 4d7ce2f: Add a `create_artifact` agent tool (smooth-tools): Big Smooth can now write a self-contained HTML report/artifact into `<workspace>/.smooth-artifacts/` and get back the absolute path plus a clickable `file://` URL — Claude Code Artifacts style. Registered in the default tool set so every host (including the daemon) gets it. Rendering artifacts inline in smooth-web is a follow-up.
+- dcee87a: Big Smooth can now delegate subtasks to a sidekick (pearl th-1adf55).
+
+  The engine already shipped `DispatchSubagentTool` (`send_sidekick`) — the
+  daemon just never registered it. Now `tools_for` builds it from the engine's
+  built-in cast plus a snapshot of THIS turn's tool set, so a sidekick inherits
+  the same kernel-sandboxed fs/grep/bash instances filtered to its role's
+  clearance (`scout` read-only, `runner` full), and runs in its own isolated
+  conversation returning only a summary — keeping an expensive investigation out
+  of the parent's context window (the win behind Claude Code's Task tool).
+
+  Registered last so the snapshot never contains `send_sidekick` itself (no
+  recursive dispatch), and only when a gateway is resolvable (a sidekick with no
+  model would just error). Sidekick sub-calls still cross the load-bearing kernel
+  sandbox, but NOT the daemon's userspace deny-policy/narc hooks — documented
+  in-code as a known defense-in-depth gap for this first cut.
+
+- 7f6b64f: Fix `th pearls pull` failing with "cannot merge with uncommitted changes"
+
+  `DOLT_PULL` merges, and Dolt refuses to merge a dirty working set — but
+  read-path commands dirty it as a side effect: `th msg inbox` and the
+  `th msg watch` poll loop heartbeat the `agents` table without committing.
+  That wedged `th pearls pull` on every invocation, and silently stopped
+  `th msg watch` from receiving remote messages at all (it swallows pull
+  errors, so each poll's own heartbeat blocked the next poll's pull).
+
+  `SmoothDolt::pull` now commits the working set first, via a new
+  `commit_working_set` helper that no-ops when the store is already clean
+  (`commit` passes `--allow-empty`, so an unconditional call would add an
+  empty commit per pull). Fixing it at that shared choke point covers every
+  caller, including interrupted commands that leave the store dirty.
+
+- ff955e0: Maintain session metadata in the daemon's durable store (th-503c80). Appending a
+  message now increments the owning session's `messageCount` (and refreshes
+  `lastActivityAt`/`updatedAt`) and writes it through to sqlite, so sessions no
+  longer report `messageCount: 0` despite having real messages. Empty-session
+  churn is out of scope here — the engine's `handle_create_session` mints a fresh
+  session per WS connection when no known `conversationId` is passed, which the
+  storage adapter can't prevent.
+- dcda585: Add the `smooth-glow-up` skill — Smooth's **Presence** design language.
+
+  Sibling to smooai's `smooai-glow-up` (Aurora), but for a terminal-first
+  product. Aurora is a dashboard language: cool midnight ground, teal→gold→coral
+  spent as _heat_. Presence is for a personal agent you cohabit with: a **warm**
+  ground, and color spent on **presence and attention** — the teal→blue `th`
+  gradient reserved for Big Smooth himself, amber meaning only "he needs you".
+
+  Grounded in what already ships (`crates/smooth-code/src/theme.rs`,
+  `crates/smooth-web/web/src/globals.css`) and covers all three Smooth surfaces:
+  the `th code` TUI, `th` CLI output, and the smooth-web SPA — including the
+  terminal translation of web ideas (borders not glass, foreground-only styling,
+  form-not-just-color), pipe/NO_COLOR safety, and how to actually _see_ a TUI
+  change (ratatui `TestBackend` snapshots + tmux `capture-pane`).
+
+- fe323d9: Add `th referrals` — the operator CLI for the partner / advocate referral program (SMOODEV-1035), which had API routes and schemas but no way to drive them short of hand-rolled curl. Covers `show` / `create` / `update` for the program economics, `partners list|add|update|remove`, `link` to print a partner's shareable referral URL, plus `attributions` / `visits` / `commissions`. Registered as top-level `th referrals` and under `th api referrals`. `--rate` takes a human percentage (20) rather than basis points, and partners are addressable by email, display name, or code instead of uuid. Referral links point at `api.smoo.ai/r/<code>` — the host that actually serves the redirect; the marketing site 404s that path.
+- d18e080: Fix `th code`: send the local auth token so it can actually connect
+  (pearl th-6dd202).
+
+  `th code` called `connect_async` with no authentication at all, while the
+  daemon runs the operator's **strict-auth** local flavor — so every session
+  died on `401 Unauthorized` even with a healthy Big Smooth, and the error
+  unhelpfully suggested `Run: th up` for a server that was already up.
+
+  Verified against the live daemon: no-auth → 401, `Authorization: Bearer` →
+  401 (the upgrade path doesn't consult headers), `?token=<correct>` → 101
+  Switching Protocols, `?token=WRONG` → 401. The client now resolves the token
+  the same way the daemon does (`SMOOTH_LOCAL_TOKEN` → `~/.smooth/operator-token`,
+  read-only — the daemon owns provisioning) and passes it as the query param,
+  percent-encoded so a token containing `&`/`#`/space can't silently truncate
+  the URL. A 401 now explains the token mismatch instead of misdirecting.
+
+- ec502ee: `th code`: first application of the smooth-glow-up (Presence) skill
+  (pearl th-24cdf3).
+
+  - **Greeting printed twice** on every cold start — the splash renders "Type a
+    message to get started. /help for commands." and `app.rs` added an identical
+    `System:` message directly beneath it. Removed the duplicate.
+  - **Status bar hierarchy.** It was flat pipe-soup — identity, metrics and
+    keybindings in one uniform gray separated by `|`, with the health dot buried
+    mid-row. Now presence leads (the health glyph opens the line — it's Big
+    Smooth's "I'm awake" signal), live state reads next, and the static
+    keybindings are dimmed and right-aligned so alignment does the separating
+    work. Middots replace pipes throughout.
+  - **Health state no longer color-only.** Three identical `●` differing only by
+    hue said nothing under `NO_COLOR`, on a mono terminal, or to the ~8% of users
+    who can't separate green from amber. The shape now carries it too: `●` awake,
+    `◐` degraded, `○` unknown.
+
+  Verified by rendering under tmux at 110/120/80 columns and with `NO_COLOR=1`.
+
 ## 0.25.0
 
 ### Minor Changes
