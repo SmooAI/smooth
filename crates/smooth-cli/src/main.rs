@@ -8365,16 +8365,25 @@ mod org_cli_tests {
             })
         ));
         match Cli::try_parse_from([
-            "th", "crm", "deals", "update", "some-deal", "--value", "13600", "--mrr", "550", "--upfront", "7000",
+            "th",
+            "crm",
+            "deals",
+            "update",
+            "some-deal",
+            "--value",
+            "13600",
+            "--mrr",
+            "550",
+            "--upfront",
+            "7000",
         ])
         .expect("th crm deals update")
         .command
         {
             Some(Commands::Crm {
-                cmd:
-                    smooai::crm::Cmd::Deals {
-                        cmd: smooai::crm::DealsCmd::Update { value, mrr, upfront, .. },
-                    },
+                cmd: smooai::crm::Cmd::Deals {
+                    cmd: smooai::crm::DealsCmd::Update { value, mrr, upfront, .. },
+                },
             }) => {
                 assert_eq!(value, Some(13600.0));
                 assert_eq!(mrr, Some(550.0));

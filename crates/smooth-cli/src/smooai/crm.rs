@@ -1137,7 +1137,10 @@ async fn deals(cmd: DealsCmd) -> Result<()> {
                 body["closeDate"] = json!(d);
             }
             let empty = body.as_object().is_some_and(|o| o.is_empty());
-            anyhow::ensure!(!empty, "nothing to update — pass at least one of --title/--value/--mrr/--upfront/--stage/--close-date");
+            anyhow::ensure!(
+                !empty,
+                "nothing to update — pass at least one of --title/--value/--mrr/--upfront/--stage/--close-date"
+            );
             client
                 .patch(&format!("/organizations/{org}/crm/deals/{deal_id}"), &body)
                 .await
