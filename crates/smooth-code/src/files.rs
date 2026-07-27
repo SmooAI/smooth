@@ -1,8 +1,36 @@
 //! File tree browser with .gitignore-aware walking.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use ignore::WalkBuilder;
+
+/// Memoized `is_dir` answers for the walker's sort comparator.
+///
+/// `Path::is_dir()` is a live filesystem stat. Calling it from inside a sort
+/// comparator makes that comparator non-deterministic whenever the tree
+/// changes mid-walk — a temp dir created or dropped by another thread or
+/// process. The same path can then answer `true` for one comparison and
+/// `false` for the next, which makes the ordering non-transitive and trips
+/// Rust's `slice::sort` "comparison function does not correctly implement a
+/// total order" panic. Caching the first answer keeps the comparator a total
+/// order for the whole walk no matter what happens on disk underneath it.
+#[derive(Default)]
+struct DirCache(Mutex<HashMap<PathBuf, bool>>);
+
+impl DirCache {
+    /// Return the `is_dir` verdict for `path`, statting at most once per path.
+    fn is_dir(&self, path: &Path) -> bool {
+        let mut cache = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(&known) = cache.get(path) {
+            return known;
+        }
+        let is_dir = path.is_dir();
+        cache.insert(path.to_path_buf(), is_dir);
+        is_dir
+    }
+}
 
 /// Maximum directory depth to walk.
 const MAX_DEPTH: usize = 4;
@@ -50,20 +78,17 @@ impl FileTree {
             anyhow::bail!("not a directory: {}", root.display());
         }
 
+        let dirs = DirCache::default();
         let walker = WalkBuilder::new(root)
             .max_depth(Some(MAX_DEPTH))
             .hidden(true) // respect hidden files setting (skip dotfiles)
             .git_ignore(true)
             .git_global(true)
             .git_exclude(true)
-            .sort_by_file_path(|a, b| {
-                let a_is_dir = a.is_dir();
-                let b_is_dir = b.is_dir();
-                match (a_is_dir, b_is_dir) {
-                    (true, false) => std::cmp::Ordering::Less,
-                    (false, true) => std::cmp::Ordering::Greater,
-                    _ => a.file_name().cmp(&b.file_name()),
-                }
+            .sort_by_file_path(move |a, b| match (dirs.is_dir(a), dirs.is_dir(b)) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.file_name().cmp(&b.file_name()),
             })
             .build();
 
@@ -162,6 +187,41 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    /// Regression test for th-129eda: the walker's sort comparator used to
+    /// call `Path::is_dir()` directly, so a directory that disappeared
+    /// mid-walk (parallel tests churning `/tmp`) flipped its verdict and made
+    /// the ordering non-transitive — `slice::sort` then panicked with
+    /// "comparison function does not correctly implement a total order".
+    /// The cache must keep answering with the verdict it first observed.
+    #[test]
+    fn dir_cache_verdict_survives_the_path_disappearing() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let dir = tmp.path().join("vanishing");
+        fs::create_dir(&dir).expect("create dir");
+
+        let cache = DirCache::default();
+        assert!(cache.is_dir(&dir), "should observe a real directory");
+
+        fs::remove_dir(&dir).expect("remove dir");
+        assert!(!dir.exists(), "the directory is genuinely gone");
+
+        // Uncached, `dir.is_dir()` is now false — the cache must not flip.
+        assert!(cache.is_dir(&dir), "cached verdict must stay stable mid-sort");
+    }
+
+    /// Files stay files, and a missing path is remembered as a non-directory.
+    #[test]
+    fn dir_cache_reports_files_and_missing_paths_as_non_dirs() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let file = tmp.path().join("a.txt");
+        fs::write(&file, "x").expect("write");
+
+        let cache = DirCache::default();
+        assert!(!cache.is_dir(&file));
+        assert!(!cache.is_dir(&tmp.path().join("nope")));
+        assert!(cache.is_dir(tmp.path()));
+    }
 
     /// Helper: create a small directory tree for testing.
     fn make_test_tree() -> TempDir {
