@@ -1,5 +1,68 @@
 # @smooai/smooth
 
+## 0.26.0
+
+### Minor Changes
+
+- 4bf038b: `th roles` — first-class CLI for editing an org's RBAC roles (SMOODEV-2368 /
+  ADR-105), so you can manage the custom-role catalog without clicking through the
+  web dashboard or hand-rolling curl against a user JWT.
+
+  Subcommands (all take `--org`/`SMOOAI_ORG_ID` and `--json`): `list` and `show`
+  (full permission-key list) read the catalog; `create <name>` makes a custom role
+  (with `--template <kind>` it seeds from an archetype via
+  `/workforce/role-templates/create-role`); `delete` removes a custom role;
+  `grant`/`revoke` add/remove permission keys with a read-modify-write that
+  preserves every existing key exactly (PATCH the whole array), `set-permissions`
+  replaces the set wholesale; `member-roles <email>` shows a member's roles and
+  `assign`/`unassign` edit them (read-modify-write over the replace-all PUT).
+
+  System roles (`organizationId == null`) are immutable, so
+  grant/revoke/set-permissions/delete refuse them locally with a clear error
+  before any API call. Keys that don't match `[a-z0-9_.*-]` warn but still send
+  (the server is the source of truth for validity). Rides the user JWT
+  (`th auth login`) because the roles routes 401 under an M2M token.
+
+### Patch Changes
+
+- 4bfce2b: feat(daemon): Big Smooth auto-recalls durable memories into every turn
+
+  Bumps the engine pin (`smooth-operator-server`/`-svc`) to `ce2f9e3`
+  (`th-daemon-memory-seam` = the core-1.7.0 daemon lineage + the cherry-picked
+  `StorageAdapter::memory_for_access` seam from smooth-operator #330 / th-374b27),
+  and overrides `memory_for_access` on the daemon's `SqliteStorageAdapter` to
+  return its durable SQLite memory store. The engine's runner now feeds that store
+  to `AgentConfig::with_memory`, so remembered preferences (the `remember` tool's
+  writes, th-6d1692) are auto-injected into every turn via `memory.recall(...)` —
+  no explicit `recall` call needed, and they survive daemon restarts. Closes the
+  last gap so "always add shows to smoo-hub" actually influences later turns
+  unprompted (th-7a9832).
+
+- fbf6a71: `th code` is a first-class Big Smooth client again — canonical WS protocol
+  (pearl th-248f33).
+
+  `th code` spoke the bespoke `smooth-bigsmooth` protocol (`TaskStart` out,
+  `Connected`/`TokenDelta` in). That crate was **deleted** with the microVM stack
+  (th-f4a801) and Big Smooth now hosts smooth-operator's canonical,
+  schema-driven WS — so nothing had spoken `th code`'s dialect for months and
+  every turn died on "Timed out waiting for Connected event".
+
+  It now speaks the same protocol as the web SPA (`smooth-web/web/src/operator.ts`):
+  `create_conversation_session` on connect, `send_message` per turn, streaming
+  back over `stream_token` / `stream_chunk`. Same daemon, same conversations and
+  sessions, same tools — just a terminal instead of a browser.
+
+  Translation happens at the edge of `client.rs`, mapping canonical frames onto
+  the TUI's existing internal events, so `app.rs`/`render.rs` are untouched.
+  Details that came from reading the shipped client rather than guessing: the
+  session reply IS the connection signal; tool calls _and_ results both nest
+  under `rawResponse` (reading `state.toolResult` leaves tools stuck "running"
+  forever); `stream_reasoning` is dropped so chain-of-thought never renders as
+  the answer. Cancel/steer have no canonical verb, so they send nothing rather
+  than a frame the server would reject.
+
+  Verified end-to-end against the live daemon: a real turn streams a reply.
+
 ## 0.25.1
 
 ### Patch Changes
@@ -55,7 +118,7 @@
   `crates/smooth-web/web/src/globals.css`) and covers all three Smooth surfaces:
   the `th code` TUI, `th` CLI output, and the smooth-web SPA — including the
   terminal translation of web ideas (borders not glass, foreground-only styling,
-  form-not-just-color), pipe/NO_COLOR safety, and how to actually _see_ a TUI
+  form-not-just-color), pipe/NO*COLOR safety, and how to actually \_see* a TUI
   change (ratatui `TestBackend` snapshots + tmux `capture-pane`).
 
 - fe323d9: Add `th referrals` — the operator CLI for the partner / advocate referral program (SMOODEV-1035), which had API routes and schemas but no way to drive them short of hand-rolled curl. Covers `show` / `create` / `update` for the program economics, `partners list|add|update|remove`, `link` to print a partner's shareable referral URL, plus `attributions` / `visits` / `commissions`. Registered as top-level `th referrals` and under `th api referrals`. `--rate` takes a human percentage (20) rather than basis points, and partners are addressable by email, display name, or code instead of uuid. Referral links point at `api.smoo.ai/r/<code>` — the host that actually serves the redirect; the marketing site 404s that path.
