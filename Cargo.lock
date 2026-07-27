@@ -4937,6 +4937,7 @@ dependencies = [
  "smooai-smooth-diver",
  "smooai-smooth-operator-core",
  "smooai-smooth-pearls",
+ "smooai-smooth-policy",
  "smooai-smooth-tmux",
  "smooai-smooth-web",
  "tabled",

@@ -67,12 +67,15 @@ smooth/
 
 ### Auth — `auth.smoo.ai` and what to expect from login
 
-- `th api login` exchanges OAuth2 `grant_type=client_credentials` at `https://auth.smoo.ai/token` and stores a ~60-minute JWT at `~/.smooth/auth/smooai.json`.
-- Credential resolution order: `--client-id`/`--client-secret` flags → `SMOOAI_CLIENT_ID`/`SMOOAI_CLIENT_SECRET` env → interactive prompt.
-- Mint client credentials in the web app (Org Settings → API Keys) — the secret is shown **once**.
-- `th api whoami` shows the active identity (`client:…` for M2M, `user:…` for dashboard), the active org, the JWT TTL, and any `Admin roles` grants (e.g. `super_admin` → cross-org powers).
-- `th api orgs list / switch <id>` to change the active org. `th api logout` deletes the cached JWT.
-- `th auth login` (no `api`) is **provider** auth — LLM creds at `~/.smooth/providers.json`. Different system. Don't confuse them.
+> **`th auth` is the ONE Smoo AI identity surface.** `th api login` / `logout` / `whoami` were removed (pearl th-16b0ca) — two spellings for one identity was actively confusing, and only `th auth` understands auth profiles. The `th api <resource>` verbs stay; they aren't auth.
+
+- `th auth login` — the **user** browser flow by default on a TTY (`smoo.ai/cli-login`, Supabase session). `--no-browser` for an email + password prompt; `--m2m` to authenticate a service account via OAuth2 `client_credentials` at `https://auth.smoo.ai/token`.
+- M2M credential resolution order: `--client-id`/`--client-secret` flags → `SMOOAI_CLIENT_ID`/`SMOOAI_CLIENT_SECRET` env → interactive prompt. Mint the pair in the web app (Org Settings → API Keys) — the secret is shown **once**.
+- `th auth whoami` shows both sessions (user + M2M), the active org, expiry, and which file each came from. `th auth logout [--m2m|--all]` clears them.
+- `th auth profile` manages named profiles — each bundles a user + M2M session so one host can hold several identities. Select per-command with `--profile <name>` / `SMOOAI_PROFILE`, or set the default with `th auth profile use <name>`.
+- **Sessions live under `~/.config/smooth/auth/`** (XDG), in `profiles/<name>/{smooai-user.json,smooai.json}` for named profiles or directly in `auth/` for the default. `~/.smooth/auth/` is the pre-SMOODEV-1739 legacy tree, kept only as a migration backup — nothing should read it.
+- Profile resolution lives in `smooth_policy::auth_paths` and is called by **both** `th` and `smooth-daemon` at startup, so the daemon reads the same credentials as the `th` tool it shells out to regardless of how it was launched (th-16b0ca).
+- `th auth login` is **not** LLM-provider auth. Provider creds (`~/.smooth/providers.json`) are a separate system — see `th cast models` / `th model`.
 
 ### The high-leverage subtrees
 
@@ -146,7 +149,7 @@ Need to call api.smoo.ai?
 | Pattern | Suggestion |
 |---|---|
 | `curl … api.smoo.ai` | `th api …` |
-| `curl … auth.smoo.ai/token` | `th api login` |
+| `curl … auth.smoo.ai/token` | `th auth login` (`--m2m` for a service account) |
 | `curl … atlassian.net/rest/api` | `th jira sync` (or file a pearl) |
 | `echo \| gh secret set … --body -` | `scripts/secret-helpers/gh-secret-set` (SMOODEV-879) |
 | `pnpm sst secret list` (raw) | `scripts/secret-helpers/sst-secret-list` (SMOODEV-908) |
@@ -319,7 +322,7 @@ Tables: `pearls`, `pearl_dependencies`, `pearl_labels`, `pearl_comments`,
 - `smooth.db` — Legacy SQLite (migrate with `th pearls migrate-from-sqlite`)
 - `audit/` — Rotating tool usage logs per actor
 - `providers.json` — LLM credentials
-- `auth/smooai.json` — cached Smoo AI JWT (`th api login`)
+- `auth/` — **legacy** Smoo AI session tree (pre-SMOODEV-1739). Live sessions moved to `~/.config/smooth/auth/` (see §1a); these files remain only as a migration backup.
 - `mcp.toml` — MCP server configs (see `docs/extending.md`)
 - `plugins/<name>/plugin.toml` — CLI-wrapper tool manifests
 

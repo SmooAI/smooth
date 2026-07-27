@@ -25,10 +25,12 @@ thiserror.workspace = true
 anyhow.workspace = true
 sha2 = "0.10"
 dirs-next.workspace = true
+# th-16b0ca: `auth_paths` reads the stored session JSON to name a migrated
+# profile after its user's email.
+serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-serde_json.workspace = true
 
 [lints]
 workspace = true
