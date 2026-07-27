@@ -99,6 +99,15 @@ enum ScheduleCmd {
 #[tokio::main]
 async fn main() -> ExitCode {
     init_tracing();
+    // Pearl th-16b0ca: resolve the active auth profile and export
+    // SMOOAI_USER_AUTH_FILE / SMOOAI_AUTH_FILE, exactly as `th` does at
+    // startup. Without this the daemon's CredentialsStore fell back to the
+    // legacy `~/.smooth/auth/*` files whenever it wasn't launched as a child
+    // of `th` (launchd, `nohup smooth-daemon`), so a browser sign-in through
+    // the daemon landed in a different file than the `th` tool it shells out
+    // to reads — the daemon looked logged in while `th` did not. `init` won't
+    // clobber values already set, so inheriting from `th up` still wins.
+    smooth_policy::auth_paths::init(None);
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

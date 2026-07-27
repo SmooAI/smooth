@@ -123,7 +123,15 @@ th auth logout --m2m                             # deletes ~/.smooth/auth/smooai
 
 ### Provider auth is separate
 
-`th auth login` configures LLM providers (Anthropic, OpenAI, llm.smoo.ai, etc.) at `~/.smooth/providers.json`. It has nothing to do with `auth.smoo.ai`. Different file, different lifecycle, different command tree.
+**LLM provider** credentials (Anthropic, OpenAI, llm.smoo.ai, …) live at `~/.smooth/providers.json` and are managed through the model/cast surface (`th model`, `th cast models`) — a different file, lifecycle, and command tree from `auth.smoo.ai`.
+
+`th auth login` is **Smoo AI identity**, not provider auth. (An earlier revision of this doc said the opposite; `th auth` became the single identity surface when `th api login`/`logout`/`whoami` were removed — pearl th-16b0ca.)
+
+### Where sessions are stored
+
+Sessions live under `~/.config/smooth/auth/` (XDG): `profiles/<name>/{smooai-user.json,smooai.json}` for a named profile, or directly in `auth/` for the default one. `~/.smooth/auth/` is the pre-SMOODEV-1739 legacy tree, kept only as a migration backup.
+
+Resolution lives in `smooth_policy::auth_paths` and runs at startup in **both** `th` and `smooth-daemon`, so Big Smooth and the `th` tool it shells out to always read the same credentials — whether the daemon was started by `th up`, launchd, or a bare `nohup smooth-daemon` (pearl th-16b0ca).
 
 ---
 

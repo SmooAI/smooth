@@ -19,7 +19,7 @@ mod operator_serve;
 mod service;
 mod smooai;
 
-use smooai::{cmd_login, cmd_logout, cmd_orgs, cmd_whoami};
+use smooai::cmd_orgs;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -701,43 +701,13 @@ enum OrgsCommands {
     },
 }
 
-/// Pearl th-9cd759: `th api login/logout/whoami` moved to the `th auth`
-/// surface. One release cycle of warnings, then the three arms get removed
-/// (the `th api <resource>` operations stay — they aren't auth).
-fn deprecated_api_auth_hint(old: &str, new: &str) {
-    use owo_colors::OwoColorize;
-    eprintln!(
-        "{} `th api {old}` is deprecated and will be removed in a future release — use `{new}`",
-        "warning:".yellow().bold()
-    );
-}
-
 #[derive(Subcommand)]
 enum ApiCommands {
-    /// DEPRECATED — use `th auth login --m2m`. Authenticate `th` against
-    /// the Smoo AI platform API. Exchanges an OAuth2 client_credentials
-    /// grant at `https://auth.smoo.ai/token` for a bearer JWT and stores
-    /// it at `~/.smooth/auth/smooai.json`.
-    ///
-    /// Credential resolution order (first present wins):
-    ///   1. `--client-id` + `--client-secret` flags
-    ///   2. `SMOOAI_CLIENT_ID` + `SMOOAI_CLIENT_SECRET` env vars
-    ///   3. Interactive prompt
-    ///
-    /// Create a client_id / client_secret pair in the smooai web app
-    /// (Organization Settings → API Keys) before running this.
-    Login {
-        #[arg(long)]
-        client_id: Option<String>,
-        #[arg(long)]
-        client_secret: Option<String>,
-    },
-    /// DEPRECATED — use `th auth logout --m2m`. Forget the current Smoo AI
-    /// platform session — deletes `~/.smooth/auth/smooai.json`. Idempotent.
-    Logout,
-    /// DEPRECATED — use `th auth whoami`. Print the currently-logged-in
-    /// Smoo AI user + active org.
-    Whoami,
+    // `th api login` / `logout` / `whoami` were removed (pearl th-16b0ca).
+    // Smoo AI identity lives under `th auth` — `th auth login [--m2m]`,
+    // `th auth logout [--m2m|--all]`, `th auth whoami`. Two spellings for one
+    // identity was actively confusing: `th auth` handles both the user browser
+    // flow and M2M, and it is the surface that understands auth profiles.
     /// Smoo AI organization management.
     #[command(visible_alias = "org")]
     Orgs {
@@ -1653,18 +1623,6 @@ async fn main() -> Result<()> {
         #[cfg(feature = "admin")]
         Some(Commands::Admin { cmd }) => admin::dispatch(cmd).await,
         Some(Commands::Api { cmd }) => match cmd {
-            ApiCommands::Login { client_id, client_secret } => {
-                deprecated_api_auth_hint("login", "th auth login --m2m");
-                cmd_login(client_id, client_secret).await
-            }
-            ApiCommands::Logout => {
-                deprecated_api_auth_hint("logout", "th auth logout --m2m");
-                cmd_logout().await
-            }
-            ApiCommands::Whoami => {
-                deprecated_api_auth_hint("whoami", "th auth whoami");
-                cmd_whoami().await
-            }
             ApiCommands::Orgs { cmd } => cmd_orgs(cmd).await,
             ApiCommands::Agents { cmd } => smooai::agents::cmd(cmd).await,
             ApiCommands::Keys { cmd } => smooai::keys::cmd(cmd).await,
