@@ -205,6 +205,15 @@ enum Commands {
         #[command(subcommand)]
         cmd: smooai::crawl::Cmd,
     },
+    /// Edit an org's RBAC roles (SMOODEV-2368 / ADR-105) — `th roles list`,
+    /// `show`, `create` (optionally `--template`), `grant`/`revoke`/
+    /// `set-permissions` on a role's permission keys, and `assign`/`unassign`
+    /// roles to members. System roles are immutable. User-authed (`th auth login`).
+    #[command(visible_alias = "role")]
+    Roles {
+        #[command(subcommand)]
+        cmd: smooai::roles::Cmd,
+    },
     /// Smoo AI agentic web search (ADR-088) — `th search <query>` returns
     /// ranked results (+ optional `--answer`), served by our own search stack
     /// (self-hosted SearXNG + in-house crawler + LLM answer synthesis). Full
@@ -1680,6 +1689,7 @@ async fn main() -> Result<()> {
         Some(Commands::Widgets { cmd }) => smooai::widgets::cmd(cmd).await,
         Some(Commands::Dashboard { cmd }) => smooai::dashboard::cmd(cmd).await,
         Some(Commands::Crawl { cmd }) => smooai::crawl::cmd(cmd).await,
+        Some(Commands::Roles { cmd }) => smooai::roles::cmd(cmd).await,
         Some(Commands::Search { args }) => smooai::websearch::run(args).await,
         Some(Commands::Knowledge { cmd }) => smooai::knowledge::cmd(cmd).await,
         Some(Commands::Crm { cmd }) => smooai::crm::cmd(cmd).await,
