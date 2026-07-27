@@ -5,7 +5,7 @@
 //! running.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -167,6 +167,121 @@ fn percent_encode_token(token: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Canonical operator protocol  <->  the TUI's internal event vocabulary
+// ---------------------------------------------------------------------------
+//
+// Big Smooth speaks smooth-operator's canonical, schema-driven WS protocol —
+// outbound frames are `{action, requestId, …}`, inbound are `{type, …}`. The
+// TUI's `ClientEvent`/`ServerEvent` enums are the ORIGINAL bespoke
+// `smooth-bigsmooth` shapes, and that crate was deleted with the microVM stack
+// (th-f4a801), so nothing has spoken them since. Rather than rewrite the whole
+// TUI, this layer makes `th code` a first-class canonical client — exactly like
+// the web SPA (`crates/smooth-web/web/src/operator.ts`) — and translates at the
+// edge, leaving `app.rs`/`render.rs` untouched (pearl th-248f33).
+
+/// The TUI runs one turn at a time, so a fixed correlation id is enough — the
+/// canonical protocol scopes streaming to the session, not a task id.
+const TURN_ID: &str = "turn";
+
+/// Translate one canonical inbound frame into the TUI's internal event.
+///
+/// `None` means "nothing for the UI" — an unrecognized `type`, or a frame we
+/// deliberately drop (see `stream_reasoning`).
+fn translate_frame(v: &serde_json::Value) -> Option<ServerEvent> {
+    let ty = v.get("type")?.as_str()?;
+    match ty {
+        // The reply to `create_conversation_session` carries the session id and
+        // is what marks us connected. Other `immediate_response`s (history,
+        // conversation lists, renames) have no `sessionId` and fall through to
+        // `None`, which is what we want — they aren't UI events here.
+        "immediate_response" => {
+            let session_id = v.get("data")?.get("sessionId")?.as_str()?.to_string();
+            Some(ServerEvent::Connected { session_id })
+        }
+        "stream_token" => Some(ServerEvent::TokenDelta {
+            task_id: TURN_ID.to_string(),
+            content: v.get("token").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+        }),
+        // Reasoning rides its own channel and must NEVER render as the answer
+        // (th-4d8682, and the persona's no-chain-of-thought rule). Dropped
+        // rather than merged into the reply stream.
+        "stream_reasoning" => None,
+        "stream_chunk" => {
+            // Both the call and its result are nested under `rawResponse` —
+            // reading `state.toolResult` instead leaves every tool stuck
+            // "running" forever, the bug operator.ts documents.
+            let raw = v.get("data")?.get("state")?.get("rawResponse")?;
+            if let Some(call) = raw.get("toolCall") {
+                return Some(ServerEvent::ToolCallStart {
+                    task_id: TURN_ID.to_string(),
+                    tool_name: call.get("name").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+                    arguments: stringify(call.get("arguments")),
+                });
+            }
+            let res = raw.get("toolResult")?;
+            Some(ServerEvent::ToolCallComplete {
+                task_id: TURN_ID.to_string(),
+                tool_name: res.get("name").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+                result: stringify(res.get("result")),
+                is_error: res.get("isError").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                duration_ms: 0,
+            })
+        }
+        "eventual_response" => Some(ServerEvent::TaskComplete {
+            task_id: TURN_ID.to_string(),
+            iterations: 0,
+            cost_usd: 0.0,
+        }),
+        "error" => Some(ServerEvent::Error {
+            message: v
+                .get("message")
+                .or_else(|| v.get("error"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown error")
+                .to_string(),
+        }),
+        "pong" => Some(ServerEvent::Pong),
+        _ => None,
+    }
+}
+
+/// JSON value -> plain string: already-string values pass through unquoted,
+/// anything else is serialized. (Tool arguments arrive both ways.)
+fn stringify(v: Option<&serde_json::Value>) -> String {
+    match v {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+        None => String::new(),
+    }
+}
+
+/// Translate an outbound TUI event into a canonical frame.
+///
+/// `None` means "nothing to send" (e.g. a turn was requested before the
+/// session id arrived — the caller buffers instead).
+fn to_canonical_frame(event: &ClientEvent, session_id: Option<&str>, request_id: &str) -> Option<serde_json::Value> {
+    match event {
+        ClientEvent::TaskStart { message, model, .. } => {
+            let sid = session_id?;
+            let mut frame = serde_json::json!({
+                "action": "send_message",
+                "requestId": request_id,
+                "sessionId": sid,
+                "message": message,
+            });
+            if let Some(m) = model.as_ref().filter(|m| !m.is_empty()) {
+                frame["model"] = serde_json::Value::String(m.clone());
+            }
+            Some(frame)
+        }
+        ClientEvent::Ping => Some(serde_json::json!({ "action": "ping", "requestId": request_id })),
+        // The canonical protocol has no cancel/steer verb yet; dropping beats
+        // sending a frame the server will reject as unknown.
+        ClientEvent::TaskCancel { .. } | ClientEvent::Steer { .. } => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // BigSmoothClient
 // ---------------------------------------------------------------------------
 
@@ -182,6 +297,12 @@ pub struct BigSmoothClient {
     connected: Arc<AtomicBool>,
     conn_mgr: Arc<ConnectionManager>,
     msg_buffer: Arc<MessageBuffer>,
+    /// Session id handed back by `create_conversation_session`; every
+    /// `send_message` must carry it. Shared because the read loop discovers it
+    /// and the send path needs it.
+    session_id: Arc<std::sync::Mutex<Option<String>>>,
+    /// Monotonic source for canonical `requestId`s.
+    next_request: Arc<AtomicU64>,
 }
 
 impl BigSmoothClient {
@@ -201,6 +322,8 @@ impl BigSmoothClient {
             connected: Arc::new(AtomicBool::new(false)),
             conn_mgr: Arc::new(ConnectionManager::new(config)),
             msg_buffer: Arc::new(MessageBuffer::new(buffer_size)),
+            session_id: Arc::new(std::sync::Mutex::new(None)),
+            next_request: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -264,6 +387,7 @@ impl BigSmoothClient {
         // Read loop — on disconnect, mark state and trigger reconnect
         let connected_read = Arc::clone(&connected);
         let conn_mgr_read = Arc::clone(&self.conn_mgr);
+        let session_read = Arc::clone(&self.session_id);
         tokio::spawn(async move {
             while let Some(Ok(msg)) = ws_source.next().await {
                 let text = match msg {
@@ -272,13 +396,18 @@ impl BigSmoothClient {
                     _ => continue,
                 };
 
-                if let Ok(event) = serde_json::from_str::<ServerEvent>(&text) {
-                    if matches!(event, ServerEvent::Connected { .. }) {
-                        connected_read.store(true, Ordering::SeqCst);
-                    }
-                    if event_tx.send(event).is_err() {
-                        break;
-                    }
+                let Ok(frame) = serde_json::from_str::<serde_json::Value>(&text) else {
+                    continue;
+                };
+                let Some(event) = translate_frame(&frame) else {
+                    continue; // not a UI-bearing frame
+                };
+                if let ServerEvent::Connected { session_id } = &event {
+                    *session_read.lock().unwrap_or_else(|e| e.into_inner()) = Some(session_id.clone());
+                    connected_read.store(true, Ordering::SeqCst);
+                }
+                if event_tx.send(event).is_err() {
+                    break;
                 }
             }
             connected_read.store(false, Ordering::SeqCst);
@@ -287,6 +416,17 @@ impl BigSmoothClient {
 
         self.ws_tx = Some(send_tx.clone());
         self.event_rx = Some(event_rx);
+
+        // Canonical handshake: the server hands back a session id in reply to
+        // `create_conversation_session`, and that reply is what marks us
+        // connected. Same opening move the web SPA makes (operator.ts).
+        let hello = serde_json::json!({
+            "action": "create_conversation_session",
+            "requestId": format!("cs-{}", self.next_request.fetch_add(1, Ordering::Relaxed)),
+            "agentId": uuid::Uuid::new_v4().to_string(),
+            "userName": "th code",
+        });
+        send_tx.send(hello.to_string()).map_err(|e| anyhow::anyhow!("failed to open session: {e}"))?;
 
         // Wait for Connected event (up to 5s)
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -462,7 +602,14 @@ impl BigSmoothClient {
     /// If the connection is down, the message is buffered (up to the configured
     /// limit) and will be sent when the connection is re-established.
     pub async fn send(&self, event: &ClientEvent) -> anyhow::Result<()> {
-        let json = serde_json::to_string(event)?;
+        let session = self.session_id.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let request_id = format!("turn-{}", self.next_request.fetch_add(1, Ordering::Relaxed));
+        let Some(frame) = to_canonical_frame(event, session.as_deref(), &request_id) else {
+            // Nothing the canonical protocol carries (cancel/steer), or no
+            // session yet — drop rather than send a frame the server rejects.
+            return Ok(());
+        };
+        let json = frame.to_string();
 
         if let Some(tx) = self.ws_tx.as_ref() {
             if self.connected.load(Ordering::SeqCst) {
@@ -708,19 +855,39 @@ mod tests {
             connected: Arc::new(AtomicBool::new(true)),
             conn_mgr,
             msg_buffer: Arc::new(MessageBuffer::new(buffer_size)),
+            // A live session, so `send` produces a real canonical frame.
+            session_id: Arc::new(std::sync::Mutex::new(Some("sess-test".to_string()))),
+            next_request: Arc::new(AtomicU64::new(1)),
         };
 
+        // th-248f33: the wire is now the CANONICAL operator protocol
+        // (`{action, requestId, …}`), not the deleted bespoke `{"type":"Ping"}`
+        // shape this test used to assert.
         let event = ClientEvent::Ping;
         client.send(&event).await.expect("send");
 
         let received = rx.recv().await.expect("receive");
-        assert!(received.contains(r#""type":"Ping"#));
+        assert!(received.contains(r#""action":"ping""#), "canonical ping frame: {received}");
 
-        // Also test TaskCancel
+        // A turn rides `send_message` with the session id attached.
+        let turn = ClientEvent::TaskStart {
+            message: "hello".into(),
+            model: None,
+            budget: None,
+            working_dir: None,
+            agent: None,
+            prior_messages: vec![],
+        };
+        client.send(&turn).await.expect("send turn");
+        let received2 = rx.recv().await.expect("receive turn");
+        assert!(received2.contains(r#""action":"send_message""#), "canonical turn frame: {received2}");
+        assert!(received2.contains("sess-test"), "carries the session id: {received2}");
+
+        // Cancel has no canonical verb — it must NOT put a bogus frame on the
+        // wire, so nothing further arrives.
         let cancel = ClientEvent::TaskCancel { task_id: "t-42".into() };
         client.send(&cancel).await.expect("send cancel");
-        let received2 = rx.recv().await.expect("receive cancel");
-        assert!(received2.contains(r#""task_id":"t-42"#));
+        assert!(rx.try_recv().is_err(), "cancel must not invent a wire frame");
     }
 
     /// Regression (pearl th-6dd202): `th code` connected with NO auth while the
@@ -760,4 +927,111 @@ mod tests {
     /// Serializes the tests that mutate the process-global SMOOTH_LOCAL_TOKEN;
     /// cargo runs tests in parallel threads of one process.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+}
+
+#[cfg(test)]
+mod canonical_protocol_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The reply to `create_conversation_session` is what marks us connected —
+    /// waiting for a bespoke `Connected` frame that no server has emitted since
+    /// smooth-bigsmooth was deleted is exactly what hung every turn (th-248f33).
+    #[test]
+    fn session_reply_becomes_connected() {
+        let ev = translate_frame(&json!({
+            "type": "immediate_response",
+            "status": 200,
+            "data": { "sessionId": "sess-1", "agentId": "a-1" }
+        }));
+        match ev {
+            Some(ServerEvent::Connected { session_id }) => assert_eq!(session_id, "sess-1"),
+            other => panic!("expected Connected, got {other:?}"),
+        }
+    }
+
+    /// Other `immediate_response`s (history, lists, renames) carry no session id
+    /// and must NOT be mistaken for the handshake reply.
+    #[test]
+    fn immediate_response_without_session_is_not_connected() {
+        assert!(translate_frame(&json!({"type":"immediate_response","data":{"title":"x"}})).is_none());
+    }
+
+    #[test]
+    fn stream_token_becomes_token_delta() {
+        match translate_frame(&json!({"type":"stream_token","token":"hel"})) {
+            Some(ServerEvent::TokenDelta { content, .. }) => assert_eq!(content, "hel"),
+            other => panic!("expected TokenDelta, got {other:?}"),
+        }
+    }
+
+    /// Reasoning must never reach the answer stream.
+    #[test]
+    fn reasoning_is_dropped_not_rendered_as_the_answer() {
+        assert!(translate_frame(&json!({"type":"stream_reasoning","token":"thinking..."})).is_none());
+    }
+
+    /// Tool call AND result both live under `rawResponse`; reading
+    /// `state.toolResult` leaves every tool stuck "running" forever.
+    #[test]
+    fn tool_call_and_result_ride_raw_response() {
+        let start = translate_frame(&json!({
+            "type": "stream_chunk",
+            "data": {"state": {"rawResponse": {"toolCall": {"name":"read_file","arguments":{"path":"a.rs"}}}}}
+        }));
+        match start {
+            Some(ServerEvent::ToolCallStart { tool_name, arguments, .. }) => {
+                assert_eq!(tool_name, "read_file");
+                assert!(arguments.contains("a.rs"), "args serialized: {arguments}");
+            }
+            other => panic!("expected ToolCallStart, got {other:?}"),
+        }
+        let done = translate_frame(&json!({
+            "type": "stream_chunk",
+            "data": {"state": {"rawResponse": {"toolResult": {"name":"read_file","result":"contents","isError":false}}}}
+        }));
+        match done {
+            Some(ServerEvent::ToolCallComplete { result, is_error, .. }) => {
+                assert_eq!(result, "contents");
+                assert!(!is_error);
+            }
+            other => panic!("expected ToolCallComplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_frames_are_ignored() {
+        assert!(translate_frame(&json!({"type":"otp_sent"})).is_none());
+        assert!(translate_frame(&json!({"nope":1})).is_none());
+    }
+
+    /// A turn is `send_message` carrying the session id — and is withheld
+    /// entirely until the handshake supplies one.
+    #[test]
+    fn task_start_becomes_send_message_and_needs_a_session() {
+        let ev = ClientEvent::TaskStart {
+            message: "hi".into(),
+            model: Some("smooth-coding".into()),
+            budget: None,
+            working_dir: None,
+            agent: None,
+            prior_messages: vec![],
+        };
+        let frame = to_canonical_frame(&ev, Some("sess-9"), "turn-1").expect("frame");
+        assert_eq!(frame["action"], "send_message");
+        assert_eq!(frame["sessionId"], "sess-9");
+        assert_eq!(frame["message"], "hi");
+        assert_eq!(frame["model"], "smooth-coding");
+        assert_eq!(frame["requestId"], "turn-1");
+        // No session yet -> nothing goes on the wire.
+        assert!(to_canonical_frame(&ev, None, "turn-2").is_none());
+    }
+
+    #[test]
+    fn cancel_and_steer_are_not_invented_on_the_wire() {
+        let cancel = ClientEvent::TaskCancel { task_id: "t".into() };
+        assert!(to_canonical_frame(&cancel, Some("s"), "r").is_none());
+        let ping = to_canonical_frame(&ClientEvent::Ping, Some("s"), "r-1").expect("ping");
+        assert_eq!(ping["action"], "ping");
+    }
 }
