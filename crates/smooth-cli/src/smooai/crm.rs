@@ -1084,7 +1084,7 @@ async fn deals(cmd: DealsCmd) -> Result<()> {
             if json {
                 print_json(&body);
             } else {
-                render_deals(&body);
+                render_deals(&body, &won_stage_names(&client, &org).await);
             }
         }
         DealsCmd::Show { deal_id, org } => {
@@ -1508,6 +1508,23 @@ async fn resolve_contact_id(client: &UserClient, org: &str, s: &str) -> Result<S
 /// contributes $0 to the forecast while still looking fine in `deals show`.
 /// A lowercase "proposal" next to the real "Proposal" cost a $13.6k deal its
 /// place on the board exactly this way.
+/// Names of the org's won stages. Best-effort — a failed lookup degrades the
+/// MRR split to "all open" rather than failing the list.
+async fn won_stage_names(client: &UserClient, org: &str) -> Vec<String> {
+    let Ok(stages) = client.get(&format!("/organizations/{org}/crm/stages")).await else {
+        return Vec::new();
+    };
+    stages
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter(|st| st.get("isWon").and_then(Value::as_bool).unwrap_or(false))
+                .filter_map(|st| st.get("name").and_then(Value::as_str).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 async fn resolve_stage_name(client: &UserClient, org: &str, s: &str) -> Result<String> {
     let stages = client.get(&format!("/organizations/{org}/crm/stages")).await.context("GET stages")?;
     let names: Vec<String> = stages
@@ -1612,20 +1629,48 @@ fn contact_label(c: &Value) -> String {
     }
 }
 
-fn render_deals(body: &Value) {
+/// Splits deal MRR into won (revenue you actually collect) and open (MRR that
+/// only exists if the deal closes). Summing the two together reads as revenue
+/// and isn't — a board of open proposals would show a run-rate of zero real
+/// dollars. `won_stages` empty (fetch failed / unseeded board) → all open.
+fn split_mrr(deals: &[Value], won_stages: &[String]) -> (f64, f64) {
+    let won: Vec<String> = won_stages.iter().map(|s| s.trim().to_lowercase()).collect();
+    let (mut won_mrr, mut open_mrr) = (0.0, 0.0);
+    for d in deals {
+        let Some(m) = as_money(d.get("mrr")) else { continue };
+        let stage = d.get("stage").and_then(Value::as_str).unwrap_or("").trim().to_lowercase();
+        if won.contains(&stage) {
+            won_mrr += m;
+        } else {
+            open_mrr += m;
+        }
+    }
+    (won_mrr, open_mrr)
+}
+
+fn render_deals(body: &Value, won_stages: &[String]) {
     let deals = body.as_array().cloned().unwrap_or_default();
     let pipeline: f64 = deals.iter().filter_map(|d| as_money(d.get("value"))).sum();
-    let mrr_total: f64 = deals.iter().filter_map(|d| as_money(d.get("mrr"))).sum();
+    let (won_mrr, open_mrr) = split_mrr(&deals, won_stages);
+    let mrr_cell = match (won_mrr > 0.0, open_mrr > 0.0) {
+        (_, true) => format!(
+            "{} / mo won  {} {} / mo open",
+            fmt_money(Some(won_mrr)).bold(),
+            "·".dimmed(),
+            fmt_money(Some(open_mrr))
+        ),
+        _ => format!("{} / mo won", fmt_money(Some(won_mrr)).bold()),
+    };
     println!();
     println!("  {}", "Deals".bold());
     println!(
-        "  {} {}     {} {}     {} {} / mo",
+        "  {} {}     {} {}     {} {}",
         "Total".dimmed(),
         deals.len().to_string().bold(),
         "Pipeline".dimmed(),
         fmt_money(Some(pipeline)).bold(),
         "MRR".dimmed(),
-        fmt_money(Some(mrr_total)).bold()
+        mrr_cell
     );
     if deals.is_empty() {
         println!("\n  {}\n", "no deals yet".dimmed());
@@ -3276,7 +3321,7 @@ mod tests {
     use super::{
         extract_timeline_items, fmt_cents, group_thousands, image_content_type, is_clear_token, is_overdue, looks_like_uuid, match_stage_name, norm_email,
         norm_phone, normalize_entity_type, own_image_id, parent_row_points_up, parse_entity_ref, parse_relative, parse_when, preview_body, reminder_status,
-        split_entity_ref, timeline_glyph, EntityRef, ImageEntity,
+        split_entity_ref, split_mrr, timeline_glyph, EntityRef, ImageEntity,
     };
     use serde_json::json;
 
@@ -3589,5 +3634,25 @@ mod tests {
         assert!(err.contains("Proposal"), "{err}");
         // Unseeded board: nothing to validate against, value passes through.
         assert_eq!(match_stage_name(&[], "whatever").unwrap(), "whatever");
+    }
+
+    #[test]
+    fn split_mrr_separates_won_run_rate_from_pipeline() {
+        let deals = vec![
+            json!({ "stage": "Closed Won", "mrr": "40.00" }),
+            json!({ "stage": "Proposal", "mrr": "550.00" }),
+            json!({ "stage": "Proposal", "mrr": "540.00" }),
+            json!({ "stage": "Qualified", "mrr": null }),
+            json!({ "stage": "Closed Lost", "mrr": "99.00" }),
+        ];
+        let won = vec!["Closed Won".to_string()];
+        // The bug: these summed to "$1,090/mo MRR" when $1,090 of it was two
+        // open proposals and the only real revenue was $40.
+        assert_eq!(split_mrr(&deals, &won), (40.0, 1189.0));
+        // Case/whitespace drift on the stage string must not move revenue.
+        let sloppy = vec![json!({ "stage": " closed won ", "mrr": "40.00" })];
+        assert_eq!(split_mrr(&sloppy, &won), (40.0, 0.0));
+        // No won stages known (lookup failed) → nothing claimed as revenue.
+        assert_eq!(split_mrr(&deals, &[]), (0.0, 1229.0));
     }
 }
