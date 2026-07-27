@@ -202,17 +202,23 @@ prost-types = "0.13"
 # — flip this to a core-main rev once smooth absorbs th-10eb50. Keep the
 # `multimodal-content-model` remote branch alive until then (it anchors this rev).
 # Engine on core 0.16.2 (crates.io). The chat-first Big Smooth daemon runs on
-# smooth-operator-server @ 9db9d319 (th-daemon-denypolicy: the branch built
-# against published core 1.7.0 AND carrying the `tool_hooks` builder seam on
-# LocalServer) — so the whole repo pins 1.7.0 to keep one core version across the
-# graph. Core 1.7.0 ships the permission system (`permission::PermissionHook`,
-# `AutoMode`, `Verdict`) + `DenyPolicy` circuit-breaker tier, so the daemon
-# installs the engine's PermissionHook (Bypass + a declarative DenyPolicy) as its
-# first tool_hook and retires the duplicate in-daemon AutoModeHook. narc still
-# re-homes as the second ToolHook via the same `.tool_hooks(…)` seam.
+# smooth-operator-server @ ce2f9e3 (th-daemon-memory-seam: 9db9d319 —
+# th-daemon-denypolicy, built against published core 1.7.0 AND carrying the
+# `tool_hooks` builder seam on LocalServer — PLUS the cherry-picked
+# `StorageAdapter::memory_for_access` seam from #330/th-374b27) — so the whole
+# repo pins 1.7.0 to keep one core version across the graph. Core 1.7.0 ships the
+# permission system (`permission::PermissionHook`, `AutoMode`, `Verdict`) +
+# `DenyPolicy` circuit-breaker tier, so the daemon installs the engine's
+# PermissionHook (Bypass + a declarative DenyPolicy) as its first tool_hook and
+# retires the duplicate in-daemon AutoModeHook. narc still re-homes as the second
+# ToolHook via the same `.tool_hooks(…)` seam. memory_for_access lets the daemon's
+# SqliteStorageAdapter feed its durable memory store into every turn's auto-recall
+# (th-7a9832). Keep the `th-daemon-memory-seam` remote branch alive — it anchors
+# this rev; #330 is on core-main but core-main is still 0.16.2, so the daemon
+# stays on this 1.7.0 side lineage until main absorbs the core bump.
 smooth-operator = { version = "1.7.0", package = "smooai-smooth-operator-core" }
-smooth-operator-server = { git = "https://github.com/SmooAI/smooth-operator.git", rev = "9db9d319287e2ebcd3ab027e39971a0f51ef5b67", package = "smooai-smooth-operator-server", default-features = false }
-smooth-operator-svc = { git = "https://github.com/SmooAI/smooth-operator.git", rev = "9db9d319287e2ebcd3ab027e39971a0f51ef5b67", package = "smooai-smooth-operator", default-features = false }
+smooth-operator-server = { git = "https://github.com/SmooAI/smooth-operator.git", rev = "ce2f9e369789351bf0d7a1f7aff65a4d69a1d4b1", package = "smooai-smooth-operator-server", default-features = false }
+smooth-operator-svc = { git = "https://github.com/SmooAI/smooth-operator.git", rev = "ce2f9e369789351bf0d7a1f7aff65a4d69a1d4b1", package = "smooai-smooth-operator", default-features = false }
 # smooth-owned coding-harness extensions to the generic engine (re-homed from
 # the engine when it went generic at 0.14.0). See crates/smooth-cast.
 smooth-cast = { version = "0.25.1", path = "crates/smooth-cast", package = "smooai-smooth-cast" }

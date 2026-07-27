@@ -407,6 +407,15 @@ impl StorageAdapter for SqliteStorageAdapter {
     fn knowledge_for_access(&self, access: &AccessContext) -> Arc<dyn KnowledgeBase> {
         self.knowledge.reader(access.clone())
     }
+
+    fn memory_for_access(&self, _access: &AccessContext) -> Option<Arc<dyn Memory>> {
+        // Single-tenant daemon: one durable memory store, unscoped by access.
+        // Returning it here is what makes the engine auto-recall remembered
+        // preferences into every turn (th-7a9832) — the `remember` tool already
+        // writes through the same store, so recall sees them immediately and
+        // across restarts.
+        Some(self.memory())
+    }
 }
 
 #[cfg(test)]
@@ -604,5 +613,30 @@ mod tests {
         mem.store(MemoryEntry::new("some fact", MemoryType::User)).unwrap();
         assert!(mem.recall("   ", 5).unwrap().is_empty(), "blank query recalls nothing");
         assert!(mem.recall("nonexistent term", 5).unwrap().is_empty(), "no keyword match recalls nothing");
+    }
+
+    // th-7a9832: the StorageAdapter seam the engine reads through for auto-recall.
+    // The runner calls `memory_for_access` and, on `Some`, feeds it to
+    // `AgentConfig::with_memory` — so this override is what actually lights up
+    // Big Smooth's durable auto-recall.
+    #[test]
+    fn memory_for_access_exposes_the_durable_store() {
+        use smooth_operator::MemoryType;
+        let dir = tempfile::tempdir().unwrap();
+        let a = SqliteStorageAdapter::open(&dir.path().join("op.db")).unwrap();
+        // A memory written through the `remember`-tool handle...
+        a.memory()
+            .store(MemoryEntry::new("always add shows to the smoo-hub watchlist", MemoryType::Project))
+            .unwrap();
+        // ...must be visible through the access-seam the engine recalls from.
+        let recalled = a
+            .memory_for_access(&AccessContext::anonymous())
+            .expect("daemon adapter must expose a memory store for auto-recall")
+            .recall("add shows to my watchlist", 5)
+            .unwrap();
+        assert!(
+            recalled.iter().any(|e| e.content.contains("smoo-hub watchlist")),
+            "the seam must recall a stored memory relevant to the message"
+        );
     }
 }
