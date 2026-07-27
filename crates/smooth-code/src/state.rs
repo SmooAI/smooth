@@ -274,6 +274,14 @@ pub struct AppState {
     /// first message. `None` until the first real user message is
     /// sent, and remains `None` when the LLM auto-name call fails.
     pub session_title: Option<String>,
+    /// Big Smooth conversation this TUI session is bound to, learned from the
+    /// first connect and replayed on every later one.
+    ///
+    /// `run_agent_streaming` builds a fresh client per turn, so the daemon
+    /// would otherwise open a new conversation each time and the agent would
+    /// remember nothing across turns (pearl th-255d2a). Carrying the id here
+    /// keeps every turn appending to one conversation.
+    pub conversation_id: Option<String>,
     /// Chat message history.
     pub messages: Vec<ChatMessage>,
     /// Number of leading messages that have already been flushed into
@@ -385,6 +393,7 @@ impl AppState {
             working_dir,
             session_id: Uuid::new_v4().to_string(),
             session_title: None,
+            conversation_id: None,
             messages: Vec::new(),
             committed_count: 0,
             input: String::new(),

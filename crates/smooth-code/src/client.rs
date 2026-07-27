@@ -116,6 +116,11 @@ pub enum ServerEvent {
     },
     Connected {
         session_id: String,
+        /// Conversation this session is bound to. Handing it back as
+        /// `conversationId` on a later `create_conversation_session` resumes
+        /// that conversation rather than starting a fresh one — this is what
+        /// gives `th code` memory across turns (pearl th-255d2a).
+        conversation_id: Option<String>,
     },
     Pong,
     Error {
@@ -195,8 +200,10 @@ fn translate_frame(v: &serde_json::Value) -> Option<ServerEvent> {
         // conversation lists, renames) have no `sessionId` and fall through to
         // `None`, which is what we want — they aren't UI events here.
         "immediate_response" => {
-            let session_id = v.get("data")?.get("sessionId")?.as_str()?.to_string();
-            Some(ServerEvent::Connected { session_id })
+            let data = v.get("data")?;
+            let session_id = data.get("sessionId")?.as_str()?.to_string();
+            let conversation_id = data.get("conversationId").and_then(serde_json::Value::as_str).map(str::to_string);
+            Some(ServerEvent::Connected { session_id, conversation_id })
         }
         "stream_token" => Some(ServerEvent::TokenDelta {
             task_id: TURN_ID.to_string(),
@@ -301,6 +308,13 @@ pub struct BigSmoothClient {
     /// `send_message` must carry it. Shared because the read loop discovers it
     /// and the send path needs it.
     session_id: Arc<std::sync::Mutex<Option<String>>>,
+    /// Conversation to resume on connect, and the one the server confirmed.
+    ///
+    /// `th code` builds a fresh client per turn, so without this every turn
+    /// would open its own conversation and the agent would remember nothing
+    /// (pearl th-255d2a). Seed it with [`Self::resume_conversation`] and the
+    /// handshake asks the server to append to that conversation instead.
+    conversation_id: Arc<std::sync::Mutex<Option<String>>>,
     /// Monotonic source for canonical `requestId`s.
     next_request: Arc<AtomicU64>,
 }
@@ -323,8 +337,26 @@ impl BigSmoothClient {
             conn_mgr: Arc::new(ConnectionManager::new(config)),
             msg_buffer: Arc::new(MessageBuffer::new(buffer_size)),
             session_id: Arc::new(std::sync::Mutex::new(None)),
+            conversation_id: Arc::new(std::sync::Mutex::new(None)),
             next_request: Arc::new(AtomicU64::new(1)),
         }
+    }
+
+    /// Ask the next [`Self::connect`] to resume `conversation_id` instead of
+    /// starting a new conversation. Call before `connect`; a `None` or empty
+    /// id is ignored, which makes "first turn of the session" the natural
+    /// no-op case.
+    pub fn resume_conversation(&mut self, conversation_id: Option<&str>) {
+        if let Some(id) = conversation_id.filter(|c| !c.trim().is_empty()) {
+            *self.conversation_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.to_string());
+        }
+    }
+
+    /// The conversation the server bound this session to, once connected.
+    /// Persist it across turns and feed it back via [`Self::resume_conversation`].
+    #[must_use]
+    pub fn conversation_id(&self) -> Option<String> {
+        self.conversation_id.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Connect to Big Smooth over WebSocket.
@@ -388,6 +420,7 @@ impl BigSmoothClient {
         let connected_read = Arc::clone(&connected);
         let conn_mgr_read = Arc::clone(&self.conn_mgr);
         let session_read = Arc::clone(&self.session_id);
+        let conversation_read = Arc::clone(&self.conversation_id);
         tokio::spawn(async move {
             while let Some(Ok(msg)) = ws_source.next().await {
                 let text = match msg {
@@ -402,8 +435,15 @@ impl BigSmoothClient {
                 let Some(event) = translate_frame(&frame) else {
                     continue; // not a UI-bearing frame
                 };
-                if let ServerEvent::Connected { session_id } = &event {
+                if let ServerEvent::Connected { session_id, conversation_id } = &event {
                     *session_read.lock().unwrap_or_else(|e| e.into_inner()) = Some(session_id.clone());
+                    // Record the conversation the server actually bound us to
+                    // — on a resume it echoes the one we asked for, on a fresh
+                    // session it's the newly created one. Either way this is
+                    // what the next turn resumes.
+                    if let Some(cid) = conversation_id {
+                        *conversation_read.lock().unwrap_or_else(|e| e.into_inner()) = Some(cid.clone());
+                    }
                     connected_read.store(true, Ordering::SeqCst);
                 }
                 if event_tx.send(event).is_err() {
@@ -420,12 +460,20 @@ impl BigSmoothClient {
         // Canonical handshake: the server hands back a session id in reply to
         // `create_conversation_session`, and that reply is what marks us
         // connected. Same opening move the web SPA makes (operator.ts).
-        let hello = serde_json::json!({
+        let mut hello = serde_json::json!({
             "action": "create_conversation_session",
             "requestId": format!("cs-{}", self.next_request.fetch_add(1, Ordering::Relaxed)),
             "agentId": uuid::Uuid::new_v4().to_string(),
             "userName": "th code",
         });
+        // Resume rather than start fresh when we already know the conversation.
+        // The server binds the new session to it and `send_message` appends,
+        // so the agent sees this TUI session's earlier turns. Without it every
+        // turn was its own conversation and Big Smooth remembered nothing
+        // (pearl th-255d2a).
+        if let Some(cid) = self.conversation_id() {
+            hello["conversationId"] = serde_json::Value::String(cid);
+        }
         send_tx.send(hello.to_string()).map_err(|e| anyhow::anyhow!("failed to open session: {e}"))?;
 
         // Wait for Connected event (up to 5s)
@@ -857,6 +905,7 @@ mod tests {
             msg_buffer: Arc::new(MessageBuffer::new(buffer_size)),
             // A live session, so `send` produces a real canonical frame.
             session_id: Arc::new(std::sync::Mutex::new(Some("sess-test".to_string()))),
+            conversation_id: Arc::new(std::sync::Mutex::new(None)),
             next_request: Arc::new(AtomicU64::new(1)),
         };
 
@@ -945,9 +994,50 @@ mod canonical_protocol_tests {
             "data": { "sessionId": "sess-1", "agentId": "a-1" }
         }));
         match ev {
-            Some(ServerEvent::Connected { session_id }) => assert_eq!(session_id, "sess-1"),
+            Some(ServerEvent::Connected { session_id, conversation_id }) => {
+                assert_eq!(session_id, "sess-1");
+                // A server that omits `conversationId` must not break the
+                // handshake — the next turn simply starts a new conversation.
+                assert_eq!(conversation_id, None);
+            }
             other => panic!("expected Connected, got {other:?}"),
         }
+    }
+
+    /// th-255d2a: the handshake reply carries the conversation the session was
+    /// bound to, and the client must surface it — it is the only thing that
+    /// lets the next turn resume instead of starting over.
+    #[test]
+    fn connected_carries_conversation_id_when_present() {
+        let ev = translate_frame(&json!({
+            "type": "immediate_response",
+            "status": 200,
+            "data": { "sessionId": "sess-2", "conversationId": "conv-9", "agentId": "a-1" }
+        }));
+        match ev {
+            Some(ServerEvent::Connected { session_id, conversation_id }) => {
+                assert_eq!(session_id, "sess-2");
+                assert_eq!(conversation_id.as_deref(), Some("conv-9"));
+            }
+            other => panic!("expected Connected, got {other:?}"),
+        }
+    }
+
+    /// Seeding a conversation is what makes the *next* connect a resume.
+    /// Blank/absent ids are ignored so the first turn stays a fresh start.
+    #[test]
+    fn resume_conversation_seeds_and_ignores_blanks() {
+        let mut client = BigSmoothClient::new("http://localhost:4400");
+        assert_eq!(client.conversation_id(), None);
+
+        client.resume_conversation(None);
+        assert_eq!(client.conversation_id(), None, "None must not seed");
+
+        client.resume_conversation(Some("   "));
+        assert_eq!(client.conversation_id(), None, "blank must not seed");
+
+        client.resume_conversation(Some("conv-42"));
+        assert_eq!(client.conversation_id().as_deref(), Some("conv-42"));
     }
 
     /// Other `immediate_response`s (history, lists, renames) carry no session id

@@ -1215,10 +1215,23 @@ async fn run_agent_streaming(message: &str, tx: mpsc::UnboundedSender<AgentEvent
 
     let url = std::env::var("SMOOTH_URL").unwrap_or_else(|_| "http://localhost:4400".into());
     let mut client = BigSmoothClient::new(&url);
+    // Resume this TUI session's conversation. A client is built per turn, so
+    // without this the daemon opens a fresh conversation every message and the
+    // agent starts from zero each time — tell it your name, and the next turn
+    // it has never heard of you (pearl th-255d2a). `None` on the first turn.
+    {
+        let s = state.lock().unwrap_or_else(|e| e.into_inner());
+        client.resume_conversation(s.conversation_id.as_deref());
+    }
     client
         .connect()
         .await
         .map_err(|e| anyhow::anyhow!("Cannot connect to Big Smooth at {url}: {e}. Run: th up"))?;
+    // Remember whatever the server bound us to, so the next turn resumes it.
+    if let Some(cid) = client.conversation_id() {
+        let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+        s.conversation_id = Some(cid);
+    }
 
     // Create the streaming assistant message synchronously so tool
     // calls that arrive before the main event loop has a chance to
