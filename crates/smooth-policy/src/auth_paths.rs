@@ -144,20 +144,51 @@ fn name_from_email(email: &str) -> Option<String> {
     }
 }
 
-/// One-time migration: if the XDG auth dir doesn't exist yet but the legacy
-/// `~/.smooth/auth` does, COPY the legacy sessions into a named profile
+/// Whether `auth` already holds a session — the default profile or any named
+/// one. This, not the mere existence of the directory, is what "already
+/// migrated" means (pearl th-9268a9).
+fn has_any_session_in(auth: &Path) -> bool {
+    if auth.join(USER_FILE).exists() || auth.join(M2M_FILE).exists() {
+        return true;
+    }
+    let Ok(rd) = fs::read_dir(auth.join("profiles")) else {
+        return false;
+    };
+    rd.flatten().any(|e| {
+        let p = e.path();
+        p.join(USER_FILE).exists() || p.join(M2M_FILE).exists()
+    })
+}
+
+/// One-time migration: if the XDG auth tree holds no session yet but the
+/// legacy `~/.smooth/auth` does, COPY the legacy sessions into a named profile
 /// (derived from the user email, else `default`) and mark it active.
 /// Non-destructive — the legacy files are left as a backup.
+///
+/// The guard is **content-based**, deliberately. It used to be
+/// `if auth_dir().exists() { return }`, which stranded sessions: an earlier run
+/// with nothing to migrate creates the directory empty and returns, so a
+/// session written to the legacy path afterwards — exactly what the daemon's
+/// browser login did on smoo-hub — could never migrate. Both `th` and the
+/// daemon then resolved the empty default profile and reported "Not logged in"
+/// while a perfectly good session sat in the legacy tree (th-9268a9).
 pub fn migrate_legacy() -> Result<()> {
-    let auth = auth_dir();
-    if auth.exists() {
+    migrate_legacy_between(&auth_dir(), &legacy_auth_dir())
+}
+
+/// The migration proper, against explicit directories.
+///
+/// Split out so it is testable with tempdirs: the public entry point resolves
+/// `$HOME` / `$XDG_CONFIG_HOME`, and driving that from a test means mutating
+/// process-global env, which races every other test in the binary (th-129eda).
+fn migrate_legacy_between(auth: &Path, legacy: &Path) -> Result<()> {
+    if has_any_session_in(auth) {
         return Ok(());
     }
-    let legacy = legacy_auth_dir();
     let lu = legacy.join(USER_FILE);
     let lm = legacy.join(M2M_FILE);
     if !lu.exists() && !lm.exists() {
-        fs::create_dir_all(&auth).ok();
+        fs::create_dir_all(auth).ok();
         return Ok(());
     }
     let name = session_email(&lu).and_then(|e| name_from_email(&e)).unwrap_or_else(|| "default".to_string());
@@ -169,7 +200,7 @@ pub fn migrate_legacy() -> Result<()> {
     if lm.exists() {
         fs::copy(&lm, pdir.join(M2M_FILE)).ok();
     }
-    fs::write(active_file(), &name).ok();
+    fs::write(auth.join("active"), &name).ok();
     eprintln!(
         "th: migrated legacy ~/.smooth/auth → {} (profile '{name}', now active). Originals left as a backup.",
         pdir.display()
@@ -245,6 +276,8 @@ pub fn remove_profile(name: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::TempDir;
+
     use super::*;
 
     #[test]
@@ -272,6 +305,79 @@ mod tests {
         assert!(default_user.ends_with("auth/smooai-user.json"));
         assert!(named_user.ends_with("auth/profiles/tara/smooai-user.json"));
         assert!(m2m_file(Some("tara")).ends_with("auth/profiles/tara/smooai.json"));
+    }
+
+    /// The smoo-hub state, exactly: the XDG auth dir exists but is EMPTY (an
+    /// earlier run with nothing to migrate created it), and a real session was
+    /// later written to the legacy tree. The old `if auth.exists() { return }`
+    /// guard stranded that session forever — `th` and the daemon both reported
+    /// "Not logged in" with a good session sitting in `~/.smooth/auth`.
+    /// Pearl th-9268a9.
+    #[test]
+    fn migrates_when_xdg_dir_exists_but_is_empty() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let auth = tmp.path().join("config/smooth/auth");
+        let legacy = tmp.path().join("dot-smooth/auth");
+        fs::create_dir_all(&auth).expect("empty xdg dir");
+        fs::create_dir_all(&legacy).expect("legacy dir");
+        fs::write(legacy.join(USER_FILE), r#"{"user":"brent@smoo.ai"}"#).expect("legacy session");
+
+        migrate_legacy_between(&auth, &legacy).expect("migrate");
+
+        let migrated = auth.join("profiles").join("brent").join(USER_FILE);
+        assert!(migrated.exists(), "legacy session must migrate into a profile");
+        assert_eq!(fs::read_to_string(auth.join("active")).unwrap().trim(), "brent");
+        assert!(legacy.join(USER_FILE).exists(), "migration is non-destructive");
+    }
+
+    /// Idempotence: once a session lives in the XDG tree the migration must not
+    /// run again and clobber it with whatever stale copy the legacy tree holds.
+    #[test]
+    fn does_not_remigrate_over_an_existing_session() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let auth = tmp.path().join("auth");
+        let legacy = tmp.path().join("legacy");
+        let pdir = auth.join("profiles").join("brent");
+        fs::create_dir_all(&pdir).expect("profile");
+        fs::create_dir_all(&legacy).expect("legacy dir");
+        fs::write(pdir.join(USER_FILE), "CURRENT").expect("current session");
+        fs::write(legacy.join(USER_FILE), "STALE").expect("stale legacy");
+
+        migrate_legacy_between(&auth, &legacy).expect("migrate");
+
+        assert_eq!(fs::read_to_string(pdir.join(USER_FILE)).unwrap(), "CURRENT");
+    }
+
+    /// A default-profile session (no named profile) also counts as migrated.
+    #[test]
+    fn default_profile_session_counts_as_migrated() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let auth = tmp.path().join("auth");
+        let legacy = tmp.path().join("legacy");
+        fs::create_dir_all(&auth).expect("auth");
+        fs::create_dir_all(&legacy).expect("legacy");
+        fs::write(auth.join(USER_FILE), "CURRENT").expect("default session");
+        fs::write(legacy.join(USER_FILE), "STALE").expect("stale legacy");
+
+        migrate_legacy_between(&auth, &legacy).expect("migrate");
+
+        assert!(!auth.join("profiles").exists(), "must not migrate on top of a default-profile session");
+        assert_eq!(fs::read_to_string(auth.join(USER_FILE)).unwrap(), "CURRENT");
+    }
+
+    /// Nothing to migrate: the dir is created so later lookups are cheap, and
+    /// no profile or active pointer is invented.
+    #[test]
+    fn no_legacy_sessions_creates_dir_only() {
+        let tmp = TempDir::new().expect("tmpdir");
+        let auth = tmp.path().join("auth");
+        let legacy = tmp.path().join("legacy");
+
+        migrate_legacy_between(&auth, &legacy).expect("migrate");
+
+        assert!(auth.exists());
+        assert!(!auth.join("active").exists());
+        assert!(!auth.join("profiles").exists());
     }
 
     /// Regression guard for th-16b0ca. The daemon's bug was reading the
