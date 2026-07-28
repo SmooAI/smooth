@@ -125,6 +125,13 @@ pub enum ServerEvent {
     Pong,
     Error {
         message: String,
+        /// `requestId` the server echoed back, when it sent one. The read loop
+        /// rewrites this to `Some(turn id)` only when the error belongs to the
+        /// in-flight turn; consumers treat any other value — including `None`
+        /// — as non-fatal chatter rather than a reason to abandon the turn
+        /// (th-472012).
+        #[serde(default)]
+        request_id: Option<String>,
     },
     #[serde(other)]
     Unknown,
@@ -240,12 +247,8 @@ fn translate_frame(v: &serde_json::Value) -> Option<ServerEvent> {
             cost_usd: 0.0,
         }),
         "error" => Some(ServerEvent::Error {
-            message: v
-                .get("message")
-                .or_else(|| v.get("error"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("unknown error")
-                .to_string(),
+            message: smooth_cast::wire::error_message(v),
+            request_id: v.get("requestId").and_then(serde_json::Value::as_str).map(str::to_string),
         }),
         "pong" => Some(ServerEvent::Pong),
         _ => None,
@@ -288,6 +291,34 @@ fn to_canonical_frame(event: &ClientEvent, session_id: Option<&str>, request_id:
     }
 }
 
+/// The keep-alive loop, extracted from `connect` so a test can drive the code
+/// the client actually runs.
+///
+/// pearl th-472012: this loop used to build its frame with
+/// `serde_json::to_string(&ClientEvent::Ping)`, emitting the bespoke
+/// `{"type":"Ping"}` instead of a canonical `{"action":"ping",…}`. The server
+/// rejected it every 15 seconds with `missing 'action' field`, and that error
+/// tore down whatever turn was in flight.
+///
+/// The existing test covered `send()` and `to_canonical_frame()` — both
+/// already correct — so it sailed past the one path that was broken. Hence
+/// this function exists: so the regression test drives the loop itself.
+async fn heartbeat_loop(tx: mpsc::UnboundedSender<String>, connected: Arc<AtomicBool>, interval: Duration, next_request: Arc<AtomicU64>) {
+    loop {
+        tokio::time::sleep(interval).await;
+        if !connected.load(Ordering::SeqCst) {
+            break;
+        }
+        let request_id = format!("hb-{}", next_request.fetch_add(1, Ordering::Relaxed));
+        let Some(frame) = to_canonical_frame(&ClientEvent::Ping, None, &request_id) else {
+            break;
+        };
+        if tx.send(frame.to_string()).is_err() {
+            break;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // BigSmoothClient
 // ---------------------------------------------------------------------------
@@ -317,6 +348,12 @@ pub struct BigSmoothClient {
     conversation_id: Arc<std::sync::Mutex<Option<String>>>,
     /// Monotonic source for canonical `requestId`s.
     next_request: Arc<AtomicU64>,
+    /// `requestId` of the in-flight turn, so the read loop can tell a failure
+    /// of *this turn* from unrelated protocol chatter (a rejected heartbeat,
+    /// a late error for a cancelled turn). Only a matching id is fatal —
+    /// pearl th-472012, where a rejected ping tore down a turn whose answer
+    /// the daemon had already produced.
+    turn_request: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl BigSmoothClient {
@@ -339,6 +376,7 @@ impl BigSmoothClient {
             session_id: Arc::new(std::sync::Mutex::new(None)),
             conversation_id: Arc::new(std::sync::Mutex::new(None)),
             next_request: Arc::new(AtomicU64::new(1)),
+            turn_request: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -421,6 +459,7 @@ impl BigSmoothClient {
         let conn_mgr_read = Arc::clone(&self.conn_mgr);
         let session_read = Arc::clone(&self.session_id);
         let conversation_read = Arc::clone(&self.conversation_id);
+        let turn_read = Arc::clone(&self.turn_request);
         tokio::spawn(async move {
             while let Some(Ok(msg)) = ws_source.next().await {
                 let text = match msg {
@@ -432,9 +471,20 @@ impl BigSmoothClient {
                 let Ok(frame) = serde_json::from_str::<serde_json::Value>(&text) else {
                     continue;
                 };
-                let Some(event) = translate_frame(&frame) else {
+                let Some(mut event) = translate_frame(&frame) else {
                     continue; // not a UI-bearing frame
                 };
+                // Attribute errors: keep `request_id` only when it names the
+                // in-flight turn. Everything else — a rejected heartbeat, a
+                // late error for an abandoned turn, an unattributed protocol
+                // complaint — is downgraded so it can be shown without
+                // discarding an answer the daemon may still be producing.
+                if let ServerEvent::Error { request_id, .. } = &mut event {
+                    let turn = turn_read.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    if request_id.is_none() || *request_id != turn {
+                        *request_id = None;
+                    }
+                }
                 if let ServerEvent::Connected { session_id, conversation_id } = &event {
                     *session_read.lock().unwrap_or_else(|e| e.into_inner()) = Some(session_id.clone());
                     // Record the conversation the server actually bound us to
@@ -495,21 +545,12 @@ impl BigSmoothClient {
         }
 
         // Spawn heartbeat task
-        let hb_tx = send_tx;
-        let hb_connected = Arc::clone(&self.connected);
-        let hb_interval = self.conn_mgr.config().heartbeat_interval;
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(hb_interval).await;
-                if !hb_connected.load(Ordering::SeqCst) {
-                    break;
-                }
-                let ping = serde_json::to_string(&ClientEvent::Ping).unwrap_or_default();
-                if hb_tx.send(ping).is_err() {
-                    break;
-                }
-            }
-        });
+        tokio::spawn(heartbeat_loop(
+            send_tx,
+            Arc::clone(&self.connected),
+            self.conn_mgr.config().heartbeat_interval,
+            Arc::clone(&self.next_request),
+        ));
 
         Ok(())
     }
@@ -657,6 +698,11 @@ impl BigSmoothClient {
             // session yet — drop rather than send a frame the server rejects.
             return Ok(());
         };
+        if matches!(event, ClientEvent::TaskStart { .. }) {
+            // Remember which request the turn rides on, so an error frame can
+            // be attributed to it (or not) — see `turn_request`.
+            *self.turn_request.lock().unwrap_or_else(|e| e.into_inner()) = Some(request_id);
+        }
         let json = frame.to_string();
 
         if let Some(tx) = self.ws_tx.as_ref() {
@@ -907,6 +953,7 @@ mod tests {
             session_id: Arc::new(std::sync::Mutex::new(Some("sess-test".to_string()))),
             conversation_id: Arc::new(std::sync::Mutex::new(None)),
             next_request: Arc::new(AtomicU64::new(1)),
+            turn_request: Arc::new(std::sync::Mutex::new(None)),
         };
 
         // th-248f33: the wire is now the CANONICAL operator protocol
@@ -1093,6 +1140,77 @@ mod canonical_protocol_tests {
     fn unknown_frames_are_ignored() {
         assert!(translate_frame(&json!({"type":"otp_sent"})).is_none());
         assert!(translate_frame(&json!({"nope":1})).is_none());
+    }
+
+    /// **The th-472012 regression test.**
+    ///
+    /// Drives `heartbeat_loop` — the actual code `connect` spawns — rather
+    /// than `to_canonical_frame`, which was already correct while the
+    /// heartbeat was broken. Asserting on the helper would have passed
+    /// throughout the outage; only the loop's real output proves the fix.
+    ///
+    /// What went wrong: the loop emitted `{"type":"Ping"}`, the canonical
+    /// server answered `VALIDATION_ERROR / missing 'action' field` every 15s,
+    /// and that error killed any turn still running.
+    #[tokio::test]
+    async fn heartbeat_loop_emits_canonical_ping_frames() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let connected = Arc::new(AtomicBool::new(true));
+        let handle = tokio::spawn(heartbeat_loop(
+            tx,
+            Arc::clone(&connected),
+            Duration::from_millis(5),
+            Arc::new(AtomicU64::new(1)),
+        ));
+
+        let raw = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("heartbeat should fire within the timeout")
+            .expect("heartbeat should send a frame");
+        let frame: serde_json::Value = serde_json::from_str(&raw).expect("heartbeat frame is valid JSON");
+
+        assert_eq!(frame["action"], "ping", "the server rejects any frame without `action`: {raw}");
+        assert!(frame.get("type").is_none(), "the bespoke {{\"type\":\"Ping\"}} shape must not come back: {raw}");
+        assert!(
+            frame["requestId"].as_str().is_some_and(|id| id.starts_with("hb-")),
+            "heartbeats carry their own request id so their errors are attributable: {raw}"
+        );
+
+        // The loop must also stop once the connection is marked down.
+        connected.store(false, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("loop should exit after disconnect")
+            .expect("loop should not panic");
+    }
+
+    /// An error frame is only fatal to the turn it names. The read loop clears
+    /// `request_id` for anything else, and `translate_frame` must surface the
+    /// id in the first place for that check to be possible.
+    #[test]
+    fn error_frames_carry_their_request_id() {
+        let attributed = translate_frame(&json!({
+            "type": "error",
+            "requestId": "turn-3",
+            "error": { "code": "TOOL_FAILED", "message": "boom" },
+        }));
+        match attributed {
+            Some(ServerEvent::Error { message, request_id }) => {
+                assert_eq!(request_id.as_deref(), Some("turn-3"));
+                assert_eq!(message, "TOOL_FAILED: boom", "the real reason, not \"unknown error\"");
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+
+        // A rejected heartbeat: the server had no requestId to echo.
+        let unattributed = translate_frame(&json!({
+            "type": "error",
+            "error": { "code": "VALIDATION_ERROR", "message": "missing 'action' field" },
+        }));
+        match unattributed {
+            Some(ServerEvent::Error { request_id, .. }) => assert!(request_id.is_none()),
+            other => panic!("expected Error, got {other:?}"),
+        }
     }
 
     /// A turn is `send_message` carrying the session id — and is withheld
