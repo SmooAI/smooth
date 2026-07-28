@@ -12,6 +12,7 @@ mod config;
 mod daemon_health;
 mod daemon_launcher;
 mod ext;
+mod fda;
 mod gradient;
 mod hooks;
 mod mcp_config;
@@ -556,6 +557,13 @@ enum Commands {
         /// (e.g. git@github.com:you/smooth-config.git)
         #[arg(long)]
         remote: Option<String>,
+        /// macOS only: guide the one-time Full Disk Access grant when the
+        /// workspace is on an external volume. Opens the FDA settings pane and
+        /// reveals `th` + the daemon binary in Finder to drag in. FDA can't be
+        /// granted programmatically (SIP-protected TCC.db), so this is as
+        /// automated as it gets. Run on the host's console, not over SSH.
+        #[arg(long)]
+        fix_fda: bool,
     },
     /// List skills available in the current workspace. Reads
     /// `.smooth/skills/`, `~/.smooth/skills/`, `~/.claude/skills/`,
@@ -1597,9 +1605,15 @@ async fn main() -> Result<()> {
             agent,
             auto_approve,
         }) => cmd_code(headless, message, file, model, budget, json, resume, list, agent, auto_approve).await,
-        Some(Commands::Doctor { init_home_repo, remote }) => {
+        Some(Commands::Doctor {
+            init_home_repo,
+            remote,
+            fix_fda,
+        }) => {
             if init_home_repo {
                 cmd_doctor_init_home_repo(remote.as_deref())
+            } else if fix_fda {
+                cmd_doctor_fix_fda()
             } else {
                 cmd_doctor().await
             }
@@ -3436,6 +3450,27 @@ async fn cmd_doctor() -> Result<()> {
     // 8. Sandboxes (built-in via microsandbox crate)
     println!("  {} Sandboxes: {}", "✓".green().bold(), "built-in (microsandbox)".green());
 
+    // 10. Workspace on a TCC-gated external volume (macOS). If the daemon's
+    // workspace lives under /Volumes it needs Full Disk Access, or every fs op
+    // there returns EPERM and Big Smooth looks jailed (pearl th-b85641).
+    #[cfg(target_os = "macos")]
+    if let Some(ext) = fda::candidate_workspace().as_deref().and_then(fda::workspace_on_external_volume) {
+        let denied = fda::read_access_denied(&ext);
+        let msg = if denied {
+            "external volume — access DENIED"
+        } else {
+            "external volume — needs Full Disk Access"
+        };
+        println!("  {} Workspace: {}", "✗".red().bold(), format!("{} ({})", msg, ext.display()).red());
+        println!(
+            "    {} grant Full Disk Access to th + the daemon: run `th doctor --fix-fda` on the host console",
+            "→".cyan()
+        );
+        issues += 1;
+    } else {
+        println!("  {} Workspace: {}", "✓".green().bold(), "on boot volume (no Full Disk Access needed)".green());
+    }
+
     // 9. Git hooks
     let hooks_status = hooks::check(None);
     if !hooks::print_doctor_status(&hooks_status) {
@@ -3465,6 +3500,53 @@ async fn cmd_doctor() -> Result<()> {
         println!("{}", format!("{issues} issue(s) found. Fix them and run: th doctor").yellow().bold());
     }
 
+    Ok(())
+}
+
+/// Guide the one-time Full Disk Access grant (pearl th-b85641). FDA can't be set
+/// programmatically (SIP-protected TCC.db), so this opens the settings pane and
+/// reveals the binaries to drag in — the fastest a grant can be made.
+#[cfg(target_os = "macos")]
+fn cmd_doctor_fix_fda() -> Result<()> {
+    println!("{} {}", gradient::smooth(), "Full Disk Access".bold().cyan());
+
+    let targets = fda::grant_targets();
+    println!("\n  These binaries need Full Disk Access (grant is per-binary):");
+    for t in &targets {
+        println!("    {} {}", "•".cyan(), t.display().to_string().bold());
+    }
+
+    println!(
+        "\n  {} Opening the Full Disk Access settings pane + revealing each binary in Finder…",
+        "→".cyan()
+    );
+    if let Err(e) = fda::open_fda_settings() {
+        println!("    {} couldn't open System Settings ({e}). Open it by hand:", "✗".red().bold());
+        println!("      System Settings → Privacy & Security → Full Disk Access");
+    }
+    for t in &targets {
+        let _ = fda::reveal_in_finder(t);
+    }
+
+    println!("\n  Then, in the Full Disk Access list:");
+    println!(
+        "    1. Click {} and drag each revealed binary in (or add it), toggle it {}.",
+        "+".bold(),
+        "on".green()
+    );
+    println!("    2. Restart the daemon so it re-reads the grant: {}.", "th down && th up".bold());
+    println!(
+        "\n  {} the `th` grant is keyed to its code signature; every `pnpm install:th` rebuild",
+        "⚠".yellow().bold()
+    );
+    println!("     changes it and drops the grant. Sign `th` with a stable identity to make it stick,");
+    println!("     or keep the workspace on the boot volume to avoid the gate entirely.");
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn cmd_doctor_fix_fda() -> Result<()> {
+    println!("{} Full Disk Access is a macOS-only concept; nothing to do here.", "○".dimmed());
     Ok(())
 }
 
